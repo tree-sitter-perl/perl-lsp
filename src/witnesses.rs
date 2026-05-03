@@ -807,6 +807,83 @@ impl WitnessReducer for ReturnArmReturn {
     }
 }
 
+// ---- Symbol return reducer ----
+//
+// Claims plain `InferredType` payloads on `Symbol(_)` attachments —
+// the per-symbol equivalent of `NamedSubReturn`. Pushed by writeback
+// (local subs/methods) and `seed_bag_from_constraints` (hand-crafted
+// FAs / cache-loaded blobs) so any caller asking "what does THIS
+// specific sym return?" routes through the bag instead of reading
+// `Symbol.return_type` directly. Class-scoped multi-overload
+// dispatch (e.g. `find_method_return_type_raw`'s arity-bound lookup
+// against a candidate set) uses this — the dispatch pre-resolves to
+// a sym_id, then the bag answers what that sym's stored return type
+// is.
+//
+// Latest wins so a later writeback re-publish (the worklist clears
+// `local_return` on every iteration and re-pushes from
+// `Symbol.return_type`) dominates an older value. Registered AFTER
+// every more-precise reducer (Plugin override, branch-arm fold,
+// arity dispatch) so those still get to claim first.
+
+pub struct SubReturnReducer;
+
+impl WitnessReducer for SubReturnReducer {
+    fn name(&self) -> &str {
+        "sub_return"
+    }
+
+    fn claims(&self, w: &Witness) -> bool {
+        // Source-tag claim — only the writeback-pushed (`local_return`)
+        // and enrichment-pushed (`imported_return`) sources fire here.
+        // Excludes:
+        //   - branch_arm-source InferredType witnesses (materialized
+        //     by the registry from per-arm Edge facts) — those are
+        //     `BranchArmFold`'s, and its agreement / disagreement
+        //     result must propagate (single-arm or disagreeing arms
+        //     yield None on purpose; SubReturnReducer mustn't paper
+        //     over that with an arbitrary latest pick).
+        //   - framework_accessor-source ArityReturn observations
+        //     (different payload shape; FluentArityDispatch claims).
+        //   - any other Builder-source InferredType — Symbol attachment
+        //     should only carry our two flavors of "this sym's
+        //     stored return type" facts.
+        if !matches!(w.attachment, WitnessAttachment::Symbol(_)) {
+            return false;
+        }
+        if !matches!(w.payload, WitnessPayload::InferredType(_)) {
+            return false;
+        }
+        match &w.source {
+            WitnessSource::Builder(s) if s == "local_return" => true,
+            WitnessSource::Enrichment(s) if s == "imported_return" => true,
+            _ => false,
+        }
+    }
+
+    fn reduce(&self, ws: &[&Witness], q: &ReducerQuery) -> ReducedValue {
+        // Only fire when the caller has no arity preference. With an
+        // arity hint, an arity-aware reducer (FluentArityDispatch)
+        // gets the first chance — and if its answer is None for the
+        // requested arity, that's a "this symbol doesn't dispatch
+        // here" signal that the caller will resolve via a different
+        // attachment (`NamedSub` lookup in `query_sub_return_type`,
+        // for instance). Falling through to a plain stored-return
+        // read in that case would silently wrong-answer Mojo::Base
+        // writer-vs-getter dispatch (`level(1)` on the getter sym
+        // would pretend to return the getter's String value).
+        if q.arity_hint.is_some() {
+            return ReducedValue::None;
+        }
+        for w in ws.iter().rev() {
+            if let WitnessPayload::InferredType(t) = &w.payload {
+                return ReducedValue::Type(t.clone());
+            }
+        }
+        ReducedValue::None
+    }
+}
+
 // ---- Plugin-override priority reducer ----
 //
 // Claims `Symbol(_)` attachments carrying an `InferredType` payload
@@ -892,6 +969,9 @@ impl ReducerRegistry {
         r.register(Box::new(FluentArityDispatch));
         r.register(Box::new(NamedSubReturn));
         r.register(Box::new(ReturnArmReturn));
+        // Last — fallback for "this Symbol's stored return type"
+        // queries that none of the more-precise reducers claimed.
+        r.register(Box::new(SubReturnReducer));
         r
     }
 
@@ -1078,12 +1158,19 @@ pub fn query_sub_return_type(
     // Name-keyed multi-dispatch and cross-file imports both ride
     // `NamedSub` — frameworks like Mojo::Base publish per-arity
     // observations on the logical name (one getter + one writer share
-    // it), and `enrich_imported_types_with_keys` mirrors imported
-    // return types here. We query this BEFORE falling back to the
-    // local symbol's stored `return_type`, otherwise the first matching
-    // Symbol's type would pre-empt the multi-dispatch answer (e.g.
-    // `level(1)` would return the getter's String instead of the
-    // writer's invocant ClassName).
+    // it), `write_back_sub_return_types` mirrors every local sub's
+    // resolved return type here, and `enrich_imported_types_with_keys`
+    // does the same for cross-file imports. After the writeback runs
+    // there is no plain sub whose answer is reachable only through
+    // `Symbol.return_type`; the field is a cache, not a parallel
+    // truth. (Mid-build callers don't exist — every consumer reaches
+    // this function through `FileAnalysis::sub_return_type_at_arity`,
+    // which only runs post-build.)
+    //
+    // `local_sym` is still used above for the `Symbol(_)` query branch
+    // — arity-discriminated single-symbol dispatch (`return X if @_ == N`)
+    // attaches to the symbol id, not the name.
+    let _ = local_sym;
     let att = WitnessAttachment::NamedSub(sub_name.to_string());
     let q = ReducerQuery {
         attachment: &att,
@@ -1094,17 +1181,6 @@ pub fn query_sub_return_type(
     };
     if let ReducedValue::Type(t) = reg.query(bag, &q) {
         return Some(t);
-    }
-    // Final fallback: the local symbol's stored `return_type`. This
-    // covers plain subs whose return came from the per-arm fold and
-    // got written back to `Symbol.return_type` directly, with no
-    // name-keyed observations published.
-    if let Some(sym) = local_sym {
-        if let crate::file_analysis::SymbolDetail::Sub { return_type, .. } = &sym.detail {
-            if let Some(t) = return_type {
-                return Some(t.clone());
-            }
-        }
     }
     None
 }

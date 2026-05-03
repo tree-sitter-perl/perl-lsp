@@ -6068,11 +6068,11 @@ impl<'a> Builder<'a> {
     fn resolve_return_types(&mut self) {
         let (returns_by_scope, arm_types_per_ri) = self.collect_return_arm_types();
         self.emit_arity_return_witnesses(&arm_types_per_ri);
+        self.emit_delegation_edges();
         let (mut return_types, mut return_provenance) =
             self.fold_per_sub_return_arms(&returns_by_scope);
         self.seed_plugin_overrides_into_return_types(&mut return_types, &mut return_provenance);
-        self.propagate_via_delegation(&mut return_types, &mut return_provenance);
-        self.propagate_via_self_method_tails(&mut return_types, &mut return_provenance);
+        self.fill_returns_via_bag_chase(&mut return_types, &mut return_provenance);
         self.write_back_sub_return_types(&return_types, &return_provenance);
         self.propagate_call_bindings_to_constraints(&return_types);
         self.fixup_call_bound_hash_key_owners(&return_types);
@@ -6302,16 +6302,11 @@ impl<'a> Builder<'a> {
     }
 
     /// Step 4: seed Plugin overrides into `return_types` before
-    /// delegation / self_method_tail propagation. Plugin-source
-    /// `InferredType` witnesses on `Symbol(sym_id)` (pushed by
-    /// `apply_type_overrides`) carry priority > Builder; the
-    /// `PluginOverrideReducer` short-circuit dominates the per-arm
-    /// fold above. Provenance was already written as `PluginOverride`
-    /// by `apply_type_overrides`; clear any conflicting
-    /// `return_provenance` entry so the writeback can't clobber that
-    /// with `ReducerFold`. Subs that delegate to an overridden sub
-    /// inherit the override (the delegation pass sees
-    /// `return_types[overridden] = override`).
+    /// delegation / self_method_tail propagation. Routes through
+    /// `PluginOverrideReducer`'s own `claims` + `reduce` so the
+    /// predicate stays in lock-step with the registry — if the reducer
+    /// gains a tie-breaker or attachment-shape filter, the seed pass
+    /// inherits it for free instead of silently disagreeing.
     fn seed_plugin_overrides_into_return_types(
         &self,
         return_types: &mut std::collections::HashMap<String, InferredType>,
@@ -6320,89 +6315,86 @@ impl<'a> Builder<'a> {
             crate::file_analysis::TypeProvenance,
         >,
     ) {
-        use crate::witnesses::{WitnessAttachment, WitnessPayload};
+        use crate::witnesses::{
+            FrameworkFact, PluginOverrideReducer, ReducedValue, ReducerQuery, Witness,
+            WitnessAttachment, WitnessReducer,
+        };
 
+        let plugin_reducer = PluginOverrideReducer;
         for sym in &self.symbols {
             if !matches!(sym.kind, SymKind::Sub | SymKind::Method) {
                 continue;
             }
             let att = WitnessAttachment::Symbol(sym.id);
-            let bag_override = self
+            let claimed: Vec<&Witness> = self
                 .bag
                 .for_attachment(&att)
-                .iter()
-                .filter_map(|w| match (w.source.priority(), &w.payload) {
-                    (p, WitnessPayload::InferredType(t)) if p > 10 => Some((p, t.clone())),
-                    _ => None,
-                })
-                .max_by_key(|(p, _)| *p)
-                .map(|(_, t)| t);
-            if let Some(t) = bag_override {
+                .into_iter()
+                .filter(|w| plugin_reducer.claims(w))
+                .collect();
+            if claimed.is_empty() {
+                continue;
+            }
+            let q = ReducerQuery {
+                attachment: &att,
+                point: None,
+                framework: FrameworkFact::Plain,
+                arity_hint: None,
+                context: None,
+            };
+            if let ReducedValue::Type(t) = plugin_reducer.reduce(&claimed, &q) {
                 return_types.insert(sym.name.clone(), t);
                 return_provenance.remove(&sym.name);
             }
         }
     }
 
-    /// Step 5: propagate return types through delegation chains. If
-    /// sub X's body is `return Y()` (recorded in
-    /// `sub_return_delegations`) and Y has a known return type, X
-    /// inherits it. Iterate until no changes — chains converge in at
-    /// most `delegations.len()` passes; the 20-iter cap is a safety
-    /// net for unforeseen cycles. Mirrors `DelegationReducer` in
-    /// `witnesses.rs` (which uses `ReducerQuery::return_of` instead of
-    /// the in-progress `return_types` map).
-    fn propagate_via_delegation(
-        &self,
-        return_types: &mut std::collections::HashMap<String, InferredType>,
-        return_provenance: &mut std::collections::HashMap<
-            String,
-            crate::file_analysis::TypeProvenance,
-        >,
-    ) {
-        let mut changed = true;
-        let mut iters = 0;
-        while changed && iters < 20 {
-            changed = false;
-            iters += 1;
-            let pairs: Vec<(String, String)> = self
-                .sub_return_delegations
-                .iter()
-                .map(|(k, v)| (k.clone(), v.clone()))
-                .collect();
-            for (delegator, delegate) in pairs {
-                if return_types.contains_key(&delegator) {
-                    continue;
-                }
-                if let Some(t) = return_types.get(&delegate).cloned() {
-                    return_types.insert(delegator.clone(), t);
-                    return_provenance.insert(
-                        delegator,
-                        crate::file_analysis::TypeProvenance::Delegation {
-                            kind: "sub_return".into(),
-                            via: delegate,
-                        },
-                    );
-                    changed = true;
-                }
-            }
-        }
-    }
+    /// Re-emittable: push edge facts for every recorded sub-return
+    /// delegation (`return other()` shape) and every self-method-tail
+    /// (`sub get { shift->method(...) }` shape) into the bag. Each
+    /// becomes `NamedSub(delegator) → Edge(NamedSub(delegate))`,
+    /// tagged so provenance attribution can later distinguish the two.
+    ///
+    /// Replaces the old hand-rolled fixed-point loops
+    /// (`propagate_via_delegation` / `propagate_via_self_method_tails`).
+    /// The registry's edge-chase resolves transitively, so multi-hop
+    /// chains converge as fast as the worklist's outer fold runs —
+    /// no inner iter cap to maintain.
+    ///
+    /// Clear-and-emit on tags `delegation` and `self_method_tail` so
+    /// repeat calls inside the worklist driver stay idempotent (no
+    /// duplicate edges accumulate).
+    ///
+    /// Self-recursion (a sub whose tail is its own name) is skipped —
+    /// can't infer your own return from yourself, and emitting the
+    /// edge would only contribute a `NamedSub(name) → Edge(NamedSub(name))`
+    /// that the registry's cycle guard would short-circuit on anyway.
+    fn emit_delegation_edges(&mut self) {
+        use crate::witnesses::{Witness, WitnessAttachment, WitnessPayload, WitnessSource};
 
-    /// Step 6: self-method-tail propagation. Perl's last statement
-    /// returns, so `sub get { shift->_generate_route(GET => @_) }`
-    /// returns whatever `_generate_route` returns. Same fixed-point
-    /// shape as delegation; mirrors `SelfMethodTailReducer`.
-    /// Self-recursion (`sub_name == tail_method`) is skipped — can't
-    /// infer your own return type from yourself.
-    fn propagate_via_self_method_tails(
-        &self,
-        return_types: &mut std::collections::HashMap<String, InferredType>,
-        return_provenance: &mut std::collections::HashMap<
-            String,
-            crate::file_analysis::TypeProvenance,
-        >,
-    ) {
+        self.bag.remove_by_source_tag("delegation");
+        self.bag.remove_by_source_tag("self_method_tail");
+
+        let zero = Span {
+            start: Point { row: 0, column: 0 },
+            end: Point { row: 0, column: 0 },
+        };
+
+        let delegation_edges: Vec<Witness> = self
+            .sub_return_delegations
+            .iter()
+            .filter(|(delegator, delegate)| delegator != delegate)
+            .map(|(delegator, delegate)| Witness {
+                attachment: WitnessAttachment::NamedSub(delegator.clone()),
+                source: WitnessSource::Builder("delegation".into()),
+                payload: WitnessPayload::Edge(WitnessAttachment::NamedSub(delegate.clone())),
+                span: zero,
+            })
+            .collect();
+        for w in delegation_edges {
+            self.bag.push(w);
+        }
+
         let scope_to_sub: std::collections::HashMap<ScopeId, String> = self
             .scopes
             .iter()
@@ -6413,39 +6405,137 @@ impl<'a> Builder<'a> {
                 _ => None,
             })
             .collect();
-        let mut changed = true;
-        let mut iters = 0;
-        while changed && iters < 20 {
-            changed = false;
-            iters += 1;
-            let tails: Vec<(ScopeId, String)> = self
-                .self_method_tails
-                .iter()
-                .map(|(k, v)| (*k, v.clone()))
-                .collect();
-            for (scope_id, tail_method) in tails {
-                let sub_name = match scope_to_sub.get(&scope_id) {
-                    Some(n) => n.clone(),
-                    None => continue,
-                };
-                if return_types.contains_key(&sub_name) {
-                    continue;
-                }
+        let tail_edges: Vec<Witness> = self
+            .self_method_tails
+            .iter()
+            .filter_map(|(scope_id, tail_method)| {
+                let sub_name = scope_to_sub.get(scope_id)?;
                 if sub_name == tail_method {
-                    continue;
+                    return None;
                 }
-                if let Some(t) = return_types.get(&tail_method).cloned() {
-                    return_types.insert(sub_name.clone(), t);
-                    return_provenance.insert(
-                        sub_name,
-                        crate::file_analysis::TypeProvenance::Delegation {
-                            kind: "self_method_tail".into(),
-                            via: tail_method,
-                        },
-                    );
-                    changed = true;
+                Some(Witness {
+                    attachment: WitnessAttachment::NamedSub(sub_name.clone()),
+                    source: WitnessSource::Builder("self_method_tail".into()),
+                    payload: WitnessPayload::Edge(WitnessAttachment::NamedSub(
+                        tail_method.clone(),
+                    )),
+                    span: zero,
+                })
+            })
+            .collect();
+        for w in tail_edges {
+            self.bag.push(w);
+        }
+    }
+
+    /// For Sub/Method symbols whose return type didn't surface from
+    /// the per-arm fold or plugin overrides, AND who are recorded as
+    /// delegators (`return X()`) or self-method-tail callers
+    /// (`shift->M` last expr), query the bag's `NamedSub(name)`
+    /// attachment via the registry and accept its answer.
+    ///
+    /// Replaces the work the old `propagate_via_delegation` and
+    /// `propagate_via_self_method_tails` loops did, but goes through
+    /// the bag instead of the in-progress `return_types` map. Multi-hop
+    /// resolution converges across worklist iterations (each
+    /// iteration's writeback publishes a NamedSub witness that the
+    /// next iteration's chase can resolve through). The bag's
+    /// monotone-append + finite lattice argument carries termination;
+    /// no inner cap needed.
+    ///
+    /// Restricted to subs that actually appear in the delegation /
+    /// self-method-tail bookkeeping. Without this guard, a
+    /// framework-synthesized accessor with multiple symbols sharing a
+    /// name (Mojo::Base `has` getter+writer for `routes` —
+    /// returning `Mojolicious::Routes` and `Mojolicious` respectively)
+    /// would have its first-symbol getter type silently overwritten
+    /// by the writer's type: `NamedSubReturn` returns the latest
+    /// `InferredType` witness on the attachment, and writeback pushes
+    /// one per symbol.  The old propagation passes never touched
+    /// these — they only filled in delegators/tails, which is what
+    /// this restricted pass also does.
+    fn fill_returns_via_bag_chase(
+        &self,
+        return_types: &mut std::collections::HashMap<String, InferredType>,
+        return_provenance: &mut std::collections::HashMap<
+            String,
+            crate::file_analysis::TypeProvenance,
+        >,
+    ) {
+        use crate::witnesses::{
+            BagContext, FrameworkFact, ReducedValue, ReducerQuery, ReducerRegistry,
+            WitnessAttachment,
+        };
+
+        let scope_to_sub: std::collections::HashMap<ScopeId, String> = self
+            .scopes
+            .iter()
+            .filter_map(|s| match &s.kind {
+                ScopeKind::Sub { name } | ScopeKind::Method { name } => {
+                    Some((s.id, name.clone()))
                 }
+                _ => None,
+            })
+            .collect();
+        let tail_by_sub: std::collections::HashMap<&str, &str> = self
+            .self_method_tails
+            .iter()
+            .filter_map(|(scope_id, tail_method)| {
+                scope_to_sub
+                    .get(scope_id)
+                    .map(|name| (name.as_str(), tail_method.as_str()))
+            })
+            .collect();
+
+        let reg = ReducerRegistry::with_defaults();
+        let ctx = BagContext {
+            scopes: &self.scopes,
+            package_framework: &self.package_framework,
+        };
+        let mut updates: Vec<(String, InferredType, crate::file_analysis::TypeProvenance)> =
+            Vec::new();
+        for sym in &self.symbols {
+            if !matches!(sym.kind, SymKind::Sub | SymKind::Method) {
+                continue;
             }
+            if return_types.contains_key(&sym.name) {
+                continue;
+            }
+            let delegate = self.sub_return_delegations.get(&sym.name);
+            let tail = tail_by_sub.get(sym.name.as_str()).copied();
+            if delegate.is_none() && tail.is_none() {
+                continue;
+            }
+            let att = WitnessAttachment::NamedSub(sym.name.clone());
+            let q = ReducerQuery {
+                attachment: &att,
+                point: None,
+                framework: FrameworkFact::Plain,
+                arity_hint: None,
+                context: Some(&ctx),
+            };
+            let resolved = match reg.query(&self.bag, &q) {
+                ReducedValue::Type(t) => t,
+                _ => continue,
+            };
+            let provenance = if let Some(via) = delegate {
+                crate::file_analysis::TypeProvenance::Delegation {
+                    kind: "sub_return".into(),
+                    via: via.clone(),
+                }
+            } else if let Some(via) = tail {
+                crate::file_analysis::TypeProvenance::Delegation {
+                    kind: "self_method_tail".into(),
+                    via: via.to_string(),
+                }
+            } else {
+                unreachable!("delegate or tail must be Some — we filtered above")
+            };
+            updates.push((sym.name.clone(), resolved, provenance));
+        }
+        for (name, t, prov) in updates {
+            return_types.insert(name.clone(), t);
+            return_provenance.insert(name, prov);
         }
     }
 
@@ -6521,33 +6611,43 @@ impl<'a> Builder<'a> {
         }
 
         // Publish every Sub/Method's resolved return type to the bag
-        // as `NamedSub(name) → InferredType(t)`. Catches both
-        // worklist-resolved returns (set above) and framework-pinned
-        // ones (Mojo::Base accessors, Moo `has`, DBIC column accessors
-        // — these set `return_type` in the SymbolDetail constructor at
-        // walk-time synthesis, never flow through `return_types`).
-        // Same shape `enrich_imported_types_with_keys` uses for
-        // imports, so NamedSub is the universal "what does sub X
-        // return?" attachment for both local and cross-file lookups.
-        let named_sub_witnesses: Vec<Witness> = self
-            .symbols
-            .iter()
-            .filter_map(|sym| {
-                if !matches!(sym.kind, SymKind::Sub | SymKind::Method) {
-                    return None;
-                }
-                let SymbolDetail::Sub { return_type: Some(rt), .. } = &sym.detail else {
-                    return None;
-                };
-                Some(Witness {
-                    attachment: WitnessAttachment::NamedSub(sym.name.clone()),
-                    source: WitnessSource::Builder("local_return".into()),
-                    payload: WitnessPayload::InferredType(rt.clone()),
-                    span: sym.span,
-                })
-            })
-            .collect();
-        for w in named_sub_witnesses {
+        // on TWO attachments:
+        //   - `NamedSub(name)` — name-keyed lookup (cross-file imports
+        //     ride the same shape via `enrich_imported_types_with_keys`,
+        //     so this is the universal "what does sub `name` return?"
+        //     answer regardless of locality).
+        //   - `Symbol(sym_id)` — id-keyed lookup. Class-scoped dispatch
+        //     (`find_method_return_type_raw` resolves to a sym_id via
+        //     ancestor walk, then asks the bag what THAT sym returns)
+        //     rides this — name-keyed `NamedSub` would conflate
+        //     getter+writer pairs that share a method name.
+        // Catches both worklist-resolved returns (set above) and
+        // framework-pinned ones (Mojo::Base accessors, Moo `has`,
+        // DBIC column accessors — these set `return_type` in the
+        // SymbolDetail constructor at walk-time synthesis, never flow
+        // through `return_types`).
+        let mut writeback_witnesses: Vec<Witness> = Vec::new();
+        for sym in &self.symbols {
+            if !matches!(sym.kind, SymKind::Sub | SymKind::Method) {
+                continue;
+            }
+            let SymbolDetail::Sub { return_type: Some(rt), .. } = &sym.detail else {
+                continue;
+            };
+            writeback_witnesses.push(Witness {
+                attachment: WitnessAttachment::NamedSub(sym.name.clone()),
+                source: WitnessSource::Builder("local_return".into()),
+                payload: WitnessPayload::InferredType(rt.clone()),
+                span: sym.span,
+            });
+            writeback_witnesses.push(Witness {
+                attachment: WitnessAttachment::Symbol(sym.id),
+                source: WitnessSource::Builder("local_return".into()),
+                payload: WitnessPayload::InferredType(rt.clone()),
+                span: sym.span,
+            });
+        }
+        for w in writeback_witnesses {
             self.bag.push(w);
         }
     }
