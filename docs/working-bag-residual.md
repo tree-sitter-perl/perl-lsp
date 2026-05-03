@@ -37,20 +37,45 @@ inference-flavored consumer routes through the bag.
       shape, scope-keyed. Push `NamedSub(sub_name) → Edge(NamedSub(tail_method))`.
       Drop the loop.
 
-- [ ] *(Followup)* `apply_chain_typing_invocants` (builder.rs:6030) —
-      currently dispatches through `resolve_invocant_class_tree`.
-      Should query `Expression(refidx)` from the bag for method-call
-      invocants and `Variable{name, scope}` for scalar invocants.
-      Bigger refactor — needs constructor-pattern handling on the bag
-      side (NamedSub("new") doesn't carry per-class info).
+- [x] **`apply_chain_typing_invocants` + `apply_chain_typing_assignments`**
+      (builder.rs:6020 / 5937) — both still call
+      `resolve_invocant_class_tree`, but the function's BODY is now
+      bag-routed. Queries `Expression(refidx)` for method-call
+      invocants (with constructor-pattern bake before bag consult),
+      `Variable{name, scope}` for scalar invocants,
+      `NamedSub(name, arity=Some(0/N))` for bareword + function-call
+      invocants. Walk-time bag is sparser (TC mirroring is post-walk;
+      plugin / framework synthesis pushes are immediate) so walk-time
+      calls return None for variables and PostFold's invocant
+      refresh fills them. Same function used in both contexts.
+      `scope_at_point` lookup means it works post-walk after
+      `scope_stack` is empty.
 
-- [ ] *(Followup)* `apply_chain_typing_assignments` (builder.rs:5937) —
-      emit `Variable{$x, scope} → Edge(Expression(rhs_refidx))` and
-      let the registry chase. Drop direct `resolve_invocant_class_tree`
-      calls. Needs clear-and-emit pattern (idempotency in the worklist).
+      The mistake along the way: I initially added a parallel
+      `resolve_node_class_via_bag` function. Got pushed back on. Right
+      answer: mutate the existing function. See
+      `feedback_no_via_bag_siblings.md`.
 
-- [ ] *(Followup)* Delete `resolve_invocant_class_tree` and
-      `receiver_type_for` once both chain-typing passes are bag-routed.
+- [x] **`receiver_type_for` bareword arm** (builder.rs:1373) —
+      direct `Symbol.return_type` field read replaced with
+      `bag_query_named_sub`. Variable arm still reads TCs directly
+      because at walk time TCs ARE the canonical store (the bag
+      mirrors them post-walk via `populate_witness_bag`); reading TCs
+      here isn't a parallel path with the bag, it's reading the bag's
+      input.
+
+- [x] **Plugin synthesis pushes bag witnesses at synthesis time**
+      (builder.rs:1606 in `apply_emit_action::Method`) — top-level
+      plugin synth (`on_class.is_none()` — `app` from
+      Mojolicious::Lite, etc.) pushes Symbol(sid) + NamedSub(name)
+      Plugin-source witnesses immediately, mirroring the
+      enrichment-time pattern for cross-file imports. Class-scoped
+      synth (`on_class.is_some()`) skips the bag push entirely:
+      same-named methods across nested namespaces (mojo-helpers
+      emits `users` proxy on Controller AND inside `admin`'s
+      namespace) would conflate via NamedSubReturn-latest-wins.
+      Bridges remain the dispatch mechanism for class-scoped synth
+      (per CLAUDE.md rule #8).
 
 ## Symbol.return_type readers (route through bag)
 
@@ -75,9 +100,11 @@ inference-flavored consumer routes through the bag.
 
 - [ ] *(Followup)* `resolve_invocant_class` bareword arm
       (file_analysis.rs:3644) — direct Sub.return_type read for
-      bareword-as-zero-arg-call detection. Three-way mirror with
-      `resolve_invocant_class_tree` and `receiver_type_for`. All three
-      go away when chain typing migrates above.
+      bareword-as-zero-arg-call detection. The Builder-side mirrors
+      (`resolve_invocant_class_tree`, `receiver_type_for`) are now
+      bag-routed; this FA-side mirror is the last one. Migrate to
+      `sub_return_type_at_arity` (which already routes through the
+      bag).
 
 ## Polish
 
@@ -86,6 +113,30 @@ inference-flavored consumer routes through the bag.
       witness mid-scope, this loses temporal precision (reassignment
       narrowing sees the latest binding instead of the point-of-emission
       one). Thread the chasing witness's span through `materialize`.
+
+- [ ] *(Followup, hack)* **`emit_call_arg_key_accesses` is walk-time
+      only** (builder.rs:5583, called from `visit_method_call` at
+      ~line 4953 and `visit_function_call` at ~line 3987). Runs
+      inside the live walk and gates on `invocant_class.is_some()` —
+      which forces walk-time invocant_class resolution to fall back
+      to syntactic text reads (bareword → just the text). That's a
+      parallel path with the bag for invocants whose canonical class
+      only the bag knows (e.g. `app->routes`: walk-time syntactic
+      reads `app` as class "app", but the plugin-pushed
+      `NamedSub("app") → ClassName(Mojolicious)` is the real answer).
+      The bag-routed `resolve_invocant_class_tree` would do the right
+      thing, but emit_call_arg_key_accesses' walk-time gating means
+      we can't drop the syntactic walk-time set without losing the
+      key emissions for `MooApp->new(name => 'alice')` and friends.
+
+      Move `emit_call_arg_key_accesses` to a post-walk pass that
+      reads each MethodCall ref's now-canonical `invocant_class`
+      (filled by `apply_chain_typing_invocants` against the bag) and
+      iterates the args node from `ChainTypingIndex` (or stores the
+      args span on the ref). Once that's done, walk-time
+      invocant_class becomes purely closed-under-syntax (constructor
+      pattern + `__PACKAGE__` only) — no syntactic-text fallback for
+      bareword, no parallel path with the bag.
 
 ## Don't do
 
