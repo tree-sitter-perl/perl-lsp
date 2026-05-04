@@ -1,158 +1,292 @@
-# Bag-residual punch list
+# Bag-residual action plan
 
-Working notes from the spike/edge-facts review. Things that still bypass
-the bag after Step 4 landed. Use as a checklist; cross out as each lands.
+The principle: **the bag is the only truth.** Every dual-store, every
+syntactic bake, every "the field is canonical at this phase" caveat is
+a hack we have to remember. They all go.
 
-## Root cause
+What's left is structured around four directives. Items are grouped
+under the directive they serve so the cleanup never feels like
+unrelated chores.
 
-`Symbol.return_type` is still load-bearing — not just a cache. Three
-downstream sites read it directly because there's no bag-emitted answer
-for "plain sub with implicit-last-expr return" until writeback, and
-because the writeback's NamedSub publish wasn't there originally.
+---
 
-After this PR's items land, the field becomes a true cache: every
-inference-flavored consumer routes through the bag.
+## Directive 1 — Methods belong in the bag
 
-## Mechanical fixes (no semantic change)
+Today `find_method_return_type_seen` (file_analysis.rs:2103) chases
+`return_self_method` recursively at FA query time, calling
+`resolve_method_in_ancestors` to thread class context through the
+inheritance chain. The bag's `Edge(NamedSub(b))` for the same shape is
+name-keyed only — it can't represent "method `b` on class `C`."
 
-- [x] **`seed_plugin_overrides_into_return_types`** (builder.rs:6315) —
-      manual `max_by_key(priority)` scan re-implements PluginOverrideReducer.
-      Replace with `reg.query()` so reducer-claim changes can't silently
-      drift. Mechanical.
+Result: cross-class dispatch has its own typer. The bag answers some
+questions and the FA-side recursion answers the rest. The seam is
+maintained by hand (`fill_returns_via_bag_chase` is "restricted to
+delegators/tails" precisely to avoid colliding with what the FA-side
+will answer differently).
 
-- [x] **Dead `Symbol.return_type` fallback in `query_sub_return_type`**
-      (witnesses.rs:1102-1108) — writeback already pushes NamedSub for
-      every sub with a resolved return_type; the NamedSub branch above
-      always answers when this branch would have. Provably dead.
+**Action items.** Treat as one design pass; do not split.
 
-## Edge-emission migrations (replace procedural propagation)
+- [ ] **Add `MethodOnClass { class, name }` attachment.** A reserved
+      `ReturnOfKey::MethodOnClass` payload already exists (`witnesses.rs:18-21`,
+      held under `#[allow(dead_code)]`) — the design saw this coming.
+      Pick the final shape now (struct vs tuple, `Arc<str>` vs `String`)
+      and commit.
 
-- [x] **`propagate_via_delegation`** (builder.rs:6355) — fixed-point
-      loop reading `sub_return_delegations: HashMap<String, String>`
-      directly. Replace with re-emittable pass pushing
-      `NamedSub(delegator) → Edge(NamedSub(delegate))`. Registry chase
-      handles transitivity. Drop the loop.
+- [ ] **Inheritance edge emitter.** For each `package_parents[C] = [P1, P2]`
+      and each method `m` resolvable on `P1`, push
+      `MethodOnClass(C, m) → Edge(MethodOnClass(P1, m))`. The registry's
+      cycle-guarded materialize gives MRO walking for free. Emitter
+      lives in builder.rs (rule #1 stays intact — it consumes
+      `package_parents`, doesn't walk the tree).
 
-- [x] **`propagate_via_self_method_tails`** (builder.rs:6398) — same
-      shape, scope-keyed. Push `NamedSub(sub_name) → Edge(NamedSub(tail_method))`.
-      Drop the loop.
+- [ ] **Cross-file bridges become edges, not callback walks.**
+      `for_each_entity_bridged_to` and the plugin-namespace dispatch
+      walk both fold into the same Edge(MethodOnClass(...)) shape.
+      `BagContext` extends to carry `&ModuleIndex` so cross-file edges
+      materialize through the registry just like in-file ones.
 
-- [x] **`apply_chain_typing_invocants` + `apply_chain_typing_assignments`**
-      (builder.rs:6020 / 5937) — both still call
-      `resolve_invocant_class_tree`, but the function's BODY is now
-      bag-routed. Queries `Expression(refidx)` for method-call
-      invocants (with constructor-pattern bake before bag consult),
-      `Variable{name, scope}` for scalar invocants,
-      `NamedSub(name, arity=Some(0/N))` for bareword + function-call
-      invocants. Walk-time bag is sparser (TC mirroring is post-walk;
-      plugin / framework synthesis pushes are immediate) so walk-time
-      calls return None for variables and PostFold's invocant
-      refresh fills them. Same function used in both contexts.
-      `scope_at_point` lookup means it works post-walk after
-      `scope_stack` is empty.
+- [ ] **Replace `find_method_return_type_seen`** with
+      `MethodOnClass(C, m)` queries. Drop `find_method_return_type_raw`'s
+      ancestor walk + procedural overload picking — the registry handles
+      both via edges. Drop `self_method_tail` (the FA helper, not the
+      Builder map) entirely.
 
-      The mistake along the way: I initially added a parallel
-      `resolve_node_class_via_bag` function. Got pushed back on. Right
-      answer: mutate the existing function. See
-      `feedback_no_via_bag_siblings.md`.
+- [ ] **Drop the "restricted to delegators/tails" guard** in
+      `fill_returns_via_bag_chase` (builder.rs:6736). With class-aware
+      edges, `NamedSubReturn`'s name conflation problem goes away — the
+      bag can ask `MethodOnClass(C, m)` directly and never confuse a
+      Mojo `level` getter with its writer pair.
 
-- [x] **`receiver_type_for` bareword arm** (builder.rs:1373) —
-      direct `Symbol.return_type` field read replaced with
-      `bag_query_named_sub`. Variable arm still reads TCs directly
-      because at walk time TCs ARE the canonical store (the bag
-      mirrors them post-walk via `populate_witness_bag`); reading TCs
-      here isn't a parallel path with the bag, it's reading the bag's
-      input.
+**Why one design pass.** The attachment shape, the edge emitter, the
+`BagContext` extension, and the `find_method_return_type_seen` rewrite
+are interlocked. Doing them piecemeal means living with two code paths
+mid-refactor and another "remember to migrate" hack.
 
-- [x] **Plugin synthesis pushes bag witnesses at synthesis time**
-      (builder.rs:1606 in `apply_emit_action::Method`) — top-level
-      plugin synth (`on_class.is_none()` — `app` from
-      Mojolicious::Lite, etc.) pushes Symbol(sid) + NamedSub(name)
-      Plugin-source witnesses immediately, mirroring the
-      enrichment-time pattern for cross-file imports. Class-scoped
-      synth (`on_class.is_some()`) skips the bag push entirely:
-      same-named methods across nested namespaces (mojo-helpers
-      emits `users` proxy on Controller AND inside `admin`'s
-      namespace) would conflate via NamedSubReturn-latest-wins.
-      Bridges remain the dispatch mechanism for class-scoped synth
-      (per CLAUDE.md rule #8).
+---
 
-## Symbol.return_type readers (route through bag)
+## Directive 2 — All expressions are the same thing
 
-- [x] **`find_method_return_type_raw`** (file_analysis.rs:2126/2142) —
-      replaced direct field reads with `symbol_return_type_via_bag`
-      that queries `Symbol(sym_id)` through the registry. New
-      `SubReturnReducer` claims `local_return` / `imported_return`
-      witnesses, registered last so Plugin / branch-arm / arity
-      dispatch get first crack. Multi-overload class-bound dispatch
-      stays procedural (still picks sym_id by `params.len()`); the
-      per-sym answer routes through the bag.
+Arms aren't a separate concept. `return $x`, `return Foo->new`,
+`return $self->method`, `42 if cond else "x"` — every one of these is
+"the value of an expression." The current code special-cases:
 
-      Two subtleties baked into the reducer:
-      - source-tag claim (only `local_return` / `imported_return`),
-        not all `Symbol+InferredType` — branch_arm-source materialized
-        witnesses must keep flowing through `BranchArmFold` so its
-        "single arm or disagreement → None" yields properly;
-      - fires only when `arity_hint.is_none()`, so an arity-specific
-        query whose `FluentArityDispatch` answer is None doesn't
-        get papered over by the getter sym's flat stored value
-        (Mojo `level(1)` mustn't return the getter's String).
+- `arm_payload` (builder.rs:3591) dispatches on node kind to decide
+  bake-vs-Edge per arm shape. Strings, numbers, anon hashes,
+  arithmetic, regexp get baked; variables, method calls, function
+  calls get Edges; ternaries are recursed into; everything else
+  returns `None`.
+- `ReturnArm(Span)` is its own attachment kind, with its own reducer
+  (`ReturnArmReturn`).
+- The chain typer's `arm_types_per_ri` array threads bag-resolved arm
+  types alongside `ReturnInfo` records.
+- Variable reads, method-call results, and function-call results each
+  publish to a different attachment shape (`Variable`, `Expression(RefIdx)`,
+  `NamedSub`).
 
-- [ ] *(Followup)* `resolve_invocant_class` bareword arm
-      (file_analysis.rs:3644) — direct Sub.return_type read for
-      bareword-as-zero-arg-call detection. The Builder-side mirrors
-      (`resolve_invocant_class_tree`, `receiver_type_for`) are now
-      bag-routed; this FA-side mirror is the last one. Migrate to
-      `sub_return_type_at_arity` (which already routes through the
-      bag).
+The fix is one attachment that means "the value of the expression at
+this span," with every expression — literal, ref-bearing, or compound —
+publishing to it.
 
-## Polish
+**Action items.** Probably needs a short design session before
+implementation; flag the open questions inline.
 
-- [ ] *(Followup)* `BagContext::scope_point` (witnesses.rs:1026) — uses
-      scope-end as the chase anchor. For Edge fired from a `branch_arm`
-      witness mid-scope, this loses temporal precision (reassignment
-      narrowing sees the latest binding instead of the point-of-emission
-      one). Thread the chasing witness's span through `materialize`.
+- [ ] **One expression attachment.** Candidate shape: `Expr(Span)` (or
+      `Node(NodeId)` if we want to key by AST node identity). Replaces
+      both `ReturnArm(Span)` and `Expression(RefIdx)`. Refs that are
+      expressions (method calls in rvalue position) keep their RefIdx
+      as metadata for non-type lookups (rename, ref_at) but the type
+      answer rides `Expr(span)`.
 
-- [ ] *(Followup, hack)* **`emit_call_arg_key_accesses` is walk-time
-      only** (builder.rs:5583, called from `visit_method_call` at
-      ~line 4953 and `visit_function_call` at ~line 3987). Runs
-      inside the live walk and gates on `invocant_class.is_some()` —
-      which forces walk-time invocant_class resolution to fall back
-      to syntactic text reads (bareword → just the text). That's a
-      parallel path with the bag for invocants whose canonical class
-      only the bag knows (e.g. `app->routes`: walk-time syntactic
-      reads `app` as class "app", but the plugin-pushed
-      `NamedSub("app") → ClassName(Mojolicious)` is the real answer).
-      The bag-routed `resolve_invocant_class_tree` would do the right
-      thing, but emit_call_arg_key_accesses' walk-time gating means
-      we can't drop the syntactic walk-time set without losing the
-      key emissions for `MooApp->new(name => 'alice')` and friends.
+- [ ] **Walker emits `Expr` witnesses uniformly.** Literals push
+      `InferredType` (closed under syntax — `42` is `Numeric`). Refs
+      push `Edge(Variable{...})` / `Edge(NamedSub)` / `Edge(MethodOnClass(...))`
+      to the resolution target. Compound exprs (ternary, do-block,
+      block-as-rvalue) push `Edge`s to each component's `Expr(span)`
+      and let `BranchArmFold` agree across them.
 
-      Move `emit_call_arg_key_accesses` to a post-walk pass that
-      reads each MethodCall ref's now-canonical `invocant_class`
-      (filled by `apply_chain_typing_invocants` against the bag) and
-      iterates the args node from `ChainTypingIndex` (or stores the
-      args span on the ref). Once that's done, walk-time
-      invocant_class becomes purely closed-under-syntax (constructor
-      pattern + `__PACKAGE__` only) — no syntactic-text fallback for
-      bareword, no parallel path with the bag.
+- [ ] **Kill `arm_payload`.** Its job is "given a node, what witness
+      shape?" — but every node in rvalue position needs the same shape
+      (an `Expr(span)` witness). The dispatch becomes one walker
+      callback that runs on every expression node.
 
-## Don't do
+- [ ] **Kill `ReturnArm` and `ReturnArmReturn`.** A `return EXPR`
+      becomes `Edge(Expr(expr_span))` on `Symbol(sub_id)` —
+      `BranchArmFold` already handles agreement across multiple
+      `branch_arm`-source witnesses on a sub.
 
-- **`apply_type_overrides`** is fine. It already just emits a
-  Plugin-priority witness; the seed pass that consumed it (item 1
-  above) was the redundant piece.
+- [ ] **Kill `last_expr_type`.** Implicit-last-expression-as-return is
+      just one more branch_arm-source `Edge(Expr(last_stmt_span))` on
+      `Symbol(sub_id)`. Same machinery as explicit returns; no
+      side-channel map.
 
-- **Display/UI consumers of `Symbol.return_type`** (backend.rs,
-  symbols.rs, hover, outline) — let them keep reading the field as a
-  cache. They're not making inference decisions.
+- [ ] **Kill the `arm_types_per_ri` / `returns_by_scope` plumbing.**
+      Once arms are `Edge`s, `fold_per_sub_return_arms` is just
+      `query(Symbol(sid))` — the registry materializes the edges and
+      `BranchArmFold` agrees them.
 
-- **`enrich_imported_types_with_keys`'s `sub_return_type_local`
-  early-out check** (file_analysis.rs:1592) — using the field as a
-  cache to skip already-resolved bindings. Fine.
+**Open design questions, decide before starting.**
+
+1. **`Span` vs `NodeId` keying.** Spans are stable across
+   serialize/deserialize and align with how `ReturnArm` is keyed today.
+   NodeIds are tighter against the AST but die at the cache boundary.
+   Recommend `Span`.
+
+2. **Do refs keep `Expression(RefIdx)`?** Rename and "find references"
+   need ref-keyed lookup. Easiest: keep `RefIdx` as a non-type
+   side-index, route the type answer through `Expr(span)`, and let
+   `Expression(RefIdx)` fade to "the ref's metadata," not "the
+   expression's type."
+
+3. **Anonymous expressions that aren't refs** (a bare arithmetic
+   subexpression nested inside a return). Today they don't have an
+   attachment because no consumer asks. After the unification they
+   would — but only if something Edges to them. Lazy emission (only
+   when needed) is fine; the walker doesn't need to publish for every
+   span unconditionally.
+
+---
+
+## Directive 3 — One attachment per fact, no source-tag claims
+
+Multiple reducers claim `Symbol(_)` + `InferredType` today. They
+disambiguate by `WitnessSource` tag: `PluginOverrideReducer` claims
+priority>10, `BranchArmFold` claims `branch_arm`, `SubReturnReducer`
+claims `local_return` / `imported_return`, `FluentArityDispatch`
+claims a different payload. A new push that lands on the same
+attachment with a new source tag silently bypasses the gate that the
+original author of the source filter wrote.
+
+This is the "fill in the hack somewhere else" pattern. Kill it by
+giving each semantic category its own attachment shape.
+
+**Action items.**
+
+- [ ] **Drop the dual `Symbol(_)` + `NamedSub(_)` writeback** in
+      `write_back_sub_return_types` (builder.rs:6917). Pick one
+      attachment per sub. For local subs that's `Symbol(sym_id)`. The
+      registry exposes a name→sym_id resolver (built from the symbols
+      table) so name-keyed callers (cross-file imports, plugin
+      overrides on names that haven't been resolved to ids yet) hit
+      the right id without a parallel attachment.
+
+- [ ] **Cross-file imports stop riding `NamedSub`.** Imported subs do
+      have a sym_id once enrichment runs (`enrich_imported_types_with_keys`
+      synthesizes HashKeyDef symbols already; do the same for the sub
+      itself, or extend the registry's name-resolver to chase across
+      `module_index`).
+
+- [ ] **Kill `WitnessAttachment::NamedSub`.** Once the two callers
+      above migrate, the variant goes away.
+
+- [ ] **Kill source-tag claim filters.** `SubReturnReducer::claims`
+      should match by attachment-shape disjointness. After arms move
+      to `Expr` attachments (Directive 2), branch_arm witnesses no
+      longer land on `Symbol(_)` — the source-tag exclusion in
+      `FrameworkAwareTypeFold::claims` and `SubReturnReducer::claims`
+      becomes unnecessary.
+
+- [ ] **Kill `SubReturnReducer`'s `if q.arity_hint.is_some()`
+      short-circuit** (witnesses.rs:875). With distinct attachments
+      for "stored return" vs "guarded arm," the registry's first-match
+      dispatch handles ordering naturally — no reducer needs to know
+      another reducer exists.
+
+---
+
+## Directive 4 — One canonical store, never two
+
+Every dual-store is a synchronization hazard. The bag is canonical;
+everything else is at most a derived index rebuilt from it.
+
+**Action items, ordered by leverage.**
+
+- [ ] **Kill `Symbol.return_type` as load-bearing state.** Today
+      `write_back_sub_return_types` sets it inside the worklist, and
+      the worklist's snapshot tracks it for fixed-point detection.
+      Make it a pure cache filled lazily by reading the bag at first
+      access (or at FA construction time, post-finalize). The worklist
+      snapshot tracks bag content directly — every Symbol(sid) answer
+      from the registry, hashed.
+
+- [ ] **Kill `imported_return_types`** (file_analysis.rs:1668). Bag's
+      sub-return witnesses (whatever attachment shape we settle on
+      after Directive 3) are the one source.
+
+- [ ] **Kill `FileAnalysis.type_constraints` as a write target.** It
+      can survive as a derived projection over Variable witnesses
+      built post-finalize for legacy consumers, OR die outright if
+      nothing reads it that can't read the bag instead. Audit
+      `push_type_constraint` callers to decide.
+
+- [ ] **Kill the walk-time TC-first read** in
+      `invocant_type_at_node`'s scalar arm (builder.rs:1358-1362). The
+      reason it exists is "walk-time bag isn't populated yet, TCs
+      are." Fix by populating the bag live during the walk (push
+      Variable witnesses as TCs are seeded, not in one shot at
+      `populate_witness_bag`). Then the bag is canonical at every
+      phase, walk-time included.
+
+- [ ] **Kill `pending_witnesses` staging.** With live walk-time bag
+      population, the staging vec is dead — push directly to
+      `self.bag` from the walk emit sites.
+
+- [ ] **Kill the FA-side `resolve_invocant_class` bareword arm field
+      read** (file_analysis.rs:3768-3775). Already a known followup;
+      route through `sub_return_type_at_arity(bare, Some(0))`. Becomes
+      trivial after Directive 1 lands the unified attachment shape.
+
+- [ ] **Kill the Builder's `last_expr_type` map.** Already listed
+      under Directive 2 — repeated here because it's a dual-store, not
+      just an arm-special-case.
+
+- [ ] **Kill `sub_return_delegations` and `self_method_tails` Builder
+      maps** as inputs to bag emission. After Directive 2, each return
+      is just an `Edge(Expr(span))` — the walker emits the edge
+      directly, no bookkeeping map. `fixup_call_bound_hash_key_owners`
+      (the only other reader) walks delegation chains for HashKeyOwner
+      resolution, which is a different question — that piece either
+      gets its own bag-routed answer (a `HashKeyOwnerEdge`?) or stays
+      procedural and explicitly NOT a type-inference path.
+
+---
+
+## Roadmap — separate design session
+
+- **Arity is bolted on, not first-class.** It has its own
+  `ReducerQuery` field, its own `TypeObservation` variant, its own
+  reducer, its own re-emittable pass, its own walk-time `ArityBranch`
+  enum. The "should just flow" version has return arms carry
+  `Vec<Guard>` and the registry filter arms by satisfied guards; arity
+  is one guard kind among many. But arity is the only guard kind today
+  — generalizing now is premature.
+  
+  **Schedule a separate design session** when a second guard kind
+  appears (type-of-arg dispatch, truthiness gating, `wantarray`
+  context). Until then, leave the bolt-on alone — but do NOT ship more
+  arity-shaped facts that need their own reducer.
+
+- **Reducer-claim discipline.** After Directive 3 lands, write down
+  the rule: "a reducer claims by attachment-shape, not by source tag.
+  If you need source-tag disambiguation, you're modeling two facts —
+  give them two attachments."
+
+---
+
+## Hardening (not principle-driven, but should land alongside)
+
+- [ ] `MAX_FOLD_ITERATIONS` is `debug_assert!`-only — release builds
+      have no cap, just rely on the lattice argument. Add a real
+      release-mode bound with a `tracing::error!` and break, or trust
+      the lattice and remove the debug-only check entirely. Pick one.
+
+---
 
 ## Validation gate
 
-After each phase: `cargo test`, `./run_e2e.sh`. 506 unit + 93 e2e at
-baseline; both must stay green.
+After each directive: `cargo test`, `./run_e2e.sh`. Numbers as of this
+plan: 506 unit + 93 e2e green; both must stay green.
+
+Each directive is a single PR — don't ship them piecemeal. The whole
+point is that the bag is the only truth at every commit; a partial
+migration where two paths coexist is exactly the state we're trying
+to leave.
