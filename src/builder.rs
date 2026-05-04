@@ -1332,7 +1332,16 @@ impl<'a> Builder<'a> {
                 let idx = self.refs.iter().position(|r| {
                     matches!(r.kind, RefKind::MethodCall { .. }) && r.span == span
                 })?;
-                self.bag_query_expression(crate::witnesses::RefIdx(idx as u32))
+                // Arity from the method-call node disambiguates fluent
+                // accessors (Mojo::Base `has 'title' => 'default'`
+                // synthesizes a 0-arg getter returning String AND a
+                // 1-arg writer returning $self). Without it the Edge
+                // chase to NamedSub(method) falls through
+                // FluentArityDispatch (no matching arm without a hint)
+                // to NamedSubReturn — latest-wins picks the writer's
+                // ClassName instead of the getter's String.
+                let arity = self.extract_call_args(node).len() as u32;
+                self.bag_query_expression(crate::witnesses::RefIdx(idx as u32), Some(arity))
             }
             "scalar" => {
                 let text = node.utf8_text(self.source).ok()?;
@@ -6386,7 +6395,11 @@ impl<'a> Builder<'a> {
     /// but reads `&self.bag` (the in-progress builder bag). Includes
     /// the `FirstParam → ClassName` projection so chain-typer
     /// consumers see a concrete class instead of a parametric type.
-    fn bag_query_expression(&self, ref_idx: crate::witnesses::RefIdx) -> Option<InferredType> {
+    fn bag_query_expression(
+        &self,
+        ref_idx: crate::witnesses::RefIdx,
+        arity_hint: Option<u32>,
+    ) -> Option<InferredType> {
         use crate::witnesses::{
             BagContext, FrameworkFact, ReducedValue, ReducerQuery, ReducerRegistry,
             WitnessAttachment,
@@ -6401,7 +6414,7 @@ impl<'a> Builder<'a> {
             attachment: &att,
             point: None,
             framework: FrameworkFact::Plain,
-            arity_hint: None,
+            arity_hint,
             context: Some(&ctx),
         };
         match reg.query(&self.bag, &q) {
