@@ -10,7 +10,14 @@ unrelated chores.
 
 ---
 
-## Directive 1 — Delete `Symbol.return_type` and the FA-side method-typing
+## Directive 1 — Delete `Symbol.return_type` and the FA-side method-typing — **LANDED (with residue)**
+
+> **Status:** landed in `dc4315f` on `refactor/bag-residual-d1-redo`.
+> The directive's biggest subtractions shipped (field gone, FA-side
+> method typing gone, build-time chase gone, MRO bug fixed). Two
+> bullets did not land as written and have been folded into D3 — see
+> "Residue routed to D3" below. Smaller stylistic cleanups are in
+> `docs/prompt-cleanups.md`.
 
 The bag is the only type-query path in principle (CLAUDE.md: "the bag
 is THE single type-query path"). In practice today, `Symbol.return_type`
@@ -78,80 +85,90 @@ Each bullet names a delete-able thing. The order is "delete biggest
 first, let the compiler tell you what's missing, fix exactly that —
 do not pre-emptively rewrite consumers."
 
-- [ ] **Delete `SymbolDetail::Sub.return_type` field.** This is the
-      forcing function for the rest. Pre-measured blast radius:
-      ~55 `cargo check --tests` errors across 14 files. Distribution:
-      builder.rs ~17 (construction sites — drop the field, push a
-      `Symbol(sid) → InferredType(t)` witness in its place),
-      builder_tests.rs ~17 (test fixtures — drop the field from
-      literals; tests asserting on the field route through bag query
-      methods), file_analysis.rs ~5 (internal field-fallback reads
-      inside bag-routed query methods — these are exactly the code
-      paths to delete, not patch), backend.rs ~2 (the
-      `build_imported_return_types` machinery — see next bullet),
-      and ~14 elsewhere across symbols.rs, main.rs, plugin/cli.rs,
-      module_resolver.rs, module_index.rs, witnesses.rs, tests.
+- [x] **Delete `SymbolDetail::Sub.return_type` field.** Landed.
+      Construction sites drop the literal; walk-time synthesis writes
+      `Builder.resolved_returns` (build-only map); writeback publishes
+      `Symbol(sid)` / `NamedSub(name)` / `MethodOnClass{class, name}`
+      witnesses into the bag. The intermediate `resolved_returns`
+      map was not in the original design — see
+      `docs/prompt-cleanups.md` for its scheduled deletion.
 
-- [ ] **Delete `imported_return_types`** (backend.rs's
-      `build_imported_return_types` plus the FA field it populates).
-      The cross-file `MethodOnClass` query subsumes it — Symbol(sid)
-      witnesses on a cached module's bag are reachable via the
-      registry once `BagContext` carries `&ModuleIndex`. The field
-      deletion above will surface this code path as compile errors
-      that should be deleted, not patched.
+- [~] **Delete `imported_return_types`** — partial. The FA field is
+      gone, but `backend.rs::build_imported_return_types` survives and
+      still copies imported sub return types into the local bag as
+      `NamedSub` witnesses via `enrich_imported_types_with_keys`. The
+      cross-file `MethodOnClass` query reaches the same data through
+      `BagContext.module_index`, so the copy is now a parallel path.
+      **Routed to D3** — bullet "Delete `build_imported_return_types`."
 
-- [ ] **Delete `find_method_return_type_seen`,
-      `find_method_return_type_raw`, and `self_method_tail`.** The
-      sole public entry point `find_method_return_type` becomes a
-      thin wrapper that routes through `MethodOnClass(class, name)`
-      with the caller's `arity_hint`. No procedural ancestor walk;
-      no procedural overload picking. The registry's
-      `Edge(MethodOnClass(parent, name))` chase handles MRO; arity
-      is selected by the existing `FluentArityDispatch` reducer
-      claiming `Symbol(_)`.
+- [x] **Delete `find_method_return_type_seen`,
+      `find_method_return_type_raw`, and `self_method_tail`.** Landed.
+      `find_method_return_type` is now a thin wrapper that builds a
+      `MethodOnClass{class, name}` `ReducerQuery` and dispatches
+      through the registry.
 
-- [ ] **Delete `fill_returns_via_bag_chase`'s
-      "delegators-and-tails-only" guard** (currently
-      builder.rs:6738-6756). Once the field is gone, the chase has
-      no consumer and the function itself is deletable.
-      `sub_return_delegations` and `self_method_tails` Builder maps
-      may stay as walk-time bookkeeping for the bag-emit path
-      (they're inputs, not outputs), but their use as inputs to a
-      build-time chase ends here.
+- [x] **Delete `fill_returns_via_bag_chase`** and its
+      delegators-and-tails-only guard. Landed — the function and its
+      sole call site in `resolve_return_types` are gone.
 
-- [ ] **Add `WitnessAttachment::MethodOnClass { class, name }`.**
-      Stable shape, owned strings (cache blob serializes via
-      bincode+zstd; `Arc<str>` is fine if you want the
-      space saving, but `String` matches every other attachment
-      payload and keeps the diff smaller).
+- [x] **Add `WitnessAttachment::MethodOnClass { class, name }`.**
+      Landed with owned `String`s, plus `MethodOnClassReducer` for the
+      primary fallback. `FluentArityDispatch::claims` was extended to
+      include `MethodOnClass` so per-arity facts dispatch on the same
+      class-keyed shape.
 
-- [ ] **Emit `MethodOnClass(C, m) → Edge(MethodOnClass(P, m))`
-      witnesses for inheritance.** For each
-      `package_parents[C] = [P1, P2, ...]`, for each method `m`
-      defined locally on `C` or accessible on `P_i`, emit the edge.
-      Cross-file bridges (`for_each_entity_bridged_to` consumers) and
-      cross-file primary cached modules become the same edge shape —
-      the registry walks them through `BagContext.module_index`. No
-      callback walkers in the registry's materialize.
+- [~] **Emit `MethodOnClass(C, m) → Edge(MethodOnClass(P, m))`
+      witnesses for inheritance** — **did NOT land as written.**
+      Inheritance + plugin-namespace bridges resolve via a structural
+      walk inside `query_rec`'s `MethodOnClass` fallback (consults
+      `package_parents`, `module_index.parents_cached`, and
+      `for_each_entity_bridged_to`), recursing through the same
+      registry. It's centralized — one site, not many — but it is the
+      "another bespoke walker" shape the next architectural pillar
+      (`prompt-graph-walking.md`) wants to eliminate, and it reads as
+      a softer version of trap #2 from the abandoned-attempt list.
+      **Routed to D3** — bullet "Inheritance via Edge witnesses."
 
-- [ ] **Extend `BagContext` to carry `Option<&ModuleIndex>`.** The
-      registry uses it to chase edges into cached modules' bags
-      during `MethodOnClass` resolution. In-file callers
-      (build-time, isolated tests) pass `None`.
+- [x] **Extend `BagContext` to carry `Option<&ModuleIndex>`** and
+      `&HashMap<String, Vec<String>>` for `package_parents`. Landed.
 
-- [ ] **Fix `for_each_ancestor_class`'s DFS to left-to-right
-      `@ISA` order.** Currently it pushes parents left-to-right then
-      `stack.pop()`s, traversing in reverse `@ISA` order — wrong for
-      Perl's default DFS-MRO. Add a regression test:
-      `@ISA = (A, B)` where both `A::m` and `B::m` exist with
-      different return types; `find_method_return_type(C, "m", _, _)`
-      must return `A`'s.
+- [x] **Fix `for_each_ancestor_class`'s DFS to left-to-right
+      `@ISA` order.** Landed. Parents are now collected, then
+      `into_iter().rev()`-pushed so LIFO pops in `@ISA` order. New
+      regression test
+      `for_each_ancestor_class_walks_left_to_right_isa_order` pins
+      it. The structural disambiguation test
+      (`method_on_class_disambiguates_same_name_across_classes`)
+      is also green.
 
-- [ ] **Keep this test green:**
-      `method_on_class_disambiguates_same_name_across_classes`
-      (builder_tests.rs, lifted from the abandoned attempt). It's
-      the structural pin: same-named methods on unrelated classes
-      resolve to their own per-class types at every arity.
+- [x] **Keep this test green:**
+      `method_on_class_disambiguates_same_name_across_classes` —
+      green on `dc4315f`.
+
+### Residue routed to D3
+
+Two D1 bullets did not land as written. They are listed verbatim in
+D3's action items below so the tracking lives in one place:
+
+1. **Inheritance via `Edge(MethodOnClass(parent, name))` witnesses.**
+   Replace `query_rec`'s structural walk with build-time edge emission.
+   The registry's existing edge-chase mechanism walks them with no
+   special-case code, and the new code becomes nothing more than
+   "push edges that already correspond to `package_parents` /
+   bridges entries." Eliminates a bespoke walker before the
+   graph-walking pillar inherits it.
+
+2. **Delete `build_imported_return_types`.** Now that
+   `BagContext.module_index` lets the registry reach into cached
+   modules' bags directly, the function and the imported-return push
+   inside `enrich_imported_types_with_keys` are redundant. Keep the
+   `HashKeyDef` synthesis side of `enrich_imported_types_with_keys`;
+   only the return-type push goes.
+
+A third related cleanup — the new source-tag claims (`"delegation"`,
+`"self_method_tail"`) added to `SubReturnReducer::claims` in this PR —
+already lives under D3's "Kill source-tag claim filters" bullet. The
+list there is no longer two filters, it's four.
 
 ### Non-goals (explicit)
 
@@ -265,45 +282,98 @@ implementation; flag the open questions inline.
 Multiple reducers claim `Symbol(_)` + `InferredType` today. They
 disambiguate by `WitnessSource` tag: `PluginOverrideReducer` claims
 priority>10, `BranchArmFold` claims `branch_arm`, `SubReturnReducer`
-claims `local_return` / `imported_return`, `FluentArityDispatch`
-claims a different payload. A new push that lands on the same
-attachment with a new source tag silently bypasses the gate that the
-original author of the source filter wrote.
+claims `local_return` / `imported_return` / `delegation` /
+`self_method_tail` (the last two added by D1's writeback rewrite),
+`FluentArityDispatch` claims a different payload. A new push that
+lands on the same attachment with a new source tag silently bypasses
+the gate that the original author of the source filter wrote.
 
 This is the "fill in the hack somewhere else" pattern. Kill it by
-giving each semantic category its own attachment shape.
+giving each semantic category its own attachment shape. **D3 also
+absorbs two bullets from D1 that did not land as the directive
+required.**
 
 **Action items.**
 
-- [ ] **Drop the dual `Symbol(_)` + `NamedSub(_)` writeback** in
-      `write_back_sub_return_types` (builder.rs:6917). Pick one
-      attachment per sub. For local subs that's `Symbol(sym_id)`. The
-      registry exposes a name→sym_id resolver (built from the symbols
-      table) so name-keyed callers (cross-file imports, plugin
-      overrides on names that haven't been resolved to ids yet) hit
-      the right id without a parallel attachment.
+- [ ] **Inheritance via `Edge(MethodOnClass(parent, name))` witnesses.**
+      *(Routed from D1.)* Today `query_rec` chases inheritance
+      structurally — for a `MethodOnClass{C, m}` query the local bag
+      can't answer, the registry consults `ctx.package_parents`,
+      `ctx.module_index.parents_cached`, and
+      `idx.for_each_entity_bridged_to(class, ...)` and recurses on
+      `MethodOnClass{P, m}`. That's a hand-rolled walker over a graph
+      that's about to be unified by `prompt-graph-walking.md`. Replace
+      it with build-time emission: for each `package_parents[C] = [P1,
+      P2, ...]`, push `MethodOnClass(C, m) → Edge(MethodOnClass(P_i, m))`
+      witnesses; for each PluginNamespace bridged to `class`, push
+      `MethodOnClass(class, name) → Edge(Symbol(entity_id))`
+      witnesses (the bridge half already lands in
+      `write_back_sub_return_types`'s plugin-bridge pass — extend it
+      to also cover cross-file bridges by reading
+      `module_index.workspace_namespaces()` or equivalent). Then
+      delete the structural fallback in `query_rec` — the registry's
+      existing edge-chase machinery handles MRO and bridge walking
+      without further code. Cross-file primary lookup
+      (`module_index.get_cached(class)`) can stay as a single
+      cross-bag recursion or move to a `MethodOnClass(class, _) →
+      Edge(... in cached bag)` shape; pick whichever the residual
+      `query_rec` code reduces to most cleanly.
 
-- [ ] **Cross-file imports stop riding `NamedSub`.** Imported subs do
-      have a sym_id once enrichment runs (`enrich_imported_types_with_keys`
-      synthesizes HashKeyDef symbols already; do the same for the sub
-      itself, or extend the registry's name-resolver to chase across
-      `module_index`).
+- [ ] **Delete `build_imported_return_types`** (backend.rs:134) and
+      the imported-return push inside
+      `FileAnalysis::enrich_imported_types_with_keys`. *(Routed from
+      D1.)* The cross-file `MethodOnClass` query subsumes both —
+      `BagContext.module_index` is wired through, so registry queries
+      against a bag without local `NamedSub("foo")` witnesses already
+      reach the cached module's bag for `foo`'s return type. Keep the
+      `HashKeyDef` synthesis half of
+      `enrich_imported_types_with_keys` (it's a separate concern —
+      injecting synthetic symbols for fat-comma key completion). The
+      `imported_returns` HashMap parameter on
+      `enrich_imported_types_with_keys` becomes vestigial once the
+      function only synthesizes hash keys; either drop the parameter
+      or rename the function to reflect its narrower scope.
+
+- [ ] **Drop the dual `Symbol(_)` + `NamedSub(_)` writeback** in
+      `write_back_sub_return_types` (builder.rs around the
+      `writeback_witnesses` push). Pick one attachment per sub. For
+      local subs that's `Symbol(sym_id)`. The registry exposes a
+      name→sym_id resolver (built from the symbols table) so
+      name-keyed callers (cross-file imports, plugin overrides on
+      names that haven't been resolved to ids yet) hit the right id
+      without a parallel attachment. `MethodOnClass{class, name}`
+      stays — it's the class-keyed shape that earned its keep in D1.
+
+- [ ] **Cross-file imports stop riding `NamedSub`.** Imported subs
+      do have a sym_id once enrichment runs
+      (`enrich_imported_types_with_keys` synthesizes HashKeyDef
+      symbols already; do the same for the sub itself, or extend the
+      registry's name-resolver to chase across `module_index`).
+      Combines with the bullet above to remove the last `NamedSub`
+      consumer.
 
 - [ ] **Kill `WitnessAttachment::NamedSub`.** Once the two callers
       above migrate, the variant goes away.
 
 - [ ] **Kill source-tag claim filters.** `SubReturnReducer::claims`
-      should match by attachment-shape disjointness. After arms move
-      to `Expr` attachments (Directive 2), branch_arm witnesses no
-      longer land on `Symbol(_)` — the source-tag exclusion in
-      `FrameworkAwareTypeFold::claims` and `SubReturnReducer::claims`
-      becomes unnecessary.
+      currently matches `local_return` / `imported_return` /
+      `delegation` / `self_method_tail` (four filters; D1 added the
+      latter two). Should match by attachment-shape disjointness
+      instead. After arms move to `Expr` attachments (Directive 2),
+      branch_arm witnesses no longer land on `Symbol(_)` — the
+      source-tag exclusion in `FrameworkAwareTypeFold::claims` and
+      `SubReturnReducer::claims` becomes unnecessary. Delegation /
+      self-method-tail edges already ride `Edge(...)` payloads; the
+      tag-filter on the `InferredType` payload exists only because
+      writeback also pushes plain `InferredType` on the same
+      attachment under those tags — and that goes away when the
+      writeback collapses to one attachment per sub (bullet above).
 
 - [ ] **Kill `SubReturnReducer`'s `if q.arity_hint.is_some()`
-      short-circuit** (witnesses.rs:875). With distinct attachments
-      for "stored return" vs "guarded arm," the registry's first-match
-      dispatch handles ordering naturally — no reducer needs to know
-      another reducer exists.
+      short-circuit** (witnesses.rs around line 875). With distinct
+      attachments for "stored return" vs "guarded arm," the
+      registry's first-match dispatch handles ordering naturally —
+      no reducer needs to know another reducer exists.
 
 ---
 

@@ -32,14 +32,17 @@ Four docs, one engine:
 
 ```
 staircase 1–4 (LANDED, PR #27) ─┐
-                                 ├─▶ bag-residual D1 redo (delete Symbol.return_type + FA-side method typing)
+                                 ├─▶ bag-residual D1 redo (LANDED dc4315f, with residue → D3)
                                  ├─▶ bag-residual D2 (one expression attachment)
-                                 ├─▶ bag-residual D3 (one attachment per fact)
+                                 ├─▶ bag-residual D3 (one attachment per fact, +D1 residue)
                                  ├─▶ bag-residual D4 (residual canonical-store cleanup)
                                  │       │
                                  │       └─▶ sequence-types phases 1-3
                                  │
-                                 └─▶ residual Parts 1-5 (independent)
+                                 ├─▶ residual Parts 1-5 (independent)
+                                 │
+                                 └─▶ docs/prompt-cleanups.md (small, parallel,
+                                       independent — pick anytime)
 ```
 
 - **Unification staircase** is done. PR #27 subsumed Steps 1–4: the walker only
@@ -52,6 +55,13 @@ staircase 1–4 (LANDED, PR #27) ─┐
   cross-file dispatch + the "no source-tag claims" rule both need). Land in
   order; do not split a directive across PRs — partial lands recreate the
   two-paths-coexist state we just left.
+  - **D1 landed in `dc4315f`** with two bullets routed forward to D3:
+    inheritance via `Edge(MethodOnClass(parent, name))` witnesses (the
+    structural walk landed in `query_rec` instead) and deleting
+    `build_imported_return_types` (the FA field went, the function survived
+    with bag-routed reads). The residue is explicit in
+    `docs/working-bag-residual.md` D3 — D3 is now larger than originally
+    scoped.
 - **Sequence-types phases 1-3** can start once D2 lands (the unified
   `Expr(Span)` attachment is what sequence types thread their lattice through).
   Phases 4-5 (cross-file mutation effects, pipelines) compose on top.
@@ -62,21 +72,19 @@ staircase 1–4 (LANDED, PR #27) ─┐
 
 ### Recommended sequencing
 
-1. **Bag-residual D1 (redo)** — Delete `SymbolDetail::Sub.return_type`,
-   delete `find_method_return_type_seen` + `_raw` + `self_method_tail`,
-   delete the build-time chase guard, delete `imported_return_types`.
-   Add `MethodOnClass{class, name}` attachment + inheritance edge
-   emitter + `BagContext.module_index` for cross-file bridges. Fix
-   the DFS-MRO order. **Subtractive framing — delete first, let the
-   compiler enumerate the consumers.** Pre-measured blast: ~55 cargo
-   errors across 14 files. First attempt (`refactor/bag-residual-d1-method-on-class`,
-   commit `c322178`) was abandoned for being additive; that branch's
-   residue (build-time chase + guard, two-walk dispatch, borrow-bearing
-   helper) re-infects D3 if shipped. Lifted from it: the regression
-   test `method_on_class_disambiguates_same_name_across_classes`
-   already on this branch as a forward-going pin. Absorbs the field
-   deletion + `imported_return_types` deletion that were originally
-   D4. Unlocks D3/D4.
+1. **Bag-residual D1 (redo)** — **LANDED in `dc4315f`.** Deleted
+   `SymbolDetail::Sub.return_type`, `find_method_return_type_seen` /
+   `_raw` / `self_method_tail`, the build-time chase, the
+   `imported_return_types` FA field. Added `MethodOnClass{class, name}`
+   attachment + `MethodOnClassReducer` + `BagContext.module_index` /
+   `package_parents`. Fixed DFS-MRO order. Two bullets did not land
+   as written: edge-witness emission for inheritance, and deletion of
+   `build_imported_return_types`. Both routed to D3 with explicit
+   tracking in `working-bag-residual.md`. Tests: 508 unit (was 506,
+   +2 regressions). First attempt
+   (`refactor/bag-residual-d1-method-on-class`, commit `c322178`) was
+   abandoned for being additive — its cautionary value preserved in
+   the directive's "what NOT to repeat" section.
 2. **Bag-residual D2** — one `Expr(Span)` attachment for every expression value.
    Kills `arm_payload`'s node-kind dispatch, `ReturnArm`, `last_expr_type`.
    Unblocks sequence-types.
