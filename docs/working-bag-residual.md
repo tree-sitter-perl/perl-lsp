@@ -195,85 +195,83 @@ work. ROADMAP.md's rule applies: do not split a directive across PRs.
 
 ---
 
-## Directive 2 — All expressions are the same thing
+## Directive 2 — All expressions are the same thing — **LANDED**
 
-Arms aren't a separate concept. `return $x`, `return Foo->new`,
-`return $self->method`, `42 if cond else "x"` — every one of these is
-"the value of an expression." The current code special-cases:
+> **Status:** landed on `refactor/bag-residual-d2-expr-attachment`.
+> Every action item below shipped. The walker now publishes through
+> a single `Expr(Span)` attachment, the per-RI `arm_types_per_ri` /
+> `returns_by_scope` plumbing is gone, and `fold_per_sub_return_arms`
+> is one `query(Symbol(sid))` plus the implicit-last-expr fallback.
 
-- `arm_payload` (builder.rs:3591) dispatches on node kind to decide
-  bake-vs-Edge per arm shape. Strings, numbers, anon hashes,
-  arithmetic, regexp get baked; variables, method calls, function
-  calls get Edges; ternaries are recursed into; everything else
-  returns `None`.
-- `ReturnArm(Span)` is its own attachment kind, with its own reducer
-  (`ReturnArmReturn`).
-- The chain typer's `arm_types_per_ri` array threads bag-resolved arm
-  types alongside `ReturnInfo` records.
-- Variable reads, method-call results, and function-call results each
-  publish to a different attachment shape (`Variable`, `Expression(RefIdx)`,
-  `NamedSub`).
+### What landed
 
-The fix is one attachment that means "the value of the expression at
-this span," with every expression — literal, ref-bearing, or compound —
-publishing to it.
+- [x] **One expression attachment.** `WitnessAttachment::Expr(Span)`
+      replaces `ReturnArm(Span)` and is the new "value of this
+      expression" key. `Expression(RefIdx)` survives as ref metadata
+      (the method-call chain typer still reads it for receiver
+      resolution); the type answer for any rvalue expression rides
+      `Expr(span)`.
 
-**Action items.** Probably needs a short design session before
-implementation; flag the open questions inline.
+- [x] **Walker emits `Expr` witnesses uniformly.** `expr_payload`
+      is the single dispatch — literals bake `InferredType`, names
+      push `Edge(Variable{...})` / `Edge(NamedSub)` /
+      `Edge(Expression(refidx))`, ternaries push two `branch_arm`
+      Edges to each arm's `Expr(span)` and recurse so chained
+      ternaries each carry their own arm payloads.
 
-- [ ] **One expression attachment.** Candidate shape: `Expr(Span)` (or
-      `Node(NodeId)` if we want to key by AST node identity). Replaces
-      both `ReturnArm(Span)` and `Expression(RefIdx)`. Refs that are
-      expressions (method calls in rvalue position) keep their RefIdx
-      as metadata for non-type lookups (rename, ref_at) but the type
-      answer rides `Expr(span)`.
+- [x] **Killed `arm_payload`.** Replaced by `expr_payload` (every
+      rvalue node, not just return arms) and `emit_expr_witness`.
 
-- [ ] **Walker emits `Expr` witnesses uniformly.** Literals push
-      `InferredType` (closed under syntax — `42` is `Numeric`). Refs
-      push `Edge(Variable{...})` / `Edge(NamedSub)` / `Edge(MethodOnClass(...))`
-      to the resolution target. Compound exprs (ternary, do-block,
-      block-as-rvalue) push `Edge`s to each component's `Expr(span)`
-      and let `BranchArmFold` agree across them.
+- [x] **Killed `ReturnArm` and `ReturnArmReturn`.** `return EXPR` now
+      emits `Edge(Expr(body_span))` source `branch_arm` on
+      `Symbol(sub_id)`. Ternary returns expand to per-arm Edges so
+      BranchArmFold has the ≥2 arms it needs; non-ternary returns
+      go through the new `SymbolReturnArmFold` which accepts 1+ arms
+      via `resolve_return_type` (replaces the per-RI Vec fold).
 
-- [ ] **Kill `arm_payload`.** Its job is "given a node, what witness
-      shape?" — but every node in rvalue position needs the same shape
-      (an `Expr(span)` witness). The dispatch becomes one walker
-      callback that runs on every expression node.
+- [x] **Killed `last_expr_type`.** Replaced with `last_expr_span:
+      HashMap<ScopeId, Span>` — the fold reads `Expr(last_expr_span)`
+      via the bag, no side-channel type cache.
 
-- [ ] **Kill `ReturnArm` and `ReturnArmReturn`.** A `return EXPR`
-      becomes `Edge(Expr(expr_span))` on `Symbol(sub_id)` —
-      `BranchArmFold` already handles agreement across multiple
-      `branch_arm`-source witnesses on a sub.
+- [x] **Killed the `arm_types_per_ri` / `returns_by_scope` plumbing.**
+      `emit_arity_return_witnesses` queries `Expr(body_span)` per RI
+      inline; `fold_per_sub_return_arms` queries `Symbol(sub_id)`
+      directly with `last_expr_span` as the implicit-return fallback.
+      `collect_return_arm_types` and its tuple return are gone.
 
-- [ ] **Kill `last_expr_type`.** Implicit-last-expression-as-return is
-      just one more branch_arm-source `Edge(Expr(last_stmt_span))` on
-      `Symbol(sub_id)`. Same machinery as explicit returns; no
-      side-channel map.
+### Reducer shape
 
-- [ ] **Kill the `arm_types_per_ri` / `returns_by_scope` plumbing.**
-      Once arms are `Edge`s, `fold_per_sub_return_arms` is just
-      `query(Symbol(sid))` — the registry materializes the edges and
-      `BranchArmFold` agrees them.
+`SymbolReturnArmFold` is the new home for "this sub's return type
+agreed across its arms." It's distinct from `BranchArmFold` because
+the two have different agreement rules:
 
-**Open design questions, decide before starting.**
+- `BranchArmFold` (Variable + Expr): ≥2 arms must agree. A single
+  arm = inference fell short; surface ambiguity.
+- `SymbolReturnArmFold` (Symbol): 1+ arms via `resolve_return_type`.
+  A single `return X` IS the answer; multiple agreeing arms collapse
+  to that type; disagreement → None (with HashRef subsumed by Object).
 
-1. **`Span` vs `NodeId` keying.** Spans are stable across
-   serialize/deserialize and align with how `ReturnArm` is keyed today.
-   NodeIds are tighter against the AST but die at the cache boundary.
-   Recommend `Span`.
+Registered before `BranchArmFold` so the registry's first-match
+dispatch routes Symbol-attached witnesses through the Symbol-fold.
+Both reducers claim source `branch_arm` + payload `InferredType`,
+but their `claims` predicates filter by attachment shape, so they
+never fight over the same witness set.
 
-2. **Do refs keep `Expression(RefIdx)`?** Rename and "find references"
-   need ref-keyed lookup. Easiest: keep `RefIdx` as a non-type
-   side-index, route the type answer through `Expr(span)`, and let
-   `Expression(RefIdx)` fade to "the ref's metadata," not "the
-   expression's type."
+### Open design questions, resolved
 
-3. **Anonymous expressions that aren't refs** (a bare arithmetic
-   subexpression nested inside a return). Today they don't have an
-   attachment because no consumer asks. After the unification they
-   would — but only if something Edges to them. Lazy emission (only
-   when needed) is fine; the walker doesn't need to publish for every
-   span unconditionally.
+1. **`Span` vs `NodeId` keying.** Spans. They survive the cache
+   boundary; NodeIds don't.
+
+2. **Do refs keep `Expression(RefIdx)`?** Yes. The method-call chain
+   typer reads receiver-and-method-resolved types through it.
+   `expr_payload` Edges from `Expr(span)` to `Expression(refidx)` for
+   method-call rvalues, so the type answer still rides `Expr` —
+   `Expression(refidx)` is an internal hop, not a parallel attachment.
+
+3. **Anonymous compound expressions.** Lazy: the walker only emits
+   `Expr(span)` for nodes that have a payload via `expr_payload` (or
+   for ternaries via the `emit_expr_witness` recursion). Bare
+   subexpressions only get witnesses when something Edges to them.
 
 ---
 
@@ -418,9 +416,16 @@ everything else is at most a derived index rebuilt from it.
       route through `sub_return_type_at_arity(bare, Some(0))`. Becomes
       trivial after Directive 1 lands the unified attachment shape.
 
-- [ ] **Kill the Builder's `last_expr_type` map.** Already listed
-      under Directive 2 — repeated here because it's a dual-store, not
-      just an arm-special-case.
+- [x] **Kill the Builder's `last_expr_type` map.** Landed in
+      Directive 2. Replaced with `last_expr_span: HashMap<ScopeId, Span>`
+      whose value is the structural pointer to the implicit-return
+      span; the type rides the bag via `Expr(last_expr_span)`. D4
+      can still kill `last_expr_span` itself by emitting an
+      `Edge(Expr(span))` source `branch_arm` on `Symbol(sub_id)`
+      from the walker (so the implicit-return is just one more
+      arm), but that requires deciding when to flush "this is the
+      last statement we saw" — easiest at sub-body-close, which
+      means a small visit hook.
 
 - [ ] **Kill `sub_return_delegations` and `self_method_tails` Builder
       maps** as inputs to bag emission. After Directive 2, each return
@@ -430,6 +435,25 @@ everything else is at most a derived index rebuilt from it.
       resolution, which is a different question — that piece either
       gets its own bag-routed answer (a `HashKeyOwnerEdge`?) or stays
       procedural and explicitly NOT a type-inference path.
+
+- [ ] **Collapse the per-arm Edge expansion in
+      `publish_return_arm_witnesses` and
+      `emit_branch_arm_witnesses_for_ternary`.** D2 left a residual
+      duplication of mechanism: when the return body (or the RHS of
+      `my $x = $c ? A : B`) is a ternary, the walker emits per-arm
+      `branch_arm` Edges *both* on `Expr(ternary_span)` (via
+      `emit_expr_witness`) *and* on the consumer attachment
+      (`Symbol(sub_id)` / `Variable($x)`). A single
+      `Edge(Expr(body_span))` from the consumer would be enough —
+      the registry's edge chase calls `BranchArmFold` on `Expr(_)`,
+      which already handles per-arm agreement. Both agreement and
+      disagreement traces fold to the same answer either way (today
+      and post-collapse), so this is purely a cleanup. After the
+      change, `publish_return_arm_witnesses` becomes
+      `emit_expr_witness(body); push Symbol(sid) ← Edge(Expr(body_span))`
+      with no ternary special-case, and
+      `emit_branch_arm_witnesses_for_ternary` becomes one Edge from
+      `Variable($x)` to `Expr(ternary_span)`.
 
 ---
 

@@ -172,7 +172,7 @@ fn build_with_plugins_inner(
         fold_ranges: Vec::new(),
         imports: Vec::new(),
         return_infos: Vec::new(),
-        last_expr_type: std::collections::HashMap::new(),
+        last_expr_span: std::collections::HashMap::new(),
         self_method_tails: std::collections::HashMap::new(),
         call_bindings: Vec::new(),
         method_call_bindings: Vec::new(),
@@ -711,14 +711,15 @@ fn raw_mid_op(node: tree_sitter::Node, source: &[u8]) -> String {
 }
 
 /// Structural index of one return-expression in a sub body. Type
-/// information has moved to the bag — per-arm via
-/// `ReturnArm(span)`, per-sub via `Symbol(sub_id)`'s `branch_arm`
-/// witnesses (which are `Edge`s pointing at the per-arm attachment,
-/// chased by registry materialization at query time). What's left
-/// in this struct is the structure consumers still need to see at a
-/// glance: which sub the return belongs to, where it is, and which
-/// arity bucket it gates on (so `emit_arity_return_witnesses` can
-/// pair each arm's bag-resolved type with its arg-count).
+/// information lives in the bag: the body expression carries its own
+/// `Expr(body_span)` witnesses (literal types, Edges to Variable /
+/// NamedSub / Expression / nested Expr), and `Symbol(sub_id)` collects
+/// per-arm `branch_arm`-source `Edge(Expr(...))` witnesses. What's
+/// left in this struct is what consumers still need at a glance:
+/// which sub the return belongs to, where it is, the arity bucket it
+/// gates on (for `emit_arity_return_witnesses`), and the body span
+/// (the `Expr(span)` key both `emit_arity_return_witnesses` and
+/// `fold_per_sub_return_arms` query inline via `bag_query_expr_span`).
 struct ReturnInfo {
     /// The scope (Sub/Method) this return belongs to.
     scope: ScopeId,
@@ -727,10 +728,13 @@ struct ReturnInfo {
     /// the bag-resolved arm type AT REDUCTION TIME. `None` for
     /// returns that aren't arity-gated.
     arity_branch: Option<ArityBranch>,
-    /// Span of the return-expression node. Doubles as the
-    /// `WitnessAttachment::ReturnArm(span)` key for per-arm bag
-    /// queries (collect_return_arm_types reads this).
+    /// Span of the return-expression node — kept for diagnostics and
+    /// for matching against arity-classification anchors.
     span: Span,
+    /// Span of the inner body expression (the `EXPR` in `return EXPR`).
+    /// Doubles as the `WitnessAttachment::Expr(span)` key the per-RI
+    /// fold reads. `None` for bare `return;` — those have no value.
+    body_span: Option<Span>,
 }
 
 /// If `return_node` is `return CALL`, where CALL is a simple named function
@@ -873,8 +877,15 @@ struct Builder<'a> {
     imports: Vec<Import>,
     /// Return values collected during the walk (explicit `return` + implicit last expr).
     return_infos: Vec<ReturnInfo>,
-    /// For each Sub/Method scope, the type of the last expression (implicit return).
-    last_expr_type: std::collections::HashMap<ScopeId, Option<InferredType>>,
+    /// For each Sub/Method scope, the body span of the last
+    /// top-level expression statement. Used as the implicit-return
+    /// query key — `fold_per_sub_return_arms` reads `Expr(span)` via
+    /// `bag_query_expr_span` for scopes without an explicit `return`.
+    /// Replaces the old `last_expr_type: HashMap<ScopeId,
+    /// Option<InferredType>>` dual-store: types now ride the bag,
+    /// this map only carries the structural pointer to the source
+    /// span.
+    last_expr_span: std::collections::HashMap<ScopeId, Span>,
     /// For each Sub/Method scope whose last body statement is
     /// `shift->M(...)` or `$self->M(...)`: the method name M.
     /// Perl's last statement returns, so if M is another method on
@@ -1334,7 +1345,7 @@ impl<'a> Builder<'a> {
             "method_call_expression" => {
                 // Constructor pattern is closed under syntax — bake
                 // before consulting the bag. Same shape the walker's
-                // `arm_payload` uses for return arms.
+                // `expr_payload` uses for every rvalue expression.
                 if let Some(class) = self.extract_constructor_class(node) {
                     return Some(InferredType::ClassName(class));
                 }
@@ -2031,14 +2042,15 @@ impl<'a> Builder<'a> {
             }
 
             // Return expressions → record structural facts pre-visit
-            // (scope, arity branch, span); emit per-arm + per-sub
-            // witnesses POST visit_children so the body's refs are
-            // already allocated. `arm_payload` for method-call arms
-            // returns `Edge(Expression(refidx))`; finding refidx
-            // requires the ref to exist, which requires the walker
-            // to have visited the method-call expression.
+            // (scope, arity branch, body span); emit per-expression +
+            // per-sub witnesses POST visit_children so the body's refs
+            // are already allocated. `expr_payload` for method-call
+            // bodies returns `Edge(Expression(refidx))`; finding
+            // refidx requires the ref to exist, which requires the
+            // walker to have visited the method-call expression.
             "return_expression" => {
                 let span = node_to_span(node);
+                let body_span = node.named_child(0).map(node_to_span);
                 let scope = self.enclosing_sub_scope();
                 if let Some(scope) = scope {
                     let arity_branch = classify_arity_branch(node, self.source);
@@ -2046,6 +2058,7 @@ impl<'a> Builder<'a> {
                         scope,
                         arity_branch,
                         span,
+                        body_span,
                     });
                     // If the return body is `return other()` (a direct call),
                     // record the delegation so hash-key ownership can walk
@@ -2058,36 +2071,22 @@ impl<'a> Builder<'a> {
                 }
                 self.visit_children(node);
                 if let Some(scope) = scope {
-                    self.publish_return_arm_witnesses(node, scope, span);
-                    // Ternary returns: `return $c ? A : B;` — emit
-                    // per-arm branch_arm witnesses on the sub's
-                    // Symbol so BranchArmFold sees both arms
-                    // explicitly (agreement / disagreement surface
-                    // even when arm types are bag-resolved Edges).
-                    if let Some(child) = node.named_child(0) {
-                        if child.kind() == "conditional_expression" {
-                            if let Some(sub_name) = self.enclosing_sub_name() {
-                                if let Some(sym_id) = self.find_sub_symbol_for(&sub_name, scope) {
-                                    self.emit_branch_arm_witnesses(
-                                        child,
-                                        crate::witnesses::WitnessAttachment::Symbol(sym_id),
-                                        node,
-                                    );
-                                }
-                            }
-                        }
-                    }
+                    self.publish_return_arm_witnesses(node, scope);
                 }
             }
 
             // Expression statements inside sub bodies → track last
-            // expression type. Perl returns the last statement's
-            // value, so this IS the sub's implicit return.
+            // expression's body span for the implicit-return path.
+            // Perl returns the last statement's value, so this IS
+            // the sub's implicit return when there's no explicit
+            // `return`. Each top-level statement we visit overwrites
+            // the prior entry, so when the walk leaves the sub the
+            // map points at the genuinely-last statement.
             //
             // IMPORTANT: only statements at the sub body's TOP
             // level count. A `$self->M(...)` call buried inside a
             // `grep { … }` or an `if`-block is not the sub's
-            // return. Both `last_expr_type` and `self_method_tails`
+            // return. Both `last_expr_span` and `self_method_tails`
             // are gated on this — the outer block must be the
             // sub/method's direct body.
             "expression_statement" => {
@@ -2107,11 +2106,15 @@ impl<'a> Builder<'a> {
                         })
                         .unwrap_or(false);
                     if is_body_top_level {
-                        let child = node.named_child(0);
-                        let expr_type = child.and_then(|c| self.infer_expression_type(c));
-                        self.last_expr_type.insert(scope, expr_type);
-                        if let Some(c) = child {
-                            if let Some(method_name) = self.self_method_call_name(c) {
+                        if let Some(child) = node.named_child(0) {
+                            // Make sure the expression has Expr(span)
+                            // witnesses populated — `bag_query_expr_span`
+                            // resolves through them in the implicit-return
+                            // fallback. No-op for compound nodes whose
+                            // payload doesn't bake to a witness shape.
+                            self.emit_expr_witness(child);
+                            self.last_expr_span.insert(scope, node_to_span(child));
+                            if let Some(method_name) = self.self_method_call_name(child) {
                                 self.self_method_tails.insert(scope, method_name);
                             } else {
                                 // A non-self-method-tail top-level
@@ -3478,11 +3481,12 @@ impl<'a> Builder<'a> {
                 // Visit the RHS (may contain refs, calls, etc.)
                 self.visit_node(right);
 
-                // Branch-arm detection: if RHS is a ternary, emit one
-                // BranchArm witness per arm on the LHS variable. POST
-                // visit_node — needs the arms' refs to exist so
-                // arm_payload can resolve `Edge(Expression(refidx))`
-                // for method-call arms.
+                // Branch-arm detection: if RHS is a ternary, emit
+                // per-arm `branch_arm`-source `Edge(Expr(arm_span))`
+                // witnesses on the LHS variable, plus the arms' own
+                // Expr(span) payloads. POST visit_node — needs the
+                // arms' refs to exist so `expr_payload` can resolve
+                // `Edge(Expression(refidx))` for method-call arms.
                 if right.kind() == "conditional_expression" {
                     if let Some(vt) = self.get_var_text_from_lhs(left) {
                         self.emit_branch_arm_witnesses_for_ternary(&vt, right, node);
@@ -3556,59 +3560,23 @@ impl<'a> Builder<'a> {
         None
     }
 
-    /// Generic branch-arm emission. Walks both arms of a
-    /// `conditional_expression`, infers each arm's type, and pushes
-    /// `BranchArm` observations onto `attachment`. Use for:
-    ///   - `my $x = $c ? A : B;`        → Variable($x)
-    ///   - `if ($c) { return A } else { return B }` → Symbol(sub)
-    ///   - `return $c ? A : B;`         → Symbol(sub)
-    ///   - any chained ternary that feeds into an attachment-able
-    ///     consumer.
-    /// The reducer handles the agreement/disagreement policy — this
-    /// just emits evidence.
-    fn emit_branch_arm_witnesses(
-        &mut self,
-        cond_expr: Node<'a>,
-        attachment: crate::witnesses::WitnessAttachment,
-        context: Node<'a>,
-    ) {
-        use crate::witnesses::{Witness, WitnessSource};
-        let consequent = cond_expr.child_by_field_name("consequent");
-        let alternative = cond_expr.child_by_field_name("alternative");
-        let span = node_to_span(context);
-        for arm in [consequent, alternative].into_iter().flatten() {
-            let payload = self.arm_payload(arm);
-            if let Some(p) = payload {
-                self.pending_witnesses.push(Witness {
-                    attachment: attachment.clone(),
-                    source: WitnessSource::Builder("branch_arm".into()),
-                    payload: p,
-                    span,
-                });
-            }
-        }
-    }
-
-    /// Compute the right `WitnessPayload` shape for one arm of a
-    /// branch (ternary / if-else / arity-gated return). Direct
-    /// dispatch on node kind — no recursion through walker
-    /// inference. Three categories:
+    /// Compute the right `WitnessPayload` shape for an expression node.
+    /// Single dispatch — every rvalue node, whether it appears as a
+    /// return body, ternary arm, RHS of assignment, or anywhere else,
+    /// runs through here. Two categories:
     ///
     /// - **Closed under syntax** (literals, constructors, arithmetic,
     ///   regexp): walker bakes `InferredType(t)` from the node kind
     ///   alone. There's nothing to resolve — `42` is `Numeric` no
     ///   matter what.
-    /// - **Name-dependent** (variables, method calls, function
-    ///   calls): walker emits `Edge(...)` to the attachment that
-    ///   carries the resolved type. Registry materialization
-    ///   chases.
-    /// - **Compound** (ternary): returns `None`; the per-arm
-    ///   emission is handled by the caller via
-    ///   `emit_branch_arm_witnesses` (which loops over arms calling
-    ///   `arm_payload` recursively).
-    fn arm_payload(&self, arm: Node<'a>) -> Option<crate::witnesses::WitnessPayload> {
+    /// - **Name-dependent / compound** (variables, calls, ternaries):
+    ///   walker emits `Edge(...)` to the attachment that carries the
+    ///   resolved type. Registry materialization chases at query
+    ///   time. Ternaries Edge to their own `Expr(span)` since the
+    ///   per-arm witnesses live there.
+    fn expr_payload(&self, node: Node<'a>) -> Option<crate::witnesses::WitnessPayload> {
         use crate::witnesses::{RefIdx, WitnessAttachment, WitnessPayload};
-        match arm.kind() {
+        match node.kind() {
             // Closed-under-syntax — bake.
             "string_literal" | "interpolated_string_literal" => {
                 Some(WitnessPayload::InferredType(InferredType::String))
@@ -3631,14 +3599,14 @@ impl<'a> Builder<'a> {
             | "preinc_expression"
             | "func0op_call_expression"
             | "func1op_call_expression" => self
-                .infer_expression_result_type(arm)
+                .infer_expression_result_type(node)
                 .map(WitnessPayload::InferredType),
 
             // Variable — Edge to its Variable attachment. Registry
             // materialization routes through `query_variable_type`
             // (scope-walking + framework-aware fold).
             "scalar" => {
-                let name = arm.utf8_text(self.source).ok()?;
+                let name = node.utf8_text(self.source).ok()?;
                 Some(WitnessPayload::Edge(WitnessAttachment::Variable {
                     name: name.to_string(),
                     scope: self.current_scope(),
@@ -3651,10 +3619,10 @@ impl<'a> Builder<'a> {
             // populate_witness_bag has pushed `Edge(NamedSub(method))`
             // there, so the chase resolves through.
             "method_call_expression" => {
-                if let Some(class) = self.extract_constructor_class(arm) {
+                if let Some(class) = self.extract_constructor_class(node) {
                     return Some(WitnessPayload::InferredType(InferredType::ClassName(class)));
                 }
-                let span = node_to_span(arm);
+                let span = node_to_span(node);
                 let idx = self.refs.iter().position(|r| {
                     matches!(r.kind, RefKind::MethodCall { .. }) && r.span == span
                 })?;
@@ -3667,7 +3635,7 @@ impl<'a> Builder<'a> {
             // chases NamedSub which carries InferredType from
             // writeback (locals) or enrichment (imports).
             "function_call_expression" | "ambiguous_function_call_expression" => {
-                let func = arm.child_by_field_name("function")?;
+                let func = node.child_by_field_name("function")?;
                 let name = func.utf8_text(self.source).ok()?;
                 Some(WitnessPayload::Edge(WitnessAttachment::NamedSub(
                     name.to_string(),
@@ -3677,78 +3645,154 @@ impl<'a> Builder<'a> {
             // Bareword / scoped-identifier as expression — same as
             // function call (calling a sub by name without parens).
             "bareword" | "scoped_identifier" => {
-                let name = arm.utf8_text(self.source).ok()?;
+                let name = node.utf8_text(self.source).ok()?;
                 Some(WitnessPayload::Edge(WitnessAttachment::NamedSub(
                     name.to_string(),
                 )))
             }
 
-            // Ternary — caller handles per-arm via
-            // `emit_branch_arm_witnesses`.
-            "conditional_expression" => None,
+            // Ternary — Edge to its own Expr(span). The per-arm
+            // `branch_arm`-source witnesses live on that attachment;
+            // the registry's edge chase + BranchArmFold agree them.
+            "conditional_expression" => Some(WitnessPayload::Edge(WitnessAttachment::Expr(
+                node_to_span(node),
+            ))),
 
             _ => None,
         }
     }
 
-    /// Publish bag witnesses for one return: per-arm type on
-    /// `ReturnArm(span)` if the walker can bake it (`arm_payload`),
-    /// and an unconditional per-sub `branch_arm`-source
-    /// `Edge(ReturnArm(span))` on `Symbol(sub_id)`. The per-sub edge
-    /// is unconditional so post-walk refresh
-    /// (`apply_chain_typing_return_arms`) can fill in the
-    /// `ReturnArm` later — the edge resolves to the eventual type
-    /// once chain typing or variable lookup completes.
-    /// `BranchArmFold` claims by `branch_arm` source; registry
-    /// materialization chases the edge through `ReturnArm(span)` so
-    /// the reducer sees a resolved `InferredType` after the bag
-    /// converges.
-    fn publish_return_arm_witnesses(
-        &mut self,
-        return_node: Node<'a>,
-        scope: ScopeId,
-        span: Span,
-    ) {
+    /// Emit the `Expr(span)` witnesses for `node` and (recursively)
+    /// its sub-arms. For a non-ternary node: one witness on
+    /// `Expr(span)` with the node's `expr_payload` (literal type, or
+    /// Edge to Variable/NamedSub/Expression). For a ternary: two
+    /// `branch_arm`-source `Edge(Expr(arm_span))` witnesses on
+    /// `Expr(span)`, plus a recursive call per arm so each arm's own
+    /// `Expr(span)` is populated. Idempotent on span — multiple
+    /// callers (return arm + chain typing + RHS-of-assignment) firing
+    /// against the same node produce duplicate witnesses but don't
+    /// change query answers, since the latest-wins reducers fold
+    /// them all the same way.
+    fn emit_expr_witness(&mut self, node: Node<'a>) {
         use crate::witnesses::{Witness, WitnessAttachment, WitnessPayload, WitnessSource};
-        if let Some(body) = return_node.named_child(0) {
-            if let Some(payload) = self.arm_payload(body) {
+        let span = node_to_span(node);
+        if node.kind() == "conditional_expression" {
+            let arms = [
+                node.child_by_field_name("consequent"),
+                node.child_by_field_name("alternative"),
+            ];
+            for arm in arms.into_iter().flatten() {
+                // Make sure the arm's own Expr(span) carries its
+                // payload — consumers Edge into it from
+                // Variable($n)/Symbol(sid) for the `my $n = $c ? A : B`
+                // and ternary-return paths.
+                self.emit_expr_witness(arm);
                 self.pending_witnesses.push(Witness {
-                    attachment: WitnessAttachment::ReturnArm(span),
-                    source: WitnessSource::Builder("return_arm".into()),
-                    payload,
-                    span,
-                });
-            }
-        }
-        if let Some(sub_name) = self.enclosing_sub_name() {
-            if let Some(sym_id) = self.find_sub_symbol_for(&sub_name, scope) {
-                self.pending_witnesses.push(Witness {
-                    attachment: WitnessAttachment::Symbol(sym_id),
+                    attachment: WitnessAttachment::Expr(span),
                     source: WitnessSource::Builder("branch_arm".into()),
-                    payload: WitnessPayload::Edge(WitnessAttachment::ReturnArm(span)),
-                    span,
+                    payload: WitnessPayload::Edge(WitnessAttachment::Expr(node_to_span(arm))),
+                    span: node_to_span(arm),
                 });
             }
+            return;
+        }
+        if let Some(payload) = self.expr_payload(node) {
+            self.pending_witnesses.push(Witness {
+                attachment: WitnessAttachment::Expr(span),
+                source: WitnessSource::Builder("expression".into()),
+                payload,
+                span,
+            });
         }
     }
 
-    /// RHS-ternary convenience wrapper: `my $x = $c ? A : B` →
-    /// BranchArm on Variable($x).
+    /// Publish witnesses for one explicit `return EXPR`:
+    /// - `Expr(expr_span)` carries the return body's resolved type
+    ///   (literal, variable Edge, call Edge, or recursively-emitted
+    ///   ternary).
+    /// - `Symbol(sub_id)` gets one or more `branch_arm`-source
+    ///   `Edge(Expr(arm_span))` witnesses. Ternary returns expand to
+    ///   per-arm Edges so BranchArmFold sees ≥2 arms; non-ternary
+    ///   returns produce a single Edge that the per-RI fold reads via
+    ///   `bag_query_expr` (single-arm + multi-arm both go through
+    ///   `resolve_return_type`, which accepts the single-arm case
+    ///   that BranchArmFold deliberately rejects).
+    fn publish_return_arm_witnesses(&mut self, return_node: Node<'a>, scope: ScopeId) {
+        use crate::witnesses::{Witness, WitnessAttachment, WitnessPayload, WitnessSource};
+        let body = match return_node.named_child(0) {
+            Some(b) => b,
+            None => return,
+        };
+        let body_span = node_to_span(body);
+        // Always emit the body's own Expr witnesses first so anything
+        // pointing here resolves.
+        self.emit_expr_witness(body);
+
+        let Some(sub_name) = self.enclosing_sub_name() else { return };
+        let Some(sym_id) = self.find_sub_symbol_for(&sub_name, scope) else { return };
+
+        if body.kind() == "conditional_expression" {
+            // Ternary return: per-arm Edges on Symbol(sid) so
+            // BranchArmFold can disambiguate the ≥2 arms that the
+            // syntax guarantees exist.
+            let arms = [
+                body.child_by_field_name("consequent"),
+                body.child_by_field_name("alternative"),
+            ];
+            for arm in arms.into_iter().flatten() {
+                self.pending_witnesses.push(Witness {
+                    attachment: WitnessAttachment::Symbol(sym_id),
+                    source: WitnessSource::Builder("branch_arm".into()),
+                    payload: WitnessPayload::Edge(WitnessAttachment::Expr(node_to_span(arm))),
+                    span: body_span,
+                });
+            }
+        } else {
+            // Plain return: one Edge to the body's Expr(span). The
+            // per-RI fold (`bag_query_expr` + `resolve_return_type`)
+            // handles single-arm and multi-arm uniformly.
+            self.pending_witnesses.push(Witness {
+                attachment: WitnessAttachment::Symbol(sym_id),
+                source: WitnessSource::Builder("branch_arm".into()),
+                payload: WitnessPayload::Edge(WitnessAttachment::Expr(body_span)),
+                span: body_span,
+            });
+        }
+    }
+
+    /// RHS-ternary convenience: `my $x = $c ? A : B` → per-arm
+    /// `branch_arm` Edges on Variable($x). Each Edge points at the
+    /// arm's `Expr(arm_span)`, which `emit_expr_witness` populates
+    /// with the arm's resolved payload.
     fn emit_branch_arm_witnesses_for_ternary(
         &mut self,
         lhs_var: &str,
         cond_expr: Node<'a>,
         context: Node<'a>,
     ) {
+        use crate::witnesses::{Witness, WitnessAttachment, WitnessPayload, WitnessSource};
         let scope = self.current_scope();
-        self.emit_branch_arm_witnesses(
-            cond_expr,
-            crate::witnesses::WitnessAttachment::Variable {
-                name: lhs_var.to_string(),
-                scope,
-            },
-            context,
-        );
+        let attachment = WitnessAttachment::Variable {
+            name: lhs_var.to_string(),
+            scope,
+        };
+        let context_span = node_to_span(context);
+        // Make sure the ternary's Expr(span) is populated even though
+        // the per-arm Edges below skip it — keeps query points
+        // resolving against the ternary span working downstream.
+        self.emit_expr_witness(cond_expr);
+        let arms = [
+            cond_expr.child_by_field_name("consequent"),
+            cond_expr.child_by_field_name("alternative"),
+        ];
+        for arm in arms.into_iter().flatten() {
+            self.pending_witnesses.push(Witness {
+                attachment: attachment.clone(),
+                source: WitnessSource::Builder("branch_arm".into()),
+                payload: WitnessPayload::Edge(WitnessAttachment::Expr(node_to_span(arm))),
+                span: context_span,
+            });
+        }
     }
 
     /// Closed-under-syntax type observation for an expression node.
@@ -3760,7 +3804,7 @@ impl<'a> Builder<'a> {
     /// - Constructor pattern `Bareword->new` → `ClassName`.
     ///
     /// Variables, function calls, name-driven method calls — all
-    /// excluded. They go through `arm_payload` as `Edge` payloads
+    /// excluded. They go through `expr_payload` as `Edge` payloads
     /// pointing at attachments the bag knows.
     fn infer_expression_type(&self, node: Node<'a>) -> Option<InferredType> {
         match node.kind() {
@@ -6301,56 +6345,27 @@ impl<'a> Builder<'a> {
     /// in `witnesses.rs` and carry the same logic — Phase 6's worklist
     /// driver will switch the loop bodies below to registry calls.
     fn resolve_return_types(&mut self) {
-        let (returns_by_scope, arm_types_per_ri) = self.collect_return_arm_types();
-        self.emit_arity_return_witnesses(&arm_types_per_ri);
+        self.emit_arity_return_witnesses();
         self.emit_delegation_edges();
-        let (mut return_types, mut return_provenance) =
-            self.fold_per_sub_return_arms(&returns_by_scope);
+        let (mut return_types, mut return_provenance) = self.fold_per_sub_return_arms();
         self.seed_plugin_overrides_into_return_types(&mut return_types, &mut return_provenance);
         self.write_back_sub_return_types(&return_types, &return_provenance);
         self.propagate_call_bindings_to_constraints(&return_types);
         self.fixup_call_bound_hash_key_owners(&return_types);
     }
 
-    /// Step 1: read each return arm's resolved type from the bag.
-    /// The walker already published per-arm payloads on
-    /// `ReturnArm(span)` (Type for bakeable arms, Edge for variable
-    /// arms); registry materialization chases the edges through
-    /// `Variable{...}` to a framework-aware fold every time we ask.
-    /// `returns_by_scope` feeds step 3's per-sub agreement fold;
-    /// `arm_types_per_ri` feeds step 2's arity-witness emission.
-    fn collect_return_arm_types(
-        &self,
-    ) -> (
-        std::collections::HashMap<ScopeId, Vec<InferredType>>,
-        Vec<Option<InferredType>>,
-    ) {
-        let mut returns_by_scope: std::collections::HashMap<ScopeId, Vec<InferredType>> =
-            std::collections::HashMap::new();
-        let mut arm_types_per_ri: Vec<Option<InferredType>> =
-            Vec::with_capacity(self.return_infos.len());
-        for ri in &self.return_infos {
-            let arm_type = self.bag_query_return_arm(ri.span);
-            if let Some(t) = arm_type.clone() {
-                returns_by_scope.entry(ri.scope).or_default().push(t);
-            }
-            arm_types_per_ri.push(arm_type);
-        }
-        (returns_by_scope, arm_types_per_ri)
-    }
-
-    /// Single-attachment registry query for `ReturnArm(span)`. Used
-    /// by `collect_return_arm_types` and the chain-typing return-arm
-    /// refresh to read whatever the bag currently knows about an
-    /// arm. Threads the file's scope topology + per-package
-    /// framework as a `BagContext` so Edge chases through
-    /// `Variable{...}` use scope-chain + framework-aware semantics.
-    fn bag_query_return_arm(&self, span: Span) -> Option<InferredType> {
+    /// Single-attachment registry query for `Expr(span)`. Used by
+    /// `emit_arity_return_witnesses` (per-RI) and the implicit-last-
+    /// expression fallback in `fold_per_sub_return_arms`. Threads the
+    /// file's scope topology + per-package framework as a `BagContext`
+    /// so Edge chases through `Variable{...}` use scope-chain +
+    /// framework-aware semantics.
+    fn bag_query_expr_span(&self, span: Span) -> Option<InferredType> {
         use crate::witnesses::{
             BagContext, FrameworkFact, ReducedValue, ReducerQuery, ReducerRegistry,
             WitnessAttachment,
         };
-        let att = WitnessAttachment::ReturnArm(span);
+        let att = WitnessAttachment::Expr(span);
         let reg = ReducerRegistry::with_defaults();
         let ctx = BagContext {
             scopes: &self.scopes,
@@ -6461,15 +6476,15 @@ impl<'a> Builder<'a> {
     /// `FluentArityDispatch` would answer with one arm even when the
     /// per-arm fold says "agreement failed" (different arms differ).
     /// Walk-time arity classification stays a `Some(_)` enum on
-    /// `ReturnInfo`; only the fold consults the bag-resolved arm type
-    /// from step 1.
+    /// `ReturnInfo`; the type is read out per-RI by querying the
+    /// body's `Expr(span)` against the current bag.
     ///
     /// Idempotent across re-runs — clears every prior `arity_detection`
     /// witness from the bag before re-emitting. The worklist driver
     /// calls `resolve_return_types` repeatedly until fixed point;
     /// without this clear-and-emit, each iteration would duplicate
     /// every arity witness in the bag.
-    fn emit_arity_return_witnesses(&mut self, arm_types_per_ri: &[Option<InferredType>]) {
+    fn emit_arity_return_witnesses(&mut self) {
         use crate::witnesses::{
             TypeObservation, Witness, WitnessAttachment, WitnessPayload, WitnessSource,
         };
@@ -6488,12 +6503,14 @@ impl<'a> Builder<'a> {
         }
 
         let mut arity_witnesses: Vec<Witness> = Vec::new();
-        for (ri, arm_type) in self.return_infos.iter().zip(arm_types_per_ri.iter()) {
+        for ri in &self.return_infos {
             let Some(branch) = ri.arity_branch else { continue };
             if !arity_discriminated_scopes.contains(&ri.scope) {
                 continue;
             }
-            let Some(t) = arm_type.clone() else { continue };
+            let Some(t) = ri.body_span.and_then(|sp| self.bag_query_expr_span(sp)) else {
+                continue;
+            };
             let Some(sym_id) = self.find_sub_symbol_for_scope(ri.scope) else { continue };
             let arg_count = match branch {
                 ArityBranch::Zero => Some(0u32),
@@ -6538,14 +6555,13 @@ impl<'a> Builder<'a> {
 
     /// Step 3: fold each Sub/Method scope's return arms into a single
     /// type via `resolve_return_type` (1+ arms agree → `Some(t)`,
-    /// disagreement → `None`). Falls back to `last_expr_type` for subs
-    /// without explicit `return`s — Perl's last statement is the
-    /// implicit return. Provenance is recorded as `ReducerFold {
-    /// reducer: "return_arms" }` so `--dump-package` can answer "why
-    /// does this return X?".
+    /// disagreement → `None`). Falls back to `last_expr_span`'s
+    /// Expr(span) query for subs without explicit `return`s — Perl's
+    /// last statement is the implicit return. Provenance is recorded
+    /// as `ReducerFold { reducer: "return_arms" }` so `--dump-package`
+    /// can answer "why does this return X?".
     fn fold_per_sub_return_arms(
         &mut self,
-        returns_by_scope: &std::collections::HashMap<ScopeId, Vec<InferredType>>,
     ) -> (
         std::collections::HashMap<String, InferredType>,
         std::collections::HashMap<String, crate::file_analysis::TypeProvenance>,
@@ -6595,48 +6611,45 @@ impl<'a> Builder<'a> {
                 })
                 .map(|s| s.id);
 
-            // Three sources, in priority order:
-            //   1. Per-arm fold via `returns_by_scope` — direct arms
-            //      from explicit `return EXPR` statements, agreed via
-            //      `resolve_return_type`. Wins when present.
-            //   2. Bag query on `Symbol(sub_id)` — picks up arms
-            //      pushed by `emit_branch_arm_witnesses` (ternary
-            //      arms, if/else arms) that don't naturally land in
-            //      `returns_by_scope`. `BranchArmFold` agrees them.
-            //   3. `last_expr_type` for subs without explicit returns.
-            let (resolved, evidence) = if let Some(arms) =
-                returns_by_scope.get(&scope.id).filter(|a| !a.is_empty())
-            {
-                let r = resolve_return_type(arms);
-                let ev = vec![format!("return_arms={}", arms.len())];
-                (r, ev)
-            } else {
-                let bag_answer = sub_sym_id.and_then(|id| {
-                    let att = WitnessAttachment::Symbol(id);
-                    let q = ReducerQuery {
-                        attachment: &att,
-                        point: None,
-                        framework: FrameworkFact::Plain,
-                        arity_hint: None,
-                        context: Some(&ctx),
-                    };
-                    if let ReducedValue::Type(t) = reg.query(&self.bag, &q) {
-                        Some(t)
-                    } else {
-                        None
-                    }
-                });
-                if let Some(t) = bag_answer {
-                    (Some(t), vec!["symbol_bag".into()])
+            // Two sources, in priority order:
+            //   1. Bag query on `Symbol(sub_id)` — covers explicit
+            //      `return EXPR` arms (each emits one `branch_arm`
+            //      Edge to `Expr(body_span)` on Symbol) and ternary
+            //      returns (each arm emits its own Edge). Both
+            //      `SymbolReturnArmFold` (1+ arms via
+            //      `resolve_return_type`) and `BranchArmFold` (≥2
+            //      arms agree) can answer here; the registered order
+            //      gives the Symbol-fold first refusal.
+            //   2. `Expr(last_expr_span)` for subs without explicit
+            //      returns — Perl's implicit-last-statement return.
+            let bag_answer = sub_sym_id.and_then(|id| {
+                let att = WitnessAttachment::Symbol(id);
+                let q = ReducerQuery {
+                    attachment: &att,
+                    point: None,
+                    framework: FrameworkFact::Plain,
+                    arity_hint: None,
+                    context: Some(&ctx),
+                };
+                if let ReducedValue::Type(t) = reg.query(&self.bag, &q) {
+                    Some(t)
                 } else {
-                    let r = self.last_expr_type.get(&scope.id).and_then(|t| t.clone());
-                    let ev = if r.is_some() {
-                        vec!["last_expr".into()]
-                    } else {
-                        Vec::new()
-                    };
-                    (r, ev)
+                    None
                 }
+            });
+            let (resolved, evidence) = if let Some(t) = bag_answer {
+                (Some(t), vec!["symbol_bag".into()])
+            } else {
+                let r = self
+                    .last_expr_span
+                    .get(&scope.id)
+                    .and_then(|sp| self.bag_query_expr_span(*sp));
+                let ev = if r.is_some() {
+                    vec!["last_expr".into()]
+                } else {
+                    Vec::new()
+                };
+                (r, ev)
             };
 
             if let (Some(rt), Some(sid)) = (resolved, sub_sym_id) {

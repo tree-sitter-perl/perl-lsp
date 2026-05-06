@@ -64,17 +64,20 @@ pub enum WitnessAttachment {
     HashKey { owner: HashKeyOwner, name: String },
     /// Package-level facts (isa edges, framework mode).
     Package(String),
-    /// One return-arm of a sub, identified by the return expression's
-    /// span. Carries the arm's resolved type as either a direct
-    /// `InferredType(t)` (literals, constructors) or an `Edge` to the
-    /// arm-source attachment (a variable's `Variable{name, scope}` for
-    /// `return $foo`). The per-sub fold queries `Symbol(sub_id)` whose
-    /// `branch_arm` witnesses are themselves edges to per-arm
-    /// `ReturnArm` attachments — registry materialization chases the
-    /// edges, so `BranchArmFold` sees each arm's resolved type
-    /// uniformly. Arity dispatch (`emit_arity_return_witnesses`)
-    /// queries each `ReturnArm` directly to read per-arm types.
-    ReturnArm(Span),
+    /// The value of an expression at this span. One attachment shape
+    /// for every rvalue: literals, variable reads, function calls,
+    /// method calls, ternaries, return-arm bodies, implicit-last
+    /// statements. Witnesses on an `Expr` are either a direct
+    /// `InferredType(t)` (literals, constructors, builtin returns) or
+    /// an `Edge` to the resolution target (`Variable{name, scope}` for
+    /// `$foo`, `NamedSub(name)` for a function call,
+    /// `Expression(refidx)` for a method call's
+    /// receiver-and-method-resolved type, or another `Expr(inner_span)`
+    /// for compound expressions). Replaces both the old
+    /// `ReturnArm(Span)` and the per-arm dispatch in `arm_payload`:
+    /// every node in rvalue position takes the same shape now, and the
+    /// per-sub fold reads `Edge(Expr(span))` arms via Symbol(sub_id).
+    Expr(Span),
     /// Class-keyed method dispatch: "what does method `name` return on
     /// class `class`?" — the cross-class disambiguation `NamedSub(name)`
     /// can't carry. Inheritance composes through `Edge(MethodOnClass(parent, name))`
@@ -623,17 +626,17 @@ fn merge_rep(existing: Option<Rep>, new: Rep) -> Option<Rep> {
     }
 }
 
-// ---- Branch-arm fold reducer (ternary + explicit if/else arms) ----
+// ---- Branch-arm fold reducer (ternary RHS + Expr-attached arms) ----
 
-/// Generic branch-arm reduction: collects `BranchArm` observations
-/// across any attachment kind (Variable, Symbol, Expression). Same
-/// semantics as the ternary fold inside FrameworkAwareTypeFold —
-/// agreement → that type; disagreement → None.
-///
-/// Registered alongside FrameworkAwareTypeFold so *any* attachment
-/// can carry branch-arm witnesses — ternary into a variable, if/else
-/// returns on a Symbol (sub), chain-collapsing expressions on an
-/// Expression, etc.
+/// Branch-arm reduction for `Variable` and `Expr` attachments —
+/// `my $x = $c ? A : B` and the per-arm Expr witnesses a ternary's
+/// own `Expr(span)` carries. Agreement across ≥2 arms → that type;
+/// single arm → None (ternaries always carry both arms by syntax,
+/// so a single witness here means inference for one arm failed and
+/// we shouldn't claim the other arm represents the whole
+/// expression). Symbol-attached return arms go through
+/// `SymbolReturnArmFold` instead — single-return subs DO carry their
+/// answer via one witness, so the ≥2 rule is wrong there.
 pub struct BranchArmFold;
 
 impl WitnessReducer for BranchArmFold {
@@ -642,16 +645,17 @@ impl WitnessReducer for BranchArmFold {
     }
 
     fn claims(&self, w: &Witness) -> bool {
-        // Source-tag claim — the walker (and any downstream pass that
-        // wants to contribute a branch-arm fact) emits with source
-        // `Builder("branch_arm")`. After registry materialization,
-        // every claimed witness has an `InferredType` payload (the
-        // walker pushed `Type(t)` directly for bakeable arms; the
-        // registry chased `Edge(target)` arms through to a resolved
-        // type and replaced them with synthetic `InferredType`
-        // witnesses preserving source + span). Reducer needs only
-        // the values.
-        matches!(&w.source, WitnessSource::Builder(s) if s == "branch_arm")
+        // Source-tag + attachment claim — the walker (and any
+        // downstream pass that wants to contribute a branch-arm fact)
+        // emits with source `Builder("branch_arm")`. After registry
+        // materialization, every claimed witness has an
+        // `InferredType` payload. We restrict to Variable/Expr here;
+        // Symbol attachments are owned by `SymbolReturnArmFold`,
+        // which uses `resolve_return_type` semantics (1+ arms).
+        matches!(
+            w.attachment,
+            WitnessAttachment::Variable { .. } | WitnessAttachment::Expr(_)
+        ) && matches!(&w.source, WitnessSource::Builder(s) if s == "branch_arm")
             && matches!(w.payload, WitnessPayload::InferredType(_))
     }
 
@@ -663,12 +667,6 @@ impl WitnessReducer for BranchArmFold {
                 _ => None,
             })
             .collect();
-        // A single arm is not "agreement" — `if (cond) { return X }`
-        // alone leaves the alternative undetermined. The fold only
-        // produces a type when at least two arms exist AND they all
-        // agree. Otherwise yield to the next reducer / fallback (e.g.
-        // `Symbol.return_type` carries the agreement across every
-        // return arm via `resolve_return_type`).
         if arms.len() < 2 {
             return ReducedValue::None;
         }
@@ -677,6 +675,47 @@ impl WitnessReducer for BranchArmFold {
             return ReducedValue::Type(first.clone());
         }
         ReducedValue::None
+    }
+}
+
+// ---- Symbol-attached return-arm fold ----
+//
+// Claims `Symbol(sub_id)` attachments carrying `branch_arm`-source
+// `InferredType` payloads (Edges materialized into types). Each
+// witness is one return arm — a `return EXPR` body, an explicit
+// if/else arm pushed onto Symbol, or an implicit-last-expression
+// edge. `resolve_return_type` agrees them: 1 arm → that type,
+// agreeing arms → that type, disagreeing → None (with HashRef
+// subsumed by Object). Replaces the per-RI `returns_by_scope` Vec
+// fold the builder used to do by hand. Registered before BranchArmFold
+// so the Symbol case is handled here even though both reducers
+// claim source `branch_arm`.
+
+pub struct SymbolReturnArmFold;
+
+impl WitnessReducer for SymbolReturnArmFold {
+    fn name(&self) -> &str {
+        "symbol_return_arm_fold"
+    }
+
+    fn claims(&self, w: &Witness) -> bool {
+        matches!(w.attachment, WitnessAttachment::Symbol(_))
+            && matches!(&w.source, WitnessSource::Builder(s) if s == "branch_arm")
+            && matches!(w.payload, WitnessPayload::InferredType(_))
+    }
+
+    fn reduce(&self, ws: &[&Witness], _q: &ReducerQuery) -> ReducedValue {
+        let arms: Vec<InferredType> = ws
+            .iter()
+            .filter_map(|w| match &w.payload {
+                WitnessPayload::InferredType(t) => Some(t.clone()),
+                _ => None,
+            })
+            .collect();
+        match crate::file_analysis::resolve_return_type(&arms) {
+            Some(t) => ReducedValue::Type(t),
+            None => ReducedValue::None,
+        }
     }
 }
 
@@ -802,28 +841,37 @@ impl WitnessReducer for NamedSubReturn {
     }
 }
 
-// ---- Return-arm reducer ----
+// ---- Expression reducer ----
 //
-// Claims `InferredType` payloads on `ReturnArm(_)` attachments —
-// the per-arm storage that every `return X` in a sub body
-// publishes. The walker pushes either `Type(t)` directly (literals,
-// constructors) or `Edge(target)` (variable returns). Edge witnesses
-// get materialized by the registry into synthetic `Type` witnesses
-// before any reducer claims, so this reducer always sees plain
-// types. Latest-wins: chain typing's post-walk refresh pass pushes
-// updated `Type` witnesses on a different source tag, and we want
-// that latest value to dominate the original walk-time push.
+// Claims `InferredType` payloads on `Expr(_)` attachments — the unified
+// expression-result attachment that every rvalue node publishes
+// through. The walker pushes either `Type(t)` directly (literals,
+// constructors, builtin-determined returns) or `Edge(target)` for
+// name-keyed resolution (Variable lookups, NamedSub for plain-named
+// calls, Expression for method-call receivers, or recursive Expr edges
+// for compound expressions). Edge witnesses get materialized by the
+// registry into synthetic `Type` witnesses before any reducer claims,
+// so this reducer always sees plain types. Latest-wins:
+// `emit_expr_witness` is called from multiple walk sites (return
+// body, top-level expression statement, ternary parent that recurses
+// into its arms), so the same node may receive several witnesses;
+// reading from the back picks the most recently published.
 
-pub struct ReturnArmReturn;
+pub struct ExprReturn;
 
-impl WitnessReducer for ReturnArmReturn {
+impl WitnessReducer for ExprReturn {
     fn name(&self) -> &str {
-        "return_arm_return"
+        "expr_return"
     }
 
     fn claims(&self, w: &Witness) -> bool {
-        matches!(w.attachment, WitnessAttachment::ReturnArm(_))
+        matches!(w.attachment, WitnessAttachment::Expr(_))
             && matches!(w.payload, WitnessPayload::InferredType(_))
+            // BranchArmFold (registered earlier) handles `branch_arm`-source
+            // witnesses on Expr — ternary arms agree under its rule. This
+            // reducer covers the remaining "this expr just has a type"
+            // case (a literal, a variable read, a chased call result).
+            && !matches!(&w.source, WitnessSource::Builder(s) if s == "branch_arm")
     }
 
     fn reduce(&self, ws: &[&Witness], _q: &ReducerQuery) -> ReducedValue {
@@ -1057,11 +1105,19 @@ impl ReducerRegistry {
         // `Symbol(_)` attachments — different attachment shape than
         // BranchArmFold's typical Variable / Symbol-via-edge claims).
         r.register(Box::new(PluginOverrideReducer));
+        // SymbolReturnArmFold runs before BranchArmFold because both
+        // claim `branch_arm`-source InferredType witnesses; the
+        // Symbol-attached case allows single-arm answers (a sub with
+        // one `return X`) which BranchArmFold rejects. Keeping them
+        // distinct (rather than making BranchArmFold attachment-aware)
+        // makes the source-tag / attachment-shape rule clear: each
+        // reducer claims its own (attachment, source) pair.
+        r.register(Box::new(SymbolReturnArmFold));
         r.register(Box::new(BranchArmFold));
         r.register(Box::new(FrameworkAwareTypeFold));
         r.register(Box::new(FluentArityDispatch));
         r.register(Box::new(NamedSubReturn));
-        r.register(Box::new(ReturnArmReturn));
+        r.register(Box::new(ExprReturn));
         // MethodOnClass primary-fallback runs after the arity-aware
         // dispatch (FluentArityDispatch claims MethodOnClass +
         // ArityReturn) so per-arity facts win when the caller has an
