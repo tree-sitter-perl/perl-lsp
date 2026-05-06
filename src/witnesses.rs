@@ -50,13 +50,6 @@ pub enum WitnessAttachment {
     Expression(RefIdx),
     /// A symbol property ("this sub is a dispatcher").
     Symbol(SymbolId),
-    /// A symbol referenced by name without a local `SymbolId` — i.e.
-    /// imported from another module. The bag carries the imported
-    /// return type here so the bag-query path is uniform across
-    /// local and cross-file callees. Without this attachment kind
-    /// imported subs would need a separate lookup (the old
-    /// `imported_return_types` map), reintroducing parallel paths.
-    NamedSub(String),
     /// A specific call site — property of the call, not of its result
     /// or its receiver.
     CallSite(RefIdx),
@@ -739,25 +732,19 @@ impl WitnessReducer for FluentArityDispatch {
     }
 
     fn claims(&self, w: &Witness) -> bool {
-        // Three attachment shapes carry `ArityReturn` observations:
+        // Two attachment shapes carry `ArityReturn` observations:
         //   - `Symbol(_)` — single sub with internal arity branches
         //     (`return X unless @_; return Y;`), one Symbol id, one
         //     witness per arm.
-        //   - `NamedSub(_)` — multiple Symbol ids share a logical name
+        //   - `MethodOnClass{...}` — class-scoped multi-symbol dispatch
         //     (Mojo::Base / Moo `has` synthesizes a getter and writer
-        //     under the same method name). Per-Symbol witnesses can't
-        //     dispatch across distinct symbols, so the framework
-        //     synthesis publishes name-keyed observations and this
-        //     reducer folds them at query time.
-        //   - `MethodOnClass{...}` — class-scoped variant of NamedSub
-        //     for cross-class dispatch (`Sweet::flavor` vs `Sour::flavor`
-        //     can't share the same NamedSub bucket without
-        //     last-write-wins clobbering).
+        //     under the same method name; the per-class bucket carries
+        //     both arms). Cross-class same-name methods stay
+        //     addressable per `MethodOnClass{class, _}` — they can't
+        //     share a bucket and clobber each other.
         matches!(
             w.attachment,
-            WitnessAttachment::Symbol(_)
-                | WitnessAttachment::NamedSub(_)
-                | WitnessAttachment::MethodOnClass { .. }
+            WitnessAttachment::Symbol(_) | WitnessAttachment::MethodOnClass { .. }
         ) && matches!(
             w.payload,
             WitnessPayload::Observation(TypeObservation::ArityReturn { .. })
@@ -795,51 +782,14 @@ impl WitnessReducer for FluentArityDispatch {
 }
 
 // Sub-return delegation chains (`return other()`,
-// `shift->method(...)`) used to be represented as
-// `ReturnDelegation(name)` / `SelfMethodTail(name)` observations
-// chased via `ReducerQuery::return_of`. After the edge-fact
-// migration (May 2026) the bag-side representation is
-// `Edge(NamedSub(name))` — registry materialization handles the
-// chase transparently, so dedicated reducers are no longer
-// needed. The procedural fixed-point loops in
-// `Builder::propagate_via_delegation` /
+// `shift->method(...)`) are represented as `Edge(Symbol(...))` /
+// `Edge(MethodOnClass{...})` payloads. Registry materialization
+// handles the chase transparently. The procedural fixed-point loops
+// in `Builder::propagate_via_delegation` /
 // `Builder::propagate_via_self_method_tails` continue to own
 // build-time delegation propagation (they read the
 // `sub_return_delegations` / `self_method_tails` maps directly,
 // not the bag).
-
-// ---- Named-sub return reducer ----
-//
-// Claims plain `InferredType` payloads on `NamedSub` attachments —
-// the import-side equivalent of `Symbol.return_type` for local subs.
-// Produced by `FileAnalysis::enrich_imported_types_with_keys` so
-// imports flow through the SAME bag-query path as locals; no
-// separate `imported_return_types` lookup at consumer sites.
-
-pub struct NamedSubReturn;
-
-impl WitnessReducer for NamedSubReturn {
-    fn name(&self) -> &str {
-        "named_sub_return"
-    }
-
-    fn claims(&self, w: &Witness) -> bool {
-        matches!(w.attachment, WitnessAttachment::NamedSub(_))
-            && matches!(w.payload, WitnessPayload::InferredType(_))
-    }
-
-    fn reduce(&self, ws: &[&Witness], _q: &ReducerQuery) -> ReducedValue {
-        // One witness per import — the latest one wins (enrichment
-        // truncates back to baseline before re-deriving, so there's
-        // never accumulated stale state).
-        for w in ws.iter().rev() {
-            if let WitnessPayload::InferredType(t) = &w.payload {
-                return ReducedValue::Type(t.clone());
-            }
-        }
-        ReducedValue::None
-    }
-}
 
 // ---- Expression reducer ----
 //
@@ -911,46 +861,35 @@ impl WitnessReducer for SubReturnReducer {
     }
 
     fn claims(&self, w: &Witness) -> bool {
-        // Source-tag claim — only the writeback-pushed (`local_return`)
-        // and enrichment-pushed (`imported_return`) sources fire here.
-        // Excludes:
-        //   - branch_arm-source InferredType witnesses (materialized
-        //     by the registry from per-arm Edge facts) — those are
-        //     `BranchArmFold`'s, and its agreement / disagreement
-        //     result must propagate (single-arm or disagreeing arms
-        //     yield None on purpose; SubReturnReducer mustn't paper
-        //     over that with an arbitrary latest pick).
-        //   - framework_accessor-source ArityReturn observations
-        //     (different payload shape; FluentArityDispatch claims).
-        //   - any other Builder-source InferredType — Symbol attachment
-        //     should only carry our two flavors of "this sym's
-        //     stored return type" facts.
+        // Excludes `branch_arm`-source witnesses — those are
+        // `SymbolReturnArmFold`'s, and its agreement / disagreement
+        // result must propagate (single-arm ambiguity or disagreeing
+        // arms yield None on purpose; this reducer mustn't paper
+        // over that with a latest-wins pick on the same materialized
+        // arm types). Without the filter, materialize's synthetic
+        // `Symbol(_) + InferredType` witnesses (one per arm, with
+        // `branch_arm` source preserved) would all be claimed here
+        // too, and the disagreement signal disappears.
         if !matches!(w.attachment, WitnessAttachment::Symbol(_)) {
             return false;
         }
         if !matches!(w.payload, WitnessPayload::InferredType(_)) {
             return false;
         }
-        match &w.source {
-            WitnessSource::Builder(s) if s == "local_return" => true,
-            WitnessSource::Builder(s) if s == "delegation" => true,
-            WitnessSource::Builder(s) if s == "self_method_tail" => true,
-            WitnessSource::Enrichment(s) if s == "imported_return" => true,
-            _ => false,
-        }
+        !matches!(&w.source, WitnessSource::Builder(s) if s == "branch_arm")
     }
 
     fn reduce(&self, ws: &[&Witness], q: &ReducerQuery) -> ReducedValue {
-        // Only fire when the caller has no arity preference. With an
-        // arity hint, an arity-aware reducer (FluentArityDispatch)
-        // gets the first chance — and if its answer is None for the
-        // requested arity, that's a "this symbol doesn't dispatch
-        // here" signal that the caller will resolve via a different
-        // attachment (`NamedSub` lookup in `query_sub_return_type`,
-        // for instance). Falling through to a plain stored-return
-        // read in that case would silently wrong-answer Mojo::Base
-        // writer-vs-getter dispatch (`level(1)` on the getter sym
-        // would pretend to return the getter's String value).
+        // With an arity hint, an arity-aware reducer
+        // (`FluentArityDispatch`) gets the first chance — and if it
+        // returns None for the requested arity on this single sym,
+        // that's a "this symbol doesn't dispatch here" signal: the
+        // caller should be answering through `MethodOnClass{class,
+        // name}` (cross-symbol dispatch within the class). Falling
+        // through to a plain stored-return read on the wrong sym
+        // would silently wrong-answer Mojo::Base writer-vs-getter
+        // (`level(1)` on the getter sym would surface the getter's
+        // String value instead of routing to the writer).
         if q.arity_hint.is_some() {
             return ReducedValue::None;
         }
@@ -1116,7 +1055,6 @@ impl ReducerRegistry {
         r.register(Box::new(BranchArmFold));
         r.register(Box::new(FrameworkAwareTypeFold));
         r.register(Box::new(FluentArityDispatch));
-        r.register(Box::new(NamedSubReturn));
         r.register(Box::new(ExprReturn));
         // MethodOnClass primary-fallback runs after the arity-aware
         // dispatch (FluentArityDispatch claims MethodOnClass +
@@ -1218,39 +1156,48 @@ impl ReducerRegistry {
             }
         }
 
-        // Inheritance walk for `MethodOnClass{C, m}` queries the local
-        // bag couldn't answer. Two structural facts compose:
+        // Inheritance + bridge fallback for `MethodOnClass{C, m}`
+        // queries that the local bag couldn't answer.
+        //
+        // D3 added build-time and enrichment-time edge emission for
+        // the common cases: local writeback emits
+        // `MethodOnClass(child, m) → Edge(MethodOnClass(parent, m))`
+        // for every method `m` on a *local* parent;
+        // `enrich_imported_types_with_keys` projects the same shape
+        // for *cross-file* parents. When edges are present, the
+        // generic edge-chase machinery resolves inheritance without
+        // touching this fallback.
+        //
+        // The fallback covers the residual: callers that build a
+        // FileAnalysis without going through `build()` +
+        // enrichment (hand-crafted FAs, isolated tests), and
+        // cross-file plugin-namespace bridges declared in *other*
+        // files whose entities would otherwise need an N×N
+        // pre-emission to reach. Three structural facts compose:
         //
         //   1. `module_index.get_cached(C)` — when `C` lives in
-        //      another file, its cached `FileAnalysis` carries the
-        //      direct facts for C (its synthesized accessors, its own
-        //      writeback witnesses). Recurse with C's cached bag.
+        //      another file, recurse into its cached bag for the
+        //      direct facts on C.
         //   2. `package_parents[C]` (local) ∪
         //      `module_index.parents_cached(C)` (cross-file) — the
-        //      inheritance chain in Perl-default DFS-MRO order
-        //      (left-to-right `@ISA`). Recurse on
-        //      `MethodOnClass{P, m}` for each parent until one
-        //      answers. Cross-file P resolves through (1) on the
-        //      recursive call.
+        //      Perl DFS-MRO chain. Recurse on `MethodOnClass{P, m}`
+        //      for each parent. Cross-file P resolves through (1)
+        //      on the recursive call.
+        //   3. `module_index.for_each_entity_bridged_to(class, ...)`
+        //      — entities in *other* files' plugin namespaces
+        //      bridged to `class`. Each match feeds the cached bag
+        //      a `Symbol(sym.id)` query, since per-FA SymbolIds
+        //      can't be portably edge-encoded.
         //
-        // The shared `(bag, attachment)`-keyed visited set breaks both
+        // The shared `(bag, attachment)`-keyed visited set breaks
         // local cycles (`class :isa Self`) and cross-file loops
-        // (`A use parent B; B use parent A`) — see the doc on `query`.
+        // (`A use parent B; B use parent A`).
         if let WitnessAttachment::MethodOnClass { class, name } = q.attachment {
             if let Some(ctx) = q.context {
-                // (1) Cross-file primary: cached module for class C.
-                // Skip when the current bag IS already the cached
-                // module's bag — `query_rec`'s entry guard would
-                // bounce us anyway, but the explicit check avoids
-                // even building `cached_ctx` and `sub_q`.
+                // (1) Cross-file primary lookup.
                 if let Some(idx) = ctx.module_index {
                     if let Some(cached) = idx.get_cached(class) {
                         if !std::ptr::eq(bag, &cached.analysis.witnesses) {
-                            // Reuse cached's own package_parents /
-                            // scopes / package_framework so further
-                            // parent walks and Variable edge chases
-                            // happen in the cached file's context,
-                            // not ours.
                             let cached_ctx = BagContext {
                                 scopes: &cached.analysis.scopes,
                                 package_framework: &cached.analysis.package_framework,
@@ -1303,26 +1250,16 @@ impl ReducerRegistry {
                     }
                 }
                 // (3) Cross-file plugin-namespace bridges. Plugin
-                // namespaces in OTHER files may bridge entities to
-                // `class` (mojo-helpers emits `helper` Methods with
-                // a `Bridge::Class("Mojolicious::Controller")` so
-                // any controller's method dispatch picks them up).
-                // The local file's `plugin_namespaces` already gets
-                // edges emitted at build time
-                // (`Builder::write_back_sub_return_types`'s bridge
-                // pass); cross-file ones need module_index walking.
-                //
-                // For each matching entity, query the cached
-                // module's bag for `Symbol(sym.id)` at arity=None.
-                // Plugin-emitted Methods aren't arity-discriminated
-                // (each helper has one signature), so the writeback's
-                // plain `InferredType` answer is the right one
-                // regardless of how many args the caller passed.
-                // SubReturnReducer's `arity_hint=Some` short-circuit
-                // would silently zero this out — the arity-aware
-                // gate exists for Mojo accessor getter/writer
-                // dispatch, where multiple syms share a name and
-                // arity disambiguates; it doesn't apply here.
+                // entities declared in OTHER files (mojo-helpers'
+                // helpers, etc.) bridged to `class` aren't
+                // reachable via the local bag's edges nor the
+                // cross-file primary (`get_cached(class)` returns
+                // the canonical class file, not the file with the
+                // bridging plugin). Walk the index for matching
+                // entities and ask each cached module for
+                // `Symbol(sym.id)` at arity=None — bridged Methods
+                // aren't arity-discriminated, so the writeback's
+                // plain `InferredType` answer is correct.
                 if let Some(idx) = ctx.module_index {
                     let mut found: Option<InferredType> = None;
                     idx.for_each_entity_bridged_to(class, |cached, sym| {
@@ -1508,10 +1445,10 @@ fn scope_point(scopes: &[Scope], scope: ScopeId) -> tree_sitter::Point {
 
 /// Single canonical query for "what does this sub return?". Handles
 /// both local subs (resolved via the `symbols` table to a `Symbol`
-/// attachment) and imported / cross-file subs (`NamedSub` attachment,
-/// pushed by enrichment) through one path. Callers don't need to
-/// branch on "is this local"; the bag has the right witnesses either
-/// way and the reducer registry produces an answer if one exists.
+/// attachment) and imported / cross-file subs (resolved through
+/// `BagContext.module_index`'s exporter index → recurse into the
+/// cached module's bag with `Symbol(cached_sid)`). Callers don't
+/// need to branch on "is this local"; one path covers both.
 pub fn query_sub_return_type(
     bag: &WitnessBag,
     symbols: &[crate::file_analysis::Symbol],
@@ -1519,9 +1456,9 @@ pub fn query_sub_return_type(
     arity_hint: Option<u32>,
     context: Option<&BagContext>,
 ) -> Option<InferredType> {
-    // Local-symbol bag query first — picks up arity-discriminated
-    // dispatch via FluentArityDispatch.
     let reg = ReducerRegistry::with_defaults();
+    // Local-symbol bag query first — picks up arity-discriminated
+    // dispatch via FluentArityDispatch on the matching sym.
     let local_sym = symbols.iter().find(|s| {
         s.name == sub_name
             && matches!(
@@ -1541,33 +1478,68 @@ pub fn query_sub_return_type(
         if let ReducedValue::Type(t) = reg.query(bag, &q) {
             return Some(t);
         }
+        // Cross-symbol dispatch within the sym's class (Mojo::Base
+        // getter+writer share a name; `find()` returns the getter
+        // first but at `arity=1` the writer's answer is required).
+        // `MethodOnClass{class, name}` carries every per-arity arm
+        // that synthesis published.
+        if let Some(class) = sym.package.as_ref() {
+            let att = WitnessAttachment::MethodOnClass {
+                class: class.clone(),
+                name: sub_name.to_string(),
+            };
+            let q = ReducerQuery {
+                attachment: &att,
+                point: None,
+                framework: FrameworkFact::Plain,
+                arity_hint,
+                context,
+            };
+            if let ReducedValue::Type(t) = reg.query(bag, &q) {
+                return Some(t);
+            }
+        }
     }
-    // Name-keyed multi-dispatch and cross-file imports both ride
-    // `NamedSub` — frameworks like Mojo::Base publish per-arity
-    // observations on the logical name (one getter + one writer share
-    // it), `write_back_sub_return_types` mirrors every local sub's
-    // resolved return type here, and `enrich_imported_types_with_keys`
-    // does the same for cross-file imports. After the writeback runs
-    // there is no plain sub whose answer is reachable only through
-    // `Symbol.return_type`; the field is a cache, not a parallel
-    // truth. (Mid-build callers don't exist — every consumer reaches
-    // this function through `FileAnalysis::sub_return_type_at_arity`,
-    // which only runs post-build.)
-    //
-    // `local_sym` is still used above for the `Symbol(_)` query branch
-    // — arity-discriminated single-symbol dispatch (`return X if @_ == N`)
-    // attaches to the symbol id, not the name.
-    let _ = local_sym;
-    let att = WitnessAttachment::NamedSub(sub_name.to_string());
-    let q = ReducerQuery {
-        attachment: &att,
-        point: None,
-        framework: FrameworkFact::Plain,
-        arity_hint,
-        context,
-    };
-    if let ReducedValue::Type(t) = reg.query(bag, &q) {
-        return Some(t);
+    // Cross-file imports: walk the module_index for exporters of
+    // `sub_name` and recurse into each cached module's bag for the
+    // matching `Symbol(cached_sid)`. Replaces the legacy
+    // `NamedSub` attachment that enrichment used to mirror imports
+    // onto. The recursion shares the registry — same arity dispatch,
+    // same plugin overrides, same fold rules — only the bag and
+    // symbols change.
+    if let Some(ctx) = context {
+        if let Some(idx) = ctx.module_index {
+            for module_name in idx.find_exporters(sub_name) {
+                let Some(cached) = idx.get_cached(&module_name) else { continue };
+                let Some(sym) = cached.analysis.symbols.iter().find(|s| {
+                    s.name == sub_name
+                        && matches!(
+                            s.kind,
+                            crate::file_analysis::SymKind::Sub
+                                | crate::file_analysis::SymKind::Method
+                        )
+                }) else {
+                    continue;
+                };
+                let cached_ctx = BagContext {
+                    scopes: &cached.analysis.scopes,
+                    package_framework: &cached.analysis.package_framework,
+                    module_index: Some(idx),
+                    package_parents: &cached.analysis.package_parents,
+                };
+                let att = WitnessAttachment::Symbol(sym.id);
+                let q = ReducerQuery {
+                    attachment: &att,
+                    point: None,
+                    framework: FrameworkFact::Plain,
+                    arity_hint,
+                    context: Some(&cached_ctx),
+                };
+                if let ReducedValue::Type(t) = reg.query(&cached.analysis.witnesses, &q) {
+                    return Some(t);
+                }
+            }
+        }
     }
     None
 }

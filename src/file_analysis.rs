@@ -1591,31 +1591,64 @@ impl FileAnalysis {
             .unwrap_or(TypeProvenance::Inferred)
     }
 
-    /// Convenience wrapper: enrich with return types only (no hash keys).
-    #[cfg(test)]
-    pub fn enrich_imported_types(&mut self, imported_returns: HashMap<String, InferredType>) {
-        self.enrich_imported_types_with_keys(imported_returns, HashMap::new(), None);
-    }
-
-    /// Resolve call bindings for imported functions and inject hash key defs.
-    /// Call after building, when module index data is available.
+    /// Resolve call bindings for imported functions and inject
+    /// synthetic HashKeyDef symbols. Walks `self.imports` against
+    /// `module_index` to derive each imported sub's return type and
+    /// hash-key set inline — `build_imported_return_types` and the
+    /// `imported_returns` / `imported_hash_keys` parameters were
+    /// killed in D3 since the bag now reaches cross-file `Symbol(_)`
+    /// witnesses through `BagContext.module_index` directly. Call
+    /// after building, when the module index is available.
     pub fn enrich_imported_types_with_keys(
         &mut self,
-        imported_returns: HashMap<String, InferredType>,
-        imported_hash_keys: HashMap<String, Vec<String>>,
         module_index: Option<&ModuleIndex>,
     ) {
-        // Truncate back to baseline so repeated enrichment doesn't accumulate duplicates.
-        // Same idea applies to the bag — enrichment pushes new
-        // witnesses via `push_type_constraint`, so we truncate back
-        // to the build-time baseline witness count first.
+        // Truncate back to baseline so repeated enrichment doesn't
+        // accumulate duplicates. The bag is also truncated; enrichment
+        // pushes Variable witnesses via `push_type_constraint`.
         self.type_constraints.truncate(self.base_type_constraint_count);
         self.symbols.truncate(self.base_symbol_count);
         self.witnesses.truncate(self.base_witness_count);
 
+        // Build the import → exported-name map inline from
+        // `self.imports` + `module_index`. `imported_hash_keys` is
+        // the only piece still needed by enrichment; imported return
+        // types are reached lazily by `query_sub_return_type` walking
+        // `module_index.find_exporters(name)`.
+        let mut imported_hash_keys: HashMap<String, Vec<String>> = HashMap::new();
+        let mut imported_returns: HashMap<String, InferredType> = HashMap::new();
+        if let Some(idx) = module_index {
+            for import in &self.imports {
+                let Some(cached) = idx.get_cached(&import.module_name) else { continue };
+                for sym in &cached.analysis.symbols {
+                    if !matches!(sym.kind, SymKind::Sub | SymKind::Method) {
+                        continue;
+                    }
+                    if !cached.analysis.export.iter().any(|n| n == &sym.name)
+                        && !cached.analysis.export_ok.iter().any(|n| n == &sym.name)
+                    {
+                        continue;
+                    }
+                    if matches!(sym.detail, SymbolDetail::Sub { .. }) {
+                        if let Some(ty) = cached.analysis.symbol_return_type_via_bag(sym.id, None) {
+                            imported_returns.insert(sym.name.clone(), ty);
+                        }
+                    }
+                    if let Some(sub_info) = cached.sub_info(&sym.name) {
+                        let hk = sub_info.hash_keys();
+                        if !hk.is_empty() {
+                            imported_hash_keys.insert(sym.name.clone(), hk.to_vec());
+                        }
+                    }
+                }
+            }
+        }
+
+        // Push call-binding TCs for imports whose return type the
+        // cross-file scan resolved. Same shape the local-sub path
+        // produces (`propagate_call_bindings_to_constraints`).
         let mut to_push: Vec<TypeConstraint> = Vec::new();
         for binding in &self.call_bindings {
-            // Skip if already resolved (local sub or builtin)
             if self.sub_return_type_local(&binding.func_name).is_some()
                 || builtin_return_type(&binding.func_name).is_some()
             {
@@ -1633,36 +1666,14 @@ impl FileAnalysis {
         for tc in to_push {
             self.push_type_constraint(tc);
         }
-        // Mirror every imported return type into the bag as a
-        // `NamedSub` witness so `query_sub_return_type` resolves
-        // imports through the same path it uses for locals. The
-        // bag is the only durable carrier of imported return types
-        // post-D1; the legacy `imported_return_types` map went away
-        // with the field-deletion pass.
-        use crate::witnesses::{Witness, WitnessAttachment, WitnessPayload, WitnessSource};
-        for (name, ty) in &imported_returns {
-            self.witnesses.push(Witness {
-                attachment: WitnessAttachment::NamedSub(name.clone()),
-                source: WitnessSource::Enrichment("imported_return".to_string()),
-                payload: WitnessPayload::InferredType(ty.clone()),
-                span: Span {
-                    start: Point { row: 0, column: 0 },
-                    end: Point { row: 0, column: 0 },
-                },
-            });
-        }
-        let _ = imported_returns;
 
         // Inject synthetic HashKeyDef symbols for imported functions' hash keys.
         // Imported subs have no local package — package=None mirrors the
-        // HashKeyAccess fixup's default for imported bindings, so the pair
-        // match each other without bleeding into other workspace files'
-        // locally-packaged `sub get_config` hash keys.
+        // HashKeyAccess fixup's default for imported bindings.
         for (func_name, keys) in &imported_hash_keys {
             let owner = HashKeyOwner::Sub { package: None, name: func_name.clone() };
             for key_name in keys {
                 let id = SymbolId(self.symbols.len() as u32);
-                // Use a zero-size span at file start for synthetic symbols
                 let zero_span = Span {
                     start: Point { row: 0, column: 0 },
                     end: Point { row: 0, column: 0 },
@@ -1678,7 +1689,6 @@ impl FileAnalysis {
                     detail: SymbolDetail::HashKeyDef {
                         owner: owner.clone(),
                         is_dynamic: false,
-
                     },
                     namespace: Namespace::Language,
                     outline_label: None,
@@ -1686,14 +1696,12 @@ impl FileAnalysis {
             }
         }
 
-        // Phase 5 follow-up: the builder's HashKeyAccess owner fixup only runs
-        // for bindings where the func's return type is known at build time.
-        // Imported funcs aren't in that map; their return types come in via
-        // `imported_returns` here. Retry the fixup now so the consumer-side
-        // `$cfg = Lib::get_config(); $cfg->{host}` access gets its owner set
-        // to Sub{None, "get_config"}, matching the synthetic HashKeyDef we
-        // just injected. Without this, cross-file hash-key references
-        // would silently miss every consumer access.
+        // HashKeyAccess owner fixup for imports: the builder's pass
+        // only ran for bindings where the func's return type was
+        // known at build time. Cross-file return types come in here,
+        // so the consumer-side `$cfg = Lib::get_config(); $cfg->{host}`
+        // access gets its owner set to Sub{None, "get_config"},
+        // matching the synthetic HashKeyDef we just injected.
         let imported_keyed_subs: std::collections::HashSet<String> = imported_hash_keys
             .keys()
             .cloned()
@@ -1712,22 +1720,15 @@ impl FileAnalysis {
             for r in &mut self.refs {
                 if let RefKind::HashKeyAccess { ref var_text, ref mut owner } = r.kind {
                     if owner.is_some() && !matches!(owner, Some(HashKeyOwner::Variable { .. })) {
-                        // Already linked to a real owner by the builder — don't overwrite.
                         continue;
                     }
                     if let Some(func_name) = binding_by_var.get(var_text.as_str()) {
-                        // Only set if the specific key is actually in the
-                        // imported hash_keys for this func — avoids linking
-                        // unrelated `$cfg->{random}` to the imported def.
                         if let Some(keys) = imported_hash_keys.get(func_name) {
                             if keys.iter().any(|k| k == &r.target_name) {
                                 *owner = Some(HashKeyOwner::Sub {
                                     package: None,
                                     name: func_name.clone(),
                                 });
-                                // Clear resolves_to so the index linker in
-                                // rebuild_enrichment_indices picks it up
-                                // against the newly-injected synthetic def.
                                 r.resolves_to = None;
                             }
                         }
@@ -1736,9 +1737,67 @@ impl FileAnalysis {
             }
         }
 
-        // Cross-file method call return type resolution
-        self.resolve_method_call_types(module_index);
+        // Cross-file inheritance edges. Local writeback emits
+        // `MethodOnClass(child, m) → Edge(MethodOnClass(parent, m))`
+        // for every method `m` declared on a *local* parent. When
+        // the parent class lives in another file (or its methods
+        // do, via further parent chaining), we read the cached
+        // analysis here and project the same edge shape into the
+        // local bag. The registry's edge-chase then follows
+        // `MethodOnClass(child, m) → MethodOnClass(parent_cross, m)`
+        // and re-enters the cached parent's bag via the existing
+        // cross-file primary lookup in `query_rec`.
+        if let Some(idx) = module_index {
+            use crate::witnesses::{Witness, WitnessAttachment, WitnessPayload, WitnessSource};
+            let zero = Span {
+                start: Point { row: 0, column: 0 },
+                end: Point { row: 0, column: 0 },
+            };
+            // Snapshot to avoid double-mutable-borrow when pushing.
+            let parents_snapshot: Vec<(String, Vec<String>)> = self
+                .package_parents
+                .iter()
+                .map(|(c, ps)| (c.clone(), ps.clone()))
+                .collect();
+            for (child, parents) in &parents_snapshot {
+                // First-parent-wins per method, mirroring Perl's
+                // default DFS-MRO. Aligned with the local-parent
+                // edge emission in `write_back_sub_return_types`.
+                let mut emitted_for_child: std::collections::HashSet<String> =
+                    std::collections::HashSet::new();
+                for parent in parents {
+                    if parent == child {
+                        continue;
+                    }
+                    let Some(cached) = idx.get_cached(parent) else { continue };
+                    for sym in &cached.analysis.symbols {
+                        if sym.package.as_deref() != Some(parent.as_str()) {
+                            continue;
+                        }
+                        if !matches!(sym.kind, SymKind::Sub | SymKind::Method) {
+                            continue;
+                        }
+                        if !emitted_for_child.insert(sym.name.clone()) {
+                            continue;
+                        }
+                        self.witnesses.push(Witness {
+                            attachment: WitnessAttachment::MethodOnClass {
+                                class: child.clone(),
+                                name: sym.name.clone(),
+                            },
+                            source: WitnessSource::Enrichment("inheritance_cross".to_string()),
+                            payload: WitnessPayload::Edge(WitnessAttachment::MethodOnClass {
+                                class: parent.clone(),
+                                name: sym.name.clone(),
+                            }),
+                            span: zero,
+                        });
+                    }
+                }
+            }
+        }
 
+        self.resolve_method_call_types(module_index);
         self.rebuild_enrichment_indices();
     }
 

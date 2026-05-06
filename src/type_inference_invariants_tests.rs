@@ -13,7 +13,7 @@
 //! `apply_type_overrides` step, etc.) and re-passes once it's restored.
 
 use super::*;
-use crate::file_analysis::{InferredType, SymKind, SymbolDetail, TypeProvenance};
+use crate::file_analysis::{InferredType, SymKind, TypeProvenance};
 use crate::plugin::{
     CompletionQueryContext, FrameworkPlugin, OverrideTarget, PluginCompletionAnswer,
     PluginRegistry, PluginSigHelpAnswer, SigHelpQueryContext, Trigger, TypeOverride,

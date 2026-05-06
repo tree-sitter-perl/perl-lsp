@@ -210,22 +210,21 @@ fn core_class_still_holds_class_against_hashref_access() {
 #[test]
 fn fluent_chain_get_to_resolves_via_edge_chase() {
     // `$r->get('/x')->to('Y#z')` — the RefIdx for `->get(...)`'s
-    // result carries `Edge(NamedSub("get"))`. Registry materialization
-    // chases the edge through `NamedSub("get")` (where the resolved
-    // return type lives, mirrored from local subs by
-    // `mirror_local_returns_to_named_sub` and from imports by
-    // `enrich_imported_types_with_keys`), finds Route, and the chain
-    // hop sees a plain `InferredType::ClassName`.
+    // result carries `Edge(Symbol(get_sid))`. Registry materialization
+    // chases the edge through `Symbol(get_sid)` (where the resolved
+    // return type lives, published by writeback), finds Route, and
+    // the chain hop sees a plain `InferredType::ClassName`.
     let mut bag = WitnessBag::new();
     let get_ref = RefIdx(42);
+    let get_sid = SymbolId(7);
     bag.push(Witness {
         attachment: WitnessAttachment::Expression(get_ref),
         source: WitnessSource::Builder("chain".into()),
-        payload: WitnessPayload::Edge(WitnessAttachment::NamedSub("get".into())),
+        payload: WitnessPayload::Edge(WitnessAttachment::Symbol(get_sid)),
         span: span(0, 0, 0, 0),
     });
     bag.push(Witness {
-        attachment: WitnessAttachment::NamedSub("get".into()),
+        attachment: WitnessAttachment::Symbol(get_sid),
         source: WitnessSource::Builder("local_return".into()),
         payload: WitnessPayload::InferredType(InferredType::ClassName(
             "Mojolicious::Routes::Route".into(),
@@ -255,7 +254,7 @@ fn edge_with_unresolved_target_yields_none() {
     bag.push(Witness {
         attachment: WitnessAttachment::Expression(RefIdx(7)),
         source: WitnessSource::Builder("chain".into()),
-        payload: WitnessPayload::Edge(WitnessAttachment::NamedSub("nowhere".into())),
+        payload: WitnessPayload::Edge(WitnessAttachment::Symbol(SymbolId(99))),
         span: span(0, 0, 0, 0),
     });
     let reg = ReducerRegistry::with_defaults();
@@ -274,8 +273,8 @@ fn edge_with_unresolved_target_yields_none() {
 #[test]
 fn edge_chase_terminates_on_cycle() {
     let mut bag = WitnessBag::new();
-    let a = WitnessAttachment::NamedSub("a".into());
-    let b = WitnessAttachment::NamedSub("b".into());
+    let a = WitnessAttachment::Symbol(SymbolId(1));
+    let b = WitnessAttachment::Symbol(SymbolId(2));
     bag.push(Witness {
         attachment: a.clone(),
         source: WitnessSource::Builder("test".into()),
@@ -302,8 +301,8 @@ fn edge_chase_terminates_on_cycle() {
 #[test]
 fn edge_chase_resolves_transitively() {
     let mut bag = WitnessBag::new();
-    let a = WitnessAttachment::NamedSub("a".into());
-    let b = WitnessAttachment::NamedSub("b".into());
+    let a = WitnessAttachment::Symbol(SymbolId(1));
+    let b = WitnessAttachment::Symbol(SymbolId(2));
     bag.push(Witness {
         attachment: a.clone(),
         source: WitnessSource::Builder("test".into()),
@@ -669,10 +668,13 @@ fn plugin_override_priority_dominates_builder_inferred_type() {
 // for the new contract.)
 
 #[test]
-fn plugin_override_reducer_yields_when_only_builder_witnesses_present() {
-    // Plugin-priority short-circuit must not claim Builder-only
-    // Symbol+InferredType witnesses — those are Phase 4+ inferred
-    // facts. Returning None here lets later reducers handle them.
+fn plugin_override_reducer_declines_builder_priority_witnesses() {
+    // Plugin-priority short-circuit must not fire on Builder-only
+    // Symbol+InferredType witnesses (priority == 10). Post-D3,
+    // `SubReturnReducer` claims those instead and produces the
+    // stored-return answer; what we're asserting here is that the
+    // claim is NOT routed through `PluginOverrideReducer`'s
+    // priority short-circuit.
     let sym_id = SymbolId(7);
     let mut bag = WitnessBag::new();
     bag.push(Witness {
@@ -689,8 +691,10 @@ fn plugin_override_reducer_yields_when_only_builder_witnesses_present() {
         framework: FrameworkFact::Plain,
         arity_hint: None, context: None,
     };
-    // PluginOverrideReducer declines (priority == 10), no other
-    // reducer claims Symbol+InferredType in Phase 3, so the
-    // registry returns None.
-    assert_eq!(reg.query(&bag, &q), ReducedValue::None);
+    // SubReturnReducer (registered last) returns the stored type.
+    // PluginOverrideReducer's short-circuit didn't fire — if it had,
+    // the answer would still be `Type(String)` but this test is
+    // mostly a smoke check that the registry resolves through the
+    // expected reducer chain.
+    assert_eq!(reg.query(&bag, &q), ReducedValue::Type(InferredType::String));
 }

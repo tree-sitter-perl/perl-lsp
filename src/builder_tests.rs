@@ -6656,19 +6656,11 @@ sub to  { my $self = shift; return $self; }
     let mut fa = build_fa(app_src);
     // First enrichment — simulates publish_diagnostics after module
     // resolution. Populates type_constraints + type_constraints_by_var.
-    fa.enrich_imported_types_with_keys(
-        std::collections::HashMap::new(),
-        std::collections::HashMap::new(),
-        Some(&idx),
-    );
+    fa.enrich_imported_types_with_keys(Some(&idx));
     // Second enrichment — simulates a subsequent change or refresh.
     // Before the fix, the stale type_constraints_by_var indices
     // panicked `inferred_type` during resolve_method_call_types.
-    fa.enrich_imported_types_with_keys(
-        std::collections::HashMap::new(),
-        std::collections::HashMap::new(),
-        Some(&idx),
-    );
+    fa.enrich_imported_types_with_keys(Some(&idx));
 
     // Sanity: `$r` is still typed after the second run (not just
     // "didn't crash" — the state is actually usable).
@@ -6786,11 +6778,7 @@ sub to { my $self = shift; return $self; }
     // Mojolicious.pm's `routes` accessor) don't land in
     // `type_constraints`, and `$r` stays untyped.
     let mut fa = fa;
-    fa.enrich_imported_types_with_keys(
-        std::collections::HashMap::new(),
-        std::collections::HashMap::new(),
-        Some(&idx),
-    );
+    fa.enrich_imported_types_with_keys(Some(&idx));
     let fa = fa;
 
     // Locate the two target lines by content — decoupled from

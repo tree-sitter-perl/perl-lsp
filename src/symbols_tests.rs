@@ -1643,9 +1643,7 @@ fn test_demo_file_chain_to_resolves_on_line_71() {
     // `my $r = $app->routes;` becomes a TypeConstraint. Without
     // this, the backend's `enrich_analysis(uri)` hasn't fired
     // yet and the whole chain is un-typed.
-    let (imported_returns, imported_keys) =
-        crate::backend::build_imported_return_types_for_test(&analysis, &idx);
-    analysis.enrich_imported_types_with_keys(imported_returns, imported_keys, Some(&idx));
+    analysis.enrich_imported_types_with_keys(Some(&idx));
 
     // Find line 71 ($r->get('/users')->to('Users#list');).
     let (line_idx, chain_line) = demo_source
@@ -2073,8 +2071,7 @@ fn test_demo_chain_empirical_truth_table() {
         .unwrap();
     let tree = parser.parse(&demo_source, None).unwrap();
     let mut analysis = crate::builder::build(&tree, demo_source.as_bytes());
-    let (ir, ik) = crate::backend::build_imported_return_types_for_test(&analysis, &idx);
-    analysis.enrich_imported_types_with_keys(ir, ik, Some(&idx));
+    analysis.enrich_imported_types_with_keys(Some(&idx));
 
     let (line_idx, chain_line) = demo_source
         .lines()

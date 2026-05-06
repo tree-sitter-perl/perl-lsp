@@ -120,9 +120,8 @@ fn test_resolve_reassignment_changes_type() {
 fn test_resolve_sub_return_type() {
     use crate::witnesses::{Witness, WitnessAttachment, WitnessPayload, WitnessSource};
     // Hand-craft a FileAnalysis with a sub that has a return type.
-    // Post-D1, return types live in the bag — seed `Symbol(0)` and
-    // `NamedSub("get_config")` directly so the bag-routed query
-    // picks them up.
+    // Post-D3, return types live on `Symbol(_)` only — seed
+    // `Symbol(0)` directly so the bag-routed query picks it up.
     let mut fa = FileAnalysis::new(
         vec![Scope {
             id: ScopeId(0),
@@ -181,12 +180,6 @@ fn test_resolve_sub_return_type() {
     };
     fa.witnesses.push(Witness {
         attachment: WitnessAttachment::Symbol(SymbolId(0)),
-        source: WitnessSource::Builder("local_return".into()),
-        payload: WitnessPayload::InferredType(InferredType::HashRef),
-        span: zero_span,
-    });
-    fa.witnesses.push(Witness {
-        attachment: WitnessAttachment::NamedSub("get_config".to_string()),
         source: WitnessSource::Builder("local_return".into()),
         payload: WitnessPayload::InferredType(InferredType::HashRef),
         span: zero_span,
@@ -276,75 +269,16 @@ fn test_class_name_helper() {
     assert_eq!(InferredType::String.class_name(), None);
 }
 
-// ---- sub_return_type fallback tests ----
-
-#[test]
-fn test_sub_return_type_imported_fallback() {
-    let mut fa = fa_with_constraints(vec![]);
-    let mut imported = HashMap::new();
-    imported.insert("get_config".to_string(), InferredType::HashRef);
-    fa.enrich_imported_types(imported);
-
-    assert_eq!(
-        fa.sub_return_type_at_arity("get_config", None),
-        Some(InferredType::HashRef)
-    );
-    // Local subs should still return None
-    assert_eq!(fa.sub_return_type_at_arity("nonexistent", None), None);
-}
-
-// ---- enrich_imported_types tests ----
-
-#[test]
-fn test_enrich_imported_types_pushes_constraints() {
-    let mut fa = FileAnalysis::new(
-        vec![Scope {
-            id: ScopeId(0),
-            parent: None,
-            kind: ScopeKind::File,
-            span: Span {
-                start: Point::new(0, 0),
-                end: Point::new(10, 0),
-            },
-            package: None,
-        }],
-        vec![],
-        vec![],
-        vec![],
-        vec![],
-        vec![],
-        // A call binding: my $cfg = get_config()
-        vec![CallBinding {
-            variable: "$cfg".to_string(),
-            func_name: "get_config".to_string(),
-            scope: ScopeId(0),
-            span: Span {
-                start: Point::new(2, 0),
-                end: Point::new(2, 30),
-            },
-        }],
-        HashMap::new(),
-        vec![],
-        HashSet::new(),
-        vec![],
-        vec![],
-        vec![],
-        HashMap::new(),
-        HashMap::new(),
-        vec![],
-    );
-
-    let mut imported = HashMap::new();
-    imported.insert("get_config".to_string(), InferredType::HashRef);
-    fa.enrich_imported_types(imported);
-
-    // Should have pushed a type constraint for $cfg
-    assert_eq!(
-        fa.inferred_type_via_bag("$cfg", Point::new(3, 0)),
-        Some(InferredType::HashRef),
-        "Enrichment should propagate imported return type to call binding variable"
-    );
-}
+// `test_sub_return_type_imported_fallback` and
+// `test_enrich_imported_types_pushes_constraints` were removed in
+// D3: the imported-returns path no longer rides a name-keyed bag
+// attachment. Cross-file imports resolve through
+// `query_sub_return_type` walking `module_index.find_exporters` and
+// recursing into the cached module's `Symbol(_)` witness; the
+// integration tests under `symbols_tests.rs` (e.g.
+// `test_demo_chain_empirical_truth_table`) and
+// `builder_tests.rs::enrichment_twice_does_not_crash_on_stale_indices`
+// exercise the new path end-to-end against a real `ModuleIndex`.
 
 // ---- Phase 5: refs_by_target index + eager HashKeyAccess resolution ----
 
@@ -403,6 +337,9 @@ fn test_phase5_dynamic_method_call_via_constant_folding() {
 /// synthetic def, so rename / references / refs_by_target all work.
 #[test]
 fn test_phase5_consumer_side_cross_file_resolves_via_enrichment() {
+    use crate::module_index::ModuleIndex;
+    use std::sync::Arc;
+
     let mut fa = build_fa_from_source(
         r#"
             use TestExporter qw(get_config);
@@ -423,17 +360,23 @@ fn test_phase5_consumer_side_cross_file_resolves_via_enrichment() {
         "pre-enrichment, access should not be resolved"
     );
 
-    // Simulate what the Backend's enrich_analysis does after the
-    // module index resolves TestExporter::get_config returning HashRef
-    // with keys { host, port, name }.
-    let mut imported_returns = HashMap::new();
-    imported_returns.insert("get_config".to_string(), InferredType::HashRef);
-    let mut imported_hash_keys = HashMap::new();
-    imported_hash_keys.insert(
-        "get_config".to_string(),
-        vec!["host".to_string(), "port".to_string(), "name".to_string()],
+    // Stub `TestExporter` with `get_config` returning a hashref whose
+    // keys (host, port, name) the builder synthesizes as HashKeyDefs.
+    // Enrichment reads these via `cached.sub_info("get_config").hash_keys()`
+    // and injects synthetic local HashKeyDefs against the consumer.
+    let test_exporter_pm = r#"
+package TestExporter;
+use Exporter 'import';
+our @EXPORT_OK = qw(get_config);
+sub get_config { return { host => 'h', port => 1, name => 'n' }; }
+1;
+"#;
+    let idx = ModuleIndex::new_for_test();
+    idx.register_workspace_module(
+        std::path::PathBuf::from("/tmp/TestExporter.pm"),
+        Arc::new(build_fa_from_source(test_exporter_pm)),
     );
-    fa.enrich_imported_types_with_keys(imported_returns, imported_hash_keys, None);
+    fa.enrich_imported_types_with_keys(Some(&idx));
 
     // The synthetic HashKeyDef `host` owned by Sub{None, "get_config"}
     // must now have the access indexed under it.
