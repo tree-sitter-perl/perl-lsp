@@ -718,7 +718,8 @@ fn raw_mid_op(node: tree_sitter::Node, source: &[u8]) -> String {
 /// left in this struct is what consumers still need at a glance:
 /// which sub the return belongs to, where it is, the arity bucket it
 /// gates on (for `emit_arity_return_witnesses`), and the body span
-/// (for the per-RI Expr query in `collect_return_arm_types`).
+/// (the `Expr(span)` key both `emit_arity_return_witnesses` and
+/// `fold_per_sub_return_arms` query inline via `bag_query_expr_span`).
 struct ReturnInfo {
     /// The scope (Sub/Method) this return belongs to.
     scope: ScopeId,
@@ -878,11 +879,12 @@ struct Builder<'a> {
     return_infos: Vec<ReturnInfo>,
     /// For each Sub/Method scope, the body span of the last
     /// top-level expression statement. Used as the implicit-return
-    /// query key — `collect_return_arm_types` reads `Expr(span)` for
-    /// scopes without an explicit `return`. Replaces the old
-    /// `last_expr_type: HashMap<ScopeId, Option<InferredType>>`
-    /// dual-store: types now ride the bag, this map only carries
-    /// the structural pointer to the source span.
+    /// query key — `fold_per_sub_return_arms` reads `Expr(span)` via
+    /// `bag_query_expr_span` for scopes without an explicit `return`.
+    /// Replaces the old `last_expr_type: HashMap<ScopeId,
+    /// Option<InferredType>>` dual-store: types now ride the bag,
+    /// this map only carries the structural pointer to the source
+    /// span.
     last_expr_span: std::collections::HashMap<ScopeId, Span>,
     /// For each Sub/Method scope whose last body statement is
     /// `shift->M(...)` or `$self->M(...)`: the method name M.
@@ -2069,7 +2071,7 @@ impl<'a> Builder<'a> {
                 }
                 self.visit_children(node);
                 if let Some(scope) = scope {
-                    self.publish_return_arm_witnesses(node, scope, span);
+                    self.publish_return_arm_witnesses(node, scope);
                 }
             }
 
@@ -3715,12 +3717,7 @@ impl<'a> Builder<'a> {
     ///   `bag_query_expr` (single-arm + multi-arm both go through
     ///   `resolve_return_type`, which accepts the single-arm case
     ///   that BranchArmFold deliberately rejects).
-    fn publish_return_arm_witnesses(
-        &mut self,
-        return_node: Node<'a>,
-        scope: ScopeId,
-        _span: Span,
-    ) {
+    fn publish_return_arm_witnesses(&mut self, return_node: Node<'a>, scope: ScopeId) {
         use crate::witnesses::{Witness, WitnessAttachment, WitnessPayload, WitnessSource};
         let body = match return_node.named_child(0) {
             Some(b) => b,

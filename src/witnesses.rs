@@ -851,10 +851,11 @@ impl WitnessReducer for NamedSubReturn {
 // calls, Expression for method-call receivers, or recursive Expr edges
 // for compound expressions). Edge witnesses get materialized by the
 // registry into synthetic `Type` witnesses before any reducer claims,
-// so this reducer always sees plain types. Latest-wins: post-walk
-// chain typing refresh re-derives Expr witnesses on a different
-// source tag, and we want the most recently published type to
-// dominate the original walk-time push.
+// so this reducer always sees plain types. Latest-wins:
+// `emit_expr_witness` is called from multiple walk sites (return
+// body, top-level expression statement, ternary parent that recurses
+// into its arms), so the same node may receive several witnesses;
+// reading from the back picks the most recently published.
 
 pub struct ExprReturn;
 

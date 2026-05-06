@@ -436,6 +436,25 @@ everything else is at most a derived index rebuilt from it.
       gets its own bag-routed answer (a `HashKeyOwnerEdge`?) or stays
       procedural and explicitly NOT a type-inference path.
 
+- [ ] **Collapse the per-arm Edge expansion in
+      `publish_return_arm_witnesses` and
+      `emit_branch_arm_witnesses_for_ternary`.** D2 left a residual
+      duplication of mechanism: when the return body (or the RHS of
+      `my $x = $c ? A : B`) is a ternary, the walker emits per-arm
+      `branch_arm` Edges *both* on `Expr(ternary_span)` (via
+      `emit_expr_witness`) *and* on the consumer attachment
+      (`Symbol(sub_id)` / `Variable($x)`). A single
+      `Edge(Expr(body_span))` from the consumer would be enough —
+      the registry's edge chase calls `BranchArmFold` on `Expr(_)`,
+      which already handles per-arm agreement. Both agreement and
+      disagreement traces fold to the same answer either way (today
+      and post-collapse), so this is purely a cleanup. After the
+      change, `publish_return_arm_witnesses` becomes
+      `emit_expr_witness(body); push Symbol(sid) ← Edge(Expr(body_span))`
+      with no ternary special-case, and
+      `emit_branch_arm_witnesses_for_ternary` becomes one Edge from
+      `Variable($x)` to `Expr(ternary_span)`.
+
 ---
 
 ## Roadmap — separate design session
