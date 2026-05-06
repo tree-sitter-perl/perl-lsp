@@ -33,7 +33,7 @@ Four docs, one engine:
 ```
 staircase 1–4 (LANDED, PR #27) ─┐
                                  ├─▶ bag-residual D1 redo (LANDED dc4315f, with residue → D3)
-                                 ├─▶ bag-residual D2 (one expression attachment)
+                                 ├─▶ bag-residual D2 (LANDED — one expression attachment)
                                  ├─▶ bag-residual D3 (one attachment per fact, +D1 residue)
                                  ├─▶ bag-residual D4 (residual canonical-store cleanup)
                                  │       │
@@ -85,19 +85,30 @@ staircase 1–4 (LANDED, PR #27) ─┐
    (`refactor/bag-residual-d1-method-on-class`, commit `c322178`) was
    abandoned for being additive — its cautionary value preserved in
    the directive's "what NOT to repeat" section.
-2. **Bag-residual D2** — one `Expr(Span)` attachment for every expression value.
-   Kills `arm_payload`'s node-kind dispatch, `ReturnArm`, `last_expr_type`.
-   Unblocks sequence-types.
+2. **Bag-residual D2** — **LANDED** on
+   `refactor/bag-residual-d2-expr-attachment`. One `Expr(Span)`
+   attachment for every expression value. Killed `arm_payload`,
+   `ReturnArm`, `ReturnArmReturn`, `last_expr_type`,
+   `arm_types_per_ri` / `returns_by_scope` plumbing,
+   `collect_return_arm_types`. Added `expr_payload` (single
+   dispatch), `emit_expr_witness` (recursive arm population), and
+   `SymbolReturnArmFold` (1+-arm `resolve_return_type` for
+   Symbol-attached return arms; `BranchArmFold` keeps the ≥2 rule
+   for ternary RHS on Variable/Expr). Tests: 509 unit + 93 e2e
+   green. Unblocks sequence-types.
 3. **Bag-residual D3** — one attachment per fact, no source-tag claims. Kills
    `WitnessAttachment::NamedSub` and the source-tag claim filters in
    `SubReturnReducer` / `FrameworkAwareTypeFold`.
 4. **Bag-residual D4** (now smaller) — kill `FileAnalysis.type_constraints`
    as a write target, walk-time bag is live (no `pending_witnesses` staging,
-   no walk-time TC-first read), kill `last_expr_type` /
+   no walk-time TC-first read), kill the `last_expr_span` /
    `sub_return_delegations` / `self_method_tails` Builder maps as
-   bag-emit inputs. The field-deletion bullets that lived here moved
-   to D1 (and a "lazy cache" rebuild is explicitly **not** scheduled —
-   only add if profiling later shows the bag query is hot).
+   bag-emit inputs (D2 already replaced the type-typed `last_expr_type`
+   map with the structural `last_expr_span`; D4 routes that through
+   bag emissions too). The field-deletion bullets that lived here
+   moved to D1 (and a "lazy cache" rebuild is explicitly **not**
+   scheduled — only add if profiling later shows the bag query is
+   hot).
 5. **Sequence-types phases 1-3** on the clean foundation.
 6. **Residual Parts** (start with whichever is hurting most — likely Part 5b
    narrowing or Part 5c parametric types for DBIC, depending on workload).
