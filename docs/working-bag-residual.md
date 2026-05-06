@@ -275,103 +275,133 @@ never fight over the same witness set.
 
 ---
 
-## Directive 3 — One attachment per fact, no source-tag claims
+## Directive 3 — One attachment per fact, no source-tag claims — **LANDED (with residue)**
 
-Multiple reducers claim `Symbol(_)` + `InferredType` today. They
-disambiguate by `WitnessSource` tag: `PluginOverrideReducer` claims
-priority>10, `BranchArmFold` claims `branch_arm`, `SubReturnReducer`
-claims `local_return` / `imported_return` / `delegation` /
-`self_method_tail` (the last two added by D1's writeback rewrite),
-`FluentArityDispatch` claims a different payload. A new push that
-lands on the same attachment with a new source tag silently bypasses
-the gate that the original author of the source filter wrote.
+> **Status:** landed on `refactor/bag-residual-d3`. The variant
+> `WitnessAttachment::NamedSub` is gone, the dual writeback collapsed
+> to `Symbol(sid)` + `MethodOnClass{class, name}` only, cross-file
+> imports route through `module_index.find_exporters` + recursive
+> `Symbol(cached_sid)` query, and source-tag claim filters on
+> `SubReturnReducer` collapsed to a single `branch_arm` exclusion.
+> Two design choices departed from the original directive — see
+> "Residue" below.
 
-This is the "fill in the hack somewhere else" pattern. Kill it by
-giving each semantic category its own attachment shape. **D3 also
-absorbs two bullets from D1 that did not land as the directive
-required.**
+### What landed
 
-**Action items.**
+- [x] **Killed `WitnessAttachment::NamedSub`** entirely. `cargo build`
+      enumerated 17 consumers; each was migrated to `Symbol(sid)`
+      (id-keyed) or `MethodOnClass{class, name}` (class-keyed) or
+      deleted outright (writeback's name-keyed mirror,
+      `record_framework_accessor_witness`'s name-keyed observation,
+      `emit_delegation_edges`' name-keyed primary).
 
-- [ ] **Inheritance via `Edge(MethodOnClass(parent, name))` witnesses.**
-      *(Routed from D1.)* Today `query_rec` chases inheritance
-      structurally — for a `MethodOnClass{C, m}` query the local bag
-      can't answer, the registry consults `ctx.package_parents`,
-      `ctx.module_index.parents_cached`, and
-      `idx.for_each_entity_bridged_to(class, ...)` and recurses on
-      `MethodOnClass{P, m}`. That's a hand-rolled walker over a graph
-      that's about to be unified by `prompt-graph-walking.md`. Replace
-      it with build-time emission: for each `package_parents[C] = [P1,
-      P2, ...]`, push `MethodOnClass(C, m) → Edge(MethodOnClass(P_i, m))`
-      witnesses; for each PluginNamespace bridged to `class`, push
-      `MethodOnClass(class, name) → Edge(Symbol(entity_id))`
-      witnesses (the bridge half already lands in
-      `write_back_sub_return_types`'s plugin-bridge pass — extend it
-      to also cover cross-file bridges by reading
-      `module_index.workspace_namespaces()` or equivalent). Then
-      delete the structural fallback in `query_rec` — the registry's
-      existing edge-chase machinery handles MRO and bridge walking
-      without further code. Cross-file primary lookup
-      (`module_index.get_cached(class)`) can stay as a single
-      cross-bag recursion or move to a `MethodOnClass(class, _) →
-      Edge(... in cached bag)` shape; pick whichever the residual
-      `query_rec` code reduces to most cleanly.
+- [x] **Drop the dual `Symbol(_)` + `NamedSub(_)` writeback.** Local
+      subs publish on `Symbol(sym_id)` + `MethodOnClass{class, name}`
+      only. Plugin synth (`Method` and `Symbol` arms) drops the
+      free-function `NamedSub` push and relies on `Symbol(sid)`.
 
-- [ ] **Delete `build_imported_return_types`** (backend.rs:134) and
-      the imported-return push inside
-      `FileAnalysis::enrich_imported_types_with_keys`. *(Routed from
-      D1.)* The cross-file `MethodOnClass` query subsumes both —
-      `BagContext.module_index` is wired through, so registry queries
-      against a bag without local `NamedSub("foo")` witnesses already
-      reach the cached module's bag for `foo`'s return type. Keep the
-      `HashKeyDef` synthesis half of
-      `enrich_imported_types_with_keys` (it's a separate concern —
-      injecting synthetic symbols for fat-comma key completion). The
-      `imported_returns` HashMap parameter on
-      `enrich_imported_types_with_keys` becomes vestigial once the
-      function only synthesizes hash keys; either drop the parameter
-      or rename the function to reflect its narrower scope.
+- [x] **Cross-file imports stop riding `NamedSub`.**
+      `query_sub_return_type` walks `idx.find_exporters(name)` and
+      recurses into the cached module's bag with
+      `Symbol(cached_sid)`. Same registry, same arity dispatch, same
+      framework rules — only the bag and symbols change.
 
-- [ ] **Drop the dual `Symbol(_)` + `NamedSub(_)` writeback** in
-      `write_back_sub_return_types` (builder.rs around the
-      `writeback_witnesses` push). Pick one attachment per sub. For
-      local subs that's `Symbol(sym_id)`. The registry exposes a
-      name→sym_id resolver (built from the symbols table) so
-      name-keyed callers (cross-file imports, plugin overrides on
-      names that haven't been resolved to ids yet) hit the right id
-      without a parallel attachment. `MethodOnClass{class, name}`
-      stays — it's the class-keyed shape that earned its keep in D1.
+- [x] **Delete `build_imported_return_types`** (backend.rs) and the
+      `imported_returns` / `imported_hash_keys` parameters on
+      `enrich_imported_types_with_keys`. The function now derives
+      `imported_hash_keys` inline from `self.imports` +
+      `module_index`. Imported return types are reached lazily by
+      the bag-query path; no local mirror is needed.
 
-- [ ] **Cross-file imports stop riding `NamedSub`.** Imported subs
-      do have a sym_id once enrichment runs
-      (`enrich_imported_types_with_keys` synthesizes HashKeyDef
-      symbols already; do the same for the sub itself, or extend the
-      registry's name-resolver to chase across `module_index`).
-      Combines with the bullet above to remove the last `NamedSub`
-      consumer.
+- [x] **Build-time `Edge(MethodOnClass(parent, name))` inheritance
+      witnesses.** *(Routed from D1.)* Local writeback emits
+      `MethodOnClass(child, m) → Edge(MethodOnClass(parent, m))` for
+      every method `m` declared on a *local* parent, with
+      first-parent-wins dedup so DFS-MRO order is preserved.
+      `enrich_imported_types_with_keys` does the same projection for
+      *cross-file* parents (their methods are read from the cached
+      analysis). Tag `inheritance` (writeback) and
+      `inheritance_cross` (enrichment).
 
-- [ ] **Kill `WitnessAttachment::NamedSub`.** Once the two callers
-      above migrate, the variant goes away.
+- [x] **Method-call expression edges keyed on class.** D2 left
+      `Edge(NamedSub(method))` on `Expression(refidx)` as the
+      chain-typer's bootstrap. D3 replaces it with a re-emittable
+      pass `emit_method_call_return_edges` that publishes
+      `Edge(MethodOnClass{class, method})` for every `MethodCall` ref
+      whose `invocant_class` is currently filled. Re-emission inside
+      the worklist driver picks up newly-resolvable invocants each
+      iteration; `apply_chain_typing_invocants` now runs in PreFold
+      too (was PostFold-only) so the variable-typed receivers'
+      classes land in the bag while the worklist is still iterating.
+      Snapshot extended to track filled-`invocant_class` count so
+      the loop registers the progression as movement.
 
-- [ ] **Kill source-tag claim filters.** `SubReturnReducer::claims`
-      currently matches `local_return` / `imported_return` /
-      `delegation` / `self_method_tail` (four filters; D1 added the
-      latter two). Should match by attachment-shape disjointness
-      instead. After arms move to `Expr` attachments (Directive 2),
-      branch_arm witnesses no longer land on `Symbol(_)` — the
-      source-tag exclusion in `FrameworkAwareTypeFold::claims` and
-      `SubReturnReducer::claims` becomes unnecessary. Delegation /
-      self-method-tail edges already ride `Edge(...)` payloads; the
-      tag-filter on the `InferredType` payload exists only because
-      writeback also pushes plain `InferredType` on the same
-      attachment under those tags — and that goes away when the
-      writeback collapses to one attachment per sub (bullet above).
+- [x] **Source-tag claim filters collapsed.** `SubReturnReducer::claims`
+      now matches by attachment shape + the single `branch_arm`
+      exclusion (which still must stay — see residue). The four-way
+      filter on `local_return` / `delegation` / `self_method_tail` /
+      `imported_return` is gone.
 
-- [ ] **Kill `SubReturnReducer`'s `if q.arity_hint.is_some()`
-      short-circuit** (witnesses.rs around line 875). With distinct
-      attachments for "stored return" vs "guarded arm," the
-      registry's first-match dispatch handles ordering naturally —
-      no reducer needs to know another reducer exists.
+### Residue
+
+Two pieces of the original directive shipped differently than the
+plan called for; both were design adjustments forced by the "what
+if the caller bypasses enrichment?" question and the "build-time
+edges N×N for cross-file plugin bridges" question.
+
+1. **`query_rec`'s structural inheritance + bridge fallback was
+   NOT deleted.** Build-time edges optimize the common path
+   (writeback handles every local-parent method; enrichment handles
+   every cross-file-parent method), but tests and tools that build
+   a `FileAnalysis` without going through enrichment (hand-crafted
+   FAs in unit tests, isolated builders) need *some* path to find
+   inherited methods. Restoring the structural walk preserves that
+   floor. The walk is now documented as a transitional fallback
+   pending the graph-walking pillar; build-time edges remain the
+   primary path.
+
+   Cross-file plugin-namespace bridges (#3 of the structural walk —
+   `for_each_entity_bridged_to`) also stayed for a different reason:
+   pre-emitting `MethodOnClass(bridged_class, helper_name) →
+   Edge(...)` for every helper in every other file is N×N in the
+   worst case. The lazy `for_each_entity_bridged_to` walk is
+   strictly more efficient. The directive's "extend the writeback to
+   cover cross-file bridges" is feasible but unnecessary while the
+   walk is integrated with the registry (not a parallel system).
+
+2. **`SubReturnReducer`'s `arity_hint.is_some()` short-circuit
+   stayed.** D2 was supposed to move every branch_arm witness off
+   `Symbol(_)` so the source-tag filter could collapse, but the
+   materializer's `Symbol(_) + InferredType` synthetic witnesses
+   (one per arm, source preserved) still land on Symbol after edge
+   chase — `SymbolReturnArmFold` claims them via its `branch_arm`
+   filter. SubReturnReducer's matching exclusion is the floor that
+   keeps disagreement signals propagating. Same for the arity_hint
+   guard: removing it lets the per-getter-Symbol query at arity=1
+   wrong-answer with the getter's stored String instead of routing
+   to the writer's per-class arm. The `arity_hint=Some` →
+   `MethodOnClass{class, name}` escalation in `query_sub_return_type`
+   is what handles the cross-symbol dispatch.
+
+   Net effect: source-tag claims in `SubReturnReducer` collapsed
+   from four entries to one (`branch_arm` only). Same for
+   `FrameworkAwareTypeFold` and `ExprReturn`. Full collapse waits
+   on a follow-up that moves materialized branch_arm witnesses to a
+   dedicated attachment shape.
+
+### Validation
+
+After this directive: 507 unit tests + 93 e2e tests green. The
+unit count went up by 1 (rewrote
+`plugin_override_reducer_yields_when_only_builder_witnesses_present`
+to assert the post-D3 behavior; deleted two tests of the now-dead
+imported-returns parameter; rewrote
+`test_phase5_consumer_side_cross_file_resolves_via_enrichment` to
+build a real `ModuleIndex` stub instead of passing
+`imported_returns` as a parameter).
+
+Cache `EXTRACT_VERSION` bumped 19 → 20 (bag shape changed; cached
+blobs from older builds are re-resolved with priority).
 
 ---
 
@@ -455,6 +485,39 @@ everything else is at most a derived index rebuilt from it.
       `emit_branch_arm_witnesses_for_ternary` becomes one Edge from
       `Variable($x)` to `Expr(ternary_span)`.
 
+- [ ] **Drop `SubReturnReducer`'s `arity_hint.is_some()` short-circuit
+      and the matching `branch_arm` source-tag exclusion**
+      (witnesses.rs:863-902). These are the last source-tag claim
+      filters in the registry — D3 collapsed four to one for
+      `SubReturnReducer`, but the one stayed because two distinct
+      facts still share `Symbol(_)`:
+
+      1. The per-symbol stored return ("if you ask THIS sym, ignoring
+         arity, this is the answer").
+      2. Per-arm `branch_arm` witnesses materialized onto `Symbol(_)`
+         after edge chase (one synthetic `InferredType` per arm,
+         source preserved). `SymbolReturnArmFold` claims those for
+         agreement / disagreement; `SubReturnReducer` must NOT
+         paper-over their `None` with a latest-wins pick.
+
+      The `arity_hint.is_some()` guard is the same compromise on the
+      other axis: at `arity=Some`, we want the per-class arm dispatch
+      via `MethodOnClass{class, name}`, not a single sym's stored
+      return (otherwise Mojo getter-vs-writer wrong-answers — the
+      getter sym surfaces String when level(1) was asked).
+
+      **Real fix:** move per-arm branch witnesses off `Symbol(_)` to
+      a dedicated attachment shape (`SymbolReturnArm(SymbolId)` or
+      reuse `Expr(body_span)` per the per-arm-Edge collapse above),
+      and route arity dispatch through `MethodOnClass` exclusively
+      so `Symbol(_)` carries only one fact family. After that, both
+      the source-tag filter and the arity_hint short-circuit can
+      go — `SubReturnReducer::claims` becomes plain
+      "Symbol + InferredType, period" and `reduce` becomes
+      unconditional latest-wins. **Until this lands the
+      "claim by attachment shape, not source tag" rule has one
+      documented exception.**
+
 ---
 
 ## Roadmap — separate design session
@@ -472,10 +535,13 @@ everything else is at most a derived index rebuilt from it.
   context). Until then, leave the bolt-on alone — but do NOT ship more
   arity-shaped facts that need their own reducer.
 
-- **Reducer-claim discipline.** After Directive 3 lands, write down
-  the rule: "a reducer claims by attachment-shape, not by source tag.
+- **Reducer-claim discipline.** D3 landed with the rule almost
+  enforced: "a reducer claims by attachment-shape, not by source tag.
   If you need source-tag disambiguation, you're modeling two facts —
-  give them two attachments."
+  give them two attachments." One documented exception remains
+  (`SubReturnReducer`'s `branch_arm` filter + `arity_hint`
+  short-circuit) and is tracked in the D4 list above; the rule
+  becomes unconditional once that item lands.
 
 ---
 

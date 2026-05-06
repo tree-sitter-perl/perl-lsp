@@ -701,13 +701,7 @@ fn cli_dump_package(root: &str, package_name: &str) {
     // are visible — same pass the LSP runs in publish_diagnostics.
     let bin = bincode::serialize(&*analysis_ro).expect("bincode FileAnalysis");
     let mut analysis: FileAnalysis = bincode::deserialize(&bin).expect("bincode FileAnalysis roundtrip");
-    let (imported_returns, imported_keys) =
-        backend::build_imported_return_types(&analysis, &module_index);
-    analysis.enrich_imported_types_with_keys(
-        imported_returns,
-        imported_keys,
-        Some(&module_index),
-    );
+    analysis.enrich_imported_types_with_keys(Some(&module_index));
 
     // Collect subs/methods declared inside this package.
     let mut subs: Vec<&file_analysis::Symbol> = analysis

@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -7,7 +6,7 @@ use tower_lsp::lsp_types::*;
 use tower_lsp::lsp_types::{notification, request};
 use tower_lsp::{Client, LanguageServer};
 
-use crate::file_analysis::{FileAnalysis, InferredType};
+use crate::file_analysis::FileAnalysis;
 use crate::file_store::{FileKey, FileStore};
 use crate::module_index::ModuleIndex;
 use crate::symbols;
@@ -48,13 +47,7 @@ impl Backend {
                 // across the await — publishing is async and could deadlock.
                 let mut pending: Vec<(Url, Vec<Diagnostic>)> = Vec::new();
                 files.for_each_open_mut(|uri, doc| {
-                    let (imported_returns, imported_keys) =
-                        build_imported_return_types(&doc.analysis, module_index);
-                    doc.analysis.enrich_imported_types_with_keys(
-                        imported_returns,
-                        imported_keys,
-                        Some(module_index),
-                    );
+                    doc.analysis.enrich_imported_types_with_keys(Some(module_index));
                     let diagnostics = symbols::collect_diagnostics(&doc.analysis, module_index);
                     pending.push((uri.clone(), diagnostics));
                 });
@@ -76,13 +69,7 @@ impl Backend {
 
     fn enrich_analysis(&self, uri: &Url) {
         if let Some(mut doc) = self.files.get_open_mut(uri) {
-            let (imported_returns, imported_keys) =
-                build_imported_return_types(&doc.analysis, &self.module_index);
-            doc.analysis.enrich_imported_types_with_keys(
-                imported_returns,
-                imported_keys,
-                Some(&self.module_index),
-            );
+            doc.analysis.enrich_imported_types_with_keys(Some(&self.module_index));
         }
     }
 
@@ -121,53 +108,6 @@ fn refs_to_locations(results: Vec<crate::resolve::RefLocation>) -> Option<Vec<Lo
     });
     locations.dedup_by(|a, b| a.uri == b.uri && a.range == b.range);
     Some(locations)
-}
-
-#[cfg(test)]
-pub fn build_imported_return_types_for_test(
-    analysis: &crate::file_analysis::FileAnalysis,
-    module_index: &ModuleIndex,
-) -> (HashMap<String, InferredType>, HashMap<String, Vec<String>>) {
-    build_imported_return_types(analysis, module_index)
-}
-
-pub(crate) fn build_imported_return_types(
-    analysis: &crate::file_analysis::FileAnalysis,
-    module_index: &ModuleIndex,
-) -> (HashMap<String, InferredType>, HashMap<String, Vec<String>>) {
-    use crate::file_analysis::{SymKind, SymbolDetail};
-
-    let mut type_map = HashMap::new();
-    let mut keys_map = HashMap::new();
-    for import in &analysis.imports {
-        let cached = match module_index.get_cached(&import.module_name) {
-            Some(c) => c,
-            None => continue,
-        };
-        for sym in &cached.analysis.symbols {
-            if !matches!(sym.kind, SymKind::Sub | SymKind::Method) {
-                continue;
-            }
-            // Limit to exported names for parity with prior ExportedSub behavior.
-            if !cached.analysis.export.iter().any(|n| n == &sym.name)
-                && !cached.analysis.export_ok.iter().any(|n| n == &sym.name)
-            {
-                continue;
-            }
-            if matches!(sym.detail, SymbolDetail::Sub { .. }) {
-                if let Some(ty) = cached.analysis.symbol_return_type_via_bag(sym.id, None) {
-                    type_map.insert(sym.name.clone(), ty);
-                }
-            }
-            if let Some(sub_info) = cached.sub_info(&sym.name) {
-                let hk = sub_info.hash_keys();
-                if !hk.is_empty() {
-                    keys_map.insert(sym.name.clone(), hk.to_vec());
-                }
-            }
-        }
-    }
-    (type_map, keys_map)
 }
 
 #[tower_lsp::async_trait]
@@ -625,7 +565,8 @@ impl LanguageServer for Backend {
                     _ => unreachable!(),
                 };
 
-                let mut all_changes: HashMap<Url, Vec<TextEdit>> = HashMap::new();
+                let mut all_changes: std::collections::HashMap<Url, Vec<TextEdit>> =
+                    std::collections::HashMap::new();
 
                 let mut collect = |uri: Url, analysis: &FileAnalysis| {
                     let edits = rename_fn(analysis, &name, new_name);

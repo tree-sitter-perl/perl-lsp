@@ -34,7 +34,7 @@ Four docs, one engine:
 staircase 1–4 (LANDED, PR #27) ─┐
                                  ├─▶ bag-residual D1 redo (LANDED dc4315f, with residue → D3)
                                  ├─▶ bag-residual D2 (LANDED — one expression attachment)
-                                 ├─▶ bag-residual D3 (one attachment per fact, +D1 residue)
+                                 ├─▶ bag-residual D3 (LANDED — NamedSub variant gone)
                                  ├─▶ bag-residual D4 (residual canonical-store cleanup)
                                  │       │
                                  │       └─▶ sequence-types phases 1-3
@@ -96,9 +96,23 @@ staircase 1–4 (LANDED, PR #27) ─┐
    Symbol-attached return arms; `BranchArmFold` keeps the ≥2 rule
    for ternary RHS on Variable/Expr). Tests: 509 unit + 93 e2e
    green. Unblocks sequence-types.
-3. **Bag-residual D3** — one attachment per fact, no source-tag claims. Kills
-   `WitnessAttachment::NamedSub` and the source-tag claim filters in
-   `SubReturnReducer` / `FrameworkAwareTypeFold`.
+3. **Bag-residual D3** — **LANDED** on `refactor/bag-residual-d3`.
+   Killed `WitnessAttachment::NamedSub` outright (compiler-driven
+   subtractive deletion of 17 consumer sites). Dual writeback
+   collapsed to `Symbol(sym_id)` + `MethodOnClass{class, name}`.
+   Cross-file imports route through `module_index.find_exporters` +
+   recursive `Symbol(cached_sid)` query in
+   `query_sub_return_type`. `build_imported_return_types` deleted;
+   `enrich_imported_types_with_keys` derives its inputs inline.
+   Build-time + enrichment-time `Edge(MethodOnClass(parent, name))`
+   inheritance edges replace the eager half of `query_rec`'s
+   structural walk; the walk stays as a fallback for hand-crafted
+   FAs and cross-file plugin bridges (where build-time pre-emission
+   would be N×N). Method-call `Expression(refidx)` edges now key on
+   class via a re-emittable worklist pass. Source-tag claim filters
+   on `SubReturnReducer` collapsed to a single `branch_arm`
+   exclusion. Cache `EXTRACT_VERSION` bumped 19 → 20. Tests: 507
+   unit + 93 e2e green.
 4. **Bag-residual D4** (now smaller) — kill `FileAnalysis.type_constraints`
    as a write target, walk-time bag is live (no `pending_witnesses` staging,
    no walk-time TC-first read), kill the `last_expr_span` /
