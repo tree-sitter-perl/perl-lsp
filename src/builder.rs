@@ -5924,11 +5924,13 @@ impl<'a> Builder<'a> {
     /// lands in the bag exactly once at the end of the loop, no matter
     /// how deep the chain is.
     ///
-    /// `MAX_FOLD_ITERATIONS` is the debug-only safety net the spec
-    /// calls for: the lattice argument (witnesses are monotonically
-    /// appended; reduced answers refine within a finite enum)
-    /// guarantees termination, and the assertion catches dependency
-    /// tracking bugs that would otherwise spin forever.
+    /// `MAX_FOLD_ITERATIONS` is the all-builds safety net: the lattice
+    /// argument (witnesses are monotonically appended; reduced answers
+    /// refine within a finite enum) guarantees termination, but a
+    /// dependency-tracking bug could let the snapshot oscillate. The
+    /// `debug_assert!` fires in dev so the regression is caught
+    /// immediately; in release we log and break to keep the LSP
+    /// responsive instead of spinning forever.
     ///
     /// `ChainPassMode::PostFold` (invocant-class refresh on
     /// `MethodCall` refs) runs once after the loop terminates, since
@@ -5946,6 +5948,13 @@ impl<'a> Builder<'a> {
                 "type-inference fold did not converge in {iters} iterations — \
                  lattice argument or dependency tracking is broken"
             );
+            if iters >= MAX_FOLD_ITERATIONS {
+                eprintln!(
+                    "perl-lsp: type-inference fold exceeded {MAX_FOLD_ITERATIONS} iterations; \
+                     bailing out to keep the LSP responsive"
+                );
+                break;
+            }
             self.run_chain_typing_reducer(idx, ChainPassMode::PreFold);
             self.resolve_return_types();
             let cur = self.fold_state_snapshot();
@@ -6039,10 +6048,15 @@ impl<'a> Builder<'a> {
             ) else { continue };
             let Some(var) = self.get_var_text_from_lhs(left) else { continue };
             let span = node_to_span(node);
-            let already_typed = self
-                .type_constraints
-                .iter()
-                .any(|tc| tc.variable == var && tc.constraint_span.start == span.start);
+            // Idempotency: skip if a Variable witness for this var was
+            // already pushed at the assignment's start point. The bag
+            // is canonical; `type_constraints` is a finalize-time
+            // projection so it can't be the read source mid-build.
+            let already_typed = self.bag.all().iter().any(|w| {
+                matches!(&w.attachment, crate::witnesses::WitnessAttachment::Variable { name, .. } if name == &var)
+                    && matches!(w.payload, crate::witnesses::WitnessPayload::InferredType(_))
+                    && w.span.start == span.start
+            });
             if already_typed {
                 continue;
             }
@@ -6874,31 +6888,18 @@ impl<'a> Builder<'a> {
     ) {
         use crate::witnesses::{Witness, WitnessAttachment, WitnessPayload, WitnessSource};
 
+        // Bag-only: clear-and-emit on tag `call_binding`. The
+        // `type_constraints` vec is a finalize-time projection (see
+        // `finalize_post_walk`), so intra-build mutations don't need
+        // to mirror.
         self.bag.remove_by_source_tag("call_binding");
-        let cb_keys: std::collections::HashSet<(String, ScopeId, Span)> = self
-            .call_bindings
-            .iter()
-            .map(|b| (b.variable.clone(), b.scope, b.span))
-            .collect();
-        self.type_constraints.retain(|tc| {
-            !cb_keys.contains(&(tc.variable.clone(), tc.scope, tc.constraint_span))
-        });
-
-        let mut new_constraints = Vec::new();
-        let mut new_witnesses = Vec::new();
         for binding in &self.call_bindings {
             let rt = return_types
                 .get(&binding.func_name)
                 .cloned()
                 .or_else(|| builtin_return_type(&binding.func_name));
             if let Some(rt) = rt {
-                new_constraints.push(TypeConstraint {
-                    variable: binding.variable.clone(),
-                    scope: binding.scope,
-                    constraint_span: binding.span,
-                    inferred_type: rt.clone(),
-                });
-                new_witnesses.push(Witness {
+                self.bag.push(Witness {
                     attachment: WitnessAttachment::Variable {
                         name: binding.variable.clone(),
                         scope: binding.scope,
@@ -6911,10 +6912,6 @@ impl<'a> Builder<'a> {
                     },
                 });
             }
-        }
-        self.type_constraints.extend(new_constraints);
-        for w in new_witnesses {
-            self.bag.push(w);
         }
     }
 
@@ -7093,14 +7090,24 @@ impl<'a> Builder<'a> {
     }
 
     fn resolve_hash_key_owners(&mut self) {
-        // Build type constraint lookup
+        use crate::witnesses::{WitnessAttachment, WitnessPayload};
+        // Build type constraint lookup from the bag — Variable
+        // witnesses with `InferredType` payloads are the seed-time
+        // type-constraint shape (`push_type_constraint` mirrors every
+        // TC into one of these). The bag is canonical at this phase.
         let mut type_map: std::collections::HashMap<String, Vec<(ScopeId, InferredType, Point)>> =
             std::collections::HashMap::new();
-        for tc in &self.type_constraints {
-            type_map
-                .entry(tc.variable.clone())
-                .or_default()
-                .push((tc.scope, tc.inferred_type.clone(), tc.constraint_span.start));
+        for w in self.bag.all() {
+            if let (
+                WitnessAttachment::Variable { name, scope },
+                WitnessPayload::InferredType(t),
+            ) = (&w.attachment, &w.payload)
+            {
+                type_map
+                    .entry(name.clone())
+                    .or_default()
+                    .push((*scope, t.clone(), w.span.start));
+            }
         }
 
         // Build variable def lookup

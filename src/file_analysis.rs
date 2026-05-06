@@ -1389,18 +1389,25 @@ impl FileAnalysis {
     /// If you find a third use case, prefer `inferred_type_via_bag`
     /// and only fall back here if you have a concrete reason that
     /// would survive a code review.
+    ///
+    /// Reads directly from the bag's Variable+InferredType witnesses —
+    /// the bag is canonical, `type_constraints` is a finalize-time
+    /// projection.
     pub fn inferred_type(&self, var_name: &str, point: Point) -> Option<&InferredType> {
-        let mut best: Option<&TypeConstraint> = None;
-        for tc in &self.type_constraints {
-            if tc.variable != var_name { continue; }
-            let scope = &self.scopes[tc.scope.0 as usize];
-            if !contains_point(&scope.span, point) { continue; }
-            if tc.constraint_span.start > point { continue; }
-            if best.is_none() || tc.constraint_span.start > best.unwrap().constraint_span.start {
-                best = Some(tc);
+        use crate::witnesses::{WitnessAttachment, WitnessPayload};
+        let mut best: Option<(&InferredType, Point)> = None;
+        for w in self.witnesses.all() {
+            let WitnessAttachment::Variable { name, scope } = &w.attachment else { continue };
+            if name != var_name { continue; }
+            let scope_obj = &self.scopes[scope.0 as usize];
+            if !contains_point(&scope_obj.span, point) { continue; }
+            if w.span.start > point { continue; }
+            let WitnessPayload::InferredType(t) = &w.payload else { continue };
+            if best.is_none() || w.span.start > best.unwrap().1 {
+                best = Some((t, w.span.start));
             }
         }
-        best.map(|tc| &tc.inferred_type)
+        best.map(|(t, _)| t)
     }
 
     /// Part 6/7 — query the witness bag via the reducer registry for
