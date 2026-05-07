@@ -1363,7 +1363,7 @@ my $host = $cfg->{host};
 /// Inherited-method rename — pin the chain that the LSP rename
 /// path walks. e2e `rename: process → execute` was the surface
 /// failure: `rename_method_in_class` strict-matches both the
-/// def's `package` and the call site's `invocant_class`, so a
+/// def's `package` and the call site's `invocant_class_cache`, so a
 /// rename starting on `$worker->process()` (invocant=MyWorker)
 /// only catches the call sites in the child class — never
 /// reaches `sub process` in `BaseWorker.pm`. The chain is

@@ -249,7 +249,7 @@ fn collect_from_analysis(
              RefKind::MethodCall { .. }) => {
                 // Method-shaped call: match only when the ref's
                 // invocant resolves to the target scope. The
-                // build-time `invocant_class` cache is preferred;
+                // build-time `invocant_class_cache` is preferred;
                 // when it's `None` we fall back to a bag query
                 // (`invocant_class_of_method_call`) so cross-file
                 // call sites typed only by enrichment don't get

@@ -237,7 +237,7 @@ $b->run;
 ///       finds the class via the variable-type flow.
 ///   (b) Inline chain: `Sner->new->hi` — the outer `->hi`'s
 ///       invocant is a `method_call_expression`. The build-time
-///       `invocant_class` field on MethodCall refs is populated by
+///       `invocant_class_cache` field on MethodCall refs is populated by
 ///       `resolve_invocant_class_tree`, which walks chain invocants
 ///       including `<Class>->new` constructors.
 ///
@@ -294,7 +294,7 @@ Bler->new->hi;
     assert!(
         sner_lines.contains(&13),
         "Sner->new->hi (inline chain) missing — chain invocant resolution \
-             via build-time invocant_class should cover this: {:?}",
+             via build-time invocant_class_cache should cover this: {:?}",
         sner_lines
     );
     // No Bler anywhere in Sner results.
@@ -359,7 +359,7 @@ Bler->new->hi;
 /// exist in the codebase:
 ///
 ///   1. `Builder::resolve_invocant_class_tree` — populates
-///      `RefKind::MethodCall.invocant_class` at build time.
+///      `RefKind::MethodCall.invocant_class_cache` at build time.
 ///   2. `FileAnalysis::resolve_method_invocant` — tree-based,
 ///      used by `find_definition` and `hover_info`.
 ///   3. `FileAnalysis::resolve_invocant_class` — text fallback
@@ -557,7 +557,7 @@ $b->run;
 /// `resolved_package: Option<String>`, populated at build time
 /// by consulting `Imports`. Every resolver (find_definition,
 /// hover_info, rename_kind_at, refs_to, rename_sub) keys off
-/// that field. Same shape as `invocant_class` on MethodCall.
+/// that field. Same shape as `invocant_class_cache` on MethodCall.
 #[test]
 fn sub_refs_respect_import_graph_not_just_name() {
     use crate::file_analysis::RenameKind;
@@ -898,7 +898,7 @@ $u->create(name => 'alice');
         },
         other => panic!("expected Method, got {:?}", other),
     };
-    // class must be "Users" — from the plugin's emitted invocant_class.
+    // class must be "Users" — from the plugin's emitted invocant_class_cache.
     if let TargetKind::Method { ref class } = target.kind {
         assert_eq!(class, "Users", "target class should be Users");
     }
@@ -1111,13 +1111,13 @@ fn test_refs_to_role_mask_excludes_workspace() {
     assert!(results.is_empty());
 }
 
-/// Red-pin: cross-file `invocant_class` is set once at build time and
+/// Red-pin: cross-file `invocant_class_cache` is set once at build time and
 /// never refreshed. When a consumer file's `$b` invocant only becomes
 /// typeable post-enrichment (because the producer's return type lives
 /// in another file), the consumer's `$b->method()` MethodCall ref keeps
-/// `invocant_class: None` forever — the bag learns the type but the
+/// `invocant_class_cache: None` forever — the bag learns the type but the
 /// ref field doesn't get re-derived. `refs_to`'s
-/// `(invocant_class, scope) match (Some(cn), Some(pkg)) => cn == pkg`
+/// `(invocant_class_cache, scope) match (Some(cn), Some(pkg)) => cn == pkg`
 /// filter (resolve.rs:256-258) excludes unresolved invocants, so the
 /// cross-file call site silently doesn't show up in references for the
 /// target method.
@@ -1129,12 +1129,12 @@ fn test_refs_to_role_mask_excludes_workspace() {
 ///     bag.
 ///   - Consumer A: `use B qw(make_b); my $b = make_b(); $b->touch();`.
 ///     At build time of A the imported sub's return type isn't
-///     visible → `$b` untyped → `$b->touch()` ref's `invocant_class`
+///     visible → `$b` untyped → `$b->touch()` ref's `invocant_class_cache`
 ///     stays None.
 ///   - `enrich_imported_types_with_keys` on A does push a Variable
 ///     witness for `$b: ClassName('B')` (so `inferred_type_via_bag`
 ///     answers correctly) but does NOT re-fill the MethodCall ref's
-///     `invocant_class`.
+///     `invocant_class_cache`.
 ///   - `refs_to` for `B::touch` then misses A's call site.
 ///
 /// Fix surface: either invalidate-and-rebuild the consumer when
@@ -1191,7 +1191,7 @@ $b->touch();
     );
 
     // Build a FileStore over both files. `refs_to` reads
-    // `invocant_class` directly off the consumer's MethodCall ref —
+    // `invocant_class_cache` directly off the consumer's MethodCall ref —
     // that field was populated at consumer-build time when B's types
     // weren't yet known.
     let store = FileStore::new();
@@ -1209,7 +1209,7 @@ $b->touch();
     assert!(
         consumer_hit,
         "refs_to(B::touch) missed consumer's $$b->touch() call site. \
-         invocant_class on the MethodCall ref is None because the \
+         invocant_class_cache on the MethodCall ref is None because the \
          consumer was built before B's return types were known, and \
          enrichment does not refresh ref fields. hits: {:?}",
         refs.iter().map(|r| (&r.key, r.span.start.row)).collect::<Vec<_>>(),
@@ -1218,9 +1218,9 @@ $b->touch();
 
 /// Companion: `find_highlights`'s cross-file fallback path
 /// (`file_analysis.rs:2746-2757`) must agree with the bag-routed
-/// invocant_class. Cursor sits on the cross-file `$b->touch()` call;
+/// invocant_class_cache. Cursor sits on the cross-file `$b->touch()` call;
 /// the file also has a *second* call site `$b->touch()` whose ref
-/// has the same None invocant_class. Both should highlight together
+/// has the same None invocant_class_cache. Both should highlight together
 /// once enrichment has typed `$b: B`.
 #[test]
 fn find_highlights_cross_file_invocant_resolved_post_enrichment() {
@@ -1261,7 +1261,7 @@ $b->touch();
     );
 
     // Two call sites in the file, both should be highlighted together
-    // since they share the same (cross-file) invocant_class.
+    // since they share the same (cross-file) invocant_class_cache.
     assert_eq!(
         highlights.len(),
         2,
@@ -1332,9 +1332,9 @@ $x->ping();
     store.insert_workspace(consumer_path.clone(), consumer_fa);
 
     // Target the parent's `ping` — refs_to uses class-keyed Method
-    // matching, so `$x->ping()` (whose nearest invocant_class is C)
+    // matching, so `$x->ping()` (whose nearest invocant_class_cache is C)
     // doesn't directly equal P. The current `refs_to` filter is a
-    // strict scope == invocant_class compare; it does NOT walk
+    // strict scope == invocant_class_cache compare; it does NOT walk
     // ancestors. Targeting `C::ping` (the inherited shape) is what
     // matches today, and that's the relevant case for the
     // invocant-refresh fix: even though `ping` isn't defined on C,

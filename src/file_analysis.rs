@@ -426,17 +426,28 @@ pub enum RefKind {
         invocant_span: Option<Span>,
         /// Span of just the method name (for rename — r.span covers the whole expression).
         method_name_span: Span,
-        /// Resolved class of the invocant at build time, when derivable
-        /// from the tree. Populated for:
+        /// **Build-time cache. Read via
+        /// `FileAnalysis::invocant_class_of_method_call(r)`, not
+        /// directly** — direct reads miss invocants that only get
+        /// typed by post-build cross-file enrichment, silently
+        /// excluding the ref from class-keyed scans (`refs_to`,
+        /// `find_highlights`, `rename_callable_in_scope`,
+        /// `collect_refs_for_target`). The `_cache` suffix is the
+        /// reminder. Tree-aware readers (hover, find-def,
+        /// rename_kind_at) self-heal via `resolve_method_invocant`;
+        /// the no-tree readers above must go through the helper.
+        ///
+        /// Populated at build time when the class is derivable from
+        /// the tree:
         ///   - `$self`/`__PACKAGE__` → current package
         ///   - bareword `Foo` → `Foo`
         ///   - typed `$var` → constraint's ClassName
         ///   - `Foo->new` chain invocant → `Foo` (via extract_constructor_class)
-        /// `None` means "couldn't pin a class at build time" — refs_to
-        /// treats that as no-match (safe default, avoids cross-linking
-        /// unrelated classes that share a method name).
+        /// `None` means "couldn't pin a class at build time" — the
+        /// helper falls back to a bag query at read time, which sees
+        /// post-enrichment refinements.
         #[serde(default)]
-        invocant_class: Option<String>,
+        invocant_class_cache: Option<String>,
     },
     PackageRef,
     HashKeyAccess {
@@ -2592,14 +2603,14 @@ impl FileAnalysis {
                     // Nothing local; leave cross-file resolution to
                     // the LSP adapter (symbols::find_definition).
                 }
-                RefKind::MethodCall { ref invocant, ref invocant_span, ref invocant_class, .. } => {
-                    // Prefer the build-time `invocant_class` (pre-computed
+                RefKind::MethodCall { ref invocant, ref invocant_span, ref invocant_class_cache, .. } => {
+                    // Prefer the build-time `invocant_class_cache` (pre-computed
                     // by `resolve_invocant_class_tree`, handles chains
                     // like `Foo->new->m`). Fall back to the runtime
                     // resolver for refs where the builder couldn't pin
                     // a class (rare — plugin-emitted refs from older
                     // code paths, ERROR-recovered invocants).
-                    let class_name = invocant_class.clone().or_else(|| self.resolve_method_invocant(
+                    let class_name = invocant_class_cache.clone().or_else(|| self.resolve_method_invocant(
                         invocant, invocant_span, r.scope, point, tree, source_bytes, module_index,
                     ));
 
@@ -2893,8 +2904,8 @@ impl FileAnalysis {
                             && contains_point(&mr.span, point)
                             && mr.target_name != r.target_name);
                     if let Some(mr) = method_hover {
-                        if let RefKind::MethodCall { ref invocant, ref invocant_span, ref invocant_class, .. } = mr.kind {
-                            let class_name = invocant_class.clone().or_else(|| self.resolve_method_invocant(
+                        if let RefKind::MethodCall { ref invocant, ref invocant_span, ref invocant_class_cache, .. } = mr.kind {
+                            let class_name = invocant_class_cache.clone().or_else(|| self.resolve_method_invocant(
                                 invocant, invocant_span, mr.scope, point, tree, Some(source.as_bytes()), module_index,
                             ));
                             if let Some(ref cn) = class_name {
@@ -3000,11 +3011,11 @@ impl FileAnalysis {
                         }
                     }
                 }
-                RefKind::MethodCall { ref invocant, ref invocant_span, ref invocant_class, .. } => {
-                    // Prefer the build-time `invocant_class` field
+                RefKind::MethodCall { ref invocant, ref invocant_span, ref invocant_class_cache, .. } => {
+                    // Prefer the build-time `invocant_class_cache` field
                     // (handles chains); fall back to the runtime
                     // tree-based resolver.
-                    let class_name = invocant_class.clone().or_else(|| self.resolve_method_invocant(
+                    let class_name = invocant_class_cache.clone().or_else(|| self.resolve_method_invocant(
                         invocant, invocant_span, r.scope, point, tree, Some(source.as_bytes()), module_index,
                     ));
                     if let Some(ref cn) = class_name {
@@ -3160,10 +3171,10 @@ impl FileAnalysis {
                         package: resolved_package.clone(),
                     });
                 }
-                RefKind::MethodCall { invocant, invocant_span, invocant_class, .. } => {
+                RefKind::MethodCall { invocant, invocant_span, invocant_class_cache, .. } => {
                     // Prefer build-time class (chain-resolved);
                     // fall back to text-based resolution.
-                    let class = invocant_class.clone()
+                    let class = invocant_class_cache.clone()
                         .or_else(|| {
                             let resolve_point = invocant_span.map(|s| s.start).unwrap_or(point);
                             self.invocant_text_to_class(Some(invocant), resolve_point)
@@ -3224,7 +3235,7 @@ impl FileAnalysis {
     ///
     ///   * decl walk — `Sub`/`Method` symbols whose `package == scope`
     ///   * FunctionCall refs whose `resolved_package == scope`
-    ///   * MethodCall refs whose `invocant_class == scope`
+    ///   * MethodCall refs whose `invocant_class_cache == scope`
     ///
     /// The two call shapes both resolve to the same underlying sub:
     /// `package Foo; sub run {}` is callable as `run()` OR
@@ -3333,8 +3344,8 @@ impl FileAnalysis {
                         }
                     }
                 }
-                RefKind::MethodCall { ref invocant, ref invocant_span, ref invocant_class, .. } => {
-                    let class_name = invocant_class.clone().or_else(|| self.resolve_method_invocant(
+                RefKind::MethodCall { ref invocant, ref invocant_span, ref invocant_class_cache, .. } => {
+                    let class_name = invocant_class_cache.clone().or_else(|| self.resolve_method_invocant(
                         invocant, invocant_span, r.scope, point, tree, source_bytes, module_index,
                     ));
                     // Try inheritance-aware resolution first
@@ -3491,17 +3502,17 @@ impl FileAnalysis {
     /// it's `None`. Readers that filter refs by class (refs_to,
     /// collect_refs_for_target, find_highlights cross-file fallback,
     /// rename_callable_in_scope) route through this so they see
-    /// post-enrichment-fresh types — `invocant_class` is set once at
+    /// post-enrichment-fresh types — `invocant_class_cache` is set once at
     /// build time, but cross-file enrichment can later type the
     /// invocant via the bag without refilling the field. Hover /
     /// find-def / rename_kind_at already self-heal via the
     /// tree-aware `resolve_method_invocant`; this is the no-tree
     /// equivalent for bulk ref scans.
     pub fn invocant_class_of_method_call(&self, r: &Ref) -> Option<String> {
-        let RefKind::MethodCall { invocant, invocant_span, invocant_class, .. } = &r.kind else {
+        let RefKind::MethodCall { invocant, invocant_span, invocant_class_cache, .. } = &r.kind else {
             return None;
         };
-        if let Some(cn) = invocant_class.clone() {
+        if let Some(cn) = invocant_class_cache.clone() {
             return Some(cn);
         }
         let point = invocant_span.map(|s| s.start).unwrap_or(r.span.start);
@@ -3644,7 +3655,7 @@ impl FileAnalysis {
     /// Cross-class method rename has to touch two distinct things:
     ///   * the `sub M` definition in whichever ancestor actually
     ///     defines the method, and
-    ///   * every `$obj->M(...)` call site whose static `invocant_class`
+    ///   * every `$obj->M(...)` call site whose static `invocant_class_cache`
     ///     is the rename target *or* an intermediate ancestor that
     ///     inherited (didn't override) the method.
     ///

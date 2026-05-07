@@ -5604,7 +5604,7 @@ $app->helper('users.create' => sub { my ($c, $name) = @_; });
 /// Discovers two separate bugs at the same time:
 ///   (1) Handler.owner is the *declaring* package (`MyApp`), so
 ///       `$c->url_for(...)` on a `Users` controller fails the
-///       `owner_class == invocant_class` filter in
+///       `owner_class == invocant_class_cache` filter in
 ///       `dispatch_target_completions`.
 ///   (2) No coverage for "does url_for completion work at all".
 #[test]
@@ -6528,7 +6528,7 @@ sub _generate_route {
     let fa = build_fa(src);
 
     // The MethodCall ref for `_generate_route` (inside `get`'s body)
-    // must carry `invocant_class = Mojolicious::Routes::Route` —
+    // must carry `invocant_class_cache = Mojolicious::Routes::Route` —
     // proving the build-time chain resolver treated `shift` as
     // `$self` and looked up the enclosing package.
     let gr_ref = fa
@@ -6539,13 +6539,13 @@ sub _generate_route {
         })
         .expect("MethodCall ref for `_generate_route`");
 
-    if let RefKind::MethodCall { invocant_class, .. } = &gr_ref.kind {
+    if let RefKind::MethodCall { invocant_class_cache, .. } = &gr_ref.kind {
         assert_eq!(
-            invocant_class.as_deref(),
+            invocant_class_cache.as_deref(),
             Some("Mojolicious::Routes::Route"),
             "`shift->_generate_route` must resolve its invocant to \
-                 the enclosing package. got invocant_class: {:?}",
-            invocant_class,
+                 the enclosing package. got invocant_class_cache: {:?}",
+            invocant_class_cache,
         );
     } else {
         panic!("expected MethodCall ref");
@@ -6577,13 +6577,13 @@ sub inline {
         .find(|r| matches!(r.kind, RefKind::MethodCall { .. }) && r.target_name == "inline")
         .expect("MethodCall ref for `inline`");
 
-    if let RefKind::MethodCall { invocant_class, .. } = &inline_ref.kind {
+    if let RefKind::MethodCall { invocant_class_cache, .. } = &inline_ref.kind {
         assert_eq!(
-            invocant_class.as_deref(),
+            invocant_class_cache.as_deref(),
             Some("Mojolicious::Routes::Route"),
             "`$$_[0]->inline` must resolve its invocant to the \
-                 enclosing package. got invocant_class: {:?}",
-            invocant_class,
+                 enclosing package. got invocant_class_cache: {:?}",
+            invocant_class_cache,
         );
     } else {
         panic!("expected MethodCall ref");

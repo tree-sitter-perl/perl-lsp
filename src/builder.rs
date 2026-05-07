@@ -46,7 +46,7 @@ pub fn default_plugin_registry() -> Arc<PluginRegistry> {
 ///   node, indexed by the call-expression span. Lets the post-walk
 ///   keys-as-HashKeyAccess emission look up the args from a
 ///   MethodCall ref instead of stashing them on the ref itself or
-///   running emit at walk time (where invocant_class is still
+///   running emit at walk time (where invocant_class_cache is still
 ///   getting refined).
 ///
 /// Built once per `build_with_plugins_inner` call and consumed by both
@@ -64,7 +64,7 @@ struct ChainTypingIndex<'a> {
 /// `PreFold` runs between the two `resolve_return_types` calls —
 /// assignments and return arms feed the second fold (assignments via
 /// `var_type_via_bag` for `return $var`; return arms directly through
-/// `return_infos`). Invocants are query-time outputs (`Ref.invocant_class`)
+/// `return_infos`). Invocants are query-time outputs (`Ref.invocant_class_cache`)
 /// and don't influence the fold, so they wait until after every sub
 /// return type is resolved.
 ///
@@ -311,7 +311,7 @@ fn build_with_plugins_inner(
     // Post-pass: emit `HashKeyAccess` refs for even-position stringy
     // args on every resolved `MethodCall` ref (`MooApp->new(name => 'alice')`,
     // helper-emitted controllers, etc.). Runs after `fold_to_fixed_point`
-    // so `invocant_class` is canonical against the bag — was a walk-time
+    // so `invocant_class_cache` is canonical against the bag — was a walk-time
     // emission gated on the partially-resolved walk-time class, now it's
     // a single post-walk pass that joins refs to args via the chain
     // typing index.
@@ -404,7 +404,7 @@ impl<'a> Builder<'a> {
     ///
     /// Method-call return edges (`Expression(refidx) → Edge(MethodOnClass{class, method})`)
     /// are emitted later — by `emit_method_call_return_edges` from
-    /// inside the worklist, once `invocant_class` is filled.
+    /// inside the worklist, once `invocant_class_cache` is filled.
     fn populate_witness_bag(&mut self) {
         use crate::witnesses::{
             TypeObservation, Witness, WitnessAttachment, WitnessPayload, WitnessSource,
@@ -412,7 +412,7 @@ impl<'a> Builder<'a> {
 
         // Rep observations from `$v->{k}` access. Method-call return
         // edges on `Expression(refidx)` are emitted later — by the
-        // chain-typing PostFold pass once `invocant_class` is filled —
+        // chain-typing PostFold pass once `invocant_class_cache` is filled —
         // as `Edge(MethodOnClass{class, method})`. Without a known
         // class there's no class-keyed answer to chase to, so the
         // emission is gated by chain-typing's own progress.
@@ -1735,7 +1735,7 @@ impl<'a> Builder<'a> {
                 // Plugins declare `invocant` as the intended receiver
                 // class (e.g. route plugin uses "Users" for `->to('Users#list')`);
                 // treat that as the resolved class unless it's a sigil-shape.
-                let invocant_class = if invocant.is_empty()
+                let invocant_class_cache = if invocant.is_empty()
                     || invocant.starts_with('$')
                     || invocant.starts_with('@')
                     || invocant.starts_with('%')
@@ -1749,7 +1749,7 @@ impl<'a> Builder<'a> {
                         invocant,
                         invocant_span,
                         method_name_span: span,
-                        invocant_class,
+                        invocant_class_cache,
                     },
                     span,
                     scope: self.current_scope(),
@@ -3565,7 +3565,7 @@ impl<'a> Builder<'a> {
             // Edge to the call's `Expression(refidx)` attachment;
             // `emit_method_call_return_edges` re-emits
             // `Edge(MethodOnClass{class, method})` there once
-            // `invocant_class` is filled, so the chase resolves through.
+            // `invocant_class_cache` is filled, so the chase resolves through.
             "method_call_expression" => {
                 if let Some(class) = self.extract_constructor_class(node) {
                     return Some(WitnessPayload::InferredType(InferredType::ClassName(class)));
@@ -4913,16 +4913,16 @@ impl<'a> Builder<'a> {
         });
         // Always store the invocant span so post-walk refinement
         // (`apply_chain_typing_invocants`) can find the node and
-        // fill `invocant_class` for refs that walk-time couldn't
+        // fill `invocant_class_cache` for refs that walk-time couldn't
         // resolve (variable invocants whose TC isn't yet seeded,
         // call-chain invocants whose inner sub return type isn't
         // resolved). Without this, a `$obj->method` ref whose
-        // walk-time invocant_class was None would stay None
+        // walk-time invocant_class_cache was None would stay None
         // forever and class-scoped `refs_to` would silently match
         // too broadly.
         let invocant_span = invocant_node.map(node_to_span);
 
-        // Walk-time invocant_class — closed-under-syntax cases only:
+        // Walk-time invocant_class_cache — closed-under-syntax cases only:
         //   - constructor pattern (`Sner->new->hi`)
         //   - `__PACKAGE__->method(...)`
         //
@@ -4933,9 +4933,9 @@ impl<'a> Builder<'a> {
         // mid-fold) stays None and gets filled by PostFold's
         // `apply_chain_typing_invocants` against the canonical bag.
         // Now that `emit_method_call_arg_keys` runs post-walk, no
-        // walk-time consumer reads `invocant_class` — leaving it
+        // walk-time consumer reads `invocant_class_cache` — leaving it
         // None at walk-time costs nothing.
-        let invocant_class = invocant_node.and_then(|n| match n.kind() {
+        let invocant_class_cache = invocant_node.and_then(|n| match n.kind() {
             "method_call_expression" => self.extract_constructor_class(n),
             "bareword" | "package"
                 if n.utf8_text(self.source).ok() == Some("__PACKAGE__") =>
@@ -4955,7 +4955,7 @@ impl<'a> Builder<'a> {
                                 invocant: invocant.clone().unwrap_or_default(),
                                 invocant_span,
                                 method_name_span,
-                                invocant_class: invocant_class.clone(),
+                                invocant_class_cache: invocant_class_cache.clone(),
                             },
                             node_to_span(node),
                             rname,
@@ -4969,7 +4969,7 @@ impl<'a> Builder<'a> {
                         invocant: invocant.clone().unwrap_or_default(),
                         invocant_span,
                         method_name_span,
-                        invocant_class: invocant_class.clone(),
+                        invocant_class_cache: invocant_class_cache.clone(),
                     },
                     node_to_span(node),
                     name.clone(),
@@ -5030,11 +5030,11 @@ impl<'a> Builder<'a> {
         }
 
         // Even-position stringy args become `HashKeyAccess` refs
-        // owned by `Sub{invocant_class, method_name}` — pairs with
+        // owned by `Sub{invocant_class_cache, method_name}` — pairs with
         // the HashKeyDef symbols that `has` / `bless { … }`
         // synthesize on the callee side. Emission is deferred to
         // post-walk (`emit_method_call_arg_keys`) so the owner's
-        // class can be read off the canonical `invocant_class`
+        // class can be read off the canonical `invocant_class_cache`
         // (filled by `apply_chain_typing_invocants` against the
         // bag) instead of the partially-resolved walk-time value.
         // The chain-typing index records the args node by call
@@ -5969,7 +5969,7 @@ impl<'a> Builder<'a> {
     ///
     /// Idempotent across both calls — assignments skip if a TC already
     /// exists, return arms only upgrade `None → Some`, invocants skip
-    /// if `invocant_class` is already pinned. Running the reducer twice
+    /// if `invocant_class_cache` is already pinned. Running the reducer twice
     /// in `PostFold` mode would type strictly the same set as one call.
     fn run_chain_typing_reducer(
         &mut self,
@@ -5979,12 +5979,12 @@ impl<'a> Builder<'a> {
         match mode {
             ChainPassMode::PreFold => {
                 self.apply_chain_typing_assignments(idx);
-                // Refresh `invocant_class` each iteration too.
+                // Refresh `invocant_class_cache` each iteration too.
                 // Variable invocants whose TC just landed in the
                 // worklist's previous iteration become resolvable
                 // here — earlier this only ran in PostFold, which
                 // meant the bag's `method_call_return` edges
-                // (re-emitted from filled invocant_class) couldn't
+                // (re-emitted from filled invocant_class_cache) couldn't
                 // see them until the loop already terminated.
                 // `apply_chain_typing_invocants` is idempotent (skips
                 // refs whose class is already pinned).
@@ -6074,17 +6074,17 @@ impl<'a> Builder<'a> {
             .map(|s| (s.id, self.resolved_returns.get(&s.id).cloned()))
             .collect();
         answers.sort_by_key(|(id, _)| id.0);
-        // Count refs with filled `invocant_class` so progressive
+        // Count refs with filled `invocant_class_cache` so progressive
         // chain-typing inside the loop registers as movement —
         // without this, an iteration that only newly fills
-        // `invocant_class` (driving the next iteration's
+        // `invocant_class_cache` (driving the next iteration's
         // `emit_method_call_return_edges` to publish a new edge)
         // would produce the same answers/bag snapshot and the loop
         // would terminate prematurely.
         let invocant_filled = self
             .refs
             .iter()
-            .filter(|r| matches!(&r.kind, RefKind::MethodCall { invocant_class: Some(_), .. }))
+            .filter(|r| matches!(&r.kind, RefKind::MethodCall { invocant_class_cache: Some(_), .. }))
             .count();
         (answers, self.bag.len(), invocant_filled)
     }
@@ -6188,7 +6188,7 @@ impl<'a> Builder<'a> {
         }
     }
 
-    /// Re-resolve `invocant_class` on every MethodCall ref using the
+    /// Re-resolve `invocant_class_cache` on every MethodCall ref using the
     /// tree + the now-final symbol table (return types have been
     /// filled in by the second `resolve_return_types`). This catches
     /// function-call chains like `get_foo()->bar()` where the
@@ -6204,12 +6204,12 @@ impl<'a> Builder<'a> {
         let mut pending: Vec<(usize, Node<'a>)> = Vec::new();
         for (i, r) in self.refs.iter().enumerate() {
             if let RefKind::MethodCall {
-                invocant_class,
+                invocant_class_cache,
                 invocant_span: Some(sp),
                 ..
             } = &r.kind
             {
-                if invocant_class.is_some() {
+                if invocant_class_cache.is_some() {
                     continue;
                 }
                 if let Some(n) = idx.invocant_nodes.get(&(sp.start, sp.end)).copied() {
@@ -6219,8 +6219,8 @@ impl<'a> Builder<'a> {
         }
         for (i, node) in pending {
             if let Some(class) = self.resolve_invocant_class_tree(node) {
-                if let RefKind::MethodCall { invocant_class, .. } = &mut self.refs[i].kind {
-                    *invocant_class = Some(class);
+                if let RefKind::MethodCall { invocant_class_cache, .. } = &mut self.refs[i].kind {
+                    *invocant_class_cache = Some(class);
                 }
             }
         }
@@ -6228,22 +6228,22 @@ impl<'a> Builder<'a> {
 
     /// Post-walk: emit even-position stringy args of every resolved
     /// `MethodCall` ref as `HashKeyAccess` refs owned by
-    /// `Sub{invocant_class, method_name}`. Pairs with the
+    /// `Sub{invocant_class_cache, method_name}`. Pairs with the
     /// `HashKeyDef` symbols that `has` / `bless { … }` synthesize on
     /// the callee side; without these refs, `ref_at` on a constructor
     /// arg only finds the broad `MethodCall` ref and rename clobbers
     /// the wrong token.
     ///
-    /// Runs post-PostFold so `invocant_class` is already filled
+    /// Runs post-PostFold so `invocant_class_cache` is already filled
     /// against the canonical bag — moves the keys-emission gating
-    /// off the walk-time `invocant_class.is_some()` shortcut that
+    /// off the walk-time `invocant_class_cache.is_some()` shortcut that
     /// previously forced syntactic walk-time class resolution to
     /// keep working.
     fn emit_method_call_arg_keys(&mut self, idx: &ChainTypingIndex<'a>) {
         // Snapshot first so we can `&mut self` the emit loop below.
         let mut pending: Vec<(HashKeyOwner, Node<'a>)> = Vec::new();
         for r in &self.refs {
-            let RefKind::MethodCall { invocant_class: Some(cls), .. } = &r.kind else {
+            let RefKind::MethodCall { invocant_class_cache: Some(cls), .. } = &r.kind else {
                 continue;
             };
             let Some(args) = idx
@@ -6284,7 +6284,7 @@ impl<'a> Builder<'a> {
     }
 
     /// Re-emittable: for every `MethodCall` ref whose
-    /// `invocant_class` is filled (walk-time syntax-known invocants
+    /// `invocant_class_cache` is filled (walk-time syntax-known invocants
     /// like `Foo->m`, plus PostFold-resolved variable invocants),
     /// publish `Expression(refidx) → Edge(MethodOnClass{class, method})`
     /// so the chain typer's `bag_query_expression` chases the
@@ -6301,7 +6301,7 @@ impl<'a> Builder<'a> {
 
         let mut edges: Vec<Witness> = Vec::new();
         for (i, r) in self.refs.iter().enumerate() {
-            let RefKind::MethodCall { invocant_class: Some(class), .. } = &r.kind else {
+            let RefKind::MethodCall { invocant_class_cache: Some(class), .. } = &r.kind else {
                 continue;
             };
             edges.push(Witness {
