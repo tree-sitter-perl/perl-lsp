@@ -510,10 +510,15 @@ pub enum InferredType {
     ///
     /// Design history: Phase 1 of Part 5c shipped this as a flat
     /// `{ base: String, type_args: Vec<TypeArg> }` shape with
-    /// dual-accessor helpers — that encoding's reflexive
-    /// complexity (per-method allowlist, `_open` emitter, accessor
-    /// pair) is gone now, lifted into per-flavor methods on
-    /// `ParametricType`. See `docs/prompt-parametric-redesign.md`.
+    /// dual-accessor helpers; the per-method allowlist and the
+    /// data-layout-special-cased accessors are gone, lifted into
+    /// per-flavor methods on `ParametricType`. The emitter still
+    /// gates per-shape — `Strict` (constructor keys), `Open`
+    /// (Parametric receiver claims the method), `Deferred`
+    /// (chain receiver, type unresolvable until enrichment) — but
+    /// the three flavors share one `emit_call_arg_key_accesses`
+    /// body via a `Gate` discriminator. See
+    /// `docs/adr/parametric-types.md`.
     Parametric(ParametricType),
 }
 

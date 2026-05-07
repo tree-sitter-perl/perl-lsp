@@ -1013,6 +1013,27 @@ struct Builder<'a> {
     parametric_emitted_refs: std::collections::HashSet<usize>,
 }
 
+/// Owner-and-gating discriminator for `emit_call_arg_key_accesses`.
+/// One emitter, three semantics:
+///   * `Strict(owner)` — supplied owner; emit only if a matching
+///     HashKeyDef is registered for `(key, owner)`. Prevents
+///     `Foo::bar(name=>1)` from latching onto unrelated
+///     `Sub{Foo,new}` keys when `name` isn't actually a `bar` arg.
+///   * `Open(owner)` — supplied owner; emit unconditionally.
+///     The receiver's flavor pinned the owner via
+///     `method_arg_owner` — the type IS the gate; cross-file
+///     producer's HashKeyDef may not be visible at consumer build.
+///   * `Deferred` — owner=None at emit time. Post-walk fixup in
+///     `FileAnalysis::fix_chain_receiver_hash_key_owners`
+///     fills the owner once the enclosing call's receiver type
+///     resolves (in-file via `call_ref_by_start` recursion, or
+///     cross-file once `module_index` is available).
+enum Gate {
+    Strict(HashKeyOwner),
+    Open(HashKeyOwner),
+    Deferred,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum FrameworkMode {
     Moo,
@@ -4208,7 +4229,7 @@ impl<'a> Builder<'a> {
                         package: resolved_package.clone(),
                         name: name.to_string(),
                     };
-                    self.emit_call_arg_key_accesses(args, &owner);
+                    self.emit_call_arg_key_accesses(args, Gate::Strict(owner));
                 }
                 // Push type constraints on arguments of known builtins
                 if let Some(arg_type) = crate::file_analysis::builtin_first_arg_type(name) {
@@ -6026,45 +6047,80 @@ impl<'a> Builder<'a> {
     /// Foo { field $x :param }` — Point->new(x => 3, …) needs the
     /// MethodCall ref's `find_param_field` fallback in
     /// `find_definition`).
-    fn emit_call_arg_key_accesses(&mut self, args_node: Node<'a>, owner: &HashKeyOwner) {
-        let named: Vec<Node<'a>> = (0..args_node.named_child_count())
-            .filter_map(|i| args_node.named_child(i))
+    fn emit_call_arg_key_accesses(&mut self, args_node: Node<'a>, gate: Gate) {
+        // Unwrap one level into a hash literal / paren wrapper —
+        // search's `{KEY=>...}` is `anonymous_hash_expression`
+        // wrapping a `list_expression` of pairs; constructors are
+        // paren-wrapped. Even-position iteration expects a flat
+        // pair list. Constructor-style args without the wrapper
+        // pass through unchanged.
+        let mut effective = args_node;
+        if matches!(effective.kind(), "anonymous_hash_expression" | "parenthesized_expression")
+            && effective.named_child_count() == 1
+        {
+            if let Some(inner) = effective.named_child(0) {
+                if matches!(inner.kind(), "list_expression" | "anonymous_hash_expression") {
+                    effective = inner;
+                }
+            }
+        }
+        let named: Vec<Node<'a>> = (0..effective.named_child_count())
+            .filter_map(|i| effective.named_child(i))
             .collect();
         // Single-arg calls present the arg directly (no list_expression
         // wrapper). One arg can't be a key/value pair.
-        if named.len() < 2 && args_node.kind() != "list_expression" && args_node.kind() != "parenthesized_expression" {
+        if named.len() < 2
+            && effective.kind() != "list_expression"
+            && effective.kind() != "parenthesized_expression"
+        {
             return;
         }
         for (idx, child) in named.iter().enumerate() {
-            if idx % 2 == 0
-                && matches!(child.kind(), "bareword" | "autoquoted_bareword" | "string_literal" | "interpolated_string_literal")
-            {
-                if let Some((key, is_dynamic)) = self.extract_key_text(*child) {
-                    if !is_dynamic && self.has_hash_key_def(&key, owner) {
-                        let access = self.determine_access(*child);
-                        // `scope_at_point` instead of `current_scope`
-                        // so this works both inside the walk
-                        // (function-call args path) and post-walk
-                        // (method-call args path; the walk has
-                        // unwound by then and `scope_stack` is empty).
-                        // Equivalent at walk-time because a node's
-                        // innermost containing scope IS what
-                        // `current_scope` would return at that point.
-                        let span = node_to_span(*child);
-                        self.refs.push(Ref {
-                            kind: RefKind::HashKeyAccess {
-                                var_text: String::new(),
-                                owner: Some(owner.clone()),
-                            },
-                            span,
-                            scope: self.scope_at_point(span.start),
-                            target_name: key,
-                            access,
-                            resolves_to: None,
-                        });
-                    }
-                }
+            if idx % 2 != 0 { continue; }
+            if !matches!(
+                child.kind(),
+                "bareword" | "autoquoted_bareword" | "string_literal" | "interpolated_string_literal"
+            ) {
+                continue;
             }
+            let Some((key, is_dynamic)) = self.extract_key_text(*child) else { continue };
+            if is_dynamic { continue; }
+            // Gate decides whether to emit + what owner to record.
+            // Strict checks the local symbol table for a matching
+            // HashKeyDef (prevents `Foo::bar(name=>1)` from latching
+            // onto unrelated `Sub{Foo,new}` keys). Open trusts the
+            // caller (the receiver's flavor pinned the owner).
+            // Deferred emits with `owner: None`; the post-walk
+            // fixup in `fix_chain_receiver_hash_key_owners` fills
+            // the owner once the receiver type resolves
+            // (in-file or cross-file).
+            let owner_to_emit: Option<HashKeyOwner> = match &gate {
+                Gate::Strict(owner) => {
+                    if !self.has_hash_key_def(&key, owner) { continue; }
+                    Some(owner.clone())
+                }
+                Gate::Open(owner) => Some(owner.clone()),
+                Gate::Deferred => None,
+            };
+            let access = self.determine_access(*child);
+            // `scope_at_point` instead of `current_scope` so this
+            // works both inside the walk (function-call args path)
+            // and post-walk (method-call args path; scope_stack is
+            // empty by then). Equivalent at walk-time because a
+            // node's innermost containing scope IS what
+            // current_scope would return.
+            let span = node_to_span(*child);
+            self.refs.push(Ref {
+                kind: RefKind::HashKeyAccess {
+                    var_text: String::new(),
+                    owner: owner_to_emit,
+                },
+                span,
+                scope: self.scope_at_point(span.start),
+                target_name: key,
+                access,
+                resolves_to: None,
+            });
         }
     }
 
@@ -6694,141 +6750,18 @@ impl<'a> Builder<'a> {
         for path in pending {
             match path {
                 Path::Claimed(owner, args) => {
-                    self.emit_call_arg_key_accesses_open(args, &owner);
+                    self.emit_call_arg_key_accesses(args, Gate::Open(owner));
                 }
                 Path::Strict(owner, args) => {
-                    self.emit_call_arg_key_accesses(args, &owner);
+                    self.emit_call_arg_key_accesses(args, Gate::Strict(owner));
                 }
                 Path::Deferred(args) => {
-                    self.emit_call_arg_key_accesses_deferred(args);
+                    self.emit_call_arg_key_accesses(args, Gate::Deferred);
                 }
             }
         }
     }
 
-    /// Emit `HashKeyAccess` refs for fat-comma keys in a method-
-    /// call's args with `owner: None`. Enrichment fixes the
-    /// owner post-build once `module_index` makes the receiver
-    /// type resolvable. Same emission shape as `_open`, just
-    /// with no owner pinned. Used when the receiver is a chain
-    /// of method calls whose return type lives in another file
-    /// — build can't resolve cross-file, but the keys still need
-    /// HashKeyAccess refs in the FA so `refs_to` finds them
-    /// after enrichment.
-    fn emit_call_arg_key_accesses_deferred(&mut self, args_node: Node<'a>) {
-        let mut effective = args_node;
-        if matches!(effective.kind(), "anonymous_hash_expression" | "parenthesized_expression")
-            && effective.named_child_count() == 1
-        {
-            if let Some(inner) = effective.named_child(0) {
-                if matches!(inner.kind(), "list_expression" | "anonymous_hash_expression") {
-                    effective = inner;
-                }
-            }
-        }
-        let named: Vec<Node<'a>> = (0..effective.named_child_count())
-            .filter_map(|i| effective.named_child(i))
-            .collect();
-        if named.len() < 2
-            && effective.kind() != "list_expression"
-            && effective.kind() != "parenthesized_expression"
-        {
-            return;
-        }
-        for (idx, child) in named.iter().enumerate() {
-            if idx % 2 == 0
-                && matches!(
-                    child.kind(),
-                    "bareword" | "autoquoted_bareword" | "string_literal" | "interpolated_string_literal"
-                )
-            {
-                if let Some((key, is_dynamic)) = self.extract_key_text(*child) {
-                    if !is_dynamic {
-                        let access = self.determine_access(*child);
-                        let span = node_to_span(*child);
-                        self.refs.push(Ref {
-                            kind: RefKind::HashKeyAccess {
-                                var_text: String::new(),
-                                owner: None,
-                            },
-                            span,
-                            scope: self.scope_at_point(span.start),
-                            target_name: key,
-                            access,
-                            resolves_to: None,
-                        });
-                    }
-                }
-            }
-        }
-    }
-
-    /// Like `emit_call_arg_key_accesses` but skips the
-    /// `has_hash_key_def` gate. Used when the *type* of the call's
-    /// receiver already pins the row class (Parametric receivers).
-    /// Cross-file producer `HashKeyDef`s aren't visible at consumer
-    /// build time, so the strict gate would block legitimate
-    /// emissions. Bounded false-positive: an unknown key emits a
-    /// ref but `find_definition` returns None for it.
-    fn emit_call_arg_key_accesses_open(&mut self, args_node: Node<'a>, owner: &HashKeyOwner) {
-        // Unwrap one level into a hash literal / parenthesized
-        // wrapper so DBIC's `search({KEY=>...})` shape (args is
-        // `anonymous_hash_expression` whose only child is a
-        // `list_expression` of the k=>v pairs) reaches the same
-        // even-position iterator a flat `(k=>v, k2=>v2)` list
-        // would. Native `emit_call_arg_key_accesses` doesn't need
-        // this because constructors are usually `Foo->new(k=>v)`
-        // (paren list, no hash literal); search's hashref arg is
-        // structurally one extra level.
-        let mut effective = args_node;
-        if matches!(effective.kind(), "anonymous_hash_expression" | "parenthesized_expression")
-            && effective.named_child_count() == 1
-        {
-            if let Some(inner) = effective.named_child(0) {
-                if matches!(inner.kind(), "list_expression" | "anonymous_hash_expression") {
-                    effective = inner;
-                }
-            }
-        }
-        let named: Vec<Node<'a>> = (0..effective.named_child_count())
-            .filter_map(|i| effective.named_child(i))
-            .collect();
-        if named.len() < 2
-            && effective.kind() != "list_expression"
-            && effective.kind() != "parenthesized_expression"
-        {
-            return;
-        }
-        // (Open-emit doesn't gate via `has_hash_key_def` — see
-        // doc on the function. The pair-iteration loop below is
-        // identical to the strict-emit version.)
-        for (idx, child) in named.iter().enumerate() {
-            if idx % 2 == 0
-                && matches!(
-                    child.kind(),
-                    "bareword" | "autoquoted_bareword" | "string_literal" | "interpolated_string_literal"
-                )
-            {
-                if let Some((key, is_dynamic)) = self.extract_key_text(*child) {
-                    if !is_dynamic {
-                        let access = self.determine_access(*child);
-                        let span = node_to_span(*child);
-                        self.refs.push(Ref {
-                            kind: RefKind::HashKeyAccess {
-                                var_text: String::new(),
-                                owner: Some(owner.clone()),
-                            },
-                            span,
-                            scope: self.scope_at_point(span.start),
-                            target_name: key,
-                            access,
-                            resolves_to: None,
-                        });
-                    }
-                }
-            }
-        }
-    }
 
     /// Phase 4 of the worklist refactor: this is the tiny driver. Each
     /// step is a named helper below. The call-binding propagator and
