@@ -1348,14 +1348,15 @@ $x->ping();
     );
 }
 
-/// Perf bench (gated `#[ignore]`). Generates a synthetic
-/// workspace with N files × M method-call sites and measures
-/// `refs_to` wall time. Useful when changing the invocant
-/// resolver — gut-check the cost. Run with
-///   `cargo test --release -- --nocapture --ignored \
-///    bench_refs_to_invocant_resolution`
+/// Perf bench, gated on `--features perf_bench` so the default
+/// `cargo test` never sees it (no `#[ignore]` count). Generates
+/// a synthetic workspace with N files × M method-call sites and
+/// measures `refs_to` wall time. Useful when changing the
+/// invocant resolver — gut-check the cost. Run with:
+///   cargo test --release --features perf_bench -- --nocapture \
+///     bench_refs_to_invocant_resolution
+#[cfg(feature = "perf_bench")]
 #[test]
-#[ignore]
 fn bench_refs_to_invocant_resolution() {
     use crate::module_index::ModuleIndex;
     use std::sync::Arc;
