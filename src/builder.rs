@@ -1288,11 +1288,14 @@ impl<'a> Builder<'a> {
             _ => None,
         };
         let inferred_type = self.infer_expression_type(arg);
-        let sub_params = if arg.kind() == "anonymous_subroutine_expression" {
-            self.extract_anonymous_sub_params(arg)
-        } else {
-            Vec::new()
-        };
+        let (sub_params, sub_body_last_expr_span) =
+            if arg.kind() == "anonymous_subroutine_expression" {
+                let params = self.extract_anonymous_sub_params(arg);
+                let last = self.anonymous_sub_body_last_expr_span(arg);
+                (params, last)
+            } else {
+                (Vec::new(), None)
+            };
         plugin::ArgInfo {
             text,
             string_value,
@@ -1300,7 +1303,38 @@ impl<'a> Builder<'a> {
             content_span,
             inferred_type,
             sub_params,
+            sub_body_last_expr_span,
         }
+    }
+
+    /// Span of the body's last expression on an
+    /// `anonymous_subroutine_expression`. Mirrors
+    /// `infer_anonymous_sub_return_type`'s body-walk — the last
+    /// statement, unwrapped from `expression_statement` /
+    /// `return_expression` if necessary, gives us the expression
+    /// whose type IS the sub's return when called. Plugins use
+    /// this to emit a back-edge from the synthesized Method's
+    /// Symbol to that Expr, deferring return-type inference to
+    /// query time.
+    fn anonymous_sub_body_last_expr_span(&self, node: Node<'a>) -> Option<Span> {
+        if node.kind() != "anonymous_subroutine_expression" {
+            return None;
+        }
+        let body = node.child_by_field_name("body")?;
+        let mut node = body.named_child(body.named_child_count().checked_sub(1)?)?;
+        // Peel through `expression_statement` and `return_expression`
+        // wrappers (an explicit `return $expr;` shows up as
+        // `expression_statement → return_expression → $expr` in
+        // tree-sitter-perl). One unwrap isn't enough.
+        loop {
+            match node.kind() {
+                "expression_statement" | "return_expression" => {
+                    node = node.named_child(0)?;
+                }
+                _ => break,
+            }
+        }
+        Some(node_to_span(node))
     }
 
     /// Extract params from an anonymous sub. Delegates to the builder's
@@ -1674,6 +1708,7 @@ impl<'a> Builder<'a> {
                 hide_in_outline,
                 opaque_return,
                 outline_label,
+                return_via_edge,
             } => {
                 let return_type_for_bag = return_type.clone();
                 let is_class_scoped = on_class.is_some();
@@ -1732,11 +1767,32 @@ impl<'a> Builder<'a> {
                     if !is_class_scoped {
                         self.bag.push(Witness {
                             attachment: WitnessAttachment::Symbol(sid),
-                            source: WitnessSource::Plugin(plugin_id),
+                            source: WitnessSource::Plugin(plugin_id.clone()),
                             payload: WitnessPayload::InferredType(rt),
                             span,
                         });
                     }
+                } else if let Some(target_span) = return_via_edge {
+                    // Lazy return type: emit `Symbol(sid) → Edge(
+                    // Expr(target_span))`. The writeback
+                    // (`write_back_sub_return_types`) iterates
+                    // symbols and projects whatever payload sits
+                    // on each `Symbol(sid)` to `MethodOnClass{class,
+                    // name}` for class-scoped methods, so this
+                    // single Symbol-attached emission reaches both
+                    // attachments. The bag's edge-chase resolver
+                    // follows the edge at query time — by then,
+                    // the sub body has been walked and
+                    // `Expr(target_span)` carries its type.
+                    use crate::witnesses::{
+                        Witness, WitnessAttachment, WitnessPayload, WitnessSource,
+                    };
+                    self.bag.push(Witness {
+                        attachment: WitnessAttachment::Symbol(sid),
+                        source: WitnessSource::Plugin(plugin_id),
+                        payload: WitnessPayload::Edge(WitnessAttachment::Expr(target_span)),
+                        span,
+                    });
                 }
             }
             plugin::EmitAction::HashKeyDef { name, owner, span, selection_span } => {
@@ -1947,6 +2003,7 @@ impl<'a> Builder<'a> {
             "package_statement" => self.visit_package(node),
             "class_statement" => self.visit_class(node),
             "subroutine_declaration_statement" => self.visit_sub(node, false),
+            "anonymous_subroutine_expression" => self.visit_anonymous_sub(node),
             "method_declaration_statement" => self.visit_sub(node, true),
             "variable_declaration" => self.visit_variable_decl(node),
             "for_statement" => self.visit_for(node),
@@ -2442,6 +2499,29 @@ impl<'a> Builder<'a> {
         self.detect_first_param_type(&params, node);
 
         // Visit children (body, etc.)
+        self.visit_children(node);
+        self.pop_scope();
+    }
+
+    /// Walk an `anonymous_subroutine_expression` (a `sub { ... }`
+    /// arg literal). No symbol creation (anon subs are values,
+    /// not named entities) but DOES push a `Sub` scope around the
+    /// body so `enclosing_sub_scope()` returns Some inside it.
+    /// Without the scope, `return $x` inside `sub { return $x }`
+    /// can't fire the return-arm witness emission, and plugin-
+    /// synthesized callables that lazily edge into the body's
+    /// `Expr(span)` (mojo-helpers' `return_via_edge`) lose their
+    /// target. Conventional name `(anon)` so the scope chain
+    /// reads sensibly in `--dump-package`.
+    fn visit_anonymous_sub(&mut self, node: Node<'a>) {
+        let params = self.extract_params(node);
+        self.push_scope(
+            ScopeKind::Sub { name: "(anon)".into() },
+            node_to_span(node),
+            None,
+        );
+        self.record_signature_params(node, &params);
+        self.detect_first_param_type(&params, node);
         self.visit_children(node);
         self.pop_scope();
     }
@@ -5702,7 +5782,7 @@ impl<'a> Builder<'a> {
             return None;
         }
         let args = node.child_by_field_name("arguments")?;
-        let row_class = self.first_string_literal_arg(args)?;
+        let row_class = self.first_string_or_constfold_arg(args)?;
         let base = self
             .discover_resultset_class(&row_class)
             .unwrap_or_else(|| "DBIx::Class::ResultSet".to_string());
@@ -5710,6 +5790,49 @@ impl<'a> Builder<'a> {
             base,
             row: row_class,
         }))
+    }
+
+    /// Like `first_string_literal_arg` but additionally const-folds
+    /// a scalar arg (`$sner` where `my $sner = 'Foo'` exists in
+    /// scope). Used by `extract_resultset_parametric` so
+    /// `$schema->resultset($sner)` types the same as
+    /// `$schema->resultset('Foo')` when `$sner` is a known
+    /// compile-time constant. Multi-value const-folding (a scalar
+    /// that resolves to multiple strings) bails — Parametric's
+    /// `row` is a single class, not a sum type yet.
+    fn first_string_or_constfold_arg(&self, args: Node<'a>) -> Option<String> {
+        if let Some(s) = self.first_string_literal_arg(args) {
+            return Some(s);
+        }
+        // Try the first arg as a `scalar` node with const-foldable
+        // value. Same one-level unwrap rule as the literal helper.
+        let arg_node = match args.kind() {
+            "scalar" => Some(args),
+            "parenthesized_expression" | "list_expression" => {
+                let mut found: Option<Node<'a>> = None;
+                for i in 0..args.named_child_count() {
+                    if let Some(c) = args.named_child(i) {
+                        found = Some(c);
+                        break;
+                    }
+                }
+                found
+            }
+            _ => None,
+        }?;
+        if arg_node.kind() != "scalar" {
+            return None;
+        }
+        let var_text = arg_node.utf8_text(self.source).ok()?;
+        let folded = self.resolve_constant_strings(var_text, 0)?;
+        // Single-value fold only — multi-value (loop variable that
+        // takes several strings) doesn't have a single row class to
+        // emit. Future Part 5 sum-types work could lift this.
+        if folded.len() == 1 {
+            folded.into_iter().next()
+        } else {
+            None
+        }
     }
 
     /// Discover the resultset class for a given row class via the
@@ -6489,7 +6612,35 @@ impl<'a> Builder<'a> {
         // false → strict has_hash_key_def gating (prevents
         // `Foo::bar(name=>1)` from latching onto `Sub{Foo,new}`
         // keys when `name` isn't actually a `bar` arg).
-        let mut pending: Vec<(HashKeyOwner, Node<'a>, bool)> = Vec::new();
+        // Three paths for hash-key arg owner:
+        //
+        //  * **Parametric receiver claims the method.** Ask the
+        //    flavor: `p.method_arg_owner(method)`. `Some` means
+        //    "I claim — emit unconditionally with this owner;
+        //    the type IS the gate." Cross-file producer's
+        //    HashKeyDef may not be visible at consumer build;
+        //    the type already pinned the class.
+        //  * **Non-Parametric receiver, locally typed.** Fall
+        //    through to `Sub { package: receiver, name: method
+        //    }` with `has_hash_key_def` strict-eq gating —
+        //    prevents `Foo::bar(name=>1)` from latching onto
+        //    `Sub{Foo,new}` keys.
+        //  * **Chain receiver, type unresolvable at build.**
+        //    Build doesn't have `module_index` access, so a
+        //    chain hop whose link-type lives in another file
+        //    (helper-style: `$c->sner_r->search({...})`) returns
+        //    None at this point. Emit `HashKeyAccess` refs
+        //    eagerly with `owner: None`; enrichment runs later
+        //    with `module_index` and fixes the owner once the
+        //    receiver type is resolvable. Same precedent as
+        //    cross-file invocant refresh (PR #34): build emits
+        //    what it can; enrichment fills gaps.
+        enum Path<'a> {
+            Claimed(HashKeyOwner, Node<'a>),
+            Strict(HashKeyOwner, Node<'a>),
+            Deferred(Node<'a>),
+        }
+        let mut pending: Vec<Path<'a>> = Vec::new();
         for (i, r) in self.refs.iter().enumerate() {
             if !matches!(r.kind, RefKind::MethodCall { .. }) {
                 continue;
@@ -6508,45 +6659,106 @@ impl<'a> Builder<'a> {
                     _ => continue,
                 })
                 .copied();
-            // Two paths for hash-key arg owner:
-            //
-            //  * **Parametric receiver claims the method.** Ask the
-            //    flavor: `p.method_arg_owner(method_name)`. `Some`
-            //    means "I claim this method's args; emit
-            //    unconditionally with this owner — the type is the
-            //    gate." Returns the row class (Class owner) for
-            //    DBIC's row-keyed methods (search, find, create,
-            //    update, ...) and None for count/exists. Cross-
-            //    file producer's HashKeyDef may not be visible at
-            //    consumer build; the type already pinned the class.
-            //  * **Non-Parametric / unclaimed.** Fall through to
-            //    `Sub { package: receiver, name: method }` strict-
-            //    eq path. Constructor keys (Mojo `has`) etc.
             let inv_ty = invocant_node.and_then(|n| self.invocant_type_at_node(n));
-            let claimed = inv_ty
+            if let Some(claimed) = inv_ty
                 .as_ref()
                 .and_then(|ty| ty.as_parametric())
-                .and_then(|p| p.method_arg_owner(&r.target_name));
-            let (owner, parametric) = match claimed {
-                Some(o) => (o, true),
-                None => {
-                    let Some(cls) = self.method_call_invocant.get(&i) else { continue };
-                    (
-                        HashKeyOwner::Sub {
-                            package: Some(cls.clone()),
-                            name: r.target_name.clone(),
-                        },
-                        false,
-                    )
-                }
-            };
-            pending.push((owner, args, parametric));
+                .and_then(|p| p.method_arg_owner(&r.target_name))
+            {
+                pending.push(Path::Claimed(claimed, args));
+                continue;
+            }
+            if let Some(cls) = self.method_call_invocant.get(&i) {
+                pending.push(Path::Strict(
+                    HashKeyOwner::Sub {
+                        package: Some(cls.clone()),
+                        name: r.target_name.clone(),
+                    },
+                    args,
+                ));
+                continue;
+            }
+            // Receiver type unresolvable at build. Only defer for
+            // chain receivers — bareword/variable receivers that
+            // didn't type are likely user-error or untyped code,
+            // not cross-file. Chain receivers (invocant is a
+            // method-call expression) are exactly the case
+            // post-enrichment can fix.
+            let is_chain_receiver = invocant_node
+                .map(|n| n.kind() == "method_call_expression")
+                .unwrap_or(false);
+            if is_chain_receiver {
+                pending.push(Path::Deferred(args));
+            }
         }
-        for (owner, args, parametric) in pending {
-            if parametric {
-                self.emit_call_arg_key_accesses_open(args, &owner);
-            } else {
-                self.emit_call_arg_key_accesses(args, &owner);
+        for path in pending {
+            match path {
+                Path::Claimed(owner, args) => {
+                    self.emit_call_arg_key_accesses_open(args, &owner);
+                }
+                Path::Strict(owner, args) => {
+                    self.emit_call_arg_key_accesses(args, &owner);
+                }
+                Path::Deferred(args) => {
+                    self.emit_call_arg_key_accesses_deferred(args);
+                }
+            }
+        }
+    }
+
+    /// Emit `HashKeyAccess` refs for fat-comma keys in a method-
+    /// call's args with `owner: None`. Enrichment fixes the
+    /// owner post-build once `module_index` makes the receiver
+    /// type resolvable. Same emission shape as `_open`, just
+    /// with no owner pinned. Used when the receiver is a chain
+    /// of method calls whose return type lives in another file
+    /// — build can't resolve cross-file, but the keys still need
+    /// HashKeyAccess refs in the FA so `refs_to` finds them
+    /// after enrichment.
+    fn emit_call_arg_key_accesses_deferred(&mut self, args_node: Node<'a>) {
+        let mut effective = args_node;
+        if matches!(effective.kind(), "anonymous_hash_expression" | "parenthesized_expression")
+            && effective.named_child_count() == 1
+        {
+            if let Some(inner) = effective.named_child(0) {
+                if matches!(inner.kind(), "list_expression" | "anonymous_hash_expression") {
+                    effective = inner;
+                }
+            }
+        }
+        let named: Vec<Node<'a>> = (0..effective.named_child_count())
+            .filter_map(|i| effective.named_child(i))
+            .collect();
+        if named.len() < 2
+            && effective.kind() != "list_expression"
+            && effective.kind() != "parenthesized_expression"
+        {
+            return;
+        }
+        for (idx, child) in named.iter().enumerate() {
+            if idx % 2 == 0
+                && matches!(
+                    child.kind(),
+                    "bareword" | "autoquoted_bareword" | "string_literal" | "interpolated_string_literal"
+                )
+            {
+                if let Some((key, is_dynamic)) = self.extract_key_text(*child) {
+                    if !is_dynamic {
+                        let access = self.determine_access(*child);
+                        let span = node_to_span(*child);
+                        self.refs.push(Ref {
+                            kind: RefKind::HashKeyAccess {
+                                var_text: String::new(),
+                                owner: None,
+                            },
+                            span,
+                            scope: self.scope_at_point(span.start),
+                            target_name: key,
+                            access,
+                            resolves_to: None,
+                        });
+                    }
+                }
             }
         }
     }
@@ -7188,19 +7400,47 @@ impl<'a> Builder<'a> {
             } else {
                 false
             };
-            // Symbol writeback: only when this sym has a resolved
-            // return type. The single source of truth is
-            // `resolved_returns` — walk-time synthesis writes there,
-            // worklist's first pass above updates it.
-            let Some(rt) = self.resolved_returns.get(&sym.id).cloned() else { continue };
-            writeback_witnesses.push(Witness {
-                attachment: WitnessAttachment::Symbol(sym.id),
-                source: WitnessSource::Builder("local_return".into()),
-                payload: WitnessPayload::InferredType(rt.clone()),
-                span: sym.span,
-            });
+            // Symbol writeback: when this sym has a resolved
+            // return type, push it. Two sources:
+            //   * `resolved_returns` — walk-time synthesis +
+            //     worklist's per-name folds. Concrete InferredType.
+            //   * pre-existing `Symbol(sid)` witness with
+            //     `Edge(_)` payload — plugin-emitted lazy return
+            //     (mojo-helpers' `return_via_edge` shape). The
+            //     synthesis emits ONLY on `Symbol(sid)`; this
+            //     writeback mirrors to `MethodOnClass{class, name}`
+            //     for class-scoped synth so cross-file lookup
+            //     reaches it via the same path concrete returns
+            //     use.
+            let payload_for_writeback: Option<WitnessPayload> =
+                if let Some(rt) = self.resolved_returns.get(&sym.id) {
+                    Some(WitnessPayload::InferredType(rt.clone()))
+                } else {
+                    self.bag
+                        .all()
+                        .iter()
+                        .find(|w| {
+                            matches!(&w.attachment, WitnessAttachment::Symbol(s) if *s == sym.id)
+                                && matches!(w.payload, WitnessPayload::Edge(_))
+                        })
+                        .map(|w| w.payload.clone())
+                };
+            let Some(payload) = payload_for_writeback else { continue };
+            // Concrete return types come through `resolved_returns`
+            // and need pushing on Symbol(sid). Edge-payload returns
+            // were already emitted on Symbol(sid) by the plugin;
+            // skip re-pushing those (would duplicate the witness).
+            let already_on_symbol = matches!(payload, WitnessPayload::Edge(_));
+            if !already_on_symbol {
+                writeback_witnesses.push(Witness {
+                    attachment: WitnessAttachment::Symbol(sym.id),
+                    source: WitnessSource::Builder("local_return".into()),
+                    payload: payload.clone(),
+                    span: sym.span,
+                });
+            }
             // MethodOnClass primary: only the primary (first sym for
-            // (class, name)) publishes the plain `InferredType` slot.
+            // (class, name)) publishes the plain payload slot.
             // Secondary syms participate via `ArityReturn`
             // observations only.
             if is_primary {
@@ -7211,7 +7451,7 @@ impl<'a> Builder<'a> {
                             name: sym.name.clone(),
                         },
                         source: WitnessSource::Builder("local_return".into()),
-                        payload: WitnessPayload::InferredType(rt),
+                        payload,
                         span: sym.span,
                     });
                 }

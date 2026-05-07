@@ -1276,8 +1276,68 @@ impl FileAnalysis {
     /// mirror; they resolve lazily through `query_sub_return_type`.
     pub(crate) fn finalize_post_walk(&mut self) {
         self.resolve_method_call_types(None);
+        // Fill HashKeyAccess owners that are resolvable in-file
+        // via the chain-recursion dispatcher
+        // (`method_call_invocant_type`'s `call_ref_by_start`
+        // walk). Cross-file gaps stay None until
+        // `enrich_imported_types_with_keys` re-runs the same
+        // routine with `module_index`.
+        self.fix_chain_receiver_hash_key_owners(None);
         self.base_symbol_count = self.symbols.len();
         self.base_witness_count = self.witnesses.len();
+    }
+
+    /// Set the `owner` on `HashKeyAccess { owner: None, .. }` refs
+    /// whose enclosing `MethodCall`'s receiver types as a
+    /// `Parametric` flavor that claims this method's args (DBIC's
+    /// `search`/`find`/`update`/...). Build emits these refs
+    /// eagerly with `owner: None` for chain receivers it can't
+    /// resolve at walk time; this routine fills them once the
+    /// receiver's type is resolvable.
+    ///
+    /// `module_index = None` resolves only in-file chains. The
+    /// same routine runs from enrichment with `module_index =
+    /// Some(_)` to fill cross-file gaps. Idempotent — only None-
+    /// owner refs are touched, so a second run leaves them alone.
+    fn fix_chain_receiver_hash_key_owners(&mut self, module_index: Option<&ModuleIndex>) {
+        let mut owner_fixes: Vec<(usize, HashKeyOwner)> = Vec::new();
+        for (i, r) in self.refs.iter().enumerate() {
+            if !matches!(r.kind, RefKind::HashKeyAccess { owner: None, .. }) {
+                continue;
+            }
+            // Find the enclosing MethodCall ref by span
+            // containment — smallest-span containing MethodCall
+            // wins (innermost call's args).
+            let mut enclosing: Option<&Ref> = None;
+            let mut enclosing_area: u64 = u64::MAX;
+            for other in &self.refs {
+                if !matches!(other.kind, RefKind::MethodCall { .. }) {
+                    continue;
+                }
+                if !contains_point(&other.span, r.span.start) {
+                    continue;
+                }
+                let area = (other.span.end.row.saturating_sub(other.span.start.row)) as u64
+                    * 10_000
+                    + other.span.end.column as u64;
+                if area < enclosing_area {
+                    enclosing = Some(other);
+                    enclosing_area = area;
+                }
+            }
+            let Some(call) = enclosing else { continue };
+            let Some(ty) = self.method_call_invocant_type(call, module_index) else {
+                continue;
+            };
+            let Some(p) = ty.as_parametric() else { continue };
+            let Some(o) = p.method_arg_owner(&call.target_name) else { continue };
+            owner_fixes.push((i, o));
+        }
+        for (i, o) in owner_fixes {
+            if let RefKind::HashKeyAccess { ref mut owner, .. } = self.refs[i].kind {
+                *owner = Some(o);
+            }
+        }
     }
 
 
@@ -1866,6 +1926,15 @@ impl FileAnalysis {
                 }
             }
         }
+
+        // Deferred HashKeyAccess owner fix for chain-receiver
+        // method calls — see `fix_chain_receiver_hash_key_owners`.
+        // Enrichment runs it with module_index so cross-file
+        // receiver types resolve; the same routine runs from
+        // `finalize_post_walk` with module_index=None for the
+        // in-file-resolvable case (chain recursion via
+        // `call_ref_by_start` doesn't need module_index).
+        self.fix_chain_receiver_hash_key_owners(module_index);
 
         // Cross-file inheritance edges. Local writeback emits
         // `MethodOnClass(child, m) → Edge(MethodOnClass(parent, m))`

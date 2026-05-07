@@ -463,3 +463,191 @@ $schema->frobnicate('Schema::Result::Users')->search({{ name => 'X' }});
         def,
     );
 }
+
+// ─────────────────────────────────────────────────────────────────
+// Composition stress tests — verify the architecture pieces
+// (const folding + Parametric emission + RowOf projection +
+// Mojo helper synthesis + cross-file enrichment) compose without
+// per-scenario seam fixes. Failures here mean a real
+// architectural gap, not a missing test.
+// ─────────────────────────────────────────────────────────────────
+
+/// **Composition: const-folded resultset arg.**
+/// `my $sner = 'Schema::Result::Sner'; $schema->resultset($sner)
+/// ->search({ name => ... })` — column completion via a
+/// resultset whose row class is named via a scalar constant
+/// rather than a string literal. Exercises the const-folding
+/// path in `extract_resultset_parametric`.
+#[test]
+fn const_folded_resultset_arg_resolves_columns() {
+    let src = "
+package Schema::Result::Sner;
+use base 'DBIx::Class::Core';
+__PACKAGE__->add_columns(
+    name => { data_type => 'varchar' },
+);
+
+package main;
+my $schema;
+my $sner = 'Schema::Result::Sner';
+$schema->resultset($sner)->search({ name => 'foo' });
+";
+    let (fa, tree) = parse_with_tree(src);
+    let pt = point_at(src, "name => 'foo'");
+    let def = fa.find_definition(pt, Some(&tree), Some(src.as_bytes()), None);
+    assert!(
+        def.is_some(),
+        "const-folded `resultset($$sner)` must thread Parametric \
+         through to column completion. got: {:?}",
+        def,
+    );
+    // Row should be the `name => { data_type ... }` line in
+    // Schema::Result::Sner (line 4).
+    assert_eq!(def.unwrap().start.row, 4);
+}
+
+/// **Composition: const folding + RowOf + method dispatch.**
+/// `my $row = $schema->resultset($sner)->find(1); $row->name`
+/// — const fold gives Parametric; find projects through RowOf;
+/// $row types as the row class; `->name` dispatches to the
+/// column accessor. Tests that the projection composes through
+/// const folding the same as it does through literal args.
+#[test]
+fn const_folded_resultset_find_to_row_method_dispatch() {
+    let src = "
+package Schema::Result::Sner;
+use base 'DBIx::Class::Core';
+__PACKAGE__->add_columns(
+    name => { data_type => 'varchar' },
+);
+
+package main;
+my $schema;
+my $sner = 'Schema::Result::Sner';
+my $row = $schema->resultset($sner)->find(1);
+$row->name;
+";
+    let (fa, tree) = parse_with_tree(src);
+    let pt = point_at(src, "->name");
+    let pt = Point::new(pt.row, pt.column + 2);
+    let def = fa.find_definition(pt, Some(&tree), Some(src.as_bytes()), None);
+    assert!(
+        def.is_some(),
+        "const-fold + find→row composition must let `$$row->name` \
+         resolve to the column accessor. got: {:?}",
+        def,
+    );
+    assert_eq!(def.unwrap().start.row, 4);
+}
+
+/// **Composition: in-file Mojo helper returning Parametric.**
+/// Single-file variant — helper synth + edge-back-pointer + body-
+/// inferred Parametric return type compose during one builder
+/// pass. The action's package inherits from Mojolicious::Controller
+/// via `Mojo::Base`, so `visit_sub`'s `pkg_is_subclass` check
+/// marks `$c = shift` as the invocant — `$c` types as the
+/// controller class, method dispatch walks parents up to the
+/// helper's bridged namespace.
+#[test]
+fn mojo_helper_returning_resultset_composes_in_file() {
+    let src = "
+package Schema::Result::Sner;
+use base 'DBIx::Class::Core';
+__PACKAGE__->add_columns(
+    name => { data_type => 'varchar' },
+);
+
+package MyApp;
+use Mojo::Base 'Mojolicious';
+my $schema;
+my $app;
+$app->helper(sner_r => sub {
+    my $sner = 'Schema::Result::Sner';
+    return $schema->resultset($sner);
+});
+
+package MyApp::Controller::X;
+use Mojo::Base 'Mojolicious::Controller';
+sub action {
+    my $c = shift;
+    $c->sner_r->search({ name => 'foo' });
+}
+1;
+";
+    let (fa, tree) = parse_with_tree(src);
+    let pt = point_at(src, "name => 'foo'");
+    let def = fa.find_definition(pt, Some(&tree), Some(src.as_bytes()), None);
+    assert!(
+        def.is_some(),
+        "in-file helper composition (helper synth + return_via_edge \
+         + Parametric body inference + parent-chain dispatch + row-\
+         class hash-key narrowing) must let `$$c->sner_r->search\
+         ({{ name }})` resolve to Sner's column. got: {:?}",
+        def,
+    );
+    assert_eq!(def.unwrap().start.row, 4);
+}
+
+/// **Composition: same as the in-file test, split across two
+/// files.** Producer declares `Schema::Result::Sner` + the
+/// `MyApp` helper; consumer is a Mojolicious::Controller subclass
+/// using the helper. `refs_to(HashKeyOfClass(Sner), name)` should
+/// find the consumer's call site if cross-file enrichment carries
+/// the Parametric all the way through.
+#[test]
+fn mojo_helper_returning_resultset_composes_cross_file() {
+    let producer_src = "
+package Schema::Result::Sner;
+use base 'DBIx::Class::Core';
+__PACKAGE__->add_columns(
+    name => { data_type => 'varchar' },
+);
+
+package MyApp;
+use Mojo::Base 'Mojolicious';
+my $schema;
+my $app;
+$app->helper(sner_r => sub {
+    my $sner = 'Schema::Result::Sner';
+    return $schema->resultset($sner);
+});
+1;
+";
+    let consumer_src = "
+package MyApp::Controller::X;
+use Mojo::Base 'Mojolicious::Controller';
+sub action {
+    my $c = shift;
+    $c->sner_r->search({ name => 'foo' });
+}
+1;
+";
+    let producer_path = PathBuf::from("/tmp/composition_producer.pm");
+    let consumer_path = PathBuf::from("/tmp/composition_consumer.pm");
+
+    let idx = ModuleIndex::new_for_test();
+    idx.register_workspace_module(producer_path.clone(), Arc::new(parse(producer_src)));
+
+    let mut consumer_fa = parse(consumer_src);
+    consumer_fa.enrich_imported_types_with_keys(Some(&idx));
+
+    let store = FileStore::new();
+    store.insert_workspace(producer_path.clone(), parse(producer_src));
+    store.insert_workspace(consumer_path.clone(), consumer_fa);
+
+    let target = TargetRef {
+        name: "name".to_string(),
+        kind: TargetKind::HashKeyOfClass("Schema::Result::Sner".to_string()),
+    };
+    let refs = refs_to(&store, Some(&idx), &target, RoleMask::WORKSPACE);
+    let consumer_hit = refs
+        .iter()
+        .any(|r| matches!(&r.key, FileKey::Path(p) if p == &consumer_path));
+    assert!(
+        consumer_hit,
+        "Mojo helper returning Parametric ResultSet must compose \
+         cross-file via the namespace bridge + edge-back-pointer + \
+         enrichment. hits: {:?}",
+        refs.iter().map(|r| (&r.key, r.span.start.row)).collect::<Vec<_>>(),
+    );
+}
