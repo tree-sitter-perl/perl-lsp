@@ -8646,3 +8646,45 @@ my $m = MooApp->new('a', 1, 'b', 2);
         "both even-position args (`'a'`, `'b'`) must emit HashKeyAccess",
     );
 }
+
+/// Red-pin: known regression introduced by D4-E (commit 80b2b88).
+/// `longmess` calls `longmess_heavy` which is defined later in the
+/// source. Both arms of the if/else return that call, so the chain
+/// should fold to String. It currently folds to None because
+/// `expr_payload`'s `function_call_expression` arm does a walk-time
+/// `self.symbols.iter().find(name)` that misses forward references —
+/// the post-walk `emit_delegation_edges` pass that used to cover this
+/// case in D3 was removed without an equivalent.
+///
+/// Spec: docs/prompt-forward-reference-resolution.md.
+/// Reverse the order of the two subs in the source and the test
+/// passes. When the spec lands, drop `#[ignore]` and add coverage for
+/// method calls + scoped-identifier calls.
+#[test]
+#[ignore = "forward-reference regression — see docs/prompt-forward-reference-resolution.md"]
+fn forward_reference_call_in_sub_return_resolves() {
+    let src = r#"
+package main;
+
+sub longmess {
+    if ($_[0]) {
+        return longmess_heavy(@_);
+    }
+    else {
+        return longmess_heavy(@_);
+    }
+}
+
+sub longmess_heavy { return "ouch"; }
+"#;
+    let fa = build_fa(src);
+    let rt = fa.sub_return_type_at_arity("longmess", None);
+    assert_eq!(
+        rt,
+        Some(InferredType::String),
+        "longmess must fold to String through both arms — \
+         got {:?}. Walk-order regression: longmess_heavy is \
+         defined after longmess.",
+        rt,
+    );
+}
