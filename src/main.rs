@@ -82,6 +82,10 @@ async fn main() {
             cli_dump_package(&args[2], &args[3]);
             return;
         }
+        Some("--clear-cache") => {
+            cli_clear_cache(args.get(2).map(|s| s.as_str()));
+            return;
+        }
         _ => {}
     }
 
@@ -122,6 +126,9 @@ fn print_usage() {
     eprintln!("DEBUG:");
     eprintln!("  perl-lsp --dump-package <root> <package>               Dump every sub in <package>");
     eprintln!("                                                         with derived type info");
+    eprintln!("  perl-lsp --clear-cache [<root>]                        Wipe the module cache for");
+    eprintln!("                                                         <root>, or every project if");
+    eprintln!("                                                         <root> is omitted");
     eprintln!();
     eprintln!("  perl-lsp --version                                     Print version");
 }
@@ -933,4 +940,50 @@ fn cli_workspace_symbol(root: &str, query: &str) {
 
     eprintln!("{} symbols matching '{}'", results.len(), query);
     println!("{}", serde_json::to_string_pretty(&results).unwrap());
+}
+
+/// --clear-cache [<root>] — Remove the SQLite module cache.
+///
+/// Without `<root>`: nuke the entire `~/.cache/perl-lsp` (or
+/// `$XDG_CACHE_HOME/perl-lsp`) tree — every project the user has
+/// touched. With `<root>`: only the per-project cache dir
+/// (`<base>/<workspace_hash>`) is removed; other projects keep theirs.
+///
+/// `<root>` is canonicalized and joined with `file://` to match the
+/// hash key the LSP server and `cli_full_startup` write under (the
+/// initialize request hands a `file://` URI; both CLI and server feed
+/// that string into `cache_dir_for_workspace`). Without canonicalizing
+/// here a relative path would hash to a different bucket and silently
+/// "clear" a non-existent dir.
+///
+/// On the next LSP start the cache is recreated from scratch — the
+/// resolver re-resolves modules lazily and the workspace indexer
+/// re-walks the tree. Pure side-effect command; prints what was
+/// removed so it's obvious whether anything happened.
+fn cli_clear_cache(root: Option<&str>) {
+    let target = match root {
+        Some(r) => {
+            let root_path = std::path::Path::new(r)
+                .canonicalize()
+                .unwrap_or_else(|_| std::path::PathBuf::from(r));
+            let root_uri = format!("file://{}", root_path.display());
+            module_cache::cache_dir_for_workspace(Some(&root_uri))
+        }
+        None => module_cache::cache_base_dir(),
+    };
+    let Some(path) = target else {
+        eprintln!("Cannot determine cache dir: $HOME and $XDG_CACHE_HOME are both unset");
+        std::process::exit(1);
+    };
+    if !path.exists() {
+        eprintln!("Cache already absent: {}", path.display());
+        return;
+    }
+    match std::fs::remove_dir_all(&path) {
+        Ok(()) => eprintln!("Cleared cache: {}", path.display()),
+        Err(e) => {
+            eprintln!("Failed to remove {}: {}", path.display(), e);
+            std::process::exit(1);
+        }
+    }
 }
