@@ -97,19 +97,17 @@ type's witness with cross-file evidence; local emission becomes
 ## Cost estimate
 
 Inventory of strict-eq gates that would migrate:
-- `has_hash_key_def` (1 site, builder.rs:5860) — already handled
-  by Part 5c's `_open` sibling.
-- `find_param_field` (1 site, file_analysis.rs) — Perl 5.38 :param
-  resolution. Cross-file `Class :param` declarations would
-  similarly miss without a Parametric-aware path. Lower frequency
-  than DBIC, hasn't bitten yet.
-- `resolve_method_in_ancestors` (1 site, file_analysis.rs ancestor
-  walk) — already cross-file aware via `module_index`. Not strict-
-  eq exactly; uses `package_parents` to walk MRO. Different
-  pattern.
-- `symbols_named` for cross-file (multiple sites) — these
-  generally ARE cross-file aware via `module_index.find_exporters`.
-  Specific to the imported-sub flow.
+- `has_hash_key_def` — already handled by Part 5c's `_open`
+  sibling.
+- `find_param_field` — Perl 5.38 :param resolution. Cross-file
+  `Class :param` declarations would similarly miss without a
+  Parametric-aware path. Lower frequency than DBIC, hasn't bitten
+  yet.
+- `resolve_method_in_ancestors` — already cross-file aware via
+  `module_index`. Not strict-eq exactly; uses `package_parents` to
+  walk MRO. Different pattern.
+- `symbols_named` for cross-file — generally cross-file aware via
+  `module_index.find_exporters`. Specific to the imported-sub flow.
 
 Realistic migration: probably 3-5 sites per direction (gate-strip,
 or generic helper introduction), maybe 50-80 LOC of refactor + new

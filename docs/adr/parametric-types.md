@@ -167,22 +167,14 @@ v2 redesign. Bumping is free; old blobs re-resolve lazily.
 
 ## Where this is going
 
-- **Receiver-relative return types.** `return_type: ReturnExpr`
-  admitting `Receiver` placeholders + `UnionOnArgs` branches —
-  subsumes per-method projection (`find` declares
-  `RowOf(Receiver)` once on the symbol) AND arity dispatch
-  (Mojo `has` accessors as `{ args.is_empty() => T, _ => Self }`,
-  retiring `FluentArityDispatch`). Spec'd in
-  `docs/prompt-return-type-expressions.md`.
-- **DBIC out of core.** The `visit_dbic_*` family + Phase 1
-  emission move to a plugin. Per-method projection table moves
-  from "in core" to "operators emitted by the plugin." Spec:
-  `docs/prompt-dbic-as-plugin.md`.
-- **Nested hash-key (Tiers 1–3).** Recursive flavor fields
-  already in place; emission + consumer narrowing is its own
-  workstream. Spec: `docs/prompt-nested-hashkey.md`.
-- **Plugin escape hatch.** Deferred. Compiler exhaustiveness
-  forces correct addition when motivated.
+The next pillar is receiver-relative return types: `return_type`
+becomes a `ReturnExpr` admitting `Receiver` placeholders and
+`UnionOnArgs` branches, so `find` declares `RowOf(Receiver)` once
+on the symbol instead of every call site emitting it. Same shape
+subsumes Mojo `has`'s arity dispatch. Spec:
+`docs/prompt-return-type-expressions.md`. The DBIC port, nested-
+hash-key tiers, and the deferred `Plugin` escape hatch all queue
+behind it — the ROADMAP carries their order.
 
 ## Test discipline
 

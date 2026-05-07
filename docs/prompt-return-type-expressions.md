@@ -5,26 +5,14 @@ flavor redesign (`docs/adr/parametric-types.md`). Subsumes per-
 method projection (DBIC `find` etc.) AND arity dispatch (Mojo
 `has` accessors) in one mechanism.
 
-## What it replaces
-
-Today's call-site emitter (`extract_resultset_parametric` +
-flavor `return_projection`) emits `Parametric(RowOf(receiver))`
-on each `find` / `first` / etc. call. That works for in-tree
-DBIC, but the per-method table lives at the call site rather
-than on the symbol. Plugins (DBIC port, GraphQL, Mojo::Pg, …)
-end up duplicating the same shape: "this method projects the
-receiver through some operator."
-
-Today's arity dispatch (`FluentArityDispatch` + `ArityReturn`
-observation + bespoke reducer) is the same kind of fact —
-Mojo `has 'name' => 'default'` synthesizes a 0-arg getter
-returning String AND a 1-arg writer returning `$self`. Today
-it's a per-arm `ArityReturn` witness consumed by an
-arity-specific reducer.
-
-Both shapes are "the symbol's return type depends on context"
-— in one case the receiver, in the other the args. One
-mechanism handles both.
+Two existing mechanisms collapse into one: the call-site emitter
+that bakes per-method projection (`extract_resultset_parametric` +
+flavor `return_projection`), and the arity-dispatch family
+(`FluentArityDispatch` + `ArityReturn` + its bespoke reducer).
+Both are "the symbol's return type depends on context" — receiver
+in one case, args in the other. Symbol-declarative wins for the
+same reason `RowOf` did: the rule belongs on the type, not at
+every call site.
 
 ## The shape
 
