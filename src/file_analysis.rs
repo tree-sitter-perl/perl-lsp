@@ -5620,3 +5620,7 @@ mod tests;
 #[cfg(test)]
 #[path = "call_ref_index_tests.rs"]
 mod call_ref_index_tests;
+
+#[cfg(test)]
+#[path = "parametric_resultset_tests.rs"]
+mod parametric_resultset_tests;
