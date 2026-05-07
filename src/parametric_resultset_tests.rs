@@ -361,7 +361,6 @@ $schema->resultset('Schema::Result::Users')->search({ name => 'X' });
 /// to the plugin's parametric-semantics declaration (see
 /// `docs/prompt-dbic-as-plugin.md` + `docs/prompt-parametric-semantics.md`).
 #[test]
-#[ignore = "per-method return-type projection (search→preserve, find→row) queued with DBIC plugin work"]
 fn method_dispatch_through_find_resolves_to_row_class() {
     let src = format!(
         "{}
@@ -399,7 +398,6 @@ my $name = $schema->resultset('Schema::Result::Users')->find(1)->name;
 /// so the gap is visible in the test list, not invisible in the
 /// roadmap.
 #[test]
-#[ignore = "custom resultset_class discovery — follow-up phase, see prompt-type-inference-residual.md Part 5c"]
 fn goto_def_offers_custom_resultset_method() {
     let src = r#"
 package Schema::Result::Users;

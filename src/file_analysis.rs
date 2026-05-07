@@ -614,6 +614,40 @@ impl ParametricType {
             ParametricType::RowOf(_) => None,
         }
     }
+
+    /// Return-type projection for `recv->method(...)`. `Some(p)`
+    /// means the call site emits a witness of `Parametric(p)` —
+    /// the flavor declares that this method projects through
+    /// some operator. `None` means default (fall through to
+    /// standard `MethodOnClass` resolution).
+    ///
+    /// ResultSet projects through `RowOf<self>` for methods that
+    /// return a single row (find / first / single / next /
+    /// create / find_or_new / find_or_create / update_or_create
+    /// / new_result). search / search_rs preserve the Parametric
+    /// (no projection — they return the same ResultSet shape);
+    /// the absence of an entry here means "preserve via the
+    /// standard return-type resolution."  count / exists return
+    /// Numeric and aren't represented as projections — they fall
+    /// through to whatever cross-file lookup of the method's
+    /// return type yields.
+    ///
+    /// Per CLAUDE.md #10: each flavor's projections live in its
+    /// own match arm. New flavors add their own; consumers
+    /// dispatch generically.
+    pub fn return_projection(&self, method: &str) -> Option<ParametricType> {
+        match self {
+            ParametricType::ResultSet { .. } => match method {
+                "find" | "first" | "single" | "next" | "create"
+                | "find_or_new" | "find_or_create" | "update_or_create"
+                | "new_result" => Some(ParametricType::RowOf(Box::new(
+                    InferredType::Parametric(self.clone()),
+                ))),
+                _ => None,
+            },
+            ParametricType::RowOf(_) => None,
+        }
+    }
 }
 
 impl InferredType {

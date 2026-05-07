@@ -5059,6 +5059,49 @@ impl<'a> Builder<'a> {
                         span: r_span,
                     });
                 }
+
+                // Per-flavor return-type projection. When the
+                // receiver types as a Parametric flavor and the
+                // flavor declares a `return_projection(method)`
+                // (e.g. ResultSet projects through `RowOf<self>`
+                // for find / first / single / next / create /
+                // find_or_new / find_or_create / update_or_create
+                // / new_result), emit the projected operator on
+                // this call's `Expression(refidx)`. The bag's
+                // `class_name()` evaluation reduces the operator
+                // when consumed (`RowOf<ResultSet { row }>` →
+                // `ClassName(row)`), so chain typing through
+                // `my $row = $rs->find(...)` gives `$row` the
+                // row class. No method allowlist in core: the
+                // flavor owns its projection table (CLAUDE.md
+                // #10).
+                //
+                // Co-located with the `extract_resultset_parametric`
+                // emission so the DBIC plugin port lifts both in
+                // one shot.
+                if let Some(inv_node) = invocant_node {
+                    if let Some(recv_ty) = self.invocant_type_at_node(inv_node) {
+                        if let Some(proj) = recv_ty
+                            .as_parametric()
+                            .and_then(|p| p.return_projection(name))
+                        {
+                            self.parametric_emitted_refs.insert(idx);
+                            let r_span = self.refs[idx].span;
+                            self.bag.push(crate::witnesses::Witness {
+                                attachment: crate::witnesses::WitnessAttachment::Expression(
+                                    crate::witnesses::RefIdx(idx as u32),
+                                ),
+                                source: crate::witnesses::WitnessSource::Builder(
+                                    "parametric_projection".into(),
+                                ),
+                                payload: crate::witnesses::WitnessPayload::InferredType(
+                                    InferredType::Parametric(proj),
+                                ),
+                                span: r_span,
+                            });
+                        }
+                    }
+                }
             }
         }
 
@@ -5636,16 +5679,20 @@ impl<'a> Builder<'a> {
         None
     }
 
-    /// `recv->resultset('Foo')` → `Parametric { base:
-    /// "DBIx::Class::ResultSet", type_args: [Class("Foo")] }`. The
-    /// receiver doesn't have to be schema-typed — DBIC's `resultset`
-    /// method name is rare enough on non-schema receivers that the
-    /// false-positive rate is negligible, and gating on
-    /// schema-typed-ness would lose the case where the schema's
-    /// type isn't yet known (cross-file imports during enrichment).
-    /// First arg must be a string literal (`'Foo'` or `"Foo"`); a
-    /// non-literal (variable, computed) means the row class is
-    /// dynamic and we don't claim.
+    /// `recv->resultset('Foo')` → `Parametric(ResultSet { base,
+    /// row })`. `base` is discovered via the
+    /// `<NS>::Result::<X>` ↔ `<NS>::ResultSet::<X>` convention if
+    /// that class exists in this file; otherwise falls back to
+    /// `DBIx::Class::ResultSet` (the universal DBIC default that
+    /// runtime DBIC creates dynamically when no custom resultset
+    /// class is defined). The fallback hardcode is core-resident
+    /// for now — the DBIC plugin (queued, see
+    /// `docs/prompt-dbic-as-plugin.md`) will own it once the port
+    /// lands.
+    ///
+    /// First arg must be a string literal — a non-literal
+    /// (variable, computed) means the row class is dynamic and
+    /// we don't claim.
     fn extract_resultset_parametric(&self, node: Node<'a>) -> Option<InferredType> {
         if node.kind() != "method_call_expression" {
             return None;
@@ -5656,10 +5703,35 @@ impl<'a> Builder<'a> {
         }
         let args = node.child_by_field_name("arguments")?;
         let row_class = self.first_string_literal_arg(args)?;
+        let base = self
+            .discover_resultset_class(&row_class)
+            .unwrap_or_else(|| "DBIx::Class::ResultSet".to_string());
         Some(InferredType::Parametric(crate::file_analysis::ParametricType::ResultSet {
-            base: "DBIx::Class::ResultSet".to_string(),
+            base,
             row: row_class,
         }))
+    }
+
+    /// Discover the resultset class for a given row class via the
+    /// `<NS>::Result::<X>` ↔ `<NS>::ResultSet::<X>` convention.
+    /// Returns `Some(class)` only when the discovered class is
+    /// declared in the file's symbols (`SymKind::Package` or
+    /// `SymKind::Class`). Cross-file discovery (looking up
+    /// `<NS>::ResultSet::<X>` in `module_index`) is queued with
+    /// the DBIC plugin port — most projects keep the row class
+    /// and resultset class in sibling files of the same dist,
+    /// so this in-file discovery covers the common case until
+    /// the plugin lands.
+    fn discover_resultset_class(&self, row_class: &str) -> Option<String> {
+        if !row_class.contains("::Result::") {
+            return None;
+        }
+        let candidate = row_class.replacen("::Result::", "::ResultSet::", 1);
+        let exists = self.symbols.iter().any(|s| {
+            s.name == candidate
+                && matches!(s.kind, SymKind::Package | SymKind::Class)
+        });
+        if exists { Some(candidate) } else { None }
     }
 
     /// First named child of a call-arg node that's a string literal,
