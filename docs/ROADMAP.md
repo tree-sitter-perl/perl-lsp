@@ -29,6 +29,10 @@ Four docs, one engine:
 | `prompt-cross-file-invocant-refresh.md` | **REGRESSION** — `invocant_class` cache stale after enrichment, cross-file refs under-match | **LANDED (PR #34)** — bag-only resolver |
 | `prompt-type-inference-residual.md` | **WHAT'S MISSING** — Parts 1–5 fact classes | each is a reducer+emitter pair |
 | `prompt-nested-hashkey.md` | **FOLLOW-UP TO 5C** — hash-key intelligence on Parametric values + structural hashes + array-element narrowing | three tiers (~30 / ~150 / ~50 LOC) |
+| `prompt-parametric-semantics.md` | **PER-FLAVOR PARAMETRIC SEMANTICS** — pluggable `hash_key_class` / `element_type` / `dispatch_class` per parametric base; required for non-DBIC parametrics (Promise, Mojo::Collection, GraphQL) | open discussion; queued before DBIC plugin port |
+| `prompt-type-system-encoding.md` | **TYPE-SAFE AXIS DISPATCH** — make wrong-axis class-name reads unrepresentable; covers the dual-class problem + the two-bag-attachments seam | discussion; partially deferred to graph-walking |
+| `prompt-type-is-the-gate.md` | **GENERALIZE STRICT-EQ GATES** — `type_says()` answers replace local-symbol-table presence checks; cross-file completeness story | defer until 2nd site arrives |
+| `prompt-dbic-as-plugin.md` | **MOVE DBIC OUT OF CORE** — port `visit_dbic_*` family + Parametric emission + custom resultset_class discovery to a plugin | queued behind parametric-semantics + type-system-encoding |
 | `prompt-sequence-types.md` | **FIRST BIG CONSUMER** — sequence type lattice | 5 phases; ~half the spike's diff on a clean foundation |
 
 ### Dependency map
@@ -90,6 +94,29 @@ regression backlog gating them.
   ~30 LOC, may bundle into the 5c PR; (2) structurally-typed hash literals
   + chain narrowing (`$config->{db}->{host}`), ~150 LOC, own PR; (3)
   array-element narrowing for `$obj->{users}->[0]->{name}`, ~50 LOC on top.
+- **Per-flavor parametric semantics** (`docs/prompt-parametric-semantics.md`)
+  is the architectural follow-up that unblocks plugin-emitted parametric
+  flavors (Promise, Collection, GraphQL types). Today's hard-coded
+  `hash_key_class()` rule on `InferredType` is DBIC-shaped; non-DBIC
+  parametrics need pluggable per-base semantics (trait-shape recommended).
+  Queued before the DBIC-plugin port.
+- **Type-system encoding for axis dispatch** (`docs/prompt-type-system-encoding.md`)
+  is the medium-term sharpening of Part 5c's dual-class lesson —
+  `dispatch_class()` and `hash_key_class()` should be statically distinct so
+  wrong-axis reads are unrepresentable. Trait-based variant is the cheapest;
+  phantom-typed newtype is the strongest. Defer until the full axis set
+  is known (Element, Wrapped, Effect on top of Dispatch + HashKey).
+- **Type-is-the-gate generalization** (`docs/prompt-type-is-the-gate.md`)
+  retires strict-eq local-symbol-table gates in favor of "the type
+  carries the answer" — Part 5c's `_open` emitter sibling is the first
+  example. Defer until a second site arrives so the generalization shape
+  is empirically grounded.
+- **DBIC as a plugin** (`docs/prompt-dbic-as-plugin.md`) — port the
+  in-builder `visit_dbic_*` family + Phase 1 Parametric emission +
+  custom resultset_class discovery to a plugin (Rust, in-tree). Queued
+  behind parametric-semantics + type-system-encoding. The "everything
+  is a plugin" direction makes core's per-ORM specials a CLAUDE.md #10
+  smell.
 
 ### Recommended sequencing
 

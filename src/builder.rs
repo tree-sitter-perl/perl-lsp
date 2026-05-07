@@ -49,6 +49,27 @@ pub fn default_plugin_registry() -> Arc<PluginRegistry> {
 ///   running emit at walk time (where invocant_class is still
 ///   getting refined).
 ///
+/// Tree-sitter-perl `arguments` field shapes encountered in the
+/// wild (notes for parser-side adjustments — `args` is the value
+/// of `child_by_field_name("arguments")`):
+///
+/// | Call shape | `args.kind()`                 | Notes |
+/// | --- | --- | --- |
+/// | `f()`                | (no `arguments` field)        | empty arglist; field absent |
+/// | `f($x)`              | `scalar`                      | single non-literal arg, unwrapped |
+/// | `f('x')`             | `string_literal`              | single string, unwrapped |
+/// | `f('x', 'y')`        | `list_expression`             | flat positional list |
+/// | `f(k => v)`          | `list_expression`             | fat-comma is flat in this list |
+/// | `Foo->new(k => v)`   | `parenthesized_expression`    | constructor wraps in parens |
+/// | `f({k => v})`        | `anonymous_hash_expression`   | hashref-arg shape — DBIC's `search`/`find`. The hash's children are a `list_expression` of the k=>v pairs |
+/// | `qw(a b c)`          | `quoted_word_list`            | DBIC `add_columns(qw(...))` shape |
+///
+/// Recursive-into-wrapper rule: emitters typically walk one level
+/// past `parenthesized_expression` / `anonymous_hash_expression`
+/// to the enclosed `list_expression`. The k=>v iteration logic
+/// expects a flat positional list; nested wrappers want unwrapping
+/// at the call site, not in the arg-walker.
+///
 /// Built once per `build_with_plugins_inner` call and consumed by both
 /// `ChainPassMode::PreFold` and `ChainPassMode::PostFold` invocations
 /// of the reducer.
