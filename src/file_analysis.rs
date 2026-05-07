@@ -1387,16 +1387,14 @@ impl FileAnalysis {
     ///
     /// This is the piece that makes `$r->get('/x')->to(...)` fold
     /// across chain hops without needing an intermediate variable.
+    /// Resolve the inferred return type of a method call by its
+    /// ref index. Reads `Expression(refidx)` witnesses seeded by
+    /// the builder; `module_index` lets cross-file MethodOnClass
+    /// edges (e.g. `$r->get(...)` where `get` lives in
+    /// `Mojolicious::Routes`) chase through the registry's
+    /// recursive walker.
     #[allow(dead_code)] // documented type-query entry point; CLAUDE.md
-    pub fn method_call_return_type_via_bag(&self, ref_idx: usize) -> Option<InferredType> {
-        self.method_call_return_type_via_bag_with_index(ref_idx, None)
-    }
-
-    /// Like `method_call_return_type_via_bag` but threads a
-    /// `ModuleIndex` so cross-file MethodOnClass edges (e.g.
-    /// `$r->get(...)`'s return type when `get` is defined in
-    /// `Mojolicious::Routes`) can resolve.
-    pub fn method_call_return_type_via_bag_with_index(
+    pub fn method_call_return_type_via_bag(
         &self,
         ref_idx: usize,
         module_index: Option<&ModuleIndex>,
@@ -2642,7 +2640,7 @@ impl FileAnalysis {
                     // the LSP adapter (symbols::find_definition).
                 }
                 RefKind::MethodCall { .. } => {
-                    let class_name = self.method_call_invocant_class_with_index(r, module_index);
+                    let class_name = self.method_call_invocant_class(r, module_index);
 
                     // Check if cursor is on a named arg key in the call args,
                     // not on the method name itself. Resolve to hash key def or :param field.
@@ -2756,9 +2754,15 @@ impl FileAnalysis {
     }
 
     /// Find all references to the symbol at cursor.
-    pub fn find_references(&self, point: Point, tree: Option<&tree_sitter::Tree>, source_bytes: Option<&[u8]>) -> Vec<Span> {
-        if let Some((target_id, include_decl)) = self.resolve_target_at(point, tree, source_bytes, None) {
-            let mut results = self.collect_refs_for_target(target_id, include_decl, tree, source_bytes);
+    pub fn find_references(
+        &self,
+        point: Point,
+        tree: Option<&tree_sitter::Tree>,
+        source_bytes: Option<&[u8]>,
+        module_index: Option<&ModuleIndex>,
+    ) -> Vec<Span> {
+        if let Some((target_id, include_decl)) = self.resolve_target_at(point, tree, source_bytes, module_index) {
+            let mut results = self.collect_refs_for_target(target_id, include_decl, tree, source_bytes, module_index);
             results.sort_by_key(|(s, _)| (s.start.row, s.start.column));
             results.dedup_by(|a, b| a.0.start == b.0.start && a.0.end == b.0.end);
             results.into_iter().map(|(span, _)| span).collect()
@@ -2768,9 +2772,15 @@ impl FileAnalysis {
     }
 
     /// Document highlights: like references but with read/write annotation.
-    pub fn find_highlights(&self, point: Point, tree: Option<&tree_sitter::Tree>, source_bytes: Option<&[u8]>) -> Vec<(Span, AccessKind)> {
-        if let Some((target_id, _)) = self.resolve_target_at(point, tree, source_bytes, None) {
-            let mut results = self.collect_refs_for_target(target_id, true, tree, source_bytes);
+    pub fn find_highlights(
+        &self,
+        point: Point,
+        tree: Option<&tree_sitter::Tree>,
+        source_bytes: Option<&[u8]>,
+        module_index: Option<&ModuleIndex>,
+    ) -> Vec<(Span, AccessKind)> {
+        if let Some((target_id, _)) = self.resolve_target_at(point, tree, source_bytes, module_index) {
+            let mut results = self.collect_refs_for_target(target_id, true, tree, source_bytes, module_index);
             results.sort_by_key(|(s, _)| (s.start.row, s.start.column));
             results.dedup_by(|a, b| a.0.start == b.0.start && a.0.end == b.0.end);
             return results;
@@ -2787,7 +2797,7 @@ impl FileAnalysis {
                 RefKind::MethodCall { method_name_span, .. } => {
                     // Single bag-routed invocant resolver — same call
                     // for the cursor's ref and every candidate.
-                    let Some(wanted_class) = self.method_call_invocant_class(r) else {
+                    let Some(wanted_class) = self.method_call_invocant_class(r, module_index) else {
                         return Vec::new();
                     };
                     results.push((*method_name_span, r.access));
@@ -2795,7 +2805,7 @@ impl FileAnalysis {
                         if std::ptr::eq(other, r) { continue; }
                         if other.target_name != r.target_name { continue; }
                         if !matches!(other.kind, RefKind::MethodCall { .. }) { continue; }
-                        let Some(ocn) = self.method_call_invocant_class(other) else { continue };
+                        let Some(ocn) = self.method_call_invocant_class(other, module_index) else { continue };
                         if ocn != wanted_class { continue; }
                         if let RefKind::MethodCall { method_name_span: ms, .. } = &other.kind {
                             results.push((*ms, other.access));
@@ -2831,6 +2841,7 @@ impl FileAnalysis {
         include_decl: bool,
         tree: Option<&tree_sitter::Tree>,
         source_bytes: Option<&[u8]>,
+        module_index: Option<&ModuleIndex>,
     ) -> Vec<(Span, AccessKind)> {
         let sym = self.symbol(target_id);
         let mut results: Vec<(Span, AccessKind)> = Vec::new();
@@ -2874,7 +2885,7 @@ impl FileAnalysis {
                             // `$obj->foo(...)` expression so we use
                             // `method_name_span` to highlight just
                             // the identifier.
-                            match (self.method_call_invocant_class(r), &sym_package) {
+                            match (self.method_call_invocant_class(r, module_index), &sym_package) {
                                 (Some(cn), Some(pkg)) if cn == *pkg => {
                                     results.push((*method_name_span, r.access));
                                 }
@@ -2931,7 +2942,7 @@ impl FileAnalysis {
                             && mr.target_name != r.target_name);
                     if let Some(mr) = method_hover {
                         if matches!(mr.kind, RefKind::MethodCall { .. }) {
-                            let class_name = self.method_call_invocant_class_with_index(mr, module_index);
+                            let class_name = self.method_call_invocant_class(mr, module_index);
                             if let Some(ref cn) = class_name {
                                 match self.resolve_method_in_ancestors(cn, &mr.target_name, module_index) {
                                     Some(MethodResolution::Local { sym_id, class: ref defining_class, .. }) => {
@@ -3036,7 +3047,7 @@ impl FileAnalysis {
                     }
                 }
                 RefKind::MethodCall { .. } => {
-                    let class_name = self.method_call_invocant_class_with_index(r, module_index);
+                    let class_name = self.method_call_invocant_class(r, module_index);
                     if let Some(ref cn) = class_name {
                         match self.resolve_method_in_ancestors(cn, &r.target_name, module_index) {
                             Some(MethodResolution::Local { sym_id, class: ref defining_class, .. }) => {
@@ -3139,7 +3150,7 @@ impl FileAnalysis {
 
     /// Rename: return all spans + new text for renaming the symbol at cursor.
     pub fn rename_at(&self, point: Point, new_name: &str, tree: Option<&tree_sitter::Tree>, source_bytes: Option<&[u8]>) -> Option<Vec<(Span, String)>> {
-        let refs = self.find_references(point, tree, source_bytes);
+        let refs = self.find_references(point, tree, source_bytes, None);
         if refs.is_empty() {
             return None;
         }
@@ -3180,7 +3191,7 @@ impl FileAnalysis {
     /// falls through to symbol-at resolution; if that also has no
     /// class context (orphan Sub), returns `None` — the cursor isn't
     /// on something we can safely rename.
-    pub fn rename_kind_at(&self, point: Point) -> Option<RenameKind> {
+    pub fn rename_kind_at(&self, point: Point, module_index: Option<&ModuleIndex>) -> Option<RenameKind> {
         if let Some(r) = self.ref_at(point) {
             match &r.kind {
                 RefKind::Variable | RefKind::ContainerAccess => return Some(RenameKind::Variable),
@@ -3191,7 +3202,7 @@ impl FileAnalysis {
                     });
                 }
                 RefKind::MethodCall { .. } => {
-                    if let Some(class) = self.method_call_invocant_class(r) {
+                    if let Some(class) = self.method_call_invocant_class(r, module_index) {
                         return Some(RenameKind::Method {
                             name: r.target_name.clone(),
                             class,
@@ -3262,6 +3273,7 @@ impl FileAnalysis {
         old_name: &str,
         scope: &Option<String>,
         new_name: &str,
+        module_index: Option<&ModuleIndex>,
     ) -> Vec<(Span, String)> {
         let mut edits = Vec::new();
         for sym in &self.symbols {
@@ -3282,7 +3294,7 @@ impl FileAnalysis {
                     // MethodCall refs target a class — `None` scope
                     // doesn't reach methods.
                     if let (Some(cls), Some(wanted)) =
-                        (self.method_call_invocant_class(r), scope.as_ref())
+                        (self.method_call_invocant_class(r, module_index), scope.as_ref())
                     {
                         if &cls == wanted {
                             edits.push((*method_name_span, new_name.to_string()));
@@ -3299,8 +3311,14 @@ impl FileAnalysis {
     /// Function rename path. Delegates to the unified
     /// `rename_callable_in_scope`; the distinction between "function"
     /// and "method" in Perl is just call shape, not identity.
-    pub fn rename_sub_in_package(&self, old_name: &str, package: &Option<String>, new_name: &str) -> Vec<(Span, String)> {
-        self.rename_callable_in_scope(old_name, package, new_name)
+    pub fn rename_sub_in_package(
+        &self,
+        old_name: &str,
+        package: &Option<String>,
+        new_name: &str,
+        module_index: Option<&ModuleIndex>,
+    ) -> Vec<(Span, String)> {
+        self.rename_callable_in_scope(old_name, package, new_name, module_index)
     }
 
     /// Class-scoped method rename — public-API name used by the
@@ -3308,8 +3326,14 @@ impl FileAnalysis {
     /// `rename_sub_in_package(old, &Some(class), new)`: function and
     /// method calls into the same package are two shapes of the same
     /// callable.
-    pub fn rename_method_in_class(&self, old_name: &str, class: &str, new_name: &str) -> Vec<(Span, String)> {
-        self.rename_callable_in_scope(old_name, &Some(class.to_string()), new_name)
+    pub fn rename_method_in_class(
+        &self,
+        old_name: &str,
+        class: &str,
+        new_name: &str,
+        module_index: Option<&ModuleIndex>,
+    ) -> Vec<(Span, String)> {
+        self.rename_callable_in_scope(old_name, &Some(class.to_string()), new_name, module_index)
     }
 
     /// Find all occurrences of a package name (def + refs + use statements) for cross-file rename.
@@ -3354,7 +3378,7 @@ impl FileAnalysis {
                     }
                 }
                 RefKind::MethodCall { .. } => {
-                    let class_name = self.method_call_invocant_class_with_index(r, module_index);
+                    let class_name = self.method_call_invocant_class(r, module_index);
                     // Try inheritance-aware resolution first
                     if let Some(ref cn) = class_name {
                         match self.resolve_method_in_ancestors(cn, &r.target_name, module_index) {
@@ -3477,20 +3501,12 @@ impl FileAnalysis {
     /// edge witnesses on chain receivers). This helper just queries
     /// the bag, never re-derives.
     ///
-    /// Threadless variant — equivalent to
-    /// `method_call_invocant_class_with_index(r, None)`. Use this
-    /// for callers that don't have a `ModuleIndex` (CLI debug,
-    /// tests). Cross-file MethodOnClass edges won't chase without
-    /// an index.
-    pub fn method_call_invocant_class(&self, r: &Ref) -> Option<String> {
-        self.method_call_invocant_class_with_index(r, None)
-    }
-
-    /// `method_call_invocant_class` with a `ModuleIndex` so chain
-    /// receivers whose return type lives in another package can be
-    /// resolved (e.g. `$r->get('/x')->to(...)` where `Routes::get`
-    /// returns `Routes::Route`).
-    pub fn method_call_invocant_class_with_index(
+    /// `module_index` lets chain receivers whose return type lives
+    /// in another package resolve (e.g. `$r->get('/x')->to(...)`
+    /// where `Routes::get` returns `Routes::Route`). Pass `None`
+    /// only when no index is available (CLI debug, isolated tests);
+    /// every LSP-facing reader has one.
+    pub fn method_call_invocant_class(
         &self,
         r: &Ref,
         module_index: Option<&ModuleIndex>,
@@ -3555,7 +3571,7 @@ impl FileAnalysis {
                         // registry's `query_rec`.
                         let recv = &self.refs[recv_idx];
                         if let Some(recv_class) =
-                            self.method_call_invocant_class_with_index(recv, module_index)
+                            self.method_call_invocant_class(recv, module_index)
                         {
                             if recv.target_name == "new" {
                                 return Some(recv_class);

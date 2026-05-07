@@ -259,7 +259,7 @@ fn collect_from_analysis(
                 // less subs and genuinely unpinnable invocants stay
                 // out, no cross-linking.
                 let scope = callable_scope_for_refs.as_ref().unwrap();
-                match (analysis.method_call_invocant_class_with_index(r, module_index), scope) {
+                match (analysis.method_call_invocant_class(r, module_index), scope) {
                     (Some(cn), Some(pkg)) => &cn == pkg,
                     _ => false,
                 }

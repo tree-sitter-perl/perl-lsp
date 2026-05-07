@@ -462,7 +462,7 @@ $b->run;
     );
 
     // ---- (3) references — via rename_kind_at → TargetRef → refs_to.
-    let target_from_f = match fa.rename_kind_at(f_run_call) {
+    let target_from_f = match fa.rename_kind_at(f_run_call, None) {
         Some(RenameKind::Method { name, class }) => TargetRef {
             name,
             kind: TargetKind::Method { class },
@@ -484,7 +484,7 @@ $b->run;
     // ---- (4) rename — BEFORE moving `fa` into the store. Rename
     // Foo::run to renamed_run. Must edit Foo::run decl + $f->run
     // call, NOT Bar::run or $b->run.
-    let edits = fa.rename_method_in_class("run", "Foo", "renamed_run");
+    let edits = fa.rename_method_in_class("run", "Foo", "renamed_run", None);
     let edit_lines: Vec<usize> = edits.iter().map(|(span, _)| span.start.row).collect();
     assert!(
         edit_lines.contains(&2),
@@ -610,7 +610,7 @@ hi();
     //   row 15 — `hi()` call
     let hi_call = tree_sitter::Point { row: 15, column: 0 };
 
-    let kind = fa.rename_kind_at(hi_call);
+    let kind = fa.rename_kind_at(hi_call, None);
     let hover = fa.hover_info(hi_call, src, Some(&tree), None);
     let gd = fa.find_definition(hi_call, Some(&tree), Some(src.as_bytes()), None);
 
@@ -633,10 +633,10 @@ hi();
 
     let rename_edits = match &kind {
         Some(RenameKind::Function { name, package }) => {
-            fa.rename_sub_in_package(name, package, "renamed_hi")
+            fa.rename_sub_in_package(name, package, "renamed_hi", None)
         }
         Some(RenameKind::Method { name, class }) => {
-            fa.rename_method_in_class(name, class, "renamed_hi")
+            fa.rename_method_in_class(name, class, "renamed_hi", None)
         }
         _ => Vec::new(),
     };
@@ -783,7 +783,7 @@ $r->post('/users')->to(controller => 'Users', action => 'create');
         row: line_helper,
         column: helper_col + 2,
     };
-    let helper_highlights = fa.find_highlights(helper_pt, Some(&tree), Some(src.as_bytes()));
+    let helper_highlights = fa.find_highlights(helper_pt, Some(&tree), Some(src.as_bytes()), None);
     let helper_rows: Vec<usize> = helper_highlights.iter().map(|(s, _)| s.start.row).collect();
     assert!(
         helper_rows.contains(&line_helper),
@@ -803,7 +803,7 @@ $r->post('/users')->to(controller => 'Users', action => 'create');
         row: line_route,
         column: route_col + 2,
     };
-    let route_highlights = fa.find_highlights(route_pt, Some(&tree), Some(src.as_bytes()));
+    let route_highlights = fa.find_highlights(route_pt, Some(&tree), Some(src.as_bytes()), None);
     let route_rows: Vec<usize> = route_highlights.iter().map(|(s, _)| s.start.row).collect();
     assert!(
         route_rows.contains(&line_route),
@@ -890,7 +890,7 @@ $u->create(name => 'alice');
         column: create_col + 2,
     };
 
-    let kind = f1_fa.rename_kind_at(cursor);
+    let kind = f1_fa.rename_kind_at(cursor, None);
     let target = match kind {
         Some(RenameKind::Method { name, class }) => TargetRef {
             name,
@@ -1256,6 +1256,7 @@ $b->touch();
         tree_sitter::Point { row: 3, column: 4 },
         None,
         None,
+        Some(&idx),
     );
 
     assert_eq!(
@@ -1519,22 +1520,14 @@ $x->makeFoo()->ping();
     );
 }
 
-/// **Red-pin** — `find_highlights` doesn't thread `module_index`
-/// down to `method_call_invocant_class`, so a chain hop whose
-/// receiver class is only known via cross-file `MethodOnClass`
-/// resolution (`$x->makeFoo()->ping()` — `makeFoo` returns a
-/// cross-file class) silently fails to highlight.
-///
-/// The threaded reader is `crate::resolve::refs_to`; it works
-/// (`refs_to_cross_file_chain_hop_post_enrichment` covers it).
-/// The same scenario via the in-file `find_highlights` path
-/// (used by `textDocument/documentHighlight`) currently doesn't.
-///
-/// Un-ignore when polish lands `module_index` through
+/// `find_highlights` chain-hop case: receiver class only known
+/// via cross-file `MethodOnClass` resolution (`$x->makeFoo()->ping()`
+/// — `makeFoo` returns a cross-file class). Was a red-pin until
+/// the polish commit threaded `module_index` through
 /// `find_highlights` / `collect_refs_for_target` /
-/// `find_references` / `rename_kind_at` / `rename_callable_in_scope`.
+/// `find_references` / `rename_kind_at` / `rename_callable_in_scope`,
+/// matching `crate::resolve::refs_to`'s already-threaded shape.
 #[test]
-#[ignore = "find_highlights doesn't thread module_index — polish commit un-ignores"]
 fn find_highlights_cross_file_chain_hop_post_enrichment() {
     use crate::module_index::ModuleIndex;
     use std::sync::Arc;
@@ -1570,6 +1563,7 @@ $x->makeFoo()->ping();
         tree_sitter::Point { row: 3, column: 18 },
         None,
         None,
+        Some(&idx),
     );
 
     // Both call sites of `->ping()` share the same chain receiver
