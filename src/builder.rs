@@ -716,6 +716,13 @@ struct ReturnInfo {
     body_span: Option<Span>,
 }
 
+/// Strip a `Pkg::Sub::` prefix from a sub-name identifier, returning the bare
+/// trailing component. `"Foo::Bar::baz"` → `"baz"`; `"baz"` → `"baz"`. Pure
+/// string op — does not consult the symbol table or package state.
+fn bare_name(s: &str) -> &str {
+    s.rsplit("::").next().unwrap_or(s)
+}
+
 /// If `return_node` is `return CALL`, where CALL is a simple named function
 /// call or method call, return the bare called name. Otherwise None. Used to
 /// collect hash-key ownership delegation chains for post-pass resolution.
@@ -733,7 +740,7 @@ fn extract_delegated_call_name<'a>(return_node: Node<'a>, source: &'a [u8]) -> O
     };
     // Strip package prefix — delegation is stored by bare sub name to match
     // the return_types lookup convention.
-    Some(call_name.rsplit("::").next().unwrap_or(call_name).to_string())
+    Some(bare_name(call_name).to_string())
 }
 
 /// Find the `varname` child of a variable node (`scalar`/`array`/`hash`/etc.).
@@ -1383,7 +1390,7 @@ impl<'a> Builder<'a> {
                 if text == "__PACKAGE__" {
                     return self.package_for_node(node).map(InferredType::ClassName);
                 }
-                let bare = text.rsplit("::").next().unwrap_or(text);
+                let bare = bare_name(text);
                 // Bareword invocant is ambiguous: class-name reference
                 // OR zero-arg function call whose return type seeds
                 // the chain (`app->routes` where `sub app :: Mojolicious`).
@@ -1416,7 +1423,7 @@ impl<'a> Builder<'a> {
                 }
                 let func = node.child_by_field_name("function")?;
                 let name = func.utf8_text(self.source).ok()?;
-                let bare = name.rsplit("::").next().unwrap_or(name);
+                let bare = bare_name(name);
                 let arg_count = self.extract_call_args(node).len() as u32;
                 self.bag_query_named_sub(bare, Some(arg_count))
             }
@@ -3431,6 +3438,18 @@ impl<'a> Builder<'a> {
         }
     }
 
+    /// Find a local Sub or Method symbol by bare name. Used by
+    /// `expr_payload`'s function/bareword arms (walk-time) and
+    /// `resolve_forward_call_targets` (post-walk) — both want the same
+    /// "is there a local sub I could route a call edge to" answer, so
+    /// they share this lookup.
+    fn find_callee_symbol(&self, bare: &str) -> Option<SymbolId> {
+        self.symbols
+            .iter()
+            .find(|s| s.name == bare && matches!(s.kind, SymKind::Sub | SymKind::Method))
+            .map(|s| s.id)
+    }
+
     /// Locate the SymbolId for a Sub/Method named `name` whose body's
     /// inner scope is (an ancestor of) `body_scope`. Scans
     /// `self.symbols` for a matching Sub symbol.
@@ -3567,26 +3586,18 @@ impl<'a> Builder<'a> {
             // the chase resolves through. Cross-file imports without
             // a local sym don't pin the Expr(span); chain typing's
             // own resolvers cover the chain-receiver case.
-            "function_call_expression" | "ambiguous_function_call_expression" => {
-                let func = node.child_by_field_name("function")?;
-                let name = func.utf8_text(self.source).ok()?;
-                let bare = name.rsplit("::").next().unwrap_or(name);
-                let sid = self.symbols.iter().find(|s| {
-                    s.name == bare
-                        && matches!(s.kind, SymKind::Sub | SymKind::Method)
-                })?.id;
-                Some(WitnessPayload::Edge(WitnessAttachment::Symbol(sid)))
-            }
-
-            // Bareword / scoped-identifier as expression — same as
-            // function call (calling a sub by name without parens).
-            "bareword" | "scoped_identifier" => {
-                let name = node.utf8_text(self.source).ok()?;
-                let bare = name.rsplit("::").next().unwrap_or(name);
-                let sid = self.symbols.iter().find(|s| {
-                    s.name == bare
-                        && matches!(s.kind, SymKind::Sub | SymKind::Method)
-                })?.id;
+            // Function / bareword / scoped-identifier call — extract the
+            // callee's bare name and Edge to its `Symbol(sid)`. Failures
+            // (target not yet in symbol table) are recovered post-walk by
+            // `resolve_forward_call_targets`; same `forward_callee_name`
+            // helper is the source of truth for "what name does this node
+            // refer to" so the live and recovery paths can't diverge.
+            "function_call_expression"
+            | "ambiguous_function_call_expression"
+            | "bareword"
+            | "scoped_identifier" => {
+                let bare = self.forward_callee_name(node)?;
+                let sid = self.find_callee_symbol(&bare)?;
                 Some(WitnessPayload::Edge(WitnessAttachment::Symbol(sid)))
             }
 
@@ -3642,7 +3653,7 @@ impl<'a> Builder<'a> {
                 payload,
                 span,
             });
-        } else if let Some(name) = self.forward_call_name(node) {
+        } else if let Some(name) = self.forward_callee_name(node) {
             // Sub call by bare name whose target wasn't in the symbol
             // table yet — Perl resolves these at symbol-table time, not
             // parse time, so the lookup is legitimately deferred. Queue
@@ -3654,24 +3665,22 @@ impl<'a> Builder<'a> {
         }
     }
 
-    /// Return the bare-name of the sub the expression node *would* have
-    /// been resolved to, for the kinds whose `expr_payload` arm produces
-    /// `Edge(Symbol(sid))`. `None` for any other kind. Mirrors the
-    /// extraction logic in `expr_payload` exactly so a lookup that
-    /// failed there with `?` is rephrased as a queue entry here.
-    fn forward_call_name(&self, node: Node<'a>) -> Option<String> {
-        match node.kind() {
+    /// Bare callee name for an expression node whose `expr_payload` arm
+    /// resolves to `Edge(Symbol(sid))`. `None` for any other kind. Sole
+    /// source of truth for "what sub-name does this node reference" —
+    /// `expr_payload`'s call arm calls this for the live lookup, and
+    /// `emit_expr_witness` calls it again to queue forward-ref retries
+    /// when the live lookup misses. Keeping a single extractor is what
+    /// makes the live and post-walk paths impossible to diverge.
+    fn forward_callee_name(&self, node: Node<'a>) -> Option<String> {
+        let raw = match node.kind() {
             "function_call_expression" | "ambiguous_function_call_expression" => {
-                let func = node.child_by_field_name("function")?;
-                let name = func.utf8_text(self.source).ok()?;
-                Some(name.rsplit("::").next().unwrap_or(name).to_string())
+                node.child_by_field_name("function")?.utf8_text(self.source).ok()?
             }
-            "bareword" | "scoped_identifier" => {
-                let name = node.utf8_text(self.source).ok()?;
-                Some(name.rsplit("::").next().unwrap_or(name).to_string())
-            }
-            _ => None,
-        }
+            "bareword" | "scoped_identifier" => node.utf8_text(self.source).ok()?,
+            _ => return None,
+        };
+        Some(bare_name(raw).to_string())
     }
 
     /// Post-walk: re-resolve every queued `(name, expr_span)` pair
@@ -3687,9 +3696,7 @@ impl<'a> Builder<'a> {
         use crate::witnesses::{Witness, WitnessAttachment, WitnessPayload, WitnessSource};
         let queued = std::mem::take(&mut self.unresolved_call_targets);
         for entry in queued {
-            let Some(sid) = self.symbols.iter().find(|s| {
-                s.name == entry.name && matches!(s.kind, SymKind::Sub | SymKind::Method)
-            }).map(|s| s.id) else {
+            let Some(sid) = self.find_callee_symbol(&entry.name) else {
                 continue;
             };
             self.bag.push(Witness {
@@ -7007,18 +7014,15 @@ impl<'a> Builder<'a> {
         &mut self,
         return_types: &std::collections::HashMap<String, InferredType>,
     ) {
-        let bare = |s: &str| -> String { s.rsplit("::").next().unwrap_or(s).to_string() };
-
         let binding_map: std::collections::HashMap<&str, String> = self
             .call_bindings
             .iter()
             .filter(|b| {
-                let name = bare(&b.func_name);
                 return_types
-                    .get(&name)
+                    .get(bare_name(&b.func_name))
                     .map_or(false, |t| *t == InferredType::HashRef)
             })
-            .map(|b| (b.variable.as_str(), bare(&b.func_name)))
+            .map(|b| (b.variable.as_str(), bare_name(&b.func_name).to_string()))
             .collect();
 
         let sub_package: std::collections::HashMap<&str, Option<String>> = self

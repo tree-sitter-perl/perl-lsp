@@ -170,6 +170,22 @@ fn index_workspace(root: &str) -> file_store::FileStore {
     store
 }
 
+/// Canonicalize `root` and produce the matching `file://...` URI.
+/// Returns both because callers usually want the path (for `@INC`
+/// project-lib discovery, file walking) AND the URI (the cache hash
+/// key, since the LSP server's `cache_dir_for_workspace` is fed the
+/// initialize request's `root_uri` string verbatim — `file://...`).
+/// Falls back to the raw input if `canonicalize` fails (path doesn't
+/// exist, permissions): same string lands in both halves so the
+/// caller's downstream "does this dir exist?" check still fires.
+fn canonical_root_and_uri(root: &str) -> (std::path::PathBuf, String) {
+    let path = std::path::Path::new(root)
+        .canonicalize()
+        .unwrap_or_else(|_| std::path::PathBuf::from(root));
+    let uri = format!("file://{}", path.display());
+    (path, uri)
+}
+
 /// Full CLI workspace setup: index the workspace, open the SQLite cache,
 /// warm cached modules, resolve missing imports + ancestors via @INC,
 /// save fresh entries back to disk. Mirrors the LSP server's startup
@@ -180,9 +196,7 @@ fn cli_full_startup(root: &str) -> (file_store::FileStore, module_index::ModuleI
     let ws = index_workspace(root);
 
     let module_index = module_index::ModuleIndex::new_for_cli();
-    let root_path = std::path::Path::new(root).canonicalize()
-        .unwrap_or_else(|_| std::path::PathBuf::from(root));
-    let root_uri = format!("file://{}", root_path.display());
+    let (root_path, root_uri) = canonical_root_and_uri(root);
 
     let mut inc_paths = module_resolver::discover_inc_paths();
     module_resolver::add_project_lib_paths(&mut inc_paths, &root_path);
@@ -963,10 +977,7 @@ fn cli_workspace_symbol(root: &str, query: &str) {
 fn cli_clear_cache(root: Option<&str>) {
     let target = match root {
         Some(r) => {
-            let root_path = std::path::Path::new(r)
-                .canonicalize()
-                .unwrap_or_else(|_| std::path::PathBuf::from(r));
-            let root_uri = format!("file://{}", root_path.display());
+            let (_, root_uri) = canonical_root_and_uri(r);
             module_cache::cache_dir_for_workspace(Some(&root_uri))
         }
         None => module_cache::cache_base_dir(),

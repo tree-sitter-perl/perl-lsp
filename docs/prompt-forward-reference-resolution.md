@@ -8,6 +8,15 @@ tail) green in `builder_tests.rs`. Implemented as
 `populate_witness_bag` and `fold_to_fixed_point`. The remaining
 sections below are kept as historical context for the diagnosis.
 
+**Follow-up filed:** the landed shape is a two-phase recovery
+(walk-time `find_callee_symbol` + post-walk retry queue) which still
+duplicates the "is this a callee symbol?" rule across two sites. The
+deeper unification — pushing the lookup off the walk entirely via a
+`WitnessAttachment::CalleeByName` and a single post-walk resolver —
+is filed as `prompt-cleanups.md` **§6**. Independent, self-contained,
+and the regression bar is "the four `forward_reference_*` sibling
+tests pass byte-for-byte." Pick it up when convenient.
+
 ## The bug
 
 ```perl
