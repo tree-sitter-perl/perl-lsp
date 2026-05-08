@@ -1380,31 +1380,47 @@ impl<'a> Builder<'a> {
         Some(node_to_span(node))
     }
 
-    /// Project a `refgen_expression` (`\&foo`, `\&Foo::bar`,
-    /// `\&$dynamic`) onto a `MethodOnClass{class, name}`
-    /// attachment that names the referenced sub. The bag's
-    /// existing edge-chase handles in-file resolution (against
-    /// the named sub's `Symbol` witnesses, which carry its
-    /// return-arm folds) AND cross-file resolution via
-    /// `module_index` — we don't need to know the body span;
-    /// MethodOnClass IS the address. `class` defaults to the
-    /// current package for bare names; for `Foo::bar` we split
-    /// at the last `::`. Returns `None` for `\&$var` whose name
-    /// isn't const-foldable.
-    fn refgen_method_on_class(
+    /// Single derivation site for a CodeRef-shaped value's
+    /// `return_edge`, given the source node. Both `expr_payload`
+    /// (bag-witness emission, walk-time) and
+    /// `infer_expression_type` (closed-syntax InferredType for
+    /// chain typing's RHS) call this — keeping them in sync by
+    /// construction.
+    ///
+    /// Two recognized shapes:
+    ///   - `anonymous_subroutine_expression` →
+    ///     `Expr(body_last_expr_span)`. Bag walks the body's
+    ///     last-expression witnesses at query time.
+    ///   - `refgen_expression` (`\&foo`, `\&Foo::bar`,
+    ///     `\&$const_folded`) → `MethodOnClass { class, name }`.
+    ///     Bag's MRO + `module_index` machinery resolves it,
+    ///     including cross-file. Bare names default `class` to
+    ///     the current package; qualified names split at the
+    ///     last `::`. `\&$var` with a non-const-foldable name
+    ///     returns `None`.
+    ///
+    /// Other node kinds return `None` (caller decides whether to
+    /// wrap the result in `CodeRef { return_edge: None }` for
+    /// opaque-coderef sources or fall through entirely).
+    fn coderef_return_edge_for(
         &self,
         node: Node<'a>,
     ) -> Option<crate::witnesses::WitnessAttachment> {
-        if node.kind() != "refgen_expression" {
-            return None;
+        match node.kind() {
+            "anonymous_subroutine_expression" => self
+                .anonymous_sub_body_last_expr_span(node)
+                .map(crate::witnesses::WitnessAttachment::Expr),
+            "refgen_expression" => {
+                let names = self.extract_names_from_refgen(node);
+                let raw = names.into_iter().next()?;
+                let (class, name) = match raw.rsplit_once("::") {
+                    Some((c, n)) => (c.to_string(), n.to_string()),
+                    None => (self.current_package.clone()?, raw),
+                };
+                Some(crate::witnesses::WitnessAttachment::MethodOnClass { class, name })
+            }
+            _ => None,
         }
-        let names = self.extract_names_from_refgen(node);
-        let raw = names.into_iter().next()?;
-        let (class, name) = match raw.rsplit_once("::") {
-            Some((c, n)) => (c.to_string(), n.to_string()),
-            None => (self.current_package.clone()?, raw),
-        };
-        Some(crate::witnesses::WitnessAttachment::MethodOnClass { class, name })
     }
 
     /// Extract params from an anonymous sub. Delegates to the builder's
@@ -2152,10 +2168,15 @@ impl<'a> Builder<'a> {
             "coderef_call_expression" => {
                 // Walk-time: just narrow the operand to CodeRef.
                 // The callable-return propagation onto this call's
-                // `Expr(span)` happens post-walk in
-                // `emit_coderef_call_return_edges` — at walk time
-                // the operand's TC isn't seeded yet (chain typing
-                // runs in step 6, after the live walk in step 1).
+                // value-type happens at *query* time — `invocant_
+                // type_at_node`'s `coderef_call_expression` arm
+                // chases the operand's `CodeRef.return_edge`
+                // through the bag every time it's asked. Chain
+                // typing already re-asks on each worklist
+                // iteration, so monotone refinement of the
+                // operand's TC lifts the call's type for free as
+                // the lattice settles. No witness emission here;
+                // no post-walk pass.
                 self.infer_deref_type(node, InferredType::CodeRef { return_edge: None });
                 self.visit_children(node);
             }
@@ -3759,21 +3780,8 @@ impl<'a> Builder<'a> {
                 Some(WitnessPayload::InferredType(InferredType::ArrayRef))
             }
             "quoted_regexp" => Some(WitnessPayload::InferredType(InferredType::Regexp)),
-            "anonymous_subroutine_expression" => {
-                let return_edge = self
-                    .anonymous_sub_body_last_expr_span(node)
-                    .map(WitnessAttachment::Expr);
-                Some(WitnessPayload::InferredType(InferredType::CodeRef { return_edge }))
-            }
-            "refgen_expression" => {
-                // `\&foo`, `\&Foo::bar`, `\&$dynamic_const_folded`
-                // — typed CodeRef with a MethodOnClass attachment
-                // pointing at the referenced sub. Lets cross-file
-                // `helper(name => \&Other::Pkg::sub)` lift the
-                // helper's return type through the bag's existing
-                // module_index recursion. Bare-name `\&foo` falls
-                // back to `current_package` for the class.
-                let return_edge = self.refgen_method_on_class(node);
+            "anonymous_subroutine_expression" | "refgen_expression" => {
+                let return_edge = self.coderef_return_edge_for(node);
                 Some(WitnessPayload::InferredType(InferredType::CodeRef { return_edge }))
             }
             "binary_expression"
@@ -4027,14 +4035,11 @@ impl<'a> Builder<'a> {
             "anonymous_hash_expression" => Some(InferredType::HashRef),
             "anonymous_array_expression" => Some(InferredType::ArrayRef),
             "quoted_regexp" => Some(InferredType::Regexp),
-            "anonymous_subroutine_expression" => Some(InferredType::CodeRef {
-                return_edge: self
-                    .anonymous_sub_body_last_expr_span(node)
-                    .map(crate::witnesses::WitnessAttachment::Expr),
-            }),
-            "refgen_expression" => Some(InferredType::CodeRef {
-                return_edge: self.refgen_method_on_class(node),
-            }),
+            "anonymous_subroutine_expression" | "refgen_expression" => {
+                Some(InferredType::CodeRef {
+                    return_edge: self.coderef_return_edge_for(node),
+                })
+            }
             "method_call_expression" => {
                 self.extract_constructor_class(node).map(InferredType::ClassName)
             }
@@ -4096,23 +4101,25 @@ impl<'a> Builder<'a> {
     }
 
     /// Infer a type on the first named child (the operand) of a dereference expression.
-    fn infer_deref_type(&mut self, node: Node<'a>, inferred_type: InferredType) {
+    fn infer_deref_type(&mut self, node: Node<'a>, narrowing: InferredType) {
         if let Some(operand) = node.named_child(0) {
-            // Skip the deref-narrowing TC when the operand is
-            // already known to be the same shape — pushing a
-            // coarser fact (`CodeRef { return_edge: None }` from
-            // `$cb->()` after `my $cb = sub { ... }` typed it
-            // with an edge) would clobber the literal's richer
-            // attachment under latest-wins reduction. The narrowing
-            // is meant to TYPE the variable when its assignment
-            // is opaque; if the type is already established with
-            // matching shape, the fact adds nothing.
+            // The narrowing is observational — `$cb->()` says
+            // "$cb is a coderef", `${$x}` says "$x is a hashref",
+            // etc. — and doesn't reveal payload (no body span
+            // from the deref site). If the operand is ALREADY
+            // typed with a witness at least as informative as
+            // this narrowing, the TC would only ever clobber
+            // richer payload under latest-wins reduction (the
+            // motivating regression: a `my $cb = sub { ... }`
+            // literal's `CodeRef { return_edge: Some(_) }` losing
+            // its edge to the subsequent `$cb->()`'s
+            // `CodeRef { return_edge: None }`). Skip in that case.
             if let Some(existing) = self.invocant_type_at_node(operand) {
-                if std::mem::discriminant(&existing) == std::mem::discriminant(&inferred_type) {
+                if existing.subsumes_narrowing(&narrowing) {
                     return;
                 }
             }
-            self.push_var_type_constraint(operand, node, inferred_type);
+            self.push_var_type_constraint(operand, node, narrowing);
         }
     }
 

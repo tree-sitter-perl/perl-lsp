@@ -737,6 +737,42 @@ impl InferredType {
             _ => None,
         }
     }
+
+    /// True when `self` is at least as informative as `narrowing`
+    /// — adding the narrowing's TC would not refine `self` further.
+    /// "Informativeness" is defined per-variant: same discriminant
+    /// AND, where the variant carries refinable payload, `self`'s
+    /// payload is at least as specific as `narrowing`'s.
+    ///
+    /// Used by `infer_deref_type` to suppress the
+    /// `$cb->()`-shaped narrowing TC when the operand was already
+    /// typed with a richer attachment (e.g. an anon-sub literal's
+    /// `CodeRef { return_edge: Some(_) }` should NOT be clobbered
+    /// by the deref's `CodeRef { return_edge: None }` under
+    /// latest-wins reduction).
+    ///
+    /// Conservative: returns false on different discriminants
+    /// (let the reducer-stack decide the conflict). Variants
+    /// without refinable payload (HashRef/ArrayRef/Regexp/Numeric/
+    /// String) subsume themselves trivially.
+    pub fn subsumes_narrowing(&self, narrowing: &InferredType) -> bool {
+        match (self, narrowing) {
+            // Refinable-payload variants — `self` subsumes only
+            // if its payload is at least as specific.
+            (
+                InferredType::CodeRef { return_edge: have },
+                InferredType::CodeRef { return_edge: want },
+            ) => want.is_none() || have.is_some(),
+            (InferredType::ClassName(a), InferredType::ClassName(b)) => a == b,
+            (InferredType::FirstParam { package: a }, InferredType::FirstParam { package: b }) => {
+                a == b
+            }
+            (InferredType::Parametric(a), InferredType::Parametric(b)) => a == b,
+            // Unit-shape variants subsume themselves; mismatched
+            // discriminants don't subsume.
+            (a, b) => std::mem::discriminant(a) == std::mem::discriminant(b),
+        }
+    }
 }
 
 /// Where a type judgement came from. Lets debugging surface "the
