@@ -491,16 +491,30 @@ pub enum InferredType {
     HashRef,
     /// `$x = []` or `$x = [ ... ]` — unblessed array reference.
     ArrayRef,
-    /// `$x = sub { ... }` — code reference. `return_edge` carries
-    /// the span of the body's last expression for sub-literal
-    /// origins, so calling it through a rebound scalar (`my $sub =
-    /// sub {...}; $app->helper(thing => $sub)`) propagates the
-    /// callable's return type the same way a literal-in-arg-slot
-    /// does. `None` for opaque coderefs (function references,
-    /// `\&foo`, params typed `CodeRef`, etc.) where we don't have
-    /// a body span to point at — the bag's edge-chase resolver
-    /// just returns nothing for those, same as before.
-    CodeRef { return_edge: Option<Span> },
+    /// `$x = sub { ... }` — code reference. `return_edge` is a
+    /// witness-bag attachment whose type IS the callable's return
+    /// when invoked. Two shapes populate it:
+    ///
+    ///   - Anonymous-sub literals (`sub { ... }`) →
+    ///     `Expr(body_last_expr_span)`. The bag walks that span's
+    ///     own witnesses at query time, after the body is built.
+    ///   - Named-sub references (`\&foo`, `\&Foo::bar`) →
+    ///     `MethodOnClass { class, name }`. Same attachment the
+    ///     bag's existing edge-chase uses for method dispatch —
+    ///     resolves in-file via the named-sub's Symbol witnesses
+    ///     AND cross-file via `module_index` (the bag transparently
+    ///     recurses into the cached module's bag).
+    ///
+    /// Survives variable rebinding because chain typing propagates
+    /// the whole `InferredType` through `my $sub = ...` via the
+    /// bag's TC machinery — so `helper(name => sub {...})` and
+    /// `my $cb = \&foo; helper(name => $cb)` both reach the same
+    /// attachment-driven resolution.
+    ///
+    /// `None` for opaque sources (params typed `CodeRef`, deref-
+    /// shape narrowing, `Rep::Code` observations) where no body or
+    /// named target is reachable from the syntax alone.
+    CodeRef { return_edge: Option<crate::witnesses::WitnessAttachment> },
     /// `$x = qr/.../` — compiled regular expression.
     Regexp,
     /// Used in numeric context (`+`, `-`, `==`, etc.).
@@ -705,17 +719,21 @@ impl InferredType {
         }
     }
 
-    /// Span of the body's last expression for sub-literal-origin
-    /// `CodeRef` values. Survives variable rebinding because it's
-    /// carried on the `InferredType` itself: `my $sub = sub { ... }`
-    /// propagates the same `CodeRef { return_edge: Some(span) }`
-    /// through chain typing, so a downstream callable-shape consumer
-    /// (Mojo helper plugin, signature-help return formatter, etc.)
-    /// can `Edge(Expr(span))` into the body's last expression and
-    /// pick up its type at query time.
-    pub fn callable_return_edge(&self) -> Option<Span> {
+    /// Witness-bag attachment whose type IS this callable's return
+    /// when invoked. `Expr(span)` for anon-sub literals (resolves
+    /// at query time via the body's last-expression witnesses);
+    /// `MethodOnClass{class, name}` for named-sub references
+    /// (`\&foo`, `\&Foo::bar` — resolves via the bag's existing
+    /// MRO + cross-file machinery, same shape used by method
+    /// dispatch). Returns `None` for opaque coderef sources.
+    ///
+    /// Survives variable rebinding: chain typing propagates the
+    /// `InferredType` through `my $cb = ...` via the bag's TC
+    /// machinery, so consumers see the same attachment whether
+    /// the callable arrives as a literal or a rebound scalar.
+    pub fn callable_return_edge(&self) -> Option<&crate::witnesses::WitnessAttachment> {
         match self {
-            InferredType::CodeRef { return_edge } => *return_edge,
+            InferredType::CodeRef { return_edge } => return_edge.as_ref(),
             _ => None,
         }
     }

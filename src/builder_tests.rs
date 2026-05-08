@@ -767,6 +767,24 @@ fn test_arrow_code_deref_infers_coderef() {
 }
 
 #[test]
+fn test_coderef_call_propagates_return_type() {
+    // `my $cb = sub { [1,2] }; my $r = $cb->();` — the literal's
+    // `return_edge` (Expr(body_last)) rides through the binding,
+    // and `$cb->()` should chase it: $r types as ArrayRef.
+    // Anonymous-sub literal whose body's last expression is an
+    // anonymous_array_expression — closed-under-syntax, so the
+    // body span resolves to ArrayRef without name lookup.
+    let fa = build_fa("my $cb = sub { [1,2] };\nmy $r = $cb->();\nmy $z;");
+    let ty = fa.inferred_type_via_bag("$r", Point::new(2, 0));
+    assert_eq!(
+        ty,
+        Some(InferredType::ArrayRef),
+        "coderef call must inherit the callable's return type via return_edge: got {:?}",
+        ty,
+    );
+}
+
+#[test]
 fn test_postfix_array_deref_infers_arrayref() {
     let fa = build_fa("my $x;\nmy @a = $x->@*;\nmy $z;");
     let ty = fa.inferred_type_via_bag("$x", Point::new(2, 0));

@@ -52,29 +52,30 @@ pub struct ArgInfo {
     /// HashKeyDef so signature help can surface it at call sites.
     #[serde(default)]
     pub sub_params: Vec<EmittedParam>,
-    /// Span of the body's last expression for any arg whose type
-    /// resolves to `InferredType::CodeRef { return_edge: Some(_) }`.
-    /// Plugins emit `Symbol(method_id) → Edge(Expr(span))` against
-    /// it so the synthesized callable's return type follows the
-    /// body's last-expression type at query time.
+    /// Witness-bag attachment whose type IS this arg's callable
+    /// return when invoked, projected from
+    /// `arg.inferred_type.callable_return_edge()`. Plugins emit
+    /// `Symbol(method_id) → Edge(target)` against it so a
+    /// synthesized callable's return follows the source
+    /// callable's return at query time.
     ///
-    /// Bag-aware. Two shapes resolve uniformly:
+    /// Three reachability shapes resolve uniformly:
     ///
     /// ```perl
-    /// $app->helper(name => sub { ... });           # literal
+    /// $app->helper(name => sub { ... });          # anon literal
     /// my $sub = sub { ... };
-    /// $app->helper(name => $sub);                  # rebound
+    /// $app->helper(name => $sub);                 # rebound anon
+    /// $app->helper(name => \&Foo::bar);           # named ref (cross-file ok)
     /// ```
     ///
-    /// In both cases the `CodeRef`'s `return_edge` carries the
-    /// body span — populated at the literal site, propagated
-    /// through `my $sub = ...` by the bag's TC machinery, and
-    /// projected onto this field by the host. `None` for opaque
-    /// coderefs (function refs, params typed `CodeRef`, deref
-    /// shapes like `&{...}`, empty bodies) where the body span
-    /// genuinely isn't reachable.
+    /// Anon-sub origins yield `Expr(body_last_expr_span)`; named-
+    /// sub references yield `MethodOnClass{class, name}`, which
+    /// resolves through the bag's MRO + `module_index` machinery
+    /// — so cross-file `\&Foo::bar` works without any consumer-
+    /// side branching. `None` for genuinely opaque coderefs
+    /// (params typed `CodeRef`, deref-shape narrowing, etc.).
     #[serde(default)]
-    pub callable_return_edge: Option<Span>,
+    pub callable_return_edge: Option<crate::witnesses::WitnessAttachment>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -203,26 +204,29 @@ pub enum EmitAction {
         /// ("helper") and appends the non-invocant params.
         #[serde(default)]
         outline_label: Option<String>,
-        /// Lazy return type via `Edge` to an `Expr(span)` attachment
-        /// — the synthesized Method's return type IS that expression's
-        /// type, resolved at query time after the source has fully
-        /// walked. Lets plugins like `mojo-helpers` lift the return
-        /// type from a `sub { ... }` callback's body without
-        /// inspecting the body at plugin-call time (when the body
-        /// hasn't been walked yet). Set to `args[N].callable_return_edge`
-        /// for the relevant callback arg — works whether the arg is
-        /// a sub-literal (`helper(name => sub { ... })`) or a
-        /// rebound coderef (`my $sub = sub { ... }; helper(name =>
-        /// $sub)`). The host populates `callable_return_edge` from
-        /// the arg's bag-resolved `CodeRef` shape.
+        /// Lazy return type via `Edge` to a witness-bag attachment
+        /// — the synthesized Method's return type IS that
+        /// attachment's type, resolved at query time. The target
+        /// can be:
         ///
-        /// Mutually exclusive with `return_type` in spirit — if both
-        /// are set, `return_type` wins (the plugin overrode
-        /// explicitly). Builder pushes a `Symbol(sid) → Edge(Expr(span))`
-        /// witness; the bag's edge-chase resolver follows it at
-        /// query time.
+        ///   - `Expr(span)` for anon-sub bodies (the bag walks
+        ///     the body's last-expression witnesses).
+        ///   - `MethodOnClass{class, name}` for named-sub
+        ///     references (the bag's MRO + cross-file machinery
+        ///     resolves it).
+        ///
+        /// Set to `args[N].callable_return_edge` for the relevant
+        /// callback arg — works for anon literals, rebound
+        /// scalars, AND `\&Foo::bar` references (cross-file). The
+        /// host populates `callable_return_edge` from the arg's
+        /// bag-resolved `CodeRef` shape.
+        ///
+        /// Mutually exclusive with `return_type` in spirit — if
+        /// both are set, `return_type` wins (the plugin overrode
+        /// explicitly). Builder pushes `Symbol(sid) → Edge(target)`;
+        /// the bag's edge-chase resolver follows it at query time.
         #[serde(default)]
-        return_via_edge: Option<Span>,
+        return_via_edge: Option<crate::witnesses::WitnessAttachment>,
     },
     /// Synthesize a `HashKeyDef` for a constructor/stash/etc. key.
     HashKeyDef {
