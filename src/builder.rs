@@ -218,6 +218,7 @@ fn build_with_plugins_inner(
         plugins,
         method_call_invocant: std::collections::HashMap::new(),
         parametric_emitted_refs: std::collections::HashSet::new(),
+        anon_sub_symbol_by_span: std::collections::HashMap::new(),
     };
 
     // Create file-level scope and walk
@@ -1011,6 +1012,17 @@ struct Builder<'a> {
     /// class's plain return-type entry. **Build-only**, like
     /// `method_call_invocant`.
     parametric_emitted_refs: std::collections::HashSet<usize>,
+
+    /// Span (of the `anonymous_subroutine_expression` node) →
+    /// SymbolId of the synthesized `(anon)` Sub symbol. Populated by
+    /// `visit_anonymous_sub`; read by `coderef_return_edge_for` so
+    /// the edge for `sub { ... }` literals lands on
+    /// `Symbol(sym_id)` instead of `Expr(body_last)` — uniform
+    /// attachment shape with named subs, so `FluentArityDispatch`
+    /// (and the new `ReturnExprReducer`) sees anon-sub arity arms
+    /// and substitutes Receiver placeholders without any per-shape
+    /// dispatch in the chase site.
+    anon_sub_symbol_by_span: std::collections::HashMap<Span, SymbolId>,
 }
 
 /// Owner-and-gating discriminator for `emit_call_arg_key_accesses`.
@@ -1388,9 +1400,16 @@ impl<'a> Builder<'a> {
     /// construction.
     ///
     /// Two recognized shapes:
-    ///   - `anonymous_subroutine_expression` →
-    ///     `Expr(body_last_expr_span)`. Bag walks the body's
-    ///     last-expression witnesses at query time.
+    ///   - `anonymous_subroutine_expression` → `Symbol(sub_id)`,
+    ///     looked up in `anon_sub_symbol_by_span`. The bag's
+    ///     symbol-keyed reducers (`ReturnExprReducer`,
+    ///     `FluentArityDispatch`, `SubReturnReducer`) all see anon
+    ///     subs the same way they see named subs — uniform
+    ///     attachment shape, no special-case for "this is anonymous."
+    ///     Falls back to `Expr(body_last_expr_span)` only when the
+    ///     symbol stash misses, which would mean a parse-error /
+    ///     ERROR-recovery path where `visit_anonymous_sub` didn't
+    ///     run; the body-span chase is still meaningful in that case.
     ///   - `refgen_expression` (`\&foo`, `\&Foo::bar`,
     ///     `\&$const_folded`) → `MethodOnClass { class, name }`.
     ///     Bag's MRO + `module_index` machinery resolves it,
@@ -1407,9 +1426,14 @@ impl<'a> Builder<'a> {
         node: Node<'a>,
     ) -> Option<crate::witnesses::WitnessAttachment> {
         match node.kind() {
-            "anonymous_subroutine_expression" => self
-                .anonymous_sub_body_last_expr_span(node)
-                .map(crate::witnesses::WitnessAttachment::Expr),
+            "anonymous_subroutine_expression" => {
+                let span = node_to_span(node);
+                if let Some(sym_id) = self.anon_sub_symbol_by_span.get(&span) {
+                    return Some(crate::witnesses::WitnessAttachment::Symbol(*sym_id));
+                }
+                self.anonymous_sub_body_last_expr_span(node)
+                    .map(crate::witnesses::WitnessAttachment::Expr)
+            }
             "refgen_expression" => {
                 let names = self.extract_names_from_refgen(node);
                 let raw = names.into_iter().next()?;
@@ -1513,6 +1537,40 @@ impl<'a> Builder<'a> {
                 if let Some(class) = self.extract_constructor_class(node) {
                     return Some(InferredType::ClassName(class));
                 }
+                // Dynamic-method dispatch: `$obj->$cb(args)`. The parser
+                // shapes this as `method_call_expression` with a
+                // `method` field whose first named child is a `scalar`,
+                // not a bareword. Semantically it's `$cb->($obj,
+                // args)` — the coderef in `$cb` is invoked with `$obj`
+                // as the receiver. Route through the same edge chase
+                // as `coderef_call_expression`'s arm: chase the
+                // scalar's `CodeRef.return_edge` with `$obj`'s type
+                // as `q.receiver` and `arity = args.len()` (no
+                // first-arg-is-receiver subtraction here — the
+                // method-call syntax already accounts for the
+                // receiver via the `invocant` field).
+                if let Some(method_field) = node.child_by_field_name("method") {
+                    let scalar_node = if method_field.kind() == "scalar" {
+                        Some(method_field)
+                    } else {
+                        method_field
+                            .named_child(0)
+                            .filter(|c| c.kind() == "scalar")
+                    };
+                    if let Some(scalar) = scalar_node {
+                        let cb_ty = self.invocant_type_at_node(scalar)?;
+                        let target = cb_ty.callable_return_edge()?.clone();
+                        let invocant_ty = node
+                            .child_by_field_name("invocant")
+                            .and_then(|inv| self.invocant_type_at_node(inv));
+                        let arity = self.extract_call_args(node).len() as u32;
+                        return self.bag_query_attachment_with(
+                            &target,
+                            Some(arity),
+                            invocant_ty,
+                        );
+                    }
+                }
                 let span = node_to_span(node);
                 let idx = self.refs.iter().position(|r| {
                     matches!(r.kind, RefKind::MethodCall { .. }) && r.span == span
@@ -1530,20 +1588,56 @@ impl<'a> Builder<'a> {
                 self.bag_query_expression(crate::witnesses::RefIdx(idx as u32), Some(arity))
             }
             "coderef_call_expression" => {
-                // `$cb->()` — value-type IS whatever the operand's
+                // `$cb->(args)` — value-type IS whatever the operand's
                 // `CodeRef.return_edge` resolves to. Resolve the
                 // operand recursively (via this same dispatch),
                 // pull its callable return target, and chase it
-                // through the bag. No witness emission, no
-                // post-walk pass — chain typing re-asks every fold
-                // iteration, so monotone refinement of the operand
-                // type lifts $r's type on the next pass for free.
+                // through the bag.
+                //
+                // Arity / receiver semantics depend on the target
+                // attachment shape:
+                //   - `MethodOnClass{...}` → the first arg IS the
+                //     method's receiver (Perl's `\&Class::method`
+                //     semantics: invoking via coderef requires
+                //     passing the invocant as arg[0]). Drop it from
+                //     the arity count and surface its type as
+                //     `q.receiver` so `ReturnExpr::Receiver`
+                //     substitutes correctly. Also covers the
+                //     `\&foo` case (bare named sub) — today's
+                //     `coderef_return_edge_for` emits MethodOnClass
+                //     even for non-method subs in the current
+                //     package; that's a known caveat (would be
+                //     wrong for a plain sub treated as a method),
+                //     but it matches the existing arity dispatch
+                //     contract: the synth's UnionOnArgs branches
+                //     are written in receiver-relative arity.
+                //   - `Symbol(_)` (anon subs after Phase 2,
+                //     in-file named subs) → no receiver convention,
+                //     `q.receiver = None`, arity = args.len().
+                //     UnionOnArgs branches that mention `Receiver`
+                //     get `None`-substituted; Concrete arms work
+                //     unchanged.
+                //   - `Expr(_)` fallback (parse-error recovery for
+                //     anon subs whose Symbol stash didn't fire) →
+                //     same as Symbol: opaque body span, no
+                //     receiver, arity = args.len().
                 let operand = node.named_child(0)?;
                 let target = self
                     .invocant_type_at_node(operand)?
                     .callable_return_edge()?
                     .clone();
-                self.bag_query_attachment(&target)
+                let args = self.extract_call_args(node);
+                let (arity, receiver) = match &target {
+                    crate::witnesses::WitnessAttachment::MethodOnClass { .. } => {
+                        let recv_ty = args
+                            .first()
+                            .and_then(|n| self.invocant_type_at_node(*n));
+                        let arity = (args.len() as u32).saturating_sub(1);
+                        (Some(arity), recv_ty)
+                    }
+                    _ => (Some(args.len() as u32), None),
+                };
+                self.bag_query_attachment_with(&target, arity, receiver)
             }
             "scalar" => {
                 let text = node.utf8_text(self.source).ok()?;
@@ -2618,26 +2712,91 @@ impl<'a> Builder<'a> {
     }
 
     /// Walk an `anonymous_subroutine_expression` (a `sub { ... }`
-    /// arg literal). No symbol creation (anon subs are values,
-    /// not named entities) but DOES push a `Sub` scope around the
-    /// body so `enclosing_sub_scope()` returns Some inside it.
-    /// Without the scope, `return $x` inside `sub { return $x }`
-    /// can't fire the return-arm witness emission, and plugin-
-    /// synthesized callables that lazily edge into the body's
-    /// `Expr(span)` (mojo-helpers' `return_via_edge`) lose their
-    /// target. Conventional name `(anon)` so the scope chain
-    /// reads sensibly in `--dump-package`.
+    /// arg literal). Ensures a Symbol of kind `Sub` exists with the
+    /// conventional name `(anon)` so the per-scope arity / return
+    /// machinery (`emit_arity_return_witnesses`,
+    /// `fold_per_sub_return_arms`, plugin-priority writeback) finds
+    /// the sub uniformly with named subs — no special-case for "this
+    /// is an anonymous body." The Symbol's `span` matches the scope's
+    /// span exactly so `find_sub_symbol_for_scope` resolves by
+    /// containment, and `coderef_return_edge_for` can stash a
+    /// `Symbol(sym_id)` edge for the value-side `CodeRef.return_edge`
+    /// on `\&foo`-equivalent invocations.
+    ///
+    /// Symbol creation goes through `ensure_anon_sub_symbol` which
+    /// is idempotent — `expr_payload` may have already created the
+    /// symbol when handling `my $cb = sub {...}` (the assignment's
+    /// RHS extraction runs before the walker descends into the
+    /// body), so visit-time creation must be a no-op in that case.
+    /// Multiple anon subs all share the name `(anon)`; uniqueness
+    /// is by SymbolId, not name. Cross-file lookup by name is
+    /// suppressed by the `(` prefix (Perl identifiers can't start
+    /// with a paren), so a workspace search for `(anon)` won't
+    /// surface them.
     fn visit_anonymous_sub(&mut self, node: Node<'a>) {
         let params = self.extract_params(node);
+        let span = node_to_span(node);
+        self.ensure_anon_sub_symbol(node, &params);
         self.push_scope(
             ScopeKind::Sub { name: "(anon)".into() },
-            node_to_span(node),
+            span,
             None,
         );
         self.record_signature_params(node, &params);
         self.detect_first_param_type(&params, node);
         self.visit_children(node);
         self.pop_scope();
+    }
+
+    /// Ensure an `(anon)` Symbol exists for the given anon-sub node
+    /// and return its `SymbolId`. Called by both the rvalue-side
+    /// `expr_payload` (so `my $cb = sub {...}`'s TC sees a
+    /// `return_edge: Symbol(_)` from the start) and `visit_anonymous_sub`
+    /// (covers anon subs that aren't on the rhs of an assignment —
+    /// `helper(name => sub {...})`, `Carp::confess(sub {...}->())`,
+    /// etc.). Keyed by node span, so re-entries for the same node
+    /// return the existing id.
+    fn ensure_anon_sub_symbol(
+        &mut self,
+        node: Node<'a>,
+        params: &[ParamInfo],
+    ) -> SymbolId {
+        let span = node_to_span(node);
+        if let Some(id) = self.anon_sub_symbol_by_span.get(&span) {
+            return *id;
+        }
+        let sym_id = self.add_symbol(
+            "(anon)".into(),
+            SymKind::Sub,
+            span,
+            self.sub_keyword_span(node).unwrap_or(span),
+            SymbolDetail::Sub {
+                params: params.to_vec(),
+                is_method: false,
+                doc: None,
+                display: None,
+                hide_in_outline: true,
+                opaque_return: false,
+            },
+        );
+        self.anon_sub_symbol_by_span.insert(span, sym_id);
+        sym_id
+    }
+
+    /// Span of the `sub` keyword itself for an anon-sub node — the
+    /// natural selection span (where goto-def / hover should land
+    /// when targeting the value, not the body). Returns None if the
+    /// keyword is missing (incomplete-source recovery wraps anon
+    /// subs in ERROR nodes).
+    fn sub_keyword_span(&self, node: Node<'a>) -> Option<Span> {
+        for i in 0..node.child_count() {
+            if let Some(c) = node.child(i) {
+                if c.kind() == "sub" {
+                    return Some(node_to_span(c));
+                }
+            }
+        }
+        None
     }
 
     fn extract_params(&self, sub_node: Node<'a>) -> Vec<ParamInfo> {
@@ -3602,6 +3761,20 @@ impl<'a> Builder<'a> {
                 self.visit_variable_decl(left);
             }
             if let Some(right) = node.child_by_field_name("right") {
+                // Visit RHS children FIRST so any side-effecting walk
+                // steps (anon-sub Symbol creation in `visit_anonymous_sub`,
+                // ref/scope allocation, plugin hook firing) have run by
+                // the time we read the rvalue's `InferredType`.
+                // Specifically: `my $cb = sub {...}` needs
+                // `coderef_return_edge_for` to see the (anon) Symbol
+                // already in `anon_sub_symbol_by_span`, so the TC for
+                // `$cb` carries `CodeRef { return_edge: Symbol(_) }`
+                // — uniform attachment shape with named subs, so the
+                // bag's `FluentArityDispatch` / `ReturnExprReducer`
+                // claim arity-arm and Receiver-substitution witnesses
+                // through the Symbol attachment without a per-shape
+                // dispatch in the chase site.
+                self.visit_node(right);
                 // Try constructor class first, then literal types, then expression type
                 let inferred = self.infer_expression_type(right)
                     .or_else(|| self.infer_expression_result_type(right));
@@ -3657,8 +3830,9 @@ impl<'a> Builder<'a> {
                         }
                     }
                 }
-                // Visit the RHS (may contain refs, calls, etc.)
-                self.visit_node(right);
+                // RHS already visited above (moved before
+                // `infer_expression_type` so anon-sub Symbol creation
+                // happens before the rvalue's TC is read).
 
                 // Branch-arm detection: if RHS is a ternary, emit
                 // per-arm `branch_arm`-source `Edge(Expr(arm_span))`
@@ -3781,6 +3955,19 @@ impl<'a> Builder<'a> {
             }
             "quoted_regexp" => Some(WitnessPayload::InferredType(InferredType::Regexp)),
             "anonymous_subroutine_expression" | "refgen_expression" => {
+                // Pre-create the (anon) Symbol so `coderef_return_edge_for`'s
+                // anon-sub arm resolves to `Symbol(sym_id)` instead of
+                // falling back to the body-span edge. The walker's
+                // `visit_anonymous_sub` runs LATER (descends into the
+                // body after the assignment finishes pushing its
+                // payload), so without this pre-step the TC for the
+                // bound variable carries the stale Expr-span edge and
+                // `FluentArityDispatch` / `ReturnExprReducer` never see
+                // the call site through Symbol-attached witnesses.
+                if node.kind() == "anonymous_subroutine_expression" {
+                    let params = self.extract_params(node);
+                    self.ensure_anon_sub_symbol(node, &params);
+                }
                 let return_edge = self.coderef_return_edge_for(node);
                 Some(WitnessPayload::InferredType(InferredType::CodeRef { return_edge }))
             }
@@ -4956,6 +5143,67 @@ impl<'a> Builder<'a> {
                         framework,
                         format!("Mojo::Base `has '{}'` fluent writer (returns invocant)", name),
                     );
+
+                    // Symbol-declarative ReturnExpr for class-keyed
+                    // dispatch. Replaces the per-arm ArityReturn arms
+                    // when consumers route through `MethodOnClass{class,
+                    // name}` (chain typer's `\&Class::name; $cb->($obj,
+                    // ...)` chase, dynamic-method `$obj->$cb()`). The
+                    // value-side `Receiver` evaluates against
+                    // `q.receiver` — which the chain typer threads
+                    // from the call site (first arg for coderef-of-
+                    // method, invocant for dynamic-method).
+                    //
+                    // Lives **alongside** the per-Symbol ArityReturn
+                    // observations for now: Phase 5 unifies them.
+                    // ReturnExprReducer is registered before
+                    // FluentArityDispatch so this answer wins.
+                    if let Some(class) = self.current_package.clone() {
+                        // Build the union: an Empty arm exists only
+                        // when there's a getter type to return (a
+                        // default value gave us one); without it the
+                        // arity-0 caller has no answer (legacy behavior),
+                        // so the union has only the writer arm.
+                        // The `AtLeast(1)` guard on the writer arm is
+                        // tighter than `Any` — it makes the writer's
+                        // Receiver answer apply *only* when the call
+                        // has at least one explicit arg, so an
+                        // arity-0 caller with no getter type falls
+                        // through cleanly to whatever else the bag
+                        // can answer (rather than spuriously matching
+                        // `Any` and substituting Receiver).
+                        let mut branches: Vec<(
+                            crate::witnesses::ArgGuard,
+                            crate::witnesses::ReturnExpr,
+                        )> = Vec::new();
+                        if let Some(t) = getter_type.clone() {
+                            branches.push((
+                                crate::witnesses::ArgGuard::Empty,
+                                crate::witnesses::ReturnExpr::Concrete(t),
+                            ));
+                        }
+                        branches.push((
+                            crate::witnesses::ArgGuard::AtLeast(1),
+                            crate::witnesses::ReturnExpr::Receiver,
+                        ));
+                        let return_expr =
+                            crate::witnesses::ReturnExpr::UnionOnArgs { branches };
+                        let zero = Span {
+                            start: Point { row: 0, column: 0 },
+                            end: Point { row: 0, column: 0 },
+                        };
+                        self.bag.push(crate::witnesses::Witness {
+                            attachment: crate::witnesses::WitnessAttachment::MethodOnClass {
+                                class,
+                                name: name.clone(),
+                            },
+                            source: crate::witnesses::WitnessSource::Builder(
+                                "framework_accessor_returnexpr".into(),
+                            ),
+                            payload: crate::witnesses::WitnessPayload::ReturnExpr(return_expr),
+                            span: zero,
+                        });
+                    }
                 }
             }
         }
@@ -5272,9 +5520,23 @@ impl<'a> Builder<'a> {
                         source: crate::witnesses::WitnessSource::Builder(
                             "parametric_resultset".into(),
                         ),
-                        payload: crate::witnesses::WitnessPayload::InferredType(ty),
+                        payload: crate::witnesses::WitnessPayload::InferredType(ty.clone()),
                         span: r_span,
                     });
+
+                    // Symbol-declarative ReturnExpr declarations on
+                    // `MethodOnClass{base, method}` so consumers
+                    // chasing `\&MyRS::find` (inheritance walk reaches
+                    // `MethodOnClass{DBIx::Class::ResultSet, find}`),
+                    // `$obj->$cb()` (dynamic-method via CodeRef edge),
+                    // and the standard direct call site all see the
+                    // same `Operator(RowOf(Receiver))` declaration
+                    // and substitute the receiver from their own
+                    // call-site context. Kept alongside the
+                    // call-site `parametric_projection` emission for
+                    // now — phase 5 retires that, leaving ReturnExpr
+                    // as the single source of truth.
+                    self.emit_parametric_return_expr_decls(&ty);
                 }
 
                 // Per-flavor return-type projection. When the
@@ -5927,6 +6189,47 @@ impl<'a> Builder<'a> {
             base,
             row: row_class,
         }))
+    }
+
+    /// Push `ReturnExpr` declarations on `MethodOnClass{base, m}`
+    /// for every projection method the flavor declares. Called
+    /// after each `extract_resultset_parametric` hit so the chain
+    /// typer's coderef-edge / dynamic-method / inheritance routes
+    /// all see the same answer through the bag's standard
+    /// `MethodOnClass` chase. Latest-wins among duplicates: same
+    /// `(base, method)` pair seen twice (two `resultset(...)` calls
+    /// in one file) re-publishes the same ReturnExpr — the
+    /// reducer's content equality on Operator(RowOf(Receiver))
+    /// makes that a no-op.
+    ///
+    /// Idempotent across re-runs: `EXTRACT_VERSION` bumps when
+    /// `WitnessPayload::ReturnExpr` lands, so cached blobs from
+    /// before this phase don't carry stale declarations. Within
+    /// one build, the worklist driver doesn't call this — emission
+    /// happens once during the live walk.
+    fn emit_parametric_return_expr_decls(&mut self, ty: &InferredType) {
+        let Some(p) = ty.as_parametric() else { return };
+        let base_class = match p {
+            crate::file_analysis::ParametricType::ResultSet { base, .. } => base.clone(),
+            crate::file_analysis::ParametricType::RowOf(_) => return,
+        };
+        let zero = Span {
+            start: Point { row: 0, column: 0 },
+            end: Point { row: 0, column: 0 },
+        };
+        for (method_name, return_expr) in p.return_method_declarations() {
+            self.bag.push(crate::witnesses::Witness {
+                attachment: crate::witnesses::WitnessAttachment::MethodOnClass {
+                    class: base_class.clone(),
+                    name: method_name.to_string(),
+                },
+                source: crate::witnesses::WitnessSource::Builder(
+                    "parametric_return_expr".into(),
+                ),
+                payload: crate::witnesses::WitnessPayload::ReturnExpr(return_expr),
+                span: zero,
+            });
+        }
     }
 
     /// Like `first_string_literal_arg` but additionally const-folds
@@ -6966,6 +7269,22 @@ impl<'a> Builder<'a> {
         &self,
         att: &crate::witnesses::WitnessAttachment,
     ) -> Option<InferredType> {
+        self.bag_query_attachment_with(att, None, None)
+    }
+
+    /// Same chase as `bag_query_attachment`, but threads
+    /// `arity_hint` and `receiver` into the registry query so
+    /// `ReturnExprReducer` (UnionOnArgs branches, Receiver
+    /// substitution, Operator(RowOf, Receiver) projections) can
+    /// answer with the right arm. Used by the chain typer's
+    /// coderef-call / dynamic-method-call arms where the call
+    /// site contributes both pieces of context.
+    fn bag_query_attachment_with(
+        &self,
+        att: &crate::witnesses::WitnessAttachment,
+        arity_hint: Option<u32>,
+        receiver: Option<InferredType>,
+    ) -> Option<InferredType> {
         use crate::witnesses::{
             BagContext, FrameworkFact, ReducedValue, ReducerQuery, ReducerRegistry,
         };
@@ -6980,7 +7299,8 @@ impl<'a> Builder<'a> {
             attachment: att,
             point: None,
             framework: FrameworkFact::Plain,
-            arity_hint: None,
+            arity_hint,
+            receiver,
             context: Some(&ctx),
         };
         match reg.query(&self.bag, &q) {
@@ -7030,6 +7350,7 @@ impl<'a> Builder<'a> {
             &self.symbols,
             name,
             arity_hint,
+            None,
             Some(&ctx),
         )
     }
@@ -7061,6 +7382,7 @@ impl<'a> Builder<'a> {
             point: None,
             framework: FrameworkFact::Plain,
             arity_hint,
+            receiver: None,
             context: Some(&ctx),
         };
         match reg.query(&self.bag, &q) {
@@ -7073,86 +7395,124 @@ impl<'a> Builder<'a> {
     }
 
 
-    /// Step 2: emit `ArityReturn` witnesses on `Symbol(sub_id)` — the
-    /// payload `FluentArityDispatch` (the spec's "ArityReturnReducer")
-    /// folds at query time. Only for arity-DISCRIMINATED subs (≥ 1
-    /// `Zero`/`Exact(_)` arm); plain subs don't emit, otherwise
-    /// `FluentArityDispatch` would answer with one arm even when the
-    /// per-arm fold says "agreement failed" (different arms differ).
-    /// Walk-time arity classification stays a `Some(_)` enum on
-    /// `ReturnInfo`; the type is read out per-RI by querying the
-    /// body's `Expr(span)` against the current bag.
+    /// Step 2: emit a `UnionOnArgs` `ReturnExpr` per arity-
+    /// discriminated sub on `Symbol(sub_id)` and
+    /// `MethodOnClass{class, name}`. Replaces the per-arm
+    /// `ArityReturn` observations that fed `FluentArityDispatch`
+    /// (retired in this phase) — the bag's `ReturnExprReducer`
+    /// dispatches the call's `arity_hint` against the union's
+    /// branches.
     ///
-    /// Idempotent across re-runs — clears every prior `arity_detection`
-    /// witness from the bag before re-emitting. The worklist driver
-    /// calls `resolve_return_types` repeatedly until fixed point;
-    /// without this clear-and-emit, each iteration would duplicate
-    /// every arity witness in the bag.
+    /// Walk-time arity classification stays a `Some(_)` enum on
+    /// `ReturnInfo`; per-arm types are read out by querying each
+    /// body's `Expr(span)` against the current bag. Only fires for
+    /// arity-DISCRIMINATED subs (≥ 1 `Zero`/`Exact(_)` arm) — plain
+    /// subs leave the per-Symbol slot empty so SubReturnReducer's
+    /// stored-return read is what answers.
+    ///
+    /// Idempotent across re-runs — clears every prior
+    /// `arity_detection` witness from the bag before re-emitting.
+    /// The worklist driver calls `resolve_return_types` repeatedly
+    /// until fixed point; without this clear-and-emit, each
+    /// iteration would duplicate every arity witness in the bag.
     fn emit_arity_return_witnesses(&mut self) {
         use crate::witnesses::{
-            TypeObservation, Witness, WitnessAttachment, WitnessPayload, WitnessSource,
+            ArgGuard, ReturnExpr, Witness, WitnessAttachment, WitnessPayload, WitnessSource,
         };
 
         self.bag.remove_by_source_tag("arity_detection");
 
-        let mut arity_discriminated_scopes: std::collections::HashSet<ScopeId> =
+        // Group return arms by scope. Only scopes with at least one
+        // Zero / Exact arm are arity-discriminated.
+        let mut by_scope: std::collections::HashMap<
+            ScopeId,
+            Vec<(ArityBranch, Span)>,
+        > = std::collections::HashMap::new();
+        let mut discriminated: std::collections::HashSet<ScopeId> =
             std::collections::HashSet::new();
         for ri in &self.return_infos {
-            if matches!(
-                ri.arity_branch,
-                Some(ArityBranch::Zero) | Some(ArityBranch::Exact(_))
-            ) {
-                arity_discriminated_scopes.insert(ri.scope);
+            let Some(branch) = ri.arity_branch else { continue };
+            if matches!(branch, ArityBranch::Zero | ArityBranch::Exact(_)) {
+                discriminated.insert(ri.scope);
+            }
+            if let Some(span) = ri.body_span {
+                by_scope.entry(ri.scope).or_default().push((branch, span));
             }
         }
 
-        let mut arity_witnesses: Vec<Witness> = Vec::new();
-        for ri in &self.return_infos {
-            let Some(branch) = ri.arity_branch else { continue };
-            if !arity_discriminated_scopes.contains(&ri.scope) {
+        let mut to_push: Vec<Witness> = Vec::new();
+        for scope in &discriminated {
+            let arms = match by_scope.get(scope) {
+                Some(a) => a,
+                None => continue,
+            };
+            // Sort arms so narrow guards come before broad ones —
+            // ReturnExprReducer's UnionOnArgs picks first-match.
+            // Empty / Exact(N) before Default; ties broken by
+            // source order (stable).
+            let mut sorted: Vec<(ArgGuard, ReturnExpr)> = Vec::new();
+            // Pass 1: Zero / Exact arms.
+            for (branch, body_span) in arms {
+                let Some(t) = self.bag_query_expr_span(*body_span) else { continue };
+                match branch {
+                    ArityBranch::Zero => {
+                        sorted.push((ArgGuard::Empty, ReturnExpr::Concrete(t)));
+                    }
+                    ArityBranch::Exact(n) => {
+                        sorted.push((ArgGuard::Exact(*n), ReturnExpr::Concrete(t)));
+                    }
+                    ArityBranch::Default => {} // pass 2
+                }
+            }
+            // Pass 2: Default arm(s). Fold to a single Any branch
+            // — multiple Default arms with disagreeing types lose
+            // their disagreement signal here, which is the same
+            // semantics the legacy FluentArityDispatch offered:
+            // the per-arm fold runs separately
+            // (`fold_per_sub_return_arms`) and is what surfaces
+            // ambiguity in the writeback.
+            let mut default_t: Option<InferredType> = None;
+            for (branch, body_span) in arms {
+                if matches!(branch, ArityBranch::Default) {
+                    if let Some(t) = self.bag_query_expr_span(*body_span) {
+                        default_t = Some(t);
+                    }
+                }
+            }
+            if let Some(t) = default_t {
+                sorted.push((ArgGuard::Any, ReturnExpr::Concrete(t)));
+            }
+            if sorted.is_empty() {
                 continue;
             }
-            let Some(t) = ri.body_span.and_then(|sp| self.bag_query_expr_span(sp)) else {
-                continue;
-            };
-            let Some(sym_id) = self.find_sub_symbol_for_scope(ri.scope) else { continue };
-            let arg_count = match branch {
-                ArityBranch::Zero => Some(0u32),
-                ArityBranch::Exact(n) => Some(n),
-                ArityBranch::Default => None,
-            };
-            arity_witnesses.push(Witness {
+            let Some(sym_id) = self.find_sub_symbol_for_scope(*scope) else { continue };
+            let return_expr = ReturnExpr::UnionOnArgs { branches: sorted };
+            // The Symbol attachment carries it for in-file Symbol-
+            // keyed lookups. The MethodOnClass attachment mirrors
+            // for class-keyed dispatch (cross-file inheritance,
+            // `\&Class::method` chase).
+            let body_span = arms[0].1;
+            to_push.push(Witness {
                 attachment: WitnessAttachment::Symbol(sym_id),
                 source: WitnessSource::Builder("arity_detection".into()),
-                payload: WitnessPayload::Observation(TypeObservation::ArityReturn {
-                    arg_count,
-                    return_type: t.clone(),
-                }),
-                span: ri.span,
+                payload: WitnessPayload::ReturnExpr(return_expr.clone()),
+                span: body_span,
             });
-            // Mirror onto `MethodOnClass{class, name}` so class-keyed
-            // dispatch from `find_method_return_type` picks up the
-            // arm even when the caller doesn't have a sym_id in hand.
-            // Resolve the sub's `(class, name)` via the symbol table —
-            // arity-discriminated subs are always concretely named.
             if let Some(sym) = self.symbols.get(sym_id.0 as usize) {
                 if let Some(class) = sym.package.clone() {
-                    arity_witnesses.push(Witness {
+                    to_push.push(Witness {
                         attachment: WitnessAttachment::MethodOnClass {
                             class,
                             name: sym.name.clone(),
                         },
                         source: WitnessSource::Builder("arity_detection".into()),
-                        payload: WitnessPayload::Observation(TypeObservation::ArityReturn {
-                            arg_count,
-                            return_type: t,
-                        }),
-                        span: ri.span,
+                        payload: WitnessPayload::ReturnExpr(return_expr),
+                        span: body_span,
                     });
                 }
             }
         }
-        for w in arity_witnesses {
+        for w in to_push {
             self.bag.push(w);
         }
     }
@@ -7233,6 +7593,7 @@ impl<'a> Builder<'a> {
                     point: None,
                     framework: FrameworkFact::Plain,
                     arity_hint: None,
+                    receiver: None,
                     context: Some(&ctx),
                 };
                 if let ReducedValue::Type(t) = reg.query(&self.bag, &q) {
@@ -7326,6 +7687,7 @@ impl<'a> Builder<'a> {
                 point: None,
                 framework: FrameworkFact::Plain,
                 arity_hint: None,
+                receiver: None,
                 context: None,
             };
             if let ReducedValue::Type(t) = plugin_reducer.reduce(&claimed, &q) {

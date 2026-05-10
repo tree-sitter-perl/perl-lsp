@@ -675,6 +675,44 @@ impl ParametricType {
             ParametricType::RowOf(_) => None,
         }
     }
+
+    /// Symbol-declarative projection table — list of `(method_name,
+    /// ReturnExpr)` pairs the flavor publishes on
+    /// `MethodOnClass{base, method}` so consumers chasing through
+    /// inheritance / coderef-edge / dynamic-method routes hit the
+    /// projection without the call-site `parametric_projection`
+    /// emitter firing. Used by `emit_parametric_return_expr_decls`
+    /// after every `extract_resultset_parametric` hit — the `base`
+    /// discovered there pins the class slot for the witness.
+    ///
+    /// `ReturnExpr::Operator(RowOf(Receiver))` evaluates at the
+    /// reducer with `q.receiver = the call's invocant type`. For
+    /// `\&MyRS::find; $cb->($rs, ...)`, the chain typer's coderef
+    /// arm sees the target is `MethodOnClass{MyRS, find}`,
+    /// inheritance walks to `MethodOnClass{DBIx::Class::ResultSet,
+    /// find}`, finds the `Operator(RowOf, Receiver)` declaration,
+    /// substitutes `q.receiver = $rs`'s `Parametric(ResultSet)`,
+    /// evaluates `RowOf(ResultSet { row, .. }) → ClassName(row)`.
+    pub fn return_method_declarations(
+        &self,
+    ) -> Vec<(&'static str, crate::witnesses::ReturnExpr)> {
+        match self {
+            ParametricType::ResultSet { .. } => {
+                let row_of_receiver = crate::witnesses::ReturnExpr::Operator(
+                    crate::witnesses::ParametricOp::RowOf(Box::new(
+                        crate::witnesses::ReturnExpr::Receiver,
+                    )),
+                );
+                ["find", "first", "single", "next", "create",
+                 "find_or_new", "find_or_create", "update_or_create",
+                 "new_result"]
+                    .iter()
+                    .map(|m| (*m, row_of_receiver.clone()))
+                    .collect()
+            }
+            ParametricType::RowOf(_) => Vec::new(),
+        }
+    }
 }
 
 impl InferredType {
@@ -1752,6 +1790,7 @@ impl FileAnalysis {
             point: None,
             framework: FrameworkFact::Plain,
             arity_hint: None,
+            receiver: None,
             context: Some(&ctx),
         };
         match reg.query(&self.witnesses, &q) {
@@ -1792,6 +1831,7 @@ impl FileAnalysis {
             &self.symbols,
             sub_name,
             arity,
+            None,
             Some(&ctx),
         )
     }
@@ -2401,6 +2441,7 @@ impl FileAnalysis {
             point: None,
             framework: FrameworkFact::Plain,
             arity_hint: arg_count.map(|n| n as u32),
+            receiver: None,
             context: Some(&ctx),
         };
         match reg.query(&self.witnesses, &q) {
@@ -2445,11 +2486,20 @@ impl FileAnalysis {
             module_index,
             package_parents: &self.package_parents,
         };
+        // Default receiver = `ClassName(class_name)` so that
+        // `ReturnExpr::Receiver` evaluates correctly for class-keyed
+        // method-return queries that don't have a specific
+        // call-site invocant — Mojo `has 'title'` writer's
+        // Receiver evaluates to ClassName(Bar), DBIC `find`'s
+        // RowOf(Receiver) wraps the Parametric (when one is
+        // supplied via the `arg_count` Some path elsewhere). Same
+        // policy as `query_sub_return_type`'s class-fallback rule.
         let q = ReducerQuery {
             attachment: &att,
             point: None,
             framework,
             arity_hint: arg_count.map(|n| n as u32),
+            receiver: Some(InferredType::ClassName(class_name.to_string())),
             context: Some(&ctx),
         };
         let reg = ReducerRegistry::with_defaults();
@@ -6081,3 +6131,7 @@ mod call_ref_index_tests;
 #[cfg(test)]
 #[path = "parametric_resultset_tests.rs"]
 mod parametric_resultset_tests;
+
+#[cfg(test)]
+#[path = "return_expr_tests.rs"]
+mod return_expr_tests;
