@@ -542,6 +542,17 @@ pub enum InferredType {
     /// body via a `Gate` discriminator. See
     /// `docs/adr/parametric-types.md`.
     Parametric(ParametricType),
+    /// Positional container — `my @arr = (...)` or
+    /// `push @arr, ...` contributions accumulated walk-side. The
+    /// `Vec` stores per-index types; `element_at(i)` projects.
+    /// Spike scope: tuple shape only, no Homogeneous / Cycle /
+    /// Heterogeneous classification yet.
+    ///
+    /// Placed at the END of the enum so bincode-serialized cache
+    /// blobs keep their existing variant indices stable. Inserting
+    /// new variants in the middle would shift every subsequent
+    /// variant's wire-format index and silently misread old blobs.
+    Sequence(Vec<InferredType>),
 }
 
 /// Concrete parametric flavors + type-level operators. Each
@@ -695,6 +706,17 @@ impl InferredType {
             InferredType::Parametric(p) => p.class_name(),
             _ => None,
         }
+    }
+
+    /// Project a `Sequence(...)` to its element at index `i`. Negative
+    /// indices wrap from the end (Perl `$arr[-1]`). `None` for any
+    /// non-Sequence type or out-of-bounds index.
+    pub fn element_at(&self, i: i32) -> Option<&InferredType> {
+        let InferredType::Sequence(elems) = self else { return None };
+        let n = elems.len() as i32;
+        let idx = if i < 0 { n + i } else { i };
+        if idx < 0 || idx >= n { return None; }
+        elems.get(idx as usize)
     }
 
     /// True if this is any object-shaped variant (ClassName,
@@ -2252,6 +2274,21 @@ impl FileAnalysis {
                 let text = node.utf8_text(source).ok()?;
                 Some(InferredType::ClassName(text.to_string()))
             }
+            "array_element_expression" => {
+                // `$arr[N]` — look up `@arr`'s Sequence shape via the
+                // bag, project the index. The bag answer is whatever
+                // the walker's last `push` / `my @arr = (...)`
+                // contribution left on `Variable{"@arr", scope}`.
+                let arr = node.child_by_field_name("array")?;
+                let name = arr
+                    .named_child(0)
+                    .and_then(|n| n.utf8_text(source).ok())?;
+                let idx_node = node.child_by_field_name("index")?;
+                let idx: i32 = idx_node.utf8_text(source).ok()?.parse().ok()?;
+                let arr_var = format!("@{}", name);
+                self.inferred_type_via_bag(&arr_var, point)
+                    .and_then(|t| t.element_at(idx).cloned())
+            }
             "method_call_expression" => {
                 let invocant_node = node.child_by_field_name("invocant")?;
                 let invocant_type = self.resolve_expression_type(invocant_node, source, module_index)?;
@@ -3348,7 +3385,7 @@ impl FileAnalysis {
     }
 
     /// Hover info: return display text for the symbol at cursor.
-    pub fn hover_info(&self, point: Point, source: &str, _tree: Option<&tree_sitter::Tree>, module_index: Option<&ModuleIndex>) -> Option<String> {
+    pub fn hover_info(&self, point: Point, source: &str, tree: Option<&tree_sitter::Tree>, module_index: Option<&ModuleIndex>) -> Option<String> {
         // Check refs first
         if let Some(r) = self.ref_at(point) {
             match &r.kind {
@@ -3361,7 +3398,9 @@ impl FileAnalysis {
                             && mr.target_name != r.target_name);
                     if let Some(mr) = method_hover {
                         if matches!(mr.kind, RefKind::MethodCall { .. }) {
-                            let class_name = self.method_call_invocant_class(mr, module_index);
+                            let class_name = self.method_call_invocant_class_with_tree(
+                                mr, tree, Some(source.as_bytes()), module_index,
+                            );
                             if let Some(ref cn) = class_name {
                                 match self.resolve_method_in_ancestors(cn, &mr.target_name, module_index) {
                                     Some(MethodResolution::Local { sym_id, class: ref defining_class, .. }) => {
@@ -3466,7 +3505,9 @@ impl FileAnalysis {
                     }
                 }
                 RefKind::MethodCall { .. } => {
-                    let class_name = self.method_call_invocant_class(r, module_index);
+                    let class_name = self.method_call_invocant_class_with_tree(
+                        r, tree, Some(source.as_bytes()), module_index,
+                    );
                     if let Some(ref cn) = class_name {
                         match self.resolve_method_in_ancestors(cn, &r.target_name, module_index) {
                             Some(MethodResolution::Local { sym_id, class: ref defining_class, .. }) => {
@@ -3930,6 +3971,23 @@ impl FileAnalysis {
         r: &Ref,
         module_index: Option<&ModuleIndex>,
     ) -> Option<String> {
+        self.method_call_invocant_class_with_tree(r, None, None, module_index)
+    }
+
+    /// Tree-aware variant. When a `tree` + `source` are available
+    /// (every LSP-facing reader has them), this routes non-trivial
+    /// invocants (`$arr[N]`, future shapes) through
+    /// `resolve_expression_type` on the actual CST node — the same
+    /// arm the cursor-context completion path uses. Without the
+    /// tree, falls through to the string-based bag query.
+    /// One resolution rule, two entry points, no shape drift.
+    pub fn method_call_invocant_class_with_tree(
+        &self,
+        r: &Ref,
+        tree: Option<&tree_sitter::Tree>,
+        source: Option<&[u8]>,
+        module_index: Option<&ModuleIndex>,
+    ) -> Option<String> {
         let RefKind::MethodCall { invocant, invocant_span, .. } = &r.kind else {
             return None;
         };
@@ -3946,6 +4004,33 @@ impl FileAnalysis {
         // variables — so we resolve here directly.
         if invocant == "shift" || invocant == "$_[0]" || invocant == "@_[0]" {
             return self.enclosing_class_for_scope(r.scope);
+        }
+
+        // Tree-aware fast path: find the invocant's CST node and
+        // dispatch through `resolve_expression_type`. That arm
+        // already handles `array_element_expression` (and any
+        // future non-trivial invocant shape) — keeping hover /
+        // dispatch on the same projection logic completion uses.
+        if let (Some(tree), Some(source), Some(span)) = (tree, source, invocant_span) {
+            let node = tree.root_node().descendant_for_point_range(span.start, span.end);
+            if let Some(node) = node {
+                // Only take this path for shapes the string-based
+                // bag query can't handle. `scalar` / `array` /
+                // `hash` invocants are simple variables — the
+                // existing string lookup is fine and consistent
+                // with every other variable-typed call site.
+                let needs_tree = !matches!(
+                    node.kind(),
+                    "scalar" | "array" | "hash" | "bareword" | "package" | "scoped_identifier"
+                );
+                if needs_tree {
+                    if let Some(t) = self.resolve_expression_type(node, source, module_index) {
+                        if let Some(cn) = t.class_name() {
+                            return Some(cn.to_string());
+                        }
+                    }
+                }
+            }
         }
 
         // `__PACKAGE__` is rewritten to the enclosing package at
@@ -6058,6 +6143,7 @@ pub fn inferred_type_to_tag(ty: &InferredType) -> String {
             Some(c) => format!("Object:{}", c),
             None => "Parametric".to_string(),
         },
+        InferredType::Sequence(_) => "Sequence".to_string(),
     }
 }
 
@@ -6098,6 +6184,14 @@ pub(crate) fn format_inferred_type(ty: &InferredType) -> String {
         InferredType::Numeric => "Numeric".to_string(),
         InferredType::String => "String".to_string(),
         InferredType::Parametric(p) => format_parametric_type(p),
+        InferredType::Sequence(elems) => {
+            // Angle brackets, not `[...]` — markdown renderers treat
+            // bracketed text as link syntax and either swallow it
+            // or render it as a broken link. Matches the
+            // `Parametric<T1, T2>` style.
+            let parts: Vec<String> = elems.iter().map(format_inferred_type).collect();
+            format!("Sequence<{}>", parts.join(", "))
+        }
     }
 }
 

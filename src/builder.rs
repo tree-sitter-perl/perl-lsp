@@ -191,6 +191,7 @@ fn build_with_plugins_inner(
         fold_ranges: Vec::new(),
         imports: Vec::new(),
         return_infos: Vec::new(),
+        pending_array_pushes: Vec::new(),
         last_expr_span: std::collections::HashMap::new(),
         call_bindings: Vec::new(),
         method_call_bindings: Vec::new(),
@@ -207,10 +208,17 @@ fn build_with_plugins_inner(
         plugin_namespaces: Vec::new(),
         type_provenance: std::collections::HashMap::new(),
         bag: crate::witnesses::WitnessBag::new(),
-        unresolved_call_targets: Vec::new(),
+        unresolved_expr_nodes: Vec::new(),
         package_framework: std::collections::HashMap::new(),
         scope_stack: Vec::new(),
-        current_package: None,
+        // Perl's implicit top-level package. Without this seed,
+        // top-level scripts (`Mojolicious::Lite` apps, one-off
+        // `.pl` files) have `current_package = None` until they
+        // hit an explicit `package` statement — which means
+        // `package_uses` never records the file's `use` lines and
+        // `Trigger::UsesModule` plugin triggers don't fire. Same
+        // as Perl's own runtime: every script starts in `main`.
+        current_package: Some("main".to_string()),
         next_scope_id: 0,
         next_symbol_id: 0,
         package_ranges: Vec::new(),
@@ -294,7 +302,7 @@ fn build_with_plugins_inner(
     // them now against the final symbol table and push the
     // `Expr(span) → Edge(Symbol(sid))` witness the walk would have.
     // See `docs/prompt-forward-reference-resolution.md`.
-    b.resolve_forward_call_targets();
+    b.resolve_forward_expr_witnesses();
 
     // Phase 6: worklist driver. Replaces the manually-ordered
     // `fold → chain → fold → chain` sequence with one fixed-point
@@ -320,6 +328,14 @@ fn build_with_plugins_inner(
     // otherwise spin forever.
     let chain_idx = build_chain_typing_index(tree);
     b.fold_to_fixed_point(&chain_idx);
+    // PostFold filled `invocant_class` on MethodCall refs after the
+    // worklist exited; re-emit method-call return edges so
+    // Expression(refidx) chases resolve through to
+    // MethodOnClass{class, method} for any invocant freshly known.
+    // Then push array contributions: spans queryable through the
+    // freshly-published edges.
+    b.emit_method_call_return_edges();
+    b.emit_array_push_witnesses();
 
     // Test-only: re-run the worklist fold one more time to pin
     // idempotency. Production callers always pass `false`; only
@@ -923,6 +939,16 @@ struct Builder<'a> {
     imports: Vec<Import>,
     /// Return values collected during the walk (explicit `return` + implicit last expr).
     return_infos: Vec<ReturnInfo>,
+    /// Pending `push @arr, X, Y` contributions queued at walk time
+    /// and re-resolved in the worklist (phase 6) once method-call
+    /// return types are filled. Stored as
+    /// `(scope, arr_name, contribution_spans)` triples — re-emitted
+    /// each iteration as `Variable{arr_name, scope} +
+    /// InferredType(Sequence(...))` with the latest known per-arg
+    /// types. Clear-and-emit on `source_tag = "array_push"`. Spike
+    /// scope: tuple shape only; cross-scope and conditional
+    /// branches not yet handled.
+    pending_array_pushes: Vec<(ScopeId, String, Vec<Span>)>,
     /// For each Sub/Method scope, the body span of the last
     /// top-level expression statement. Used as the implicit-return
     /// query key — `seed_return_types_from_bag` reads `Expr(span)` via
@@ -991,14 +1017,25 @@ struct Builder<'a> {
     /// the analysis is constructed — no second seeding pass.
     bag: crate::witnesses::WitnessBag,
     /// Walk-time symbol-table lookups that came up empty for a name
-    /// resolvable to a local sub. Perl's name resolution for subs is
-    /// forward-tolerant (`sub a { b() } sub b {…}` is legal), but the
-    /// walk emits witnesses live, so a forward-defined callee silently
-    /// produces no witness in `expr_payload`'s call arms. Re-resolved
-    /// against the final symbol table by `resolve_forward_call_targets`
-    /// between `populate_witness_bag` and `fold_to_fixed_point`. See
-    /// `docs/prompt-forward-reference-resolution.md`.
-    unresolved_call_targets: Vec<UnresolvedCallTarget>,
+    /// Nodes that `emit_expr_witness` couldn't resolve at walk
+    /// time. Two common shapes:
+    ///   * **Forward-defined sub call** — `sub a { b() } sub b {…}`
+    ///     is legal Perl, but the walk emits witnesses live and the
+    ///     callee isn't in the symbol table yet when `b()` is
+    ///     visited.
+    ///   * **Walked-before-children parent** — `visit_function_call`
+    ///     fires before its arg subtree is walked, so any
+    ///     `emit_expr_witness` called inside the parent visitor on
+    ///     a method-call arg finds no matching `MethodCall` ref
+    ///     yet (refs are pushed during `visit_method_call_expression`,
+    ///     which runs later).
+    ///
+    /// `resolve_forward_expr_witnesses` retries `expr_payload` on
+    /// each queued node post-walk — refs are complete + the
+    /// symbol table is final by then, so the live and recovery
+    /// paths produce byte-identical witnesses (same span, same
+    /// `expression` source tag).
+    unresolved_expr_nodes: Vec<Node<'a>>,
     /// Per-package framework fact, computed from `framework_modes` once
     /// the walk finishes. Available before `resolve_return_types` so
     /// the bag-aware return-arm fold can ask the framework-aware
@@ -1089,18 +1126,6 @@ enum FrameworkMode {
     Moo,
     Moose,
     MojoBase,
-}
-
-/// Queued by `emit_expr_witness` whenever a name-driven call kind
-/// (`function_call_expression`, `bareword`, `scoped_identifier`) couldn't
-/// emit its `Edge(Symbol(_))` witness because the callee wasn't in the
-/// symbol table yet. Re-resolved post-walk against the final symbols.
-#[derive(Debug, Clone)]
-struct UnresolvedCallTarget {
-    /// Bare sub name (e.g. `longmess_heavy`, stripped of any `Pkg::` prefix).
-    name: String,
-    /// `Expr(span)` attachment that the missing witness should land on.
-    expr_span: Span,
 }
 
 impl<'a> Builder<'a> {
@@ -4030,10 +4055,10 @@ impl<'a> Builder<'a> {
     }
 
     /// Find a local Sub or Method symbol by bare name. Used by
-    /// `expr_payload`'s function/bareword arms (walk-time) and
-    /// `resolve_forward_call_targets` (post-walk) — both want the same
-    /// "is there a local sub I could route a call edge to" answer, so
-    /// they share this lookup.
+    /// `expr_payload`'s function/bareword arms — both at walk
+    /// time and post-walk via `resolve_forward_expr_witnesses`'s
+    /// retry. One lookup, two emission paths, byte-identical
+    /// witnesses.
     fn find_callee_symbol(&self, bare: &str) -> Option<SymbolId> {
         self.symbols
             .iter()
@@ -4196,9 +4221,8 @@ impl<'a> Builder<'a> {
             // Function / bareword / scoped-identifier call — extract the
             // callee's bare name and Edge to its `Symbol(sid)`. Failures
             // (target not yet in symbol table) are recovered post-walk by
-            // `resolve_forward_call_targets`; same `forward_callee_name`
-            // helper is the source of truth for "what name does this node
-            // refer to" so the live and recovery paths can't diverge.
+            // `resolve_forward_expr_witnesses`, which re-calls this same
+            // `expr_payload` against the final symbol table.
             "function_call_expression"
             | "ambiguous_function_call_expression"
             | "bareword"
@@ -4260,25 +4284,30 @@ impl<'a> Builder<'a> {
                 payload,
                 span,
             });
-        } else if let Some(name) = self.forward_callee_name(node) {
-            // Sub call by bare name whose target wasn't in the symbol
-            // table yet — Perl resolves these at symbol-table time, not
-            // parse time, so the lookup is legitimately deferred. Queue
-            // for `resolve_forward_call_targets` to retry post-walk.
-            self.unresolved_call_targets.push(UnresolvedCallTarget {
-                name,
-                expr_span: span,
-            });
+        } else {
+            // `expr_payload` returned None — either the callee
+            // sym isn't in the table yet (forward-defined sub),
+            // or our parent visitor fired before this node's own
+            // walker emitted its Ref (push-before-children
+            // ordering). Both cases share one recovery: queue the
+            // node and re-call `expr_payload` post-walk against
+            // the now-final symbol table + refs.
+            //
+            // Don't queue node kinds `expr_payload` doesn't claim
+            // — `expr_payload`'s match is the single source of
+            // truth for "can this resolve later." Anything that
+            // returns None for a structural reason (unsupported
+            // syntax) will return None again post-walk, and the
+            // retry is a no-op.
+            self.unresolved_expr_nodes.push(node);
         }
     }
 
-    /// Bare callee name for an expression node whose `expr_payload` arm
-    /// resolves to `Edge(Symbol(sid))`. `None` for any other kind. Sole
-    /// source of truth for "what sub-name does this node reference" —
-    /// `expr_payload`'s call arm calls this for the live lookup, and
-    /// `emit_expr_witness` calls it again to queue forward-ref retries
-    /// when the live lookup misses. Keeping a single extractor is what
-    /// makes the live and post-walk paths impossible to diverge.
+    /// Bare callee name for an expression node whose `expr_payload`
+    /// arm resolves to `Edge(Symbol(sid))`. `None` for any other
+    /// kind. Sole source of truth for "what sub-name does this node
+    /// reference" — `expr_payload`'s call arm calls this for the
+    /// live lookup.
     fn forward_callee_name(&self, node: Node<'a>) -> Option<String> {
         let raw = match node.kind() {
             "function_call_expression" | "ambiguous_function_call_expression" => {
@@ -4290,27 +4319,27 @@ impl<'a> Builder<'a> {
         Some(bare_name(raw).to_string())
     }
 
-    /// Post-walk: re-resolve every queued `(name, expr_span)` pair
-    /// against the now-final symbol table and push the
-    /// `Expr(span) → Edge(Symbol(sid))` witness that
-    /// `emit_expr_witness` would have pushed live if the target had
-    /// existed. Same source tag (`expression`) and span as the
-    /// walk-time path so reducers can't tell the two emission sites
-    /// apart. Names that still don't resolve (cross-file imports
-    /// without a local sym, typos) are silently dropped — the bag is
-    /// monotone, no negative witnesses.
-    fn resolve_forward_call_targets(&mut self) {
-        use crate::witnesses::{Witness, WitnessAttachment, WitnessPayload, WitnessSource};
-        let queued = std::mem::take(&mut self.unresolved_call_targets);
-        for entry in queued {
-            let Some(sid) = self.find_callee_symbol(&entry.name) else {
-                continue;
-            };
+    /// Post-walk: re-call `expr_payload` on every queued node. By
+    /// this point the symbol table is final (forward sub refs
+    /// resolve) and every node's Ref has been emitted (parent
+    /// visitors that fired before child walks now have refs to
+    /// chase). Same `expression` source tag and span as the
+    /// walk-time path, so reducers can't tell the two emission
+    /// sites apart. Nodes that still return None (cross-file
+    /// imports without a local sym, syntax `expr_payload` doesn't
+    /// claim) are silently dropped — the bag is monotone, no
+    /// negative witnesses.
+    fn resolve_forward_expr_witnesses(&mut self) {
+        use crate::witnesses::{Witness, WitnessAttachment, WitnessSource};
+        let queued = std::mem::take(&mut self.unresolved_expr_nodes);
+        for node in queued {
+            let Some(payload) = self.expr_payload(node) else { continue };
+            let span = node_to_span(node);
             self.bag.push(Witness {
-                attachment: WitnessAttachment::Expr(entry.expr_span),
+                attachment: WitnessAttachment::Expr(span),
                 source: WitnessSource::Builder("expression".into()),
-                payload: WitnessPayload::Edge(WitnessAttachment::Symbol(sid)),
-                span: entry.expr_span,
+                payload,
+                span,
             });
         }
     }
@@ -4767,6 +4796,15 @@ impl<'a> Builder<'a> {
             Ok(t) => t,
             Err(_) => return,
         };
+        // Generic array contribution — `push @arr, X, Y` extends
+        // `@arr`'s `Sequence` shape. Walk-time projection: resolve
+        // each X / Y through `emit_expr_witness + bag_query_expr_span`,
+        // look up the running Sequence for `@arr` in scope, append.
+        // Latest-wins Variable witness keeps the running answer
+        // queryable at any later point. Spike scope: tuple shape
+        // only — no Homogeneous / Cycle classification yet.
+        self.emit_array_push_contribution(arr_name, &children[1..]);
+
         let is_export = arr_name.ends_with("@EXPORT") && !arr_name.ends_with("@EXPORT_OK");
         let is_export_ok = arr_name.ends_with("@EXPORT_OK");
         if !is_export && !is_export_ok { return; }
@@ -4782,6 +4820,75 @@ impl<'a> Builder<'a> {
             } else {
                 self.export_ok.extend(values);
             }
+        }
+    }
+
+    /// Queue an array contribution for the worklist's re-emittable
+    /// pass. We can't resolve method-call return types at walk time
+    /// (phase 6 fills them); we just record the contribution shape
+    /// and let `emit_array_push_witnesses` re-emit each iteration.
+    fn emit_array_push_contribution(&mut self, arr_name: &str, args: &[Node<'a>]) {
+        if args.is_empty() { return; }
+        let scope = self.current_scope();
+        // Emit the Expr(span) witness for each arg now — the worklist
+        // will look them up by span later. Walk-time emission is the
+        // contract for "this expression's type is queryable from the
+        // bag once the worklist settles."
+        let spans: Vec<Span> = args
+            .iter()
+            .map(|n| {
+                self.emit_expr_witness(*n);
+                node_to_span(*n)
+            })
+            .collect();
+        self.pending_array_pushes
+            .push((scope, arr_name.to_string(), spans));
+    }
+
+    /// Post-fold pass: drain `pending_array_pushes`'s queued
+    /// contributions into `Variable{arr_name, scope} +
+    /// InferredType(Sequence(...))` witnesses. Runs once after
+    /// `fold_to_fixed_point` (which fills `invocant_class`) +
+    /// `emit_method_call_return_edges` (which publishes
+    /// `Expression(refidx) → Edge(MethodOnClass{...})`), so by
+    /// the time we read each contribution's type, the method-call
+    /// chain has resolved end-to-end. Each contribution's
+    /// `Expr(span)` was queued by `emit_expr_witness` at walk time
+    /// and resolved by `resolve_forward_expr_witnesses` post-walk,
+    /// so `bag_query_expr_span` chases through to the materialized
+    /// type — no per-pass backfill needed here.
+    fn emit_array_push_witnesses(&mut self) {
+        use crate::witnesses::{Witness, WitnessAttachment, WitnessPayload, WitnessSource};
+        self.bag.remove_by_source_tag("array_push");
+        // Group by (scope, arr_name) so successive pushes
+        // accumulate into one Sequence.
+        let mut grouped: std::collections::HashMap<(ScopeId, String), Vec<Span>> =
+            std::collections::HashMap::new();
+        for (scope, name, spans) in &self.pending_array_pushes {
+            grouped
+                .entry((*scope, name.clone()))
+                .or_default()
+                .extend(spans.iter().copied());
+        }
+        for ((scope, name), spans) in grouped {
+            let resolved: Vec<InferredType> = spans
+                .iter()
+                .filter_map(|sp| self.bag_query_expr_span(*sp))
+                .collect();
+            if resolved.is_empty() { continue; }
+            // Zero-span "applies forever after this point" — matches
+            // the chain-assignment / TC-mirror convention. A
+            // non-zero scoped span would get filtered out by
+            // `FrameworkAwareTypeFold`'s narrowing rule for any
+            // query point outside the span.
+            let last = *spans.last().expect("non-empty by construction");
+            let zero = Span { start: last.end, end: last.end };
+            self.bag.push(Witness {
+                attachment: WitnessAttachment::Variable { name, scope },
+                source: WitnessSource::Builder("array_push".into()),
+                payload: WitnessPayload::InferredType(InferredType::Sequence(resolved)),
+                span: zero,
+            });
         }
     }
 
