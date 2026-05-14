@@ -87,7 +87,7 @@ fn mojo_sub_name_does_not_flip_type_to_hashref() {
         attachment: &att,
         point: None,
         framework: FrameworkFact::MojoBase,
-        arity_hint: None, context: None,
+        arity_hint: None, receiver: None, context: None,
     };
     let v = reg.query(&bag, &q);
     assert_eq!(
@@ -116,7 +116,7 @@ fn plain_hashref_access_without_class_evidence() {
         attachment: &att,
         point: None,
         framework: FrameworkFact::Plain,
-        arity_hint: None, context: None,
+        arity_hint: None, receiver: None, context: None,
     };
     assert_eq!(
         reg.query(&bag, &q),
@@ -156,7 +156,7 @@ fn bless_target_array_with_class_assertion_keeps_class() {
         attachment: &att,
         point: None,
         framework: FrameworkFact::Plain,
-        arity_hint: None, context: None,
+        arity_hint: None, receiver: None, context: None,
     };
     assert_eq!(
         reg.query(&bag, &q),
@@ -195,7 +195,7 @@ fn core_class_still_holds_class_against_hashref_access() {
         attachment: &att,
         point: None,
         framework: FrameworkFact::CoreClass,
-        arity_hint: None, context: None,
+        arity_hint: None, receiver: None, context: None,
     };
     assert_eq!(
         reg.query(&bag, &q),
@@ -238,7 +238,7 @@ fn fluent_chain_get_to_resolves_via_edge_chase() {
         attachment: &att,
         point: None,
         framework: FrameworkFact::Plain,
-        arity_hint: None, context: None,
+        arity_hint: None, receiver: None, context: None,
     };
     assert_eq!(
         reg.query(&bag, &q),
@@ -263,7 +263,7 @@ fn edge_with_unresolved_target_yields_none() {
         attachment: &att,
         point: None,
         framework: FrameworkFact::Plain,
-        arity_hint: None, context: None,
+        arity_hint: None, receiver: None, context: None,
     };
     assert_eq!(reg.query(&bag, &q), ReducedValue::None);
 }
@@ -292,7 +292,7 @@ fn edge_chase_terminates_on_cycle() {
         attachment: &a,
         point: None,
         framework: FrameworkFact::Plain,
-        arity_hint: None, context: None,
+        arity_hint: None, receiver: None, context: None,
     };
     assert_eq!(reg.query(&bag, &q), ReducedValue::None);
 }
@@ -320,7 +320,7 @@ fn edge_chase_resolves_transitively() {
         attachment: &a,
         point: None,
         framework: FrameworkFact::Plain,
-        arity_hint: None, context: None,
+        arity_hint: None, receiver: None, context: None,
     };
     assert_eq!(
         reg.query(&bag, &q),
@@ -366,7 +366,7 @@ fn narrowed_span_wins_over_outer_witness_at_inside_point() {
         attachment: &att,
         point: Some(p(5, 4)),
         framework: FrameworkFact::Plain,
-        arity_hint: None, context: None,
+        arity_hint: None, receiver: None, context: None,
     };
     assert_eq!(
         reg.query(&bag, &inside),
@@ -377,7 +377,7 @@ fn narrowed_span_wins_over_outer_witness_at_inside_point() {
         attachment: &att,
         point: Some(p(2, 0)),
         framework: FrameworkFact::Plain,
-        arity_hint: None, context: None,
+        arity_hint: None, receiver: None, context: None,
     };
     assert_eq!(
         reg.query(&bag, &outside),
@@ -420,7 +420,7 @@ fn branch_arms_agree_folds_to_that_type() {
         attachment: &att,
         point: None,
         framework: FrameworkFact::Plain,
-        arity_hint: None, context: None,
+        arity_hint: None, receiver: None, context: None,
     };
     assert_eq!(
         reg.query(&bag, &q),
@@ -442,7 +442,7 @@ fn branch_arms_disagree_folds_to_none() {
         attachment: &att,
         point: None,
         framework: FrameworkFact::Plain,
-        arity_hint: None, context: None,
+        arity_hint: None, receiver: None, context: None,
     };
     assert_eq!(reg.query(&bag, &q), ReducedValue::None);
 }
@@ -507,7 +507,7 @@ fn branch_arm_edge_resolves_through_variable() {
         attachment: &att,
         point: None,
         framework: FrameworkFact::Plain,
-        arity_hint: None, context: None,
+        arity_hint: None, receiver: None, context: None,
     };
     assert_eq!(
         reg.query(&bag, &q),
@@ -515,7 +515,7 @@ fn branch_arm_edge_resolves_through_variable() {
     );
 }
 
-// ---- Fluent arity dispatch reducer ----
+// ---- ReturnExpr-based arity dispatch ----
 
 fn wsym(sym_id: u32, payload: WitnessPayload) -> Witness {
     Witness {
@@ -529,63 +529,66 @@ fn wsym(sym_id: u32, payload: WitnessPayload) -> Witness {
 #[test]
 fn arity_zero_returns_string_default_returns_self() {
     // `sub name { my $self = shift; return $self->{name} unless @_; ...; $self }`
-    // — arity 0 → String; default → ClassName(MojoRoute).
+    // — arity 0 → String; default → ClassName(MojoRoute) via Receiver
+    // substitution. After phase 5 retired `FluentArityDispatch`, the
+    // bag mechanism is `ReturnExpr::UnionOnArgs` on `Symbol(_)` and
+    // the chain typer / class lookup threads the receiver.
     let sub_id = 42;
     let mut bag = WitnessBag::new();
     bag.push(wsym(
         sub_id,
-        WitnessPayload::Observation(TypeObservation::ArityReturn {
-            arg_count: Some(0),
-            return_type: InferredType::String,
-        }),
-    ));
-    bag.push(wsym(
-        sub_id,
-        WitnessPayload::Observation(TypeObservation::ArityReturn {
-            arg_count: None,
-            return_type: InferredType::ClassName("MojoRoute".into()),
+        WitnessPayload::ReturnExpr(ReturnExpr::UnionOnArgs {
+            branches: vec![
+                (ArgGuard::Empty, ReturnExpr::Concrete(InferredType::String)),
+                (ArgGuard::Any, ReturnExpr::Receiver),
+            ],
         }),
     ));
 
     let reg = ReducerRegistry::with_defaults();
     let att = WitnessAttachment::Symbol(crate::file_analysis::SymbolId(sub_id));
+    let receiver = InferredType::ClassName("MojoRoute".into());
 
     // Caller passes no args: `$r->name` — arity 0.
     let q0 = ReducerQuery {
         attachment: &att,
         point: None,
         framework: FrameworkFact::Plain,
-        arity_hint: Some(0), context: None,
+        arity_hint: Some(0),
+        receiver: Some(receiver.clone()),
+        context: None,
     };
     assert_eq!(
         reg.query(&bag, &q0),
         ReducedValue::Type(InferredType::String)
     );
 
-    // Caller passes one arg: `$r->name('x')` — arity 1 matches no
-    // exact; fall back to default.
+    // Caller passes one arg: `$r->name('x')` — arity 1 falls through
+    // to Any → Receiver, returning the invocant class.
     let q1 = ReducerQuery {
         attachment: &att,
         point: None,
         framework: FrameworkFact::Plain,
-        arity_hint: Some(1), context: None,
+        arity_hint: Some(1),
+        receiver: Some(receiver.clone()),
+        context: None,
     };
     assert_eq!(
         reg.query(&bag, &q1),
-        ReducedValue::Type(InferredType::ClassName("MojoRoute".into()))
+        ReducedValue::Type(receiver.clone())
     );
 
-    // Arity unknown (not at a call site) — also falls back to default.
+    // Arity unknown — Empty doesn't match None (strict Some(0)
+    // only), Any does. Returns Receiver substitution.
     let qn = ReducerQuery {
         attachment: &att,
         point: None,
         framework: FrameworkFact::Plain,
-        arity_hint: None, context: None,
+        arity_hint: None,
+        receiver: Some(receiver.clone()),
+        context: None,
     };
-    assert_eq!(
-        reg.query(&bag, &qn),
-        ReducedValue::Type(InferredType::ClassName("MojoRoute".into()))
-    );
+    assert_eq!(reg.query(&bag, &qn), ReducedValue::Type(receiver));
 }
 
 #[test]
@@ -605,7 +608,7 @@ fn numeric_then_string_prefers_numeric_noop_when_class_set() {
         attachment: &att,
         point: None,
         framework: FrameworkFact::Plain,
-        arity_hint: None, context: None,
+        arity_hint: None, receiver: None, context: None,
     };
     assert_eq!(
         reg.query(&bag, &q),
@@ -645,7 +648,7 @@ fn plugin_override_priority_dominates_builder_inferred_type() {
         attachment: &att,
         point: None,
         framework: FrameworkFact::Plain,
-        arity_hint: None, context: None,
+        arity_hint: None, receiver: None, context: None,
     };
     match reg.query(&bag, &q) {
         ReducedValue::Type(InferredType::ClassName(name)) => {
@@ -689,7 +692,7 @@ fn plugin_override_reducer_declines_builder_priority_witnesses() {
         attachment: &att,
         point: None,
         framework: FrameworkFact::Plain,
-        arity_hint: None, context: None,
+        arity_hint: None, receiver: None, context: None,
     };
     // SubReturnReducer (registered last) returns the stored type.
     // PluginOverrideReducer's short-circuit didn't fire — if it had,
@@ -697,4 +700,170 @@ fn plugin_override_reducer_declines_builder_priority_witnesses() {
     // mostly a smoke check that the registry resolves through the
     // expected reducer chain.
     assert_eq!(reg.query(&bag, &q), ReducedValue::Type(InferredType::String));
+}
+
+// ---- ReturnExpr reducer ----
+
+/// `Concrete(t)` payload reduces to `t` regardless of receiver/arity.
+#[test]
+fn return_expr_concrete_resolves_directly() {
+    let sym_id = SymbolId(11);
+    let mut bag = WitnessBag::new();
+    bag.push(Witness {
+        attachment: WitnessAttachment::Symbol(sym_id),
+        source: WitnessSource::Builder("test".into()),
+        payload: WitnessPayload::ReturnExpr(ReturnExpr::Concrete(InferredType::HashRef)),
+        span: span(0, 0, 0, 0),
+    });
+    let reg = ReducerRegistry::with_defaults();
+    let att = WitnessAttachment::Symbol(sym_id);
+    let q = ReducerQuery {
+        attachment: &att,
+        point: None,
+        framework: FrameworkFact::Plain,
+        arity_hint: None,
+        receiver: None,
+        context: None,
+    };
+    assert_eq!(reg.query(&bag, &q), ReducedValue::Type(InferredType::HashRef));
+}
+
+/// `Receiver` substitutes with `q.receiver`; without one, returns None.
+#[test]
+fn return_expr_receiver_substitutes_from_query() {
+    let sym_id = SymbolId(12);
+    let mut bag = WitnessBag::new();
+    bag.push(Witness {
+        attachment: WitnessAttachment::Symbol(sym_id),
+        source: WitnessSource::Builder("test".into()),
+        payload: WitnessPayload::ReturnExpr(ReturnExpr::Receiver),
+        span: span(0, 0, 0, 0),
+    });
+    let reg = ReducerRegistry::with_defaults();
+    let att = WitnessAttachment::Symbol(sym_id);
+    let q_with = ReducerQuery {
+        attachment: &att,
+        point: None,
+        framework: FrameworkFact::Plain,
+        arity_hint: None,
+        receiver: Some(InferredType::ClassName("Foo".into())),
+        context: None,
+    };
+    assert_eq!(
+        reg.query(&bag, &q_with),
+        ReducedValue::Type(InferredType::ClassName("Foo".into()))
+    );
+    let q_without = ReducerQuery {
+        attachment: &att,
+        point: None,
+        framework: FrameworkFact::Plain,
+        arity_hint: None,
+        receiver: None,
+        context: None,
+    };
+    assert_eq!(reg.query(&bag, &q_without), ReducedValue::None);
+}
+
+/// `UnionOnArgs` dispatches on `q.arity_hint`. `Empty` matches `Some(0)`,
+/// `Any` is the catch-all. Unmatched returns None.
+#[test]
+fn return_expr_union_on_args_dispatches_by_arity() {
+    let sym_id = SymbolId(13);
+    let mut bag = WitnessBag::new();
+    bag.push(Witness {
+        attachment: WitnessAttachment::Symbol(sym_id),
+        source: WitnessSource::Builder("test".into()),
+        payload: WitnessPayload::ReturnExpr(ReturnExpr::UnionOnArgs {
+            branches: vec![
+                (ArgGuard::Empty, ReturnExpr::Concrete(InferredType::String)),
+                (ArgGuard::Any, ReturnExpr::Receiver),
+            ],
+        }),
+        span: span(0, 0, 0, 0),
+    });
+    let reg = ReducerRegistry::with_defaults();
+    let att = WitnessAttachment::Symbol(sym_id);
+
+    let q_empty = ReducerQuery {
+        attachment: &att,
+        point: None,
+        framework: FrameworkFact::Plain,
+        arity_hint: Some(0),
+        receiver: Some(InferredType::ClassName("Foo".into())),
+        context: None,
+    };
+    assert_eq!(
+        reg.query(&bag, &q_empty),
+        ReducedValue::Type(InferredType::String),
+        "arity 0 must hit the Empty arm before Any"
+    );
+
+    let q_any = ReducerQuery {
+        attachment: &att,
+        point: None,
+        framework: FrameworkFact::Plain,
+        arity_hint: Some(1),
+        receiver: Some(InferredType::ClassName("Foo".into())),
+        context: None,
+    };
+    assert_eq!(
+        reg.query(&bag, &q_any),
+        ReducedValue::Type(InferredType::ClassName("Foo".into())),
+        "arity 1 falls through to Any => Receiver"
+    );
+
+    let q_no_hint = ReducerQuery {
+        attachment: &att,
+        point: None,
+        framework: FrameworkFact::Plain,
+        arity_hint: None,
+        receiver: Some(InferredType::ClassName("Foo".into())),
+        context: None,
+    };
+    assert_eq!(
+        reg.query(&bag, &q_no_hint),
+        ReducedValue::Type(InferredType::ClassName("Foo".into())),
+        "no hint falls through Empty (strict Some(0) only) and \
+         hits Any => Receiver — the catch-all"
+    );
+}
+
+/// `Operator(RowOf(Receiver))` substitutes Receiver, wraps into the
+/// value-side `ParametricType::RowOf` operator. Downstream consumers
+/// of `ParametricType::class_name()` evaluate it correctly.
+#[test]
+fn return_expr_operator_rowof_wraps_receiver() {
+    let sym_id = SymbolId(14);
+    let mut bag = WitnessBag::new();
+    bag.push(Witness {
+        attachment: WitnessAttachment::Symbol(sym_id),
+        source: WitnessSource::Builder("test".into()),
+        payload: WitnessPayload::ReturnExpr(ReturnExpr::Operator(
+            ParametricOp::RowOf(Box::new(ReturnExpr::Receiver)),
+        )),
+        span: span(0, 0, 0, 0),
+    });
+    let reg = ReducerRegistry::with_defaults();
+    let att = WitnessAttachment::Symbol(sym_id);
+    let receiver = InferredType::Parametric(ParametricType::ResultSet {
+        base: "DBIx::Class::ResultSet".into(),
+        row: "Schema::Result::Users".into(),
+    });
+    let q = ReducerQuery {
+        attachment: &att,
+        point: None,
+        framework: FrameworkFact::Plain,
+        arity_hint: None,
+        receiver: Some(receiver.clone()),
+        context: None,
+    };
+    let result = reg.query(&bag, &q);
+    let ReducedValue::Type(InferredType::Parametric(ParametricType::RowOf(inner))) = result else {
+        panic!("expected Parametric(RowOf(_)); got {:?}", result);
+    };
+    assert_eq!(*inner, receiver, "RowOf must wrap the substituted receiver");
+    // Downstream consumption: the value-side accessor evaluates RowOf
+    // to the row class.
+    let parametric = ParametricType::RowOf(inner);
+    assert_eq!(parametric.class_name(), Some("Schema::Result::Users"));
 }

@@ -37,7 +37,6 @@ pub enum ParametricType {
     // Future: Wrapped { class, inner } for Promise/Future/Lazy,
     // ListOf { class?, element } for Mojo::Collection/ArrayRef,
     // HashRef { key, value? }, Plugin { id, args } escape hatch.
-    // See docs/prompt-return-type-expressions.md.
 }
 ```
 
@@ -163,18 +162,25 @@ escape hatch handles the long tail. Don't ship a variant without
 an emitter.
 
 **Cache invalidation.** `EXTRACT_VERSION` bumped 23 → 24 for the
-v2 redesign. Bumping is free; old blobs re-resolve lazily.
+v2 redesign, then 26 → 27 for the `ReturnExpr` payload variant.
+Bumping is free; old blobs re-resolve lazily.
 
 ## Where this is going
 
-The next pillar is receiver-relative return types: `return_type`
-becomes a `ReturnExpr` admitting `Receiver` placeholders and
-`UnionOnArgs` branches, so `find` declares `RowOf(Receiver)` once
-on the symbol instead of every call site emitting it. Same shape
-subsumes Mojo `has`'s arity dispatch. Spec:
-`docs/prompt-return-type-expressions.md`. The DBIC port, nested-
-hash-key tiers, and the deferred `Plugin` escape hatch all queue
-behind it — the ROADMAP carries their order.
+The receiver-relative return-type pillar landed alongside this
+work — `docs/adr/return-expr.md` carries the load-bearing
+decisions. The summary: `WitnessPayload::ReturnExpr(_)` admits
+`Concrete(t)` / `Receiver` / `Operator(RowOf(_))` / `UnionOnArgs`
+shapes; `ReturnExprReducer` substitutes `q.receiver` for
+`Receiver` placeholders and dispatches `UnionOnArgs` against
+`q.arity_hint`. DBIC `find` / `single` / etc. declare
+`Operator(RowOf(Receiver))` on `MethodOnClass{base, method}`,
+collapsing the per-call-site projection emitter; Mojo `has`
+declares `UnionOnArgs` on `MethodOnClass{class, name}`, retiring
+`FluentArityDispatch` and `TypeObservation::ArityReturn`.
+
+The deferred `Plugin` escape hatch and nested-hash-key tiers
+queue behind this — the ROADMAP carries their order.
 
 ## Test discipline
 
