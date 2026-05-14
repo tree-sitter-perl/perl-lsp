@@ -893,9 +893,9 @@ impl WitnessReducer for ExprReturn {
 // and the `arity_hint` short-circuit in `reduce` below.
 //
 // Latest wins so a later writeback re-publish (the worklist clears
-// `local_return` on every iteration and re-pushes from
-// `resolved_returns`) dominates an older value. Registered AFTER
-// every more-precise reducer (Plugin override, ReturnExpr arity
+// `local_return` on every iteration and re-pushes via the registry
+// query) dominates an older value. Registered AFTER every
+// more-precise reducer (Plugin override, ReturnExpr arity
 // dispatch) so those still get to claim first.
 //
 // Per-arm return witnesses live on `SymbolReturnArm(sub_id)` and are
