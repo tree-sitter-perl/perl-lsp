@@ -102,10 +102,12 @@ consumers query.
 
 ## Where this is going
 
-Sequence types (`prompt-sequence-types.md`) land additively: emit
-`Container(ArrayId)` contributions, write `ShapeReducer` /
-`ElementAtReducer`. No `deferred_X` field, no bridging seed pass,
-no walker-side computation of element type.
+Sequence types — the first feature built fully on this foundation
+— landed in ~90 LOC (`ec62653`). See `adr/sequence-types.md` for
+the data-model contract; `prompt-sequence-types.md` for the
+residual phases. The shape held: zero new bag attachments, zero
+new reducers, zero registry touches, every list operator extends
+the same way (`SequenceTransform` payload + one `SeqOp` variant).
 
 Residual Parts 1–5 (`prompt-type-inference-residual.md`) are
 each a reducer + emitter pair. Same shape, same path.

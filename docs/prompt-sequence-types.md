@@ -1,89 +1,59 @@
-# Sequence Types — Phased Spec
+# Sequence Types — Residual Phases
 
-> **Status: design.** Lands *after*
-> `docs/prompt-type-inference-unification.md` Step 3 (closures
-> retired, `ReducerContext` in place, `Symbol.return_type`
-> bag-mediated, framework synthesis emits witnesses).
+> **Status: spike landed (`ec62653`), broader phases queued.**
 >
-> This spec assumes the unification has happened. It deliberately
-> keeps nothing from the `spike/sequence-witnesses` branch —
-> implementation starts fresh on the cleaner foundation. The spike
-> validated the design; this spec is the build plan.
+> The core data model and walker contract live in
+> `docs/adr/sequence-types.md`: `InferredType::Sequence(Vec<…>)`,
+> tuple shape on `Variable{name, scope}`, `array_element_expression`
+> projection in `resolve_expression_type`, the
+> `SequenceTransform / SeqOp` pattern for list operators, the
+> `package main` seed. This document is the design corpus for the
+> phases that don't ship in the spike — full shape lattice,
+> cross-method contributions, pipeline reducers, framework
+> integration. Read the ADR first.
 >
 > Cross-refs:
-> - `docs/prompt-type-inference-unification.md` — prerequisite refactor.
-> - `docs/prompt-type-inference-spec.md` — witness/reducer model.
+> - `docs/adr/sequence-types.md` — what landed; the data-model contract.
+> - `docs/adr/bag-canonical.md` — the unification foundation.
 > - `CLAUDE.md` "Build pipeline phases" + "Worklist invariants".
 
-## TL;DR
+## What's landed
 
-Add a single new `InferredType` variant (`Sequence(ArrayShape)`)
-and the bag machinery to populate and query it. The walker observes
-contributions to positional containers; reducers fold those into
-shape information; access expressions project shapes back to
-element types. No carrier distinction (Array vs ArrayRef collapse
-into one variant), no deferred build-side fields, no closure
-threading — those concerns evaporate in the post-unification world.
+The spike (`ec62653`) shipped the minimum-viable container:
 
-The spec phases the work in five steps. Each step ships green and
-adds capability; later steps don't reshuffle earlier ones. Phase 1
-is a self-contained bag refactor (no walker changes). Phase 2 is
-walker emission. Phase 3 is framework integration. Phases 4–5 are
-follow-on capability (pipelines, escape analysis); each is a
-separate design pass and can be deferred indefinitely.
+- `InferredType::Sequence(Vec<InferredType>)` — tuple shape only.
+- Walker pushes per-array `Variable{name, scope}` witnesses
+  accumulated via `pending_array_pushes` + post-fold
+  `emit_array_push_witnesses`.
+- `array_element_expression` arm in `resolve_expression_type`
+  projects via `element_at(i)`. Cursor-context completion AND
+  `method_call_invocant_class_with_tree` (hover/dispatch) share it.
+- Top-level scripts seed `current_package = Some("main")`.
 
-## What the spike validated
+What's NOT landed and what this prompt is for:
 
-The spike's bag-side design was right. Carry forward:
+1. **Full shape lattice** — extend the payload to
+   `Empty | Homogeneous(T) | Tuple | CycleTuple | Heterogeneous`
+   with classification rules (LUB, period detection ≥4, reset
+   semantics). Current payload is bare `Vec<InferredType>` which
+   only models the `Tuple` shape.
+2. **`Container(ArrayId)` attachment** for cross-method
+   contributions — when `push @{$self->kids}, X` happens in one
+   sub and `$self->kids->[0]` reads in another. Needs identity
+   at emission time, not scope-keyed `Variable` witnesses.
+3. **`SequenceAccess(Span)` attachment + ElementAtReducer** —
+   reducer-time projection. Becomes load-bearing when method
+   returns carry sequence shapes (e.g. a sub returns `@list`,
+   the caller indexes into it without binding to a local first).
+4. **Framework synthesis** — Mojo::Base / Moo `has 'kids'`
+   accessors emit `SlotReturnGetter` so the getter's return
+   type folds to the slot's `Sequence(...)` shape.
+5. **Pipeline reducers** — `map` / `grep` / `sort` / `reverse` /
+   `flatten`. Shape locked in `adr/sequence-types.md`
+   (`SequenceTransform { source, op: SeqOp }` payload + one
+   reducer). This prompt has the per-op folding rules.
 
-- **One type variant** for positional containers: `Sequence(ArrayShape)`.
-  Drop the carrier distinction (Array vs ArrayRef). Perl's
-  list-vs-scalar context is a property of the *expression's
-  evaluation context*, not the contained data.
-- **Five-variant shape lattice**: `Empty | Homogeneous(T) | Tuple([T..])
-  | CycleTuple([T..K]) | Heterogeneous`. Ordered by informativeness;
-  classifier specializes when contributions admit precise structure,
-  generalizes when they don't.
-- **Identity at emission time**: `ArrayId::{Lexical, HashSlot, Anonymous}`.
-  Resolved by the walker; reducers never compute identity, only fold
-  by attachment.
-- **Two attachment kinds**: `Container(ArrayId)` for shape and
-  `SequenceAccess(Span)` for read sites.
-- **Three observation kinds**: `ArrayContribution { type, position }`,
-  `ArrayReset`, `ArrayAccessAt { container, position }`.
-
-What the spike got wrong, and the spec corrects:
-
-- `Heterogeneous` carried a `Box<InferredType>` payload that was
-  ~always `ArrayRef` sentinel. **Drop the payload.** `Heterogeneous`
-  is unit; `element_at` returns `None`.
-- The spike kept `InferredType::ArrayRef` alongside `Sequence(Empty)`
-  as two ways to spell the same thing. **Drop `ArrayRef`.** Migrate
-  consumers to `Sequence(Empty)` as the "we know it's array-shaped,
-  contents unknown" answer.
-- The spike reused `resolve_return_type`'s "Object subsumes HashRef"
-  laxness for slot LUB and silently mis-classified `[User, Order]`.
-  **Use a strict `unify_via_object_subsumption` helper.** Rename
-  `resolve_return_type` to expose its semantics (it's not a generic
-  LUB).
-- Cycle detection requires length ≥ 4. Length 2 is indistinguishable
-  from a 2-tuple.
-- The spike added `array_shape_of` as a `ReducerQuery` closure. In
-  the post-unification world this is **`ctx.shape_of(id)`** — a
-  method on `ReducerContext`, not a caller-installed closure. No
-  canonicality leak.
-
-What gets sharper after unification (assumed available):
-
-- No `deferred_seq_access` field on `ReturnInfo`. Returns through
-  the generic `DeferredType::Bag(WitnessAttachment)` mechanism.
-- No `seed_slot_return_getters_into_return_types`. The generic seed
-  pass handles every Symbol-attached witness uniformly.
-- No build-side / FA-side wrapper duplication. One query path:
-  `bag_query(WitnessAttachment::SequenceAccess(span))` works the
-  same at build time and query time.
-- Framework synthesis emits `SlotReturnGetter` instead of pinning
-  `return_type` directly — that's already the convention post-Step 3.
+Each is purely additive. Each is independently shippable.
 
 ## Data model
 
@@ -278,53 +248,100 @@ unaffected — they're already a separate concern.
 
 ## Phasing
 
-Each phase ships green. Each phase delivers user-visible value.
-Later phases don't reshuffle earlier ones.
+Each phase is independently shippable, each delivers user-visible
+value, each is purely additive over the spike's foundation.
 
-### Phase 1 — Lattice + reducers (bag-side only).
+### Phase 1 — Full shape lattice.
 
-Add `Sequence`, `ArrayShape`, `ArrayId`, position enums.
-Remove `InferredType::ArrayRef`; migrate consumers to
-`Sequence(Empty)`. Rename `resolve_return_type` to expose its
-semantics; add a strict `unify_via_object_subsumption` helper.
-Add the three new attachments + observations + reducers. Register
-reducers in priority order through the registry.
+The spike's `Sequence(Vec<InferredType>)` only models a `Tuple`
+shape. Extend to the full lattice:
 
-**No walker changes.** Tests are entirely hand-crafted witnesses;
-they pin the lattice's classification rules (≥4 for cycle, strict
-unification, temporal/reset filters) and the reducer projections.
+```rust
+pub enum InferredType {
+    // …
+    Sequence(ArrayShape),
+}
 
-Acceptance: 20-ish unit tests covering each shape variant, every
+pub enum ArrayShape {
+    Empty,
+    Homogeneous(Box<InferredType>),
+    Tuple(Vec<InferredType>),       // ≤ TUPLE_LIMIT, mixed types
+    CycleTuple(Vec<InferredType>),  // period K, requires ≥ 2 full cycles
+    Heterogeneous,                  // unit; no useful element type
+}
+
+const TUPLE_LIMIT: usize = 6;
+```
+
+Migrate the spike's emission to push the classified shape: the
+post-fold `emit_array_push_witnesses` classifies the accumulated
+contributions, not just stores the `Vec`. Drop `InferredType::ArrayRef`
+in the same pass — migrate consumers to `Sequence(ArrayShape::Empty)`
+as the "we know it's array-shaped, contents unknown" answer.
+
+Add a strict `unify_via_object_subsumption` helper (or rename
+`resolve_return_type` if its semantics overlap) — the existing
+"Object subsumes HashRef" laxness silently mis-classifies
+`[User, Order]` slot LUBs.
+
+**Cycle detection requires length ≥ 4.** Length 2 is
+indistinguishable from a 2-tuple.
+
+Acceptance: ~20 unit tests covering each shape variant, every
 projection mode, the temporal filter, the reset-generation rule.
-Full suite green.
+`ArrayRef` is gone. Tuple, Homogeneous, CycleTuple, Heterogeneous
+all surface through `bag_query` at real-Perl-source access sites.
 
-Estimated diff: ~600 lines added, ~50 deleted (ArrayRef
-migration). One file each: `file_analysis.rs` (data),
-`witnesses.rs` (attachments + observations + reducers),
-`witnesses_tests.rs` (tests).
+Estimated diff: ~400 lines added (the lattice + classification),
+~50 deleted (ArrayRef migration).
 
-### Phase 2 — Builder emission.
+### Phase 2 — `Container(ArrayId)` + `SequenceAccess(Span)` attachments.
 
-Add `resolve_array_id(node)` and the visit-time emission helpers
-(push/unshift, anonymous literals, lexical inits, indexed reads,
-resets, iter-var typing). Wire them into the dispatcher in
-`visit()`.
+The spike piggybacks on `Variable{name, scope}` which is fine for
+in-sub `@arr`. Cross-method contributions need identity at
+emission time, not scope-keyed lookup. Introduce:
 
-**No framework integration.** Mojo `has` accessors continue to
-return their baked defaults at this phase — they don't yet emit
-`SlotReturnGetter`.
+```rust
+pub enum WitnessAttachment {
+    // …
+    Container(ArrayId),
+    SequenceAccess(Span),
+}
 
-Acceptance: emission tests on real Perl source via `build_fa()`,
-asserting the bag has the expected contributions / accesses /
-resets for each shape. The key user-visible change at this phase is
-that `my @users; push @users, User->new; …; $users[0]` types as
-`User` end-to-end through `bag_query(SequenceAccess(span))` —
-falls out of the canonical-attachment path with zero special-case
-wiring (no `deferred_seq_access` field, no
-`seq_access_type_via_bag`).
+pub enum ArrayId {
+    Lexical { scope: ScopeId, name: String },
+    HashSlot { container: String, key: String },  // $self->{kids}
+    Anonymous { origin: Span },
+}
+```
 
-Estimated diff: ~300 lines added (emission helpers + dispatcher
-wiring). No deletions; this phase is purely additive.
+Walker `resolve_array_id(node)` recognizes the LHS shape:
+`array(varname X)` → `Lexical`; `hash_element_expression` →
+`HashSlot`; `anonymous_array_expression` → `Anonymous`; method
+call where the receiver is a known framework accessor →
+collapse to the getter's slot.
+
+Add a `ShapeReducer` claiming `Container(_) + ArrayContribution|ArrayReset`
+and an `ElementAtReducer` claiming `SequenceAccess(_) + ArrayAccessAt`.
+The walker still owns identity (no per-witness recomputation); the
+reducer applies the lattice classifier from Phase 1.
+
+Replace the spike's `array_element_expression` arm in
+`resolve_expression_type` with `bag_query(SequenceAccess(span))` —
+one query path, build-time + query-time identical.
+
+**No framework integration in this phase** — `has` accessors keep
+returning baked defaults until Phase 3.
+
+Acceptance: `my @users; push @users, User->new; $users[0]` keeps
+typing as User (regression coverage from the spike). Plus:
+cross-method contributions in one file (`sub a { push @{$self->{x}}, … }
+sub b { $self->{x}[-1] }`) type end-to-end. The `_route` plugin
+override is removable for the single-file case.
+
+Estimated diff: ~300 lines added (attachments + reducers +
+emission helpers). The spike's walk-time projection arm is
+replaced rather than augmented.
 
 ### Phase 3 — Framework integration.
 
@@ -407,59 +424,25 @@ spec when its turn comes:
   HoTT-y, defensible, deferred — no real-world Perl that the
   analyzer cares about needs it.
 
-## Net cost
+## Pickup checklist
 
-Through Phase 3 (the realistic ship-target before Phase 4's
-cross-file work begins): **~1100 lines added**, ~130 lines deleted.
-The spike's equivalent diff was ~2300 added, ~30 deleted; the
-post-unification version is roughly half the size for the same
-functionality.
+If you're about to start a phase, the load-bearing facts:
 
-The ratio holds because every spike-side bridging mechanism —
-deferred fields, dual wrappers, seed passes, closure threading,
-override fallbacks — evaporates in the unified world.
-
-## Acceptance criteria, per phase
-
-- **Phase 1.** Hand-crafted-witness tests covering: each shape
-  variant; element-at projection on each; iter-element LUB; the
-  temporal filter; the reset-generation rule; `Heterogeneous` is
-  unit and yields `None` from `element_at`. `InferredType::ArrayRef`
-  no longer exists in the codebase. `resolve_return_type` is
-  renamed; strict `unify_via_object_subsumption` is the LUB primitive
-  for shape inference.
-
-- **Phase 2.** Real-Perl-source emission tests: anonymous literal,
-  lexical literal init (Tuple), pure-push (Homogeneous), mixed
-  init+push (collapses to Homogeneous), reset on `@x = ()`,
-  indexed read at `$arr[0]` and `$arr[-1]`, iter var typed via
-  `for my $e (@arr)`. Each test asserts both the bag's contents
-  and the resulting type at the access site through `bag_query`.
-
-- **Phase 3.** Mojo::Base `has 'kids'` getter return type folds to
-  `Sequence(<shape>)` when the slot has contributions; falls back
-  to a witness-emitted default when it doesn't. The
-  Mojolicious::Routes::Route `_route` override is removed; the
-  *intra-file* chain (synthetic Route fixture exercising
-  `add_child` + `children->[-1]` within one parsed file) types
-  end-to-end without it. The cross-file real-Mojo case may still
-  need the override pending Phase 4.
-
-- **Phase 4.** Real Mojolicious's `_route` types end-to-end with
-  no override anywhere. Effect-signature inference is robust to
-  recursion / cycles in the callee body (terminates in
-  `MAX_FOLD_ITERATIONS`).
-
-- **Phase 5.** `map`, `grep`, `sort`, splat / concat all type
-  through the pipeline reducer. Block-return inference for
-  `map { … }` is consistent with the rest of return-type inference
-  (i.e., goes through the bag, not a special path).
-
-## Closing note
-
-The spike taught us the design; the unification clears the way
-for the implementation to be small. This spec is the build plan
-on the cleared ground. Each phase is independently shippable, each
-delivers user-visible value, and the final shape — through Phase 3
-or 5 — is roughly half the code the spike needed for the same
-capability.
+- The data model is in `src/file_analysis.rs::InferredType`.
+  `Sequence(Vec<InferredType>)` lives at the END of the enum;
+  keep new variants at the end and bump `EXTRACT_VERSION` in
+  `src/module_cache.rs`.
+- Walker emission queues live on `Builder`. The spike uses
+  `pending_array_pushes: Vec<(ScopeId, String, Vec<Span>)>` —
+  Phase 2's `Container(ArrayId)` shift replaces the scope+name
+  key with `ArrayId`.
+- The post-fold pass is `Builder::emit_array_push_witnesses`,
+  called after `fold_to_fixed_point` so method-call return types
+  are resolvable.
+- Walker queues anything `expr_payload` can't resolve at walk
+  time via `unresolved_expr_nodes` — retried post-walk against
+  the final symbol table + refs. New emission shapes inherit
+  this for free.
+- Test pattern: `spike_array_hop_with_helper_and_cross_file_completion`
+  in `src/builder_tests.rs` shows the build-FA + module-index +
+  resolve / complete / hover assertions.

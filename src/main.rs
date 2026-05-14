@@ -86,6 +86,10 @@ async fn main() {
             cli_clear_cache(args.get(2).map(|s| s.as_str()));
             return;
         }
+        Some("--parse") if args.len() >= 3 => {
+            cli_parse(&args[2]);
+            return;
+        }
         _ => {}
     }
 
@@ -129,6 +133,8 @@ fn print_usage() {
     eprintln!("  perl-lsp --clear-cache [<root>]                        Wipe the module cache for");
     eprintln!("                                                         <root>, or every project if");
     eprintln!("                                                         <root> is omitted");
+    eprintln!("  perl-lsp --parse <file|-->                             Print tree-sitter parse tree");
+    eprintln!("                                                         (`-` reads from stdin)");
     eprintln!();
     eprintln!("  perl-lsp --version                                     Print version");
 }
@@ -997,4 +1003,95 @@ fn cli_clear_cache(root: Option<&str>) {
             std::process::exit(1);
         }
     }
+}
+
+/// Pretty-print the tree-sitter parse tree for a Perl source file.
+/// `<file>` may be `-` to read from stdin. Mirrors `tree-sitter parse`
+/// output shape — `(node_kind [row, col] - [row, col]` per line,
+/// 2-space indent per depth, field names prefixed (`field: kind`).
+fn cli_parse(path: &str) {
+    use std::io::Read;
+    let source = if path == "-" {
+        let mut s = String::new();
+        if let Err(e) = std::io::stdin().read_to_string(&mut s) {
+            eprintln!("read stdin: {}", e);
+            std::process::exit(1);
+        }
+        s
+    } else {
+        match std::fs::read_to_string(path) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("read {}: {}", path, e);
+                std::process::exit(1);
+            }
+        }
+    };
+    let mut parser = tree_sitter::Parser::new();
+    parser
+        .set_language(&ts_parser_perl::LANGUAGE.into())
+        .expect("set Perl language");
+    let Some(tree) = parser.parse(&source, None) else {
+        eprintln!("parse failed");
+        std::process::exit(1);
+    };
+    use std::io::IsTerminal;
+    let color = std::io::stdout().is_terminal();
+    // 6 rainbow ANSI 256-color picks. Both the paren AND the node
+    // kind name share the depth's color — that's the visual cue
+    // for "this paren matches this kind." Field names + line
+    // ranges get distinct colors so they don't blur into the
+    // rainbow.
+    const RAINBOW: [&str; 6] = [
+        "\x1b[38;5;196m", // red
+        "\x1b[38;5;208m", // orange
+        "\x1b[38;5;226m", // yellow
+        "\x1b[38;5;46m",  // green
+        "\x1b[38;5;39m",  // blue
+        "\x1b[38;5;165m", // magenta
+    ];
+    const FIELD: &str = "\x1b[38;5;245m"; // gray
+    const RANGE: &str = "\x1b[38;5;242m"; // darker gray
+    const RESET: &str = "\x1b[0m";
+    fn walk(node: tree_sitter::Node, field: Option<&str>, depth: usize, color: bool) {
+        let pad = "  ".repeat(depth);
+        let (hue, fc, rc, rs) = if color {
+            (RAINBOW[depth % 6], FIELD, RANGE, RESET)
+        } else {
+            ("", "", "", "")
+        };
+        let prefix = field
+            .map(|f| format!("{}{}: {}", fc, f, rs))
+            .unwrap_or_default();
+        let s = node.start_position();
+        let e = node.end_position();
+        print!(
+            "{}{}{}({}{} {}[{}, {}] - [{}, {}]{}",
+            pad,
+            prefix,
+            hue,
+            node.kind(),
+            rs,
+            rc,
+            s.row,
+            s.column,
+            e.row,
+            e.column,
+            rs,
+        );
+        let mut cursor = node.walk();
+        let mut field_idx: u32 = 0;
+        for child in node.children(&mut cursor) {
+            let fname = node.field_name_for_child(field_idx);
+            field_idx += 1;
+            if !child.is_named() {
+                continue;
+            }
+            println!();
+            walk(child, fname, depth + 1, color);
+        }
+        print!("{}){}", hue, rs);
+    }
+    walk(tree.root_node(), None, 0, color);
+    println!();
 }

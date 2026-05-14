@@ -1427,7 +1427,11 @@ fn test_hash_key_def_implicit_return_gets_sub_owner() {
         assert_eq!(
             *owner,
             HashKeyOwner::Sub {
-                package: None,
+                // Top-level scripts default to `main` per Perl's
+                // own semantics; the implicit-package seed in
+                // `Builder::new` makes this an explicit `Some("main")`
+                // rather than `None`.
+                package: Some("main".to_string()),
                 name: "get_config".to_string()
             },
             "implicit return hash key should have Sub get_config owner, got {:?}",
@@ -1517,7 +1521,11 @@ fn test_hash_key_def_in_return_gets_sub_owner() {
         assert_eq!(
             *owner,
             HashKeyOwner::Sub {
-                package: None,
+                // Top-level scripts default to `main` per Perl's
+                // own semantics; the implicit-package seed in
+                // `Builder::new` makes this an explicit `Some("main")`
+                // rather than `None`.
+                package: Some("main".to_string()),
                 name: "get_config".to_string()
             },
             "host def should have Sub get_config owner, got {:?}",
@@ -1539,7 +1547,7 @@ fn test_hash_key_def_in_return_gets_sub_owner() {
         assert_eq!(
             *owner,
             Some(HashKeyOwner::Sub {
-                package: None,
+                package: Some("main".to_string()),
                 name: "get_config".to_string()
             }),
             "host ref should have Sub get_config owner, got {:?}",
@@ -9095,4 +9103,198 @@ has 'name' => (is => 'ro');
         assert!(all_names.contains("a"), "missing import name 'a': {:?}", all_names);
         assert!(all_names.contains("b"), "missing import name 'b': {:?}", all_names);
     }
+}
+
+/// **Spike: array intelligence on the bag-canonical foundation.**
+///
+/// The headline scenario, top-to-bottom:
+///
+/// ```perl
+/// # Some/User.pm (cross-file)
+/// package Some::User;
+/// use Mojo::Base -base;
+/// has 'name';
+/// sub greet { ... }
+/// sub email { ... }
+///
+/// # main
+/// package MyApp;
+/// use Mojolicious::Lite;
+/// use constant DEFAULT_NAME => 'alice';
+///
+/// helper make_user => sub {
+///     my ($c, $name) = @_;
+/// .   return Some::User->new(name => $name);
+/// };
+///
+/// sub action {
+///     my $c = Mojolicious::Controller->new;
+///     my @users;
+///     push @users, $c->make_user(DEFAULT_NAME);   # const fold + plugin helper
+///     push @users, $c->make_user('bob');
+///     $users[0]->                                  # ← method completion here
+/// }
+/// ```
+///
+/// The chain through `$users[0]`:
+///   1. mojo-helpers plugin synthesizes `make_user` on
+///      `Mojolicious::Controller` with `return_via_edge` pointing
+///      at the anon-sub's body.
+///   2. Coderef-return edge resolves the body's last expression
+///      (`Some::User->new(...)`) → `ClassName("Some::User")`.
+///   3. `push @users, $c->make_user(...)` contributes
+///      `ClassName("Some::User")` to `@users`'s `Sequence` shape.
+///   4. `$users[0]` projects the Sequence to its first element.
+///   5. Method / hash-key completion on the projected class crosses
+///      the file boundary into `Some::User.pm`.
+///
+/// The **new** code on this branch is purely the array hop —
+/// declaration emission, `push` contribution, and projection at
+/// `$users[N]`. Everything else (helper synth, coderef return,
+/// const fold, cross-file dispatch, Mojo::Base hash-key defs)
+/// drops out of the existing bag-canonical machinery for free.
+#[test]
+fn spike_array_hop_with_helper_and_cross_file_completion() {
+    use crate::module_index::ModuleIndex;
+    use std::path::PathBuf;
+    use std::sync::Arc;
+
+    let user_pm = r#"
+package Some::User;
+use Mojo::Base -base;
+has 'name';
+sub greet { my $self = shift; "hi $self->{name}" }
+sub email { my $self = shift; "$self->{name}\@x.com" }
+1;
+"#;
+    let user_fa = build_fa(user_pm);
+
+    let idx = ModuleIndex::new_for_test();
+    idx.register_workspace_module(
+        PathBuf::from("/tmp/Some/User.pm"),
+        Arc::new(user_fa),
+    );
+
+    let app_src = r#"
+package MyApp;
+use Mojolicious::Lite;
+use constant DEFAULT_NAME => 'alice';
+
+my $app = Mojolicious->new;
+$app->helper(make_user => sub {
+    my ($c, $name) = @_;
+    return Some::User->new(name => $name);
+});
+
+sub action {
+    my $c = Mojolicious::Controller->new;
+    my @users;
+    push @users, $c->make_user(DEFAULT_NAME);
+    push @users, $c->make_user('bob');
+    $users[0]->greet();
+}
+"#;
+    let app_fa = build_fa(app_src);
+
+    // Load-bearing: walk the tree to find the `$users[0]` node and
+    // ask `resolve_expression_type` what it is. This is the receiver
+    // resolution path the chain typer + cursor context both go
+    // through for completion.
+    let tree = parse(app_src);
+    fn find_array_element<'a>(node: tree_sitter::Node<'a>) -> Option<tree_sitter::Node<'a>> {
+        if node.kind() == "array_element_expression" {
+            return Some(node);
+        }
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            if let Some(hit) = find_array_element(child) {
+                return Some(hit);
+            }
+        }
+        None
+    }
+    let elem_node = find_array_element(tree.root_node())
+        .expect("test source contains `$users[0]`");
+    let resolved = app_fa
+        .resolve_expression_type(elem_node, app_src.as_bytes(), Some(&idx))
+        .expect("$users[0] resolves to a type");
+    assert_eq!(
+        resolved.class_name(),
+        Some("Some::User"),
+        "the array hop survives the chain: helper(coderef) → push → \
+         $users[0] → Some::User. got: {:?}",
+        resolved,
+    );
+
+    // Cross-file method completion on the resolved class. Mojo::Base
+    // accessor (`name`) + user-defined methods come through unified.
+    let methods = app_fa.complete_methods_for_class("Some::User", Some(&idx));
+    let method_names: std::collections::HashSet<&str> =
+        methods.iter().map(|c| c.label.as_str()).collect();
+    assert!(method_names.contains("greet"), "cross-file user method 'greet' missing");
+    assert!(method_names.contains("email"), "cross-file user method 'email' missing");
+    assert!(method_names.contains("name"), "Mojo::Base accessor 'name' missing");
+
+    // Hash-key completion on the same class — synthesized by
+    // `has 'name'`, reachable across files. Cross-file hash-key
+    // completion flows through enrichment; the local
+    // `complete_hash_keys_for_class` doesn't gate on `ModuleIndex`,
+    // so this stays a soft observation for the spike rather than a
+    // hard assert. The load-bearing claim is the array hop, not the
+    // FA-side hash-key API.
+    let keys = app_fa.complete_hash_keys_for_class("Some::User", Point::new(0, 0));
+    let key_names: std::collections::HashSet<&str> =
+        keys.iter().map(|c| c.label.as_str()).collect();
+    let _ = key_names; // intentionally not asserted in the spike
+
+    // Hover on `$users[0]->greet` — the tree-aware
+    // `method_call_invocant_class_with_tree` path. The string-side
+    // `method_call_invocant_class` couldn't resolve `$users[0]`
+    // (it isn't a Variable witness name); the tree-aware variant
+    // dispatches through `resolve_expression_type` on the actual
+    // CST node, hitting the same array_element_expression arm
+    // cursor_context uses for completion. One projection rule,
+    // both entry points.
+    fn find_method_call<'a>(
+        node: tree_sitter::Node<'a>,
+        src: &[u8],
+        method: &str,
+    ) -> Option<tree_sitter::Node<'a>> {
+        if node.kind() == "method_call_expression" {
+            if let Some(m) = node.child_by_field_name("method") {
+                if m.utf8_text(src).ok() == Some(method) {
+                    return Some(node);
+                }
+            }
+        }
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            if let Some(hit) = find_method_call(child, src, method) {
+                return Some(hit);
+            }
+        }
+        None
+    }
+    let greet_call = find_method_call(tree.root_node(), app_src.as_bytes(), "greet")
+        .expect("test source contains `$users[0]->greet()`");
+    let method_node = greet_call
+        .child_by_field_name("method")
+        .expect("method-call has a method child");
+    let hover = app_fa.hover_info(
+        method_node.start_position(),
+        app_src,
+        Some(&tree),
+        Some(&idx),
+    );
+    let hover_text = hover.expect("hover on `$users[0]->greet` returns text");
+    assert!(
+        hover_text.contains("Some::User"),
+        "hover on `$users[0]->greet` should mention Some::User; got: {}",
+        hover_text,
+    );
+    assert!(
+        hover_text.contains("greet"),
+        "hover should include the method name; got: {}",
+        hover_text,
+    );
 }
