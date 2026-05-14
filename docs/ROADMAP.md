@@ -28,10 +28,12 @@ backburner: ship when types + architecture are in a healthy place.
 | `prompt-dbic-as-plugin.md` | **MOVE DBIC OUT OF CORE** — port `visit_dbic_*` family + Parametric emission to a plugin | ReturnExpr gate cleared; still behind type-system-encoding |
 | `prompt-sequence-types.md` | sequence type lattice | 5 phases on the clean foundation |
 
-Landed work has its durable record in `docs/adr/` (`parametric-types.md`
-for the Part 5c flavor enum + cross-file deferred owner fix;
-`return-expr.md` for receiver-relative return types subsuming
-per-method projection + arity dispatch;
+Landed work has its durable record in `docs/adr/` (`bag-canonical.md`
+for the invariant that closes the staircase — the bag is the only
+source of types, edges chase, materialized projections are bugs;
+`parametric-types.md` for the Part 5c flavor enum + cross-file
+deferred owner fix; `return-expr.md` for receiver-relative return
+types subsuming per-method projection + arity dispatch;
 `plugin-system.md` for the `return_via_edge` lazy-return mechanism;
 `file-store-and-resolve.md` for forward-reference resolution + cross-file
 invocant refresh) and the commit history.
@@ -39,7 +41,12 @@ invocant refresh) and the commit history.
 ### Notes on the queued work
 
 - **Sequence-types phases 1-3** thread a lattice through the unified
-  `Expr(Span)` attachment. Phases 4-5 (cross-file mutation effects,
+  `Expr(Span)` attachment. The bag-canonical foundation
+  (`adr/bag-canonical.md`) is in place — sequences are now purely
+  additive: emit `Container(ArrayId)` contributions, write
+  `ShapeReducer` / `ElementAtReducer`, done. No `deferred_X` field,
+  no walker-side computation, target diff ~60% of the original
+  spike's ~2300 lines. Phases 4-5 (cross-file mutation effects,
   pipelines) compose on top.
 - **Residual Parts 1-5** — invocant mutations, hash-key unions, method
   loops, functional operators, value-indexed returns. Independent
@@ -162,6 +169,7 @@ type-inference phases when an engine refactor needs cooling time.
 1. `CLAUDE.md` — live architecture, build pipeline, worklist invariants,
    plugin mechanics, type-inference query path. Source of truth.
 2. `docs/adr/*.md` — load-bearing decisions for landed work (pod rendering,
-   plugin system, error recovery, file store + resolve, parametric types).
+   plugin system, error recovery, file store + resolve, parametric types,
+   bag-canonical typing).
 3. This roadmap — what's queued, what blocks what.
 4. The relevant `prompt-*.md` for the workstream you're picking up.

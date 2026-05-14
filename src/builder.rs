@@ -199,7 +199,6 @@ fn build_with_plugins_inner(
         package_uses: std::collections::HashMap::new(),
         use_dedup: std::collections::HashSet::new(),
         sub_return_delegations: std::collections::HashMap::new(),
-        resolved_returns: std::collections::HashMap::new(),
         framework_modes: std::collections::HashMap::new(),
         framework_imports: std::collections::HashSet::new(),
         constant_strings: std::collections::HashMap::new(),
@@ -492,6 +491,46 @@ impl<'a> Builder<'a> {
                 span,
             });
         }
+
+        // Implicit-last-statement return edges. For each user-defined
+        // sub/method scope with NO explicit `return` statements, push
+        // `Symbol(sid) → Edge(Expr(last_expr_span))` so registry
+        // queries on `Symbol(sid)` materialize the implicit return
+        // through the canonical edge-chase path. Subs with explicit
+        // returns route via the `Edge(SymbolReturnArm(sid))` chain
+        // `publish_return_arm_witnesses` pushes — those claim the
+        // same attachment shape first via `SymbolReturnArmFold`.
+        // Framework / plugin-synthesized syms have no Scope and thus
+        // no entry in `last_expr_span`; they're invisible to this
+        // loop, which is the right behavior (their answer comes from
+        // the synth-pushed Symbol witness directly).
+        //
+        // Invariant: `return_infos` is walk-final by the time
+        // `populate_witness_bag` runs — it's populated only by
+        // `visit_return_expression` during the live walk and never
+        // mutated after. No clear-and-emit tag on the implicit-return
+        // edge is therefore needed; the gate `return_infos.is_empty()
+        // for this scope` is a one-shot decision.
+        let mut implicit_edges: Vec<(SymbolId, Span, Span)> = Vec::new();
+        for scope in &self.scopes {
+            if !matches!(scope.kind, ScopeKind::Sub { .. } | ScopeKind::Method { .. }) {
+                continue;
+            }
+            if self.return_infos.iter().any(|ri| ri.scope == scope.id) {
+                continue;
+            }
+            let Some(span) = self.last_expr_span.get(&scope.id).copied() else { continue };
+            let Some(sym_id) = self.find_sub_symbol_for_scope(scope.id) else { continue };
+            implicit_edges.push((sym_id, span, scope.span));
+        }
+        for (sym_id, expr_span, sym_span) in implicit_edges {
+            self.bag.push(Witness {
+                attachment: WitnessAttachment::Symbol(sym_id),
+                source: WitnessSource::Builder("implicit_return".into()),
+                payload: WitnessPayload::Edge(WitnessAttachment::Expr(expr_span)),
+                span: sym_span,
+            });
+        }
     }
 
 }
@@ -723,7 +762,7 @@ fn raw_mid_op(node: tree_sitter::Node, source: &[u8]) -> String {
 /// which sub the return belongs to, where it is, the arity bucket it
 /// gates on (for `emit_arity_return_witnesses`), and the body span
 /// (the `Expr(span)` key both `emit_arity_return_witnesses` and
-/// `fold_per_sub_return_arms` query inline via `bag_query_expr_span`).
+/// `seed_return_types_from_bag` query inline via `bag_query_expr_span`).
 struct ReturnInfo {
     /// The scope (Sub/Method) this return belongs to.
     scope: ScopeId,
@@ -886,7 +925,7 @@ struct Builder<'a> {
     return_infos: Vec<ReturnInfo>,
     /// For each Sub/Method scope, the body span of the last
     /// top-level expression statement. Used as the implicit-return
-    /// query key — `fold_per_sub_return_arms` reads `Expr(span)` via
+    /// query key — `seed_return_types_from_bag` reads `Expr(span)` via
     /// `bag_query_expr_span` for scopes without an explicit `return`.
     /// Replaces the old `last_expr_type: HashMap<ScopeId,
     /// Option<InferredType>>` dual-store: types now ride the bag,
@@ -924,20 +963,6 @@ struct Builder<'a> {
     /// intermediate subs so `sub chain { return get_config() }` doesn't
     /// orphan `$cfg = chain(); $cfg->{host}`.
     sub_return_delegations: std::collections::HashMap<String, String>,
-    /// Per-symbol resolved return type. Replaces `SymbolDetail::Sub.return_type`
-    /// (deleted in D1 of the bag-residual refactor). Walk-time synthesis
-    /// (Mojo/Moo/DBIC accessors) writes here; worklist's `return_types`
-    /// fold writes here; the final writeback iterates this map to push
-    /// `Symbol(sid)` and (for first-seen `(class, name)`) `MethodOnClass`
-    /// witnesses into the bag. Lives only inside the builder — never
-    /// makes it into `FileAnalysis`. The bag is the single durable
-    /// authority on return types post-build.
-    ///
-    /// Scheduled for deletion: see `docs/prompt-cleanups.md` #1. Direct
-    /// emit at synthesis time would remove this sidecar; what blocks it
-    /// is `MethodOnClass` primary-dedup, which currently needs the full
-    /// symbol list visible at writeback.
-    resolved_returns: std::collections::HashMap<SymbolId, InferredType>,
     /// Framework mode per package (Moo, Moose, MojoBase) for accessor synthesis.
     framework_modes: std::collections::HashMap<String, FrameworkMode>,
     /// Functions implicitly imported by OOP frameworks (has, extends, with, etc.)
@@ -1301,7 +1326,13 @@ impl<'a> Builder<'a> {
     /// arg is an anonymous sub, also extracts its param list so plugins
     /// registering handlers (`->on('ready', sub ($s, $m) {})`) can preserve
     /// the handler signature for later sig-help lookup.
-    fn arg_info_for(&self, arg: Node<'a>) -> plugin::ArgInfo {
+    ///
+    /// `&mut self` because the inferred-type derivation emits the arg's
+    /// `Expr(span)` witness onto the bag before querying it — the order
+    /// matters: emit first, then query. Reversing yields `None` from the
+    /// query (no witness on the attachment yet) and the caller would
+    /// silently skip the `callable_return_edge` projection.
+    fn arg_info_for(&mut self, arg: Node<'a>) -> plugin::ArgInfo {
         let text = arg.utf8_text(self.source).unwrap_or("").to_string();
         let mut content_span: Option<Span> = None;
         let string_value = match arg.kind() {
@@ -1333,7 +1364,8 @@ impl<'a> Builder<'a> {
             }
             _ => None,
         };
-        let inferred_type = self.infer_expression_type(arg);
+        self.emit_expr_witness(arg);
+        let inferred_type = self.bag_query_expr_span(node_to_span(arg));
         let sub_params = if arg.kind() == "anonymous_subroutine_expression" {
             self.extract_anonymous_sub_params(arg)
         } else {
@@ -1347,13 +1379,13 @@ impl<'a> Builder<'a> {
         //   my $sub = sub { … }; helper(_, $sub)   (rebound anon)
         //   helper(name => \&Foo::bar)             (named ref)
         //
-        // The literal path goes through `infer_expression_type`'s
-        // syntax-closed arms (anon-sub + refgen); the rebind path
-        // goes through `invocant_type_at_node`'s `scalar` arm,
-        // which `bag_query_variable`-resolves the variable's TC.
-        // Either yields the right `CodeRef` shape; the projection
-        // extracts the attachment whatever its target shape
-        // (`Expr(span)` for anon, `MethodOnClass{...}` for refgen).
+        // The literal paths (anon-sub + refgen) flow through
+        // `emit_expr_witness`'s closed-syntax arms in `expr_payload`;
+        // the rebind path goes through `invocant_type_at_node`'s
+        // `scalar` arm, which `bag_query_variable`-resolves the
+        // variable's TC. Either yields the right `CodeRef` shape;
+        // the projection extracts the attachment whatever its target
+        // shape (`Expr(span)` for anon, `MethodOnClass{...}` for refgen).
         let callable_return_edge = inferred_type
             .as_ref()
             .and_then(InferredType::callable_return_edge)
@@ -1406,11 +1438,10 @@ impl<'a> Builder<'a> {
     }
 
     /// Single derivation site for a CodeRef-shaped value's
-    /// `return_edge`, given the source node. Both `expr_payload`
-    /// (bag-witness emission, walk-time) and
-    /// `infer_expression_type` (closed-syntax InferredType for
-    /// chain typing's RHS) call this — keeping them in sync by
-    /// construction.
+    /// `return_edge`, given the source node. Used by `expr_payload`
+    /// when emitting the bag witness for `anonymous_subroutine_expression`
+    /// / `refgen_expression` — the bag is canonical and there's no
+    /// second consumer that bypasses it.
     ///
     /// Two recognized shapes:
     ///   - `anonymous_subroutine_expression` → `Symbol(sub_id)`,
@@ -1802,7 +1833,7 @@ impl<'a> Builder<'a> {
     /// Build the read-only snapshot plugins see, minus the call-shape bits
     /// that only method-call vs function-call callers know.
     fn base_call_context(
-        &self,
+        &mut self,
         args_raw: Vec<Node<'a>>,
         call_span: Span,
         selection_span: Span,
@@ -1931,7 +1962,6 @@ impl<'a> Builder<'a> {
                 return_via_edge,
             } => {
                 let return_type_for_bag = return_type.clone();
-                let is_class_scoped = on_class.is_some();
                 let detail = SymbolDetail::Sub {
                     params: params.into_iter().map(Into::into).collect(),
                     is_method,
@@ -1971,27 +2001,23 @@ impl<'a> Builder<'a> {
                 // Mirror the return type into the bag so walk-time and
                 // post-walk consumers see the plugin-synthesized sub
                 // through the same bag-query path locals + imports
-                // already use. Free-function synth gets `Symbol(sid)`;
-                // class-scoped synth (`on_class: Some(_)`) skips the
-                // bag push — `MethodOnClass{class, name}` is published
-                // later by the writeback from `resolved_returns`,
-                // keeping same-named methods across unrelated namespaces
-                // addressable per-class. Bridges remain the dispatch
-                // mechanism for class-scoped plugin synth (CLAUDE.md
-                // rule #8).
+                // already use. Symbol(sid) is pushed unconditionally —
+                // class-scoped and free-fn synth both publish here.
+                // Writeback's `MethodOnClass{class, name}` mirror reads
+                // back through the registry's Edge(Symbol(sid)) chase,
+                // so the per-class slot is populated for class-scoped
+                // synth too. Bridges remain the dispatch mechanism for
+                // plugin namespaces (CLAUDE.md rule #8).
                 if let Some(rt) = return_type_for_bag {
                     use crate::witnesses::{
                         Witness, WitnessAttachment, WitnessPayload, WitnessSource,
                     };
-                    self.resolved_returns.insert(sid, rt.clone());
-                    if !is_class_scoped {
-                        self.bag.push(Witness {
-                            attachment: WitnessAttachment::Symbol(sid),
-                            source: WitnessSource::Plugin(plugin_id.clone()),
-                            payload: WitnessPayload::InferredType(rt),
-                            span,
-                        });
-                    }
+                    self.bag.push(Witness {
+                        attachment: WitnessAttachment::Symbol(sid),
+                        source: WitnessSource::Plugin(plugin_id.clone()),
+                        payload: WitnessPayload::InferredType(rt),
+                        span,
+                    });
                 } else if let Some(target) = return_via_edge {
                     // Lazy return type: emit `Symbol(sid) →
                     // Edge(target)`. `target` is whichever
@@ -2104,20 +2130,17 @@ impl<'a> Builder<'a> {
             plugin::EmitAction::Symbol { name, kind, span, selection_span, detail, return_type } => {
                 // The per-symbol return type rides at the action
                 // level (not on `SymbolDetail`) since D1 of the
-                // bag-residual refactor. We push the type into the
-                // bag the same way the `Method` variant does, so the
-                // chain typer's bag-routed queries see
-                // plugin-synthesized callables (e.g. Mojolicious::Lite's
-                // `app` → ClassName(Mojolicious)). One Symbol(sid)
-                // push covers every callable kind; the writeback's
-                // `MethodOnClass{class, name}` emission picks up
-                // class-scoped synths via `resolved_returns`.
+                // bag-residual refactor. The Symbol(sid) push is the
+                // canonical record — chain typing's bag-routed
+                // queries see plugin-synthesized callables uniformly
+                // with locals + imports. Writeback iterates symbols
+                // and pushes `MethodOnClass{class, name} → Edge(Symbol(sid))`
+                // for the primary slot when the sym carries a class.
                 let sid = self.add_symbol_ns(name, kind, span, selection_span, detail, ns);
                 if let Some(rt) = return_type {
                     use crate::witnesses::{
                         Witness, WitnessAttachment, WitnessPayload, WitnessSource,
                     };
-                    self.resolved_returns.insert(sid, rt.clone());
                     self.bag.push(Witness {
                         attachment: WitnessAttachment::Symbol(sid),
                         source: WitnessSource::Plugin(plugin_id),
@@ -2756,7 +2779,7 @@ impl<'a> Builder<'a> {
     /// arg literal). Ensures a Symbol of kind `Sub` exists with the
     /// conventional name `(anon)` so the per-scope arity / return
     /// machinery (`emit_arity_return_witnesses`,
-    /// `fold_per_sub_return_arms`, plugin-priority writeback) finds
+    /// `seed_return_types_from_bag`, plugin-priority writeback) finds
     /// the sub uniformly with named subs — no special-case for "this
     /// is an anonymous body." The Symbol's `span` matches the scope's
     /// span exactly so `find_sub_symbol_for_scope` resolves by
@@ -3914,9 +3937,15 @@ impl<'a> Builder<'a> {
                 // attachment without a per-shape dispatch in the
                 // chase site.
                 self.visit_node(right);
-                // Try constructor class first, then literal types, then expression type
-                let inferred = self.infer_expression_type(right)
-                    .or_else(|| self.infer_expression_result_type(right));
+                // Push the RHS's Expr(span) witness so the bag is
+                // canonical for this expression, then query for the
+                // resolved type. `emit_expr_witness` covers every
+                // shape via `expr_payload` — literals, anon-subs,
+                // constructor patterns, binary ops, scalars, calls,
+                // ternaries; Edge payloads resolve through the
+                // registry's materialization.
+                self.emit_expr_witness(right);
+                let inferred = self.bag_query_expr_span(node_to_span(right));
                 if let Some(it) = inferred {
                     if let Some(vt) = self.get_var_text_from_lhs(left) {
                         self.push_type_constraint(TypeConstraint {
@@ -3926,8 +3955,17 @@ impl<'a> Builder<'a> {
                             inferred_type: it,
                         });
                     }
-                } else if let Some(func_name) = self.extract_call_name(right) {
-                    // RHS is a function call — record binding for return-type post-pass
+                }
+                // Always record call/method-call bindings (independent
+                // of whether the bag resolved a type) — they're the
+                // source-sub linkage that hash-key ownership fixup
+                // walks. Pre-Step-4, the bag's call resolution wasn't
+                // available at walk time so `inferred` was None for
+                // function calls and the binding fell out of the
+                // `else if` branch; with the implicit-return edge
+                // routing through SymbolReturnArm chains, the type
+                // surfaces but the binding still has to fire.
+                if let Some(func_name) = self.extract_call_name(right) {
                     if let Some(vt) = self.get_var_text_from_lhs(left) {
                         self.call_bindings.push(CallBinding {
                             variable: vt,
@@ -4347,43 +4385,17 @@ impl<'a> Builder<'a> {
         });
     }
 
-    /// Closed-under-syntax type observation for an expression node.
-    /// The walker observes; it does not chase names. Only kinds whose
-    /// type is determined by the syntax alone:
-    ///
-    /// - Literals (`"foo"`, `42`, `{}`, `[]`, `qr//`).
-    /// - Anonymous subs → `CodeRef { return_edge: Expr(body_last) }`.
-    /// - `\&foo` / `\&Foo::bar` →
-    ///   `CodeRef { return_edge: MethodOnClass{class, name} }`.
-    /// - Constructor pattern `Bareword->new` → `ClassName`.
-    ///
-    /// Variables, function calls, name-driven method calls — all
-    /// excluded. They go through `expr_payload` as `Edge` payloads
-    /// pointing at attachments the bag knows.
-    fn infer_expression_type(&self, node: Node<'a>) -> Option<InferredType> {
-        match node.kind() {
-            "string_literal" | "interpolated_string_literal" => Some(InferredType::String),
-            "number" => Some(InferredType::Numeric),
-            "anonymous_hash_expression" => Some(InferredType::HashRef),
-            "anonymous_array_expression" => Some(InferredType::ArrayRef),
-            "quoted_regexp" => Some(InferredType::Regexp),
-            "anonymous_subroutine_expression" | "refgen_expression" => {
-                Some(InferredType::CodeRef {
-                    return_edge: self.coderef_return_edge_for(node),
-                })
-            }
-            "method_call_expression" => {
-                self.extract_constructor_class(node).map(InferredType::ClassName)
-            }
-            _ => None,
-        }
-    }
 
     /// What does this anonymous-sub return, by inspecting the body's
-    /// last expression? Closed under syntax — recurses through
-    /// `infer_expression_type` only, no name lookup. Used by Mojo
-    /// `has 'x' => sub { [] }` to type the getter's return.
-    fn infer_anonymous_sub_return_type(&self, node: Node<'a>) -> Option<InferredType> {
+    /// last expression? Emits the body's last-expression witness
+    /// onto the bag, then queries the resolved type at that
+    /// attachment. Used by Mojo `has 'x' => sub { [] }` to type the
+    /// getter's return. Recursion handles `sub { sub { [] } }`:
+    /// the outer's `bag_query` yields `CodeRef { return_edge }`,
+    /// but the caller wants the inner sub's *return*, so we recurse
+    /// into the nested anon-sub's body if the bag's CodeRef shape
+    /// doesn't unwrap on its own.
+    fn infer_anonymous_sub_return_type(&mut self, node: Node<'a>) -> Option<InferredType> {
         if node.kind() != "anonymous_subroutine_expression" {
             return None;
         }
@@ -4393,7 +4405,8 @@ impl<'a> Builder<'a> {
             "expression_statement" | "return_expression" => last_stmt.named_child(0)?,
             _ => last_stmt,
         };
-        self.infer_expression_type(expr)
+        self.emit_expr_witness(expr);
+        self.bag_query_expr_span(node_to_span(expr))
             .or_else(|| self.infer_anonymous_sub_return_type(expr))
     }
 
@@ -5029,21 +5042,12 @@ impl<'a> Builder<'a> {
     /// records `TypeProvenance::FrameworkSynthesis` so dump-package
     /// reports the accessor's origin, but pushes no bag witness.
     ///
-    /// Intentionally does NOT seed `resolved_returns` for these
-    /// syms: the per-Symbol attachment's UnionOnArgs is the
-    /// canonical answer (gated to its specific arity), and a
-    /// writeback `InferredType` push would mask the gate — `level`
-    /// getter at arity 1 would surface its String return instead
-    /// of routing to the writer's MethodOnClass arm. Cross-symbol
-    /// dispatch still works because Mojo `has` synth additionally
-    /// pushes a multi-arm UnionOnArgs on
-    /// `MethodOnClass{class, name}` (see `visit_has_call`'s
-    /// MojoBase branch); Moo accessors share return types across
-    /// arms (writer returns the same isa-type as getter) so
-    /// MethodOnClass falls back to the primary's writeback —
-    /// which doesn't fire for these syms either, but
-    /// MethodOnClassReducer + the standard cross-class chase
-    /// still answer through inheritance.
+    /// The per-Symbol UnionOnArgs is the canonical answer (gated
+    /// to its specific arity). Cross-symbol dispatch (getter+
+    /// writer pair sharing `(class, name)`) is published by
+    /// `publish_class_accessor_union` as a multi-arm UnionOnArgs
+    /// on `MethodOnClass{class, name}` so per-arity callers route
+    /// to the right arm regardless of which sym they hit first.
     fn record_framework_accessor_witness(
         &mut self,
         sym_id: SymbolId,
@@ -5330,13 +5334,16 @@ impl<'a> Builder<'a> {
             }
             FrameworkMode::MojoBase => {
                 // Infer getter return type from default value if present
-                let getter_type = mojo_default_node.and_then(|n| {
+                let getter_type = if let Some(n) = mojo_default_node {
                     if n.kind() == "anonymous_subroutine_expression" {
                         self.infer_anonymous_sub_return_type(n)
                     } else {
-                        self.infer_expression_type(n)
+                        self.emit_expr_witness(n);
+                        self.bag_query_expr_span(node_to_span(n))
                     }
-                });
+                } else {
+                    None
+                };
                 let fluent_type = self
                     .current_package
                     .as_ref()
@@ -7105,7 +7112,14 @@ impl<'a> Builder<'a> {
             .symbols
             .iter()
             .filter(|s| matches!(s.kind, SymKind::Sub | SymKind::Method))
-            .map(|s| (s.id, self.resolved_returns.get(&s.id).cloned()))
+            .map(|s| {
+                (
+                    s.id,
+                    self.bag_query_attachment(
+                        &crate::witnesses::WitnessAttachment::Symbol(s.id),
+                    ),
+                )
+            })
             .collect();
         answers.sort_by_key(|(id, _)| id.0);
         // Count entries in the build-time invocant cache so
@@ -7389,8 +7403,7 @@ impl<'a> Builder<'a> {
     fn resolve_return_types(&mut self) {
         self.emit_arity_return_witnesses();
         self.emit_method_call_return_edges();
-        let (mut return_types, mut return_provenance) = self.fold_per_sub_return_arms();
-        self.seed_plugin_overrides_into_return_types(&mut return_types, &mut return_provenance);
+        let (return_types, return_provenance) = self.seed_return_types_from_bag();
         self.write_back_sub_return_types(&return_provenance);
         self.propagate_call_bindings_to_constraints(&return_types);
         self.fixup_call_bound_hash_key_owners(&return_types);
@@ -7446,7 +7459,7 @@ impl<'a> Builder<'a> {
 
     /// Single-attachment registry query for `Expr(span)`. Used by
     /// `emit_arity_return_witnesses` (per-RI) and the implicit-last-
-    /// expression fallback in `fold_per_sub_return_arms`. Threads the
+    /// expression fallback in `seed_return_types_from_bag`. Threads the
     /// file's scope topology + per-package framework as a `BagContext`
     /// so Edge chases through `Variable{...}` use scope-chain +
     /// framework-aware semantics.
@@ -7669,7 +7682,7 @@ impl<'a> Builder<'a> {
             // Pass 2: Default arm(s). Fold to a single Any branch
             // — multiple Default arms with disagreeing types lose
             // their disagreement signal here; the per-arm fold
-            // runs separately (`fold_per_sub_return_arms`) and is
+            // runs separately (`seed_return_types_from_bag`) and is
             // what surfaces ambiguity in the writeback.
             let mut default_t: Option<InferredType> = None;
             for (branch, body_span) in arms {
@@ -7717,14 +7730,26 @@ impl<'a> Builder<'a> {
         }
     }
 
-    /// Step 3: fold each Sub/Method scope's return arms into a single
-    /// type via `resolve_return_type` (1+ arms agree → `Some(t)`,
-    /// disagreement → `None`). Falls back to `last_expr_span`'s
-    /// Expr(span) query for subs without explicit `return`s — Perl's
-    /// last statement is the implicit return. Provenance is recorded
-    /// as `ReducerFold { reducer: "return_arms" }` so `--dump-package`
-    /// can answer "why does this return X?".
-    fn fold_per_sub_return_arms(
+    /// The seed pass — pure read. For every Sub/Method scope, query
+    /// `Symbol(sub_id)` through the registry; the registry
+    /// materializes through whatever edge chain the bag carries
+    /// (`Edge(SymbolReturnArm(_))` for explicit returns,
+    /// `Edge(Expr(last_expr_span))` for implicit returns —
+    /// pushed by `populate_witness_bag`,
+    /// `ReturnExpr(UnionOnArgs{..})` for arity-discriminated subs,
+    /// `Plugin + InferredType` for plugin overrides). No bag
+    /// writes — the seed pass only builds the name-keyed
+    /// `return_types` map for downstream consumers (call-binding
+    /// propagation, hash-key fixup) and the per-sym provenance
+    /// entries.
+    ///
+    /// Provenance: records `ReducerFold { reducer: "return_arms" }`
+    /// unless `self.type_provenance` already carries a stronger entry
+    /// (`PluginOverride`, `Delegation`) — those are written upstream
+    /// (`apply_type_overrides`, synthesis sites) and must survive the
+    /// seed pass, otherwise `--dump-package` would lose the
+    /// "why did this come from a plugin?" story.
+    fn seed_return_types_from_bag(
         &mut self,
     ) -> (
         std::collections::HashMap<String, InferredType>,
@@ -7743,11 +7768,6 @@ impl<'a> Builder<'a> {
 
         let reg = ReducerRegistry::with_defaults();
 
-        // Collect into a buffer first so we don't hold a `&self`
-        // borrow across the `&mut self.resolved_returns.insert(...)`
-        // step below.
-        let mut updates: Vec<(SymbolId, String, InferredType, Vec<String>)> = Vec::new();
-
         let ctx = BagContext {
             scopes: &self.scopes,
             package_framework: &self.package_framework,
@@ -7755,15 +7775,14 @@ impl<'a> Builder<'a> {
             package_parents: &self.package_parents,
         };
 
+        let mut updates: Vec<(SymbolId, String, InferredType)> = Vec::new();
+
         for scope in &self.scopes {
             let sub_name = match &scope.kind {
                 ScopeKind::Sub { name } | ScopeKind::Method { name } => name.clone(),
                 _ => continue,
             };
 
-            // Find the sym for this scope first — used both for the
-            // bag-source fallback below and for the per-sym update
-            // below.
             let sub_sym_id = self
                 .symbols
                 .iter()
@@ -7775,18 +7794,15 @@ impl<'a> Builder<'a> {
                 })
                 .map(|s| s.id);
 
-            // Two sources, in priority order:
-            //   1. Bag query on `Symbol(sub_id)` — covers explicit
-            //      `return EXPR` arms via the `Edge(SymbolReturnArm(_))`
-            //      chain `publish_return_arm_witnesses` emits. The
-            //      registry materializes the chain into the
-            //      arm-fold's answer (`SymbolReturnArmFold` claiming
-            //      `SymbolReturnArm(_)`); ternary arms inside a
-            //      return body fold one level deeper via
-            //      `BranchArmFold` on the body's `Expr(_)`.
-            //   2. `Expr(last_expr_span)` for subs without explicit
-            //      returns — Perl's implicit-last-statement return.
-            let bag_answer = sub_sym_id.and_then(|id| {
+            // Single source: registry query on `Symbol(sub_id)`.
+            // Materialization handles every edge:
+            //   - `Edge(SymbolReturnArm(_))` for explicit returns
+            //   - `Edge(Expr(last_expr_span))` for implicit returns
+            //     (pushed by `populate_witness_bag`)
+            //   - `ReturnExpr(UnionOnArgs{...})` for framework /
+            //     arity-discriminated subs
+            //   - `Plugin + InferredType` for plugin overrides
+            let resolved = sub_sym_id.and_then(|id| {
                 let att = WitnessAttachment::Symbol(id);
                 let q = ReducerQuery {
                     attachment: &att,
@@ -7802,120 +7818,54 @@ impl<'a> Builder<'a> {
                     None
                 }
             });
-            let (resolved, evidence) = if let Some(t) = bag_answer {
-                (Some(t), vec!["symbol_bag".into()])
-            } else {
-                let r = self
-                    .last_expr_span
-                    .get(&scope.id)
-                    .and_then(|sp| self.bag_query_expr_span(*sp));
-                let ev = if r.is_some() {
-                    vec!["last_expr".into()]
-                } else {
-                    Vec::new()
-                };
-                (r, ev)
-            };
 
             if let (Some(rt), Some(sid)) = (resolved, sub_sym_id) {
-                updates.push((sid, sub_name, rt, evidence));
+                updates.push((sid, sub_name, rt));
             }
         }
 
-        // Apply per-sym updates. `resolved_returns` is sym_id-keyed so
-        // two packages defining the same sub name (`@ISA = (A, B)`
-        // where both A::m and B::m exist) each get their own entry —
-        // a name-keyed `HashMap<String, _>` would last-write-wins
-        // and silently surface B's answer for both, breaking
-        // class-keyed dispatch.
-        for (sid, sub_name, rt, evidence) in updates {
-            self.resolved_returns.insert(sid, rt.clone());
+        for (sid, sub_name, rt) in updates {
             return_types.insert(sub_name.clone(), rt);
-            return_provenance.insert(
-                sub_name,
-                crate::file_analysis::TypeProvenance::ReducerFold {
-                    reducer: "return_arms".into(),
-                    evidence,
-                },
+            // Don't overwrite a stronger upstream provenance —
+            // `PluginOverride` (from `apply_type_overrides`) and
+            // `Delegation` (from synthesis sites) record *why* a
+            // type came in by a path the reducer fold doesn't see.
+            // The bag's answer is the same value, but the
+            // provenance story would lose its source if we
+            // clobbered it with `ReducerFold { return_arms }`.
+            let preserve = matches!(
+                self.type_provenance.get(&sid),
+                Some(
+                    crate::file_analysis::TypeProvenance::PluginOverride { .. }
+                    | crate::file_analysis::TypeProvenance::Delegation { .. }
+                )
             );
+            if !preserve {
+                return_provenance.insert(
+                    sub_name,
+                    crate::file_analysis::TypeProvenance::ReducerFold {
+                        reducer: "return_arms".into(),
+                        evidence: vec!["symbol_bag".into()],
+                    },
+                );
+            }
         }
         (return_types, return_provenance)
     }
 
-    /// Step 4: seed Plugin overrides into `return_types` before
-    /// delegation / self_method_tail propagation. Routes through
-    /// `PluginOverrideReducer`'s own `claims` + `reduce` so the
-    /// predicate stays in lock-step with the registry — if the reducer
-    /// gains a tie-breaker or attachment-shape filter, the seed pass
-    /// inherits it for free instead of silently disagreeing.
-    fn seed_plugin_overrides_into_return_types(
-        &mut self,
-        return_types: &mut std::collections::HashMap<String, InferredType>,
-        return_provenance: &mut std::collections::HashMap<
-            String,
-            crate::file_analysis::TypeProvenance,
-        >,
-    ) {
-        use crate::witnesses::{
-            FrameworkFact, PluginOverrideReducer, ReducedValue, ReducerQuery, Witness,
-            WitnessAttachment, WitnessReducer,
-        };
-
-        let plugin_reducer = PluginOverrideReducer;
-        // Two-step: collect (sym_id, name, rt) without holding a
-        // borrow on self.symbols, then write to resolved_returns
-        // and return_types in a separate pass. Same pattern as
-        // `fold_per_sub_return_arms` to avoid the &self / &mut self
-        // borrow conflict.
-        let mut overrides: Vec<(SymbolId, String, InferredType)> = Vec::new();
-        for sym in &self.symbols {
-            if !matches!(sym.kind, SymKind::Sub | SymKind::Method) {
-                continue;
-            }
-            let att = WitnessAttachment::Symbol(sym.id);
-            let claimed: Vec<&Witness> = self
-                .bag
-                .for_attachment(&att)
-                .into_iter()
-                .filter(|w| plugin_reducer.claims(w))
-                .collect();
-            if claimed.is_empty() {
-                continue;
-            }
-            let q = ReducerQuery {
-                attachment: &att,
-                point: None,
-                framework: FrameworkFact::Plain,
-                arity_hint: None,
-                receiver: None,
-                context: None,
-            };
-            if let ReducedValue::Type(t) = plugin_reducer.reduce(&claimed, &q) {
-                overrides.push((sym.id, sym.name.clone(), t));
-            }
-        }
-        for (sid, name, t) in overrides {
-            self.resolved_returns.insert(sid, t.clone());
-            return_types.insert(name.clone(), t);
-            return_provenance.remove(&name);
-        }
-    }
-
-    /// Step 7: writeback. Iterate `resolved_returns` and publish each
-    /// resolved per-symbol return type to the bag on two attachments:
-    ///
-    ///   - `Symbol(sym_id)` — id-keyed answer, claimed by
-    ///     `SubReturnReducer`. Used by per-symbol queries that already
-    ///     know which sym they're asking about (cross-file imports
-    ///     recursing into a cached bag, dump-package iteration).
-    ///   - `MethodOnClass{class, name}` — class-keyed answer, claimed
-    ///     by `MethodOnClassReducer`. Only the FIRST sym for a given
-    ///     `(class, name)` pair publishes here (the "primary"); later
-    ///     syms participate via the cross-symbol
-    ///     `ReturnExpr::UnionOnArgs` declaration that
-    ///     `publish_class_accessor_union` emits at synth time. This
-    ///     primary push is what `find_method_return_type` falls back
-    ///     to when no `ReturnExpr` answers.
+    /// Step 7: writeback. Mirror per-sym answers onto
+    /// `MethodOnClass{class, name}` for the primary sym of each
+    /// `(class, name)` pair, plus plugin-namespace bridges and
+    /// inheritance edges. The primary mirror is published as
+    /// `Edge(Symbol(sid))` — pure edge, no value duplication. The
+    /// registry's materialization routes class-keyed queries through
+    /// to the sym's own bag answer (UnionOnArgs, plugin override,
+    /// arm fold, implicit-return edge), so any shape the sym carries
+    /// surfaces uniformly. ReturnExpr declarations on
+    /// `MethodOnClass{class, name}` (from
+    /// `publish_class_accessor_union`) claim first and answer
+    /// arity-aware queries; the writeback's Edge fills the
+    /// no-arity-hint and Edge-fallback slots.
     ///
     /// Cross-file imports do not get a writeback push here — they
     /// resolve lazily via `query_sub_return_type` walking
@@ -7923,13 +7873,11 @@ impl<'a> Builder<'a> {
     /// module's `Symbol(cached_sid)`. Same registry, same rules; no
     /// local mirror needed.
     ///
-    /// `return_self_method` is set for subs whose return couldn't
-    /// be collapsed in-file. Plugin overrides flow through
-    /// `return_types` via the bag-priority seeding step, with
-    /// `return_provenance` cleared so we don't clobber the existing
-    /// `PluginOverride` entry written by `apply_type_overrides`. No
-    /// special-case skip needed — overrides win because they're
-    /// higher-priority bag witnesses.
+    /// Plugin overrides surface through the seed pass's registry
+    /// query (PluginOverrideReducer is registered first);
+    /// `seed_return_types_from_bag` preserves the existing
+    /// `PluginOverride` entry in `self.type_provenance` so the
+    /// plugin source story survives `--dump-package`.
     ///
     /// Idempotent across re-runs: `bag.remove_by_source_tag("local_return")`
     /// (and `"plugin_bridge"` / `"inheritance"`) at the start of every
@@ -7950,23 +7898,16 @@ impl<'a> Builder<'a> {
         self.bag.remove_by_source_tag("plugin_bridge");
         self.bag.remove_by_source_tag("inheritance");
 
-        // First pass: update `resolved_returns` from worklist's
-        // per-name folds and (when no fold answer exists) `return_self_method`
-        // from the in-flight self-method-tail bookkeeping. The map is
-        // the post-field source of truth for "what does this sym
-        // return?" — walk-time synthesis seeds it directly,
-        // worklist-resolved folds update it here.
-        // `resolved_returns` is the post-D1 source of truth for
-        // per-sym return types. Walk-time synthesis writes to it
-        // directly (`record_framework_accessor_witness`,
-        // plugin emit handlers). Worklist's
-        // `fold_per_sub_return_arms` and
-        // `seed_plugin_overrides_into_return_types` write per-sym
-        // here too — the legacy `return_types: HashMap<String, _>`
-        // is kept around only for downstream consumers that look up
-        // by name (call-binding propagation, hash-key fixup) and is
-        // intentionally last-write-wins on name collisions; the bag
-        // path keys by `sym_id` and stays correct.
+        // The bag is canonical — walk-time synthesis pushes
+        // `Symbol(sid)` witnesses directly (Plugin overrides, plugin
+        // synth, return arm chains, implicit-return edges from
+        // `populate_witness_bag`, ReturnExpr arity unions). The seed
+        // pass's job is purely to read the registry's answer per sym
+        // and surface it in the name-keyed `return_types` map for
+        // downstream consumers (call-binding propagation, hash-key
+        // fixup). Writeback below mirrors per-sym answers onto
+        // `MethodOnClass{class, name}` primary via Edge(Symbol(sid)) —
+        // no value duplication, the edge IS the mirror.
         for sym in &self.symbols {
             if !matches!(sym.kind, SymKind::Sub | SymKind::Method) {
                 continue;
@@ -7975,112 +7916,45 @@ impl<'a> Builder<'a> {
                 self.type_provenance.insert(sym.id, prov.clone());
             }
         }
-        // Publish every Sub/Method's resolved return type to the bag
-        // on TWO attachments:
-        //   - `Symbol(sym_id)` — id-keyed lookup. The Symbol attachment
-        //     carries every per-symbol fact in the bag (arity arms,
-        //     plugin overrides). Writeback's value here is the
-        //     "if you ask THIS sym what it returns, ignoring class
-        //     context, here's the inferred answer." Cross-file imports
-        //     reach this same shape by recursing into the cached
-        //     module's bag with `Symbol(cached_sid)`.
-        //   - `MethodOnClass{class, name}` — class-keyed lookup. The
-        //     authoritative class-scoped answer that
-        //     `find_method_return_type` queries through. Multiple
-        //     symbols can share `(class, name)` (Mojo::Base getter +
-        //     writer); the FIRST one's resolved return type is the
-        //     "primary" — what callers see when they don't constrain
-        //     by arity AND no `ReturnExpr` declaration answers.
-        //     Per-arity dispatch lives on the same attachment via
-        //     `ReturnExpr::UnionOnArgs` declarations
-        //     (`publish_class_accessor_union`,
-        //     `emit_arity_return_witnesses`).
-        // Catches both worklist-resolved returns (set above) and
-        // framework-pinned ones (Mojo::Base accessors, Moo `has`,
-        // DBIC column accessors — these write directly into
-        // `resolved_returns` at walk-time synthesis, never flow
-        // through `return_types`).
+        // Publish `MethodOnClass{class, name} → Edge(Symbol(sid))`
+        // for the primary sym of each (class, name) pair. The edge
+        // routes class-keyed queries to the sym's own bag answer
+        // (UnionOnArgs, plugin override, arm fold, implicit-return
+        // edge — whichever the sym carries); the registry's
+        // materialization handles every shape uniformly. No value
+        // copying — the edge IS the mirror.
+        //
+        // Primary-dedup: the FIRST sym for `(class, name)` claims
+        // the slot. Secondary syms (Mojo getter+writer sharing
+        // `(class, name)`) participate via the cross-symbol
+        // `ReturnExpr::UnionOnArgs` declaration pushed by
+        // `publish_class_accessor_union` on the same attachment.
+        // ReturnExprReducer runs first; the Edge below is a no-op
+        // when UnionOnArgs answers and a useful fallback otherwise.
+        // Walking every sym (not just ones with answers) is what
+        // keeps the primary slot stable: a Mojo getter without a
+        // default still occupies primary for `(class, name)` so
+        // the writer's `ClassName(C)` doesn't surface as the
+        // no-arity-hint default.
         let mut writeback_witnesses: Vec<Witness> = Vec::new();
-        // Track primary for each (class, method_name) — the first
-        // Sub/Method symbol declared in (or synthesized into) the
-        // class wins the "primary" slot on `MethodOnClass`. The
-        // primary defines the plain `InferredType` answer that
-        // `MethodOnClassReducer` returns when the caller has no arity
-        // preference. Crucially we walk EVERY sym (rt-less ones too):
-        // a Mojo getter without a default (`has 'title'`) has
-        // `return_type: None` and must still claim the primary slot —
-        // otherwise the secondary fluent writer's `ClassName(C)`
-        // would silently surface as the default, wrong-answering
-        // `find_method_return_type` at arity=None.
         let mut method_on_class_seen: std::collections::HashSet<(String, String)> =
             std::collections::HashSet::new();
         for sym in &self.symbols {
             if !matches!(sym.kind, SymKind::Sub | SymKind::Method) {
                 continue;
             }
-            // Mark primary FIRST — even when this sym has no rt, it
-            // still occupies the primary slot for (class, name).
-            let is_primary = if let Some(class) = sym.package.as_ref() {
-                method_on_class_seen.insert((class.clone(), sym.name.clone()))
-            } else {
-                false
-            };
-            // Symbol writeback: when this sym has a resolved
-            // return type, push it. Two sources:
-            //   * `resolved_returns` — walk-time synthesis +
-            //     worklist's per-name folds. Concrete InferredType.
-            //   * pre-existing `Symbol(sid)` witness with
-            //     `Edge(_)` payload — plugin-emitted lazy return
-            //     (mojo-helpers' `return_via_edge` shape). The
-            //     synthesis emits ONLY on `Symbol(sid)`; this
-            //     writeback mirrors to `MethodOnClass{class, name}`
-            //     for class-scoped synth so cross-file lookup
-            //     reaches it via the same path concrete returns
-            //     use.
-            let payload_for_writeback: Option<WitnessPayload> =
-                if let Some(rt) = self.resolved_returns.get(&sym.id) {
-                    Some(WitnessPayload::InferredType(rt.clone()))
-                } else {
-                    self.bag
-                        .all()
-                        .iter()
-                        .find(|w| {
-                            matches!(&w.attachment, WitnessAttachment::Symbol(s) if *s == sym.id)
-                                && matches!(w.payload, WitnessPayload::Edge(_))
-                        })
-                        .map(|w| w.payload.clone())
-                };
-            let Some(payload) = payload_for_writeback else { continue };
-            // Concrete return types come through `resolved_returns`
-            // and need pushing on Symbol(sid). Edge-payload returns
-            // were already emitted on Symbol(sid) by the plugin;
-            // skip re-pushing those (would duplicate the witness).
-            let already_on_symbol = matches!(payload, WitnessPayload::Edge(_));
-            if !already_on_symbol {
+            let Some(class) = sym.package.clone() else { continue };
+            let is_primary = method_on_class_seen.insert((class.clone(), sym.name.clone()));
+            if is_primary {
                 writeback_witnesses.push(Witness {
-                    attachment: WitnessAttachment::Symbol(sym.id),
+                    attachment: WitnessAttachment::MethodOnClass {
+                        class,
+                        name: sym.name.clone(),
+                    },
                     source: WitnessSource::Builder("local_return".into()),
-                    payload: payload.clone(),
+                    payload: WitnessPayload::Edge(WitnessAttachment::Symbol(sym.id)),
                     span: sym.span,
                 });
-            }
-            // MethodOnClass primary: only the primary (first sym for
-            // (class, name)) publishes the plain payload slot.
-            // Secondary syms participate via the cross-symbol
-            // `ReturnExpr::UnionOnArgs` declaration that the
-            // accessor-synth helpers emit at walk time.
-            if is_primary {
-                if let Some(class) = sym.package.clone() {
-                    writeback_witnesses.push(Witness {
-                        attachment: WitnessAttachment::MethodOnClass {
-                            class,
-                            name: sym.name.clone(),
-                        },
-                        source: WitnessSource::Builder("local_return".into()),
-                        payload,
-                        span: sym.span,
-                    });
-                }
             }
         }
         // Plugin-namespace bridges: each `PluginNamespace` declares

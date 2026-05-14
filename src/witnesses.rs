@@ -833,12 +833,11 @@ impl WitnessReducer for SymbolReturnArmFold {
 // Sub-return delegation chains (`return other()`,
 // `shift->method(...)`) are represented as `Edge(Symbol(...))` /
 // `Edge(MethodOnClass{...})` payloads. Registry materialization
-// handles the chase transparently. The procedural fixed-point loops
-// in `Builder::propagate_via_delegation` /
-// `Builder::propagate_via_self_method_tails` continue to own
-// build-time delegation propagation (they read the
-// `sub_return_delegations` / `self_method_tails` maps directly,
-// not the bag).
+// handles the chase transparently — no procedural delegation /
+// self-method-tail propagation pass remains in the builder.
+// `TypeProvenance::Delegation` is recorded at synthesis time by
+// the emitter that pushes the Edge witness; the seed pass
+// preserves it across worklist iterations.
 
 // ---- Expression reducer ----
 //
@@ -894,9 +893,9 @@ impl WitnessReducer for ExprReturn {
 // and the `arity_hint` short-circuit in `reduce` below.
 //
 // Latest wins so a later writeback re-publish (the worklist clears
-// `local_return` on every iteration and re-pushes from
-// `resolved_returns`) dominates an older value. Registered AFTER
-// every more-precise reducer (Plugin override, ReturnExpr arity
+// `local_return` on every iteration and re-pushes via the registry
+// query) dominates an older value. Registered AFTER every
+// more-precise reducer (Plugin override, ReturnExpr arity
 // dispatch) so those still get to claim first.
 //
 // Per-arm return witnesses live on `SymbolReturnArm(sub_id)` and are
