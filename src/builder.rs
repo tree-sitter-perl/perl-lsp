@@ -503,6 +503,13 @@ impl<'a> Builder<'a> {
         // no entry in `last_expr_span`; they're invisible to this
         // loop, which is the right behavior (their answer comes from
         // the synth-pushed Symbol witness directly).
+        //
+        // Invariant: `return_infos` is walk-final by the time
+        // `populate_witness_bag` runs — it's populated only by
+        // `visit_return_expression` during the live walk and never
+        // mutated after. No clear-and-emit tag on the implicit-return
+        // edge is therefore needed; the gate `return_infos.is_empty()
+        // for this scope` is a one-shot decision.
         let mut implicit_edges: Vec<(SymbolId, Span, Span)> = Vec::new();
         for scope in &self.scopes {
             if !matches!(scope.kind, ScopeKind::Sub { .. } | ScopeKind::Method { .. }) {
@@ -1303,6 +1310,12 @@ impl<'a> Builder<'a> {
     /// arg is an anonymous sub, also extracts its param list so plugins
     /// registering handlers (`->on('ready', sub ($s, $m) {})`) can preserve
     /// the handler signature for later sig-help lookup.
+    ///
+    /// `&mut self` because the inferred-type derivation emits the arg's
+    /// `Expr(span)` witness onto the bag before querying it — the order
+    /// matters: emit first, then query. Reversing yields `None` from the
+    /// query (no witness on the attachment yet) and the caller would
+    /// silently skip the `callable_return_edge` projection.
     fn arg_info_for(&mut self, arg: Node<'a>) -> plugin::ArgInfo {
         let text = arg.utf8_text(self.source).unwrap_or("").to_string();
         let mut content_span: Option<Span> = None;
