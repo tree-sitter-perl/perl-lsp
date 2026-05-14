@@ -26,28 +26,32 @@ backburner: ship when types + architecture are in a healthy place.
 | `prompt-type-system-encoding.md` | **TYPE-SAFE AXIS DISPATCH** — make wrong-axis class-name reads unrepresentable | discussion; partially deferred to graph-walking |
 | `prompt-type-is-the-gate.md` | **GENERALIZE STRICT-EQ GATES** — `type_says()` answers replace local-symbol-table presence checks | two instances landed (Part 5c); general refactor open |
 | `prompt-dbic-as-plugin.md` | **MOVE DBIC OUT OF CORE** — port `visit_dbic_*` family + Parametric emission to a plugin | ReturnExpr gate cleared; still behind type-system-encoding |
-| `prompt-sequence-types.md` | sequence type lattice | 5 phases on the clean foundation |
+| `prompt-sequence-types.md` | sequence type lattice — residual phases | ADR `sequence-types.md` for the landed data model; prompt for full lattice + cross-method + pipelines |
 
 Landed work has its durable record in `docs/adr/` (`bag-canonical.md`
 for the invariant that closes the staircase — the bag is the only
 source of types, edges chase, materialized projections are bugs;
-`parametric-types.md` for the Part 5c flavor enum + cross-file
-deferred owner fix; `return-expr.md` for receiver-relative return
-types subsuming per-method projection + arity dispatch;
-`plugin-system.md` for the `return_via_edge` lazy-return mechanism;
-`file-store-and-resolve.md` for forward-reference resolution + cross-file
-invocant refresh) and the commit history.
+`sequence-types.md` for the positional-container data model + the
+`SequenceTransform/SeqOp` pattern for list operators (spike at
+`ec62653`); `parametric-types.md` for the Part 5c flavor enum +
+cross-file deferred owner fix; `return-expr.md` for receiver-
+relative return types subsuming per-method projection + arity
+dispatch; `plugin-system.md` for the `return_via_edge` lazy-return
+mechanism; `file-store-and-resolve.md` for forward-reference
+resolution + cross-file invocant refresh) and the commit history.
 
 ### Notes on the queued work
 
-- **Sequence-types phases 1-3** thread a lattice through the unified
-  `Expr(Span)` attachment. The bag-canonical foundation
-  (`adr/bag-canonical.md`) is in place — sequences are now purely
-  additive: emit `Container(ArrayId)` contributions, write
-  `ShapeReducer` / `ElementAtReducer`, done. No `deferred_X` field,
-  no walker-side computation, target diff ~60% of the original
-  spike's ~2300 lines. Phases 4-5 (cross-file mutation effects,
-  pipelines) compose on top.
+- **Sequence types** — spike landed (`ec62653`) in ~90 LOC: tuple
+  shape on `Variable{name, scope}` + walk-time push contribution +
+  `array_element_expression` projection in `resolve_expression_type`.
+  See `adr/sequence-types.md`. Residual phases queued in
+  `prompt-sequence-types.md`: full shape lattice (Homogeneous /
+  CycleTuple / Heterogeneous classification), `Container(ArrayId)`
+  attachment for cross-method contributions, framework `has`
+  accessor synthesis returning slot shapes, pipeline reducers
+  (`SequenceTransform` + `SeqOp` for map/grep/sort/reverse). Each
+  is purely additive — no retrofit.
 - **Residual Parts 1-5** — invocant mutations, hash-key unions, method
   loops, functional operators, value-indexed returns. Independent
   reducer+emitter pairs. Order by value.
