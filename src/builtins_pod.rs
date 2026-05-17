@@ -1,23 +1,30 @@
-//! Parser for `perlfunc.pod`. Pure — no state, no I/O.
+//! Locate + parse `perlfunc.pod` for builtin hover docs.
 //!
-//! Storage and lookup live in [`module_cache`] / [`module_index`]:
-//! - At startup, `module_index` discovers the running perl's
-//!   `pods/perlfunc.pod`, parses it via this module, and writes the
-//!   resulting entries to SQLite keyed by perl version. Re-parse only
-//!   happens when the meta row says the perl version changed.
-//! - Hover reads from the in-memory mirror that `ModuleIndex` hydrates
-//!   from SQLite at construction time.
+//! All actual POD walking is delegated to [`crate::pod`] — the
+//! tree-sitter-pod-backed renderer that already handles interior
+//! sequences (C<>/B<>/L<>/E<>/…), nested formatting, verbatim
+//! paragraphs, and multi-angle-bracket variants. This module is just
+//! discovery (runtime perl → bundled fallback) + the perl-version
+//! footer that gets appended to each rendered entry.
+//!
+//! Storage and lookup live in [`crate::module_cache`] /
+//! [`crate::module_index`]: at startup the resolver thread writes
+//! the parsed entries to SQLite (keyed by perl version, same
+//! invalidation pattern as `inc_hash` / `plugin_fingerprint`) and
+//! hydrates an in-memory mirror. Re-parse only happens when the
+//! version tag changes.
 
 use std::collections::HashMap;
 
-/// Parsed entries: builtin name → markdown body (already rendered).
+/// Parsed entries: builtin name → markdown body (already rendered,
+/// with the per-perl-version footer appended).
 pub struct ParsedBuiltins {
-    /// `"5.42.0"` etc. — used as the cache invalidation key. The
-    /// `source` suffix distinguishes runtime-parsed entries from
-    /// bundled-fallback ones so we re-parse if the user installs
-    /// `perl-doc` on what was previously a stripped image.
+    /// `"5.42.0 (runtime)"` / `"5.42.0 (bundled)"` — used as the
+    /// SQLite invalidation key. The source suffix distinguishes
+    /// runtime-parsed entries from bundled-fallback ones so we
+    /// re-parse if the user installs `perl-doc` on what was
+    /// previously a stripped image.
     pub perl_version: String,
-    /// `name -> markdown` for each builtin found in perlfunc.pod.
     pub entries: HashMap<String, String>,
 }
 
@@ -30,14 +37,8 @@ const BUNDLED_VERSION: &str = include_str!("../vendored/perlfunc.version");
 /// Locate and parse `perlfunc.pod`. Prefers the running perl's copy
 /// (so hover docs match the perl the user is targeting); falls back
 /// to the bundled snapshot when the runtime POD isn't on disk.
-/// Returns `None` only when both runtime and bundled paths fail —
-/// which shouldn't happen in practice since the bundle ships in the
-/// binary.
 pub fn parse_perlfunc() -> Option<ParsedBuiltins> {
-    if let Some(p) = parse_runtime_perlfunc() {
-        return Some(p);
-    }
-    parse_bundled_perlfunc()
+    parse_runtime_perlfunc().or_else(parse_bundled_perlfunc)
 }
 
 fn parse_runtime_perlfunc() -> Option<ParsedBuiltins> {
@@ -52,7 +53,7 @@ fn parse_runtime_perlfunc() -> Option<ParsedBuiltins> {
     })?;
     let tag = format!("{} (runtime)", perl_version);
     Some(ParsedBuiltins {
-        entries: parse_perlfunc_pod(&pod, &tag),
+        entries: render_entries(&pod, &tag),
         perl_version: tag,
     })
 }
@@ -61,7 +62,7 @@ fn parse_bundled_perlfunc() -> Option<ParsedBuiltins> {
     let version = BUNDLED_VERSION.trim();
     let tag = format!("{} (bundled)", version);
     Some(ParsedBuiltins {
-        entries: parse_perlfunc_pod(BUNDLED_POD, &tag),
+        entries: render_entries(BUNDLED_POD, &tag),
         perl_version: tag,
     })
 }
@@ -78,180 +79,54 @@ fn run_perl(args: &[&str]) -> Option<String> {
     Some(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
-/// Walk the POD line-by-line. Open a section on `=item <name>`; close
-/// on the next `=item` or `=back`. Body accumulates verbatim, then
-/// POD inline markup is lowered to markdown. Each entry gets a small
-/// `*from perlfunc.pod (perl X.Y.Z)*` footer so the hover panel says
-/// where the doc came from.
-pub fn parse_perlfunc_pod(pod: &str, perl_version: &str) -> HashMap<String, String> {
-    let mut out: HashMap<String, String> = HashMap::new();
-    let mut current: Option<Section> = None;
-
-    for line in pod.lines() {
-        if let Some(rest) = line.strip_prefix("=item ") {
-            flush(&mut out, current.take(), perl_version);
-            let rest = rest.trim();
-            let (name_tok, sig_tail) = match rest.split_once(char::is_whitespace) {
-                Some((n, t)) => (n, t.trim()),
-                None => (rest, ""),
-            };
-            let name = strip_inline_markup(name_tok)
-                .trim_matches(|c: char| !c.is_alphanumeric() && c != '_')
-                .to_string();
-            if !is_plausible_builtin_name(&name) {
-                continue;
-            }
-            current = Some(Section { name, signature: sig_tail.to_string(), body: String::new() });
-            continue;
-        }
-        if line.starts_with("=back") || line.starts_with("=head") {
-            flush(&mut out, current.take(), perl_version);
-            continue;
-        }
-        if line.starts_with("=for ") || line.starts_with("X<") {
-            continue;
-        }
-        if let Some(sec) = current.as_mut() {
-            sec.body.push_str(line);
-            sec.body.push('\n');
-        }
+/// Walk perlfunc.pod via the shared POD parser and decorate each
+/// entry with the source-perl footer. The footer tells hover panels
+/// whether the docs came from the user's perl or the bundled
+/// fallback, which is the only piece of metadata that needs to ride
+/// alongside the rendered body.
+fn render_entries(pod: &str, perl_version_tag: &str) -> HashMap<String, String> {
+    let mut entries = crate::pod::extract_perlfunc_items(pod);
+    let footer = format!("\n\n*from perlfunc.pod (perl {})*", perl_version_tag);
+    for body in entries.values_mut() {
+        body.push_str(&footer);
     }
-    flush(&mut out, current.take(), perl_version);
-    out
-}
-
-struct Section {
-    name: String,
-    signature: String,
-    body: String,
-}
-
-fn flush(out: &mut HashMap<String, String>, sec: Option<Section>, perl_version: &str) {
-    if let Some(s) = sec {
-        // First entry wins: perlfunc.pod lists some builtins twice
-        // (`pos EXPR` then `pos`). The first body is the canonical one.
-        out.entry(s.name.clone()).or_insert_with(|| render_entry(&s, perl_version));
-    }
-}
-
-fn render_entry(s: &Section, perl_version: &str) -> String {
-    let mut md = String::new();
-    md.push_str("```perl\n");
-    md.push_str(&s.name);
-    if !s.signature.is_empty() {
-        md.push(' ');
-        md.push_str(&strip_inline_markup(&s.signature));
-    }
-    md.push_str("\n```\n\n");
-    let lowered = strip_inline_markup(&s.body);
-    md.push_str(trim_to_paragraphs(&lowered, 3).trim());
-    md.push_str(&format!("\n\n*from perlfunc.pod (perl {})*", perl_version));
-    md
-}
-
-fn is_plausible_builtin_name(s: &str) -> bool {
-    let mut chars = s.chars();
-    match chars.next() {
-        Some(c) if c.is_ascii_lowercase() => {}
-        _ => return false,
-    }
-    chars.all(|c| c.is_ascii_lowercase() || c == '_' || c.is_ascii_digit())
-}
-
-fn trim_to_paragraphs(s: &str, n: usize) -> String {
-    let mut out = String::new();
-    let mut paragraph_count = 0;
-    let mut in_paragraph = false;
-    for line in s.lines() {
-        if line.trim().is_empty() {
-            if in_paragraph {
-                paragraph_count += 1;
-                if paragraph_count >= n {
-                    break;
-                }
-            }
-            in_paragraph = false;
-        } else {
-            in_paragraph = true;
-        }
-        out.push_str(line);
-        out.push('\n');
-    }
-    out
-}
-
-/// Lower POD inline markup to plain markdown. Non-nested only —
-/// enough for perlfunc.pod's body shape.
-fn strip_inline_markup(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    let mut chars = s.chars().peekable();
-    while let Some(c) = chars.next() {
-        if matches!(c, 'C' | 'B' | 'I' | 'L' | 'F' | 'S' | 'E' | 'X') && chars.peek() == Some(&'<') {
-            chars.next();
-            let mut inner = String::new();
-            while let Some(&nc) = chars.peek() {
-                if nc == '>' { chars.next(); break; }
-                inner.push(nc);
-                chars.next();
-            }
-            // L<text|target> → drop the target.
-            let inner = inner.split('|').next().unwrap_or(&inner).to_string();
-            match c {
-                'C' | 'F' => { out.push('`'); out.push_str(&inner); out.push('`'); }
-                'B' => { out.push_str("**"); out.push_str(&inner); out.push_str("**"); }
-                'I' => { out.push('*'); out.push_str(&inner); out.push('*'); }
-                _ => out.push_str(&inner),
-            }
-        } else {
-            out.push(c);
-        }
-    }
-    out
+    entries
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn fixture(body: &str) -> String {
-        format!(
-            "=head1 NAME\n\nfake perlfunc - test\n\n=over 8\n\n{}\n=back\n",
-            body
-        )
+    #[test]
+    fn bundled_perlfunc_yields_common_builtins() {
+        let parsed = parse_bundled_perlfunc().expect("bundled POD parses");
+        for name in ["push", "pop", "shift", "scalar", "keys", "values", "join", "split"] {
+            assert!(
+                parsed.entries.contains_key(name),
+                "bundled perlfunc.pod should contain `{name}` (got {} entries)",
+                parsed.entries.len(),
+            );
+        }
     }
 
     #[test]
-    fn parses_basic_item() {
-        let pod = fixture("=item push ARRAY,LIST\nX<push>\n\nAppends to the array.\n\nReturns the new length.\n");
-        let map = parse_perlfunc_pod(&pod, "5.42.0");
-        let push = map.get("push").expect("push entry exists");
-        assert!(push.contains("push ARRAY,LIST"), "signature: {push}");
-        assert!(push.contains("Appends to the array"), "body: {push}");
-        assert!(push.contains("perl 5.42.0"), "version footer: {push}");
+    fn entries_carry_version_footer() {
+        let parsed = parse_bundled_perlfunc().expect("bundled POD parses");
+        let push = parsed.entries.get("push").expect("push entry");
+        assert!(
+            push.contains("perl ") && push.contains("bundled"),
+            "expected version footer in entry body, got tail: {}",
+            push.chars().rev().take(80).collect::<String>().chars().rev().collect::<String>(),
+        );
     }
 
     #[test]
-    fn rejects_non_builtin_items() {
-        // `=item *` (bullet) and `=item -X` (file-test) shouldn't slip in.
-        let pod = fixture("=item *\n\nbullet\n\n=item -X\n\nfile test\n");
-        let map = parse_perlfunc_pod(&pod, "5.42.0");
-        assert!(map.is_empty(), "unexpected entries: {:?}", map.keys().collect::<Vec<_>>());
-    }
-
-    #[test]
-    fn strips_inline_markup() {
-        assert_eq!(strip_inline_markup("C<foo>"), "`foo`");
-        assert_eq!(strip_inline_markup("B<bold>"), "**bold**");
-        assert_eq!(strip_inline_markup("L<perlvar/$.>"), "perlvar/$.");
-        assert_eq!(strip_inline_markup("L<text|target>"), "text");
-    }
-
-    #[test]
-    fn first_entry_wins() {
-        let pod = fixture("=item pos SCALAR\n\nfirst body\n\n=item pos\n\nsecond body\n");
-        let map = parse_perlfunc_pod(&pod, "5.42.0");
-        let pos = map.get("pos").expect("pos entry exists");
-        assert!(pos.contains("first body"));
-        assert!(!pos.contains("second body"));
+    fn push_body_describes_array_append() {
+        let parsed = parse_bundled_perlfunc().expect("bundled POD parses");
+        let push = parsed.entries.get("push").expect("push entry");
+        assert!(
+            push.to_lowercase().contains("array"),
+            "push body should mention `array`, got: {push}"
+        );
     }
 }

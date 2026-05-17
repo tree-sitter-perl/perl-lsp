@@ -96,6 +96,85 @@ pub fn extract_item_section(sub_name: &str, pod_text: &str) -> Option<String> {
     if result.is_empty() { None } else { Some(result) }
 }
 
+/// Extract every `=item` entry from a `perlfunc.pod`-shaped document,
+/// keyed by the first whitespace-delimited token of the item line
+/// (the builtin name). Body of each entry is rendered through the
+/// same markdown pipeline as `pod_to_markdown`, so nested
+/// `interior_sequence` (C<>/B<>/L<>/etc.) and verbatim paragraphs
+/// land as proper markdown.
+///
+/// First entry wins: `perlfunc.pod` sometimes lists the same builtin
+/// twice (`=item pos EXPR` then `=item pos`); the canonical body
+/// lives under the first one.
+pub fn extract_perlfunc_items(pod_text: &str) -> std::collections::HashMap<String, String> {
+    let mut out: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    let tree = match parse_pod(pod_text) {
+        Some(t) => t,
+        None => return out,
+    };
+    let bytes = pod_text.as_bytes();
+    let root = tree.root_node();
+
+    // Walk siblings: when we hit `=item <name> ...`, collect until
+    // the next `=item`/`=back`/`=head*`/`=cut` and flush. Plain /
+    // verbatim / formatted children get rendered into `body` via the
+    // existing render_node machinery.
+    let mut current: Option<(String, String)> = None;
+
+    let flush = |out: &mut std::collections::HashMap<String, String>, sec: Option<(String, String)>| {
+        if let Some((name, body)) = sec {
+            out.entry(name).or_insert_with(|| body.trim().to_string());
+        }
+    };
+
+    for i in 0..root.named_child_count() {
+        let child = match root.named_child(i) {
+            Some(c) => c,
+            None => continue,
+        };
+        if child.kind() == "command_paragraph" {
+            let cmd = get_command_name(&child, bytes);
+            if cmd == "=item" {
+                flush(&mut out, current.take());
+                let content = get_content_text(&child, bytes);
+                if let Some(name) = perlfunc_item_name(&content) {
+                    current = Some((name, String::new()));
+                }
+                continue;
+            }
+            if cmd == "=back" || cmd == "=head1" || cmd == "=head2" || cmd == "=head3" || cmd == "=cut" {
+                flush(&mut out, current.take());
+                continue;
+            }
+        }
+        if let Some((_, body)) = current.as_mut() {
+            render_node(child, bytes, body);
+        }
+    }
+    flush(&mut out, current.take());
+    out
+}
+
+/// Identifier name from a `=item` line in `perlfunc.pod`. Each entry
+/// looks like `=item NAME[ SIGNATURE]`; we take the first
+/// whitespace-delimited token and validate it as a plausible builtin
+/// (lowercase ASCII identifier). Rejects bullets (`*`), file-test
+/// shorthands (`-X`), and other non-identifier =item content.
+fn perlfunc_item_name(content: &str) -> Option<String> {
+    let first = content.split_whitespace().next()?;
+    let name = first.trim_matches(|c: char| !c.is_alphanumeric() && c != '_');
+    if name.is_empty() { return None; }
+    let mut chars = name.chars();
+    let head = chars.next()?;
+    if !head.is_ascii_lowercase() {
+        return None;
+    }
+    if !chars.all(|c| c.is_ascii_lowercase() || c == '_' || c.is_ascii_digit()) {
+        return None;
+    }
+    Some(name.to_string())
+}
+
 // ---- Parser ----
 
 fn parse_pod(pod_text: &str) -> Option<tree_sitter::Tree> {
