@@ -361,3 +361,48 @@ fn test_require_context_module_prefix() {
         }
     );
 }
+
+#[test]
+fn test_detect_qualified_path_basic() {
+    let source = "my $x = Math::Util::";
+    let ctx = detect_cursor_context(source, Point::new(0, 20), None);
+    assert_eq!(
+        ctx,
+        CursorContext::QualifiedPath { package: "Math::Util".to_string() },
+    );
+}
+
+#[test]
+fn test_detect_qualified_path_midword() {
+    // Cursor mid-typed-name: `Math::Util::squ|` — should still
+    // detect Math::Util as the package being qualified against.
+    let source = "my $x = Math::Util::squ";
+    let ctx = detect_cursor_context(source, Point::new(0, 23), None);
+    assert_eq!(
+        ctx,
+        CursorContext::QualifiedPath { package: "Math::Util".to_string() },
+    );
+}
+
+/// Unicode word characters in package names (Perl identifiers under
+/// `use utf8` accept Unicode letters — `Acmé::Util`, `Münch::Helpers`,
+/// etc.). Byte-wise walkback would stop at a UTF-8 continuation byte
+/// and yield the wrong package text; the character-aware walkback
+/// has to consume `é` / `ü` / etc. as single chars.
+///
+/// Marker for future work: ideally the tree-sitter parser tells us
+/// the qualified-name span directly so we don't reimplement Perl's
+/// identifier rules in the text walkback. The current case is the
+/// common one (text walkback inside detect_cursor_context).
+#[test]
+fn test_detect_qualified_path_with_unicode_segment() {
+    let source = "my $x = Acmé::Util::";
+    // Point.column is a byte offset (`é` is 2 bytes), not a char
+    // count — using `source.len()` keeps us aligned with the rest
+    // of the detection path which slices by byte.
+    let ctx = detect_cursor_context(source, Point::new(0, source.len()), None);
+    assert_eq!(
+        ctx,
+        CursorContext::QualifiedPath { package: "Acmé::Util".to_string() },
+    );
+}

@@ -176,29 +176,40 @@ pub fn detect_cursor_context(source: &str, point: Point, analysis: Option<&FileA
 
 /// Walk back through the prefix to find a `Word(::Word)*` package
 /// name immediately preceding the cursor's `::`. Stops at any
-/// non-identifier/`::` character.
+/// non-identifier / non-`:` character.
+///
+/// Character-aware on purpose: Perl under `use utf8` allows Unicode
+/// word characters in identifiers (e.g. `Acmé::Util`), so we can't
+/// walk bytes — a UTF-8 continuation byte would stop the walkback
+/// early. TODO: ideally lean on the tree-sitter parser here — the
+/// cursor's enclosing node already knows what's a qualified-name
+/// token. For now the text walkback covers the common case and
+/// degrades gracefully when the tree is mid-edit (ERROR nodes).
 fn extract_package_from_prefix(prefix: &str) -> String {
-    let bytes = prefix.as_bytes();
-    let end = bytes.len();
-    let mut start = end;
-    while start > 0 {
-        let c = bytes[start - 1] as char;
-        if c.is_ascii_alphanumeric() || c == '_' || c == ':' {
-            start -= 1;
+    let end_byte = prefix.len();
+    let mut start_byte = end_byte;
+    for (idx, c) in prefix.char_indices().rev() {
+        if is_perl_word_char(c) || c == ':' {
+            start_byte = idx;
         } else {
             break;
         }
     }
-    // Trim a leading stray `:` if the walk landed on `:Foo` (rare).
-    while start < end && bytes[start] == b':' {
-        start += 1;
-    }
-    prefix[start..end].to_string()
+    prefix[start_byte..end_byte].trim_start_matches(':').to_string()
 }
 
-/// Plausible package name: `Word(::Word)*`, each segment starts with a
-/// letter or `_` and contains alnum/`_`. Rejects empty/digit-leading
-/// or trailing-`:` shapes.
+/// Perl identifier character (under `use utf8`): a Unicode word
+/// character — letter, digit, or underscore. The non-utf8 case is a
+/// strict subset of this, so accepting Unicode here is at worst
+/// over-permissive for non-utf8 files (the parser is the source of
+/// truth either way; we're just narrowing completion scope).
+fn is_perl_word_char(c: char) -> bool {
+    c.is_alphanumeric() || c == '_'
+}
+
+/// Plausible package name: `Word(::Word)*`, each segment starts with
+/// an alphabetic char or `_` and contains word chars. Rejects empty,
+/// digit-leading, or trailing-`:` shapes.
 fn is_perl_package_name(s: &str) -> bool {
     if s.is_empty() {
         return false;
@@ -206,10 +217,10 @@ fn is_perl_package_name(s: &str) -> bool {
     for segment in s.split("::") {
         let mut chars = segment.chars();
         match chars.next() {
-            Some(c) if c.is_ascii_alphabetic() || c == '_' => {}
+            Some(c) if c.is_alphabetic() || c == '_' => {}
             _ => return false,
         }
-        if !chars.all(|c| c.is_ascii_alphanumeric() || c == '_') {
+        if !chars.all(is_perl_word_char) {
             return false;
         }
     }
