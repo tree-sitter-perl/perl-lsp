@@ -651,6 +651,14 @@ fn completion_items_native(
             }
             Vec::new()
         }
+        CursorContext::QualifiedPath { ref package } => {
+            // `Foo::Bar::<cursor>` — return subs declared in (or
+            // inherited by) that package, qualified with the package
+            // prefix so the client filter matches against what the
+            // user typed. Suppress the global firehose; this branch
+            // is the answer.
+            return qualified_path_completions(analysis, module_index, package);
+        }
         CursorContext::General => {
             let mut items = Vec::new();
             // Keyval arg completions if inside a call at key position.
@@ -783,6 +791,74 @@ fn complete_import_list(module_name: &str, module_index: &ModuleIndex) -> Vec<Co
     items
 }
 
+/// Completion items for `Package::<cursor>` — subs declared in that
+/// package (cross-file + local + inherited) PLUS sub-packages nested
+/// underneath. Typing `Mojo::` shows both the methods on Mojo itself
+/// and the available namespaces (`Util`, `Base`, `IOLoop`, …) so the
+/// user can drill in without leaving completion. Subs sort first
+/// (priority 010), sub-packages second (020).
+fn qualified_path_completions(
+    analysis: &FileAnalysis,
+    module_index: &ModuleIndex,
+    package: &str,
+) -> Vec<CompletionItem> {
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut items: Vec<CompletionItem> = Vec::new();
+
+    // Subs declared in this package (cross-file + local + inherited).
+    // Insert the bare name — the typed `Package::` prefix stays put.
+    for c in analysis.complete_methods_for_class(package, Some(module_index)) {
+        if !seen.insert(c.label.clone()) {
+            continue;
+        }
+        items.push(CompletionItem {
+            label: c.label.clone(),
+            kind: Some(CompletionItemKind::FUNCTION),
+            detail: c.detail.clone().or_else(|| Some(format!("from {}", package))),
+            sort_text: Some(format!("010{}", c.label)),
+            insert_text: Some(c.label),
+            ..Default::default()
+        });
+    }
+
+    // Sub-packages — both cross-file modules whose name starts with
+    // `Package::` AND in-file `package Package::Other` declarations.
+    // Label is the suffix (what follows the typed prefix), so the
+    // client's `Package::<typed>` filter matches naturally.
+    let prefix = format!("{}::", package);
+    let mut subpaths: Vec<(String, &'static str)> = Vec::new();
+    for (name, is_resolved) in module_index.complete_module_names(&prefix) {
+        let hint = if is_resolved { "indexed" } else { "available" };
+        subpaths.push((name, hint));
+    }
+    for sym in &analysis.symbols {
+        if !matches!(sym.kind, FaSymKind::Package | FaSymKind::Class) {
+            continue;
+        }
+        if sym.name.starts_with(&prefix) && sym.name != package {
+            subpaths.push((sym.name.clone(), "in-file"));
+        }
+    }
+    for (name, hint) in subpaths {
+        let suffix = match name.strip_prefix(&prefix) {
+            Some(s) if !s.is_empty() => s.to_string(),
+            _ => continue,
+        };
+        if !seen.insert(suffix.clone()) {
+            continue;
+        }
+        items.push(CompletionItem {
+            label: suffix.clone(),
+            kind: Some(CompletionItemKind::MODULE),
+            detail: Some(hint.to_string()),
+            sort_text: Some(format!("020{}", suffix)),
+            insert_text: Some(suffix),
+            ..Default::default()
+        });
+    }
+    items
+}
+
 /// Returns snippet completions for ref-type dereference after `->`.
 fn ref_type_snippet_completions(ty: &InferredType) -> Vec<CompletionItem> {
     match ty {
@@ -837,9 +913,23 @@ pub fn hover_info(
         });
     }
 
-    // Check if cursor is on an imported function call
+    // Check if cursor is on an imported function call or a Perl
+    // builtin. Builtin docs come from `module_index.builtin_doc`,
+    // which the resolver thread hydrates from SQLite (parsed from
+    // `perlfunc.pod` only on cold-cache miss).
     if let Some(r) = analysis.ref_at(point) {
         if matches!(r.kind, RefKind::FunctionCall { .. }) {
+            if is_perl_builtin(&r.target_name) {
+                if let Some(markdown) = module_index.builtin_doc(&r.target_name) {
+                    return Some(Hover {
+                        contents: HoverContents::Markup(MarkupContent {
+                            kind: MarkupKind::Markdown,
+                            value: markdown,
+                        }),
+                        range: None,
+                    });
+                }
+            }
             if let Some((import, _path, remote_name)) =
                 resolve_imported_function(analysis, &r.target_name, module_index)
             {

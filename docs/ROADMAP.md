@@ -80,6 +80,20 @@ resolution + cross-file invocant refresh) and the commit history.
   (type-of-arg, truthiness, `wantarray`) become new `ArgGuard`
   variants — no new reducers. Do **not** ship more guard-shaped facts
   that need their own reducer; fold them into `ArgGuard`.
+- **Cursor-context qualified-path detection should lean on the parser.**
+  `extract_package_from_prefix` in `cursor_context.rs` walks the source
+  text backward to recover the `Foo::Bar` chunk preceding the cursor's
+  `::`. It now correctly handles Unicode (PR #42), but it's still
+  reimplementing Perl's identifier rules in a text walkback — the
+  tree-sitter-perl parse already knows where qualified-name tokens
+  begin and end. Plan: thread the tree into `detect_cursor_context`
+  (or move QualifiedPath into `detect_cursor_context_tree`) and ask
+  the enclosing node for its span; fall back to the text walkback
+  only when the cursor sits inside an ERROR node (mid-edit). Side
+  benefit: drops `is_perl_package_name` + `is_perl_word_char` once
+  the tree path is authoritative. Same shape applies to
+  `extract_invocant_from_prefix` (also byte-walks, also reimplements
+  identifier rules) — same fix, same site.
 - **`return_via_edge` chases lack provenance.** Helper Methods that
   resolve their return type by chasing a `CodeRef.return_edge` (anon-
   literal `Expr(span)` or `\&foo` `MethodOnClass{...}`) record no

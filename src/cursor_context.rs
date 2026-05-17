@@ -30,6 +30,14 @@ pub enum CursorContext {
         /// The fully typed module name (only set when in_import_list is true)
         module_name: Option<String>,
     },
+    /// After a `Package::` qualifier outside a `use`/`require` line —
+    /// completion offers subs from that package (and inherited from
+    /// its parents), not the global workspace symbol flood.
+    QualifiedPath {
+        /// The package text before the trailing `::` (e.g.
+        /// `"Mojo::Util"`, `"MathUtils"`).
+        package: String,
+    },
     /// No specific trigger — general completion.
     General,
 }
@@ -143,6 +151,19 @@ pub fn detect_cursor_context(source: &str, point: Point, analysis: Option<&FileA
         }
     }
 
+    // Check for `Package::` qualifier — completion narrows to that
+    // package's subs. Mid-word also OK: `MathUtils::s` → strip the
+    // trailing identifier and detect the `::`.
+    {
+        let check = strip_trailing_identifier(trimmed);
+        if let Some(pkg_text) = check.strip_suffix("::") {
+            let pkg = extract_package_from_prefix(pkg_text);
+            if is_perl_package_name(&pkg) {
+                return CursorContext::QualifiedPath { package: pkg };
+            }
+        }
+    }
+
     // Check for sigil trigger
     if let Some(last_char) = trimmed.chars().last() {
         if matches!(last_char, '$' | '@' | '%') {
@@ -151,6 +172,59 @@ pub fn detect_cursor_context(source: &str, point: Point, analysis: Option<&FileA
     }
 
     CursorContext::General
+}
+
+/// Walk back through the prefix to find a `Word(::Word)*` package
+/// name immediately preceding the cursor's `::`. Stops at any
+/// non-identifier / non-`:` character.
+///
+/// Character-aware on purpose: Perl under `use utf8` allows Unicode
+/// word characters in identifiers (e.g. `Acmé::Util`), so we can't
+/// walk bytes — a UTF-8 continuation byte would stop the walkback
+/// early. TODO: ideally lean on the tree-sitter parser here — the
+/// cursor's enclosing node already knows what's a qualified-name
+/// token. For now the text walkback covers the common case and
+/// degrades gracefully when the tree is mid-edit (ERROR nodes).
+fn extract_package_from_prefix(prefix: &str) -> String {
+    let end_byte = prefix.len();
+    let mut start_byte = end_byte;
+    for (idx, c) in prefix.char_indices().rev() {
+        if is_perl_word_char(c) || c == ':' {
+            start_byte = idx;
+        } else {
+            break;
+        }
+    }
+    prefix[start_byte..end_byte].trim_start_matches(':').to_string()
+}
+
+/// Perl identifier character (under `use utf8`): a Unicode word
+/// character — letter, digit, or underscore. The non-utf8 case is a
+/// strict subset of this, so accepting Unicode here is at worst
+/// over-permissive for non-utf8 files (the parser is the source of
+/// truth either way; we're just narrowing completion scope).
+fn is_perl_word_char(c: char) -> bool {
+    c.is_alphanumeric() || c == '_'
+}
+
+/// Plausible package name: `Word(::Word)*`, each segment starts with
+/// an alphabetic char or `_` and contains word chars. Rejects empty,
+/// digit-leading, or trailing-`:` shapes.
+fn is_perl_package_name(s: &str) -> bool {
+    if s.is_empty() {
+        return false;
+    }
+    for segment in s.split("::") {
+        let mut chars = segment.chars();
+        match chars.next() {
+            Some(c) if c.is_alphabetic() || c == '_' => {}
+            _ => return false,
+        }
+        if !chars.all(is_perl_word_char) {
+            return false;
+        }
+    }
+    true
 }
 
 /// Resolve an invocant type from its text, using analysis when available.
