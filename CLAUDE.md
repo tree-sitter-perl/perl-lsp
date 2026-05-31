@@ -22,7 +22,7 @@ Builder          builder.rs                   → produces FileAnalysis
 Data model       file_analysis.rs             → FileAnalysis (serde, bincode-cacheable)
 ```
 
-See `docs/ROADMAP.md` for the forward design corpus entry point. `docs/adr/file-store-and-resolve.md` covers the landed cross-file unification (single role-tagged FileStore + RoleMask + resolve_symbol). Residual forward work in `docs/prompt-unification-residual.md`; the next architectural pillar (graph walking) in `docs/prompt-graph-walking.md`.
+See `docs/ROADMAP.md` for the forward design corpus entry point. `docs/adr/file-store-and-resolve.md` covers the landed cross-file unification (single role-tagged FileStore + RoleMask + `refs_to`). A unified `resolve_symbol` cursor→target entry point is planned but **not landed** — handlers currently resolve the target via `FileAnalysis::rename_kind_at`, then map `RenameKind`→`TargetRef` inline (duplicated in `backend.rs` references/rename and `main.rs`) and call `refs_to`. Residual forward work in `docs/prompt-unification-residual.md`; the next architectural pillar (graph walking) in `docs/prompt-graph-walking.md`.
 
 ### Rules (read before writing code)
 
