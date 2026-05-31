@@ -7963,9 +7963,8 @@ impl<'a> Builder<'a> {
         // pass's job is purely to read the registry's answer per sym
         // and surface it in the name-keyed `return_types` map for
         // downstream consumers (call-binding propagation, hash-key
-        // fixup). Writeback below mirrors per-sym answers onto
-        // `MethodOnClass{class, name}` primary via Edge(Symbol(sid)) —
-        // no value duplication, the edge IS the mirror.
+        // fixup). Writeback (below) mirrors per-sym answers onto
+        // `MethodOnClass` via edges.
         for sym in &self.symbols {
             if !matches!(sym.kind, SymKind::Sub | SymKind::Method) {
                 continue;
