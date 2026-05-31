@@ -5,9 +5,9 @@
 //! handles @INC discovery, in-process parsing, SQLite persistence, and cpanfile
 //! pre-scanning.
 //!
-//! As of unification phase 2, the cache stores full `FileAnalysis` (not a lossy
-//! `ModuleExports` summary). This means cross-file refs, type constraints, call
-//! bindings, and framework context all survive the module boundary.
+//! The cache stores the full `FileAnalysis` (not a lossy summary), so
+//! cross-file refs, type constraints, call bindings, and framework context
+//! all survive the module boundary.
 //!
 //! See also:
 //! - `module_resolver.rs` — resolver thread, in-process parsing
@@ -40,9 +40,8 @@ impl CachedModule {
 
     /// Look up metadata for a sub/method in this module.
     ///
-    /// Unlike the old `ExportedSub`, this returns a lightweight view into the
-    /// full `FileAnalysis`. Works for any declared sub — exported or not —
-    /// because we now store the whole analysis, not just a pre-extracted summary.
+    /// Returns a lightweight view into the full `FileAnalysis`. Works for
+    /// any declared sub — exported or not.
     pub fn sub_info(&self, name: &str) -> Option<SubInfo<'_>> {
         // Prefer the first matching Sub/Method symbol. Builder may emit several
         // when rw accessors exist (getter + setter); overloads are collected as
@@ -629,8 +628,7 @@ impl ModuleIndex {
     /// Every cached module that declares at least one `PluginNamespace`
     /// whose `bridges` list includes `Bridge::Class(class_name)`.
     /// Callers then pull the namespace's entities from the module's
-    /// `FileAnalysis` and iterate. Successor to
-    /// `modules_with_class_content` — explicit bridges instead of
+    /// `FileAnalysis` and iterate. Explicit bridges rather than
     /// symbol-package inference.
     pub fn modules_bridging_to(&self, class_name: &str) -> Vec<String> {
         match self.bridges_index.get(class_name) {
@@ -654,9 +652,8 @@ impl ModuleIndex {
     /// bridged class.
     ///
     /// Single source of truth for plugin-synthesized entity lookup
-    /// across files. Replaces the former `modules_with_class_content`
-    /// / per-caller symbol.package scan that kept getting forgotten
-    /// by new features.
+    /// across files — explicit bridges rather than a per-caller
+    /// `symbol.package` scan.
     pub fn for_each_entity_bridged_to(
         &self,
         class_name: &str,

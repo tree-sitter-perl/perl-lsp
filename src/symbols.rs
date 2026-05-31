@@ -515,20 +515,16 @@ fn completion_items_native(
     }
 
     // Dispatch-target completions are orthogonal to the context match:
-    // a user typing inside `$obj->emit(^)` is simultaneously after a `->`
-    // (tree detects `Method`) and inside call args (general path would
-    // apply too). Pull the call context out once, prepend handler
-    // completions at arg-0, and — just as importantly — SUPPRESS the
-    // global sub/module firehose at arg-N>0 so comma-triggered
-    // completion inside a dispatch call doesn't dump hundreds of
-    // unrelated symbols. Sig help is the right affordance past arg-0;
-    // completion gets out of the way.
-    // Dispatch-target items are built into a separate vec so we can
-    // retarget their textEdit range to the string-content span when
-    // the cursor is mid-string. Keeping them out of the shared
-    // `candidates` buffer avoids having to filter by kind later —
-    // identifier completions (variables/subs/methods) pass through
-    // the usual candidate → item conversion untouched.
+    // inside `$obj->emit(^)` the cursor is both after a `->` (tree
+    // detects `Method`) and inside call args. Pull the call context out
+    // once, prepend handler completions at arg-0, and SUPPRESS the global
+    // sub/module firehose at arg-N>0 so comma-triggered completion in a
+    // dispatch call doesn't dump hundreds of unrelated symbols (sig help
+    // is the right affordance past arg-0).
+    //
+    // Dispatch items go in a separate vec so we can retarget their
+    // textEdit range to the string-content span mid-string, without
+    // having to filter the shared `candidates` buffer by kind later.
     let mut dispatch_items: Vec<CompletionItem> = Vec::new();
     let mut candidates: Vec<CompletionCandidate> = Vec::new();
     let mut suppress_firehose = false;
@@ -2004,7 +2000,7 @@ fn imported_function_completions(
 }
 
 /// Build completion candidates for functions from modules that aren't imported
-/// at all. Each candidate carries an `additional_edit` that inserts a full
+/// at all. Each candidate carries `additional_edits` that insert a full
 /// `use Module qw(func);` statement.
 fn unimported_function_completions(
     analysis: &FileAnalysis,

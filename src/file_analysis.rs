@@ -41,7 +41,7 @@ pub(crate) mod point_opt_serde {
     }
 }
 
-// ---- Shared types (formerly in analysis.rs) ----
+// ---- Shared types ----
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Span {
@@ -154,11 +154,10 @@ pub enum PackageKind {
 
 // ---- Namespace ----
 
-/// Origin tag for symbols and refs. Phase 1 of the namespace-widening work:
-/// every entity gets a `Namespace` that records whether it's native Perl or
-/// was produced by a framework rule (built-in or plugin). Downstream features
-/// (completion bucketing, diagnostic suppression, plugin-aware rename) read
-/// this tag instead of reconstructing provenance from names and positions.
+/// Origin tag for symbols and refs: native Perl vs produced by a framework
+/// rule (built-in or plugin). Downstream features (completion bucketing,
+/// diagnostic suppression, plugin-aware rename) read this tag instead of
+/// reconstructing provenance from names and positions.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Namespace {
     /// Native Perl: subs, variables, packages, classes, hash keys extracted
@@ -526,27 +525,14 @@ pub enum InferredType {
     /// for type-level projections. Per-axis methods on
     /// `ParametricType` (`class_name`, `hash_key_class`,
     /// `method_arg_owner`) carry per-flavor policy. **Match
-    /// invariant: never `_ => …`.** Compiler exhaustiveness is
-    /// the safety net for the future `Plugin` escape hatch
-    /// variant.
-    ///
-    /// Design history: Phase 1 of Part 5c shipped this as a flat
-    /// `{ base: String, type_args: Vec<TypeArg> }` shape with
-    /// dual-accessor helpers; the per-method allowlist and the
-    /// data-layout-special-cased accessors are gone, lifted into
-    /// per-flavor methods on `ParametricType`. The emitter still
-    /// gates per-shape — `Strict` (constructor keys), `Open`
-    /// (Parametric receiver claims the method), `Deferred`
-    /// (chain receiver, type unresolvable until enrichment) — but
-    /// the three flavors share one `emit_call_arg_key_accesses`
-    /// body via a `Gate` discriminator. See
-    /// `docs/adr/parametric-types.md`.
+    /// invariant: never `_ => …`** — compiler exhaustiveness is
+    /// the safety net for the future `Plugin` escape hatch variant.
+    /// See `docs/adr/parametric-types.md`.
     Parametric(ParametricType),
     /// Positional container — `my @arr = (...)` or
     /// `push @arr, ...` contributions accumulated walk-side. The
     /// `Vec` stores per-index types; `element_at(i)` projects.
-    /// Spike scope: tuple shape only, no Homogeneous / Cycle /
-    /// Heterogeneous classification yet.
+    /// Tuple shape only (no homogeneous/heterogeneous classification).
     ///
     /// Placed at the END of the enum so bincode-serialized cache
     /// blobs keep their existing variant indices stable. Inserting
@@ -557,8 +543,10 @@ pub enum InferredType {
 
 /// Concrete parametric flavors + type-level operators. Each
 /// concrete flavor carries the data its semantics need; operators
-/// (`RowOf`) wrap a sub-`InferredType` and reduce via
-/// `ParametricProjectionReducer` in the witness bag.
+/// (`RowOf`) wrap a sub-`InferredType` and project via the
+/// value-side accessors (`class_name` / `hash_key_class`), or in
+/// symbol-declarative form via `ReturnExprReducer`'s `Operator(RowOf)`
+/// arm.
 ///
 /// **Match invariant: never `_ => …` arms.** Every consumer
 /// explicitly handles every variant. The compiler enforces this
@@ -575,23 +563,14 @@ pub enum ParametricType {
     ///   - method dispatch goes through `base`
     ///   - hash-key arg owner / direct hash-key access go through `row`
     ///
-    /// Pinned by internal-shape tests so a refactor to a single-
-    /// class encoding silently breaks `RowOf` rather than
-    /// silently returning the wrong dimension.
-    ResultSet { base: String, row: String },
-
-    /// `RowOf<T>` — type-level projection. Reduces:
-    ///   - `RowOf<ResultSet { base, row }>` → `ClassName(row)`
-    ///   - everything else → `None` (the operand has no row
-    ///     dimension)
+    /// Pinned by internal-shape tests so a refactor to a single-class
+    /// encoding can't silently merge the two dimensions.
     ///
-    /// Lazy: emitted as a witness, reduced by
-    /// `ParametricProjectionReducer` in the bag. Composes —
-    /// `RowOf<RowOf<X>>` evaluates by recursing into the operand.
-    /// Plugin port (queued) emits `RowOf(receiver_type)` for
-    /// methods like `find` / `first` / `single` / `next` /
-    /// `create` that project a ResultSet to its row.
-    RowOf(Box<InferredType>),
+    /// The row-of projection (`find`/`first`/… → the row class) lives on
+    /// the deferred side as `ReturnExpr::Operator(RowOf)`, which
+    /// `eval_return_expr` projects eagerly to `ClassName(row)` — there is
+    /// no value-side `RowOf` variant.
+    ResultSet { base: String, row: String },
 }
 
 impl ParametricType {
@@ -600,17 +579,6 @@ impl ParametricType {
     pub fn class_name(&self) -> Option<&str> {
         match self {
             ParametricType::ResultSet { base, .. } => Some(base.as_str()),
-            ParametricType::RowOf(inner) => {
-                // Evaluate: row-class of inner (if inner is
-                // ResultSet) is the dispatch class for the
-                // projected value.
-                match inner.as_ref() {
-                    InferredType::Parametric(ParametricType::ResultSet { row, .. }) => {
-                        Some(row.as_str())
-                    }
-                    _ => None,
-                }
-            }
         }
     }
 
@@ -618,15 +586,10 @@ impl ParametricType {
     /// on this value. ResultSet returns `row` (the column-keyed
     /// class — used today only by the cleanup-pass HashKeyAccess
     /// owner-resolution paths; HRI shape isn't supported but the
-    /// field is the right one when it lands). Operators evaluate
-    /// recursively.
+    /// field is the right one when it lands).
     pub fn hash_key_class(&self) -> Option<&str> {
         match self {
             ParametricType::ResultSet { row, .. } => Some(row.as_str()),
-            ParametricType::RowOf(inner) => match inner.as_ref() {
-                InferredType::Parametric(p) => p.hash_key_class(),
-                _ => None,
-            },
         }
     }
 
@@ -638,8 +601,8 @@ impl ParametricType {
     ///
     /// ResultSet claims the row-keyed methods (search, search_rs,
     /// find, find_or_new, find_or_create, update_or_create, create,
-    /// update, populate). Methods that take filters or no args
-    /// (count, exists, delete, all without args) return None.
+    /// update, populate, new_result). Methods that take filters or no
+    /// args (count, exists, delete, all without args) return None.
     pub fn method_arg_owner(&self, method: &str) -> Option<HashKeyOwner> {
         match self {
             ParametricType::ResultSet { row, .. } => match method {
@@ -649,7 +612,6 @@ impl ParametricType {
                 }
                 _ => None,
             },
-            ParametricType::RowOf(_) => None,
         }
     }
 
@@ -658,8 +620,8 @@ impl ParametricType {
     /// ReturnExpr)` pairs the flavor publishes on
     /// `MethodOnClass{base, method}` so consumers chasing through
     /// inheritance / coderef-edge / dynamic-method routes hit the
-    /// projection without the call-site `parametric_projection`
-    /// emitter firing. Used by `emit_parametric_return_expr_decls`
+    /// projection without the call-site `parametric_resultset` witness
+    /// firing. Used by `emit_parametric_return_expr_decls`
     /// after every `extract_resultset_parametric` hit — the `base`
     /// discovered there pins the class slot for the witness.
     ///
@@ -688,7 +650,6 @@ impl ParametricType {
                     .map(|m| (*m, row_of_receiver.clone()))
                     .collect()
             }
-            ParametricType::RowOf(_) => Vec::new(),
         }
     }
 }
@@ -819,14 +780,13 @@ pub enum TypeProvenance {
     /// Carries the asserting plugin's id and a free-form reason for
     /// the debugger.
     PluginOverride { plugin_id: String, reason: String },
-    /// Produced by a witness-bag reducer at type-resolution time.
-    /// `reducer` names the rule that fired (`framework_aware`,
-    /// `branch_arm`, `arity_dispatch`, `named_sub_return`, …);
-    /// `evidence` is a short list of human-readable facts the
-    /// reducer leaned on ("framework=MojoBase", "arms=2 agree",
-    /// "arity=Default"). Read-only debugging aid surfaced by
-    /// `--dump-package`. Empty `evidence` is fine — the reducer
-    /// name alone often answers "why".
+    /// Produced by a witness-bag fold at type-resolution time.
+    /// `reducer` names the rule that fired (currently only
+    /// `"return_arms"` is recorded — see `seed_return_types_from_bag`);
+    /// `evidence` is a short list of human-readable facts the fold
+    /// leaned on. Read-only debugging aid surfaced by `--dump-package`.
+    /// Empty `evidence` is fine — the reducer name alone often answers
+    /// "why".
     ReducerFold { reducer: String, evidence: Vec<String> },
     /// Tail-delegation: the sub's body ends in `shift->M(...)` /
     /// `$self->M(...)` / `return Y()` and inherits the tail's
@@ -955,10 +915,9 @@ pub enum HandlerOwner {
 
 // ---- Plugin namespace ----
 
-/// A plugin-controlled scope. Replaces the bolt-on of "plugin entities
-/// become Methods on a hijacked Perl class" with a first-class
-/// registration: the plugin says "I own a namespace — here's its
-/// bridges (how Perl-space expressions find it) and its entities".
+/// A plugin-controlled scope: the plugin says "I own a namespace — here's
+/// its bridges (how Perl-space expressions find it) and its entities",
+/// rather than masquerading entities as Methods on a hijacked Perl class.
 ///
 /// Why this exists:
 ///   * Helpers aren't methods on `Mojolicious::Controller`. They're
@@ -968,9 +927,7 @@ pub enum HandlerOwner {
 ///     entities don't collide at the class level — they're owned by
 ///     the namespace, not the class.
 ///   * Cross-file lookup is one primitive
-///     (`ModuleIndex::namespaces_bridged_to(class)`) instead of the
-///     patchwork of `class_content_index` / `reverse_index` /
-///     `modules_with_symbol`.
+///     (`ModuleIndex::for_each_entity_bridged_to(class, ...)`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PluginNamespace {
     /// Plugin-generated unique identifier. E.g.
@@ -1256,13 +1213,13 @@ pub struct FileAnalysis {
     /// (a Mojolicious app, a Minion instance, an event-emitter subclass,
     /// …). Declares bridges into Perl-space and owns a set of entities.
     /// Lookups union these with native Perl resolution — see
-    /// `ModuleIndex::namespaces_bridged_to` for the cross-file primitive.
+    /// `ModuleIndex::for_each_entity_bridged_to` for the cross-file primitive.
     #[serde(default)]
     pub plugin_namespaces: Vec<PluginNamespace>,
 
     /// Per-symbol provenance for return types. Populated for plugin
-    /// `overrides()` and (with this spike) for reducer-driven folds
-    /// over the witness bag. Missing entry == `TypeProvenance::Inferred`.
+    /// `overrides()` and for reducer-driven folds over the witness bag.
+    /// Missing entry == `TypeProvenance::Inferred`.
     /// Read-only debugging aid: features like hover/completion don't
     /// branch on it; it exists so `--dump-package` and a future
     /// inspector can answer "why does the LSP think this returns X?"
@@ -1270,14 +1227,13 @@ pub struct FileAnalysis {
     #[serde(default)]
     pub type_provenance: HashMap<SymbolId, TypeProvenance>,
 
-    /// Detected framework mode per package (for Part 6's resolver).
+    /// Detected framework mode per package (for the type resolver).
     /// Populated by the builder when `use Moo` / `use Mojo::Base` /
-    /// `use Moose` etc. is observed. Additive: the existing framework
-    /// accessor synthesis keeps running the same code paths.
+    /// `use Moose` etc. is observed.
     #[serde(default)]
     pub package_framework: HashMap<String, crate::witnesses::FrameworkFact>,
 
-    /// Part 7 — the witness bag. Canonical store for type facts:
+    /// The witness bag. Canonical store for type facts:
     /// every Variable type, Symbol/MethodOnClass return type, branch
     /// arm Edge, hash-key observation. `inferred_type_via_bag` reads
     /// here. The builder pushes directly via `push_type_constraint`
@@ -1487,8 +1443,8 @@ impl FileAnalysis {
                 .push(sym.id);
         }
 
-        // Phase 5: link HashKeyAccess refs to their HashKeyDef symbols whenever
-        // the owner is already resolved (the builder's pre-pass handled type
+        // Link HashKeyAccess refs to their HashKeyDef symbols whenever the
+        // owner is already resolved (the builder's pre-pass handled type
         // constraints + variable identity + call-binding fixups). With this
         // link, `refs_to_symbol(def_id)` returns all accesses in O(1), which
         // is what references, rename, and highlights consume.
@@ -1549,7 +1505,7 @@ impl FileAnalysis {
             self.refs[idx].resolves_to = Some(sid);
         }
 
-        // Refs by target name, and refs by resolved target SymbolId (phase 5).
+        // Refs by target name, and refs by resolved target SymbolId.
         // Same loop populates the start-point → call-ref-idx index
         // used by `method_call_invocant_class` to chase chain
         // receivers. Only MethodCall (whose span covers the whole
@@ -1565,18 +1521,15 @@ impl FileAnalysis {
                 self.refs_by_target.entry(sym_id).or_default().push(i);
             }
             if matches!(r.kind, RefKind::MethodCall { .. } | RefKind::FunctionCall { .. }) {
-                // First write wins. Method-call refs are visited
-                // outer-first by the walker (the outer call site is
-                // emitted before recursing into its receiver), so
-                // for a chain like `Foo->new->m` the outer `m` ref
-                // would land at start point of `Foo`. Insert with
-                // `or_insert(i)` and rely on the inner receiver
-                // being visited later — but for FunctionCall there
-                // is no outer clash because chains-of-function-calls
-                // don't have the same shape. To keep the inner
-                // receiver as the lookup target, prefer overwriting
-                // when the new ref has a *smaller* span (closer to
-                // the actual receiver).
+                // Smaller span (closer to the actual receiver) wins;
+                // a tie keeps the earlier insertion. Method-call refs
+                // are visited outer-first, so for a chain like
+                // `Foo->new->m` the outer `m` and inner `Foo->new`
+                // share a start point — keeping the smaller-span ref
+                // points the index at the inner receiver. FunctionCall
+                // refs (just the function-name span) are naturally
+                // narrower than the enclosing MethodCall, so they win
+                // the same way.
                 let cur = self.call_ref_by_start.get(&r.span.start).copied();
                 let take = match cur {
                     None => true,
@@ -1718,11 +1671,10 @@ impl FileAnalysis {
         best.map(|(t, _)| t)
     }
 
-    /// Part 6/7 — query the witness bag via the reducer registry for
-    /// a variable at a point, falling back to the legacy
-    /// `inferred_type()` when the bag has nothing. Returns owned
-    /// `InferredType` because the reducer may synthesize a value not
-    /// stored anywhere.
+    /// Query the witness bag via the reducer registry for a variable at
+    /// a point, falling back to the legacy `inferred_type()` when the bag
+    /// has nothing. Returns owned `InferredType` because the reducer may
+    /// synthesize a value not stored anywhere.
     ///
     /// The bag is the canonical store: `push_type_constraint` (TC
     /// shape), `call_bindings` propagation, framework accessor
@@ -1741,20 +1693,14 @@ impl FileAnalysis {
         )
     }
 
-    /// Part 6/7 — resolve the inferred return type of a method call
-    /// by its ref index (from `refs`). Uses the Expression-attached
-    /// witnesses seeded by the builder; the `return_of` closure looks
-    /// up `sub_return_type` by name, resolving a `FirstParam`
-    /// invocant to the method's enclosing class.
+    /// Resolve the inferred return type of a method call by its ref index
+    /// (into `refs`). Reads the `Expression(refidx)` witnesses seeded by
+    /// the builder; `module_index` lets cross-file `MethodOnClass` edges
+    /// (e.g. `$r->get(...)` where `get` lives in `Mojolicious::Routes`)
+    /// chase through the registry's recursive walker.
     ///
-    /// This is the piece that makes `$r->get('/x')->to(...)` fold
-    /// across chain hops without needing an intermediate variable.
-    /// Resolve the inferred return type of a method call by its
-    /// ref index. Reads `Expression(refidx)` witnesses seeded by
-    /// the builder; `module_index` lets cross-file MethodOnClass
-    /// edges (e.g. `$r->get(...)` where `get` lives in
-    /// `Mojolicious::Routes`) chase through the registry's
-    /// recursive walker.
+    /// This is the piece that makes `$r->get('/x')->to(...)` fold across
+    /// chain hops without needing an intermediate variable.
     #[allow(dead_code)] // documented type-query entry point; CLAUDE.md
     pub fn method_call_return_type_via_bag(
         &self,
@@ -1797,10 +1743,10 @@ impl FileAnalysis {
         }
     }
 
-    /// Part 6b — resolve a sub's return type at a call site given
-    /// the caller's arg count. Queries the arity-dispatch reducer; if
-    /// no arity fact exists, falls back to the declared /
-    /// inferred-from-returns `sub_return_type`.
+    /// Resolve a sub's return type at a call site given the caller's arg
+    /// count. Queries the arity-dispatch reducer; if no arity fact
+    /// exists, falls back to `sub_return_type` (declared /
+    /// inferred-from-returns).
     ///
     /// `arity` is the number of *additional* args passed after the
     /// invocant on methods (or simply the arg count for plain subs).
@@ -1825,8 +1771,8 @@ impl FileAnalysis {
         )
     }
 
-    /// Part 1 — list hash keys that have been written to on instances
-    /// of `class`. Powers dynamic-key completion: `$self->{` completes
+    /// List hash keys that have been written to on instances of `class`.
+    /// Powers dynamic-key completion: `$self->{` completes
     /// with both `has`-declared keys and keys observed as write
     /// targets across the class's methods.
     #[allow(dead_code)] // documented type-query entry point; CLAUDE.md
@@ -1895,11 +1841,9 @@ impl FileAnalysis {
     /// Resolve call bindings for imported functions and inject
     /// synthetic HashKeyDef symbols. Walks `self.imports` against
     /// `module_index` to derive each imported sub's return type and
-    /// hash-key set inline — `build_imported_return_types` and the
-    /// `imported_returns` / `imported_hash_keys` parameters were
-    /// killed in D3 since the bag now reaches cross-file `Symbol(_)`
-    /// witnesses through `BagContext.module_index` directly. Call
-    /// after building, when the module index is available.
+    /// hash-key set, reaching cross-file `Symbol(_)` witnesses through
+    /// `BagContext.module_index` directly. Call after building, when the
+    /// module index is available.
     pub fn enrich_imported_types_with_keys(
         &mut self,
         module_index: Option<&ModuleIndex>,
@@ -2183,7 +2127,7 @@ impl FileAnalysis {
     }
 
     /// Rebuild indices affected by enrichment (type constraints + symbols +
-    /// the phase-5 refs_by_target + HashKeyAccess linkage).
+    /// refs_by_target + HashKeyAccess linkage).
     ///
     /// Enrichment injects synthetic HashKeyDef symbols for imported subs and
     /// clears `resolves_to` on HashKeyAccess refs that now have a matching
@@ -2205,7 +2149,7 @@ impl FileAnalysis {
         }
 
         // Re-link HashKeyAccess refs to (possibly newly-injected) HashKeyDef
-        // symbols, mirroring build_indices's phase-5 logic.
+        // symbols, mirroring build_indices's logic.
         let hashkey_defs: HashMap<(String, HashKeyOwner), SymbolId> = self.symbols.iter()
             .filter_map(|sym| {
                 if let SymbolDetail::HashKeyDef { owner, .. } = &sym.detail {
@@ -2440,15 +2384,13 @@ impl FileAnalysis {
             module_index: None,
             package_parents: &self.package_parents,
             };
-        // Default the arity hint from the sym's own param count
-        // when the caller didn't supply one. Symbol introspection
-        // is naturally "what does THIS sym return," and the sym's
-        // params count IS its native arity — Mojo writer (params=1)
-        // answers its `(AtLeast(1), Receiver)` arm, getter (params=0)
-        // answers its `(Empty, Concrete(_))` arm. Without this, a
-        // writer's per-Symbol UnionOnArgs would be unmatched at a
-        // None hint (AtLeast(1) doesn't match None) and the query
-        // would silently return None.
+        // Default the arity hint from the sym's own param count when
+        // the caller didn't supply one — the sym's params count IS its
+        // native arity. Mojo writer (params=1) answers its
+        // `(AtLeast(1), Receiver)` arm, getter (params=0) its
+        // `(Empty, Concrete(_))` arm. Without this a writer's
+        // UnionOnArgs would be unmatched at a None hint (AtLeast(1)
+        // doesn't match None) and the query would silently return None.
         //
         // Default receiver = `ClassName(class)` so the writer's
         // `Receiver` placeholder evaluates to the natural fluent
@@ -2586,20 +2528,16 @@ impl FileAnalysis {
             class_name.to_string()
         };
         if let Some(ref rt) = self.find_method_return_type(class_name, method_name, module_index, None) {
-            // `opaque_return` lets the declaring plugin say "this
-            // whole chain link is internal plumbing — don't render
-            // the class name OR the return type". The chain still
-            // resolves (find_method_return_type returned the proxy),
-            // but the user doesn't see the proxy-class path at every
-            // completion detail line. Plugin-declared; the core
-            // never inspects names.
+            // `opaque_return` lets the declaring plugin say "this chain
+            // link is internal plumbing — don't render the class name OR
+            // the return type". The chain still resolves; the user just
+            // doesn't see the proxy-class path at every completion detail.
             //
-            // Check both the completion context class AND the
-            // defining class (when the method is inherited from a
-            // parent): the plugin declares opacity on the symbol
-            // where the method LIVES, which is the defining class
-            // during a cross-class walk (e.g. Users inheriting the
-            // helper from Mojolicious::Controller).
+            // Check both the context class AND the defining class: the
+            // plugin declares opacity on the symbol where the method
+            // LIVES, which is the defining class during a cross-class
+            // walk (e.g. Users inheriting the helper from
+            // Mojolicious::Controller).
             let opaque = self.method_opaque_return_cross_file(class_name, method_name, module_index)
                 || defining_class.is_some_and(|dc| {
                     self.method_opaque_return_cross_file(dc, method_name, module_index)
@@ -3072,23 +3010,18 @@ impl FileAnalysis {
                 RefKind::MethodCall { .. } => {
                     let class_name = self.method_call_invocant_class(r, module_index);
 
-                    // Check if cursor is on a named arg key in the
-                    // call args, not on the method name itself.
-                    // Resolve to hash key def or :param field.
+                    // Cursor on a named arg key (not the method name):
+                    // resolve to its hash-key def or :param field.
                     //
-                    // The owner for hash-key args is per-flavor +
-                    // method-aware: ask the receiver's
-                    // ParametricType for `method_arg_owner(method)`
-                    // — `Some(owner)` means the flavor claims this
-                    // method's args (DBIC's ResultSet returns the
-                    // row class for search/find/create/etc.;
-                    // returns None for count/exists). When the
-                    // flavor doesn't claim, fall back to the
-                    // receiver's class (constructor keys etc. on
-                    // `bless { } 'Foo'`-shaped non-Parametric
-                    // values). Method dispatch on the same ref
-                    // still uses `class_name()`, so `$rs->search`
-                    // resolves against the ResultSet base.
+                    // The hash-key-arg owner is per-flavor + method-aware:
+                    // `ParametricType::method_arg_owner(method)` —
+                    // `Some(owner)` means the flavor claims these args
+                    // (DBIC ResultSet → row class for search/find/create;
+                    // None for count/exists). When unclaimed, fall back to
+                    // the receiver's class (constructor keys on
+                    // `bless {} 'Foo'`). Method dispatch still uses
+                    // `class_name()`, so `$rs->search` resolves against the
+                    // ResultSet base.
                     if let (Some(t), Some(s)) = (tree, source_bytes) {
                         if let Some(key_name) = self.call_arg_key_at(t, s, point) {
                             let owner = self
@@ -3307,7 +3240,7 @@ impl FileAnalysis {
             results.push((sym.selection_span, AccessKind::Declaration));
         }
 
-        // Phase 5: O(1) lookup for every ref resolved to this symbol.
+        // O(1) lookup for every ref resolved to this symbol.
         // This covers variables, HashKeyAccess refs whose owner was resolved at
         // build time, and any future kinds that set resolves_to.
         for &idx in self.refs_to_symbol(target_id) {
@@ -3711,8 +3644,6 @@ impl FileAnalysis {
         None
     }
 
-    /// Find all occurrences of a sub name (def + ALL call refs) for cross-file rename.
-    /// Searches both FunctionCall and MethodCall refs because Perl subs can be called either way.
     /// Scope-aware rename for a sub/method: matches decls + both
     /// call shapes that resolve to this (scope, name) pair.
     ///
@@ -3936,36 +3867,29 @@ impl FileAnalysis {
     }
 
     /// Resolve a `MethodCall` ref's invocant class via the witness
-    /// bag — **the** invocant resolver. No tree, no text fallback,
-    /// no per-reader parallel paths. Every reader (refs_to,
-    /// find_highlights, collect_refs_for_target, rename_callable_in_scope,
-    /// hover, find-def, rename_kind_at, resolve_target_at, the
-    /// completion path) routes through here.
+    /// bag — **the** invocant resolver. No tree, no text fallback, no
+    /// per-reader parallel paths: every reader routes through here.
     ///
     /// Dispatch by invocant shape:
     ///   * `$var` / `@var` / `%var` → `inferred_type_via_bag` (so
-    ///     cross-file enrichment's variable types compose
-    ///     automatically — the bug that prompted this rewrite).
+    ///     cross-file enrichment's variable types compose automatically).
     ///   * `$self` (untyped) → enclosing class fallback.
     ///   * `__PACKAGE__` → enclosing class.
     ///   * Chain or function-call receiver (invocant_span points at
     ///     another ref) → that ref's bag answer
     ///     (`method_call_return_type_via_bag` for MethodCall;
-    ///     `sub_return_type_at_arity` for FunctionCall). Receiver
-    ///     ref is found via `ref_idx_by_exact_span` (O(1)).
+    ///     `sub_return_type_at_arity` for FunctionCall). Receiver ref
+    ///     found via the `call_ref_by_start` index (O(1)).
     ///   * Bareword → `Foo` if a zero-arg sub by that name returns
     ///     ClassName, else the bareword itself.
     ///
-    /// Build-time chain typing still runs in the builder — its
-    /// product lands in the bag (Variable witnesses, `Expression`
-    /// edge witnesses on chain receivers). This helper just queries
-    /// the bag, never re-derives.
+    /// Query-only: build-time chain typing already landed its product
+    /// in the bag (Variable witnesses, `Expression` edge witnesses on
+    /// chain receivers); this never re-derives.
     ///
-    /// `module_index` lets chain receivers whose return type lives
-    /// in another package resolve (e.g. `$r->get('/x')->to(...)`
-    /// where `Routes::get` returns `Routes::Route`). Pass `None`
-    /// only when no index is available (CLI debug, isolated tests);
-    /// every LSP-facing reader has one.
+    /// `module_index` lets chain receivers whose return type lives in
+    /// another package resolve (e.g. `$r->get('/x')->to(...)`). Pass
+    /// `None` only for CLI debug / isolated tests.
     pub fn method_call_invocant_class(
         &self,
         r: &Ref,
@@ -4143,8 +4067,8 @@ impl FileAnalysis {
     /// dispatch shape as `method_call_invocant_class` but returning
     /// the type, not just the class name. Lets readers that care
     /// about Parametric narrowing (hash-key lookup for DBIC search-
-    /// family methods, etc.) inspect `parametric_type_args` without
-    /// re-resolving the invocant from scratch.
+    /// family methods, etc.) inspect the `Parametric` flavor (via
+    /// `as_parametric`) without re-resolving the invocant from scratch.
     pub fn method_call_invocant_type(
         &self,
         r: &Ref,
@@ -4322,9 +4246,8 @@ impl FileAnalysis {
     /// Single-source-of-truth DFS ancestor walk for every per-class
     /// lookup on this file: walks `class_name` and every ancestor
     /// (local `package_parents` ∪ cross-file `parents_cached`),
-    /// cycle-safe via `seen_classes`, depth-capped at 20 (matches
-    /// Perl's default MRO and the historical `resolve_method_in_ancestors`
-    /// bound). Visitor decides when to stop via `ControlFlow::Break`.
+    /// cycle-safe via a `seen` set, depth-capped at 20 (Perl's default
+    /// MRO bound). Visitor decides when to stop via `ControlFlow::Break`.
     ///
     /// Both `resolve_method_in_ancestors` (find-first) and
     /// `for_each_dispatch_handler_on_class` (collect-all) route
@@ -4673,9 +4596,6 @@ impl FileAnalysis {
     }
 
     // helpers defined at module scope below
-    // (`resolve_cross_file_method` retired — `resolve_method_in_ancestors`
-    // now routes through the unified `for_each_ancestor_class` traversal,
-    // which already unions local and cross-file parents.)
 
     /// Check if a symbol is defined within a class/package.
     pub(crate) fn symbol_in_class(&self, sym_id: SymbolId, class_name: &str) -> bool {
@@ -4759,8 +4679,7 @@ impl FileAnalysis {
         // `package X;`, `my`/`our` decls, `use` imports, …) attach
         // to the file scope directly. Statement-form `package X;`
         // is package context, not a lexical boundary, so it doesn't
-        // create an intermediate scope. The bucket-merge + post-sort
-        // shim that used to live here is gone — children come out in
+        // create an intermediate scope. Children come out in
         // declaration order from the symbols vector.
         //
         // Plugin namespaces are NOT surfaced. They exist for
@@ -6209,9 +6128,6 @@ fn format_parametric_type(p: &ParametricType) -> String {
     match p {
         ParametricType::ResultSet { base, row } => {
             format!("{}<{}>", base, row)
-        }
-        ParametricType::RowOf(inner) => {
-            format!("RowOf<{}>", format_inferred_type(inner))
         }
     }
 }

@@ -22,7 +22,7 @@ Builder          builder.rs                   → produces FileAnalysis
 Data model       file_analysis.rs             → FileAnalysis (serde, bincode-cacheable)
 ```
 
-See `docs/ROADMAP.md` for the forward design corpus entry point. `docs/adr/file-store-and-resolve.md` covers the landed cross-file unification (single role-tagged FileStore + RoleMask + resolve_symbol). Residual forward work in `docs/prompt-unification-residual.md`; the next architectural pillar (graph walking) in `docs/prompt-graph-walking.md`.
+See `docs/ROADMAP.md` for the forward design corpus entry point. `docs/adr/file-store-and-resolve.md` covers the landed cross-file unification (single role-tagged FileStore + RoleMask + `refs_to`). A unified `resolve_symbol` cursor→target entry point is planned but **not landed** — handlers currently resolve the target via `FileAnalysis::rename_kind_at`, then map `RenameKind`→`TargetRef` inline (duplicated in `backend.rs` references/rename and `main.rs`) and call `refs_to`. Residual forward work in `docs/prompt-unification-residual.md`; the next architectural pillar (graph walking) in `docs/prompt-graph-walking.md`.
 
 ### Rules (read before writing code)
 
@@ -53,6 +53,18 @@ See `docs/ROADMAP.md` for the forward design corpus entry point. `docs/adr/file-
    - **Per-base / per-name lookup tables in core** for behavior plugins should own. The plugin trait carries the rule; core dispatches generically.
 
    The discipline is hard because the special case is always the smallest diff right now. Reaching up to the general path is the larger commit. Do the larger commit anyway — the special case never stays cheap, and provenance / observability / future flavors of the same rule all rot when they're not paying it forward.
+
+### Comment style
+
+Comments earn their keep by explaining **why**, not **what**. The code already says what it does; a comment that restates it is dead weight and drifts the moment the code changes.
+
+- **Write the why:** non-obvious invariants, ordering constraints ("registered first so X claims before Y"), surprising trade-offs, the war story behind a workaround, and pointers to the ADR that owns the decision. One or two tight lines beats a paragraph.
+- **Don't narrate history.** No "replaces the old X", "used to be Y", "D3 added", "the staircase deleted", "Spike goals", "Part 6 of the spec", "as Phase 4–6 land". Git remembers; the comment shouldn't. Describe what *is*, not what *was* or what *changed*.
+- **Don't restate the architecture.** If it's in this file or derivable from the types, link or omit — don't paraphrase it inline.
+- **Don't enumerate every match arm / field in prose** when the code is self-evident; comment only the arm that's surprising.
+- A doc comment (`///`) on a public item states its contract; reserve the long-form rationale for the one spot that owns it, not every caller.
+
+When a comment grows past a few lines, that's a smell: either the code wants a clearer name/shape, or the rationale belongs in an ADR under `docs/adr/` with a one-line pointer here.
 
 ### File map
 
@@ -146,7 +158,7 @@ The fold driver in step 6 is the only place type inference iterates. Adding a ne
 
 - **Reducers are stateless.** A `WitnessReducer` claims a `WitnessAttachment` shape (`Symbol(_)` / `Variable{..}` / `Expression(_)` / etc.) and folds the witnesses for that attachment into a `ReducedValue`. They live in `witnesses.rs` and register through `ReducerRegistry::with_defaults()`. The worklist driver never special-cases a reducer — it just runs the registry on each attachment.
 - **Witnesses are monotone.** Once a witness is in the bag, it stays. New facts append; no reducer rewrites or deletes another's witness. Termination follows from the lattice (`InferredType` is a finite enum, ~12 variants) plus the snapshot check: when nothing new appears in two consecutive iterations, the fixed point is reached.
-- **Edges, not values.** If a registry query on attachment `A` already resolves through an edge chase, do NOT re-push the materialized `InferredType(t)` onto `A` as a "cache." That's the parallel-store bug the staircase deleted. Mirrors between attachments go through `Edge(target)`, not `InferredType` copies — see writeback's `MethodOnClass{class, name} → Edge(Symbol(sid))` for the canonical shape.
+- **Edges, not values** (stated under "Type inference" above). The two structural enforcers: mirrors between attachments go through `Edge(target)` — see writeback's `MethodOnClass{class, name} → Edge(Symbol(sid))`, the canonical shape ("the edge IS the mirror") — and re-emittable passes clear-and-emit (next bullet). A materialized `InferredType` re-pushed onto an edge-reachable attachment is the parallel-store bug the staircase deleted.
 - **Re-emittable passes are clear-and-emit.** Every builder pass that legitimately re-derives its bag contribution per iteration calls `WitnessBag::remove_by_source_tag(...)` at the start of every run, then re-pushes from current state. Current re-emittable tags: `arity_detection` (per-Symbol UnionOnArgs), `method_call_return` (call-site `Edge(MethodOnClass{...})`), `local_return` / `plugin_bridge` / `inheritance` (writeback), `call_binding` (propagator). Chain typing's TC-existence check serves the same role for chain-assignment witnesses. Anything else added to a fold step that pushes witnesses MUST follow this idempotency pattern or the worklist will spin.
 - **Walker only observes.** No walk-time function returns a type without first emitting the witness. `emit_expr_witness` is the canonical entry; `expr_payload` carries the closed-syntax bake for literals and the `Edge` payloads for name-dependent shapes. Consumers that need a type at walk time do `emit_expr_witness(node); bag_query_expr_span(span)` — emit first, query after.
 - **Source priority breaks ties.** `WitnessSource::priority()` returns 100 for `Plugin(_)` and 10 for everything else. The `PluginOverrideReducer` runs first in the registry and short-circuits when it sees a higher-priority witness on a Symbol attachment. New "this answer must dominate" sources go on this priority axis — never as a special-case branch in another reducer.

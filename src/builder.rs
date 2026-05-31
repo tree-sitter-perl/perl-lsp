@@ -31,9 +31,8 @@ pub fn default_plugin_registry() -> Arc<PluginRegistry> {
     }).clone()
 }
 
-/// Single CST walk that powers the post-walk `ChainTypingReducer`
-/// (Phase 5 of the type-inference worklist refactor). Replaces three
-/// independent tree walks at the old steps 7/8/10:
+/// Single CST walk that powers the post-walk `ChainTypingReducer`.
+/// Indexes the node sets the reducer needs:
 ///
 /// - `assignment_nodes` — every `assignment_expression`, used to type
 ///   `my $X = <rhs>` (and bare `$X = …`) via `resolve_invocant_class_tree`.
@@ -84,8 +83,8 @@ struct ChainTypingIndex<'a> {
 ///
 /// `PreFold` runs between the two `resolve_return_types` calls —
 /// assignments and return arms feed the second fold (assignments via
-/// `var_type_via_bag` for `return $var`; return arms directly through
-/// `return_infos`). Invocants are query-time outputs (`Ref.invocant_class`)
+/// the bag's Variable query for `return $var`; return arms directly
+/// through `return_infos`). Invocants are query-time outputs (`Ref.invocant_class`)
 /// and don't influence the fold, so they wait until after every sub
 /// return type is resolved.
 ///
@@ -158,7 +157,7 @@ pub fn build_with_plugins(
 /// Test-only entry: build the file, then re-run the worklist fold
 /// driver (`fold_to_fixed_point`) one extra time before finalizing.
 ///
-/// Since Phase 6, the fold is fully idempotent: the resulting
+/// The fold is fully idempotent: the resulting
 /// `FileAnalysis` is byte-identical to a plain `build_with_plugins(...)`
 /// call — same `type_provenance`, same `sub_return_type_at_arity`
 /// answers, same witness counts. The two re-emittable passes inside
@@ -304,9 +303,9 @@ fn build_with_plugins_inner(
     // See `docs/prompt-forward-reference-resolution.md`.
     b.resolve_forward_expr_witnesses();
 
-    // Phase 6: worklist driver. Replaces the manually-ordered
-    // `fold → chain → fold → chain` sequence with one fixed-point
-    // loop over chain typing + reducer dispatch. Each iteration runs
+    // Worklist driver: one fixed-point loop over chain typing +
+    // reducer dispatch (rather than a manually-ordered
+    // `fold → chain → fold → chain` sequence). Each iteration runs
     // `ChainPassMode::PreFold` (assignment + return-arm refresh)
     // followed by `resolve_return_types`; the loop exits when the
     // snapshot of Sub/Method return types and bag length stops
@@ -473,7 +472,7 @@ impl<'a> Builder<'a> {
             });
         }
 
-        // Part 1 — invocant mutations on hash keys.
+        // Invocant mutations on hash keys.
         let mut mutations: Vec<(HashKeyOwner, String, Span)> = Vec::new();
         for r in &self.refs {
             if let (RefKind::HashKeyAccess { owner, var_text }, AccessKind::Write) =
@@ -523,8 +522,8 @@ impl<'a> Builder<'a> {
         //
         // Invariant: `return_infos` is walk-final by the time
         // `populate_witness_bag` runs — it's populated only by
-        // `visit_return_expression` during the live walk and never
-        // mutated after. No clear-and-emit tag on the implicit-return
+        // `visit_node`'s `return_expression` arm during the live walk
+        // and never mutated after. No clear-and-emit tag on the implicit-return
         // edge is therefore needed; the gate `return_infos.is_empty()
         // for this scope` is a one-shot decision.
         let mut implicit_edges: Vec<(SymbolId, Span, Span)> = Vec::new();
@@ -571,7 +570,7 @@ enum ArityBranch {
 /// look at the connector keyword (`if` vs `unless`) to decide. If
 /// it's a bare expression_statement, this is a default branch.
 ///
-/// Known idioms (spike shortlist):
+/// Known idioms:
 ///   - `return X unless @_;`       → Zero
 ///   - `return X;`                  → Default
 ///
@@ -945,18 +944,15 @@ struct Builder<'a> {
     /// `(scope, arr_name, contribution_spans)` triples — re-emitted
     /// each iteration as `Variable{arr_name, scope} +
     /// InferredType(Sequence(...))` with the latest known per-arg
-    /// types. Clear-and-emit on `source_tag = "array_push"`. Spike
-    /// scope: tuple shape only; cross-scope and conditional
-    /// branches not yet handled.
+    /// types. Clear-and-emit on `source_tag = "array_push"`. Tuple
+    /// shape only; cross-scope and conditional branches not handled.
     pending_array_pushes: Vec<(ScopeId, String, Vec<Span>)>,
     /// For each Sub/Method scope, the body span of the last
     /// top-level expression statement. Used as the implicit-return
     /// query key — `seed_return_types_from_bag` reads `Expr(span)` via
     /// `bag_query_expr_span` for scopes without an explicit `return`.
-    /// Replaces the old `last_expr_type: HashMap<ScopeId,
-    /// Option<InferredType>>` dual-store: types now ride the bag,
-    /// this map only carries the structural pointer to the source
-    /// span.
+    /// Types ride the bag; this map only carries the structural
+    /// pointer to the source span.
     last_expr_span: std::collections::HashMap<ScopeId, Span>,
     /// Assignments where RHS is a function call — resolved in return-type post-pass.
     call_bindings: Vec<CallBinding>,
@@ -1016,9 +1012,8 @@ struct Builder<'a> {
     /// push directly here. Moved into `FileAnalysis.witnesses` when
     /// the analysis is constructed — no second seeding pass.
     bag: crate::witnesses::WitnessBag,
-    /// Walk-time symbol-table lookups that came up empty for a name
-    /// Nodes that `emit_expr_witness` couldn't resolve at walk
-    /// time. Two common shapes:
+    /// Nodes that `emit_expr_witness` couldn't resolve at walk time.
+    /// Two common shapes:
     ///   * **Forward-defined sub call** — `sub a { b() } sub b {…}`
     ///     is legal Perl, but the walk emits witnesses live and the
     ///     callee isn't in the symbol table yet when `b()` is
@@ -1027,7 +1022,7 @@ struct Builder<'a> {
     ///     fires before its arg subtree is walked, so any
     ///     `emit_expr_witness` called inside the parent visitor on
     ///     a method-call arg finds no matching `MethodCall` ref
-    ///     yet (refs are pushed during `visit_method_call_expression`,
+    ///     yet (refs are pushed during `visit_method_call`,
     ///     which runs later).
     ///
     /// `resolve_forward_expr_witnesses` retries `expr_payload` on
@@ -1532,14 +1527,6 @@ impl<'a> Builder<'a> {
             .collect()
     }
 
-    /// Best-effort receiver-type resolution for a method call. Handles:
-    ///   * `$self` / `__PACKAGE__`        → current package
-    ///   * bare `Pkg::Name`               → literal class
-    ///   * `$var` with a prior `my $var = Pkg->new` → looked up via
-    ///     the bag's Variable witnesses (latest wins). This lets the
-    ///     mojo-events plugin resolve `$obj->emit(...)` in a consumer
-    ///     file to the producer's class, enabling cross-file def/ref
-    ///     pairing.
     /// Resolve a bare `foo()` call to the package whose `sub foo` it
     /// refers to. Order mirrors Perl's name-lookup rule:
     ///
@@ -1691,8 +1678,8 @@ impl<'a> Builder<'a> {
                 //     but it matches the existing arity dispatch
                 //     contract: the synth's UnionOnArgs branches
                 //     are written in receiver-relative arity.
-                //   - `Symbol(_)` (anon subs after Phase 2,
-                //     in-file named subs) → no receiver convention,
+                //   - `Symbol(_)` (anon subs, in-file named subs)
+                //     → no receiver convention,
                 //     `q.receiver = None`, arity = args.len().
                 //     UnionOnArgs branches that mention `Receiver`
                 //     get `None`-substituted; Concrete arms work
@@ -2072,7 +2059,7 @@ impl<'a> Builder<'a> {
                 self.add_symbol_ns(name, SymKind::HashKeyDef, span, selection_span, detail, ns);
             }
             plugin::EmitAction::HashKeyAccess { name, owner, var_text, span, access } => {
-                // `owner: Some(owner)` so the phase-5 linkage pass (which looks
+                // `owner: Some(owner)` so the linkage pass (which looks
                 // for HashKeyAccess → HashKeyDef by name+owner) pairs these
                 // refs to both in-file and cross-file defs automatically.
                 self.refs.push(Ref {
@@ -2154,9 +2141,8 @@ impl<'a> Builder<'a> {
             }
             plugin::EmitAction::Symbol { name, kind, span, selection_span, detail, return_type } => {
                 // The per-symbol return type rides at the action
-                // level (not on `SymbolDetail`) since D1 of the
-                // bag-residual refactor. The Symbol(sid) push is the
-                // canonical record — chain typing's bag-routed
+                // level, not on `SymbolDetail`. The Symbol(sid) push
+                // is the canonical record — chain typing's bag-routed
                 // queries see plugin-synthesized callables uniformly
                 // with locals + imports. Writeback iterates symbols
                 // and pushes `MethodOnClass{class, name} → Edge(Symbol(sid))`
@@ -4246,35 +4232,43 @@ impl<'a> Builder<'a> {
     /// Emit the `Expr(span)` witnesses for `node` and (recursively)
     /// its sub-arms. For a non-ternary node: one witness on
     /// `Expr(span)` with the node's `expr_payload` (literal type, or
-    /// Edge to Variable/Symbol/Expression). For a ternary: two
-    /// `branch_arm`-source `Edge(Expr(arm_span))` witnesses on
-    /// `Expr(span)`, plus a recursive call per arm so each arm's own
-    /// `Expr(span)` is populated. Idempotent on span — multiple
-    /// callers (return arm + chain typing + RHS-of-assignment) firing
-    /// against the same node produce duplicate witnesses but don't
-    /// change query answers, since the latest-wins reducers fold
-    /// them all the same way.
+    /// Edge to Variable/Symbol/Expression). For a ternary: one
+    /// `Edge(Expr(arm_span))` per arm on `BranchArm(span)`, a single
+    /// `Edge(BranchArm(span))` on `Expr(span)` (so the expression
+    /// resolves to `BranchArmFold`'s agreed answer), plus a recursive
+    /// call per arm so each arm's own `Expr(span)` is populated.
+    /// Idempotent on span — multiple callers (return arm + chain typing
+    /// + RHS-of-assignment) firing against the same node produce
+    /// duplicate witnesses but don't change query answers, since the
+    /// latest-wins reducers fold them all the same way.
     fn emit_expr_witness(&mut self, node: Node<'a>) {
         use crate::witnesses::{Witness, WitnessAttachment, WitnessPayload, WitnessSource};
         let span = node_to_span(node);
         if node.kind() == "conditional_expression" {
+            let arm_att = WitnessAttachment::BranchArm(span);
             let arms = [
                 node.child_by_field_name("consequent"),
                 node.child_by_field_name("alternative"),
             ];
             for arm in arms.into_iter().flatten() {
                 // Make sure the arm's own Expr(span) carries its
-                // payload — consumers Edge into it from
-                // Variable($n)/Symbol(sid) for the `my $n = $c ? A : B`
-                // and ternary-return paths.
+                // payload, then collect it on the BranchArm attachment.
                 self.emit_expr_witness(arm);
                 self.bag.push(Witness {
-                    attachment: WitnessAttachment::Expr(span),
+                    attachment: arm_att.clone(),
                     source: WitnessSource::Builder("branch_arm".into()),
                     payload: WitnessPayload::Edge(WitnessAttachment::Expr(node_to_span(arm))),
                     span: node_to_span(arm),
                 });
             }
+            // The ternary's value IS the agreed arm type: point its
+            // Expr(span) at the BranchArm fold.
+            self.bag.push(Witness {
+                attachment: WitnessAttachment::Expr(span),
+                source: WitnessSource::Builder("branch_arm".into()),
+                payload: WitnessPayload::Edge(arm_att),
+                span,
+            });
             return;
         }
         if let Some(payload) = self.expr_payload(node) {
@@ -4801,8 +4795,8 @@ impl<'a> Builder<'a> {
         // each X / Y through `emit_expr_witness + bag_query_expr_span`,
         // look up the running Sequence for `@arr` in scope, append.
         // Latest-wins Variable witness keeps the running answer
-        // queryable at any later point. Spike scope: tuple shape
-        // only — no Homogeneous / Cycle classification yet.
+        // queryable at any later point. Tuple shape only — no
+        // homogeneous/heterogeneous classification yet.
         self.emit_array_push_contribution(arr_name, &children[1..]);
 
         let is_export = arr_name.ends_with("@EXPORT") && !arr_name.ends_with("@EXPORT_OK");
@@ -5056,60 +5050,26 @@ impl<'a> Builder<'a> {
         }
     }
 
-    /// Publish a framework-synthesized accessor's return type into the
-    /// witness bag instead of relying solely on `Symbol.return_type`.
-    ///
-    /// `apply_type_overrides` (the plugin path) writes Plugin-priority
-    /// witnesses on `Symbol(_)` so the bag — the spec's "single
-    /// type-query path" — answers consistently with the symbol's
-    /// stored type. Framework accessors used to skip this and only set
-    /// `Symbol.return_type` directly. The dump-package round of QA
-    /// caught two consequences:
-    ///
-    ///   1. `symbol_witness_count: 0` for every Mojo::Base / Moo / DBIC
-    ///      accessor — bag-level introspection couldn't see them.
-    ///   2. Multi-arity sisters (Mojo::Base getter `name()` + writer
-    ///      `name($v)`) share a method name. `query_sub_return_type`
-    ///      finds the first `Symbol` by name and folds witnesses on
-    ///      that id; the writer's distinct return type was never
-    ///      visible. `level(1)` returned the getter's `String` instead
-    ///      of the invocant's `Mojo::Log`.
-    ///
-    /// This helper publishes both witnesses and the per-symbol
-    /// provenance entry. Two attachment shapes cover the query
-    /// surface:
-    ///   - `Symbol(sym_id)` — per-symbol queries with an arity hint
-    ///     (e.g. the dump-package iteration); also bumps the
-    ///     symbol's witness count.
-    ///   - `MethodOnClass{class, name}` — cross-symbol arity dispatch
-    ///     scoped to the declaring class. The writer's `Some(1)` and
-    ///     the getter's `Some(0)` both attach here, and the reducer
-    ///     picks by `arity_hint` regardless of which sister `find()`
-    ///     returned. Class-keyed so `Sweet::flavor` and
-    ///     `Sour::flavor` stay addressable independently.
-    ///
-    /// Source is `Builder("framework_accessor")` — core synthesis,
-    /// not a Plugin override. Provenance is `FrameworkSynthesis`
-    /// for the same reason; plugins are user-installed and
-    /// configurable, framework `has` synthesis is part of the
-    /// analyzer itself.
     /// Publish a multi-arm `UnionOnArgs` ReturnExpr on
-    /// `MethodOnClass{current_package, name}` so cross-symbol
-    /// dispatch (a name with multiple syms — Mojo/Moo getter +
-    /// writer pair, future arity-overloaded subs) routes through
-    /// one declaration instead of relying on whichever sym the
-    /// "primary" rule picked first. The chain typer's coderef-edge,
-    /// dynamic-method, and direct-method routes all hit this same
-    /// attachment with their call-site receiver, so substitution
-    /// answers uniformly.
+    /// `MethodOnClass{current_package, name}` so cross-symbol arity
+    /// dispatch routes through one class-keyed declaration instead of
+    /// whichever sym the "primary" rule picked first. A name with
+    /// multiple syms (Mojo/Moo getter `name()` + writer `name($v)`)
+    /// shares `(class, name)`; the writer's `Some(1)` and getter's
+    /// `Some(0)` both attach here and the reducer picks by `arity_hint`
+    /// (without this, `level(1)` returns the getter's `String` instead
+    /// of the writer's invocant type). Class-keyed so `Sweet::flavor` /
+    /// `Sour::flavor` stay independent. The chain typer's coderef-edge,
+    /// dynamic-method, and direct-method routes all hit this attachment
+    /// with their call-site receiver, so substitution answers uniformly.
     ///
-    /// Branch ordering: `Empty` / `Exact(N)` first, `AtLeast(N)`
-    /// next, `Any` last — `UnionOnArgs` is first-match. Caller is
-    /// responsible for ordering since each framework knows its own
-    /// arm shape.
+    /// Branch ordering is the caller's responsibility (each framework
+    /// knows its arm shape): `Empty` / `Exact(N)` first, `AtLeast(N)`
+    /// next, `Any` last — `UnionOnArgs` is first-match.
     ///
-    /// No-op when `current_package` is unset (file-scoped accessors
-    /// don't have a class slot).
+    /// The per-Symbol answer + provenance is published separately by
+    /// `record_framework_accessor_witness`. No-op when `current_package`
+    /// is unset (file-scoped accessors have no class slot).
     fn publish_class_accessor_union(
         &mut self,
         name: &str,
@@ -6215,7 +6175,7 @@ impl<'a> Builder<'a> {
         // Distinguish read vs write by asking determine_access on the
         // element node itself — `$self->{k} = ...` has this element as
         // the LHS of an assignment, so the grandparent check returns
-        // Write. Needed for Part 1 (invocant mutations).
+        // Write. Needed for invocant mutations.
         let element_access = self.determine_access(node);
 
         // Record the key access
@@ -6521,7 +6481,6 @@ impl<'a> Builder<'a> {
         let Some(p) = ty.as_parametric() else { return };
         let base_class = match p {
             crate::file_analysis::ParametricType::ResultSet { base, .. } => base.clone(),
-            crate::file_analysis::ParametricType::RowOf(_) => return,
         };
         let zero = Span {
             start: Point { row: 0, column: 0 },
@@ -6577,7 +6536,7 @@ impl<'a> Builder<'a> {
         let folded = self.resolve_constant_strings(var_text, 0)?;
         // Single-value fold only — multi-value (loop variable that
         // takes several strings) doesn't have a single row class to
-        // emit. Future Part 5 sum-types work could lift this.
+        // emit. Future sum-types work could lift this.
         if folded.len() == 1 {
             folded.into_iter().next()
         } else {
@@ -7097,28 +7056,21 @@ impl<'a> Builder<'a> {
         }
     }
 
-    /// Phase 5 of the worklist refactor: the three post-walk CST walks
-    /// (assignment typing, return-arm refresh, invocant-class refresh)
-    /// collapse into one **ChainTypingReducer**. A single CST walk
-    /// builds a `ChainTypingIndex` (assignment, return-expression, and
-    /// invocant nodes by span); the reducer drains the index in two
-    /// modes — `PreFold` between the two `resolve_return_types` calls
-    /// (assignments + return arms feed fold-2), `PostFold` after the
-    /// second fold (invocants are query-time outputs and need every
-    /// sub return type resolved).
+    /// The post-walk **ChainTypingReducer**: one CST walk builds a
+    /// `ChainTypingIndex` (assignment, return-expression, and invocant
+    /// nodes by span); this drains it in two modes — `PreFold`
+    /// (assignments + return arms feed the next `resolve_return_types`)
+    /// and `PostFold` (invocants are query-time outputs, so they need
+    /// every sub return type resolved first). The worklist driver
+    /// (`fold_to_fixed_point`) calls `PreFold` each iteration and
+    /// `PostFold` once after the lattice settles. Assignment + invocant
+    /// typing run through `resolve_invocant_class_tree`; return arms
+    /// feed the fold via `return_infos`.
     ///
-    /// The recursive typer (`resolve_invocant_class_tree` for
-    /// assignments + invocants, `infer_return_value_type` for return
-    /// arms) is unchanged — only the scheduling collapses. Step 6's
-    /// first invocation feeds chain types via the same path; step 9
-    /// (still the second hardcoded fold call) re-runs and picks up any
-    /// chain types that needed the first fold to land. Phase 6 will
-    /// replace the explicit pre/post split with a worklist driver.
-    ///
-    /// Idempotent across both calls — assignments skip if a TC already
+    /// Idempotent across calls — assignments skip if a TC already
     /// exists, return arms only upgrade `None → Some`, invocants skip
     /// if `invocant_class` is already pinned. Running the reducer twice
-    /// in `PostFold` mode would type strictly the same set as one call.
+    /// in `PostFold` mode types strictly the same set as one call.
     fn run_chain_typing_reducer(
         &mut self,
         idx: &ChainTypingIndex<'a>,
@@ -7144,13 +7096,12 @@ impl<'a> Builder<'a> {
         }
     }
 
-    /// Phase 6: replace the manually-ordered `fold → chain → fold`
-    /// sequence with a fixed-point loop. Each iteration runs
-    /// `ChainPassMode::PreFold` (assignment typing + return-arm refresh)
-    /// followed by `resolve_return_types` (the reducer-dispatch driver
-    /// from Phase 4); when the snapshot of Sub/Method return types and
-    /// the bag length stops moving, the lattice has settled and the
-    /// loop exits.
+    /// Fixed-point loop driving chain typing + reducer dispatch. Each
+    /// iteration runs `ChainPassMode::PreFold` (assignment typing +
+    /// return-arm refresh) followed by `resolve_return_types` (the
+    /// reducer-dispatch driver); when the snapshot of Sub/Method return
+    /// types and the bag length stops moving, the lattice has settled
+    /// and the loop exits.
     ///
     /// The two re-emittable passes inside `resolve_return_types`
     /// (arity-return witnesses, call-binding propagator) are
@@ -7499,10 +7450,10 @@ impl<'a> Builder<'a> {
     }
 
 
-    /// Phase 4 of the worklist refactor: this is the tiny driver. Each
-    /// step is a named helper below. The call-binding propagator and
-    /// hash-key-owner fixup are post-fold sync passes — they're
-    /// conceptually "not reducers" (per the spec) and stay procedural,
+    /// The tiny reducer-dispatch driver. Each step is a named helper
+    /// below. The call-binding propagator and hash-key-owner fixup are
+    /// post-fold sync passes — conceptually "not reducers" and stay
+    /// procedural,
     /// but factored out as named methods. The reducer registry
     /// (`PluginOverrideReducer`, `ReturnExprReducer`,
     /// `MethodOnClassReducer`, `SubReturnReducer`) lives in
@@ -8012,9 +7963,8 @@ impl<'a> Builder<'a> {
         // pass's job is purely to read the registry's answer per sym
         // and surface it in the name-keyed `return_types` map for
         // downstream consumers (call-binding propagation, hash-key
-        // fixup). Writeback below mirrors per-sym answers onto
-        // `MethodOnClass{class, name}` primary via Edge(Symbol(sid)) —
-        // no value duplication, the edge IS the mirror.
+        // fixup). Writeback (below) mirrors per-sym answers onto
+        // `MethodOnClass` via edges.
         for sym in &self.symbols {
             if !matches!(sym.kind, SymKind::Sub | SymKind::Method) {
                 continue;
@@ -8166,9 +8116,9 @@ impl<'a> Builder<'a> {
         }
     }
 
-    /// Step 8: `CallBindingPropagator` (per Phase 4 spec — not a
-    /// witness reducer, just the bag-and-TC sync pass that runs after
-    /// the fold). For each `my $cfg = get_config()` binding recorded
+    /// `CallBindingPropagator` — not a witness reducer, just the
+    /// bag-and-TC sync pass that runs after the fold. For each
+    /// `my $cfg = get_config()` binding recorded
     /// during the walk, push BOTH the legacy `TypeConstraint` and the
     /// corresponding `Variable` witness so any later bag query about
     /// `$cfg` sees the call-resolved type without a separate sync pass.
