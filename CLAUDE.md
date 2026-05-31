@@ -54,6 +54,18 @@ See `docs/ROADMAP.md` for the forward design corpus entry point. `docs/adr/file-
 
    The discipline is hard because the special case is always the smallest diff right now. Reaching up to the general path is the larger commit. Do the larger commit anyway — the special case never stays cheap, and provenance / observability / future flavors of the same rule all rot when they're not paying it forward.
 
+### Comment style
+
+Comments earn their keep by explaining **why**, not **what**. The code already says what it does; a comment that restates it is dead weight and drifts the moment the code changes.
+
+- **Write the why:** non-obvious invariants, ordering constraints ("registered first so X claims before Y"), surprising trade-offs, the war story behind a workaround, and pointers to the ADR that owns the decision. One or two tight lines beats a paragraph.
+- **Don't narrate history.** No "replaces the old X", "used to be Y", "D3 added", "the staircase deleted", "Spike goals", "Part 6 of the spec", "as Phase 4–6 land". Git remembers; the comment shouldn't. Describe what *is*, not what *was* or what *changed*.
+- **Don't restate the architecture.** If it's in this file or derivable from the types, link or omit — don't paraphrase it inline.
+- **Don't enumerate every match arm / field in prose** when the code is self-evident; comment only the arm that's surprising.
+- A doc comment (`///`) on a public item states its contract; reserve the long-form rationale for the one spot that owns it, not every caller.
+
+When a comment grows past a few lines, that's a smell: either the code wants a clearer name/shape, or the rationale belongs in an ADR under `docs/adr/` with a one-line pointer here.
+
 ### File map
 
 - `main.rs` — entry, CLI modes (`--rename`, `--workspace-symbol`, `--dump-package`, `--version`). `cli_full_startup(root)` = "act like LSP just started".
