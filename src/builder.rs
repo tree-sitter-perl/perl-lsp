@@ -84,8 +84,8 @@ struct ChainTypingIndex<'a> {
 ///
 /// `PreFold` runs between the two `resolve_return_types` calls —
 /// assignments and return arms feed the second fold (assignments via
-/// `var_type_via_bag` for `return $var`; return arms directly through
-/// `return_infos`). Invocants are query-time outputs (`Ref.invocant_class`)
+/// the bag's Variable query for `return $var`; return arms directly
+/// through `return_infos`). Invocants are query-time outputs (`Ref.invocant_class`)
 /// and don't influence the fold, so they wait until after every sub
 /// return type is resolved.
 ///
@@ -523,8 +523,8 @@ impl<'a> Builder<'a> {
         //
         // Invariant: `return_infos` is walk-final by the time
         // `populate_witness_bag` runs — it's populated only by
-        // `visit_return_expression` during the live walk and never
-        // mutated after. No clear-and-emit tag on the implicit-return
+        // `visit_node`'s `return_expression` arm during the live walk
+        // and never mutated after. No clear-and-emit tag on the implicit-return
         // edge is therefore needed; the gate `return_infos.is_empty()
         // for this scope` is a one-shot decision.
         let mut implicit_edges: Vec<(SymbolId, Span, Span)> = Vec::new();
@@ -1027,7 +1027,7 @@ struct Builder<'a> {
     ///     fires before its arg subtree is walked, so any
     ///     `emit_expr_witness` called inside the parent visitor on
     ///     a method-call arg finds no matching `MethodCall` ref
-    ///     yet (refs are pushed during `visit_method_call_expression`,
+    ///     yet (refs are pushed during `visit_method_call`,
     ///     which runs later).
     ///
     /// `resolve_forward_expr_witnesses` retries `expr_payload` on
