@@ -15,7 +15,7 @@
 //! it to `Open` (workspace entry removed); closing demotes it back.
 //!
 //! Queries that span files (rename, workspace/symbol, cross-file refs) iterate
-//! this store uniformly via `iter_all_analyses` — no per-role handler code.
+//! this store uniformly via `for_each_analysis` — no per-role handler code.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;

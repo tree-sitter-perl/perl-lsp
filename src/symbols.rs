@@ -2004,7 +2004,7 @@ fn imported_function_completions(
 }
 
 /// Build completion candidates for functions from modules that aren't imported
-/// at all. Each candidate carries an `additional_edit` that inserts a full
+/// at all. Each candidate carries `additional_edits` that insert a full
 /// `use Module qw(func);` statement.
 fn unimported_function_completions(
     analysis: &FileAnalysis,

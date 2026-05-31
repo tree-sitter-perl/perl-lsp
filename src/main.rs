@@ -688,7 +688,7 @@ fn cli_rename(root: &str, file: &str, line_str: &str, col_str: &str, new_name: &
 /// derived type info. Debugging aid for the witness/reducer pipeline:
 /// prints the raw `return_type` baked into the Symbol, the witness-bag
 /// projection at the default and a few common arities, the structural
-/// tail (`return_self_method`), every param's inferred type at a point
+/// tail-delegation, every param's inferred type at a point
 /// just past the sub's signature, and a witness count so you can see at
 /// a glance whether the bag has anything to say.
 fn cli_dump_package(root: &str, package_name: &str) {
