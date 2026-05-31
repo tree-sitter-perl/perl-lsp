@@ -1687,8 +1687,8 @@ impl<'a> Builder<'a> {
                 //     but it matches the existing arity dispatch
                 //     contract: the synth's UnionOnArgs branches
                 //     are written in receiver-relative arity.
-                //   - `Symbol(_)` (anon subs after Phase 2,
-                //     in-file named subs) → no receiver convention,
+                //   - `Symbol(_)` (anon subs, in-file named subs)
+                //     → no receiver convention,
                 //     `q.receiver = None`, arity = args.len().
                 //     UnionOnArgs branches that mention `Receiver`
                 //     get `None`-substituted; Concrete arms work
@@ -5052,60 +5052,26 @@ impl<'a> Builder<'a> {
         }
     }
 
-    /// Publish a framework-synthesized accessor's return type into the
-    /// witness bag instead of relying solely on `Symbol.return_type`.
-    ///
-    /// `apply_type_overrides` (the plugin path) writes Plugin-priority
-    /// witnesses on `Symbol(_)` so the bag — the spec's "single
-    /// type-query path" — answers consistently with the symbol's
-    /// stored type. Framework accessors used to skip this and only set
-    /// `Symbol.return_type` directly. The dump-package round of QA
-    /// caught two consequences:
-    ///
-    ///   1. `symbol_witness_count: 0` for every Mojo::Base / Moo / DBIC
-    ///      accessor — bag-level introspection couldn't see them.
-    ///   2. Multi-arity sisters (Mojo::Base getter `name()` + writer
-    ///      `name($v)`) share a method name. `query_sub_return_type`
-    ///      finds the first `Symbol` by name and folds witnesses on
-    ///      that id; the writer's distinct return type was never
-    ///      visible. `level(1)` returned the getter's `String` instead
-    ///      of the invocant's `Mojo::Log`.
-    ///
-    /// This helper publishes both witnesses and the per-symbol
-    /// provenance entry. Two attachment shapes cover the query
-    /// surface:
-    ///   - `Symbol(sym_id)` — per-symbol queries with an arity hint
-    ///     (e.g. the dump-package iteration); also bumps the
-    ///     symbol's witness count.
-    ///   - `MethodOnClass{class, name}` — cross-symbol arity dispatch
-    ///     scoped to the declaring class. The writer's `Some(1)` and
-    ///     the getter's `Some(0)` both attach here, and the reducer
-    ///     picks by `arity_hint` regardless of which sister `find()`
-    ///     returned. Class-keyed so `Sweet::flavor` and
-    ///     `Sour::flavor` stay addressable independently.
-    ///
-    /// Source is `Builder("framework_accessor")` — core synthesis,
-    /// not a Plugin override. Provenance is `FrameworkSynthesis`
-    /// for the same reason; plugins are user-installed and
-    /// configurable, framework `has` synthesis is part of the
-    /// analyzer itself.
     /// Publish a multi-arm `UnionOnArgs` ReturnExpr on
-    /// `MethodOnClass{current_package, name}` so cross-symbol
-    /// dispatch (a name with multiple syms — Mojo/Moo getter +
-    /// writer pair, future arity-overloaded subs) routes through
-    /// one declaration instead of relying on whichever sym the
-    /// "primary" rule picked first. The chain typer's coderef-edge,
-    /// dynamic-method, and direct-method routes all hit this same
-    /// attachment with their call-site receiver, so substitution
-    /// answers uniformly.
+    /// `MethodOnClass{current_package, name}` so cross-symbol arity
+    /// dispatch routes through one class-keyed declaration instead of
+    /// whichever sym the "primary" rule picked first. A name with
+    /// multiple syms (Mojo/Moo getter `name()` + writer `name($v)`)
+    /// shares `(class, name)`; the writer's `Some(1)` and getter's
+    /// `Some(0)` both attach here and the reducer picks by `arity_hint`
+    /// (without this, `level(1)` returns the getter's `String` instead
+    /// of the writer's invocant type). Class-keyed so `Sweet::flavor` /
+    /// `Sour::flavor` stay independent. The chain typer's coderef-edge,
+    /// dynamic-method, and direct-method routes all hit this attachment
+    /// with their call-site receiver, so substitution answers uniformly.
     ///
-    /// Branch ordering: `Empty` / `Exact(N)` first, `AtLeast(N)`
-    /// next, `Any` last — `UnionOnArgs` is first-match. Caller is
-    /// responsible for ordering since each framework knows its own
-    /// arm shape.
+    /// Branch ordering is the caller's responsibility (each framework
+    /// knows its arm shape): `Empty` / `Exact(N)` first, `AtLeast(N)`
+    /// next, `Any` last — `UnionOnArgs` is first-match.
     ///
-    /// No-op when `current_package` is unset (file-scoped accessors
-    /// don't have a class slot).
+    /// The per-Symbol answer + provenance is published separately by
+    /// `record_framework_accessor_witness`. No-op when `current_package`
+    /// is unset (file-scoped accessors have no class slot).
     fn publish_class_accessor_union(
         &mut self,
         name: &str,
