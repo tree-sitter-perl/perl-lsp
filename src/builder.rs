@@ -198,6 +198,7 @@ fn build_with_plugins_inner(
         package_parents: std::collections::HashMap::new(),
         package_uses: std::collections::HashMap::new(),
         use_dedup: std::collections::HashSet::new(),
+        dispatch_dedup: std::collections::HashSet::new(),
         sub_return_delegations: std::collections::HashMap::new(),
         framework_modes: std::collections::HashMap::new(),
         framework_imports: std::collections::HashSet::new(),
@@ -980,6 +981,12 @@ struct Builder<'a> {
     /// `SyntheticUse { args: [], imports: ["b"] }` would collide on the
     /// args-only key and silently drop the second emission.
     use_dedup: std::collections::HashSet<(Option<String>, String, Vec<String>, Vec<String>)>,
+    /// (span_start, span_end, dispatcher, target_name) of DispatchCall refs
+    /// already emitted. Two plugins can legitimately both claim a dispatch
+    /// site (e.g. the bundled `minion` plugin and a project plugin that adds
+    /// the same verb for a Minion subclass); identical refs at one span are
+    /// pure noise that would double-count in `refs_to`. First write wins.
+    dispatch_dedup: std::collections::HashSet<(Point, Point, String, String)>,
     /// sub_name → delegated sub name, for bodies that are `return other()` or
     /// a bare trailing call. Used to propagate hash-key ownership through
     /// intermediate subs so `sub chain { return get_config() }` doesn't
@@ -2130,14 +2137,21 @@ impl<'a> Builder<'a> {
                 // (owner, name). The var_text lives on the kind for
                 // features that want to show the receiver in hover.
                 let _ = var_text; // reserved for future hover enrichment
-                self.refs.push(Ref {
-                    kind: RefKind::DispatchCall { dispatcher, owner: Some(owner) },
-                    span,
-                    scope: self.current_scope(),
-                    target_name: name,
-                    access: AccessKind::Read,
-                    resolves_to: None,
-                });
+                if self.dispatch_dedup.insert((
+                    span.start,
+                    span.end,
+                    dispatcher.clone(),
+                    name.clone(),
+                )) {
+                    self.refs.push(Ref {
+                        kind: RefKind::DispatchCall { dispatcher, owner: Some(owner) },
+                        span,
+                        scope: self.current_scope(),
+                        target_name: name,
+                        access: AccessKind::Read,
+                        resolves_to: None,
+                    });
+                }
             }
             plugin::EmitAction::Symbol { name, kind, span, selection_span, detail, return_type } => {
                 // The per-symbol return type rides at the action

@@ -6036,6 +6036,44 @@ $minion->enqueue_p(send_email => ['bob']);
     );
 }
 
+/// A Minion SUBCLASS receiver (`Acme::Minion` isa Minion, the crm
+/// `Clove::Minion` shape) must still register + dispatch tasks. The
+/// receiver types to `ClassName("Acme::Minion")`, which a name-prefix
+/// allowlist (`== "Minion" || starts_with("Minion::")`) silently rejects —
+/// the rule-#10 trap. The plugin no longer gates on receiver class, so the
+/// Handler (owner Minion) and the enqueue DispatchCall pair as usual.
+#[test]
+fn plugin_minion_subclass_receiver_still_wires() {
+    let src = r#"
+package MyApp;
+use Minion;
+
+my $minion = Acme::Minion->new;
+$minion->add_task(send_email => sub { my ($job) = @_; });
+$minion->enqueue(send_email => ['alice']);
+"#;
+    let fa = build_fa(src);
+
+    let handler = fa.symbols.iter().find(|s| {
+        s.kind == SymKind::Handler
+            && s.name == "send_email"
+            && matches!(&s.detail, SymbolDetail::Handler { owner: HandlerOwner::Class(c), .. } if c == "Minion")
+    });
+    assert!(
+        handler.is_some(),
+        "add_task on a Minion subclass receiver must still register a Minion-owned Handler",
+    );
+
+    let has_enqueue_dc = fa.refs.iter().any(|r| matches!(
+        &r.kind, RefKind::DispatchCall { dispatcher, .. }
+        if dispatcher == "enqueue" && r.target_name == "send_email"
+    ));
+    assert!(
+        has_enqueue_dc,
+        "enqueue on a Minion subclass receiver must still emit a DispatchCall",
+    );
+}
+
 /// $job inside an add_task callback is typed as Minion::Job so
 /// completion on $job-> resolves to Minion::Job methods.
 #[test]

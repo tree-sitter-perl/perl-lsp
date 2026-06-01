@@ -73,26 +73,26 @@ fn triggers() {
     ]
 }
 
-// Extract the task name, owner class, and tight name-span from a
-// method call. Returns () when the call isn't eligible (dynamic name,
-// unrecognized receiver, etc.).
+// Extract the task name and tight name-span from a method call. Returns
+// () when the call isn't eligible (dynamic name).
+//
+// We deliberately do NOT gate on the receiver class. A name-prefix match
+// (`== "Minion" || starts_with("Minion::")`) is the rule-#10 antipattern:
+// a real subclass like `Clove::Minion` (`use Mojo::Base 'Minion'`, often
+// overriding `enqueue`) isa Minion but fails the string test, so its
+// dispatch sites silently emit no ref. The cross-file ancestry that would
+// answer "isa Minion?" isn't resolved at emit time, and mojo-events takes
+// the same no-allowlist stance. The trigger filter (file uses Minion / is
+// a Mojo app or plugin) + the dispatcher method-name set + a string-literal
+// first arg are the signal. Owner is the global Minion task registry, not
+// the receiver's class, so every add_task / enqueue site pairs regardless
+// of which $minion instance (or subclass) it was called on.
 fn resolve_task(ctx) {
     let args = ctx.args;
     if args.len() < 1 { return (); }
 
     let name = args[0].string_value;
     if name == () { return (); }
-
-    // Gate on receiver class when we have one — Minion itself or any
-    // Minion:: subclass. Unknown-typed receivers get a pass so long as
-    // the dispatcher method name matched; the trigger filter plus the
-    // method-name check already narrow this to Minion-shaped calls.
-    let rtype = ctx.receiver_type;
-    if rtype != () && rtype.contains("ClassName") {
-        let rcn = rtype.ClassName;
-        let looks_minion = rcn == "Minion" || rcn.starts_with("Minion::");
-        if !looks_minion { return (); }
-    }
 
     #{
         name: name,
