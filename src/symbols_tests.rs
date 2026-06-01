@@ -2583,3 +2583,72 @@ $r->get('/users')->
         );
     }
 }
+
+/// Pin: a Mojo helper registered in one file (`$app->helper(widget => ...)`)
+/// must be reachable by goto-definition from `$c->widget` in ANOTHER file.
+///
+/// The provider's `mojo-helpers` synthesis bridges `widget` to
+/// `Mojolicious::Controller`; the consumer's `$c` is a controller subclass.
+/// `resolve_method_in_ancestors` already finds the bridged symbol, but if its
+/// `CrossFile` result only carries the class name, the goto-def consumer
+/// re-looks-up the method in `Mojolicious::Controller`'s OWN module (where it
+/// doesn't exist) and the jump is lost. Same-file works; this is the cross-file
+/// hole that had no coverage.
+#[test]
+fn cross_file_plugin_helper_goto_def_resolves() {
+    let provider_src = "package My::Plugin;\n\
+use Mojo::Base 'Mojolicious::Plugin';\n\
+sub register ($self, $app, $conf) {\n\
+  $app->helper(widget => sub ($c) { return Widget->new; });\n\
+}\n\
+1;\n";
+    let provider = parse_analysis(provider_src);
+    // Sanity: the provider really did synthesize a `widget` Method bridged to
+    // Mojolicious::Controller (otherwise the test would pass vacuously once the
+    // bug is "fixed" by an unrelated path).
+    assert!(
+        provider.plugin_namespaces.iter().any(|ns| ns
+            .bridges
+            .iter()
+            .any(|b| matches!(b, crate::file_analysis::Bridge::Class(c) if c == "Mojolicious::Controller"))),
+        "provider must bridge a namespace to Mojolicious::Controller",
+    );
+
+    let idx = crate::module_index::ModuleIndex::new_for_test();
+    let provider_path = std::path::PathBuf::from("/tmp/perl_lsp_pin_My_Plugin.pm");
+    idx.register_workspace_module(provider_path.clone(), std::sync::Arc::new(provider));
+
+    let consumer_src = "package My::Ctrl;\n\
+use Mojo::Base 'Mojolicious::Controller';\n\
+sub action ($c) {\n\
+  my $w = $c->widget;\n\
+  return $w;\n\
+}\n\
+1;\n";
+    let consumer = parse_analysis(consumer_src);
+    let mut parser = tree_sitter::Parser::new();
+    parser.set_language(&ts_parser_perl::LANGUAGE.into()).unwrap();
+    let tree = parser.parse(consumer_src, None).unwrap();
+
+    // Cursor on the `widget` token in `$c->widget`.
+    let byte = consumer_src.find("widget;").expect("call site present");
+    let prefix = &consumer_src[..byte];
+    let pos = Position {
+        line: prefix.matches('\n').count() as u32,
+        character: (byte - prefix.rfind('\n').map(|i| i + 1).unwrap_or(0)) as u32,
+    };
+
+    let uri = Url::parse("file:///consumer.pl").unwrap();
+    let resp = find_definition(&consumer, pos, &uri, &idx, &tree, consumer_src);
+
+    let loc = match resp {
+        Some(GotoDefinitionResponse::Scalar(loc)) => loc,
+        Some(GotoDefinitionResponse::Array(mut v)) if !v.is_empty() => v.remove(0),
+        other => panic!("expected a goto-def location for cross-file helper, got {other:?}"),
+    };
+    assert!(
+        loc.uri.path().ends_with("My_Plugin.pm"),
+        "goto-def should land in the provider file, got {}",
+        loc.uri,
+    );
+}
