@@ -509,10 +509,21 @@ impl WitnessReducer for FrameworkAwareTypeFold {
     }
 
     fn reduce(&self, ws: &[&Witness], q: &ReducerQuery) -> ReducedValue {
+        // Point-narrowing is variable-lifetime semantics: at the query point,
+        // which assignment of `$x` is live. It only makes sense for `Variable`
+        // attachments. This reducer also claims `Expression` (a method call's
+        // resolved return type) — those carry one witness spanning the call,
+        // and filtering them by a point inherited from a chasing variable's
+        // scope wrongly discards them (`my $g = X->new->m` chased at `$g`'s
+        // scope-end, where the call span doesn't contain it). So only narrow
+        // for variables; expressions fold every witness.
+        let narrow_point = q
+            .point
+            .filter(|_| matches!(q.attachment, WitnessAttachment::Variable { .. }));
         // Narrowing: with a `point`, pick the narrowest-span
         // InferredType witness containing it (already post-narrowing).
         // Falls through to the full fold otherwise.
-        if let Some(point) = q.point {
+        if let Some(point) = narrow_point {
             let mut narrow: Option<(&Witness, u64)> = None;
             for w in ws {
                 if let WitnessPayload::InferredType(_) = w.payload {
@@ -544,7 +555,7 @@ impl WitnessReducer for FrameworkAwareTypeFold {
             // Temporal ordering: only consider witnesses emitted at or
             // before the query point — a later reassignment shouldn't
             // influence a lookup at an earlier line.
-            if let Some(point) = q.point {
+            if let Some(point) = narrow_point {
                 if w.span.start > point {
                     continue;
                 }
@@ -552,7 +563,7 @@ impl WitnessReducer for FrameworkAwareTypeFold {
             // Skip scoped InferredType witnesses that don't contain the
             // query point — narrowing facts for a different slice of the
             // variable's lifetime.
-            if let (Some(point), WitnessPayload::InferredType(_)) = (q.point, &w.payload) {
+            if let (Some(point), WitnessPayload::InferredType(_)) = (narrow_point, &w.payload) {
                 if !span_is_zero(&w.span) && !span_contains(&w.span, point) {
                     continue;
                 }
@@ -1317,6 +1328,8 @@ impl ReducerRegistry {
                                 bag,
                                 ctx.scopes,
                                 ctx.package_framework,
+                                ctx.package_parents,
+                                ctx.module_index,
                                 name,
                                 *scope,
                                 point,
@@ -1366,6 +1379,8 @@ impl ReducerRegistry {
         bag: &WitnessBag,
         scopes: &[Scope],
         package_framework: &HashMap<String, FrameworkFact>,
+        package_parents: &HashMap<String, Vec<String>>,
+        module_index: Option<&crate::module_index::ModuleIndex>,
         var: &str,
         scope: ScopeId,
         point: Point,
@@ -1382,12 +1397,15 @@ impl ReducerRegistry {
             .find_map(|sid| scopes[sid.0 as usize].package.as_ref())
             .and_then(|pkg| package_framework.get(pkg).copied())
             .unwrap_or(FrameworkFact::Plain);
-        let empty_parents: HashMap<String, Vec<String>> = HashMap::new();
+        // Preserve the caller's index + parents. Resolving a variable whose
+        // value is a cross-file method chain needs both; rebuilding them empty
+        // here is what dropped the index mid-chase and made `Variable` the lone
+        // attachment that couldn't resolve across files.
         let ctx = BagContext {
             scopes,
             package_framework,
-            module_index: None,
-            package_parents: &empty_parents,
+            module_index,
+            package_parents,
         };
         for sid in chain {
             let att = WitnessAttachment::Variable {
@@ -1547,6 +1565,8 @@ pub fn query_variable_type(
     bag: &WitnessBag,
     scopes: &[Scope],
     package_framework: &HashMap<String, FrameworkFact>,
+    package_parents: &HashMap<String, Vec<String>>,
+    module_index: Option<&crate::module_index::ModuleIndex>,
     var: &str,
     scope: ScopeId,
     point: Point,
@@ -1557,6 +1577,8 @@ pub fn query_variable_type(
         bag,
         scopes,
         package_framework,
+        package_parents,
+        module_index,
         var,
         scope,
         point,

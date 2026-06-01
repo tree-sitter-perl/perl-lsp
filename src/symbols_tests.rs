@@ -2756,17 +2756,14 @@ sub action ($c) {\n\
     );
 }
 
-/// Captured gap: same as `cross_file_helper_return_type_needs_module_index`,
-/// but the helper routes the value through a LEXICAL (`my $g = chain; return
-/// $g`) instead of returning the chain directly. The direct form resolves
-/// (return-arm edges chase with the index); the lexical form does NOT, because
-/// the variable-resolution path (`query_variable_type` /
-/// `query_variable_with_visited`) carries no `module_index` and can't chase a
-/// cross-file edge off a `Variable` attachment. "Edges, not values" is the
-/// right fix (push `Variable($g) → Edge(Expr(rhs))`), but it needs the index
-/// threaded through the variable query path first. Un-ignore when that lands.
+/// Like `cross_file_helper_return_type_needs_module_index`, but the helper
+/// routes the value through a LEXICAL (`my $g = chain; return $g`) — the common
+/// `my $x = …; return $x` shape. This is the end-to-end pin for unifying
+/// `Variable` into the canonical edge chase: the variable query path now
+/// carries the `module_index`, the cross-file chain assignment is stored as
+/// `Variable($g) → Edge(Expr(rhs))` ("Edges, not values"), and point-narrowing
+/// no longer wrongly filters the materialized `Expression` witness.
 #[test]
-#[ignore = "needs module_index threaded through query_variable_type (Edges, not values)"]
 fn cross_file_lexical_chain_return_type() {
     let other_src = "package My::Other;\n\
 use Mojo::Base -base;\n\

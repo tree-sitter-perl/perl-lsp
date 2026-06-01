@@ -3966,16 +3966,30 @@ impl<'a> Builder<'a> {
                             inferred_type: it,
                         });
                     }
+                } else if let Some(vt) = self.get_var_text_from_lhs(left) {
+                    // RHS didn't resolve at build time — typically a cross-file
+                    // method chain whose type needs the module index, absent
+                    // during the parallel per-file workspace build. Don't drop
+                    // it to a dead end: link the variable to the RHS expr as an
+                    // EDGE so a query that carries the index chases it lazily
+                    // ("Edges, not values"). In-file chains never reach here —
+                    // they resolved above and materialized.
+                    use crate::witnesses::{Witness, WitnessAttachment, WitnessPayload, WitnessSource};
+                    let scope = self.current_scope();
+                    let rhs_span = node_to_span(right);
+                    // Zero-extent span at the assignment start — same convention
+                    // as `push_type_constraint`. A non-zero span would make the
+                    // resolved Variable witness subject to point-containment
+                    // narrowing and get skipped at any query point past the
+                    // assignment (which is every real use of the variable).
+                    let at = node_to_span(node).start;
+                    self.bag.push(Witness {
+                        attachment: WitnessAttachment::Variable { name: vt, scope },
+                        source: WitnessSource::Builder("assign_edge".into()),
+                        payload: WitnessPayload::Edge(WitnessAttachment::Expr(rhs_span)),
+                        span: Span { start: at, end: at },
+                    });
                 }
-                // NOTE: when the RHS is a cross-file method chain it doesn't
-                // resolve here (build time has no module index), so nothing is
-                // pushed and the variable's type is a dead end at query time.
-                // The fix is "Edges, not values" — push `Variable($x) →
-                // Edge(Expr(rhs))` and resolve lazily — but the variable query
-                // path (`query_variable_type`) carries no `module_index`, so a
-                // bare edge can't chase across files. Threading the index
-                // through that path is the prerequisite. See the `#[ignore]`d
-                // `cross_file_lexical_chain_return_type` for the captured gap.
                 // Always record call/method-call bindings (independent
                 // of whether the bag resolved a type) — they're the
                 // source-sub linkage that hash-key ownership fixup
@@ -7598,6 +7612,8 @@ impl<'a> Builder<'a> {
             &self.bag,
             &self.scopes,
             &self.package_framework,
+            &self.package_parents,
+            None, // build time: no module index (single-file)
             name,
             scope,
             point,

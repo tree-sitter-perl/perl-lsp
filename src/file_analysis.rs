@@ -1682,11 +1682,28 @@ impl FileAnalysis {
     /// `inferred_type` reads the same Variable+InferredType slice
     /// without applying reducer rules.
     pub fn inferred_type_via_bag(&self, var_name: &str, point: Point) -> Option<InferredType> {
+        self.inferred_type_via_bag_ctx(var_name, point, None)
+    }
+
+    /// As `inferred_type_via_bag`, but with a `ModuleIndex` so a variable whose
+    /// value is a cross-file method chain (`my $x = Foo->new->bar`) resolves —
+    /// the chase keeps the index when it crosses the `Variable` edge instead of
+    /// dead-ending. Pass the index from query-time callers (hover/completion);
+    /// the bare wrapper keeps `None` for build-time / single-file callers. Both
+    /// now carry `package_parents` (previously dropped to empty).
+    pub fn inferred_type_via_bag_ctx(
+        &self,
+        var_name: &str,
+        point: Point,
+        module_index: Option<&ModuleIndex>,
+    ) -> Option<InferredType> {
         let scope = self.scope_at(point)?;
         crate::witnesses::query_variable_type(
             &self.witnesses,
             &self.scopes,
             &self.package_framework,
+            &self.package_parents,
+            module_index,
             var_name,
             scope,
             point,
