@@ -65,6 +65,11 @@ fn triggers() {
         #{ UsesModule: "Mojolicious::Lite" },
         #{ UsesModule: "Mojolicious" },
         #{ ClassIsa: "Mojolicious" },
+        // Tasks are most often registered in a Mojo plugin's `register`
+        // (`$app->minion->add_task(...)`), whose package isn't a Minion
+        // or Mojolicious subclass. The receiver-type gate below still
+        // confirms it's a Minion call.
+        #{ ClassIsa: "Mojolicious::Plugin" },
     ]
 }
 

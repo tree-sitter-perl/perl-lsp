@@ -24,6 +24,11 @@ fn triggers() {
         #{ UsesModule: "Mojolicious::Lite" },
         #{ UsesModule: "Mojolicious" },
         #{ ClassIsa: "Mojolicious" },
+        // Mojo plugins are the canonical place to register helpers
+        // (`sub register ($self, $app, $conf) { $app->helper(...) }`),
+        // and a plugin package is rarely a Mojolicious subclass itself.
+        // Without this, every helper defined in a plugin stays dark.
+        #{ ClassIsa: "Mojolicious::Plugin" },
     ]
 }
 

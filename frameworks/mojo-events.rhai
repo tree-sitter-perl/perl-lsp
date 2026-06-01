@@ -15,7 +15,15 @@
 fn id() { "mojo-events" }
 
 fn triggers() {
-    [ #{ ClassIsa: "Mojo::EventEmitter" } ]
+    [
+        #{ ClassIsa: "Mojo::EventEmitter" },
+        // Event wire-ups also happen inside Mojo plugins subscribing to an
+        // emitter they hold (`$minion->on(worker => ...)` in a plugin's
+        // `register`). The plugin package isn't itself an EventEmitter, so
+        // gate on the receiver type in the hook (already done) and let this
+        // trigger open the door.
+        #{ ClassIsa: "Mojolicious::Plugin" },
+    ]
 }
 
 // Shared resolver: name + owner class + tight span around the name
