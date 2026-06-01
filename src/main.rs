@@ -43,8 +43,15 @@ async fn main() {
             cli_outline(&args[2]);
             return;
         }
-        Some("--hover") if args.len() >= 5 => {
-            cli_hover(&args[2], &args[3], &args[4]);
+        // `--hover <root> <file> <line> <col>` enables cross-file hover (same
+        // setup as the server); the legacy `--hover <file> <line> <col>` form
+        // stays single-file. Disambiguated by arg count.
+        Some("--hover") if args.len() >= 6 => {
+            cli_hover(Some(&args[2]), &args[3], &args[4], &args[5]);
+            return;
+        }
+        Some("--hover") if args.len() == 5 => {
+            cli_hover(None, &args[2], &args[3], &args[4]);
             return;
         }
         Some("--type-at") if args.len() >= 5 => {
@@ -114,7 +121,7 @@ fn print_usage() {
     eprintln!("  perl-lsp --check [<root>] [--severity error|warning]    Batch diagnostics (CI)");
     eprintln!("                           [--format json|human]");
     eprintln!("  perl-lsp --outline <file>                              Document symbol outline");
-    eprintln!("  perl-lsp --hover <file> <line> <col>                   Type info and docs");
+    eprintln!("  perl-lsp --hover [<root>] <file> <line> <col>         Type info and docs (root = cross-file)");
     eprintln!("  perl-lsp --type-at <file> <line> <col>                 Single type query");
     eprintln!("  perl-lsp --definition <root> <file> <line> <col>       Cross-file goto-def");
     eprintln!("  perl-lsp --references <root> <file> <line> <col>       Cross-file find-refs");
@@ -449,13 +456,20 @@ fn cli_outline(file: &str) {
     println!("{}", serde_json::to_string_pretty(&results).unwrap());
 }
 
-/// --hover <file> <line> <col> — Type info and docs
-fn cli_hover(file: &str, line_str: &str, col_str: &str) {
-    let (source, tree, analysis) = parse_file(file);
+/// --hover [<root>] <file> <line> <col> — Type info and docs.
+/// With `root`, runs full startup so hover resolves cross-file (imported
+/// types, inherited + plugin-bridged methods); without it, single-file.
+fn cli_hover(root: Option<&str>, file: &str, line_str: &str, col_str: &str) {
     let point = parse_point(line_str, col_str);
+    // Full startup BEFORE parse_file so the plugin root is pinned before the
+    // process-wide registry builds on the first parse (same order as gd).
+    let idx = root.map(|r| cli_full_startup(r).1);
+    let (source, tree, mut analysis) = parse_file(file);
+    if let Some(ref idx) = idx {
+        analysis.enrich_imported_types_with_keys(Some(idx));
+    }
 
-    // Use the same hover function as the LSP, but without module_index
-    if let Some(markdown) = analysis.hover_info(point, &source, Some(&tree), None) {
+    if let Some(markdown) = analysis.hover_info(point, &source, Some(&tree), idx.as_ref()) {
         println!("{}", markdown);
     } else {
         eprintln!("No hover info at {}:{}", line_str, col_str);

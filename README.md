@@ -167,7 +167,7 @@ perl-lsp --check [<root>] [--severity error|warning] [--format json|human]
 
 # Code exploration
 perl-lsp --outline <file>
-perl-lsp --hover <file> <line> <col>
+perl-lsp --hover [<root>] <file> <line> <col>   # <root> enables cross-file hover
 perl-lsp --type-at <file> <line> <col>
 perl-lsp --definition <root> <file> <line> <col>
 perl-lsp --references <root> <file> <line> <col>

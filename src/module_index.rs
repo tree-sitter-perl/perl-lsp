@@ -657,7 +657,11 @@ impl ModuleIndex {
     pub fn for_each_entity_bridged_to(
         &self,
         class_name: &str,
-        mut visit: impl FnMut(&Arc<CachedModule>, &crate::file_analysis::Symbol),
+        // `mod_name` is the cache key the bridging module is registered under
+        // — the authoritative handle for a follow-up `get_cached(mod_name)`.
+        // Don't re-derive it from the analysis: the registration name and the
+        // file's first `package` can differ.
+        mut visit: impl FnMut(&str, &Arc<CachedModule>, &crate::file_analysis::Symbol),
     ) {
         for mod_name in self.modules_bridging_to(class_name) {
             let Some(cached) = self.get_cached(&mod_name) else { continue };
@@ -675,7 +679,7 @@ impl ModuleIndex {
                 for sym_id in &ns.entities {
                     let idx = sym_id.0 as usize;
                     let Some(sym) = cached.analysis.symbols.get(idx) else { continue };
-                    visit(&cached, sym);
+                    visit(&mod_name, &cached, sym);
                 }
             }
         }

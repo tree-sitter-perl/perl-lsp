@@ -2586,7 +2586,7 @@ impl FileAnalysis {
         }
         let Some(idx) = module_index else { return false };
         let mut found = false;
-        idx.for_each_entity_bridged_to(class_name, |_cached, sym| {
+        idx.for_each_entity_bridged_to(class_name, |_mod, _cached, sym| {
             if found { return; }
             if sym.name != method_name { return; }
             if !matches!(sym.kind, SymKind::Sub | SymKind::Method) { return; }
@@ -2716,7 +2716,7 @@ impl FileAnalysis {
             // Collect into a temporary list to avoid borrow-checker
             // issues with the closure capturing &mut seen_names/candidates.
             let mut bridged: Vec<(String, SymKind, Option<SymbolDetail>, Option<InferredType>)> = Vec::new();
-            idx.for_each_entity_bridged_to(class_name, |_cached, sym| {
+            idx.for_each_entity_bridged_to(class_name, |_mod, _cached, sym| {
                 if !matches!(sym.kind, SymKind::Sub | SymKind::Method) { return; }
                 bridged.push((
                     sym.name.clone(),
@@ -3355,9 +3355,12 @@ impl FileAnalysis {
                                         }
                                         return Some(text);
                                     }
-                                    Some(MethodResolution::CrossFile { ref class, .. }) => {
+                                    Some(MethodResolution::CrossFile { ref class, ref def_module }) => {
                                         if let Some(idx) = module_index {
-                                            if let Some(cached) = idx.get_cached(class) {
+                                            // Bridged helper lives in `def_module`; real
+                                            // inherited method in `class`'s own module.
+                                            let module = def_module.as_deref().unwrap_or(class.as_str());
+                                            if let Some(cached) = idx.get_cached(module) {
                                                 if let Some(sub_info) = cached.sub_info(&mr.target_name) {
                                                     let sig = format_cross_file_signature(&mr.target_name, &sub_info);
                                                     let mut text = format!("```perl\n{}\n```\n\n*class {} — resolved from `{}`*", sig, class, r.target_name);
@@ -3457,9 +3460,12 @@ impl FileAnalysis {
                                 }
                                 return Some(text);
                             }
-                            Some(MethodResolution::CrossFile { ref class, .. }) => {
+                            Some(MethodResolution::CrossFile { ref class, ref def_module }) => {
                                 if let Some(idx) = module_index {
-                                    if let Some(cached) = idx.get_cached(class) {
+                                    // Bridged helper lives in `def_module`; real
+                                    // inherited method in `class`'s own module.
+                                    let module = def_module.as_deref().unwrap_or(class.as_str());
+                                    if let Some(cached) = idx.get_cached(module) {
                                         if let Some(sub_info) = cached.sub_info(&r.target_name) {
                                             let class_label = if class != cn {
                                                 format!("{} (from {})", cn, class)
@@ -4378,27 +4384,27 @@ impl FileAnalysis {
             if let Some(idx) = module_index {
                 if let Some(cached) = idx.get_cached(cls) {
                     if cached.has_sub(method_name) {
-                        // Real method in `cls`'s own module — consumer locates
-                        // it via `get_cached(cls).sub_info(method)`.
-                        result = Some(MethodResolution::CrossFile { class: cls.to_string(), def_site: None });
+                        // Real method in `cls`'s own module.
+                        result = Some(MethodResolution::CrossFile { class: cls.to_string(), def_module: None });
                         return std::ops::ControlFlow::Break(());
                     }
                 }
                 // Plugin-bridged method (e.g. a Mojo helper synthesized in
                 // another file, bridged to `cls`). The SAME bridge walk
-                // completion uses — capture the real def-site here so the
-                // result isn't lossy; the consumer would otherwise re-look-up
-                // the method in `cls`'s module, where it doesn't exist.
-                let mut bridged: Option<CrossFileDef> = None;
-                idx.for_each_entity_bridged_to(cls, |cached, sym| {
-                    if bridged.is_some() { return; }
+                // completion uses — record which module the symbol actually
+                // lives in (its registration key, not a re-derived package
+                // name) so consumers don't re-look-it-up in `cls`'s module,
+                // where a bridged helper doesn't exist.
+                let mut bridged_module: Option<String> = None;
+                idx.for_each_entity_bridged_to(cls, |mod_name, _cached, sym| {
+                    if bridged_module.is_some() { return; }
                     if !matches!(sym.kind, SymKind::Sub | SymKind::Method) { return; }
                     if sym.name == method_name {
-                        bridged = Some(CrossFileDef { path: cached.path.clone(), span: sym.selection_span });
+                        bridged_module = Some(mod_name.to_string());
                     }
                 });
-                if let Some(def_site) = bridged {
-                    result = Some(MethodResolution::CrossFile { class: cls.to_string(), def_site: Some(def_site) });
+                if bridged_module.is_some() {
+                    result = Some(MethodResolution::CrossFile { class: cls.to_string(), def_module: bridged_module });
                     return std::ops::ControlFlow::Break(());
                 }
             }
@@ -4454,7 +4460,7 @@ impl FileAnalysis {
             }
             // (3) Cross-file plugin-namespace bridge.
             if let Some(idx) = module_index {
-                idx.for_each_entity_bridged_to(cls, |cached, sym| {
+                idx.for_each_entity_bridged_to(cls, |_mod, cached, sym| {
                     if let SymbolDetail::Handler { dispatchers, .. } = &sym.detail {
                         if disp_matches(dispatchers) {
                             let prov = cached.path.file_name()
@@ -5063,29 +5069,20 @@ pub const PRIORITY_DYNAMIC: u8 = 50;
 
 // ---- Method resolution types ----
 
-/// Where a cross-file method's definition actually lives. Populated when the
-/// resolver found the method through a plugin BRIDGE — the symbol lives in the
-/// bridging file, not in `class`'s own module — so a consumer (goto-def) can
-/// jump straight there. Looking it up in `class`'s module would miss it: a
-/// bridged helper isn't a real sub there. `None` for a real inherited method
-/// in the class's own module, which the consumer locates the existing way
-/// (`get_cached(class).sub_info(method)`).
-#[derive(Debug, Clone)]
-pub struct CrossFileDef {
-    pub path: std::path::PathBuf,
-    pub span: Span,
-}
-
 /// Result of resolving a method through the inheritance chain.
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
 pub enum MethodResolution {
     /// Found in a local class within this file.
     Local { class: String, sym_id: SymbolId },
-    /// Found in a cross-file module. `def_site` is `Some` when the hit came
-    /// through a plugin bridge (carries the real location); `None` for a real
-    /// method in `class`'s own module.
-    CrossFile { class: String, def_site: Option<CrossFileDef> },
+    /// Found in a cross-file module. `def_module` names the module the
+    /// definition actually lives in: `Some(m)` when the hit came through a
+    /// plugin BRIDGE (the synthesized symbol lives in bridging module `m`, not
+    /// in `class`'s own module); `None` for a real method in `class`'s module.
+    /// Every consumer resolves location/signature the same way —
+    /// `get_cached(def_module.unwrap_or(class)).sub_info(method)` — so bridged
+    /// helpers and real inherited methods share one code path.
+    CrossFile { class: String, def_module: Option<String> },
 }
 
 /// Result of resolving a sub/method call — local symbol or cross-file metadata.

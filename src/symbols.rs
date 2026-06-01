@@ -289,19 +289,12 @@ pub fn find_definition(
             use crate::file_analysis::MethodResolution;
             let class_name = analysis.method_call_invocant_class(r, Some(module_index));
             if let Some(ref cn) = class_name {
-                if let Some(MethodResolution::CrossFile { ref class, ref def_site }) = analysis.resolve_method_in_ancestors(cn, &r.target_name, Some(module_index)) {
-                    // Bridged method: the resolver already located the real def
-                    // site (in the bridging file, not `class`'s own module).
-                    if let Some(ds) = def_site {
-                        if let Ok(module_uri) = Url::from_file_path(&ds.path) {
-                            return Some(GotoDefinitionResponse::Scalar(Location {
-                                uri: module_uri,
-                                range: span_to_range(ds.span),
-                            }));
-                        }
-                    }
-                    // Real inherited method living in `class`'s own module.
-                    if let Some(cached) = module_index.get_cached(class) {
+                if let Some(MethodResolution::CrossFile { ref class, ref def_module }) = analysis.resolve_method_in_ancestors(cn, &r.target_name, Some(module_index)) {
+                    // One path for both: a real inherited method lives in
+                    // `class`'s own module; a plugin-bridged helper lives in
+                    // `def_module` (the bridging file). Same lookup either way.
+                    let module = def_module.as_deref().unwrap_or(class);
+                    if let Some(cached) = module_index.get_cached(module) {
                         if let Some(sub_info) = cached.sub_info(&r.target_name) {
                             if let Ok(module_uri) = Url::from_file_path(&cached.path) {
                                 let line = sub_info.def_line();

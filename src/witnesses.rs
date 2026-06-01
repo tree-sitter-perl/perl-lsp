@@ -1255,7 +1255,7 @@ impl ReducerRegistry {
                 // bridged Methods aren't arity-discriminated.
                 if let Some(idx) = ctx.module_index {
                     let mut found: Option<InferredType> = None;
-                    idx.for_each_entity_bridged_to(class, |cached, sym| {
+                    idx.for_each_entity_bridged_to(class, |_mod, cached, sym| {
                         if found.is_some() {
                             return;
                         }

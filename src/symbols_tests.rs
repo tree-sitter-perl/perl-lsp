@@ -2652,3 +2652,52 @@ sub action ($c) {\n\
         loc.uri,
     );
 }
+
+/// Pin: cross-file hover on a plugin-synthesized helper. Same shape as
+/// `cross_file_plugin_helper_goto_def_resolves` but exercises the hover
+/// consumer arm, which shared the same lossy `get_cached(class).sub_info`
+/// bug (looking the bridged helper up in the class's own module). Hover
+/// needs the symbol's signature, not just a location, so this guards the
+/// unified `def_module` path end-to-end.
+#[test]
+fn cross_file_plugin_helper_hover_resolves() {
+    let provider_src = "package My::Plugin;\n\
+use Mojo::Base 'Mojolicious::Plugin';\n\
+sub register ($self, $app, $conf) {\n\
+  $app->helper(widget => sub ($c) { return Widget->new; });\n\
+}\n\
+1;\n";
+    let idx = crate::module_index::ModuleIndex::new_for_test();
+    idx.register_workspace_module(
+        std::path::PathBuf::from("/tmp/perl_lsp_pin_hover_My_Plugin.pm"),
+        std::sync::Arc::new(parse_analysis(provider_src)),
+    );
+
+    let consumer_src = "package My::Ctrl;\n\
+use Mojo::Base 'Mojolicious::Controller';\n\
+sub action ($c) {\n\
+  my $w = $c->widget;\n\
+  return $w;\n\
+}\n\
+1;\n";
+    let consumer = parse_analysis(consumer_src);
+    let mut parser = tree_sitter::Parser::new();
+    parser.set_language(&ts_parser_perl::LANGUAGE.into()).unwrap();
+    let tree = parser.parse(consumer_src, None).unwrap();
+
+    let byte = consumer_src.find("widget;").expect("call site present");
+    let prefix = &consumer_src[..byte];
+    let point = tree_sitter::Point {
+        row: prefix.matches('\n').count(),
+        column: byte - prefix.rfind('\n').map(|i| i + 1).unwrap_or(0),
+    };
+
+    let hover = consumer
+        .hover_info(point, consumer_src, Some(&tree), Some(&idx))
+        .expect("cross-file hover should resolve the bridged helper");
+    assert!(hover.contains("widget"), "hover should mention the helper, got: {hover}");
+    assert!(
+        hover.contains("Mojolicious::Controller"),
+        "hover should show the bridging class, got: {hover}",
+    );
+}
