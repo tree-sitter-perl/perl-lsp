@@ -126,6 +126,9 @@ impl LanguageServer for Backend {
                     .map(|f| f.uri.as_str())
             });
         self.module_index.set_workspace_root(root);
+        // Same root drives repo-local `.perl-lsp/` plugin discovery, so the
+        // plugin set and the per-project cache key can't disagree.
+        crate::plugin::rhai_host::set_workspace_root(root);
 
         Ok(InitializeResult {
             server_info: Some(ServerInfo {

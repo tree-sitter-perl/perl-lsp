@@ -345,6 +345,63 @@ pub fn load_bundled(engine: Arc<Engine>) -> Vec<Box<dyn FrameworkPlugin>> {
     out
 }
 
+/// The workspace root, pinned from the SAME value the LSP/CLI hands
+/// `ModuleIndex::set_workspace_root` — so repo-local plugin discovery and
+/// the per-project SQLite cache agree on what "the project" is. If they
+/// were derived independently (e.g. a cwd ancestor-walk), a plugin set
+/// loaded against one root could invalidate a cache keyed on another.
+static WORKSPACE_ROOT: std::sync::RwLock<Option<std::path::PathBuf>> =
+    std::sync::RwLock::new(None);
+
+/// Record the workspace root for repo-local plugin discovery. Accepts the
+/// same `file://…` URI (or bare path) passed to the module index; `None`
+/// clears it (no project root → no repo-local plugins). Call this before
+/// the first `build()` so the process-wide registry sees it.
+pub fn set_workspace_root(root: Option<&str>) {
+    let path = root.map(|r| {
+        std::path::PathBuf::from(r.strip_prefix("file://").unwrap_or(r))
+    });
+    if let Ok(mut guard) = WORKSPACE_ROOT.write() {
+        *guard = path;
+    }
+}
+
+/// Directories to load user `.rhai` plugins from, in priority order.
+///
+/// 1. `$PERL_LSP_PLUGIN_DIR` — explicit global opt-in (a power user's
+///    personal plugin collection), honored whenever it points at a dir.
+/// 2. `<workspace-root>/.perl-lsp/` — a project shipping plugins for its
+///    own kits, with zero global config. The root is whatever the client
+///    sent at `initialize` (or the CLI's root arg), the exact value the
+///    SQLite cache is keyed on — pinned here, never re-derived, so the
+///    fingerprint that invalidates the cache and the plugins actually
+///    loaded stay in lockstep. With no root set (single-file CLI modes),
+///    falls back to `./.perl-lsp` so running inside a project still works.
+///
+/// Both the loader and the cache fingerprint call this, so "what gets
+/// loaded" and "what invalidates the cache" can't drift apart.
+pub fn plugin_search_dirs() -> Vec<std::path::PathBuf> {
+    let mut dirs: Vec<std::path::PathBuf> = Vec::new();
+    if let Ok(dir) = std::env::var("PERL_LSP_PLUGIN_DIR") {
+        let p = std::path::PathBuf::from(dir);
+        if p.is_dir() {
+            dirs.push(p);
+        }
+    }
+    let root = WORKSPACE_ROOT
+        .read()
+        .ok()
+        .and_then(|g| g.clone())
+        .or_else(|| std::env::current_dir().ok());
+    if let Some(root) = root {
+        let repo = root.join(".perl-lsp");
+        if repo.is_dir() && !dirs.contains(&repo) {
+            dirs.push(repo);
+        }
+    }
+    dirs
+}
+
 /// Stable hash of the plugin set the next `build()` will load. Used by the
 /// SQLite module cache to invalidate stored FileAnalysis blobs when the
 /// plugins that produced them have changed — without this, editing a
@@ -353,13 +410,14 @@ pub fn load_bundled(engine: Arc<Engine>) -> Vec<Box<dyn FrameworkPlugin>> {
 /// Inputs:
 ///   * Every bundled plugin's `(id, source)` pair — catches binary
 ///     rebuilds whose only change was a `frameworks/*.rhai` edit.
-///   * Every `.rhai` file in `$PERL_LSP_PLUGIN_DIR`, with its path —
-///     catches user-plugin add / remove / rename / edit across LSP
-///     restarts.
+///   * Every `.rhai` file in each `plugin_search_dirs()` entry, with its
+///     path — catches user-plugin add / remove / rename / edit across
+///     LSP restarts, whether the plugin lives in `$PERL_LSP_PLUGIN_DIR`
+///     or a repo-local `.perl-lsp/`.
 ///
 /// Read-only: no compile, no side effects, no log spam. Fails open
-/// (returns the bundled-only hash) if the user dir can't be read,
-/// matching the rest of the loader's silently-tolerant behavior.
+/// (returns the bundled-only hash) if a dir can't be read, matching
+/// the rest of the loader's silently-tolerant behavior.
 pub fn plugin_fingerprint() -> String {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
@@ -371,8 +429,7 @@ pub fn plugin_fingerprint() -> String {
         src.hash(&mut hasher);
     }
 
-    if let Ok(dir) = std::env::var("PERL_LSP_PLUGIN_DIR") {
-        let path = std::path::PathBuf::from(&dir);
+    for path in plugin_search_dirs() {
         // Sort entries by path so the hash is independent of readdir order.
         let mut entries: Vec<std::path::PathBuf> = match std::fs::read_dir(&path) {
             Ok(read) => read

@@ -11,8 +11,9 @@ use crate::file_analysis::*;
 use crate::plugin::{self, PluginRegistry};
 
 /// Process-wide plugin registry, built once with the bundled Rhai plugins
-/// (plus anything discovered under `$PERL_LSP_PLUGIN_DIR`). All `build()`
-/// calls share it; tests that need isolation use `build_with_plugins()`.
+/// plus anything in `plugin_search_dirs()` (`$PERL_LSP_PLUGIN_DIR` and the
+/// nearest repo-local `.perl-lsp/`). All `build()` calls share it; tests
+/// that need isolation use `build_with_plugins()`.
 pub fn default_plugin_registry() -> Arc<PluginRegistry> {
     static REG: OnceLock<Arc<PluginRegistry>> = OnceLock::new();
     REG.get_or_init(|| {
@@ -21,9 +22,8 @@ pub fn default_plugin_registry() -> Arc<PluginRegistry> {
         for p in plugin::rhai_host::load_bundled(engine.clone()) {
             reg.register(p);
         }
-        if let Ok(dir) = std::env::var("PERL_LSP_PLUGIN_DIR") {
-            let path = std::path::PathBuf::from(dir);
-            for p in plugin::rhai_host::load_plugin_dir(&path, engine) {
+        for dir in plugin::rhai_host::plugin_search_dirs() {
+            for p in plugin::rhai_host::load_plugin_dir(&dir, engine.clone()) {
                 reg.register(p);
             }
         }

@@ -200,10 +200,14 @@ fn canonical_root_and_uri(root: &str) -> (std::path::PathBuf, String) {
 /// CLI command that needs cross-file resolution to behave like the
 /// running server.
 fn cli_full_startup(root: &str) -> (file_store::FileStore, module_index::ModuleIndex) {
+    let (root_path, root_uri) = canonical_root_and_uri(root);
+    // Pin repo-local `.perl-lsp/` plugin discovery to the same root the
+    // cache keys on, before `index_workspace` triggers the first build().
+    plugin::rhai_host::set_workspace_root(Some(&root_uri));
+
     let ws = index_workspace(root);
 
     let module_index = module_index::ModuleIndex::new_for_cli();
-    let (root_path, root_uri) = canonical_root_and_uri(root);
 
     let mut inc_paths = module_resolver::discover_inc_paths();
     module_resolver::add_project_lib_paths(&mut inc_paths, &root_path);
@@ -367,6 +371,9 @@ fn cli_outline(file: &str) {
             file_analysis::SymKind::Sub | file_analysis::SymKind::Method
             | file_analysis::SymKind::Package | file_analysis::SymKind::Class
             | file_analysis::SymKind::Variable | file_analysis::SymKind::Handler => {}
+            // Modules (`use` statements) are intentionally absent — outlines
+            // show structure, not imports (matches the LSP `document_symbols`
+            // path and mainstream language servers).
             _ => continue,
         }
         // Honor plugin-opted-out symbols: DSL imports, framework
