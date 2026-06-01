@@ -675,15 +675,13 @@ fn plugin_mojo_demo_outline_pinned() {
 [NAMESPACE] MyApp::Progress @L131
 [MODULE] use parent @L132
 [FUNCTION] new @L134
-  [VARIABLE] $class @L135
-  [VARIABLE] $self @L136
   [EVENT] <event> ready ($ctx) @L137
   [EVENT] <event> step ($n, $total) @L138
   [EVENT] <event> done ($result) @L139
 [FUNCTION] tick @L143
-  [VARIABLE] $self @L144
-  [VARIABLE] $n @L144
 ";
+    // File-scope `my` vars ($app, $r, $minion) survive; sub-body lexicals
+    // ($class/$self in new, $self/$n in tick) are dropped as working state.
     assert_eq!(
         rendered, expected,
         "\n---- ACTUAL ----\n{}\n---- EXPECTED ----\n{}",

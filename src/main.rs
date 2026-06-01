@@ -377,6 +377,13 @@ fn cli_outline(file: &str) {
             _ => false,
         };
         if hidden { continue; }
+        // Same noise rule as the LSP outline: sub-body lexicals are working
+        // state, not structure. `FileAnalysis::scope_within_sub_body` owns it.
+        if sym.kind == file_analysis::SymKind::Variable
+            && analysis.scope_within_sub_body(sym.scope)
+        {
+            continue;
+        }
         let mut entry = serde_json::json!({
             "name": sym.name,
             "kind": format!("{:?}", sym.kind),

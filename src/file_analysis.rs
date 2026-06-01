@@ -4690,6 +4690,26 @@ impl FileAnalysis {
         self.outline_children_of(ScopeId(0))
     }
 
+    /// Whether a scope sits inside a sub/method body (directly or via nested
+    /// blocks). The single rule behind hiding working-state lexicals from the
+    /// outline: variables declared here are local scratch, not structure, so
+    /// only file/package- and class-body-scoped variables (`our`, class
+    /// `field`s) survive. A `Class` or `File` boundary reached first means
+    /// "structural"; a `Sub`/`Method` reached first means "working state".
+    /// Both the outline tree builder and the `--outline` CLI ask this.
+    pub fn scope_within_sub_body(&self, scope: ScopeId) -> bool {
+        let mut cur = Some(scope);
+        while let Some(id) = cur {
+            let Some(s) = self.scopes.iter().find(|s| s.id == id) else { return false };
+            match s.kind {
+                ScopeKind::Sub { .. } | ScopeKind::Method { .. } => return true,
+                ScopeKind::Class { .. } | ScopeKind::File => return false,
+                ScopeKind::Block | ScopeKind::ForLoop { .. } => cur = s.parent,
+            }
+        }
+        false
+    }
+
     fn outline_children_of(&self, parent_scope: ScopeId) -> Vec<OutlineSymbol> {
         let mut result = Vec::new();
 
@@ -4785,6 +4805,7 @@ impl FileAnalysis {
                     (format!("use {}", sym.name), None, Vec::new())
                 }
                 SymKind::Variable => {
+                    if self.scope_within_sub_body(sym.scope) { continue; }
                     let detail = match &sym.detail {
                         SymbolDetail::Variable { decl_kind, .. } => match decl_kind {
                             DeclKind::My => "my",
