@@ -1337,12 +1337,33 @@ impl ReducerRegistry {
                             )
                         }
                         _ => {
+                            // A `MethodOnClass{class,..}` reached through an edge is
+                            // a fresh method dispatch: its receiver is that call's
+                            // invocant (`class`), so a fluent `ReturnExpr(Receiver)`
+                            // substitutes the dispatch class — not whatever the outer
+                            // query carried. Mirrors `query_sub_return_type`'s
+                            // `effective_receiver`. The exception is an inheritance
+                            // hop (`MethodOnClass{child} → Edge(MethodOnClass{parent})`):
+                            // there the source is itself a `MethodOnClass`, and the
+                            // child's receiver must carry through so an inherited fluent
+                            // accessor returns the child, not where `has` was declared.
+                            let receiver = match target {
+                                WitnessAttachment::MethodOnClass { class, .. }
+                                    if !matches!(
+                                        q.attachment,
+                                        WitnessAttachment::MethodOnClass { .. }
+                                    ) =>
+                                {
+                                    Some(InferredType::ClassName(class.clone()))
+                                }
+                                _ => q.receiver.clone(),
+                            };
                             let sub_q = ReducerQuery {
                                 attachment: target,
                                 point: q.point,
                                 framework: q.framework,
                                 arity_hint: q.arity_hint,
-                                receiver: q.receiver.clone(),
+                                receiver,
                                 context: q.context,
                             };
                             if let ReducedValue::Type(t) = self.query_rec(bag, &sub_q, visited) {

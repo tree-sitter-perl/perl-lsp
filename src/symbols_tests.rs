@@ -2811,3 +2811,123 @@ sub action ($c) {\n\
         "lexical-chain return type should resolve cross-file to My::Other, got: {hover}",
     );
 }
+
+/// The fluent-accessor sibling of `cross_file_helper_return_type_needs_module_index`:
+/// the helper returns `My::Other->new->acc($x)` where `acc` is a Mojo::Base `has`
+/// accessor (fluent setter — returns the invocant), NOT a plain `return $self` sub.
+/// The fluent return is modeled as `ReturnExpr(Receiver)`, so its resolution
+/// substitutes the query's receiver. Before the receiver-reset fix, the consumer's
+/// call-site receiver (`Mojolicious::Controller`, the type of `$c`) leaked down the
+/// edge chase into `MethodOnClass{My::Other, acc}` and got substituted there. The
+/// receiver for a method-call return must be that call's invocant (`My::Other`).
+#[test]
+fn cross_file_fluent_accessor_chain_return_type() {
+    let other_src = "package My::Other;\n\
+use Mojo::Base -base;\n\
+has acc => sub { {} };\n\
+1;\n";
+    let provider_src = "package My::Plugin;\n\
+use Mojo::Base 'Mojolicious::Plugin';\n\
+sub register ($self, $app, $conf) {\n\
+  $app->helper(thing => sub ($c) { return My::Other->new->acc($x); });\n\
+}\n\
+1;\n";
+    let idx = crate::module_index::ModuleIndex::new_for_test();
+    idx.register_workspace_module(
+        std::path::PathBuf::from("/tmp/perl_lsp_pin_acc_Other.pm"),
+        std::sync::Arc::new(parse_analysis(other_src)),
+    );
+    idx.register_workspace_module(
+        std::path::PathBuf::from("/tmp/perl_lsp_pin_acc_Plugin.pm"),
+        std::sync::Arc::new(parse_analysis(provider_src)),
+    );
+
+    let consumer_src = "package My::Ctrl;\n\
+use Mojo::Base 'Mojolicious::Controller';\n\
+sub action ($c) {\n\
+  my $x = $c->thing;\n\
+  return $x;\n\
+}\n\
+1;\n";
+    let consumer = parse_analysis(consumer_src);
+    let mut parser = tree_sitter::Parser::new();
+    parser.set_language(&ts_parser_perl::LANGUAGE.into()).unwrap();
+    let tree = parser.parse(consumer_src, None).unwrap();
+    let byte = consumer_src.find("thing;").expect("call site");
+    let prefix = &consumer_src[..byte];
+    let point = tree_sitter::Point {
+        row: prefix.matches('\n').count(),
+        column: byte - prefix.rfind('\n').map(|i| i + 1).unwrap_or(0),
+    };
+
+    let hover = consumer
+        .hover_info(point, consumer_src, Some(&tree), Some(&idx))
+        .expect("cross-file hover should resolve");
+    assert!(
+        hover.contains("My::Other"),
+        "fluent-accessor chain return type should resolve to My::Other (not the \
+         consumer's call-site receiver), got: {hover}",
+    );
+}
+
+/// The MRO subtlety of the receiver-reset fix: a fluent `has` accessor declared
+/// on a PARENT but dispatched on a CHILD (`Child->new->acc($x)`) must return the
+/// *child*, not the class where `has` was declared. The receiver reset keys on the
+/// dispatch class (`MethodOnClass{Child}` → receiver `Child`); the inheritance hop
+/// to `MethodOnClass{Parent, acc}` must then carry that child receiver through so
+/// the parent's `ReturnExpr(Receiver)` substitutes `Child`.
+#[test]
+fn cross_file_inherited_fluent_accessor_returns_child() {
+    let base_src = "package My::Base;\n\
+use Mojo::Base -base;\n\
+has acc => sub { {} };\n\
+1;\n";
+    let child_src = "package My::Child;\n\
+use Mojo::Base 'My::Base';\n\
+1;\n";
+    let provider_src = "package My::Plugin;\n\
+use Mojo::Base 'Mojolicious::Plugin';\n\
+sub register ($self, $app, $conf) {\n\
+  $app->helper(thing => sub ($c) { return My::Child->new->acc($x); });\n\
+}\n\
+1;\n";
+    let idx = crate::module_index::ModuleIndex::new_for_test();
+    idx.register_workspace_module(
+        std::path::PathBuf::from("/tmp/perl_lsp_pin_inh_Base.pm"),
+        std::sync::Arc::new(parse_analysis(base_src)),
+    );
+    idx.register_workspace_module(
+        std::path::PathBuf::from("/tmp/perl_lsp_pin_inh_Child.pm"),
+        std::sync::Arc::new(parse_analysis(child_src)),
+    );
+    idx.register_workspace_module(
+        std::path::PathBuf::from("/tmp/perl_lsp_pin_inh_Plugin.pm"),
+        std::sync::Arc::new(parse_analysis(provider_src)),
+    );
+
+    let consumer_src = "package My::Ctrl;\n\
+use Mojo::Base 'Mojolicious::Controller';\n\
+sub action ($c) {\n\
+  my $x = $c->thing;\n\
+  return $x;\n\
+}\n\
+1;\n";
+    let consumer = parse_analysis(consumer_src);
+    let mut parser = tree_sitter::Parser::new();
+    parser.set_language(&ts_parser_perl::LANGUAGE.into()).unwrap();
+    let tree = parser.parse(consumer_src, None).unwrap();
+    let byte = consumer_src.find("thing;").expect("call site");
+    let prefix = &consumer_src[..byte];
+    let point = tree_sitter::Point {
+        row: prefix.matches('\n').count(),
+        column: byte - prefix.rfind('\n').map(|i| i + 1).unwrap_or(0),
+    };
+
+    let hover = consumer
+        .hover_info(point, consumer_src, Some(&tree), Some(&idx))
+        .expect("cross-file hover should resolve");
+    assert!(
+        hover.contains("My::Child"),
+        "inherited fluent accessor must return the dispatch (child) class, got: {hover}",
+    );
+}
