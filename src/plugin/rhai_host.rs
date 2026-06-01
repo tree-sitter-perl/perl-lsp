@@ -327,6 +327,7 @@ const BUNDLED: &[(&str, &str)] = &[
     ("mojo-lite", include_str!("../../frameworks/mojo-lite.rhai")),
     ("minion", include_str!("../../frameworks/minion.rhai")),
     ("data-printer", include_str!("../../frameworks/data-printer.rhai")),
+    ("dbic-resultddl", include_str!("../../frameworks/dbic-resultddl.rhai")),
 ];
 
 pub fn load_bundled(engine: Arc<Engine>) -> Vec<Box<dyn FrameworkPlugin>> {
@@ -609,6 +610,7 @@ mod tests {
             ("mojo-lite", include_str!("../../frameworks/mojo-lite.rhai")),
             ("minion", include_str!("../../frameworks/minion.rhai")),
             ("data-printer", include_str!("../../frameworks/data-printer.rhai")),
+            ("dbic-resultddl", include_str!("../../frameworks/dbic-resultddl.rhai")),
         ] {
             RhaiPlugin::from_source(src, engine.clone())
                 .unwrap_or_else(|e| panic!("{}.rhai failed to compile: {e}", id));
@@ -681,6 +683,92 @@ mod tests {
         });
         assert!(has_namespace,
             "missing PluginNamespace for My::Emitter events; got: {:?}", emissions);
+    }
+
+    #[test]
+    fn bundled_dbic_resultddl_synthesizes_accessors() {
+        use crate::plugin::{ArgInfo, CallKind};
+
+        let engine = Arc::new(make_engine());
+        let bundled = load_bundled(engine);
+        let plugin = bundled
+            .into_iter()
+            .find(|p| p.id() == "dbic-resultddl")
+            .expect("dbic-resultddl is bundled");
+
+        // `col text => text;` and `has_many searches => {...};` each install
+        // an accessor named by the (autoquoted) first arg.
+        let cases = [("col", "text"), ("has_many", "searches"), ("belongs_to", "product")];
+        for (func, accessor) in cases {
+            let name_span = sp(1, 4, 1, 8);
+            let ctx = CallContext {
+                call_kind: CallKind::Function,
+                function_name: Some(func.into()),
+                method_name: None,
+                receiver_text: None,
+                receiver_type: None,
+                args: vec![ArgInfo {
+                    text: accessor.into(),
+                    string_value: Some(accessor.into()),
+                    span: name_span,
+                    content_span: None,
+                    inferred_type: Some(InferredType::String),
+                    sub_params: vec![],
+                    callable_return_edge: None,
+                }],
+                call_span: sp(1, 0, 1, 20),
+                selection_span: sp(1, 0, 1, 3),
+                current_package: Some("My::Schema::Result::Thing".into()),
+                current_package_parents: vec![],
+                current_package_uses: vec!["DBIx::Class::ResultDDL".into()],
+            };
+
+            let emissions = plugin.on_function_call(&ctx);
+            let has_method = emissions.iter().any(|e| {
+                matches!(e, EmitAction::Method { name, is_method, .. }
+                    if name == accessor && *is_method)
+            });
+            assert!(has_method,
+                "{func} '{accessor}' should synthesize an accessor Method; got: {emissions:?}");
+        }
+    }
+
+    #[test]
+    fn dbic_resultddl_skips_dynamic_and_non_dsl() {
+        use crate::plugin::{ArgInfo, CallKind};
+
+        let engine = Arc::new(make_engine());
+        let bundled = load_bundled(engine);
+        let plugin = bundled.into_iter().find(|p| p.id() == "dbic-resultddl").unwrap();
+
+        let mk = |func: &str, string_value: Option<String>| CallContext {
+            call_kind: CallKind::Function,
+            function_name: Some(func.into()),
+            method_name: None,
+            receiver_text: None,
+            receiver_type: None,
+            args: vec![ArgInfo {
+                text: "x".into(),
+                string_value,
+                span: sp(1, 4, 1, 8),
+                content_span: None,
+                inferred_type: None,
+                sub_params: vec![],
+                callable_return_edge: None,
+            }],
+            call_span: sp(1, 0, 1, 20),
+            selection_span: sp(1, 0, 1, 3),
+            current_package: Some("My::Schema::Result::Thing".into()),
+            current_package_parents: vec![],
+            current_package_uses: vec!["DBIx::Class::ResultDDL".into()],
+        };
+
+        // Dynamic column name (`col $field => ...`) — nothing to synthesize.
+        assert!(plugin.on_function_call(&mk("col", None)).is_empty(),
+            "dynamic col name must be skipped");
+        // A non-DSL function with a string arg is not our concern.
+        assert!(plugin.on_function_call(&mk("table", Some("embeddings".into()))).is_empty(),
+            "`table` declares no accessor and must emit nothing");
     }
 
     #[test]
