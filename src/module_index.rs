@@ -114,10 +114,12 @@ impl<'a> SubInfo<'a> {
         )
     }
 
-    pub fn return_type(&self) -> Option<InferredType> {
+    /// Pass `module_index` so a return type produced by a cross-file method
+    /// chain in the sub body resolves; `None` keeps it single-file.
+    pub fn return_type(&self, module_index: Option<&ModuleIndex>) -> Option<InferredType> {
         match &self.primary.detail {
             SymbolDetail::Sub { .. } => {
-                self.analysis.symbol_return_type_via_bag(self.primary.id, None)
+                self.analysis.symbol_return_type_via_bag_ctx(self.primary.id, None, module_index)
             }
             _ => None,
         }
@@ -148,11 +150,11 @@ impl<'a> SubInfo<'a> {
 
     /// Return type for an overload with the given arity, if any matches.
     #[allow(dead_code)] // public SubInfo accessor; consumed by tooling/future cross-file callers
-    pub fn return_type_for_arity(&self, arity: usize) -> Option<InferredType> {
+    pub fn return_type_for_arity(&self, arity: usize, module_index: Option<&ModuleIndex>) -> Option<InferredType> {
         for sym in std::iter::once(self.primary).chain(self.overloads.iter().copied()) {
             if let SymbolDetail::Sub { params, .. } = &sym.detail {
                 if params.len() == arity {
-                    return self.analysis.symbol_return_type_via_bag(sym.id, Some(arity));
+                    return self.analysis.symbol_return_type_via_bag_ctx(sym.id, Some(arity), module_index);
                 }
             }
         }

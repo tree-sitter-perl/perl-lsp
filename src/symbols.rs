@@ -760,7 +760,7 @@ fn complete_import_list(module_name: &str, module_index: &ModuleIndex) -> Vec<Co
     for name in &cached.analysis.export {
         if seen.insert(name.clone()) {
             let detail = cached.sub_info(name)
-                .and_then(|s| s.return_type())
+                .and_then(|s| s.return_type(None))
                 .map(|rt| format!("@EXPORT → {}", format_inferred_type(&rt)))
                 .or(Some("@EXPORT".to_string()));
             items.push(CompletionItem {
@@ -776,7 +776,7 @@ fn complete_import_list(module_name: &str, module_index: &ModuleIndex) -> Vec<Co
     for name in &cached.analysis.export_ok {
         if seen.insert(name.clone()) {
             let detail = cached.sub_info(name)
-                .and_then(|s| s.return_type())
+                .and_then(|s| s.return_type(None))
                 .map(|rt| format!("→ {}", format_inferred_type(&rt)));
             items.push(CompletionItem {
                 label: name.clone(),
@@ -1962,7 +1962,7 @@ fn imported_function_completions(
                 }
 
                 let rt_prefix = cached.sub_info(name)
-                    .and_then(|s| s.return_type())
+                    .and_then(|s| s.return_type(None))
                     .map(|rt| format!("→ {} ", format_inferred_type(&rt)))
                     .unwrap_or_default();
 
@@ -2130,7 +2130,7 @@ fn completion_detail_for_import(
 ) -> String {
     if let Some(cached) = cached {
         if let Some(sub_info) = cached.sub_info(name) {
-            if let Some(rt) = sub_info.return_type() {
+            if let Some(rt) = sub_info.return_type(None) {
                 return format!("→ {} ({})", format_inferred_type(&rt), module_name);
             }
         }
@@ -2146,7 +2146,7 @@ fn format_imported_signature(name: &str, sub_info: &SubInfo<'_>) -> String {
         .collect::<Vec<_>>()
         .join(", ");
     let mut sig = format!("sub {}({})", name, params_str);
-    if let Some(rt) = sub_info.return_type() {
+    if let Some(rt) = sub_info.return_type(None) {
         sig.push_str(&format!(" → {}", format_inferred_type(&rt)));
     }
     sig

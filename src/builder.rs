@@ -3967,6 +3967,15 @@ impl<'a> Builder<'a> {
                         });
                     }
                 }
+                // NOTE: when the RHS is a cross-file method chain it doesn't
+                // resolve here (build time has no module index), so nothing is
+                // pushed and the variable's type is a dead end at query time.
+                // The fix is "Edges, not values" — push `Variable($x) →
+                // Edge(Expr(rhs))` and resolve lazily — but the variable query
+                // path (`query_variable_type`) carries no `module_index`, so a
+                // bare edge can't chase across files. Threading the index
+                // through that path is the prerequisite. See the `#[ignore]`d
+                // `cross_file_lexical_chain_return_type` for the captured gap.
                 // Always record call/method-call bindings (independent
                 // of whether the bag resolved a type) — they're the
                 // source-sub linkage that hash-key ownership fixup

@@ -2701,3 +2701,116 @@ sub action ($c) {\n\
         "hover should show the bridging class, got: {hover}",
     );
 }
+
+/// Pin: cross-file hover return type that REQUIRES the module index — the
+/// helper returns `Other->new->fluent`, so typing the return means recursing
+/// into `My::Other`'s module to resolve `fluent`. With `module_index: None`
+/// in the return-type query (the old behavior) this came back untyped; the
+/// `_ctx` threading lights it up. Guards the return-position cross-file chain.
+#[test]
+fn cross_file_helper_return_type_needs_module_index() {
+    let other_src = "package My::Other;\n\
+use Mojo::Base -base;\n\
+sub fluent ($self) { return $self; }\n\
+1;\n";
+    let provider_src = "package My::Plugin;\n\
+use Mojo::Base 'Mojolicious::Plugin';\n\
+sub register ($self, $app, $conf) {\n\
+  $app->helper(thing => sub ($c) { return My::Other->new->fluent; });\n\
+}\n\
+1;\n";
+    let idx = crate::module_index::ModuleIndex::new_for_test();
+    idx.register_workspace_module(
+        std::path::PathBuf::from("/tmp/perl_lsp_pin_ret_Other.pm"),
+        std::sync::Arc::new(parse_analysis(other_src)),
+    );
+    idx.register_workspace_module(
+        std::path::PathBuf::from("/tmp/perl_lsp_pin_ret_Plugin.pm"),
+        std::sync::Arc::new(parse_analysis(provider_src)),
+    );
+
+    let consumer_src = "package My::Ctrl;\n\
+use Mojo::Base 'Mojolicious::Controller';\n\
+sub action ($c) {\n\
+  my $x = $c->thing;\n\
+  return $x;\n\
+}\n\
+1;\n";
+    let consumer = parse_analysis(consumer_src);
+    let mut parser = tree_sitter::Parser::new();
+    parser.set_language(&ts_parser_perl::LANGUAGE.into()).unwrap();
+    let tree = parser.parse(consumer_src, None).unwrap();
+    let byte = consumer_src.find("thing;").expect("call site");
+    let prefix = &consumer_src[..byte];
+    let point = tree_sitter::Point {
+        row: prefix.matches('\n').count(),
+        column: byte - prefix.rfind('\n').map(|i| i + 1).unwrap_or(0),
+    };
+
+    let hover = consumer
+        .hover_info(point, consumer_src, Some(&tree), Some(&idx))
+        .expect("cross-file hover should resolve");
+    assert!(
+        hover.contains("My::Other"),
+        "return type should resolve cross-file to My::Other, got: {hover}",
+    );
+}
+
+/// Captured gap: same as `cross_file_helper_return_type_needs_module_index`,
+/// but the helper routes the value through a LEXICAL (`my $g = chain; return
+/// $g`) instead of returning the chain directly. The direct form resolves
+/// (return-arm edges chase with the index); the lexical form does NOT, because
+/// the variable-resolution path (`query_variable_type` /
+/// `query_variable_with_visited`) carries no `module_index` and can't chase a
+/// cross-file edge off a `Variable` attachment. "Edges, not values" is the
+/// right fix (push `Variable($g) → Edge(Expr(rhs))`), but it needs the index
+/// threaded through the variable query path first. Un-ignore when that lands.
+#[test]
+#[ignore = "needs module_index threaded through query_variable_type (Edges, not values)"]
+fn cross_file_lexical_chain_return_type() {
+    let other_src = "package My::Other;\n\
+use Mojo::Base -base;\n\
+sub fluent ($self) { return $self; }\n\
+1;\n";
+    let provider_src = "package My::Plugin;\n\
+use Mojo::Base 'Mojolicious::Plugin';\n\
+sub register ($self, $app, $conf) {\n\
+  $app->helper(thing => sub ($c) { my $g = My::Other->new->fluent; return $g; });\n\
+}\n\
+1;\n";
+    let idx = crate::module_index::ModuleIndex::new_for_test();
+    idx.register_workspace_module(
+        std::path::PathBuf::from("/tmp/perl_lsp_pin_lex_Other.pm"),
+        std::sync::Arc::new(parse_analysis(other_src)),
+    );
+    idx.register_workspace_module(
+        std::path::PathBuf::from("/tmp/perl_lsp_pin_lex_Plugin.pm"),
+        std::sync::Arc::new(parse_analysis(provider_src)),
+    );
+
+    let consumer_src = "package My::Ctrl;\n\
+use Mojo::Base 'Mojolicious::Controller';\n\
+sub action ($c) {\n\
+  my $x = $c->thing;\n\
+  return $x;\n\
+}\n\
+1;\n";
+    let consumer = parse_analysis(consumer_src);
+    let mut parser = tree_sitter::Parser::new();
+    parser.set_language(&ts_parser_perl::LANGUAGE.into()).unwrap();
+    let tree = parser.parse(consumer_src, None).unwrap();
+    let byte = consumer_src.find("thing;").expect("call site");
+    let prefix = &consumer_src[..byte];
+    let point = tree_sitter::Point {
+        row: prefix.matches('\n').count(),
+        column: byte - prefix.rfind('\n').map(|i| i + 1).unwrap_or(0),
+    };
+
+    let hover = consumer
+        .hover_info(point, consumer_src, Some(&tree), Some(&idx))
+        .expect("cross-file hover should resolve");
+    assert!(
+        hover.contains("My::Other"),
+        "lexical-chain return type should resolve cross-file to My::Other, got: {hover}",
+    );
+}

@@ -2372,6 +2372,22 @@ impl FileAnalysis {
         sym_id: SymbolId,
         arg_count: Option<usize>,
     ) -> Option<InferredType> {
+        self.symbol_return_type_via_bag_ctx(sym_id, arg_count, None)
+    }
+
+    /// As `symbol_return_type_via_bag`, but with a `ModuleIndex` so the
+    /// reducer chase can cross module boundaries — the sub's body may return
+    /// a value typed by a cross-file method chain (`my $m = Foo->new->bar; …;
+    /// return $m`). Without the index that chain dies at the boundary and the
+    /// return type comes back `None`. Pass the index whenever the query has
+    /// one (hover/completion against a cached module); the bare wrapper above
+    /// keeps `None` for the many call sites that don't.
+    pub(crate) fn symbol_return_type_via_bag_ctx(
+        &self,
+        sym_id: SymbolId,
+        arg_count: Option<usize>,
+        module_index: Option<&ModuleIndex>,
+    ) -> Option<InferredType> {
         use crate::witnesses::{
             BagContext, FrameworkFact, ReducedValue, ReducerQuery, ReducerRegistry,
             WitnessAttachment,
@@ -2381,7 +2397,7 @@ impl FileAnalysis {
         let ctx = BagContext {
             scopes: &self.scopes,
             package_framework: &self.package_framework,
-            module_index: None,
+            module_index,
             package_parents: &self.package_parents,
             };
         // Default the arity hint from the sym's own param count when
@@ -3364,7 +3380,7 @@ impl FileAnalysis {
                                                 if let Some(sub_info) = cached.sub_info(&mr.target_name) {
                                                     let sig = format_cross_file_signature(&mr.target_name, &sub_info);
                                                     let mut text = format!("```perl\n{}\n```\n\n*class {} — resolved from `{}`*", sig, class, r.target_name);
-                                                    if let Some(rt) = sub_info.return_type() {
+                                                    if let Some(rt) = sub_info.return_type(Some(idx)) {
                                                         text.push_str(&format!("\n\n*returns: {}*", format_inferred_type(&rt)));
                                                     }
                                                     if let Some(doc) = sub_info.doc() {
@@ -3418,7 +3434,7 @@ impl FileAnalysis {
                                 .collect::<Vec<_>>()
                                 .join(", ");
                             let mut sig = format!("sub {}({})", r.target_name, sig_params);
-                            if let Some(rt) = sub_info.return_type() {
+                            if let Some(rt) = sub_info.return_type(Some(idx)) {
                                 sig.push_str(&format!(" → {}", format_inferred_type(&rt)));
                             }
                             let mut text = format!("```perl\n{}\n```", sig);
@@ -3474,7 +3490,7 @@ impl FileAnalysis {
                                             };
                                             let sig = format_cross_file_signature(&r.target_name, &sub_info);
                                             let mut text = format!("```perl\n{}\n```\n\n*class {}*", sig, class_label);
-                                            if let Some(rt) = sub_info.return_type() {
+                                            if let Some(rt) = sub_info.return_type(Some(idx)) {
                                                 text.push_str(&format!("\n\n*returns: {}*", format_inferred_type(&rt)));
                                             }
                                             if let Some(doc) = sub_info.doc() {
