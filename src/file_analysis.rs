@@ -4801,9 +4801,14 @@ impl FileAnalysis {
                 SymKind::Package => {
                     (sym.name.clone(), Some("package".to_string()), Vec::new())
                 }
-                SymKind::Module => {
-                    (format!("use {}", sym.name), None, Vec::new())
-                }
+                // `use` statements are not structure — mainstream language
+                // servers (rust-analyzer, pyright, tsserver, gopls, clangd)
+                // all keep imports out of the document outline. The synthetic
+                // expansions a kit plugin emits would be even worse (a dozen
+                // per `use Clove::Base 'Controller'`), but real ones are noise
+                // too. Modules still drive resolution; they're just not
+                // navigation targets.
+                SymKind::Module => continue,
                 SymKind::Variable => {
                     if self.scope_within_sub_body(sym.scope) { continue; }
                     let detail = match &sym.detail {

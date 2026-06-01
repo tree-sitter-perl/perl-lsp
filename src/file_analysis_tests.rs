@@ -652,10 +652,6 @@ fn plugin_mojo_demo_outline_pinned() {
     let rendered = render_outline(&fa.document_symbols());
     let expected = "\
 [NAMESPACE] MyApp @L34
-[MODULE] use strict @L35
-[MODULE] use warnings @L36
-[MODULE] use Mojolicious::Lite @L37
-[MODULE] use Mojolicious @L38
 [VARIABLE] $app @L44
 [FUNCTION] <helper> current_user ($fallback) @L45
 [FUNCTION] <helper> users.create ($name, $email) @L52
@@ -668,20 +664,19 @@ fn plugin_mojo_demo_outline_pinned() {
 [FUNCTION] <route> GET /users/profile @L79
 [FUNCTION] <route> POST /users/profile ($form_data) @L84
 [FUNCTION] <route> ANY /fallback @L90
-[MODULE] use Minion @L104
 [VARIABLE] $minion @L105
 [FUNCTION] <task> send_email ($to, $subject, $body) @L107
 [FUNCTION] <task> resize_image ($path, $width, $height) @L113
 [NAMESPACE] MyApp::Progress @L131
-[MODULE] use parent @L132
 [FUNCTION] new @L134
   [EVENT] <event> ready ($ctx) @L137
   [EVENT] <event> step ($n, $total) @L138
   [EVENT] <event> done ($result) @L139
 [FUNCTION] tick @L143
 ";
-    // File-scope `my` vars ($app, $r, $minion) survive; sub-body lexicals
-    // ($class/$self in new, $self/$n in tick) are dropped as working state.
+    // `use` lines absent: outlines show structure, not imports. File-scope
+    // `my` vars ($app, $r, $minion) survive; sub-body lexicals ($class/$self
+    // in new, $self/$n in tick) are dropped as working state.
     assert_eq!(
         rendered, expected,
         "\n---- ACTUAL ----\n{}\n---- EXPECTED ----\n{}",
