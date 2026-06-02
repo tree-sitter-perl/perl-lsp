@@ -57,8 +57,8 @@ fn type_constraint_inner(name, params) {
 // future Types::Standard release land here, nowhere else.
 
 fn types_standard_exports() {
-    [
-        // Core type hierarchy
+    // Base type constants, each shipping is_X / assert_X / to_X companions.
+    let base = [
         "Any", "Item",
         "Bool",
         "Undef", "Defined", "Value",
@@ -67,101 +67,45 @@ fn types_standard_exports() {
         "Ref", "CodeRef", "RegexpRef", "GlobRef", "FileHandle",
         "ArrayRef", "HashRef", "ScalarRef",
         "Object",
-        // Parameterisable container types
         "Map", "Optional", "Slurpy", "Tuple", "CycleTuple", "Dict",
-        // Type combinators and utilities
         "Maybe", "Overload", "StrMatch", "OptList", "Tied",
         "Enum",
-        // Constraint constructors (also in type_constraint_names)
         "InstanceOf", "ConsumerOf", "HasMethods",
-        // Coercion / validation helpers exported as functions
-        "slurpy", "MkOpt", "Join", "Split",
-        // is_* / assert_* / to_* families: every type constant above
-        // ships these three companions. Listed individually so the
-        // import-gate suppresses `assert_InstanceOf(...)` etc. too.
-        "is_Any", "assert_Any", "to_Any",
-        "is_Item", "assert_Item", "to_Item",
-        "is_Bool", "assert_Bool", "to_Bool",
-        "is_Undef", "assert_Undef", "to_Undef",
-        "is_Defined", "assert_Defined", "to_Defined",
-        "is_Value", "assert_Value", "to_Value",
-        "is_Str", "assert_Str", "to_Str",
-        "is_LaxNum", "assert_LaxNum", "to_LaxNum",
-        "is_StrictNum", "assert_StrictNum", "to_StrictNum",
-        "is_Num", "assert_Num", "to_Num",
-        "is_Int", "assert_Int", "to_Int",
-        "is_ClassName", "assert_ClassName", "to_ClassName",
-        "is_RoleName", "assert_RoleName", "to_RoleName",
-        "is_Ref", "assert_Ref", "to_Ref",
-        "is_CodeRef", "assert_CodeRef", "to_CodeRef",
-        "is_RegexpRef", "assert_RegexpRef", "to_RegexpRef",
-        "is_GlobRef", "assert_GlobRef", "to_GlobRef",
-        "is_FileHandle", "assert_FileHandle", "to_FileHandle",
-        "is_ArrayRef", "assert_ArrayRef", "to_ArrayRef",
-        "is_HashRef", "assert_HashRef", "to_HashRef",
-        "is_ScalarRef", "assert_ScalarRef", "to_ScalarRef",
-        "is_Object", "assert_Object", "to_Object",
-        "is_Maybe", "assert_Maybe", "to_Maybe",
-        "is_Map", "assert_Map", "to_Map",
-        "is_Optional", "assert_Optional", "to_Optional",
-        "is_Slurpy", "assert_Slurpy", "to_Slurpy",
-        "is_Tuple", "assert_Tuple", "to_Tuple",
-        "is_CycleTuple", "assert_CycleTuple", "to_CycleTuple",
-        "is_Dict", "assert_Dict", "to_Dict",
-        "is_Overload", "assert_Overload", "to_Overload",
-        "is_StrMatch", "assert_StrMatch", "to_StrMatch",
-        "is_OptList", "assert_OptList", "to_OptList",
-        "is_Tied", "assert_Tied", "to_Tied",
-        "is_Enum", "assert_Enum", "to_Enum",
-        "is_InstanceOf", "assert_InstanceOf", "to_InstanceOf",
-        "is_ConsumerOf", "assert_ConsumerOf", "to_ConsumerOf",
-        "is_HasMethods", "assert_HasMethods", "to_HasMethods",
-    ]
+    ];
+    // Coercion / validation helpers: exported as plain functions, no companions.
+    let standalone = ["slurpy", "MkOpt", "Join", "Split"];
+    let out = [];
+    for t in base { out += t; out += "is_" + t; out += "assert_" + t; out += "to_" + t; }
+    for t in standalone { out += t; }
+    out
 }
 
 fn types_common_string_exports() {
-    [
+    let base = [
         "SimpleStr", "NonEmptySimpleStr",
         "NonEmptyStr",
         "LowerCaseStr", "UpperCaseStr",
         "LowerCaseSimpleStr", "UpperCaseSimpleStr",
         "StrLength", "DelimitedStr",
         "NumericCode", "Password", "StrongPassword",
-        "is_SimpleStr", "assert_SimpleStr", "to_SimpleStr",
-        "is_NonEmptySimpleStr", "assert_NonEmptySimpleStr", "to_NonEmptySimpleStr",
-        "is_NonEmptyStr", "assert_NonEmptyStr", "to_NonEmptyStr",
-        "is_LowerCaseStr", "assert_LowerCaseStr", "to_LowerCaseStr",
-        "is_UpperCaseStr", "assert_UpperCaseStr", "to_UpperCaseStr",
-        "is_LowerCaseSimpleStr", "assert_LowerCaseSimpleStr", "to_LowerCaseSimpleStr",
-        "is_UpperCaseSimpleStr", "assert_UpperCaseSimpleStr", "to_UpperCaseSimpleStr",
-        "is_StrLength", "assert_StrLength", "to_StrLength",
-        "is_DelimitedStr", "assert_DelimitedStr", "to_DelimitedStr",
-        "is_NumericCode", "assert_NumericCode", "to_NumericCode",
-        "is_Password", "assert_Password", "to_Password",
-        "is_StrongPassword", "assert_StrongPassword", "to_StrongPassword",
-    ]
+    ];
+    let out = [];
+    for t in base { out += t; out += "is_" + t; out += "assert_" + t; out += "to_" + t; }
+    out
 }
 
 fn types_common_numeric_exports() {
-    [
+    let base = [
         "PositiveNum", "PositiveOrZeroNum",
         "PositiveInt", "PositiveOrZeroInt",
         "NegativeNum", "NegativeOrZeroNum",
         "NegativeInt", "NegativeOrZeroInt",
         "SingleDigit",
         "NumRange", "IntRange",
-        "is_PositiveNum", "assert_PositiveNum", "to_PositiveNum",
-        "is_PositiveOrZeroNum", "assert_PositiveOrZeroNum", "to_PositiveOrZeroNum",
-        "is_PositiveInt", "assert_PositiveInt", "to_PositiveInt",
-        "is_PositiveOrZeroInt", "assert_PositiveOrZeroInt", "to_PositiveOrZeroInt",
-        "is_NegativeNum", "assert_NegativeNum", "to_NegativeNum",
-        "is_NegativeOrZeroNum", "assert_NegativeOrZeroNum", "to_NegativeOrZeroNum",
-        "is_NegativeInt", "assert_NegativeInt", "to_NegativeInt",
-        "is_NegativeOrZeroInt", "assert_NegativeOrZeroInt", "to_NegativeOrZeroInt",
-        "is_SingleDigit", "assert_SingleDigit", "to_SingleDigit",
-        "is_NumRange", "assert_NumRange", "to_NumRange",
-        "is_IntRange", "assert_IntRange", "to_IntRange",
-    ]
+    ];
+    let out = [];
+    for t in base { out += t; out += "is_" + t; out += "assert_" + t; out += "to_" + t; }
+    out
 }
 
 // `use Types::Standard qw/Str Int .../` → emit Import so the named constants

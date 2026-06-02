@@ -350,6 +350,13 @@ fn collect_from_analysis(
 ) {
     use crate::file_analysis::HashKeyOwner;
 
+    // `name` is constant across all refs in this call (it is `target.name`), so
+    // the only varying key is the invocant class. Cache chains keyed by class to
+    // avoid an O(refs × ancestor_depth) DFS on large files with many same-method
+    // calls against the same class.
+    let mut rename_chain_cache: std::collections::HashMap<String, Vec<String>> =
+        std::collections::HashMap::new();
+
     // Include declaration spans when this file defines the target.
     for sym in &analysis.symbols {
         if symbol_defines_target(sym, target) {
@@ -405,11 +412,13 @@ fn collect_from_analysis(
                 let scope = callable_scope_for_refs.as_ref().unwrap();
                 match (analysis.method_call_invocant_class(r, module_index), scope) {
                     (Some(cn), Some(pkg)) => {
-                        &cn == pkg
-                            || analysis
-                                .method_rename_chain(&cn, &r.target_name, module_index)
-                                .iter()
-                                .any(|c| c == pkg)
+                        &cn == pkg || rename_chain_cache
+                            .entry(cn.clone())
+                            .or_insert_with(|| {
+                                analysis.method_rename_chain(&cn, &r.target_name, module_index)
+                            })
+                            .iter()
+                            .any(|c| c == pkg)
                     }
                     _ => false,
                 }
