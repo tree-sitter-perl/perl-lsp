@@ -20,8 +20,13 @@ fn triggers() {
         // Event wire-ups also happen inside Mojo plugins subscribing to an
         // emitter they hold (`$minion->on(worker => ...)` in a plugin's
         // `register`). The plugin package isn't itself an EventEmitter, so
-        // gate on the receiver type in the hook (already done) and let this
-        // trigger open the door.
+        // this trigger opens the door there. `resolve_event` does NOT gate on
+        // receiver class — it takes the receiver's class as the handler's
+        // owner (falling back to `current_package`), the same no-allowlist
+        // stance as minion: the `on`/`emit`/`subscribe` verb + a string first
+        // arg is the signal. A stray `$x->on('e', sub)` in such a file thus
+        // registers an owner-scoped handler; harmless (owner won't match an
+        // unrelated `emit`).
         #{ ClassIsa: "Mojolicious::Plugin" },
     ]
 }
