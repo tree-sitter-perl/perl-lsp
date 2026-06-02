@@ -9428,3 +9428,58 @@ sub action {
         hover_text,
     );
 }
+
+/// `has x => (isa => InstanceOf['Foo'])` — the constraint is `InstanceOf['Foo']`,
+/// a Type::Tiny constraint *value*, not a class. The core types that call
+/// expression as `TypeConstraintOf(ClassName(Foo))` (plugin fold), and the
+/// accessor projects the constrained inner, so `x` returns `Foo`.
+#[test]
+fn moo_instanceof_isa_types_accessor_to_inner_class() {
+    let fa = build_fa(
+        "package T;\nuse Moo;\nuse Types::Standard qw/InstanceOf/;\nhas thing => (is => 'ro', isa => InstanceOf['My::Thing']);\n1;\n",
+    );
+    assert_eq!(
+        fa.sub_return_type_at_arity("thing", Some(0)),
+        Some(InferredType::ClassName("My::Thing".to_string())),
+        "InstanceOf['My::Thing'] isa must give the getter a My::Thing return",
+    );
+}
+
+/// The constructor expression itself is a `TypeConstraintOf` — NOT the inner
+/// class. `$t->name` must see a constraint (so it can route to Type::Tiny
+/// later), and an `isa => $t` projects the inner. This guards against the
+/// lossy "InstanceOf['Foo'] == ClassName(Foo)" shortcut we rejected.
+#[test]
+fn instanceof_expression_is_a_type_constraint_not_the_class() {
+    let fa = build_fa(
+        "package T;\nuse Moo;\nuse Types::Standard qw/InstanceOf/;\nmy $t = InstanceOf['My::Thing'];\n1;\n",
+    );
+    let ty = fa
+        .inferred_type_via_bag("$t", Point::new(3, 20))
+        .expect("$t should carry a type");
+    assert!(
+        matches!(&ty, InferredType::TypeConstraintOf(inner)
+            if matches!(inner.as_ref(), InferredType::ClassName(c) if c == "My::Thing")),
+        "InstanceOf['My::Thing'] is a TypeConstraintOf(ClassName(My::Thing)), got {:?}",
+        ty,
+    );
+    assert!(
+        ty.constrained_inner().and_then(|i| i.class_name()) == Some("My::Thing"),
+        "constrained_inner projects the class for the isa→accessor path",
+    );
+}
+
+/// const-fold / variable path: `my $t = InstanceOf['Foo']; has x => (isa => $t)`.
+/// `has` edges to the RHS `$t`, whose type is the constraint, and projects the
+/// inner — no special handling of the variable form.
+#[test]
+fn moo_isa_via_constraint_variable_projects_inner() {
+    let fa = build_fa(
+        "package T;\nuse Moo;\nuse Types::Standard qw/InstanceOf/;\nmy $t = InstanceOf['My::Thing'];\nhas thing => (is => 'ro', isa => $t);\n1;\n",
+    );
+    assert_eq!(
+        fa.sub_return_type_at_arity("thing", Some(0)),
+        Some(InferredType::ClassName("My::Thing".to_string())),
+        "isa => $constraint_var must project the constrained inner onto the accessor",
+    );
+}

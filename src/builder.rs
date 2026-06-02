@@ -225,6 +225,7 @@ fn build_with_plugins_inner(
         open_statement_package: None,
         plugins,
         dispatch_manifest: std::collections::HashMap::new(),
+        type_constraint_names: std::collections::HashSet::new(),
         provisional_dispatches: Vec::new(),
         method_call_invocant: std::collections::HashMap::new(),
         parametric_emitted_refs: std::collections::HashSet::new(),
@@ -234,6 +235,11 @@ fn build_with_plugins_inner(
         .plugins
         .dispatch_verbs()
         .map(|d| (d.verb.clone(), d.clone()))
+        .collect();
+    b.type_constraint_names = b
+        .plugins
+        .type_constraint_names()
+        .map(|s| s.to_string())
         .collect();
 
     // Create file-level scope and walk
@@ -1078,6 +1084,10 @@ struct Builder<'a> {
     /// construction (trigger-independent, like overrides). Drives provisional
     /// dispatch collection in the method-call walk.
     dispatch_manifest: std::collections::HashMap<String, plugin::DispatchVerb>,
+    /// Constraint-constructor name gate from plugin `type_constraint_names()`
+    /// (`InstanceOf`, …), flattened once. A call to one of these is typed as
+    /// `TypeConstraintOf` via the plugin's fold rather than its callee return.
+    type_constraint_names: std::collections::HashSet<String>,
     /// Dispatch candidates recorded during the walk, promoted to refs in
     /// enrichment once the receiver's cross-file class is known. See
     /// `file_analysis::ProvisionalDispatch`.
@@ -4298,6 +4308,18 @@ impl<'a> Builder<'a> {
             | "bareword"
             | "scoped_identifier" => {
                 let bare = self.forward_callee_name(node)?;
+                // Type::Tiny constraint constructor (`InstanceOf['Foo']`): the
+                // call is a *value* of type `TypeConstraintOf(inner)` — you
+                // call `->check` on it, not Foo's methods. The plugin folds the
+                // params (core extracts them, rule #1); we wrap.
+                if self.type_constraint_names.contains(&bare) {
+                    let params = self.extract_constraint_params(node);
+                    if let Some(inner) = self.plugins.type_constraint_inner(&bare, &params) {
+                        return Some(WitnessPayload::InferredType(
+                            InferredType::TypeConstraintOf(Box::new(inner)),
+                        ));
+                    }
+                }
                 let sid = self.find_callee_symbol(&bare)?;
                 Some(WitnessPayload::Edge(WitnessAttachment::Symbol(sid)))
             }
@@ -5256,6 +5278,11 @@ impl<'a> Builder<'a> {
         let mut attr_names: Vec<(String, Span)> = Vec::new();
         let mut is_value: Option<String> = None;
         let mut isa_value: Option<String> = None;
+        // The `isa` value NODE — for a parametric constraint
+        // (`InstanceOf['Foo']`) `extract_fat_comma_pairs` drops the value
+        // (it isn't a bareword/string), so the node is the only handle.
+        // Read structurally, never re-parsed.
+        let mut isa_value_node: Option<Node<'a>> = None;
         let mut mojo_default_node: Option<Node<'a>> = None;
 
         // Get the arguments node
@@ -5316,6 +5343,9 @@ impl<'a> Builder<'a> {
                                 _ => {}
                             }
                         }
+                        if isa_value_node.is_none() {
+                            isa_value_node = self.fat_comma_value_node(*child, "isa");
+                        }
                     }
                     _ => {}
                 }
@@ -5327,7 +5357,21 @@ impl<'a> Builder<'a> {
         // Map isa value to InferredType
         let return_type = match mode {
             FrameworkMode::Moo | FrameworkMode::Moose => {
-                isa_value.as_deref().and_then(|isa| self.map_isa_to_type(isa, mode))
+                // String / bareword isa (`'Str'`, `'My::Class'`) → meaning-map.
+                // A parametric constraint (`InstanceOf['Foo']`) isn't a string,
+                // so resolve its expression type and ask the *constraint* what
+                // it constrains to (rule #10 — the type answers). Same path
+                // covers `isa => $t` where `$t` is a constraint-typed variable.
+                isa_value
+                    .as_deref()
+                    .and_then(|isa| self.map_isa_to_type(isa, mode))
+                    .or_else(|| {
+                        let n = isa_value_node?;
+                        self.emit_expr_witness(n);
+                        self.bag_query_expr_span(node_to_span(n))?
+                            .constrained_inner()
+                            .cloned()
+                    })
             }
             FrameworkMode::MojoBase => {
                 // Fluent return: ClassName(current_package)
@@ -5681,6 +5725,83 @@ impl<'a> Builder<'a> {
             return;
         }
         names.extend(self.extract_string_list(node));
+    }
+
+    /// Walk a constraint constructor's args (`InstanceOf['Foo']`,
+    /// `Enum['a','b']`) into a flat param list for the plugin fold. The
+    /// arg is the parameterizing arrayref `['Foo', ...]`; we flatten its
+    /// elements. String elements fill `string` (class names, enum values);
+    /// nested type params (`Int`, `InstanceOf[...]`) leave the `ty` slot
+    /// for a later pass (nesting is deferred). Rule #1: only the builder
+    /// walks these nodes — the plugin gets the structured params.
+    fn extract_constraint_params(&self, call_node: Node<'a>) -> Vec<plugin::ConstraintParam> {
+        let mut params = Vec::new();
+        let Some(args) = call_node.child_by_field_name("arguments") else {
+            return params;
+        };
+        // The `[...]` arrayref holds the type params; flatten one level.
+        // If the args aren't an arrayref (`InstanceOf('Foo')`), scan them
+        // directly under the same loop.
+        let container = args;
+        for i in 0..container.named_child_count() {
+            let Some(child) = container.named_child(i) else { continue };
+            match child.kind() {
+                "string_literal" | "interpolated_string_literal" => {
+                    if let Some(s) = self.extract_string_content(child) {
+                        params.push(plugin::ConstraintParam { string: Some(s), ty: None });
+                    }
+                }
+                "anonymous_array_expression" | "array_ref_expression" => {
+                    for j in 0..child.named_child_count() {
+                        let Some(el) = child.named_child(j) else { continue };
+                        if matches!(el.kind(), "string_literal" | "interpolated_string_literal") {
+                            if let Some(s) = self.extract_string_content(el) {
+                                params.push(plugin::ConstraintParam { string: Some(s), ty: None });
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        params
+    }
+
+    /// The value NODE for fat-comma `key` in a `( k => v, ... )` list,
+    /// without stringifying — companion to `extract_fat_comma_pairs` for
+    /// the complex values that one drops (a Type::Tiny constructor). The
+    /// caller walks the node structurally.
+    fn fat_comma_value_node(&self, node: Node<'a>, key: &str) -> Option<Node<'a>> {
+        let count = node.child_count();
+        let mut i = 0;
+        while i < count {
+            let key_node = match node.child(i) {
+                Some(c) if c.is_named() => c,
+                _ => { i += 1; continue; }
+            };
+            let this_key = match key_node.kind() {
+                "bareword" | "autoquoted_bareword" => {
+                    key_node.utf8_text(self.source).ok().map(|s| s.to_string())
+                }
+                "string_literal" | "interpolated_string_literal" => {
+                    self.extract_string_content(key_node)
+                }
+                _ => { i += 1; continue; }
+            };
+            i += 1; // step over the key
+            while i < count {
+                match node.child(i) {
+                    Some(c) if c.kind() == "=>" => { i += 1; break; }
+                    Some(c) if !c.is_named() => { i += 1; }
+                    _ => break,
+                }
+            }
+            if this_key.as_deref() == Some(key) {
+                return node.child(i).filter(|c| c.is_named());
+            }
+            i += 1;
+        }
+        None
     }
 
     /// Extract key-value pairs from a fat-comma list expression.

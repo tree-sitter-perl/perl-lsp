@@ -553,6 +553,22 @@ pub struct DispatchVerb {
     pub name_arg_index: usize,
 }
 
+/// One extracted parameter of a parametric type-constraint constructor
+/// (`InstanceOf['Foo']` → one param with `string: "Foo"`). The builder
+/// fills exactly one of the two fields per param (rule #1 — it walked the
+/// node so the plugin doesn't have to): `string` for a string-literal
+/// param (class names, enum values), `ty` for a nested type param (`Int`,
+/// `InstanceOf[...]`, …) once nesting is resolved. Handed to
+/// `type_constraint_inner` so the plugin folds however many params there
+/// are into the constrained inner type.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConstraintParam {
+    #[serde(default)]
+    pub string: Option<String>,
+    #[serde(default)]
+    pub ty: Option<InferredType>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum OverrideTarget {
     /// Method `name` defined on the package `class`. Match is by exact
@@ -584,6 +600,29 @@ pub trait FrameworkPlugin: Send + Sync {
     /// `DispatchVerb`. Default empty; only dispatch-style plugins declare.
     fn dispatch_verbs(&self) -> &[DispatchVerb] {
         &[]
+    }
+
+    /// Names this plugin treats as type-constraint constructors
+    /// (`InstanceOf`, `ConsumerOf`, …). A cheap dispatch gate: the builder
+    /// only folds a call into a `TypeConstraintOf` when its name is in the
+    /// union of these across plugins. (First cut — a global gate; later
+    /// this moves to the import seam so it's package-scoped.)
+    fn type_constraint_names(&self) -> &[String] {
+        &[]
+    }
+
+    /// Fold a constraint constructor's extracted params into the
+    /// *constrained inner* type (the type a satisfying value has). The
+    /// builder wraps the result in `TypeConstraintOf`. Return `None` to
+    /// decline (`name` not ours, or unfoldable params). Arity lives here,
+    /// not in the core — see `ConstraintParam`.
+    #[allow(unused_variables)]
+    fn type_constraint_inner(
+        &self,
+        name: &str,
+        params: &[ConstraintParam],
+    ) -> Option<InferredType> {
+        None
     }
 
     // ---- Emit hooks (parse time) ----
@@ -849,6 +888,30 @@ impl PluginRegistry {
     /// Trigger-independent, same rationale as `overrides`.
     pub fn dispatch_verbs<'a>(&'a self) -> impl Iterator<Item = &'a DispatchVerb> + 'a {
         self.plugins.iter().flat_map(|p| p.dispatch_verbs().iter())
+    }
+
+    /// Union of constraint-constructor names across the registry — the
+    /// builder's dispatch gate for which calls to fold into a constraint.
+    pub fn type_constraint_names<'a>(&'a self) -> impl Iterator<Item = &'a str> + 'a {
+        self.plugins
+            .iter()
+            .flat_map(|p| p.type_constraint_names().iter().map(|s| s.as_str()))
+    }
+
+    /// Fold a constraint constructor → its inner type, asking the plugin(s)
+    /// that claim `name`. First non-`None` wins.
+    pub fn type_constraint_inner(
+        &self,
+        name: &str,
+        params: &[ConstraintParam],
+    ) -> Option<InferredType> {
+        self.plugins.iter().find_map(|p| {
+            if p.type_constraint_names().iter().any(|n| n == name) {
+                p.type_constraint_inner(name, params)
+            } else {
+                None
+            }
+        })
     }
 
     /// Return plugins whose triggers match the current package context.

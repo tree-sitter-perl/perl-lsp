@@ -1042,6 +1042,7 @@ fn receiver_discriminant(r: &Option<InferredType>) -> u8 {
         InferredType::String => 8,
         InferredType::Parametric(_) => 9,
         InferredType::Sequence(_) => 10,
+        InferredType::TypeConstraintOf(_) => 11,
     }
 }
 

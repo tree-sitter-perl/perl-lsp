@@ -539,6 +539,17 @@ pub enum InferredType {
     /// new variants in the middle would shift every subsequent
     /// variant's wire-format index and silently misread old blobs.
     Sequence(Vec<InferredType>),
+    /// A Type::Tiny / Types::Standard constraint *object* —
+    /// `InstanceOf['Foo']`, `ArrayRef[Int]`, … — carrying the type it
+    /// constrains values to. The constraint is a value in its own right:
+    /// method dispatch on it routes to `Type::Tiny` (deferred), NOT the
+    /// inner type. Its one job here is projection: an `isa => <constraint>`
+    /// gives its accessor the *constrained* (inner) type via
+    /// `constrained_inner()`. A plugin's `type_constraint_inner` fold
+    /// produces the inner; the core wraps it. See
+    /// `docs/prompt-type-constraint-types.md`. Kept at the END for
+    /// bincode variant-index stability (bump `EXTRACT_VERSION`).
+    TypeConstraintOf(Box<InferredType>),
 }
 
 /// Concrete parametric flavors + type-level operators. Each
@@ -665,6 +676,18 @@ impl InferredType {
             InferredType::ClassName(name) => Some(name.as_str()),
             InferredType::FirstParam { package } => Some(package.as_str()),
             InferredType::Parametric(p) => p.class_name(),
+            _ => None,
+        }
+    }
+
+    /// Project a `TypeConstraintOf(inner)` to its constrained inner type —
+    /// the type a value satisfying this constraint has. `None` for any
+    /// non-constraint type. This is the rule-#10 "ask the value" entry
+    /// point: `has`'s isa→accessor projection calls it without ever
+    /// matching on the constraint's shape itself.
+    pub fn constrained_inner(&self) -> Option<&InferredType> {
+        match self {
+            InferredType::TypeConstraintOf(inner) => Some(inner),
             _ => None,
         }
     }
@@ -6308,6 +6331,9 @@ pub fn inferred_type_to_tag(ty: &InferredType) -> String {
             None => "Parametric".to_string(),
         },
         InferredType::Sequence(_) => "Sequence".to_string(),
+        // A constraint is a Type::Tiny object; method dispatch (deferred)
+        // routes there, so tag it as such rather than as its inner type.
+        InferredType::TypeConstraintOf(_) => "Object:Type::Tiny".to_string(),
     }
 }
 
@@ -6355,6 +6381,9 @@ pub(crate) fn format_inferred_type(ty: &InferredType) -> String {
             // `Parametric<T1, T2>` style.
             let parts: Vec<String> = elems.iter().map(format_inferred_type).collect();
             format!("Sequence<{}>", parts.join(", "))
+        }
+        InferredType::TypeConstraintOf(inner) => {
+            format!("TypeConstraint<{}>", format_inferred_type(inner))
         }
     }
 }

@@ -20,9 +20,9 @@ use crate::file_analysis::{HashKeyOwner, InferredType, Span};
 use tree_sitter::Point;
 
 use super::{
-    CallContext, CompletionQueryContext, DispatchVerb, EmitAction, FrameworkPlugin,
-    PluginCompletionAnswer, PluginSigHelpAnswer, SigHelpQueryContext, Trigger, TypeOverride,
-    UseContext,
+    CallContext, CompletionQueryContext, ConstraintParam, DispatchVerb, EmitAction,
+    FrameworkPlugin, PluginCompletionAnswer, PluginSigHelpAnswer, SigHelpQueryContext, Trigger,
+    TypeOverride, UseContext,
 };
 
 /// An engine built with our helpers and type registrations. Engines are
@@ -120,9 +120,11 @@ pub struct RhaiPlugin {
     triggers: Vec<Trigger>,
     overrides: Vec<TypeOverride>,
     dispatch_verbs: Vec<DispatchVerb>,
+    type_constraint_names: Vec<String>,
     engine: Arc<Engine>,
     ast: Arc<AST>,
     has_on_function_call: bool,
+    has_type_constraint_inner: bool,
     has_on_method_call: bool,
     has_on_use: bool,
     has_on_signature_help: bool,
@@ -203,8 +205,29 @@ impl RhaiPlugin {
             }
         }
 
+        // `type_constraint_names()` — the constraint-constructor dispatch gate.
+        let mut type_constraint_names: Vec<String> = Vec::new();
+        if signatures.iter().any(|n| n == "type_constraint_names") {
+            match engine.call_fn::<Array>(&mut rhai::Scope::new(), &ast, "type_constraint_names", ()) {
+                Ok(arr) => {
+                    for d in arr {
+                        match from_dynamic::<String>(&d) {
+                            Ok(s) => type_constraint_names.push(s),
+                            Err(e) => log::error!(
+                                "plugin `{}` type_constraint_names() bad entry: {}",
+                                id,
+                                e
+                            ),
+                        }
+                    }
+                }
+                Err(e) => log::error!("plugin `{}` type_constraint_names() failed: {}", id, e),
+            }
+        }
+
         Ok(Self {
             has_on_function_call: signatures.iter().any(|n| n == "on_function_call"),
+            has_type_constraint_inner: signatures.iter().any(|n| n == "type_constraint_inner"),
             has_on_method_call: signatures.iter().any(|n| n == "on_method_call"),
             has_on_use: signatures.iter().any(|n| n == "on_use"),
             has_on_signature_help: signatures.iter().any(|n| n == "on_signature_help"),
@@ -213,6 +236,7 @@ impl RhaiPlugin {
             triggers,
             overrides,
             dispatch_verbs,
+            type_constraint_names,
             engine,
             ast: Arc::new(ast),
         })
@@ -291,6 +315,48 @@ impl FrameworkPlugin for RhaiPlugin {
         &self.dispatch_verbs
     }
 
+    fn type_constraint_names(&self) -> &[String] {
+        &self.type_constraint_names
+    }
+
+    fn type_constraint_inner(
+        &self,
+        name: &str,
+        params: &[ConstraintParam],
+    ) -> Option<InferredType> {
+        if !self.has_type_constraint_inner {
+            return None;
+        }
+        let params_dyn = to_dynamic(params).ok()?;
+        let out: Result<Dynamic, _> = self.engine.call_fn(
+            &mut rhai::Scope::new(),
+            &self.ast,
+            "type_constraint_inner",
+            (name.to_string(), params_dyn),
+        );
+        let v = match out {
+            Ok(v) => v,
+            Err(e) => {
+                log::error!("plugin `{}`::type_constraint_inner failed: {}", self.id, e);
+                return None;
+            }
+        };
+        if v.is_unit() {
+            return None;
+        }
+        match from_dynamic::<InferredType>(&v) {
+            Ok(t) => Some(t),
+            Err(e) => {
+                log::error!(
+                    "plugin `{}`::type_constraint_inner bad return: {}",
+                    self.id,
+                    e
+                );
+                None
+            }
+        }
+    }
+
     fn on_function_call(&self, ctx: &CallContext) -> Vec<EmitAction> {
         if !self.has_on_function_call {
             return Vec::new();
@@ -355,6 +421,7 @@ const BUNDLED: &[(&str, &str)] = &[
     ("minion", include_str!("../../frameworks/minion.rhai")),
     ("data-printer", include_str!("../../frameworks/data-printer.rhai")),
     ("dbic-resultddl", include_str!("../../frameworks/dbic-resultddl.rhai")),
+    ("type-tiny", include_str!("../../frameworks/type-tiny.rhai")),
 ];
 
 pub fn load_bundled(engine: Arc<Engine>) -> Vec<Box<dyn FrameworkPlugin>> {
@@ -638,6 +705,7 @@ mod tests {
             ("minion", include_str!("../../frameworks/minion.rhai")),
             ("data-printer", include_str!("../../frameworks/data-printer.rhai")),
             ("dbic-resultddl", include_str!("../../frameworks/dbic-resultddl.rhai")),
+    ("type-tiny", include_str!("../../frameworks/type-tiny.rhai")),
         ] {
             RhaiPlugin::from_source(src, engine.clone())
                 .unwrap_or_else(|e| panic!("{}.rhai failed to compile: {e}", id));
