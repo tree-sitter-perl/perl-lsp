@@ -147,6 +147,7 @@ impl FileStore {
     }
 
     /// Fetch a workspace-role analysis by path.
+    #[allow(dead_code)]
     pub fn get_workspace(&self, path: &Path) -> Option<Arc<FileAnalysis>> {
         self.workspace.get(path).map(|e| Arc::clone(e.value()))
     }

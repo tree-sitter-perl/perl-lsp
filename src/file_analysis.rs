@@ -4104,6 +4104,12 @@ impl FileAnalysis {
     /// with no package; FunctionCall refs whose resolver didn't pin
     /// a package match those. MethodCall refs always need a class —
     /// `None` scope never matches them.
+    ///
+    /// Single-file rename primitive: exact-match on `scope`, no
+    /// inheritance fan-out. Cross-file callers go through `refs_to`
+    /// (which calls `method_rename_chain` for MethodCall fan-out) and
+    /// convert `RefLocation`s to edits directly.
+    #[allow(dead_code)]
     fn rename_callable_in_scope(
         &self,
         old_name: &str,
@@ -4143,10 +4149,10 @@ impl FileAnalysis {
         edits
     }
 
-    /// Package-scoped sub rename — public-API name used by the
-    /// Function rename path. Delegates to the unified
-    /// `rename_callable_in_scope`; the distinction between "function"
-    /// and "method" in Perl is just call shape, not identity.
+    /// Package-scoped sub rename. Single-file; callers that need
+    /// cross-file fan-out (including inheritance) go through `refs_to`
+    /// with `RoleMask::EDITABLE`. Tested by single-file rename pins.
+    #[allow(dead_code)]
     pub fn rename_sub_in_package(
         &self,
         old_name: &str,
@@ -4157,11 +4163,10 @@ impl FileAnalysis {
         self.rename_callable_in_scope(old_name, package, new_name, module_index)
     }
 
-    /// Class-scoped method rename — public-API name used by the
-    /// Method rename path. Same semantics as
-    /// `rename_sub_in_package(old, &Some(class), new)`: function and
-    /// method calls into the same package are two shapes of the same
-    /// callable.
+    /// Class-scoped method rename. Single-file; callers that need
+    /// cross-file fan-out (including inheritance) go through `refs_to`
+    /// with `RoleMask::EDITABLE`. Tested by single-file rename pins.
+    #[allow(dead_code)]
     pub fn rename_method_in_class(
         &self,
         old_name: &str,
@@ -4173,6 +4178,7 @@ impl FileAnalysis {
     }
 
     /// Find all occurrences of a package name (def + refs + use statements) for cross-file rename.
+    #[allow(dead_code)]
     pub fn rename_package(&self, old_name: &str, new_name: &str) -> Vec<(Span, String)> {
         let mut edits = Vec::new();
         for sym in &self.symbols {
