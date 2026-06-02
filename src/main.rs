@@ -464,12 +464,12 @@ fn cli_hover(root: Option<&str>, file: &str, line_str: &str, col_str: &str) {
     // Full startup BEFORE parse_file so the plugin root is pinned before the
     // process-wide registry builds on the first parse (same order as gd).
     let idx = root.map(|r| cli_full_startup(r).1);
-    let (source, tree, mut analysis) = parse_file(file);
+    let (source, _tree, mut analysis) = parse_file(file);
     if let Some(ref idx) = idx {
         analysis.enrich_imported_types_with_keys(Some(idx));
     }
 
-    if let Some(markdown) = analysis.hover_info(point, &source, Some(&tree), idx.as_ref()) {
+    if let Some(markdown) = analysis.hover_info(point, &source, idx.as_ref()) {
         println!("{}", markdown);
     } else {
         eprintln!("No hover info at {}:{}", line_str, col_str);

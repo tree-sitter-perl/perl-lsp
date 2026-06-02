@@ -349,6 +349,14 @@ fn build_with_plugins_inner(
     // freshly-published edges.
     b.emit_method_call_return_edges();
     b.emit_array_push_witnesses();
+    // Record each method-call invocant's resolved type at its span so
+    // the tree-free query entry (`FileAnalysis::expr_type_at_span`) can
+    // answer "what is this expression?" without a CST. Runs after array
+    // pushes so `$arr[N]` invocants project against the settled
+    // `Variable{@arr}` Sequence. The build-time symbolic executor
+    // (`invocant_type_at_node`) is the single structure-discovery site;
+    // this pass records its answer.
+    b.emit_invocant_expr_witnesses(&chain_idx);
 
     // Test-only: re-run the worklist fold one more time to pin
     // idempotency. Production callers always pass `false`; only
@@ -1788,12 +1796,33 @@ impl<'a> Builder<'a> {
             }
             "array_element_expression" => {
                 let array = node.child_by_field_name("array")?;
-                if array.kind() != "container_variable" { return None; }
                 let varname = array.named_child(0)?;
-                if varname.utf8_text(self.source).ok() != Some("_") { return None; }
                 let index = node.child_by_field_name("index")?;
-                if index.utf8_text(self.source).ok() != Some("0") { return None; }
-                self.package_for_node(node).map(InferredType::ClassName)
+                // `$_[0]` is the positional-receiver pseudo-invocant
+                // (`sub m { $_[0]->... }`) — enclosing-class identity,
+                // not a real array read.
+                if array.kind() == "container_variable"
+                    && varname.utf8_text(self.source).ok() == Some("_")
+                    && index.utf8_text(self.source).ok() == Some("0")
+                {
+                    return self.package_for_node(node).map(InferredType::ClassName);
+                }
+                // General `$arr[N]`: read `@arr`'s Sequence shape from
+                // the bag and project the index. Mirror of
+                // `FileAnalysis::resolve_expression_type`'s array arm.
+                let name = varname.utf8_text(self.source).ok()?;
+                let idx: i32 = index.utf8_text(self.source).ok()?.parse().ok()?;
+                let arr_var = format!("@{}", name);
+                let scope = self.scope_at_point(node.start_position());
+                self.bag_query_variable(&arr_var, scope, node.start_position())
+                    .and_then(|t| t.element_at(idx).cloned())
+            }
+            "hash_element_expression" => {
+                // Chaining base: resolve the container expression's type
+                // (`$obj->{k}` where `$obj` chains further). Mirror of
+                // `FileAnalysis::resolve_expression_type`'s hash arm.
+                let base = node.named_child(0)?;
+                self.invocant_type_at_node(base)
             }
             "function_call_expression" | "ambiguous_function_call_expression" => {
                 if self.is_shift_call(node) {
@@ -4988,6 +5017,42 @@ impl<'a> Builder<'a> {
                 source: WitnessSource::Builder("array_push".into()),
                 payload: WitnessPayload::InferredType(InferredType::Sequence(resolved)),
                 span: zero,
+            });
+        }
+    }
+
+    /// Record each method-call invocant's resolved type on
+    /// `Expr(invocant_span)`. The query-time mirror
+    /// (`FileAnalysis::expr_type_at_span`) reads these to type an
+    /// expression without re-walking the CST. Materializes the answer
+    /// from `invocant_type_at_node` (the single build-time symbolic
+    /// executor) rather than an edge: the invocant's span is its own
+    /// attachment, no edge mirrors it, so this is a source value the
+    /// walker uniquely computes — not a parallel cache of an
+    /// edge-reachable result. Chain receivers whose class is only
+    /// knowable cross-file resolve to `None` here and stay unrecorded;
+    /// the query side's chain recursion fills them at enrichment.
+    fn emit_invocant_expr_witnesses(&mut self, idx: &ChainTypingIndex<'a>) {
+        use crate::witnesses::{Witness, WitnessAttachment, WitnessPayload, WitnessSource};
+        let mut pending: Vec<(Span, Node<'a>)> = Vec::new();
+        for r in &self.refs {
+            if let RefKind::MethodCall {
+                invocant_span: Some(sp),
+                ..
+            } = &r.kind
+            {
+                if let Some(n) = idx.invocant_nodes.get(&(sp.start, sp.end)).copied() {
+                    pending.push((*sp, n));
+                }
+            }
+        }
+        for (span, node) in pending {
+            let Some(ty) = self.invocant_type_at_node(node) else { continue };
+            self.bag.push(Witness {
+                attachment: WitnessAttachment::Expr(span),
+                source: WitnessSource::Builder("invocant_expr".into()),
+                payload: WitnessPayload::InferredType(ty),
+                span,
             });
         }
     }
