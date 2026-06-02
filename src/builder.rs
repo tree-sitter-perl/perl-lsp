@@ -9025,7 +9025,34 @@ impl<'a> Builder<'a> {
         if pairs.is_empty() {
             return;
         }
+        let zero = Span {
+            start: Point { row: 0, column: 0 },
+            end: Point { row: 0, column: 0 },
+        };
         for (plugin_id, ov) in pairs {
+            // A `Method` override is a framework fact about a class —
+            // "method `name` on `class` returns T" — independent of
+            // whether that class is defined locally. Publish it on the
+            // class-keyed attachment so a method call resolves through
+            // `MethodOnClassReducer` even when the home class (e.g.
+            // `Mojolicious::Routes::Route`) lives in external @INC and
+            // isn't indexed: the declarative type IS the answer, no
+            // local symbol required. This is what lets a route-builder
+            // chain (`$r->any(...)->to(...)`) keep its receiver typed —
+            // and therefore brand — without a vendored Mojolicious.
+            // Sub overrides stay symbol-keyed (they name a package
+            // function, not a class method).
+            if let plugin::OverrideTarget::Method { class, name } = &ov.target {
+                self.bag.push(Witness {
+                    attachment: WitnessAttachment::MethodOnClass {
+                        class: class.clone(),
+                        name: name.clone(),
+                    },
+                    source: WitnessSource::Plugin(plugin_id.clone()),
+                    payload: WitnessPayload::InferredType(ov.return_type.clone()),
+                    span: zero,
+                });
+            }
             // Collect target SymbolIds in a snapshot so we can mutate
             // self.bag + self.type_provenance below without holding
             // an aliasing borrow on self.symbols.
@@ -9049,10 +9076,6 @@ impl<'a> Builder<'a> {
                 // Zero-extent span — core-synthesized witness, no
                 // user-visible "because: …" anchor needed beyond the
                 // provenance entry below.
-                let zero = Span {
-                    start: Point { row: 0, column: 0 },
-                    end: Point { row: 0, column: 0 },
-                };
                 self.bag.push(Witness {
                     attachment: WitnessAttachment::Symbol(sym_id),
                     source: WitnessSource::Plugin(plugin_id.clone()),

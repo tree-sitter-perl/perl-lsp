@@ -38,17 +38,55 @@ fn triggers() {
 // chained route builder (`$r->_route('GET')->to('...')->name('...')`)
 // loses its receiver type after the first hop and the rest of the
 // chain stops resolving.
+// Every route-builder verb returns a `Mojolicious::Routes::Route` (the
+// child route for `get`/`any`/`under`/…, `$self` for the fluent
+// `to`/`name`/`over`/…). They're declared here, not inferred, because
+// the real bodies live in external Mojolicious (@INC) and route via
+// `_route`/`add_child` through @_-shift / array-slice patterns the
+// engine doesn't model — so without these the receiver loses its Route
+// type after the first hop and a partial `->to('#action')` never gets a
+// brand to inherit from. `apply_type_overrides` publishes each as a
+// class-keyed `MethodOnClass` fact, so the chain types even when
+// Mojolicious isn't indexed (rule #8: the framework plugin owns the
+// rule; core dispatches it generically — no verb name-allowlist in core,
+// rule #10). `routes` on the app/controller surface hands back the root
+// Route that seeds the whole chain.
+fn route_method_override(class, name, return_class, reason) {
+    #{
+        target: #{ Method: #{ class: class, name: name }},
+        return_type: #{ ClassName: return_class },
+        reason: reason,
+    }
+}
+
 fn overrides() {
-    [
-        #{
-            target: #{ Method: #{
-                class: "Mojolicious::Routes::Route",
-                name: "_route",
-            }},
-            return_type: #{ ClassName: "Mojolicious::Routes::Route" },
-            reason: "_route returns $self via @_-shift; inference doesn't model array-slice returns",
-        }
-    ]
+    let route_verbs = [
+        "_route", "route", "any", "get", "post", "put", "patch", "delete",
+        "options", "under", "to", "name", "websocket", "bridge", "via",
+        "over", "requires", "methods", "add_child",
+    ];
+    let reason = "Mojolicious route builder returns a Route ($self / child); bodies live in @INC and shift @_";
+    let out = [];
+    // The verb surface lives on `Mojolicious::Routes::Route` and the
+    // router `Mojolicious::Routes` (which `isa` Route in real Mojo).
+    // Declared on BOTH so the chain types even when Mojolicious isn't
+    // indexed — without an indexed copy there are no inheritance edges
+    // to carry the verbs down from Route to the router.
+    for v in route_verbs {
+        out += route_method_override("Mojolicious::Routes::Route", v, "Mojolicious::Routes::Route", reason);
+        out += route_method_override("Mojolicious::Routes", v, "Mojolicious::Routes::Route", reason);
+    }
+    // The chain root: `$app->routes` / `$c->routes` hand back the
+    // top-level router (`Mojolicious::Routes`, NOT an individual Route —
+    // forcing Route here would mistype the container). This is what
+    // seeds `my $r = $self->routes; $r->any(...)` so the brand chain can
+    // start. Real indexed Mojo declares the same; the override makes it
+    // hold without a vendored copy.
+    out += route_method_override("Mojolicious", "routes", "Mojolicious::Routes",
+        "Mojolicious app `routes` accessor returns the top-level router");
+    out += route_method_override("Mojolicious::Controller", "routes", "Mojolicious::Routes",
+        "Mojolicious controller `routes` accessor returns the top-level router");
+    out
 }
 
 // A route is a first-class thing — it has identity (the `Controller#action`
