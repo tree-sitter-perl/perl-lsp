@@ -118,13 +118,15 @@ resolves (the `minion` helper bridged to `Mojolicious::Controller`… see the
 caveat below) → `$app->minion->enqueue('Borkage…')` lights up via option-B
 dispatch. Closes the `$app->minion` form, the last dark minion shape.
 
-**Caveat to verify:** helpers are bridged to `Mojolicious::Controller`, but
-`$app` is the `Mojolicious` app, not a controller. In Mojo, helpers are callable
-on both the app and controllers. So either the `minion` helper must also bridge
-to the app class, or `param_types` should type `$app` as
-`Mojolicious::Controller` (pragmatic: the helper set is the same), or the helper
-bridge widens to "app + controller." Decide during implementation — typing
-`$app` as the class that actually carries the `minion` helper is what matters.
+**Caveat — RESOLVED.** `mojo-helpers.rhai` already bridges every helper's
+`PluginNamespace` to BOTH `Mojolicious::Controller` and `Mojolicious` (the two
+sibling entry classes — they both `use Mojo::Base -base`, neither inherits the
+other; helpers live on the app's renderer and are reached from a controller via
+`->app`). So `$app->minion` resolves through the `Mojolicious` bridge as soon as
+`$app` is typed. Therefore `param_types` types `$app` as the **honest** type,
+`Mojolicious` (and a Mojolicious subclass app inherits the bridge) — no
+"type it as Controller" hack. See `docs/prompt-app-entity.md` for the longer-
+term model that decouples "helpers belong to the app" from "who sees them."
 
 ## Sequencing
 
