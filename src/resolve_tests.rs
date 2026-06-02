@@ -1798,6 +1798,81 @@ sub fire ($minion) {\n  $minion->enqueue('send_email' => ['a@b']);\n}\n1;\n",
     );
 }
 
+/// The query-time `ReceiverGated` gap closer: a Handler `refs_to` must
+/// include a dispatch call-site in a NON-OPEN workspace file whose receiver
+/// `isa Minion` only CROSS-FILE and which does NOT `use Minion` itself. The
+/// emit-hook path can't fire (no `use Minion` trigger) and the file is never
+/// enriched (workspace, not open), so nothing materializes a `DispatchCall`
+/// ref. Under enrichment-eager promotion this call site was invisible
+/// (the previously-`#[ignore]`d gap); query-time resolution of the gated
+/// candidate against the cross-file `My::Minion isa Minion` chain surfaces
+/// it. See `docs/adr/receiver-gated-dispatch.md`.
+#[test]
+fn refs_to_handler_finds_dispatch_in_unenriched_cross_file_subclass() {
+    use crate::module_index::ModuleIndex;
+    use std::sync::Arc;
+
+    let store = FileStore::new();
+    let idx = ModuleIndex::new_for_test();
+    idx.set_workspace_root(None);
+
+    // `My::Minion isa Minion`, established cross-file in the index.
+    let minion_sub_path = PathBuf::from("/tmp/rg_my_minion.pm");
+    let minion_sub_fa = parse("package My::Minion;\nuse parent 'Minion';\nsub new { bless {}, shift }\n1;\n");
+    idx.register_workspace_module(minion_sub_path, Arc::new(minion_sub_fa));
+
+    // Registry file (open/workspace): add_task stamps the Handler.
+    let path_reg = PathBuf::from("/tmp/rg_minion_reg.pm");
+    let fa_reg = parse(
+        "package App::Tasks;\nuse Minion;\n\
+sub setup ($minion) {\n  $minion->add_task('send_email' => sub ($job, $to) { 1 });\n}\n1;\n",
+    );
+    store.insert_workspace(path_reg.clone(), fa_reg);
+
+    // Caller: receiver is a cross-file Minion SUBCLASS, and the file does
+    // NOT `use Minion`. Built without enrichment (insert_workspace mirrors
+    // the indexer). No materialized DispatchCall ref — must resolve lazily.
+    let path_call = PathBuf::from("/tmp/rg_minion_call.pm");
+    let fa_call = parse(
+        "package App::Worker;\n\
+sub fire {\n  my $self = shift;\n  my $minion = My::Minion->new;\n  $minion->enqueue('send_email' => ['a@b']);\n}\n1;\n",
+    );
+    // Sanity: no DispatchCall ref was materialized at build (query-time path
+    // is the only thing that can surface this site).
+    assert!(
+        !fa_call.refs.iter().any(|r|
+            matches!(&r.kind, crate::file_analysis::RefKind::DispatchCall { .. })),
+        "precondition: the caller must have NO materialized DispatchCall ref",
+    );
+    store.insert_workspace(path_call.clone(), fa_call);
+
+    let results = refs_to(
+        &store,
+        Some(&idx),
+        &TargetRef {
+            name: "send_email".to_string(),
+            kind: TargetKind::Handler {
+                owner: crate::file_analysis::HandlerOwner::Class("Minion".to_string()),
+                name: "send_email".to_string(),
+            },
+            method_classes: Vec::new(),
+        },
+        RoleMask::EDITABLE,
+    );
+
+    assert!(
+        results.iter().any(|r| matches!(&r.key, FileKey::Path(p) if p == &path_reg)),
+        "expected the add_task registration; got {:?}",
+        results,
+    );
+    assert!(
+        results.iter().any(|r| matches!(&r.key, FileKey::Path(p) if p == &path_call)),
+        "expected the cross-file enqueue call-site in the unenriched subclass \
+         worker to surface via query-time gated resolution; got {:?}",
+        results,
+    );
+}
+
 /// A package that declares its exports via a runtime exporter setup
 /// (Sub::Exporter) must let cross-file `refs_to` fan the defining sub
 /// out to a consumer's `use X qw/name/` import and call site — the

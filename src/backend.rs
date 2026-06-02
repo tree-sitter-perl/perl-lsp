@@ -14,6 +14,21 @@ pub struct Backend {
     client: Client,
     files: Arc<FileStore>,
     module_index: Arc<ModuleIndex>,
+    /// Opt-in `unresolved-dispatch` diagnostic toggle, set from
+    /// `initializationOptions.diagnostics.unresolvedDispatch`. Shared with the
+    /// resolver refresh callback (which also publishes diagnostics), hence the
+    /// atomic. Default off — QA/plugin-author channel.
+    unresolved_dispatch: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl Backend {
+    fn diagnostic_options(&self) -> symbols::DiagnosticOptions {
+        symbols::DiagnosticOptions {
+            unresolved_dispatch: self
+                .unresolved_dispatch
+                .load(std::sync::atomic::Ordering::Relaxed),
+        }
+    }
 }
 
 impl Backend {
@@ -23,8 +38,11 @@ impl Backend {
         // We need Arc<ModuleIndex> so the refresh callback can access it.
         // Two-phase init: create ModuleIndex whose refresh callback references
         // a later-set Arc<ModuleIndex>, then wire up the Arc.
+        let unresolved_dispatch = Arc::new(std::sync::atomic::AtomicBool::new(false));
+
         let refresh_client = client.clone();
         let refresh_files = Arc::clone(&files);
+        let refresh_unresolved_dispatch = Arc::clone(&unresolved_dispatch);
 
         let module_index_holder: Arc<std::sync::OnceLock<Arc<ModuleIndex>>> =
             Arc::new(std::sync::OnceLock::new());
@@ -37,6 +55,7 @@ impl Backend {
             let client = refresh_client.clone();
             let files = Arc::clone(&refresh_files);
             let holder = Arc::clone(&holder_clone);
+            let unresolved_dispatch = Arc::clone(&refresh_unresolved_dispatch);
             tokio_handle.spawn(async move {
                 let module_index = match holder.get() {
                     Some(idx) => idx,
@@ -45,9 +64,13 @@ impl Backend {
                 // Collect (uri, diagnostics) first without holding the store lock
                 // across the await — publishing is async and could deadlock.
                 let mut pending: Vec<(Url, Vec<Diagnostic>)> = Vec::new();
+                let options = symbols::DiagnosticOptions {
+                    unresolved_dispatch: unresolved_dispatch
+                        .load(std::sync::atomic::Ordering::Relaxed),
+                };
                 files.for_each_open_mut(|uri, doc| {
                     doc.analysis.enrich_imported_types_with_keys(Some(module_index));
-                    let diagnostics = symbols::collect_diagnostics(&doc.analysis, module_index);
+                    let diagnostics = symbols::collect_diagnostics(&doc.analysis, module_index, options);
                     pending.push((uri.clone(), diagnostics));
                 });
                 for (uri, diags) in pending {
@@ -63,6 +86,7 @@ impl Backend {
             module_index,
             client,
             files,
+            unresolved_dispatch,
         }
     }
 
@@ -74,8 +98,9 @@ impl Backend {
 
     async fn publish_diagnostics(&self, uri: &Url) {
         self.enrich_analysis(uri);
+        let options = self.diagnostic_options();
         let diagnostics = match self.files.get_open(uri) {
-            Some(doc) => symbols::collect_diagnostics(&doc.analysis, &self.module_index),
+            Some(doc) => symbols::collect_diagnostics(&doc.analysis, &self.module_index, options),
             None => vec![],
         };
         self.client
@@ -171,6 +196,19 @@ impl LanguageServer for Backend {
         // Same root drives repo-local `.perl-lsp/` plugin discovery, so the
         // plugin set and the per-project cache key can't disagree.
         crate::plugin::rhai_host::set_workspace_root(root);
+
+        // Opt-in diagnostics from `initializationOptions.diagnostics`.
+        // `{ "diagnostics": { "unresolvedDispatch": true } }` enables the
+        // QA/plugin-author `unresolved-dispatch` channel; absent = off.
+        if let Some(opts) = &params.initialization_options {
+            let on = opts
+                .get("diagnostics")
+                .and_then(|d| d.get("unresolvedDispatch"))
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            self.unresolved_dispatch
+                .store(on, std::sync::atomic::Ordering::Relaxed);
+        }
 
         Ok(InitializeResult {
             server_info: Some(ServerInfo {

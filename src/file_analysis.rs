@@ -1093,6 +1093,132 @@ pub fn parents_of(
     parents
 }
 
+/// Does `class` equal `target` or descend from it? Walks local
+/// `package_parents` first, then the cross-file inheritance graph via
+/// `module_index.parents_cached`. The single isa-walk seam — both the
+/// `ReceiverGated` gate and `FileAnalysis::class_isa` route here, so the
+/// MRO is enumerated in exactly one place. Cycle-guarded by `seen`;
+/// `budget` caps TOTAL classes visited (not ancestry depth) — a backstop
+/// against a pathological graph, set well above any real MRO.
+/// `parents_cached` is keyed by module name, which coincides with the
+/// class name here.
+pub fn class_isa(
+    class: &str,
+    target: &str,
+    package_parents: &HashMap<String, Vec<String>>,
+    module_index: Option<&ModuleIndex>,
+) -> bool {
+    if class == target {
+        return true;
+    }
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut stack: Vec<String> = vec![class.to_string()];
+    let mut budget = 0;
+    while let Some(cur) = stack.pop() {
+        if budget > 200 {
+            break;
+        }
+        budget += 1;
+        if !seen.insert(cur.clone()) {
+            continue;
+        }
+        if cur == target {
+            return true;
+        }
+        if let Some(parents) = package_parents.get(&cur) {
+            for p in parents {
+                stack.push(p.clone());
+            }
+        }
+        if let Some(idx) = module_index {
+            for p in idx.parents_cached(&cur) {
+                stack.push(p);
+            }
+        }
+    }
+    false
+}
+
+/// Three-way outcome of resolving a [`ReceiverGated`] value against a
+/// concrete receiver class. Splitting "doesn't apply" from "can't tell"
+/// is load-bearing: `DoesNotApply` is a settled negative (the receiver
+/// typed, it just isn't a descendant of the gate), while `ReceiverUntyped`
+/// is a *typing gap* — the receiver couldn't be pinned to any class, so
+/// applicability is unknown. The opt-in `unresolved-dispatch` diagnostic
+/// fires only on the latter; treating the two alike would either bury real
+/// gaps or spew noise on every unrelated receiver.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GateResult<U> {
+    /// Receiver `isa` the gate class — here is the inner value.
+    Applies(U),
+    /// Receiver typed to a concrete class that is NOT a descendant of the
+    /// gate. Settled negative; never diagnosed.
+    DoesNotApply,
+    /// Receiver class is unknown (`None` / unresolved). A genuine typing
+    /// gap — the only state the diagnostic surfaces.
+    ReceiverUntyped,
+}
+
+/// A value whose inner payload can be read ONLY through a cross-file isa
+/// check against a receiver class. The enforcement is structural, not a
+/// convention: `inner` is private with no `pub` field, no `Deref`, no
+/// `into_inner` — the sole reader is [`resolve_for`](Self::resolve_for),
+/// which gates on the receiver. A consumer therefore *cannot* observe
+/// gated content without first asking "does this receiver qualify?", so a
+/// future caller that forgets the isa filter is a compile error, not a
+/// silent drift (rule #10: the type carries the rule, the consumer can't
+/// re-decide it).
+///
+/// `gate` is a single `ClassName` today; widening it to a set later is a
+/// change to `resolve_for`'s internals, not to call sites — they already
+/// only ever see `Applies`/`DoesNotApply`/`ReceiverUntyped`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReceiverGated<T> {
+    /// The receiver must `isa` this class for `inner` to be readable.
+    gate: String,
+    /// Gated payload. PRIVATE by design — see the type's doc.
+    inner: T,
+}
+
+impl<T> ReceiverGated<T> {
+    /// Mint a gated value. The only constructor — pairs the payload with
+    /// the class the receiver must descend from to read it.
+    pub fn new(gate: impl Into<String>, inner: T) -> Self {
+        Self { gate: gate.into(), inner }
+    }
+
+    /// The gate class, exposed for diagnostics/observability. Reading the
+    /// gate is harmless — it's the *inner payload* that's protected.
+    pub fn gate(&self) -> &str {
+        &self.gate
+    }
+
+    /// The one reader. `receiver_class` is the concrete class of the
+    /// dispatch receiver as the bag resolved it (cross-file aware); `None`
+    /// or an unresolved name yields `ReceiverUntyped`. Otherwise the inner
+    /// value is handed back iff the receiver `isa` the gate, walking the
+    /// single `class_isa` seam (local `package_parents` ∪ cross-file
+    /// `parents_cached`).
+    pub fn resolve_for(
+        &self,
+        receiver_class: Option<&str>,
+        package_parents: &HashMap<String, Vec<String>>,
+        module_index: Option<&ModuleIndex>,
+    ) -> GateResult<&T> {
+        match receiver_class {
+            None => GateResult::ReceiverUntyped,
+            Some(recv) if recv.is_empty() => GateResult::ReceiverUntyped,
+            Some(recv) => {
+                if class_isa(recv, &self.gate, package_parents, module_index) {
+                    GateResult::Applies(&self.inner)
+                } else {
+                    GateResult::DoesNotApply
+                }
+            }
+        }
+    }
+}
+
 // ---- Hash key owner (for scope graph) ----
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -1152,13 +1278,14 @@ pub struct MethodCallBinding {
     pub span: Span,
 }
 
-/// A build-time dispatch candidate: a call to a plugin-declared dispatch
-/// verb (`$x->enqueue('T')`), recorded before we know whether the receiver
-/// actually `isa` the verb's target class. Enrichment resolves that
-/// cross-file and, if it holds, promotes this into a `DispatchCall` ref.
-/// See `plugin::DispatchVerb` and `FileAnalysis::enrich_imported_types_with_keys`.
+/// The readable half of a dispatch candidate — everything needed to
+/// synthesize a `DispatchCall` ref / handler link ONCE the receiver passes
+/// the gate. Carried as the inner payload of a [`ReceiverGated`], so the
+/// only way to reach these fields is `resolve_for(receiver_class, …)`:
+/// no consumer can mistake an unfiltered candidate for a confirmed
+/// dispatch. The gate class (`target_class`) lives on the wrapper.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ProvisionalDispatch {
+pub struct DispatchCandidate {
     /// The handler name (task / event) — the dispatch's first meaningful arg.
     pub name: String,
     /// Span of the name argument (the future `DispatchCall` ref span).
@@ -1167,19 +1294,65 @@ pub struct ProvisionalDispatch {
     pub dispatcher: String,
     /// Handler owner the synthesized ref pairs against (e.g. `Minion`).
     pub owner_class: String,
-    /// Receiver must `isa` this for the candidate to promote.
-    pub target_class: String,
     /// Receiver's class as resolved at build time, if any. `None` when the
     /// receiver type wasn't known locally (e.g. a helper-returned value);
-    /// enrichment then re-resolves it cross-file via `call_span`'s MethodCall
-    /// ref + the module index.
+    /// query-time resolution then re-resolves it cross-file via `call_span`'s
+    /// MethodCall ref + the module index.
     #[serde(default)]
     pub receiver_class: Option<String>,
     /// Whole-call span of the dispatch call (`node_to_span` of the
     /// `method_call_expression`). Matches the native MethodCall ref's `span`,
-    /// so enrichment can find that ref and resolve the receiver class with
+    /// so the resolver can find that ref and resolve the receiver class with
     /// the index when `receiver_class` is `None`.
     pub call_span: Span,
+}
+
+/// A build-time dispatch candidate gated on its receiver type: a call to a
+/// plugin-declared dispatch verb (`$x->enqueue('T')`), recorded before we
+/// know whether the receiver actually `isa` the verb's target class. The
+/// gate (`target_class`) lives on the `ReceiverGated` wrapper; resolution
+/// is cross-file and happens at QUERY time in `resolve.rs`
+/// (`refs_to`) and dispatch goto-def — never eagerly materialized, so
+/// candidates in non-open workspace/dependency files surface the same as
+/// open ones. See `docs/adr/receiver-gated-dispatch.md`.
+pub type ProvisionalDispatch = ReceiverGated<DispatchCandidate>;
+
+impl ProvisionalDispatch {
+    /// Receiver-locator accessors. These three fields are gate *input*, not
+    /// gated *content*: the host needs the call site to resolve the receiver
+    /// class that the gate then checks (chicken-and-egg otherwise). Only the
+    /// handler-link payload (`name`, `owner_class`) stays behind
+    /// `resolve_for`. Defined ON the type so the type author — not an outside
+    /// consumer — draws the input/content line.
+    fn receiver_hint(&self) -> Option<&String> {
+        self.inner.receiver_class.as_ref()
+    }
+    fn call_span(&self) -> Span {
+        self.inner.call_span
+    }
+    fn dispatcher(&self) -> &str {
+        &self.inner.dispatcher
+    }
+}
+
+/// A confirmed dispatch — a gated candidate whose receiver isa-resolved at
+/// query time. The projection `refs_to` / goto-def consume to match a
+/// `Handler` target `(owner, name)` at `span`.
+#[derive(Debug, Clone)]
+pub struct AppliedDispatch {
+    pub name: String,
+    pub span: Span,
+    pub owner: HandlerOwner,
+}
+
+/// A dispatch candidate whose receiver couldn't be typed — a typing gap the
+/// opt-in diagnostic surfaces. Never `DoesNotApply` (that's a settled
+/// negative).
+#[derive(Debug, Clone)]
+pub struct UntypedDispatch {
+    pub call_span: Span,
+    pub dispatcher: String,
+    pub gate: String,
 }
 
 // ---- Import ----
@@ -1411,18 +1584,19 @@ pub struct FileAnalysis {
     base_symbol_count: usize,
     #[serde(default)]
     base_witness_count: usize,
-    /// Ref baseline — enrichment synthesizes `DispatchCall` refs from
-    /// `provisional_dispatches` (cross-file receiver isa), so it truncates
-    /// `refs` back to this length before re-deriving to stay idempotent.
+    /// Ref baseline — enrichment re-derives synthetic refs (imported hash
+    /// keys), so it truncates `refs` back to this length before re-deriving
+    /// to stay idempotent.
     #[serde(default)]
     base_ref_count: usize,
 
-    /// Build-time dispatch candidates awaiting a cross-file receiver isa
-    /// check. The builder records one per call matching a plugin
-    /// `DispatchVerb`; `enrich_imported_types_with_keys` promotes the ones
-    /// whose receiver `isa` the verb's `target_class` into `DispatchCall`
-    /// refs. See `DispatchVerb` — this is the "receiver provides the magic"
-    /// path that file-trigger-gated emit hooks can't reach.
+    /// Build-time dispatch candidates, each gated on its receiver's class.
+    /// The builder records one per call matching a plugin `DispatchVerb`,
+    /// ungated and per-file; the gate (`isa target_class`) is checked at
+    /// QUERY time by `applicable_dispatches` (cross-file receiver isa), so
+    /// candidates in non-open files surface the same as open ones. The
+    /// `ReceiverGated` wrapper makes the inner handler payload unreadable
+    /// without that check. See `docs/adr/receiver-gated-dispatch.md`.
     #[serde(default)]
     pub provisional_dispatches: Vec<ProvisionalDispatch>,
 
@@ -2151,12 +2325,10 @@ impl FileAnalysis {
         self.witnesses.truncate(self.base_witness_count);
         self.refs.truncate(self.base_ref_count);
 
-        // Promote provisional dispatches whose receiver `isa` the verb's
-        // target class (resolved cross-file here, where the module index is
-        // available). This is the receiver-driven dispatch path — a
-        // `$minion->enqueue('T')` lights up by the receiver's type, not by
-        // the file's `use` statements.
-        self.promote_provisional_dispatches(module_index);
+        // Dispatch promotion is NOT done here: gated candidates resolve at
+        // query time (`applicable_dispatches`), so a `$minion->enqueue('T')`
+        // surfaces by the receiver's type whether or not its file is open.
+        // See `docs/adr/receiver-gated-dispatch.md`.
 
         // Build the import → exported-name map inline from
         // `self.imports` + `module_index`. `imported_hash_keys` is
@@ -2429,110 +2601,139 @@ impl FileAnalysis {
         }
     }
 
-    /// Turn `provisional_dispatches` into real `DispatchCall` refs for the
-    /// candidates whose receiver class `isa` the verb's target. Runs inside
-    /// `enrich_imported_types_with_keys`, after `refs` was truncated back to
-    /// `base_ref_count`, so it's idempotent across repeated enrichment.
-    ///
-    /// Receiver resolution is two-tier: the build-time `receiver_class` hint
-    /// (a locally-constructed `My::Minion->new`, a typed `has`-attribute) when
-    /// present, else cross-file resolution of the call's invocant via
+    /// Resolve one gated dispatch candidate against its receiver, AT QUERY
+    /// TIME. Receiver resolution is two-tier: the build-time `receiver_class`
+    /// hint (a locally-constructed `My::Minion->new`, a typed `has`-attribute)
+    /// when present, else cross-file resolution of the call's invocant via
     /// `method_call_invocant_class` with the module index — which lights up
     /// helper-/attribute-returned receivers (`$c->minion->enqueue`,
     /// `$self->_minion->enqueue`) that only type once other modules are in
-    /// scope.
-    fn promote_provisional_dispatches(&mut self, module_index: Option<&ModuleIndex>) {
-        if self.provisional_dispatches.is_empty() {
-            return;
-        }
-        // Dedup against refs that already exist at the same site (the
-        // parse-time plugin emit, in files whose triggers fired).
-        let mut existing: std::collections::HashSet<(Point, Point, String, String)> =
-            std::collections::HashSet::new();
-        for r in &self.refs {
-            if let RefKind::DispatchCall { dispatcher, .. } = &r.kind {
-                existing.insert((r.span.start, r.span.end, dispatcher.clone(), r.target_name.clone()));
-            }
-        }
-        let candidates = std::mem::take(&mut self.provisional_dispatches);
-        let mut new_refs: Vec<Ref> = Vec::new();
-        for c in &candidates {
-            // Prefer the build-time hint (locally-constructed receiver);
-            // otherwise resolve the call's invocant cross-file with the
-            // index — this is what lights up `$app->minion->enqueue(...)`
-            // and `$self->_minion->enqueue(...)`, whose receiver type only
-            // exists once other modules are in scope.
-            let recv = c.receiver_class.clone().or_else(|| {
-                self.refs
-                    .iter()
-                    .find(|r| {
-                        r.span == c.call_span
-                            && r.target_name == c.dispatcher
-                            && matches!(r.kind, RefKind::MethodCall { .. })
-                    })
-                    .and_then(|r| self.method_call_invocant_class(r, module_index))
-            });
-            let Some(recv) = recv else { continue };
-            if !self.class_isa(&recv, &c.target_class, module_index) {
-                continue;
-            }
-            let key = (c.span.start, c.span.end, c.dispatcher.clone(), c.name.clone());
-            if !existing.insert(key) {
-                continue;
-            }
-            new_refs.push(Ref {
-                kind: RefKind::DispatchCall {
-                    dispatcher: c.dispatcher.clone(),
-                    owner: Some(HandlerOwner::Class(c.owner_class.clone())),
-                },
-                span: c.span,
-                scope: self.scope_at(c.span.start).unwrap_or(ScopeId(0)),
-                target_name: c.name.clone(),
-                access: AccessKind::Read,
-                resolves_to: None,
-            });
-        }
-        self.refs.extend(new_refs);
-        self.provisional_dispatches = candidates;
+    /// scope. The gate (`isa target_class`) is applied by `resolve_for`; the
+    /// caller never reads the inner candidate without it.
+    fn resolve_dispatch_candidate<'a>(
+        &'a self,
+        gated: &'a ProvisionalDispatch,
+        module_index: Option<&ModuleIndex>,
+    ) -> GateResult<&'a DispatchCandidate> {
+        let recv = self.dispatch_receiver_class(gated, module_index);
+        gated.resolve_for(recv.as_deref(), &self.package_parents, module_index)
     }
 
-    /// Does `class` equal `target` or descend from it? Walks local
-    /// `package_parents` first, then the cross-file inheritance graph via
-    /// `module_index.parents_cached`. Cycle-guarded by `seen`; `budget` caps
-    /// TOTAL classes visited (not ancestry depth) — a backstop against a
-    /// pathological graph, set well above any real MRO. `parents_cached` is
-    /// keyed by module name, which coincides with the class name here.
-    fn class_isa(&self, class: &str, target: &str, module_index: Option<&ModuleIndex>) -> bool {
-        if class == target {
-            return true;
-        }
-        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-        let mut stack: Vec<String> = vec![class.to_string()];
-        let mut budget = 0;
-        while let Some(cur) = stack.pop() {
-            if budget > 200 {
-                break;
+    /// Resolve the receiver class for a gated dispatch candidate: the
+    /// build-time hint, else the call's invocant via the MethodCall ref at
+    /// `call_span` (cross-file aware through the bag). Uses only the gate-input
+    /// accessors, never the gated handler payload.
+    fn dispatch_receiver_class(
+        &self,
+        gated: &ProvisionalDispatch,
+        module_index: Option<&ModuleIndex>,
+    ) -> Option<String> {
+        gated.receiver_hint().cloned().or_else(|| {
+            let call_span = gated.call_span();
+            let dispatcher = gated.dispatcher();
+            self.refs
+                .iter()
+                .find(|r| {
+                    r.span == call_span
+                        && r.target_name == dispatcher
+                        && matches!(r.kind, RefKind::MethodCall { .. })
+                })
+                .and_then(|r| self.method_call_invocant_class(r, module_index))
+        })
+    }
+
+    /// Query-time handler call-sites in THIS file: every gated dispatch
+    /// candidate whose receiver isa-resolves the gate, projected to the data
+    /// `refs_to` and goto-def need. This is the single seam that replaces
+    /// enrichment-eager promotion — both `resolve.rs` (handler references)
+    /// and dispatch goto-def call it, so they can't drift. Candidates ride
+    /// the cache; resolution is lazy, so non-open workspace/dependency files
+    /// surface exactly like open ones (`docs/adr/receiver-gated-dispatch.md`).
+    pub fn applicable_dispatches(
+        &self,
+        module_index: Option<&ModuleIndex>,
+    ) -> Vec<AppliedDispatch> {
+        // Avoid double-counting a site the emit-hook path already materialized
+        // as a real `DispatchCall` ref (files whose triggers fired).
+        let materialized: HashSet<(Point, Point, String)> = self
+            .refs
+            .iter()
+            .filter_map(|r| match &r.kind {
+                RefKind::DispatchCall { dispatcher, .. } => {
+                    Some((r.span.start, r.span.end, dispatcher.clone()))
+                }
+                _ => None,
+            })
+            .collect();
+        let mut out = Vec::new();
+        for gated in &self.provisional_dispatches {
+            if let GateResult::Applies(c) = self.resolve_dispatch_candidate(gated, module_index) {
+                if materialized.contains(&(c.span.start, c.span.end, c.dispatcher.clone())) {
+                    continue;
+                }
+                out.push(AppliedDispatch {
+                    name: c.name.clone(),
+                    span: c.span,
+                    owner: HandlerOwner::Class(c.owner_class.clone()),
+                });
             }
-            budget += 1;
-            if !seen.insert(cur.clone()) {
+        }
+        out
+    }
+
+    /// The applicable dispatch at a cursor point, if the cursor sits on a
+    /// gated dispatch verb call whose receiver isa-resolves. Drives
+    /// query-time dispatch goto-def — the same gate as `applicable_dispatches`,
+    /// so an open file with a cross-file receiver resolves the handler without
+    /// any eagerly-materialized `DispatchCall` ref. Matches on either the
+    /// name-arg span or the whole-call span so the cursor anywhere on the
+    /// `verb('name')` call lands.
+    pub fn dispatch_at(
+        &self,
+        point: Point,
+        module_index: Option<&ModuleIndex>,
+    ) -> Option<AppliedDispatch> {
+        for gated in &self.provisional_dispatches {
+            // `call_span` (a gate-input accessor) spans the whole `verb('name')`
+            // call, so it covers the name-arg too — cheap cursor pre-filter
+            // before resolving the gate.
+            if !contains_point(&gated.call_span(), point) {
                 continue;
             }
-            if cur == target {
-                return true;
-            }
-            if let Some(parents) = self.package_parents.get(&cur) {
-                for p in parents {
-                    stack.push(p.clone());
-                }
-            }
-            if let Some(idx) = module_index {
-                for p in idx.parents_cached(&cur) {
-                    stack.push(p);
-                }
+            if let GateResult::Applies(c) = self.resolve_dispatch_candidate(gated, module_index) {
+                return Some(AppliedDispatch {
+                    name: c.name.clone(),
+                    span: c.span,
+                    owner: HandlerOwner::Class(c.owner_class.clone()),
+                });
             }
         }
-        false
+        None
     }
+
+    /// Gated dispatch candidates in THIS file whose receiver couldn't be
+    /// typed (`ReceiverUntyped`) — the genuine typing gaps the opt-in
+    /// `unresolved-dispatch` diagnostic surfaces. `DoesNotApply` is a settled
+    /// negative and never appears here.
+    pub fn untyped_dispatches(
+        &self,
+        module_index: Option<&ModuleIndex>,
+    ) -> Vec<UntypedDispatch> {
+        let mut out = Vec::new();
+        for gated in &self.provisional_dispatches {
+            if let GateResult::ReceiverUntyped =
+                self.resolve_dispatch_candidate(gated, module_index)
+            {
+                out.push(UntypedDispatch {
+                    call_span: gated.call_span(),
+                    dispatcher: gated.dispatcher().to_string(),
+                    gate: gated.gate().to_string(),
+                });
+            }
+        }
+        out
+    }
+
 
     /// Rebuild indices affected by enrichment (type constraints + symbols +
     /// refs_by_target + HashKeyAccess linkage).

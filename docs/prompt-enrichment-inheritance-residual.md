@@ -18,9 +18,11 @@ The short verdict:
   without changing the index-free-builder contract (rule #1). Latent
   hazard, documented, deferred.
 
-- **Dispatch-verb promotion in non-open files** is a real gap caused by
-  the resolver lifecycle: only OPEN documents are enriched. Architectural,
-  deferred.
+- **Dispatch-verb promotion in non-open files** WAS a real gap caused by
+  the resolver lifecycle (only OPEN documents enriched). **Landed:** the
+  `ReceiverGated<DispatchCandidate>` seam resolves the receiver isa-check at
+  query time (`docs/adr/receiver-gated-dispatch.md`), so call sites in non-
+  open workspace/dependency files surface like open ones.
 
 Two `#[ignore]`-d failing repros pin the two real gaps
 (`builder_tests.rs::param_types_manifest::probe_*`).
@@ -37,7 +39,7 @@ cross-file/isa-based already, or (iii) BROKEN.
 | Manifest member | Applicability gate | Verdict |
 |---|---|---|
 | `overrides()` | Trigger-INDEPENDENT post-pass (`apply_type_overrides`, `builder.rs:320`). Applied to every build regardless of `use`s. | **(ii) correct.** Plugin-priority witness on `Symbol(sid)`; the home module picks it up even without `use Mojolicious`. Cross-file consumers reach it via the `MethodOnClass → Edge(Symbol)` writeback + cross-file primary lookup. |
-| `dispatch_verbs()` | RECEIVER-isa at enrichment (`promote_provisional_dispatches`, `file_analysis.rs:2443`). `class_isa` walks local `package_parents` ∪ `module_index.parents_cached` (cross-file). | **(ii) correct by design** for OPEN files — receiver-driven, cross-file. **(iii) gap for NON-OPEN files** — see angle B. The emit-hook path (`EmitAction::DispatchCall`) covers files that `use Minion`; the manifest path covers cross-file/subclass receivers, but ONLY at enrichment, which non-open files never get. |
+| `dispatch_verbs()` | RECEIVER-isa at QUERY time (`FileAnalysis::applicable_dispatches`). Each candidate rides the cache as `ReceiverGated<DispatchCandidate>`; `resolve_for` walks the single `class_isa` seam (local `package_parents` ∪ `module_index.parents_cached`). | **(ii) correct, all files.** The emit-hook path (`EmitAction::DispatchCall`) covers files that `use Minion`; the manifest path covers cross-file/subclass receivers and now resolves lazily at the query, so non-open workspace/dependency files surface identically. See `docs/adr/receiver-gated-dispatch.md`. |
 | `type_constraint_names()` / `type_constraint_inner()` | Syntactic gate on constraint-constructor call names where the `has`/`isa` appears. | **(i) correctly local.** The constraint vocabulary applies where the constructor expression is written. Not an inheritance question. |
 | `param_types()` | `in_role` check via `transitive_parents(&pkg)` (`builder.rs:3442`), applied at the sub-declaration walk. `transitive_parents` walks **local `package_parents` only**. | **(iii) gap.** A class whose `in_role` ancestor is reachable only through a CROSS-FILE intermediate role/parent is not typed. Direct cross-file `with 'Role'` works (the role name is a direct local parent); a cross-file *grandparent* role does not. Same root cause as the `ClassIsa` gap. |
 | `app_surface_consumers()` | Trigger-INDEPENDENT bake (`builder.rs:254`) onto `FileAnalysis.app_surface_consumers`; consumed by `parents_of` as the synthetic `APP_SURFACE_CLASS` edge. | **(ii) correct.** `parents_of` is the single seam; the `MethodOnClass` walk + ancestor walks all route through it, so the surface resolves cross-file from every consumer. |
@@ -64,12 +66,11 @@ Confirmed by `probe_class_isa_trigger_through_cross_file_parent` (FAILS).
 builder is index-free by rule #1. There is no module index to consult
 mid-walk, and even if one were threaded in, indexing order isn't
 guaranteed (the dependency carrying `Mojo::EventEmitter` may not be indexed
-yet). This is the *exact* reason the `dispatch_verbs` path was moved to
-enrichment (`promote_provisional_dispatches`): emission deferred to a phase
-that owns the module index. Making `ClassIsa` cross-file-aware means moving
-emit-hook firing out of the walk into a post-index pass — a large change
-that re-implements the trigger evaluation against the cross-file graph and
-re-runs every applicable hook at enrichment.
+yet). The `dispatch_verbs` path answers this by deferring the receiver
+isa-check to QUERY time (the `ReceiverGated` seam, `applicable_dispatches`),
+which owns the module index. Making `ClassIsa` cross-file-aware is the same
+move for *emission*: a gated producer resolved post-index. Phase 2 mints it
+on the same seam — see `docs/adr/receiver-gated-dispatch.md`.
 
 The in-file case composes correctly today
 (`plugin_mojo_events_triggers_through_transitive_parent` — Mid + Leaf same
@@ -79,9 +80,9 @@ file). It's strictly the cross-file ancestry that's missed.
 
 ## B. Enrichment for dependencies / non-open files
 
-`enrich_imported_types_with_keys` (which runs `promote_provisional_dispatches`,
-the imported-hash-key synthesis, the cross-file `inheritance_cross` edge
-projection, and `resolve_method_call_types(Some(idx))`) is called ONLY for:
+`enrich_imported_types_with_keys` (which runs the imported-hash-key
+synthesis, the cross-file `inheritance_cross` edge projection, and
+`resolve_method_call_types(Some(idx))`) is called ONLY for:
 
 - OPEN documents — `backend.rs:50` (resolver refresh, `for_each_open_mut`)
   and `backend.rs:72` (`publish_diagnostics`).
@@ -100,7 +101,7 @@ What this means per enrichment pass:
 |---|---|---|
 | `inheritance_cross` edge projection | No | **Yes** — `query_rec`'s structural `MethodOnClass` fallback (`witnesses.rs:1190`+) walks `parents_of` + recurses into cached bags + `for_each_entity_bridged_to`, with `BagContext.module_index` set. So a dep class inheriting from another dep, or bridging a plugin namespace, still resolves method return types. The build-time edges are an optimization the dep misses, not a correctness floor. |
 | imported hash-key synthesis + `resolve_method_call_types` | No | Partially — cross-file method-return queries route through the same `MethodOnClass` walk; imported-hash-key COMPLETION on a binding inside a non-open dep file would miss the synthetic `HashKeyDef`, but that's a completion-in-a-dependency scenario the LSP doesn't surface (you complete in open files). |
-| `promote_provisional_dispatches` | No | **No.** Dispatch refs are only materialized at enrichment. There is no query-time path that synthesizes a `DispatchCall` ref on demand — `resolve::refs_to` for a Handler matches existing `RefKind::DispatchCall` refs in each file's analysis (`resolve.rs:362`). A `$minion->enqueue('task')` in a non-open workspace file whose receiver isa-Minion is cross-file (and which doesn't `use Minion`, so the emit-hook path doesn't fire either) is invisible to references-to-handler. |
+| dispatch resolution | N/A (no enrichment pass) | **Yes — query-time.** Gated candidates ride the cache; `resolve::refs_to` for a Handler calls `applicable_dispatches`, which resolves the receiver isa-check on demand against the module index. A `$minion->enqueue('task')` in a non-open workspace file whose receiver isa-Minion is cross-file (and which doesn't `use Minion`) now surfaces. The `ReceiverGated` seam makes the inner handler payload unreadable without that check (`docs/adr/receiver-gated-dispatch.md`). |
 
 Confirmed by `probe_dispatch_promotion_in_unenriched_workspace_file`
 (FAILS).
@@ -114,22 +115,18 @@ correctness floor for return-type / method resolution when a caller
 bypasses enrichment. The "what if the caller bypasses enrichment?"
 question from D3's residue is **answered correctly** for type resolution.
 
-The genuine gap is **dispatch promotion**, because it produces a *ref*
-(a side-effecting structural emission), not a *type answer*, and there is
-no query-time fallback that re-derives the ref. The fix is to run
-enrichment over workspace files in a post-index pass and re-enrich on
-change — which mutates Arc'd analyses in the FileStore / module index and
-introduces an ordering + invalidation lifecycle. That is the
-"large/architectural" class; deferred with the failing repro.
+The dispatch gap is **closed**: the query-time middle option below landed.
+The Handler ref query (and dispatch goto-def) scans each file's gated
+dispatch candidates and resolves the receiver isa-check lazily, the same
+way the `MethodOnClass` walk resolves types — so dispatch resolution now
+joins type resolution as a query-time answer, not an enrichment-time ref.
 
-A narrower middle option (NOT taken, noted for the implementer): emit the
-`ProvisionalDispatch` candidates as a query-time source that `refs_to`
-consults — i.e. teach the Handler ref query to also scan
-`provisional_dispatches` whose receiver isa-resolves at query time, the
-same way the `MethodOnClass` walk resolves types lazily. That keeps the
-"no enrichment over deps" invariant but moves promotion to the query, like
-the type path. It's the principled shape (lazy, index-at-query-time) but
-touches `resolve.rs` + the dispatch model and warrants its own PR.
+The landed shape: dispatch candidates ride the cache as
+`ReceiverGated<DispatchCandidate>`; `refs_to` calls
+`FileAnalysis::applicable_dispatches`, which resolves each candidate's
+receiver isa at query time. Keeps the "no enrichment over deps" invariant,
+mirrors the type path, and the `ReceiverGated` type makes the inner handler
+payload unreadable without the isa filter (`docs/adr/receiver-gated-dispatch.md`).
 
 ---
 
@@ -147,19 +144,21 @@ touches `resolve.rs` + the dispatch model and warrants its own PR.
   index-free-builder contract. Fixing means moving emit-hook firing into a
   post-index pass — the same migration `dispatch_verbs` already made.
 
-- **Broken (deferred, architectural):** dispatch-verb promotion in non-open
-  files. No query-time fallback re-derives the `DispatchCall` ref, so
-  references-to-handler miss call sites in unenriched workspace/dependency
-  files.
+- **Landed:** dispatch-verb resolution in non-open files, via the
+  query-time `ReceiverGated` seam (`docs/adr/receiver-gated-dispatch.md`).
+  References-to-handler and dispatch goto-def now reach call sites in
+  unenriched workspace/dependency files.
 
 ## Repros
 
-`src/builder_tests.rs`, module `param_types_manifest`:
+`src/builder_tests.rs`:
 
-- `probe_class_isa_trigger_through_cross_file_parent` — `#[ignore]`,
-  FAILS. Cross-file `ClassIsa` trigger.
-- `probe_dispatch_promotion_in_unenriched_workspace_file` — `#[ignore]`,
-  FAILS. Dispatch promotion without enrichment.
-
-Both are `#[ignore]`-d (not deleted) so the gap stays visible and a future
-fix has its acceptance test ready.
+- `param_types_manifest::probe_class_isa_trigger_through_cross_file_parent`
+  — `#[ignore]`, FAILS. Cross-file `ClassIsa` trigger. STILL OPEN; Phase 2
+  mints this on the same `ReceiverGated` seam.
+- `param_types_manifest::dispatch_resolves_query_time_in_unenriched_workspace_file`
+  — PASSES (un-ignored). The dispatch gap's acceptance test, now green via
+  query-time gated resolution.
+- `resolve::tests::refs_to_handler_finds_dispatch_in_unenriched_cross_file_subclass`
+  — PASSES. A Handler `refs_to` reaches a dispatch call site in a non-open
+  workspace file whose receiver isa-resolves cross-file.

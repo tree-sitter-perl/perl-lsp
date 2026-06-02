@@ -88,12 +88,17 @@ Members today:
 - **`overrides()` → `[TypeOverride]`** — priority return-type assertions (above).
 - **`dispatch_verbs()` → `[DispatchVerb]`** — "method `verb` on a receiver that
   `isa target_class` dispatches a named handler into `owner_class`'s registry"
-  (`enqueue`→Minion tasks). The builder records a `ProvisionalDispatch` per
-  matching call; **enrichment** (which has the module index) promotes the ones
-  whose receiver `isa` the target — resolved by *receiver type*, cross-file, not
-  by the file's `use`s. That's why a `Minion` subclass (`Clove::Minion`) or a
-  helper-returned receiver (`$c->minion->enqueue`) lights up where a file-level
-  trigger never would. See `file_analysis.rs::promote_provisional_dispatches`.
+  (`enqueue`→Minion tasks). The builder records a per-call candidate as a
+  `ReceiverGated<DispatchCandidate>` (ungated, per-file, rides the cache); the
+  receiver isa-check runs at **query time** in
+  `FileAnalysis::applicable_dispatches` (which has the module index) — resolved
+  by *receiver type*, cross-file, not by the file's `use`s. That's why a
+  `Minion` subclass (`Clove::Minion`) or a helper-returned receiver
+  (`$c->minion->enqueue`) lights up where a file-level trigger never would, and
+  why a call site in a non-open workspace/dependency file surfaces the same as
+  an open one. The `ReceiverGated` type makes the inner handler payload
+  unreadable without the isa filter (drift = compile error). See
+  `docs/adr/receiver-gated-dispatch.md`.
 - **`type_constraint_names()` / `type_constraint_inner(name, params)`** — the
   Type::Tiny `isa` vocabulary. Names gate which call expressions are constraint
   constructors; the core extracts each constructor's params (rule #1) into a

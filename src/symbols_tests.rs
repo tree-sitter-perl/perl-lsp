@@ -60,7 +60,7 @@ fn test_diagnostics_skips_builtins() {
     let source = "use Carp qw(croak);\nprint 'hello';\ndie 'oops';\n";
     let analysis = parse_analysis(source);
     let module_index = crate::module_index::ModuleIndex::new_for_test();
-    let diags = collect_diagnostics(&analysis, &module_index);
+    let diags = collect_diagnostics(&analysis, &module_index, Default::default());
     // print and die are builtins, croak is explicitly imported — no diagnostics
     assert!(
         diags.is_empty(),
@@ -74,10 +74,59 @@ fn test_diagnostics_unresolved_function() {
     let source = "frobnicate();\n";
     let analysis = parse_analysis(source);
     let module_index = crate::module_index::ModuleIndex::new_for_test();
-    let diags = collect_diagnostics(&analysis, &module_index);
+    let diags = collect_diagnostics(&analysis, &module_index, Default::default());
     assert_eq!(diags.len(), 1);
     assert_eq!(diags[0].severity, Some(DiagnosticSeverity::INFORMATION));
     assert!(diags[0].message.contains("frobnicate"));
+}
+
+#[test]
+fn unresolved_dispatch_fires_only_when_enabled_and_only_on_untyped_receiver() {
+    use crate::symbols::DiagnosticOptions;
+    // `$minion` is a non-self sub param with no type annotation — genuinely
+    // untyped. The minion `enqueue` dispatch verb fires, but its receiver
+    // can't be pinned to any class → `ReceiverUntyped`.
+    let source = "package W;\nsub fire {\n  my ($self, $minion) = @_;\n  $minion->enqueue('send_email');\n}\n1;\n";
+    let analysis = parse_analysis(source);
+    let module_index = crate::module_index::ModuleIndex::new_for_test();
+
+    // Off by default: no dispatch diagnostic.
+    let default_diags = collect_diagnostics(&analysis, &module_index, Default::default());
+    assert!(
+        !default_diags.iter().any(|d|
+            matches!(&d.code, Some(NumberOrString::String(c)) if c == "unresolved-dispatch")),
+        "unresolved-dispatch must be off by default; got {:?}",
+        default_diags.iter().map(|d| &d.message).collect::<Vec<_>>(),
+    );
+
+    // Enabled: exactly one unresolved-dispatch on the untyped receiver.
+    let on = DiagnosticOptions { unresolved_dispatch: true };
+    let diags = collect_diagnostics(&analysis, &module_index, on);
+    let dispatch_diags: Vec<_> = diags.iter().filter(|d|
+        matches!(&d.code, Some(NumberOrString::String(c)) if c == "unresolved-dispatch")).collect();
+    assert_eq!(
+        dispatch_diags.len(), 1,
+        "expected one unresolved-dispatch on the untyped receiver; got {:?}",
+        diags.iter().map(|d| &d.message).collect::<Vec<_>>(),
+    );
+}
+
+#[test]
+fn unresolved_dispatch_silent_on_does_not_apply() {
+    use crate::symbols::DiagnosticOptions;
+    // Receiver typed to a concrete, unrelated class → DoesNotApply, NOT a
+    // typing gap. Even with the diagnostic enabled, it must stay silent.
+    let source = "package W;\nsub fire {\n  my $x = Some::Other->new;\n  $x->enqueue('send_email');\n}\npackage Some::Other;\nsub new { bless {}, shift }\nsub enqueue { 1 }\n1;\n";
+    let analysis = parse_analysis(source);
+    let module_index = crate::module_index::ModuleIndex::new_for_test();
+    let on = DiagnosticOptions { unresolved_dispatch: true };
+    let diags = collect_diagnostics(&analysis, &module_index, on);
+    assert!(
+        !diags.iter().any(|d|
+            matches!(&d.code, Some(NumberOrString::String(c)) if c == "unresolved-dispatch")),
+        "DoesNotApply (typed, unrelated receiver) must never diagnose; got {:?}",
+        diags.iter().map(|d| &d.message).collect::<Vec<_>>(),
+    );
 }
 
 #[test]
@@ -85,7 +134,7 @@ fn test_diagnostics_skips_local_sub() {
     let source = "sub helper { 1 }\nhelper();\n";
     let analysis = parse_analysis(source);
     let module_index = crate::module_index::ModuleIndex::new_for_test();
-    let diags = collect_diagnostics(&analysis, &module_index);
+    let diags = collect_diagnostics(&analysis, &module_index, Default::default());
     assert!(
         diags.is_empty(),
         "Locally defined sub should not produce diagnostic, got: {:?}",
@@ -98,7 +147,7 @@ fn test_diagnostics_skips_package_qualified() {
     let source = "Foo::Bar::baz();\n";
     let analysis = parse_analysis(source);
     let module_index = crate::module_index::ModuleIndex::new_for_test();
-    let diags = collect_diagnostics(&analysis, &module_index);
+    let diags = collect_diagnostics(&analysis, &module_index, Default::default());
     assert!(
         diags.is_empty(),
         "Package-qualified calls should not produce diagnostic",
@@ -112,7 +161,7 @@ fn test_diagnostics_no_unresolved_for_not_operator() {
     let source = "my $x = 1;\nmy $y = not $x;\nif (not $x) { }\n";
     let analysis = parse_analysis(source);
     let module_index = crate::module_index::ModuleIndex::new_for_test();
-    let diags = collect_diagnostics(&analysis, &module_index);
+    let diags = collect_diagnostics(&analysis, &module_index, Default::default());
     let not_diags: Vec<_> = diags.iter().filter(|d| d.message.contains("not")).collect();
     assert!(
         not_diags.is_empty(),
@@ -140,7 +189,7 @@ sub speak {
 "#;
     let analysis = parse_analysis(source);
     let module_index = crate::module_index::ModuleIndex::new_for_test();
-    let diags = collect_diagnostics(&analysis, &module_index);
+    let diags = collect_diagnostics(&analysis, &module_index, Default::default());
     let super_diags: Vec<_> = diags
         .iter()
         .filter(|d| d.message.contains("SUPER"))
@@ -3132,7 +3181,7 @@ fn types_standard_explicit_import_suppresses_diagnostic() {
     let source = "use Types::Standard qw/Str Int/;\nStr();\nInt();\n";
     let analysis = parse_analysis(source);
     let module_index = crate::module_index::ModuleIndex::new_for_test();
-    let diags = collect_diagnostics(&analysis, &module_index);
+    let diags = collect_diagnostics(&analysis, &module_index, Default::default());
     let names: Vec<&str> = diags.iter()
         .filter_map(|d| {
             if matches!(&d.code, Some(NumberOrString::String(c)) if c == "unresolved-function") {
@@ -3158,7 +3207,7 @@ fn types_standard_all_flag_suppresses_diagnostic() {
     let source = "use Types::Standard '-all';\nInstanceOf(['Foo']);\n";
     let analysis = parse_analysis(source);
     let module_index = crate::module_index::ModuleIndex::new_for_test();
-    let diags = collect_diagnostics(&analysis, &module_index);
+    let diags = collect_diagnostics(&analysis, &module_index, Default::default());
     let unresolved: Vec<&str> = diags.iter()
         .filter_map(|d| {
             if matches!(&d.code, Some(NumberOrString::String(c)) if c == "unresolved-function") {
@@ -3186,7 +3235,7 @@ fn types_common_string_numeric_explicit_import_suppresses_diagnostic() {
     );
     let analysis = parse_analysis(source);
     let module_index = crate::module_index::ModuleIndex::new_for_test();
-    let diags = collect_diagnostics(&analysis, &module_index);
+    let diags = collect_diagnostics(&analysis, &module_index, Default::default());
     let unresolved: Vec<&str> = diags.iter()
         .filter_map(|d| {
             if matches!(&d.code, Some(NumberOrString::String(c)) if c == "unresolved-function") {
@@ -3224,7 +3273,7 @@ fn types_standard_instanceof_constraint_typing_still_works() {
     );
     // No unresolved-function diagnostics for Str, Int, InstanceOf
     let module_index = crate::module_index::ModuleIndex::new_for_test();
-    let diags = collect_diagnostics(&analysis, &module_index);
+    let diags = collect_diagnostics(&analysis, &module_index, Default::default());
     let unresolved: Vec<&str> = diags.iter()
         .filter_map(|d| {
             if matches!(&d.code, Some(NumberOrString::String(c)) if c == "unresolved-function") {

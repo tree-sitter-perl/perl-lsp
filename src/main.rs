@@ -307,6 +307,10 @@ fn cli_check(args: &[String]) {
     let json_mode = is_json_format(args);
     let min_severity = get_arg_value(args, "--severity").unwrap_or("warning");
     let min_rank = severity_rank(min_severity);
+    // Opt-in QA channel, mirrors the LSP `initializationOptions` toggle.
+    let options = symbols::DiagnosticOptions {
+        unresolved_dispatch: args.iter().any(|a| a == "--unresolved-dispatch"),
+    };
 
     let (ws, module_index) = cli_full_startup(root);
 
@@ -314,7 +318,7 @@ fn cli_check(args: &[String]) {
 
     for entry in ws.workspace_raw().iter() {
         let file = entry.key().display().to_string();
-        let diags = symbols::collect_diagnostics(entry.value(), &module_index);
+        let diags = symbols::collect_diagnostics(entry.value(), &module_index, options);
         for d in diags {
             let sev = match d.severity {
                 Some(s) if s == tower_lsp::lsp_types::DiagnosticSeverity::ERROR => "error",

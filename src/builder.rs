@@ -2267,15 +2267,19 @@ impl<'a> Builder<'a> {
             Some(InferredType::ClassName(c)) => Some(c.clone()),
             _ => None,
         };
-        self.provisional_dispatches.push(crate::file_analysis::ProvisionalDispatch {
-            name,
-            span,
-            dispatcher: method.to_string(),
-            owner_class: spec.owner_class.clone(),
-            target_class: spec.target_class.clone(),
-            receiver_class,
-            call_span: ctx.call_span,
-        });
+        // Gate the candidate on the verb's `target_class`: the inner
+        // payload is unreadable until a receiver isa-resolves at query time.
+        self.provisional_dispatches.push(crate::file_analysis::ReceiverGated::new(
+            spec.target_class.clone(),
+            crate::file_analysis::DispatchCandidate {
+                name,
+                span,
+                dispatcher: method.to_string(),
+                owner_class: spec.owner_class.clone(),
+                receiver_class,
+                call_span: ctx.call_span,
+            },
+        ));
     }
 
     /// Convert a plugin-produced `EmitAction` into real builder state. All

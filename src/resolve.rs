@@ -467,6 +467,25 @@ fn collect_from_analysis(
             });
         }
     }
+
+    // Query-time dispatch resolution: gated candidates (which ride the cache
+    // ungated, even in non-open workspace/dependency files) resolve their
+    // receiver isa-check NOW against the module index. The `Applies` ones are
+    // handler call-sites that enrichment-eager promotion would have missed in
+    // any file that's never enriched. `applicable_dispatches` skips sites the
+    // emit-hook path already materialized above, so no double-count.
+    // See `docs/adr/receiver-gated-dispatch.md`.
+    if let TargetKind::Handler { owner, name: hname } = &target.kind {
+        for applied in analysis.applicable_dispatches(module_index) {
+            if &applied.name == hname && &applied.owner == owner {
+                out.push(RefLocation {
+                    key: key.clone(),
+                    span: applied.span,
+                    access: AccessKind::Read,
+                });
+            }
+        }
+    }
 }
 
 #[cfg(test)]

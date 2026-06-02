@@ -1682,3 +1682,46 @@ fn test_route_controller_token_disambiguates_by_ownership() {
         "ownership of `monthly` should pick Beta over the Alpha decoy",
     );
 }
+
+// ---- ReceiverGated seam ----
+
+#[test]
+fn receiver_gated_applies_on_exact_gate() {
+    let pp: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
+    let gated = ReceiverGated::new("Minion", 7u32);
+    assert_eq!(
+        gated.resolve_for(Some("Minion"), &pp, None),
+        GateResult::Applies(&7u32),
+    );
+}
+
+#[test]
+fn receiver_gated_applies_through_local_ancestry() {
+    let mut pp: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
+    pp.insert("My::Minion".into(), vec!["Minion".into()]);
+    let gated = ReceiverGated::new("Minion", "payload");
+    // A descendant resolves through the single `class_isa` walk.
+    assert_eq!(
+        gated.resolve_for(Some("My::Minion"), &pp, None),
+        GateResult::Applies(&"payload"),
+    );
+}
+
+#[test]
+fn receiver_gated_does_not_apply_for_unrelated_class() {
+    let pp: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
+    let gated = ReceiverGated::new("Minion", 1u8);
+    // A concrete, unrelated receiver is a settled negative — NOT untyped.
+    assert_eq!(
+        gated.resolve_for(Some("Some::Other"), &pp, None),
+        GateResult::DoesNotApply,
+    );
+}
+
+#[test]
+fn receiver_gated_untyped_for_unknown_receiver() {
+    let pp: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
+    let gated = ReceiverGated::new("Minion", 1u8);
+    assert_eq!(gated.resolve_for(None, &pp, None), GateResult::ReceiverUntyped);
+    assert_eq!(gated.resolve_for(Some(""), &pp, None), GateResult::ReceiverUntyped);
+}

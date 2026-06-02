@@ -5891,16 +5891,20 @@ fn plugin_app_surface_minion_enqueue_resolves_when_app_typed() {
 
     fa.enrich_imported_types_with_keys(Some(&idx));
 
-    let dc = fa.refs.iter().find(|r| {
+    // `Mojolicious::Lite` is a trigger, so the emit-hook materializes the
+    // DispatchCall directly; `applicable_dispatches` de-dups the gated
+    // candidate against it. Either path surfaces the handler — exactly once.
+    let has_materialized = fa.refs.iter().any(|r|
         matches!(&r.kind, RefKind::DispatchCall { dispatcher, owner: Some(HandlerOwner::Class(c)) }
             if dispatcher == "enqueue" && c == "Minion")
-            && r.target_name == "send_email"
-    });
+            && r.target_name == "send_email");
+    let has_gated = fa.applicable_dispatches(Some(&idx)).iter().any(|a|
+        a.name == "send_email" && a.owner == HandlerOwner::Class("Minion".into()));
     assert!(
-        dc.is_some(),
-        "`$app->minion->enqueue` must promote to a Minion DispatchCall — \
-         the `minion` helper resolves from the typed $app via the app surface, \
-         and its Acme::Minion return type drives dispatch promotion",
+        has_materialized ^ has_gated,
+        "`$app->minion->enqueue` must surface as a Minion dispatch exactly once — \
+         via the emit-hook ref OR the gated candidate; materialized={has_materialized} \
+         gated={has_gated}",
     );
 }
 
@@ -6344,11 +6348,13 @@ $minion->enqueue_p(send_email => ['bob']);
 /// app — so the bundled minion plugin's triggers never fire, and there's no
 /// `DispatchCall` after the plain build. But `$m` is a locally-constructed
 /// `Acme::Minion` (isa Minion, declared cross-file), so the builder records
-/// a provisional dispatch and enrichment — which has the module index, hence
-/// the cross-file `isa` — promotes it. This is the "wherever the minion came
-/// from provides the magic" path the file-trigger model couldn't reach.
+/// a gated candidate and `applicable_dispatches` — which has the module
+/// index, hence the cross-file `isa` — resolves it at QUERY time, with no
+/// enrichment. This is the "wherever the minion came from provides the magic"
+/// path the file-trigger model couldn't reach.
 #[test]
-fn provisional_dispatch_promotes_on_subclass_receiver_at_enrichment() {
+fn gated_dispatch_resolves_on_subclass_receiver_query_time() {
+    use crate::file_analysis::HandlerOwner;
     use std::path::PathBuf;
     let base = build_fa("package Acme::Minion;\nuse Mojo::Base 'Minion';\n1;\n");
     let idx = crate::module_index::ModuleIndex::new_for_test();
@@ -6357,44 +6363,37 @@ fn provisional_dispatch_promotes_on_subclass_receiver_at_enrichment() {
         std::sync::Arc::new(base),
     );
 
-    let mut fa = build_fa(
+    let fa = build_fa(
         "package Worker;\nsub go {\n  my $m = Acme::Minion->new;\n  $m->enqueue('send_email' => ['a']);\n}\n1;\n",
     );
-    // The triggers never fired, so nothing was emitted at parse time.
+    // The triggers never fired, so nothing was materialized at parse time.
     assert!(
         !fa.refs.iter().any(|r| matches!(&r.kind, RefKind::DispatchCall { .. })),
-        "no DispatchCall should exist before enrichment (plugin didn't fire)",
+        "no DispatchCall ref should exist (plugin trigger didn't fire)",
     );
 
-    fa.enrich_imported_types_with_keys(Some(&idx));
-
-    let dc = fa.refs.iter().find(|r| {
-        matches!(&r.kind, RefKind::DispatchCall { dispatcher, owner: Some(HandlerOwner::Class(c)) }
-            if dispatcher == "enqueue" && c == "Minion")
-            && r.target_name == "send_email"
-    });
-    assert!(
-        dc.is_some(),
-        "enrichment must synthesize a Minion DispatchCall for enqueue on a \
-         Minion-subclass receiver, even in a file that never uses Minion",
+    // No enrichment — query-time resolution alone surfaces the dispatch,
+    // exactly as a non-open workspace file would be served.
+    let applied = fa.applicable_dispatches(Some(&idx));
+    assert_eq!(
+        applied.iter().filter(|a|
+            a.name == "send_email" && a.owner == HandlerOwner::Class("Minion".into())).count(),
+        1,
+        "query-time resolution must surface exactly one Minion dispatch for \
+         enqueue on a Minion-subclass receiver, even with no enrichment; got {:?}",
+        applied,
     );
-
-    // Idempotent: a second enrichment must not double the ref.
-    fa.enrich_imported_types_with_keys(Some(&idx));
-    let count = fa.refs.iter().filter(|r| {
-        matches!(&r.kind, RefKind::DispatchCall { .. }) && r.target_name == "send_email"
-    }).count();
-    assert_eq!(count, 1, "re-enrichment must not duplicate the synthesized DispatchCall");
 }
 
-/// Option B, step 1: the receiver isn't locally typed — it's a cross-file
-/// method-call return (`$b->minion` where `Box::minion` returns an
-/// `Acme::Minion`). The build-time hint is `None`; enrichment resolves the
-/// invocant cross-file (via the module index) and, finding it isa Minion,
-/// promotes the dispatch. This is the `$self->_minion->enqueue(...)` shape —
-/// works whenever the receiver's type is actually resolvable.
+/// The receiver isn't locally typed — it's a cross-file method-call return
+/// (`$b->minion` where `Box::minion` returns an `Acme::Minion`). The
+/// build-time hint is `None`; query-time resolution resolves the invocant
+/// cross-file (via the module index) and, finding it isa Minion, surfaces the
+/// dispatch. This is the `$self->_minion->enqueue(...)` shape — works whenever
+/// the receiver's type is actually resolvable.
 #[test]
-fn provisional_dispatch_resolves_cross_file_receiver_at_enrichment() {
+fn gated_dispatch_resolves_cross_file_receiver_query_time() {
+    use crate::file_analysis::HandlerOwner;
     use std::path::PathBuf;
     let idx = crate::module_index::ModuleIndex::new_for_test();
     idx.register_workspace_module(
@@ -6408,26 +6407,18 @@ fn provisional_dispatch_resolves_cross_file_receiver_at_enrichment() {
         )),
     );
 
-    let mut fa = build_fa(
+    let fa = build_fa(
         "package Worker;\nsub go {\n  my $b = Box->new;\n  $b->minion->enqueue('send_email' => ['a']);\n}\n1;\n",
     );
-    // Receiver `$b->minion` isn't typed at build (Box is another file).
-    assert!(
-        fa.provisional_dispatches.iter().any(|p| p.receiver_class.is_none()),
-        "the cross-file-receiver candidate should carry no build-time class hint",
-    );
 
-    fa.enrich_imported_types_with_keys(Some(&idx));
-
-    let dc = fa.refs.iter().find(|r| {
-        matches!(&r.kind, RefKind::DispatchCall { dispatcher, owner: Some(HandlerOwner::Class(c)) }
-            if dispatcher == "enqueue" && c == "Minion")
-            && r.target_name == "send_email"
-    });
+    // No enrichment: the gate resolves the cross-file receiver lazily.
+    let applied = fa.applicable_dispatches(Some(&idx));
     assert!(
-        dc.is_some(),
-        "enrichment must resolve the cross-file receiver `$b->minion` (Acme::Minion \
-         isa Minion) and synthesize the DispatchCall",
+        applied.iter().any(|a|
+            a.name == "send_email" && a.owner == HandlerOwner::Class("Minion".into())),
+        "query-time resolution must resolve the cross-file receiver `$b->minion` \
+         (Acme::Minion isa Minion) and surface the dispatch; got {:?}",
+        applied,
     );
 }
 
@@ -6724,7 +6715,7 @@ sub session { my ($self, $key) = @_; }
     // resolve_method_in_ancestors; our fix extends that to pick
     // up plugin-emitted methods on parent classes declared
     // elsewhere in the workspace.
-    let diags = crate::symbols::collect_diagnostics(&fa, &idx);
+    let diags = crate::symbols::collect_diagnostics(&fa, &idx, Default::default());
     for diag in &diags {
         let msg = &diag.message;
         assert!(
@@ -10106,6 +10097,7 @@ fn instanceof_accessor_chains_into_method_call() {
 /// index (variable arm) and chases the helper bridge the way hover does.
 #[test]
 fn provisional_dispatch_resolves_helper_returned_receiver() {
+    use crate::file_analysis::HandlerOwner;
     use std::path::PathBuf;
     let idx = crate::module_index::ModuleIndex::new_for_test();
     idx.register_workspace_module(
@@ -10119,20 +10111,31 @@ fn provisional_dispatch_resolves_helper_returned_receiver() {
         )),
     );
 
-    let mut fa = build_fa(
+    let fa = build_fa(
         "package Acme::Ctrl;\nuse Mojo::Base 'Mojolicious::Controller';\nsub act ($c) {\n  $c->minion->enqueue('Task.go');\n}\n1;\n",
     );
-    fa.enrich_imported_types_with_keys(Some(&idx));
 
-    let dc = fa.refs.iter().find(|r| {
+    // This file hits a Mojo trigger, so the emit-hook materializes the
+    // DispatchCall directly (it doesn't gate on the receiver). The handler
+    // is surfaced either way; `applicable_dispatches` de-dups the gated
+    // candidate against the materialized ref so there's no double-count.
+    let has_materialized = fa.refs.iter().any(|r|
         matches!(&r.kind, RefKind::DispatchCall { dispatcher, owner: Some(HandlerOwner::Class(c)) }
             if dispatcher == "enqueue" && c == "Minion")
-            && r.target_name == "Task.go"
-    });
+            && r.target_name == "Task.go");
+    let applied = fa.applicable_dispatches(Some(&idx));
+    let has_gated = applied.iter().any(|a|
+        a.name == "Task.go" && a.owner == HandlerOwner::Class("Minion".into()));
     assert!(
-        dc.is_some(),
-        "enrichment must resolve the helper-returned receiver $c->minion (Acme::Minion \
-         isa Minion) and synthesize the DispatchCall for the chained enqueue",
+        has_materialized ^ has_gated,
+        "the helper-returned receiver $c->minion (Acme::Minion isa Minion) enqueue \
+         must surface exactly once — via the emit-hook ref OR the gated candidate, \
+         never both; materialized={has_materialized} gated={has_gated} applied={:?}",
+        applied,
+    );
+    assert!(
+        has_materialized,
+        "this file hits a Mojo trigger, so the emit-hook materializes the dispatch",
     );
 }
 
@@ -10261,30 +10264,24 @@ mod param_types_manifest {
         );
     }
 
-    /// Dispatch-verb promotion in a NON-OPEN workspace/dependency file
-    /// whose dispatch receiver `isa Minion` only CROSS-FILE and which
-    /// does NOT `use Minion` itself. The minion plugin's emit-hook path
+    /// Dispatch-verb resolution in a NON-OPEN workspace/dependency file
+    /// whose dispatch receiver `isa Minion` only CROSS-FILE and which does
+    /// NOT `use Minion` itself. The minion plugin's emit-hook path
     /// (`UsesModule`/`ClassIsa` trigger) doesn't fire — only the
-    /// trigger-independent `dispatch_verbs()` manifest captures the
-    /// `ProvisionalDispatch`. Promotion happens in
-    /// `enrich_imported_types_with_keys`, but workspace/dependency files
-    /// are built via `crate::builder::build` WITHOUT enrichment and the
-    /// resolver refresh only re-enriches OPEN documents. So the call
-    /// site never becomes a `DispatchCall` ref and references-to-handler
-    /// miss it.
-    ///
-    /// Architectural gap (resolver lifecycle), NOT a contained fix.
-    /// See the doc.
+    /// trigger-independent `dispatch_verbs()` manifest captures a gated
+    /// candidate. Under the query-time `ReceiverGated` seam the file is built
+    /// WITHOUT enrichment (as the workspace indexer does) yet
+    /// `applicable_dispatches` resolves the receiver cross-file and surfaces
+    /// the call site. See `docs/adr/receiver-gated-dispatch.md`.
     #[test]
-    #[ignore = "dispatch promotion needs enrichment over non-open files; see docs/prompt-enrichment-inheritance-residual.md"]
-    fn probe_dispatch_promotion_in_unenriched_workspace_file() {
+    fn dispatch_resolves_query_time_in_unenriched_workspace_file() {
         use crate::module_index::ModuleIndex;
         use std::path::PathBuf;
         let idx = ModuleIndex::new_for_test();
         idx.set_workspace_root(None);
-        // `My::Minion` isa Minion, cross-file. The worker file below
-        // never `use`s Minion — the emit-hook trigger can't fire, only
-        // the receiver-isa manifest promotion at enrichment can.
+        // `My::Minion` isa Minion, cross-file. The worker file below never
+        // `use`s Minion — the emit-hook trigger can't fire, only the
+        // receiver-isa manifest candidate, gated and resolved at query time.
         idx.insert_cache(
             "My::Minion",
             Some(fake_cached_for_class(
@@ -10297,15 +10294,15 @@ mod param_types_manifest {
         let src = "package My::Worker;\nsub run {\n  my $self = shift;\n  my $minion = My::Minion->new;\n  $minion->enqueue('send_email');\n}\n1;\n";
         // Build exactly as the workspace indexer does: no enrichment.
         let fa = build_fa(src);
-        let dispatch_refs = fa.refs.iter().filter(|r|
-            matches!(&r.kind, crate::file_analysis::RefKind::DispatchCall { .. })
-        ).count();
+        let applied = fa.applicable_dispatches(Some(&idx));
         assert_eq!(
-            dispatch_refs, 1,
-            "workspace-indexed file (no enrichment) should still have its \
-             enqueue promoted to a DispatchCall — else cross-file handler \
-             references miss it"
+            applied.len(), 1,
+            "workspace-indexed file (no enrichment) should resolve its enqueue \
+             dispatch at query time via the cross-file receiver isa — else \
+             cross-file handler references miss it; got {:?}",
+            applied,
         );
+        assert_eq!(applied[0].name, "send_email");
     }
 
     // Wildcard-method param_types: a rule with `method: None` applies to every

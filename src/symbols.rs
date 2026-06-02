@@ -177,6 +177,19 @@ pub fn find_definition(
 ) -> Option<GotoDefinitionResponse> {
     let point = position_to_point(pos);
 
+    // Query-time dispatch goto-def: a `$minion->enqueue('task')` whose
+    // receiver isa-resolves (possibly cross-file) jumps to the handler, even
+    // when no `DispatchCall` ref was materialized for this site. The gate is
+    // applied in `dispatch_at`; we just map the resolved handler to its
+    // definition. Runs before `find_definition` because the cursor is on the
+    // name-string arg, which `find_definition` would otherwise treat as a
+    // plain string literal. See `docs/adr/receiver-gated-dispatch.md`.
+    if let Some(applied) = analysis.dispatch_at(point, Some(module_index)) {
+        if let Some(resp) = dispatch_handler_locations(&applied.owner, &applied.name, module_index) {
+            return Some(resp);
+        }
+    }
+
     // Try local definition first
     if let Some(span) = analysis.find_definition(point, Some(tree), Some(source.as_bytes()), Some(module_index)) {
         return Some(GotoDefinitionResponse::Scalar(Location {
@@ -257,30 +270,8 @@ pub fn find_definition(
         // registrations → return all as an Array so the editor can show
         // the picker.
         if let RefKind::DispatchCall { owner: Some(owner), .. } = &r.kind {
-            use crate::file_analysis::SymbolDetail;
-            let mut locs: Vec<Location> = Vec::new();
-            for module_name in module_index.modules_with_symbol(&r.target_name) {
-                let Some(cached) = module_index.get_cached(&module_name) else { continue };
-                for sym in &cached.analysis.symbols {
-                    if sym.name != r.target_name { continue; }
-                    if let SymbolDetail::Handler { owner: o, .. } = &sym.detail {
-                        if o == owner {
-                            if let Ok(module_uri) = Url::from_file_path(&cached.path) {
-                                locs.push(Location {
-                                    uri: module_uri,
-                                    range: span_to_range(sym.selection_span),
-                                });
-                            }
-                        }
-                    }
-                }
-            }
-            if !locs.is_empty() {
-                return Some(if locs.len() == 1 {
-                    GotoDefinitionResponse::Scalar(locs.into_iter().next().unwrap())
-                } else {
-                    GotoDefinitionResponse::Array(locs)
-                });
+            if let Some(resp) = dispatch_handler_locations(owner, &r.target_name, module_index) {
+                return Some(resp);
             }
         }
 
@@ -315,6 +306,44 @@ pub fn find_definition(
     }
 
     None
+}
+
+/// All `Handler` definitions matching `(owner, name)` across cached modules.
+/// A dispatch (`$emitter->emit('ready')`) can target stacked registrations
+/// in different files; multiple hits return an `Array` so the editor shows a
+/// picker. Shared by the materialized-ref path and the query-time
+/// `dispatch_at` path so both resolve handlers identically.
+fn dispatch_handler_locations(
+    owner: &crate::file_analysis::HandlerOwner,
+    name: &str,
+    module_index: &ModuleIndex,
+) -> Option<GotoDefinitionResponse> {
+    use crate::file_analysis::SymbolDetail;
+    let mut locs: Vec<Location> = Vec::new();
+    for module_name in module_index.modules_with_symbol(name) {
+        let Some(cached) = module_index.get_cached(&module_name) else { continue };
+        for sym in &cached.analysis.symbols {
+            if sym.name != name { continue; }
+            if let SymbolDetail::Handler { owner: o, .. } = &sym.detail {
+                if o == owner {
+                    if let Ok(module_uri) = Url::from_file_path(&cached.path) {
+                        locs.push(Location {
+                            uri: module_uri,
+                            range: span_to_range(sym.selection_span),
+                        });
+                    }
+                }
+            }
+        }
+    }
+    if locs.is_empty() {
+        return None;
+    }
+    Some(if locs.len() == 1 {
+        GotoDefinitionResponse::Scalar(locs.into_iter().next().unwrap())
+    } else {
+        GotoDefinitionResponse::Array(locs)
+    })
 }
 
 pub fn find_references(analysis: &FileAnalysis, pos: Position, uri: &Url, tree: &Tree, source: &str, module_index: Option<&ModuleIndex>) -> Vec<Location> {
@@ -2203,7 +2232,23 @@ fn is_perl_builtin(name: &str) -> bool {
 }
 
 
-pub fn collect_diagnostics(analysis: &FileAnalysis, module_index: &ModuleIndex) -> Vec<Diagnostic> {
+/// Opt-in diagnostic toggles. Defaults are all-off for the QA/plugin-author
+/// channels (noise for end users); the always-on hints (`unresolved-function`
+/// / `unresolved-method`) ignore this. Parsed from `initializationOptions`
+/// in `backend.rs`. See `docs/adr/receiver-gated-dispatch.md`.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct DiagnosticOptions {
+    /// Fire `unresolved-dispatch` when a known dispatch verb's receiver can't
+    /// be typed (`GateResult::ReceiverUntyped`) — never on a settled
+    /// `DoesNotApply`. Off by default.
+    pub unresolved_dispatch: bool,
+}
+
+pub fn collect_diagnostics(
+    analysis: &FileAnalysis,
+    module_index: &ModuleIndex,
+    options: DiagnosticOptions,
+) -> Vec<Diagnostic> {
     let mut diagnostics = Vec::new();
 
     for r in &analysis.refs {
@@ -2397,6 +2442,27 @@ pub fn collect_diagnostics(analysis: &FileAnalysis, module_index: &ModuleIndex) 
             ),
             ..Default::default()
         });
+    }
+
+    // Opt-in `unresolved-dispatch`: a known dispatch verb whose receiver
+    // couldn't be typed, so we can't tell if the dispatch applies. Fires ONLY
+    // on `ReceiverUntyped` (a real typing gap), never on `DoesNotApply` — the
+    // 3-way `GateResult` keeps the two apart so the diagnostic can't spew on
+    // every unrelated receiver. QA/plugin-author tool, hence default-off.
+    if options.unresolved_dispatch {
+        for untyped in analysis.untyped_dispatches(Some(module_index)) {
+            diagnostics.push(Diagnostic {
+                range: span_to_range(untyped.call_span),
+                severity: Some(DiagnosticSeverity::INFORMATION),
+                code: Some(NumberOrString::String("unresolved-dispatch".into())),
+                source: Some("perl-lsp".into()),
+                message: format!(
+                    "dispatch verb '{}' fired on an untyped receiver; can't confirm it dispatches into {}",
+                    untyped.dispatcher, untyped.gate,
+                ),
+                ..Default::default()
+            });
+        }
     }
 
     diagnostics
