@@ -569,6 +569,27 @@ pub struct ConstraintParam {
     pub ty: Option<InferredType>,
 }
 
+/// A plugin-declared parameter type for a role-contract method: "in a class
+/// that does `in_role`, the sub `method`'s parameter at index `param` has type
+/// `ClassName(type_class)`." The motivating case is a framework role whose
+/// required method has a typed argument the source can't express — e.g.
+/// `Clove::Upgrade::OneTime`'s `sub run_upgrade ($self, $app)`, where `$app`
+/// is the `Mojolicious` app. The builder applies this at the sub-declaration
+/// walk (the one place that sees a sub's params, rule #1), pushing a Variable
+/// type constraint for the param — the same mechanism `detect_first_param_type`
+/// uses for `$self`. See `docs/prompt-param-typing.md`. (Callback-arg param
+/// typing — `$job` in a Minion task — stays in the per-plugin `VarType` emit;
+/// this manifest is the *declaration*-site selector that has no hook.)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ParamType {
+    pub method: String,
+    /// The enclosing package must do/inherit this role/class (matched against
+    /// the package's resolved ancestry — `with` / `extends` / `isa` / `does`).
+    pub in_role: String,
+    pub param: usize,
+    pub type_class: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum OverrideTarget {
     /// Method `name` defined on the package `class`. Match is by exact
@@ -599,6 +620,12 @@ pub trait FrameworkPlugin: Send + Sync {
     /// in the enrichment pass (cross-file receiver isa resolution) — see
     /// `DispatchVerb`. Default empty; only dispatch-style plugins declare.
     fn dispatch_verbs(&self) -> &[DispatchVerb] {
+        &[]
+    }
+
+    /// Static role-contract parameter-type manifest — see `ParamType`.
+    /// Applied at the sub-declaration walk. Default empty.
+    fn param_types(&self) -> &[ParamType] {
         &[]
     }
 
@@ -888,6 +915,11 @@ impl PluginRegistry {
     /// Trigger-independent, same rationale as `overrides`.
     pub fn dispatch_verbs<'a>(&'a self) -> impl Iterator<Item = &'a DispatchVerb> + 'a {
         self.plugins.iter().flat_map(|p| p.dispatch_verbs().iter())
+    }
+
+    /// Yield every role-contract parameter-type rule across the registry.
+    pub fn param_types<'a>(&'a self) -> impl Iterator<Item = &'a ParamType> + 'a {
+        self.plugins.iter().flat_map(|p| p.param_types().iter())
     }
 
     /// Union of constraint-constructor names across the registry — the

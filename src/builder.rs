@@ -226,6 +226,7 @@ fn build_with_plugins_inner(
         plugins,
         dispatch_manifest: std::collections::HashMap::new(),
         type_constraint_names: std::collections::HashSet::new(),
+        param_type_manifest: std::collections::HashMap::new(),
         provisional_dispatches: Vec::new(),
         method_call_invocant: std::collections::HashMap::new(),
         parametric_emitted_refs: std::collections::HashSet::new(),
@@ -241,6 +242,12 @@ fn build_with_plugins_inner(
         .type_constraint_names()
         .map(|s| s.to_string())
         .collect();
+    for pt in b.plugins.param_types() {
+        b.param_type_manifest
+            .entry(pt.method.clone())
+            .or_default()
+            .push(pt.clone());
+    }
 
     // Create file-level scope and walk
     let file_scope = b.push_scope(ScopeKind::File, node_to_span(tree.root_node()), None);
@@ -1096,6 +1103,9 @@ struct Builder<'a> {
     /// (`InstanceOf`, …), flattened once. A call to one of these is typed as
     /// `TypeConstraintOf` via the plugin's fold rather than its callee return.
     type_constraint_names: std::collections::HashSet<String>,
+    /// Plugin `param_types()` manifest, grouped by method name. At a matching
+    /// sub declaration in a role-doer, the named param gets a typed TC.
+    param_type_manifest: std::collections::HashMap<String, Vec<plugin::ParamType>>,
     /// Dispatch candidates recorded during the walk, promoted to refs in
     /// enrichment once the receiver's cross-file class is known. See
     /// `file_analysis::ProvisionalDispatch`.
@@ -2881,6 +2891,11 @@ impl<'a> Builder<'a> {
         // Detect first-param-is-self pattern
         self.detect_first_param_type(&params, node);
 
+        // Role-contract param typing: a plugin `param_types()` rule may type
+        // a named param (e.g. `$app` in a `Clove::Upgrade::OneTime` doer's
+        // `run_upgrade`). Same mechanism as `detect_first_param_type`.
+        self.apply_param_type_manifest(&name, &params, node);
+
         // Visit children (body, etc.)
         self.visit_children(node);
         self.pop_scope();
@@ -3197,6 +3212,43 @@ impl<'a> Builder<'a> {
             }
         }
         // Legacy params: they'll be picked up as normal variable_declaration nodes
+    }
+
+    /// Apply plugin `param_types()` rules to a sub declaration: if a rule's
+    /// `method` matches and the enclosing package does/inherits the rule's
+    /// `in_role`, push a typed TC for the named param — the role contract's
+    /// declared type. Called inside the sub scope (like
+    /// `detect_first_param_type`). The role check uses the parents recorded so
+    /// far (`with` typically precedes the method); a role declared *after* the
+    /// method in the file wouldn't be seen at this walk point.
+    fn apply_param_type_manifest(&mut self, method: &str, params: &[ParamInfo], node: Node<'a>) {
+        let Some(rules) = self.param_type_manifest.get(method) else { return };
+        let Some(pkg) = self.current_package.clone() else { return };
+        // Resolved ancestry of the enclosing package (roles via `with`,
+        // parents via extends/isa/use parent), plus the package itself.
+        let ancestry = self.transitive_parents(&pkg);
+        // Snapshot the matching (param-index, class) pairs before mutating
+        // self via push_type_constraint (can't hold the manifest borrow).
+        let mut to_type: Vec<(String, String)> = Vec::new();
+        for r in rules {
+            let in_scope = pkg == r.in_role || ancestry.iter().any(|a| a == &r.in_role);
+            if !in_scope { continue; }
+            if let Some(p) = params.get(r.param) {
+                if p.name.starts_with('$') {
+                    to_type.push((p.name.clone(), r.type_class.clone()));
+                }
+            }
+        }
+        let scope = self.current_scope();
+        let span = node_to_span(node);
+        for (variable, class) in to_type {
+            self.push_type_constraint(TypeConstraint {
+                variable,
+                scope,
+                constraint_span: span,
+                inferred_type: InferredType::ClassName(class),
+            });
+        }
     }
 
     fn detect_first_param_type(&mut self, params: &[ParamInfo], node: Node<'a>) {

@@ -9738,3 +9738,81 @@ fn provisional_dispatch_resolves_helper_returned_receiver() {
          isa Minion) and synthesize the DispatchCall for the chained enqueue",
     );
 }
+
+/// Role-contract parameter typing: a plugin's `param_types()` manifest types a
+/// named param of a sub declared in a class that does the rule's role. The
+/// motivating case is `Clove::Upgrade::OneTime`'s `run_upgrade ($self, $app)`,
+/// where `$app` is the Mojolicious app — a type the source can't express and
+/// no callback-arg hook can reach (it's a plain sub declaration).
+mod param_types_manifest {
+    use super::*;
+    use crate::plugin::{
+        CompletionQueryContext, FrameworkPlugin, ParamType, PluginCompletionAnswer,
+        PluginRegistry, PluginSigHelpAnswer, SigHelpQueryContext, Trigger,
+    };
+    use std::sync::Arc;
+
+    struct UpgradeRolePlugin;
+    impl FrameworkPlugin for UpgradeRolePlugin {
+        fn id(&self) -> &str { "upgrade-role-test" }
+        fn triggers(&self) -> &[Trigger] {
+            static T: [Trigger; 1] = [Trigger::Always];
+            &T
+        }
+        fn param_types(&self) -> &[ParamType] {
+            // Built lazily into a static so the &[] borrow is 'static.
+            use std::sync::OnceLock;
+            static PT: OnceLock<Vec<ParamType>> = OnceLock::new();
+            PT.get_or_init(|| {
+                vec![ParamType {
+                    method: "run_upgrade".into(),
+                    in_role: "My::Upgrade::Role".into(),
+                    param: 1,
+                    type_class: "Mojolicious".into(),
+                }]
+            })
+        }
+        fn on_signature_help(&self, _: &SigHelpQueryContext) -> Option<PluginSigHelpAnswer> { None }
+        fn on_completion(&self, _: &CompletionQueryContext) -> Option<PluginCompletionAnswer> { None }
+    }
+
+    fn build_with_upgrade(source: &str) -> FileAnalysis {
+        let mut reg = PluginRegistry::new();
+        reg.register(Box::new(UpgradeRolePlugin));
+        let mut parser = tree_sitter::Parser::new();
+        parser.set_language(&ts_parser_perl::LANGUAGE.into()).unwrap();
+        let tree = parser.parse(source, None).unwrap();
+        crate::builder::build_with_plugins(&tree, source.as_bytes(), Arc::new(reg))
+    }
+
+    #[test]
+    fn role_doer_run_upgrade_app_param_typed() {
+        // `use Moo; with 'Role'` populates package_parents (core framework
+        // handling); the manifest then types `$app` as Mojolicious.
+        let fa = build_with_upgrade(
+            "package My::Doer;\nuse Moo;\nwith 'My::Upgrade::Role';\nsub run_upgrade ($self, $app) {\n  my $x = $app;\n}\n1;\n",
+        );
+        let ty = fa
+            .inferred_type_via_bag("$app", Point::new(4, 10))
+            .expect("$app should be typed by the param_types manifest");
+        assert!(
+            matches!(&ty, InferredType::ClassName(c) if c == "Mojolicious"),
+            "role-contract param typing should make $app a Mojolicious, got {:?}",
+            ty,
+        );
+    }
+
+    #[test]
+    fn non_doer_same_method_name_not_typed() {
+        // Same method name, but the class does NOT do the role → no typing
+        // (the rule is role-gated, not name-gated).
+        let fa = build_with_upgrade(
+            "package Other;\nsub run_upgrade ($self, $app) {\n  my $x = $app;\n}\n1;\n",
+        );
+        assert_eq!(
+            fa.inferred_type_via_bag("$app", Point::new(2, 10)),
+            None,
+            "a class that doesn't do the role must not get the contract param type",
+        );
+    }
+}

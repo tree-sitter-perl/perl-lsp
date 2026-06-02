@@ -21,8 +21,8 @@ use tree_sitter::Point;
 
 use super::{
     CallContext, CompletionQueryContext, ConstraintParam, DispatchVerb, EmitAction,
-    FrameworkPlugin, PluginCompletionAnswer, PluginSigHelpAnswer, SigHelpQueryContext, Trigger,
-    TypeOverride, UseContext,
+    FrameworkPlugin, ParamType, PluginCompletionAnswer, PluginSigHelpAnswer, SigHelpQueryContext,
+    Trigger, TypeOverride, UseContext,
 };
 
 /// An engine built with our helpers and type registrations. Engines are
@@ -120,6 +120,7 @@ pub struct RhaiPlugin {
     triggers: Vec<Trigger>,
     overrides: Vec<TypeOverride>,
     dispatch_verbs: Vec<DispatchVerb>,
+    param_types: Vec<ParamType>,
     type_constraint_names: Vec<String>,
     engine: Arc<Engine>,
     ast: Arc<AST>,
@@ -205,6 +206,26 @@ impl RhaiPlugin {
             }
         }
 
+        // `param_types()` — role-contract parameter typing.
+        let mut param_types: Vec<ParamType> = Vec::new();
+        if signatures.iter().any(|n| n == "param_types") {
+            match engine.call_fn::<Array>(&mut rhai::Scope::new(), &ast, "param_types", ()) {
+                Ok(arr) => {
+                    for d in arr {
+                        match from_dynamic::<ParamType>(&d) {
+                            Ok(v) => param_types.push(v),
+                            Err(e) => log::error!(
+                                "plugin `{}` param_types() bad entry: {}",
+                                id,
+                                e
+                            ),
+                        }
+                    }
+                }
+                Err(e) => log::error!("plugin `{}` param_types() failed: {}", id, e),
+            }
+        }
+
         // `type_constraint_names()` — the constraint-constructor dispatch gate.
         let mut type_constraint_names: Vec<String> = Vec::new();
         if signatures.iter().any(|n| n == "type_constraint_names") {
@@ -236,6 +257,7 @@ impl RhaiPlugin {
             triggers,
             overrides,
             dispatch_verbs,
+            param_types,
             type_constraint_names,
             engine,
             ast: Arc::new(ast),
@@ -313,6 +335,10 @@ impl FrameworkPlugin for RhaiPlugin {
 
     fn dispatch_verbs(&self) -> &[DispatchVerb] {
         &self.dispatch_verbs
+    }
+
+    fn param_types(&self) -> &[ParamType] {
+        &self.param_types
     }
 
     fn type_constraint_names(&self) -> &[String] {
