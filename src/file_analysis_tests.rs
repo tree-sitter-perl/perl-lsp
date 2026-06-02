@@ -1414,3 +1414,167 @@ $dog->speak();
     let chain = fa.method_rename_chain("Dog", "nonexistent", None);
     assert_eq!(chain, vec!["Dog".to_string()]);
 }
+
+// ---- Mojolicious route controller-token → class ----
+
+/// Camelize matches `Mojo::Util::camelize` exactly (verified against
+/// the crm-vendored Mojo::Util source): `-` → `::`, `_` within a
+/// segment → `ucfirst lc` pieces concatenated, leading-uppercase token
+/// passes through unchanged.
+#[test]
+fn test_camelize_controller_matches_mojo_util() {
+    let cases = [
+        ("login", "Login"),
+        ("sales_reports", "SalesReports"),
+        ("integrations-ads_api", "Integrations::AdsApi"),
+        ("foo_bar-baz", "FooBar::Baz"),
+        ("users", "Users"),
+        // Already class-shaped: untouched (camelize's `/^[A-Z]/` gate).
+        ("FooBar", "FooBar"),
+        ("Foo::Bar", "Foo::Bar"),
+        // Mixed-case piece is lowercased first, then ucfirst'd.
+        ("sales_REPORTS", "SalesReports"),
+    ];
+    for (input, want) in cases {
+        assert_eq!(
+            camelize_controller(input),
+            want,
+            "camelize_controller({input:?})",
+        );
+    }
+}
+
+#[test]
+fn test_module_tail_matches() {
+    assert!(module_tail_matches("Clove::Controller::Login", "Login"));
+    assert!(module_tail_matches(
+        "App::Controller::Integrations::AdsApi",
+        "Integrations::AdsApi",
+    ));
+    assert!(module_tail_matches("Login", "Login"));
+    // Tail must align on a `::` boundary — not a substring.
+    assert!(!module_tail_matches("Clove::Controller::AdminLogin", "Login"));
+    assert!(!module_tail_matches("Clove::Controller::Logins", "Login"));
+}
+
+/// Cross-file pin: a route `->to('users#list')` (controller token
+/// `users`, lowercase, never a Perl package name on its own) resolves
+/// its MethodCall invocant to the controller class under the app's
+/// namespace that owns `list`.
+#[test]
+fn test_route_controller_token_resolves_cross_file() {
+    use crate::module_index::ModuleIndex;
+    use std::sync::Arc;
+
+    // App file declaring the route. The mojo-routes plugin turns the
+    // `->to('users#list')` string into a `MethodCall { invocant: "users",
+    // method_name: "list" }` — the token is passed raw.
+    let app = build_fa_from_source(
+        r#"
+        package Some::App;
+        use Mojolicious::Lite;
+        sub startup {
+            my $self = shift;
+            $self->routes->get('/users')->to('users#list');
+        }
+        1;
+        "#,
+    );
+
+    // The controller class lives in another file under the app's
+    // controller namespace and defines `list`.
+    let controller = build_fa_from_source(
+        r#"
+        package Some::App::Controller::Users;
+        use Mojo::Base 'Mojolicious::Controller';
+        sub list { my $c = shift; }
+        1;
+        "#,
+    );
+
+    let idx = ModuleIndex::new_for_test();
+    idx.register_workspace_module(
+        std::path::PathBuf::from("/tmp/Some_App_Controller_Users.pm"),
+        Arc::new(controller),
+    );
+
+    let to_ref = app
+        .refs
+        .iter()
+        .find(|r| {
+            r.target_name == "list"
+                && matches!(&r.kind, RefKind::MethodCall { invocant, .. } if invocant == "users")
+        })
+        .expect("plugin emits MethodCall {invocant: users, method: list} for ->to('users#list')");
+
+    let class = app.method_call_invocant_class(to_ref, Some(&idx));
+    assert_eq!(
+        class.as_deref(),
+        Some("Some::App::Controller::Users"),
+        "controller token `users` should camelize + workspace-resolve to the owning controller class",
+    );
+}
+
+/// When the same short controller name exists under multiple controller
+/// roots, ownership of the action disambiguates: only the class that
+/// actually defines the method is chosen.
+#[test]
+fn test_route_controller_token_disambiguates_by_ownership() {
+    use crate::module_index::ModuleIndex;
+    use std::sync::Arc;
+
+    let app = build_fa_from_source(
+        r#"
+        package Some::App;
+        use Mojolicious::Lite;
+        sub startup {
+            my $self = shift;
+            $self->routes->get('/r')->to('reports#monthly');
+        }
+        1;
+        "#,
+    );
+
+    // Two `*::Controller::Reports` classes; only the second defines
+    // `monthly`. The first is a decoy with a different action.
+    let decoy = build_fa_from_source(
+        r#"
+        package Alpha::Controller::Reports;
+        sub daily { }
+        1;
+        "#,
+    );
+    let owner = build_fa_from_source(
+        r#"
+        package Beta::Controller::Reports;
+        sub monthly { }
+        1;
+        "#,
+    );
+
+    let idx = ModuleIndex::new_for_test();
+    idx.register_workspace_module(
+        std::path::PathBuf::from("/tmp/Alpha_Reports.pm"),
+        Arc::new(decoy),
+    );
+    idx.register_workspace_module(
+        std::path::PathBuf::from("/tmp/Beta_Reports.pm"),
+        Arc::new(owner),
+    );
+
+    let to_ref = app
+        .refs
+        .iter()
+        .find(|r| {
+            r.target_name == "monthly"
+                && matches!(&r.kind, RefKind::MethodCall { invocant, .. } if invocant == "reports")
+        })
+        .expect("MethodCall for ->to('reports#monthly')");
+
+    let class = app.method_call_invocant_class(to_ref, Some(&idx));
+    assert_eq!(
+        class.as_deref(),
+        Some("Beta::Controller::Reports"),
+        "ownership of `monthly` should pick Beta over the Alpha decoy",
+    );
+}

@@ -4338,7 +4338,92 @@ impl FileAnalysis {
         if let Some(InferredType::ClassName(c)) = self.sub_return_type_at_arity(bare, Some(0)) {
             return Some(c);
         }
+
+        // Controller-token invocant. A bareword that is *not class-shaped*
+        // — doesn't begin uppercase — can never be a Perl package name;
+        // Mojo's own `camelize` early-returns on `/^[A-Z]/` for exactly
+        // this reason. Such a token is a route controller key:
+        // `->to('login#act')` emits `MethodCall { invocant: "login",
+        // method_name: "act" }`. Camelize per Mojo::Util and workspace-
+        // search for the controller class that owns the action. The
+        // discriminator is the leading-char case (structural, mirrors
+        // camelize's gate), not a route name-allowlist (rule #10).
+        if invocant
+            .as_bytes()
+            .first()
+            .is_some_and(u8::is_ascii_lowercase)
+        {
+            if let Some(cls) =
+                self.resolve_controller_token(invocant, &r.target_name, module_index)
+            {
+                return Some(cls);
+            }
+        }
+
         Some(invocant.to_string())
+    }
+
+    /// Map a Mojolicious route controller token (`'login'`,
+    /// `'integrations-ads_api'`) to the controller class that owns
+    /// `action`. Camelizes the token (Mojo::Util `camelize`) then
+    /// searches the module index for a class whose name tail equals the
+    /// camelized token AND that defines (or inherits) `action`.
+    ///
+    /// Namespace-agnostic by design (rule #10): we do NOT hardcode
+    /// `*::Controller::*`. A workspace may have several controller roots
+    /// (`Clove::Controller`, `Billing::Controller`, …) sharing short
+    /// names; we disambiguate by "which candidate actually owns the
+    /// action." Among survivors we prefer the `*::Controller::<Camelized>`
+    /// shape (Mojo's default controller namespace) as a deterministic
+    /// tiebreak, but ownership is the gate.
+    fn resolve_controller_token(
+        &self,
+        token: &str,
+        action: &str,
+        module_index: Option<&ModuleIndex>,
+    ) -> Option<String> {
+        let camelized = camelize_controller(token);
+        if camelized.is_empty() {
+            return None;
+        }
+        let idx = module_index?;
+
+        // Primary candidates: modules whose own package defines a sub
+        // named `action` (reverse index, O(1)) and whose name tail is the
+        // camelized token. Widen to every tail-matching module when none
+        // define it locally, so a controller that *inherits* the action
+        // from a base still resolves.
+        let mut candidates: Vec<String> = idx
+            .modules_with_symbol(action)
+            .into_iter()
+            .filter(|m| module_tail_matches(m, &camelized))
+            .collect();
+        if candidates.is_empty() {
+            idx.for_each_cached(|name, _| {
+                if module_tail_matches(name, &camelized) {
+                    candidates.push(name.to_string());
+                }
+            });
+        }
+        candidates.sort();
+        candidates.dedup();
+
+        // Disambiguate by ownership: keep only classes that actually
+        // resolve `action` (locally / via ancestors / via bridges), then
+        // prefer the `*::Controller::<Camelized>` shape deterministically.
+        let mut owners: Vec<String> = candidates
+            .into_iter()
+            .filter(|cls| {
+                self.resolve_method_in_ancestors(cls, action, Some(idx))
+                    .is_some()
+            })
+            .collect();
+        owners.sort_by(|a, b| {
+            is_controller_shaped(b)
+                .cmp(&is_controller_shaped(a))
+                .then_with(|| a.cmp(b))
+        });
+        owners.into_iter().next()
     }
 
     /// Full `InferredType` of a `MethodCall` ref's invocant — same
@@ -6327,6 +6412,71 @@ fn span_size(span: &Span) -> usize {
         0
     };
     rows * 10000 + cols
+}
+
+/// Camelize a Mojolicious controller token to its class-name fragment,
+/// matching `Mojo::Util::camelize` exactly:
+///
+/// ```text
+/// return $str if $str =~ /^[A-Z]/;
+/// return join '::', map {
+///   join('', map { ucfirst lc } split /_/)
+/// } split /-/, $str;
+/// ```
+///
+/// `-` splits into `::` namespace segments; within a segment `_` splits
+/// into pieces each `ucfirst lc`'d (lowercase the whole piece, then
+/// uppercase the first char) and concatenated. A leading-uppercase token
+/// is already a class fragment and passes through unchanged.
+///
+/// `login` → `Login`, `sales_reports` → `SalesReports`,
+/// `integrations-ads_api` → `Integrations::AdsApi`.
+fn camelize_controller(token: &str) -> String {
+    if token.chars().next().is_some_and(|c| c.is_ascii_uppercase()) {
+        return token.to_string();
+    }
+    token
+        .split('-')
+        .map(|segment| {
+            segment
+                .split('_')
+                .map(ucfirst_lc)
+                .collect::<Vec<_>>()
+                .join("")
+        })
+        .collect::<Vec<_>>()
+        .join("::")
+}
+
+/// Perl `ucfirst lc`: lowercase the whole string, then uppercase the
+/// first character. Empty input stays empty (so a stray `_` contributes
+/// nothing, as in Perl).
+fn ucfirst_lc(piece: &str) -> String {
+    let lower = piece.to_lowercase();
+    let mut chars = lower.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+        None => String::new(),
+    }
+}
+
+/// True when `module`'s `::`-delimited tail equals `camelized` — i.e.
+/// the camelized form is the trailing namespace segment(s) of the class.
+/// `Clove::Controller::Login` matches `Login`;
+/// `App::Controller::Integrations::AdsApi` matches `Integrations::AdsApi`.
+fn module_tail_matches(module: &str, camelized: &str) -> bool {
+    module == camelized
+        || module
+            .strip_suffix(camelized)
+            .is_some_and(|prefix| prefix.ends_with("::"))
+}
+
+/// True when a class name has a `::Controller::` segment — Mojo's default
+/// controller namespace convention. Used only as a deterministic tiebreak
+/// among candidates that already pass the ownership gate; never as a
+/// hardcoded namespace requirement.
+fn is_controller_shaped(class: &str) -> bool {
+    class.contains("::Controller::") || class.ends_with("::Controller")
 }
 
 /// Strip the implicit invocant param from a handler signature so hover
