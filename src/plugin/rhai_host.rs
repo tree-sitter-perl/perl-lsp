@@ -693,6 +693,7 @@ mod tests {
             method_name: None,
             receiver_text: None,
             receiver_type: None,
+            receiver_route_defaults: Vec::new(),
             args: vec![],
             call_span: sp(0, 0, 0, 5),
             selection_span: sp(0, 0, 0, 5),
@@ -798,6 +799,7 @@ mod tests {
             method_name: Some("on".into()),
             receiver_text: Some("$self".into()),
             receiver_type: Some(InferredType::ClassName("My::Emitter".into())),
+            receiver_route_defaults: Vec::new(),
             args: vec![
                 ArgInfo {
                     text: "'connect'".into(),
@@ -869,6 +871,7 @@ mod tests {
                 method_name: None,
                 receiver_text: None,
                 receiver_type: None,
+                receiver_route_defaults: Vec::new(),
                 args: vec![ArgInfo {
                     text: accessor.into(),
                     string_value: Some(accessor.into()),
@@ -909,6 +912,7 @@ mod tests {
             method_name: None,
             receiver_text: None,
             receiver_type: None,
+            receiver_route_defaults: Vec::new(),
             args: vec![ArgInfo {
                 text: "x".into(),
                 string_value,
@@ -950,6 +954,7 @@ mod tests {
             method_name: Some("on".into()),
             receiver_text: Some("$self".into()),
             receiver_type: Some(InferredType::ClassName("Foo".into())),
+            receiver_route_defaults: Vec::new(),
             args: vec![
                 // Dynamic name — string_value is None, so plugin must skip.
                 ArgInfo {
@@ -1050,6 +1055,7 @@ mod tests {
             method_name: None,
             receiver_text: None,
             receiver_type: None,
+            receiver_route_defaults: Vec::new(),
             args: vec![],
             call_span: sp(0, 0, 0, 0),
             selection_span: sp(0, 0, 0, 0),
