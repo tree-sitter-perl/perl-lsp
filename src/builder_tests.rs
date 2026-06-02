@@ -9927,4 +9927,99 @@ mod param_types_manifest {
             "a class that doesn't do the role must not get the contract param type",
         );
     }
+
+    // ---- Cross-file manifest-applicability probes ----
+    // Whether build-time `transitive_parents`-gated plugin behavior reaches a
+    // class whose ancestry is established cross-file. See
+    // `docs/prompt-enrichment-inheritance-residual.md`.
+
+    /// `ClassIsa`-triggered plugin emission on a class whose trigger-class
+    /// ancestry is only established CROSS-FILE. `Leaf` extends `Mid` (a
+    /// cross-file module) which extends `Mojo::EventEmitter`. The
+    /// mojo-events plugin's `ClassIsa: "Mojo::EventEmitter"` trigger walks
+    /// local `transitive_parents` (builder is index-free during the walk),
+    /// which sees only `Mid` — not the cross-file `Mojo::EventEmitter`.
+    /// Enrichment can't help: plugin emit hooks fire at parse time, inside
+    /// `build()`, before any module index exists.
+    ///
+    /// Architectural gap, NOT a contained fix — documented as a latent
+    /// hazard. See the doc.
+    #[test]
+    #[ignore = "cross-file ClassIsa trigger: architectural, see docs/prompt-enrichment-inheritance-residual.md"]
+    fn probe_class_isa_trigger_through_cross_file_parent() {
+        use crate::module_index::ModuleIndex;
+        use std::path::PathBuf;
+        let idx = ModuleIndex::new_for_test();
+        idx.set_workspace_root(None);
+        idx.insert_cache(
+            "Mid",
+            Some(fake_cached_for_class(
+                "Mid",
+                &PathBuf::from("/fake/Mid.pm"),
+                &[],
+                &["Mojo::EventEmitter"],
+            )),
+        );
+        let src = "package Leaf;\nuse parent 'Mid';\nsub wire {\n  my $self = shift;\n  $self->on('ready', sub { 1 });\n}\n1;\n";
+        let mut parser = tree_sitter::Parser::new();
+        parser.set_language(&ts_parser_perl::LANGUAGE.into()).unwrap();
+        let tree = parser.parse(src, None).unwrap();
+        let mut fa = crate::builder::build(&tree, src.as_bytes());
+        fa.enrich_imported_types_with_keys(Some(&idx));
+        let ready = fa.symbols.iter().filter(|s| {
+            s.kind == SymKind::Handler && s.name == "ready"
+                && matches!(&s.namespace, Namespace::Framework { id } if id == "mojo-events")
+        }).count();
+        assert_eq!(
+            ready, 1,
+            "mojo-events ClassIsa trigger should fire via cross-file parent chain"
+        );
+    }
+
+    /// Dispatch-verb promotion in a NON-OPEN workspace/dependency file
+    /// whose dispatch receiver `isa Minion` only CROSS-FILE and which
+    /// does NOT `use Minion` itself. The minion plugin's emit-hook path
+    /// (`UsesModule`/`ClassIsa` trigger) doesn't fire — only the
+    /// trigger-independent `dispatch_verbs()` manifest captures the
+    /// `ProvisionalDispatch`. Promotion happens in
+    /// `enrich_imported_types_with_keys`, but workspace/dependency files
+    /// are built via `crate::builder::build` WITHOUT enrichment and the
+    /// resolver refresh only re-enriches OPEN documents. So the call
+    /// site never becomes a `DispatchCall` ref and references-to-handler
+    /// miss it.
+    ///
+    /// Architectural gap (resolver lifecycle), NOT a contained fix.
+    /// See the doc.
+    #[test]
+    #[ignore = "dispatch promotion needs enrichment over non-open files; see docs/prompt-enrichment-inheritance-residual.md"]
+    fn probe_dispatch_promotion_in_unenriched_workspace_file() {
+        use crate::module_index::ModuleIndex;
+        use std::path::PathBuf;
+        let idx = ModuleIndex::new_for_test();
+        idx.set_workspace_root(None);
+        // `My::Minion` isa Minion, cross-file. The worker file below
+        // never `use`s Minion — the emit-hook trigger can't fire, only
+        // the receiver-isa manifest promotion at enrichment can.
+        idx.insert_cache(
+            "My::Minion",
+            Some(fake_cached_for_class(
+                "My::Minion",
+                &PathBuf::from("/fake/My/Minion.pm"),
+                &["new"],
+                &["Minion"],
+            )),
+        );
+        let src = "package My::Worker;\nsub run {\n  my $self = shift;\n  my $minion = My::Minion->new;\n  $minion->enqueue('send_email');\n}\n1;\n";
+        // Build exactly as the workspace indexer does: no enrichment.
+        let fa = build_fa(src);
+        let dispatch_refs = fa.refs.iter().filter(|r|
+            matches!(&r.kind, crate::file_analysis::RefKind::DispatchCall { .. })
+        ).count();
+        assert_eq!(
+            dispatch_refs, 1,
+            "workspace-indexed file (no enrichment) should still have its \
+             enqueue promoted to a DispatchCall — else cross-file handler \
+             references miss it"
+        );
+    }
 }
