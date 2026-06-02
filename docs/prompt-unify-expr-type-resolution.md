@@ -1,5 +1,27 @@
 # Unify expression-type resolution: one chase, no tree
 
+> **LANDED.** `FileAnalysis::expr_type_at_span(span, module_index)` is the
+> single tree-free query entry; `method_call_invocant_class(r, module_index)`
+> resolves the invocant via it (the `_with_tree` variant is deleted, the tree
+> fast path gone — `method_call_invocant_class` takes no tree).
+> `resolve_expression_type` is now a thin `node → span → expr_type_at_span`
+> adapter that degrades to its old node-kind walk only when no witness was
+> recorded (raw-cursor / incomplete-ERROR completion). The builder records
+> each invocant's type at its span via `emit_invocant_expr_witnesses`
+> (`invocant_type_at_node`, the single build-time symbolic executor, extended
+> to general `$arr[N]` + `hash_element_expression`). `hover_info` dropped its
+> now-vestigial `tree` parameter. `EXTRACT_VERSION` bumped (new `invocant_expr`
+> witnesses ride the cache blob).
+>
+> **Carve-outs kept** (documented inline): pseudo-invocants (`shift` / `$_[0]`
+> / `$self` / `__PACKAGE__`) → enclosing-class identity (not bag-typed); the
+> cross-file chain-receiver recursion + the variable-by-name bag lookup stay in
+> `method_call_invocant_class`, because a variable/chain whose class is only
+> known post-enrichment has no build-time `Expr(span)` witness — the span alone
+> can't carry the variable name, and `invocant_type_at_node` returns `None` for
+> it at build. These re-derive from the same bag at enrichment; they are not a
+> second structure-discovery implementation.
+
 > Two functions resolve "what type is this expression?" and they drift:
 > `FileAnalysis::resolve_expression_type` (tree-walking) and
 > `method_call_invocant_class[_with_tree]` (refs + bag). They answer the same

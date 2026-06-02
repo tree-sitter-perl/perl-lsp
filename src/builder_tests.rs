@@ -1292,6 +1292,98 @@ $calc->get_self->get_config->{host};
     );
 }
 
+/// Acceptance for the unified, tree-free expression-type chase
+/// (`docs/prompt-unify-expr-type-resolution.md`): the ref-keyed,
+/// `tree: None` invocant-class path and the node-keyed
+/// `resolve_expression_type` path must produce identical answers for
+/// every invocant shape — scalar, chain, array-element, function-call,
+/// and hash-element. Both now route through `expr_type_at_span`.
+#[test]
+fn invocant_class_and_resolve_expression_type_agree_tree_free() {
+    let src = "\
+package Foo;
+sub new { bless {}, shift }
+sub kid { return Foo->new(); }
+sub cfg { return { host => 'x' }; }
+package main;
+sub mk { return Foo->new(); }
+my $f = Foo->new();
+my @arr;
+push @arr, Foo->new();
+my %h = (it => $f);
+$f->kid();
+$f->kid()->kid();
+$arr[0]->kid();
+mk()->kid();
+$h{it}->kid();
+";
+    let tree = parse(src);
+    let fa = build(&tree, src.as_bytes());
+
+    // For every MethodCall ref with an invocant span, the two paths
+    // must agree. The invocant-class path takes no tree; the
+    // expression-type path is fed the actual invocant CST node.
+    let mut checked_shapes = 0;
+    for r in &fa.refs {
+        let RefKind::MethodCall { invocant_span: Some(sp), .. } = &r.kind else {
+            continue;
+        };
+        let invocant_node = tree
+            .root_node()
+            .descendant_for_point_range(sp.start, sp.end)
+            .expect("invocant span maps to a node");
+        // Skip if the descendant doesn't exactly cover the invocant
+        // (parser quirk for some shapes) — we only compare where both
+        // paths see the same node.
+        if invocant_node.start_position() != sp.start
+            || invocant_node.end_position() != sp.end
+        {
+            continue;
+        }
+        let via_ref = fa.method_call_invocant_class(r, None);
+        let via_node = fa
+            .resolve_expression_type(invocant_node, src.as_bytes(), None)
+            .and_then(|t| t.class_name().map(|s| s.to_string()));
+        assert_eq!(
+            via_ref, via_node,
+            "invocant-class (tree-free) vs resolve_expression_type disagree \
+             for invocant `{}` (kind {})",
+            invocant_node.utf8_text(src.as_bytes()).unwrap_or("?"),
+            invocant_node.kind(),
+        );
+        checked_shapes += 1;
+    }
+    // Sanity: the source exercises scalar / chain / array-element /
+    // function-call / hash-element invocants, so we should have
+    // compared several.
+    assert!(
+        checked_shapes >= 5,
+        "expected to compare at least the 5 invocant shapes, got {}",
+        checked_shapes,
+    );
+
+    // Spot-check the concrete answers so a mutual `None` regression
+    // can't pass the agreement assert vacuously.
+    let kid_on_scalar = fa.refs.iter().find(|r| {
+        matches!(&r.kind, RefKind::MethodCall { invocant, .. } if invocant == "$f")
+            && r.target_name == "kid"
+    });
+    assert_eq!(
+        kid_on_scalar.and_then(|r| fa.method_call_invocant_class(r, None)).as_deref(),
+        Some("Foo"),
+        "scalar invocant `$f->kid` should type as Foo, tree-free",
+    );
+    let kid_on_array = fa.refs.iter().find(|r| {
+        matches!(&r.kind, RefKind::MethodCall { invocant, .. } if invocant.starts_with("$arr"))
+            && r.target_name == "kid"
+    });
+    assert_eq!(
+        kid_on_array.and_then(|r| fa.method_call_invocant_class(r, None)).as_deref(),
+        Some("Foo"),
+        "array-element invocant `$arr[0]->kid` should type as Foo, tree-free",
+    );
+}
+
 #[test]
 fn test_package_at() {
     let fa = build_fa("package Foo;\nsub bar { }");
@@ -1652,7 +1744,7 @@ fn test_highlights_read_write() {
 fn test_hover_variable() {
     let src = "my $greeting = 'hello';\nprint $greeting;";
     let fa = build_fa(src);
-    let hover = fa.hover_info(Point::new(1, 8), src, None, None);
+    let hover = fa.hover_info(Point::new(1, 8), src, None);
     assert!(hover.is_some(), "should have hover info");
     let text = hover.unwrap();
     assert!(
@@ -1666,7 +1758,7 @@ fn test_hover_variable() {
 fn test_hover_sub() {
     let src = "sub greet { }\ngreet();";
     let fa = build_fa(src);
-    let hover = fa.hover_info(Point::new(1, 1), src, None, None);
+    let hover = fa.hover_info(Point::new(1, 1), src, None);
     assert!(hover.is_some(), "should have hover info for function call");
     let text = hover.unwrap();
     assert!(
@@ -1682,7 +1774,7 @@ fn test_hover_shows_inferred_type() {
         "package Point;\nsub new { bless {}, shift }\npackage main;\nmy $p = Point->new();\n$p;";
     let fa = build_fa(src);
     // Hover on $p usage at line 4
-    let hover = fa.hover_info(Point::new(4, 1), src, None, None);
+    let hover = fa.hover_info(Point::new(4, 1), src, None);
     assert!(hover.is_some(), "should have hover info");
     let text = hover.unwrap();
     assert!(
@@ -1698,7 +1790,7 @@ fn test_hover_type_at_usage_after_reassignment() {
     let src = "package Point;\nsub new { bless {}, shift }\npackage Foo;\nsub new { bless {}, shift }\npackage main;\nmy $x = Point->new();\n$x;\n$x = Foo->new();\n$x;";
     let fa = build_fa(src);
     // line 6: $x; — should be Point
-    let hover1 = fa.hover_info(Point::new(6, 1), src, None, None);
+    let hover1 = fa.hover_info(Point::new(6, 1), src, None);
     assert!(hover1.is_some());
     let text1 = hover1.unwrap();
     assert!(
@@ -1707,7 +1799,7 @@ fn test_hover_type_at_usage_after_reassignment() {
         text1
     );
     // line 8: $x; — should be Foo (after reassignment)
-    let hover2 = fa.hover_info(Point::new(8, 1), src, None, None);
+    let hover2 = fa.hover_info(Point::new(8, 1), src, None);
     assert!(hover2.is_some());
     let text2 = hover2.unwrap();
     assert!(
@@ -1722,7 +1814,7 @@ fn test_hover_shows_return_type() {
     let src = "package Foo;\nsub make { return Foo->new() }\nsub new { bless {}, shift }\npackage main;\nmake();";
     let fa = build_fa(src);
     // Hover on sub make definition
-    let hover = fa.hover_info(Point::new(1, 5), src, None, None);
+    let hover = fa.hover_info(Point::new(1, 5), src, None);
     assert!(hover.is_some(), "should have hover info for sub");
     let text = hover.unwrap();
     assert!(
@@ -5260,7 +5352,7 @@ sub get { my $self = shift; return $self; }
     let point = tree_sitter::Point { row, column: col };
 
     let hover = app_fa
-        .hover_info(point, app_src, None, Some(&idx))
+        .hover_info(point, app_src, Some(&idx))
         .expect("hover on DSL verb `get` returns text");
 
     assert!(
@@ -6974,7 +7066,7 @@ sub to { my $self = shift; return $self; }
     // back empty is a dead token — the user's reported symptom.
     // Print detailed per-probe status so failures pinpoint the hop.
     let check = |label: &str, point: tree_sitter::Point| {
-        let hover = fa.hover_info(point, &src, Some(&tree), Some(&idx));
+        let hover = fa.hover_info(point, &src, Some(&idx));
         let def = fa.find_definition(point, Some(&tree), Some(src.as_bytes()), Some(&idx));
         assert!(
             hover.is_some() || def.is_some(),
@@ -7018,7 +7110,7 @@ sub to { my $self = shift; return $self; }
     //      reported no highlight on `app->` in nvim; the narrow
     //      FunctionCall ref is what feeds semantic tokens.
     let app_point = probe(row_app_routes, col_of(line_app_routes, "app"));
-    let app_hover = fa.hover_info(app_point, &src, Some(&tree), Some(&idx));
+    let app_hover = fa.hover_info(app_point, &src, Some(&idx));
     let app_hover_text = app_hover.as_deref().unwrap_or("");
     assert!(
         app_hover_text.contains("The Mojolicious application instance"),
@@ -9413,7 +9505,6 @@ sub action {
     let hover = app_fa.hover_info(
         method_node.start_position(),
         app_src,
-        Some(&tree),
         Some(&idx),
     );
     let hover_text = hover.expect("hover on `$users[0]->greet` returns text");
@@ -9602,7 +9693,7 @@ fn instanceof_accessor_chains_into_method_call() {
     let call = find_call(tree.root_node(), src.as_bytes(), "greet").expect("has $self->other->greet");
     let method_node = call.child_by_field_name("method").unwrap();
     let hover = fa
-        .hover_info(method_node.start_position(), src, Some(&tree), Some(&idx))
+        .hover_info(method_node.start_position(), src, Some(&idx))
         .expect("hover on ->greet resolves");
     assert!(
         hover.contains("Other"),

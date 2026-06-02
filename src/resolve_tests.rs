@@ -414,7 +414,7 @@ $b->run;
 
     // ---- (1) hover — cursor on `$f->run`. Must mention Foo, not Bar.
     let hover = fa
-        .hover_info(f_run_call, src, Some(&tree), None)
+        .hover_info(f_run_call, src, None)
         .expect("hover on $f->run returns something");
     assert!(
         hover.contains("Foo"),
@@ -429,7 +429,7 @@ $b->run;
 
     // Mirror: hover on $b->run mentions Bar, not Foo.
     let hover_b = fa
-        .hover_info(b_run_call, src, Some(&tree), None)
+        .hover_info(b_run_call, src, None)
         .expect("hover on $b->run returns something");
     assert!(
         hover_b.contains("Bar"),
@@ -611,7 +611,7 @@ hi();
     let hi_call = tree_sitter::Point { row: 15, column: 0 };
 
     let kind = fa.rename_kind_at(hi_call, None);
-    let hover = fa.hover_info(hi_call, src, Some(&tree), None);
+    let hover = fa.hover_info(hi_call, src, None);
     let gd = fa.find_definition(hi_call, Some(&tree), Some(src.as_bytes()), None);
 
     // Rename kind — for gr/rename construction.

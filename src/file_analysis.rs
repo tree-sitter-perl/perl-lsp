@@ -1830,6 +1830,100 @@ impl FileAnalysis {
         }
     }
 
+    /// Registry query against `Expr(span)` — the bag attachment the
+    /// builder seeds at every meaningful expression node (literals,
+    /// variable reads, method-call invocants, ternaries). Mirror of the
+    /// build-time `Builder::bag_query_expr_span`. `module_index` lets a
+    /// recorded `Edge` (e.g. a method-call invocant pointing at an
+    /// `Expression(refidx)`) chase cross-file.
+    fn bag_query_expr_span(
+        &self,
+        span: Span,
+        module_index: Option<&ModuleIndex>,
+    ) -> Option<InferredType> {
+        use crate::witnesses::{
+            BagContext, FrameworkFact, ReducedValue, ReducerQuery, ReducerRegistry,
+            WitnessAttachment,
+        };
+        let att = WitnessAttachment::Expr(span);
+        let reg = ReducerRegistry::with_defaults();
+        let ctx = BagContext {
+            scopes: &self.scopes,
+            package_framework: &self.package_framework,
+            module_index,
+            package_parents: &self.package_parents,
+        };
+        let q = ReducerQuery {
+            attachment: &att,
+            point: None,
+            framework: FrameworkFact::Plain,
+            arity_hint: None,
+            receiver: None,
+            context: Some(&ctx),
+        };
+        match reg.query(&self.witnesses, &q) {
+            ReducedValue::Type(t) => Some(t),
+            _ => None,
+        }
+    }
+
+    /// The type of the expression occupying `span`, resolved tree-free
+    /// from the bag. This is the single query-time entry that
+    /// `method_call_invocant_class` and `resolve_expression_type` both
+    /// route through: structure was discovered once in the builder
+    /// (recorded as `Expr(span)` witnesses + the `Expression(refidx)`
+    /// call axis), and every consumer reads it back by span.
+    ///
+    /// Resolution order:
+    /// 1. A call ref starting at and contained in `span` (chain /
+    ///    function-call receiver) — its bag-resolved return type. This
+    ///    arm re-derives at enrichment, so cross-file chain receivers
+    ///    whose class only becomes known once other modules load still
+    ///    resolve here.
+    /// 2. The `Expr(span)` witness the builder recorded for the
+    ///    expression (variable reads via `Edge(Variable)`, `$arr[N]`
+    ///    projections, ternaries, literals).
+    pub fn expr_type_at_span(
+        &self,
+        span: Span,
+        module_index: Option<&ModuleIndex>,
+    ) -> Option<InferredType> {
+        // A call whose span IS this expression — its return type. The
+        // exact-span match is what distinguishes "the value of
+        // `$f->get_bar()->get_name()`" (the outer call's return) from
+        // "the inner receiver `$f->get_bar()`" (which has its own,
+        // narrower span). `call_ref_by_start` deliberately points at the
+        // innermost receiver, so we can't use it here — we want the ref
+        // that exactly spans the queried expression.
+        if let Some((recv_idx, kind)) = self.refs.iter().enumerate().find_map(|(i, r)| {
+            if r.span == span && matches!(r.kind, RefKind::MethodCall { .. } | RefKind::FunctionCall { .. }) {
+                Some((i, &r.kind))
+            } else {
+                None
+            }
+        }) {
+            match kind {
+                RefKind::MethodCall { .. } => {
+                    if let Some(t) =
+                        self.method_call_return_type_via_bag(recv_idx, module_index)
+                    {
+                        return Some(t);
+                    }
+                }
+                RefKind::FunctionCall { .. } => {
+                    if let Some(t) = self.sub_return_type_at_arity(
+                        &self.refs[recv_idx].target_name,
+                        Some(0),
+                    ) {
+                        return Some(t);
+                    }
+                }
+                _ => {}
+            }
+        }
+        self.bag_query_expr_span(span, module_index)
+    }
+
     /// Resolve a sub's return type at a call site given the caller's arg
     /// count. Queries the arity-dispatch reducer; if no arity fact
     /// exists, falls back to `sub_return_type` (declared /
@@ -2399,6 +2493,20 @@ impl FileAnalysis {
         source: &[u8],
         module_index: Option<&ModuleIndex>,
     ) -> Option<InferredType> {
+        // Tree-free first: the builder recorded the type of every
+        // meaningful expression at its span (`Expr(span)` + the
+        // `Expression(refidx)` call axis). Read it back by span — the
+        // same chase `method_call_invocant_class` uses. The node-kind
+        // walk below is the degradation path for the raw-cursor /
+        // incomplete-ERROR case completion hits where no witness was
+        // recorded (a node that never existed at build time).
+        let span = Span {
+            start: node.start_position(),
+            end: node.end_position(),
+        };
+        if let Some(t) = self.expr_type_at_span(span, module_index) {
+            return Some(t);
+        }
         let point = node.start_position();
         match node.kind() {
             "scalar" => {
@@ -3536,7 +3644,7 @@ impl FileAnalysis {
     }
 
     /// Hover info: return display text for the symbol at cursor.
-    pub fn hover_info(&self, point: Point, source: &str, tree: Option<&tree_sitter::Tree>, module_index: Option<&ModuleIndex>) -> Option<String> {
+    pub fn hover_info(&self, point: Point, source: &str, module_index: Option<&ModuleIndex>) -> Option<String> {
         // Check refs first
         if let Some(r) = self.ref_at(point) {
             match &r.kind {
@@ -3549,9 +3657,7 @@ impl FileAnalysis {
                             && mr.target_name != r.target_name);
                     if let Some(mr) = method_hover {
                         if matches!(mr.kind, RefKind::MethodCall { .. }) {
-                            let class_name = self.method_call_invocant_class_with_tree(
-                                mr, tree, Some(source.as_bytes()), module_index,
-                            );
+                            let class_name = self.method_call_invocant_class(mr, module_index);
                             if let Some(ref cn) = class_name {
                                 match self.resolve_method_in_ancestors(cn, &mr.target_name, module_index) {
                                     Some(MethodResolution::Local { sym_id, class: ref defining_class, .. }) => {
@@ -3659,9 +3765,7 @@ impl FileAnalysis {
                     }
                 }
                 RefKind::MethodCall { .. } => {
-                    let class_name = self.method_call_invocant_class_with_tree(
-                        r, tree, Some(source.as_bytes()), module_index,
-                    );
+                    let class_name = self.method_call_invocant_class(r, module_index);
                     if let Some(ref cn) = class_name {
                         match self.resolve_method_in_ancestors(cn, &r.target_name, module_index) {
                             Some(MethodResolution::Local { sym_id, class: ref defining_class, .. }) => {
@@ -4119,108 +4223,57 @@ impl FileAnalysis {
         r: &Ref,
         module_index: Option<&ModuleIndex>,
     ) -> Option<String> {
-        self.method_call_invocant_class_with_tree(r, None, None, module_index)
-    }
-
-    /// Tree-aware variant. When a `tree` + `source` are available
-    /// (every LSP-facing reader has them), this routes non-trivial
-    /// invocants (`$arr[N]`, future shapes) through
-    /// `resolve_expression_type` on the actual CST node — the same
-    /// arm the cursor-context completion path uses. Without the
-    /// tree, falls through to the string-based bag query.
-    /// One resolution rule, two entry points, no shape drift.
-    pub fn method_call_invocant_class_with_tree(
-        &self,
-        r: &Ref,
-        tree: Option<&tree_sitter::Tree>,
-        source: Option<&[u8]>,
-        module_index: Option<&ModuleIndex>,
-    ) -> Option<String> {
         let RefKind::MethodCall { invocant, invocant_span, .. } = &r.kind else {
             return None;
         };
         if invocant.is_empty() {
             return None;
         }
-        let point = invocant_span.map(|s| s.start).unwrap_or(r.span.start);
 
         // Pseudo-invocants for "$self at the method's first arg":
         // `shift` (no args; `sub m { my $self = shift; ... }`),
-        // `$_[0]` / `@_[0]` (positional). Tree-aware build-time
-        // resolver treats these as enclosing-class identity. The
-        // bag has no Variable witness for them — they aren't real
-        // variables — so we resolve here directly.
-        if invocant == "shift" || invocant == "$_[0]" || invocant == "@_[0]" {
+        // `$_[0]` / `@_[0]` (positional), and raw `__PACKAGE__` on
+        // synthesized refs. None are real variables, so the bag has no
+        // witness for them — resolve to enclosing-class identity here.
+        if invocant == "shift"
+            || invocant == "$_[0]"
+            || invocant == "@_[0]"
+            || invocant == "__PACKAGE__"
+        {
             return self.enclosing_class_for_scope(r.scope);
         }
 
-        // Tree-aware fast path: find the invocant's CST node and
-        // dispatch through `resolve_expression_type`. That arm
-        // already handles `array_element_expression` (and any
-        // future non-trivial invocant shape) — keeping hover /
-        // dispatch on the same projection logic completion uses.
-        if let (Some(tree), Some(source), Some(span)) = (tree, source, invocant_span) {
-            let node = tree.root_node().descendant_for_point_range(span.start, span.end);
-            if let Some(node) = node {
-                // Only take this path for shapes the string-based
-                // bag query can't handle. `scalar` / `array` /
-                // `hash` invocants are simple variables — the
-                // existing string lookup is fine and consistent
-                // with every other variable-typed call site.
-                let needs_tree = !matches!(
-                    node.kind(),
-                    "scalar" | "array" | "hash" | "bareword" | "package" | "scoped_identifier"
-                );
-                if needs_tree {
-                    if let Some(t) = self.resolve_expression_type(node, source, module_index) {
-                        if let Some(cn) = t.class_name() {
-                            return Some(cn.to_string());
-                        }
-                    }
-                }
+        // The invocant's type, resolved tree-free from the bag at its
+        // span. Covers every recorded shape: scalar/array/hash reads,
+        // chain receivers (the `Expression(refidx)` axis), function-call
+        // receivers, baked literals.
+        if let Some(span) = invocant_span {
+            if let Some(cn) = self
+                .expr_type_at_span(*span, module_index)
+                .and_then(|t| t.class_name().map(|s| s.to_string()))
+            {
+                return Some(cn);
             }
         }
 
-        // `__PACKAGE__` is rewritten to the enclosing package at
-        // walk time, but synthesized refs may still carry it raw.
-        if invocant == "__PACKAGE__" {
-            return self.enclosing_class_for_scope(r.scope);
-        }
-
-        // Chain / function-call receiver — checked BEFORE the
-        // simple-variable path because complex invocants like
-        // `$r->get('/x')` lead with `$` but aren't a variable
-        // lookup; they're a sub-expression whose type lives in
-        // another ref's bag answer. Index `call_ref_by_start`
-        // returns the *innermost* call-shaped ref starting at
-        // `invocant_span.start` (smallest-span tie-break in
-        // `build_indices`); we additionally require that ref's
-        // span be contained in `invocant_span` so we don't loop
-        // back on the outer ref itself for `Foo->m` where there's
-        // no real inner receiver.
+        // Cross-file chain-receiver fallback. When the inner receiver's
+        // class is only knowable once other modules load (`$c->minion->
+        // enqueue` at enrichment), the build-time `Expr(span)` witness
+        // is absent and `method_call_return_type_via_bag` has no edge to
+        // chase. Re-resolve the receiver's own invocant class fresh with
+        // the index, then chase `MethodOnClass{class, method}` through
+        // `find_method_return_type` (ancestors + cross-file bridges via
+        // the registry). This is the one structure-from-refs step the
+        // bag can't pre-record, so it lives here, not in the builder.
         if let Some(span) = invocant_span {
             if let Some(&recv_idx) = self.call_ref_by_start.get(&span.start) {
                 let recv_span = self.refs[recv_idx].span;
                 let contained = recv_span.start == span.start
                     && (recv_span.end.row, recv_span.end.column)
                         <= (span.end.row, span.end.column);
-                // Guard against the lookup returning the outer ref
-                // itself (no genuine inner receiver). Compare by
-                // pointer to handle the equal-span case.
                 let is_self = std::ptr::eq(&self.refs[recv_idx], r);
                 if contained && !is_self {
-                    match &self.refs[recv_idx].kind {
-                    RefKind::MethodCall { .. } => {
-                        // Recursive: resolve the receiver's own
-                        // invocant class fresh (so cross-file
-                        // enrichment-typed variables compose
-                        // through chain hops without depending on
-                        // a build-time-published Expression edge),
-                        // then chase MethodOnClass{class, method}
-                        // through `find_method_return_type` — the
-                        // single class-keyed entry point that walks
-                        // ancestors + cross-file bridges via the
-                        // registry's `query_rec`.
+                    if let RefKind::MethodCall { .. } = &self.refs[recv_idx].kind {
                         let recv = &self.refs[recv_idx];
                         if let Some(recv_class) =
                             self.method_call_invocant_class(recv, module_index)
@@ -4228,63 +4281,54 @@ impl FileAnalysis {
                             if recv.target_name == "new" {
                                 return Some(recv_class);
                             }
-                            if let Some(t) = self.find_method_return_type(
-                                &recv_class,
-                                &recv.target_name,
-                                module_index,
-                                None,
-                            ) {
-                                if let Some(cn) = t.class_name() {
-                                    return Some(cn.to_string());
-                                }
+                            if let Some(cn) = self
+                                .find_method_return_type(
+                                    &recv_class,
+                                    &recv.target_name,
+                                    module_index,
+                                    None,
+                                )
+                                .and_then(|t| t.class_name().map(|s| s.to_string()))
+                            {
+                                return Some(cn);
                             }
                         }
                         return None;
-                    }
-                    RefKind::FunctionCall { .. } => {
-                        let recv = &self.refs[recv_idx];
-                        if let Some(InferredType::ClassName(c)) =
-                            self.sub_return_type_at_arity(&recv.target_name, Some(0))
-                        {
-                            return Some(c);
-                        }
-                        return None;
-                    }
-                    _ => {}
                     }
                 }
             }
         }
 
-        // Variable invocant — bag query handles every typed shape
-        // (TC, FrameworkAware, BranchArm, ReturnExpr, cross-file
-        // Variable witnesses pushed by enrichment). Thread the
-        // `module_index` so a variable whose type flows from a
-        // cross-file source — `my $m = $c->helper` where the helper
-        // (and its return) live in another file — resolves here the
-        // same way hover does. Dropping it was the gap that left
-        // option-B dispatch dark on helper-returned receivers.
+        // Variable invocant. `expr_type_at_span` above only answers when
+        // the builder pre-recorded an `Expr(span)` — which it can't for a
+        // variable whose type flows from a cross-file source resolved
+        // only at enrichment (`my $x = $c->helper`, `$$x` re-typed once
+        // other modules load). Re-derive from the bag by the variable's
+        // name + position, threading the index so the chase follows the
+        // cross-file Variable edge. Same single bag query everything else
+        // uses; only the var name (which lives on the ref, not the span)
+        // brings us here instead of `expr_type_at_span`.
+        let point = invocant_span.map(|s| s.start).unwrap_or(r.span.start);
         let first = invocant.as_bytes()[0];
         if first == b'$' || first == b'@' || first == b'%' {
-            if let Some(t) = self.inferred_type_via_bag_ctx(invocant, point, module_index) {
-                if let Some(cn) = t.class_name() {
-                    return Some(cn.to_string());
-                }
+            if let Some(cn) = self
+                .inferred_type_via_bag_ctx(invocant, point, module_index)
+                .and_then(|t| t.class_name().map(|s| s.to_string()))
+            {
+                return Some(cn);
             }
-            // `$self` enclosing-class fallback. Other untyped
-            // variable invocants stay None — better than poisoning
-            // them with the surrounding package and pretending
-            // method calls land on it.
+            // `$self` enclosing-class fallback for an untyped variable
+            // invocant. Other untyped variable invocants stay None —
+            // better than poisoning them with the surrounding package.
             if invocant == "$self" {
                 return self.enclosing_class_for_scope(r.scope);
             }
             return None;
         }
 
-        // Bareword invocant. Could be a zero-arg sub returning
-        // ClassName (`app->routes` where `app` is plugin-emitted) —
-        // promote that case. Otherwise the bareword *is* the class
-        // name (`Foo->method`).
+        // Bareword invocant. Could be a zero-arg sub returning ClassName
+        // (`app->routes` where `app` is plugin-emitted); promote that.
+        // Otherwise the bareword text *is* the class (`Foo->method`).
         let bare = invocant.rsplit("::").next().unwrap_or(invocant);
         if let Some(InferredType::ClassName(c)) = self.sub_return_type_at_arity(bare, Some(0)) {
             return Some(c);
@@ -4316,9 +4360,15 @@ impl FileAnalysis {
             return self.enclosing_class_for_scope(r.scope).map(InferredType::ClassName);
         }
 
-        // Chain / function-call receiver — same indexing path
-        // `method_call_invocant_class` uses, but we surface the
-        // full type instead of unwrapping to class_name.
+        // Chain / function-call receiver. Unlike the class-name path,
+        // this surfaces the full type so `Parametric` narrowing (DBIC
+        // `search`/`find` row-class) survives the hop — and that needs
+        // the *innermost* receiver ref (via `call_ref_by_start`), not an
+        // exact-span match, because the Parametric witness lands on the
+        // receiver-producing call's `Expression(refidx)`. `expr_type_at_
+        // span`'s exact-span chase intentionally collapses that flavor to
+        // a plain class, so the class-name path can route through it but
+        // this one cannot.
         if let Some(span) = invocant_span {
             if let Some(&recv_idx) = self.call_ref_by_start.get(&span.start) {
                 let recv_span = self.refs[recv_idx].span;
@@ -4346,7 +4396,7 @@ impl FileAnalysis {
         // Variable invocant.
         let first = invocant.as_bytes()[0];
         if first == b'$' || first == b'@' || first == b'%' {
-            if let Some(t) = self.inferred_type_via_bag(invocant, point) {
+            if let Some(t) = self.inferred_type_via_bag_ctx(invocant, point, module_index) {
                 return Some(t);
             }
             if invocant == "$self" {

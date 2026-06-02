@@ -898,12 +898,11 @@ pub fn hover_info(
     source: &str,
     pos: Position,
     module_index: &ModuleIndex,
-    tree: &Tree,
 ) -> Option<Hover> {
     let point = position_to_point(pos);
 
     // Try local hover first
-    if let Some(markdown) = analysis.hover_info(point, source, Some(tree), Some(module_index)) {
+    if let Some(markdown) = analysis.hover_info(point, source, Some(module_index)) {
         return Some(Hover {
             contents: HoverContents::Markup(MarkupContent {
                 kind: MarkupKind::Markdown,

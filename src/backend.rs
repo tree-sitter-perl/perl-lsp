@@ -625,7 +625,6 @@ impl LanguageServer for Backend {
             &doc.text,
             pos,
             &self.module_index,
-            &doc.tree,
         ))
     }
 

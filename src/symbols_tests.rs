@@ -610,7 +610,7 @@ fn test_hover_on_builtin_uses_module_index() {
         "```perl\npush ARRAY,LIST\n```\n\nAppends LIST to ARRAY.",
     );
 
-    let tree = crate::document::Document::new(source.to_string())
+    let _tree = crate::document::Document::new(source.to_string())
         .unwrap()
         .tree;
     let hover = hover_info(
@@ -618,7 +618,6 @@ fn test_hover_on_builtin_uses_module_index() {
         source,
         Position { line: 0, character: 0 },
         &module_index,
-        &tree,
     )
     .expect("expected hover on `push`");
     let text = match hover.contents {
@@ -2683,7 +2682,7 @@ sub action ($c) {\n\
     let consumer = parse_analysis(consumer_src);
     let mut parser = tree_sitter::Parser::new();
     parser.set_language(&ts_parser_perl::LANGUAGE.into()).unwrap();
-    let tree = parser.parse(consumer_src, None).unwrap();
+    let _tree = parser.parse(consumer_src, None).unwrap();
 
     let byte = consumer_src.find("widget;").expect("call site present");
     let prefix = &consumer_src[..byte];
@@ -2693,7 +2692,7 @@ sub action ($c) {\n\
     };
 
     let hover = consumer
-        .hover_info(point, consumer_src, Some(&tree), Some(&idx))
+        .hover_info(point, consumer_src, Some(&idx))
         .expect("cross-file hover should resolve the bridged helper");
     assert!(hover.contains("widget"), "hover should mention the helper, got: {hover}");
     assert!(
@@ -2739,7 +2738,7 @@ sub action ($c) {\n\
     let consumer = parse_analysis(consumer_src);
     let mut parser = tree_sitter::Parser::new();
     parser.set_language(&ts_parser_perl::LANGUAGE.into()).unwrap();
-    let tree = parser.parse(consumer_src, None).unwrap();
+    let _tree = parser.parse(consumer_src, None).unwrap();
     let byte = consumer_src.find("thing;").expect("call site");
     let prefix = &consumer_src[..byte];
     let point = tree_sitter::Point {
@@ -2748,7 +2747,7 @@ sub action ($c) {\n\
     };
 
     let hover = consumer
-        .hover_info(point, consumer_src, Some(&tree), Some(&idx))
+        .hover_info(point, consumer_src, Some(&idx))
         .expect("cross-file hover should resolve");
     assert!(
         hover.contains("My::Other"),
@@ -2795,7 +2794,7 @@ sub action ($c) {\n\
     let consumer = parse_analysis(consumer_src);
     let mut parser = tree_sitter::Parser::new();
     parser.set_language(&ts_parser_perl::LANGUAGE.into()).unwrap();
-    let tree = parser.parse(consumer_src, None).unwrap();
+    let _tree = parser.parse(consumer_src, None).unwrap();
     let byte = consumer_src.find("thing;").expect("call site");
     let prefix = &consumer_src[..byte];
     let point = tree_sitter::Point {
@@ -2804,7 +2803,7 @@ sub action ($c) {\n\
     };
 
     let hover = consumer
-        .hover_info(point, consumer_src, Some(&tree), Some(&idx))
+        .hover_info(point, consumer_src, Some(&idx))
         .expect("cross-file hover should resolve");
     assert!(
         hover.contains("My::Other"),
@@ -2852,7 +2851,7 @@ sub action ($c) {\n\
     let consumer = parse_analysis(consumer_src);
     let mut parser = tree_sitter::Parser::new();
     parser.set_language(&ts_parser_perl::LANGUAGE.into()).unwrap();
-    let tree = parser.parse(consumer_src, None).unwrap();
+    let _tree = parser.parse(consumer_src, None).unwrap();
     let byte = consumer_src.find("thing;").expect("call site");
     let prefix = &consumer_src[..byte];
     let point = tree_sitter::Point {
@@ -2861,7 +2860,7 @@ sub action ($c) {\n\
     };
 
     let hover = consumer
-        .hover_info(point, consumer_src, Some(&tree), Some(&idx))
+        .hover_info(point, consumer_src, Some(&idx))
         .expect("cross-file hover should resolve");
     assert!(
         hover.contains("My::Other"),
@@ -2915,7 +2914,7 @@ sub action ($c) {\n\
     let consumer = parse_analysis(consumer_src);
     let mut parser = tree_sitter::Parser::new();
     parser.set_language(&ts_parser_perl::LANGUAGE.into()).unwrap();
-    let tree = parser.parse(consumer_src, None).unwrap();
+    let _tree = parser.parse(consumer_src, None).unwrap();
     let byte = consumer_src.find("thing;").expect("call site");
     let prefix = &consumer_src[..byte];
     let point = tree_sitter::Point {
@@ -2924,7 +2923,7 @@ sub action ($c) {\n\
     };
 
     let hover = consumer
-        .hover_info(point, consumer_src, Some(&tree), Some(&idx))
+        .hover_info(point, consumer_src, Some(&idx))
         .expect("cross-file hover should resolve");
     assert!(
         hover.contains("My::Child"),
