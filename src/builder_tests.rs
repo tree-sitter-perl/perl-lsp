@@ -10193,3 +10193,170 @@ mod param_types_manifest {
         );
     }
 }
+
+// ---- Fix #1: `not` operator ----
+
+/// `not $x` must never produce an unresolved-function diagnostic.
+/// Validated in symbols_tests; here we confirm the builder emits a
+/// FunctionCall ref (so the name is visible for filtering) whose name
+/// is "not" — the is_perl_builtin guard in collect_diagnostics then
+/// suppresses it.
+#[test]
+fn not_operator_emits_function_call_ref_named_not() {
+    let fa = build_fa("my $x = 1;\nmy $y = not $x;\n");
+    let not_refs: Vec<_> = fa
+        .refs
+        .iter()
+        .filter(|r| r.target_name == "not" && matches!(r.kind, RefKind::FunctionCall { .. }))
+        .collect();
+    // The ref exists (so the builtin filter has something to suppress).
+    assert!(
+        !not_refs.is_empty(),
+        "`not` should emit a FunctionCall ref; got refs: {:?}",
+        fa.refs.iter().map(|r| (&r.target_name, &r.kind)).collect::<Vec<_>>(),
+    );
+}
+
+// ---- Fix #2: `\&subname` code-ref ----
+
+/// `\&handler` must emit a FunctionCall ref pointing at `handler`
+/// so goto-def and references both work.
+#[test]
+fn refgen_bare_name_emits_function_call_ref() {
+    let fa = build_fa("sub handler { 1 }\nmy $cb = \\&handler;\n");
+    let refs: Vec<_> = fa
+        .refs
+        .iter()
+        .filter(|r| r.target_name == "handler" && matches!(r.kind, RefKind::FunctionCall { .. }))
+        .collect();
+    assert_eq!(
+        refs.len(),
+        1,
+        "\\&handler should emit exactly one FunctionCall ref for `handler`; got: {:?}",
+        fa.refs
+            .iter()
+            .filter(|r| r.target_name == "handler")
+            .map(|r| &r.kind)
+            .collect::<Vec<_>>(),
+    );
+}
+
+/// `\&Pkg::handler` (qualified form) must also emit a FunctionCall ref.
+#[test]
+fn refgen_qualified_name_emits_function_call_ref() {
+    let fa = build_fa("my $cb = \\&Foo::handler;\n");
+    let refs: Vec<_> = fa
+        .refs
+        .iter()
+        .filter(|r| {
+            r.target_name == "handler" || r.target_name == "Foo::handler"
+        })
+        .collect();
+    assert!(
+        !refs.is_empty(),
+        "\\&Foo::handler should emit a FunctionCall ref; got refs: {:?}",
+        fa.refs.iter().map(|r| (&r.target_name, &r.kind)).collect::<Vec<_>>(),
+    );
+}
+
+/// goto-def on `\&handler` should land on the `sub handler` definition.
+/// FunctionCall refs route goto-def through package+name matching, not
+/// `resolves_to`, so we check `find_definition` returns the sub's span.
+#[test]
+fn refgen_goto_def_lands_on_sub_definition() {
+    // sub handler on line 0, \&handler on line 1 col 9
+    let src = "sub handler { 1 }\nmy $cb = \\&handler;\n";
+    let fa = build_fa(src);
+    let sub_sym = fa
+        .symbols
+        .iter()
+        .find(|s| s.name == "handler" && matches!(s.kind, SymKind::Sub))
+        .expect("handler sub should be defined");
+    // Cursor at the `h` of `\&handler` on line 1 (0-indexed row=1, col≈11)
+    let def_span = fa.find_definition(
+        Point::new(1, 11),
+        None,
+        None,
+        None,
+    );
+    assert_eq!(
+        def_span,
+        Some(sub_sym.selection_span),
+        "goto-def on \\&handler should land on the handler sub; sym={:?}",
+        sub_sym,
+    );
+}
+
+// ---- Fix #3: around/before/after modifier bodies ----
+
+/// In `around foo => sub { my ($orig, $self) = @_; ... }`, `$self` (param index 1)
+/// must be typed as the enclosing class so `$self->method` chains resolve.
+#[test]
+fn around_modifier_second_param_typed_as_class() {
+    let src = r#"
+package Dog;
+use Moo;
+
+sub speak { "woof" }
+
+around speak => sub {
+    my ($orig, $self) = @_;
+    return $self->speak_loudly();
+};
+
+sub speak_loudly { "WOOF" }
+"#;
+    let fa = build_fa(src);
+
+    // `$self` inside the around body should resolve to `Dog`
+    // (row=8 is the `return $self->speak_loudly()` line).
+    let ty = fa.inferred_type_via_bag("$self", Point::new(8, 12));
+    assert!(
+        ty.is_some(),
+        "$self inside `around` body should have an inferred type; got None.\
+         \nAll TCs: {:?}",
+        fa.refs
+            .iter()
+            .filter(|r| r.target_name == "$self")
+            .collect::<Vec<_>>(),
+    );
+    match ty.unwrap() {
+        InferredType::ClassName(name) => assert_eq!(name, "Dog", "$self should be Dog"),
+        InferredType::FirstParam { package } => {
+            assert_eq!(package, "Dog", "$self FirstParam should be Dog")
+        }
+        other => panic!("expected ClassName/FirstParam for $self, got {:?}", other),
+    }
+}
+
+/// In `before foo => sub { my ($self) = @_; ... }`, `$self` (param index 0)
+/// must be typed as the enclosing class.
+#[test]
+fn before_modifier_first_param_typed_as_class() {
+    let src = r#"
+package Cat;
+use Moo;
+
+sub meow { "mrrp" }
+
+before meow => sub {
+    my ($self) = @_;
+    $self->hiss();
+};
+
+sub hiss { "ssss" }
+"#;
+    let fa = build_fa(src);
+
+    // Row 8 = `$self->hiss()` line
+    let ty = fa.inferred_type_via_bag("$self", Point::new(8, 4));
+    assert!(
+        ty.is_some(),
+        "$self inside `before` body should have an inferred type",
+    );
+    match ty.unwrap() {
+        InferredType::ClassName(name) => assert_eq!(name, "Cat"),
+        InferredType::FirstParam { package } => assert_eq!(package, "Cat"),
+        other => panic!("expected ClassName/FirstParam, got {:?}", other),
+    }
+}

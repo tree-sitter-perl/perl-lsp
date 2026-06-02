@@ -105,6 +105,53 @@ fn test_diagnostics_skips_package_qualified() {
     );
 }
 
+// The `not` operator parses as `ambiguous_function_call_expression` because tree-sitter-perl
+// has no dedicated node type for it; it must be suppressed by the builtins list, not by CST shape.
+#[test]
+fn test_diagnostics_no_unresolved_for_not_operator() {
+    let source = "my $x = 1;\nmy $y = not $x;\nif (not $x) { }\n";
+    let analysis = parse_analysis(source);
+    let module_index = crate::module_index::ModuleIndex::new_for_test();
+    let diags = collect_diagnostics(&analysis, &module_index);
+    let not_diags: Vec<_> = diags.iter().filter(|d| d.message.contains("not")).collect();
+    assert!(
+        not_diags.is_empty(),
+        "`not` should not produce an unresolved-function diagnostic; got: {:?}",
+        not_diags.iter().map(|d| &d.message).collect::<Vec<_>>(),
+    );
+}
+
+// SUPER::method calls store `target_name = "SUPER::method"` which can never be found
+// by a literal MRO walk; the `::` guard must suppress the diagnostic.
+#[test]
+fn test_diagnostics_no_unresolved_for_super_method() {
+    let source = r#"
+package Animal;
+sub speak { "..." }
+
+package Dog;
+use parent -norequire, 'Animal';
+sub speak {
+    my ($self) = @_;
+    my $parent = $self->SUPER::speak();
+    return "Woof! $parent";
+}
+1;
+"#;
+    let analysis = parse_analysis(source);
+    let module_index = crate::module_index::ModuleIndex::new_for_test();
+    let diags = collect_diagnostics(&analysis, &module_index);
+    let super_diags: Vec<_> = diags
+        .iter()
+        .filter(|d| d.message.contains("SUPER"))
+        .collect();
+    assert!(
+        super_diags.is_empty(),
+        "`SUPER::speak` should not produce an unresolved-method diagnostic; got: {:?}",
+        super_diags.iter().map(|d| &d.message).collect::<Vec<_>>(),
+    );
+}
+
 #[test]
 fn test_code_action_from_diagnostic() {
     let source = "use Carp qw(croak);\ncarp('oops');\n";
