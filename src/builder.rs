@@ -3070,6 +3070,22 @@ impl<'a> Builder<'a> {
             SymbolDetail::Sub { params: params.clone(), is_method, doc, display: None, hide_in_outline: false, opaque_return: false },
         );
 
+        // Exporter::Extensible method-attribute export form: `sub foo :Export`.
+        // The sub's name is the export; recognizing the attribute is builder
+        // parsing of framework syntax. The attribute can appear before the
+        // package's `use Exporter::Extensible` is seen in source order, so we
+        // don't gate on package_uses here — `:Export` is unambiguous enough.
+        self.detect_export_attribute(node, &name);
+
+        // Importer's advertise hook: a module implements `IMPORTER_MENU` to
+        // tell `Importer` (and Exporter::Tiny) its export list. Best-effort:
+        // pull the `export` / `export_ok` keys' name arrays from the return
+        // list when statically present. `export_anon` (name → coderef) and
+        // any computed menu are unmodeled (runtime).
+        if name == "IMPORTER_MENU" {
+            self.detect_importer_menu(node);
+        }
+
         // Push sub scope
         let scope_kind = if is_method {
             ScopeKind::Method { name: name.clone() }
@@ -3667,6 +3683,31 @@ impl<'a> Builder<'a> {
         let Ok(module_name) = module_node.utf8_text(self.source) else { return };
         let raw_args = self.extract_mojo_base_args(node);
         let (imports, _qw_close) = self.extract_use_import_list(node);
+
+        // Importer consumer form: `use Importer 'M' => qw/foo bar/` imports
+        // foo/bar *from M*, not from Importer. Re-target so the import refs
+        // and the `Import` entry pin to M — then the existing imported-symbol
+        // resolution (goto-def → M's sub; cross-file refs_to) crosses to M.
+        // The first stringy arg is the source module; the rest are names.
+        // Honest limit: `Importer->import(...)`-style or hashref menu forms
+        // aren't covered — only the `use Importer 'M' => @names` line.
+        if module_name == "Importer" {
+            if let Some((source_module, names)) = imports.split_first() {
+                if !source_module.is_empty() && source_module.contains("::") {
+                    self.process_use(
+                        source_module.clone(),
+                        raw_args,
+                        names.to_vec(),
+                        node_to_span(node),
+                        node_to_span(module_node),
+                        Some(node),
+                        None,
+                    );
+                    return;
+                }
+            }
+        }
+
         self.process_use(
             module_name.to_string(),
             raw_args,
@@ -5154,6 +5195,38 @@ impl<'a> Builder<'a> {
                     self.visit_push_call(node);
                 }
 
+                // Runtime-exporter declaration calls (recognizing literal
+                // setup syntax, same idiom as the `has`/`extends` branches
+                // above — builder parsing of framework syntax, not
+                // consumer-side shape-branching). Exporter::Extensible's
+                // `export(...)` and Exporter::Declare's `exports(...)` take
+                // a flat name list; Exporter::Declare's `export NAME => sub`
+                // and `default_export NAME => sub` take a name + coderef.
+                // Gated on the package having `use`d the relevant exporter
+                // so an unrelated `sub export {}` in some other module isn't
+                // mistaken for a declaration.
+                if matches!(name, "export" | "exports" | "default_export")
+                    && self.package_uses_exporter_declare_family()
+                {
+                    match name {
+                        "exports" => self.detect_export_name_list_call(node),
+                        // `export(qw/.../)` (Extensible, parens + qw) vs
+                        // `export NAME => sub` (Declare, fat-comma pair):
+                        // the qw / pure-name-list form has no fat comma, the
+                        // pair form's second arg is a coderef. Try the pair
+                        // form first; fall back to the list form.
+                        "export" => {
+                            if self.is_export_pair_call(node) {
+                                self.detect_export_pair_call(node);
+                            } else {
+                                self.detect_export_name_list_call(node);
+                            }
+                        }
+                        "default_export" => self.detect_export_pair_call(node),
+                        _ => {}
+                    }
+                }
+
                 // Framework plugin dispatch for function calls. Mirrors
                 // the method-call path so plugins (e.g. Mojolicious::Lite
                 // routes: `get '/path' => sub {}`) get the same
@@ -5217,6 +5290,198 @@ impl<'a> Builder<'a> {
                 self.export.extend(values);
             } else {
                 self.export_ok.extend(values);
+            }
+        }
+    }
+
+    // ---- Runtime exporter modeling ----
+    //
+    // Static analysis can't run an exporter's `import()`, so we model the
+    // declarative *setup* shapes: the names a package registers as exports
+    // map to same-named subs in the package. We feed the discovered names
+    // into `export_ok` — the existing `@EXPORT_OK` plumbing then drives
+    // goto-def (`resolve_imported_function` → same-named sub), cross-file
+    // `refs_to` (the consumer's `use X 'name'` FunctionCall ref pins to X;
+    // the def is a `Sub { package: X }` symbol), and diagnostic suppression
+    // (`find_exporters`). Generators (Exporter::Extensible `-name` entries,
+    // inline coderefs) are best-effort: the name resolves to a same-named
+    // sub if one exists, else goto-def stops at the `use` line. Tags
+    // (`-tag`, `:tag`) and sigil'd vars (`$x`, `@y`) are group/var
+    // vocabulary, not subs — skipped. Conditional/computed exports built
+    // at runtime are unmodeled.
+
+    /// Add `names` to `export_ok` (the package's exported vocabulary),
+    /// deduped against what's already there. The defining sub is the
+    /// same-named symbol — no separate provenance, matching how `@EXPORT_OK`
+    /// names already trace to their subs via the resolver.
+    fn record_runtime_exports(&mut self, names: impl IntoIterator<Item = String>) {
+        for name in names {
+            if name.is_empty() { continue; }
+            if !self.export_ok.contains(&name) && !self.export.contains(&name) {
+                self.export_ok.push(name);
+            }
+        }
+    }
+
+    /// Keep only entries that name a sub: a plain bareword. Sigil'd vars
+    /// (`$x`/`@y`/`%z` — exported package globals, not subs) and tags
+    /// (`-tag`/`:group` — Exporter::Extensible export groups) are dropped.
+    /// The same-named-sub resolution only makes sense for sub names.
+    fn keep_sub_export_names(names: impl IntoIterator<Item = String>) -> Vec<String> {
+        names
+            .into_iter()
+            .filter(|n| {
+                n.chars()
+                    .next()
+                    .map_or(false, |c| c == '_' || c.is_ascii_alphabetic())
+            })
+            .collect()
+    }
+
+    /// True if the current package `use`d an exporter whose vocabulary
+    /// includes `export` / `exports` / `default_export` as declaration
+    /// verbs — Exporter::Extensible or Exporter::Declare (incl. its
+    /// `-magic` / role variants whose names start with that prefix).
+    /// Gates the call-name detection so a plain `sub export {}` elsewhere
+    /// isn't read as an export declaration.
+    fn package_uses_exporter_declare_family(&self) -> bool {
+        let Some(pkg) = self.current_package.as_ref() else { return false };
+        let Some(uses) = self.package_uses.get(pkg) else { return false };
+        uses.iter().any(|m| {
+            m == "Exporter::Extensible"
+                || m == "Exporter::Declare"
+                || m.starts_with("Exporter::Declare::")
+        })
+    }
+
+    /// Distinguish `export NAME => sub {...}` (Exporter::Declare pair form)
+    /// from `export(qw/.../)` / `export('a', 'b')` (name-list form). The
+    /// pair form's second positional is a coderef; the list form's args are
+    /// all names. We treat presence of an `anonymous_subroutine_expression`
+    /// (or `\&sub` reference) among the args as the pair-form signal.
+    fn is_export_pair_call(&self, node: Node<'a>) -> bool {
+        let Some(args) = node.child_by_field_name("arguments") else { return false };
+        for i in 0..args.named_child_count() {
+            if let Some(c) = args.named_child(i) {
+                if matches!(c.kind(), "anonymous_subroutine_expression" | "refgen_expression") {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    /// `export( qw( foo $bar -tag ) )` / `exports(qw/a b/)` — Exporter::
+    /// Extensible's `export(...)` and Exporter::Declare's `exports(...)`.
+    /// Both take a flat name list; only the sub-name entries are kept.
+    fn detect_export_name_list_call(&mut self, node: Node<'a>) {
+        let Some(args) = node.child_by_field_name("arguments") else { return };
+        let names = Self::keep_sub_export_names(self.extract_string_names(args));
+        self.record_runtime_exports(names);
+    }
+
+    /// `export NAME => sub {...}` / `default_export NAME => sub {...}`
+    /// (Exporter::Declare). The first positional is the exported name; the
+    /// value is an inline coderef (or, if absent, a same-named sub). We
+    /// model the name → same-named sub edge; the inline coderef body isn't
+    /// a separately-addressable symbol, so goto-def lands on a `sub NAME`
+    /// if the author also defined one (common) and otherwise on the `use`
+    /// line. Honest limit: anonymous-only exports aren't resolvable.
+    fn detect_export_pair_call(&mut self, node: Node<'a>) {
+        let Some(args) = node.child_by_field_name("arguments") else { return };
+        // First named child is the export name (bareword or string).
+        let Some(first) = args.named_child(0) else { return };
+        let names = match first.kind() {
+            "bareword" | "autoquoted_bareword" => {
+                first.utf8_text(self.source).ok().map(|s| s.to_string()).into_iter().collect()
+            }
+            "string_literal" | "interpolated_string_literal" => {
+                self.extract_string_content(first).into_iter().collect()
+            }
+            _ => Vec::new(),
+        };
+        self.record_runtime_exports(Self::keep_sub_export_names(names));
+    }
+
+    /// `sub foo : Export(...)` / `sub foo :Export` — Exporter::Extensible's
+    /// method-attribute export form. The sub's own name is the export; the
+    /// attribute's args are tags/options, not names. Called from `visit_sub`
+    /// with the sub name already known.
+    fn detect_export_attribute(&mut self, node: Node<'a>, sub_name: &str) {
+        let Some(attrs) = node.child_by_field_name("attributes") else { return };
+        let mut has_export_attr = false;
+        for i in 0..attrs.named_child_count() {
+            let Some(attr) = attrs.named_child(i) else { continue };
+            if attr.kind() != "attribute" { continue; }
+            let attr_name = attr
+                .child_by_field_name("name")
+                .and_then(|n| n.utf8_text(self.source).ok());
+            if attr_name == Some("Export") {
+                has_export_attr = true;
+                break;
+            }
+        }
+        if has_export_attr {
+            self.record_runtime_exports(Self::keep_sub_export_names([sub_name.to_string()]));
+        }
+    }
+
+    /// Scan an `IMPORTER_MENU` sub body for `export => [...]` /
+    /// `export_ok => [...]` fat-comma pairs in its return list and record
+    /// the named subs. Walks the body for a `return` (or trailing) list;
+    /// for each `export`/`export_ok` bareword key, pulls names from the
+    /// following arrayref. Best-effort static read — a menu built at
+    /// runtime (loops, conditionals, computed keys) isn't covered.
+    fn detect_importer_menu(&mut self, sub_node: Node<'a>) {
+        let Some(body) = sub_node.child_by_field_name("body") else { return };
+        // Collect every list_expression under the body (the return list and
+        // its operands). We look at the immediate children of each list for
+        // `key => [...]` pairs rather than recursing into the arrayrefs.
+        let mut lists: Vec<Node<'a>> = Vec::new();
+        Self::collect_list_expressions(body, &mut lists);
+        for list in lists {
+            let count = list.child_count();
+            let mut i = 0;
+            while i < count {
+                let Some(k) = list.child(i) else { i += 1; continue };
+                i += 1;
+                if !k.is_named() { continue; }
+                let key = match k.kind() {
+                    "bareword" | "autoquoted_bareword" => {
+                        k.utf8_text(self.source).ok().map(|s| s.to_string())
+                    }
+                    "string_literal" | "interpolated_string_literal" => {
+                        self.extract_string_content(k)
+                    }
+                    _ => None,
+                };
+                if !matches!(key.as_deref(), Some("export") | Some("export_ok")) {
+                    continue;
+                }
+                // Next named sibling is the value (skip the `=>` / commas).
+                while i < count {
+                    match list.child(i) {
+                        Some(v) if v.is_named() => {
+                            let names = Self::keep_sub_export_names(self.extract_string_names(v));
+                            self.record_runtime_exports(names);
+                            break;
+                        }
+                        _ => i += 1,
+                    }
+                }
+            }
+        }
+    }
+
+    /// Depth-first collect every `list_expression` node reachable from
+    /// `node` (used to find the menu pairs anywhere in a return body).
+    fn collect_list_expressions(node: Node<'a>, out: &mut Vec<Node<'a>>) {
+        if node.kind() == "list_expression" {
+            out.push(node);
+        }
+        for i in 0..node.named_child_count() {
+            if let Some(c) = node.named_child(i) {
+                Self::collect_list_expressions(c, out);
             }
         }
     }

@@ -56,6 +56,142 @@ fn test_refs_to_finds_sub_across_workspace_files() {
     );
 }
 
+/// Exporter::Extensible: `export(...)` + `:Export` register subs as
+/// exports without `@EXPORT_OK`. A consumer's `use X 'name'` must fan
+/// out to the def under `refs_to`.
+#[test]
+fn test_refs_to_exporter_extensible_cross_file() {
+    let store = FileStore::new();
+    let path_a = PathBuf::from("/tmp/resolve_ext_a.pm");
+    let path_b = PathBuf::from("/tmp/resolve_ext_b.pm");
+
+    let fa_a = parse(
+        "package Ext;\nuse Exporter::Extensible -exporter_setup => 1;\nexport(qw/foo/);\nsub foo { 42 }\nsub bar :Export {}\n1;\n",
+    );
+    store.insert_workspace(path_a.clone(), fa_a);
+
+    let fa_b = parse("package C;\nuse Ext qw/foo/;\nsub baz { foo(); }\n1;\n");
+    store.insert_workspace(path_b.clone(), fa_b);
+
+    let results = refs_to(
+        &store,
+        None,
+        &TargetRef {
+            name: "foo".to_string(),
+            kind: TargetKind::Sub { package: Some("Ext".to_string()) },
+        },
+        RoleMask::EDITABLE,
+    );
+    assert!(
+        results.iter().any(|r| matches!(&r.key, FileKey::Path(p) if p == &path_a)
+            && r.access == AccessKind::Declaration),
+        "expected declaration of foo in Ext, got {:?}",
+        results,
+    );
+    assert!(
+        results.iter().any(|r| matches!(&r.key, FileKey::Path(p) if p == &path_b)
+            && r.access == AccessKind::Read),
+        "expected call to foo in consumer, got {:?}",
+        results,
+    );
+}
+
+/// Exporter::Declare: `default_export name => sub {}` registers exports.
+#[test]
+fn test_refs_to_exporter_declare_cross_file() {
+    let store = FileStore::new();
+    let path_a = PathBuf::from("/tmp/resolve_decl_a.pm");
+    let path_b = PathBuf::from("/tmp/resolve_decl_b.pm");
+
+    let fa_a = parse(
+        "package Decl;\nuse Exporter::Declare;\ndefault_export foo => sub { 42 };\nsub foo { 42 }\n1;\n",
+    );
+    store.insert_workspace(path_a.clone(), fa_a);
+
+    let fa_b = parse("package C;\nuse Decl qw/foo/;\nsub baz { foo(); }\n1;\n");
+    store.insert_workspace(path_b.clone(), fa_b);
+
+    let results = refs_to(
+        &store,
+        None,
+        &TargetRef {
+            name: "foo".to_string(),
+            kind: TargetKind::Sub { package: Some("Decl".to_string()) },
+        },
+        RoleMask::EDITABLE,
+    );
+    assert!(
+        results.iter().any(|r| matches!(&r.key, FileKey::Path(p) if p == &path_a)),
+        "expected def of foo in Decl, got {:?}",
+        results,
+    );
+    assert!(
+        results.iter().any(|r| matches!(&r.key, FileKey::Path(p) if p == &path_b)
+            && r.access == AccessKind::Read),
+        "expected call to foo in consumer, got {:?}",
+        results,
+    );
+}
+
+/// Importer consumer form: `use Importer 'Src' => qw/foo/` imports foo
+/// from Src — the call must fan out to Src's def, not stop at Importer.
+#[test]
+fn test_refs_to_importer_consumer_cross_file() {
+    let store = FileStore::new();
+    let path_a = PathBuf::from("/tmp/resolve_imp_src.pm");
+    let path_b = PathBuf::from("/tmp/resolve_imp_consumer.pm");
+
+    let fa_a = parse("package Src::Mod;\nour @EXPORT_OK = qw/foo/;\nsub foo { 42 }\n1;\n");
+    store.insert_workspace(path_a.clone(), fa_a);
+
+    let fa_b = parse(
+        "package C;\nuse Importer 'Src::Mod' => qw/foo/;\nsub baz { foo(); }\n1;\n",
+    );
+    store.insert_workspace(path_b.clone(), fa_b);
+
+    let results = refs_to(
+        &store,
+        None,
+        &TargetRef {
+            name: "foo".to_string(),
+            kind: TargetKind::Sub { package: Some("Src::Mod".to_string()) },
+        },
+        RoleMask::EDITABLE,
+    );
+    assert!(
+        results.iter().any(|r| matches!(&r.key, FileKey::Path(p) if p == &path_a)
+            && r.access == AccessKind::Declaration),
+        "expected decl of foo in Src::Mod, got {:?}",
+        results,
+    );
+    assert!(
+        results.iter().any(|r| matches!(&r.key, FileKey::Path(p) if p == &path_b)),
+        "expected import/call of foo in consumer pinned to Src::Mod, got {:?}",
+        results,
+    );
+}
+
+/// False-positive guard: a `sub export {}` in a non-exporter package
+/// must not register phantom exports that pollute cross-file refs.
+#[test]
+fn test_refs_to_export_not_registered_without_use() {
+    let store = FileStore::new();
+    let path_a = PathBuf::from("/tmp/resolve_noexport.pm");
+    let fa_a = parse("package Plain;\nsub export {}\nexport('phantom');\n1;\n");
+    store.insert_workspace(path_a.clone(), fa_a);
+
+    let results = refs_to(
+        &store,
+        None,
+        &TargetRef {
+            name: "phantom".to_string(),
+            kind: TargetKind::Sub { package: Some("Plain".to_string()) },
+        },
+        RoleMask::EDITABLE,
+    );
+    assert!(results.is_empty(), "no phantom export, got {:?}", results);
+}
+
 /// Adversarial #1: a dotted helper `users.create` and a route's
 /// `Users#create` share a method name but live on different
 /// classes. gr on one must NOT pick up the other.

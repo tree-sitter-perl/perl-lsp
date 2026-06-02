@@ -114,6 +114,39 @@ fn test_find_exporters_uses_reverse_index() {
 }
 
 #[test]
+fn test_find_exporters_exporter_extensible() {
+    // Names declared via `export(...)` and `:Export` attributes are
+    // discoverable cross-file — the goto-def proxy for a consumer's import.
+    let idx = ModuleIndex::new_for_test();
+    let src = "package My::Ext;\nuse Exporter::Extensible -exporter_setup => 1;\nexport(qw( foo $bar -tag ));\nsub foo {}\nsub bar :Export {}\n1;";
+    idx.insert_cache("My::Ext", Some(parse_source_to_cached(src, "My::Ext")));
+    assert_eq!(idx.find_exporters("foo"), vec!["My::Ext"]);
+    assert_eq!(idx.find_exporters("bar"), vec!["My::Ext"]);
+    // Sigil'd / tag entries aren't subs — not advertised.
+    assert!(idx.find_exporters("$bar").is_empty());
+    assert!(idx.find_exporters("-tag").is_empty());
+}
+
+#[test]
+fn test_find_exporters_exporter_declare() {
+    let idx = ModuleIndex::new_for_test();
+    let src = "package My::Decl;\nuse Exporter::Declare;\ndefault_export foo => sub { 1 };\nexport bar => sub { 2 };\nexports qw/a b/;\nsub bar {}\n1;";
+    idx.insert_cache("My::Decl", Some(parse_source_to_cached(src, "My::Decl")));
+    assert_eq!(idx.find_exporters("foo"), vec!["My::Decl"]);
+    assert_eq!(idx.find_exporters("bar"), vec!["My::Decl"]);
+    assert_eq!(idx.find_exporters("a"), vec!["My::Decl"]);
+}
+
+#[test]
+fn test_find_exporters_importer_menu() {
+    let idx = ModuleIndex::new_for_test();
+    let src = "package My::Menu;\nsub IMPORTER_MENU {\n  return ( export => [qw/foo bar/], export_ok => ['baz'] );\n}\nsub foo {}\n1;";
+    idx.insert_cache("My::Menu", Some(parse_source_to_cached(src, "My::Menu")));
+    assert_eq!(idx.find_exporters("foo"), vec!["My::Menu"]);
+    assert_eq!(idx.find_exporters("baz"), vec!["My::Menu"]);
+}
+
+#[test]
 fn test_get_return_type_cached() {
     use crate::file_analysis::InferredType;
 
