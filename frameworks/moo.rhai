@@ -12,13 +12,15 @@
 //                       a class, the delegated method's return edges to the
 //                       remote method on that class
 //
-// The core walks the `has` CST and hands this plugin the decision-ready
-// `ctx.has_options` shape (rule #1 — only the builder touches tree-sitter).
-// What lives HERE is the vocabulary: which keyword maps to which name pattern
-// and return behavior. New Moo accessor behavior is a new arm in this file,
-// not a branch in the builder. The default accessor / isa / constructor-key
-// synthesis is still native in `visit_has_call` (a larger move left as future
-// work); this plugin is the established seam for everything beyond it.
+// The core walks the `has` CST and hands this plugin EVERY fat-comma option
+// key→value as a value-shape-classified `ctx.has_options` entry (rule #1 —
+// only the builder touches tree-sitter; no keyword allowlist in core, so a
+// new keyword needs no core edit). What lives HERE is the vocabulary: which
+// keyword maps to which name pattern and return behavior; arms below ignore
+// keywords/shapes they don't act on. New Moo accessor behavior is a new arm
+// in this file, not a branch in the builder. The default accessor / isa /
+// constructor-key synthesis is still native in `visit_has_call` (a larger
+// move left as future work); this plugin is the seam for everything beyond it.
 
 fn id() { "moo" }
 

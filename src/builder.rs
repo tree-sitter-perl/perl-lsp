@@ -3499,6 +3499,11 @@ impl<'a> Builder<'a> {
     /// check uses parents recorded so far (`with` typically precedes the method);
     /// a role declared *after* the method in the file wouldn't be seen here.
     fn apply_param_type_manifest(&mut self, method: &str, params: &[ParamInfo], node: Node<'a>) {
+        // No rules → skip the ancestry DFS + alloc every sub declaration would
+        // otherwise pay for nothing.
+        if self.param_type_manifest.is_empty() && self.param_type_wildcards.is_empty() {
+            return;
+        }
         let Some(pkg) = self.current_package.clone() else { return };
         // Resolved ancestry of the enclosing package (roles via `with`,
         // parents via extends/isa/use parent), plus the package itself.
@@ -4007,19 +4012,6 @@ impl<'a> Builder<'a> {
         }
     }
 
-    /// Check if we're at package scope (file scope or class block, not inside a sub).
-    #[allow(dead_code)]
-    fn is_package_scope(&self) -> bool {
-        for &scope_id in self.scope_stack.iter().rev() {
-            match &self.scopes[scope_id.0 as usize].kind {
-                ScopeKind::File => return true,
-                ScopeKind::Sub { .. } | ScopeKind::Method { .. } => return false,
-                _ => continue, // class/block/for-loop at package level are OK
-            }
-        }
-        true // empty stack = file scope
-    }
-
     /// Accumulate `use constant NAME => value` into constant_strings.
     fn accumulate_use_constant(&mut self, node: Node<'a>) {
         // CST: use_statement → module:"constant", list_expression(autoquoted_bareword, value...)
@@ -4350,11 +4342,18 @@ impl<'a> Builder<'a> {
                         names.extend(self.extract_string_names(child));
                     }
                 }
-                if !names.is_empty() {
-                    if export_var == "@EXPORT" {
-                        self.export = names;
-                    } else {
-                        self.export_ok = names;
+                // Union, not clobber: runtime-exporter discovery (`:Export`
+                // attrs, Sub::Exporter / Exporter::Declare setup) may have
+                // recorded names earlier in this package walk. An overwrite
+                // would drop them; the two mechanisms compose.
+                let target = if export_var == "@EXPORT" {
+                    &mut self.export
+                } else {
+                    &mut self.export_ok
+                };
+                for name in names {
+                    if !target.contains(&name) {
+                        target.push(name);
                     }
                 }
             }
@@ -5480,6 +5479,24 @@ impl<'a> Builder<'a> {
         })
     }
 
+    /// True if the current package `use`d an exporter that defines the
+    /// method-call setup verbs `setup_import_methods` (Moose::Exporter) /
+    /// `add_type` (Type::Library, Exporter::Tiny, Type::Tiny). Gates those
+    /// method-call detections so an unrelated `$x->add_type({name=>...})`
+    /// or `$x->setup_import_methods(...)` elsewhere isn't read as an export
+    /// declaration (false cross-file goto-def + suppressed diagnostics).
+    fn package_uses_moose_exporter_or_type_library(&self) -> bool {
+        let Some(pkg) = self.current_package.as_ref() else { return false };
+        let Some(uses) = self.package_uses.get(pkg) else { return false };
+        uses.iter().any(|m| {
+            m == "Moose::Exporter"
+                || m == "Type::Library"
+                || m == "Type::Tiny"
+                || m == "Exporter::Tiny"
+                || m.starts_with("Type::Library::")
+        })
+    }
+
     /// Distinguish `export NAME => sub {...}` (Exporter::Declare pair form)
     /// from `export(qw/.../)` / `export('a', 'b')` (name-list form). The
     /// pair form's second positional is a coderef; the list form's args are
@@ -5517,15 +5534,7 @@ impl<'a> Builder<'a> {
         let Some(args) = node.child_by_field_name("arguments") else { return };
         // First named child is the export name (bareword or string).
         let Some(first) = args.named_child(0) else { return };
-        let names = match first.kind() {
-            "bareword" | "autoquoted_bareword" => {
-                first.utf8_text(self.source).ok().map(|s| s.to_string()).into_iter().collect()
-            }
-            "string_literal" | "interpolated_string_literal" => {
-                self.extract_string_content(first).into_iter().collect()
-            }
-            _ => Vec::new(),
-        };
+        let names: Vec<String> = self.extract_node_string(first).into_iter().collect();
         self.record_runtime_exports(Self::keep_sub_export_names(names));
     }
 
@@ -5565,38 +5574,19 @@ impl<'a> Builder<'a> {
         // `key => [...]` pairs rather than recursing into the arrayrefs.
         let mut lists: Vec<Node<'a>> = Vec::new();
         Self::collect_list_expressions(body, &mut lists);
+        // Collect first, record after — `for_each_fat_comma_pair` holds a
+        // shared borrow of self that `record_runtime_exports` (mut) can't
+        // overlap.
+        let mut names: Vec<String> = Vec::new();
         for list in lists {
-            let count = list.child_count();
-            let mut i = 0;
-            while i < count {
-                let Some(k) = list.child(i) else { i += 1; continue };
-                i += 1;
-                if !k.is_named() { continue; }
-                let key = match k.kind() {
-                    "bareword" | "autoquoted_bareword" => {
-                        k.utf8_text(self.source).ok().map(|s| s.to_string())
-                    }
-                    "string_literal" | "interpolated_string_literal" => {
-                        self.extract_string_content(k)
-                    }
-                    _ => None,
-                };
-                if !matches!(key.as_deref(), Some("export") | Some("export_ok")) {
-                    continue;
+            self.for_each_fat_comma_pair(list, |key, val| {
+                if matches!(key, "export" | "export_ok") {
+                    names.extend(Self::keep_sub_export_names(self.extract_string_names(val)));
                 }
-                // Next named sibling is the value (skip the `=>` / commas).
-                while i < count {
-                    match list.child(i) {
-                        Some(v) if v.is_named() => {
-                            let names = Self::keep_sub_export_names(self.extract_string_names(v));
-                            self.record_runtime_exports(names);
-                            break;
-                        }
-                        _ => i += 1,
-                    }
-                }
-            }
+                true
+            });
         }
+        self.record_runtime_exports(names);
     }
 
     /// Depth-first collect every `list_expression` node reachable from
@@ -6069,7 +6059,7 @@ impl<'a> Builder<'a> {
                             }
                         }
                         if isa_value_node.is_none() {
-                            isa_value_node = self.fat_comma_value_node(*child, "isa");
+                            isa_value_node = self.value_node_after_key(*child, "isa");
                         }
                     }
                     _ => {}
@@ -6456,41 +6446,31 @@ impl<'a> Builder<'a> {
                 self.bag_query_expr_span(node_to_span(n))?.constrained_inner().cloned()
             });
 
+        // Classify each option by VALUE shape, not by keyword — the keyword
+        // vocabulary is the plugin's (rule #10). `shorthand` (`=> 1`),
+        // `explicit_name` (`=> 'name'`), and `handles` (`=> {..}` / `[..]`)
+        // are mutually exclusive value shapes; an option whose value matches
+        // none still passes through with all fields empty (the plugin's arms
+        // ignore keywords / shapes it doesn't act on).
         let mut options: Vec<plugin::HasOption> = Vec::new();
         for (keyword, val_node) in option_nodes {
-            let opt = match keyword.as_str() {
-                "predicate" | "clearer" | "writer" | "reader" | "builder" => {
-                    if self.node_is_numeric_one(val_node) {
-                        plugin::HasOption {
-                            keyword,
-                            shorthand: true,
-                            explicit_name: None,
-                            handles: Vec::new(),
-                        }
-                    } else if let Some(s) = self.extract_node_string(val_node) {
-                        plugin::HasOption {
-                            keyword,
-                            shorthand: false,
-                            explicit_name: Some(s),
-                            handles: Vec::new(),
-                        }
-                    } else {
-                        continue;
-                    }
-                }
-                "handles" => {
-                    let pairs = self.extract_handles_delegation(val_node);
-                    if pairs.is_empty() { continue; }
-                    plugin::HasOption {
-                        keyword,
-                        shorthand: false,
-                        explicit_name: None,
-                        handles: pairs,
-                    }
-                }
-                _ => continue,
+            let shorthand = self.node_is_numeric_one(val_node);
+            let explicit_name = if shorthand {
+                None
+            } else {
+                self.extract_node_string(val_node)
             };
-            options.push(opt);
+            let handles = if shorthand || explicit_name.is_some() {
+                Vec::new()
+            } else {
+                self.extract_handles_delegation(val_node)
+            };
+            options.push(plugin::HasOption {
+                keyword,
+                shorthand,
+                explicit_name,
+                handles,
+            });
         }
 
         if options.is_empty() { return None; }
@@ -6498,9 +6478,11 @@ impl<'a> Builder<'a> {
     }
 
     /// Walk a `has` options fat-comma list, capturing the `isa` value (its
-    /// string and node) and the value node for each accessor-option keyword.
-    /// Keeps the raw nodes so the classifier can tell the shorthand `1` from
-    /// an explicit `'name'` and parse `handles` hashref/arrayref structurally.
+    /// string and node) and the value node for *every other* option keyword —
+    /// no allowlist. The accessor-keyword vocabulary lives in `moo.rhai`
+    /// (rule #10); core only does the CST walk (rule #1) and hands the full
+    /// option list to the plugin, which decides which keywords matter. Keeps
+    /// the raw value nodes so the classifier can read the value shape.
     fn collect_has_option_value_nodes(
         &self,
         opts_node: Node<'a>,
@@ -6508,55 +6490,20 @@ impl<'a> Builder<'a> {
         isa_value_node: &mut Option<Node<'a>>,
         option_nodes: &mut Vec<(String, Node<'a>)>,
     ) {
-        let count = opts_node.child_count();
-        let mut i = 0;
-        while i < count {
-            let key_node = match opts_node.child(i) {
-                Some(c) if c.is_named() => c,
-                _ => { i += 1; continue; }
-            };
-            let key = match key_node.kind() {
-                "bareword" | "autoquoted_bareword" => key_node.utf8_text(self.source).ok().map(|s| s.to_string()),
-                "string_literal" | "interpolated_string_literal" => self.extract_string_content(key_node),
-                _ => { i += 1; continue; }
-            };
-            let key = match key { Some(k) => k, None => { i += 1; continue; } };
-
-            // Step past the key, then the `=>` and any unnamed tokens.
-            i += 1;
-            while i < count {
-                match opts_node.child(i) {
-                    Some(c) if c.kind() == "=>" => { i += 1; break; }
-                    Some(c) if !c.is_named() => { i += 1; }
-                    _ => break,
+        self.for_each_fat_comma_pair(opts_node, |key, val_node| {
+            // `isa` feeds the resolved attribute type, not an accessor option.
+            if key == "isa" {
+                if isa_value.is_none() {
+                    *isa_value = self.extract_node_string(val_node);
                 }
+                if isa_value_node.is_none() {
+                    *isa_value_node = Some(val_node);
+                }
+            } else {
+                option_nodes.push((key.to_string(), val_node));
             }
-            let val_node = loop {
-                if i >= count { break None; }
-                match opts_node.child(i) {
-                    Some(c) if c.is_named() => break Some(c),
-                    Some(_) => { i += 1; }
-                    None => break None,
-                }
-            };
-            let val_node = match val_node { Some(v) => v, None => continue };
-
-            match key.as_str() {
-                "isa" => {
-                    if isa_value.is_none() {
-                        *isa_value = self.extract_node_string(val_node);
-                    }
-                    if isa_value_node.is_none() {
-                        *isa_value_node = Some(val_node);
-                    }
-                }
-                "predicate" | "clearer" | "writer" | "reader" | "builder" | "handles" => {
-                    option_nodes.push((key, val_node));
-                }
-                _ => {}
-            }
-            i += 1;
-        }
+            true
+        });
     }
 
     /// `true` when the node is the integer literal `1` (the `=> 1` shorthand).
@@ -6665,18 +6612,8 @@ impl<'a> Builder<'a> {
         for i in 0..node.child_count() {
             if let Some(child) = node.child(i) {
                 if child.start_byte() <= module_end { continue; }
-                match child.kind() {
-                    "autoquoted_bareword" | "bareword" => {
-                        if let Ok(text) = child.utf8_text(self.source) {
-                            args.push(text.to_string());
-                        }
-                    }
-                    "string_literal" | "interpolated_string_literal" => {
-                        if let Some(text) = self.extract_string_content(child) {
-                            args.push(text);
-                        }
-                    }
-                    _ => {}
+                if let Some(text) = self.extract_node_string(child) {
+                    args.push(text);
                 }
             }
         }
@@ -6775,96 +6712,17 @@ impl<'a> Builder<'a> {
         }
     }
 
-    /// The value NODE for fat-comma `key` in a `( k => v, ... )` list,
-    /// without stringifying — companion to `extract_fat_comma_pairs` for
-    /// the complex values that one drops (a Type::Tiny constructor). The
-    /// caller walks the node structurally.
-    fn fat_comma_value_node(&self, node: Node<'a>, key: &str) -> Option<Node<'a>> {
-        let count = node.child_count();
-        let mut i = 0;
-        while i < count {
-            let key_node = match node.child(i) {
-                Some(c) if c.is_named() => c,
-                _ => { i += 1; continue; }
-            };
-            let this_key = match key_node.kind() {
-                "bareword" | "autoquoted_bareword" => {
-                    key_node.utf8_text(self.source).ok().map(|s| s.to_string())
-                }
-                "string_literal" | "interpolated_string_literal" => {
-                    self.extract_string_content(key_node)
-                }
-                _ => { i += 1; continue; }
-            };
-            i += 1; // step over the key
-            while i < count {
-                match node.child(i) {
-                    Some(c) if c.kind() == "=>" => { i += 1; break; }
-                    Some(c) if !c.is_named() => { i += 1; }
-                    _ => break,
-                }
-            }
-            if this_key.as_deref() == Some(key) {
-                return node.child(i).filter(|c| c.is_named());
-            }
-            i += 1;
-        }
-        None
-    }
-
     /// Extract key-value pairs from a fat-comma list expression.
     /// Returns pairs like [("is", "ro"), ("isa", "Str")].
     fn extract_fat_comma_pairs(&self, node: Node<'a>) -> Vec<(String, String)> {
         let mut pairs = Vec::new();
-        let mut i = 0;
-        let count = node.child_count();
-        while i < count {
-            let key_node = match node.child(i) {
-                Some(c) if c.is_named() => c,
-                _ => { i += 1; continue; }
-            };
-
-            // Key: bareword/autoquoted_bareword or string
-            let key = match key_node.kind() {
-                "bareword" | "autoquoted_bareword" => key_node.utf8_text(self.source).ok().map(|s| s.to_string()),
-                "string_literal" | "interpolated_string_literal" => self.extract_string_content(key_node),
-                _ => { i += 1; continue; }
-            };
-
-            let key = match key {
-                Some(k) => k,
-                None => { i += 1; continue; }
-            };
-
-            // Skip '=>'
-            i += 1;
-            while i < count {
-                match node.child(i) {
-                    Some(c) if c.kind() == "=>" => { i += 1; break; }
-                    Some(c) if !c.is_named() => { i += 1; }
-                    _ => break,
-                }
+        // Only string-valued pairs survive — complex values (refs, calls) drop.
+        self.for_each_fat_comma_pair(node, |key, val_node| {
+            if let Some(v) = self.extract_node_string(val_node) {
+                pairs.push((key.to_string(), v));
             }
-
-            // Value: string, bareword, or skip complex values
-            if i < count {
-                if let Some(val_node) = node.child(i) {
-                    if val_node.is_named() {
-                        let val = match val_node.kind() {
-                            "bareword" | "autoquoted_bareword" => val_node.utf8_text(self.source).ok().map(|s| s.to_string()),
-                            "string_literal" | "interpolated_string_literal" => self.extract_string_content(val_node),
-                            _ => None,
-                        };
-                        if let Some(v) = val {
-                            pairs.push((key, v));
-                        }
-                        i += 1;
-                        continue;
-                    }
-                }
-            }
-            i += 1;
-        }
+            true
+        });
         pairs
     }
 
@@ -6883,13 +6741,17 @@ impl<'a> Builder<'a> {
     // otherwise goto-def stops at the `use` line. Conditional/dynamic
     // exports built at runtime are unmodeled.
 
-    /// Find the value node following a fat-comma `key` in a list-like
-    /// container (`list_expression`, the body of an `anonymous_hash_expression`,
-    /// or a `use` statement's arg list). Keys may be barewords,
-    /// autoquoted barewords (`-setup`), or strings.
-    fn value_node_after_key(&self, container: Node<'a>, key: &str) -> Option<Node<'a>> {
-        // Descend into an anonymous hash's inner list so callers can pass
-        // either the `{ ... }` node or the bare list.
+    /// Walk a fat-comma list, invoking `f(key_string, value_node)` for each
+    /// `key => value` pair. The single fat-comma scanner — every "find the
+    /// value after a key" caller routes here. Accepts a bare `list_expression`
+    /// / `parenthesized_expression` or an `anonymous_hash_expression` (its
+    /// inner list is unwrapped). Keys are barewords, autoquoted barewords
+    /// (`-setup`), or strings; non-key/non-value tokens (commas, `=>`) skip.
+    /// Stops early when `f` returns `false`.
+    fn for_each_fat_comma_pair<F>(&self, container: Node<'a>, mut f: F)
+    where
+        F: FnMut(&str, Node<'a>) -> bool,
+    {
         let list = if container.kind() == "anonymous_hash_expression" {
             (0..container.named_child_count())
                 .filter_map(|i| container.named_child(i))
@@ -6902,23 +6764,36 @@ impl<'a> Builder<'a> {
         let mut i = 0;
         while i < count {
             let Some(k_node) = list.child(i) else { i += 1; continue; };
-            if !k_node.is_named() { i += 1; continue; }
-            let k_text = match k_node.kind() {
-                "bareword" | "autoquoted_bareword" => k_node.utf8_text(self.source).ok().map(|s| s.to_string()),
-                "string_literal" | "interpolated_string_literal" => self.extract_string_content(k_node),
-                _ => None,
-            };
             i += 1;
-            if k_text.as_deref() != Some(key) { continue; }
-            // Skip the fat comma / commas, return the next named node.
-            while i < count {
+            if !k_node.is_named() { continue; }
+            let Some(key) = self.extract_node_string(k_node) else { continue; };
+            // Skip the fat comma / commas to the next named node (the value).
+            let val = loop {
                 match list.child(i) {
-                    Some(c) if c.is_named() => return Some(c),
-                    _ => i += 1,
+                    Some(c) if c.is_named() => break Some(c),
+                    Some(_) => i += 1,
+                    None => break None,
                 }
-            }
+            };
+            let Some(val) = val else { break; };
+            i += 1; // step past the value so the next key isn't read off it
+            if !f(&key, val) { return; }
         }
-        None
+    }
+
+    /// Find the value node following a fat-comma `key` in a list-like
+    /// container. Thin single-key lookup over `for_each_fat_comma_pair`.
+    fn value_node_after_key(&self, container: Node<'a>, key: &str) -> Option<Node<'a>> {
+        let mut found = None;
+        self.for_each_fat_comma_pair(container, |k, v| {
+            if k == key {
+                found = Some(v);
+                false
+            } else {
+                true
+            }
+        });
+        found
     }
 
     /// `use Sub::Exporter -setup => { exports => [...] }` — pull the
@@ -6950,34 +6825,11 @@ impl<'a> Builder<'a> {
         // Generator hashref: `{ name => \&gen }`. The values are coderefs,
         // not strings, so `extract_string_names` won't have grabbed the
         // names — they're the keys.
-        let inner = if list.kind() == "anonymous_hash_expression" {
-            (0..list.named_child_count())
-                .filter_map(|i| list.named_child(i))
-                .find(|c| c.kind() == "list_expression")
-        } else { None };
-        if let Some(inner) = inner {
-            let count = inner.child_count();
-            let mut i = 0;
-            let mut expect_key = true;
-            while i < count {
-                if let Some(c) = inner.child(i) {
-                    if c.kind() == "=>" { expect_key = false; i += 1; continue; }
-                    if c.kind() == "," { expect_key = true; i += 1; continue; }
-                    if c.is_named() && expect_key {
-                        if let Some(k) = match c.kind() {
-                            "bareword" | "autoquoted_bareword" => c.utf8_text(self.source).ok().map(|s| s.to_string()),
-                            "string_literal" | "interpolated_string_literal" => self.extract_string_content(c),
-                            _ => None,
-                        } {
-                            names.push(k);
-                        }
-                        expect_key = false;
-                    } else if c.is_named() {
-                        expect_key = false;
-                    }
-                }
-                i += 1;
-            }
+        if list.kind() == "anonymous_hash_expression" {
+            self.for_each_fat_comma_pair(list, |key, _val| {
+                names.push(key.to_string());
+                true
+            });
         }
         names
     }
@@ -7161,6 +7013,8 @@ impl<'a> Builder<'a> {
             _ => None,
         });
 
+        let args = self.extract_call_args(node);
+
         if let Some(ref name) = method_name {
             // Dynamic method dispatch: $self->$method() — resolve $method if known
             if name.starts_with('$') {
@@ -7181,7 +7035,7 @@ impl<'a> Builder<'a> {
                             self.method_call_invocant.insert(idx, c);
                         }
                         self.method_call_arity
-                            .insert(idx, self.extract_call_args(node).len() as u32);
+                            .insert(idx, args.len() as u32);
                     }
                 }
             } else {
@@ -7200,14 +7054,18 @@ impl<'a> Builder<'a> {
                     self.method_call_invocant.insert(idx, c);
                 }
                 self.method_call_arity
-                    .insert(idx, self.extract_call_args(node).len() as u32);
+                    .insert(idx, args.len() as u32);
 
                 // Runtime-exporter setup in method-call form:
                 // `Moose::Exporter->setup_import_methods(...)`,
-                // `__PACKAGE__->add_type({ name => 'X' })`. Match on the
-                // method name only — the invocant package isn't load-bearing
-                // (Type::Library subclasses inherit `add_type`).
-                if matches!(name.as_str(), "setup_import_methods" | "add_type") {
+                // `__PACKAGE__->add_type({ name => 'X' })`. The invocant
+                // package isn't load-bearing (Type::Library subclasses inherit
+                // `add_type`), so gate on the enclosing package having `use`d
+                // the relevant exporter — otherwise an unrelated
+                // `$x->add_type(...)` would pollute `export_ok`.
+                if matches!(name.as_str(), "setup_import_methods" | "add_type")
+                    && self.package_uses_moose_exporter_or_type_library()
+                {
                     if let Some(args) = node.child_by_field_name("arguments") {
                         self.detect_exporter_setup_call(name, args);
                     }
@@ -7323,9 +7181,8 @@ impl<'a> Builder<'a> {
         // `->on()` can't accidentally break DBIC `->add_columns()`.
         if !self.plugins.is_empty() {
             if let Some(ref name) = method_name {
-                let args_raw = self.extract_call_args(node);
                 let mut ctx = self.base_call_context(
-                    args_raw,
+                    args.clone(),
                     node_to_span(node),
                     method_name_span,
                 );

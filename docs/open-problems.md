@@ -67,6 +67,26 @@ vocabulary, core owns the mechanism" split the framework plugins use.
 Out of scope until the exporter-shape catalog is worth building; the
 explicit-`qw` import path is fully handled in the meantime.
 
+**Rule-#10 debt (recorded, not yet paid):** the *which module/verb is an
+export declaration* decision is still a module-name allowlist in core —
+`package_uses_exporter_declare_family()` (Exporter::Extensible /
+Exporter::Declare), `package_uses_moose_exporter_or_type_library()`
+(Moose::Exporter / Type::Library / Exporter::Tiny), and the verb dispatch
+in `detect_exporter_setup_call` / the `export` / `exports` /
+`default_export` / `setup_exporter` arms. Both call families are now
+*gated* on the enclosing package having `use`d the matching exporter
+(so an unrelated `$x->add_type(...)` no longer pollutes `export_ok`), but
+the gate's vocabulary lives in core, not a plugin manifest. The
+principled shape, analogous to `param_types()` / `dispatch_verbs()` /
+`type_constraint_names()`: a plugin manifest declaring `(exporter_module,
+setup_verb, extraction_shape)` triples; core keeps the CST walk (rule #1)
+and dispatches on the manifest. Deferred over the A1 gate because each
+verb's name-extraction shape (`with_meta`/`as_is` vs `name`/positional vs
+`exports` arrayref/generator-hashref) is genuinely per-verb CST code that
+stays in core regardless — manifest-izing only the recognition gate, not
+the extraction, so the win is modest until the exporter-shape catalog
+above lands and the two can be designed together.
+
 ## Residual single-store cleanups (low-leverage, no motivating bug)
 
 A few small parallel-store / dead-state items surfaced alongside the

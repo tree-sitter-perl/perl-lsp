@@ -10651,6 +10651,43 @@ fn non_exporter_setup_does_not_pollute_exports() {
     assert!(!fa.export_ok.contains(&"nope".to_string()));
 }
 
+#[test]
+fn setup_verb_name_without_exporter_use_does_not_pollute_exports() {
+    // The verb name matches a real exporter setup call, but the package never
+    // `use`d an exporter that defines it — so it's an unrelated method call
+    // (`$x->add_type({name=>...})` on some domain object) and must not record
+    // exports. Without the package-use gate this would false-positive.
+    let fa = build_fa(
+        "package My::Registry;\n\
+         my $schema = build_schema();\n\
+         $schema->add_type({ name => 'Widget' });\n\
+         __PACKAGE__->setup_import_methods(as_is => [qw/leak/]);\n\
+         1;\n",
+    );
+    assert!(!fa.export_ok.contains(&"Widget".to_string()),
+        "add_type without Type::Library use must not record exports; got {:?}", fa.export_ok);
+    assert!(!fa.export_ok.contains(&"leak".to_string()),
+        "setup_import_methods without Moose::Exporter use must not record exports; got {:?}", fa.export_ok);
+}
+
+#[test]
+fn export_ok_array_assignment_unions_with_runtime_exports() {
+    // `:Export` attr records `attr_export` at the sub walk; a later
+    // `our @EXPORT_OK = (...)` must union, not clobber, so both survive.
+    let fa = build_fa(
+        "package My::Mixed;\n\
+         use Exporter::Extensible;\n\
+         sub attr_export :Export { }\n\
+         our @EXPORT_OK = ('array_export');\n\
+         sub array_export { }\n\
+         1;\n",
+    );
+    assert!(fa.export_ok.contains(&"attr_export".to_string()),
+        "runtime :Export attr survives the array assignment; got {:?}", fa.export_ok);
+    assert!(fa.export_ok.contains(&"array_export".to_string()),
+        "array-assigned name recorded; got {:?}", fa.export_ok);
+}
+
 // Moo/Moose non-default has options: predicate, clearer,
 // writer, reader, builder, handles
 // ============================================================
