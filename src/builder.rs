@@ -226,6 +226,7 @@ fn build_with_plugins_inner(
         method_call_invocant: std::collections::HashMap::new(),
         parametric_emitted_refs: std::collections::HashSet::new(),
         anon_sub_symbol_by_span: std::collections::HashMap::new(),
+        modifier_invocant_pos: None,
     };
 
     // Create file-level scope and walk
@@ -1093,6 +1094,14 @@ struct Builder<'a> {
     /// placeholders without any per-shape dispatch in the chase
     /// site.
     anon_sub_symbol_by_span: std::collections::HashMap<Span, SymbolId>,
+
+    /// Invocant parameter index for the next anonymous sub to be visited.
+    /// Set by `visit_function_call` when it detects a Moose/Moo method
+    /// modifier (`around`/`before`/`after`): 1 for `around` (first param
+    /// is `$orig`), 0 for `before`/`after`. Consumed and cleared by
+    /// `visit_anonymous_sub` so it applies only to the immediately
+    /// following anon sub, not to nested lambdas.
+    modifier_invocant_pos: Option<usize>,
 }
 
 /// Owner-and-gating discriminator for `emit_call_arg_key_accesses`.
@@ -2328,6 +2337,13 @@ impl<'a> Builder<'a> {
             }
             "method_call_expression" => self.visit_method_call(node),
 
+            // Code-ref capture: `\&handler` or `\&Pkg::handler`.
+            // Emits a FunctionCall ref at the name span so goto-def /
+            // references resolve to the sub definition. The `expr_payload`
+            // path handles the CodeRef type witness; this arm adds the
+            // navigation ref that `expr_payload` doesn't emit.
+            "refgen_expression" => self.visit_refgen(node),
+
             // Hash access
             "hash_element_expression" => self.visit_hash_element(node),
 
@@ -2809,7 +2825,20 @@ impl<'a> Builder<'a> {
     /// with a paren), so a workspace search for `(anon)` won't
     /// surface them.
     fn visit_anonymous_sub(&mut self, node: Node<'a>) {
-        let params = self.extract_params(node);
+        let mut params = self.extract_params(node);
+        // If the caller set `modifier_invocant_pos` (from `around`/`before`/`after`
+        // in a Moo/Moose context), mark the designated param as the invocant so
+        // `detect_first_param_type` types it as the enclosing class. Consume the
+        // position immediately — it applies only to this next anon sub, not to any
+        // nested lambdas the body might contain.
+        let modifier_pos = self.modifier_invocant_pos.take();
+        if let Some(pos) = modifier_pos {
+            if let Some(p) = params.get_mut(pos) {
+                if p.name.starts_with('$') {
+                    p.is_invocant = true;
+                }
+            }
+        }
         let span = node_to_span(node);
         self.ensure_anon_sub_symbol(node, &params);
         self.push_scope(
@@ -3100,20 +3129,22 @@ impl<'a> Builder<'a> {
     }
 
     fn detect_first_param_type(&mut self, params: &[ParamInfo], node: Node<'a>) {
-        if params.is_empty() { return; }
-        let first = &params[0];
-        if !first.name.starts_with('$') { return; }
-
-        // Use the `is_invocant` flag set at extract time rather than
-        // matching on names. This way `sub list { my ($c) = @_ }` in a
-        // controller types `$c` as the current package the same way
-        // `sub new { my ($self) = @_ }` always has — the caller side
-        // (builder or plugin) owns the invocancy decision.
-        if !first.is_invocant { return; }
+        // Find the first param with `is_invocant = true` — normally params[0] for
+        // regular methods, but params[1] for `around` modifiers (params[0] is $orig).
+        // The caller that sets up the param list (visit_sub for named subs,
+        // visit_anonymous_sub for modifier bodies) is responsible for marking the
+        // correct param as the invocant.
+        let invocant = params
+            .iter()
+            .find(|p| p.is_invocant && p.name.starts_with('$'));
+        let invocant = match invocant {
+            Some(p) => p,
+            None => return,
+        };
 
         if let Some(ref pkg) = self.current_package {
             self.push_type_constraint(TypeConstraint {
-                variable: first.name.clone(),
+                variable: invocant.name.clone(),
                 scope: self.current_scope(),
                 constraint_span: node_to_span(node),
                 inferred_type: InferredType::FirstParam { package: pkg.clone() },
@@ -4750,6 +4781,26 @@ impl<'a> Builder<'a> {
                     self.visit_push_call(node);
                 }
 
+                // Moose/Moo method modifiers: `around`/`before`/`after foo => sub {...}`.
+                // The anonymous sub body is a method body — its invocant parameter needs to
+                // be typed as the enclosing class. `around` takes `($orig, $self, @args)`,
+                // so the invocant is at position 1; `before`/`after` take `($self, @args)`,
+                // position 0. Set `modifier_invocant_pos` so `visit_anonymous_sub` (called
+                // when `visit_children` descends into the sub arg) marks the right param.
+                // Only applies in Moo/Moose contexts; other frameworks/plain-Perl `around`
+                // calls aren't affected because `framework_modes` won't contain the package.
+                let is_modifier = matches!(name, "around" | "before" | "after");
+                if is_modifier {
+                    if let Some(pkg) = self.current_package.as_ref() {
+                        if matches!(
+                            self.framework_modes.get(pkg),
+                            Some(FrameworkMode::Moo | FrameworkMode::Moose)
+                        ) {
+                            self.modifier_invocant_pos = Some(if name == "around" { 1 } else { 0 });
+                        }
+                    }
+                }
+
                 // Framework plugin dispatch for function calls. Mirrors
                 // the method-call path so plugins (e.g. Mojolicious::Lite
                 // routes: `get '/path' => sub {}`) get the same
@@ -4769,6 +4820,10 @@ impl<'a> Builder<'a> {
             }
         }
         self.visit_children(node);
+        // If `modifier_invocant_pos` wasn't consumed by a nested `visit_anonymous_sub`
+        // (malformed or modifier-without-sub-body code), clear it so it doesn't leak
+        // to the next anonymous sub in the file.
+        self.modifier_invocant_pos = None;
     }
 
     /// Handle `push @EXPORT, 'foo', 'bar'` — append to export lists.
@@ -5698,6 +5753,37 @@ impl<'a> Builder<'a> {
                 self.push_var_type_constraint(arg, node, arg_type);
             }
         }
+        self.visit_children(node);
+    }
+
+    /// Handle `\&name` and `\&Pkg::name` refgen expressions.
+    /// Emits a FunctionCall ref at the sub-name span so goto-def and references
+    /// resolve to the sub definition. The `expr_payload` / `coderef_return_edge_for`
+    /// paths own the CodeRef type witness; this visitor owns the navigation ref.
+    fn visit_refgen(&mut self, node: Node<'a>) {
+        // Extract name(s) — `extract_names_from_refgen` handles plain names,
+        // qualified names, and const-foldable `\&$var` cases.
+        let names = self.extract_names_from_refgen(node);
+        if !names.is_empty() {
+            // The `function` child wraps the `&name` form; use the varname
+            // node's span so the ref lands on the identifier, not the `&`.
+            let name_span = node.named_child(0).and_then(|func_node| {
+                // func_node is aliased as "function"; its named child is "varname".
+                func_node.named_child(0).map(node_to_span)
+            }).unwrap_or_else(|| node_to_span(node));
+
+            for name in names {
+                let pkg = self.resolve_call_package(&name);
+                self.add_ref(
+                    RefKind::FunctionCall { resolved_package: pkg },
+                    name_span,
+                    name,
+                    AccessKind::Read,
+                );
+            }
+        }
+        // Still descend: `\@array`, `\%hash`, `\$scalar` children may carry
+        // variable refs that the walk needs to see.
         self.visit_children(node);
     }
 

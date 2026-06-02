@@ -2175,7 +2175,7 @@ static PERL_BUILTINS: &[&str] = &[
     "lstat",
     "map", "mkdir", "msgctl", "msgget", "msgrcv", "msgsnd",
     "my",
-    "new", "next", "no",
+    "new", "next", "no", "not",
     "oct", "open", "opendir", "ord", "our",
     "pack", "pipe", "pop", "pos", "print", "printf", "prototype", "push",
     "quotemeta",
@@ -2334,6 +2334,15 @@ pub fn collect_diagnostics(analysis: &FileAnalysis, module_index: &ModuleIndex) 
 
         // Skip universal methods
         if universal_methods.contains(&method_name.as_str()) {
+            continue;
+        }
+
+        // Skip SUPER::-qualified and other package-qualified method names.
+        // `$self->SUPER::foo()` stores `target_name = "SUPER::foo"`; trying
+        // to find a method literally named "SUPER::foo" in the MRO always
+        // fails. Caller-side package dispatch (`Class::method`) is intentional
+        // and not our job to validate here.
+        if method_name.contains("::") {
             continue;
         }
 
