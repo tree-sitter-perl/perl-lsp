@@ -1048,9 +1048,15 @@ pub struct ProvisionalDispatch {
     pub target_class: String,
     /// Receiver's class as resolved at build time, if any. `None` when the
     /// receiver type wasn't known locally (e.g. a helper-returned value);
-    /// such candidates only promote if enrichment can resolve the receiver.
+    /// enrichment then re-resolves it cross-file via `call_span`'s MethodCall
+    /// ref + the module index.
     #[serde(default)]
     pub receiver_class: Option<String>,
+    /// Whole-call span of the dispatch call (`node_to_span` of the
+    /// `method_call_expression`). Matches the native MethodCall ref's `span`,
+    /// so enrichment can find that ref and resolve the receiver class with
+    /// the index when `receiver_class` is `None`.
+    pub call_span: Span,
 }
 
 // ---- Import ----
@@ -2218,8 +2224,23 @@ impl FileAnalysis {
         let candidates = std::mem::take(&mut self.provisional_dispatches);
         let mut new_refs: Vec<Ref> = Vec::new();
         for c in &candidates {
-            let Some(recv) = c.receiver_class.as_deref() else { continue };
-            if !self.class_isa(recv, &c.target_class, module_index) {
+            // Prefer the build-time hint (locally-constructed receiver);
+            // otherwise resolve the call's invocant cross-file with the
+            // index — this is what lights up `$app->minion->enqueue(...)`
+            // and `$self->_minion->enqueue(...)`, whose receiver type only
+            // exists once other modules are in scope.
+            let recv = c.receiver_class.clone().or_else(|| {
+                self.refs
+                    .iter()
+                    .find(|r| {
+                        r.span == c.call_span
+                            && r.target_name == c.dispatcher
+                            && matches!(r.kind, RefKind::MethodCall { .. })
+                    })
+                    .and_then(|r| self.method_call_invocant_class(r, module_index))
+            });
+            let Some(recv) = recv else { continue };
+            if !self.class_isa(&recv, &c.target_class, module_index) {
                 continue;
             }
             let key = (c.span.start, c.span.end, c.dispatcher.clone(), c.name.clone());

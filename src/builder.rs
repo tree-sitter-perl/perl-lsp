@@ -2002,6 +2002,7 @@ impl<'a> Builder<'a> {
             owner_class: spec.owner_class.clone(),
             target_class: spec.target_class.clone(),
             receiver_class,
+            call_span: ctx.call_span,
         });
     }
 

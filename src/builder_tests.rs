@@ -6084,6 +6084,50 @@ fn provisional_dispatch_promotes_on_subclass_receiver_at_enrichment() {
     assert_eq!(count, 1, "re-enrichment must not duplicate the synthesized DispatchCall");
 }
 
+/// Option B, step 1: the receiver isn't locally typed — it's a cross-file
+/// method-call return (`$b->minion` where `Box::minion` returns an
+/// `Acme::Minion`). The build-time hint is `None`; enrichment resolves the
+/// invocant cross-file (via the module index) and, finding it isa Minion,
+/// promotes the dispatch. This is the `$self->_minion->enqueue(...)` shape —
+/// works whenever the receiver's type is actually resolvable.
+#[test]
+fn provisional_dispatch_resolves_cross_file_receiver_at_enrichment() {
+    use std::path::PathBuf;
+    let idx = crate::module_index::ModuleIndex::new_for_test();
+    idx.register_workspace_module(
+        PathBuf::from("/tmp/b_acme_minion.pm"),
+        std::sync::Arc::new(build_fa("package Acme::Minion;\nuse Mojo::Base 'Minion';\n1;\n")),
+    );
+    idx.register_workspace_module(
+        PathBuf::from("/tmp/b_box.pm"),
+        std::sync::Arc::new(build_fa(
+            "package Box;\nsub new { bless {}, shift }\nsub minion ($self) { return Acme::Minion->new; }\n1;\n",
+        )),
+    );
+
+    let mut fa = build_fa(
+        "package Worker;\nsub go {\n  my $b = Box->new;\n  $b->minion->enqueue('send_email' => ['a']);\n}\n1;\n",
+    );
+    // Receiver `$b->minion` isn't typed at build (Box is another file).
+    assert!(
+        fa.provisional_dispatches.iter().any(|p| p.receiver_class.is_none()),
+        "the cross-file-receiver candidate should carry no build-time class hint",
+    );
+
+    fa.enrich_imported_types_with_keys(Some(&idx));
+
+    let dc = fa.refs.iter().find(|r| {
+        matches!(&r.kind, RefKind::DispatchCall { dispatcher, owner: Some(HandlerOwner::Class(c)) }
+            if dispatcher == "enqueue" && c == "Minion")
+            && r.target_name == "send_email"
+    });
+    assert!(
+        dc.is_some(),
+        "enrichment must resolve the cross-file receiver `$b->minion` (Acme::Minion \
+         isa Minion) and synthesize the DispatchCall",
+    );
+}
+
 /// A Minion SUBCLASS receiver (`Acme::Minion` isa Minion, the crm
 /// `Clove::Minion` shape) must still register + dispatch tasks. The
 /// receiver types to `ClassName("Acme::Minion")`, which a name-prefix
