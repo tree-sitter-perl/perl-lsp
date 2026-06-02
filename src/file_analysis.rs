@@ -2320,11 +2320,13 @@ impl FileAnalysis {
     /// `enrich_imported_types_with_keys`, after `refs` was truncated back to
     /// `base_ref_count`, so it's idempotent across repeated enrichment.
     ///
-    /// Receiver resolution is intentionally simple for now: the build-time
-    /// `receiver_class` hint (a locally-constructed `My::Minion->new`, a
-    /// typed `has`-attribute). Candidates with no hint are left for a later
-    /// index-aware receiver resolution pass — they don't regress anything
-    /// because the parse-time plugin emit still covers the triggered files.
+    /// Receiver resolution is two-tier: the build-time `receiver_class` hint
+    /// (a locally-constructed `My::Minion->new`, a typed `has`-attribute) when
+    /// present, else cross-file resolution of the call's invocant via
+    /// `method_call_invocant_class` with the module index — which lights up
+    /// helper-/attribute-returned receivers (`$c->minion->enqueue`,
+    /// `$self->_minion->enqueue`) that only type once other modules are in
+    /// scope.
     fn promote_provisional_dispatches(&mut self, module_index: Option<&ModuleIndex>) {
         if self.provisional_dispatches.is_empty() {
             return;
@@ -2382,19 +2384,22 @@ impl FileAnalysis {
 
     /// Does `class` equal `target` or descend from it? Walks local
     /// `package_parents` first, then the cross-file inheritance graph via
-    /// `module_index.parents_cached`. Depth/cycle guarded.
+    /// `module_index.parents_cached`. Cycle-guarded by `seen`; `budget` caps
+    /// TOTAL classes visited (not ancestry depth) — a backstop against a
+    /// pathological graph, set well above any real MRO. `parents_cached` is
+    /// keyed by module name, which coincides with the class name here.
     fn class_isa(&self, class: &str, target: &str, module_index: Option<&ModuleIndex>) -> bool {
         if class == target {
             return true;
         }
         let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
         let mut stack: Vec<String> = vec![class.to_string()];
-        let mut depth = 0;
+        let mut budget = 0;
         while let Some(cur) = stack.pop() {
-            if depth > 40 {
+            if budget > 200 {
                 break;
             }
-            depth += 1;
+            budget += 1;
             if !seen.insert(cur.clone()) {
                 continue;
             }

@@ -5804,12 +5804,11 @@ impl<'a> Builder<'a> {
         let Some(args) = call_node.child_by_field_name("arguments") else {
             return params;
         };
-        // The `[...]` arrayref holds the type params; flatten one level.
-        // If the args aren't an arrayref (`InstanceOf('Foo')`), scan them
-        // directly under the same loop.
-        let container = args;
-        for i in 0..container.named_child_count() {
-            let Some(child) = container.named_child(i) else { continue };
+        // The `[...]` arrayref holds the type params; flatten one level
+        // (the `anonymous_array_expression` arm below). A non-arrayref form
+        // (`InstanceOf('Foo')`) is scanned directly by the same loop.
+        for i in 0..args.named_child_count() {
+            let Some(child) = args.named_child(i) else { continue };
             match child.kind() {
                 "string_literal" | "interpolated_string_literal" => {
                     if let Some(s) = self.extract_string_content(child) {

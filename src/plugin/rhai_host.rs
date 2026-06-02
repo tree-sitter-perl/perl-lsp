@@ -705,7 +705,7 @@ mod tests {
             ("minion", include_str!("../../frameworks/minion.rhai")),
             ("data-printer", include_str!("../../frameworks/data-printer.rhai")),
             ("dbic-resultddl", include_str!("../../frameworks/dbic-resultddl.rhai")),
-    ("type-tiny", include_str!("../../frameworks/type-tiny.rhai")),
+            ("type-tiny", include_str!("../../frameworks/type-tiny.rhai")),
         ] {
             RhaiPlugin::from_source(src, engine.clone())
                 .unwrap_or_else(|e| panic!("{}.rhai failed to compile: {e}", id));
