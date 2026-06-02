@@ -96,7 +96,7 @@ When a comment grows past a few lines, that's a smell: either the code wants a c
 
 ### Cross-file enrichment
 
-`enrich_imported_types_with_keys()` on `FileAnalysis` propagates imported return types and hash keys: pushes `TypeConstraint`s for call bindings to imported funcs, injects synthetic `HashKeyDef` symbols for cross-file hash-key completion. Idempotent: `base_type_constraint_count` / `base_symbol_count` / `base_witness_count` set after initial build; enrichment truncates back to baseline before appending. `rebuild_enrichment_indices()` rebuilds index maps after. Called from `publish_diagnostics()` and the resolver refresh callback.
+`enrich_imported_types_with_keys()` on `FileAnalysis` propagates imported return types and hash keys: pushes `TypeConstraint`s for call bindings to imported funcs, injects synthetic `HashKeyDef` symbols for cross-file hash-key completion. Idempotent: `base_type_constraint_count` / `base_symbol_count` / `base_witness_count` set after initial build; enrichment truncates back to baseline before appending. `rebuild_enrichment_indices()` rebuilds index maps after. Called from `publish_diagnostics()` and the resolver refresh callback — i.e. **OPEN documents only**; workspace-index + dependency files are built without enrichment. Type/method resolution through inheritance survives this via the `MethodOnClass` query-time walk, but dispatch-verb promotion and `ClassIsa`/`param_types` ancestry-gated emission do NOT — see `docs/prompt-enrichment-inheritance-residual.md` for the per-manifest applicability matrix and the deferred gaps.
 
 ## Type inference (witness bag)
 
