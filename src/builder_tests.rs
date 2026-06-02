@@ -4081,6 +4081,120 @@ push @EXPORT_OK, 'bar', 'baz';
 }
 
 #[test]
+fn test_exporter_extensible_export_call() {
+    // `export(qw( foo $bar @baz -tag ))` — only the plain sub name `foo`
+    // is recorded; sigil'd vars and `-tag` group names are skipped.
+    let fa = build_fa(
+        "
+package My::Ext;
+use Exporter::Extensible -exporter_setup => 1;
+export(qw( foo $bar @baz -tag ));
+sub foo { 1 }
+",
+    );
+    assert_eq!(fa.export_ok, vec!["foo"]);
+}
+
+#[test]
+fn test_exporter_extensible_attribute() {
+    // `sub foo :Export(...)` / `sub bar :Export` — the sub name is the export.
+    let fa = build_fa(
+        "
+package My::Ext;
+use Exporter::Extensible -exporter_setup => 1;
+sub foo : Export(-tag) { 1 }
+sub bar :Export { 2 }
+sub plain { 3 }
+",
+    );
+    assert!(fa.export_ok.contains(&"foo".to_string()));
+    assert!(fa.export_ok.contains(&"bar".to_string()));
+    assert!(!fa.export_ok.contains(&"plain".to_string()));
+}
+
+#[test]
+fn test_exporter_declare_export_pair() {
+    // `default_export NAME => sub {}` / `export NAME => sub {}` / `exports qw/../`.
+    let fa = build_fa(
+        "
+package My::Decl;
+use Exporter::Declare;
+default_export foo => sub { 1 };
+export bar => sub { 2 };
+exports qw/a b/;
+",
+    );
+    assert!(fa.export_ok.contains(&"foo".to_string()));
+    assert!(fa.export_ok.contains(&"bar".to_string()));
+    assert!(fa.export_ok.contains(&"a".to_string()));
+    assert!(fa.export_ok.contains(&"b".to_string()));
+}
+
+#[test]
+fn test_exporter_call_gated_on_use() {
+    // False-positive guard: a `sub export {}` (or a stray `export(...)`)
+    // in a package that didn't `use` an exporter-declare family module
+    // must NOT register exports.
+    let fa = build_fa(
+        "
+package Plain;
+sub export { 1 }
+export('not_an_export');
+",
+    );
+    assert!(fa.export_ok.is_empty());
+}
+
+#[test]
+fn test_importer_consumer_retargets_source() {
+    // `use Importer 'M' => qw/foo bar/` imports foo/bar FROM M. The Import
+    // entry must point at M, not Importer, so goto-def crosses to M's subs.
+    let fa = build_fa(
+        "
+package My::Consumer;
+use Importer 'Some::Module' => qw/foo bar/;
+",
+    );
+    let imp = fa
+        .imports
+        .iter()
+        .find(|i| i.module_name == "Some::Module")
+        .expect("Import re-targeted to Some::Module");
+    let names: Vec<&str> = imp
+        .imported_symbols
+        .iter()
+        .map(|s| s.local_name.as_str())
+        .collect();
+    assert!(names.contains(&"foo"));
+    assert!(names.contains(&"bar"));
+    // No Import should pin to Importer itself.
+    assert!(fa.imports.iter().all(|i| i.module_name != "Importer"));
+}
+
+#[test]
+fn test_importer_menu_advertised_names() {
+    // IMPORTER_MENU advertises export lists; pull the `export`/`export_ok`
+    // name arrays. `export_anon` (name → coderef) is unmodeled.
+    let fa = build_fa(
+        "
+package My::Menu;
+sub IMPORTER_MENU {
+  return (
+    export => [qw/foo bar/],
+    export_ok => ['baz'],
+    export_anon => { quux => sub { 1 } },
+  );
+}
+sub foo { 1 }
+",
+    );
+    assert!(fa.export_ok.contains(&"foo".to_string()));
+    assert!(fa.export_ok.contains(&"bar".to_string()));
+    assert!(fa.export_ok.contains(&"baz".to_string()));
+    assert!(!fa.export_ok.contains(&"quux".to_string()));
+}
+
+#[test]
 fn test_use_constant_string() {
     let fa = build_fa(
         "
