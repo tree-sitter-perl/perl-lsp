@@ -636,18 +636,13 @@ fn cli_rename(root: &str, file: &str, line_str: &str, col_str: &str, new_name: &
 
     let file_path = Path::new(file).canonicalize().unwrap_or_else(|_| PathBuf::from(file));
     let point = parse_point(line_str, col_str);
-    // Full startup so the workspace files this renames across are built with
-    // the same plugins (loaded from `root`'s `.perl-lsp/`, not cwd).
-    let (ws, _idx) = cli_full_startup(root);
+    // Full startup so workspace files are built with the same plugins, type
+    // inference, and enrichment that the LSP backend would use.
+    let (ws, idx) = cli_full_startup(root);
+    let (_source, _tree, mut analysis) = parse_file(file);
+    analysis.enrich_imported_types_with_keys(Some(&idx));
 
-    // Ensure target file is in the workspace index
-    if ws.get_workspace(&file_path).is_none() {
-        let (_source, _tree, analysis) = parse_file(file);
-        ws.insert_workspace(file_path.clone(), analysis);
-    }
-    let analysis_ref = ws.get_workspace(&file_path).unwrap();
-
-    let rename_kind = match analysis_ref.rename_kind_at(point, None) {
+    let rename_kind = match analysis.rename_kind_at(point, Some(&idx)) {
         Some(k) => k,
         None => {
             eprintln!("Nothing renameable at {}:{}", line_str, col_str);
@@ -659,6 +654,8 @@ fn cli_rename(root: &str, file: &str, line_str: &str, col_str: &str, new_name: &
 
     let mut all_edits: HashMap<String, Vec<serde_json::Value>> = HashMap::new();
 
+    // Variable / HashKey / Handler: single-file rename (lexical scope or not
+    // yet cross-filed). Reuse the tree-based rename_at path.
     match &rename_kind {
         file_analysis::RenameKind::Variable
         | file_analysis::RenameKind::HashKey(_)
@@ -666,49 +663,56 @@ fn cli_rename(root: &str, file: &str, line_str: &str, col_str: &str, new_name: &
             let source = std::fs::read_to_string(&file_path).expect("cannot read file");
             let mut parser = module_resolver::create_parser();
             let tree = parser.parse(&source, None).expect("parse failed");
-            if let Some(edits) = analysis_ref.rename_at(point, new_name, Some(&tree), Some(source.as_bytes())) {
+            if let Some(edits) = analysis.rename_at(point, new_name, Some(&tree), Some(source.as_bytes())) {
                 let json_edits: Vec<_> = edits.into_iter()
                     .map(|(span, text)| span_to_json(span, text))
                     .collect();
                 all_edits.insert(file_path.display().to_string(), json_edits);
             }
+            println!("{}", serde_json::to_string_pretty(&serde_json::json!(all_edits)).unwrap());
+            return;
         }
-        file_analysis::RenameKind::Function { .. } | file_analysis::RenameKind::Method { .. } => {
-            for entry in ws.workspace_raw().iter() {
-                let edits = match &rename_kind {
-                    file_analysis::RenameKind::Function { name, package } =>
-                        entry.value().rename_sub_in_package(name, package, new_name, None),
-                    file_analysis::RenameKind::Method { name, class } =>
-                        entry.value().rename_method_in_class(name, class, new_name, None),
-                    _ => unreachable!(),
-                };
-                if !edits.is_empty() {
-                    let json_edits: Vec<_> = edits.into_iter()
-                        .map(|(span, text)| span_to_json(span, text))
-                        .collect();
-                    all_edits.insert(entry.key().display().to_string(), json_edits);
-                }
-            }
-        }
-        file_analysis::RenameKind::Package(_) => {
-            let name = match &rename_kind {
-                file_analysis::RenameKind::Package(n) => n.clone(),
-                _ => unreachable!(),
-            };
-            for entry in ws.workspace_raw().iter() {
-                let edits = entry.value().rename_package(&name, new_name);
-                if !edits.is_empty() {
-                    let json_edits: Vec<_> = edits.into_iter()
-                        .map(|(span, text)| span_to_json(span, text))
-                        .collect();
-                    all_edits.insert(entry.key().display().to_string(), json_edits);
-                }
-            }
-        }
+        _ => {}
+    }
+
+    // Function / Method / Package: cross-file rename. Same resolution path as
+    // `cli_references` and the LSP rename handler — both go through `refs_to`
+    // with EDITABLE mask so rename and references agree on which call sites
+    // qualify and dep files are never edited.
+    let target = match &rename_kind {
+        file_analysis::RenameKind::Function { name, package } => resolve::TargetRef {
+            name: name.clone(),
+            kind: resolve::TargetKind::Sub { package: package.clone() },
+        },
+        file_analysis::RenameKind::Method { name, class } => resolve::TargetRef {
+            name: name.clone(),
+            kind: resolve::TargetKind::Method { class: class.clone() },
+        },
+        file_analysis::RenameKind::Package(name) => resolve::TargetRef {
+            name: name.clone(),
+            kind: resolve::TargetKind::Package,
+        },
+        // Already handled above.
+        _ => unreachable!(),
     };
 
-    // Drop the ref before iterating
-    drop(analysis_ref);
+    // Insert the enriched target file as the freshest workspace copy so its
+    // own refs join the cross-file set (the background index may hold a staler
+    // un-enriched build).
+    ws.insert_workspace(file_path, analysis);
+
+    // EDITABLE — never emit edits into dependency (@INC/CPAN) files.
+    let hits = resolve::refs_to(&ws, Some(&idx), &target, resolve::RoleMask::EDITABLE);
+    for loc in hits {
+        let path = match &loc.key {
+            file_store::FileKey::Path(p) => p.display().to_string(),
+            file_store::FileKey::Url(u) => u
+                .to_file_path()
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|_| u.to_string()),
+        };
+        all_edits.entry(path).or_default().push(span_to_json(loc.span, new_name.to_string()));
+    }
 
     println!("{}", serde_json::to_string_pretty(&serde_json::json!(all_edits)).unwrap());
 }

@@ -6,7 +6,6 @@ use tower_lsp::lsp_types::*;
 use tower_lsp::lsp_types::{notification, request};
 use tower_lsp::{Client, LanguageServer};
 
-use crate::file_analysis::FileAnalysis;
 use crate::file_store::{FileKey, FileStore};
 use crate::module_index::ModuleIndex;
 use crate::symbols;
@@ -82,6 +81,49 @@ impl Backend {
         self.client
             .publish_diagnostics(uri.clone(), diagnostics, None)
             .await;
+    }
+}
+
+/// Build a WorkspaceEdit by finding every reference to `target` in the editable
+/// workspace and replacing each ref's span with `new_name`.
+///
+/// Rename shares the same resolution path as references — both go through
+/// `refs_to(EDITABLE)`. This is the single place that decides which spans get
+/// edited, so rename and references can't diverge on which call sites qualify.
+/// `refs_to` handles inheritance fan-out for Method targets (via
+/// `method_rename_chain`) so callers on child classes of a base method are
+/// included without any special-casing here.
+fn rename_via_refs_to(
+    files: &FileStore,
+    module_index: Option<&crate::module_index::ModuleIndex>,
+    target: &crate::resolve::TargetRef,
+    new_name: &str,
+) -> Option<WorkspaceEdit> {
+    use crate::resolve::{refs_to, RoleMask};
+
+    // Rename must not touch deps — EDITABLE stops at workspace/open files.
+    let locations = refs_to(files, module_index, target, RoleMask::EDITABLE);
+    if locations.is_empty() {
+        return None;
+    }
+
+    let mut all_changes: std::collections::HashMap<Url, Vec<TextEdit>> =
+        std::collections::HashMap::new();
+    for loc in locations {
+        if let Some(uri) = loc.to_url() {
+            all_changes.entry(uri).or_default().push(TextEdit {
+                range: symbols::span_to_range(loc.span),
+                new_text: new_name.to_string(),
+            });
+        }
+    }
+    if all_changes.is_empty() {
+        None
+    } else {
+        Some(WorkspaceEdit {
+            changes: Some(all_changes),
+            ..Default::default()
+        })
     }
 }
 
@@ -510,6 +552,9 @@ impl LanguageServer for Backend {
     }
 
     async fn rename(&self, params: RenameParams) -> Result<Option<WorkspaceEdit>> {
+        use crate::file_analysis::RenameKind;
+        use crate::resolve::{TargetKind, TargetRef};
+
         let uri = &params.text_document_position.text_document.uri;
         let pos = params.text_document_position.position;
         let new_name = &params.new_name;
@@ -522,96 +567,42 @@ impl LanguageServer for Backend {
         let rename_kind = doc.analysis.rename_kind_at(point, Some(&self.module_index));
 
         match rename_kind {
-            Some(crate::file_analysis::RenameKind::Variable) => {
-                // Single-file only — lexical scope doesn't cross files
+            Some(RenameKind::Variable) => {
+                // Single-file only — lexical scope doesn't cross files.
                 Ok(symbols::rename(&doc.analysis, pos, uri, new_name, Some(&doc.tree), Some(&doc.text)))
             }
-            Some(crate::file_analysis::RenameKind::Handler { .. }) => {
+            Some(RenameKind::Handler { .. }) => {
                 // Cross-file handler rename not yet wired — fall back to
-                // single-file for the moment. This will edit the Handler
-                // symbol + every DispatchCall ref in the current file.
+                // single-file for the moment.
                 Ok(symbols::rename(&doc.analysis, pos, uri, new_name, Some(&doc.tree), Some(&doc.text)))
             }
-            Some(crate::file_analysis::RenameKind::HashKey(_)) => {
-                // Hash keys: single-file for now
+            Some(RenameKind::HashKey(_)) => {
+                // Hash keys: single-file for now.
                 Ok(symbols::rename(&doc.analysis, pos, uri, new_name, Some(&doc.tree), Some(&doc.text)))
             }
-            Some(crate::file_analysis::RenameKind::Function { .. })
-            | Some(crate::file_analysis::RenameKind::Method { .. })
-            | Some(crate::file_analysis::RenameKind::Package(_)) => {
-                // Unpack per-kind name + build a per-kind rename closure.
-                let (name, rename_fn): (String, Box<dyn Fn(&FileAnalysis, &str, &str) -> Vec<(crate::file_analysis::Span, String)>>) = match rename_kind.as_ref().unwrap() {
-                    crate::file_analysis::RenameKind::Function { name, package } => {
-                        let p = package.clone();
-                        let mi = Arc::clone(&self.module_index);
-                        (name.clone(), Box::new(move |fa, old, new| {
-                            fa.rename_sub_in_package(old, &p, new, Some(&mi))
-                        }))
-                    }
-                    crate::file_analysis::RenameKind::Method { name, class } => {
-                        // Walk MyWorker → ... → BaseWorker (the actual
-                        // defining class). Each link is needed: the
-                        // call-site invocant class on `$worker->process`
-                        // (resolved via the bag-routed
-                        // `method_call_invocant_class`) is "MyWorker"
-                        // (the static type), while the `sub process`
-                        // definition lives in BaseWorker.
-                        // `rename_method_in_class` matches strict
-                        // class == scope, so without the chain we'd
-                        // pick up only one of the two ends.
-                        let chain = doc.analysis.method_rename_chain(
-                            class,
-                            name,
-                            Some(&self.module_index),
-                        );
-                        let mi = Arc::clone(&self.module_index);
-                        (name.clone(), Box::new(move |fa, old, new| {
-                            let mut all = Vec::new();
-                            for c in &chain {
-                                all.extend(fa.rename_method_in_class(old, c, new, Some(&mi)));
-                            }
-                            all
-                        }))
-                    }
-                    crate::file_analysis::RenameKind::Package(n) =>
-                        (n.clone(), Box::new(FileAnalysis::rename_package)),
-                    _ => unreachable!(),
+            Some(RenameKind::Function { ref name, ref package }) => {
+                let target = TargetRef {
+                    name: name.clone(),
+                    kind: TargetKind::Sub { package: package.clone() },
                 };
-
-                let mut all_changes: std::collections::HashMap<Url, Vec<TextEdit>> =
-                    std::collections::HashMap::new();
-
-                let mut collect = |uri: Url, analysis: &FileAnalysis| {
-                    let edits = rename_fn(analysis, &name, new_name);
-                    if !edits.is_empty() {
-                        all_changes.entry(uri).or_default().extend(
-                            edits.into_iter().map(|(span, text)| TextEdit {
-                                range: symbols::span_to_range(span),
-                                new_text: text,
-                            })
-                        );
-                    }
+                drop(doc);
+                Ok(rename_via_refs_to(&self.files, Some(&self.module_index), &target, new_name))
+            }
+            Some(RenameKind::Method { ref name, ref class }) => {
+                let target = TargetRef {
+                    name: name.clone(),
+                    kind: TargetKind::Method { class: class.clone() },
                 };
-
-                // Iterate all file-backed analyses (open + workspace, deduped).
-                self.files.for_each_analysis(|key, analysis| {
-                    let entry_uri = match key {
-                        FileKey::Url(u) => u,
-                        FileKey::Path(p) => Url::from_file_path(&p).unwrap_or_else(|_| {
-                            Url::parse(&format!("file://{}", p.display())).unwrap()
-                        }),
-                    };
-                    collect(entry_uri, analysis);
-                });
-
-                if all_changes.is_empty() {
-                    Ok(None)
-                } else {
-                    Ok(Some(WorkspaceEdit {
-                        changes: Some(all_changes),
-                        ..Default::default()
-                    }))
-                }
+                drop(doc);
+                Ok(rename_via_refs_to(&self.files, Some(&self.module_index), &target, new_name))
+            }
+            Some(RenameKind::Package(ref n)) => {
+                let target = TargetRef {
+                    name: n.clone(),
+                    kind: TargetKind::Package,
+                };
+                drop(doc);
+                Ok(rename_via_refs_to(&self.files, Some(&self.module_index), &target, new_name))
             }
             None => Ok(None),
         }

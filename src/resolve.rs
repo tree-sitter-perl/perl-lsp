@@ -367,9 +367,17 @@ fn collect_from_analysis(
             _ => false,
         };
         if matches_kind {
+            // MethodCall r.span covers the whole call expression; callers
+            // (rename, highlight) want just the method-name token so they
+            // can replace or underline exactly the right characters.
+            let span = if let RefKind::MethodCall { method_name_span, .. } = &r.kind {
+                *method_name_span
+            } else {
+                r.span
+            };
             out.push(RefLocation {
                 key: key.clone(),
-                span: r.span,
+                span,
                 access: r.access,
             });
         }
