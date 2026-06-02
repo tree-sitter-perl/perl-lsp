@@ -20,8 +20,9 @@ use crate::file_analysis::{HashKeyOwner, InferredType, Span};
 use tree_sitter::Point;
 
 use super::{
-    CallContext, CompletionQueryContext, EmitAction, FrameworkPlugin, PluginCompletionAnswer,
-    PluginSigHelpAnswer, SigHelpQueryContext, Trigger, TypeOverride, UseContext,
+    CallContext, CompletionQueryContext, DispatchVerb, EmitAction, FrameworkPlugin,
+    PluginCompletionAnswer, PluginSigHelpAnswer, SigHelpQueryContext, Trigger, TypeOverride,
+    UseContext,
 };
 
 /// An engine built with our helpers and type registrations. Engines are
@@ -118,6 +119,7 @@ pub struct RhaiPlugin {
     id: String,
     triggers: Vec<Trigger>,
     overrides: Vec<TypeOverride>,
+    dispatch_verbs: Vec<DispatchVerb>,
     engine: Arc<Engine>,
     ast: Arc<AST>,
     has_on_function_call: bool,
@@ -181,6 +183,26 @@ impl RhaiPlugin {
             }
         }
 
+        // `dispatch_verbs()` — same optional, fail-safe contract as overrides.
+        let mut dispatch_verbs: Vec<DispatchVerb> = Vec::new();
+        if signatures.iter().any(|n| n == "dispatch_verbs") {
+            match engine.call_fn::<Array>(&mut rhai::Scope::new(), &ast, "dispatch_verbs", ()) {
+                Ok(arr) => {
+                    for d in arr {
+                        match from_dynamic::<DispatchVerb>(&d) {
+                            Ok(v) => dispatch_verbs.push(v),
+                            Err(e) => log::error!(
+                                "plugin `{}` dispatch_verbs() bad entry: {}",
+                                id,
+                                e
+                            ),
+                        }
+                    }
+                }
+                Err(e) => log::error!("plugin `{}` dispatch_verbs() failed: {}", id, e),
+            }
+        }
+
         Ok(Self {
             has_on_function_call: signatures.iter().any(|n| n == "on_function_call"),
             has_on_method_call: signatures.iter().any(|n| n == "on_method_call"),
@@ -190,6 +212,7 @@ impl RhaiPlugin {
             id,
             triggers,
             overrides,
+            dispatch_verbs,
             engine,
             ast: Arc::new(ast),
         })
@@ -262,6 +285,10 @@ impl FrameworkPlugin for RhaiPlugin {
 
     fn overrides(&self) -> &[TypeOverride] {
         &self.overrides
+    }
+
+    fn dispatch_verbs(&self) -> &[DispatchVerb] {
+        &self.dispatch_verbs
     }
 
     fn on_function_call(&self, ctx: &CallContext) -> Vec<EmitAction> {

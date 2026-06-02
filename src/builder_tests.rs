@@ -6036,6 +6036,54 @@ $minion->enqueue_p(send_email => ['bob']);
     );
 }
 
+/// Option B: a `$minion->enqueue('T')` lights up by the RECEIVER's type,
+/// not the file's `use`s. `Worker` never `use`s Minion and isn't a Mojo
+/// app — so the bundled minion plugin's triggers never fire, and there's no
+/// `DispatchCall` after the plain build. But `$m` is a locally-constructed
+/// `Acme::Minion` (isa Minion, declared cross-file), so the builder records
+/// a provisional dispatch and enrichment — which has the module index, hence
+/// the cross-file `isa` — promotes it. This is the "wherever the minion came
+/// from provides the magic" path the file-trigger model couldn't reach.
+#[test]
+fn provisional_dispatch_promotes_on_subclass_receiver_at_enrichment() {
+    use std::path::PathBuf;
+    let base = build_fa("package Acme::Minion;\nuse Mojo::Base 'Minion';\n1;\n");
+    let idx = crate::module_index::ModuleIndex::new_for_test();
+    idx.register_workspace_module(
+        PathBuf::from("/tmp/b_acme_minion.pm"),
+        std::sync::Arc::new(base),
+    );
+
+    let mut fa = build_fa(
+        "package Worker;\nsub go {\n  my $m = Acme::Minion->new;\n  $m->enqueue('send_email' => ['a']);\n}\n1;\n",
+    );
+    // The triggers never fired, so nothing was emitted at parse time.
+    assert!(
+        !fa.refs.iter().any(|r| matches!(&r.kind, RefKind::DispatchCall { .. })),
+        "no DispatchCall should exist before enrichment (plugin didn't fire)",
+    );
+
+    fa.enrich_imported_types_with_keys(Some(&idx));
+
+    let dc = fa.refs.iter().find(|r| {
+        matches!(&r.kind, RefKind::DispatchCall { dispatcher, owner: Some(HandlerOwner::Class(c)) }
+            if dispatcher == "enqueue" && c == "Minion")
+            && r.target_name == "send_email"
+    });
+    assert!(
+        dc.is_some(),
+        "enrichment must synthesize a Minion DispatchCall for enqueue on a \
+         Minion-subclass receiver, even in a file that never uses Minion",
+    );
+
+    // Idempotent: a second enrichment must not double the ref.
+    fa.enrich_imported_types_with_keys(Some(&idx));
+    let count = fa.refs.iter().filter(|r| {
+        matches!(&r.kind, RefKind::DispatchCall { .. }) && r.target_name == "send_email"
+    }).count();
+    assert_eq!(count, 1, "re-enrichment must not duplicate the synthesized DispatchCall");
+}
+
 /// A Minion SUBCLASS receiver (`Acme::Minion` isa Minion, the crm
 /// `Clove::Minion` shape) must still register + dispatch tasks. The
 /// receiver types to `ClassName("Acme::Minion")`, which a name-prefix

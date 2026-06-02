@@ -522,6 +522,37 @@ pub struct TypeOverride {
     pub reason: String,
 }
 
+/// A plugin-declared "this method dispatches a named handler when its
+/// receiver is a `target_class` (or a subclass)" rule. Unlike the
+/// `on_method_call` emit hook — which fires only when the *file*'s
+/// triggers match and can't see cross-file inheritance — a dispatch verb
+/// is resolved at **enrichment** time, against the receiver's actual
+/// (cross-file-resolved) class. So `$minion->enqueue('T')` lights up
+/// wherever a `$minion` typed as a Minion subclass is in scope, no matter
+/// what `use` statements the surrounding file has. The builder records a
+/// provisional candidate for every call matching `verb`; enrichment keeps
+/// the ones whose receiver `isa target_class` and pairs them to the
+/// `owner_class` Handler.
+///
+/// Like `overrides`, this manifest is NOT trigger-gated — it's read from
+/// every loaded plugin and unioned.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DispatchVerb {
+    /// Method name that performs the dispatch (`enqueue`, `enqueue_p`).
+    pub verb: String,
+    /// Receiver class the verb belongs to; the call only counts when the
+    /// receiver's resolved class `isa` this (cross-file inheritance walk).
+    pub target_class: String,
+    /// Handler owner the synthesized `DispatchCall` pairs against —
+    /// usually the same as `target_class`, but kept distinct so a verb on
+    /// one class can dispatch into another's registry.
+    pub owner_class: String,
+    /// Positional index of the handler-name argument. Almost always 0;
+    /// some sugar passes a label first and the name second.
+    #[serde(default)]
+    pub name_arg_index: usize,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum OverrideTarget {
     /// Method `name` defined on the package `class`. Match is by exact
@@ -545,6 +576,13 @@ pub trait FrameworkPlugin: Send + Sync {
     /// applied at the end of every build — see `TypeOverride`. Default
     /// is no overrides; only plugins that need them implement this.
     fn overrides(&self) -> &[TypeOverride] {
+        &[]
+    }
+
+    /// Static dispatch-verb manifest. Read once at plugin load and applied
+    /// in the enrichment pass (cross-file receiver isa resolution) — see
+    /// `DispatchVerb`. Default empty; only dispatch-style plugins declare.
+    fn dispatch_verbs(&self) -> &[DispatchVerb] {
         &[]
     }
 
@@ -805,6 +843,12 @@ impl PluginRegistry {
         self.plugins
             .iter()
             .flat_map(|p| p.overrides().iter().map(move |o| (p.id(), o)))
+    }
+
+    /// Yield every dispatch-verb declaration across the registry.
+    /// Trigger-independent, same rationale as `overrides`.
+    pub fn dispatch_verbs<'a>(&'a self) -> impl Iterator<Item = &'a DispatchVerb> + 'a {
+        self.plugins.iter().flat_map(|p| p.dispatch_verbs().iter())
     }
 
     /// Return plugins whose triggers match the current package context.

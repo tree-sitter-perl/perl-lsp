@@ -50,6 +50,22 @@ fn enqueue_options() {
     ]
 }
 
+// Dispatch-verb manifest (resolved at enrichment, against the receiver's
+// cross-file class — NOT trigger-gated). This is how `$minion->enqueue('T')`
+// resolves to the task by the receiver's type alone, even in a plain class
+// that never `use`s Minion. The parse-time `on_method_call` branch below
+// still fires in triggered files (its emit is deduped against these), so an
+// index-less build (no receiver type yet) keeps working.
+fn dispatch_verbs() {
+    let verbs = ["enqueue", "enqueue_p", "perform_jobs",
+                 "perform_jobs_in_foreground", "foreground"];
+    let out = [];
+    for v in verbs {
+        out += #{ verb: v, target_class: "Minion", owner_class: "Minion", name_arg_index: 0 };
+    }
+    out
+}
+
 fn triggers() {
     [
         // Fire wherever Minion is in play. `use Minion;` covers

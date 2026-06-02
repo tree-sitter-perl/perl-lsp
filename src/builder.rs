@@ -224,10 +224,17 @@ fn build_with_plugins_inner(
         package_ranges: Vec::new(),
         open_statement_package: None,
         plugins,
+        dispatch_manifest: std::collections::HashMap::new(),
+        provisional_dispatches: Vec::new(),
         method_call_invocant: std::collections::HashMap::new(),
         parametric_emitted_refs: std::collections::HashSet::new(),
         anon_sub_symbol_by_span: std::collections::HashMap::new(),
     };
+    b.dispatch_manifest = b
+        .plugins
+        .dispatch_verbs()
+        .map(|d| (d.verb.clone(), d.clone()))
+        .collect();
 
     // Create file-level scope and walk
     let file_scope = b.push_scope(ScopeKind::File, node_to_span(tree.root_node()), None);
@@ -383,6 +390,7 @@ fn build_with_plugins_inner(
     fa.package_framework = package_framework;
     fa.witnesses = bag;
     fa.witnesses.rebuild_index();
+    fa.provisional_dispatches = std::mem::take(&mut b.provisional_dispatches);
     // Finalize: run the legacy text-based MCB resolver as a fallback.
     // For every assignment the unified typer (run before
     // `resolve_return_types` above) couldn't handle, MCB fills in.
@@ -1065,6 +1073,15 @@ struct Builder<'a> {
     /// Framework plugin registry. Shared Arc so multiple builders in one
     /// process avoid re-compiling the same Rhai scripts.
     plugins: Arc<PluginRegistry>,
+
+    /// Plugin `dispatch_verbs()` manifest, flattened to verb → spec once at
+    /// construction (trigger-independent, like overrides). Drives provisional
+    /// dispatch collection in the method-call walk.
+    dispatch_manifest: std::collections::HashMap<String, plugin::DispatchVerb>,
+    /// Dispatch candidates recorded during the walk, promoted to refs in
+    /// enrichment once the receiver's cross-file class is known. See
+    /// `file_analysis::ProvisionalDispatch`.
+    provisional_dispatches: Vec<crate::file_analysis::ProvisionalDispatch>,
 
     /// Build-time chain-typing cache for MethodCall ref invocants.
     /// Keyed by `refs[idx]`. Walk-time fills it for syntactic cases
@@ -1957,6 +1974,35 @@ impl<'a> Builder<'a> {
         for (plugin_id, action) in actions {
             self.apply_emit_action(plugin_id, action);
         }
+    }
+
+    /// Record a provisional dispatch when a method call matches a plugin
+    /// `dispatch_verbs()` declaration. The receiver isa check happens later,
+    /// at enrichment, against the cross-file-resolved receiver class — here
+    /// we just capture the candidate (name + span + the build-time receiver
+    /// class hint, if any). Trigger-independent: keyed off the global verb
+    /// manifest, not the file's `use`s, so a `$minion->enqueue('T')` in a
+    /// plain class is captured the same as one in a Mojo app.
+    fn record_provisional_dispatch(&mut self, method: &str, ctx: &plugin::CallContext) {
+        let Some(spec) = self.dispatch_manifest.get(method) else { return };
+        let Some(arg) = ctx.args.get(spec.name_arg_index) else { return };
+        let Some(name) = arg.string_value.clone() else { return };
+        if name.is_empty() {
+            return;
+        }
+        let span = arg.span;
+        let receiver_class = match &ctx.receiver_type {
+            Some(InferredType::ClassName(c)) => Some(c.clone()),
+            _ => None,
+        };
+        self.provisional_dispatches.push(crate::file_analysis::ProvisionalDispatch {
+            name,
+            span,
+            dispatcher: method.to_string(),
+            owner_class: spec.owner_class.clone(),
+            target_class: spec.target_class.clone(),
+            receiver_class,
+        });
     }
 
     /// Convert a plugin-produced `EmitAction` into real builder state. All
@@ -5957,6 +6003,7 @@ impl<'a> Builder<'a> {
                 ctx.method_name = Some(name.clone());
                 ctx.receiver_text = invocant_text.clone();
                 ctx.receiver_type = self.receiver_type_for(invocant_node);
+                self.record_provisional_dispatch(name, &ctx);
                 self.dispatch_method_call_plugins(ctx);
             }
         }

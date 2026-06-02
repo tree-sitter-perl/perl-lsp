@@ -1029,6 +1029,30 @@ pub struct MethodCallBinding {
     pub span: Span,
 }
 
+/// A build-time dispatch candidate: a call to a plugin-declared dispatch
+/// verb (`$x->enqueue('T')`), recorded before we know whether the receiver
+/// actually `isa` the verb's target class. Enrichment resolves that
+/// cross-file and, if it holds, promotes this into a `DispatchCall` ref.
+/// See `plugin::DispatchVerb` and `FileAnalysis::enrich_imported_types_with_keys`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProvisionalDispatch {
+    /// The handler name (task / event) — the dispatch's first meaningful arg.
+    pub name: String,
+    /// Span of the name argument (the future `DispatchCall` ref span).
+    pub span: Span,
+    /// The verb (`enqueue`), kept for the `DispatchCall.dispatcher`.
+    pub dispatcher: String,
+    /// Handler owner the synthesized ref pairs against (e.g. `Minion`).
+    pub owner_class: String,
+    /// Receiver must `isa` this for the candidate to promote.
+    pub target_class: String,
+    /// Receiver's class as resolved at build time, if any. `None` when the
+    /// receiver type wasn't known locally (e.g. a helper-returned value);
+    /// such candidates only promote if enrichment can resolve the receiver.
+    #[serde(default)]
+    pub receiver_class: Option<String>,
+}
+
 // ---- Import ----
 
 /// One name brought into scope by a `use` statement.
@@ -1249,6 +1273,20 @@ pub struct FileAnalysis {
     base_symbol_count: usize,
     #[serde(default)]
     base_witness_count: usize,
+    /// Ref baseline — enrichment synthesizes `DispatchCall` refs from
+    /// `provisional_dispatches` (cross-file receiver isa), so it truncates
+    /// `refs` back to this length before re-deriving to stay idempotent.
+    #[serde(default)]
+    base_ref_count: usize,
+
+    /// Build-time dispatch candidates awaiting a cross-file receiver isa
+    /// check. The builder records one per call matching a plugin
+    /// `DispatchVerb`; `enrich_imported_types_with_keys` promotes the ones
+    /// whose receiver `isa` the verb's `target_class` into `DispatchCall`
+    /// refs. See `DispatchVerb` — this is the "receiver provides the magic"
+    /// path that file-trigger-gated emit hooks can't reach.
+    #[serde(default)]
+    pub provisional_dispatches: Vec<ProvisionalDispatch>,
 
     // Indices (built in post-pass — skipped by serde; call rebuild_all_indices() after deserialize)
     #[serde(skip, default)]
@@ -1313,6 +1351,8 @@ impl FileAnalysis {
             package_framework: HashMap::new(),
             base_symbol_count: 0,
             base_witness_count: 0,
+            base_ref_count: 0,
+            provisional_dispatches: Vec::new(),
             scope_starts: Vec::new(),
             symbols_by_name: HashMap::new(),
             symbols_by_scope: HashMap::new(),
@@ -1350,6 +1390,7 @@ impl FileAnalysis {
         self.fix_chain_receiver_hash_key_owners(None);
         self.base_symbol_count = self.symbols.len();
         self.base_witness_count = self.witnesses.len();
+        self.base_ref_count = self.refs.len();
     }
 
     /// Set the `owner` on `HashKeyAccess { owner: None, .. }` refs
@@ -1871,6 +1912,14 @@ impl FileAnalysis {
         // for imported-hash-key completion.
         self.symbols.truncate(self.base_symbol_count);
         self.witnesses.truncate(self.base_witness_count);
+        self.refs.truncate(self.base_ref_count);
+
+        // Promote provisional dispatches whose receiver `isa` the verb's
+        // target class (resolved cross-file here, where the module index is
+        // available). This is the receiver-driven dispatch path — a
+        // `$minion->enqueue('T')` lights up by the receiver's type, not by
+        // the file's `use` statements.
+        self.promote_provisional_dispatches(module_index);
 
         // Build the import → exported-name map inline from
         // `self.imports` + `module_index`. `imported_hash_keys` is
@@ -2141,6 +2190,91 @@ impl FileAnalysis {
             }
             _ => {}
         }
+    }
+
+    /// Turn `provisional_dispatches` into real `DispatchCall` refs for the
+    /// candidates whose receiver class `isa` the verb's target. Runs inside
+    /// `enrich_imported_types_with_keys`, after `refs` was truncated back to
+    /// `base_ref_count`, so it's idempotent across repeated enrichment.
+    ///
+    /// Receiver resolution is intentionally simple for now: the build-time
+    /// `receiver_class` hint (a locally-constructed `My::Minion->new`, a
+    /// typed `has`-attribute). Candidates with no hint are left for a later
+    /// index-aware receiver resolution pass — they don't regress anything
+    /// because the parse-time plugin emit still covers the triggered files.
+    fn promote_provisional_dispatches(&mut self, module_index: Option<&ModuleIndex>) {
+        if self.provisional_dispatches.is_empty() {
+            return;
+        }
+        // Dedup against refs that already exist at the same site (the
+        // parse-time plugin emit, in files whose triggers fired).
+        let mut existing: std::collections::HashSet<(Point, Point, String, String)> =
+            std::collections::HashSet::new();
+        for r in &self.refs {
+            if let RefKind::DispatchCall { dispatcher, .. } = &r.kind {
+                existing.insert((r.span.start, r.span.end, dispatcher.clone(), r.target_name.clone()));
+            }
+        }
+        let candidates = std::mem::take(&mut self.provisional_dispatches);
+        let mut new_refs: Vec<Ref> = Vec::new();
+        for c in &candidates {
+            let Some(recv) = c.receiver_class.as_deref() else { continue };
+            if !self.class_isa(recv, &c.target_class, module_index) {
+                continue;
+            }
+            let key = (c.span.start, c.span.end, c.dispatcher.clone(), c.name.clone());
+            if !existing.insert(key) {
+                continue;
+            }
+            new_refs.push(Ref {
+                kind: RefKind::DispatchCall {
+                    dispatcher: c.dispatcher.clone(),
+                    owner: Some(HandlerOwner::Class(c.owner_class.clone())),
+                },
+                span: c.span,
+                scope: self.scope_at(c.span.start).unwrap_or(ScopeId(0)),
+                target_name: c.name.clone(),
+                access: AccessKind::Read,
+                resolves_to: None,
+            });
+        }
+        self.refs.extend(new_refs);
+        self.provisional_dispatches = candidates;
+    }
+
+    /// Does `class` equal `target` or descend from it? Walks local
+    /// `package_parents` first, then the cross-file inheritance graph via
+    /// `module_index.parents_cached`. Depth/cycle guarded.
+    fn class_isa(&self, class: &str, target: &str, module_index: Option<&ModuleIndex>) -> bool {
+        if class == target {
+            return true;
+        }
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut stack: Vec<String> = vec![class.to_string()];
+        let mut depth = 0;
+        while let Some(cur) = stack.pop() {
+            if depth > 40 {
+                break;
+            }
+            depth += 1;
+            if !seen.insert(cur.clone()) {
+                continue;
+            }
+            if cur == target {
+                return true;
+            }
+            if let Some(parents) = self.package_parents.get(&cur) {
+                for p in parents {
+                    stack.push(p.clone());
+                }
+            }
+            if let Some(idx) = module_index {
+                for p in idx.parents_cached(&cur) {
+                    stack.push(p);
+                }
+            }
+        }
+        false
     }
 
     /// Rebuild indices affected by enrichment (type constraints + symbols +
