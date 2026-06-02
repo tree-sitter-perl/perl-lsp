@@ -1515,6 +1515,110 @@ fn test_route_controller_token_resolves_cross_file() {
     );
 }
 
+/// Composition pin (crm's Alerts.pm shape): a partial `->to('#list')`
+/// off a route whose controller default was set by an ancestor
+/// `->to('alerts#')` must inherit `alerts`, camelize it, and resolve
+/// cross-file to the owning controller class — exactly like the full
+/// form `->to('alerts#list')` does. Mirrors:
+///
+/// ```text
+/// my $alerts_r = $r->any('/alerts')->to('alerts#');  # brand controller=alerts
+/// $alerts_r->get('/')->to('#list');                  # partial: inherits alerts
+/// my $crud = $alerts_r->under('/:type')->to('#get'); # nested: inherits alerts
+/// $crud->get('/x')->to('#read');                     # partial off nested
+/// ```
+#[test]
+fn test_partial_route_brand_composes_with_camelize_cross_file() {
+    use crate::module_index::ModuleIndex;
+    use std::sync::Arc;
+
+    let app = build_fa_from_source(
+        r#"
+        package Clove::App;
+        use Mojo::Base 'Mojolicious';
+        sub startup {
+            my $self = shift;
+            my $r = $self->routes;
+            my $alerts_r = $r->any('/alerts')->to('alerts#');
+            $alerts_r->get('/')->to('#list');
+            my $crud = $alerts_r->under('/:type')->to('#get_alert');
+            $crud->get('/settings')->to('#read_settings');
+            my $billing_r = $r->any('/billing')->to('billing#');
+            $billing_r->get('/')->to('#index');
+        }
+        1;
+        "#,
+    );
+
+    let alerts = build_fa_from_source(
+        r#"
+        package Clove::Controller::Alerts;
+        use Mojo::Base 'Mojolicious::Controller';
+        sub list { my $c = shift; }
+        sub get_alert { my $c = shift; }
+        sub read_settings { my $c = shift; }
+        1;
+        "#,
+    );
+    let billing = build_fa_from_source(
+        r#"
+        package Clove::Controller::Billing;
+        use Mojo::Base 'Mojolicious::Controller';
+        sub index { my $c = shift; }
+        1;
+        "#,
+    );
+
+    let idx = ModuleIndex::new_for_test();
+    idx.register_workspace_module(
+        std::path::PathBuf::from("/tmp/Clove_Controller_Alerts.pm"),
+        Arc::new(alerts),
+    );
+    idx.register_workspace_module(
+        std::path::PathBuf::from("/tmp/Clove_Controller_Billing.pm"),
+        Arc::new(billing),
+    );
+
+    // Direct child (`$alerts_r->get('/')->to('#list')`), nested via
+    // `under` (`$crud` inherits `alerts`), and a partial off the nested
+    // group all resolve to the same controller class as the full form.
+    for action in ["list", "get_alert", "read_settings"] {
+        let to_ref = app
+            .refs
+            .iter()
+            .find(|r| {
+                r.target_name == action
+                    && matches!(&r.kind, RefKind::MethodCall { invocant, .. } if invocant == "alerts")
+            })
+            .unwrap_or_else(|| {
+                panic!("partial ->to('#{action}') should emit MethodCall {{invocant: alerts, method: {action}}}")
+            });
+
+        let class = app.method_call_invocant_class(to_ref, Some(&idx));
+        assert_eq!(
+            class.as_deref(),
+            Some("Clove::Controller::Alerts"),
+            "partial ->to('#{action}') should inherit controller `alerts`, camelize, and resolve cross-file",
+        );
+    }
+
+    // Sibling group re-brands its own descendants — no leak from
+    // `alerts`. The partial `#index` inherits `billing`, not `alerts`.
+    let index_ref = app
+        .refs
+        .iter()
+        .find(|r| {
+            r.target_name == "index"
+                && matches!(&r.kind, RefKind::MethodCall { invocant, .. } if invocant == "billing")
+        })
+        .expect("sibling group partial ->to('#index') should inherit `billing`");
+    assert_eq!(
+        app.method_call_invocant_class(index_ref, Some(&idx)).as_deref(),
+        Some("Clove::Controller::Billing"),
+        "sibling group must re-brand to `billing`, not leak `alerts`",
+    );
+}
+
 /// When the same short controller name exists under multiple controller
 /// roots, ownership of the action disambiguates: only the class that
 /// actually defines the method is chosen.
