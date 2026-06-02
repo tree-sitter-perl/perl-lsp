@@ -425,14 +425,16 @@ impl LanguageServer for Backend {
         let point = symbols::position_to_point(pos);
         let rk = doc.analysis.rename_kind_at(point, Some(&self.module_index));
         let target = match rk {
-            Some(RenameKind::Function { .. })
-            | Some(RenameKind::Method { .. })
-            | Some(RenameKind::Package(_))
-            | Some(RenameKind::Handler { .. }) => {
+            Some(
+                kind @ (RenameKind::Function { .. }
+                | RenameKind::Method { .. }
+                | RenameKind::Package(_)
+                | RenameKind::Handler { .. }),
+            ) => {
                 // Single mapping shared with rename + CLI so references and
                 // rename agree on target identity, including the Method
                 // inheritance chain (rule #5).
-                TargetRef::from_rename_kind(rk.unwrap(), &doc.analysis, Some(&self.module_index))
+                TargetRef::from_rename_kind(kind, &doc.analysis, Some(&self.module_index))
                     .expect("non-HashKey/Variable kinds map to a target")
             }
             Some(RenameKind::HashKey(name)) => {
