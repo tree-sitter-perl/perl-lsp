@@ -3311,6 +3311,51 @@ has 'status' => (is => 'rwp');
 }
 
 #[test]
+fn test_moo_has_accessor_keyword() {
+    // `accessor => 'get_set_x'` synthesizes a combined read/write method named
+    // `get_set_x` — distinct from the attr-named default accessor.
+    let fa = build_fa(
+        "
+package Foo;
+use Moo;
+has 'x' => (is => 'rw', accessor => 'get_set_x');
+",
+    );
+    let acc: Vec<_> = fa
+        .symbols
+        .iter()
+        .filter(|s| s.name == "get_set_x" && s.kind == SymKind::Method)
+        .collect();
+    assert_eq!(acc.len(), 1, "accessor keyword should synthesize get_set_x method");
+    // The default attr-named accessor ('x') still exists from `is => 'rw'`.
+    let default_acc: Vec<_> = fa
+        .symbols
+        .iter()
+        .filter(|s| s.name == "x" && s.kind == SymKind::Method)
+        .collect();
+    assert!(!default_acc.is_empty(), "default attr accessor still synthesized");
+}
+
+#[test]
+fn test_moo_has_ro_does_not_synthesize_ro_symbol() {
+    // `is => 'ro'` must NOT synthesize a method named `ro` — the gate that
+    // fixes the phantom-`ro` regression (names_a_method excludes `is`).
+    let fa = build_fa(
+        "
+package Foo;
+use Moo;
+has 'y' => (is => 'ro');
+",
+    );
+    let ro_sym: Vec<_> = fa
+        .symbols
+        .iter()
+        .filter(|s| s.name == "ro")
+        .collect();
+    assert!(ro_sym.is_empty(), "`is => 'ro'` must not mint a symbol named `ro`");
+}
+
+#[test]
 fn test_mojo_has_basic() {
     let fa = build_fa(
         "
@@ -4143,6 +4188,54 @@ export('not_an_export');
 ",
     );
     assert!(fa.export_ok.is_empty());
+}
+
+/// Gate 5: `find_sub_for_call` (resolution path) must check `export_ok`, not
+/// just `export`. A name that Foo records only in `@EXPORT_OK` suppresses the
+/// diagnostic in symbols.rs (already checks both), but before this fix
+/// `signature_for_call` / goto-def would fall through because the resolution
+/// path only tested `export`. Now both lists are checked.
+#[test]
+fn test_export_ok_resolves_cross_file() {
+    use crate::module_index::ModuleIndex;
+    use std::path::PathBuf;
+
+    // Build a module that exports `fetch_data` via @EXPORT_OK only.
+    let provider_fa = build_fa(
+        "package Data::Fetcher;\nour @EXPORT_OK = qw(fetch_data);\nsub fetch_data { my ($url) = @_; }\n1;\n",
+    );
+    assert!(
+        provider_fa.export_ok.contains(&"fetch_data".to_string()),
+        "provider must record fetch_data in export_ok",
+    );
+
+    let idx = ModuleIndex::new_for_test();
+    idx.set_workspace_root(None);
+    idx.insert_cache(
+        "Data::Fetcher",
+        Some(std::sync::Arc::new(crate::module_index::CachedModule::new(
+            PathBuf::from("/fake/Data/Fetcher.pm"),
+            std::sync::Arc::new(provider_fa),
+        ))),
+    );
+
+    // Consumer: bare `use Data::Fetcher;` — calls `fetch_data(...)`.
+    let consumer_fa = build_fa(
+        "package My::App;\nuse Data::Fetcher;\nfetch_data('http://example.com');\n",
+    );
+
+    // signature_for_call exercises find_sub_for_call → bare-import path.
+    let sig = consumer_fa.signature_for_call(
+        "fetch_data",
+        false,
+        None,
+        tree_sitter::Point::new(2, 0),
+        Some(&idx),
+    );
+    assert!(
+        sig.is_some(),
+        "signature_for_call must resolve fetch_data via @EXPORT_OK, got None",
+    );
 }
 
 #[test]
@@ -10535,6 +10628,39 @@ mod param_types_manifest {
             None,
             "a non-action helper's 2nd param must NOT be typed Catalyst (P1.3 \
              over-application); only attribute-carrying actions receive $c",
+        );
+    }
+
+    /// Catalyst private-action names (`begin`/`end`/`auto`/`default`/`index`)
+    /// are dispatched by name alone — no action attribute. The `requires_action_attr`
+    /// gate must not exclude them, so `$c` still types.
+    #[test]
+    fn catalyst_private_action_names_type_c_without_attr() {
+        // `sub end { my ($self,$c)=@_ }` in a controller — no attribute.
+        let fa = build_with_catalyst(
+            "package MyApp::Controller::Root;\nuse parent 'Catalyst::Controller';\nsub end {\n    my ($self, $c) = @_;\n    my $r = $c;\n}\n1;\n",
+        );
+        let ty = fa
+            .inferred_type_via_bag("$c", Point::new(4, 12))
+            .expect("private-action end: $c should be typed even without an attribute");
+        assert!(
+            matches!(&ty, InferredType::ClassName(c) if c == "Catalyst"),
+            "sub end without action attr must type $c as Catalyst, got {:?}",
+            ty,
+        );
+    }
+
+    /// A plain helper sub whose name happens to NOT be a private-action name
+    /// and carries no action attribute must still be excluded.
+    #[test]
+    fn catalyst_plain_helper_not_a_private_action() {
+        let fa = build_with_catalyst(
+            "package MyApp::Controller::Root;\nuse parent 'Catalyst::Controller';\nsub helper {\n    my ($self, $x) = @_;\n    my $r = $x;\n}\n1;\n",
+        );
+        assert_eq!(
+            fa.inferred_type_via_bag("$x", Point::new(4, 12)),
+            None,
+            "non-action, non-private-action helper must NOT have $x typed as Catalyst",
         );
     }
 }
