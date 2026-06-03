@@ -31,7 +31,21 @@ fn triggers() {
         #{ UsesModule: "Moose" },
         #{ UsesModule: "Moose::Role" },
         #{ UsesModule: "Mouse" },
+        // Dancer2::Plugin re-exports Moo's `has` into the consuming plugin, so
+        // `has my_setting => (...)` there wants the same accessor synthesis.
+        #{ UsesModule: "Dancer2::Plugin" },
     ]
+}
+
+// Keywords whose value names a method to synthesize. Any OTHER option keyword
+// (`is`/`isa`/`default`/`lazy`/`coerce`/`required`/`trigger`/…) carries data,
+// not a method name — its value (`'ro'`, `'Str'`, …) must NOT mint a symbol.
+// This gate is the whole fix for the phantom-`ro`/`rw`/`lazy` regression: core
+// hands every fat-comma option through by value shape (rule #1), and the
+// vocabulary of "which keyword produces a name" lives here (rule #8/#10).
+fn names_a_method(kw) {
+    kw == "reader" || kw == "writer" || kw == "predicate"
+        || kw == "clearer" || kw == "builder" || kw == "handles"
 }
 
 // Derive a `=> 1` shorthand name: `prefix + attr`, with the Moo/Moose private
@@ -89,6 +103,19 @@ fn on_function_call(ctx) {
 
         for opt in opts.options {
             let kw = opt.keyword;
+
+            // `lazy_build => 1` (Moose) implies a builder/clearer/predicate
+            // trio at runtime; expand it to the three companion methods.
+            if kw == "lazy_build" && opt.shorthand {
+                out += plain_method("_build_" + attr, span, []);
+                out += plain_method(derive_name("clear_", attr), span, []);
+                out += plain_method(derive_name("has_", attr), span, []);
+                continue;
+            }
+
+            // Only name-producing keywords mint a method. Everything else
+            // (is/isa/default/lazy/…) carries data, not a method name.
+            if !names_a_method(kw) { continue; }
 
             if kw == "handles" {
                 // One method per delegated name. With a class-typed isa, edge

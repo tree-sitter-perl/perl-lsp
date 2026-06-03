@@ -11049,3 +11049,112 @@ has 'logger' => (is => 'ro', isa => \"InstanceOf['Log::Any']\", handles => { log
         other => panic!("unexpected provenance: {other:?}"),
     }
 }
+
+/// Regression: an option keyword that carries DATA, not a method name
+/// (`is`/`isa`/`default`/`lazy`/…), must never mint a method named after its
+/// string value. The sprint that moved the accessor vocabulary into moo.rhai
+/// briefly synthesized phantom `ro`/`rw`/`lazy`/`bare` methods from every
+/// option's value — this pins the gate that stopped it.
+#[test]
+fn test_moo_has_no_phantom_method_from_data_options() {
+    let fa = build_fa(
+        "
+package Foo;
+use Moo;
+has 'name' => (is => 'ro', isa => 'Str', default => 'bob', lazy => 1, required => 1);
+",
+    );
+    for phantom in ["ro", "rw", "lazy", "bare", "Str", "bob", "1"] {
+        let hits: Vec<_> = fa
+            .symbols
+            .iter()
+            .filter(|s| s.name == phantom && s.kind == SymKind::Method)
+            .collect();
+        assert!(
+            hits.is_empty(),
+            "option value `{phantom}` must not become a method, got {} symbol(s)",
+            hits.len()
+        );
+    }
+    // The real accessor still lands.
+    let name: Vec<_> = fa
+        .symbols
+        .iter()
+        .filter(|s| s.name == "name" && s.kind == SymKind::Method)
+        .collect();
+    assert_eq!(name.len(), 1, "the real `name` accessor must still synthesize");
+}
+
+/// Moose `lazy_build => 1` implies a builder/clearer/predicate trio at runtime.
+#[test]
+fn test_moose_has_lazy_build_expands_trio() {
+    let fa = build_fa(
+        "
+package Foo;
+use Moose;
+has 'cache' => (is => 'ro', lazy_build => 1);
+",
+    );
+    for (name, what) in [
+        ("_build_cache", "builder"),
+        ("clear_cache", "clearer"),
+        ("has_cache", "predicate"),
+    ] {
+        let hits: Vec<_> = fa
+            .symbols
+            .iter()
+            .filter(|s| s.name == name && s.kind == SymKind::Method)
+            .collect();
+        assert_eq!(hits.len(), 1, "lazy_build must synthesize the {what} `{name}`");
+    }
+    // `lazy_build`/`is` themselves are not methods.
+    for phantom in ["lazy_build", "ro", "1"] {
+        assert!(
+            !fa.symbols.iter().any(|s| s.name == phantom && s.kind == SymKind::Method),
+            "`{phantom}` must not become a method"
+        );
+    }
+}
+
+/// goto-def on a `has` accessor must land on the attribute name token of the
+/// `has` declaration, not an option line (`is => 'ro'`) inside the body.
+#[test]
+fn test_moo_has_accessor_selection_span_is_attr_name() {
+    // `has` on line 3 (0-indexed), attr `name` at col 5; options on line 4.
+    let fa = build_fa("package Foo;\nuse Moo;\nhas name => (\n    is => 'ro',\n);\n");
+    let name = fa
+        .symbols
+        .iter()
+        .find(|s| s.name == "name" && s.kind == SymKind::Method)
+        .expect("name accessor");
+    assert_eq!(
+        name.selection_span.start.row, 2,
+        "selection_span must point at the `has name` line, not the options line"
+    );
+}
+
+/// Dancer2::Plugin re-exports Moo's `has`, so consumer plugins get accessor
+/// synthesis even though they never literally `use Moo`.
+#[test]
+fn test_dancer2_plugin_has_synthesizes_accessor() {
+    let fa = build_fa(
+        "
+package My::Plugin;
+use Dancer2::Plugin;
+has my_setting => (is => 'ro', isa => 'Str');
+",
+    );
+    let acc: Vec<_> = fa
+        .symbols
+        .iter()
+        .filter(|s| s.name == "my_setting" && s.kind == SymKind::Method)
+        .collect();
+    assert_eq!(acc.len(), 1, "Dancer2::Plugin `has` must synthesize the accessor");
+    // And no phantom from the `is`/`isa` data options.
+    for phantom in ["ro", "Str"] {
+        assert!(
+            !fa.symbols.iter().any(|s| s.name == phantom && s.kind == SymKind::Method),
+            "`{phantom}` must not become a method under Dancer2::Plugin either"
+        );
+    }
+}

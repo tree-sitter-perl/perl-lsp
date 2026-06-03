@@ -3892,7 +3892,9 @@ impl<'a> Builder<'a> {
         // Detect framework mode from use statements
         if let Some(pkg) = self.current_package.as_ref().cloned() {
             match module_name.as_str() {
-                "Moo" | "Moo::Role" => {
+                // Dancer2::Plugin re-exports Moo's `has`/`with`/etc. into the
+                // consuming plugin package, so it gets Moo-mode accessor synthesis.
+                "Moo" | "Moo::Role" | "Dancer2::Plugin" => {
                     self.framework_modes.insert(pkg, FrameworkMode::Moo);
                     for kw in &["has", "with", "extends", "around", "before", "after"] {
                         self.framework_imports.insert(kw.to_string());
