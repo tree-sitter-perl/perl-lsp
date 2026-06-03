@@ -44,8 +44,8 @@ fn triggers() {
 // hands every fat-comma option through by value shape (rule #1), and the
 // vocabulary of "which keyword produces a name" lives here (rule #8/#10).
 fn names_a_method(kw) {
-    kw == "reader" || kw == "writer" || kw == "predicate"
-        || kw == "clearer" || kw == "builder" || kw == "handles"
+    kw == "reader" || kw == "writer" || kw == "accessor"
+        || kw == "predicate" || kw == "clearer" || kw == "builder" || kw == "handles"
 }
 
 // Derive a `=> 1` shorthand name: `prefix + attr`, with the Moo/Moose private
@@ -162,9 +162,9 @@ fn on_function_call(ctx) {
             }
             if name == () { continue; }
 
-            // writer takes a value arg; the rest take none.
+            // writer/accessor take a value arg; the rest take none.
             let params = [];
-            if kw == "writer" {
+            if kw == "writer" || kw == "accessor" {
                 params = [ #{ name: "$val", "default": (), is_slurpy: false, is_invocant: false } ];
             }
             out += plain_method(name, span, params);

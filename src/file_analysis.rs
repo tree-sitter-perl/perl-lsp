@@ -6466,10 +6466,14 @@ impl FileAnalysis {
                         }
                     }
                 }
-                // Also check @EXPORT (bare imports)
+                // Also check @EXPORT and @EXPORT_OK (bare imports).
+                // @EXPORT_OK names suppress diagnostics in symbols.rs; resolution
+                // must match or goto-def fails for names in @EXPORT_OK.
                 for import in &self.imports {
                     if let Some(cached) = idx.get_cached(&import.module_name) {
-                        if cached.analysis.export.iter().any(|s| s == name) {
+                        if cached.analysis.export.iter().any(|s| s == name)
+                            || cached.analysis.export_ok.iter().any(|s| s == name)
+                        {
                             if let Some(sub_info) = cached.sub_info(name) {
                                 return Some(cross_file_resolved(&sub_info));
                             }

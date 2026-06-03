@@ -3543,12 +3543,12 @@ impl<'a> Builder<'a> {
 
         // Named rules: only those keyed to exactly this method name.
         if let Some(rules) = self.param_type_manifest.get(method) {
-            Self::collect_param_type_matches(rules, params, has_action_attr, &mut to_gate);
+            Self::collect_param_type_matches(rules, params, has_action_attr, method, &mut to_gate);
         }
 
         // Wildcard rules: method is None — apply to every sub in the class.
         let wildcards = std::mem::take(&mut self.param_type_wildcards);
-        Self::collect_param_type_matches(&wildcards, params, has_action_attr, &mut to_gate);
+        Self::collect_param_type_matches(&wildcards, params, has_action_attr, method, &mut to_gate);
         self.param_type_wildcards = wildcards;
 
         let scope = self.current_scope();
@@ -3575,10 +3575,16 @@ impl<'a> Builder<'a> {
         rules: &[plugin::ParamType],
         params: &[ParamInfo],
         has_action_attr: bool,
+        sub_name: &str,
         out: &mut Vec<(String, String, String)>,
     ) {
+        // Catalyst dispatches these private actions by name; over-inclusion of
+        // non-action-attributed subs is a documented follow-up (qa-findings P1.3).
+        const CATALYST_PRIVATE_ACTIONS: &[&str] =
+            &["begin", "end", "auto", "default", "index"];
+        let is_private_action = CATALYST_PRIVATE_ACTIONS.contains(&sub_name);
         for r in rules {
-            if r.requires_action_attr && !has_action_attr {
+            if r.requires_action_attr && !has_action_attr && !is_private_action {
                 continue;
             }
             if let Some(p) = params.get(r.param) {

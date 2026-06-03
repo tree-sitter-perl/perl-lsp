@@ -478,7 +478,7 @@ fn resolve_node_type(
     match node.kind() {
         "scalar" | "array" | "hash" => {
             let text = node.utf8_text(source).ok()?;
-            analysis.inferred_type_via_bag(text, point)
+            analysis.inferred_type_via_bag_ctx(text, point, module_index)
         }
         "bareword" | "package" => {
             let text = node.utf8_text(source).ok()?;
