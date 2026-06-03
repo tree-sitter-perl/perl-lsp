@@ -235,6 +235,7 @@ fn build_with_plugins_inner(
         app_surface_consumers: Vec::new(),
         param_type_manifest: std::collections::HashMap::new(),
         param_type_wildcards: Vec::new(),
+        any_requires_action_attr: false,
         provisional_dispatches: Vec::new(),
         gated_param_types: Vec::new(),
         method_call_invocant: std::collections::HashMap::new(),
@@ -243,8 +244,6 @@ fn build_with_plugins_inner(
         method_call_ref_dedup: std::collections::HashSet::new(),
         route_branded_refs: std::collections::HashSet::new(),
         anon_sub_symbol_by_span: std::collections::HashMap::new(),
-        fold_ref_by_span: std::collections::HashMap::new(),
-        fold_method_sym_by_name: std::collections::HashMap::new(),
         modifier_invocant_pos: None,
     };
     b.dispatch_manifest = b
@@ -273,6 +272,14 @@ fn build_with_plugins_inner(
             None => b.param_type_wildcards.push(pt.clone()),
         }
     }
+    b.any_requires_action_attr = b
+        .param_type_manifest
+        .values()
+        .flatten()
+        .any(|r| r.requires_action_attr)
+        || b.param_type_wildcards
+            .iter()
+            .any(|r| r.requires_action_attr);
 
     // Create file-level scope and walk
     let file_scope = b.push_scope(ScopeKind::File, node_to_span(tree.root_node()), None);
@@ -1149,6 +1156,11 @@ struct Builder<'a> {
     /// declaration in a matching class, regardless of method name. The
     /// "every action in a controller" case (Catalyst `$c`).
     param_type_wildcards: Vec<plugin::ParamType>,
+    /// True when any rule in `param_type_manifest` or `param_type_wildcards`
+    /// has `requires_action_attr: true`. Precomputed after manifest load so
+    /// `apply_param_type_manifest` can skip `collect_attributes` (a CST walk
+    /// + Vec alloc per sub) for projects with no attribute-gated rules.
+    any_requires_action_attr: bool,
     /// Dispatch candidates recorded during the walk, promoted to refs in
     /// enrichment once the receiver's cross-file class is known. See
     /// `file_analysis::ProvisionalDispatch`.
@@ -1215,20 +1227,6 @@ struct Builder<'a> {
     /// placeholders without any per-shape dispatch in the chase
     /// site.
     anon_sub_symbol_by_span: std::collections::HashMap<Span, SymbolId>,
-
-    /// Fold-loop lookup indices, populated once by `fold_to_fixed_point`
-    /// before the worklist iterates. `refs` and `symbols` are immutable
-    /// during the fold (only the bag + invocant caches change), so these
-    /// stay valid across every iteration. Without them, the per-iteration
-    /// passes (`emit_route_brand_witnesses`, `seed_return_types_from_bag`)
-    /// did a linear `refs.iter().position` / `symbols.iter().find` per
-    /// method-call / sub-scope — O(refs²) / O(scopes·symbols) per
-    /// iteration, the cold-index hot path on dense files (SQL::Abstract).
-    /// `ref_by_span`: method-call ref span → its index in `refs`.
-    /// `method_sym_by_name`: sub/method name → candidate symbol indices
-    /// (multiple packages can declare the same name).
-    fold_ref_by_span: std::collections::HashMap<(Point, Point), usize>,
-    fold_method_sym_by_name: std::collections::HashMap<String, Vec<usize>>,
 
     /// Invocant parameter index for the next anonymous sub to be visited.
     /// Set by `visit_function_call` when it detects a Moose/Moo method
@@ -3535,7 +3533,11 @@ impl<'a> Builder<'a> {
         // Action attributes (`:Local`, `:Chained`, `:Args`, …) are the only
         // honest signal that a controller sub is a dispatch *action* — the slot
         // that actually receives `$c`. `requires_action_attr` rules gate on it.
-        let has_action_attr = !self.collect_attributes(node).is_empty();
+        // Skip the CST walk + Vec alloc entirely when no loaded rule uses it.
+        let has_action_attr = self.any_requires_action_attr
+            && node
+                .child_by_field_name("attributes")
+                .map_or(false, |a| a.named_child_count() > 0);
 
         // Collect (variable, gate-class, type-class) before mutating self —
         // can't hold the manifest borrow while pushing into `gated_param_types`.
@@ -8418,7 +8420,14 @@ impl<'a> Builder<'a> {
 
     /// Build the per-iteration lookup maps the fold passes reuse.
     /// `refs`/`symbols` are stable across the fold, so this runs once.
-    fn build_fold_lookup_indices(&mut self) {
+    /// Returns `(ref_by_span, method_sym_by_name)` as locals owned by
+    /// `fold_to_fixed_point`; callers that need them receive `&`-refs.
+    fn build_fold_lookup_indices(
+        &self,
+    ) -> (
+        std::collections::HashMap<(Point, Point), usize>,
+        std::collections::HashMap<String, Vec<usize>>,
+    ) {
         let mut ref_by_span = std::collections::HashMap::with_capacity(self.refs.len());
         for (i, r) in self.refs.iter().enumerate() {
             if matches!(r.kind, RefKind::MethodCall { .. }) {
@@ -8435,8 +8444,7 @@ impl<'a> Builder<'a> {
                 sym_by_name.entry(s.name.clone()).or_default().push(i);
             }
         }
-        self.fold_ref_by_span = ref_by_span;
-        self.fold_method_sym_by_name = sym_by_name;
+        (ref_by_span, sym_by_name)
     }
 
     /// Fixed-point loop driving chain typing + reducer dispatch. Each
@@ -8469,10 +8477,14 @@ impl<'a> Builder<'a> {
     /// into the bag — a single pass against the now-final symbol
     /// table is sufficient.
     fn fold_to_fixed_point(&mut self, idx: &ChainTypingIndex<'a>) {
+        use crate::witnesses::ReducerRegistry;
         const MAX_FOLD_ITERATIONS: usize = 64;
-        self.build_fold_lookup_indices();
+        let (ref_by_span, method_sym_by_name) = self.build_fold_lookup_indices();
+        // One registry for the entire fold — stateless/immutable, so sharing
+        // across snapshot queries and seed pass is safe.
+        let reg = ReducerRegistry::with_defaults();
         let mut iters = 0usize;
-        let mut prev = self.fold_state_snapshot();
+        let mut prev = self.fold_state_snapshot(&reg);
         loop {
             iters += 1;
             debug_assert!(
@@ -8488,8 +8500,8 @@ impl<'a> Builder<'a> {
                 break;
             }
             self.run_chain_typing_reducer(idx, ChainPassMode::PreFold);
-            self.resolve_return_types(idx);
-            let cur = self.fold_state_snapshot();
+            self.resolve_return_types(idx, &reg, &ref_by_span, &method_sym_by_name);
+            let cur = self.fold_state_snapshot(&reg);
             if cur == prev {
                 break;
             }
@@ -8509,16 +8521,13 @@ impl<'a> Builder<'a> {
     /// call-binding) are clear-and-emit, so their bag contribution is
     /// stable across iterations and a flat total bag length means no
     /// new chain-assignment pushes either.
-    fn fold_state_snapshot(&self) -> (Vec<(SymbolId, Option<InferredType>)>, usize, usize) {
+    fn fold_state_snapshot(
+        &self,
+        reg: &crate::witnesses::ReducerRegistry,
+    ) -> (Vec<(SymbolId, Option<InferredType>)>, usize, usize) {
         use crate::witnesses::{
-            BagContext, FrameworkFact, ReducedValue, ReducerQuery, ReducerRegistry,
-            WitnessAttachment,
+            BagContext, FrameworkFact, ReducedValue, ReducerQuery, WitnessAttachment,
         };
-        // Build the registry + context ONCE — this snapshot queries
-        // every Sub/Method symbol each iteration; the per-call
-        // `bag_query_attachment` path would re-`with_defaults()` (8 box
-        // allocs) per symbol per iteration.
-        let reg = ReducerRegistry::with_defaults();
         let ctx = BagContext {
             scopes: &self.scopes,
             package_framework: &self.package_framework,
@@ -8933,15 +8942,21 @@ impl<'a> Builder<'a> {
     /// (`PluginOverrideReducer`, `ReturnExprReducer`,
     /// `MethodOnClassReducer`, `SubReturnReducer`) lives in
     /// `witnesses.rs` and folds the bag at query time.
-    fn resolve_return_types(&mut self, idx: &ChainTypingIndex<'a>) {
+    fn resolve_return_types(
+        &mut self,
+        idx: &ChainTypingIndex<'a>,
+        reg: &crate::witnesses::ReducerRegistry,
+        ref_by_span: &std::collections::HashMap<(Point, Point), usize>,
+        method_sym_by_name: &std::collections::HashMap<String, Vec<usize>>,
+    ) {
         self.emit_arity_return_witnesses();
         // Brand BEFORE method-call edges so `route_branded_refs` is
         // current when `emit_method_call_return_edges` consults it to
         // skip route calls — otherwise the skip set lags one iteration
         // and the bag oscillates (the fold never reaches a fixed point).
-        self.emit_route_brand_witnesses(idx);
+        self.emit_route_brand_witnesses(idx, ref_by_span);
         self.emit_method_call_return_edges();
-        let (return_types, return_provenance) = self.seed_return_types_from_bag();
+        let (return_types, return_provenance) = self.seed_return_types_from_bag(reg, method_sym_by_name);
         self.write_back_sub_return_types(&return_provenance);
         self.propagate_call_bindings_to_constraints(&return_types);
         self.fixup_call_bound_hash_key_owners(&return_types);
@@ -8957,7 +8972,11 @@ impl<'a> Builder<'a> {
     /// only publishes its answer onto the bag. Recomputed each iteration
     /// (clear-and-emit on tag `route_brand`) because the receiver type it
     /// reads converges as the fold progresses.
-    fn emit_route_brand_witnesses(&mut self, idx: &ChainTypingIndex<'a>) {
+    fn emit_route_brand_witnesses(
+        &mut self,
+        idx: &ChainTypingIndex<'a>,
+        ref_by_span: &std::collections::HashMap<(Point, Point), usize>,
+    ) {
         use crate::witnesses::{Witness, WitnessAttachment, WitnessPayload, WitnessSource};
         self.bag.remove_by_source_tag("route_brand");
         self.route_branded_refs.clear();
@@ -8967,7 +8986,7 @@ impl<'a> Builder<'a> {
         let mut brands: Vec<(usize, InferredType)> = Vec::new();
         for &node in &idx.method_call_nodes {
             let span = node_to_span(node);
-            let Some(&refidx) = self.fold_ref_by_span.get(&(span.start, span.end)) else {
+            let Some(&refidx) = ref_by_span.get(&(span.start, span.end)) else {
                 continue;
             };
             let ty = self.invocant_type_at_node(node);
@@ -9358,13 +9377,14 @@ impl<'a> Builder<'a> {
     /// "why did this come from a plugin?" story.
     fn seed_return_types_from_bag(
         &mut self,
+        reg: &crate::witnesses::ReducerRegistry,
+        method_sym_by_name: &std::collections::HashMap<String, Vec<usize>>,
     ) -> (
         std::collections::HashMap<String, InferredType>,
         std::collections::HashMap<String, crate::file_analysis::TypeProvenance>,
     ) {
         use crate::witnesses::{
-            BagContext, FrameworkFact, ReducedValue, ReducerQuery, ReducerRegistry,
-            WitnessAttachment,
+            BagContext, FrameworkFact, ReducedValue, ReducerQuery, WitnessAttachment,
         };
         let mut return_types: std::collections::HashMap<String, InferredType> =
             std::collections::HashMap::new();
@@ -9372,8 +9392,6 @@ impl<'a> Builder<'a> {
             String,
             crate::file_analysis::TypeProvenance,
         > = std::collections::HashMap::new();
-
-        let reg = ReducerRegistry::with_defaults();
 
         let ctx = BagContext {
             scopes: &self.scopes,
@@ -9391,8 +9409,7 @@ impl<'a> Builder<'a> {
                 _ => continue,
             };
 
-            let sub_sym_id = self
-                .fold_method_sym_by_name
+            let sub_sym_id = method_sym_by_name
                 .get(&sub_name)
                 .and_then(|cands| {
                     cands.iter().map(|&i| &self.symbols[i]).find(|s| {
