@@ -184,6 +184,8 @@ Inspect any snippet's CST with `perl-lsp --parse <file>` (or `echo '...' | perl-
 - `child_by_field_name("right")` on `assignment_expression` returns `(` paren — iterate `named_child(i)` instead.
 - `child_by_field_name("hash")` on `$obj->{key}` returns None — use first named child.
 - ERROR nodes wrap subs in incomplete source — scan ERROR children for patterns like `my ($self) = @_`.
+- **Fat-comma `=>` has NO code semantics — it is a comma that autoquotes a bareword LHS.** `a => 1` is *identical* to `'a', 1`; `{ A => 1, B => 2 }` is identical to `{ 'A', 1, 'B', 2 }`. So for **correctness** you must **never** gate pair-list walking (`use` import args, `%EXPORT_TAGS`/`%hash` literals, `use constant {…}`, Moo `has` options, Sub::Exporter `exports`/`groups`) on the `fat_comma`/`=>` node — that silently drops the plain-comma spelling (this exact bug hid `use constant { 'GAMMA', 3 }`). Treat the `{…}`/`(…)` as a **flat positional sequence**: pair `elem[2k]`→key, `elem[2k+1]`→value, autoquoting bareword keys, identically whether the separator was `,` or `=>`. Requiring `=>` is a rule-#10 shape-branch; use the shared positional-pair-walking helpers rather than re-deriving.
+  - But `=>` **does carry *human* semantics** — a human writes it to signal "the LHS is a key/label, the RHS its value." That's a legitimate **hint** we may lean on in the future (e.g. to disambiguate an otherwise-ambiguous list, or to bias which element is the "name"). Allowed as a *heuristic/tie-breaker*, **never** as a hard gate — code that drops the plain-comma form is still a bug. Keep the correctness path separator-agnostic; treat `=>` only as extra signal on top.
 
 ## Inheritance & frameworks
 
