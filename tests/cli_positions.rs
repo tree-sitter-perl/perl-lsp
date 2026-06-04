@@ -103,6 +103,65 @@ fn references_and_definition_print_one_based_char_columns() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// E2 (inline-callback form): a Mojo helper registered as
+/// `$app->helper(name => sub ($c, ...) {...})` types the callback's first
+/// positional as `Mojolicious::Controller`, not the enclosing class. Driven
+/// through `--dump-package` so the real bundled `mojo-helpers` plugin runs.
+/// The named-sub form (`$app->helper(name => \&_h); sub _h { my $c = shift }`)
+/// is NOT yet covered — see deferred E2 note.
+#[test]
+fn mojo_helper_callback_first_param_is_controller() {
+    let dir = std::env::temp_dir().join(format!("perl-lsp-cli-helper-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let lib = dir.join("lib");
+    std::fs::create_dir_all(&lib).unwrap();
+    let src = "package MyApp;\nuse Mojo::Base 'Mojolicious';\n\nsub startup {\n    my $self = shift;\n    $self->helper(greet => sub ($c, $name) {\n        my $x = $c;\n        return $name;\n    });\n}\n\n1;\n";
+    std::fs::write(lib.join("MyApp.pm"), src).unwrap();
+
+    let mut cache = dir.clone();
+    cache.push(".test-cache");
+
+    let out = Command::new(BIN)
+        .args(["--dump-package", dir.to_str().unwrap(), "MyApp"])
+        .current_dir(&dir)
+        .env("XDG_CACHE_HOME", &cache)
+        .output()
+        .expect("run perl-lsp --dump-package");
+    let stdout = String::from_utf8(out.stdout).expect("utf8 stdout");
+    let dump: serde_json::Value =
+        serde_json::from_str(&stdout).unwrap_or_else(|e| panic!("dump JSON parse ({e}): {stdout}"));
+
+    // Find the anonymous helper callback sub and assert its `$c` param +
+    // the `$x = $c` binding both type as the controller.
+    let subs = dump["subs"].as_array().expect("subs array");
+    let anon = subs
+        .iter()
+        .find(|s| s["name"] == "(anon)")
+        .expect("anonymous callback sub in dump");
+    let c_param = anon["params"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["name"] == "$c")
+        .expect("$c param");
+    assert_eq!(
+        c_param["inferred_type"], "Mojolicious::Controller",
+        "helper callback $c should type as the controller"
+    );
+    let x_var = anon["vars_in_scope"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|v| v["var"] == "$x")
+        .expect("$x in scope");
+    assert_eq!(
+        x_var["type"], "Mojolicious::Controller",
+        "binding from $c should propagate the controller type"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn definition_matches_references_def_site() {
     // The def site appears in --references output; --definition must agree on

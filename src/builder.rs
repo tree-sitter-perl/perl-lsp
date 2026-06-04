@@ -4398,11 +4398,18 @@ impl<'a> Builder<'a> {
                 // Role::Tiny / Role::Tiny::With behave like Moo::Role for our
                 // purposes: they export `with` (and `requires`, via the role
                 // sugar) into the consuming package.
+                // MooX::Options re-exports `option` (a `has` with extra
+                // option-parsing keys) into a Moo class, so it gets Moo-mode
+                // accessor/constructor-key synthesis; the `option` keyword
+                // routes through the shared `has` path at the call site.
                 "Moo" | "Moo::Role" | "Dancer2::Plugin"
-                | "Role::Tiny" | "Role::Tiny::With" => {
+                | "Role::Tiny" | "Role::Tiny::With" | "MooX::Options" => {
                     self.framework_modes.insert(pkg, FrameworkMode::Moo);
                     for kw in &["has", "with", "extends", "around", "before", "after"] {
                         self.framework_imports.insert(kw.to_string());
+                    }
+                    if module_name == "MooX::Options" {
+                        self.framework_imports.insert("option".to_string());
                     }
                     // `requires` is role-only sugar; harmless to register for
                     // plain Moo too (a class never calls it).
@@ -6218,6 +6225,14 @@ impl<'a> Builder<'a> {
                         self.visit_has_call(node, mode);
                     }
                 }
+                // MooX::Options `option` is a `has` with extra option-parsing
+                // keys (format/doc/...). Synthesis is identical, so route it
+                // through the same path in Moo mode. Gated on the package
+                // actually using MooX::Options so an unrelated `option(...)`
+                // sub elsewhere isn't read as an attribute declaration.
+                if name == "option" && self.package_uses_moox_options() {
+                    self.visit_has_call(node, FrameworkMode::Moo);
+                }
                 // Moose/Moo `extends 'Parent'` — register parent classes
                 if name == "extends" {
                     if let Some(pkg) = self.current_package.clone() {
@@ -6329,7 +6344,7 @@ impl<'a> Builder<'a> {
                     // reader/builder/handles) lives in the moo plugin. Core does
                     // the node walk (rule #1) and hands over the decision-ready
                     // option shape; the plugin maps keywords to method names.
-                    if name == "has" {
+                    if name == "has" || name == "option" {
                         if let Some(mode) = self.current_package.as_ref()
                             .and_then(|pkg| self.framework_modes.get(pkg).copied())
                         {
@@ -6623,6 +6638,12 @@ impl<'a> Builder<'a> {
     /// `-magic` / role variants whose names start with that prefix).
     /// Gates the call-name detection so a plain `sub export {}` elsewhere
     /// isn't read as an export declaration.
+    fn package_uses_moox_options(&self) -> bool {
+        let Some(pkg) = self.current_package.as_ref() else { return false };
+        let Some(uses) = self.package_uses.get(pkg) else { return false };
+        uses.iter().any(|m| m == "MooX::Options")
+    }
+
     fn package_uses_exporter_declare_family(&self) -> bool {
         let Some(pkg) = self.current_package.as_ref() else { return false };
         let Some(uses) = self.package_uses.get(pkg) else { return false };
