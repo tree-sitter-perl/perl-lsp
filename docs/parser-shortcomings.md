@@ -12,6 +12,9 @@ Inspect any snippet with `perl-lsp --parse <file>` (or `--` for stdin).
 The already-filed `not` prefix-operator gap is **tree-sitter-perl#230** —
 the items below are its siblings.
 
+Parser version at time of writing: **ts-parser-perl 1.0.3**. Every repro
+below was re-verified against it.
+
 The recurring failure signature is **error contagion**: a single
 unlexable token doesn't fail locally, it derails the lexer/parser for
 the rest of the enclosing construct (often the rest of the file). Perl's
@@ -150,6 +153,113 @@ re-lexed as statements.
 **Real-world repro** — DBIx-Class (SQL heredocs). The leaked SQL keywords
 surface as `unresolved-function 'SELECT'` etc. (same class of false
 positive as G1's string bleed).
+
+---
+
+## GR-1 — v-string literal (`v5.6.0`) parsed as a function call
+
+A version-string literal of the form `vN.N.N` is not lexed as a v-string.
+The leading `vN` is taken as a bareword function name and the trailing
+`.N.N` becomes a concatenation expression handed to it as arguments. The
+classic `$^V lt v5.6.0` perl-version guard is the canonical trigger.
+
+**Repro** (minimal):
+```perl
+my $ok = $^V lt v5.6.0;
+my $y = 1;
+```
+
+**Actual** — `v5.6.0` collapses into an `ambiguous_function_call_expression`
+named `v5` whose argument is `(binary_expression 6 . 0)`:
+```
+(relational_expression
+  left:  (scalar (varname))              # $^V
+  right: (ambiguous_function_call_expression
+           function: (function)          # "v5"  <-- bareword
+           arguments: (binary_expression  # 6.0  treated as 6 . 0
+             left:  (number)             # 6
+             right: (number))))          # 0
+```
+Note: the parse otherwise *recovers* — no ERROR node, the following
+`my $y = 1;` is a clean statement. The damage is purely the spurious
+`function: v5` node, which the LSP then reports as `unresolved-function 'v5'`.
+
+**Expected** — a dedicated v-string / version-string literal node (analogous
+to `number` / `string_literal`), so the builder never sees a function call.
+
+**Real-world repro** — AWStats legacy CGI, two sites of the same guard:
+```
+perl-lsp --parse ~/perl-qa-corpus/AWStats/wwwroot/cgi-bin/awstats.pl   # :1938
+perl-lsp --parse ~/perl-qa-corpus/AWStats/tools/awstats_buildstaticpages.pl  # :186
+```
+both `if ( $level > 1 && $^V lt v5.6.0 ) { ... }`.
+
+**Downstream impact** — `unresolved-function 'v5'` false positive at every
+v-string site. No contagion (parse recovers at the statement boundary), so
+a builder-side stopgap that recognizes the `vN.N.N` shape and suppresses the
+FP is viable — but the clean fix is a literal node upstream.
+
+---
+
+## GR-2 — bareword constant on the LHS of `&&` errors on the operator
+
+When a bareword (a `use constant` name, or any unproven bareword) is the
+**left** operand of the high-precedence `&&` operator, the bareword is
+greedily parsed as a function call that swallows the right operand as its
+argument list, and the `&&` token itself becomes a recoverable ERROR node.
+
+**Repro** (minimal — reproduces in 1.0.3 at any nesting level, including top
+level):
+```perl
+use constant C => 1;
+my $y = 0;
+my $z = C && !$y;
+```
+
+**Actual** — `C` becomes an `ambiguous_function_call_expression`; `&&` is an
+ERROR child; the right operand `!$y` is parsed as the call's argument:
+```
+(ambiguous_function_call_expression
+  function: (function)            # "C"  <-- bareword as function
+  (ERROR (function (varname)))    # "&&"  <-- recoverable ERROR on the operator
+  arguments: (unary_expression    # !$y  becomes the "argument"
+    operand: (scalar (varname))))
+```
+
+**Trigger boundary** (verified): the error is keyed to **bareword-on-LHS of
+high-precedence `&&`**, independent of the right operand —
+`C && 1`, `C && !$y`, and `C && foo()` all error identically. It does **not**
+fire when the bareword is on the *right* (`$y && C` parses clean) nor with
+the low-precedence word operator (`C and !$y` parses clean). So it is the
+`&&` precedence/ambiguity interaction with a leading bareword, not the
+negation or the `constant` pragma per se.
+
+**Nuance vs. earlier note** — an earlier QA observation suggested the
+trivial `use constant C => 1; C && !$y` did *not* reproduce and that the
+surrounding sub/inlined-codegen context was required. Against
+**ts-parser-perl 1.0.3** the minimal top-level form reproduces directly
+(one ERROR on `&&`); the sub/ternary context is incidental, not the trigger.
+Documenting both: the real sites are all inside `sub { ... }` ternaries, but
+the parser team should reproduce against the minimal top-level form above.
+
+**Expected** — a leading bareword followed by `&&` is a logical-and
+expression whose left operand is the bareword call/constant, not a function
+call consuming the operator and right operand.
+
+**Real-world repro** — Type::Tiny inlined-constraint codegen (3/47 files),
+all `_HAS_REFUTILXS && !$Type::Tiny::AvoidCallbacks ? ... : ...` /
+`!_FIXED_PRECEDENCE && $_[2]` shapes inside `sub { ... }` bodies:
+```
+perl-lsp --parse ~/perl-qa-corpus/Type::Tiny/lib/Types/Standard.pm  # :446,478,509,531
+perl-lsp --parse ~/perl-qa-corpus/Type::Tiny/lib/Type/Tiny.pm       # :165,189
+perl-lsp --parse ~/perl-qa-corpus/Type::Tiny/lib/Eval/TypeTiny.pm   # :124
+```
+
+**Downstream impact** — the constant flags as `unresolved-function`, and the
+operator's ERROR node truncates the surrounding expression's structure
+(the `&&` RHS is mis-attached as an argument). Parser recovers at the next
+statement, so diagnostics stay complete elsewhere, but the LHS bareword and
+its `&&`-RHS are mis-modeled at every such site.
 
 ---
 

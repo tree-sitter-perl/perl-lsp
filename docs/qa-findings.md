@@ -28,16 +28,27 @@ clean (cpanminus 0% FP on hand-written code; all FPs in bundled/dep code).
 goto-def / references / hover are **less reliable than diagnostics and diverge from them** — every Round-1
 project hit this. This is the residual `resolve_symbol` cursor→target unification (CLAUDE.md: "planned but not
 landed"; handlers map `RenameKind`→`TargetRef` inline, separate from the diagnostic resolution path).
-- **NAV-1 confident WRONG jumps** *(Email::Stuffer)*. `$self->_assert_addr_list_ok` (def :296) → goto-def lands on
-  **line 3 (`use warnings`)**; `shift()->_self` → resolves to the *wrong* sub. Worse than a miss. Hover *does*
-  report `type: Email::Stuffer`, so the type is known but not threaded into method-call def resolution.
-- **NAV-2 references unreliable both directions** *(Email::Stuffer, AWStats, Perl::Critic)*. Local-method refs
-  return **0** despite 10+ in-file calls; common-name `new` floods **98 cross-corpus** matches (name-only, ignores
-  invocant class). AWStats: `Format_Number` 172 call sites → refs reports **6**.
-- **NAV-3 diagnostic resolves, goto-def doesn't** *(Perl::Critic, Type::Tiny)*. Inherited 1-hop method: not
-  flagged (diagnostic walks inheritance) but goto-def "No definition found". Explicitly-named cross-file import
-  (`to_TypeTiny`, `hashify`): not flagged + found by workspace-symbol, yet goto-def/references/hover miss it —
-  **even intra-file** (`Utils.pm` `hashify`). Divergent resolution paths is the smoking gun.
+**Root-caused** in `docs/qa-design-items.md` § "NAV — navigation/diagnostic resolution divergence" (mechanism,
+exact functions/lines, bug-vs-unification split, proposed fix per case). Verified-repro refinements below.
+- **NAV-1 confident WRONG jump** *(Email::Stuffer)*. The wrong jump is the **`$self->{email}->header_str_set`**
+  chain (1-based :314) → goto-def lands on **`:3:9` = the `package Email::Stuffer;` decl** (the
+  `$self->_assert_addr_list_ok` call one line up actually resolves correctly). Root cause:
+  `method_call_invocant_class` types `$self->{key}` as `$self`'s class (A4 over-typing), method not found there,
+  then the `find_package_or_class` fallback (file_analysis.rs ~3823) jumps to the package decl. **Contained bug**
+  (drop the fallback → honest miss) riding A4. Worse than a miss.
+- **NAV-2 references undercount** *(Email::Stuffer, AWStats, Perl::Critic)*. Method refs are gated on query-time
+  `method_call_invocant_class` in `refs_to` (resolve.rs ~413) — call sites with an untyped invocant silently drop;
+  the enriched vs. workspace build of one file disagree on the set (verified). AWStats `Format_Number` 172→6 is
+  this **+ REF-1** (expression-embedded calls emit no ref at all). The `new` cross-corpus flood was **not**
+  reproduced on the CLI (`EDITABLE` mask scopes it); name-only over-collection is the design risk if invocant
+  gating is loosened. **Unification** (stored resolved-target edge on MethodCall refs).
+- **NAV-3 diagnostic resolves, goto-def doesn't** *(Perl::Critic)*. Tag-imported `hashify` (via `:data_conversion`,
+  a `Readonly::Hash %EXPORT_TAGS` member): goto-def/hover "not found", workspace-symbol finds it, diagnostic
+  doesn't flag it. Root: `hashify` is **absent from Utils's `export_lookup`** (builder doesn't fold `%EXPORT_TAGS`),
+  and goto-def's `resolve_imported_function` gates on `exports_name` while workspace-symbol walks the raw symbol
+  table. **One B-tag producer fix** fixes the goto-def miss + single-sourcing the export surface is the
+  unification. (Intra-file `Utils.pm hashify` and the named-import sibling `interpolate` now resolve — the open
+  gap is specifically tag/`Readonly`-`%EXPORT_TAGS` membership.)
 
 ## REF-1 — ref emission for calls embedded in expressions (NEW) — **contained, builder**
 *(AWStats)* Sub-calls as operands in `.`-concatenation / complex expressions don't emit a ref: `print "<td>".Format_Number($x)."</td>"` — the `Format_Number` call gets no `FunctionCall` ref, so references undercount
@@ -58,7 +69,8 @@ Still mostly **DESIGN** (the tag/rename/re-export system, `qa-design-items.md`),
   Type::Tiny Exporter::Tiny `-types`/`-is`/`-assert`)*. Named imports resolve; the same name via tag doesn't.
   **Sharp NEW trigger — `Readonly::Array`/`Readonly::Hash` export tables** *(Perl::Critic, isolates cleanly:
   `hashify` named-import not flagged, same `hashify` via `:data_conversion` built by `Readonly::Hash our %EXPORT_TAGS => (...)` flagged 41×)*. Reading `%EXPORT_TAGS` membership (incl. the Readonly-wrapped form) to
-  expand tags on the consumer's `use` line is a **contained-ish sub-fix** of the larger system.
+  expand tags on the consumer's `use` line is a **contained-ish sub-fix** of the larger system. **Design** in
+  `docs/qa-design-items.md` § B-tag (also fixes NAV-3's goto-def miss — `hashify` is absent from `export_lookup`).
 - **B1 re-exporting test frameworks** *(Test::Most 253, Test::Spec 129)* — runtime `push @EXPORT => @{"$mod::EXPORT"}` re-export idiom. DESIGN (no re-export-chain concept yet).
 - **B4 cross-file `@EXPORT` bare-`use` at scale** *(Bugzilla ~899)* · **B5 imported-function CALL SITES don't
   resolve** *(see NAV-3 — likely the same divergence)* · **B7 Exporter::Extensible / regex import args**.
@@ -77,18 +89,23 @@ Still mostly **DESIGN** (the tag/rename/re-export system, `qa-design-items.md`),
 - **A4 hash-extracted invocant loses type** *(SpamAssassin/perltidy/Mojo)*. `my $x = $self->{field}` → HashRef.
 - **NARROW-1 (NEW)** *(Email::Stuffer)* `if (Params::Util::_INSTANCE($x,'IO::All::File')) { $x->binmode }` — the
   `_INSTANCE($x,'Class')` guard isn't recognized as narrowing `$x` to `Class`. Type-narrowing-guard family.
+  **Design** in `docs/qa-design-items.md` § NARROW-1 (general narrowing axis + branch-span-scoped witness).
 
 ## MAIN-1 — `main::` aggregation across `require` (NEW classic variant) — **DESIGN**
 *(AWStats ~270 FPs both directions)* Package-less scripts `require`'d into `main::` (legacy CGI): plugins call
 host subs and vice-versa, all `main`, but each file is analyzed in isolation so cross-file `main::` symbols don't
 unify. Distinct from `@ISA` — implicit `main` aggregation. Legacy-CGI-specific; judgment call whether to model.
+**Design** in `docs/qa-design-items.md` § MAIN-1 (require-dependency edge; gated on statically-resolvable paths).
 
 ## G. Upstream grammar gaps (→ `docs/parser-shortcomings.md`, hand off to parser team)
 - **G1 `$#_` interpolated in a string** · **G2 top-level bare `{…}` block** (perltidy) · **G3 `<<''` heredoc**.
-- **GR-1 (NEW) v-string** `$^V lt v5.6.0` → `v5.6.0` parsed as `v5(...)` function call *(AWStats; 3 sites)*.
-  Stopgap option: builder-side suppress the FP by recognizing the `vN.N.N` shape.
-- **GR-2 (NEW) `CONSTANT && expr`** → recoverable ERROR on `&&` when LHS is a bareword constant, inside
-  sub/inlined bodies *(Type::Tiny; 3/47 files)*. Parser recovers; diagnostics stay complete.
+- **GR-1 (NEW) v-string** `$^V lt v5.6.0` → `v5.6.0` parsed as `v5(...)` function call *(AWStats; 2 sites)*.
+  Stopgap option: builder-side suppress the FP by recognizing the `vN.N.N` shape. **Documented** in
+  `docs/parser-shortcomings.md` § GR-1 (verified, parser 1.0.3).
+- **GR-2 (NEW) bareword `&&`** → recoverable ERROR on `&&` whenever a bareword (incl. `use constant` name) is the
+  **LHS** of high-prec `&&` *(Type::Tiny; 3/47 files)*. Re-verified against 1.0.3: reproduces at top level too
+  (the earlier "needs sub context" nuance does not hold); keyed to bareword-on-LHS, not the negation. Parser
+  recovers; diagnostics stay complete. **Documented** in `docs/parser-shortcomings.md` § GR-2.
 - (`not` operator: tree-sitter-perl#230.)
 
 ## H. Minor / nav
