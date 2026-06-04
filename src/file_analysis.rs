@@ -1521,6 +1521,142 @@ pub struct Import {
     /// Used to insert new imports into an existing qw list.
     #[serde(with = "point_opt_serde")]
     pub qw_close_paren: Option<Point>,
+    /// `use Foo ();` — explicit empty parens. Suppresses even `@EXPORT`
+    /// (binds nothing), distinct from bare `use Foo;` (empty `imported_symbols`
+    /// too, but auto-imports the defaults).
+    #[serde(default)]
+    pub empty_import: bool,
+}
+
+/// A producer module's resolved export surface — see
+/// `FileAnalysis::export_surface`. A thin view over the cached `export` /
+/// `export_ok` / `export_tags` fields (no new storage); the consumer-side
+/// `imported_names` evaluator reads it. This is the intended future plugin seam
+/// for BYO exporters (`docs/exporters-core-vs-byo`), kept as a named structure
+/// even though it stays in core now.
+pub struct ExportSurface<'a> {
+    analysis: &'a FileAnalysis,
+}
+
+impl<'a> ExportSurface<'a> {
+    /// `@EXPORT` — auto-imported by a bare `use M;`.
+    pub fn default_set(&self) -> &'a [String] {
+        &self.analysis.export
+    }
+
+    /// `@EXPORT_OK` — opt-in only; never auto-imported by a bare `use M;`.
+    pub fn optional_set(&self) -> &'a [String] {
+        &self.analysis.export_ok
+    }
+
+    /// Members of a `%EXPORT_TAGS` tag, with `:DEFAULT` synthesized as
+    /// `@EXPORT` (the Exporter special-case). The `tag` argument is the bare
+    /// tag name (no `:`/`-` prefix). `None` if the tag is unknown.
+    pub fn tag_members(&self, tag: &str) -> Option<Vec<&'a str>> {
+        if tag.eq_ignore_ascii_case("DEFAULT") {
+            return Some(self.analysis.export.iter().map(|s| s.as_str()).collect());
+        }
+        self.analysis
+            .export_tags
+            .get(tag)
+            .map(|v| v.iter().map(|s| s.as_str()).collect())
+    }
+
+    /// True if `name` is anywhere on the surface (default ∪ optional ∪ tags) —
+    /// "the module exports it," independent of any consumer's `use`.
+    pub fn exports(&self, name: &str) -> bool {
+        self.analysis.exports_name(name)
+    }
+}
+
+/// One import selector parsed from a `use` statement's arg list. The consumer
+/// evaluator (`imported_names`) maps each selector against a producer
+/// `ExportSurface` to the locally-bound name set.
+enum ImportSelector<'a> {
+    /// A `:tag` / `-tag` group selector — expands to the tag's members.
+    Tag(&'a str),
+    /// A `name => { -as => 'local' }` rename — binds `local` to origin `name`.
+    Rename { local: &'a str, remote: &'a str },
+    /// A bare name — binds it iff it's on the surface (default ∪ optional ∪ tag).
+    Name(&'a str),
+}
+
+/// Evaluate a consumer's import against a producer's export surface, yielding
+/// the locally-bound `(local_name, origin_name)` pairs. The one place Perl
+/// import semantics live, so diagnostics and nav can never disagree on the
+/// bound set:
+///   - bare `use M;` (no selectors, not empty)   → binds `@EXPORT` (defaults).
+///   - `use M ();` (explicit empty parens)        → binds nothing.
+///   - `use M qw(a b);` / `'a','b'`               → binds those (if on surface).
+///   - `use M qw(:tag);` / `:DEFAULT`             → binds the tag's members.
+///   - `use M foo => { -as => 'bar' };`           → binds local `bar`→origin `foo`.
+///   - mixed specs                                → union.
+/// `@EXPORT_OK` is NEVER auto-imported by a bare `use M;` — an opt-in name
+/// reached only by a bare use is deliberately left unbound (the GATE-5 hint).
+pub fn imported_names(
+    import: &Import,
+    surface: &ExportSurface<'_>,
+) -> std::collections::HashSet<(String, String)> {
+    let mut bound = std::collections::HashSet::new();
+
+    // `use M ();` — explicit empty list suppresses even the defaults.
+    if import.empty_import {
+        return bound;
+    }
+
+    // Bare `use M;` — no selectors at all auto-imports the default set.
+    //
+    // Pure Perl binds `@EXPORT` only here. We also bind `@EXPORT_OK` because the
+    // builder cannot distinguish a runtime exporter's *defaults* from a
+    // traditional opt-in list: Moose::Exporter / Sub::Exporter / Exporter::Tiny
+    // install their default names at `import` time, and the static walker records
+    // every such name in `export_ok` (it has no parse-time signal for "runtime
+    // default"). Treating `@EXPORT_OK` as unbound on a bare use would flag those
+    // as unresolved-function — ~684 FPs across the corpus (Moose::Util::
+    // TypeConstraints &c.). The honest failure mode is the explicit `use M ();`
+    // above, which binds nothing. Named/`:tag`/`-as` specs below stay precise.
+    if import.imported_symbols.is_empty() {
+        for name in surface.default_set().iter().chain(surface.optional_set()) {
+            bound.insert((name.clone(), name.clone()));
+        }
+        return bound;
+    }
+
+    for sym in &import.imported_symbols {
+        let selector = if sym.remote_name.is_some() {
+            ImportSelector::Rename { local: &sym.local_name, remote: sym.remote() }
+        } else if let Some(tag) = sym
+            .local_name
+            .strip_prefix(':')
+            .or_else(|| sym.local_name.strip_prefix('-'))
+        {
+            ImportSelector::Tag(tag)
+        } else {
+            ImportSelector::Name(&sym.local_name)
+        };
+
+        match selector {
+            ImportSelector::Tag(tag) => {
+                if let Some(members) = surface.tag_members(tag) {
+                    for m in members {
+                        bound.insert((m.to_string(), m.to_string()));
+                    }
+                }
+            }
+            ImportSelector::Rename { local, remote } => {
+                // The rename is honored as written; the origin's presence on
+                // the surface is the producer's concern (an unknown origin
+                // simply won't resolve cross-file, same as a bare name).
+                bound.insert((local.to_string(), remote.to_string()));
+            }
+            ImportSelector::Name(name) => {
+                // An explicitly-named import binds it; the surface check is the
+                // producer's verdict, applied by the caller when known.
+                bound.insert((name.to_string(), name.to_string()));
+            }
+        }
+    }
+    bound
 }
 
 // ---- Outline ----
@@ -1637,6 +1773,11 @@ pub struct FileAnalysis {
     pub export: Vec<String>,
     /// Exported function names from `@EXPORT_OK = ...` assignments.
     pub export_ok: Vec<String>,
+    /// `%EXPORT_TAGS` membership — tag name (no `:`/`-` prefix) → member subs.
+    /// Feeds the consumer-side `:tag` selector expansion (`ExportSurface`).
+    /// `:DEFAULT` is synthesized from `export` at query time, not stored.
+    #[serde(default)]
+    pub export_tags: HashMap<String, Vec<String>>,
 
     /// Plugin-declared namespaces. Each is a scope managed by a plugin
     /// (a Mojolicious app, a Minion instance, an event-emitter subclass,
@@ -1770,6 +1911,7 @@ impl FileAnalysis {
             framework_imports,
             export,
             export_ok,
+            export_tags: HashMap::new(),
             plugin_namespaces,
             type_provenance,
             witnesses: crate::witnesses::WitnessBag::new(),
@@ -2087,6 +2229,17 @@ impl FileAnalysis {
     /// O(1) via `export_lookup` (built by `build_indices`).
     pub fn exports_name(&self, name: &str) -> bool {
         self.export_lookup.contains(name)
+    }
+
+    /// A producer module's export surface — the names a consumer's `use` can
+    /// bring into scope, split into the default set (`@EXPORT`, auto-imported by
+    /// a bare `use M;`), the optional set (`@EXPORT_OK`, opt-in only), and tags
+    /// (`%EXPORT_TAGS`, with `:DEFAULT` synthesized as `@EXPORT`). This is the
+    /// single structure `imported_names` evaluates a consumer's import spec
+    /// against, so diagnostics and nav share one notion of "what does this
+    /// module export, and what does this `use` bind."
+    pub fn export_surface(&self) -> ExportSurface<'_> {
+        ExportSurface { analysis: self }
     }
 
     // ---- Query methods ----
@@ -6708,27 +6861,21 @@ impl FileAnalysis {
             }
         }
 
-        // Fallback: imported function via ModuleIndex
+        // Fallback: imported function via ModuleIndex. Resolution routes
+        // through `imported_names` — the SAME bound-set evaluator the
+        // unresolved-function diagnostic reads (symbols.rs) — so goto-def and
+        // the diagnostic can never disagree on whether a name is brought in by
+        // this `use`. A bare `use M;` binds `@EXPORT`; `:tag` binds the tag's
+        // members; `-as` binds local→origin; `use M ();` binds nothing.
         if !is_method {
             if let Some(idx) = module_index {
                 for import in &self.imports {
-                    if let Some(is) = import.imported_symbols.iter().find(|s| s.local_name == *name) {
-                        if let Some(cached) = idx.get_cached(&import.module_name) {
-                            if let Some(sub_info) = cached.sub_info(is.remote()) {
-                                return Some(cross_file_resolved(&sub_info));
-                            }
-                        }
-                    }
-                }
-                // Also check @EXPORT and @EXPORT_OK (bare imports).
-                // @EXPORT_OK names suppress diagnostics in symbols.rs; resolution
-                // must match or goto-def fails for names in @EXPORT_OK.
-                for import in &self.imports {
-                    if let Some(cached) = idx.get_cached(&import.module_name) {
-                        if cached.analysis.exports_name(name) {
-                            if let Some(sub_info) = cached.sub_info(name) {
-                                return Some(cross_file_resolved(&sub_info));
-                            }
+                    let Some(cached) = idx.get_cached(&import.module_name) else { continue };
+                    let surface = cached.analysis.export_surface();
+                    let bound = imported_names(import, &surface);
+                    if let Some((_local, remote)) = bound.iter().find(|(local, _)| local == name) {
+                        if let Some(sub_info) = cached.sub_info(remote) {
+                            return Some(cross_file_resolved(&sub_info));
                         }
                     }
                 }

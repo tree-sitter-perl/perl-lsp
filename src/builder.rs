@@ -234,6 +234,7 @@ fn build_with_plugins_inner(
         export_member_sites: Vec::new(),
         export: Vec::new(),
         export_ok: Vec::new(),
+        export_tags: std::collections::HashMap::new(),
         plugin_namespaces: Vec::new(),
         type_provenance: std::collections::HashMap::new(),
         bag: crate::witnesses::WitnessBag::new(),
@@ -488,6 +489,7 @@ fn build_with_plugins_inner(
         b.package_ranges,
     );
     fa.package_framework = package_framework;
+    fa.export_tags = std::mem::take(&mut b.export_tags);
     fa.app_surface_consumers = b.app_surface_consumers.clone();
     fa.witnesses = bag;
     fa.witnesses.rebuild_index();
@@ -1196,6 +1198,11 @@ struct Builder<'a> {
     export: Vec<String>,
     /// Exported function names from @EXPORT_OK assignments.
     export_ok: Vec<String>,
+    /// `%EXPORT_TAGS` membership: tag name (without the `:`/`-` selector
+    /// prefix) → member sub names. Feeds the consumer-side `:tag` selector
+    /// expansion in `ExportSurface`; `:DEFAULT` is synthesized there from
+    /// `export`, so it is not stored here.
+    export_tags: std::collections::HashMap<String, Vec<String>>,
     /// Plugin-declared namespaces collected during the walk via
     /// `EmitAction::PluginNamespace`. Flushed into the final
     /// `FileAnalysis.plugin_namespaces`.
@@ -2700,6 +2707,7 @@ impl<'a> Builder<'a> {
                     imported_symbols,
                     span,
                     qw_close_paren: None,
+                    empty_import: false,
                 });
             }
             plugin::EmitAction::VarType { variable, at, inferred_type } => {
@@ -4486,7 +4494,15 @@ impl<'a> Builder<'a> {
         if module_name != "parent" && module_name != "base" {
             if !imports.is_empty() {
                 if let Some(node) = node {
-                    let sym_set: std::collections::HashSet<&str> = imports.iter().map(|s| s.as_str()).collect();
+                    // `:tag` / `-tag` group selectors name a `%EXPORT_TAGS`
+                    // entry, not a sub — they must not earn a FunctionCall ref
+                    // (rule #7: a ref only on a real call target), or the
+                    // unresolved-function diagnostic flags the selector itself.
+                    let sym_set: std::collections::HashSet<&str> = imports
+                        .iter()
+                        .filter(|s| !s.starts_with(':') && !s.starts_with('-'))
+                        .map(|s| s.as_str())
+                        .collect();
                     let kind = RefKind::FunctionCall {
                         resolved_package: Some(module_name.clone()),
                     };
@@ -4494,19 +4510,38 @@ impl<'a> Builder<'a> {
                 }
             }
         }
-        // Tree-sitter parses `qw(a b)` as same-name imports — no
-        // syntactic support for `use Foo ( a => { -as => 'b' } )`
-        // yet, so this loop is pure `ImportedSymbol::same`. Plugin
-        // emissions (below) can produce renaming imports.
-        let imported_symbols: Vec<ImportedSymbol> = imports
+        // Base spec: every `qw(a b)` / string-list name is a same-name import.
+        // The `name => { -as => 'local' }` rename form (Sub::Exporter /
+        // Exporter::Tiny / Exporter `-as`) overrides matching entries with the
+        // renamed local→remote binding so goto-def on the local name reaches the
+        // origin sub and references bridge the rename.
+        let mut imported_symbols: Vec<ImportedSymbol> = imports
             .iter()
             .map(|n| ImportedSymbol::same(n.clone()))
             .collect();
+        let mut empty_import = false;
+        if let Some(node) = node {
+            for (local, remote) in self.extract_as_renames(node) {
+                // The `-as` arg already appears as a bare name in `imports`
+                // (the origin) and a string in the hashref (the local); drop
+                // both flat entries and replace with the renamed binding.
+                imported_symbols.retain(|s| s.local_name != remote && s.local_name != local);
+                imported_symbols.push(ImportedSymbol::renamed(local, remote));
+            }
+            // `use Foo ();` — explicit empty parens suppress even `@EXPORT`.
+            // Distinct from bare `use Foo;` (no arg child at all), which
+            // auto-imports the defaults. The parser models the empty list as a
+            // `stub_expression`.
+            empty_import = (0..node.named_child_count())
+                .filter_map(|i| node.named_child(i))
+                .any(|c| c.kind() == "stub_expression");
+        }
         self.imports.push(Import {
             module_name: module_name.clone(),
             imported_symbols,
             span,
             qw_close_paren,
+            empty_import,
         });
 
         // Plugin dispatch for use-statements. Mojolicious::Lite
@@ -5039,6 +5074,86 @@ impl<'a> Builder<'a> {
         result
     }
 
+    /// Extract `name => { -as => 'local' }` renames from a use statement's
+    /// args. Returns `(local_name, remote_name)` pairs. Recognized by shape: a
+    /// bareword/string `name` immediately followed by a hashref whose `-as`
+    /// (or `as`) key names the local alias. Sub::Exporter / Exporter::Tiny /
+    /// Exporter's `-as` all spell it this way, so one shape covers them.
+    fn extract_as_renames(&self, node: Node<'a>) -> Vec<(String, String)> {
+        let mut out = Vec::new();
+        // The args live in a `list_expression` (multiple) or directly under the
+        // use node. Walk every descendant list once, pairing a name token with
+        // the following hashref.
+        self.collect_as_renames(node, &mut None, &mut out);
+        out
+    }
+
+    /// Recurse for `name => { -as => 'local' }` pairs. `pending_name` carries a
+    /// just-seen bareword/string awaiting its hashref; when a hashref follows,
+    /// its `-as` value becomes the local alias for that name.
+    fn collect_as_renames(
+        &self,
+        node: Node<'a>,
+        pending_name: &mut Option<String>,
+        out: &mut Vec<(String, String)>,
+    ) {
+        for i in 0..node.named_child_count() {
+            let Some(child) = node.named_child(i) else { continue };
+            match child.kind() {
+                "anonymous_hash_expression" => {
+                    if let Some(remote) = pending_name.take() {
+                        if let Some(local) = self.extract_as_alias(child) {
+                            out.push((local, remote));
+                        }
+                    }
+                }
+                "autoquoted_bareword" | "string_literal" | "bareword" => {
+                    let text = child.utf8_text(self.source).unwrap_or("");
+                    let name = text.trim().trim_matches(|c| c == '\'' || c == '"').to_string();
+                    // Skip option flags (`-as` appears at top level too in some
+                    // forms) — only real names seed a pending rename.
+                    if !name.is_empty() && !name.starts_with('-') {
+                        *pending_name = Some(name);
+                    }
+                }
+                "list_expression" | "parenthesized_expression" => {
+                    self.collect_as_renames(child, pending_name, out);
+                }
+                _ => {
+                    *pending_name = None;
+                }
+            }
+        }
+    }
+
+    /// Pull the local alias from a `{ -as => 'local' }` hashref: find the `-as`
+    /// (or `as`) key and return its string value.
+    fn extract_as_alias(&self, hashref: Node<'a>) -> Option<String> {
+        // The hashref body is a `list_expression` of `key => value` tokens.
+        let body = (0..hashref.named_child_count())
+            .filter_map(|i| hashref.named_child(i))
+            .find(|c| c.kind() == "list_expression")
+            .unwrap_or(hashref);
+        let mut saw_as_key = false;
+        for i in 0..body.named_child_count() {
+            let Some(child) = body.named_child(i) else { continue };
+            let text = child.utf8_text(self.source).unwrap_or("");
+            let bare = text.trim().trim_matches(|c| c == '\'' || c == '"');
+            if saw_as_key {
+                let local = bare.trim_start_matches('-');
+                if !local.is_empty() {
+                    return Some(local.to_string());
+                }
+            }
+            // `-as` parses as a `unary_expression` (the `-`) wrapping `as`; the
+            // raw text still ends with `as`, so match on the normalized token.
+            if bare.trim_start_matches('-') == "as" {
+                saw_as_key = true;
+            }
+        }
+        None
+    }
+
     /// Extract the import list from a use statement.
     /// Returns (imported_symbols, qw_close_paren_position).
     fn extract_use_import_list(&self, node: Node<'a>) -> (Vec<String>, Option<Point>) {
@@ -5048,6 +5163,33 @@ impl<'a> Builder<'a> {
             return (names, qw_close);
         }
         (vec![], None)
+    }
+
+    /// Classify an assignment LHS as an export package-variable, tolerating a
+    /// package qualifier. Perl exporters write either the lexical-to-package
+    /// `our @EXPORT` form or the fully-qualified `@Bugzilla::Error::EXPORT`
+    /// form (Bugzilla, many CPAN modules). Both name the *same* package global;
+    /// the qualifier is just an explicit spelling. We strip `our `/`my ` and the
+    /// sigil, then compare the trailing identifier after the last `::` against
+    /// the export-variable basename — so `@EXPORT`, `@Pkg::EXPORT`,
+    /// `%Pkg::EXPORT_TAGS` all match without a per-package branch (rule #10).
+    fn export_var_basename(lhs_text: &str) -> Option<&'static str> {
+        let trimmed = lhs_text.trim();
+        let stripped = trimmed
+            .strip_prefix("our ")
+            .or_else(|| trimmed.strip_prefix("my "))
+            .unwrap_or(trimmed)
+            .trim_start();
+        let no_sigil = stripped
+            .strip_prefix('@')
+            .or_else(|| stripped.strip_prefix('%'))
+            .unwrap_or(stripped);
+        match no_sigil.rsplit("::").next().unwrap_or(no_sigil) {
+            "EXPORT_OK" => Some("@EXPORT_OK"),
+            "EXPORT" => Some("@EXPORT"),
+            "EXPORT_TAGS" => Some("%EXPORT_TAGS"),
+            _ => None,
+        }
     }
 
     fn visit_assignment(&mut self, node: Node<'a>) {
@@ -5071,12 +5213,18 @@ impl<'a> Builder<'a> {
                 }
             }
 
+            // Export package-variable assignment — `our @EXPORT`, the qualified
+            // `@Pkg::EXPORT`, `%EXPORT_TAGS`, etc. `export_var_basename` strips
+            // the `our`/`my`, sigil, and any `Pkg::` qualifier so all spellings
+            // map to one of the three export basenames (rule #10).
+            let export_var = Self::export_var_basename(lhs_text);
+
             // Fold `%EXPORT_TAGS = ( tag => [names...], ... )` membership into
             // the export surface. The RHS list is the table literal; tag
             // members join `export_ok` like `@EXPORT_OK` names. The
             // call-wrapped `Readonly::Hash %EXPORT_TAGS => (...)` form is an
             // `ambiguous_function_call_expression`, handled in `visit_function_call`.
-            if lhs_text.ends_with("%EXPORT_TAGS") {
+            if export_var == Some("%EXPORT_TAGS") {
                 for i in 0..node.named_child_count() {
                     if let Some(child) = node.named_child(i) {
                         if child.kind() == "list_expression"
@@ -5089,12 +5237,10 @@ impl<'a> Builder<'a> {
             }
 
             // Accumulate @EXPORT / @EXPORT_OK assignments
-            let var_name = if lhs_text.ends_with("@EXPORT_OK") {
-                Some("@EXPORT_OK")
-            } else if lhs_text.ends_with("@EXPORT") && !lhs_text.ends_with("@EXPORT_OK") {
-                Some("@EXPORT")
-            } else {
-                None
+            let var_name = match export_var {
+                Some("@EXPORT_OK") => Some("@EXPORT_OK"),
+                Some("@EXPORT") => Some("@EXPORT"),
+                _ => None,
             };
             if let Some(export_var) = var_name {
                 let mut names = Vec::new();
@@ -6345,13 +6491,30 @@ impl<'a> Builder<'a> {
     /// list literal, whatever produced it.
     fn fold_export_tags_table(&mut self, table: Node<'a>) {
         let mut names = Vec::new();
+        // Track the most recent tag-name key so each value array attributes its
+        // members to the right tag for the `:tag` consumer selector. The table
+        // is a flat `key => [..], key2 => [..]` list, so the key precedes its
+        // array in named-child order.
+        let mut pending_tag: Option<String> = None;
         for i in 0..table.named_child_count() {
             let Some(child) = table.named_child(i) else { continue };
             // Member names live in the value arrays (after each tag key); the
             // bareword/string keys are selectors, not subs, so they're skipped.
             if child.kind() == "anonymous_array_expression" {
-                names.extend(self.extract_string_names(child));
+                let members = Self::keep_sub_export_names(self.extract_string_names(child));
+                if let Some(tag) = pending_tag.take() {
+                    self.export_tags.entry(tag).or_default().extend(members.iter().cloned());
+                }
+                names.extend(members);
                 self.record_export_member_sites(child);
+            } else if let Ok(text) = child.utf8_text(self.source) {
+                // A tag-name key: a bareword/string before its member array.
+                // `:DEFAULT` is the Exporter alias for `@EXPORT`, synthesized in
+                // `ExportSurface`, so don't store it as a literal tag here.
+                let tag = text.trim().trim_matches(|c| c == '\'' || c == '"').trim_start_matches([':', '-']);
+                if !tag.is_empty() {
+                    pending_tag = Some(tag.to_string());
+                }
             }
         }
         // Tag members are sub names exactly like `@EXPORT_OK` entries; drop

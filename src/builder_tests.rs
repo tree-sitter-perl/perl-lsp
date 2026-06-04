@@ -12739,6 +12739,50 @@ sub group_one { 'not a tag' }
     );
 }
 
+/// Package-qualified `@Pkg::EXPORT` / `@Pkg::EXPORT_OK` / `%Pkg::EXPORT_TAGS`
+/// (Bugzilla's form) must populate the export surface exactly like the
+/// `our @EXPORT` spelling. Without this, `use Bugzilla::Util;` resolves nothing
+/// (the 1000+ Bugzilla FP cluster).
+#[test]
+fn qualified_export_globals_populate_surface() {
+    let src = r#"
+package Bugzilla::Util;
+@Bugzilla::Util::EXPORT = qw(trick_taint detaint_natural);
+@Bugzilla::Util::EXPORT_OK = qw(opt_util);
+%Bugzilla::Util::EXPORT_TAGS = (all => [qw(trick_taint opt_util)]);
+sub trick_taint { 1 }
+sub detaint_natural { 2 }
+sub opt_util { 3 }
+"#;
+    let fa = build_fa(src);
+    assert!(
+        fa.export.contains(&"trick_taint".to_string())
+            && fa.export.contains(&"detaint_natural".to_string()),
+        "qualified @Pkg::EXPORT must populate the default set; got export={:?}",
+        fa.export,
+    );
+    assert!(
+        fa.export_ok.contains(&"opt_util".to_string()),
+        "qualified @Pkg::EXPORT_OK must populate the optional set; got export_ok={:?}",
+        fa.export_ok,
+    );
+    // Tag membership is preserved per-tag for the `:tag` consumer selector.
+    let surface = fa.export_surface();
+    let all = surface.tag_members("all").expect("all tag present");
+    assert!(
+        all.contains(&"trick_taint") && all.contains(&"opt_util"),
+        "qualified %Pkg::EXPORT_TAGS must record per-tag members; got {:?}",
+        all,
+    );
+    // :DEFAULT is synthesized from @EXPORT.
+    let default = surface.tag_members("DEFAULT").expect(":DEFAULT synthesized");
+    assert!(
+        default.contains(&"trick_taint") && default.contains(&"detaint_natural"),
+        ":DEFAULT must equal @EXPORT; got {:?}",
+        default,
+    );
+}
+
 /// A constant invoked as a call (`MAX_RETRIES()`) is reffed once by the
 /// function-call path; the bareword arm must not double-emit at that span.
 #[test]
