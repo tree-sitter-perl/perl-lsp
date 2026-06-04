@@ -551,6 +551,43 @@ fn test_field_reader_goto_def() {
     assert_eq!(span.start.row, 2, "should point to field declaration line");
 }
 
+/// NAV (a): goto-def on a method that does NOT exist on a known class
+/// must be an honest miss (None), NEVER a confident jump to the
+/// `package` decl. The `$self->{email}->method` shape used to over-type
+/// the invocant to the enclosing class and then jump to its package
+/// line when the method wasn't found — worse than a miss.
+#[test]
+fn test_goto_def_unknown_method_is_honest_miss_not_package_jump() {
+    let source = "package Foo;\nsub new { bless { email => undef }, shift }\nsub to { my $self = shift; $self->{email}->totallyunknownmethod(1); }\n1;\n";
+    let fa = build_fa(source);
+    // `totallyunknownmethod` starts at row 2, col 43 (after the `->`).
+    let def = fa.find_definition(Point::new(2, 48), None, None, None);
+    assert!(
+        def.is_none(),
+        "unknown method must return None (honest miss), not jump to package decl; got {:?}",
+        def
+    );
+}
+
+/// NAV regression (iv): goto-def on a typed same-file method still
+/// lands on the method declaration via the frozen dispatch edge.
+#[test]
+fn test_goto_def_typed_same_file_method_resolves() {
+    let source = "package Widget;\nsub new { bless {}, shift }\nsub frobnicate { 1 }\nsub run { my $w = Widget->new; $w->frobnicate; }\n1;\n";
+    let fa = build_fa(source);
+    // `frobnicate` in `$w->frobnicate` — row 3. Find its column.
+    let row = 3usize;
+    let line = source.lines().nth(row).unwrap();
+    let col = line.find("$w->frobnicate").unwrap() + "$w->".len() + 2;
+    let def = fa.find_definition(Point::new(row, col), None, None, None);
+    assert!(def.is_some(), "typed $w->frobnicate must resolve to the decl");
+    assert_eq!(
+        def.unwrap().start.row,
+        2,
+        "should land on `sub frobnicate` (row 2)"
+    );
+}
+
 #[test]
 fn test_use_symbol() {
     let fa = build_fa("use Foo::Bar;");
