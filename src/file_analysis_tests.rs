@@ -1725,3 +1725,78 @@ fn receiver_gated_untyped_for_unknown_receiver() {
     assert_eq!(gated.resolve_for(None, &pp, None), GateResult::ReceiverUntyped);
     assert_eq!(gated.resolve_for(Some(""), &pp, None), GateResult::ReceiverUntyped);
 }
+
+// ---- %EXPORT_TAGS membership folds into the export surface (B-tag / NAV-B) ----
+
+#[test]
+fn export_tags_plain_hash_members_are_exported() {
+    let fa = build_fa_from_source(
+        r#"
+        package M;
+        our @EXPORT_OK = qw( foo );
+        our %EXPORT_TAGS = (
+            all             => [ @EXPORT_OK ],
+            data_conversion => [ qw{ hashify words_from_string } ],
+        );
+        sub foo { 1 }
+        sub hashify { 2 }
+        sub words_from_string { 3 }
+        1;
+        "#,
+    );
+    // Members reached only via a tag list join the same surface as @EXPORT_OK.
+    assert!(fa.exports_name("hashify"), "tag member hashify should export");
+    assert!(fa.exports_name("words_from_string"));
+    assert!(fa.exports_name("foo"));
+    // The tag *names* are selectors, not subs — never exports.
+    assert!(!fa.exports_name("data_conversion"));
+    assert!(!fa.exports_name("all"));
+}
+
+#[test]
+fn export_tags_readonly_wrapped_members_are_exported() {
+    // The Perl::Critic::Utils shape: the table is hidden inside a
+    // `Readonly::Hash our %EXPORT_TAGS => (...)` call. The wrapper function is
+    // not load-bearing; the declared variable is the witness.
+    let fa = build_fa_from_source(
+        r#"
+        package M;
+        Readonly::Array our @EXPORT_OK => qw( interpolate );
+        Readonly::Hash our %EXPORT_TAGS => (
+            all             => [ @EXPORT_OK ],
+            data_conversion => [ qw{ hashify words_from_string interpolate } ],
+        );
+        sub interpolate { 1 }
+        sub hashify { 2 }
+        sub words_from_string { 3 }
+        1;
+        "#,
+    );
+    assert!(fa.exports_name("hashify"), "Readonly-wrapped tag member should export");
+    assert!(fa.exports_name("words_from_string"));
+    assert!(fa.exports_name("interpolate"));
+    assert!(!fa.exports_name("data_conversion"));
+    assert!(!fa.exports_name("all"));
+}
+
+#[test]
+fn name_in_no_export_or_tag_is_not_exported() {
+    // Regression guard: a sub that is neither in @EXPORT* nor any tag list
+    // stays unexported — the fold widens the surface only for tag members.
+    let fa = build_fa_from_source(
+        r#"
+        package M;
+        our @EXPORT_OK = qw( foo );
+        our %EXPORT_TAGS = (
+            data_conversion => [ qw{ hashify } ],
+        );
+        sub foo { 1 }
+        sub hashify { 2 }
+        sub private_helper { 3 }
+        1;
+        "#,
+    );
+    assert!(fa.exports_name("hashify"));
+    assert!(fa.exports_name("foo"));
+    assert!(!fa.exports_name("private_helper"), "non-exported sub must stay unexported");
+}
