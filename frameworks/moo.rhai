@@ -34,6 +34,9 @@ fn triggers() {
         // Dancer2::Plugin re-exports Moo's `has` into the consuming plugin, so
         // `has my_setting => (...)` there wants the same accessor synthesis.
         #{ UsesModule: "Dancer2::Plugin" },
+        // MooX::Options' `option` is a `has` with extra option-parsing keys;
+        // its accessor-option vocabulary (predicate/clearer/...) is identical.
+        #{ UsesModule: "MooX::Options" },
     ]
 }
 
@@ -91,7 +94,8 @@ fn isa_class(isa_type) {
 
 fn on_function_call(ctx) {
     let out = [];
-    if ctx.function_name != "has" { return out; }
+    // `option` (MooX::Options) shares `has`'s accessor-option vocabulary.
+    if ctx.function_name != "has" && ctx.function_name != "option" { return out; }
     let opts = ctx.has_options;
     if opts == () { return out; }
 

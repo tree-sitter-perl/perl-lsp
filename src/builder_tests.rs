@@ -2914,6 +2914,137 @@ fn test_with_multiple_roles() {
     assert!(parents.contains(&"Role::B".to_string()));
 }
 
+// --- E4a: MooX::Options `option` ---
+
+/// `option 'name' => (is => 'ro', ...)` is a `has` with extra option-parsing
+/// keys; it synthesizes the same accessor Method symbol + constructor HashKeyDef.
+#[test]
+fn test_moox_option_synthesizes_accessor_and_ctor_key() {
+    let fa = build_fa(
+        "
+            package MyApp;
+            use Moo;
+            use MooX::Options;
+            option 'verbose' => (is => 'ro', format => 'i', doc => 'noisy');
+            option name => (is => 'rw', isa => 'Str');
+        ",
+    );
+    // Accessor Method symbols.
+    let methods: Vec<&str> = fa
+        .symbols
+        .iter()
+        .filter(|s| s.kind == crate::file_analysis::SymKind::Method)
+        .map(|s| s.name.as_str())
+        .collect();
+    assert!(methods.contains(&"verbose"), "ro accessor: {methods:?}");
+    assert!(methods.contains(&"name"), "rw accessor: {methods:?}");
+
+    // Constructor HashKeyDefs (`MyApp->new(verbose => ...)`).
+    let ctor_keys: Vec<&str> = fa
+        .symbols
+        .iter()
+        .filter(|s| {
+            matches!(
+                &s.detail,
+                crate::file_analysis::SymbolDetail::HashKeyDef {
+                    owner: crate::file_analysis::HashKeyOwner::Sub { name, .. },
+                    ..
+                } if name == "new"
+            )
+        })
+        .map(|s| s.name.as_str())
+        .collect();
+    assert!(ctor_keys.contains(&"verbose"), "ctor key verbose: {ctor_keys:?}");
+    assert!(ctor_keys.contains(&"name"), "ctor key name: {ctor_keys:?}");
+}
+
+/// `option` outside a MooX::Options package must NOT synthesize accessors — an
+/// unrelated `option(...)` sub call isn't an attribute declaration.
+#[test]
+fn test_option_without_moox_is_not_an_accessor() {
+    let fa = build_fa(
+        "
+            package MyApp;
+            use Moo;
+            option 'verbose' => (is => 'ro');
+        ",
+    );
+    let methods: Vec<&str> = fa
+        .symbols
+        .iter()
+        .filter(|s| s.kind == crate::file_analysis::SymKind::Method)
+        .map(|s| s.name.as_str())
+        .collect();
+    assert!(!methods.contains(&"verbose"), "no synthesis without MooX::Options: {methods:?}");
+}
+
+/// Regression: plain `has` in a package that also `use`s MooX::Options is
+/// unaffected (still synthesizes via the shared path).
+#[test]
+fn test_moox_options_plain_has_still_works() {
+    let fa = build_fa(
+        "
+            package MyApp;
+            use Moo;
+            use MooX::Options;
+            has plain => (is => 'ro', isa => 'Int');
+        ",
+    );
+    let methods: Vec<&str> = fa
+        .symbols
+        .iter()
+        .filter(|s| s.kind == crate::file_analysis::SymKind::Method)
+        .map(|s| s.name.as_str())
+        .collect();
+    assert!(methods.contains(&"plain"), "plain has accessor: {methods:?}");
+}
+
+// --- E4b: `with 'Role'` role-provided methods resolve cross-file ---
+
+/// A class `with 'SomeRole'` should resolve `$self->m` to the role's `sub m`
+/// cross-file. `with` already unifies into `package_parents`, and the
+/// ancestor walk + cross-file module_index do the rest — this is a lock test.
+#[test]
+fn test_with_role_method_resolves_cross_file() {
+    use crate::module_index::ModuleIndex;
+    use std::path::PathBuf;
+
+    let idx = ModuleIndex::new_for_test();
+    idx.set_workspace_root(None);
+
+    // The role provides `log_it`.
+    idx.insert_cache(
+        "My::Role::Logging",
+        Some(fake_cached_for_class(
+            "My::Role::Logging",
+            &PathBuf::from("/fake/My/Role/Logging.pm"),
+            &["log_it"],
+            &[],
+        )),
+    );
+
+    let fa = build_fa(
+        "
+            package MyApp;
+            use Moo;
+            with 'My::Role::Logging';
+            sub run { my $self = shift; }
+        ",
+    );
+
+    // Completion surfaces the role method.
+    let methods = fa.complete_methods_for_class("MyApp", Some(&idx));
+    let names: Vec<&str> = methods.iter().map(|c| c.label.as_str()).collect();
+    assert!(names.contains(&"log_it"), "role method in completion: {names:?}");
+
+    // resolve_method_in_ancestors finds it cross-file.
+    let res = fa.resolve_method_in_ancestors("MyApp", "log_it", Some(&idx));
+    assert!(
+        matches!(res, Some(crate::file_analysis::MethodResolution::CrossFile { ref class, .. }) if class == "My::Role::Logging"),
+        "expected CrossFile to the role, got {res:?}"
+    );
+}
+
 #[test]
 fn test_load_components_bare() {
     let fa = build_fa(
