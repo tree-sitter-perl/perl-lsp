@@ -4592,6 +4592,23 @@ impl<'a> Builder<'a> {
                 }
             }
 
+            // Fold `%EXPORT_TAGS = ( tag => [names...], ... )` membership into
+            // the export surface. The RHS list is the table literal; tag
+            // members join `export_ok` like `@EXPORT_OK` names. The
+            // call-wrapped `Readonly::Hash %EXPORT_TAGS => (...)` form is an
+            // `ambiguous_function_call_expression`, handled in `visit_function_call`.
+            if lhs_text.ends_with("%EXPORT_TAGS") {
+                for i in 0..node.named_child_count() {
+                    if let Some(child) = node.named_child(i) {
+                        if child.kind() == "list_expression"
+                            || child.kind() == "parenthesized_expression"
+                        {
+                            self.fold_export_tags_table(child);
+                        }
+                    }
+                }
+            }
+
             // Accumulate @EXPORT / @EXPORT_OK assignments
             let var_name = if lhs_text.ends_with("@EXPORT_OK") {
                 Some("@EXPORT_OK")
@@ -5555,6 +5572,14 @@ impl<'a> Builder<'a> {
                     self.visit_push_call(node);
                 }
 
+                // Call-wrapped `%EXPORT_TAGS` table:
+                // `Readonly::Hash our %EXPORT_TAGS => ( tag => [...], ... )`
+                // (and Const::Fast / any wrapper). The args are
+                // `<%EXPORT_TAGS declaration> => <table list>`; we recognize the
+                // declared variable, not the wrapper function (rule #10), and
+                // fold the trailing table list the same as a plain assignment.
+                self.fold_call_wrapped_export_tags(node);
+
                 // Moose/Moo method modifiers: `around`/`before`/`after foo => sub {...}`.
                 // The anonymous sub body is a method body — its invocant parameter needs to
                 // be typed as the enclosing class. `around` takes `($orig, $self, @args)`,
@@ -5782,6 +5807,63 @@ impl<'a> Builder<'a> {
             if name.is_empty() { continue; }
             if !self.export_ok.contains(&name) && !self.export.contains(&name) {
                 self.export_ok.push(name);
+            }
+        }
+    }
+
+    /// Fold `%EXPORT_TAGS` membership into the export surface. A tag table is
+    /// a `tag => [ name, ... ], ...` literal: a flat list alternating tag-name
+    /// keys (`autoquoted_bareword`/string at even positions) with member-array
+    /// values (`anonymous_array_expression` at odd positions). Only the *member*
+    /// names are exports — the tag names are selectors, not subs — so we pull
+    /// names from the value arrays only and feed them into `export_ok` (same
+    /// surface as `@EXPORT_OK`; `exports_name` / `find_exporters` then answer
+    /// `true`). Recognized by shape, so the plain `our %EXPORT_TAGS = (...)`
+    /// assignment and the call-wrapped `Readonly::Hash our %EXPORT_TAGS => (...)`
+    /// (and Const::Fast and friends) ride the same path — `table` is just the
+    /// list literal, whatever produced it.
+    fn fold_export_tags_table(&mut self, table: Node<'a>) {
+        let mut names = Vec::new();
+        for i in 0..table.named_child_count() {
+            let Some(child) = table.named_child(i) else { continue };
+            // Member names live in the value arrays (after each tag key); the
+            // bareword/string keys are selectors, not subs, so they're skipped.
+            if child.kind() == "anonymous_array_expression" {
+                names.extend(self.extract_string_names(child));
+            }
+        }
+        // Tag members are sub names exactly like `@EXPORT_OK` entries; drop
+        // sigil'd globals / nested tag refs the array might have contributed.
+        let names = Self::keep_sub_export_names(names);
+        self.record_runtime_exports(names);
+    }
+
+    /// Recognize a call whose args declare `%EXPORT_TAGS` and fold the trailing
+    /// table — the `Readonly::Hash our %EXPORT_TAGS => (...)` shape (Const::Fast
+    /// and any other wrapper ride the same path). The wrapper function is not
+    /// load-bearing; the witness is the declared variable. The args are a flat
+    /// list `<%EXPORT_TAGS declaration>, <table list>`; fold every following
+    /// list once we've seen the declaration.
+    fn fold_call_wrapped_export_tags(&mut self, node: Node<'a>) {
+        let Some(args) = node.child_by_field_name("arguments") else { return };
+        let mut saw_export_tags_decl = false;
+        for i in 0..args.named_child_count() {
+            let Some(child) = args.named_child(i) else { continue };
+            if !saw_export_tags_decl {
+                if child.kind() == "variable_declaration"
+                    && child
+                        .utf8_text(self.source)
+                        .map_or(false, |t| t.trim_end().ends_with("%EXPORT_TAGS"))
+                {
+                    saw_export_tags_decl = true;
+                }
+                continue;
+            }
+            if child.kind() == "list_expression"
+                || child.kind() == "parenthesized_expression"
+                || child.kind() == "anonymous_array_expression"
+            {
+                self.fold_export_tags_table(child);
             }
         }
     }

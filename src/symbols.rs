@@ -2114,12 +2114,105 @@ fn unimported_function_completions(
     candidates
 }
 
-/// Find which import provides a given function name.
-/// Checks both explicitly imported symbols and all @EXPORT/@EXPORT_OK
-/// from already-imported modules. Single DashMap lookup per module.
+/// How a function name relates to an importing `use` statement. Both
+/// goto-def and the unresolved-function diagnostic read this one verdict so
+/// they can never disagree on whether a name is resolvable as imported
+/// (NAV § (c): the divergent-export-surface root cause).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ImportResolution {
+    /// The name is brought into the caller's namespace: named in `qw(...)`,
+    /// pulled in by a `:tag` selector against the producer surface, or
+    /// auto-imported by a bare `use Foo;`. Goto-def jumps; the diagnostic
+    /// stays silent (the name is genuinely available here).
+    Brought,
+    /// The name is exported by the imported module but this `use` didn't
+    /// bring it in (e.g. a named `qw(other)` that omits it). Goto-def can
+    /// still jump to the def; the diagnostic offers the "exported but not
+    /// imported" hint.
+    ExportedNotBrought,
+}
+
+/// True if a `use Foo qw(:tag, ...)` carries any `:tag` / `-tag` group
+/// selector. Tag membership is folded into the *producer* surface (B-tag), so
+/// a tagged import whose surface lists the name is treated as bringing the
+/// name in — the bounded consumer-side expansion goto-def needs, without a
+/// full per-tag selector evaluator (deferred to B2/B3).
+fn import_has_tag_selector(import: &crate::file_analysis::Import) -> bool {
+    import
+        .imported_symbols
+        .iter()
+        .any(|s| s.local_name.starts_with(':') || s.local_name.starts_with('-'))
+}
+
+/// Classify a name against a single import, given the producer's export
+/// surface verdict (`exports`). `None` = no relationship (not named, not
+/// exported, not a tag/bare bring-in).
+fn classify_import(
+    import: &crate::file_analysis::Import,
+    func_name: &str,
+    exports: bool,
+) -> Option<ImportResolution> {
+    if import.imported_symbols.iter().any(|s| s.local_name == *func_name) {
+        return Some(ImportResolution::Brought);
+    }
+    // Bare `use Foo;` auto-imports the producer's default surface; a `:tag`
+    // selector pulls in the tag's members, which now live in that surface.
+    if exports && (import.imported_symbols.is_empty() || import_has_tag_selector(import)) {
+        return Some(ImportResolution::Brought);
+    }
+    if exports {
+        return Some(ImportResolution::ExportedNotBrought);
+    }
+    None
+}
+
+/// Best resolution of `func_name` across all imports: the matched import, its
+/// remote name, the resolvability verdict, and — when known — the module path
+/// for navigation. `Brought` wins over `ExportedNotBrought` when several
+/// imports relate. The single resolvability query both goto-def and the
+/// diagnostic read.
 ///
-/// Returns the matched Import, the module's path, and the REMOTE name
-/// (the sub's actual name in the source module — differs from the
+/// The verdict is computed from the export surface alone, so an explicitly
+/// `qw()`-named import is `Brought` even when its module isn't cached yet (the
+/// diagnostic must not flag it); the path is best-effort (`None` if uncached)
+/// and goto-def simply doesn't jump cross-file when it's absent.
+fn resolve_imported_function_classified<'a>(
+    analysis: &'a FileAnalysis,
+    func_name: &str,
+    module_index: &ModuleIndex,
+) -> Option<(&'a crate::file_analysis::Import, Option<std::path::PathBuf>, String, ImportResolution)> {
+    let mut best: Option<(
+        &'a crate::file_analysis::Import,
+        Option<std::path::PathBuf>,
+        String,
+        ImportResolution,
+    )> = None;
+    for import in &analysis.imports {
+        let explicit = import.imported_symbols.iter().find(|s| s.local_name == *func_name);
+        // Producer-surface verdict: an explicit `qw()` name is always exported
+        // here; otherwise consult the cached module's folded export surface.
+        let exports = explicit.is_some()
+            || module_index
+                .get_cached(&import.module_name)
+                .map_or(false, |c| c.analysis.exports_name(func_name));
+        let Some(res) = classify_import(import, func_name, exports) else { continue };
+        let remote = explicit.map_or_else(|| func_name.to_string(), |is| is.remote().to_string());
+        let path = module_index
+            .get_cached(&import.module_name)
+            .map(|c| c.path.clone())
+            .or_else(|| module_index.module_path_cached(&import.module_name));
+        // `Brought` is the strongest verdict; once found, keep it.
+        if matches!(best, Some((_, _, _, ImportResolution::Brought))) {
+            continue;
+        }
+        best = Some((import, path, remote, res));
+    }
+    best
+}
+
+/// Find which import provides a given function name, with a concrete module
+/// path to jump to. Returns the matched Import, the module's path, and the
+/// REMOTE name (the sub's actual name in the source module — differs from the
 /// caller's `func_name` only for renaming imports like `del` → `delete`).
 /// Callers use the remote name for `cached.sub_info(...)` lookups so
 /// hover/gd/sig-help reach the real sub.
@@ -2128,25 +2221,9 @@ fn resolve_imported_function<'a>(
     func_name: &str,
     module_index: &ModuleIndex,
 ) -> Option<(&'a crate::file_analysis::Import, std::path::PathBuf, String)> {
-    for import in &analysis.imports {
-        if let Some(cached) = module_index.get_cached(&import.module_name) {
-            let explicit = import.imported_symbols.iter().find(|s| s.local_name == *func_name);
-            if let Some(is) = explicit {
-                return Some((import, cached.path.clone(), is.remote().to_string()));
-            }
-            // Export lists are always in the remote namespace — a name
-            // appearing there matches a same-name use at the call site.
-            if cached.analysis.exports_name(func_name) {
-                return Some((import, cached.path.clone(), func_name.to_string()));
-            }
-        } else if let Some(is) = import.imported_symbols.iter().find(|s| s.local_name == *func_name) {
-            // Module not cached yet but explicitly listed in qw() — trust the import.
-            if let Some(path) = module_index.module_path_cached(&import.module_name) {
-                return Some((import, path, is.remote().to_string()));
-            }
-        }
-    }
-    None
+    // Goto-def needs a concrete module path to jump to.
+    resolve_imported_function_classified(analysis, func_name, module_index)
+        .and_then(|(import, path, remote, _)| path.map(|p| (import, p, remote)))
 }
 
 fn completion_detail_for_import(
@@ -2284,90 +2361,79 @@ pub fn collect_diagnostics(
             continue;
         }
 
-        // Skip if explicitly listed in any import's qw(...),
-        // or auto-imported via @EXPORT on a bare `use Foo;` (no qw list).
-        let explicitly_imported = analysis.imports.iter().any(|imp| {
-            if imp.imported_symbols.iter().any(|s| s.local_name == *name) {
-                return true;
-            }
-            // Bare `use Foo;` — check if function is in @EXPORT or export_ok.
-            // Runtime exporters (Moose::Exporter->setup_import_methods etc.) record
-            // their names in export_ok because the builder can't distinguish
-            // "runtime default" from "explicit opt-in" at parse time.  Suppressing
-            // export_ok here avoids ~684 false positives from modules like
-            // Moose::Util::TypeConstraints.  Trade-off: traditional @EXPORT_OK names
-            // (genuinely opt-in) are also suppressed on a bare use — accepted, since
-            // flagging them is more confusing than hiding the hint.
-            if imp.imported_symbols.is_empty() {
-                if let Some(cached) = module_index.get_cached(&imp.module_name) {
-                    if cached.analysis.exports_name(name) {
-                        return true;
-                    }
-                }
-            }
-            false
-        });
-        if explicitly_imported {
-            continue;
-        }
-
-        // Check if an imported module exports this function
+        // Single resolvability verdict — the same query goto-def reads, so a
+        // name goto-def can jump to is never flagged as unresolved here (NAV
+        // § (c)). `Brought` = the name is in scope (named in qw, pulled in by a
+        // `:tag` selector against the producer surface, or auto-imported by a
+        // bare `use`); `ExportedNotBrought` = importable but not yet in the qw
+        // list → actionable hint.
+        //
+        // Bare-use auto-import deliberately treats `export_ok` as brought:
+        // runtime exporters (Moose::Exporter->setup_import_methods etc.) record
+        // their names in `export_ok` because the builder can't tell "runtime
+        // default" from "explicit opt-in" at parse time, so flagging them
+        // produced ~684 FPs (Moose::Util::TypeConstraints &c.). Traditional
+        // opt-in `@EXPORT_OK` on a bare use is suppressed too — accepted.
         let range = span_to_range(r.span);
-        if let Some((import, _path, _remote)) = resolve_imported_function(analysis, name, module_index) {
-            // Importable but not yet in the qw() list → actionable hint
-            diagnostics.push(Diagnostic {
-                range,
-                severity: Some(DiagnosticSeverity::HINT),
-                code: Some(NumberOrString::String("unresolved-function".into())),
-                source: Some("perl-lsp".into()),
-                message: format!(
-                    "'{}' is exported by {} but not imported",
-                    name, import.module_name,
-                ),
-                data: Some(serde_json::json!({
-                    "module": import.module_name,
-                    "function": name,
-                })),
-                ..Default::default()
-            });
-        } else {
-            // Search ALL cached modules for this function.
-            let exporters = module_index.find_exporters(name);
-            if !exporters.is_empty() {
-                let msg = if exporters.len() == 1 {
-                    format!(
-                        "'{}' is exported by {} (not yet imported)",
-                        name, exporters[0],
-                    )
-                } else {
-                    format!(
-                        "'{}' is exported by {} and {} other module(s)",
-                        name,
-                        exporters[0],
-                        exporters.len() - 1,
-                    )
-                };
+        let resolution = resolve_imported_function_classified(analysis, name, module_index);
+        match resolution {
+            Some((_, _, _, ImportResolution::Brought)) => continue,
+            Some((import, _path, _remote, ImportResolution::ExportedNotBrought)) => {
                 diagnostics.push(Diagnostic {
                     range,
                     severity: Some(DiagnosticSeverity::HINT),
                     code: Some(NumberOrString::String("unresolved-function".into())),
                     source: Some("perl-lsp".into()),
-                    message: msg,
+                    message: format!(
+                        "'{}' is exported by {} but not imported",
+                        name, import.module_name,
+                    ),
                     data: Some(serde_json::json!({
-                        "modules": exporters,
+                        "module": import.module_name,
                         "function": name,
                     })),
                     ..Default::default()
                 });
-            } else {
-                diagnostics.push(Diagnostic {
-                    range,
-                    severity: Some(DiagnosticSeverity::INFORMATION),
-                    code: Some(NumberOrString::String("unresolved-function".into())),
-                    source: Some("perl-lsp".into()),
-                    message: format!("'{}' is not defined in this file", name),
-                    ..Default::default()
-                });
+            }
+            None => {
+                // Search ALL cached modules for this function.
+                let exporters = module_index.find_exporters(name);
+                if !exporters.is_empty() {
+                    let msg = if exporters.len() == 1 {
+                        format!(
+                            "'{}' is exported by {} (not yet imported)",
+                            name, exporters[0],
+                        )
+                    } else {
+                        format!(
+                            "'{}' is exported by {} and {} other module(s)",
+                            name,
+                            exporters[0],
+                            exporters.len() - 1,
+                        )
+                    };
+                    diagnostics.push(Diagnostic {
+                        range,
+                        severity: Some(DiagnosticSeverity::HINT),
+                        code: Some(NumberOrString::String("unresolved-function".into())),
+                        source: Some("perl-lsp".into()),
+                        message: msg,
+                        data: Some(serde_json::json!({
+                            "modules": exporters,
+                            "function": name,
+                        })),
+                        ..Default::default()
+                    });
+                } else {
+                    diagnostics.push(Diagnostic {
+                        range,
+                        severity: Some(DiagnosticSeverity::INFORMATION),
+                        code: Some(NumberOrString::String("unresolved-function".into())),
+                        source: Some("perl-lsp".into()),
+                        message: format!("'{}' is not defined in this file", name),
+                        ..Default::default()
+                    });
+                }
             }
         }
     }

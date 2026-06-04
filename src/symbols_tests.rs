@@ -3445,3 +3445,89 @@ fn require_bareword_not_flagged() {
         );
     }
 }
+
+// ---- NAV-B: %EXPORT_TAGS single export surface, goto-def + diagnostic agree ----
+
+/// Build a cached module from raw Perl source (lets tests seed `%EXPORT_TAGS`
+/// producers that `fake_cached` can't express).
+fn cached_from_source(path: &str, source: &str) -> std::sync::Arc<crate::module_index::CachedModule> {
+    std::sync::Arc::new(crate::module_index::CachedModule::new(
+        std::path::PathBuf::from(path),
+        std::sync::Arc::new(parse_analysis(source)),
+    ))
+}
+
+/// The Perl::Critic::Utils shape: `hashify` exported only via a
+/// `Readonly::Hash our %EXPORT_TAGS` member. A consumer importing the
+/// `:data_conversion` tag and calling `hashify` must NOT be flagged as
+/// unresolved (the diagnostic agrees with goto-def's resolution).
+#[test]
+fn export_tags_tag_import_diagnostic_agrees() {
+    let producer = r#"
+package Perl::Critic::Utils;
+Readonly::Array our @EXPORT_OK => qw( interpolate );
+Readonly::Hash our %EXPORT_TAGS => (
+    all             => [ @EXPORT_OK ],
+    data_conversion => [ qw{ hashify words_from_string interpolate } ],
+);
+sub hashify { 1 }
+sub words_from_string { 2 }
+sub interpolate { 3 }
+1;
+"#;
+    let consumer = "use Perl::Critic::Utils qw(:data_conversion);\nmy %h = hashify(@list);\n";
+    let analysis = parse_analysis(consumer);
+    let module_index = crate::module_index::ModuleIndex::new_for_test();
+    module_index.insert_cache(
+        "Perl::Critic::Utils",
+        Some(cached_from_source("/usr/lib/perl5/Perl/Critic/Utils.pm", producer)),
+    );
+
+    let diags = collect_diagnostics(&analysis, &module_index, Default::default());
+    let hashify_diags: Vec<_> = diags.iter().filter(|d| d.message.contains("hashify")).collect();
+    assert!(
+        hashify_diags.is_empty(),
+        "tag-imported `hashify` must not be flagged unresolved; got {:?}",
+        hashify_diags.iter().map(|d| &d.message).collect::<Vec<_>>(),
+    );
+
+    // Goto-def reaches the producer file via the same export surface.
+    let (_import, path, remote) =
+        resolve_imported_function(&analysis, "hashify", &module_index)
+            .expect("hashify resolves through the folded export surface");
+    assert_eq!(remote, "hashify");
+    assert!(path.ends_with("Perl/Critic/Utils.pm"));
+}
+
+/// A name in neither `@EXPORT*` nor any tag is still unresolved — the fold
+/// widens the surface only for genuine tag members.
+#[test]
+fn export_tags_non_member_still_unresolved() {
+    let producer = r#"
+package Util::Tagged;
+Readonly::Hash our %EXPORT_TAGS => (
+    data_conversion => [ qw{ hashify } ],
+);
+sub hashify { 1 }
+sub private_helper { 2 }
+1;
+"#;
+    let consumer = "use Util::Tagged qw(:data_conversion);\nprivate_helper();\n";
+    let analysis = parse_analysis(consumer);
+    let module_index = crate::module_index::ModuleIndex::new_for_test();
+    module_index.insert_cache(
+        "Util::Tagged",
+        Some(cached_from_source("/usr/lib/perl5/Util/Tagged.pm", producer)),
+    );
+
+    assert!(
+        resolve_imported_function(&analysis, "private_helper", &module_index).is_none(),
+        "non-exported sub must not resolve through the export surface",
+    );
+    let diags = collect_diagnostics(&analysis, &module_index, Default::default());
+    assert!(
+        diags.iter().any(|d| d.message.contains("private_helper")),
+        "non-exported sub must still be flagged; got {:?}",
+        diags.iter().map(|d| &d.message).collect::<Vec<_>>(),
+    );
+}
