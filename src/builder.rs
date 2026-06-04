@@ -4510,6 +4510,13 @@ impl<'a> Builder<'a> {
                         }
                     }
                 }
+                // Typeglob sub installation: `*name = sub {...}`, `*name = \&other`,
+                // `*{ 'literal' } = $coderef`, loop `*$m = sub {...}`. The builder
+                // would otherwise never register these as symbols, so every call site
+                // flags unresolved. Recognize by shape (rule #10): synthesize only
+                // when the RHS produces a sub/coderef AND the LHS name is statically
+                // derivable. Truly-dynamic names (`*{$runtime}`) stay out of scope.
+                self.synthesize_glob_assigned_sub(left, node);
             }
 
             // Accumulate array/scalar assignments as constants
@@ -5927,6 +5934,157 @@ impl<'a> Builder<'a> {
             return self.extract_names_from_refgen(right);
         }
         vec![]
+    }
+
+    /// Synthesize a local Sub symbol for each name installed via typeglob
+    /// assignment whose RHS produces a sub/coderef. Shape-driven (rule #10),
+    /// mirroring the DBIC `add_columns` / `mk_group_accessors` producers: the
+    /// LHS glob name is the authoritative source, the RHS is the "is this a
+    /// sub?" gate. Without this, glob-installed subs (File::Fetch, IPC::Cmd,
+    /// File::Path, Type::Tiny) never become symbols and every call site flags
+    /// unresolved. Dynamic names (`*{$runtime}`, unfoldable concat) are skipped
+    /// rather than guessed.
+    fn synthesize_glob_assigned_sub(&mut self, glob_node: Node<'a>, assign_node: Node<'a>) {
+        // Gate on RHS shape: only a sub-producing rvalue installs a callable.
+        let Some(right) = assign_node.child_by_field_name("right") else { return };
+        if !self.glob_rhs_is_sub(right) {
+            return;
+        }
+        let names = self.glob_install_names(glob_node, assign_node);
+        let sel_span = node_to_span(glob_node);
+        let def_span = node_to_span(assign_node);
+        for name in names {
+            // Glob into another package (`*Other::foo = ...`) installs `foo`;
+            // local call sites and goto use the unqualified tail.
+            let local = name.rsplit("::").next().unwrap_or(&name).to_string();
+            if local.is_empty() {
+                continue;
+            }
+            self.add_symbol(
+                local,
+                SymKind::Sub,
+                def_span,
+                sel_span,
+                SymbolDetail::Sub {
+                    params: vec![],
+                    is_method: false,
+                    doc: None,
+                    display: None,
+                    hide_in_outline: false,
+                    opaque_return: false,
+                },
+            );
+        }
+    }
+
+    /// Is this RHS node a sub/coderef rvalue (anon sub, `\&name` alias, or a
+    /// scalar holding a coderef)? The gate for glob-assign symbol synthesis.
+    fn glob_rhs_is_sub(&self, right: Node<'a>) -> bool {
+        match right.kind() {
+            "anonymous_subroutine_expression" => true,
+            // `\&name` / `\&$var` — a code ref. `refgen_expression > function`.
+            "refgen_expression" => right
+                .named_child(0)
+                .map(|c| c.kind() == "function")
+                .unwrap_or(false),
+            // `*name = $coderef;` — a scalar presumed to hold a code ref. The
+            // LHS-name gate keeps this from over-firing on truly-dynamic globs.
+            "scalar" => true,
+            _ => false,
+        }
+    }
+
+    /// Resolve the statically-derivable name(s) the glob LHS installs into.
+    /// Returns empty when fully dynamic (no fabrication).
+    ///
+    /// Shapes: `*name` (static), `*{ 'literal' }` (string block),
+    /// `*$m` (loop var, via constant folding), `*{ $runtime }` / unfoldable
+    /// concat → empty.
+    fn glob_install_names(&self, glob_node: Node<'a>, assign_node: Node<'a>) -> Vec<String> {
+        let Some(varname) = glob_node.named_child(0) else { return vec![] };
+
+        // Bare static name: `*name` / `*Foo::bar` — varname has no inner block.
+        if varname.named_child_count() == 0 {
+            if let Ok(text) = varname.utf8_text(self.source) {
+                if !text.is_empty() {
+                    return vec![text.to_string()];
+                }
+            }
+            return vec![];
+        }
+
+        let Some(inner) = varname.named_child(0) else { return vec![] };
+        match inner.kind() {
+            // `*$m = ...` — scalar (loop var). Resolve via constant folding so
+            // `for my $m (qw/a b/)` installs both names; bail on unknown vars.
+            "scalar" => self.glob_name_from_scalar(inner),
+            // `*{ ... }` — block expression. Derive only when literal-ish.
+            "block" => self.glob_name_from_block(inner, assign_node),
+            _ => vec![],
+        }
+    }
+
+    /// `*$m` — resolve the scalar to concrete name(s) via constant folding.
+    fn glob_name_from_scalar(&self, scalar: Node<'a>) -> Vec<String> {
+        let Some(varname) = scalar.named_child(0) else { return vec![] };
+        let bare = varname.utf8_text(self.source).unwrap_or("");
+        if bare.is_empty() {
+            return vec![];
+        }
+        self.resolve_constant_strings(&format!("${}", bare), 0).unwrap_or_default()
+    }
+
+    /// `*{ EXPR }` — derive name(s) from the block's single expression.
+    /// Handles a bare string literal and a constant-foldable interpolated
+    /// string / concat; bails (empty) on anything runtime-dynamic.
+    fn glob_name_from_block(&self, block: Node<'a>, _assign_node: Node<'a>) -> Vec<String> {
+        let inner = (|| {
+            let stmt = block.named_child(0)?;
+            stmt.named_child(0)
+        })();
+        let Some(expr) = inner else { return vec![] };
+        match expr.kind() {
+            "string_literal" => self.extract_string_content(expr).into_iter().collect(),
+            "interpolated_string_literal" => self.try_fold_interpolated_string(expr),
+            // `'is_' . $type` — fold both operands; if any operand is dynamic
+            // and unresolvable, the fold yields empty and we skip (don't guess).
+            "binary_expression" => self.try_fold_string_concat(expr),
+            _ => vec![],
+        }
+    }
+
+    /// Fold a `.`-concatenation of constant-resolvable operands into name(s).
+    /// Returns empty if any operand can't be resolved to a concrete string —
+    /// the "don't fabricate a partial name" boundary.
+    fn try_fold_string_concat(&self, node: Node<'a>) -> Vec<String> {
+        // Cartesian product across operands so a loop-var operand expands.
+        let mut acc: Vec<String> = vec![String::new()];
+        for i in 0..node.named_child_count() {
+            let Some(child) = node.named_child(i) else { return vec![] };
+            let pieces: Vec<String> = match child.kind() {
+                "string_literal" => self.extract_string_content(child).into_iter().collect(),
+                "interpolated_string_literal" => self.try_fold_interpolated_string(child),
+                "binary_expression" => self.try_fold_string_concat(child),
+                "scalar" => {
+                    let varname = child.named_child(0);
+                    match varname.and_then(|v| v.utf8_text(self.source).ok()) {
+                        Some(bare) if !bare.is_empty() => self
+                            .resolve_constant_strings(&format!("${}", bare), 0)
+                            .unwrap_or_default(),
+                        _ => vec![],
+                    }
+                }
+                _ => vec![],
+            };
+            if pieces.is_empty() {
+                return vec![]; // unresolvable operand → don't guess
+            }
+            acc = acc
+                .iter()
+                .flat_map(|prefix| pieces.iter().map(move |p| format!("{}{}", prefix, p)))
+                .collect();
+        }
+        acc.into_iter().filter(|s| !s.is_empty()).collect()
     }
 
     /// Walk the glob's interpolated string AST to find the exported name(s) after "::".
