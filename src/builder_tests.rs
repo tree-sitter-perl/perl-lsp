@@ -590,6 +590,101 @@ fn test_function_call_ref() {
     assert_eq!(call_refs.len(), 1);
 }
 
+/// Rule #7: a call that appears as an *operand* of a larger expression
+/// (string concatenation, ternary) must still emit its FunctionCall ref.
+/// AWStats shape `print "<td>".Format_Number($x)."</td>"` parses the call
+/// as a `function_call_expression` nested inside a `binary_expression`
+/// (the concat) which is itself the `print` verb's argument. The generic
+/// `_ => visit_children` traversal in `visit_node` reaches it; this test
+/// pins that so a future grammar/traversal change can't silently regress
+/// references to statement-level calls only.
+#[test]
+fn call_ref_in_concatenation_operand() {
+    let fa = build_fa("sub Format_Number { }\nprint \"<td>\".Format_Number($x).\"</td>\";\n");
+    let call_refs: Vec<_> = fa
+        .refs
+        .iter()
+        .filter(|r| r.target_name == "Format_Number" && matches!(r.kind, RefKind::FunctionCall { .. }))
+        .collect();
+    assert_eq!(
+        call_refs.len(),
+        1,
+        "a call inside `.`-concatenation must emit exactly one FunctionCall ref"
+    );
+    // The ref must pin the *call name*, not the surrounding concat/print.
+    assert!(call_refs[0].span.start.row == 1);
+}
+
+/// Rule #7: calls in both arms of a ternary are operands too.
+#[test]
+fn call_ref_in_ternary_operands() {
+    let fa = build_fa("sub foo { }\nsub bar { }\nmy $y = $cond ? foo() : bar();\n");
+    let foo_refs = fa
+        .refs
+        .iter()
+        .filter(|r| r.target_name == "foo" && matches!(r.kind, RefKind::FunctionCall { .. }))
+        .count();
+    let bar_refs = fa
+        .refs
+        .iter()
+        .filter(|r| r.target_name == "bar" && matches!(r.kind, RefKind::FunctionCall { .. }))
+        .count();
+    assert_eq!(foo_refs, 1, "ternary consequent call must emit a ref");
+    assert_eq!(bar_refs, 1, "ternary alternative call must emit a ref");
+}
+
+/// Method calls nested in expression operands must also emit a MethodCall ref.
+#[test]
+fn method_call_ref_in_concatenation_operand() {
+    let fa = build_fa("my $s = \"x\" . $obj->fmt($n) . \"y\";\n");
+    let m_refs: Vec<_> = fa
+        .refs
+        .iter()
+        .filter(|r| r.target_name == "fmt" && matches!(r.kind, RefKind::MethodCall { .. }))
+        .collect();
+    assert_eq!(m_refs.len(), 1, "method call inside concat must emit one MethodCall ref");
+}
+
+/// AWStats-shaped fixture: a def plus N call sites, every call embedded in a
+/// concatenation operand. Mirrors the real-world undercount (def→6 of 172).
+/// Asserts the call-ref count equals the textual occurrence count and that a
+/// bareword that is NOT a call (`Format_Number` as a hash key) is not counted.
+#[test]
+fn call_refs_count_across_expression_positions() {
+    let src = "\
+sub Format_Number { my $n = shift; return $n; }
+print \"<td>\".Format_Number($a).\"</td>\";
+print \"<td>\".Format_Number($b).\"</td><td>x</td>\";
+my $r = \"a\" . Format_Number($c) . \"b\" . Format_Number($d);
+my $t = $cond ? Format_Number($e) : 0;
+my %h = (Format_Number => 1);
+";
+    let fa = build_fa(src);
+    let call_refs = fa
+        .refs
+        .iter()
+        .filter(|r| r.target_name == "Format_Number" && matches!(r.kind, RefKind::FunctionCall { .. }))
+        .count();
+    // 5 genuine call sites (two single-call prints, two in one concat, one ternary).
+    assert_eq!(
+        call_refs, 5,
+        "every call-position occurrence must emit a FunctionCall ref; the hash-key bareword must not"
+    );
+}
+
+/// Regression guard: a plain statement-level call still emits exactly one
+/// ref (no double-emission from the operand-traversal path).
+#[test]
+fn statement_level_call_emits_single_ref() {
+    let fa = build_fa("sub debug { }\ndebug(\"hello\");\n");
+    let call_refs = fa
+        .refs
+        .iter()
+        .filter(|r| r.target_name == "debug" && matches!(r.kind, RefKind::FunctionCall { .. }))
+        .count();
+    assert_eq!(call_refs, 1, "statement-level call must emit exactly one ref");
+}
+
 #[test]
 fn test_method_call_ref() {
     let fa = build_fa("$obj->method();");
