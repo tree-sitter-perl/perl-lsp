@@ -532,6 +532,44 @@ this shape.
 
 ---
 
+## X1 — external scanner `serialize` ABORTS under concurrent parsing (thread-safety)
+
+**Severity: HIGH — process `abort()`, uncatchable from Rust.** Unlike G1–G7
+(parse-shape gaps), this is a robustness/concurrency bug in the C external
+scanner: it crashes the whole LSP, not just one file's tree.
+
+**Symptom:**
+```
+perl-lsp: .../tree-sitter-0.25.10/src/./parser.c:415:
+ts_parser__external_scanner_serialize: Assertion `length <= 1024' failed.
+Aborted (core dumped)
+```
+
+**Trigger — rare, load-dependent.** Fired exactly ONCE, when many parses ran
+concurrently (the LSP indexes the workspace via Rayon `par_iter`, and a second
+parse loop runs on the module-resolver thread). Not reproducible at low load.
+
+**Ruled out — it is NOT a single bad file / not a stacked-heredoc serialize
+overflow.** Every `.pm`/`.pl`/`.t` in `@INC` + a large corpus (819 files) parses
+clean individually with `--parse` (0 aborts); a deterministic content overflow
+would fire every time that file is parsed. And the consumer side uses a **fresh
+`Parser` per parse** (no parser sharing).
+
+**Diagnosis.** The abort is internal to the external scanner's `serialize`,
+fires only under *concurrent* parsing despite separate `Parser` instances ⇒
+**non-thread-local (static / file-scope) state inside the external scanner**
+being raced by simultaneous parses. The serialized `length` is corrupted by a
+concurrent writer, tripping the `length <= 1024` bound. The stacked-heredoc
+state machine is the most likely home of that shared state.
+
+**Fix direction (upstream).** Make the scanner's state strictly
+per-scanner-instance / thread-local; audit `serialize`/`deserialize` and any
+`static`/global in the scanner C for cross-parse sharing. (Until fixed, any
+heavily-parallel parse path in the LSP shares this latent hazard — it's why the
+re-export resolver, which adds a second concurrent parse loop, surfaced it.)
+
+---
+
 ## TO VERIFY (parser vs builder — likely parser, confirm intent)
 
 These two reproduce as questionable CST shapes. They look like grammar
