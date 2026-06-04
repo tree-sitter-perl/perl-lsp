@@ -2661,6 +2661,7 @@ impl<'a> Builder<'a> {
             "method_declaration_statement" => self.visit_sub(node, true),
             "variable_declaration" => self.visit_variable_decl(node),
             "for_statement" => self.visit_for(node),
+            "postfix_for_expression" => self.visit_postfix_for(node),
             "use_statement" => self.visit_use(node),
             "assignment_expression" => self.visit_assignment(node),
 
@@ -3778,7 +3779,17 @@ impl<'a> Builder<'a> {
                 // Accumulate loop variable values for constant folding
                 // for my $x (qw(a b c)) → $x => ["a", "b", "c"]
                 if let Some(list_node) = node.child_by_field_name("list") {
-                    let values = self.extract_string_names(list_node);
+                    let mut values = self.extract_string_names(list_node);
+                    // CG-3a: `for my $tag (_all_html_tags()) { *$tag = sub {...} }`
+                    // (CGI.pm). When the loop source is a call to a same-file sub
+                    // whose body is a literal qw/list return, fold that sub's
+                    // literal return into the loop var so the glob-install names
+                    // resolve. Non-literal local subs (or a cross-file callee)
+                    // yield nothing → loop var stays dynamic and glob synthesis
+                    // skips (no fabrication).
+                    if values.is_empty() {
+                        values = self.fold_local_sub_literal_return(list_node);
+                    }
                     if !values.is_empty() {
                         self.constant_strings.insert(var_name, values);
                     }
@@ -3792,6 +3803,57 @@ impl<'a> Builder<'a> {
 
         // No loop variable — just visit children normally
         self.visit_children(node);
+    }
+
+    /// Statement-modifier loop: `EXPR for LIST` / `EXPR foreach LIST`.
+    ///
+    /// mk_classdata-in-LOOP (Catalyst.pm/Controller.pm, ~205 FPs):
+    /// `__PACKAGE__->mk_classdata($_) for qw/a b c/` and
+    /// `mk_classdata($_) for (LIST)` install one class-data accessor per list
+    /// element. The implicit loop var (`$_`) is the call arg; the literal qw/
+    /// list is the authoritative name source — same producer as the direct
+    /// `mk_classdata('name')` form, just driven by the loop list. Non-literal
+    /// lists (an array var, computed) fold to nothing → no synthesis.
+    fn visit_postfix_for(&mut self, node: Node<'a>) {
+        // The `list` field can point at the `(` paren for the
+        // `... for (LIST)` form (the child_by_field_name paren gotcha), so the
+        // list payload is read off the second named child instead — `[call,
+        // list]`. `extract_string_list` folds qw / paren-list / constants.
+        if let (Some(call), Some(list_node)) = (node.named_child(0), node.named_child(1)) {
+            let names = self.extract_string_list(list_node);
+            if !names.is_empty() && self.is_class_accessor_loop_body(call) {
+                self.emit_class_accessor_symbols(call, &names);
+            }
+        }
+        self.visit_children(node);
+    }
+
+    /// Is `node` a `mk_classdata`/`mk_classaccessor` call whose single arg is the
+    /// loop var (`$_` or a named scalar)? The shape that, under a statement-
+    /// modifier loop, installs one accessor per list element. Both the bare
+    /// `mk_classdata($_)` and `__PACKAGE__->mk_classdata($_)` forms qualify;
+    /// the callee name is the signal (rule #10), not the invocant.
+    fn is_class_accessor_loop_body(&self, node: Node<'a>) -> bool {
+        let (callee, args) = match node.kind() {
+            "function_call_expression" | "ambiguous_function_call_expression" => {
+                (node.child_by_field_name("function"), node.child_by_field_name("arguments"))
+            }
+            "method_call_expression" => {
+                (node.child_by_field_name("method"), node.child_by_field_name("arguments"))
+            }
+            _ => return false,
+        };
+        let Some(callee) = callee else { return false };
+        if !matches!(
+            callee.utf8_text(self.source).ok(),
+            Some("mk_classdata") | Some("mk_classaccessor")
+        ) {
+            return false;
+        }
+        // Single scalar arg — the loop var the list feeds. Anything else
+        // (a literal name, multiple args) is the non-loop form handled by
+        // `visit_group_accessors` directly, or not a per-element install.
+        matches!(args.map(|a| a.kind()), Some("scalar"))
     }
 
     fn visit_use(&mut self, node: Node<'a>) {
@@ -4477,6 +4539,106 @@ impl<'a> Builder<'a> {
             }
         }
         None
+    }
+
+    /// CG-3a: when a foreach list is a call to a SAME-FILE sub whose body is a
+    /// literal qw/list return, fold that sub's literal return into name(s). The
+    /// loop var then constant-folds and downstream glob synthesis (`*$tag = sub`)
+    /// installs one symbol per name. Returns empty for anything not a
+    /// literal-returning local sub (cross-file callee, computed return, no
+    /// match) — the "don't fabricate" boundary; the loop var stays dynamic.
+    ///
+    /// Tree-walk (rule #1): ascends `call_node` to the file root, scans
+    /// top-level `subroutine_declaration_statement`s for the called name. No
+    /// symbol-table lookup because the callee may be declared after the loop in
+    /// source order (CGI.pm: `_all_html_tags` is defined further down).
+    fn fold_local_sub_literal_return(&self, call_node: Node<'a>) -> Vec<String> {
+        let fname = match call_node.kind() {
+            "function_call_expression" | "ambiguous_function_call_expression" => {
+                call_node.child_by_field_name("function")
+            }
+            _ => return vec![],
+        };
+        let Some(fname) = fname else { return vec![] };
+        // Bare callee name only — `&Pkg::foo()` / computed callees are not
+        // same-file literal subs we can statically fold.
+        if fname.named_child_count() != 0 {
+            return vec![];
+        }
+        let Ok(name) = fname.utf8_text(self.source) else { return vec![] };
+        if name.is_empty() {
+            return vec![];
+        }
+
+        let mut root = call_node;
+        while let Some(p) = root.parent() {
+            root = p;
+        }
+        let Some(body) = self.find_local_sub_body(root, name) else { return vec![] };
+        self.literal_list_return_names(body)
+    }
+
+    /// Find a top-level sub's `body` block by name within `root`'s subtree.
+    /// First match wins (Perl's last-decl-wins is irrelevant for the literal
+    /// folds this feeds — redefinition of a qw-returning helper is not a shape
+    /// we model).
+    fn find_local_sub_body(&self, root: Node<'a>, name: &str) -> Option<Node<'a>> {
+        let mut cursor = root.walk();
+        let mut stack: Vec<Node<'a>> = root.children(&mut cursor).collect();
+        while let Some(n) = stack.pop() {
+            if matches!(
+                n.kind(),
+                "subroutine_declaration_statement" | "method_declaration_statement"
+            ) {
+                if let Some(name_node) = n.child_by_field_name("name") {
+                    if name_node.utf8_text(self.source).ok() == Some(name) {
+                        return n.child_by_field_name("body");
+                    }
+                }
+            }
+            let mut c = n.walk();
+            stack.extend(n.children(&mut c));
+        }
+        None
+    }
+
+    /// Extract the literal name list a sub body returns, when its tail/return
+    /// expression is a literal list (`return qw(...)`, `return ('a','b')`, a
+    /// bare trailing `qw(...)` / list). Empty if the body does anything beyond a
+    /// literal list (computed, conditional, interpolated-with-unknown-vars).
+    fn literal_list_return_names(&self, body: Node<'a>) -> Vec<String> {
+        // The return source is either an explicit `return EXPR` or the body's
+        // tail expression statement. Probe each statement; a `return_expression`
+        // anywhere is authoritative, else the last expression_statement.
+        let mut return_expr: Option<Node<'a>> = None;
+        let mut tail_expr: Option<Node<'a>> = None;
+        for i in 0..body.named_child_count() {
+            let Some(stmt) = body.named_child(i) else { continue };
+            if stmt.kind() == "expression_statement" {
+                if let Some(inner) = stmt.named_child(0) {
+                    if inner.kind() == "return_expression" {
+                        return_expr = Some(inner);
+                    } else {
+                        tail_expr = Some(inner);
+                    }
+                }
+            }
+        }
+        let source = return_expr.or(tail_expr);
+        let Some(source) = source else { return vec![] };
+        let list_node = if source.kind() == "return_expression" {
+            source.named_child(0)
+        } else {
+            Some(source)
+        };
+        let Some(list_node) = list_node else { return vec![] };
+        match list_node.kind() {
+            "quoted_word_list" | "list_expression" | "parenthesized_expression"
+            | "string_literal" | "interpolated_string_literal" => {
+                self.extract_string_names(list_node)
+            }
+            _ => vec![],
+        }
     }
 
     /// Resolve a name to its known constant string values.
@@ -6172,6 +6334,14 @@ impl<'a> Builder<'a> {
         for name in names {
             // Glob into another package (`*Other::foo = ...`) installs `foo`;
             // local call sites and goto use the unqualified tail.
+            //
+            // CG-3b deferred: cross-package attribution. `*{ 'DateTime::' . $sub }
+            // = __PACKAGE__->can($sub)` should attribute `$sub` under `DateTime`,
+            // but symbols are keyed by `self.current_package` at the call site
+            // (see `add_symbol`), with no per-symbol package override. So the
+            // qualified target (`DateTime::foo`) is synthesized as a local `foo`
+            // under the current package. Correct attribution needs an
+            // add_symbol-with-package seam; not built here.
             let local = name.rsplit("::").next().unwrap_or(&name).to_string();
             if local.is_empty() {
                 continue;
@@ -6206,6 +6376,28 @@ impl<'a> Builder<'a> {
             // `*name = $coderef;` — a scalar presumed to hold a code ref. The
             // LHS-name gate keeps this from over-firing on truly-dynamic globs.
             "scalar" => true,
+            // CG-3b: `*{ 'Pkg::' . $sub } = __PACKAGE__->can($sub)` (DateTime::PP)
+            // — `->can(...)` yields a coderef. Recognize as sub-producing so the
+            // glob installs a symbol. `can` on any package/`__PACKAGE__`/class
+            // invocant qualifies; the LHS-name gate still requires a
+            // statically-derivable target name.
+            "method_call_expression" => self.method_call_yields_coderef(right),
+            _ => false,
+        }
+    }
+
+    /// Does this method call yield a coderef? Today: the universal `->can(NAME)`
+    /// (UNIVERSAL::can returns the method's coderef or undef). Invocant must be a
+    /// class-ish receiver (`Pkg`, `__PACKAGE__`, a bareword/package node) — not a
+    /// `$obj` instance, where `->can` is equally valid but the name list it feeds
+    /// (cross-package glob targets) only makes sense for class injection.
+    fn method_call_yields_coderef(&self, node: Node<'a>) -> bool {
+        let Some(method) = node.child_by_field_name("method") else { return false };
+        if method.utf8_text(self.source).ok() != Some("can") {
+            return false;
+        }
+        match node.child_by_field_name("invocant").map(|n| n.kind()) {
+            Some("package" | "bareword" | "func0op_call_expression") => true,
             _ => false,
         }
     }
@@ -7906,11 +8098,20 @@ impl<'a> Builder<'a> {
             }
         }
 
-        for (name, sel_span) in &names {
+        self.emit_class_accessor_symbols(node, &names);
+    }
+
+    /// Synthesize a stub class-data `Method` symbol per `(name, selection-span)`.
+    /// Shared by `visit_group_accessors` (direct `mk_*` call args) and the
+    /// statement-modifier loop path (`mk_classdata($_) for qw/.../`); `def_node`
+    /// anchors the definition span (the call), each name carries its own select
+    /// span so rename/goto land on the source token.
+    fn emit_class_accessor_symbols(&mut self, def_node: Node<'a>, names: &[(String, Span)]) {
+        for (name, sel_span) in names {
             self.add_symbol(
                 name.clone(),
                 SymKind::Method,
-                node_to_span(node),
+                node_to_span(def_node),
                 *sel_span,
                 SymbolDetail::Sub {
                     params: vec![ParamInfo {
