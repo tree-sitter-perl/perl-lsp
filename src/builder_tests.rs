@@ -11941,6 +11941,171 @@ fn normal_assignment_unaffected() {
     );
 }
 
+// ---- CG-3a: glob loop over a local literal-returning sub ----
+
+#[test]
+fn glob_loop_over_local_qw_sub() {
+    // CGI.pm shape: the loop source is a same-file sub returning a qw list.
+    // Each installed glob name must mint a Sub symbol.
+    let src = "\
+foreach my $tag (_all_html_tags()) {
+  no strict 'refs';
+  *$tag = sub { 1 };
+}
+sub _all_html_tags { return qw(div span br); }
+";
+    let fa = build_fa(src);
+    for name in ["div", "span", "br"] {
+        assert!(has_sub(&fa, name), "loop over local qw-returning sub must mint `{name}`");
+    }
+}
+
+#[test]
+fn glob_loop_over_local_list_sub() {
+    // Same, but the local sub returns a bare parenthesized string list
+    // (no `qw`, no explicit `return`).
+    let src = "\
+for my $m (_names()) {
+  *$m = sub { 1 };
+}
+sub _names { ('alpha', 'beta') }
+";
+    let fa = build_fa(src);
+    assert!(has_sub(&fa, "alpha"), "loop over local list-returning sub must mint alpha");
+    assert!(has_sub(&fa, "beta"), "loop over local list-returning sub must mint beta");
+}
+
+#[test]
+fn glob_loop_over_nonliteral_local_sub_skipped() {
+    // The local sub's body is computed (not a literal list) → fold yields
+    // nothing, loop var stays dynamic, no fabricated symbols.
+    let src = "\
+for my $m (_dynamic()) {
+  *$m = sub { 1 };
+}
+sub _dynamic { return map { lc } @ARGV; }
+";
+    let fa = build_fa(src);
+    assert!(
+        !fa.symbols.iter().any(|s| s.kind == SymKind::Sub && s.name != "(anon)" && s.name != "_dynamic"),
+        "non-literal local sub return must not synthesize glob names"
+    );
+}
+
+#[test]
+fn glob_loop_over_unknown_sub_skipped() {
+    // Cross-file / undefined callee — no same-file body to fold. Skip.
+    let src = "\
+for my $m (Some::Other::tags()) {
+  *$m = sub { 1 };
+}
+";
+    let fa = build_fa(src);
+    assert!(
+        !fa.symbols.iter().any(|s| s.kind == SymKind::Sub && s.name != "(anon)"),
+        "unresolvable loop-source sub must not synthesize glob names"
+    );
+}
+
+// ---- CG-3b: cross-package glob injection via ->can ----
+
+#[test]
+fn glob_loop_can_rhs_synthesizes_under_current_pkg() {
+    // DateTime::PP shape. `__PACKAGE__->can($sub)` is recognized as a
+    // sub-producing RHS; the qualified target name is synthesized as the
+    // unqualified tail under the current package (cross-package attribution
+    // deferred — see synthesize_glob_assigned_sub).
+    let src = "\
+for my $sub (qw/foo bar/) {
+  *{ 'DateTime::' . $sub } = __PACKAGE__->can($sub);
+}
+";
+    let fa = build_fa(src);
+    assert!(has_sub(&fa, "foo"), "->can RHS over loop var must mint foo (tail)");
+    assert!(has_sub(&fa, "bar"), "->can RHS over loop var must mint bar (tail)");
+    assert!(!has_sub(&fa, "DateTime::foo"), "must not register the fully-qualified name");
+}
+
+#[test]
+fn glob_can_on_package_invocant() {
+    // `Pkg->can('name')` static target also qualifies as sub-producing.
+    let fa = build_fa("*alias = Foo::Bar->can('helper');\n");
+    assert!(has_sub(&fa, "alias"), "*name = Pkg->can(...) must mint a Sub symbol");
+}
+
+#[test]
+fn glob_non_can_method_rhs_skipped() {
+    // A method call that isn't `->can` is not known to yield a coderef → skip.
+    let fa = build_fa("*thing = $obj->build_something();\n");
+    assert!(!has_sub(&fa, "thing"), "non-can method RHS must not mint a Sub symbol");
+}
+
+// ---- mk_classdata in a statement-modifier loop ----
+
+fn count_method(fa: &FileAnalysis, name: &str) -> usize {
+    fa.symbols.iter().filter(|s| s.name == name && s.kind == SymKind::Method).count()
+}
+
+#[test]
+fn mk_classdata_postfix_for_qw() {
+    // Catalyst.pm:176 shape.
+    let fa = build_fa(
+        "\
+package My::App;
+use base 'Class::Accessor::Grouped';
+__PACKAGE__->mk_classdata($_) for qw/setup_finished params/;
+",
+    );
+    assert_eq!(count_method(&fa, "setup_finished"), 1, "loop mk_classdata must mint setup_finished once");
+    assert_eq!(count_method(&fa, "params"), 1, "loop mk_classdata must mint params once");
+}
+
+#[test]
+fn mk_classdata_postfix_for_list() {
+    // `mk_classdata($_) for (LIST)` bare-call form (Controller.pm:123).
+    let fa = build_fa(
+        "\
+package My::Controller;
+use base 'Class::Accessor::Grouped';
+mk_classdata($_) for ('action_namespace', 'path_prefix');
+",
+    );
+    assert_eq!(count_method(&fa, "action_namespace"), 1, "bare-call loop must mint action_namespace");
+    assert_eq!(count_method(&fa, "path_prefix"), 1, "bare-call loop must mint path_prefix");
+}
+
+#[test]
+fn mk_classdata_postfix_for_nonliteral_skipped() {
+    // Loop over an array variable → no literal names → no synthesis.
+    let fa = build_fa(
+        "\
+package My::App;
+use base 'Class::Accessor::Grouped';
+__PACKAGE__->mk_classdata($_) for @dynamic_names;
+",
+    );
+    assert!(
+        !fa.symbols.iter().any(|s| s.kind == SymKind::Method),
+        "non-literal loop list must not synthesize accessors"
+    );
+}
+
+#[test]
+fn postfix_for_non_accessor_call_synthesizes_nothing() {
+    // Regression: a statement-modifier loop whose body is an unrelated call
+    // must not mint any accessor symbol.
+    let fa = build_fa(
+        "\
+package My::App;
+print(\"$_\\n\") for qw/a b c/;
+",
+    );
+    assert!(
+        !fa.symbols.iter().any(|s| s.kind == SymKind::Method),
+        "non-accessor postfix-for loop must not synthesize accessors"
+    );
+}
+
 // ---- Class::Tiny accessor synthesis (CG-2) ----
 
 #[test]
