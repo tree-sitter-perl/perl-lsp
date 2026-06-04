@@ -11018,6 +11018,35 @@ fn sub_exporter_generator_hashref_records_keys() {
         "export_ok should contain generator name delta; got {:?}", fa.export_ok);
 }
 
+/// Sub::Exporter `exports` member collection is separator-agnostic: the
+/// fat-comma generator entry (`bar => \&gen`) and its plain-comma equivalent
+/// (`'bar', \&gen`) both put `bar` on the surface while skipping the opaque
+/// generator value.
+#[test]
+fn sub_exporter_exports_plain_comma_members_join_surface() {
+    for exports in [
+        "[ 'foo', bar => \\&_gen ]",
+        "[ 'foo', 'bar', \\&_gen ]",
+    ] {
+        let src = format!(
+            "package My::Exp;\n\
+             use Sub::Exporter -setup => {{ exports => {exports} }};\n\
+             sub foo {{}}\n\
+             sub bar {{}}\n\
+             sub _gen {{}}\n\
+             1;\n",
+        );
+        let fa = build_fa(&src);
+        for name in ["foo", "bar"] {
+            assert!(
+                fa.exports_name(name),
+                "exports `{exports}`: `{name}` must join the surface; export_ok={:?}",
+                fa.export_ok,
+            );
+        }
+    }
+}
+
 #[test]
 fn sub_exporter_setup_array_members_and_groups_join_surface() {
     // `-setup => { exports => [ qw(foo bar), baz => \&_gen ], groups => {...} }`:
@@ -11724,6 +11753,94 @@ fn use_constant_block_form_registers_each_name() {
             fa.symbols.iter().map(|s| s.name.clone()).collect::<Vec<_>>(),
         );
     }
+}
+
+#[test]
+fn use_constant_block_plain_comma_keys_register() {
+    // `=>` is just an autoquoting comma — `{ 'GAMMA', 3 }` is identical to
+    // `{ GAMMA => 3 }`. The block walker must pair positionally, so quoted
+    // plain-comma keys register as Sub symbols exactly like fat-comma keys.
+    let fa = build_fa("use constant { 'GAMMA', 3, 'DELTA', 4, A => 1, B => 2 };\n");
+    for n in ["GAMMA", "DELTA", "A", "B"] {
+        assert!(
+            fa.symbols.iter().any(|s| s.name == n && s.kind == SymKind::Sub),
+            "plain-comma block constant `{n}` must be a Sub symbol; got: {:?}",
+            fa.symbols.iter().map(|s| s.name.clone()).collect::<Vec<_>>(),
+        );
+    }
+}
+
+/// Plain-comma block constants get usage refs + goto-def/references, the same
+/// as fat-comma — the registration path is separator-agnostic end to end.
+#[test]
+fn use_constant_block_plain_comma_goto_def_and_references() {
+    use crate::file_store::FileStore;
+    use crate::resolve::{refs_to, RoleMask, TargetKind, TargetRef};
+    use std::path::PathBuf;
+
+    let src = r#"package Foo;
+use constant { 'GAMMA', 3, DELTA => 4 };
+sub go {
+    my $a = GAMMA;
+    return DELTA;
+}
+"#;
+    let fa = build_fa(src);
+    // Usage refs emitted for both spellings' keys.
+    for n in ["GAMMA", "DELTA"] {
+        assert!(
+            fa.refs.iter().any(|r| {
+                r.target_name == n
+                    && matches!(&r.kind, RefKind::FunctionCall { resolved_package }
+                        if resolved_package.as_deref() == Some("Foo"))
+            }),
+            "usage of plain/fat-comma constant `{n}` must get a FunctionCall ref; refs: {:?}",
+            fa.refs.iter().filter(|r| r.target_name == n).collect::<Vec<_>>(),
+        );
+    }
+    let store = FileStore::new();
+    store.insert_workspace(PathBuf::from("/tmp/qa_const_plain.pm"), fa);
+    for name in ["GAMMA", "DELTA"] {
+        let results = refs_to(
+            &store,
+            None,
+            &TargetRef {
+                name: name.to_string(),
+                kind: TargetKind::Sub { package: Some("Foo".to_string()) },
+                method_classes: Vec::new(),
+            },
+            RoleMask::EDITABLE,
+        );
+        assert_eq!(
+            results.len(), 2,
+            "references on `{name}` should list its def + 1 usage; got {results:?}",
+        );
+    }
+}
+
+/// Regression: positional pairing must not invent keys from a value position.
+/// In `use constant { A => 1 }` the `1` is a value, never a constant name — the
+/// walker pairs `A`→`1` and stops, so no `1`-named (or numeric) Sub appears.
+#[test]
+fn use_constant_block_does_not_mispair_values_as_keys() {
+    let fa = build_fa("use constant { A => 1, 'B', 2 };\n");
+    let const_subs: Vec<&str> = fa
+        .symbols
+        .iter()
+        .filter(|s| s.kind == SymKind::Sub)
+        .map(|s| s.name.as_str())
+        .collect();
+    assert!(
+        const_subs.contains(&"A") && const_subs.contains(&"B"),
+        "keys A and B must register; got {:?}",
+        const_subs,
+    );
+    // The value tokens (`1`, `2`) are not keys — no numeric-named Sub symbol.
+    assert!(
+        !const_subs.iter().any(|n| *n == "1" || *n == "2"),
+        "value tokens must never register as constant names; got {:?}",
+        const_subs,
+    );
 }
 
 #[test]
@@ -12783,6 +12900,37 @@ sub opt_util { 3 }
     );
 }
 
+/// `%EXPORT_TAGS = ( all => [...] )` and the plain-comma `( 'all', [...] )`
+/// fold identically — `=>` is just an autoquoting comma, so the tag key/value
+/// pairing is positional. A `:all` import must bind the folded members in both
+/// spellings.
+#[test]
+fn export_tags_plain_comma_folds_members() {
+    for table in [
+        "( all => [qw(foo bar)] )",
+        "( 'all', [qw(foo bar)] )",
+    ] {
+        let src = format!(
+            "package P;\nour %EXPORT_TAGS = {table};\nsub foo {{ 1 }}\nsub bar {{ 2 }}\n",
+        );
+        let fa = build_fa(&src);
+        let surface = fa.export_surface();
+        let all = surface
+            .tag_members("all")
+            .unwrap_or_else(|| panic!("`all` tag must fold for table `{table}`"));
+        assert!(
+            all.contains(&"foo") && all.contains(&"bar"),
+            "table `{table}`: :all members foo+bar must fold; got {:?}",
+            all,
+        );
+        assert!(
+            fa.export_ok.contains(&"foo".to_string()),
+            "table `{table}`: tag members join the export surface; got export_ok={:?}",
+            fa.export_ok,
+        );
+    }
+}
+
 /// A constant invoked as a call (`MAX_RETRIES()`) is reffed once by the
 /// function-call path; the bareword arm must not double-emit at that span.
 #[test]
@@ -12948,6 +13096,37 @@ $obj->get_config->{host};
         "goto-def on chained `->{{host}}` should resolve to Config's key def"
     );
     assert_eq!(def.unwrap().start.row, 1, "host def is the bless key on line 1");
+}
+
+/// Plain-comma blessed hash keys (`bless { 'host', $h }`) emit HashKeyDef
+/// symbols exactly like the fat-comma spelling — `collect_pair_keys` pairs
+/// positionally, so the key is the even-position element regardless of the
+/// separator that follows it.
+#[test]
+fn blessed_hash_plain_comma_keys_emit_hash_key_defs() {
+    let src = "\
+package Config;
+sub new { bless { 'host', 'localhost', port => 5432 }, shift }
+package main;
+my $c = Config->new();
+$c->{host};
+$c->{port};
+";
+    let tree = parse(src);
+    let fa = build(&tree, src.as_bytes());
+    // `bless { ... }` inside `sub new` owns its keys by the declaring sub
+    // (Config::new) — the same owner the fat-comma spelling produces.
+    let expected = HashKeyOwner::Sub { package: Some("Config".to_string()), name: "new".to_string() };
+    for key in ["host", "port"] {
+        assert!(
+            fa.symbols.iter().any(|s| s.name == key
+                && matches!(&s.detail, SymbolDetail::HashKeyDef { owner, .. } if *owner == expected)),
+            "plain/fat-comma bless key `{key}` must emit a HashKeyDef owned by Config::new; got: {:?}",
+            fa.symbols.iter()
+                .filter(|s| matches!(s.detail, SymbolDetail::HashKeyDef { .. }))
+                .map(|s| (s.name.clone(), s.detail.clone())).collect::<Vec<_>>(),
+        );
+    }
 }
 
 /// Regression: an untyped chain (`$obj->mystery->{host}` where `mystery`

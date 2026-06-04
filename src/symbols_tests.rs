@@ -3936,6 +3936,28 @@ fn as_rename_binds_local_to_origin() {
 }
 
 #[test]
+fn as_rename_plain_comma_binds_local_to_origin() {
+    let idx = modx_index();
+    // `=>` is an autoquoting comma — `'always_here', { '-as', 'here' }` is
+    // identical to `always_here => { -as => 'here' }`. The rename parse must
+    // pair positionally so the plain-comma spelling binds the alias too.
+    let src = "use ModX 'always_here', { '-as', 'here' };\nhere();\n";
+    let analysis = parse_analysis(src);
+    let renamed = analysis
+        .imports
+        .iter()
+        .flat_map(|i| i.imported_symbols.iter())
+        .find(|s| s.local_name == "here");
+    assert!(
+        renamed.map_or(false, |s| s.remote() == "always_here"),
+        "plain-comma -as rename must bind local `here` to origin `always_here`; imports: {:?}",
+        analysis.imports.iter().map(|i| i.imported_symbols.clone()).collect::<Vec<_>>(),
+    );
+    assert!(!flags_fn(src, "here", &idx), "renamed local `here` is bound — no FP");
+    assert!(gd_resolves(src, "here", &idx), "goto-def on `here` reaches origin sub");
+}
+
+#[test]
 fn empty_import_binds_nothing_flags_export_name() {
     let idx = modx_index();
     // `use ModX ();` — explicit empty list suppresses even @EXPORT.

@@ -4626,44 +4626,30 @@ impl<'a> Builder<'a> {
         }
     }
 
-    /// Block `use constant { ... }`: a flat (possibly right-nested) list of
-    /// alternating name/value entries. Register every name as a Sub symbol
-    /// and accumulate string values keyed by name.
+    /// Block `use constant { ... }`: a flat pair list of name/value entries.
+    /// Register every name as a Sub symbol and accumulate string values keyed
+    /// by name. The separator is irrelevant — `{ A => 1 }` and `{ 'A', 1 }` are
+    /// the same positional sequence (autoquoting a bareword key changes its CST
+    /// node, not its role), so names come from `extract_node_string` (bareword
+    /// *or* quoted string), never from a `=>`-presence gate.
     fn accumulate_constant_block(&mut self, hash: Node<'a>) {
-        let mut entries: Vec<Node> = Vec::new();
-        self.collect_constant_block_entries(hash, &mut entries);
-        let mut idx = 0;
-        while idx < entries.len() {
-            let name_node = entries[idx];
-            if matches!(name_node.kind(), "autoquoted_bareword" | "bareword") {
-                if let Ok(text) = name_node.utf8_text(self.source) {
-                    let n = text.to_string();
-                    self.register_constant_symbol(&n, name_node);
-                    if let Some(val) = entries.get(idx + 1) {
-                        let values = self.extract_string_names(*val);
-                        if !values.is_empty() {
-                            self.constant_strings.entry(n).or_default().extend(values);
-                        }
-                    }
-                }
+        let list = (0..hash.named_child_count())
+            .filter_map(|i| hash.named_child(i))
+            .find(|c| c.kind() == "list_expression")
+            .unwrap_or(hash);
+        let mut flat: Vec<Node<'a>> = Vec::new();
+        Self::flatten_pair_list_children(list, &mut flat);
+        let mut decls: Vec<(String, Node<'a>, Vec<String>)> = Vec::new();
+        self.for_each_pair_node_in_children(&flat, |name_node, val_node| {
+            if let Some(n) = self.extract_node_string(name_node) {
+                decls.push((n, name_node, self.extract_string_names(val_node)));
             }
-            idx += 2;
-        }
-    }
-
-    /// Flatten the name/value entries of a block-form constant hash. The
-    /// parser right-nests trailing pairs inside a `list_expression`, so we
-    /// recurse into nested lists, collecting named leaves in source order.
-    fn collect_constant_block_entries(&self, node: Node<'a>, out: &mut Vec<Node<'a>>) {
-        for k in 0..node.child_count() {
-            let c = match node.child(k) {
-                Some(c) if c.is_named() => c,
-                _ => continue,
-            };
-            if matches!(c.kind(), "list_expression" | "anonymous_hash_expression") {
-                self.collect_constant_block_entries(c, out);
-            } else {
-                out.push(c);
+            true
+        });
+        for (name, name_node, values) in decls {
+            self.register_constant_symbol(&name, name_node);
+            if !values.is_empty() {
+                self.constant_strings.entry(name).or_default().extend(values);
             }
         }
     }
@@ -5127,31 +5113,45 @@ impl<'a> Builder<'a> {
     }
 
     /// Pull the local alias from a `{ -as => 'local' }` hashref: find the `-as`
-    /// (or `as`) key and return its string value.
+    /// (or `as`) key and return its value as the local alias. Pairs positionally
+    /// through the shared walker, so the plain-comma `{ '-as', 'local' }` spelling
+    /// binds identically to the fat-comma form (`=>` is just an autoquoting comma).
+    /// The key is matched on its *normalized text* (`-as` parses as a
+    /// `unary_expression` wrapping `as` in the fat-comma form, a `string_literal`
+    /// in the plain-comma form), never on a `=>` gate.
     fn extract_as_alias(&self, hashref: Node<'a>) -> Option<String> {
-        // The hashref body is a `list_expression` of `key => value` tokens.
         let body = (0..hashref.named_child_count())
             .filter_map(|i| hashref.named_child(i))
             .find(|c| c.kind() == "list_expression")
             .unwrap_or(hashref);
-        let mut saw_as_key = false;
-        for i in 0..body.named_child_count() {
-            let Some(child) = body.named_child(i) else { continue };
-            let text = child.utf8_text(self.source).unwrap_or("");
-            let bare = text.trim().trim_matches(|c| c == '\'' || c == '"');
-            if saw_as_key {
-                let local = bare.trim_start_matches('-');
+        let children: Vec<Node<'a>> = (0..body.child_count())
+            .filter_map(|i| body.child(i))
+            .collect();
+        let mut alias = None;
+        self.for_each_pair_node_in_children(&children, |k_node, v_node| {
+            let key = k_node
+                .utf8_text(self.source)
+                .unwrap_or("")
+                .trim()
+                .trim_matches(|c| c == '\'' || c == '"')
+                .trim_start_matches('-')
+                .to_string();
+            if key == "as" {
+                let local = v_node
+                    .utf8_text(self.source)
+                    .unwrap_or("")
+                    .trim()
+                    .trim_matches(|c| c == '\'' || c == '"')
+                    .trim_start_matches('-')
+                    .to_string();
                 if !local.is_empty() {
-                    return Some(local.to_string());
+                    alias = Some(local);
+                    return false;
                 }
             }
-            // `-as` parses as a `unary_expression` (the `-`) wrapping `as`; the
-            // raw text still ends with `as`, so match on the normalized token.
-            if bare.trim_start_matches('-') == "as" {
-                saw_as_key = true;
-            }
-        }
-        None
+            true
+        });
+        alias
     }
 
     /// Extract the import list from a use statement.
@@ -6728,12 +6728,12 @@ impl<'a> Builder<'a> {
         // `key => [...]` pairs rather than recursing into the arrayrefs.
         let mut lists: Vec<Node<'a>> = Vec::new();
         Self::collect_list_expressions(body, &mut lists);
-        // Collect first, record after — `for_each_fat_comma_pair` holds a
+        // Collect first, record after — `for_each_pair_in_list` holds a
         // shared borrow of self that `record_runtime_exports` (mut) can't
         // overlap.
         let mut names: Vec<String> = Vec::new();
         for list in lists {
-            self.for_each_fat_comma_pair(list, |key, val| {
+            self.for_each_pair_in_list(list, |key, val| {
                 if matches!(key, "export" | "export_ok") {
                     names.extend(Self::keep_sub_export_names(self.extract_string_names(val)));
                 }
@@ -7838,11 +7838,11 @@ impl<'a> Builder<'a> {
         let named: Vec<Node<'a>> = rest.iter().copied().filter(|n| n.is_named()).collect();
         if let [only] = named.as_slice() {
             if matches!(only.kind(), "list_expression" | "parenthesized_expression") {
-                self.for_each_fat_comma_pair(*only, f);
+                self.for_each_pair_in_list(*only, f);
                 return;
             }
         }
-        self.for_each_fat_comma_pair_in_children(rest, f);
+        self.for_each_pair_in_children(rest, f);
     }
 
     fn collect_has_option_value_nodes(
@@ -8104,14 +8104,17 @@ impl<'a> Builder<'a> {
     // otherwise goto-def stops at the `use` line. Conditional/dynamic
     // exports built at runtime are unmodeled.
 
-    /// Walk a fat-comma list, invoking `f(key_string, value_node)` for each
-    /// `key => value` pair. The single fat-comma scanner — every "find the
-    /// value after a key" caller routes here. Accepts a bare `list_expression`
-    /// / `parenthesized_expression` or an `anonymous_hash_expression` (its
-    /// inner list is unwrapped). Keys are barewords, autoquoted barewords
-    /// (`-setup`), or strings; non-key/non-value tokens (commas, `=>`) skip.
-    /// Stops early when `f` returns `false`.
-    fn for_each_fat_comma_pair<F>(&self, container: Node<'a>, f: F)
+    /// Walk a pair list, invoking `f(key_string, value_node)` for each
+    /// positional `key, value` pair. The single pair scanner — every "find the
+    /// value after a key" caller routes here. The separator is irrelevant: `=>`
+    /// is a comma that autoquotes a bareword LHS, so `a => 1` and `'a', 1` are
+    /// the same flat sequence (elem[2k]→key, elem[2k+1]→value). Accepts a bare
+    /// `list_expression` / `parenthesized_expression` or an
+    /// `anonymous_hash_expression` (its inner list is unwrapped). Keys are
+    /// barewords, autoquoted barewords (`-setup`), or strings; the inter-token
+    /// commas / `=>` are skipped positionally. Stops early when `f` returns
+    /// `false`.
+    fn for_each_pair_in_list<F>(&self, container: Node<'a>, f: F)
     where
         F: FnMut(&str, Node<'a>) -> bool,
     {
@@ -8124,11 +8127,11 @@ impl<'a> Builder<'a> {
             container
         };
         let mut children: Vec<Node<'a>> = Vec::new();
-        Self::flatten_fat_comma_children(list, &mut children);
-        self.for_each_fat_comma_pair_in_children(&children, f);
+        Self::flatten_pair_list_children(list, &mut children);
+        self.for_each_pair_in_children(&children, f);
     }
 
-    /// Flatten a fat-comma container's children into one token stream,
+    /// Flatten a pair-list container's children into one token stream,
     /// descending tree-sitter-perl's right-associative nesting: `a => 1, b =>
     /// 2` parses as `a, =>, 1, (b, =>, 2)` — the tail pairs hide inside a
     /// nested `list_expression`. We splice that nested list's children inline
@@ -8137,7 +8140,7 @@ impl<'a> Builder<'a> {
     /// nests when it's the last child, so descending the trailing wrapper is
     /// safe — a non-trailing list is a genuine multi-element value and is kept
     /// whole.
-    fn flatten_fat_comma_children(list: Node<'a>, out: &mut Vec<Node<'a>>) {
+    fn flatten_pair_list_children(list: Node<'a>, out: &mut Vec<Node<'a>>) {
         let count = list.child_count();
         for i in 0..count {
             let Some(child) = list.child(i) else { continue };
@@ -8145,22 +8148,41 @@ impl<'a> Builder<'a> {
             // the pair stream; everything else (including a non-trailing list
             // that is a real value) stays as-is.
             if child.kind() == "list_expression" && i + 1 == count {
-                Self::flatten_fat_comma_children(child, out);
+                Self::flatten_pair_list_children(child, out);
             } else {
                 out.push(child);
             }
         }
     }
 
-    /// Slice variant of `for_each_fat_comma_pair`: walk a flat sequence of
-    /// sibling nodes (including the inter-token commas / `=>`) as fat-comma
+    /// Slice variant of `for_each_pair_in_list`: walk a flat sequence of
+    /// sibling nodes (including the inter-token commas / `=>`) as positional
     /// pairs. Lets callers feed a *sub-range* of a container's children —
     /// e.g. the option tail of `has 'name', is => 'ro', ...`, where the name
     /// and the options share one `list_expression` parent and there's no
-    /// nested options node to hand to the container variant.
-    fn for_each_fat_comma_pair_in_children<F>(&self, children: &[Node<'a>], mut f: F)
+    /// nested options node to hand to the container variant. String-key
+    /// projection over `for_each_pair_node_in_children`.
+    fn for_each_pair_in_children<F>(&self, children: &[Node<'a>], mut f: F)
     where
         F: FnMut(&str, Node<'a>) -> bool,
+    {
+        self.for_each_pair_node_in_children(children, |k_node, val| {
+            match self.extract_node_string(k_node) {
+                Some(key) => f(&key, val),
+                None => true,
+            }
+        });
+    }
+
+    /// Node-level pair walker: walk a flat sibling sequence as positional
+    /// `(key_node, value_node)` pairs, separator-agnostic (the `,` / `=>`
+    /// between tokens is skipped by position, never matched). The canonical
+    /// pairing primitive — `for_each_pair_in_children` is its string-key
+    /// projection, and span-needing callers (constant block, hash-key defs)
+    /// read the key node directly. Stops early when `f` returns `false`.
+    fn for_each_pair_node_in_children<F>(&self, children: &[Node<'a>], mut f: F)
+    where
+        F: FnMut(Node<'a>, Node<'a>) -> bool,
     {
         let count = children.len();
         let mut i = 0;
@@ -8168,8 +8190,7 @@ impl<'a> Builder<'a> {
             let k_node = children[i];
             i += 1;
             if !k_node.is_named() { continue; }
-            let Some(key) = self.extract_node_string(k_node) else { continue; };
-            // Skip the fat comma / commas to the next named node (the value).
+            // Skip the comma / fat comma to the next named node (the value).
             let val = loop {
                 match children.get(i) {
                     Some(c) if c.is_named() => break Some(*c),
@@ -8179,15 +8200,16 @@ impl<'a> Builder<'a> {
             };
             let Some(val) = val else { break; };
             i += 1; // step past the value so the next key isn't read off it
-            if !f(&key, val) { return; }
+            if !f(k_node, val) { return; }
         }
     }
 
-    /// Find the value node following a fat-comma `key` in a list-like
-    /// container. Thin single-key lookup over `for_each_fat_comma_pair`.
+    /// Find the value node following a `key` in a list-like container. Thin
+    /// single-key lookup over `for_each_pair_in_list`. Pairs positionally —
+    /// works for both `key => value` and the plain-comma `'key', value`.
     fn value_node_after_key(&self, container: Node<'a>, key: &str) -> Option<Node<'a>> {
         let mut found = None;
-        self.for_each_fat_comma_pair(container, |k, v| {
+        self.for_each_pair_in_list(container, |k, v| {
             if k == key {
                 found = Some(v);
                 false
@@ -8231,10 +8253,10 @@ impl<'a> Builder<'a> {
         // selector, never folded — it's a fat-comma key we descend past to its
         // value (the member array), not a member itself.
         if let Some(groups) = self.value_node_after_key(config, "groups") {
-            // `for_each_fat_comma_pair` holds a shared borrow; collect the
+            // `for_each_pair_in_list` holds a shared borrow; collect the
             // group member nodes first, then fold them.
             let mut member_nodes: Vec<Node<'a>> = Vec::new();
-            self.for_each_fat_comma_pair(groups, |_group_name, members_node| {
+            self.for_each_pair_in_list(groups, |_group_name, members_node| {
                 member_nodes.push(members_node);
                 true
             });
@@ -9173,9 +9195,9 @@ impl<'a> Builder<'a> {
         // Detect bless context for hash key ownership
         let owner = self.detect_anon_hash_owner(node);
 
-        // Collect fat-comma keys as HashKeyDef symbols
+        // Collect hash-literal keys as HashKeyDef symbols
         if let Some(ref owner) = owner {
-            self.collect_fat_comma_keys(node, owner);
+            self.collect_pair_keys(node, owner);
         }
 
         self.visit_children(node);
@@ -9692,7 +9714,7 @@ impl<'a> Builder<'a> {
     /// Perl, `foo(a => 1, "b", 2, c => 3)` is `foo("a", 1, "b", 2,
     /// "c", 3)` — `=>` is just an autoquoting comma. The keys are
     /// the even-position named args, regardless of which separator
-    /// comes after them. Mirrors `collect_fat_comma_keys` (callee
+    /// comes after them. Mirrors `collect_pair_keys` (callee
     /// side, emits HashKeyDef symbols); this is the caller side, so
     /// `ref_at` on the key token picks the narrow span over the
     /// broad MethodCall/FunctionCall ref. Without this, cursor on
@@ -9796,37 +9818,48 @@ impl<'a> Builder<'a> {
         })
     }
 
-    fn collect_fat_comma_keys(&mut self, node: Node<'a>, owner: &HashKeyOwner) {
-        // Walk children looking for `bareword => ...` or `'string' => ...`
-        for i in 0..node.child_count() {
-            if let Some(child) = node.child(i) {
-                // Check if next sibling is =>
-                if let Some(next) = child.next_sibling() {
-                    if next.kind() == "=>" {
-                        if matches!(child.kind(), "autoquoted_bareword" | "string_literal" | "interpolated_string_literal") {
-                            if let Some((key, is_dynamic)) = self.extract_key_text(child) {
-                                if !is_dynamic {
-                                    self.add_symbol(
-                                        key,
-                                        SymKind::HashKeyDef,
-                                        node_to_span(child),
-                                        node_to_span(child),
-                                        SymbolDetail::HashKeyDef {
-                                            owner: owner.clone(),
-                                            is_dynamic: false,
-                    
-                                        },
-                                    );
-                                }
-                            }
-                        }
+    /// Emit a `HashKeyDef` symbol for every key in a hash literal owned by
+    /// `owner` (e.g. a blessed `{ ... }`). Keys are the even-position elements
+    /// of the flat pair sequence — `{ a => 1, 'b', 2 }` is `{ 'a', 1, 'b', 2 }`,
+    /// so the separator (`,` vs `=>`) is irrelevant; we pair positionally via
+    /// the shared node-level walker and take each key node.
+    fn collect_pair_keys(&mut self, node: Node<'a>, owner: &HashKeyOwner) {
+        // Unwrap the hash wrapper to its inner list, then flatten the
+        // right-associative pair nesting into one stream so positional pairing
+        // sees every key/value across the `(b, =>, 2)` continuation boundary —
+        // the value side is a real value, never re-scanned as a key.
+        let list = if node.kind() == "anonymous_hash_expression" {
+            (0..node.named_child_count())
+                .filter_map(|i| node.named_child(i))
+                .find(|c| c.kind() == "list_expression")
+                .unwrap_or(node)
+        } else {
+            node
+        };
+        let mut flat: Vec<Node<'a>> = Vec::new();
+        Self::flatten_pair_list_children(list, &mut flat);
+        let mut defs: Vec<(String, Span)> = Vec::new();
+        self.for_each_pair_node_in_children(&flat, |k_node, _val| {
+            if matches!(
+                k_node.kind(),
+                "autoquoted_bareword" | "string_literal" | "interpolated_string_literal"
+            ) {
+                if let Some((key, is_dynamic)) = self.extract_key_text(k_node) {
+                    if !is_dynamic {
+                        defs.push((key, node_to_span(k_node)));
                     }
                 }
-                // Recurse into nested list_expressions
-                if child.kind() == "list_expression" {
-                    self.collect_fat_comma_keys(child, owner);
-                }
             }
+            true
+        });
+        for (key, span) in defs {
+            self.add_symbol(
+                key,
+                SymKind::HashKeyDef,
+                span,
+                span,
+                SymbolDetail::HashKeyDef { owner: owner.clone(), is_dynamic: false },
+            );
         }
     }
 
