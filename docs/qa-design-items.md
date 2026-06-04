@@ -1,5 +1,18 @@
 # QA design items — needs design, do not implement yet
 
+> **STATUS (2026-06-05, EV 54)** — most of these landed during the sprint; the
+> write-ups stay as reference / provenance. Per item:
+> - **LANDED:** NAV (resolved-target edge + honest-miss) · A4 (SlotType witness +
+>   reducer, v1 within-file) · E2 (helper `$c`, named-sub + inline) · D1 (multi-hop
+>   `@ISA` — verified *already* closed) · B-tag (`%EXPORT_TAGS` incl. Readonly) ·
+>   B4 (FQ-global `@Pkg::EXPORT` fold) · B2/B3 *consumer half* (bare/`:tag`/`-as`
+>   import-binding).
+> - **PARKED:** B2/B3 *re-export half* (Test::Most chains) — blocked on the upstream
+>   X1 scanner thread-safety fix (`docs/parser-shortcomings.md`).
+> - **PUNTED (next sprint):** MAIN-1, H1, MooseX::Role::Parameterized.
+> - **MOVED to `docs/prompt-type-system-futures.md`:** NARROW-1 (narrowing/
+>   flow-sensitivity — out of scope this sprint).
+
 QA-findings clusters that are **not** quick fixes: each needs a design
 decision (where the rule lives, what type/witness shape carries it,
 whether it's core or plugin) before code. Implementing the smallest diff

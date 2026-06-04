@@ -1,86 +1,56 @@
 # QA findings — open worklist
 
-Tracks what's **open**. Landed work is collapsed into the summary below (kept for the PR body).
-QA corpus: ~45 real projects across eras/authors (`~/perl-qa-corpus` + earlier `~/personal` sweeps).
+Tracks what's **open**; landed work is collapsed into the summary. `usability-sprint @ 4071e46`, EV 54,
+853 unit + 108 e2e green. Corpus: ~45 real projects across eras/authors.
 
-## ✅ Landed (PR #45 — sprint + 6 rounds + focused fixes, EXTRACT_VERSION 49)
-**Zero crashes/panics across the entire corpus** throughout. Warning-severity channel is clean everywhere
-(noise lived in hint/info, now largely cleared). Highlights:
+## ✅ Landed (PR #45 — full sprint, EV 54)
+**Zero crashes across the corpus; warning-severity channel clean everywhere.**
+- **Classic-Perl FPs:** filehandles (indirect-object), `use constant` (scalar / block / multi-NAME-form),
+  `my $x = shift`, `require Bareword`.
+- **Frameworks/codegen:** `requires`/Role::Tiny, Class::Tiny, `use X -base`, `has` comma-form, DBIC ancestry,
+  `mk_group_accessors`/`mk_classdata` (incl. `for`-loop), typeglob codegen (`*name`/`*$x`=sub, literal-return
+  loop, cross-pkg `*{'Pkg::'.$n}=->can()`), AutoLoader/SelfLoader `__END__` subs, hashref-value typing,
+  MooX::Options `option`, E2 helper `$c` (named-sub + inline).
+- **NAV unification:** method-call refs carry a build-time resolved-target edge (refs_to/goto-def/hover
+  single-sourced); precise **and** complete (0% false-exclusion, 100% typed recall), **arbitrary depth** incl.
+  chained-method-return invocants; package-decl + same-name fallbacks dropped → honest-miss on untyped receivers.
+- **A4 hash-slot typing** (the `Mutates` effect, v1 within-file): `SlotType{class,key}` witness + `SlotTypeFold`;
+  `$self->{k}=Obj->new; my $x=$self->{k}; $x->m` resolves. (Over-typing-as-container-class fixed.)
+- **Exporter:** consumer import-binding (bare→`@EXPORT`, `:tag`/`:DEFAULT`, `-as`), single-sourced
+  diagnostic+goto-def; FQ-global `@Pkg::EXPORT` folded (**Bugzilla unresolved-function 1163→95**); export-member
+  refs; Sub::Exporter `-setup`/`setup_exporter`; `%EXPORT_TAGS` (incl. Readonly).
+- **Generic FQ symbols** (`split_qualified`): `Foo::bar()` calls + `$Foo::Bar::x` var reads.
+- **Fat-comma:** every pair-walker positional (`=>` ≡ `,`); helpers renamed `*_fat_comma_*`→`*_pair_*`.
+- **Resolution:** qualified `Pkg::sub` calls; imported-fn goto-def → the sub; `Class->method`→`package`; multi-hop
+  `@ISA` (**verified closed**); cross-`@INC` inheritance (when the parent is installed); incomplete-ISA →
+  unresolved-method suppressed.
+- **Robustness/perf:** cache-clobber fix (a `None` on-demand miss no longer overwrites an indexed `Some`);
+  cold-start 9 min→seconds; CLI `--references`/`--definition` position renderer; `--timings`; committed e2e
+  warmup; ts-parser-perl 1.0.1→1.0.3.
+- **Parser handoff:** `docs/parser-shortcomings.md` G1–G7, GR-1/2/3, X1 scanner thread-safety race.
 
-- **Classic-Perl FPs:** bare-word filehandles (indirect-object), `use constant` (scalar; multi NAME-form),
-  `my $x = shift` typing, `require Bareword`.
-- **Frameworks/codegen:** `requires`/Role::Tiny, Class::Tiny, `use X -base`, `has` comma-form, DBIC ancestry
-  walk, `mk_group_accessors`/`mk_classdata` (incl. statement-modifier `for`), typeglob codegen (`*name=sub`,
-  `*$m=sub` over literal-returning locals, cross-package `*{'Pkg::'.$n}=…->can()`), AutoLoader/SelfLoader
-  `__END__` subs, hashref-value typing.
-- **NAV unification:** method-call refs carry a build-time resolved-target edge (`refs_to`/goto-def/hover
-  single-sourced); precise **and** complete, validated 0% false-exclusion + 100% typed recall, **arbitrarily
-  deep** chains; package-decl fallback dropped (honest miss); chained `->method->{key}` build-time owner.
-- **Exporter producer surface:** `@EXPORT`/`@EXPORT_OK`/`%EXPORT_TAGS` (incl. `Readonly`-wrapped) + Sub::Exporter
-  `-setup`/`setup_exporter` folded into one surface; export-member refs; tag-import goto-def.
-- **Resolution:** qualified `Pkg::Bar::baz()` calls; imported-fn goto-def lands on the sub (not the `use`);
-  `Class->method`→`package` ref; **multi-hop `@ISA` verified closed**; cross-`@INC` inheritance resolves when
-  the parent is installed; incomplete-ISA chain → `unresolved-method` suppressed (honest).
-- **Perf/infra:** cold-start 9 min → seconds (witness-bag memo); CLI `--references`/`--definition` position
-  renderer fixed; `--timings`; committed e2e warmup; `ts-parser-perl` 1.0.1 → 1.0.3.
-- **Parser handoff:** `docs/parser-shortcomings.md` G1–G7 + GR-1/GR-2 (+ G4 with a removable builder kludge).
+## OPEN — sprint finish
+### re-export chains — PARKED on the upstream scanner fix
+Branch `worktree-agent-aae99d42f4d5d74bc` (7503933; worktree pruned, branch kept). Correct in isolation
+(Test::Most `ok`/`is` resolve at the unit level) but triggers the **X1 scanner abort** under concurrent parsing.
+Unblocks when the ts-parser-perl external scanner is made thread-safe (or re-export serializes its added
+parsing). On rework: rebase, confirm no Bugzilla-cold abort, and **re-verify Test::Most→Test::More end-to-end**
+(my CLI showed "0 resolved" — possibly the now-fixed cache-clobber bug). Design: `docs/adr/reexport-surface.md`
+(on the branch); forms 1/2/3 done, form-4 (runtime `import` delegation) deferred (control-flow).
+### BIG QA PASS — the capstone (after re-export lands; Veesh: one comprehensive pass)
+Corpus sweep + def-type matrix + strictness audit, **and investigate Bugzilla `unresolved-method` 251→267
+(+16)** introduced by the FQ/H2 wave.
+### Then: finalize **PR #45 → main**.
 
----
+## Punted (next sprint)
+MAIN-1 (`main::`-across-`require`), H1 (dup-package path/role ranking — hard), MooseX::Role::Parameterized,
+**narrowing / flow-sensitivity** (NARROW-1 + A4's cross-*branch* tail — `docs/prompt-type-system-futures.md`).
 
-## OPEN
-
-### Exporter subsystem (Pillar 1) — the largest remaining FP lever
-- **Consumer import-binding — IN FLIGHT.** bare `use M;`→`@EXPORT`, `:tag`/`:DEFAULT` expansion, `-as` rename,
-  single-sourced for diagnostics+nav. Clears the dominant Bugzilla FP (1155 `unresolved-function`, e.g. bare
-  `use Bugzilla::Util;`). Design: `qa-design-items.md` § B2/B3.
-- **Deferred follow-ups:** re-export chains (Test::Most 253 / Test::Spec 129 — runtime `push @EXPORT =>
-  @{"$m::EXPORT"}` idiom) · regex import args (`qw(/^foo/)`) / negation selectors (B7).
-
-### Fat-comma audit — QUEUED (after exporter binding lands)
-`=>` has no *code* semantics (it's a comma + bareword autoquote), so pair-walkers must pair **positionally**, not
-match the `=>` node. Confirmed debt: `use constant { 'GAMMA', 3 }` (plain-comma block) registers nothing while
-`{ A => 1 }` works. Audit/fix: use-constant block, `%EXPORT_TAGS` table, Sub::Exporter `exports`/`groups`,
-export-member collector, the new exporter `imported_names`/`extract_as_renames`/`-as` parse, plus the
-`for_each_fat_comma_pair`/`flatten_fat_comma` helpers. (Rule now in CLAUDE.md.)
-- **Also rename** every helper/method whose name says `fat_comma` — the name describes the surface token, not
-  the positional-pair semantics it implements (e.g. `for_each_fat_comma_pair` → `for_each_pair_in_list`,
-  `flatten_fat_comma` → `flatten_pair_list`). `grep -rn fat_comma src/` for the set; rename in the same sweep.
-- **Human-semantics note (future):** `=>` *does* carry human intent ("LHS is a key/label") — a legitimate
-  **hint** we may lean on later (disambiguation / which-element-is-the-name), but only as a heuristic tie-breaker,
-  never a hard gate. The correctness path stays separator-agnostic.
-
-### Generic fully-qualified (FQ) symbol handling — DESIGN (cross-cutting cleanup)
-We keep adding a per-construct qualifier-stripper: `Ref::unqualified_target_name()` for `Foo::Bar::baz()` calls
-(R6), `Builder::export_var_basename` for `@Pkg::EXPORT`/`%Pkg::EXPORT_TAGS` globals (exporter round). Same
-underlying fact each time: a name token may carry a `Pkg::` qualifier; resolution = `(qualifier ?? current_pkg,
-basename)`. Generically un-handled today: FQ *variable* reads (`$Foo::Bar::x`, `@Pkg::arr`, `%Pkg::h`), `\&Pkg::sub`.
-**Unify:** one `split_qualified(name) -> (Option<pkg>, basename)` that every symbol/ref consumer resolves through
-(rule #10 — encode "is qualified" on the name/ref once), retiring the bespoke strippers. Deferred; documented here.
-
-### Type inference — DESIGN (`qa-design-items.md`)
-- **A4 — hash-extracted invocant** (Pillar 2). `my $x = $self->{field}; $x->method` → `HashRef`; also the
-  `Bugzilla::Memcached` field-type case. Slot→type witnesses from observed writes; never "no evidence → HashRef".
-- **NARROW-1** — `_INSTANCE($x,'Class')` / `ref $x eq 'Class'` narrowing guards (flow-sensitive, branch-scoped).
-- **E2** — helper/callback `$c` typed by registration context (Mojo ~75).
-
-### Inheritance / cross-file — DESIGN
-- **MAIN-1** — `main::` aggregation across `require` of package-less scripts (legacy CGI, AWStats ~270).
-- **@INC-dependency inheritance residue** — methods from *uninstalled* CPAN parents (TheSchwartz) resolve once
-  installed; **DBI-XS** (runtime-typeglob-installed) and template-method (subclass-defined) cases are inherent.
-
-### Minor / nav-quality
-- unknown-receiver same-name goto-def fallback → prefer honest-miss (libwww). · **H1** duplicate-package
-  resolution (path/role ranking; interacts with exporter @EXPORT). · **H2** block-scoped `package` reversion. ·
-  **H4** bless-constructor type. · goto-def off-by-one. · **E4** MooX::Options `option` / `with` role-required /
-  MooseX::Role::Parameterized.
-
-### Forward / parked
-- Exporter **recognition→plugin extraction** (the `ExportSurface`/`ExportDecl` seam; `exporters-core-vs-byo`).
-
-## Grammar gaps — handed off (awaiting parser team)
-`docs/parser-shortcomings.md`: G1 `$#_`-in-string · G2 top-level bare block · G3 `<<''` · G4 bareword filehandle
-· G5/G6 (per doc) · G7 `"${@}"` block-interp bleed · GR-1 v-string · GR-2 bareword-`&&`. (`not` = ts-perl#230.)
+## Post-land tech debt / futures
+Exporter recognition→**plugin extraction** (the `ExportSurface` seam) · **effects/`throws`** (designed,
+`docs/prompt-type-system-futures.md`) · **A4 v2: cross-FILE slot writes** (module_index bridge, the
+`MethodOnClass` pattern).
 
 ## Reference — confirmed NOT bugs
-XS-defined methods (DBI, PPI-on-untyped-param) · truly-dynamic `*{$runtime}=…` installs · methods from
-not-installed dependencies · `--dump-package` faithfully mirrors the editor query path.
+XS methods (DBI, PPI-on-untyped-param) · truly-dynamic `*{$runtime}=…` installs · methods from not-installed
+deps · `--dump-package` faithfully mirrors the editor query path.
