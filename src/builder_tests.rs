@@ -12993,3 +12993,118 @@ fn same_package_glob_synthesizes_under_current_package() {
             .collect::<Vec<_>>()
     );
 }
+
+// ---- ${@} block-interpolation token-stream bleed recovery (TASK-C / G1) ----
+//
+// `"${@}"` (the `@` sigil inside `${...}`) mis-lexes: the string's closing
+// quote is swallowed, wrapping the rest of the file in an ERROR and dissolving
+// every following `sub` into stray tokens — they survive NOWHERE in the tree.
+// Source-text recovery inside the ERROR span restores them. See
+// docs/parser-shortcomings.md (G1) and docs/adr/error-recovery.md.
+
+fn sub_names(fa: &FileAnalysis) -> Vec<String> {
+    fa.symbols
+        .iter()
+        .filter(|s| matches!(s.kind, SymKind::Sub | SymKind::Method))
+        .map(|s| s.name.clone())
+        .collect()
+}
+
+#[test]
+fn dollar_at_block_interp_bleed_recovers_following_subs() {
+    let src = r#"package Foo;
+my $x = "err ${@} more text here";
+sub alpha { return 1; }
+sub beta { return 2; }
+sub gamma { my $self = shift; return $self; }
+1;
+"#;
+    let fa = build_fa(src);
+    // The bleed produces zero subroutine_declaration_statement nodes; without
+    // text recovery this asserts 0 subs.
+    let names = sub_names(&fa);
+    for want in ["alpha", "beta", "gamma"] {
+        assert!(
+            names.iter().any(|n| n == want),
+            "sub `{want}` must survive the ${{@}} bleed; recovered: {names:?}"
+        );
+    }
+}
+
+#[test]
+fn dollar_at_block_interp_recovered_sub_has_correct_position() {
+    let src = r#"package Foo;
+my $x = "err ${@}";
+sub alpha { return 1; }
+1;
+"#;
+    let fa = build_fa(src);
+    let alpha = fa
+        .symbols
+        .iter()
+        .find(|s| s.name == "alpha" && matches!(s.kind, SymKind::Sub))
+        .expect("alpha recovered");
+    // `sub alpha` is on row 2 (0-based), name token at column 4.
+    assert_eq!(alpha.selection_span.start.row, 2, "alpha row");
+    assert_eq!(alpha.selection_span.start.column, 4, "alpha name column");
+    assert_eq!(alpha.package.as_deref(), Some("Foo"), "alpha package");
+}
+
+#[test]
+fn dollar_at_block_interp_bleed_keeps_package() {
+    // The package statement precedes the bleed and must still be indexed so the
+    // recovered subs key under the right package.
+    let src = r#"package Net::DNS::RR;
+my $e = "${@}in $stmnt\n";
+sub new { }
+sub decode { }
+sub encode { }
+1;
+"#;
+    let fa = build_fa(src);
+    assert!(
+        fa.symbols
+            .iter()
+            .any(|s| s.name == "Net::DNS::RR" && matches!(s.kind, SymKind::Package)),
+        "package survives the bleed"
+    );
+    for want in ["new", "decode", "encode"] {
+        assert!(
+            fa.symbols.iter().any(|s| s.name == want
+                && matches!(s.kind, SymKind::Sub | SymKind::Method)
+                && s.package.as_deref() == Some("Net::DNS::RR")),
+            "sub `{want}` recovered under Net::DNS::RR"
+        );
+    }
+}
+
+#[test]
+fn normal_parse_unaffected_by_error_text_recovery() {
+    // Regression: text recovery only runs inside ERROR spans, so a clean file
+    // must produce exactly the structurally-parsed subs with no duplicates.
+    let src = r#"package Foo;
+sub one { 1 }
+sub two { 2 }
+1;
+"#;
+    let fa = build_fa(src);
+    let mut names = sub_names(&fa);
+    names.sort();
+    assert_eq!(names, vec!["one".to_string(), "two".to_string()]);
+}
+
+#[test]
+fn error_text_recovery_does_not_duplicate_a_recovered_sub() {
+    // A sub inside an ERROR region must be recovered exactly once even when the
+    // structural loop and the text scan could fire on overlapping spans (the
+    // row-based dedup guards this). `if (` wraps the trailing sub in an ERROR;
+    // the sub mis-parses, so the text scan recovers it — and must do so once.
+    let src = "package Foo;\nif (\nsub kept { 1 }\n";
+    let fa = build_fa(src);
+    let kept: Vec<_> = fa
+        .symbols
+        .iter()
+        .filter(|s| s.name == "kept" && matches!(s.kind, SymKind::Sub | SymKind::Method))
+        .collect();
+    assert_eq!(kept.len(), 1, "no duplicate `kept`: {kept:?}");
+}

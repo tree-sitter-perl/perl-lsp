@@ -3033,6 +3033,113 @@ impl<'a> Builder<'a> {
                 }
             }
         }
+        // Token-stream bleed insurance: when a mis-lexed string (`"${@}…"`,
+        // an unterminated heredoc, etc.) swallows the closing delimiter, the
+        // bleed dissolves every `sub`/`method` declaration in the trailing
+        // region into stray tokens — they survive neither as
+        // subroutine_declaration_statement children (the structural loop
+        // above) nor anywhere else in the tree. The file is "decapitated":
+        // a 36-sub module indexes 0 subs, cascading to total loss of
+        // inherited goto-def/references across subclasses. Recover those
+        // declarations from raw source text inside the ERROR span. Generic:
+        // gated only on "we are inside a parse ERROR", never on any module.
+        // See docs/parser-shortcomings.md (G1/TASK-C) and
+        // docs/adr/error-recovery.md.
+        self.recover_subs_from_error_text(error_node);
+    }
+
+    /// Source-text fallback for declarations a token-stream bleed destroyed.
+    /// Scans the ERROR node's raw bytes for statement-position `sub NAME` /
+    /// `method NAME` and synthesizes minimal Sub/Method symbols for any not
+    /// already captured (structurally, or on this row). Only declarations
+    /// inside the ERROR span are considered — outside it tree-sitter parsed
+    /// correctly and owns the symbol.
+    fn recover_subs_from_error_text(&mut self, error_node: Node<'a>) {
+        let start_row = error_node.start_position().row;
+        let start_col = error_node.start_position().column;
+        let text = match error_node.utf8_text(self.source) {
+            Ok(t) => t,
+            Err(_) => return,
+        };
+        let pkg_is_subclass = self.current_package
+            .as_ref()
+            .map_or(false, |p| self.package_parents.contains_key(p));
+
+        for (line_off, line) in text.lines().enumerate() {
+            let row = start_row + line_off;
+            // The ERROR text's first line starts at the node's column; later
+            // lines start at column 0. Offset the recovered spans so they map
+            // back to true file columns.
+            let col_base = if line_off == 0 { start_col } else { 0 };
+            let trimmed = line.trim_start();
+            let indent = line.len() - trimmed.len();
+            let (kw_is_method, rest) = if let Some(r) = trimmed.strip_prefix("sub ") {
+                (false, r)
+            } else if let Some(r) = trimmed.strip_prefix("method ") {
+                (true, r)
+            } else {
+                continue;
+            };
+            let name_pad = rest.len() - rest.trim_start().len();
+            let rest = rest.trim_start();
+            let name: String = rest
+                .chars()
+                .take_while(|c| c.is_alphanumeric() || *c == '_')
+                .collect();
+            if name.is_empty() {
+                continue;
+            }
+            // The next non-space char after the name must look like a
+            // declaration: `{` (body), `(` (signature/prototype), `:`
+            // (attribute), `;` (forward decl), or EOL. Filters bareword noise
+            // like `$x->sub foo` that is not a real declaration.
+            let after = rest[name.len()..].trim_start();
+            let looks_decl = after.is_empty()
+                || after.starts_with('{')
+                || after.starts_with('(')
+                || after.starts_with(':')
+                || after.starts_with(';');
+            if !looks_decl {
+                continue;
+            }
+
+            // Dedup: skip if a Sub/Method symbol already lands on this row
+            // (recovered structurally above, or by an overlapping ERROR).
+            if self.symbols.iter().any(|s| {
+                matches!(s.kind, SymKind::Sub | SymKind::Method)
+                    && s.selection_span.start.row == row
+            }) {
+                continue;
+            }
+
+            let kw_len = if kw_is_method { "method ".len() } else { "sub ".len() };
+            let name_col = col_base + indent + kw_len + name_pad;
+            let name_span = Span {
+                start: Point { row, column: name_col },
+                end: Point { row, column: name_col + name.len() },
+            };
+            // The bleed makes the true body extent unknowable; a single-line
+            // declaration span is enough for goto-def / references / outline.
+            let decl_span = Span {
+                start: Point { row, column: col_base + indent },
+                end: Point { row, column: col_base + line.len() },
+            };
+            let is_method = kw_is_method || pkg_is_subclass;
+            self.add_symbol(
+                name,
+                if is_method { SymKind::Method } else { SymKind::Sub },
+                decl_span,
+                name_span,
+                SymbolDetail::Sub {
+                    params: Vec::new(),
+                    is_method,
+                    doc: None,
+                    display: None,
+                    hide_in_outline: false,
+                    opaque_return: false,
+                },
+            );
+        }
     }
 
     fn visit_children(&mut self, node: Node<'a>) {

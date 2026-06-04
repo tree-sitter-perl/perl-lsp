@@ -400,6 +400,91 @@ filehandle operand.
 
 ---
 
+## G7 — `"${@}"` block-interpolation of `$@` decapitates the rest of the file
+
+The block-interpolation form `${@}` (the `@` sigil inside `${...}`, the
+common idiom for interpolating `$@` cleanly before adjacent text, e.g.
+`"${@}signature failed"`) mis-lexes inside a double-quoted string: the
+string's **closing quote is swallowed**, so the lexer keeps consuming as
+if still inside a string until it hits the *next* `"` somewhere later in
+the file (or EOF). Everything between is wrapped in a root-spanning ERROR
+and the `sub` declarations in that region are **dissolved into the token
+stream** — they survive neither as `subroutine_declaration_statement`
+nodes nor as ERROR children. This is a contagion bug (G1/G3/G5 family),
+but the worst variant: not just FP leakage, total structural loss.
+
+For comparison, **bare `$@`** (no braces) and **`${name}`** both
+interpolate cleanly — only the `@`-sigil-inside-`${...}` shape breaks:
+```perl
+my $x = "err $@\n";       # => clean interpolated_string_literal, sub after it fine
+my $x = "err ${name}\n";  # => clean (scalar inside ${...}), sub after it fine
+my $x = "err ${@}\n";     # => ERROR to EOF, every following sub destroyed   ❌
+```
+
+**Repro** (minimal):
+```perl
+package Foo;
+my $x = "err ${@} more text here";
+sub alpha { return 1; }
+sub beta { return 2; }
+sub gamma { my $self = shift; return $self; }
+1;
+```
+
+**Actual** — the closing `"` of `"…${@}…"` is consumed; the `${@}` opens a
+`slice_container_variable`, then the string-bleed runs from `${@}` to EOF
+inside a single root ERROR. The `sub alpha/beta/gamma` declarations vanish
+entirely — only stray `scalar` tokens (e.g. `$self` from gamma's body)
+survive:
+```
+(source_file
+  (package_statement name: (package))          # Foo  -- survives (before the bleed)
+  (ERROR [1, 0] - [6, 0]
+    (variable_declaration (scalar))             # my $x
+    (ERROR (slice_container_variable (varname))) # ${@}
+    (scalar (varname))                           # $self  -- stray remnant
+    (scalar (varname))))                         # $self  -- no sub nodes at all
+```
+Zero `subroutine_declaration_statement` nodes in the whole tree.
+
+**Expected** — `${@}` recognized as interpolation of `$@` (a
+`scalar`/special-variable inside the `${...}` interpolation), the string
+terminated at its real closing quote, and the following `sub` declarations
+parsed as normal statements.
+
+**Real-world repro** — Net-DNS `lib/Net/DNS/RR.pm:60`:
+```perl
+croak "${@}in $stmnt\n";
+```
+The `${@}` at line 60 wraps `[51,0]-[844,0]` (essentially the whole file
+body) in one ERROR. `perl-lsp --parse lib/Net/DNS/RR.pm` shows **0** of
+the file's **36** `sub` declarations as `subroutine_declaration_statement`
+nodes. Same idiom recurs at `RR/RRSIG.pm:470,488`, `RR/SIG.pm:458,476`,
+and `Resolver/Base.pm:1051`.
+
+**Downstream impact** — **severe**, the highest-impact contagion bug after
+G2. `Net::DNS::RR` is the base class for 60+ RR subclasses; losing all 36
+of its subs from the symbol table cascades to total loss of inherited
+goto-def / references / completion across every `Net::DNS::RR::*`
+subclass. One mis-lexed `${@}` decapitates a whole inheritance tree.
+
+**Builder mitigation (landed)** — unlike G2 (whole-file ERROR with no
+recoverable children), the destroyed `sub`/`method` declarations here are
+recoverable from **raw source text**: their `sub NAME` lines still exist
+verbatim inside the ERROR span, the parser just refused to tokenize them.
+`recover_subs_from_error_text` (in `builder.rs`, called from
+`recover_structural_from_error`) scans the ERROR node's source bytes for
+statement-position `sub`/`method` declarations and synthesizes minimal
+Sub/Method symbols for any not already captured. This restores all 36
+RR subs to the symbol table — goto-def / references / workspace-symbol /
+inheritance work again — despite the grammar bug. It is gated only on
+"inside a parse ERROR" (never on any module name) and deduped per row
+against structural recovery. Param/return/POD detail is necessarily lost
+(the body extent is unknowable post-bleed); the declaration skeleton
+survives. The clean fix is still upstream: recognize `${@}` interpolation.
+
+---
+
 ## GR-3 — symbolic code-deref `\&{"$pkg::$sym"}` target string parsed as a literal fn name
 
 A symbolic code-reference deref whose target is a **string expression**
