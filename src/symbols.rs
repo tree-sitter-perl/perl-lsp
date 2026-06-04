@@ -208,11 +208,18 @@ pub fn find_definition(
                 // (or the .pm file if we can resolve it). Cross-file
                 // sub_info lookup uses REMOTE name — distinct from
                 // target_name for renaming imports.
+                // Re-export aware: the def may live in a module `import.module_name`
+                // re-exports (Test::Most → Test::More's `ok`). Chase the edges to
+                // the defining module; fall back to the directly-`use`d path.
+                let defining = module_index.defining_module_cached(&import.module_name, &remote_name);
+                let module_path = defining
+                    .as_ref()
+                    .map(|m| m.path.clone())
+                    .unwrap_or(module_path);
                 if let Ok(module_uri) = Url::from_file_path(&module_path) {
                     // The defining sub's line in the .pm — `Some` only when the
-                    // module is cached and the remote name resolves to a sub.
-                    let def_line = module_index
-                        .get_cached(&import.module_name)
+                    // module (or one it re-exports) defines the remote name.
+                    let def_line = defining
                         .and_then(|cached| cached.sub_info(&remote_name).map(|s| s.def_line()));
 
                     // One-hop to the defining sub whenever we actually know
@@ -1016,7 +1023,10 @@ pub fn hover_info(
                 // the REMOTE name — for a renaming import (`del` →
                 // `delete`), cursor is on `del` but sub_info lives
                 // under `delete` in the cached module.
-                if let Some(cached) = module_index.get_cached(&import.module_name) {
+                if let Some(cached) = module_index
+                    .defining_module_cached(&import.module_name, &remote_name)
+                    .or_else(|| module_index.get_cached(&import.module_name))
+                {
                     if let Some(sub_info) = cached.sub_info(&remote_name) {
                         // Present the sig under the LOCAL name — that's
                         // what the user typed and what hover should lead
@@ -2236,9 +2246,10 @@ fn classify_import(
     import: &crate::file_analysis::Import,
     func_name: &str,
     cached: Option<&CachedModule>,
+    module_index: &ModuleIndex,
 ) -> Option<(ImportResolution, String)> {
     if let Some(cached) = cached {
-        let surface = cached.analysis.export_surface();
+        let surface = cached.analysis.export_surface_with_index(module_index);
         let bound = crate::file_analysis::imported_names(import, &surface);
         if let Some((_local, remote)) = bound.iter().find(|(local, _)| local == func_name) {
             return Some((ImportResolution::Brought, remote.clone()));
@@ -2279,7 +2290,7 @@ fn resolve_imported_function_classified<'a>(
     )> = None;
     for import in &analysis.imports {
         let cached = module_index.get_cached(&import.module_name);
-        let Some((res, remote)) = classify_import(import, func_name, cached.as_deref()) else { continue };
+        let Some((res, remote)) = classify_import(import, func_name, cached.as_deref(), module_index) else { continue };
         let path = cached
             .as_ref()
             .map(|c| c.path.clone())

@@ -1573,32 +1573,58 @@ pub struct Import {
 }
 
 /// A producer module's resolved export surface — see
-/// `FileAnalysis::export_surface`. A thin view over the cached `export` /
-/// `export_ok` / `export_tags` fields (no new storage); the consumer-side
-/// `imported_names` evaluator reads it. This is the intended future plugin seam
-/// for BYO exporters (`docs/exporters-core-vs-byo`), kept as a named structure
-/// even though it stays in core now.
+/// `FileAnalysis::export_surface`. The consumer-side `imported_names` evaluator
+/// reads it; it never sees whether a name is the module's own or re-exported.
+///
+/// **Transitivity.** A module's surface can fold in other modules' surfaces via
+/// `reexport_modules` (static `@Other::EXPORT` splice, loop-push, declarative
+/// `also`). When built with a `ModuleIndex` (`export_surface_with_index`), the
+/// re-export edges are walked transitively (cross-file, seen-set bounded for
+/// cycles, fan-out budget) and the producer's default / optional / tag sets are
+/// **materialized** to include the re-exported names. The closure is computed
+/// here at query time, never baked into `FileAnalysis` — depth stays a
+/// query-time edge property, exactly like the inheritance `parents_of` walk.
+/// Without an index (`export_surface`, the back-compat path) only the module's
+/// own surface is visible.
 pub struct ExportSurface<'a> {
     analysis: &'a FileAnalysis,
+    /// `@EXPORT` ∪ re-exported defaults. `None` = own-only (no index walk).
+    default_set: Option<Vec<String>>,
+    /// `@EXPORT_OK` ∪ re-exported optionals.
+    optional_set: Option<Vec<String>>,
+    /// `%EXPORT_TAGS` ∪ re-exported tag members (per tag name).
+    tags: Option<HashMap<String, Vec<String>>>,
+    /// Union of all names on the (transitive) surface for `exports()`.
+    all_names: Option<HashSet<String>>,
 }
 
+/// Fan-out / depth budget for the re-export edge walk. Cycles are bounded by the
+/// seen-set; this caps pathological fan-out (a module re-exporting hundreds of
+/// modules) so a single surface query can't blow up. Mirrors the inheritance
+/// walk's bounded-traversal discipline.
+const MAX_REEXPORT_MODULES: usize = 256;
+
 impl<'a> ExportSurface<'a> {
-    /// `@EXPORT` — auto-imported by a bare `use M;`.
-    pub fn default_set(&self) -> &'a [String] {
-        &self.analysis.export
+    /// `@EXPORT` (∪ re-exported defaults when index-walked) — auto-imported by a
+    /// bare `use M;`.
+    pub fn default_set(&self) -> &[String] {
+        self.default_set.as_deref().unwrap_or(&self.analysis.export)
     }
 
-    /// `@EXPORT_OK` — opt-in only; never auto-imported by a bare `use M;`.
-    pub fn optional_set(&self) -> &'a [String] {
-        &self.analysis.export_ok
+    /// `@EXPORT_OK` (∪ re-exported optionals) — opt-in only; never auto-imported.
+    pub fn optional_set(&self) -> &[String] {
+        self.optional_set.as_deref().unwrap_or(&self.analysis.export_ok)
     }
 
     /// Members of a `%EXPORT_TAGS` tag, with `:DEFAULT` synthesized as
     /// `@EXPORT` (the Exporter special-case). The `tag` argument is the bare
     /// tag name (no `:`/`-` prefix). `None` if the tag is unknown.
-    pub fn tag_members(&self, tag: &str) -> Option<Vec<&'a str>> {
+    pub fn tag_members(&self, tag: &str) -> Option<Vec<&str>> {
         if tag.eq_ignore_ascii_case("DEFAULT") {
-            return Some(self.analysis.export.iter().map(|s| s.as_str()).collect());
+            return Some(self.default_set().iter().map(|s| s.as_str()).collect());
+        }
+        if let Some(tags) = &self.tags {
+            return tags.get(tag).map(|v| v.iter().map(|s| s.as_str()).collect());
         }
         self.analysis
             .export_tags
@@ -1606,9 +1632,13 @@ impl<'a> ExportSurface<'a> {
             .map(|v| v.iter().map(|s| s.as_str()).collect())
     }
 
-    /// True if `name` is anywhere on the surface (default ∪ optional ∪ tags) —
-    /// "the module exports it," independent of any consumer's `use`.
+    /// True if `name` is anywhere on the (transitive) surface (default ∪
+    /// optional ∪ tags) — "the module exports it," independent of any
+    /// consumer's `use`.
     pub fn exports(&self, name: &str) -> bool {
+        if let Some(all) = &self.all_names {
+            return all.contains(name);
+        }
         self.analysis.exports_name(name)
     }
 }
@@ -1830,6 +1860,18 @@ pub struct FileAnalysis {
     #[serde(default)]
     pub export_tags: HashMap<String, Vec<String>>,
 
+    /// Re-export edges: other modules whose export surface this module folds
+    /// into its own. Three statically-recognized idioms mint these (see
+    /// `docs/adr/reexport-surface.md`): a static `@Other::EXPORT` element in an
+    /// `@EXPORT` assignment, a loop-push over a statically-resolvable module
+    /// list (`push @EXPORT, @{"${m}::EXPORT"}`), and a declarative `also => [...]`
+    /// in `setup_import_methods`. `ExportSurface` walks these transitively at
+    /// query time (cross-file, seen-set bounded) — the closure is NOT baked here
+    /// (depth stays a query-time edge property, mirroring the inheritance
+    /// edge-walk). Runtime `import`-delegation is deliberately unmodeled.
+    #[serde(default)]
+    pub reexport_modules: Vec<String>,
+
     /// Plugin-declared namespaces. Each is a scope managed by a plugin
     /// (a Mojolicious app, a Minion instance, an event-emitter subclass,
     /// …). Declares bridges into Perl-space and owns a set of entities.
@@ -1964,6 +2006,7 @@ impl FileAnalysis {
             export,
             export_ok,
             export_tags: HashMap::new(),
+            reexport_modules: Vec::new(),
             plugin_namespaces,
             type_provenance,
             witnesses: crate::witnesses::WitnessBag::new(),
@@ -2291,7 +2334,91 @@ impl FileAnalysis {
     /// against, so diagnostics and nav share one notion of "what does this
     /// module export, and what does this `use` bind."
     pub fn export_surface(&self) -> ExportSurface<'_> {
-        ExportSurface { analysis: self }
+        ExportSurface {
+            analysis: self,
+            default_set: None,
+            optional_set: None,
+            tags: None,
+            all_names: None,
+        }
+    }
+
+    /// Like `export_surface`, but resolves `reexport_modules` transitively
+    /// through `module_index`: the materialized surface includes every
+    /// re-exported module's surface (default ∪ optional ∪ tags), walked
+    /// cross-file with a seen-set (cycles) and a fan-out budget
+    /// (`MAX_REEXPORT_MODULES`). When this module has no re-export edges the
+    /// result is identical to `export_surface` (own-only, zero extra storage).
+    /// This is the one transitive-closure site — the consumer evaluator
+    /// (`imported_names`) is untouched; it binds whatever the surface reports.
+    pub fn export_surface_with_index(
+        &self,
+        module_index: &ModuleIndex,
+    ) -> ExportSurface<'_> {
+        if self.reexport_modules.is_empty() {
+            return self.export_surface();
+        }
+
+        let mut default_set: Vec<String> = self.export.clone();
+        let mut optional_set: Vec<String> = self.export_ok.clone();
+        let mut tags: HashMap<String, Vec<String>> = self.export_tags.clone();
+
+        // BFS over re-export edges. The seen-set bounds cycles (A→B→A); the
+        // budget bounds fan-out. Edge walk mirrors `for_each_ancestor_class`.
+        let mut seen: HashSet<String> = HashSet::new();
+        let mut queue: std::collections::VecDeque<String> =
+            self.reexport_modules.iter().cloned().collect();
+        let mut visited = 0usize;
+
+        while let Some(module) = queue.pop_front() {
+            if !seen.insert(module.clone()) {
+                continue;
+            }
+            visited += 1;
+            if visited > MAX_REEXPORT_MODULES {
+                break;
+            }
+            let Some(cached) = module_index.get_cached(&module) else { continue };
+            let a = &cached.analysis;
+            for n in &a.export {
+                if !default_set.contains(n) {
+                    default_set.push(n.clone());
+                }
+            }
+            for n in &a.export_ok {
+                if !optional_set.contains(n) {
+                    optional_set.push(n.clone());
+                }
+            }
+            for (tag, members) in &a.export_tags {
+                let bucket = tags.entry(tag.clone()).or_default();
+                for m in members {
+                    if !bucket.contains(m) {
+                        bucket.push(m.clone());
+                    }
+                }
+            }
+            for next in &a.reexport_modules {
+                if !seen.contains(next) {
+                    queue.push_back(next.clone());
+                }
+            }
+        }
+
+        let mut all_names: HashSet<String> = HashSet::new();
+        all_names.extend(default_set.iter().cloned());
+        all_names.extend(optional_set.iter().cloned());
+        for members in tags.values() {
+            all_names.extend(members.iter().cloned());
+        }
+
+        ExportSurface {
+            analysis: self,
+            default_set: Some(default_set),
+            optional_set: Some(optional_set),
+            tags: Some(tags),
+            all_names: Some(all_names),
+        }
     }
 
     // ---- Query methods ----
@@ -6985,11 +7112,16 @@ impl FileAnalysis {
             if let Some(idx) = module_index {
                 for import in &self.imports {
                     let Some(cached) = idx.get_cached(&import.module_name) else { continue };
-                    let surface = cached.analysis.export_surface();
+                    let surface = cached.analysis.export_surface_with_index(idx);
                     let bound = imported_names(import, &surface);
                     if let Some((_local, remote)) = bound.iter().find(|(local, _)| local == name) {
-                        if let Some(sub_info) = cached.sub_info(remote) {
-                            return Some(cross_file_resolved(&sub_info));
+                        // The name may be defined in the directly-`use`d module
+                        // or in a module it re-exports. `defining_module_cached`
+                        // chases the same re-export edges (seen-set bounded).
+                        if let Some(cached) = idx.defining_module_cached(&import.module_name, remote) {
+                            if let Some(sub_info) = cached.sub_info(remote) {
+                                return Some(cross_file_resolved(&sub_info));
+                            }
                         }
                     }
                 }

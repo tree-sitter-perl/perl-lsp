@@ -4081,4 +4081,210 @@ fn diagnostic_and_gotodef_agree_on_bound_set() {
     }
 }
 
+// ---- Transitive export surface: re-export edges (forms 1/2/3) ----
+//
+// A re-exporting module M folds another module's surface into its own. The
+// consumer `imported_names` evaluator is UNCHANGED — it binds M's @EXPORT,
+// which `ExportSurface` now reports transitively. Each test registers the
+// producer(s) and M, then asserts the consumer's `use M;` binds the re-exported
+// names (no FP) and goto-def reaches the defining producer file.
 
+/// Register a module under a path derived from its name (`Pkg::Sub` →
+/// `/tmp/perl_lsp_re_Pkg_Sub.pm`) so goto-def assertions can pin the file.
+fn register_module(idx: &crate::module_index::ModuleIndex, pkg: &str, src: &str) {
+    let file = format!("/tmp/perl_lsp_re_{}.pm", pkg.replace("::", "_"));
+    idx.register_workspace_module(
+        std::path::PathBuf::from(file),
+        std::sync::Arc::new(parse_analysis(src)),
+    );
+}
+
+/// Like `gd_resolves`, but pins the resolved file to `target_file`.
+fn gd_resolves_to(
+    source: &str,
+    name: &str,
+    idx: &crate::module_index::ModuleIndex,
+    target_file: &str,
+) -> bool {
+    let analysis = parse_analysis(source);
+    let mut parser = tree_sitter::Parser::new();
+    parser.set_language(&ts_parser_perl::LANGUAGE.into()).unwrap();
+    let tree = parser.parse(source, None).unwrap();
+    let byte = source.rfind(&format!("{}(", name)).expect("call site present");
+    let prefix = &source[..byte];
+    let pos = Position {
+        line: prefix.matches('\n').count() as u32,
+        character: (byte - prefix.rfind('\n').map(|i| i + 1).unwrap_or(0)) as u32,
+    };
+    let uri = Url::parse("file:///consumer.pl").unwrap();
+    let loc = match find_definition(&analysis, pos, &uri, idx, &tree, source) {
+        Some(GotoDefinitionResponse::Scalar(loc)) => Some(loc),
+        Some(GotoDefinitionResponse::Array(mut v)) if !v.is_empty() => Some(v.remove(0)),
+        _ => None,
+    };
+    loc.map_or(false, |l| l.uri.path().ends_with(target_file))
+}
+
+#[test]
+fn reexport_static_splice_binds_transitively() {
+    // Form 1: `our @EXPORT = ('own_fn', @Base::EXPORT)` re-exports Base's surface.
+    let idx = crate::module_index::ModuleIndex::new_for_test();
+    register_module(&idx, "Base", "package Base;\nour @EXPORT = qw(base_fn);\nsub base_fn { 1 }\n1;\n");
+    register_module(
+        &idx,
+        "M",
+        "package M;\nour @EXPORT = ('own_fn', @Base::EXPORT);\nsub own_fn { 2 }\n1;\n",
+    );
+
+    let src = "use M;\nbase_fn();\nown_fn();\n";
+    assert!(!flags_fn(src, "base_fn", &idx), "re-exported base_fn binds, no FP");
+    assert!(!flags_fn(src, "own_fn", &idx), "own_fn binds, no FP");
+    assert!(
+        gd_resolves_to(src, "base_fn", &idx, "re_Base.pm"),
+        "goto-def base_fn reaches Base",
+    );
+    assert!(
+        gd_resolves_to(src, "own_fn", &idx, "re_M.pm"),
+        "goto-def own_fn reaches M",
+    );
+}
+
+#[test]
+fn reexport_loop_push_literal_qw_binds() {
+    // Form 2: loop-push over a literal qw module list.
+    let idx = crate::module_index::ModuleIndex::new_for_test();
+    register_module(&idx, "A", "package A;\nour @EXPORT = qw(a_fn);\nsub a_fn { 1 }\n1;\n");
+    register_module(&idx, "B", "package B;\nour @EXPORT = qw(b_fn);\nsub b_fn { 1 }\n1;\n");
+    register_module(
+        &idx,
+        "M",
+        "package M;\nour @EXPORT = ();\nfor my $m (qw(A B)) {\n    push @EXPORT, @{\"${m}::EXPORT\"};\n}\n1;\n",
+    );
+
+    let src = "use M;\na_fn();\nb_fn();\n";
+    assert!(!flags_fn(src, "a_fn", &idx), "loop-push re-exports A::a_fn");
+    assert!(!flags_fn(src, "b_fn", &idx), "loop-push re-exports B::b_fn");
+    assert!(gd_resolves_to(src, "a_fn", &idx, "re_A.pm"), "gd a_fn → A");
+    assert!(gd_resolves_to(src, "b_fn", &idx, "re_B.pm"), "gd b_fn → B");
+}
+
+#[test]
+fn reexport_loop_push_samefile_array_binds() {
+    // Form 2 variant: the loop list is a same-file `my @mods = (...)` we chase.
+    let idx = crate::module_index::ModuleIndex::new_for_test();
+    register_module(&idx, "A", "package A;\nour @EXPORT = qw(a_fn);\nsub a_fn { 1 }\n1;\n");
+    register_module(&idx, "B", "package B;\nour @EXPORT = qw(b_fn);\nsub b_fn { 1 }\n1;\n");
+    register_module(
+        &idx,
+        "M",
+        "package M;\nour @EXPORT = ();\nmy @mods = ('A', 'B');\nfor my $m (@mods) {\n    push @EXPORT, @{\"${m}::EXPORT\"};\n}\n1;\n",
+    );
+
+    let src = "use M;\na_fn();\nb_fn();\n";
+    assert!(!flags_fn(src, "a_fn", &idx), "same-file @mods list re-exports A");
+    assert!(!flags_fn(src, "b_fn", &idx), "same-file @mods list re-exports B");
+}
+
+#[test]
+fn reexport_loop_push_dynamic_list_mints_no_edge() {
+    // Form 2 honesty: a dynamic/unresolvable module list mints NO edge — the
+    // re-exported name stays unresolved (we don't fabricate).
+    let idx = crate::module_index::ModuleIndex::new_for_test();
+    register_module(&idx, "A", "package A;\nour @EXPORT = qw(a_fn);\nsub a_fn { 1 }\n1;\n");
+    register_module(
+        &idx,
+        "M",
+        "package M;\nour @EXPORT = ();\nfor my $m (@dynamic_runtime_list) {\n    push @EXPORT, @{\"${m}::EXPORT\"};\n}\n1;\n",
+    );
+    // Confirm no edge was minted on M.
+    let m = idx.get_cached("M").expect("M cached");
+    assert!(
+        m.analysis.reexport_modules.is_empty(),
+        "dynamic list must mint no re-export edge, got: {:?}",
+        m.analysis.reexport_modules,
+    );
+
+    let src = "use M;\na_fn();\n";
+    assert!(flags_fn(src, "a_fn", &idx), "dynamic list → a_fn stays unresolved (honest)");
+}
+
+#[test]
+fn reexport_declarative_also_binds() {
+    // Form 3: `setup_import_methods(also => ['Base'])` includes Base's surface.
+    let idx = crate::module_index::ModuleIndex::new_for_test();
+    register_module(&idx, "Base", "package Base;\nour @EXPORT = qw(base_fn);\nsub base_fn { 1 }\n1;\n");
+    register_module(
+        &idx,
+        "M",
+        "package M;\nuse Moose::Exporter;\nMoose::Exporter->setup_import_methods( also => [ 'Base' ] );\n1;\n",
+    );
+    let m = idx.get_cached("M").expect("M cached");
+    assert!(
+        m.analysis.reexport_modules.contains(&"Base".to_string()),
+        "also => ['Base'] mints a re-export edge, got: {:?}",
+        m.analysis.reexport_modules,
+    );
+
+    let src = "use M;\nbase_fn();\n";
+    assert!(!flags_fn(src, "base_fn", &idx), "also-re-exported base_fn binds");
+    assert!(gd_resolves_to(src, "base_fn", &idx, "re_Base.pm"), "gd base_fn → Base");
+}
+
+#[test]
+fn reexport_cycle_resolves_finitely() {
+    // A re-exports B, B re-exports A — the seen-set bounds the walk; the
+    // consumer's surface query must terminate and bind both names.
+    let idx = crate::module_index::ModuleIndex::new_for_test();
+    register_module(
+        &idx,
+        "A",
+        "package A;\nour @EXPORT = ('a_fn', @B::EXPORT);\nsub a_fn { 1 }\n1;\n",
+    );
+    register_module(
+        &idx,
+        "B",
+        "package B;\nour @EXPORT = ('b_fn', @A::EXPORT);\nsub b_fn { 1 }\n1;\n",
+    );
+
+    let src = "use A;\na_fn();\nb_fn();\n";
+    assert!(!flags_fn(src, "a_fn", &idx), "cycle: a_fn binds");
+    assert!(!flags_fn(src, "b_fn", &idx), "cycle: b_fn binds via A→B edge");
+}
+
+#[test]
+fn reexport_imported_names_evaluator_unchanged() {
+    // Consumer-unchanged guard: `imported_names` is NOT special-cased for
+    // re-exports — it binds whatever the surface reports. A surface built
+    // WITHOUT the index walk (own-only) sees just M's own @EXPORT; built WITH
+    // the index it sees the transitive set. Same evaluator, different surface.
+    let idx = crate::module_index::ModuleIndex::new_for_test();
+    register_module(&idx, "Base", "package Base;\nour @EXPORT = qw(base_fn);\nsub base_fn { 1 }\n1;\n");
+    register_module(
+        &idx,
+        "M",
+        "package M;\nour @EXPORT = ('own_fn', @Base::EXPORT);\nsub own_fn { 2 }\n1;\n",
+    );
+    let m = idx.get_cached("M").expect("M cached");
+
+    // A real bare `use M;` import, parsed from source (no Default on Import).
+    let consumer = parse_analysis("use M;\n");
+    let import = consumer.imports.iter().find(|i| i.module_name == "M").expect("use M import");
+
+    // Own-only surface: just M's own @EXPORT — base_fn NOT visible.
+    let own = m.analysis.export_surface();
+    let bound_own = crate::file_analysis::imported_names(import, &own);
+    assert!(bound_own.iter().any(|(l, _)| l == "own_fn"));
+    assert!(
+        !bound_own.iter().any(|(l, _)| l == "base_fn"),
+        "own-only surface must not include the re-exported name",
+    );
+
+    // Index-walked surface: same evaluator, transitive surface — base_fn binds.
+    let walked = m.analysis.export_surface_with_index(&idx);
+    let bound_walked = crate::file_analysis::imported_names(import, &walked);
+    assert!(bound_walked.iter().any(|(l, _)| l == "own_fn"));
+    assert!(
+        bound_walked.iter().any(|(l, _)| l == "base_fn"),
+        "transitive surface includes the re-exported name — via the SAME evaluator",
+    );
+}

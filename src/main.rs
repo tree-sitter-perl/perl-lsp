@@ -285,26 +285,43 @@ fn cli_full_startup(root: &str) -> (file_store::FileStore, module_index::ModuleI
     let mut parse_memo: module_resolver::ParseMemo = std::collections::HashMap::new();
     let mut resolved = 0usize;
     let mut already_cached = 0usize;
-    for name in &needed {
-        if module_index.cache_raw().contains_key(name.as_str()) && !stale_set.contains(name) {
-            already_cached += 1;
-            timings::record_cached(name);
-            continue;
-        }
-        if stale_set.contains(name) {
-            parse_memo.remove(name);
-        }
-        if let Some(cached) =
-            module_resolver::resolve_and_parse_with_memo(&inc_paths, name, &mut parser, &mut parse_memo)
+    // Worklist, not a fixed set: re-exporting modules (Test::Most → Test::More)
+    // pull their re-exported producers' surfaces transitively, so those
+    // producers must be resolved too even though no workspace file `use`s them
+    // directly. Enqueue each resolved module's `reexport_modules`. Bounded by
+    // the seen-set (`queued`); the cross-file surface walk handles cycles.
+    let mut queue: std::collections::VecDeque<String> = needed.iter().cloned().collect();
+    let mut queued: std::collections::HashSet<String> = needed.clone();
+    while let Some(name) = queue.pop_front() {
+        let cached_arc = if module_index.cache_raw().contains_key(name.as_str())
+            && !stale_set.contains(&name)
         {
-            if let Some(ref conn) = db {
-                module_cache::save_to_db(conn, name, &Some(std::sync::Arc::clone(&cached)), "cli");
+            already_cached += 1;
+            timings::record_cached(&name);
+            module_index.get_cached(&name)
+        } else {
+            if stale_set.contains(&name) {
+                parse_memo.remove(&name);
             }
-            module_index.insert_cache(name, Some(cached));
-            resolved += 1;
+            module_resolver::resolve_and_parse_with_memo(&inc_paths, &name, &mut parser, &mut parse_memo)
+                .map(|cached| {
+                    if let Some(ref conn) = db {
+                        module_cache::save_to_db(conn, &name, &Some(std::sync::Arc::clone(&cached)), "cli");
+                    }
+                    module_index.insert_cache(&name, Some(std::sync::Arc::clone(&cached)));
+                    resolved += 1;
+                    cached
+                })
+        };
+        if let Some(cached) = cached_arc {
+            for re in &cached.analysis.reexport_modules {
+                if queued.insert(re.clone()) {
+                    queue.push_back(re.clone());
+                }
+            }
         }
     }
-    eprintln!("Modules: {} cached, {} resolved, {} total", already_cached, resolved, needed.len());
+    eprintln!("Modules: {} cached, {} resolved, {} total", already_cached, resolved, queued.len());
 
     // `warm_cache` populated `cache_raw()` directly, bypassing the reverse
     // index, and `insert_cache` only indexes export/export_ok. Rebuild the

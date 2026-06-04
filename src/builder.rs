@@ -237,6 +237,7 @@ fn build_with_plugins_inner(
         export: Vec::new(),
         export_ok: Vec::new(),
         export_tags: std::collections::HashMap::new(),
+        reexport_modules: Vec::new(),
         plugin_namespaces: Vec::new(),
         type_provenance: std::collections::HashMap::new(),
         bag: crate::witnesses::WitnessBag::new(),
@@ -506,6 +507,7 @@ fn build_with_plugins_inner(
     );
     fa.package_framework = package_framework;
     fa.export_tags = std::mem::take(&mut b.export_tags);
+    fa.reexport_modules = std::mem::take(&mut b.reexport_modules);
     fa.app_surface_consumers = b.app_surface_consumers.clone();
     fa.regex_spans = b.regex_spans;
     fa.witnesses = bag;
@@ -1339,6 +1341,12 @@ struct Builder<'a> {
     /// expansion in `ExportSurface`; `:DEFAULT` is synthesized there from
     /// `export`, so it is not stored here.
     export_tags: std::collections::HashMap<String, Vec<String>>,
+    /// Re-export edges minted during the walk: module names whose export
+    /// surface this module folds into its own (static `@Other::EXPORT` splice,
+    /// loop-push over a resolvable module list, declarative `also => [...]`).
+    /// Flushed into `FileAnalysis.reexport_modules`; the surface walks them
+    /// transitively at query time. Dedup'd on insert via `record_reexport_edge`.
+    reexport_modules: Vec<String>,
     /// Plugin-declared namespaces collected during the walk via
     /// `EmitAction::PluginNamespace`. Flushed into the final
     /// `FileAnalysis.plugin_namespaces`.
@@ -4340,6 +4348,24 @@ impl<'a> Builder<'a> {
                     if values.is_empty() {
                         values = self.fold_local_sub_literal_return(list_node);
                     }
+                    // Form 2 (loop-push re-export): a body that does
+                    // `push @EXPORT, @{"${var}::EXPORT"}` re-exports each module
+                    // the loop iterates over. Mint an edge per statically
+                    // resolvable list element. Dynamic lists fold to `values`
+                    // empty → no edge (honest). Done before the move of
+                    // `values` into `constant_strings`.
+                    if !values.is_empty() {
+                        if let Some(body) = node
+                            .child_by_field_name("block")
+                            .or_else(|| node.child_by_field_name("body"))
+                        {
+                            if self.body_has_symbolic_export_push(body, &var_name) {
+                                for module in &values {
+                                    self.record_reexport_edge(module);
+                                }
+                            }
+                        }
+                    }
                     if !values.is_empty() {
                         self.constant_strings.insert(var_name, values);
                     }
@@ -5585,6 +5611,9 @@ impl<'a> Builder<'a> {
                     if let Some(child) = node.named_child(i) {
                         names.extend(self.extract_string_names(child));
                         self.record_export_member_sites(child);
+                        // Form 1: `@EXPORT = ( 'own', @Other::EXPORT )` — any
+                        // qualified export-var deref in the RHS is a re-export edge.
+                        self.record_static_splice_reexports(child);
                     }
                 }
                 // Union, not clobber: runtime-exporter discovery (`:Export`
@@ -6981,6 +7010,192 @@ impl<'a> Builder<'a> {
                 self.export_ok.push(name);
             }
         }
+    }
+
+    /// Form 2 recognizer: does `body` contain a `push @EXPORT, @{"${var}::EXPORT"}`
+    /// (or `@EXPORT_OK`) where the symbolic deref interpolates the loop variable
+    /// `loop_var`? Matched by shape (rule #10): a `push` whose first arg is an
+    /// `@EXPORT`/`@EXPORT_OK` array and whose later args include a symbolic
+    /// array-deref naming `${loop_var}...::EXPORT[_OK]`. The loop-list resolution
+    /// (caller) decides which modules; this only confirms the re-export pattern.
+    fn body_has_symbolic_export_push(&self, body: Node<'a>, loop_var: &str) -> bool {
+        // The interpolated scalar is the bare varname (`m` for `$m`/`${m}`).
+        let bare = loop_var.trim_start_matches('$');
+        self.find_symbolic_export_push(body, bare)
+    }
+
+    fn find_symbolic_export_push(&self, node: Node<'a>, loop_var_bare: &str) -> bool {
+        if matches!(
+            node.kind(),
+            "function_call_expression" | "ambiguous_function_call_expression"
+        ) {
+            if let Some(func) = node.child_by_field_name("function") {
+                if func.utf8_text(self.source) == Ok("push") {
+                    if let Some(args) = node.child_by_field_name("arguments") {
+                        if self.push_args_reexport_export(args, loop_var_bare) {
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+        for i in 0..node.named_child_count() {
+            if let Some(child) = node.named_child(i) {
+                if self.find_symbolic_export_push(child, loop_var_bare) {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    /// `push @EXPORT, @{"${m}::EXPORT"}` arg list: first arg an `@EXPORT`/
+    /// `@EXPORT_OK` array, a later arg a symbolic deref of `${m}...::EXPORT[_OK]`.
+    fn push_args_reexport_export(&self, args: Node<'a>, loop_var_bare: &str) -> bool {
+        let first = args.named_child(0);
+        let target_is_export = first
+            .and_then(|f| if f.kind() == "array" { f.named_child(0) } else { None })
+            .filter(|v| v.kind() == "varname")
+            .and_then(|v| v.utf8_text(self.source).ok())
+            .map(|t| matches!(t, "EXPORT" | "EXPORT_OK"))
+            .unwrap_or(false);
+        if !target_is_export {
+            return false;
+        }
+        for i in 1..args.named_child_count() {
+            if let Some(arg) = args.named_child(i) {
+                if self.is_symbolic_export_deref(arg, loop_var_bare) {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    /// True if `node` is `@{"${var}::EXPORT"}` / `@{"${var}::EXPORT_OK"}` — a
+    /// symbolic array-deref whose interpolated string both references the loop
+    /// scalar `loop_var_bare` and targets an `::EXPORT`/`::EXPORT_OK` package var.
+    fn is_symbolic_export_deref(&self, node: Node<'a>, loop_var_bare: &str) -> bool {
+        if node.kind() != "array" {
+            return false;
+        }
+        // `@{ "..." }` parses as array > varname > block > ... interpolated string.
+        let mut refs_loop_var = false;
+        let mut targets_export = false;
+        Self::scan_interpolated_export_target(
+            node,
+            self.source,
+            loop_var_bare,
+            &mut refs_loop_var,
+            &mut targets_export,
+        );
+        refs_loop_var && targets_export
+    }
+
+    fn scan_interpolated_export_target(
+        node: Node<'a>,
+        source: &[u8],
+        loop_var_bare: &str,
+        refs_loop_var: &mut bool,
+        targets_export: &mut bool,
+    ) {
+        if node.kind() == "interpolated_string_literal" {
+            if let Some(content) = node.named_child(0) {
+                if let Ok(text) = content.utf8_text(source) {
+                    // Static literal portion holds `::EXPORT[_OK]`; the
+                    // interpolated scalar is a child node, so check raw text.
+                    if text.contains("::EXPORT") {
+                        *targets_export = true;
+                    }
+                }
+                // The interpolated scalar (`${m}`) is a `scalar` child whose
+                // varname is the loop var.
+                for i in 0..content.named_child_count() {
+                    if let Some(child) = content.named_child(i) {
+                        if child.kind() == "scalar" {
+                            if let Some(vn) = child.named_child(0) {
+                                if vn.utf8_text(source) == Ok(loop_var_bare) {
+                                    *refs_loop_var = true;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        for i in 0..node.named_child_count() {
+            if let Some(child) = node.named_child(i) {
+                Self::scan_interpolated_export_target(
+                    child, source, loop_var_bare, refs_loop_var, targets_export,
+                );
+            }
+        }
+    }
+
+    /// Record a re-export edge to `module` — "this module's surface includes
+    /// `module`'s surface." Deduped; the package's own name and empty/sigil'd
+    /// junk are skipped. `ExportSurface` walks these transitively at query time.
+    fn record_reexport_edge(&mut self, module: &str) {
+        let module = module.trim();
+        if module.is_empty() {
+            return;
+        }
+        // A package re-exporting itself is a no-op edge (and a cycle the
+        // query-time seen-set would absorb anyway); drop it here for cleanliness.
+        if self.current_package.as_deref() == Some(module) {
+            return;
+        }
+        if !self.reexport_modules.iter().any(|m| m == module) {
+            self.reexport_modules.push(module.to_string());
+        }
+    }
+
+    /// Form 1 (static splice): scan an `@EXPORT`/`@EXPORT_OK` assignment RHS for
+    /// `@OtherPkg::EXPORT` / `@OtherPkg::EXPORT_OK` array-deref elements and mint
+    /// a re-export edge to each `OtherPkg`. The CST shape is an `array` node
+    /// whose `varname` text is the fully-qualified `Pkg::EXPORT[_OK]`; we strip
+    /// the trailing `::EXPORT`/`::EXPORT_OK` to recover the package. Recognized
+    /// by shape (rule #10): any qualified export-var deref in the list is an edge.
+    fn record_static_splice_reexports(&mut self, node: Node<'a>) {
+        let mut edges = Vec::new();
+        Self::collect_export_var_derefs(node, self.source, &mut edges);
+        for pkg in edges {
+            self.record_reexport_edge(&pkg);
+        }
+    }
+
+    /// Walk `node` for `array` deref elements whose varname is `Pkg::EXPORT` or
+    /// `Pkg::EXPORT_OK`, pushing the bare `Pkg` onto `out`.
+    fn collect_export_var_derefs(node: Node<'a>, source: &[u8], out: &mut Vec<String>) {
+        if node.kind() == "array" {
+            if let Some(varname) = node.named_child(0) {
+                if varname.kind() == "varname" {
+                    if let Ok(text) = varname.utf8_text(source) {
+                        if let Some(pkg) = Self::package_from_export_var(text) {
+                            out.push(pkg);
+                        }
+                    }
+                }
+            }
+        }
+        for i in 0..node.named_child_count() {
+            if let Some(child) = node.named_child(i) {
+                Self::collect_export_var_derefs(child, source, out);
+            }
+        }
+    }
+
+    /// `Foo::Bar::EXPORT` / `Foo::Bar::EXPORT_OK` → `Some("Foo::Bar")`.
+    /// Anything else (an unqualified `EXPORT`, a non-export var) → `None`.
+    fn package_from_export_var(var: &str) -> Option<String> {
+        for suffix in ["::EXPORT_OK", "::EXPORT"] {
+            if let Some(pkg) = var.strip_suffix(suffix) {
+                if !pkg.is_empty() {
+                    return Some(pkg.to_string());
+                }
+            }
+        }
+        None
     }
 
     /// Fold `%EXPORT_TAGS` membership into the export surface. A tag table is
@@ -9087,8 +9302,6 @@ impl<'a> Builder<'a> {
         match callee {
             "setup_import_methods" => {
                 // Moose::Exporter: with_meta + as_is are exported names.
-                // `also` re-exports another package's exports — unmodeled
-                // (we'd need to resolve that package's vocabulary).
                 let mut names = Vec::new();
                 for key in ["with_meta", "as_is"] {
                     if let Some(list) = self.value_node_after_key(args, key) {
@@ -9096,6 +9309,17 @@ impl<'a> Builder<'a> {
                     }
                 }
                 self.record_runtime_exports(names);
+                // Form 3: `also => [ 'Moose', ... ]` re-exports each named
+                // module's surface. The value is a literal module-name list
+                // (string/bareword elements); each is a re-export edge. The
+                // Exporter::Tiny equivalent uses the same `also =>` key shape,
+                // so recognizing by the key (not a module allowlist, rule #10)
+                // covers both.
+                if let Some(list) = self.value_node_after_key(args, "also") {
+                    for module in self.extract_string_names(list) {
+                        self.record_reexport_edge(&module);
+                    }
+                }
             }
             "setup_exporter" => {
                 // Sub::Exporter::setup_exporter({ exports => [...], groups => {...} }).

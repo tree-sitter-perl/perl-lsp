@@ -214,6 +214,13 @@ pub fn spawn_resolver(
                         for imp in &m.analysis.imports {
                             enqueue(&mut pending, imp.module_name.clone());
                         }
+                        // Re-export edges — a re-exporting module (Test::Most →
+                        // Test::More) pulls its producers' surfaces transitively,
+                        // so those producers must be resolved even when no file
+                        // `use`s them directly.
+                        for re in &m.analysis.reexport_modules {
+                            enqueue(&mut pending, re.clone());
+                        }
                         // Parent classes — inheritance chain.
                         for parents in m.analysis.package_parents.values() {
                             for parent in parents {
