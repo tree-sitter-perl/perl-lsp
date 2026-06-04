@@ -11569,6 +11569,89 @@ fn use_constant_between_subs_at_file_scope() {
 }
 
 #[test]
+fn multiple_name_form_use_constants_each_register() {
+    // Several separate NAME-form `use constant` statements in one package:
+    // each declares its own package-global sub. The use-dedup key carries the
+    // statement span, so identical work identity at different spans (the
+    // constant name isn't folded into `constant_strings` when `imports` is
+    // extracted, so it's empty for all of them) no longer collapses past the
+    // first.
+    let src = r#"package Foo;
+use constant ALPHA => 1;
+use constant BETA  => 2;
+use constant GAMMA => 3;
+sub go {
+    my $a = ALPHA;
+    my $b = BETA;
+    my $c = GAMMA;
+}
+"#;
+    let fa = build_fa(src);
+    for n in ["ALPHA", "BETA", "GAMMA"] {
+        assert!(
+            fa.symbols.iter().any(|s| s.name == n && s.kind == SymKind::Sub),
+            "every separate NAME-form constant must register a Sub symbol; `{n}` missing. got: {:?}",
+            fa.symbols.iter().map(|s| s.name.clone()).collect::<Vec<_>>(),
+        );
+        // Usages resolve: each name joins `declared_constants`, so the
+        // standalone bareword usage gets a FunctionCall ref to the def.
+        assert!(
+            fa.refs.iter().any(|r| {
+                r.target_name == n
+                    && matches!(
+                        &r.kind,
+                        RefKind::FunctionCall { resolved_package } if resolved_package.as_deref() == Some("Foo")
+                    )
+            }),
+            "usage of `{n}` must get a FunctionCall ref to its def; refs for {n}: {:?}",
+            fa.refs.iter().filter(|r| r.target_name == n).collect::<Vec<_>>(),
+        );
+    }
+}
+
+/// goto-def + references across THREE separate NAME-form `use constant`
+/// statements: every def is reachable and every usage lists.
+#[test]
+fn multiple_name_form_use_constants_goto_def_and_references() {
+    use crate::file_store::FileStore;
+    use crate::resolve::{refs_to, RoleMask, TargetKind, TargetRef};
+    use std::path::PathBuf;
+
+    let src = r#"package Foo;
+use constant ALPHA => 1;
+use constant BETA  => 2;
+use constant GAMMA => 3;
+sub go {
+    my $a = ALPHA;
+    my $b = BETA;
+    return GAMMA;
+}
+"#;
+    let fa = build_fa(src);
+    let store = FileStore::new();
+    store.insert_workspace(PathBuf::from("/tmp/qa_multi_const.pm"), fa);
+
+    // BETA: def + 1 usage = 2 hits. GAMMA: def + 1 usage = 2. ALPHA: def + 1.
+    for name in ["ALPHA", "BETA", "GAMMA"] {
+        let results = refs_to(
+            &store,
+            None,
+            &TargetRef {
+                name: name.to_string(),
+                kind: TargetKind::Sub { package: Some("Foo".to_string()) },
+                method_classes: Vec::new(),
+            },
+            RoleMask::EDITABLE,
+        );
+        assert_eq!(
+            results.len(),
+            2,
+            "references on `{name}` should list its def + 1 usage; got {results:?}"
+        );
+    }
+}
+
+#[test]
 fn indirect_object_filehandle_not_a_function_ref() {
     // `print FH LIST` — the bareword filehandle must NOT become a
     // FunctionCall ref (otherwise STDERR/STDOUT/DATA flag as unresolved).

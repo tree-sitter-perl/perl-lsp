@@ -1043,13 +1043,23 @@ struct Builder<'a> {
     /// Modules the current package has `use`d, in source order. Used by
     /// `PluginRegistry::applicable` for `Trigger::UsesModule` matching.
     package_uses: std::collections::HashMap<String, Vec<String>>,
-    /// `(current_package, module, raw_args, imports)` tuples already
+    /// `(span, current_package, module, raw_args, imports)` tuples already
     /// processed by `process_use` in this build. Both real `use`
     /// statements (from `visit_use`) and plugin-emitted `SyntheticUse`
     /// actions go through the same gate, so a second `use Moo` — real
     /// or synthetic — is a no-op. Cleared between files (lives on
     /// Builder, not FileAnalysis). Also breaks cycles when a kit
-    /// plugin's SyntheticUse re-triggers the same kit plugin's `on_use`.
+    /// plugin's SyntheticUse re-triggers the same kit plugin's `on_use`
+    /// (the re-fired synthetic carries the originating use's span, so the
+    /// key still collides and the cycle terminates).
+    ///
+    /// `span` leads the key because two distinct source statements with
+    /// otherwise-identical work identity are genuinely separate work:
+    /// `use constant ALPHA => 1; use constant BETA => 2;` share
+    /// `(pkg, "constant", [], [])` — the constant name isn't yet folded
+    /// into `constant_strings` when `imports` is extracted, so it's empty
+    /// for every such line. Without the span the second statement would
+    /// short-circuit and its symbol never register.
     ///
     /// `imports` lives in the key because the synthetic shape carries
     /// `args` and `imports` as separate fields, and real `use Foo qw(a)`
@@ -1057,7 +1067,7 @@ struct Builder<'a> {
     /// `imports` here, `SyntheticUse { args: [], imports: ["a"] }` and
     /// `SyntheticUse { args: [], imports: ["b"] }` would collide on the
     /// args-only key and silently drop the second emission.
-    use_dedup: std::collections::HashSet<(Option<String>, String, Vec<String>, Vec<String>)>,
+    use_dedup: std::collections::HashSet<(Span, Option<String>, String, Vec<String>, Vec<String>)>,
     /// (span_start, span_end, dispatcher, target_name) of DispatchCall refs
     /// already emitted. Two plugins can legitimately both claim a dispatch
     /// site (e.g. the bundled `minion` plugin and a project plugin that adds
@@ -4092,10 +4102,11 @@ impl<'a> Builder<'a> {
     /// inner emissions get their own emitter's namespace through the
     /// regular `apply_emit_action` path.
     ///
-    /// Dedup gate: `(current_package, module, raw_args, imports)` is
-    /// the work identity. A second real `use Moo;` after a synthetic
-    /// one — or vice versa, or two real ones, or a SyntheticUse cycle
-    /// (kit plugin reacting to its own emission) — short-circuits here.
+    /// Dedup gate: `(span, current_package, module, raw_args, imports)`
+    /// is the work identity. A second real `use Moo;` at a different
+    /// span still re-runs (distinct source statements are distinct work);
+    /// a SyntheticUse cycle (kit plugin reacting to its own emission,
+    /// re-firing with the SAME propagated span) short-circuits here.
     fn process_use(
         &mut self,
         module_name: String,
@@ -4107,6 +4118,7 @@ impl<'a> Builder<'a> {
         synthesized_by: Option<String>,
     ) {
         let key = (
+            span,
             self.current_package.clone(),
             module_name.clone(),
             raw_args.clone(),
