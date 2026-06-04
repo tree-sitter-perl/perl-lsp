@@ -12972,6 +12972,84 @@ for my $sub (@subs) {
     );
 }
 
+/// Pins ARBITRARY DEPTH for the chained hash-key owner: build-time owner
+/// resolution must ride the recursive chain typer, so `host` carries the same
+/// `Config` owner whether the chain is one hop or three.
+#[test]
+fn chained_method_call_hash_key_owned_at_arbitrary_depth() {
+    let src = "\
+package Config;
+sub new { bless { host => 'localhost' }, shift }
+package Foo;
+sub new { bless {}, shift }
+sub me { return $_[0] }
+sub get_config { return Config->new() }
+package main;
+my $obj = Foo->new();
+$obj->get_config->{host};
+$obj->me->me->get_config->{host};
+";
+    let tree = parse(src);
+    let fa = build(&tree, src.as_bytes());
+    let owners: Vec<_> = fa.refs.iter().filter_map(|r| match &r.kind {
+        RefKind::HashKeyAccess { owner: Some(o), .. } if r.target_name == "host" => Some(o.clone()),
+        _ => None,
+    }).collect();
+    assert_eq!(owners.len(), 2, "both 1-hop and 3-hop chained ->{{host}} should emit an owned ref, got {:?}", owners);
+    assert!(owners.iter().all(|o| *o == HashKeyOwner::Class("Config".to_string())), "every depth's owner must be Config, got {:?}", owners);
+}
+
+/// Mixed-depth chain: a method-call value, then a hash-key, then a method,
+/// then a hash-key. `$obj->get_config->deep->cfg->{host}` — the final `host`
+/// resolves through (method → typed value → method → key).
+#[test]
+fn chained_hash_key_mixed_depth_method_key() {
+    let src = "\
+package Inner;
+sub new { bless { host => 'localhost' }, shift }
+package Deep;
+sub new { bless {}, shift }
+sub cfg { return Inner->new() }
+package Config;
+sub new { bless {}, shift }
+sub deep { return Deep->new() }
+package Foo;
+sub new { bless {}, shift }
+sub get_config { return Config->new() }
+package main;
+my $obj = Foo->new();
+$obj->get_config->deep->cfg->{host};
+";
+    let tree = parse(src);
+    let fa = build(&tree, src.as_bytes());
+    let owners: Vec<_> = fa.refs.iter().filter_map(|r| match &r.kind {
+        RefKind::HashKeyAccess { owner: Some(o), .. } if r.target_name == "host" => Some(o.clone()),
+        _ => None,
+    }).collect();
+    assert_eq!(owners, vec![HashKeyOwner::Class("Inner".to_string())],
+        "mixed-depth chain must resolve host's owner to Inner, got {:?}", owners);
+}
+
+/// Regression: an untyped deep chain emits NO owner — honest-about-ignorance,
+/// never a wrong-owner latch.
+#[test]
+fn chained_hash_key_untyped_deep_chain_no_owner() {
+    let src = "\
+package Foo;
+sub new { bless {}, shift }
+sub mystery { return $_[0]->some_unknown_thing() }
+package main;
+my $obj = Foo->new();
+$obj->mystery->mystery->{host};
+";
+    let tree = parse(src);
+    let fa = build(&tree, src.as_bytes());
+    let owned: Vec<_> = fa.refs.iter().filter(|r| matches!(&r.kind,
+        RefKind::HashKeyAccess { owner: Some(_), .. }) && r.target_name == "host").collect();
+    assert!(owned.is_empty(), "untyped deep chain must not latch a wrong owner, got {:?}",
+        owned.iter().map(|r| &r.kind).collect::<Vec<_>>());
+}
+
 /// Regression: a same-package glob (`*name = sub {…}`, no `::` prefix)
 /// still synthesizes under the current package.
 #[test]

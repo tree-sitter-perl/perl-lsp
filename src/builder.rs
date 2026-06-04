@@ -2059,10 +2059,7 @@ impl<'a> Builder<'a> {
                 // `$_[0]` is the positional-receiver pseudo-invocant
                 // (`sub m { $_[0]->... }`) — enclosing-class identity,
                 // not a real array read.
-                if array.kind() == "container_variable"
-                    && varname.utf8_text(self.source).ok() == Some("_")
-                    && index.utf8_text(self.source).ok() == Some("0")
-                {
+                if self.is_positional_receiver(node) {
                     return self.package_for_node(node).map(InferredType::ClassName);
                 }
                 // General `$arr[N]`: read `@arr`'s Sequence shape from
@@ -5396,6 +5393,20 @@ impl<'a> Builder<'a> {
                 Some(WitnessPayload::Edge(WitnessAttachment::Symbol(sid)))
             }
 
+            // `$_[0]` in value position is the positional-receiver
+            // pseudo-invocant (`sub me { return $_[0] }` — the
+            // self-returning idiom). Its return value IS the call's
+            // receiver, so emit the deferred `Receiver` placeholder:
+            // `ReturnExprReducer` substitutes `q.receiver` at the call
+            // site, letting `Symbol(me)` / `MethodOnClass{C, me}` type
+            // a *chained* `$obj->me->me->...` to the receiver class at
+            // arbitrary depth. A general `$arr[N]` read carries no
+            // receiver semantics — leave it to the chain typer's
+            // element-projection arm (no Expr payload).
+            "array_element_expression" if self.is_positional_receiver(node) => {
+                Some(WitnessPayload::ReturnExpr(crate::witnesses::ReturnExpr::Receiver))
+            }
+
             // Ternary — Edge to its own Expr(span). The per-arm
             // `branch_arm`-source witnesses live on that attachment;
             // the registry's edge chase + BranchArmFold agree them.
@@ -5405,6 +5416,17 @@ impl<'a> Builder<'a> {
 
             _ => None,
         }
+    }
+
+    /// `$_[0]` — the positional-receiver pseudo-invocant of a method
+    /// body. Shared by `invocant_type_at_node`'s array-element arm and
+    /// `expr_payload`'s `Receiver` emission so both agree on the shape.
+    fn is_positional_receiver(&self, node: Node<'a>) -> bool {
+        let Some(array) = node.child_by_field_name("array") else { return false };
+        let Some(index) = node.child_by_field_name("index") else { return false };
+        array.kind() == "container_variable"
+            && array.named_child(0).and_then(|v| v.utf8_text(self.source).ok()) == Some("_")
+            && index.utf8_text(self.source).ok() == Some("0")
     }
 
     /// Emit the `Expr(span)` witnesses for `node` and (recursively)

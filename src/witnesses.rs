@@ -957,9 +957,19 @@ impl WitnessReducer for ReturnExprReducer {
     }
 
     fn claims(&self, w: &Witness) -> bool {
+        // The policy lives on the payload, not the attachment: a
+        // `ReturnExpr(_)` is a deferred (receiver/arity)-relative return
+        // wherever it's pushed. `Symbol(_)` / `MethodOnClass{..}` carry
+        // the class-keyed declarations; `Expr(_)` carries a method body's
+        // own deferred return (`sub me { return $_[0] }` → `Receiver` on
+        // the `$_[0]` body span), reached through the `SymbolReturnArm`
+        // edge chase. Claiming all three lets a self-returning method
+        // substitute the call's receiver at arbitrary chain depth.
         matches!(
             w.attachment,
-            WitnessAttachment::Symbol(_) | WitnessAttachment::MethodOnClass { .. }
+            WitnessAttachment::Symbol(_)
+                | WitnessAttachment::MethodOnClass { .. }
+                | WitnessAttachment::Expr(_)
         ) && matches!(w.payload, WitnessPayload::ReturnExpr(_))
     }
 
