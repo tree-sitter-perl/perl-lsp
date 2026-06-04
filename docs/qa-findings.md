@@ -39,10 +39,19 @@ landed"; handlers map `RenameKind`→`TargetRef` inline, separate from the diagn
   (`to_TypeTiny`, `hashify`): not flagged + found by workspace-symbol, yet goto-def/references/hover miss it —
   **even intra-file** (`Utils.pm` `hashify`). Divergent resolution paths is the smoking gun.
 
-## REF-1 — ref emission for calls embedded in expressions (NEW) — **contained, builder**
-*(AWStats)* Sub-calls as operands in `.`-concatenation / complex expressions don't emit a ref: `print "<td>".Format_Number($x)."</td>"` — the `Format_Number` call gets no `FunctionCall` ref, so references undercount
-(172→6) and goto-def is intermittent on byte-identical adjacent lines. Rule #7 violation in the builder.
-Likely a partial driver of NAV-2's undercount. **Investigate where call-ref emission is gated to statement level.**
+## REF-1 — ref emission for calls embedded in expressions — **RESOLVED (parser upgrade); regression-pinned**
+*(AWStats)* Original symptom: sub-calls as operands in `.`-concatenation / complex expressions emitted no
+`FunctionCall` ref (`print "<td>".Format_Number($x)."</td>"`), references undercounted (172→6), goto-def
+intermittent on byte-identical lines. **Root cause:** the OLD grammar parsed these `print "...".call()."..."`
+lines into ERROR nodes; the builder's `recover_structural_from_error` recovers only structural decls and skips
+expression refs, so nested calls inside the broken region got no ref. The `ts-parser-perl 1.0.3` upgrade
+(commit 944bcd1) parses these cleanly — the call is now a real `function_call_expression` nested in a
+`binary_expression`, which the generic `_ => visit_children` arm of `visit_node` already traverses. No
+builder change needed. Verified on the real file: `Format_Number` def → **183 refs** (≥172 textual sites),
+goto-def resolves on the previously-intermittent adjacent lines. Regression tests added in `builder_tests.rs`
+(`call_ref_in_concatenation_operand`, `call_ref_in_ternary_operands`, `method_call_ref_in_concatenation_operand`,
+`call_refs_count_across_expression_positions`, `statement_level_call_emits_single_ref`) so a future
+grammar/traversal change can't silently regress operand-position call refs.
 
 ## CG — sub codegen not synthesized as symbols (NEW) — **contained, high volume**
 - **CG-1 typeglob accessors** *(cpanminus File::Fetch/IPC::Cmd/File::Path ~half its diagnostics; Type::Tiny)*.
