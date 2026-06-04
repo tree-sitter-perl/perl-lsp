@@ -11700,3 +11700,111 @@ has age => (is => 'rw');
         "option keywords/values must not mint phantom methods in comma form"
     );
 }
+
+// ---- typeglob sub installation (CG-1) ----
+
+fn has_sub(fa: &FileAnalysis, name: &str) -> bool {
+    fa.symbols
+        .iter()
+        .any(|s| s.name == name && s.kind == SymKind::Sub)
+}
+
+#[test]
+fn glob_static_name_sub() {
+    let fa = build_fa("*greet = sub { return 'hi' };\n");
+    assert!(has_sub(&fa, "greet"), "static *name = sub {{...}} must mint a Sub symbol");
+}
+
+#[test]
+fn glob_alias_to_existing_sub() {
+    let fa = build_fa("*alias = \\&Other::func;\n*local_alias = \\&real;\n");
+    assert!(has_sub(&fa, "alias"), "*name = \\&Other::func glob alias must mint a Sub symbol");
+    assert!(has_sub(&fa, "local_alias"), "*name = \\&func glob alias must mint a Sub symbol");
+}
+
+#[test]
+fn glob_qualified_name_installs_tail() {
+    // `*Other::foo = sub {...}` installs `foo` into Other; the unqualified
+    // tail is what local call sites / nav use.
+    let fa = build_fa("*Other::foo = sub { 1 };\n");
+    assert!(has_sub(&fa, "foo"), "qualified glob must register the unqualified tail");
+    assert!(!has_sub(&fa, "Other::foo"), "must not register the fully-qualified string as a name");
+}
+
+#[test]
+fn glob_loop_over_qw() {
+    let src = "for my $m (qw/red green blue/) {\n  no strict 'refs';\n  *$m = sub { 1 };\n}\n";
+    let fa = build_fa(src);
+    for name in ["red", "green", "blue"] {
+        assert!(has_sub(&fa, name), "loop-installed glob `{name}` must mint a Sub symbol");
+    }
+}
+
+#[test]
+fn glob_begin_constant_style() {
+    let src = "BEGIN {\n  *_FORCE_WRITABLE = sub () { 1 };\n}\n";
+    let fa = build_fa(src);
+    assert!(
+        has_sub(&fa, "_FORCE_WRITABLE"),
+        "constant-style glob sub in BEGIN must mint a Sub symbol"
+    );
+}
+
+#[test]
+fn glob_literal_block_name() {
+    let fa = build_fa("*{ 'is_thing' } = sub { 1 };\n");
+    assert!(has_sub(&fa, "is_thing"), "`*{{ 'literal' }}` glob must mint a Sub symbol");
+}
+
+#[test]
+fn glob_scalar_rhs_coderef() {
+    let fa = build_fa("*handler = $coderef;\n");
+    assert!(has_sub(&fa, "handler"), "*name = $coderef must mint a Sub symbol");
+}
+
+#[test]
+fn glob_dynamic_name_skipped() {
+    // Fully runtime name — no static derivation, must NOT fabricate a symbol.
+    let fa = build_fa("*{ $runtime } = sub { 1 };\n");
+    // The anon `sub {...}` RHS mints an `(anon)` Sub symbol; the glob install
+    // itself must add no named Sub.
+    assert!(
+        !fa.symbols.iter().any(|s| s.kind == SymKind::Sub && s.name != "(anon)"),
+        "fully-dynamic glob name must be skipped, not guessed"
+    );
+}
+
+#[test]
+fn glob_unfoldable_concat_skipped() {
+    // `'is_' . $type` with an unknown $type is not derivable → skip.
+    let fa = build_fa("*{ 'is_' . $type } = sub { 1 };\n");
+    assert!(
+        !fa.symbols.iter().any(|s| s.kind == SymKind::Sub && s.name.starts_with("is_")),
+        "unfoldable concat name must be skipped, not guessed with a partial prefix"
+    );
+}
+
+#[test]
+fn glob_concat_with_loop_var_foldable() {
+    // `'is_' . $kind` where $kind ranges over a qw list → derivable names.
+    let src =
+        "for my $kind (qw/foo bar/) {\n  *{ 'is_' . $kind } = sub { 1 };\n}\n";
+    let fa = build_fa(src);
+    assert!(has_sub(&fa, "is_foo"), "foldable concat over loop var must mint is_foo");
+    assert!(has_sub(&fa, "is_bar"), "foldable concat over loop var must mint is_bar");
+}
+
+#[test]
+fn normal_assignment_unaffected() {
+    // Regression guard: a plain scalar assignment must not mint a Sub symbol,
+    // and `my $x = sub {...}` is a lexical coderef, not a glob install.
+    let fa = build_fa("my $x = 42;\nmy $cb = sub { 1 };\n");
+    assert!(
+        !fa.symbols.iter().any(|s| s.name == "x" && s.kind == SymKind::Sub),
+        "plain scalar assignment must not mint a Sub symbol"
+    );
+    assert!(
+        !fa.symbols.iter().any(|s| s.name == "cb" && s.kind == SymKind::Sub),
+        "lexical `my $cb = sub {{...}}` must not be treated as a glob install"
+    );
+}
