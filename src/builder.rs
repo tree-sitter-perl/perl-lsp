@@ -2125,15 +2125,21 @@ impl<'a> Builder<'a> {
             }
             "hash_element_expression" => {
                 // A hash element's VALUE type is independent of the
-                // container's class: `$self->{helper}` is whatever was
-                // stored under `helper`, not a `$self`. Resolving the
-                // base's type here mistyped the element as the
-                // container's class (`my $h = $self->{helper}` →
-                // `$h: Foo`), producing confident-wrong dispatch on
-                // `$h->method`. We know no honest value type for the
-                // slot today, so yield None (honest-untyped) rather
-                // than the container's class.
-                None
+                // container's class — never `$self`'s class. If a typed
+                // write to this slot was recorded (`SlotType{class,key}`,
+                // seeded at the write site, agreed by `SlotTypeFold`),
+                // that is the honest answer; otherwise untyped.
+                let base = node.named_child(0)?;
+                let class = self.invocant_type_at_node(base)?.class_name()?.to_string();
+                let key_node = node.child_by_field_name("key")?;
+                let (key, is_dynamic) = self.extract_key_text(key_node)?;
+                if is_dynamic {
+                    return None;
+                }
+                self.bag_query_attachment(&crate::witnesses::WitnessAttachment::SlotType {
+                    class,
+                    key,
+                })
             }
             "function_call_expression" | "ambiguous_function_call_expression" => {
                 if self.is_shift_call(node) {

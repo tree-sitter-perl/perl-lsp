@@ -624,6 +624,41 @@ fn test_hash_element_extracted_to_scalar_is_not_container_class() {
     );
 }
 
+/// A4 end-to-end (Step 3 consume join): a typed write into a slot, extracted
+/// to a scalar, types the scalar via `SlotType` — so a method call on it
+/// resolves. Helper is defined here so resolution can complete (contrast the
+/// honest-miss pin above, where it isn't).
+#[test]
+fn slot_type_write_then_extract_resolves_method() {
+    let source = "package Helper;\nsub new { bless {}, shift }\nsub do_thing { 1 }\npackage Foo;\nsub new { bless {}, shift }\nsub use_it { my $self = shift; $self->{helper} = Helper->new; my $h = $self->{helper}; $h->do_thing(); }\n1;\n";
+    let fa = build_fa(source);
+    let line = source.lines().nth(5).unwrap();
+
+    let probe = tree_sitter::Point::new(
+        5,
+        line.find("my $h").unwrap() + "my $h = $self->{helper}; ".len(),
+    );
+    let ty = fa.inferred_type("$h", probe);
+    assert_eq!(
+        ty.as_ref().and_then(|t| t.class_name()),
+        Some("Helper"),
+        "$h must type as Helper via the consumed SlotType; got {:?}",
+        ty
+    );
+
+    let def = fa.find_definition(
+        tree_sitter::Point::new(5, line.rfind("do_thing").unwrap() + 1),
+        None,
+        None,
+        None,
+    );
+    assert!(
+        matches!(&def, Some(d) if d.start.row == 2),
+        "$h->do_thing must resolve to Helper::do_thing on row 2; got {:?}",
+        def
+    );
+}
+
 
 #[test]
 fn test_use_symbol() {
