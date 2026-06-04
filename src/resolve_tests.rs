@@ -374,6 +374,116 @@ $b->run;
     );
 }
 
+/// NAV (b) repro (i): method references read the build-time-frozen
+/// dispatch edge, not a query-time invocant re-derivation. An untyped
+/// invocant (`my $w = COND ? external() : undef`) stamps NO edge, so its
+/// `->frobnicate` sites are deterministically EXCLUDED, while the typed
+/// `$self->frobnicate` (enclosing-class invocant) IS included. This is
+/// the determinism the unification buys: no enriched-vs-workspace
+/// divergence — the edge is frozen once per build.
+#[test]
+fn refs_to_method_excludes_untyped_invocant_includes_self() {
+    let store = FileStore::new();
+    let path = PathBuf::from("/tmp/nav_untyped_invocant.pm");
+
+    let fa = parse(
+        r#"package Widget;
+sub frobnicate { 1 }
+sub run {
+  my $self = shift;
+  my $w = $ENV{X} ? external() : undef;
+  $w->frobnicate;
+  $w->frobnicate;
+  $self->frobnicate;
+}
+1;
+"#,
+    );
+    store.insert_workspace(path.clone(), fa);
+
+    let results = refs_to(
+        &store,
+        None,
+        &TargetRef {
+            name: "frobnicate".to_string(),
+            kind: TargetKind::Method {
+                class: "Widget".to_string(),
+            },
+            method_classes: Vec::new(),
+        },
+        RoleMask::EDITABLE,
+    );
+    let lines: Vec<usize> = results.iter().map(|r| r.span.start.row).collect();
+    // def `sub frobnicate` (row 1) + `$self->frobnicate` (row 7).
+    assert!(
+        lines.contains(&1),
+        "frobnicate decl (row 1) missing: {:?}",
+        lines
+    );
+    assert!(
+        lines.contains(&7),
+        "$self->frobnicate (row 7) missing: {:?}",
+        lines
+    );
+    // Both untyped `$w->frobnicate` sites (rows 5, 6) EXCLUDED.
+    assert!(
+        !lines.contains(&5) && !lines.contains(&6),
+        "untyped $w->frobnicate sites (rows 5,6) wrongly included: {:?}",
+        lines
+    );
+    // Exactly two hits: the decl + the one typed call.
+    assert_eq!(
+        results.len(),
+        2,
+        "expected exactly decl + $self call, got {:?}",
+        lines
+    );
+}
+
+/// NAV regression (iv): a typed same-file invocant (`my $w = Widget->new`)
+/// still resolves fully — every `$w->frobnicate` site is matched via the
+/// frozen edge. Guards against the unification dropping valid matches.
+#[test]
+fn refs_to_method_typed_same_file_invocant_resolves_fully() {
+    let store = FileStore::new();
+    let path = PathBuf::from("/tmp/nav_typed_invocant.pm");
+
+    let fa = parse(
+        r#"package Widget;
+sub new { bless {}, shift }
+sub frobnicate { 1 }
+sub run {
+  my $w = Widget->new;
+  $w->frobnicate;
+  $w->frobnicate;
+}
+1;
+"#,
+    );
+    store.insert_workspace(path.clone(), fa);
+
+    let results = refs_to(
+        &store,
+        None,
+        &TargetRef {
+            name: "frobnicate".to_string(),
+            kind: TargetKind::Method {
+                class: "Widget".to_string(),
+            },
+            method_classes: Vec::new(),
+        },
+        RoleMask::EDITABLE,
+    );
+    let lines: Vec<usize> = results.iter().map(|r| r.span.start.row).collect();
+    assert!(lines.contains(&2), "frobnicate decl (row 2) missing: {:?}", lines);
+    assert!(
+        lines.iter().filter(|&&l| l == 5).count() == 1
+            && lines.iter().filter(|&&l| l == 6).count() == 1,
+        "both typed $w->frobnicate sites (rows 5,6) must resolve: {:?}",
+        lines
+    );
+}
+
 /// Adversarial #3: Corinna classes with same method name. Both
 /// call shapes must class-resolve correctly:
 ///

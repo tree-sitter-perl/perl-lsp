@@ -381,6 +381,44 @@ pub struct Ref {
     pub access: AccessKind,
     /// For variable refs: which Symbol this resolves to (filled in post-pass).
     pub resolves_to: Option<SymbolId>,
+    /// For `MethodCall` refs: the build-time-resolved dispatch target.
+    /// Mirrors `resolves_to` for variables (build pipeline phase 6
+    /// `PostFold`): the PostFold invocant-fill already has the invocant
+    /// class in hand, so it resolves the method on that class once and
+    /// stamps the edge here. `refs_to` / `find_definition` / hover all
+    /// read this stored edge instead of re-deriving the invocant class at
+    /// query time, so they can never disagree (the NAV unification — a
+    /// call that resolved at build time stays matched regardless of
+    /// query-time inference flakiness). `None` means the invocant class
+    /// did not infer at build time — the call is honestly unresolved, no
+    /// name-only fallback (that re-introduces the `->new` over-collect).
+    #[serde(default)]
+    pub resolved_method_target: Option<MethodTarget>,
+}
+
+/// Build-time-resolved dispatch target for a `MethodCall` ref.
+/// `invocant_class` is the class the invocant resolved to at build time
+/// (frozen); it drives the inheritance rename-chain match in `refs_to`,
+/// replacing the query-time `method_call_invocant_class` re-derivation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum MethodTarget {
+    /// Method found on a local symbol in this file (via the ancestor walk).
+    Local { sym_id: SymbolId, invocant_class: String },
+    /// Method found cross-file (real method in the invocant's module, an
+    /// inherited ancestor, or a plugin bridge). The defining symbol lives
+    /// in another file; the LSP adapter resolves location via ModuleIndex.
+    CrossFile { invocant_class: String },
+}
+
+impl MethodTarget {
+    /// The invocant class this target resolved against (drives the
+    /// rename-chain match in `refs_to`).
+    pub fn invocant_class(&self) -> &str {
+        match self {
+            MethodTarget::Local { invocant_class, .. }
+            | MethodTarget::CrossFile { invocant_class } => invocant_class,
+        }
+    }
 }
 
 /// What kind of entity is being renamed — determines single-file vs cross-file scope.
@@ -1763,9 +1801,60 @@ impl FileAnalysis {
         // `enrich_imported_types_with_keys` re-runs the same
         // routine with `module_index`.
         self.fix_chain_receiver_hash_key_owners(None);
+        // Stamp the build-time-resolved dispatch target on MethodCall
+        // refs (local-only here; enrichment re-stamps with the index
+        // for OPEN docs). Mutates existing refs in place, so it must run
+        // before sealing base_ref_count — the seal counts the refs, the
+        // stamp only sets a field on them.
+        self.stamp_method_call_targets(None);
         self.base_symbol_count = self.symbols.len();
         self.base_witness_count = self.witnesses.len();
         self.base_ref_count = self.refs.len();
+    }
+
+    /// Stamp `resolved_method_target` on every `MethodCall` ref — the NAV
+    /// unification edge (build pipeline phase 6 `PostFold`, then re-stamped
+    /// at enrichment). The invocant class is resolved ONCE here (via the
+    /// bag-routed `method_call_invocant_class`) and frozen on the ref;
+    /// `refs_to` / `find_definition` / hover read the frozen edge instead of
+    /// re-deriving the class at query time, so they can never diverge.
+    ///
+    /// Contract: if the invocant class does not infer, store `None` (honest
+    /// miss). No name-only fallback — that re-introduces the `->new` flood.
+    pub(crate) fn stamp_method_call_targets(&mut self, module_index: Option<&ModuleIndex>) {
+        // Collect resolutions first; `method_call_invocant_class` /
+        // `resolve_method_in_ancestors` borrow `&self`, so we can't hold a
+        // `&mut self.refs[i]` while calling them.
+        let mut stamped: Vec<(usize, Option<MethodTarget>)> = Vec::new();
+        for (i, r) in self.refs.iter().enumerate() {
+            if !matches!(r.kind, RefKind::MethodCall { .. }) {
+                continue;
+            }
+            let target = self
+                .method_call_invocant_class(r, module_index)
+                .map(|cn| {
+                    match self.resolve_method_in_ancestors(&cn, &r.target_name, module_index) {
+                        Some(MethodResolution::Local { sym_id, .. }) => MethodTarget::Local {
+                            sym_id,
+                            invocant_class: cn,
+                        },
+                        // Method found cross-file, OR the invocant class is
+                        // known but the method isn't found on it locally and
+                        // the class has cross-file parents / a cross-file
+                        // body the index may carry. Either way the invocant
+                        // froze, so keep the edge (CrossFile); the rename
+                        // chain still gates which targets it matches. A class
+                        // with no method and no parents still resolved its
+                        // invocant — the edge records that fact; find_def's
+                        // method-not-found arm returns None honestly.
+                        _ => MethodTarget::CrossFile { invocant_class: cn },
+                    }
+                });
+            stamped.push((i, target));
+        }
+        for (i, target) in stamped {
+            self.refs[i].resolved_method_target = target;
+        }
     }
 
     /// Set the `owner` on `HashKeyAccess { owner: None, .. }` refs
@@ -2637,6 +2726,13 @@ impl FileAnalysis {
         }
 
         self.resolve_method_call_types(module_index);
+        // Re-stamp the MethodCall dispatch-target edges now that the bag
+        // carries enriched cross-file invocant types. Enrichment truncated
+        // refs back to base_ref_count, wiping the build-time (local-only)
+        // edge; this re-derives it with the index so cross-file-typed
+        // invocants resolve. Single-sourced: refs_to / find_def / hover
+        // read this frozen edge, never re-derive at query time.
+        self.stamp_method_call_targets(module_index);
         self.rebuild_enrichment_indices();
     }
 
@@ -3757,7 +3853,14 @@ impl FileAnalysis {
                     // the LSP adapter (symbols::find_definition).
                 }
                 RefKind::MethodCall { .. } => {
-                    let class_name = self.method_call_invocant_class(r, module_index);
+                    // Single-source the invocant class off the build-time
+                    // frozen dispatch edge (NAV unification) — the same edge
+                    // refs_to / hover read, so all three agree. `None` edge
+                    // means the invocant didn't infer: honest miss.
+                    let class_name = r
+                        .resolved_method_target
+                        .as_ref()
+                        .map(|t| t.invocant_class().to_string());
 
                     // Cursor on a named arg key (not the method name):
                     // resolve to its hash-key def or :param field.
@@ -3798,31 +3901,20 @@ impl FileAnalysis {
                         }
                     }
 
-                    if let Some(ref cn) = class_name {
-                        // Find method in the resolved class (walks inheritance)
-                        match self.resolve_method_in_ancestors(cn, &r.target_name, module_index) {
-                            Some(MethodResolution::Local { sym_id, .. }) => {
-                                return Some(self.symbol(sym_id).selection_span);
-                            }
-                            Some(MethodResolution::CrossFile { .. }) => {
-                                // Cross-file method — return None so the LSP adapter
-                                // can resolve it via ModuleIndex with the correct URI.
-                                return None;
-                            }
-                            None => {
-                                // If the class has known parents, the method might be
-                                // inherited but the module index hasn't resolved yet.
-                                // Return None so the cross-file block in symbols.rs
-                                // gets a chance, rather than jumping to the package decl.
-                                if self.package_parents.contains_key(cn) {
-                                    return None;
-                                }
-                            }
+                    // Method dispatch reads the frozen edge: `Local` lands
+                    // directly on the local symbol; `CrossFile` returns None
+                    // so the LSP adapter resolves via ModuleIndex with the
+                    // correct URI. A `None` edge (invocant didn't infer) also
+                    // returns None — honest miss, never a confident wrong jump
+                    // to the package decl (NAV (a)).
+                    match &r.resolved_method_target {
+                        Some(MethodTarget::Local { sym_id, .. }) => {
+                            return Some(self.symbol(*sym_id).selection_span);
                         }
-                        // Method not found and no parents — go to class def
-                        if let Some(span) = self.find_package_or_class(cn) {
-                            return Some(span);
+                        Some(MethodTarget::CrossFile { .. }) => {
+                            return None;
                         }
+                        None => {}
                     }
                     // Last-resort "any sub/method with that name" fallback.
                     // Only fires when we couldn't resolve the invocant at
@@ -4195,7 +4287,13 @@ impl FileAnalysis {
                     }
                 }
                 RefKind::MethodCall { .. } => {
-                    let class_name = self.method_call_invocant_class(r, module_index);
+                    // Single-source the invocant class off the frozen
+                    // dispatch edge (NAV unification) — same edge find_def /
+                    // refs_to read, so hover never diverges.
+                    let class_name = r
+                        .resolved_method_target
+                        .as_ref()
+                        .map(|t| t.invocant_class().to_string());
                     if let Some(ref cn) = class_name {
                         match self.resolve_method_in_ancestors(cn, &r.target_name, module_index) {
                             Some(MethodResolution::Local { sym_id, class: ref defining_class, .. }) => {

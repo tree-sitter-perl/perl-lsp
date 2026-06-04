@@ -1461,6 +1461,7 @@ impl<'a> Builder<'a> {
             target_name,
             access,
             resolves_to: None,
+            resolved_method_target: None,
         });
     }
 
@@ -2419,6 +2420,7 @@ impl<'a> Builder<'a> {
                     target_name: name,
                     access,
                     resolves_to: None,
+                    resolved_method_target: None,
                 });
             }
             plugin::EmitAction::Handler {
@@ -2487,6 +2489,7 @@ impl<'a> Builder<'a> {
                     target_name: method_name,
                     access: AccessKind::Read,
                     resolves_to: None,
+                    resolved_method_target: None,
                 });
                 if let Some(c) = invocant_class {
                     self.method_call_invocant.insert(ref_idx, c);
@@ -2512,6 +2515,7 @@ impl<'a> Builder<'a> {
                         target_name: name,
                         access: AccessKind::Read,
                         resolves_to: None,
+                        resolved_method_target: None,
                     });
                 }
             }
@@ -8780,6 +8784,7 @@ impl<'a> Builder<'a> {
                 target_name: key,
                 access,
                 resolves_to: None,
+                resolved_method_target: None,
             });
         }
     }

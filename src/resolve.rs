@@ -389,33 +389,32 @@ fn collect_from_analysis(
             }
             (TargetKind::Sub { .. } | TargetKind::Method { .. },
              RefKind::MethodCall { .. }) => {
-                // Method-shaped call: match only when the ref's
-                // invocant resolves to the target scope. The bag is
-                // the single resolver — `method_call_invocant_class`
-                // dispatches by invocant shape (variable / chain /
-                // bareword / `__PACKAGE__`) and queries the bag.
-                // Cross-file enrichment composes naturally because
-                // it pushes Variable witnesses the bag query reads.
-                // Class still has to be `Some` to match — package-
-                // less subs and genuinely unpinnable invocants stay
-                // out, no cross-linking.
+                // Method-shaped call: match on the build-time-frozen
+                // dispatch edge (`resolved_method_target`), NOT a
+                // query-time re-derivation of the invocant class. The
+                // edge was stamped once (PostFold / enrichment) by the
+                // bag-routed resolver, so a call that resolved at build
+                // time stays matched regardless of query-time inference
+                // flakiness, and genuinely unresolved sites (no edge)
+                // are honestly excluded. This is the NAV unification —
+                // references read a stored edge, the same discipline
+                // `Variable` refs use with `resolves_to`.
                 //
-                // Inheritance: `$child->m()` is a reference to the
-                // method `m` resolves to. If the target is a class T
-                // that the invocant's class inherits this method from
-                // (T is on the resolution chain, no intermediate
-                // override), the call matches. `method_rename_chain`
-                // is `[invocant_class, ..., defining_class]` — the
-                // same chain rename walks — so references and rename
-                // agree, and unrelated same-named methods on other
-                // classes still stay out (they're never on the chain).
+                // Inheritance: the edge carries the frozen invocant
+                // class; `method_rename_chain` (deterministic over
+                // package_parents + module_index) yields
+                // `[invocant_class, ..., defining_class]`, so `$child->m`
+                // matches a target on any class T on that chain, and
+                // unrelated same-named methods on other classes stay out
+                // (never on the chain).
                 let scope = callable_scope_for_refs.as_ref().unwrap();
-                match (analysis.method_call_invocant_class(r, module_index), scope) {
-                    (Some(cn), Some(pkg)) => {
-                        &cn == pkg || rename_chain_cache
-                            .entry(cn.clone())
+                match (r.resolved_method_target.as_ref(), scope) {
+                    (Some(edge), Some(pkg)) => {
+                        let cn = edge.invocant_class();
+                        cn == pkg || rename_chain_cache
+                            .entry(cn.to_string())
                             .or_insert_with(|| {
-                                analysis.method_rename_chain(&cn, &r.target_name, module_index)
+                                analysis.method_rename_chain(cn, &r.target_name, module_index)
                             })
                             .iter()
                             .any(|c| c == pkg)
