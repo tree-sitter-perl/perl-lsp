@@ -3826,3 +3826,167 @@ Foo->bar();\n";
         "`bar` method token should resolve to `sub bar` (line 1), not the package decl",
     );
 }
+
+// ---- Consumer import-binding evaluator (ExportSurface / imported_names) ----
+//
+// One bound set, every consumer reads it: the unresolved-function diagnostic
+// and goto-def both route through `imported_names`, so "found by goto-def,
+// flagged by diagnostic" is impossible. ModX has @EXPORT=always_here,
+// @EXPORT_OK=opt_here, %EXPORT_TAGS=(all=>[both]).
+
+fn modx_index() -> crate::module_index::ModuleIndex {
+    let idx = crate::module_index::ModuleIndex::new_for_test();
+    let src = "package ModX;\n\
+our @EXPORT = qw(always_here);\n\
+our @EXPORT_OK = qw(opt_here);\n\
+our %EXPORT_TAGS = (all => [qw(always_here opt_here)]);\n\
+sub always_here { 1 }\n\
+sub opt_here { 2 }\n\
+1;\n";
+    idx.register_workspace_module(
+        std::path::PathBuf::from("/tmp/perl_lsp_pin_ModX.pm"),
+        std::sync::Arc::new(parse_analysis(src)),
+    );
+    idx
+}
+
+/// Does the unresolved-function diagnostic flag `name` in `source`?
+fn flags_fn(source: &str, name: &str, idx: &crate::module_index::ModuleIndex) -> bool {
+    let analysis = parse_analysis(source);
+    collect_diagnostics(&analysis, idx, Default::default())
+        .iter()
+        .any(|d| {
+            matches!(&d.code, Some(NumberOrString::String(c)) if c == "unresolved-function")
+                && d.message.contains(&format!("'{}'", name))
+        })
+}
+
+/// Does goto-def resolve the LAST call to `name` in `source` to ModX.pm?
+fn gd_resolves(source: &str, name: &str, idx: &crate::module_index::ModuleIndex) -> bool {
+    let analysis = parse_analysis(source);
+    let mut parser = tree_sitter::Parser::new();
+    parser.set_language(&ts_parser_perl::LANGUAGE.into()).unwrap();
+    let tree = parser.parse(source, None).unwrap();
+    let byte = source.rfind(&format!("{}(", name)).expect("call site present");
+    let prefix = &source[..byte];
+    let pos = Position {
+        line: prefix.matches('\n').count() as u32,
+        character: (byte - prefix.rfind('\n').map(|i| i + 1).unwrap_or(0)) as u32,
+    };
+    let uri = Url::parse("file:///consumer.pl").unwrap();
+    let loc = match find_definition(&analysis, pos, &uri, idx, &tree, source) {
+        Some(GotoDefinitionResponse::Scalar(loc)) => Some(loc),
+        Some(GotoDefinitionResponse::Array(mut v)) if !v.is_empty() => Some(v.remove(0)),
+        _ => None,
+    };
+    loc.map_or(false, |l| l.uri.path().ends_with("ModX.pm"))
+}
+
+#[test]
+fn bare_use_binds_export_default_no_fp_and_gd_resolves() {
+    let idx = modx_index();
+    let src = "use ModX;\nalways_here();\n";
+    assert!(!flags_fn(src, "always_here", &idx), "bare use binds @EXPORT — no FP");
+    assert!(gd_resolves(src, "always_here", &idx), "goto-def resolves @EXPORT name");
+}
+
+#[test]
+fn named_import_still_works_regression() {
+    let idx = modx_index();
+    let src = "use ModX qw(opt_here);\nopt_here();\n";
+    assert!(!flags_fn(src, "opt_here", &idx), "named import binds the name");
+    assert!(gd_resolves(src, "opt_here", &idx), "goto-def resolves named import");
+}
+
+#[test]
+fn tag_selector_binds_members_no_fp_and_gd_resolves() {
+    let idx = modx_index();
+    let src = "use ModX qw(:all);\nopt_here();\n";
+    assert!(!flags_fn(src, "opt_here", &idx), ":all tag binds member opt_here");
+    assert!(gd_resolves(src, "opt_here", &idx), "goto-def resolves :tag member");
+}
+
+#[test]
+fn default_tag_equals_export() {
+    let idx = modx_index();
+    // :DEFAULT is the Exporter alias for @EXPORT — binds always_here, not opt_here.
+    let src = "use ModX qw(:DEFAULT);\nalways_here();\n";
+    assert!(!flags_fn(src, "always_here", &idx), ":DEFAULT binds @EXPORT member");
+    assert!(gd_resolves(src, "always_here", &idx), "goto-def resolves :DEFAULT member");
+}
+
+#[test]
+fn as_rename_binds_local_to_origin() {
+    let idx = modx_index();
+    // local `here` aliases origin `always_here`; goto-def on `here` reaches the origin.
+    let src = "use ModX always_here => { -as => 'here' };\nhere();\n";
+    let analysis = parse_analysis(src);
+    let renamed = analysis
+        .imports
+        .iter()
+        .flat_map(|i| i.imported_symbols.iter())
+        .find(|s| s.local_name == "here");
+    assert!(
+        renamed.map_or(false, |s| s.remote() == "always_here"),
+        "the -as rename must bind local `here` to origin `always_here`; imports: {:?}",
+        analysis.imports.iter().map(|i| i.imported_symbols.clone()).collect::<Vec<_>>(),
+    );
+    assert!(!flags_fn(src, "here", &idx), "renamed local `here` is bound — no FP");
+    assert!(gd_resolves(src, "here", &idx), "goto-def on `here` reaches origin sub");
+}
+
+#[test]
+fn empty_import_binds_nothing_flags_export_name() {
+    let idx = modx_index();
+    // `use ModX ();` — explicit empty list suppresses even @EXPORT.
+    let src = "use ModX ();\nalways_here();\n";
+    assert!(
+        flags_fn(src, "always_here", &idx),
+        "empty `()` import binds nothing — @EXPORT name must flag (honest)",
+    );
+}
+
+#[test]
+fn export_ok_on_bare_use_is_suppressed_gate5() {
+    let idx = modx_index();
+    // GATE-5 (load-bearing): a bare `use M;` suppresses unresolved-function for
+    // @EXPORT_OK names. The builder cannot distinguish a runtime exporter's
+    // defaults (recorded in export_ok) from traditional opt-in, so flagging them
+    // would reintroduce the ~684-FP cluster. The honest "binds nothing" path is
+    // `use M ();` (empty parens), tested separately.
+    let src = "use ModX;\nopt_here();\n";
+    assert!(
+        !flags_fn(src, "opt_here", &idx),
+        "bare use must suppress unresolved-function for @EXPORT_OK names (684-FP guard)",
+    );
+}
+
+#[test]
+fn diagnostic_and_gotodef_agree_on_bound_set() {
+    let idx = modx_index();
+    // For every case, "flagged by diagnostic" must equal "NOT brought" — and a
+    // name the diagnostic stays silent on (brought) must goto-def resolve.
+    let cases: &[(&str, &str, bool)] = &[
+        // (source, name, should_flag_as_unresolved-function)
+        ("use ModX;\nalways_here();\n", "always_here", false),
+        ("use ModX qw(opt_here);\nopt_here();\n", "opt_here", false),
+        ("use ModX qw(:all);\nopt_here();\n", "opt_here", false),
+        ("use ModX ();\nalways_here();\n", "always_here", true),
+    ];
+    for (src, name, should_flag) in cases {
+        let flagged = flags_fn(src, name, &idx);
+        assert_eq!(
+            flagged, *should_flag,
+            "diagnostic verdict mismatch for `{}` in {:?}",
+            name, src,
+        );
+        // Brought names (not flagged) must be navigable.
+        if !should_flag {
+            assert!(
+                gd_resolves(src, name, &idx),
+                "a non-flagged (brought) name must goto-def resolve: `{}` in {:?}",
+                name, src,
+            );
+        }
+    }
+}

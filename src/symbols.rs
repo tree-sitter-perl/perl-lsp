@@ -2179,36 +2179,42 @@ enum ImportResolution {
     ExportedNotBrought,
 }
 
-/// True if a `use Foo qw(:tag, ...)` carries any `:tag` / `-tag` group
-/// selector. Tag membership is folded into the *producer* surface (B-tag), so
-/// a tagged import whose surface lists the name is treated as bringing the
-/// name in — the bounded consumer-side expansion goto-def needs, without a
-/// full per-tag selector evaluator (deferred to B2/B3).
-fn import_has_tag_selector(import: &crate::file_analysis::Import) -> bool {
-    import
-        .imported_symbols
-        .iter()
-        .any(|s| s.local_name.starts_with(':') || s.local_name.starts_with('-'))
-}
-
-/// Classify a name against a single import, given the producer's export
-/// surface verdict (`exports`). `None` = no relationship (not named, not
-/// exported, not a tag/bare bring-in).
+/// Classify a name against a single import. Routes through the consumer
+/// evaluator (`imported_names`) so the verdict is exactly "is this name in the
+/// bound set this `use` produces" — the single notion of import binding that
+/// diagnostics, goto-def, and references all read (NAV § (c)). Returns the
+/// resolved verdict plus the REMOTE (origin) name for the matched local name.
+///
+/// `cached` is the producer's `FileAnalysis` when known; its `export_surface`
+/// expands `:tag` selectors and supplies the `@EXPORT` defaults for a bare
+/// `use`. When absent (module not yet cached), the evaluator still binds
+/// explicitly-named `qw()` imports — those don't need the surface — so an
+/// explicit named import is never spuriously flagged while the resolver warms.
 fn classify_import(
     import: &crate::file_analysis::Import,
     func_name: &str,
-    exports: bool,
-) -> Option<ImportResolution> {
-    if import.imported_symbols.iter().any(|s| s.local_name == *func_name) {
-        return Some(ImportResolution::Brought);
+    cached: Option<&CachedModule>,
+) -> Option<(ImportResolution, String)> {
+    if let Some(cached) = cached {
+        let surface = cached.analysis.export_surface();
+        let bound = crate::file_analysis::imported_names(import, &surface);
+        if let Some((_local, remote)) = bound.iter().find(|(local, _)| local == func_name) {
+            return Some((ImportResolution::Brought, remote.clone()));
+        }
+        // Not bound by this `use`, but on the producer surface → the actionable
+        // "exported but not imported" hint (a named `qw(other)` omitting it, or
+        // an `@EXPORT_OK` name reached only by a bare `use` — GATE-5).
+        if surface.exports(func_name) {
+            return Some((ImportResolution::ExportedNotBrought, func_name.to_string()));
+        }
+        return None;
     }
-    // Bare `use Foo;` auto-imports the producer's default surface; a `:tag`
-    // selector pulls in the tag's members, which now live in that surface.
-    if exports && (import.imported_symbols.is_empty() || import_has_tag_selector(import)) {
-        return Some(ImportResolution::Brought);
-    }
-    if exports {
-        return Some(ImportResolution::ExportedNotBrought);
+    // Module not cached yet: only an explicitly-named import can be judged
+    // `Brought` without the producer surface (tags / bare-use defaults need it).
+    // This keeps a `qw(foo)` import from being flagged while the resolver warms,
+    // and never resolves a bare/tagged name it can't actually verify.
+    if let Some(sym) = import.imported_symbols.iter().find(|s| s.local_name == *func_name) {
+        return Some((ImportResolution::Brought, sym.remote().to_string()));
     }
     None
 }
@@ -2216,13 +2222,8 @@ fn classify_import(
 /// Best resolution of `func_name` across all imports: the matched import, its
 /// remote name, the resolvability verdict, and — when known — the module path
 /// for navigation. `Brought` wins over `ExportedNotBrought` when several
-/// imports relate. The single resolvability query both goto-def and the
-/// diagnostic read.
-///
-/// The verdict is computed from the export surface alone, so an explicitly
-/// `qw()`-named import is `Brought` even when its module isn't cached yet (the
-/// diagnostic must not flag it); the path is best-effort (`None` if uncached)
-/// and goto-def simply doesn't jump cross-file when it's absent.
+/// imports relate. The single resolvability query goto-def, the diagnostic, and
+/// references all read, so they can never disagree on the bound set.
 fn resolve_imported_function_classified<'a>(
     analysis: &'a FileAnalysis,
     func_name: &str,
@@ -2235,17 +2236,10 @@ fn resolve_imported_function_classified<'a>(
         ImportResolution,
     )> = None;
     for import in &analysis.imports {
-        let explicit = import.imported_symbols.iter().find(|s| s.local_name == *func_name);
-        // Producer-surface verdict: an explicit `qw()` name is always exported
-        // here; otherwise consult the cached module's folded export surface.
-        let exports = explicit.is_some()
-            || module_index
-                .get_cached(&import.module_name)
-                .map_or(false, |c| c.analysis.exports_name(func_name));
-        let Some(res) = classify_import(import, func_name, exports) else { continue };
-        let remote = explicit.map_or_else(|| func_name.to_string(), |is| is.remote().to_string());
-        let path = module_index
-            .get_cached(&import.module_name)
+        let cached = module_index.get_cached(&import.module_name);
+        let Some((res, remote)) = classify_import(import, func_name, cached.as_deref()) else { continue };
+        let path = cached
+            .as_ref()
             .map(|c| c.path.clone())
             .or_else(|| module_index.module_path_cached(&import.module_name));
         // `Brought` is the strongest verdict; once found, keep it.
