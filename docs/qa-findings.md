@@ -49,6 +49,14 @@ export-member collector, the new exporter `imported_names`/`extract_as_renames`/
   **hint** we may lean on later (disambiguation / which-element-is-the-name), but only as a heuristic tie-breaker,
   never a hard gate. The correctness path stays separator-agnostic.
 
+### Generic fully-qualified (FQ) symbol handling — DESIGN (cross-cutting cleanup)
+We keep adding a per-construct qualifier-stripper: `Ref::unqualified_target_name()` for `Foo::Bar::baz()` calls
+(R6), `Builder::export_var_basename` for `@Pkg::EXPORT`/`%Pkg::EXPORT_TAGS` globals (exporter round). Same
+underlying fact each time: a name token may carry a `Pkg::` qualifier; resolution = `(qualifier ?? current_pkg,
+basename)`. Generically un-handled today: FQ *variable* reads (`$Foo::Bar::x`, `@Pkg::arr`, `%Pkg::h`), `\&Pkg::sub`.
+**Unify:** one `split_qualified(name) -> (Option<pkg>, basename)` that every symbol/ref consumer resolves through
+(rule #10 — encode "is qualified" on the name/ref once), retiring the bespoke strippers. Deferred; documented here.
+
 ### Type inference — DESIGN (`qa-design-items.md`)
 - **A4 — hash-extracted invocant** (Pillar 2). `my $x = $self->{field}; $x->method` → `HashRef`; also the
   `Bugzilla::Memcached` field-type case. Slot→type witnesses from observed writes; never "no evidence → HashRef".
