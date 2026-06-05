@@ -534,6 +534,15 @@ this shape.
 
 ## X1 — external scanner state grows unbounded per `s{}{}`/`tr{}{}`, overflowing the 1024-byte serialize buffer
 
+> **STATUS: FIXED UPSTREAM (ts-parser-perl master), ships in the next TSP cut.**
+> Long-standing bug. Real cause: the scanner *accidentally* supported four-part
+> quotes with **different** paired delimiters (e.g. `s{...}[...]`), and in doing
+> so **leaked the close token of the first pair** onto its serialized state — so
+> every paired-delimiter `s`/`tr`/`y` left ~12 bytes behind that were never
+> reclaimed. Master pops it correctly. **Action for this repo: none upstream —
+> just bump `ts-parser-perl` when the fixed release lands, which unblocks merging
+> re-export.** Diagnosis below retained for the record.
+
 **Severity: HIGH — process `abort()`, uncatchable from Rust** (it's a C
 `assert`/`abort()` inside libtree-sitter; `catch_unwind` does not catch it, so a
 single bad file kills the whole LSP). Deterministic, single-file, isolatable.
@@ -575,13 +584,14 @@ touched — e.g. `XML/Twig.pm` (14k lines, 273 `s{}{}` in one span) reliably
 aborts (`perl-lsp --parse /usr/share/perl5/XML/Twig.pm`, 10/10). Bugzilla pulls
 in XML::Twig transitively, so Bugzilla-cold + re-export = guaranteed abort.
 
-**Fix direction (upstream).** In the external scanner, the state pushed when a
-paired-delimiter `s`/`tr`/`y` opens must be **popped when it closes** (or not
-stacked at all) — audit the `serialize`/`deserialize` + the delimiter-stack for
-the `s{}{}`/`tr{}{}` path; today serialized size is O(number of such operators in
-the file) when it must be O(open-nesting-depth). This is a latent landmine for
-*any* parse path that touches a large real-world module, not just re-export —
-re-export only widened the set of files we parse into `@INC`.
+**Root cause (confirmed upstream).** The scanner accidentally supported four-part
+quotes with *different* paired delimiters (`s{...}[...]`-style) and **leaked the
+close token of the first pair** into serialized state — so each paired-delimiter
+`s`/`tr`/`y` left ~12 bytes that were never reclaimed, making serialized size
+O(number of such operators in the file) instead of O(open-nesting-depth). Fixed
+on ts-parser-perl master (pops the first-pair close correctly); ships next cut.
+Was a latent landmine for *any* parse path touching a large real-world module —
+re-export only widened the set of files we parse into `@INC` and so hit it first.
 
 ---
 
