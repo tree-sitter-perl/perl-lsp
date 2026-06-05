@@ -1089,6 +1089,23 @@ pub fn document_highlights(analysis: &FileAnalysis, pos: Position, tree: &tree_s
         .collect()
 }
 
+/// Linked-editing ranges = the in-file occurrence set of the symbol at `pos`.
+/// Shared by the LSP `linked_editing_range` handler and the `--linked-editing`
+/// CLI so neither re-derives it — it's just `find_references` (the same path
+/// document-highlight/references use), surfaced as ranges. None when there's
+/// nothing to co-edit (fewer than two occurrences).
+pub fn linked_editing_ranges(
+    analysis: &FileAnalysis,
+    pos: Position,
+    module_index: Option<&ModuleIndex>,
+) -> Option<Vec<Range>> {
+    let refs = analysis.find_references(position_to_point(pos), None, None, module_index);
+    if refs.len() < 2 {
+        return None;
+    }
+    Some(refs.into_iter().map(span_to_range).collect())
+}
+
 pub fn selection_ranges(tree: &Tree, pos: Position) -> SelectionRange {
     let spans = cursor_context::selection_ranges(tree, position_to_point(pos));
     // Build linked list from innermost to outermost

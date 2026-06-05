@@ -75,6 +75,18 @@ async fn main() {
             cli_signature_help(&args[2], &args[3], &args[4], &args[5]);
             return;
         }
+        Some("--semantic-tokens") if args.len() >= 4 => {
+            cli_semantic_tokens(&args[2], &args[3]);
+            return;
+        }
+        Some("--document-highlight") if args.len() >= 6 => {
+            cli_document_highlight(&args[2], &args[3], &args[4], &args[5]);
+            return;
+        }
+        Some("--linked-editing") if args.len() >= 6 => {
+            cli_linked_editing(&args[2], &args[3], &args[4], &args[5]);
+            return;
+        }
         Some("--rename") if args.len() == 7 => {
             cli_rename(&args[2], &args[3], &args[4], &args[5], &args[6]);
             return;
@@ -140,6 +152,9 @@ fn print_usage() {
     eprintln!("  perl-lsp --references <root> <file> <line> <col>       Cross-file find-refs");
     eprintln!("  perl-lsp --completion <root> <file> <line> <col>       Completion items at point");
     eprintln!("  perl-lsp --signature-help <root> <file> <line> <col>   Signature help at point");
+    eprintln!("  perl-lsp --document-highlight <root> <file> <line> <col> In-file occurrences (read/write)");
+    eprintln!("  perl-lsp --linked-editing <root> <file> <line> <col>   Linked-editing occurrence set");
+    eprintln!("  perl-lsp --semantic-tokens <root> <file>               Semantic token classification");
     eprintln!();
     eprintln!("REFACTORING:");
     eprintln!("  perl-lsp --rename <root> <file> <line> <col> <new>     Cross-file rename");
@@ -710,15 +725,7 @@ fn cli_references(root: &str, file: &str, line_str: &str, col_str: &str) {
 /// and enriches it against the index exactly like the open-file path.
 fn cli_completion(root: &str, file: &str, line_str: &str, col_str: &str) {
     let (_ws, idx) = cli_full_startup(root);
-    let text = std::fs::read_to_string(file).unwrap_or_else(|e| {
-        eprintln!("Cannot read {}: {}", file, e);
-        std::process::exit(1);
-    });
-    let mut doc = document::Document::new(text).unwrap_or_else(|| {
-        eprintln!("Parse failed: {}", file);
-        std::process::exit(1);
-    });
-    doc.analysis.enrich_imported_types_with_keys(Some(&idx));
+    let doc = cli_open_document(file, &idx);
     let point = parse_point(line_str, col_str);
     let pos = tower_lsp::lsp_types::Position {
         line: point.row as u32,
@@ -747,15 +754,7 @@ fn cli_completion(root: &str, file: &str, line_str: &str, col_str: &str) {
 /// `signature_help` handler calls.
 fn cli_signature_help(root: &str, file: &str, line_str: &str, col_str: &str) {
     let (_ws, idx) = cli_full_startup(root);
-    let text = std::fs::read_to_string(file).unwrap_or_else(|e| {
-        eprintln!("Cannot read {}: {}", file, e);
-        std::process::exit(1);
-    });
-    let mut doc = document::Document::new(text).unwrap_or_else(|| {
-        eprintln!("Parse failed: {}", file);
-        std::process::exit(1);
-    });
-    doc.analysis.enrich_imported_types_with_keys(Some(&idx));
+    let doc = cli_open_document(file, &idx);
     let point = parse_point(line_str, col_str);
     let pos = tower_lsp::lsp_types::Position {
         line: point.row as u32,
@@ -790,6 +789,110 @@ fn cli_signature_help(root: &str, file: &str, line_str: &str, col_str: &str) {
             std::process::exit(1);
         }
     }
+}
+
+/// --document-highlight <root> <file> <line> <col> — in-file occurrences with
+/// read/write classification. Thin wrapper over `symbols::document_highlights`
+/// (the same producer the LSP handler calls).
+fn cli_document_highlight(root: &str, file: &str, line_str: &str, col_str: &str) {
+    let (_ws, idx) = cli_full_startup(root);
+    let doc = cli_open_document(file, &idx);
+    let point = parse_point(line_str, col_str);
+    let pos = tower_lsp::lsp_types::Position {
+        line: point.row as u32,
+        character: point.column as u32,
+    };
+
+    let highlights = symbols::document_highlights(&doc.analysis, pos, &doc.tree, &doc.text, Some(&idx));
+    let mut sources = SourceCache::new();
+    let path = std::fs::canonicalize(file)
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|_| file.to_string());
+    for h in &highlights {
+        let (line, col) = sources.display(&path, h.range.start.line as usize, h.range.start.character as usize);
+        let kind = match h.kind {
+            Some(tower_lsp::lsp_types::DocumentHighlightKind::WRITE) => "WRITE",
+            _ => "READ",
+        };
+        println!("{}:{}:{}\t{}", path, line, col, kind);
+    }
+    eprintln!("{} highlights", highlights.len());
+}
+
+/// --linked-editing <root> <file> <line> <col> — the co-edit occurrence set at
+/// point. Thin wrapper over `symbols::linked_editing_ranges`, the SAME helper
+/// the LSP `linked_editing_range` handler calls (no separate path).
+fn cli_linked_editing(root: &str, file: &str, line_str: &str, col_str: &str) {
+    let (_ws, idx) = cli_full_startup(root);
+    let doc = cli_open_document(file, &idx);
+    let point = parse_point(line_str, col_str);
+    let pos = tower_lsp::lsp_types::Position {
+        line: point.row as u32,
+        character: point.column as u32,
+    };
+
+    let path = std::fs::canonicalize(file)
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|_| file.to_string());
+    match symbols::linked_editing_ranges(&doc.analysis, pos, Some(&idx)) {
+        Some(ranges) => {
+            let mut sources = SourceCache::new();
+            for r in &ranges {
+                let (line, col) = sources.display(&path, r.start.line as usize, r.start.character as usize);
+                println!("{}:{}:{}", path, line, col);
+            }
+            eprintln!("{} linked ranges", ranges.len());
+        }
+        None => {
+            eprintln!("No linked-editing ranges at {}:{} (need >= 2 occurrences)", line_str, col_str);
+            std::process::exit(1);
+        }
+    }
+}
+
+/// --semantic-tokens <root> <file> — token classification for the file. Thin
+/// wrapper over `symbols::semantic_tokens`; decodes the LSP delta encoding back
+/// to absolute positions and names each type via `semantic_token_types()`.
+fn cli_semantic_tokens(root: &str, file: &str) {
+    let (_ws, idx) = cli_full_startup(root);
+    let doc = cli_open_document(file, &idx);
+    let tokens = symbols::semantic_tokens(&doc.analysis);
+    let legend = symbols::semantic_token_types();
+
+    // Tokens are delta-encoded (LSP wire format); accumulate to absolute
+    // 0-based (line, start-char). Printed line is 1-based; col stays 0-based.
+    let mut line: u32 = 0;
+    let mut col: u32 = 0;
+    for t in &tokens {
+        line += t.delta_line;
+        if t.delta_line == 0 {
+            col += t.delta_start;
+        } else {
+            col = t.delta_start;
+        }
+        let name = legend
+            .get(t.token_type as usize)
+            .map(|tt| tt.as_str())
+            .unwrap_or("?");
+        println!("{}:{} len={} {}", line + 1, col, t.length, name);
+    }
+    eprintln!("{} semantic tokens", tokens.len());
+}
+
+/// Build an open `Document` (tree + analysis + stable_outline) and enrich it
+/// against the index exactly like the server's open-file path. Shared by the
+/// interactive CLI modes.
+fn cli_open_document(file: &str, idx: &module_index::ModuleIndex) -> document::Document {
+    let text = std::fs::read_to_string(file).unwrap_or_else(|e| {
+        eprintln!("Cannot read {}: {}", file, e);
+        std::process::exit(1);
+    });
+    let mut doc = document::Document::new(text).unwrap_or_else(|| {
+        eprintln!("Parse failed: {}", file);
+        std::process::exit(1);
+    });
+    doc.analysis.enrich_imported_types_with_keys(Some(idx));
+    doc
 }
 
 /// --rename <root> <file> <line> <col> <new_name> — Cross-file rename

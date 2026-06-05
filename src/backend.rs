@@ -1011,19 +1011,12 @@ impl LanguageServer for Backend {
             None => return Ok(None),
         };
 
-        let point = symbols::position_to_point(pos);
-        let refs = doc.analysis.find_references(point, None, None, Some(&self.module_index));
-        if refs.len() < 2 {
-            return Ok(None);
+        match symbols::linked_editing_ranges(&doc.analysis, pos, Some(&self.module_index)) {
+            Some(ranges) => Ok(Some(LinkedEditingRanges {
+                ranges,
+                word_pattern: None,
+            })),
+            None => Ok(None),
         }
-
-        let ranges: Vec<Range> = refs.into_iter()
-            .map(|span| symbols::span_to_range(span))
-            .collect();
-
-        Ok(Some(LinkedEditingRanges {
-            ranges,
-            word_pattern: None,
-        }))
     }
 }
