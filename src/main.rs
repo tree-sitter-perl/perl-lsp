@@ -67,6 +67,14 @@ async fn main() {
             cli_references(&args[2], &args[3], &args[4], &args[5]);
             return;
         }
+        Some("--completion") if args.len() >= 6 => {
+            cli_completion(&args[2], &args[3], &args[4], &args[5]);
+            return;
+        }
+        Some("--signature-help") if args.len() >= 6 => {
+            cli_signature_help(&args[2], &args[3], &args[4], &args[5]);
+            return;
+        }
         Some("--rename") if args.len() == 7 => {
             cli_rename(&args[2], &args[3], &args[4], &args[5], &args[6]);
             return;
@@ -130,6 +138,8 @@ fn print_usage() {
     eprintln!("  perl-lsp --type-at <file> <line> <col>                 Single type query");
     eprintln!("  perl-lsp --definition <root> <file> <line> <col>       Cross-file goto-def");
     eprintln!("  perl-lsp --references <root> <file> <line> <col>       Cross-file find-refs");
+    eprintln!("  perl-lsp --completion <root> <file> <line> <col>       Completion items at point");
+    eprintln!("  perl-lsp --signature-help <root> <file> <line> <col>   Signature help at point");
     eprintln!();
     eprintln!("REFACTORING:");
     eprintln!("  perl-lsp --rename <root> <file> <line> <col> <new>     Cross-file rename");
@@ -692,6 +702,94 @@ fn cli_references(root: &str, file: &str, line_str: &str, col_str: &str) {
     }
     println!("{}", serde_json::to_string_pretty(&results).unwrap());
     eprintln!("{} references", results.len());
+}
+
+/// --completion <root> <file> <line> <col> — completion items at point.
+/// Thin wrapper over the same `symbols::completion_items` the LSP `completion`
+/// handler calls; builds a real `Document` (tree + analysis + stable_outline)
+/// and enriches it against the index exactly like the open-file path.
+fn cli_completion(root: &str, file: &str, line_str: &str, col_str: &str) {
+    let (_ws, idx) = cli_full_startup(root);
+    let text = std::fs::read_to_string(file).unwrap_or_else(|e| {
+        eprintln!("Cannot read {}: {}", file, e);
+        std::process::exit(1);
+    });
+    let mut doc = document::Document::new(text).unwrap_or_else(|| {
+        eprintln!("Parse failed: {}", file);
+        std::process::exit(1);
+    });
+    doc.analysis.enrich_imported_types_with_keys(Some(&idx));
+    let point = parse_point(line_str, col_str);
+    let pos = tower_lsp::lsp_types::Position {
+        line: point.row as u32,
+        character: point.column as u32,
+    };
+
+    let items = symbols::completion_items(
+        &doc.analysis,
+        &doc.tree,
+        &doc.text,
+        pos,
+        &idx,
+        Some(doc.stable_outline.package_lines()),
+    );
+    for it in &items {
+        match &it.detail {
+            Some(d) if !d.is_empty() => println!("{}\t{}", it.label, d),
+            _ => println!("{}", it.label),
+        }
+    }
+    eprintln!("{} completions", items.len());
+}
+
+/// --signature-help <root> <file> <line> <col> — signature help at point.
+/// Thin wrapper over `symbols::signature_help`, the same producer the LSP
+/// `signature_help` handler calls.
+fn cli_signature_help(root: &str, file: &str, line_str: &str, col_str: &str) {
+    let (_ws, idx) = cli_full_startup(root);
+    let text = std::fs::read_to_string(file).unwrap_or_else(|e| {
+        eprintln!("Cannot read {}: {}", file, e);
+        std::process::exit(1);
+    });
+    let mut doc = document::Document::new(text).unwrap_or_else(|| {
+        eprintln!("Parse failed: {}", file);
+        std::process::exit(1);
+    });
+    doc.analysis.enrich_imported_types_with_keys(Some(&idx));
+    let point = parse_point(line_str, col_str);
+    let pos = tower_lsp::lsp_types::Position {
+        line: point.row as u32,
+        character: point.column as u32,
+    };
+
+    match symbols::signature_help(&doc.analysis, &doc.tree, &doc.text, pos, &idx) {
+        Some(sh) => {
+            let active = sh.active_signature.unwrap_or(0) as usize;
+            for (i, sig) in sh.signatures.iter().enumerate() {
+                let marker = if i == active { "* " } else { "  " };
+                println!("{}{}", marker, sig.label);
+                if i == active {
+                    if let Some(p) = sh.active_parameter {
+                        let plabel = sig.parameters.as_ref()
+                            .and_then(|ps| ps.get(p as usize))
+                            .map(|pi| match &pi.label {
+                                tower_lsp::lsp_types::ParameterLabel::Simple(s) => s.clone(),
+                                tower_lsp::lsp_types::ParameterLabel::LabelOffsets([a, b]) => {
+                                    sig.label.get(*a as usize..*b as usize)
+                                        .unwrap_or("").to_string()
+                                }
+                            })
+                            .unwrap_or_default();
+                        println!("    active param: {} ({})", p, plabel);
+                    }
+                }
+            }
+        }
+        None => {
+            eprintln!("No signature help at {}:{}", line_str, col_str);
+            std::process::exit(1);
+        }
+    }
 }
 
 /// --rename <root> <file> <line> <col> <new_name> — Cross-file rename
