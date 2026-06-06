@@ -41,10 +41,10 @@ A process abort (the scanner-overflow class) is always a hard **CRASH** fail. Ou
 | type-at | [type-at.md](type-at.md) | 12 | 0 | 2 | 5 |
 | rename | [rename.md](rename.md) | 8 | 0 | 1 | 2 |
 | workspace-symbol | [workspace-symbol.md](workspace-symbol.md) | 14 | 0 | 0 | 1 |
-| diagnostics | [diagnostics.md](diagnostics.md) | 4 | 1 | 0 | 9 |
+| diagnostics | [diagnostics.md](diagnostics.md) | 2 | 3 | 0 | 9 |
 | completion | [completion.md](completion.md) | 6 | 2 | 0 | 3 |
 | signature-help | [signature-help.md](signature-help.md) | 8 | 1 | 3 | 0 |
-| semantic-tokens | [semantic-tokens.md](semantic-tokens.md) | 8 | 2 | 1 | 2 |
+| semantic-tokens | [semantic-tokens.md](semantic-tokens.md) | 10 | 0 | 1 | 2 |
 | document-highlight | [document-highlight.md](document-highlight.md) | 7 | 0 | 1 | 2 |
 | linked-editing | [linked-editing.md](linked-editing.md) | 10 | 0 | 2 | 0 |
 | **total** | | **127** | **7** | **16** | **27** |
@@ -75,9 +75,8 @@ The following capabilities have **no CLI query mode** and are therefore **not** 
 Confirmed gaps captured at xfail — the correct assertion does not currently hold, so the runner pins the gap (XPASS the day it's fixed):
 
 - **def-16-codegen-type-function** (definition) — `Types::Standard::Any` has no literal `sub`; Type::Library codegen mints it at runtime, so goto-def degrades to the package decl (`Standard.pm:1:1`) instead of the `name => "Any"` declaration at `Standard.pm:215`.
-- **diag-08** (diagnostics) — `bootstrap Net::SSLeay $VERSION` is a true unresolved-function, but the diagnostic is `info` severity and the harness binds `--severity warning`, so it is suppressed below threshold (not a regression).
+- **diag-08** (diagnostics) — XS-bootstrapped `bootstrap` at `SSLeay.pm:1023` flagged unresolved-function; should be suppressed (XS-installed sub).
+- **diag-09 / diag-10** (diagnostics) — codegen'd Log4perl accessors `is_warn`/`warn` (`Logger.pm:879/883`) flagged unresolved-method; the typeglob-codegen install isn't recognized as defining them.
 - **completion-datetime-hashkey** (completion) — `$self->{` offers only 2 of 13 mutated keys; keys assigned via `$self->{k}=...` in `_new` aren't harvested.
 - **completion-typetiny-imported-blessed** (completion) — imported `blessed` (`use Scalar::Util qw(blessed)`) absent from bareword-statement completion; only local subs offered.
 - **sig-uri-check-path-function-noinvocant** (signature-help) — `$path` wrongly elided as invocant on a PLAIN function call `_check_path($rest, $$self)`; signature shows only `($pre)`.
-- **st-uri-constant-name-enummember** (semantic-tokens) — `use constant BASE` name tagged `function` not `enumMember`; `TOK_ENUM_MEMBER` is `#[allow(dead_code)]`, never emitted.
-- **st-tt-regex-literal-regexp** (semantic-tokens) — `qr//` literal gets no semantic token; `TOK_REGEXP` is `#[allow(dead_code)]`, never emitted.
