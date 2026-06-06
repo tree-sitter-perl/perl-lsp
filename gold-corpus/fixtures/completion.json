@@ -1,0 +1,85 @@
+{
+  "capability": "completion",
+  "rows": [
+    {
+      "id": "completion-datetime-self-classic",
+      "difficulty": "simple",
+      "semantic_area": "classic",
+      "file": "x86_64-linux/DateTime.pm",
+      "line": 207,
+      "col": 11,
+      "expect": {"all":["new\tDateTime","now\tDateTime","today\tDateTime","clone\tDateTime","year\tDateTime","month\tDateTime","formatter\tDateTime","_set_locale\tDateTime"],"none":[]},
+      "status": "gold"
+    },
+    {
+      "id": "completion-catalyst-action-has-moose",
+      "difficulty": "tricky",
+      "semantic_area": "moose",
+      "file": "Catalyst/Action.pm",
+      "line": 66,
+      "col": 20,
+      "expect": {"all":["class\tCatalyst::Action","instance\tCatalyst::Action","has_instance\tCatalyst::Action","namespace\tCatalyst::Action","reverse\tCatalyst::Action","attributes\tCatalyst::Action","name\tCatalyst::Action","code\tCatalyst::Action","private_path\tCatalyst::Action","number_of_args\tCatalyst::Action"],"none":[]},
+      "status": "gold"
+    },
+    {
+      "id": "completion-uri-http-multilevel-isa",
+      "difficulty": "tricky",
+      "semantic_area": "oo-isa",
+      "file": "URI/http.pm",
+      "line": 14,
+      "col": 23,
+      "expect": {"all":["default_port\tURI::http","canonical\tURI::http","host\tURI::http (from URI::_server)","port\tURI::http (from URI::_server)","userinfo\tURI::http (from URI::_server)","authority\tURI::http (from URI::_generic)","path\tURI::http (from URI::_generic)","scheme\tURI::http (from URI)","new\tURI::http (from URI)"],"none":[]},
+      "status": "gold"
+    },
+    {
+      "id": "completion-datetime-hashkey",
+      "difficulty": "tricky",
+      "semantic_area": "type-inference",
+      "file": "x86_64-linux/DateTime.pm",
+      "line": 315,
+      "col": 30,
+      "expect": {"all":["local_rd_days\tDateTime->{local_rd_days}","local_rd_secs\tDateTime->{local_rd_secs}","formatter\tDateTime->{formatter}","locale\tDateTime->{locale}","offset_modifier\tDateTime->{offset_modifier}","rd_nanosecs\tDateTime->{rd_nanosecs}","utc_year\tDateTime->{utc_year}"],"none":[]},
+      "status": "xfail"
+    },
+    {
+      "id": "completion-uri-escape-fq-crossfile",
+      "difficulty": "tricky",
+      "semantic_area": "fq",
+      "file": "URI.pm",
+      "line": 141,
+      "col": 41,
+      "expect": {"all":["uri_escape\tURI::Escape","uri_unescape\tURI::Escape","uri_escape_utf8\tURI::Escape","escape_char\tURI::Escape"],"none":[]},
+      "status": "gold"
+    },
+    {
+      "id": "completion-datetime-partial-off",
+      "difficulty": "simple",
+      "semantic_area": "classic",
+      "file": "x86_64-linux/DateTime.pm",
+      "line": 318,
+      "col": 36,
+      "expect": {"all":["offset\tDateTime","_offset_for_local_datetime\tDateTime"],"none":[]},
+      "status": "gold"
+    },
+    {
+      "id": "completion-distzilla-self-moose-typed",
+      "difficulty": "tricky",
+      "semantic_area": "moose",
+      "file": "Dist/Zilla.pm",
+      "line": 109,
+      "col": 23,
+      "expect": {"all":["chrome\tDist::Zilla","name\tDist::Zilla","version\tDist::Zilla","abstract\tDist::Zilla","license\tDist::Zilla","authors\tDist::Zilla","plugins\tDist::Zilla","distmeta\tDist::Zilla","main_module\tDist::Zilla"],"none":[]},
+      "status": "gold"
+    },
+    {
+      "id": "completion-typetiny-imported-blessed",
+      "difficulty": "tricky",
+      "semantic_area": "exporter",
+      "file": "Type/Tiny.pm",
+      "line": 165,
+      "col": 15,
+      "expect": {"all":["blessed\t"],"none":[]},
+      "status": "xfail"
+    }
+  ]
+}

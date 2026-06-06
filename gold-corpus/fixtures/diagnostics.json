@@ -1,0 +1,68 @@
+{
+  "capability": "diagnostics",
+  "rows": [
+    {
+      "id": "diag-07",
+      "difficulty": "simple",
+      "semantic_area": "classic",
+      "file": "x86_64-linux/Net/SSLeay.pm",
+      "line": 24,
+      "col": 8,
+      "query": "",
+      "newname": "",
+      "expect": {"all":[],"none":["\"file\":\"SSLeay.pm\",\"line\":\"24\""]},
+      "status": "gold"
+    },
+    {
+      "id": "diag-08",
+      "difficulty": "tricky",
+      "semantic_area": "codegen",
+      "file": "x86_64-linux/Net/SSLeay.pm",
+      "line": 1023,
+      "col": 1,
+      "query": "",
+      "newname": "",
+      "expect": {"all":[],"none":["\"file\":\"SSLeay.pm\",\"line\":\"1023\""]},
+      "status": "xfail",
+      "note": "XS-bootstrapped sub at SSLeay.pm:1023 is flagged unresolved-function ('bootstrap'); should be suppressed."
+    },
+    {
+      "id": "diag-09",
+      "difficulty": "tricky",
+      "semantic_area": "codegen",
+      "file": "Log/Log4perl/Logger.pm",
+      "line": 879,
+      "col": 6,
+      "query": "",
+      "newname": "",
+      "expect": {"all":[],"none":["\"file\":\"Logger.pm\",\"line\":\"879\""]},
+      "status": "xfail",
+      "note": "codegen'd accessor is_warn at Logger.pm:879 flagged unresolved-method; should be suppressed."
+    },
+    {
+      "id": "diag-10",
+      "difficulty": "tricky",
+      "semantic_area": "codegen",
+      "file": "Log/Log4perl/Logger.pm",
+      "line": 883,
+      "col": 4,
+      "query": "",
+      "newname": "",
+      "expect": {"all":[],"none":["\"file\":\"Logger.pm\",\"line\":\"883\""]},
+      "status": "xfail",
+      "note": "codegen'd method warn at Logger.pm:883 flagged unresolved-method; should be suppressed."
+    },
+    {
+      "id": "diag-13",
+      "difficulty": "simple",
+      "semantic_area": "codegen",
+      "file": "CGI.pm",
+      "line": 1205,
+      "col": 4,
+      "query": "",
+      "newname": "",
+      "expect": {"all":[],"none":["\"file\":\"CGI.pm\",\"line\":\"1205\""]},
+      "status": "gold"
+    }
+  ]
+}

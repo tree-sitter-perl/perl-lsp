@@ -1,0 +1,165 @@
+{
+  "capability": "definition",
+  "rows": [
+    {
+      "id": "def-01-crossfile-import-call",
+      "difficulty": "tricky",
+      "semantic_area": "exporter",
+      "file": "Type/Registry.pm",
+      "line": 13,
+      "col": 23,
+      "expect": {"all":["Tiny.pm:430:"],"none":[]},
+      "status": "gold"
+    },
+    {
+      "id": "def-02-import-list-member",
+      "difficulty": "tricky",
+      "semantic_area": "exporter",
+      "file": "Type/Registry.pm",
+      "line": 74,
+      "col": 12,
+      "expect": {"all":["Tiny.pm:430:"],"none":[]},
+      "status": "gold"
+    },
+    {
+      "id": "def-03-samefile-method",
+      "difficulty": "simple",
+      "semantic_area": "oo-isa",
+      "file": "Type/Tiny.pm",
+      "line": 414,
+      "col": 9,
+      "expect": {"all":["Tiny.pm:525:"],"none":[]},
+      "status": "gold"
+    },
+    {
+      "id": "def-04-multihop-isa-method",
+      "difficulty": "tricky",
+      "semantic_area": "oo-isa",
+      "file": "LWP/RobotUA.pm",
+      "line": 64,
+      "col": 23,
+      "expect": {"all":["MemberMixin.pm:5:"],"none":[]},
+      "status": "gold"
+    },
+    {
+      "id": "def-05-use-parent-target",
+      "difficulty": "simple",
+      "semantic_area": "oo-isa",
+      "file": "LWP/RobotUA.pm",
+      "line": 2,
+      "col": 14,
+      "expect": {"all":["UserAgent.pm:1:"],"none":[]},
+      "status": "gold"
+    },
+    {
+      "id": "def-06-onehop-isa-method",
+      "difficulty": "tricky",
+      "semantic_area": "oo-isa",
+      "file": "LWP/UserAgent.pm",
+      "line": 711,
+      "col": 36,
+      "expect": {"all":["MemberMixin.pm:5:"],"none":[]},
+      "status": "gold"
+    },
+    {
+      "id": "def-07-export-member-to-sub",
+      "difficulty": "simple",
+      "semantic_area": "exporter",
+      "file": "LWP/Simple.pm",
+      "line": 8,
+      "col": 17,
+      "expect": {"all":["Simple.pm:32:"],"none":[]},
+      "status": "gold"
+    },
+    {
+      "id": "def-08-moose-has-accessor",
+      "difficulty": "tricky",
+      "semantic_area": "moose",
+      "file": "Dist/Zilla.pm",
+      "line": 182,
+      "col": 29,
+      "expect": {"all":["Zilla.pm:82:"],"none":[]},
+      "status": "gold"
+    },
+    {
+      "id": "def-09-with-role-target",
+      "difficulty": "simple",
+      "semantic_area": "moose",
+      "file": "Dist/Zilla.pm",
+      "line": 4,
+      "col": 6,
+      "expect": {"all":["ConfigDumper.pm:1:"],"none":[]},
+      "status": "gold"
+    },
+    {
+      "id": "def-10-use-constant",
+      "difficulty": "simple",
+      "semantic_area": "constants",
+      "file": "URI.pm",
+      "line": 16,
+      "col": 18,
+      "expect": {"all":["URI.pm:9:14"],"none":[]},
+      "status": "gold"
+    },
+    {
+      "id": "def-11-crossfile-imported-func-call",
+      "difficulty": "tricky",
+      "semantic_area": "exporter",
+      "file": "URI/_query.pm",
+      "line": 95,
+      "col": 10,
+      "expect": {"all":["Escape.pm:216:"],"none":[]},
+      "status": "gold"
+    },
+    {
+      "id": "def-12-fq-variable",
+      "difficulty": "tricky",
+      "semantic_area": "fq",
+      "file": "URI.pm",
+      "line": 116,
+      "col": 33,
+      "expect": {"all":["URI.pm:27:"],"none":[]},
+      "status": "gold"
+    },
+    {
+      "id": "def-13-fq-sub-call",
+      "difficulty": "tricky",
+      "semantic_area": "fq",
+      "file": "URI/otpauth.pm",
+      "line": 47,
+      "col": 39,
+      "expect": {"all":["Escape.pm:216:"],"none":[]},
+      "status": "gold"
+    },
+    {
+      "id": "def-14-classic-lexical-var",
+      "difficulty": "simple",
+      "semantic_area": "classic",
+      "file": "LWP/MemberMixin.pm",
+      "line": 9,
+      "col": 11,
+      "expect": {"all":["MemberMixin.pm:8:8"],"none":[]},
+      "status": "gold"
+    },
+    {
+      "id": "def-15-classmethod-crossfile",
+      "difficulty": "tricky",
+      "semantic_area": "oo-isa",
+      "file": "LWP/RobotUA.pm",
+      "line": 46,
+      "col": 31,
+      "expect": {"all":["UserAgent.pm:23:"],"none":[]},
+      "status": "gold"
+    },
+    {
+      "id": "def-16-codegen-type-function",
+      "difficulty": "tricky",
+      "semantic_area": "codegen",
+      "file": "Type/Tiny.pm",
+      "line": 414,
+      "col": 56,
+      "expect": {"all":["Standard.pm:215:"],"none":["Standard.pm:1:1"]},
+      "status": "xfail"
+    }
+  ]
+}

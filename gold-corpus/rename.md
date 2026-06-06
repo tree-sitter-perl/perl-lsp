@@ -1,32 +1,21 @@
 # rename
 
-Verified `rename` rows (`--rename`). Positions are 0-based input / 1-based output. Each row reproduces against the current usability-sprint binary.
+Generated from `fixtures/rename.json` (the source of truth) against the cpm-installed, snapshot-pinned substrate (`gold-corpus/local/lib/perl5`).
+Positions are 0-based on input, 1-based on output. Run via `gold-corpus/run.pl rename`.
 
-| id | difficulty | semantic_area | repo | cursor | expected | actual | verdict | confidence |
-|----|------------|---------------|------|--------|----------|--------|---------|------------|
-| rename-01-mkopt-def | simple | exporter | Exporter-Tiny | `lib/Exporter/Tiny.pm:429:4` `mkopt` | @EXPORT_OK :8, def :429, recursive :456 AND in-body calls :69 :104 :167 | ONLY :8, :429, :456. MISSED in-body calls :69 :104 :167. | FAIL | gold |
-| rename-02-mkopt-callsite | tricky | exporter | Exporter-Tiny | `lib/Exporter/Tiny.pm:69:12` `mkopt` | same complete set as row 1 | ONLY the 3 call sites :69 :104 :167. MISSED def :429, @EXPORT_OK :8, recursive :456. (Package resolves None.) | FAIL | gold |
-| rename-03-mkopt-hash | simple | exporter | Exporter-Tiny | `lib/Exporter/Tiny.pm:453:4` `mkopt_hash` | @EXPORT_OK :8 and def :453; no other uses | :8 and :453. Complete. | PASS | gold |
-| rename-04-croak | tricky | exporter | Exporter-Tiny | `lib/Exporter/Tiny.pm:19:4` `_croak` | def :19, @EXPORT_OK :8, in-body calls + \&_croak refs, cross-file FQ in Shiny.pm | :8,:19,:145,:164,:259,:298,:327,:360,:361,:362,:370,:402,:408 + Shiny.pm:24,31. Comment-only :341 skipped. | PASS | gold |
-| rename-05-setup-exporter | tricky | exporter | Sub-Exporter | `lib/Sub/Exporter.pm:590:4` `setup_exporter` | def :590, call :931, qw() bareword :933, group-list bareword :937, cross-file FQ in tests | All caught: :590,:931,:933,:937 + GroupGen.pm:54, s_e.pm:8, faux-export.t:114, real-export-href.t:27/175, valid-config.t:33. | PASS | gold |
-| rename-06-build-exporter | tricky | exporter | Sub-Exporter | `lib/Sub/Exporter.pm:703:4` `build_exporter` | def :703, in-body call :602, export bareword :933, call :934, cross-file FQ | def :703, :933, :934 + all cross-file FQ. MISSED in-body call :602. (Group list :937 reads `build_export` typo, correctly excluded.) | FAIL | gold |
-| rename-07-path-segments | tricky | oo-isa | URI | `lib/URI/_generic.pm:121:4` `path_segments` | def :121 + cross-file callers inheriting _generic | def :121 + smb.pm:36. Win32/Unix/URL not touched. (See reject note — expected overclaimed.) | PASS | reject |
-| rename-08-authority | tricky | oo-isa | URI | `lib/URI/_generic.pm:37:4` `authority` | def :37, cross-file in inheriting subclasses, intra-file dynamic locals (soft) | def :37 + _server.pm 7 sites + file.pm:38 + ldapi.pm:13/18. MISSED intra-file $abs/$rel/$base->canonical->authority (dynamic locals). | REVIEW | provisional |
-| rename-09-base-constant | simple | constants | URI | `lib/URI/_punycode.pm:14:13` `BASE` | def :14 + all 11 uses | def :14 + 10 uses. MISSED use at :79 (`$w *= (BASE - $t)`). | FAIL | gold |
-| rename-10-moo-has-accessor | tricky | moo | Moo | `t/accessor-coerce.t:38:6` `plus_three` | Foo's has decl :38 only; not other packages' has nor call sites (loop locals) | Method{name:plus_three, class:Foo}. ONLY :38. Others untouched. | REVIEW | provisional |
-| rename-11-urn-canonical-precision | tricky | oo-isa | URI | `lib/URI/urn.pm:90:4` `canonical` | ONLY URI::urn::canonical :90; not 7 other same-named defs | ONLY urn.pm:90. All other canonical defs (incl. subclass urn/isbn override) untouched. | PASS | gold |
+| id | difficulty | semantic_area | cursor | expect.all / expect.none | status | actual |
+|----|------------|---------------|--------|--------------------------|--------|--------|
+| rename-01-mkopt-def | simple | exporter | `Exporter/Tiny.pm:429:4` | all: Tiny.pm; "line":"8"; "line":"429"; "line":"456"; "line":"69"; "line":"104"; "line":"167" | xfail | Tiny.pm: line 8 (@EXPORT_OK), 429 (def), 456 (recursive call); Type/Registry.pm: 13,74. MISSES 69,104,167. |
+| rename-02-mkopt-callsite | tricky | exporter | `Exporter/Tiny.pm:69:12` | all: Tiny.pm; "line":"69"; "line":"104"; "line":"167"; "line":"429"; "line":"8"; "line":"456" | xfail | Tiny.pm: line 69,104,167 only. MISSES def 429, @EXPORT_OK 8, recursive 456. |
+| rename-03-mkopt-hash | simple | exporter | `Exporter/Tiny.pm:453:4` | all: Tiny.pm; "line":"8"; "line":"453" / none: "line":"429" | gold | Tiny.pm: line 8 (@EXPORT_OK, col 27-37), 453 (def). mkopt (429) untouched. |
+| rename-04-croak | tricky | exporter | `Exporter/Tiny.pm:19:4` | all: Tiny.pm; Shiny.pm; "line":"19"; "line":"8"; "line":"360"; "line":"361"; "line":"362"; "line":"24"; "line":"31" / none: "line":"340" | gold | Tiny.pm: 8,19,145,164,259,298,327,360,361,362,370,402,408; Shiny.pm: 24,31. Comment line 340 skipped. |
+| rename-05-setup-exporter | tricky | exporter | `Sub/Exporter.pm:590:4` | all: Exporter.pm; "line":"590"; "line":"931"; "line":"933"; "line":"937"; Setup.pm | gold | Exporter.pm: 590 (def), 931 (call), 933 (qw bareword), 937 (group-list bareword). Cross-file FQ: Setup.pm:218, Moose/Util.pm:34, Test/Moose.pm:19. |
+| rename-06-build-exporter | tricky | exporter | `Sub/Exporter.pm:703:4` | all: Exporter.pm; "line":"703"; "line":"933"; "line":"934"; "line":"602" | xfail | Exporter.pm: 703 (def), 933 (export bareword), 934 (call); cross-file FQ. MISSES in-body call at 602. |
+| rename-08-authority | tricky | oo-isa | `URI/_generic.pm:37:4` | all: _generic.pm; _server.pm; file.pm; ldapi.pm; "line":"37" | provisional | _generic.pm:37 (def); _server.pm:54,65,74,91,114,120,137; file.pm:38; ldapi.pm:13,18. MISSES intra-file dynamically-typed locals. |
+| rename-09-base-constant | simple | constants | `URI/_punycode.pm:14:13` | all: _punycode.pm; "line":"14"; "line":"79" | xfail | _punycode.pm: 14 (def), 47,48,49,51,71(x2),118(x2),122,124. MISSES line 79: $w *= (BASE - $t). |
+| rename-11-urn-canonical-precision | tricky | oo-isa | `URI/urn.pm:90:4` | all: urn.pm; "line":"90" / none: isbn.pm; _generic.pm | gold | urn.pm: line 90 (URI::urn::canonical def) ONLY. No other same-named canonical defs touched. |
 
-## Known-failing detail
+## Dropped (non-lib, absent from installed tree)
 
-- **rename-01 / rename-02 (mkopt)** — def-side and call-site rename give disjoint buckets. From-def catches @EXPORT_OK + def + same-scope recursive call but drops bareword calls in other sub bodies; from-callsite catches only the call-site bucket (package resolves None). Contrast `_croak` (rename-04), which catches its in-body calls — mkopt lacks a prototype, _croak has `($;@)`, parsed differently. Serious completeness defect.
-- **rename-06-build-exporter** — same def-side in-body-call defect: `my $import = build_exporter($config)` inside setup_exporter (:602) dropped; top-level bareword/call and cross-file FQ all caught.
-- **rename-09-base-constant** — use-constant rename nearly complete (10/11) but drops `BASE` in `$w *= (BASE - $t)` at :79; other `(BASE - $t)` occurrences caught — parse-specific miss.
-
-## REVIEW-class detail
-
-- **rename-08-authority** — cross-file inheritance precision strong; same-file dynamically-typed locals ($self->clone / URI->new) missed (defensible — not statically the def's class).
-- **rename-10-moo-has-accessor** — correctly class-scoped to Foo; call sites are loop locals not statically typed to Foo (unresolvable). Precision correct, completeness not exercised.
-
-## Rejected (excluded from corpus)
-
-- **rename-07-path-segments** — REJECT (expected was incorrect). The collector marked Win32.pm/Unix.pm/URL.pm callers as renameable, but URL.pm uses `URI::WithBase` and Win32/Unix use `URI::file::Base`; neither has URI::_generic in its ISA, so those invocants are NOT URI::_generic objects. The tool correctly renames only the def and the one genuinely-inheriting caller (smb: smb->_login->_server->_generic). Not renaming the others is correct, not a defect; original FAIL verdict was wrong.
+- rename-07-path-segments: REJECT in source md (expected was incorrect; tool correctly renames only def + genuinely-inheriting smb caller). Excluded from corpus per md rejection note.
+- rename-10-moo-has-accessor: cursor lived in t/accessor-coerce.t (Moo dist test file, not under lib/) -> absent from the cpm-installed tree (local/lib/perl5 has only Moo.pm and lib modules, no t/). No installed location for the Foo 'has plus_three' decl; cannot reproduce.

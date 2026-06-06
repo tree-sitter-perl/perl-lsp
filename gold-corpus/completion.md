@@ -1,27 +1,21 @@
 # completion
 
-Verified `completion` rows. Positions are 0-based input / 1-based output. Each row reproduces against the current usability-sprint binary.
+Generated from `fixtures/completion.json` (the source of truth) against the cpm-installed, snapshot-pinned substrate (`gold-corpus/local/lib/perl5`).
+Positions are 0-based on input, 1-based on output. Run via `gold-corpus/run.pl completion`.
 
-| id | difficulty | semantic_area | repo | cursor | expected | actual | verdict | confidence |
-|----|------------|---------------|------|--------|----------|--------|---------|------------|
-| completion-datetime-self-classic | simple | classic | DateTime | `lib/DateTime.pm:207:11` `$self->` | offers DateTime's own methods: new, now, today, clone, year, month, formatter, _set_locale | new/now/today/clone/year/month/formatter/_set_locale (full method list with return types) | PASS | gold |
-| completion-catalyst-action-has-moose | tricky | moose | Catalyst-Runtime | `lib/Catalyst/Action.pm:52:24` `$self->` | offers Moose has-synthesized accessors: class, instance, has_instance (predicate), namespace, reverse, attributes, name, code, private_path, number_of_args | all 10 accessors incl. predicate has_instance; number_of_args → Int\|Undef | PASS | gold |
-| completion-uri-http-multilevel-isa | tricky | oo-isa | URI | `lib/URI/http.pm:14:23` `$self->` | own default_port, canonical + inherited host/port/userinfo (URI::_server), authority/path (URI::_generic), scheme/new (URI) — full 3-level chain | full chain walked, each method origin-tagged | PASS | gold |
-| completion-datetime-hashkey | tricky | type-inference | DateTime | `lib/DateTime.pm:315:30` `$self->{` | offers all `$self->{...}` keys: tz, local_rd_days, local_rd_secs, formatter, locale, local_c, utc_year, rd_nanosecs, offset_modifier, utc_rd_days, utc_rd_secs, utc_c, utc_vals | only utc_vals + tz offered (2 of 13 keys) | FAIL | gold |
-| completion-uri-escape-fq-crossfile | tricky | fq | URI | `lib/URI.pm:141:41` `URI::Escape::` | offers URI::Escape's subs cross-file: uri_escape, uri_unescape, uri_escape_utf8, escape_char | all 4 cross-file subs present (uri_escape/uri_escape_utf8 → String) | PASS | gold |
-| completion-datetime-partial-off | simple | classic | DateTime | `lib/DateTime.pm:318:36` `$self->off` | candidate set (client-filtered) includes offset and _offset_for_local_datetime | both present in returned candidate set | PASS | gold |
-| completion-distzilla-self-moose-typed | tricky | moose | Dist-Zilla | `lib/Dist/Zilla.pm:109:23` `$self->` | has accessors with typed returns: chrome, name (DistName), version (LaxVersionStr), abstract (String), license (License), authors, plugins, distmeta (HashRef), main_module; + predicate/clearer (_has_main_module_override, _clear_license_class) | all accessors with typed returns + synthesized predicate/clearer | PASS | gold |
-| completion-jsonpp-arrayidx-invocant | tricky | classic | JSON-PP | `lib/JSON/PP.pm:147:18` `$_[0]->` | offers JSON::PP methods on $_[0] invocant: new, encode, decode, pretty, max_depth, PP_encode_json | all 6 methods present (encode → String, etc.) | PASS | gold |
-| completion-plack-request-invocant | simple | classic | Plack | `lib/Plack/Request.pm:41:25` `$_[0]->` | offers Plack::Request methods: env, address, method, path, scheme, secure, cookies, content | all 8 methods present (cookies → HashRef, content → String) | PASS | gold |
-| completion-typetiny-imported-blessed | tricky | exporter | Type::Tiny | `lib/Type/Tiny.pm:165:10` `blessed` | bareword-call completion offers imported sub blessed (from `use Scalar::Util qw(blessed)`) alongside local subs | 140 local subs offered; blessed absent (cross-file import gap) | FAIL | gold |
-| completion-jsonpp-constants-bareword | simple | constants | JSON-PP | `lib/JSON/PP.pm:342:43` `P_INDENT` | bareword completion offers use-constant subs: P_ASCII, P_LATIN1, P_UTF8, P_INDENT, P_CANONICAL, P_SHRINK | all 6 P_* constants present (plus full P_* set) | PASS | gold |
-| completion-catalyst-actionchain-crossfile-isa | tricky | moose | Catalyst-Runtime | `lib/Catalyst/ActionChain.pm:37:11` `$self->` | own has accessors (chain, _context, _chain_last_action) + cross-file inherited Catalyst::Action accessors (class, namespace, reverse, attributes, name, number_of_args) via extends | own + cross-file inherited accessors, origin-tagged | PASS | gold |
+| id | difficulty | semantic_area | cursor | expect.all / expect.none | status | actual |
+|----|------------|---------------|--------|--------------------------|--------|--------|
+| completion-datetime-self-classic | simple | classic | `x86_64-linux/DateTime.pm:207:11` | all: new	DateTime; now	DateTime; today	DateTime; clone	DateTime; year	DateTime; month	DateTime; formatter	DateTime; _set_locale	DateTime | gold | new	DateTime → DateTime; now; today; clone; year; month; formatter; _set_locale |
+| completion-catalyst-action-has-moose | tricky | moose | `Catalyst/Action.pm:66:20` | all: class	Catalyst::Action; instance	Catalyst::Action; has_instance	Catalyst::Action; namespace	Catalyst::Action; reverse	Catalyst::Action; attributes	Catalyst::Action; name	Catalyst::Action; code	Catalyst::Action; private_path	Catalyst::Action; number_of_args	Catalyst::Action | gold | class;instance;has_instance;namespace;reverse;attributes;name;code;private_path;number_of_args → Int\|Undef |
+| completion-uri-http-multilevel-isa | tricky | oo-isa | `URI/http.pm:14:23` | all: default_port	URI::http; canonical	URI::http; host	URI::http (from URI::_server); port	URI::http (from URI::_server); userinfo	URI::http (from URI::_server); authority	URI::http (from URI::_generic); path	URI::http (from URI::_generic); scheme	URI::http (from URI); new	URI::http (from URI) | gold | default_port → Numeric; canonical → URI; userinfo/host/port (from URI::_server); authority/path (from URI::_generic); new/scheme (from URI) |
+| completion-datetime-hashkey | tricky | type-inference | `x86_64-linux/DateTime.pm:315:30` | all: local_rd_days	DateTime->{local_rd_days}; local_rd_secs	DateTime->{local_rd_secs}; formatter	DateTime->{formatter}; locale	DateTime->{locale}; offset_modifier	DateTime->{offset_modifier}; rd_nanosecs	DateTime->{rd_nanosecs}; utc_year	DateTime->{utc_year} | xfail | utc_vals	DateTime->{utc_vals}; tz	DateTime->{tz} (only 2 of 13 keys) |
+| completion-uri-escape-fq-crossfile | tricky | fq | `URI.pm:141:41` | all: uri_escape	URI::Escape; uri_unescape	URI::Escape; uri_escape_utf8	URI::Escape; escape_char	URI::Escape | gold | uri_escape → String; uri_escape_utf8 → String; uri_unescape; escape_char |
+| completion-datetime-partial-off | simple | classic | `x86_64-linux/DateTime.pm:318:36` | all: offset	DateTime; _offset_for_local_datetime	DateTime | gold | _handle_offset_modifier; offset; _offset_for_local_datetime |
+| completion-distzilla-self-moose-typed | tricky | moose | `Dist/Zilla.pm:109:23` | all: chrome	Dist::Zilla; name	Dist::Zilla; version	Dist::Zilla; abstract	Dist::Zilla; license	Dist::Zilla; authors	Dist::Zilla; plugins	Dist::Zilla; distmeta	Dist::Zilla; main_module	Dist::Zilla | gold | chrome; name → DistName; version → LaxVersionStr; abstract → String; main_module → Dist::Zilla::Role::File; license → License; authors; plugins → ArrayRef[...]; distmeta → HashRef |
+| completion-typetiny-imported-blessed | tricky | exporter | `Type/Tiny.pm:165:15` | all: blessed	 | xfail | _croak; _swap; (anon); _install_overloads; new; DESTROY [140 local subs; 'blessed' absent] |
 
-## Known-failing detail
+## Dropped (non-lib, absent from installed tree)
 
-- **completion-datetime-hashkey** — `$self->{` offers only 2 keys (utc_vals, tz); misses 10+ keys assigned via `$self->{k}=...` in `_new` and elsewhere. Real gap in mutated-key harvesting for `$self->{` completion (13 distinct keys exist in source).
-- **completion-typetiny-imported-blessed** — imported subs absent from bareword-statement completion. Only local package subs offered; the `use Scalar::Util qw(blessed)` import is not surfaced. Real cross-file import-completion gap.
-
-## Rejected (excluded from corpus)
-
-None.
+- completion-jsonpp-arrayidx-invocant — old file lib/JSON/PP.pm. JSON::PP is a Perl core module and is NOT installed in the cpm substrate (only JSON::MaybeXS.pm present; no JSON/PP.pm anywhere under local/lib/perl5). File absent → cannot port the $_[0]-> invocant-method completion row.
+- completion-jsonpp-constants-bareword — old file lib/JSON/PP.pm. Same absence: JSON::PP not installed, so the use-constant P_* bareword completion has no source file in the installed tree.
+- completion-jsonpp-decode-... (any further JSON-PP rows) — n/a: only the two JSON-PP rows above existed in completion.md; both dropped for the same JSON::PP-not-installed reason.

@@ -1,0 +1,173 @@
+{
+  "capability": "type-at",
+  "rows": [
+    {
+      "id": "ti-04",
+      "difficulty": "simple",
+      "semantic_area": "classic",
+      "file": "Moo/Object.pm",
+      "line": 12,
+      "col": 6,
+      "query": "",
+      "newname": "",
+      "expect": {"all":["Moo::Object"],"none":[]},
+      "status": "gold"
+    },
+    {
+      "id": "ti-05",
+      "difficulty": "tricky",
+      "semantic_area": "oo-isa",
+      "file": "URI.pm",
+      "line": 102,
+      "col": 9,
+      "query": "",
+      "newname": "",
+      "expect": {"all":["URI"],"none":[]},
+      "status": "gold"
+    },
+    {
+      "id": "ti-06",
+      "difficulty": "simple",
+      "semantic_area": "classic",
+      "file": "URI.pm",
+      "line": 55,
+      "col": 8,
+      "query": "",
+      "newname": "",
+      "expect": {"all":["URI"],"none":[]},
+      "status": "gold"
+    },
+    {
+      "id": "ti-07",
+      "difficulty": "simple",
+      "semantic_area": "oo-isa",
+      "file": "x86_64-linux/DateTime.pm",
+      "line": 205,
+      "col": 8,
+      "query": "",
+      "newname": "",
+      "expect": {"all":["DateTime"],"none":[]},
+      "status": "gold"
+    },
+    {
+      "id": "ti-08",
+      "difficulty": "simple",
+      "semantic_area": "classic",
+      "file": "x86_64-linux/DateTime.pm",
+      "line": 543,
+      "col": 8,
+      "query": "",
+      "newname": "",
+      "expect": {"all":["DateTime"],"none":[]},
+      "status": "gold"
+    },
+    {
+      "id": "ti-09",
+      "difficulty": "tricky",
+      "semantic_area": "oo-isa",
+      "file": "Type/Tiny.pm",
+      "line": 397,
+      "col": 5,
+      "query": "",
+      "newname": "",
+      "expect": {"all":["Type::Tiny"],"none":[]},
+      "status": "gold"
+    },
+    {
+      "id": "ti-10",
+      "difficulty": "tricky",
+      "semantic_area": "a4",
+      "file": "Type/Tiny.pm",
+      "line": 400,
+      "col": 6,
+      "query": "",
+      "newname": "",
+      "expect": {"all":["Numeric"],"none":[]},
+      "status": "gold"
+    },
+    {
+      "id": "ti-11",
+      "difficulty": "simple",
+      "semantic_area": "mojo",
+      "file": "Minion.pm",
+      "line": 26,
+      "col": 9,
+      "query": "",
+      "newname": "",
+      "expect": {"all":["Minion"],"none":[]},
+      "status": "gold"
+    },
+    {
+      "id": "ti-12",
+      "difficulty": "tricky",
+      "semantic_area": "oo-isa",
+      "file": "Minion.pm",
+      "line": 108,
+      "col": 6,
+      "query": "",
+      "newname": "",
+      "expect": {"all":["Minion"],"none":[]},
+      "status": "gold"
+    },
+    {
+      "id": "ti-13",
+      "difficulty": "simple",
+      "semantic_area": "type-inference",
+      "file": "Minion.pm",
+      "line": 110,
+      "col": 6,
+      "query": "",
+      "newname": "",
+      "expect": {"all":["String"],"none":[]},
+      "status": "gold"
+    },
+    {
+      "id": "ti-14",
+      "difficulty": "tricky",
+      "semantic_area": "type-inference",
+      "file": "Minion.pm",
+      "line": 151,
+      "col": 5,
+      "query": "",
+      "newname": "",
+      "expect": {"all":["Minion::Worker"],"none":[]},
+      "status": "gold"
+    },
+    {
+      "id": "ti-15",
+      "difficulty": "simple",
+      "semantic_area": "moose",
+      "file": "Dist/Zilla.pm",
+      "line": 90,
+      "col": 7,
+      "query": "",
+      "newname": "",
+      "expect": {"all":["Dist::Zilla"],"none":[]},
+      "status": "gold"
+    },
+    {
+      "id": "ti-17",
+      "difficulty": "tricky",
+      "semantic_area": "mojo",
+      "file": "Minion.pm",
+      "line": 48,
+      "col": 5,
+      "query": "",
+      "newname": "",
+      "expect": {"all":[],"none":["Mojo::Collection","ARRAY","ArrayRef"]},
+      "status": "provisional"
+    },
+    {
+      "id": "ti-18",
+      "difficulty": "tricky",
+      "semantic_area": "exporter",
+      "file": "Minion.pm",
+      "line": 111,
+      "col": 5,
+      "query": "",
+      "newname": "",
+      "expect": {"all":[],"none":["Mojo::Loader","String","Str"]},
+      "status": "provisional"
+    }
+  ]
+}

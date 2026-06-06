@@ -1,0 +1,125 @@
+{
+  "capability": "signature-help",
+  "rows": [
+    {
+      "id": "sig-typetiny-failed-check-p0",
+      "difficulty": "tricky",
+      "semantic_area": "type-inference",
+      "file": "Type/Tiny.pm",
+      "line": 962,
+      "col": 23,
+      "expect": {"all":["_failed_check($name, $value, %attrs)","active param: 0 ($name)"],"none":[]},
+      "status": "gold"
+    },
+    {
+      "id": "sig-typetiny-failed-check-p1",
+      "difficulty": "tricky",
+      "semantic_area": "type-inference",
+      "file": "Type/Tiny.pm",
+      "line": 962,
+      "col": 32,
+      "expect": {"all":["_failed_check($name, $value, %attrs)","active param: 1 ($value)"],"none":[]},
+      "status": "gold"
+    },
+    {
+      "id": "sig-stuffer-addr-list-fatcomma-p0",
+      "difficulty": "simple",
+      "semantic_area": "classic",
+      "file": "Email/Stuffer.pm",
+      "line": 312,
+      "col": 30,
+      "expect": {"all":["_assert_addr_list_ok($header, $allow_empty, $list)","active param: 0 ($header)"],"none":[]},
+      "status": "gold"
+    },
+    {
+      "id": "sig-stuffer-addr-list-fatcomma-p2",
+      "difficulty": "tricky",
+      "semantic_area": "classic",
+      "file": "Email/Stuffer.pm",
+      "line": 312,
+      "col": 41,
+      "expect": {"all":["_assert_addr_list_ok($header, $allow_empty, $list)","active param: 2 ($list)"],"none":[]},
+      "status": "gold"
+    },
+    {
+      "id": "sig-uri-new-class-p0",
+      "difficulty": "simple",
+      "semantic_area": "oo-isa",
+      "file": "URI.pm",
+      "line": 233,
+      "col": 24,
+      "expect": {"all":["new($uri","active param: 0 ($uri"],"none":[]},
+      "status": "gold"
+    },
+    {
+      "id": "sig-uri-new-class-p1",
+      "difficulty": "tricky",
+      "semantic_area": "oo-isa",
+      "file": "URI.pm",
+      "line": 89,
+      "col": 29,
+      "expect": {"all":["new($uri","active param: 1 ($scheme)"],"none":[]},
+      "status": "gold"
+    },
+    {
+      "id": "sig-stuffer-create-crossfile",
+      "difficulty": "tricky",
+      "semantic_area": "fq",
+      "file": "Email/Stuffer.pm",
+      "line": 215,
+      "col": 37,
+      "expect": {"all":["create(%args)","active param: 0 (%args)"],"none":[]},
+      "status": "gold"
+    },
+    {
+      "id": "sig-gld-norm-imply-function",
+      "difficulty": "simple",
+      "semantic_area": "classic",
+      "file": "Getopt/Long/Descriptive.pm",
+      "line": 656,
+      "col": 25,
+      "expect": {"all":["_norm_imply($what)","active param: 0 ($what)"],"none":[]},
+      "status": "gold"
+    },
+    {
+      "id": "sig-uri-check-path-function-noinvocant",
+      "difficulty": "tricky",
+      "semantic_area": "classic",
+      "file": "URI/_generic.pm",
+      "line": 58,
+      "col": 13,
+      "expect": {"all":["_check_path($path, $pre)","active param: 0 ($path)"],"none":[]},
+      "status": "xfail"
+    },
+    {
+      "id": "sig-typetiny-new-dynamic-args",
+      "difficulty": "tricky",
+      "semantic_area": "type-inference",
+      "file": "Type/Tiny.pm",
+      "line": 1246,
+      "col": 27,
+      "expect": {"all":["new()","active param: 0 ()"],"none":[]},
+      "status": "provisional"
+    },
+    {
+      "id": "sig-typetiny-check-shift-style",
+      "difficulty": "simple",
+      "semantic_area": "type-inference",
+      "file": "Type/Tiny.pm",
+      "line": 902,
+      "col": 30,
+      "expect": {"all":["check()","active param: 0 ()"],"none":[]},
+      "status": "provisional"
+    },
+    {
+      "id": "sig-datetime-normalize-nanoseconds-indexarg",
+      "difficulty": "simple",
+      "semantic_area": "classic",
+      "file": "x86_64-linux/DateTime.pm",
+      "line": 226,
+      "col": 8,
+      "expect": {"all":["_normalize_nanoseconds()","active param: 0 ()"],"none":[]},
+      "status": "provisional"
+    }
+  ]
+}

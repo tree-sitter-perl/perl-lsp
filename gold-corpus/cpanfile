@@ -1,0 +1,25 @@
+# Distributions the gold corpus exercises. `cpm install -L local --cpanfile this`
+# pulls each plus its full dependency closure into local/lib/perl5 — the hermetic,
+# version-pinned @INC the harness queries against. Pin exact versions in
+# cpanfile.snapshot (committed) so CI reconstructs the identical tree.
+#
+# Some dists need system libraries to build: Net::SSLeay (libssl-dev),
+# XML::LibXML (libxml2-dev). CI installs those before `cpm install`.
+
+requires 'URI';
+requires 'Moo';
+requires 'DateTime';
+requires 'Type::Tiny';
+requires 'JSON::PP';
+requires 'Minion';
+requires 'Catalyst::Runtime';
+requires 'Exporter::Tiny';
+requires 'LWP';                       # libwww-perl
+requires 'Dist::Zilla';
+requires 'Plack';
+requires 'Sub::Exporter';
+requires 'Email::Stuffer';
+requires 'CGI';
+requires 'Time::HiRes';
+requires 'Log::Log4perl';
+requires 'Getopt::Long::Descriptive';

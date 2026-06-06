@@ -1,45 +1,60 @@
 #!/usr/bin/env perl
-# Gold-corpus harness — re-runs every corpus row against the current binary and
-# reports regressions. The corpus markdown is human-readable prose (expected/
-# actual are not machine fixtures), so this is a SMOKE + LIVENESS guard, not an
-# exact-assertion runner:
+# Gold-corpus harness — structured, exact-assertion regression runner.
 #
-#   * CRASH    — the query aborted the process (exit 134 / signalled). Always a
-#                regression; this is the check that would have caught the X1
-#                scanner-overflow class of bug.
-#   * REGRESS  — a row whose recorded verdict was PASS now returns empty / errors
-#                (a resolution that used to work no longer does).
-#   * (rows recorded as FAIL that still fail are reported as KNOWN-GAP, not noise.)
+# Substrate: a hermetic, version-pinned module tree installed by cpm/carton from
+# gold-corpus/cpanfile + cpanfile.snapshot into gold-corpus/local. The harness
+# points the LSP at local/lib/perl5 (workspace root + PERL5LIB), so every query
+# resolves against the SAME pinned versions in dev and CI. Rebuild the substrate:
+#     cd gold-corpus && carton install --deployment      # exact, from snapshot
+#   (or, faster:  cpm install -L local --resolver snapshot)
 #
-# Exact target-matching needs structured fixtures (a JSON sidecar generated
-# alongside the markdown) — deliberately out of scope for v1; see README.
+# Source of truth: gold-corpus/fixtures/*.json. Each row re-runs a CLI query and
+# asserts its NORMALIZED output:
+#     expect.all  — every string MUST appear
+#     expect.none — no string may appear
+#   status:
+#     gold        — assertion MUST hold; else FAIL (regression)
+#     xfail       — known gap: assertion must currently NOT hold; if it starts
+#                   holding → XPASS (gap fixed → promote to gold). Soft failure.
+#     provisional — run + report, never fails the suite
+#   a process abort (exit 134 / signal) is always a hard FAIL (the scanner-overflow class).
+#
+# Output is normalized before matching: absolute paths reduced to basenames; JSON
+# outputs (references/workspace-symbol/outline/rename/diagnostics) decoded and
+# re-encoded canonically (sorted keys, compact) so one substring ties
+# file+line+kind. The SAME normalize() backs `--emit`, which prints the canonical
+# text for one ad-hoc query — author fixtures against `--emit` and they match by
+# construction.
 #
 # Usage:
-#   gold-corpus/run.pl [capability ...]      # default: all capability files
-#   BIN=path/to/perl-lsp CORPUS=~/perl-qa-corpus gold-corpus/run.pl definition hover
-#
-# Needs the corpus repos checked out at $CORPUS (default ~/perl-qa-corpus) and a
-# release binary built. Not a cargo/CI test — it depends on that external corpus.
+#   gold-corpus/run.pl [capability ...]                       # run the suite
+#   gold-corpus/run.pl --list
+#   gold-corpus/run.pl --emit <cap> <file> <line> <col> [newname]
+#   gold-corpus/run.pl --emit workspace-symbol <query>
+#   gold-corpus/run.pl --emit diagnostics
+#   BIN=path CORPUS=<lib> gold-corpus/run.pl definition
+# CORPUS defaults to gold-corpus/local/lib/perl5; <file> is a path under it.
 
 use strict;
 use warnings;
 use FindBin qw($RealBin);
 use File::Spec;
-use POSIX qw(WIFSIGNALED WTERMSIG);
+use JSON::PP;
+use POSIX qw(WIFSIGNALED);
 
-my $root   = File::Spec->rel2abs("$RealBin/..");
-my $bin    = $ENV{BIN}    || "$root/target/release/perl-lsp";
-my $corpus = $ENV{CORPUS} || "$ENV{HOME}/perl-qa-corpus";
+my $bin    = $ENV{BIN}    || File::Spec->rel2abs("$RealBin/../target/release/perl-lsp");
+my $corpus = $ENV{CORPUS} || "$RealBin/local/lib/perl5";
+my $fxdir  = "$RealBin/fixtures";
 
-die "binary not found: $bin (build with: cargo build --release)\n" unless -x $bin;
+die "binary not found: $bin (cargo build --release)\n" unless -x $bin;
 unless (-d $corpus) {
-    die "corpus repos not found at $corpus.\n"
-      . "Set CORPUS=<dir> or check out the QA corpus there.\n";
+    die "substrate not found at $corpus.\n"
+      . "Build it: cd gold-corpus && carton install   (or cpm install -L local --resolver snapshot)\n";
 }
+# hermetic @INC: the pinned tree + its arch dir, ahead of anything inherited.
+my ($arch) = grep { -d } glob("$corpus/*/auto") ? map { s{/auto$}{}r } glob("$corpus/*/auto") : ();
+$ENV{PERL5LIB} = join(':', grep { defined && length } $corpus, $arch, $ENV{PERL5LIB});
 
-# capability file -> how to invoke it. cursor = `path:line:col`; query token is
-# the 2nd backtick group (the search string for workspace-symbol).
-#   needs: root? file? linecol? — what the CLI flag consumes.
 my %CAP = (
     'definition'         => { flag => '--definition',        root => 1, file => 1, lc => 1 },
     'references'         => { flag => '--references',         root => 1, file => 1, lc => 1 },
@@ -51,142 +66,156 @@ my %CAP = (
     'linked-editing'     => { flag => '--linked-editing',     root => 1, file => 1, lc => 1 },
     'semantic-tokens'    => { flag => '--semantic-tokens',    root => 1, file => 1, lc => 0 },
     'outline'            => { flag => '--outline',            root => 0, file => 1, lc => 0 },
-    'workspace-symbol'   => { flag => '--workspace-symbol',   root => 1, query => 1 },
+    'workspace-symbol'   => { flag => '--workspace-symbol',   root => 1, qarg => 1 },
     'rename'             => { flag => '--rename',             root => 1, file => 1, lc => 1, rename => 1 },
-    'diagnostics'        => { check => 1 },   # run --check once per repo; crash-only check
+    'diagnostics'        => { check => 1 },
 );
+my %JSON_CAP = map { $_ => 1 } qw(references workspace-symbol outline rename diagnostics);
 
-my @want = @ARGV ? @ARGV : sort keys %CAP;
-
-my %repo_dir;   # repo name -> resolved corpus path (cache)
-sub repo_path {
-    my ($repo) = @_;
-    return $repo_dir{$repo} if exists $repo_dir{$repo};
-    my $p = "$corpus/$repo";
-    $repo_dir{$repo} = (-d $p) ? $p : undef;
-    return $repo_dir{$repo};
-}
-
-# resolve the cursor's file: try <corpus>/<repo>/<path>, then <corpus>/<path>.
-sub resolve_file {
-    my ($repodir, $path) = @_;
-    for my $cand ("$repodir/$path") {
-        return $cand if -f $cand;
-    }
-    # some rows prefix the repo dir into the path already
-    (my $stripped = $path) =~ s{^[^/]+/}{};
-    my $c2 = "$repodir/$stripped";
-    return $c2 if -f $c2;
-    return "$repodir/$path";   # let the binary report the miss
-}
-
-# run a command (arrayref), capture combined output + exit/signal.
-sub run_cmd {
+sub run_cmd {                       # argv -> (stdout, crashed?)  [stderr dropped]
     my ($argv) = @_;
-    my $pid = open(my $fh, '-|');
+    my $pid = open(my $fh, '-|') // die "fork: $!";
+    if ($pid == 0) { open(STDERR, '>', '/dev/null'); exec @$argv or exit 127; }
+    local $/; my $out = <$fh> // ''; close($fh);
+    my $st = $?;
+    return ($out, (WIFSIGNALED($st) || ($st >> 8) == 134) ? 1 : 0);
+}
+sub _bn { my $s = shift; $s =~ s{^/.*/([^/]+)$}{$1}; return $s; }       # abs path -> basename
+sub _text_bn { my $s = shift; $s =~ s{/\S*?/([^/\s":]+\.(?:pm|pl|t|pod))}{$1}g; return $s; }
+sub normalize {
+    my ($cap, $raw) = @_;
+    if ($JSON_CAP{$cap}) {
+        my $data = eval { decode_json($raw) };
+        return _text_bn($raw) unless defined $data;
+        my $walk; $walk = sub {
+            my $r = ref $_[0];
+            if    ($r eq 'HASH')  { my %h = map { $_ => $walk->($_[0]{$_}) } keys %{$_[0]}; return \%h; }
+            elsif ($r eq 'ARRAY') { return [ map { $walk->($_) } @{$_[0]} ]; }
+            else { return defined $_[0] ? _bn("$_[0]") : $_[0]; }
+        };
+        return JSON::PP->new->canonical->encode($walk->($data));
+    }
+    return _text_bn($raw);
+}
+# Build the batch request for a fixture row. capability -> the `q` the binary's
+# --batch expects; file made absolute under the substrate; ws-symbol carries a
+# query string, rename a newname, diagnostics neither.
+sub batch_req {
+    my ($cap, $spec, $row, $key) = @_;
+    my %r = (id => $key, q => $cap);
+    if ($spec->{check}) { return \%r; }
+    if ($spec->{qarg})  { $r{query} = $row->{query} // ''; return \%r; }
+    $r{file} = "$corpus/$row->{file}";
+    $r{line} = $row->{line} // 0;
+    $r{col}  = $row->{col}  // 0;
+    $r{newname} = $row->{newname} // 'RENAMED' if $spec->{rename};
+    return \%r;
+}
+# Run ALL rows through ONE --batch process (one startup), return id -> response.
+sub run_batch {
+    my ($reqs) = @_;   # arrayref of request hashes
+    my $jsonl = join("\n", map { encode_json($_) } @$reqs) . "\n";
+    my ($rd, $wr);
+    pipe($rd, $wr) or die "pipe: $!";
+    my $pid = open(my $out, '-|');
     die "fork: $!" unless defined $pid;
     if ($pid == 0) {
-        open(STDERR, '>&', \*STDOUT);
-        exec @$argv or exit 127;
+        open(STDIN, '<&', $rd); close $wr;
+        open(STDERR, '>', '/dev/null');
+        exec($bin, '--batch', $corpus) or exit 127;
     }
-    local $/;
-    my $out = <$fh> // '';
-    close($fh);
-    my $st = $?;
-    my $crashed = WIFSIGNALED($st) || ($st >> 8) == 134;
-    return ($out, $st, $crashed);
-}
-
-my %seen_check;  # repo -> [crashed, ran]
-my @crashes; my @regress; my @known_gap; my @ran; my @skipped;
-
-for my $cap (@want) {
-    my $spec = $CAP{$cap} or do { warn "unknown capability: $cap\n"; next; };
-    my $file = "$RealBin/$cap.md";
-    unless (-f $file) { warn "no corpus file: $cap.md\n"; next; }
-    open(my $md, '<', $file) or die "open $file: $!";
-    while (my $line = <$md>) {
-        next unless $line =~ /^\|/;                 # table row
-        next if $line =~ /^\|\s*id\s*\|/;           # header
-        next if $line =~ /^\|[-\s|]+\|$/;           # separator
-        my @col = map { s/^\s+|\s+$//gr } split /\|/, $line;
-        shift @col if @col && $col[0] eq '';        # leading empty from |
-        my ($id, undef, undef, $repo, $cursor, $expected, undef, $verdict) = @col;
-        next unless defined $id && length $id;
-        next unless defined $verdict;               # only well-formed rows
-
-        my $repodir = repo_path($repo);
-        unless ($repodir) { push @skipped, "$id (repo $repo absent)"; next; }
-
-        # diagnostics: one --check per repo, crash-only.
-        if ($spec->{check}) {
-            unless ($seen_check{$repo}) {
-                my ($out, undef, $cr) = run_cmd([$bin, '--check', $repodir, '--severity', 'warning', '--format', 'json']);
-                $seen_check{$repo} = 1;
-                push @ran, "diagnostics/$repo";
-                push @crashes, "diagnostics --check $repo" if $cr;
-            }
-            next;
-        }
-
-        # parse cursor: `path:line:col` and optional `token`
-        my @ticks = $cursor =~ /`([^`]*)`/g;
-        my ($pathlc, $token) = @ticks;
-        next unless defined $pathlc;
-        my ($path, $ln, $cl) = $pathlc =~ /^(.*):(\d+):(\d+)$/;
-        next unless defined $path;
-
-        my @argv = ($bin, $spec->{flag});
-        if ($spec->{query}) {
-            push @argv, $repodir, ($token // '');
-        } else {
-            my $f = resolve_file($repodir, $path);
-            push @argv, $repodir if $spec->{root};
-            push @argv, $f       if $spec->{file};
-            push @argv, $ln, $cl if $spec->{lc};
-            push @argv, '__HARNESS_RENAME__' if $spec->{rename};
-        }
-
-        my ($out, $st, $crashed) = run_cmd(\@argv);
-        push @ran, "$cap/$id";
-        my $cmd = join(' ', map { /\s/ ? "'$_'" : $_ } @argv);
-
-        if ($crashed) {
-            push @crashes, "$cap/$id\n      $cmd";
-            next;
-        }
-        my $empty = ($out !~ /\S/);
-        my $pass  = ($verdict eq 'PASS');
-        if ($pass && $empty) {
-            push @regress, "$cap/$id  (was PASS, now empty)\n      $cmd";
-        } elsif (!$pass && $empty) {
-            push @known_gap, "$cap/$id";
-        }
+    close $rd;
+    print $wr $jsonl; close $wr;       # feed all requests, then EOF
+    local $/; my $resp = <$out> // ''; close($out);
+    my %by_id;
+    for my $line (split /\n/, $resp) {
+        next unless $line =~ /\S/;
+        my $r = eval { decode_json($line) } or next;
+        $by_id{$r->{id}} = $r if defined $r->{id};
     }
-    close($md);
+    return \%by_id;
 }
 
-# ---- report ----
-printf "\nGold-corpus harness — %d rows run\n", scalar @ran;
-printf "  binary: %s\n  corpus: %s\n", $bin, $corpus;
-print  "\n";
-printf "  %-10s %d\n", 'CRASH',    scalar @crashes;
-printf "  %-10s %d\n", 'REGRESS',  scalar @regress;
-printf "  %-10s %d\n", 'known-gap',scalar @known_gap;
-printf "  %-10s %d\n", 'skipped',  scalar @skipped;
+# ---- --emit: canonical output for one ad-hoc query (fixture authoring) ----
+if (@ARGV && $ARGV[0] eq '--emit') {
+    shift @ARGV;
+    my ($cap, @rest) = @ARGV;
+    my $spec = $CAP{$cap} or die "unknown capability: $cap\n";
+    my $row = $spec->{check} ? {}
+            : $spec->{qarg}  ? { query => $rest[0] }
+            :                  { file => $rest[0], line => $rest[1], col => $rest[2], newname => $rest[3] };
+    my $resp = run_batch([ batch_req($cap, $spec, $row, 'emit') ]);
+    my $r = $resp->{emit};
+    if    (!$r)        { print "<<CRASH: process aborted>>\n"; }
+    elsif (!$r->{ok})  { print "<<ERR: $r->{err}>>\n"; }
+    else {
+        my $norm = normalize($cap, $r->{out});
+        print $norm; print "\n" unless $norm =~ /\n\z/;
+    }
+    exit 0;
+}
 
-if (@crashes) {
-    print "\n!! CRASHES (process aborted — always a regression):\n";
-    print "  - $_\n" for @crashes;
+# ---- load fixtures ----
+die "no fixtures dir: $fxdir (generate it — see README)\n" unless -d $fxdir;
+my @want = grep { !/^--/ } @ARGV;
+my $list_only = grep { $_ eq '--list' } @ARGV;
+my @rows;
+for my $jf (sort glob("$fxdir/*.json")) {
+    open(my $fh, '<', $jf) or die "open $jf: $!";
+    local $/; my $j = decode_json(<$fh>); close($fh);
+    next if @want && !grep { $_ eq $j->{capability} } @want;
+    push @rows, map { { %$_, capability => $j->{capability} } } @{ $j->{rows} || [] };
 }
-if (@regress) {
-    print "\n!! REGRESSIONS (recorded PASS, now empty/broken):\n";
-    print "  - $_\n" for @regress;
+if ($list_only) {
+    my %c; $c{$_->{capability}}{$_->{status} // 'gold'}++ for @rows;
+    printf "%-20s %5s %6s %5s\n", 'capability', 'gold', 'xfail', 'prov';
+    printf "%-20s %5d %6d %5d\n", $_, $c{$_}{gold}||0, $c{$_}{xfail}||0, $c{$_}{provisional}||0 for sort keys %c;
+    exit 0;
 }
-if (@skipped) {
-    print "\nskipped (corpus repo not checked out):\n";
-    print "  - $_\n" for @skipped;
+
+# ---- run suite: ALL rows through one --batch process ----
+my @reqs; my %meta;
+for my $r (@rows) {
+    my $spec = $CAP{$r->{capability}} or next;
+    my $key = "$r->{capability}/$r->{id}";
+    $meta{$key} = [ $r, $spec ];
+    push @reqs, batch_req($r->{capability}, $spec, $r, $key);
 }
+my $resp = run_batch(\@reqs);
+
+my (@fail, @xpass, @crash, @skip, @prov); my ($pass, $xfail) = (0, 0);
+for my $req (@reqs) {                          # iterate in request order
+    my $key = $req->{id};
+    my ($r, $spec) = @{ $meta{$key} };
+    my $status = $r->{status} // 'gold';
+    my $rr = $resp->{$key};
+    if (!$rr) { push @crash, "$key (no response — batch aborted at/before this row)"; next; }
+    # ok:false is a graceful "no result" (e.g. file-not-found, no def); treat as empty output
+    my $norm = $rr->{ok} ? normalize($r->{capability}, $rr->{out}) : '';
+    if (!$rr->{ok} && $rr->{err} && $rr->{err} =~ /^file not found/) { push @skip, "$key ($rr->{err})"; next; }
+    my $ok = 1;
+    for my $s (@{ $r->{expect}{all}  || [] }) { $ok = 0, last if index($norm, $s) < 0; }
+    if ($ok) { for my $s (@{ $r->{expect}{none} || [] }) { $ok = 0, last if index($norm, $s) >= 0; } }
+    if ($status eq 'gold') {
+        if ($ok) { $pass++ } else { push @fail, "$key\n      expect: " . encode_json($r->{expect}) . "\n      got: " . substr($norm, 0, 200) }
+    } elsif ($status eq 'xfail') {
+        if ($ok) { push @xpass, "$key (XPASS — promote to gold)" } else { $xfail++ }
+    } else {
+        push @prov, $key unless $ok;
+    }
+}
+printf "\nGold-corpus harness\n  binary: %s\n  corpus: %s\n\n", $bin, $corpus;
+printf "  %-9s %d\n", 'PASS',  $pass;
+printf "  %-9s %d\n", 'xfail', $xfail;
+printf "  %-9s %d\n", 'FAIL',  scalar @fail;
+printf "  %-9s %d\n", 'XPASS', scalar @xpass;
+printf "  %-9s %d\n", 'CRASH', scalar @crash;
+printf "  %-9s %d\n", 'prov?', scalar @prov if @prov;
+printf "  %-9s %d\n", 'skip',  scalar @skip if @skip;
+print "\n!! CRASH (process aborted):\n",                 map { "  - $_\n" } @crash if @crash;
+print "\n!! FAIL (gold assertion no longer holds):\n",   map { "  - $_\n" } @fail  if @fail;
+print "\n** XPASS (known gap fixed — update fixture):\n", map { "  - $_\n" } @xpass if @xpass;
+print "\nprovisional misses:\n",                         map { "  - $_\n" } @prov  if @prov;
+print "\nskipped:\n",                                    map { "  - $_\n" } @skip  if @skip;
 print "\n";
-
-exit((@crashes || @regress) ? 1 : 0);
+exit((@fail || @crash || @xpass) ? 1 : 0);

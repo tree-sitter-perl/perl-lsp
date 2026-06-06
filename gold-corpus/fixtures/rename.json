@@ -1,0 +1,104 @@
+{
+  "capability": "rename",
+  "rows": [
+    {
+      "id": "rename-01-mkopt-def",
+      "difficulty": "simple",
+      "semantic_area": "exporter",
+      "file": "Exporter/Tiny.pm",
+      "line": 429,
+      "col": 4,
+      "newname": "RENAMED",
+      "expect": {"all":["Tiny.pm","\"line\":\"8\"","\"line\":\"429\"","\"line\":\"456\"","\"line\":\"69\"","\"line\":\"104\"","\"line\":\"167\""],"none":[]},
+      "status": "xfail"
+    },
+    {
+      "id": "rename-02-mkopt-callsite",
+      "difficulty": "tricky",
+      "semantic_area": "exporter",
+      "file": "Exporter/Tiny.pm",
+      "line": 69,
+      "col": 12,
+      "newname": "RENAMED",
+      "expect": {"all":["Tiny.pm","\"line\":\"69\"","\"line\":\"104\"","\"line\":\"167\"","\"line\":\"429\"","\"line\":\"8\"","\"line\":\"456\""],"none":[]},
+      "status": "xfail"
+    },
+    {
+      "id": "rename-03-mkopt-hash",
+      "difficulty": "simple",
+      "semantic_area": "exporter",
+      "file": "Exporter/Tiny.pm",
+      "line": 453,
+      "col": 4,
+      "newname": "RENAMED",
+      "expect": {"all":["Tiny.pm","\"line\":\"8\"","\"line\":\"453\""],"none":["\"line\":\"429\""]},
+      "status": "gold"
+    },
+    {
+      "id": "rename-04-croak",
+      "difficulty": "tricky",
+      "semantic_area": "exporter",
+      "file": "Exporter/Tiny.pm",
+      "line": 19,
+      "col": 4,
+      "newname": "RENAMED",
+      "expect": {"all":["Tiny.pm","Shiny.pm","\"line\":\"19\"","\"line\":\"8\"","\"line\":\"360\"","\"line\":\"361\"","\"line\":\"362\"","\"line\":\"24\"","\"line\":\"31\""],"none":["\"line\":\"340\""]},
+      "status": "gold"
+    },
+    {
+      "id": "rename-05-setup-exporter",
+      "difficulty": "tricky",
+      "semantic_area": "exporter",
+      "file": "Sub/Exporter.pm",
+      "line": 590,
+      "col": 4,
+      "newname": "RENAMED",
+      "expect": {"all":["Exporter.pm","\"line\":\"590\"","\"line\":\"931\"","\"line\":\"933\"","\"line\":\"937\"","Setup.pm"],"none":[]},
+      "status": "gold"
+    },
+    {
+      "id": "rename-06-build-exporter",
+      "difficulty": "tricky",
+      "semantic_area": "exporter",
+      "file": "Sub/Exporter.pm",
+      "line": 703,
+      "col": 4,
+      "newname": "RENAMED",
+      "expect": {"all":["Exporter.pm","\"line\":\"703\"","\"line\":\"933\"","\"line\":\"934\"","\"line\":\"602\""],"none":[]},
+      "status": "xfail"
+    },
+    {
+      "id": "rename-08-authority",
+      "difficulty": "tricky",
+      "semantic_area": "oo-isa",
+      "file": "URI/_generic.pm",
+      "line": 37,
+      "col": 4,
+      "newname": "RENAMED",
+      "expect": {"all":["_generic.pm","_server.pm","file.pm","ldapi.pm","\"line\":\"37\""],"none":[]},
+      "status": "provisional"
+    },
+    {
+      "id": "rename-09-base-constant",
+      "difficulty": "simple",
+      "semantic_area": "constants",
+      "file": "URI/_punycode.pm",
+      "line": 14,
+      "col": 13,
+      "newname": "RENAMED",
+      "expect": {"all":["_punycode.pm","\"line\":\"14\"","\"line\":\"79\""],"none":[]},
+      "status": "xfail"
+    },
+    {
+      "id": "rename-11-urn-canonical-precision",
+      "difficulty": "tricky",
+      "semantic_area": "oo-isa",
+      "file": "URI/urn.pm",
+      "line": 90,
+      "col": 4,
+      "newname": "RENAMED",
+      "expect": {"all":["urn.pm","\"line\":\"90\""],"none":["isbn.pm","_generic.pm"]},
+      "status": "gold"
+    }
+  ]
+}

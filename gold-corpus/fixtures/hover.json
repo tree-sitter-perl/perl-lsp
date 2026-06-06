@@ -1,0 +1,165 @@
+{
+  "capability": "hover",
+  "rows": [
+    {
+      "id": "hover-dt-now",
+      "difficulty": "simple",
+      "semantic_area": "type-inference",
+      "file": "x86_64-linux/DateTime.pm",
+      "line": 542,
+      "col": 4,
+      "expect": {"all":["sub now {","package DateTime","returns: DateTime"],"none":[]},
+      "status": "gold"
+    },
+    {
+      "id": "hover-dt-clone",
+      "difficulty": "simple",
+      "semantic_area": "type-inference",
+      "file": "x86_64-linux/DateTime.pm",
+      "line": 764,
+      "col": 4,
+      "expect": {"all":["sub clone","package DateTime","returns: DateTime"],"none":[]},
+      "status": "gold"
+    },
+    {
+      "id": "hover-dt-duration-class-const",
+      "difficulty": "simple",
+      "semantic_area": "constants",
+      "file": "x86_64-linux/DateTime.pm",
+      "line": 87,
+      "col": 4,
+      "expect": {"all":["sub duration_class () {'DateTime::Duration'}","package DateTime","returns: String"],"none":[]},
+      "status": "gold"
+    },
+    {
+      "id": "hover-dt-seconds-per-day-const",
+      "difficulty": "simple",
+      "semantic_area": "constants",
+      "file": "x86_64-linux/DateTime.pm",
+      "line": 85,
+      "col": 4,
+      "expect": {"all":["sub SECONDS_PER_DAY () {86400}","package DateTime","returns: Numeric"],"none":[]},
+      "status": "gold"
+    },
+    {
+      "id": "hover-dt-today-chain",
+      "difficulty": "tricky",
+      "semantic_area": "type-inference",
+      "file": "x86_64-linux/DateTime.pm",
+      "line": 568,
+      "col": 4,
+      "expect": {"all":["sub today { shift->now(@_)->truncate( to => 'day' ) }","package DateTime","returns: DateTime"],"none":[]},
+      "status": "gold"
+    },
+    {
+      "id": "hover-dt-truncate-in-chain",
+      "difficulty": "tricky",
+      "semantic_area": "type-inference",
+      "file": "x86_64-linux/DateTime.pm",
+      "line": 568,
+      "col": 28,
+      "expect": {"all":["sub truncate {","class DateTime","returns: DateTime"],"none":[]},
+      "status": "provisional"
+    },
+    {
+      "id": "hover-uri-new-abs-pod",
+      "difficulty": "simple",
+      "semantic_area": "pod",
+      "file": "URI.pm",
+      "line": 86,
+      "col": 4,
+      "expect": {"all":["sub new_abs","package URI","Constructs a new absolute URI object"],"none":[]},
+      "status": "gold"
+    },
+    {
+      "id": "hover-uri-const-base",
+      "difficulty": "simple",
+      "semantic_area": "constants",
+      "file": "URI/_punycode.pm",
+      "line": 14,
+      "col": 13,
+      "expect": {"all":["use constant BASE => 36;","package URI::_punycode"],"none":["returns: Numeric"]},
+      "status": "provisional"
+    },
+    {
+      "id": "hover-uri-imported-uri-unescape",
+      "difficulty": "tricky",
+      "semantic_area": "exporter",
+      "file": "URI/_server.pm",
+      "line": 97,
+      "col": 11,
+      "expect": {"all":["sub uri_unescape()","Returns a string with each %XX sequence replaced","imported from `URI::Escape`"],"none":[]},
+      "status": "gold"
+    },
+    {
+      "id": "hover-catalyst-has-address",
+      "difficulty": "simple",
+      "semantic_area": "moose",
+      "file": "Catalyst/Request.pm",
+      "line": 47,
+      "col": 4,
+      "expect": {"all":["has address => (is => 'rw');","package Catalyst::Request"],"none":["returns:"]},
+      "status": "gold"
+    },
+    {
+      "id": "hover-catalyst-has-private-path-isa",
+      "difficulty": "tricky",
+      "semantic_area": "moose",
+      "file": "Catalyst/Action.pm",
+      "line": 34,
+      "col": 4,
+      "expect": {"all":["has private_path => (","package Catalyst::Action","Returns absolute private path for this action"],"none":["returns: String"]},
+      "status": "provisional"
+    },
+    {
+      "id": "hover-minion-worker-return",
+      "difficulty": "tricky",
+      "semantic_area": "type-inference",
+      "file": "Minion.pm",
+      "line": 145,
+      "col": 4,
+      "expect": {"all":["sub worker {","package Minion","returns: Minion::Worker"],"none":[]},
+      "status": "gold"
+    },
+    {
+      "id": "hover-minion-has-app-mojo",
+      "difficulty": "simple",
+      "semantic_area": "mojo",
+      "file": "Minion.pm",
+      "line": 16,
+      "col": 4,
+      "expect": {"all":["has app => sub","package Minion","Application for job queue"],"none":[]},
+      "status": "gold"
+    },
+    {
+      "id": "hover-minion-var-worker",
+      "difficulty": "simple",
+      "semantic_area": "type-inference",
+      "file": "Minion.pm",
+      "line": 151,
+      "col": 6,
+      "expect": {"all":["my $worker = Minion::Worker->new(minion => $self);","type: Minion::Worker"],"none":[]},
+      "status": "gold"
+    },
+    {
+      "id": "hover-minion-self-shift-classic",
+      "difficulty": "simple",
+      "semantic_area": "classic",
+      "file": "Minion.pm",
+      "line": 94,
+      "col": 7,
+      "expect": {"all":["my ($self, $id) = @_;","type: Minion"],"none":[]},
+      "status": "gold"
+    },
+    {
+      "id": "hover-minion-emit-inherited",
+      "difficulty": "tricky",
+      "semantic_area": "oo-isa",
+      "file": "Minion.pm",
+      "line": 152,
+      "col": 9,
+      "expect": {"all":["sub emit()","class Minion (from Mojo::EventEmitter)","Emit event."],"none":[]},
+      "status": "provisional"
+    }
+  ]
+}

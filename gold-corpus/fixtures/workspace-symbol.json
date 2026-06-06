@@ -1,0 +1,119 @@
+{
+  "capability": "workspace-symbol",
+  "rows": [
+    {
+      "id": "ws-moo-pkg",
+      "difficulty": "simple",
+      "semantic_area": "oo-isa",
+      "query": "Moo",
+      "expect": {"all":["{\"col\":\"8\",\"file\":\"Moo.pm\",\"kind\":\"Package\",\"line\":\"0\",\"name\":\"Moo\"}"],"none":[]},
+      "status": "gold"
+    },
+    {
+      "id": "ws-uri-pkg",
+      "difficulty": "simple",
+      "semantic_area": "oo-isa",
+      "query": "URI",
+      "expect": {"all":["{\"col\":\"8\",\"file\":\"URI.pm\",\"kind\":\"Package\",\"line\":\"0\",\"name\":\"URI\"}"],"none":[]},
+      "status": "gold"
+    },
+    {
+      "id": "ws-uri-newabs",
+      "difficulty": "simple",
+      "semantic_area": "classic",
+      "query": "new_abs",
+      "expect": {"all":["{\"col\":\"4\",\"file\":\"URI.pm\",\"kind\":\"Sub\",\"line\":\"86\",\"name\":\"new_abs\"}"],"none":[]},
+      "status": "gold"
+    },
+    {
+      "id": "ws-cat-pkg",
+      "difficulty": "simple",
+      "semantic_area": "oo-isa",
+      "query": "Catalyst::Controller",
+      "expect": {"all":["{\"col\":\"8\",\"file\":\"Controller.pm\",\"kind\":\"Package\",\"line\":\"0\",\"name\":\"Catalyst::Controller\"}"],"none":[]},
+      "status": "gold"
+    },
+    {
+      "id": "ws-cat-forward",
+      "difficulty": "tricky",
+      "semantic_area": "classic",
+      "query": "forward",
+      "expect": {"all":["{\"col\":\"4\",\"file\":\"Catalyst.pm\",\"kind\":\"Sub\",\"line\":\"488\",\"name\":\"forward\"}"],"none":[]},
+      "status": "gold"
+    },
+    {
+      "id": "ws-cat-toapp",
+      "difficulty": "tricky",
+      "semantic_area": "codegen",
+      "query": "to_app",
+      "expect": {"all":["{\"col\":\"0\",\"file\":\"Catalyst.pm\",\"kind\":\"Sub\",\"line\":\"3557\",\"name\":\"to_app\"}"],"none":[]},
+      "status": "gold"
+    },
+    {
+      "id": "ws-dt-mon",
+      "difficulty": "tricky",
+      "semantic_area": "codegen",
+      "file": "x86_64-linux/DateTime.pm",
+      "query": "mon",
+      "expect": {"all":["{\"col\":\"0\",\"file\":\"DateTime.pm\",\"kind\":\"Sub\",\"line\":\"797\",\"name\":\"mon\"}"],"none":[]},
+      "status": "gold"
+    },
+    {
+      "id": "ws-dt-fromepoch",
+      "difficulty": "tricky",
+      "semantic_area": "classic",
+      "file": "x86_64-linux/DateTime.pm",
+      "query": "from_epoch",
+      "expect": {"all":["{\"col\":\"8\",\"file\":\"DateTime.pm\",\"kind\":\"Sub\",\"line\":\"485\",\"name\":\"from_epoch\"}"],"none":[]},
+      "status": "gold"
+    },
+    {
+      "id": "ws-moo-accessor",
+      "difficulty": "tricky",
+      "semantic_area": "moo",
+      "query": "namespace",
+      "expect": {"all":["{\"col\":\"4\",\"file\":\"Action.pm\",\"kind\":\"Method\",\"line\":\"29\",\"name\":\"namespace\"}","{\"col\":\"4\",\"file\":\"Action.pm\",\"kind\":\"HashKeyDef\",\"line\":\"29\",\"name\":\"namespace\"}"],"none":[]},
+      "status": "gold"
+    },
+    {
+      "id": "ws-moose-accessor",
+      "difficulty": "tricky",
+      "semantic_area": "moose",
+      "query": "part",
+      "expect": {"all":["{\"col\":\"4\",\"file\":\"ActionContainer.pm\",\"kind\":\"Method\",\"line\":\"20\",\"name\":\"part\"}","{\"col\":\"4\",\"file\":\"ActionContainer.pm\",\"kind\":\"HashKeyDef\",\"line\":\"20\",\"name\":\"part\"}"],"none":[]},
+      "status": "gold"
+    },
+    {
+      "id": "ws-subexp-build",
+      "difficulty": "simple",
+      "semantic_area": "exporter",
+      "query": "build_exporter",
+      "expect": {"all":["{\"col\":\"4\",\"file\":\"Exporter.pm\",\"kind\":\"Sub\",\"line\":\"703\",\"name\":\"build_exporter\"}"],"none":[]},
+      "status": "gold"
+    },
+    {
+      "id": "ws-exptiny-import",
+      "difficulty": "tricky",
+      "semantic_area": "exporter",
+      "query": "import",
+      "expect": {"all":["{\"col\":\"4\",\"file\":\"Tiny.pm\",\"kind\":\"Sub\",\"line\":\"53\",\"name\":\"import\"}"],"none":[]},
+      "status": "gold"
+    },
+    {
+      "id": "ws-tt-coerce",
+      "difficulty": "tricky",
+      "semantic_area": "type-inference",
+      "query": "coerce",
+      "expect": {"all":["{\"col\":\"4\",\"file\":\"Tiny.pm\",\"kind\":\"Sub\",\"line\":\"1088\",\"name\":\"coerce\"}"],"none":[]},
+      "status": "gold"
+    },
+    {
+      "id": "ws-cat-fuzzy",
+      "difficulty": "tricky",
+      "semantic_area": "oo-isa",
+      "query": "Controll",
+      "expect": {"all":["{\"col\":\"8\",\"file\":\"Controller.pm\",\"kind\":\"Package\",\"line\":\"0\",\"name\":\"Catalyst::Controller\"}"],"none":[]},
+      "status": "gold"
+    }
+  ]
+}
