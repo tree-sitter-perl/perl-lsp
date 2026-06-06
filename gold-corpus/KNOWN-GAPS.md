@@ -132,16 +132,30 @@ assertion is "no diagnostic at this site."
 - **Expect:** `$self` typed `Minion` (the enclosing class).
 - **Actual:** `No type info` on **1.1.0**; returned `Minion` on **1.0.3**.
 - **Construct:** `my $self = shift->SUPER::new;` in a `Mojo::Base`-derived class.
-- **Root cause (partially isolated):** A/B confirmed the regression is the
-  1.1.0 parser bump, not a builder edit. BUT the *isolated* CST for
-  `shift->SUPER::new` is byte-identical across 1.0.3/1.1.0, and
-  `Mojo::Base::new` resolves to `None` on **both** versions — so the break is
-  a subtler cross-file / chain-typing shape change elsewhere in the resolution
-  (not the obvious local `bless {}` / `SUPER::new` node). Not yet root-caused
-  to a single node; handed to the main agent.
-- **Fix sketch:** TBD pending root cause. Reproduce with
-  `printf '{"id":"x","q":"type-at","file":"<corpus>/Minion.pm","line":108,"col":6}\n' | perl-lsp --batch <corpus>`.
-- **Difficulty:** unknown (root cause open).
+- **Root cause (narrowed; obvious causes ruled out):** A/B'd both parser versions.
+  Findings:
+  - **Cross-file only.** Single-file `--type-at` and `--dump-package` show `$self`
+    with NO type constraint (`vars_in_scope` = `$class`, `$e`) on **both** 1.0.3
+    and 1.1.0, and the minimal `my $self = shift->SUPER::new` is `None` on both.
+    Only the substrate/batch path (root + `PERL5LIB` + module index) yields
+    `Minion` on 1.0.3 / `None` on 1.1.0. So `$self`'s type is a *query-time*
+    bag-edge chase (`Variable $self → Edge(Expr(shift->SUPER::new))`), not a TC.
+  - **CST identical.** The `shift->SUPER::new` parse is byte-identical across
+    versions (invocant `func1op_call_expression` for bare `shift`, method token
+    `"SUPER::new"`) — verified, not assumed.
+  - **Not the local suspects.** `use Mojo::Base 'Mojo::EventEmitter'` parses
+    identically (base extraction intact); `Mojo::Base::new` returns `None` on
+    both (so the `Minion` did NOT come from the parent's `new` return) — it's a
+    constructor/invocant-class fallback (`shift`→Minion, `->…new` → invocant
+    class) resolved cross-file.
+  - **Conclusion:** 1.1.0 disrupted the cross-file `new`/SUPER chain-return
+    resolution via a parse change in *some other file the resolution walk
+    touches* (an ancestor in Minion's MRO, or the module-index method-return
+    path) — not Minion's own decl. Needs chain-typer instrumentation to pin the
+    exact hop.
+- **Reproduce:** `gold-corpus/run.pl --emit type-at Minion.pm 108 6` (→ `Minion`
+  on 1.0.3, `None` on 1.1.0). The minimal single-file repro does NOT reproduce.
+- **Difficulty:** unknown (exact broken hop open; obvious causes eliminated).
 
 ---
 

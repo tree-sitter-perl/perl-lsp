@@ -100,20 +100,39 @@ sub normalize {
 # Build the batch request for a fixture row. capability -> the `q` the binary's
 # --batch expects; file made absolute under the substrate; ws-symbol carries a
 # query string, rename a newname, diagnostics neither.
+# A row's workspace root: most rows use the snapshot substrate, but a row may
+# carry its own `root` (repo-relative) — e.g. the committed re-export fixture
+# tree, which needs its own self-contained workspace.
+sub root_for {
+    my ($row) = @_;
+    return $corpus unless $row->{root};
+    return File::Spec->rel2abs("$RealBin/../$row->{root}");
+}
+# @INC for a given root: the substrate keeps its pinned PERL5LIB (corpus+arch);
+# a fixture root resolves against its own lib/.
+sub p5lib_for {
+    my ($root) = @_;
+    return $ENV{PERL5LIB} if $root eq $corpus;
+    return "$root/lib:$root";
+}
 sub batch_req {
-    my ($cap, $spec, $row, $key) = @_;
+    my ($cap, $spec, $row, $key, $root) = @_;
+    $root //= root_for($row);
     my %r = (id => $key, q => $cap);
     if ($spec->{check}) { return \%r; }
     if ($spec->{qarg})  { $r{query} = $row->{query} // ''; return \%r; }
-    $r{file} = "$corpus/$row->{file}";
+    $r{file} = "$root/$row->{file}";
     $r{line} = $row->{line} // 0;
     $r{col}  = $row->{col}  // 0;
     $r{newname} = $row->{newname} // 'RENAMED' if $spec->{rename};
     return \%r;
 }
-# Run ALL rows through ONE --batch process (one startup), return id -> response.
+# Run a batch of requests through ONE --batch process (one startup) against a
+# given root, return id -> response. Rows are grouped by root by the caller.
 sub run_batch {
-    my ($reqs) = @_;   # arrayref of request hashes
+    my ($reqs, $root, $p5lib) = @_;
+    $root  //= $corpus;
+    $p5lib //= p5lib_for($root);
     my $jsonl = join("\n", map { encode_json($_) } @$reqs) . "\n";
     my ($rd, $wr);
     pipe($rd, $wr) or die "pipe: $!";
@@ -122,7 +141,8 @@ sub run_batch {
     if ($pid == 0) {
         open(STDIN, '<&', $rd); close $wr;
         open(STDERR, '>', '/dev/null');
-        exec($bin, '--batch', $corpus) or exit 127;
+        $ENV{PERL5LIB} = $p5lib if defined $p5lib;
+        exec($bin, '--batch', $root) or exit 127;
     }
     close $rd;
     print $wr $jsonl; close $wr;       # feed all requests, then EOF
@@ -175,19 +195,24 @@ if ($list_only) {
     exit 0;
 }
 
-# ---- run suite: ALL rows through one --batch process ----
-my @reqs; my %meta;
+# ---- run suite: group rows by workspace root, one --batch per root ----
+my %groups; my %meta; my @order;
 for my $r (@rows) {
     my $spec = $CAP{$r->{capability}} or next;
     my $key = "$r->{capability}/$r->{id}";
     $meta{$key} = [ $r, $spec ];
-    push @reqs, batch_req($r->{capability}, $spec, $r, $key);
+    push @order, $key;
+    my $root = root_for($r);
+    push @{ $groups{$root} }, batch_req($r->{capability}, $spec, $r, $key, $root);
 }
-my $resp = run_batch(\@reqs);
+my $resp = {};
+for my $root (sort keys %groups) {
+    my $by = run_batch($groups{$root}, $root, p5lib_for($root));
+    %$resp = (%$resp, %$by);
+}
 
 my (@fail, @xpass, @crash, @skip, @prov); my ($pass, $xfail) = (0, 0);
-for my $req (@reqs) {                          # iterate in request order
-    my $key = $req->{id};
+for my $key (@order) {
     my ($r, $spec) = @{ $meta{$key} };
     my $status = $r->{status} // 'gold';
     my $rr = $resp->{$key};

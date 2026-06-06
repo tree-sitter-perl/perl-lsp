@@ -47,9 +47,12 @@ A process abort (the scanner-overflow class) is always a hard **CRASH** fail. Ou
 | semantic-tokens | [semantic-tokens.md](semantic-tokens.md) | 10 | 0 | 1 | 2 |
 | document-highlight | [document-highlight.md](document-highlight.md) | 7 | 0 | 1 | 2 |
 | linked-editing | [linked-editing.md](linked-editing.md) | 10 | 0 | 2 | 0 |
-| **total** | | **126** | **8** | **16** | **27** |
+| re-export (definition) | [fixtures/reexport.json](fixtures/reexport.json) | 3 | 0 | 0 | 0 |
+| **total** | | **129** | **8** | **16** | **27** |
 
 The substrate is installed lib content only — it contains **no test files (`t/*.t`), `bin/`, or examples**. Rows whose original cursor lived in a test file, or whose module is not in the snapshot (e.g. JSON::PP, Time::HiRes), are listed in each capability's "Dropped" section. Rows that leaned on test-file call sites were re-authored to the surviving in-lib locations.
+
+**Re-export fixture.** Three rows (`fixtures/reexport.json`, capability `definition` — folded under `definition` in `--list`) run against a small **committed, self-contained workspace** at `reexport-fixture/` instead of the snapshot substrate, via a per-row `root`. They flex the transitive export-surface feature: `goto-def` from a consumer of a re-exporter resolves to the *original* sub through both re-export forms — static splice (`our @EXPORT = (@RexBase::EXPORT)`) and loop-push (`push @EXPORT, @{"${m}::EXPORT"}`). The harness groups rows by `root` and runs one `--batch` per root.
 
 ## Already in corpus
 
