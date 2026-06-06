@@ -125,6 +125,26 @@ assertion is "no diagnostic at this site."
 
 ---
 
+## 5. Parser-version regression
+
+### `ti-12` — `$self = shift->SUPER::new` no longer types (ts-parser-perl 1.1.0)
+- **Cursor:** `Minion.pm:108:6` (the `$self` in `my $self = shift->SUPER::new;`)
+- **Expect:** `$self` typed `Minion` (the enclosing class).
+- **Actual:** `No type info` on **1.1.0**; returned `Minion` on **1.0.3**.
+- **Construct:** `my $self = shift->SUPER::new;` in a `Mojo::Base`-derived class.
+- **Root cause (partially isolated):** A/B confirmed the regression is the
+  1.1.0 parser bump, not a builder edit. BUT the *isolated* CST for
+  `shift->SUPER::new` is byte-identical across 1.0.3/1.1.0, and
+  `Mojo::Base::new` resolves to `None` on **both** versions — so the break is
+  a subtler cross-file / chain-typing shape change elsewhere in the resolution
+  (not the obvious local `bless {}` / `SUPER::new` node). Not yet root-caused
+  to a single node; handed to the main agent.
+- **Fix sketch:** TBD pending root cause. Reproduce with
+  `printf '{"id":"x","q":"type-at","file":"<corpus>/Minion.pm","line":108,"col":6}\n' | perl-lsp --batch <corpus>`.
+- **Difficulty:** unknown (root cause open).
+
+---
+
 ## Triage summary
 
 | gap | subsystem | difficulty |
@@ -135,6 +155,7 @@ assertion is "no diagnostic at this site."
 | diag-09 / diag-10 | typeglob-codegen synthesis | medium |
 | def-16-codegen-type-function | Type::Library synthesis | medium |
 | completion-datetime-hashkey | slot-write harvest (A4 tail) | medium–high |
+| ti-12 (`shift->SUPER::new`) | parser 1.1.0 regression | **open (root cause)** |
 
 Quickest wins: the signature-help invocant gate, imported-names in completion,
 and the `bootstrap` loader recognition — all "the producer already has the

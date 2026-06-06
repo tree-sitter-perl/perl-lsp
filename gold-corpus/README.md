@@ -38,7 +38,7 @@ A process abort (the scanner-overflow class) is always a hard **CRASH** fail. Ou
 | definition (goto-def) | [definition.md](definition.md) | 15 | 1 | 0 | 0 |
 | references | [references.md](references.md) | 15 | 0 | 0 | 1 |
 | hover | [hover.md](hover.md) | 12 | 0 | 4 | 1 |
-| type-at | [type-at.md](type-at.md) | 12 | 0 | 2 | 5 |
+| type-at | [type-at.md](type-at.md) | 11 | 1 | 2 | 5 |
 | rename | [rename.md](rename.md) | 8 | 0 | 1 | 2 |
 | workspace-symbol | [workspace-symbol.md](workspace-symbol.md) | 14 | 0 | 0 | 1 |
 | diagnostics | [diagnostics.md](diagnostics.md) | 2 | 3 | 0 | 9 |
@@ -47,7 +47,7 @@ A process abort (the scanner-overflow class) is always a hard **CRASH** fail. Ou
 | semantic-tokens | [semantic-tokens.md](semantic-tokens.md) | 10 | 0 | 1 | 2 |
 | document-highlight | [document-highlight.md](document-highlight.md) | 7 | 0 | 1 | 2 |
 | linked-editing | [linked-editing.md](linked-editing.md) | 10 | 0 | 2 | 0 |
-| **total** | | **127** | **7** | **16** | **27** |
+| **total** | | **126** | **8** | **16** | **27** |
 
 The substrate is installed lib content only — it contains **no test files (`t/*.t`), `bin/`, or examples**. Rows whose original cursor lived in a test file, or whose module is not in the snapshot (e.g. JSON::PP, Time::HiRes), are listed in each capability's "Dropped" section. Rows that leaned on test-file call sites were re-authored to the surviving in-lib locations.
 
@@ -80,3 +80,4 @@ Confirmed gaps captured at xfail — the correct assertion does not currently ho
 - **completion-datetime-hashkey** (completion) — `$self->{` offers only 2 of 13 mutated keys; keys assigned via `$self->{k}=...` in `_new` aren't harvested.
 - **completion-typetiny-imported-blessed** (completion) — imported `blessed` (`use Scalar::Util qw(blessed)`) absent from bareword-statement completion; only local subs offered.
 - **sig-uri-check-path-function-noinvocant** (signature-help) — `$path` wrongly elided as invocant on a PLAIN function call `_check_path($rest, $$self)`; signature shows only `($pre)`.
+- **ti-12** (type-at) — **ts-parser-perl 1.1.0 regression.** `my $self = shift->SUPER::new` no longer types `$self` as the enclosing class (`Minion`). Returned `Minion` on 1.0.3, `None` on 1.1.0; the isolated `shift->SUPER::new` CST is byte-identical across versions, so the break is in a subtler cross-file shape change (under investigation by the main agent). Pinned at xfail so it XPASSes the day it's fixed.

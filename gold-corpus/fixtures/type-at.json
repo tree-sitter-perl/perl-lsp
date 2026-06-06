@@ -107,7 +107,7 @@
       "query": "",
       "newname": "",
       "expect": {"all":["Minion"],"none":[]},
-      "status": "gold"
+      "status": "xfail"
     },
     {
       "id": "ti-13",

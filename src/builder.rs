@@ -1025,6 +1025,38 @@ fn find_varname_child<'a>(node: Node<'a>) -> Option<Node<'a>> {
     None
 }
 
+/// Find a directly-contained `code_deref_expression` in `node` (the grammar
+/// wraps it in a `function` node inside a call's `function` field).
+fn code_deref_in<'a>(node: Node<'a>) -> Option<Node<'a>> {
+    if node.kind() == "code_deref_expression" {
+        return Some(node);
+    }
+    for i in 0..node.named_child_count() {
+        let child = node.named_child(i)?;
+        if child.kind() == "code_deref_expression" {
+            return Some(child);
+        }
+    }
+    None
+}
+
+/// The deref operand inside `&{ EXPR }` — `code_deref_expression`'s child is a
+/// `block` wrapping `expression_statement(EXPR)`. Returns the inner EXPR node
+/// (typically a `scalar`) so callers can type/navigate the symbolic target.
+fn code_deref_operand<'a>(code_deref: Node<'a>) -> Option<Node<'a>> {
+    let block = code_deref.named_child(0)?;
+    if block.kind() != "block" {
+        // Defensive: future grammar may inline the expression.
+        return Some(block);
+    }
+    let stmt = block.named_child(0)?;
+    if stmt.kind() == "expression_statement" {
+        stmt.named_child(0)
+    } else {
+        Some(stmt)
+    }
+}
+
 /// Re-parse an `isa` value as Perl and extract the class name from
 /// `InstanceOf['Foo::Bar']` / `InstanceOf["Foo::Bar"]`. Tree-sitter-perl
 /// parses this as `ambiguous_function_call_expression` with function
@@ -3044,6 +3076,29 @@ impl<'a> Builder<'a> {
                 // the lattice settles. No witness emission here;
                 // no post-walk pass.
                 self.infer_deref_type(node, InferredType::CodeRef { return_edge: None });
+                self.visit_children(node);
+            }
+            // Symbolic code-deref: `&{ EXPR }` / `&{ EXPR }(...)`. The operand
+            // (the EXPR inside the block) is a coderef. Narrow it, then visit
+            // children so the inner scalar still gets its read ref.
+            "code_deref_expression" => {
+                if let Some(operand) = code_deref_operand(node) {
+                    if let Some(existing) = self.invocant_type_at_node(operand) {
+                        if !existing.subsumes_narrowing(&InferredType::CodeRef { return_edge: None }) {
+                            self.push_var_type_constraint(
+                                operand,
+                                node,
+                                InferredType::CodeRef { return_edge: None },
+                            );
+                        }
+                    } else {
+                        self.push_var_type_constraint(
+                            operand,
+                            node,
+                            InferredType::CodeRef { return_edge: None },
+                        );
+                    }
+                }
                 self.visit_children(node);
             }
             "array_deref_expression" => {
@@ -6590,6 +6645,20 @@ impl<'a> Builder<'a> {
             self.visit_children(node);
             return;
         }
+        // Symbolic-code-deref call: `&{ EXPR }(...)`. The `function` field is
+        // a `function` wrapping a `code_deref_expression`, NOT a sub name —
+        // its text is `&{$z}`, not a callable identifier. Emitting a
+        // FunctionCall ref here would flag the deref text as an unresolved
+        // sub. The `code_deref_expression` arm in `visit_node` narrows the
+        // operand to CodeRef; just descend so it runs.
+        if node
+            .child_by_field_name("function")
+            .map(|f| f.kind() == "code_deref_expression" || code_deref_in(f).is_some())
+            .unwrap_or(false)
+        {
+            self.visit_children(node);
+            return;
+        }
         if let Some(func_node) = node.child_by_field_name("function") {
             if let Ok(name) = func_node.utf8_text(self.source) {
                 let resolved_package = self.resolve_call_package(name);
@@ -7542,11 +7611,15 @@ impl<'a> Builder<'a> {
     /// `*$m` (loop var, via constant folding), `*{ $runtime }` / unfoldable
     /// concat → empty.
     fn glob_install_names(&self, glob_node: Node<'a>, assign_node: Node<'a>) -> Vec<String> {
-        let Some(varname) = glob_node.named_child(0) else { return vec![] };
+        // First child is `varname` for the bare form (`*name`) or a
+        // `glob_deref_expression` wrapping the block for `*{ EXPR }` — both
+        // expose the operand as their first named child, so the index walk
+        // below is shape-agnostic.
+        let Some(head) = glob_node.named_child(0) else { return vec![] };
 
         // Bare static name: `*name` / `*Foo::bar` — varname has no inner block.
-        if varname.named_child_count() == 0 {
-            if let Ok(text) = varname.utf8_text(self.source) {
+        if head.named_child_count() == 0 {
+            if let Ok(text) = head.utf8_text(self.source) {
                 if !text.is_empty() {
                     return vec![text.to_string()];
                 }
@@ -7554,7 +7627,7 @@ impl<'a> Builder<'a> {
             return vec![];
         }
 
-        let Some(inner) = varname.named_child(0) else { return vec![] };
+        let Some(inner) = head.named_child(0) else { return vec![] };
         match inner.kind() {
             // `*$m = ...` — scalar (loop var). Resolve via constant folding so
             // `for my $m (qw/a b/)` installs both names; bail on unknown vars.
@@ -7630,10 +7703,12 @@ impl<'a> Builder<'a> {
 
     /// Walk the glob's interpolated string AST to find the exported name(s) after "::".
     fn extract_names_from_glob(&self, glob_node: Node<'a>) -> Vec<String> {
-        // glob > varname > block > expression_statement > interpolated_string_literal
+        // glob > (varname | glob_deref_expression) > block > expression_statement
+        //   > interpolated_string_literal — the head node differs by spelling
+        //   (`*name` vs `*{ EXPR }`) but the index walk is the same.
         let content = (|| {
-            let varname = glob_node.named_child(0)?;
-            let block = varname.named_child(0)?;
+            let head = glob_node.named_child(0)?;
+            let block = head.named_child(0)?;
             let expr_stmt = block.named_child(0)?;
             let interp = expr_stmt.named_child(0)?;
             if interp.kind() != "interpolated_string_literal" { return None; }
@@ -7700,6 +7775,23 @@ impl<'a> Builder<'a> {
             Some(f) if f.kind() == "function" => f,
             _ => return vec![],
         };
+        // `\&{ EXPR }` — symbolic code-deref. The operand is the target
+        // (e.g. `\&{$name}` resolves through `$name`'s constant value,
+        // `\&{"$pkg::$sym"}` is a runtime string we can't statically name).
+        if let Some(code_deref) = code_deref_in(func) {
+            if let Some(operand) = code_deref_operand(code_deref) {
+                if operand.kind() == "scalar" {
+                    if let Some(scalar_varname) = operand.named_child(0) {
+                        let bare_name = scalar_varname.utf8_text(self.source).unwrap_or("");
+                        let lookup_key = format!("${}", bare_name);
+                        if let Some(values) = self.resolve_constant_strings(&lookup_key, 0) {
+                            return values;
+                        }
+                    }
+                }
+            }
+            return vec![];
+        }
         // function > varname, possibly containing a scalar child (for \&$name)
         let varname = match func.named_child(0) {
             Some(v) => v,
