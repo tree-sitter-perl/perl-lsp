@@ -59,7 +59,7 @@
       "query": "",
       "newname": "",
       "expect": {"all":["\"file\":\"URI.pm\",\"line\":\"9\"","\"file\":\"_server.pm\",\"line\":\"26\"","\"file\":\"_generic.pm\",\"line\":\"13\""],"none":[]},
-      "status": "xfail"
+      "status": "gold"
     },
     {
       "id": "ref-uri-canonical-http",
@@ -95,7 +95,7 @@
       "query": "",
       "newname": "",
       "expect": {"all":["\"file\":\"Tiny.pm\",\"line\":\"162\"","\"file\":\"Tiny.pm\",\"line\":\"175\"","\"file\":\"Tiny.pm\",\"line\":\"173\""],"none":[]},
-      "status": "xfail"
+      "status": "gold"
     },
     {
       "id": "ref-uri-escape_char-fq",

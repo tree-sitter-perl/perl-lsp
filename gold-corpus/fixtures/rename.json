@@ -87,7 +87,7 @@
       "col": 13,
       "newname": "RENAMED",
       "expect": {"all":["_punycode.pm","\"line\":\"14\"","\"line\":\"79\""],"none":[]},
-      "status": "xfail"
+      "status": "gold"
     },
     {
       "id": "rename-11-urn-canonical-precision",

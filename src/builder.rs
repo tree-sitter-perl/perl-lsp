@@ -4880,26 +4880,18 @@ impl<'a> Builder<'a> {
         }
     }
 
-    /// Emit a `FunctionCall` ref for a standalone bareword that names a
-    /// `use constant` declared in the enclosing package. Resolution is
-    /// by-name post-walk (same as any FunctionCall ref), so it points at the
-    /// constant's Sub symbol — giving goto-def and references on the usage.
+    /// Emit a `FunctionCall` ref for a standalone value-position bareword that
+    /// names a `use constant`: the unqualified form when declared in the
+    /// enclosing package, the fully-qualified form (`Pkg::NAME`) unconditionally
+    /// (it names a constant sub in another package, mirroring an FQ function
+    /// call). Resolution is by-name post-walk (same as any FunctionCall ref),
+    /// so it points at the constant's Sub symbol — goto-def and references on
+    /// the usage, cross-file for the FQ spelling.
     fn visit_const_usage(&mut self, node: Node<'a>) {
-        let pkg = match self.current_package.as_ref() {
-            Some(p) => p.clone(),
-            None => return,
-        };
         let name = match node.utf8_text(self.source) {
             Ok(t) => t,
             Err(_) => return,
         };
-        let is_declared = self
-            .declared_constants
-            .get(&pkg)
-            .is_some_and(|set| set.contains(name));
-        if !is_declared {
-            return;
-        }
         // A `MAX_RETRIES()` call already gets its FunctionCall ref from
         // `visit_function_call` (the `function` field). Don't double-emit.
         if let Some(parent) = node.parent() {
@@ -4910,6 +4902,43 @@ impl<'a> Builder<'a> {
             {
                 return;
             }
+        }
+        // A fully-qualified value-position bareword (`URI::HAS_RESERVED_...`)
+        // names a constant sub in another package. Mirror the FQ function-call
+        // ref shape so it resolves cross-file to that sub: `target_name` keeps
+        // the full path, `resolved_package` = the qualifier, span = bare tail
+        // (narrowest renamable token, rule #7). The method-invocant /
+        // `use`/`require` / isa positions never reach this arm (they route to
+        // dedicated visitors), so this is value-position only.
+        if let (Some(qualifier), _) = crate::file_analysis::split_qualified(name) {
+            let ref_span = match name.rfind("::") {
+                Some(idx) => {
+                    let s = node.start_position();
+                    Span {
+                        start: Point { row: s.row, column: s.column + idx + 2 },
+                        end: node.end_position(),
+                    }
+                }
+                None => node_to_span(node),
+            };
+            self.add_ref(
+                RefKind::FunctionCall { resolved_package: Some(qualifier.to_string()) },
+                ref_span,
+                name.to_string(),
+                AccessKind::Read,
+            );
+            return;
+        }
+        let pkg = match self.current_package.as_ref() {
+            Some(p) => p.clone(),
+            None => return,
+        };
+        let is_declared = self
+            .declared_constants
+            .get(&pkg)
+            .is_some_and(|set| set.contains(name));
+        if !is_declared {
+            return;
         }
         self.add_ref(
             RefKind::FunctionCall { resolved_package: Some(pkg) },
@@ -5419,6 +5448,32 @@ impl<'a> Builder<'a> {
         }
     }
 
+    /// The real RHS expression of an assignment. tree-sitter-perl maps the
+    /// `right` field to the opening `(` paren when the rvalue is parenthesized
+    /// (`$w *= (EXPR)`, `my %h = ( ... )`), so descending the field directly
+    /// walks a bare token and skips the entire rvalue (this dropped refs for
+    /// any constant/variable inside a parenthesized RHS). When the field is an
+    /// unnamed token, fall back to the assignment's last named child that
+    /// isn't the `left` field — the parser keeps the rvalue as a sibling.
+    fn assignment_rhs(&self, node: Node<'a>) -> Option<Node<'a>> {
+        let field = node.child_by_field_name("right");
+        if let Some(f) = field {
+            if f.is_named() {
+                return Some(f);
+            }
+        }
+        let left_id = node.child_by_field_name("left").map(|l| l.id());
+        let mut rhs = None;
+        for i in 0..node.named_child_count() {
+            if let Some(c) = node.named_child(i) {
+                if Some(c.id()) != left_id {
+                    rhs = Some(c);
+                }
+            }
+        }
+        rhs
+    }
+
     fn visit_assignment(&mut self, node: Node<'a>) {
         // Check for @ISA assignment: `our @ISA = (...)`
         if let Some(left) = node.child_by_field_name("left") {
@@ -5558,7 +5613,7 @@ impl<'a> Builder<'a> {
                 // Visit the declaration
                 self.visit_variable_decl(left);
             }
-            if let Some(right) = node.child_by_field_name("right") {
+            if let Some(right) = self.assignment_rhs(node) {
                 // Visit RHS children FIRST so any side-effecting walk
                 // steps (anon-sub Symbol creation in
                 // `visit_anonymous_sub`, ref/scope allocation, plugin
@@ -6374,6 +6429,17 @@ impl<'a> Builder<'a> {
             return;
         }
 
+        // Sigil-deref of a scalar: `%$x` / `@$x` / `$$x` parses as the outer
+        // sigil node (hash/array/scalar) whose varname child wraps an inner
+        // `scalar` node naming the dereferenced variable. The inner scalar is
+        // the renamable/highlightable token (rule #7) — emit its Variable ref
+        // and stop, since the outer node's own text (`%$x`) isn't a variable
+        // name. Block-derefs (`%{...}`) are handled above.
+        if let Some(inner) = self.sigil_deref_inner_scalar(node) {
+            self.visit_var_ref(inner);
+            return;
+        }
+
         // If this scalar is inside a block-deref, infer the type from the outer sigil.
         // Parent chain: scalar → expression_statement → block → varname → outer_node
         if node.kind() == "scalar" {
@@ -6406,6 +6472,30 @@ impl<'a> Builder<'a> {
                 access,
             );
         }
+    }
+
+    /// Sigil-deref of a scalar (`%$x` / `@$x` / `$$x`): the outer sigil node
+    /// (hash/array/scalar) wraps `(varname (scalar (varname)))`. Returns the
+    /// inner `scalar` node — the dereferenced variable — so its own Variable
+    /// ref is emitted. Excludes the plain non-deref case (a `scalar` whose
+    /// varname holds only a leaf varname) and block-derefs (handled separately).
+    fn sigil_deref_inner_scalar(&self, node: Node<'a>) -> Option<Node<'a>> {
+        if !matches!(node.kind(), "scalar" | "array" | "hash") {
+            return None;
+        }
+        for i in 0..node.child_count() {
+            let child = node.child(i)?;
+            if child.kind() != "varname" {
+                continue;
+            }
+            for j in 0..child.child_count() {
+                let gc = child.child(j)?;
+                if gc.kind() == "scalar" {
+                    return Some(gc);
+                }
+            }
+        }
+        None
     }
 
     /// Check if this node is a block-deref outer node (e.g. @{...} or %{...}).

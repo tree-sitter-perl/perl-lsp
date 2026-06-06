@@ -99,7 +99,7 @@
       "line": 190,
       "col": 7,
       "expect": {"all":["DateTime.pm:211:13","DateTime.pm:212:11","DateTime.pm:213:44"],"none":[]},
-      "status": "xfail"
+      "status": "gold"
     },
     {
       "id": "le-dt-class-new",
