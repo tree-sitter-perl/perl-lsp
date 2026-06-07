@@ -7402,11 +7402,20 @@ impl<'a> Builder<'a> {
         false
     }
 
-    /// Re-parse an `s///e` replacement as Perl and emit FunctionCall refs for
-    /// the calls inside it. The snippet is padded with the replacement's
-    /// leading rows/cols so the re-parsed nodes carry the *original* file
-    /// coordinates — no per-node offset math, spans drop straight in.
-    /// (`s///ee` double-eval is the documented edge; one level covers it.)
+    /// Re-parse an `s///e` replacement as Perl and emit refs for the entities
+    /// inside it — function calls, method calls, and variables — so the code in
+    /// the replacement gets the same navigation (goto-def / references / rename /
+    /// highlight) as code anywhere else (rule #7: every meaningful token gets a
+    /// ref). The snippet is padded with the replacement's leading rows/cols so
+    /// the re-parsed nodes carry the *original* file coordinates — no per-node
+    /// offset math, spans drop straight in. (`s///ee` double-eval is the
+    /// documented edge; one level covers it.)
+    ///
+    /// This is a deliberate secondary-parse emitter, not the main walker (its
+    /// `Node<'a>` is bound to the primary tree's lifetime, so the snippet nodes
+    /// can't flow through `visit_*`). It emits the ref shapes directly; the
+    /// downstream resolution passes (`resolve_variable_refs`, MCB) wire them up
+    /// from `(scope, name)` exactly as for natively-walked refs.
     fn emit_refs_in_eval_replacement(&mut self, repl: Node<'a>) {
         let Ok(text) = repl.utf8_text(self.source) else { return };
         if text.trim().is_empty() {
@@ -7421,24 +7430,93 @@ impl<'a> Builder<'a> {
         let mut parser = crate::module_resolver::create_parser();
         let Some(tree) = parser.parse(&bytes, None) else { return };
         let scope = self.current_scope();
+
+        // A `scalar`/`array`/`hash` node is a plain variable only when its text
+        // is sigil + identifier path: `$x`, `@a`, `%h`, `$Foo::bar`. Deref
+        // wrappers (`${...}`, `@{...}`, `$$x`) don't match here — their inner
+        // `scalar` child is a named child and gets matched on its own.
+        let plain_var = |t: &str| {
+            let mut cs = t.chars();
+            matches!(cs.next(), Some('$' | '@' | '%'))
+                && t.len() > 1
+                && cs.all(|c| c.is_alphanumeric() || c == '_' || c == ':')
+        };
+
         let mut stack = vec![tree.root_node()];
         while let Some(n) = stack.pop() {
-            if matches!(n.kind(), "function_call_expression" | "ambiguous_function_call_expression") {
-                if let Some(func) = n.child_by_field_name("function") {
-                    if let Ok(name) = func.utf8_text(&bytes) {
-                        let name = name.to_string();
-                        let resolved_package = self.resolve_call_package(&name);
-                        self.refs.push(Ref {
-                            kind: RefKind::FunctionCall { resolved_package },
-                            span: node_to_span(func),
-                            scope,
-                            target_name: name,
-                            access: AccessKind::Read,
-                            resolves_to: None,
-                            resolved_method_target: None,
-                        });
+            match n.kind() {
+                "function_call_expression" | "ambiguous_function_call_expression" => {
+                    if let Some(func) = n.child_by_field_name("function") {
+                        if let Ok(name) = func.utf8_text(&bytes) {
+                            let name = name.to_string();
+                            let resolved_package = self.resolve_call_package(&name);
+                            self.refs.push(Ref {
+                                kind: RefKind::FunctionCall { resolved_package },
+                                span: node_to_span(func),
+                                scope,
+                                target_name: name,
+                                access: AccessKind::Read,
+                                resolves_to: None,
+                                resolved_method_target: None,
+                            });
+                        }
                     }
                 }
+                "method_call_expression" => {
+                    let method = n.child_by_field_name("method");
+                    let invocant = n.child_by_field_name("invocant");
+                    // Bareword method only — `$obj->$dynamic(...)` has a sigil'd
+                    // method node and isn't a nameable target.
+                    if let Some(method) = method {
+                        if let Ok(name) = method.utf8_text(&bytes) {
+                            if name.chars().next().map_or(false, |c| c == '_' || c.is_alphabetic()) {
+                                self.refs.push(Ref {
+                                    kind: RefKind::MethodCall {
+                                        invocant: invocant
+                                            .and_then(|i| i.utf8_text(&bytes).ok())
+                                            .unwrap_or("")
+                                            .to_string(),
+                                        invocant_span: invocant.map(node_to_span),
+                                        method_name_span: node_to_span(method),
+                                    },
+                                    span: node_to_span(n),
+                                    scope,
+                                    target_name: name.to_string(),
+                                    access: AccessKind::Read,
+                                    resolves_to: None,
+                                    resolved_method_target: None,
+                                });
+                            }
+                        }
+                    }
+                }
+                "scalar" | "array" | "hash" => {
+                    if let Ok(t) = n.utf8_text(&bytes) {
+                        if plain_var(t) {
+                            // FQ tail narrowing mirrors `visit_var_ref` (rule #7).
+                            let ref_span = match t.rfind("::") {
+                                Some(idx) => {
+                                    let s = n.start_position();
+                                    Span {
+                                        start: Point { row: s.row, column: s.column + idx + 2 },
+                                        end: node_to_span(n).end,
+                                    }
+                                }
+                                None => node_to_span(n),
+                            };
+                            self.refs.push(Ref {
+                                kind: RefKind::Variable,
+                                span: ref_span,
+                                scope,
+                                target_name: t.to_string(),
+                                access: AccessKind::Read,
+                                resolves_to: None,
+                                resolved_method_target: None,
+                            });
+                        }
+                    }
+                }
+                _ => {}
             }
             for i in 0..n.named_child_count() {
                 if let Some(c) = n.named_child(i) {
