@@ -1,0 +1,41 @@
+{
+  "capability": "definition",
+  "rows": [
+    {
+      "id": "reexport-static-splice-base_fn",
+      "difficulty": "tricky",
+      "semantic_area": "exporter",
+      "root": "gold-corpus/reexport-fixture",
+      "file": "consumer.pl",
+      "line": 2,
+      "col": 8,
+      "expect": { "all": ["RexBase.pm:4:1"], "none": [] },
+      "status": "gold",
+      "note": "base_fn is re-exported by RexAll via static splice (our @EXPORT = ('all_fn', @RexBase::EXPORT)); goto-def from the consumer must reach the original sub in RexBase. Depends on the re-export transitive-surface feature."
+    },
+    {
+      "id": "reexport-loop-push-more_fn",
+      "difficulty": "tricky",
+      "semantic_area": "exporter",
+      "root": "gold-corpus/reexport-fixture",
+      "file": "consumer.pl",
+      "line": 3,
+      "col": 8,
+      "expect": { "all": ["RexMore.pm:4:1"], "none": [] },
+      "status": "gold",
+      "note": "more_fn is re-exported by RexAll via loop-push (for my $m (qw(RexMore)) { push @EXPORT, @{\"${m}::EXPORT\"} }); goto-def must reach RexMore. Exercises re-export form 2."
+    },
+    {
+      "id": "reexport-own-all_fn",
+      "difficulty": "simple",
+      "semantic_area": "exporter",
+      "root": "gold-corpus/reexport-fixture",
+      "file": "consumer.pl",
+      "line": 4,
+      "col": 8,
+      "expect": { "all": ["RexAll.pm:8:1"], "none": [] },
+      "status": "gold",
+      "note": "all_fn is RexAll's own export (control): goto-def reaches RexAll itself, confirming the re-exporter's own surface still resolves alongside the spliced/pushed ones."
+    }
+  ]
+}

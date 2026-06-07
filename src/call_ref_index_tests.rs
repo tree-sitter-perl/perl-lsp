@@ -324,6 +324,7 @@ fn equal_span_first_write_wins() {
             target_name: "first".into(),
             access: AccessKind::Read,
             resolves_to: None,
+            resolved_method_target: None,
         },
         Ref {
             kind: RefKind::MethodCall {
@@ -342,6 +343,7 @@ fn equal_span_first_write_wins() {
             target_name: "second".into(),
             access: AccessKind::Read,
             resolves_to: None,
+            resolved_method_target: None,
         },
     ];
 

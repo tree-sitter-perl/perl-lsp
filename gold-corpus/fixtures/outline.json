@@ -1,0 +1,265 @@
+{
+  "capability": "outline",
+  "rows": [
+    {
+      "id": "outline-moo-object",
+      "difficulty": "simple",
+      "semantic_area": "oo-isa",
+      "file": "Moo/Object.pm",
+      "line": 0,
+      "col": 0,
+      "expect": {
+        "all": [
+          "\"kind\":\"Package\",\"line\":\"0\",\"name\":\"Moo::Object\"",
+          "\"kind\":\"Variable\",\"line\":\"6\",\"name\":\"%NO_BUILD\"",
+          "\"kind\":\"Variable\",\"line\":\"7\",\"name\":\"%NO_DEMOLISH\"",
+          "\"kind\":\"Variable\",\"line\":\"8\",\"name\":\"$BUILD_MAKER\"",
+          "\"kind\":\"Variable\",\"line\":\"9\",\"name\":\"$DEMOLISH_MAKER\"",
+          "\"kind\":\"Sub\",\"line\":\"11\",\"name\":\"new\"",
+          "\"kind\":\"Sub\",\"line\":\"31\",\"name\":\"BUILDARGS\"",
+          "\"kind\":\"Sub\",\"line\":\"45\",\"name\":\"BUILDALL\"",
+          "\"kind\":\"Sub\",\"line\":\"53\",\"name\":\"DEMOLISHALL\"",
+          "\"kind\":\"Sub\",\"line\":\"61\",\"name\":\"does\"",
+          "\"kind\":\"Sub\",\"line\":\"71\",\"name\":\"meta\""
+        ],
+        "none": []
+      },
+      "status": "provisional"
+    },
+    {
+      "id": "outline-moo-object-typeglob-does",
+      "difficulty": "tricky",
+      "semantic_area": "codegen",
+      "file": "Moo/Object.pm",
+      "line": 0,
+      "col": 0,
+      "expect": {
+        "all": [
+          "\"col\":\"4\",\"kind\":\"Sub\",\"line\":\"61\",\"name\":\"does\"",
+          "\"col\":\"28\",\"kind\":\"Sub\",\"line\":\"66\",\"name\":\"does\""
+        ],
+        "none": []
+      },
+      "status": "provisional"
+    },
+    {
+      "id": "outline-typetiny-cmp-glob",
+      "difficulty": "tricky",
+      "semantic_area": "codegen",
+      "file": "Type/Tiny.pm",
+      "line": 0,
+      "col": 0,
+      "expect": {
+        "all": [
+          "\"col\":\"0\",\"kind\":\"Sub\",\"line\":\"689\",\"name\":\"cmp\"",
+          "\"col\":\"4\",\"kind\":\"Variable\",\"line\":\"680\",\"name\":\"@CMP\"",
+          "\"col\":\"4\",\"kind\":\"Sub\",\"line\":\"682\",\"name\":\"CMP_SUPERTYPE\"",
+          "\"col\":\"4\",\"kind\":\"Sub\",\"line\":\"683\",\"name\":\"CMP_EQUAL\"",
+          "\"col\":\"4\",\"kind\":\"Sub\",\"line\":\"684\",\"name\":\"CMP_EQUIVALENT\"",
+          "\"col\":\"4\",\"kind\":\"Sub\",\"line\":\"685\",\"name\":\"CMP_SUBTYPE\"",
+          "\"col\":\"4\",\"kind\":\"Sub\",\"line\":\"686\",\"name\":\"CMP_UNKNOWN\""
+        ],
+        "none": []
+      },
+      "status": "gold"
+    },
+    {
+      "id": "outline-dzil-prereqs-moose-has",
+      "difficulty": "tricky",
+      "semantic_area": "moose",
+      "file": "Dist/Zilla/Prereqs.pm",
+      "line": 0,
+      "col": 0,
+      "expect": {
+        "all": [
+          "\"kind\":\"Package\",\"line\":\"0\",\"name\":\"Dist::Zilla::Prereqs\"",
+          "\"kind\":\"Method\",\"line\":\"38\",\"name\":\"cpan_meta_prereqs\"",
+          "\"kind\":\"Method\",\"line\":\"38\",\"name\":\"finalize\"",
+          "\"kind\":\"Method\",\"line\":\"38\",\"name\":\"is_finalized\"",
+          "\"kind\":\"Method\",\"line\":\"38\",\"name\":\"requirements_for\"",
+          "\"kind\":\"Method\",\"line\":\"38\",\"name\":\"as_string_hash\"",
+          "\"kind\":\"Method\",\"line\":\"55\",\"name\":\"merged_requires\"",
+          "\"kind\":\"Sub\",\"line\":\"83\",\"name\":\"register_prereqs\"",
+          "\"kind\":\"Sub\",\"line\":\"109\",\"name\":\"sync_runtime_build_test_requires\""
+        ],
+        "none": []
+      },
+      "status": "gold"
+    },
+    {
+      "id": "outline-uri-escape-exporter",
+      "difficulty": "simple",
+      "semantic_area": "exporter",
+      "file": "URI/Escape.pm",
+      "line": 0,
+      "col": 0,
+      "expect": {
+        "all": [
+          "\"kind\":\"Package\",\"line\":\"0\",\"name\":\"URI::Escape\"",
+          "\"kind\":\"Variable\",\"line\":\"147\",\"name\":\"%escapes\"",
+          "\"kind\":\"Variable\",\"line\":\"148\",\"name\":\"@EXPORT\"",
+          "\"kind\":\"Variable\",\"line\":\"149\",\"name\":\"@EXPORT_OK\"",
+          "\"kind\":\"Variable\",\"line\":\"150\",\"name\":\"$VERSION\"",
+          "\"kind\":\"Variable\",\"line\":\"159\",\"name\":\"%subst\"",
+          "\"kind\":\"Variable\",\"line\":\"161\",\"name\":\"%Unsafe\"",
+          "\"kind\":\"Sub\",\"line\":\"166\",\"name\":\"uri_escape\"",
+          "\"kind\":\"Sub\",\"line\":\"203\",\"name\":\"_fail_hi\"",
+          "\"kind\":\"Sub\",\"line\":\"208\",\"name\":\"uri_escape_utf8\"",
+          "\"kind\":\"Sub\",\"line\":\"215\",\"name\":\"uri_unescape\"",
+          "\"kind\":\"Sub\",\"line\":\"233\",\"name\":\"escape_char\""
+        ],
+        "none": []
+      },
+      "status": "gold"
+    },
+    {
+      "id": "outline-uri-use-constant",
+      "difficulty": "simple",
+      "semantic_area": "constants",
+      "file": "URI.pm",
+      "line": 0,
+      "col": 0,
+      "expect": {
+        "all": [
+          "\"kind\":\"Package\",\"line\":\"0\",\"name\":\"URI\"",
+          "\"col\":\"13\",\"kind\":\"Sub\",\"line\":\"8\",\"name\":\"HAS_RESERVED_SQUARE_BRACKETS\"",
+          "\"col\":\"5\",\"kind\":\"Variable\",\"line\":\"10\",\"name\":\"$ABS_REMOTE_LEADING_DOTS\"",
+          "\"col\":\"31\",\"kind\":\"Variable\",\"line\":\"10\",\"name\":\"$ABS_ALLOW_RELATIVE_SCHEME\"",
+          "\"col\":\"59\",\"kind\":\"Variable\",\"line\":\"10\",\"name\":\"$DEFAULT_QUERY_FORM_DELIMITER\""
+        ],
+        "none": []
+      },
+      "status": "gold"
+    },
+    {
+      "id": "outline-uri-generic-parent",
+      "difficulty": "tricky",
+      "semantic_area": "oo-isa",
+      "file": "URI/_generic.pm",
+      "line": 0,
+      "col": 0,
+      "expect": {
+        "all": [
+          "\"kind\":\"Package\",\"line\":\"0\",\"name\":\"URI::_generic\"",
+          "\"kind\":\"Sub\",\"line\":\"15\",\"name\":\"_no_scheme_ok\"",
+          "\"kind\":\"Sub\",\"line\":\"19\",\"name\":\"_looks_like_raw_ip6_address\"",
+          "\"kind\":\"Sub\",\"line\":\"37\",\"name\":\"authority\"",
+          "\"kind\":\"Sub\",\"line\":\"64\",\"name\":\"path\"",
+          "\"kind\":\"Sub\",\"line\":\"82\",\"name\":\"path_query\"",
+          "\"kind\":\"Sub\",\"line\":\"100\",\"name\":\"_check_path\"",
+          "\"kind\":\"Sub\",\"line\":\"121\",\"name\":\"path_segments\"",
+          "\"kind\":\"Sub\",\"line\":\"148\",\"name\":\"_split_segment\"",
+          "\"kind\":\"Sub\",\"line\":\"156\",\"name\":\"abs\"",
+          "\"kind\":\"Sub\",\"line\":\"217\",\"name\":\"rel\""
+        ],
+        "none": []
+      },
+      "status": "gold"
+    },
+    {
+      "id": "outline-typetiny-accessors",
+      "difficulty": "simple",
+      "semantic_area": "classic",
+      "file": "Type/Tiny.pm",
+      "line": 0,
+      "col": 0,
+      "expect": {
+        "all": [
+          "\"kind\":\"Package\",\"line\":\"0\",\"name\":\"Type::Tiny\"",
+          "\"kind\":\"Sub\",\"line\":\"298\",\"name\":\"new\"",
+          "\"kind\":\"Sub\",\"line\":\"516\",\"name\":\"name\"",
+          "\"kind\":\"Sub\",\"line\":\"517\",\"name\":\"display_name\"",
+          "\"kind\":\"Sub\",\"line\":\"518\",\"name\":\"parent\"",
+          "\"kind\":\"Sub\",\"line\":\"519\",\"name\":\"constraint\"",
+          "\"kind\":\"Sub\",\"line\":\"524\",\"name\":\"coercion\"",
+          "\"kind\":\"Sub\",\"line\":\"526\",\"name\":\"library\""
+        ],
+        "none": []
+      },
+      "status": "gold"
+    },
+    {
+      "id": "outline-exporter-tiny",
+      "difficulty": "simple",
+      "semantic_area": "exporter",
+      "file": "Exporter/Tiny.pm",
+      "line": 0,
+      "col": 0,
+      "expect": {
+        "all": [
+          "\"kind\":\"Package\",\"line\":\"0\",\"name\":\"Exporter::Tiny\"",
+          "\"kind\":\"Variable\",\"line\":\"8\",\"name\":\"@EXPORT_OK\"",
+          "\"kind\":\"Sub\",\"line\":\"53\",\"name\":\"import\"",
+          "\"kind\":\"Sub\",\"line\":\"87\",\"name\":\"unimport\"",
+          "\"kind\":\"Sub\",\"line\":\"152\",\"name\":\"_exporter_validate_opts\"",
+          "\"kind\":\"Sub\",\"line\":\"187\",\"name\":\"_exporter_expand_tag\"",
+          "\"kind\":\"Sub\",\"line\":\"246\",\"name\":\"_exporter_expand_sub\"",
+          "\"kind\":\"Sub\",\"line\":\"304\",\"name\":\"_exporter_install_sub\"",
+          "\"kind\":\"Sub\",\"line\":\"429\",\"name\":\"mkopt\"",
+          "\"kind\":\"Sub\",\"line\":\"453\",\"name\":\"mkopt_hash\""
+        ],
+        "none": []
+      },
+      "status": "gold"
+    },
+    {
+      "id": "outline-type-library",
+      "difficulty": "tricky",
+      "semantic_area": "exporter",
+      "file": "Type/Library.pm",
+      "line": 0,
+      "col": 0,
+      "expect": {
+        "all": [
+          "\"kind\":\"Package\",\"line\":\"0\",\"name\":\"Type::Library\"",
+          "\"kind\":\"Variable\",\"line\":\"19\",\"name\":\"@ISA\"",
+          "\"kind\":\"Sub\",\"line\":\"177\",\"name\":\"setup_type_library\"",
+          "\"kind\":\"Sub\",\"line\":\"205\",\"name\":\"meta\"",
+          "\"kind\":\"Sub\",\"line\":\"212\",\"name\":\"add_type\"",
+          "\"kind\":\"Sub\",\"line\":\"298\",\"name\":\"get_type\"",
+          "\"kind\":\"Sub\",\"line\":\"303\",\"name\":\"has_type\"",
+          "\"kind\":\"Sub\",\"line\":\"308\",\"name\":\"type_names\"",
+          "\"kind\":\"Sub\",\"line\":\"313\",\"name\":\"add_coercion\"",
+          "\"kind\":\"Sub\",\"line\":\"341\",\"name\":\"get_coercion\"",
+          "\"kind\":\"Sub\",\"line\":\"346\",\"name\":\"has_coercion\""
+        ],
+        "none": []
+      },
+      "status": "gold"
+    },
+    {
+      "id": "outline-ppi-use-constant-sub",
+      "difficulty": "tricky",
+      "semantic_area": "constants",
+      "file": "PPI/Document.pm",
+      "line": 0,
+      "col": 0,
+      "expect": {
+        "all": [
+          "\"col\":\"13\",\"kind\":\"Sub\",\"line\":\"88\",\"name\":\"LOCATION_LINE\",\"package\":\"PPI::Document\""
+        ],
+        "none": []
+      },
+      "status": "gold",
+      "note": "use constant LOCATION_LINE outlined as Sub."
+    },
+    {
+      "id": "outline-mojo-has-accessor-single",
+      "difficulty": "tricky",
+      "semantic_area": "framework-accessor",
+      "file": "Mojo/Message.pm",
+      "line": 0,
+      "col": 0,
+      "expect": {
+        "all": [
+          "\"name\":\"content\",\"package\":\"Mojo::Message\",\"return_type\":\"Mojo::Content::Single\""
+        ],
+        "none": [
+          "\"name\":\"content\",\"package\":\"Mojo::Message\",\"params\":[\"$val\"]"
+        ]
+      },
+      "status": "gold",
+      "note": "each Mojo `has` accessor appears ONCE in the outline (getter); the same-named fluent writer is hidden (hide_in_outline) but its arity-1 return witness survives."
+    }
+  ]
+}

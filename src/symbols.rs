@@ -177,6 +177,19 @@ pub fn find_definition(
 ) -> Option<GotoDefinitionResponse> {
     let point = position_to_point(pos);
 
+    // Query-time dispatch goto-def: a `$minion->enqueue('task')` whose
+    // receiver isa-resolves (possibly cross-file) jumps to the handler, even
+    // when no `DispatchCall` ref was materialized for this site. The gate is
+    // applied in `dispatch_at`; we just map the resolved handler to its
+    // definition. Runs before `find_definition` because the cursor is on the
+    // name-string arg, which `find_definition` would otherwise treat as a
+    // plain string literal. See `docs/adr/receiver-gated-dispatch.md`.
+    if let Some(applied) = analysis.dispatch_at(point, Some(module_index)) {
+        if let Some(resp) = dispatch_handler_locations(&applied.owner, &applied.name, module_index) {
+            return Some(resp);
+        }
+    }
+
     // Try local definition first
     if let Some(span) = analysis.find_definition(point, Some(tree), Some(source.as_bytes()), Some(module_index)) {
         return Some(GotoDefinitionResponse::Scalar(Location {
@@ -195,45 +208,101 @@ pub fn find_definition(
                 // (or the .pm file if we can resolve it). Cross-file
                 // sub_info lookup uses REMOTE name — distinct from
                 // target_name for renaming imports.
+                // Re-export aware: the def may live in a module `import.module_name`
+                // re-exports (Test::Most → Test::More's `ok`). Chase the edges to
+                // the defining module; fall back to the directly-`use`d path.
+                let defining = module_index.defining_module_cached(&import.module_name, &remote_name);
+                let module_path = defining
+                    .as_ref()
+                    .map(|m| m.path.clone())
+                    .unwrap_or(module_path);
                 if let Ok(module_uri) = Url::from_file_path(&module_path) {
-                    // Try to get the actual definition line from the module index.
-                    let def_line = module_index
-                        .get_cached(&import.module_name)
+                    // The defining sub's line in the .pm — `Some` only when the
+                    // module (or one it re-exports) defines the remote name.
+                    let def_line = defining
                         .and_then(|cached| cached.sub_info(&remote_name).map(|s| s.def_line()));
-                    let def_range = match def_line {
-                        Some(line) => Range {
-                            start: Position { line, character: 0 },
-                            end: Position { line, character: 0 },
-                        },
-                        None => Range::default(),
-                    };
 
-                    let pm_location = Location {
-                        uri: module_uri,
-                        range: def_range,
-                    };
-
-                    // If cursor is inside the use statement itself (on the import name),
-                    // jump directly to the .pm definition — no need to also show the use stmt.
-                    if contains_point(&import.span, point) {
-                        return Some(GotoDefinitionResponse::Scalar(pm_location));
+                    // One-hop to the defining sub whenever we actually know
+                    // where it is (cursor on the call site OR on the import
+                    // name). Landing on the local `use` line was never the
+                    // goal — it's the consumer's import, not the definition.
+                    // The two-element Array (use stmt + def) made many editors
+                    // jump to the first entry = the `use` line. When the module
+                    // isn't cached (`def_line` is None) we can't pin the sub, so
+                    // fall back to the local `use` statement — an acceptable
+                    // landing until the resolver warms that module.
+                    if let Some(line) = def_line {
+                        return Some(GotoDefinitionResponse::Scalar(Location {
+                            uri: module_uri,
+                            range: Range {
+                                start: Position { line, character: 0 },
+                                end: Position { line, character: 0 },
+                            },
+                        }));
                     }
 
-                    return Some(GotoDefinitionResponse::Array(vec![
-                        // First: the use statement in this file
-                        Location {
-                            uri: uri.clone(),
-                            range: span_to_range(import.span),
-                        },
-                        // Second: the sub definition in the .pm file
-                        pm_location,
-                    ]));
+                    // Cursor on the import name with an unresolved def: jump to
+                    // the top of the .pm (better than the consumer's use line).
+                    if contains_point(&import.span, point) {
+                        return Some(GotoDefinitionResponse::Scalar(Location {
+                            uri: module_uri,
+                            range: Range::default(),
+                        }));
+                    }
                 }
                 // Fall back to just the use statement
                 return Some(GotoDefinitionResponse::Scalar(Location {
                     uri: uri.clone(),
                     range: span_to_range(import.span),
                 }));
+            }
+
+            // Fully-qualified call (`Foo::Bar::baz()`) with no import: the
+            // qualifier names the package directly. `find_definition`
+            // already handled the same-file case; here the defining package
+            // lives in another module. Resolve via `resolved_package` (the
+            // qualifier) and the bare sub name.
+            if let RefKind::FunctionCall { resolved_package: Some(pkg) } = &r.kind {
+                let bare = r.unqualified_target_name();
+                if let Some(path) = module_index.module_path_cached(pkg) {
+                    if let Ok(module_uri) = Url::from_file_path(&path) {
+                        let def_line = module_index
+                            .get_cached(pkg)
+                            .and_then(|cached| cached.sub_info(bare).map(|s| s.def_line()));
+                        return Some(GotoDefinitionResponse::Scalar(Location {
+                            uri: module_uri,
+                            range: Range {
+                                start: Position { line: def_line.unwrap_or(0), character: 0 },
+                                end: Position { line: def_line.unwrap_or(0), character: 0 },
+                            },
+                        }));
+                    }
+                }
+            }
+
+        }
+
+        // Fully-qualified variable read (`$Foo::Bar::x`, `@Pkg::arr`):
+        // the package lives in another module. `find_definition` handled
+        // the same-file case via `resolves_to`; here resolve the package
+        // global through the module index, mirroring the FQ-call path.
+        // Honest miss (no jump) when the package or its decl is absent.
+        if let Some((pkg, name)) = r.qualified_var_target() {
+            if let Some(path) = module_index.module_path_cached(pkg) {
+                if let Ok(module_uri) = Url::from_file_path(&path) {
+                    if let Some(def_line) = module_index
+                        .get_cached(pkg)
+                        .and_then(|cached| cached.package_var_def_line(&name, pkg))
+                    {
+                        return Some(GotoDefinitionResponse::Scalar(Location {
+                            uri: module_uri,
+                            range: Range {
+                                start: Position { line: def_line, character: 0 },
+                                end: Position { line: def_line, character: 0 },
+                            },
+                        }));
+                    }
+                }
             }
         }
 
@@ -257,30 +326,8 @@ pub fn find_definition(
         // registrations → return all as an Array so the editor can show
         // the picker.
         if let RefKind::DispatchCall { owner: Some(owner), .. } = &r.kind {
-            use crate::file_analysis::SymbolDetail;
-            let mut locs: Vec<Location> = Vec::new();
-            for module_name in module_index.modules_with_symbol(&r.target_name) {
-                let Some(cached) = module_index.get_cached(&module_name) else { continue };
-                for sym in &cached.analysis.symbols {
-                    if sym.name != r.target_name { continue; }
-                    if let SymbolDetail::Handler { owner: o, .. } = &sym.detail {
-                        if o == owner {
-                            if let Ok(module_uri) = Url::from_file_path(&cached.path) {
-                                locs.push(Location {
-                                    uri: module_uri,
-                                    range: span_to_range(sym.selection_span),
-                                });
-                            }
-                        }
-                    }
-                }
-            }
-            if !locs.is_empty() {
-                return Some(if locs.len() == 1 {
-                    GotoDefinitionResponse::Scalar(locs.into_iter().next().unwrap())
-                } else {
-                    GotoDefinitionResponse::Array(locs)
-                });
+            if let Some(resp) = dispatch_handler_locations(owner, &r.target_name, module_index) {
+                return Some(resp);
             }
         }
 
@@ -289,8 +336,12 @@ pub fn find_definition(
             use crate::file_analysis::MethodResolution;
             let class_name = analysis.method_call_invocant_class(r, Some(module_index));
             if let Some(ref cn) = class_name {
-                if let Some(MethodResolution::CrossFile { ref class }) = analysis.resolve_method_in_ancestors(cn, &r.target_name, Some(module_index)) {
-                    if let Some(cached) = module_index.get_cached(class) {
+                if let Some(MethodResolution::CrossFile { ref class, ref def_module }) = analysis.resolve_method_in_ancestors(cn, &r.target_name, Some(module_index)) {
+                    // One path for both: a real inherited method lives in
+                    // `class`'s own module; a plugin-bridged helper lives in
+                    // `def_module` (the bridging file). Same lookup either way.
+                    let module = def_module.as_deref().unwrap_or(class);
+                    if let Some(cached) = module_index.get_cached(module) {
                         if let Some(sub_info) = cached.sub_info(&r.target_name) {
                             if let Ok(module_uri) = Url::from_file_path(&cached.path) {
                                 let line = sub_info.def_line();
@@ -311,6 +362,44 @@ pub fn find_definition(
     }
 
     None
+}
+
+/// All `Handler` definitions matching `(owner, name)` across cached modules.
+/// A dispatch (`$emitter->emit('ready')`) can target stacked registrations
+/// in different files; multiple hits return an `Array` so the editor shows a
+/// picker. Shared by the materialized-ref path and the query-time
+/// `dispatch_at` path so both resolve handlers identically.
+fn dispatch_handler_locations(
+    owner: &crate::file_analysis::HandlerOwner,
+    name: &str,
+    module_index: &ModuleIndex,
+) -> Option<GotoDefinitionResponse> {
+    use crate::file_analysis::SymbolDetail;
+    let mut locs: Vec<Location> = Vec::new();
+    for module_name in module_index.modules_with_symbol(name) {
+        let Some(cached) = module_index.get_cached(&module_name) else { continue };
+        for sym in &cached.analysis.symbols {
+            if sym.name != name { continue; }
+            if let SymbolDetail::Handler { owner: o, .. } = &sym.detail {
+                if o == owner {
+                    if let Ok(module_uri) = Url::from_file_path(&cached.path) {
+                        locs.push(Location {
+                            uri: module_uri,
+                            range: span_to_range(sym.selection_span),
+                        });
+                    }
+                }
+            }
+        }
+    }
+    if locs.is_empty() {
+        return None;
+    }
+    Some(if locs.len() == 1 {
+        GotoDefinitionResponse::Scalar(locs.into_iter().next().unwrap())
+    } else {
+        GotoDefinitionResponse::Array(locs)
+    })
 }
 
 pub fn find_references(analysis: &FileAnalysis, pos: Position, uri: &Url, tree: &Tree, source: &str, module_index: Option<&ModuleIndex>) -> Vec<Location> {
@@ -611,7 +700,7 @@ fn completion_items_native(
                     Vec::new()
                 }
             } else {
-                analysis.complete_methods(invocant_text, point)
+                analysis.complete_methods(invocant_text, point, Some(module_index))
             }
         }
         CursorContext::HashKey { ref owner_type, ref var_text, ref source_sub } => {
@@ -756,7 +845,7 @@ fn complete_import_list(module_name: &str, module_index: &ModuleIndex) -> Vec<Co
     for name in &cached.analysis.export {
         if seen.insert(name.clone()) {
             let detail = cached.sub_info(name)
-                .and_then(|s| s.return_type())
+                .and_then(|s| s.return_type(None))
                 .map(|rt| format!("@EXPORT → {}", format_inferred_type(&rt)))
                 .or(Some("@EXPORT".to_string()));
             items.push(CompletionItem {
@@ -772,7 +861,7 @@ fn complete_import_list(module_name: &str, module_index: &ModuleIndex) -> Vec<Co
     for name in &cached.analysis.export_ok {
         if seen.insert(name.clone()) {
             let detail = cached.sub_info(name)
-                .and_then(|s| s.return_type())
+                .and_then(|s| s.return_type(None))
                 .map(|rt| format!("→ {}", format_inferred_type(&rt)));
             items.push(CompletionItem {
                 label: name.clone(),
@@ -894,12 +983,11 @@ pub fn hover_info(
     source: &str,
     pos: Position,
     module_index: &ModuleIndex,
-    tree: &Tree,
 ) -> Option<Hover> {
     let point = position_to_point(pos);
 
     // Try local hover first
-    if let Some(markdown) = analysis.hover_info(point, source, Some(tree), Some(module_index)) {
+    if let Some(markdown) = analysis.hover_info(point, source, Some(module_index)) {
         return Some(Hover {
             contents: HoverContents::Markup(MarkupContent {
                 kind: MarkupKind::Markdown,
@@ -935,7 +1023,10 @@ pub fn hover_info(
                 // the REMOTE name — for a renaming import (`del` →
                 // `delete`), cursor is on `del` but sub_info lives
                 // under `delete` in the cached module.
-                if let Some(cached) = module_index.get_cached(&import.module_name) {
+                if let Some(cached) = module_index
+                    .defining_module_cached(&import.module_name, &remote_name)
+                    .or_else(|| module_index.get_cached(&import.module_name))
+                {
                     if let Some(sub_info) = cached.sub_info(&remote_name) {
                         // Present the sig under the LOCAL name — that's
                         // what the user typed and what hover should lead
@@ -965,6 +1056,29 @@ pub fn hover_info(
                     range: None,
                 });
             }
+
+            // Fully-qualified call with no import: resolve the sub in the
+            // package named by the qualifier (`resolved_package`).
+            if let RefKind::FunctionCall { resolved_package: Some(pkg) } = &r.kind {
+                let bare = r.unqualified_target_name();
+                if let Some(cached) = module_index.get_cached(pkg) {
+                    if let Some(sub_info) = cached.sub_info(bare) {
+                        let sig = format_imported_signature(bare, &sub_info);
+                        let mut parts = vec![format!("```perl\n{}\n```", sig)];
+                        if let Some(doc) = sub_info.doc() {
+                            parts.push(doc.to_string());
+                        }
+                        parts.push(format!("*from `{}`*", pkg));
+                        return Some(Hover {
+                            contents: HoverContents::Markup(MarkupContent {
+                                kind: MarkupKind::Markdown,
+                                value: parts.join("\n\n"),
+                            }),
+                            range: None,
+                        });
+                    }
+                }
+            }
         }
     }
 
@@ -983,6 +1097,23 @@ pub fn document_highlights(analysis: &FileAnalysis, pos: Position, tree: &tree_s
             }),
         })
         .collect()
+}
+
+/// Linked-editing ranges = the in-file occurrence set of the symbol at `pos`.
+/// Shared by the LSP `linked_editing_range` handler and the `--linked-editing`
+/// CLI so neither re-derives it — it's just `find_references` (the same path
+/// document-highlight/references use), surfaced as ranges. None when there's
+/// nothing to co-edit (fewer than two occurrences).
+pub fn linked_editing_ranges(
+    analysis: &FileAnalysis,
+    pos: Position,
+    module_index: Option<&ModuleIndex>,
+) -> Option<Vec<Range>> {
+    let refs = analysis.find_references(position_to_point(pos), None, None, module_index);
+    if refs.len() < 2 {
+        return None;
+    }
+    Some(refs.into_iter().map(span_to_range).collect())
 }
 
 pub fn selection_ranges(tree: &Tree, pos: Position) -> SelectionRange {
@@ -1958,7 +2089,7 @@ fn imported_function_completions(
                 }
 
                 let rt_prefix = cached.sub_info(name)
-                    .and_then(|s| s.return_type())
+                    .and_then(|s| s.return_type(None))
                     .map(|rt| format!("→ {} ", format_inferred_type(&rt)))
                     .unwrap_or_default();
 
@@ -2082,12 +2213,100 @@ fn unimported_function_completions(
     candidates
 }
 
-/// Find which import provides a given function name.
-/// Checks both explicitly imported symbols and all @EXPORT/@EXPORT_OK
-/// from already-imported modules. Single DashMap lookup per module.
+/// How a function name relates to an importing `use` statement. Both
+/// goto-def and the unresolved-function diagnostic read this one verdict so
+/// they can never disagree on whether a name is resolvable as imported
+/// (NAV § (c): the divergent-export-surface root cause).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ImportResolution {
+    /// The name is brought into the caller's namespace: named in `qw(...)`,
+    /// pulled in by a `:tag` selector against the producer surface, or
+    /// auto-imported by a bare `use Foo;`. Goto-def jumps; the diagnostic
+    /// stays silent (the name is genuinely available here).
+    Brought,
+    /// The name is exported by the imported module but this `use` didn't
+    /// bring it in (e.g. a named `qw(other)` that omits it). Goto-def can
+    /// still jump to the def; the diagnostic offers the "exported but not
+    /// imported" hint.
+    ExportedNotBrought,
+}
+
+/// Classify a name against a single import. Routes through the consumer
+/// evaluator (`imported_names`) so the verdict is exactly "is this name in the
+/// bound set this `use` produces" — the single notion of import binding that
+/// diagnostics, goto-def, and references all read (NAV § (c)). Returns the
+/// resolved verdict plus the REMOTE (origin) name for the matched local name.
 ///
-/// Returns the matched Import, the module's path, and the REMOTE name
-/// (the sub's actual name in the source module — differs from the
+/// `cached` is the producer's `FileAnalysis` when known; its `export_surface`
+/// expands `:tag` selectors and supplies the `@EXPORT` defaults for a bare
+/// `use`. When absent (module not yet cached), the evaluator still binds
+/// explicitly-named `qw()` imports — those don't need the surface — so an
+/// explicit named import is never spuriously flagged while the resolver warms.
+fn classify_import(
+    import: &crate::file_analysis::Import,
+    func_name: &str,
+    cached: Option<&CachedModule>,
+    module_index: &ModuleIndex,
+) -> Option<(ImportResolution, String)> {
+    if let Some(cached) = cached {
+        let surface = cached.analysis.export_surface_with_index(module_index);
+        let bound = crate::file_analysis::imported_names(import, &surface);
+        if let Some((_local, remote)) = bound.iter().find(|(local, _)| local == func_name) {
+            return Some((ImportResolution::Brought, remote.clone()));
+        }
+        // Not bound by this `use`, but on the producer surface → the actionable
+        // "exported but not imported" hint (a named `qw(other)` omitting it, or
+        // an `@EXPORT_OK` name reached only by a bare `use` — GATE-5).
+        if surface.exports(func_name) {
+            return Some((ImportResolution::ExportedNotBrought, func_name.to_string()));
+        }
+        return None;
+    }
+    // Module not cached yet: only an explicitly-named import can be judged
+    // `Brought` without the producer surface (tags / bare-use defaults need it).
+    // This keeps a `qw(foo)` import from being flagged while the resolver warms,
+    // and never resolves a bare/tagged name it can't actually verify.
+    if let Some(sym) = import.imported_symbols.iter().find(|s| s.local_name == *func_name) {
+        return Some((ImportResolution::Brought, sym.remote().to_string()));
+    }
+    None
+}
+
+/// Best resolution of `func_name` across all imports: the matched import, its
+/// remote name, the resolvability verdict, and — when known — the module path
+/// for navigation. `Brought` wins over `ExportedNotBrought` when several
+/// imports relate. The single resolvability query goto-def, the diagnostic, and
+/// references all read, so they can never disagree on the bound set.
+fn resolve_imported_function_classified<'a>(
+    analysis: &'a FileAnalysis,
+    func_name: &str,
+    module_index: &ModuleIndex,
+) -> Option<(&'a crate::file_analysis::Import, Option<std::path::PathBuf>, String, ImportResolution)> {
+    let mut best: Option<(
+        &'a crate::file_analysis::Import,
+        Option<std::path::PathBuf>,
+        String,
+        ImportResolution,
+    )> = None;
+    for import in &analysis.imports {
+        let cached = module_index.get_cached(&import.module_name);
+        let Some((res, remote)) = classify_import(import, func_name, cached.as_deref(), module_index) else { continue };
+        let path = cached
+            .as_ref()
+            .map(|c| c.path.clone())
+            .or_else(|| module_index.module_path_cached(&import.module_name));
+        // `Brought` is the strongest verdict; once found, keep it.
+        if matches!(best, Some((_, _, _, ImportResolution::Brought))) {
+            continue;
+        }
+        best = Some((import, path, remote, res));
+    }
+    best
+}
+
+/// Find which import provides a given function name, with a concrete module
+/// path to jump to. Returns the matched Import, the module's path, and the
+/// REMOTE name (the sub's actual name in the source module — differs from the
 /// caller's `func_name` only for renaming imports like `del` → `delete`).
 /// Callers use the remote name for `cached.sub_info(...)` lookups so
 /// hover/gd/sig-help reach the real sub.
@@ -2096,27 +2315,9 @@ fn resolve_imported_function<'a>(
     func_name: &str,
     module_index: &ModuleIndex,
 ) -> Option<(&'a crate::file_analysis::Import, std::path::PathBuf, String)> {
-    for import in &analysis.imports {
-        if let Some(cached) = module_index.get_cached(&import.module_name) {
-            let explicit = import.imported_symbols.iter().find(|s| s.local_name == *func_name);
-            if let Some(is) = explicit {
-                return Some((import, cached.path.clone(), is.remote().to_string()));
-            }
-            // Export lists are always in the remote namespace — a name
-            // appearing there matches a same-name use at the call site.
-            let in_export_lists = cached.analysis.export.iter().any(|s| s == func_name)
-                || cached.analysis.export_ok.iter().any(|s| s == func_name);
-            if in_export_lists {
-                return Some((import, cached.path.clone(), func_name.to_string()));
-            }
-        } else if let Some(is) = import.imported_symbols.iter().find(|s| s.local_name == *func_name) {
-            // Module not cached yet but explicitly listed in qw() — trust the import.
-            if let Some(path) = module_index.module_path_cached(&import.module_name) {
-                return Some((import, path, is.remote().to_string()));
-            }
-        }
-    }
-    None
+    // Goto-def needs a concrete module path to jump to.
+    resolve_imported_function_classified(analysis, func_name, module_index)
+        .and_then(|(import, path, remote, _)| path.map(|p| (import, p, remote)))
 }
 
 fn completion_detail_for_import(
@@ -2126,7 +2327,7 @@ fn completion_detail_for_import(
 ) -> String {
     if let Some(cached) = cached {
         if let Some(sub_info) = cached.sub_info(name) {
-            if let Some(rt) = sub_info.return_type() {
+            if let Some(rt) = sub_info.return_type(None) {
                 return format!("→ {} ({})", format_inferred_type(&rt), module_name);
             }
         }
@@ -2142,7 +2343,7 @@ fn format_imported_signature(name: &str, sub_info: &SubInfo<'_>) -> String {
         .collect::<Vec<_>>()
         .join(", ");
     let mut sig = format!("sub {}({})", name, params_str);
-    if let Some(rt) = sub_info.return_type() {
+    if let Some(rt) = sub_info.return_type(None) {
         sig.push_str(&format!(" → {}", format_inferred_type(&rt)));
     }
     sig
@@ -2153,6 +2354,10 @@ fn format_imported_signature(name: &str, sub_info: &SubInfo<'_>) -> String {
 /// Sorted list of Perl built-in functions. Used to avoid false-positive
 /// "unresolved function" diagnostics. Checked via binary_search.
 static PERL_BUILTINS: &[&str] = &[
+    // Core bareword filehandles. Uppercase sorts before the lowercase
+    // builtin names below (ASCII), so the slice stays binary-searchable.
+    // Suppresses `print DATA`, `STDOUT->autoflush`, `-t STDIN` style FPs.
+    "ARGV", "ARGVOUT", "DATA", "STDERR", "STDIN", "STDOUT",
     "abs", "accept", "alarm", "atan2",
     "bind", "binmode", "bless",
     "caller", "chdir", "chmod", "chomp", "chop", "chown", "chr", "chroot", "close",
@@ -2175,7 +2380,7 @@ static PERL_BUILTINS: &[&str] = &[
     "lstat",
     "map", "mkdir", "msgctl", "msgget", "msgrcv", "msgsnd",
     "my",
-    "new", "next", "no",
+    "new", "next", "no", "not",
     "oct", "open", "opendir", "ord", "our",
     "pack", "pipe", "pop", "pos", "print", "printf", "prototype", "push",
     "quotemeta",
@@ -2200,8 +2405,85 @@ fn is_perl_builtin(name: &str) -> bool {
 }
 
 
-pub fn collect_diagnostics(analysis: &FileAnalysis, module_index: &ModuleIndex) -> Vec<Diagnostic> {
+/// Opt-in diagnostic toggles. Defaults are all-off for the QA/plugin-author
+/// channels (noise for end users); the always-on hints (`unresolved-function`
+/// / `unresolved-method`) ignore this. Parsed from `initializationOptions`
+/// in `backend.rs`. See `docs/adr/receiver-gated-dispatch.md`.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct DiagnosticOptions {
+    /// Fire `unresolved-dispatch` when a known dispatch verb's receiver can't
+    /// be typed (`GateResult::ReceiverUntyped`) — never on a settled
+    /// `DoesNotApply`. Off by default.
+    pub unresolved_dispatch: bool,
+}
+
+pub fn collect_diagnostics(
+    analysis: &FileAnalysis,
+    module_index: &ModuleIndex,
+    options: DiagnosticOptions,
+) -> Vec<Diagnostic> {
     let mut diagnostics = Vec::new();
+
+    // Snapshot each `use` once: its bound set (local→remote) and, when the
+    // producer is cached, the names on its (transitive) export surface. The
+    // resolvability verdict for a given call name is then a map lookup against
+    // this snapshot — the same logic as `classify_import`, but the surface walk
+    // and `imported_names` allocation happen once per import instead of once per
+    // (unresolved-ref × import) on every diagnostics publish (every keystroke).
+    // Diagnostics need only the import + verdict, not the producer path or the
+    // remote name `classify_import` also returns — so neither is computed here.
+    struct ImportBinding<'a> {
+        import: &'a crate::file_analysis::Import,
+        /// local → remote for everything this `use` brings into scope.
+        bound: HashMap<String, String>,
+        /// Names on the producer's export surface; `None` when not yet cached.
+        exported: Option<std::collections::HashSet<String>>,
+    }
+    let import_bindings: Vec<ImportBinding> = analysis
+        .imports
+        .iter()
+        .map(|import| {
+            let cached = module_index.get_cached(&import.module_name);
+            let (bound, exported) = if let Some(c) = &cached {
+                let surface = c.analysis.export_surface_with_index(module_index);
+                let bound = crate::file_analysis::imported_names(import, &surface)
+                    .into_iter()
+                    .collect();
+                (bound, Some(surface.all_names()))
+            } else {
+                // Producer not cached yet: only an explicitly-named import can be
+                // judged `Brought` (tags / bare-use defaults need the surface).
+                let bound = import
+                    .imported_symbols
+                    .iter()
+                    .map(|s| (s.local_name.clone(), s.remote().to_string()))
+                    .collect();
+                (bound, None)
+            };
+            ImportBinding { import, bound, exported }
+        })
+        .collect();
+
+    // Best resolution of a call name across all imports: `Brought` dominates
+    // `ExportedNotBrought`. Mirrors `resolve_imported_function_classified` over
+    // the precomputed snapshot.
+    let resolve_name = |name: &str| -> Option<(&crate::file_analysis::Import, ImportResolution)> {
+        let mut best: Option<(&crate::file_analysis::Import, ImportResolution)> = None;
+        for b in &import_bindings {
+            let res = if b.bound.contains_key(name) {
+                ImportResolution::Brought
+            } else if b.exported.as_ref().is_some_and(|e| e.contains(name)) {
+                ImportResolution::ExportedNotBrought
+            } else {
+                continue;
+            };
+            if matches!(best, Some((_, ImportResolution::Brought))) {
+                continue;
+            }
+            best = Some((b.import, res));
+        }
+        best
+    };
 
     for r in &analysis.refs {
         if !matches!(r.kind, RefKind::FunctionCall { .. }) {
@@ -2234,90 +2516,89 @@ pub fn collect_diagnostics(analysis: &FileAnalysis, module_index: &ModuleIndex) 
             continue;
         }
 
-        // Skip if explicitly listed in any import's qw(...),
-        // or auto-imported via @EXPORT on a bare `use Foo;` (no qw list).
-        let explicitly_imported = analysis.imports.iter().any(|imp| {
-            if imp.imported_symbols.iter().any(|s| s.local_name == *name) {
-                return true;
-            }
-            // Bare `use Foo;` — check if function is in @EXPORT (auto-imported)
-            if imp.imported_symbols.is_empty() {
-                if let Some(cached) = module_index.get_cached(&imp.module_name) {
-                    if cached.analysis.export.iter().any(|s| s == name) {
-                        return true;
-                    }
-                }
-            }
-            false
-        });
-        if explicitly_imported {
-            continue;
-        }
-
-        // Check if an imported module exports this function
+        // Single resolvability verdict — the same query goto-def reads, so a
+        // name goto-def can jump to is never flagged as unresolved here (NAV
+        // § (c)). `Brought` = the name is in scope (named in qw, pulled in by a
+        // `:tag` selector against the producer surface, or auto-imported by a
+        // bare `use`); `ExportedNotBrought` = importable but not yet in the qw
+        // list → actionable hint.
+        //
+        // Bare-use auto-import deliberately treats `export_ok` as brought:
+        // runtime exporters (Moose::Exporter->setup_import_methods etc.) record
+        // their names in `export_ok` because the builder can't tell "runtime
+        // default" from "explicit opt-in" at parse time, so flagging them
+        // produced ~684 FPs (Moose::Util::TypeConstraints &c.). Traditional
+        // opt-in `@EXPORT_OK` on a bare use is suppressed too — accepted.
         let range = span_to_range(r.span);
-        if let Some((import, _path, _remote)) = resolve_imported_function(analysis, name, module_index) {
-            // Importable but not yet in the qw() list → actionable hint
-            diagnostics.push(Diagnostic {
-                range,
-                severity: Some(DiagnosticSeverity::HINT),
-                code: Some(NumberOrString::String("unresolved-function".into())),
-                source: Some("perl-lsp".into()),
-                message: format!(
-                    "'{}' is exported by {} but not imported",
-                    name, import.module_name,
-                ),
-                data: Some(serde_json::json!({
-                    "module": import.module_name,
-                    "function": name,
-                })),
-                ..Default::default()
-            });
-        } else {
-            // Search ALL cached modules for this function.
-            let exporters = module_index.find_exporters(name);
-            if !exporters.is_empty() {
-                let msg = if exporters.len() == 1 {
-                    format!(
-                        "'{}' is exported by {} (not yet imported)",
-                        name, exporters[0],
-                    )
-                } else {
-                    format!(
-                        "'{}' is exported by {} and {} other module(s)",
-                        name,
-                        exporters[0],
-                        exporters.len() - 1,
-                    )
-                };
+        let resolution = resolve_name(name);
+        match resolution {
+            Some((_, ImportResolution::Brought)) => continue,
+            Some((import, ImportResolution::ExportedNotBrought)) => {
                 diagnostics.push(Diagnostic {
                     range,
                     severity: Some(DiagnosticSeverity::HINT),
                     code: Some(NumberOrString::String("unresolved-function".into())),
                     source: Some("perl-lsp".into()),
-                    message: msg,
+                    message: format!(
+                        "'{}' is exported by {} but not imported",
+                        name, import.module_name,
+                    ),
                     data: Some(serde_json::json!({
-                        "modules": exporters,
+                        "module": import.module_name,
                         "function": name,
                     })),
                     ..Default::default()
                 });
-            } else {
-                diagnostics.push(Diagnostic {
-                    range,
-                    severity: Some(DiagnosticSeverity::INFORMATION),
-                    code: Some(NumberOrString::String("unresolved-function".into())),
-                    source: Some("perl-lsp".into()),
-                    message: format!("'{}' is not defined in this file", name),
-                    ..Default::default()
-                });
+            }
+            None => {
+                // Search ALL cached modules for this function.
+                let exporters = module_index.find_exporters(name);
+                if !exporters.is_empty() {
+                    let msg = if exporters.len() == 1 {
+                        format!(
+                            "'{}' is exported by {} (not yet imported)",
+                            name, exporters[0],
+                        )
+                    } else {
+                        format!(
+                            "'{}' is exported by {} and {} other module(s)",
+                            name,
+                            exporters[0],
+                            exporters.len() - 1,
+                        )
+                    };
+                    diagnostics.push(Diagnostic {
+                        range,
+                        severity: Some(DiagnosticSeverity::HINT),
+                        code: Some(NumberOrString::String("unresolved-function".into())),
+                        source: Some("perl-lsp".into()),
+                        message: msg,
+                        data: Some(serde_json::json!({
+                            "modules": exporters,
+                            "function": name,
+                        })),
+                        ..Default::default()
+                    });
+                } else {
+                    diagnostics.push(Diagnostic {
+                        range,
+                        severity: Some(DiagnosticSeverity::INFORMATION),
+                        code: Some(NumberOrString::String("unresolved-function".into())),
+                        source: Some("perl-lsp".into()),
+                        message: format!("'{}' is not defined in this file", name),
+                        ..Default::default()
+                    });
+                }
             }
         }
     }
 
     // 5e: Unresolved method diagnostics for locally-defined classes
     let universal_methods = [
-        "new", "AUTOLOAD", "DESTROY", "can", "isa", "DOES", "VERSION",
+        "new", "AUTOLOAD", "DESTROY", "can", "isa", "DOES",
+        // Moose adds lowercase `does` alongside UNIVERSAL's uppercase DOES.
+        "does",
+        "VERSION",
         // DBIC meta-methods (inherited from DBIx::Class::Core)
         "add_columns", "add_column", "set_primary_key", "table", "resultset_class",
         "has_many", "has_one", "belongs_to", "might_have", "many_to_many",
@@ -2334,6 +2615,15 @@ pub fn collect_diagnostics(analysis: &FileAnalysis, module_index: &ModuleIndex) 
 
         // Skip universal methods
         if universal_methods.contains(&method_name.as_str()) {
+            continue;
+        }
+
+        // Skip SUPER::-qualified and other package-qualified method names.
+        // `$self->SUPER::foo()` stores `target_name = "SUPER::foo"`; trying
+        // to find a method literally named "SUPER::foo" in the MRO always
+        // fails. Caller-side package dispatch (`Class::method`) is intentional
+        // and not our job to validate here.
+        if method_name.contains("::") {
             continue;
         }
 
@@ -2374,6 +2664,15 @@ pub fn collect_diagnostics(analysis: &FileAnalysis, module_index: &ModuleIndex) 
             continue;
         }
 
+        // Honest-silent on an incomplete ISA chain: if `class_name` (or any
+        // resolvable ancestor) names a parent we can't resolve in the
+        // workspace or @INC, the method might be inherited from there. One
+        // predicate gates EVERY invocant-typing path (`$self`/FirstParam and
+        // direct `Pkg->m` alike), so they can't drift (rule #10).
+        if analysis.class_has_unresolved_ancestor(&class_name, Some(module_index)) {
+            continue;
+        }
+
         diagnostics.push(Diagnostic {
             range: span_to_range(r.span),
             severity: Some(DiagnosticSeverity::HINT),
@@ -2385,6 +2684,27 @@ pub fn collect_diagnostics(analysis: &FileAnalysis, module_index: &ModuleIndex) 
             ),
             ..Default::default()
         });
+    }
+
+    // Opt-in `unresolved-dispatch`: a known dispatch verb whose receiver
+    // couldn't be typed, so we can't tell if the dispatch applies. Fires ONLY
+    // on `ReceiverUntyped` (a real typing gap), never on `DoesNotApply` — the
+    // 3-way `GateResult` keeps the two apart so the diagnostic can't spew on
+    // every unrelated receiver. QA/plugin-author tool, hence default-off.
+    if options.unresolved_dispatch {
+        for untyped in analysis.untyped_dispatches(Some(module_index)) {
+            diagnostics.push(Diagnostic {
+                range: span_to_range(untyped.call_span),
+                severity: Some(DiagnosticSeverity::INFORMATION),
+                code: Some(NumberOrString::String("unresolved-dispatch".into())),
+                source: Some("perl-lsp".into()),
+                message: format!(
+                    "dispatch verb '{}' fired on an untyped receiver; can't confirm it dispatches into {}",
+                    untyped.dispatcher, untyped.gate,
+                ),
+                ..Default::default()
+            });
+        }
     }
 
     diagnostics

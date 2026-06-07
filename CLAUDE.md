@@ -68,7 +68,7 @@ When a comment grows past a few lines, that's a smell: either the code wants a c
 
 ### File map
 
-- `main.rs` — entry, CLI modes (`--rename`, `--workspace-symbol`, `--dump-package`, `--version`). `cli_full_startup(root)` = "act like LSP just started".
+- `main.rs` — entry, CLI modes (`--rename`, `--workspace-symbol`, `--dump-package`, `--parse`, `--clear-cache`, `--version`). `cli_full_startup(root)` = "act like LSP just started". `perl-lsp --parse <file|-->` prints the tree-sitter parse tree (`--` reads stdin) — use it to check node kinds/fields instead of guessing. `perl-lsp --clear-cache [<root>]` wipes the SQLite module cache — with `<root>` only that project's hashed cache dir, without it the whole `~/.cache/perl-lsp` tree. Prefer this over `rm -rf` (it canonicalizes `<root>` to the same hash the server writes under).
 - `backend.rs` — `LanguageServer` impl, request routing.
 - `document.rs` — open-file `Document` (tree + text + analysis + stable_outline).
 - `file_store.rs` — unified store for open + workspace FileAnalyses, role-tagged, dedup'd by path.
@@ -89,14 +89,14 @@ When a comment grows past a few lines, that's a smell: either the code wants a c
 - `ModuleIndex` runs a dedicated `std::thread` for FS I/O (never blocks tokio). `Arc<DashMap>` shared with async handlers.
 - `CachedModule { path, analysis: Arc<FileAnalysis> }` — full FileAnalysis survives module boundary (refs, type_constraints, call_bindings, framework_imports, package_parents). `SubInfo<'_>` view gives ExportedSub-style accessors.
 - Reverse index: `DashMap<func_name, Vec<module_name>>` for O(1) exporter lookup.
-- SQLite cache per project at `~/.cache/perl-lsp/<hash>/modules.db`. `EXTRACT_VERSION` bump triggers priority re-resolution without dropping the table.
+- SQLite cache per project at `~/.cache/perl-lsp/<hash>/modules.db` (honors `$XDG_CACHE_HOME`). `EXTRACT_VERSION` bump triggers priority re-resolution without dropping the table. To nuke it (e.g. before a cold-start repro), use `perl-lsp --clear-cache [<root>]` — not `rm -rf`.
 - **Plugin fingerprint** — bundled plugin sources + every `.rhai` in `$PERL_LSP_PLUGIN_DIR` are hashed. Mismatch on startup hard-clears modules table (same machinery as `validate_inc_paths`). Editing a plugin invalidates cache so QA isn't served stale blobs.
 - Async handlers only call `_cached` methods (zero I/O).
 - After resolution, diagnostics refresh for all open files (clears stale false positives).
 
 ### Cross-file enrichment
 
-`enrich_imported_types_with_keys()` on `FileAnalysis` propagates imported return types and hash keys: pushes `TypeConstraint`s for call bindings to imported funcs, injects synthetic `HashKeyDef` symbols for cross-file hash-key completion. Idempotent: `base_type_constraint_count` / `base_symbol_count` / `base_witness_count` set after initial build; enrichment truncates back to baseline before appending. `rebuild_enrichment_indices()` rebuilds index maps after. Called from `publish_diagnostics()` and the resolver refresh callback.
+`enrich_imported_types_with_keys()` on `FileAnalysis` propagates imported return types and hash keys: pushes `TypeConstraint`s for call bindings to imported funcs, injects synthetic `HashKeyDef` symbols for cross-file hash-key completion. Idempotent: `base_type_constraint_count` / `base_symbol_count` / `base_witness_count` set after initial build; enrichment truncates back to baseline before appending. `rebuild_enrichment_indices()` rebuilds index maps after. Called from `publish_diagnostics()` and the resolver refresh callback — i.e. **OPEN documents only**; workspace-index + dependency files are built without enrichment. Type/method resolution through inheritance survives this via the `MethodOnClass` query-time walk; **dispatch-verb resolution** survives it via the query-time `ReceiverGated` seam (`FileAnalysis::applicable_dispatches`, resolved in `refs_to` / goto-def — `docs/adr/receiver-gated-dispatch.md`). Still deferred: `ClassIsa`/`param_types` ancestry-gated *emission* (Phase 2 mints these on the same seam) — see `docs/prompt-enrichment-inheritance-residual.md` for the per-manifest applicability matrix.
 
 ## Type inference (witness bag)
 
@@ -150,7 +150,7 @@ When a comment grows past a few lines, that's a smell: either the code wants a c
 8. `FileAnalysis::new(...)` — construct FA, build indices, `resolve_method_call_types(None)` as text-based MCB fallback.
 9. `fa.finalize_post_walk()` — seal `base_*_count` for idempotent re-enrichment.
 
-`Builder::resolve_invocant_class_tree` is the **single** symbolic-execution function (chain typing, return-arm refresh, invocant filling). Adding a second is wrong; add cases. `FileAnalysis::resolve_expression_type` is the FA-side mirror at query time (cursor context, hover, completion) — keep them in sync.
+`Builder::resolve_invocant_class_tree` is the **single** build-time symbolic-execution function (chain typing, return-arm refresh, invocant filling); `invocant_type_at_node` is its node-kind dispatcher. Adding a second is wrong; add cases. Query-time expression typing is **tree-free**: `FileAnalysis::expr_type_at_span(span, module_index)` is the one entry — it reads the `Expr(span)` witnesses the builder records per invocant (`emit_invocant_expr_witnesses` PostFold pass) plus exact-span call-ref returns, materializing edges through the registry. `method_call_invocant_class(r, module_index)` resolves an invocant via it (no tree). `resolve_expression_type(node, …)` is now a thin `node → span → expr_type_at_span` adapter, degrading to a node-kind walk only for raw-cursor/incomplete-ERROR completion. There is no second structure-discovery walker to "keep in sync."
 
 ### Worklist invariants
 
@@ -173,6 +173,8 @@ The fold driver in step 6 is the only place type inference iterates. Adding a ne
 
 ## tree-sitter-perl gotchas
 
+Inspect any snippet's CST with `perl-lsp --parse <file>` (or `echo '...' | perl-lsp --parse --`) rather than guessing node kinds/fields.
+
 - `subroutine_declaration_statement` / `method_declaration_statement` — fields: `name`, `body`, `lexical`.
 - `variable_declaration` — `variable` (single) or `variables` (paren list).
 - `package_statement` / `class_statement` / `use_statement` — field: `name` / `module`.
@@ -182,13 +184,16 @@ The fold driver in step 6 is the only place type inference iterates. Adding a ne
 - `child_by_field_name("right")` on `assignment_expression` returns `(` paren — iterate `named_child(i)` instead.
 - `child_by_field_name("hash")` on `$obj->{key}` returns None — use first named child.
 - ERROR nodes wrap subs in incomplete source — scan ERROR children for patterns like `my ($self) = @_`.
+- **Fat-comma `=>` has NO code semantics — it is a comma that autoquotes a bareword LHS.** `a => 1` is *identical* to `'a', 1`; `{ A => 1, B => 2 }` is identical to `{ 'A', 1, 'B', 2 }`. So for **correctness** you must **never** gate pair-list walking (`use` import args, `%EXPORT_TAGS`/`%hash` literals, `use constant {…}`, Moo `has` options, Sub::Exporter `exports`/`groups`) on the `fat_comma`/`=>` node — that silently drops the plain-comma spelling (this exact bug hid `use constant { 'GAMMA', 3 }`). Treat the `{…}`/`(…)` as a **flat positional sequence**: pair `elem[2k]`→key, `elem[2k+1]`→value, autoquoting bareword keys, identically whether the separator was `,` or `=>`. Requiring `=>` is a rule-#10 shape-branch; use the shared positional-pair-walking helpers rather than re-deriving.
+  - But `=>` **does carry *human* semantics** — a human writes it to signal "the LHS is a key/label, the RHS its value." That's a legitimate **hint** we may lean on in the future (e.g. to disambiguate an otherwise-ambiguous list, or to bias which element is the "name"). Allowed as a *heuristic/tie-breaker*, **never** as a hard gate — code that drops the plain-comma form is still a bug. Keep the correctness path separator-agnostic; treat `=>` only as extra signal on top.
 
 ## Inheritance & frameworks
 
 - `package_parents: HashMap<String, Vec<String>>` — unified from `use parent`, `use base`, `@ISA`, `class :isa`, `class :does`, `with` (Moo/Moose), `__PACKAGE__->load_components` (DBIC).
 - `resolve_method_in_ancestors()` — DFS parent walk (Perl's default MRO), depth limit 20. `MethodResolution::Local { class, sym_id }` vs `CrossFile { class }`.
+- `parents_of(class, package_parents, module_index, consumers)` is the **single** parent-enumeration seam: local ∪ cross-file ∪ the synthetic `APP_SURFACE_CLASS` edge for manifest-declared `app_surface_consumers` (the Mojo helper/plugin "app surface", `docs/adr/plugin-system.md`). `for_each_ancestor_class`, `collect_ancestor_methods`, and the `MethodOnClass` walk in `witnesses.rs` all route through it so the edge is injected once. The consumer set rides `FileAnalysis.app_surface_consumers` (baked from the plugin manifest) and `BagContext`.
 - `complete_methods_for_class` walks ancestors, dedups by name (child shadows parent).
-- Frameworks (`FrameworkMode::{Moo, Moose, MojoBase}`) detected per-package from `use`. `has 'name' => (...)` synthesizes Method symbol + HashKeyDefs (constructor key + internal hash key). `isa` constraints map to `InferredType` (`Str`/`Int`/`HashRef`/`InstanceOf['X']`/...). Mojo::Base accessors get fluent `ClassName(current_package)` return.
+- Frameworks (`FrameworkMode::{Moo, Moose, MojoBase}`) detected per-package from `use`. `has 'name' => (...)` synthesizes Method symbol + HashKeyDefs (constructor key + internal hash key). `isa` constraints map to `InferredType` (`Str`/`Int`/`HashRef`/`InstanceOf['X']`/...). Mojo::Base accessors get fluent `ClassName(current_package)` return. **Accessor-option vocabulary (`predicate`/`clearer`/`writer`/`reader`/`builder`/`handles`) lives in `frameworks/moo.rhai`, not core** — core's `extract_has_options` walks the `has` CST (rule #1) into a decision-ready `CallContext.has_options`; the plugin owns "which keyword → which method name + return edge". New Moo behavior goes in the plugin. The default accessor / isa / constructor-key synthesis is still native in `visit_has_call` (a larger move; this seam is the path for everything past it).
 - DBIC: `__PACKAGE__->add_columns` / `has_many` / `belongs_to` / `has_one` / `might_have` synthesize accessors with typed returns.
 - Synthesized methods are standard symbols — completion/hover/goto-def/inheritance just work, including cross-file (resolver runs full builder).
 

@@ -14,6 +14,7 @@ mod pod;
 mod query_cache;
 mod resolve;
 mod symbols;
+mod timings;
 mod witnesses;
 
 use backend::Backend;
@@ -43,8 +44,15 @@ async fn main() {
             cli_outline(&args[2]);
             return;
         }
-        Some("--hover") if args.len() >= 5 => {
-            cli_hover(&args[2], &args[3], &args[4]);
+        // `--hover <root> <file> <line> <col>` enables cross-file hover (same
+        // setup as the server); the legacy `--hover <file> <line> <col>` form
+        // stays single-file. Disambiguated by arg count.
+        Some("--hover") if args.len() >= 6 => {
+            cli_hover(Some(&args[2]), &args[3], &args[4], &args[5]);
+            return;
+        }
+        Some("--hover") if args.len() == 5 => {
+            cli_hover(None, &args[2], &args[3], &args[4]);
             return;
         }
         Some("--type-at") if args.len() >= 5 => {
@@ -59,12 +67,36 @@ async fn main() {
             cli_references(&args[2], &args[3], &args[4], &args[5]);
             return;
         }
+        Some("--completion") if args.len() >= 6 => {
+            cli_completion(&args[2], &args[3], &args[4], &args[5]);
+            return;
+        }
+        Some("--signature-help") if args.len() >= 6 => {
+            cli_signature_help(&args[2], &args[3], &args[4], &args[5]);
+            return;
+        }
+        Some("--semantic-tokens") if args.len() >= 4 => {
+            cli_semantic_tokens(&args[2], &args[3]);
+            return;
+        }
+        Some("--document-highlight") if args.len() >= 6 => {
+            cli_document_highlight(&args[2], &args[3], &args[4], &args[5]);
+            return;
+        }
+        Some("--linked-editing") if args.len() >= 6 => {
+            cli_linked_editing(&args[2], &args[3], &args[4], &args[5]);
+            return;
+        }
         Some("--rename") if args.len() == 7 => {
             cli_rename(&args[2], &args[3], &args[4], &args[5], &args[6]);
             return;
         }
         Some("--workspace-symbol") if args.len() >= 4 => {
             cli_workspace_symbol(&args[2], &args[3]);
+            return;
+        }
+        Some("--batch") if args.len() >= 3 => {
+            cli_batch(&args[2]);
             return;
         }
         Some("--plugin-check") => {
@@ -110,18 +142,28 @@ fn print_usage() {
     eprintln!("USAGE:");
     eprintln!("  perl-lsp                                              Start LSP server (stdio)");
     eprintln!();
+    eprintln!("  Positions: <line> <col> input is 0-based (col = byte offset);");
+    eprintln!("             printed line:col output is 1-based (col = character).");
+    eprintln!();
     eprintln!("ANALYSIS:");
     eprintln!("  perl-lsp --check [<root>] [--severity error|warning]    Batch diagnostics (CI)");
     eprintln!("                           [--format json|human]");
+    eprintln!("                           [--timings]                    Per-module build-timing report (stderr, slowest-first)");
     eprintln!("  perl-lsp --outline <file>                              Document symbol outline");
-    eprintln!("  perl-lsp --hover <file> <line> <col>                   Type info and docs");
+    eprintln!("  perl-lsp --hover [<root>] <file> <line> <col>         Type info and docs (root = cross-file)");
     eprintln!("  perl-lsp --type-at <file> <line> <col>                 Single type query");
     eprintln!("  perl-lsp --definition <root> <file> <line> <col>       Cross-file goto-def");
     eprintln!("  perl-lsp --references <root> <file> <line> <col>       Cross-file find-refs");
+    eprintln!("  perl-lsp --completion <root> <file> <line> <col>       Completion items at point");
+    eprintln!("  perl-lsp --signature-help <root> <file> <line> <col>   Signature help at point");
+    eprintln!("  perl-lsp --document-highlight <root> <file> <line> <col> In-file occurrences (read/write)");
+    eprintln!("  perl-lsp --linked-editing <root> <file> <line> <col>   Linked-editing occurrence set");
+    eprintln!("  perl-lsp --semantic-tokens <root> <file>               Semantic token classification");
     eprintln!();
     eprintln!("REFACTORING:");
     eprintln!("  perl-lsp --rename <root> <file> <line> <col> <new>     Cross-file rename");
     eprintln!("  perl-lsp --workspace-symbol <root> <query>             Search symbols");
+    eprintln!("  perl-lsp --batch <root>                                Stream JSONL queries (one startup, many)");
     eprintln!();
     eprintln!("PLUGIN AUTHORING:");
     eprintln!("  perl-lsp --plugin-check <file.rhai>                    Lint a Rhai plugin");
@@ -168,15 +210,6 @@ fn parse_point(line_str: &str, col_str: &str) -> tree_sitter::Point {
     tree_sitter::Point::new(line, col)
 }
 
-fn index_workspace(root: &str) -> file_store::FileStore {
-    use std::path::{Path, PathBuf};
-    let root_path = Path::new(root).canonicalize().unwrap_or_else(|_| PathBuf::from(root));
-    let store = file_store::FileStore::new();
-    let count = module_resolver::index_workspace(&root_path, &store);
-    eprintln!("Indexed {} files", count);
-    store
-}
-
 /// Canonicalize `root` and produce the matching `file://...` URI.
 /// Returns both because callers usually want the path (for `@INC`
 /// project-lib discovery, file walking) AND the URI (the cache hash
@@ -200,10 +233,23 @@ fn canonical_root_and_uri(root: &str) -> (std::path::PathBuf, String) {
 /// CLI command that needs cross-file resolution to behave like the
 /// running server.
 fn cli_full_startup(root: &str) -> (file_store::FileStore, module_index::ModuleIndex) {
-    let ws = index_workspace(root);
-
-    let module_index = module_index::ModuleIndex::new_for_cli();
+    // `--check --timings` already flipped this on; the env var lets any
+    // startup-driven CLI mode (dump-package, etc.) opt in too.
+    timings::enable_from_env();
     let (root_path, root_uri) = canonical_root_and_uri(root);
+    // Pin repo-local `.perl-lsp/` plugin discovery to the same root the
+    // cache keys on, before the first build() (workspace indexing) fires.
+    plugin::rhai_host::set_workspace_root(Some(&root_uri));
+
+    // Register workspace files INTO the module index (not just a FileStore)
+    // so their plugin bridges + package names participate in cross-file
+    // lookups — the whole point of "act like the server just started".
+    // Indexing without the index (bridge-less) is what forced callers to
+    // hand-roll their own `index_workspace_with_index`, and they drifted.
+    let module_index = module_index::ModuleIndex::new_for_cli();
+    let ws = file_store::FileStore::new();
+    let indexed = module_resolver::index_workspace_with_index(&root_path, &ws, Some(&module_index));
+    eprintln!("Indexed {} files", indexed);
 
     let mut inc_paths = module_resolver::discover_inc_paths();
     module_resolver::add_project_lib_paths(&mut inc_paths, &root_path);
@@ -239,25 +285,49 @@ fn cli_full_startup(root: &str) -> (file_store::FileStore, module_index::ModuleI
     let mut parse_memo: module_resolver::ParseMemo = std::collections::HashMap::new();
     let mut resolved = 0usize;
     let mut already_cached = 0usize;
-    for name in &needed {
-        if module_index.cache_raw().contains_key(name.as_str()) && !stale_set.contains(name) {
-            already_cached += 1;
-            continue;
-        }
-        if stale_set.contains(name) {
-            parse_memo.remove(name);
-        }
-        if let Some(cached) =
-            module_resolver::resolve_and_parse_with_memo(&inc_paths, name, &mut parser, &mut parse_memo)
+    // Worklist, not a fixed set: re-exporting modules (Test::Most → Test::More)
+    // pull their re-exported producers' surfaces transitively, so those
+    // producers must be resolved too even though no workspace file `use`s them
+    // directly. Enqueue each resolved module's `reexport_modules`. Bounded by
+    // the seen-set (`queued`); the cross-file surface walk handles cycles.
+    let mut queue: std::collections::VecDeque<String> = needed.iter().cloned().collect();
+    let mut queued: std::collections::HashSet<String> = needed.clone();
+    while let Some(name) = queue.pop_front() {
+        let cached_arc = if module_index.cache_raw().contains_key(name.as_str())
+            && !stale_set.contains(&name)
         {
-            if let Some(ref conn) = db {
-                module_cache::save_to_db(conn, name, &Some(std::sync::Arc::clone(&cached)), "cli");
+            already_cached += 1;
+            timings::record_cached(&name);
+            module_index.get_cached(&name)
+        } else {
+            if stale_set.contains(&name) {
+                parse_memo.remove(&name);
             }
-            module_index.insert_cache(name, Some(cached));
-            resolved += 1;
+            module_resolver::resolve_and_parse_with_memo(&inc_paths, &name, &mut parser, &mut parse_memo)
+                .map(|cached| {
+                    if let Some(ref conn) = db {
+                        module_cache::save_to_db(conn, &name, &Some(std::sync::Arc::clone(&cached)), "cli");
+                    }
+                    module_index.insert_cache(&name, Some(std::sync::Arc::clone(&cached)));
+                    resolved += 1;
+                    cached
+                })
+        };
+        if let Some(cached) = cached_arc {
+            for re in &cached.analysis.reexport_modules {
+                if queued.insert(re.clone()) {
+                    queue.push_back(re.clone());
+                }
+            }
         }
     }
-    eprintln!("Modules: {} cached, {} resolved, {} total", already_cached, resolved, needed.len());
+    eprintln!("Modules: {} cached, {} resolved, {} total", already_cached, resolved, queued.len());
+
+    // `warm_cache` populated `cache_raw()` directly, bypassing the reverse
+    // index, and `insert_cache` only indexes export/export_ok. Rebuild the
+    // full `func → modules` index from the cache so `find_exporters` answers
+    // identically on cold and warm runs (B6 export-attribution regression).
+    module_index.rebuild_reverse_index_from_cache();
 
     (ws, module_index)
 }
@@ -288,6 +358,46 @@ fn span_to_json(span: file_analysis::Span, text: String) -> serde_json::Value {
     })
 }
 
+/// One-based, character-counted `(line, col)` for human/editor-facing CLI
+/// output. Tree-sitter `Point.column` is a 0-based **byte** offset within the
+/// line; an editor shows a 1-based **character** column. Without the byte→char
+/// step a line with multi-byte UTF-8 before the token reports a column past the
+/// visible position (the "phantom column" QA saw on unicode lines). `source` is
+/// the file's full text; rows past its end fall back to byte+1 (best effort).
+fn display_line_col(source: &str, row: usize, byte_col: usize) -> (usize, usize) {
+    let char_col = source
+        .lines()
+        .nth(row)
+        .map(|line| {
+            let upto = line.get(..byte_col.min(line.len())).unwrap_or(line);
+            upto.chars().count()
+        })
+        .unwrap_or(byte_col);
+    (row + 1, char_col + 1)
+}
+
+/// Per-file source cache for `display_line_col` — references can fan out across
+/// many files; read each at most once. Misses (unreadable file) degrade to the
+/// raw byte column via `display_line_col`'s fallback.
+struct SourceCache(std::collections::HashMap<String, Option<String>>);
+
+impl SourceCache {
+    fn new() -> Self {
+        SourceCache(std::collections::HashMap::new())
+    }
+
+    fn display(&mut self, path: &str, row: usize, byte_col: usize) -> (usize, usize) {
+        let src = self
+            .0
+            .entry(path.to_string())
+            .or_insert_with(|| std::fs::read_to_string(path).ok());
+        match src {
+            Some(s) => display_line_col(s, row, byte_col),
+            None => (row + 1, byte_col + 1),
+        }
+    }
+}
+
 // ---- CLI Commands ----
 
 /// --check [<root>] [--format json|human] [--severity error|warning|info|hint] — Batch diagnostics
@@ -299,14 +409,27 @@ fn cli_check(args: &[String]) {
     let json_mode = is_json_format(args);
     let min_severity = get_arg_value(args, "--severity").unwrap_or("warning");
     let min_rank = severity_rank(min_severity);
+    // Opt-in QA channel, mirrors the LSP `initializationOptions` toggle.
+    let options = symbols::DiagnosticOptions {
+        unresolved_dispatch: args.iter().any(|a| a == "--unresolved-dispatch"),
+    };
+
+    if args.iter().any(|a| a == "--timings") {
+        timings::enable();
+    }
+    timings::enable_from_env();
 
     let (ws, module_index) = cli_full_startup(root);
+
+    // Dump the per-module breakdown before diagnostics output so the table
+    // isn't buried under (and the early `exit(1)` below doesn't swallow it).
+    timings::report();
 
     let mut all_diagnostics = Vec::new();
 
     for entry in ws.workspace_raw().iter() {
         let file = entry.key().display().to_string();
-        let diags = symbols::collect_diagnostics(entry.value(), &module_index);
+        let diags = symbols::collect_diagnostics(entry.value(), &module_index, options);
         for d in diags {
             let sev = match d.severity {
                 Some(s) if s == tower_lsp::lsp_types::DiagnosticSeverity::ERROR => "error",
@@ -358,9 +481,413 @@ fn cli_check(args: &[String]) {
 /// --outline <file> — Document symbol outline
 fn cli_outline(file: &str) {
     let (_source, _tree, analysis) = parse_file(file);
+    println!("{}", outline_json(&analysis));
+}
 
+/// --hover [<root>] <file> <line> <col> — Type info and docs.
+/// With `root`, runs full startup so hover resolves cross-file (imported
+/// types, inherited + plugin-bridged methods); without it, single-file.
+fn cli_hover(root: Option<&str>, file: &str, line_str: &str, col_str: &str) {
+    let point = parse_point(line_str, col_str);
+    // Root form is cross-file: delegate to the single `run_one` path so it can
+    // never drift from `--batch`. The no-root single-file form has no index, so
+    // it keeps its own path (run_one always carries an idx).
+    match root {
+        Some(r) => {
+            let (ws, idx) = cli_full_startup(r);
+            let req = BatchReq {
+                id: String::new(), q: "hover".into(),
+                file: file.to_string(), line: point.row, col: point.column,
+                query: None, newname: None,
+            };
+            print_run_one(&ws, &idx, &req);
+        }
+        None => {
+            let (source, _tree, analysis) = parse_file(file);
+            if let Some(markdown) = analysis.hover_info(point, &source, None) {
+                println!("{}", markdown);
+            } else {
+                eprintln!("No hover info at {}:{}", line_str, col_str);
+                std::process::exit(1);
+            }
+        }
+    }
+}
+
+/// --type-at <file> <line> <col> — Single type query
+fn cli_type_at(file: &str, line_str: &str, col_str: &str) {
+    let (_source, _tree, analysis) = parse_file(file);
+    let point = parse_point(line_str, col_str);
+
+    // Check refs for inferred type — route through the witness bag
+    // so framework / branch / arity rules refine the answer.
+    if let Some(r) = analysis.ref_at(point) {
+        if let Some(ty) = analysis.inferred_type_via_bag(&r.target_name, point) {
+            println!("{}", file_analysis::format_inferred_type(&ty));
+            return;
+        }
+    }
+    // Check symbols
+    if let Some(sym) = analysis.symbol_at(point) {
+        if let Some(ty) = analysis.inferred_type_via_bag(&sym.name, point) {
+            println!("{}", file_analysis::format_inferred_type(&ty));
+            return;
+        }
+    }
+    eprintln!("No type info at {}:{}", line_str, col_str);
+    std::process::exit(1);
+}
+
+/// Build a cursor `BatchReq` for the single-mode wrappers that share `run_one`.
+fn cursor_req(q: &str, file: &str, line_str: &str, col_str: &str) -> BatchReq {
+    let point = parse_point(line_str, col_str);
+    BatchReq {
+        id: String::new(), q: q.to_string(),
+        file: file.to_string(), line: point.row, col: point.column,
+        query: None, newname: None,
+    }
+}
+
+/// Run `run_one` and reproduce the single-mode contract: `Ok` to stdout,
+/// `Err` to stderr with exit-1 (preserves the "miss → exit 1" behavior every
+/// single-mode command had).
+fn print_run_one(ws: &file_store::FileStore, idx: &module_index::ModuleIndex, req: &BatchReq) {
+    match run_one(ws, idx, req) {
+        Ok(s) => println!("{}", s),
+        Err(e) => {
+            eprintln!("{}", e);
+            std::process::exit(1);
+        }
+    }
+}
+
+/// --definition <root> <file> <line> <col> — Cross-file goto-def
+fn cli_definition(root: &str, file: &str, line_str: &str, col_str: &str) {
+    let (ws, idx) = cli_full_startup(root);
+    print_run_one(&ws, &idx, &cursor_req("definition", file, line_str, col_str));
+}
+
+/// --references <root> <file> <line> <col> — Cross-file find-refs
+fn cli_references(root: &str, file: &str, line_str: &str, col_str: &str) {
+    let (ws, idx) = cli_full_startup(root);
+    print_run_one(&ws, &idx, &cursor_req("references", file, line_str, col_str));
+}
+
+/// --completion <root> <file> <line> <col> — completion items at point.
+fn cli_completion(root: &str, file: &str, line_str: &str, col_str: &str) {
+    let (ws, idx) = cli_full_startup(root);
+    print_run_one(&ws, &idx, &cursor_req("completion", file, line_str, col_str));
+}
+
+/// --signature-help <root> <file> <line> <col> — signature help at point.
+fn cli_signature_help(root: &str, file: &str, line_str: &str, col_str: &str) {
+    let (ws, idx) = cli_full_startup(root);
+    print_run_one(&ws, &idx, &cursor_req("signature-help", file, line_str, col_str));
+}
+
+/// --document-highlight <root> <file> <line> <col> — in-file occurrences with
+/// read/write classification.
+fn cli_document_highlight(root: &str, file: &str, line_str: &str, col_str: &str) {
+    let (ws, idx) = cli_full_startup(root);
+    print_run_one(&ws, &idx, &cursor_req("document-highlight", file, line_str, col_str));
+}
+
+/// --linked-editing <root> <file> <line> <col> — the co-edit occurrence set.
+fn cli_linked_editing(root: &str, file: &str, line_str: &str, col_str: &str) {
+    let (ws, idx) = cli_full_startup(root);
+    print_run_one(&ws, &idx, &cursor_req("linked-editing", file, line_str, col_str));
+}
+
+/// --semantic-tokens <root> <file> — token classification for the file.
+fn cli_semantic_tokens(root: &str, file: &str) {
+    let (ws, idx) = cli_full_startup(root);
+    print_run_one(&ws, &idx, &cursor_req("semantic-tokens", file, "1", "0"));
+}
+
+/// Build an open `Document` (tree + analysis + stable_outline) and enrich it
+/// against the index exactly like the server's open-file path. Shared by the
+/// interactive CLI modes.
+fn cli_open_document(file: &str, idx: &module_index::ModuleIndex) -> document::Document {
+    let text = std::fs::read_to_string(file).unwrap_or_else(|e| {
+        eprintln!("Cannot read {}: {}", file, e);
+        std::process::exit(1);
+    });
+    let mut doc = document::Document::new(text).unwrap_or_else(|| {
+        eprintln!("Parse failed: {}", file);
+        std::process::exit(1);
+    });
+    doc.analysis.enrich_imported_types_with_keys(Some(idx));
+    doc
+}
+
+#[derive(serde::Deserialize)]
+struct BatchReq {
+    id: String,
+    q: String,
+    #[serde(default)] file: String,
+    #[serde(default)] line: usize,
+    #[serde(default)] col: usize,
+    #[serde(default)] query: Option<String>,
+    #[serde(default)] newname: Option<String>,
+}
+
+/// Single source of truth for every cursor/query CLI capability. Both the
+/// single-mode `cli_*` wrappers and `--batch` call this, so their stdout can
+/// never drift. The expensive startup state (`ws` + `idx`) is built once by the
+/// caller and shared; this re-parses only the one target file per call. Returns
+/// Stage an analysis in the workspace store for the lifetime of one cross-file
+/// query (references/rename need `refs_to` to see the freshly-enriched target),
+/// restoring the prior entry on drop. `--batch` shares one FileStore across all
+/// requests; without this restore a references/rename request would leave its
+/// enrichment-synthesized symbols in the store, so a later workspace-symbol or
+/// diagnostics request in the same batch would see different results depending
+/// on ordering.
+struct ScopedWorkspaceEntry<'a> {
+    ws: &'a file_store::FileStore,
+    path: std::path::PathBuf,
+    prior: Option<std::sync::Arc<file_analysis::FileAnalysis>>,
+}
+
+impl<'a> ScopedWorkspaceEntry<'a> {
+    fn insert(
+        ws: &'a file_store::FileStore,
+        path: std::path::PathBuf,
+        analysis: file_analysis::FileAnalysis,
+    ) -> Self {
+        let prior = ws.workspace_raw().get(&path).map(|r| r.value().clone());
+        ws.insert_workspace(path.clone(), analysis);
+        Self { ws, path, prior }
+    }
+}
+
+impl Drop for ScopedWorkspaceEntry<'_> {
+    fn drop(&mut self) {
+        match self.prior.take() {
+            Some(arc) => self.ws.insert_workspace_arc(self.path.clone(), arc),
+            None => self.ws.remove_workspace(&self.path),
+        }
+    }
+}
+
+fn run_one(
+    ws: &file_store::FileStore,
+    idx: &module_index::ModuleIndex,
+    req: &BatchReq,
+) -> Result<String, String> {
+    use tower_lsp::lsp_types::Position;
+    let file = req.file.as_str();
+    let point = tree_sitter::Point { row: req.line, column: req.col };
+    let pos = Position { line: req.line as u32, character: req.col as u32 };
+
+    // Graceful miss instead of process exit — a bad path must not kill --batch.
+    let needs_file = !matches!(req.q.as_str(), "workspace-symbol" | "diagnostics");
+    if needs_file && (file.is_empty() || !std::path::Path::new(file).exists()) {
+        return Err(format!("file not found: {}", file));
+    }
+
+    match req.q.as_str() {
+        "definition" => {
+            let (source, tree, mut analysis) = parse_file(file);
+            analysis.enrich_imported_types_with_keys(Some(idx));
+            let abs = std::fs::canonicalize(file).unwrap_or_else(|_| std::path::PathBuf::from(file));
+            let uri = tower_lsp::lsp_types::Url::from_file_path(&abs)
+                .unwrap_or_else(|_| tower_lsp::lsp_types::Url::parse("file:///unknown").unwrap());
+            if let Some(resp) = symbols::find_definition(&analysis, pos, &uri, idx, &tree, &source) {
+                use tower_lsp::lsp_types::GotoDefinitionResponse;
+                let first = match resp {
+                    GotoDefinitionResponse::Scalar(loc) => Some(loc),
+                    GotoDefinitionResponse::Array(v) => v.into_iter().next(),
+                    GotoDefinitionResponse::Link(v) => v.into_iter().next().map(|l| {
+                        tower_lsp::lsp_types::Location { uri: l.target_uri, range: l.target_range }
+                    }),
+                };
+                if let Some(loc) = first {
+                    let path = loc.uri.to_file_path().map(|p| p.display().to_string())
+                        .unwrap_or_else(|_| loc.uri.to_string());
+                    let (line, col) = SourceCache::new().display(
+                        &path, loc.range.start.line as usize, loc.range.start.character as usize);
+                    return Ok(format!("{}:{}:{}", path, line, col));
+                }
+            }
+            Err(format!("No definition found at {}:{}", req.line, req.col))
+        }
+        "references" => {
+            let (_s, _t, mut analysis) = parse_file(file);
+            analysis.enrich_imported_types_with_keys(Some(idx));
+            let file_path = std::path::Path::new(file).canonicalize()
+                .unwrap_or_else(|_| std::path::PathBuf::from(file));
+            let target = analysis.rename_kind_at(point, Some(idx))
+                .and_then(|k| resolve::TargetRef::from_rename_kind(k, &analysis, Some(idx)));
+            let mut sources = SourceCache::new();
+            let mut results = Vec::new();
+            match target {
+                None => {
+                    let path_str = file_path.display().to_string();
+                    for span in &analysis.find_references(point, None, None, Some(idx)) {
+                        let (line, col) = sources.display(&path_str, span.start.row, span.start.column);
+                        results.push(serde_json::json!({"file": path_str, "line": line, "col": col}));
+                    }
+                }
+                Some(target) => {
+                    let _staged = ScopedWorkspaceEntry::insert(ws, file_path.clone(), analysis);
+                    let mask = resolve::references_mask_for(ws, Some(idx), &target);
+                    for loc in resolve::refs_to(ws, Some(idx), &target, mask) {
+                        let path = match &loc.key {
+                            file_store::FileKey::Path(p) => p.display().to_string(),
+                            file_store::FileKey::Url(u) => u.to_file_path()
+                                .map(|p| p.display().to_string()).unwrap_or_else(|_| u.to_string()),
+                        };
+                        let (line, col) = sources.display(&path, loc.span.start.row, loc.span.start.column);
+                        results.push(serde_json::json!({"file": path, "line": line, "col": col}));
+                    }
+                }
+            }
+            Ok(serde_json::to_string_pretty(&results).unwrap())
+        }
+        "hover" => {
+            let (source, _t, mut analysis) = parse_file(file);
+            analysis.enrich_imported_types_with_keys(Some(idx));
+            analysis.hover_info(point, &source, Some(idx))
+                .ok_or_else(|| format!("No hover info at {}:{}", req.line, req.col))
+        }
+        "type-at" => {
+            let (_s, _t, analysis) = parse_file(file);
+            if let Some(r) = analysis.ref_at(point) {
+                if let Some(ty) = analysis.inferred_type_via_bag(&r.target_name, point) {
+                    return Ok(file_analysis::format_inferred_type(&ty));
+                }
+            }
+            if let Some(sym) = analysis.symbol_at(point) {
+                if let Some(ty) = analysis.inferred_type_via_bag(&sym.name, point) {
+                    return Ok(file_analysis::format_inferred_type(&ty));
+                }
+            }
+            Err(format!("No type info at {}:{}", req.line, req.col))
+        }
+        "completion" => {
+            let doc = cli_open_document(file, idx);
+            let items = symbols::completion_items(
+                &doc.analysis, &doc.tree, &doc.text, pos, idx,
+                Some(doc.stable_outline.package_lines()));
+            let mut out = String::new();
+            for it in &items {
+                match &it.detail {
+                    Some(d) if !d.is_empty() => out.push_str(&format!("{}\t{}\n", it.label, d)),
+                    _ => out.push_str(&format!("{}\n", it.label)),
+                }
+            }
+            Ok(out.trim_end_matches('\n').to_string())
+        }
+        "signature-help" => {
+            let doc = cli_open_document(file, idx);
+            match symbols::signature_help(&doc.analysis, &doc.tree, &doc.text, pos, idx) {
+                Some(sh) => {
+                    let active = sh.active_signature.unwrap_or(0) as usize;
+                    let mut out = String::new();
+                    for (i, sig) in sh.signatures.iter().enumerate() {
+                        let marker = if i == active { "* " } else { "  " };
+                        out.push_str(&format!("{}{}\n", marker, sig.label));
+                        if i == active {
+                            if let Some(p) = sh.active_parameter {
+                                let plabel = sig.parameters.as_ref()
+                                    .and_then(|ps| ps.get(p as usize))
+                                    .map(|pi| match &pi.label {
+                                        tower_lsp::lsp_types::ParameterLabel::Simple(s) => s.clone(),
+                                        tower_lsp::lsp_types::ParameterLabel::LabelOffsets([a, b]) =>
+                                            sig.label.get(*a as usize..*b as usize).unwrap_or("").to_string(),
+                                    })
+                                    .unwrap_or_default();
+                                out.push_str(&format!("    active param: {} ({})\n", p, plabel));
+                            }
+                        }
+                    }
+                    Ok(out.trim_end_matches('\n').to_string())
+                }
+                None => Err(format!("No signature help at {}:{}", req.line, req.col)),
+            }
+        }
+        "document-highlight" => {
+            let doc = cli_open_document(file, idx);
+            let highlights = symbols::document_highlights(&doc.analysis, pos, &doc.tree, &doc.text, Some(idx));
+            let mut sources = SourceCache::new();
+            let path = std::fs::canonicalize(file).map(|p| p.display().to_string())
+                .unwrap_or_else(|_| file.to_string());
+            let mut out = String::new();
+            for h in &highlights {
+                let (line, col) = sources.display(&path, h.range.start.line as usize, h.range.start.character as usize);
+                let kind = match h.kind {
+                    Some(tower_lsp::lsp_types::DocumentHighlightKind::WRITE) => "WRITE",
+                    _ => "READ",
+                };
+                out.push_str(&format!("{}:{}:{}\t{}\n", path, line, col, kind));
+            }
+            Ok(out.trim_end_matches('\n').to_string())
+        }
+        "linked-editing" => {
+            let doc = cli_open_document(file, idx);
+            let path = std::fs::canonicalize(file).map(|p| p.display().to_string())
+                .unwrap_or_else(|_| file.to_string());
+            match symbols::linked_editing_ranges(&doc.analysis, pos, Some(idx)) {
+                Some(ranges) => {
+                    let mut sources = SourceCache::new();
+                    let mut out = String::new();
+                    for r in &ranges {
+                        let (line, col) = sources.display(&path, r.start.line as usize, r.start.character as usize);
+                        out.push_str(&format!("{}:{}:{}\n", path, line, col));
+                    }
+                    Ok(out.trim_end_matches('\n').to_string())
+                }
+                None => Err(format!("No linked-editing ranges at {}:{} (need >= 2 occurrences)", req.line, req.col)),
+            }
+        }
+        "semantic-tokens" => {
+            let doc = cli_open_document(file, idx);
+            let tokens = symbols::semantic_tokens(&doc.analysis);
+            let legend = symbols::semantic_token_types();
+            let (mut line, mut col): (u32, u32) = (0, 0);
+            let mut out = String::new();
+            for t in &tokens {
+                line += t.delta_line;
+                if t.delta_line == 0 { col += t.delta_start; } else { col = t.delta_start; }
+                let name = legend.get(t.token_type as usize).map(|tt| tt.as_str()).unwrap_or("?");
+                out.push_str(&format!("{}:{} len={} {}\n", line + 1, col, t.length, name));
+            }
+            Ok(out.trim_end_matches('\n').to_string())
+        }
+        "outline" => {
+            let (_s, _t, analysis) = parse_file(file);
+            Ok(outline_json(&analysis))
+        }
+        "workspace-symbol" => {
+            let q = req.query.clone().unwrap_or_default().to_lowercase();
+            let mut results = Vec::new();
+            for entry in ws.workspace_raw().iter() {
+                for sym in &entry.value().symbols {
+                    if sym.name.to_lowercase().contains(&q) {
+                        results.push(serde_json::json!({
+                            "name": sym.name, "kind": format!("{:?}", sym.kind),
+                            "file": entry.key().display().to_string(),
+                            "line": sym.selection_span.start.row, "col": sym.selection_span.start.column,
+                        }));
+                    }
+                }
+            }
+            Ok(serde_json::to_string_pretty(&results).unwrap())
+        }
+        "rename" => {
+            let new_name = req.newname.clone().unwrap_or_else(|| "RENAMED".to_string());
+            run_rename(ws, idx, file, point, &new_name)
+        }
+        "diagnostics" => Ok(batch_diagnostics(ws, idx)),
+        other => Err(format!("unknown query: {}", other)),
+    }
+}
+
+/// Document-symbol outline as the pretty-JSON array string (shared by
+/// `cli_outline` and `run_one`).
+fn outline_json(analysis: &file_analysis::FileAnalysis) -> String {
     let mut results = Vec::new();
-    let mut outline_seen: std::collections::HashSet<(String, String, usize, usize)> =
+    let mut seen: std::collections::HashSet<(String, String, usize, usize)> =
         std::collections::HashSet::new();
     for sym in &analysis.symbols {
         match sym.kind {
@@ -369,20 +896,24 @@ fn cli_outline(file: &str) {
             | file_analysis::SymKind::Variable | file_analysis::SymKind::Handler => {}
             _ => continue,
         }
-        // Honor plugin-opted-out symbols: DSL imports, framework
-        // infrastructure, anything the plugin flagged as non-outline.
         let hidden = match &sym.detail {
             file_analysis::SymbolDetail::Sub { hide_in_outline, .. } => *hide_in_outline,
             file_analysis::SymbolDetail::Handler { hide_in_outline, .. } => *hide_in_outline,
             _ => false,
         };
         if hidden { continue; }
+        if sym.kind == file_analysis::SymKind::Variable && analysis.scope_within_sub_body(sym.scope) {
+            continue;
+        }
         let mut entry = serde_json::json!({
             "name": sym.name,
             "kind": format!("{:?}", sym.kind),
             "line": sym.selection_span.start.row,
             "col": sym.selection_span.start.column,
         });
+        // Richer per-symbol detail (package, params, inferred return type,
+        // method flag, display flavor, handler dispatchers) — the QA/debug
+        // signal the outline carries beyond name/kind/line/col.
         if let Some(ref pkg) = sym.package {
             entry["package"] = serde_json::json!(pkg);
         }
@@ -413,275 +944,137 @@ fn cli_outline(file: &str) {
             entry["dispatchers"] = serde_json::json!(dispatchers);
             entry["display"] = serde_json::json!(format!("{:?}", display));
         }
-
-        // Fan-out dedup: framework plugins may register the same Symbol
-        // on multiple classes (Mojo helpers on Controller AND the app
-        // class) for resolution; the outline should only show it once.
         use file_analysis::Namespace;
         let is_framework = matches!(sym.namespace, Namespace::Framework { .. });
         let is_dupeable = is_framework && matches!(sym.kind,
             file_analysis::SymKind::Sub | file_analysis::SymKind::Method);
         if is_dupeable {
-            let key = (
-                format!("{:?}", sym.kind),
-                sym.name.clone(),
-                sym.span.start.row,
-                sym.span.start.column,
-            );
-            if !outline_seen.insert(key) {
-                continue;
-            }
+            let key = (format!("{:?}", sym.kind), sym.name.clone(),
+                sym.span.start.row, sym.span.start.column);
+            if !seen.insert(key) { continue; }
         }
         results.push(entry);
     }
-
-    println!("{}", serde_json::to_string_pretty(&results).unwrap());
+    serde_json::to_string_pretty(&results).unwrap()
 }
 
-/// --hover <file> <line> <col> — Type info and docs
-fn cli_hover(file: &str, line_str: &str, col_str: &str) {
-    let (source, tree, analysis) = parse_file(file);
-    let point = parse_point(line_str, col_str);
-
-    // Use the same hover function as the LSP, but without module_index
-    if let Some(markdown) = analysis.hover_info(point, &source, Some(&tree), None) {
-        println!("{}", markdown);
-    } else {
-        eprintln!("No hover info at {}:{}", line_str, col_str);
-        std::process::exit(1);
-    }
-}
-
-/// --type-at <file> <line> <col> — Single type query
-fn cli_type_at(file: &str, line_str: &str, col_str: &str) {
-    let (_source, _tree, analysis) = parse_file(file);
-    let point = parse_point(line_str, col_str);
-
-    // Check refs for inferred type — route through the witness bag
-    // so framework / branch / arity rules refine the answer.
-    if let Some(r) = analysis.ref_at(point) {
-        if let Some(ty) = analysis.inferred_type_via_bag(&r.target_name, point) {
-            println!("{}", file_analysis::format_inferred_type(&ty));
-            return;
-        }
-    }
-    // Check symbols
-    if let Some(sym) = analysis.symbol_at(point) {
-        if let Some(ty) = analysis.inferred_type_via_bag(&sym.name, point) {
-            println!("{}", file_analysis::format_inferred_type(&ty));
-            return;
-        }
-    }
-    eprintln!("No type info at {}:{}", line_str, col_str);
-    std::process::exit(1);
-}
-
-/// --definition <root> <file> <line> <col> — Cross-file goto-def
-fn cli_definition(root: &str, file: &str, line_str: &str, col_str: &str) {
-    let (source, tree, analysis) = parse_file(file);
-    let point = parse_point(line_str, col_str);
-
-    // Build a real ModuleIndex and register workspace modules the same
-    // way the backend does, so CLI gd goes through the production
-    // cross-file resolution path (Handler/MethodCallRef/DispatchCall/
-    // inheritance walk via class_content_index) instead of the CLI's
-    // old ad-hoc workspace scan. Keeps nvim and CLI results in sync.
-    let idx = module_index::ModuleIndex::new_for_cli();
-    let files = file_store::FileStore::new();
-    let root_path = std::path::PathBuf::from(root);
-    module_resolver::index_workspace_with_index(&root_path, &files, Some(&idx));
-
-    let abs = std::fs::canonicalize(file).unwrap_or_else(|_| std::path::PathBuf::from(file));
-    let uri = tower_lsp::lsp_types::Url::from_file_path(&abs)
-        .unwrap_or_else(|_| tower_lsp::lsp_types::Url::parse("file:///unknown").unwrap());
-    let pos = tower_lsp::lsp_types::Position {
-        line: point.row as u32,
-        character: point.column as u32,
-    };
-
-    if let Some(resp) = symbols::find_definition(&analysis, pos, &uri, &idx, &tree, &source) {
-        use tower_lsp::lsp_types::GotoDefinitionResponse;
-        let first = match resp {
-            GotoDefinitionResponse::Scalar(loc) => Some(loc),
-            GotoDefinitionResponse::Array(v) => v.into_iter().next(),
-            GotoDefinitionResponse::Link(v) => v.into_iter().next().map(|l| tower_lsp::lsp_types::Location {
-                uri: l.target_uri,
-                range: l.target_range,
-            }),
-        };
-        if let Some(loc) = first {
-            let path = loc.uri.to_file_path()
-                .map(|p| p.display().to_string())
-                .unwrap_or_else(|_| loc.uri.to_string());
-            println!("{}:{}:{}", path,
-                loc.range.start.line + 1,
-                loc.range.start.character + 1);
-            return;
-        }
-    }
-
-    let _ = files; // suppress unused-variable warnings
-    eprintln!("No definition found at {}:{}", line_str, col_str);
-    std::process::exit(1);
-}
-
-/// --references <root> <file> <line> <col> — Cross-file find-refs
-fn cli_references(root: &str, file: &str, line_str: &str, col_str: &str) {
-    let (source, tree, analysis) = parse_file(file);
-    let point = parse_point(line_str, col_str);
-
-    let mut results = Vec::new();
+/// Cross-file rename edit-set as the pretty-JSON object string (shared by
+/// `cli_rename` and `run_one`). `file` is the originating file; `point` the cursor.
+fn run_rename(
+    ws: &file_store::FileStore,
+    idx: &module_index::ModuleIndex,
+    file: &str,
+    point: tree_sitter::Point,
+    new_name: &str,
+) -> Result<String, String> {
+    use std::collections::HashMap;
     let file_path = std::path::Path::new(file).canonicalize()
         .unwrap_or_else(|_| std::path::PathBuf::from(file));
-
-    // Local refs
-    let local_refs = analysis.find_references(point, Some(&tree), Some(source.as_bytes()), None);
-    for span in &local_refs {
-        results.push(serde_json::json!({
-            "file": file_path.display().to_string(),
-            "line": span.start.row,
-            "col": span.start.column,
-        }));
-    }
-
-    // Cross-file refs (for functions/methods/packages)
-    if let Some(r) = analysis.ref_at(point) {
-        let target = &r.target_name;
-        let is_sub = matches!(r.kind,
-            file_analysis::RefKind::FunctionCall { .. } | file_analysis::RefKind::MethodCall { .. }
-        ) || analysis.symbol_at(point).map(|s| matches!(s.kind,
-            file_analysis::SymKind::Sub | file_analysis::SymKind::Method
-        )).unwrap_or(false);
-
-        if is_sub || matches!(r.kind, file_analysis::RefKind::PackageRef) {
-            let ws = index_workspace(root);
-            // Derive the scope (package for Sub, class for Method) so
-            // cross-file walks don't union unrelated packages that
-            // share a symbol name.
-            let scope_from_ref = match &r.kind {
-                file_analysis::RefKind::FunctionCall { resolved_package } =>
-                    Some(("sub", resolved_package.clone())),
-                file_analysis::RefKind::MethodCall { .. } =>
-                    analysis.method_call_invocant_class(r, None).map(|c| ("method", Some(c))),
-                _ => None,
-            };
-            let scope_from_sym = analysis.symbol_at(point).and_then(|s| match s.kind {
-                file_analysis::SymKind::Sub => Some(("sub", s.package.clone())),
-                file_analysis::SymKind::Method => Some(("method", s.package.clone())),
-                _ => None,
-            });
-            let scope = scope_from_ref.or(scope_from_sym);
-
-            for entry in ws.workspace_raw().iter() {
-                if *entry.key() == file_path { continue; }
-                let edits = if matches!(r.kind, file_analysis::RefKind::PackageRef) {
-                    entry.value().rename_package(target, target)
-                } else {
-                    match &scope {
-                        Some(("sub", package)) =>
-                            entry.value().rename_sub_in_package(target, package, target, None),
-                        Some(("method", Some(class))) =>
-                            entry.value().rename_method_in_class(target, class, target, None),
-                        // Unresolvable method scope — skip rather than
-                        // cross-link. Matches refs_to / rename semantics.
-                        _ => Vec::new(),
-                    }
-                };
-                for (span, _) in edits {
-                    results.push(serde_json::json!({
-                        "file": entry.key().display().to_string(),
-                        "line": span.start.row,
-                        "col": span.start.column,
-                    }));
-                }
-            }
-        }
-    }
-
-    println!("{}", serde_json::to_string_pretty(&results).unwrap());
-    eprintln!("{} references", results.len());
-}
-
-/// --rename <root> <file> <line> <col> <new_name> — Cross-file rename
-fn cli_rename(root: &str, file: &str, line_str: &str, col_str: &str, new_name: &str) {
-    use std::path::{Path, PathBuf};
-    use std::collections::HashMap;
-
-    let file_path = Path::new(file).canonicalize().unwrap_or_else(|_| PathBuf::from(file));
-    let point = parse_point(line_str, col_str);
-    let ws = index_workspace(root);
-
-    // Ensure target file is in the workspace index
-    if ws.get_workspace(&file_path).is_none() {
-        let (_source, _tree, analysis) = parse_file(file);
-        ws.insert_workspace(file_path.clone(), analysis);
-    }
-    let analysis_ref = ws.get_workspace(&file_path).unwrap();
-
-    let rename_kind = match analysis_ref.rename_kind_at(point, None) {
-        Some(k) => k,
-        None => {
-            eprintln!("Nothing renameable at {}:{}", line_str, col_str);
-            std::process::exit(1);
-        }
-    };
-
-    eprintln!("Rename kind: {:?}", rename_kind);
-
+    let (_s, _t, mut analysis) = parse_file(file);
+    analysis.enrich_imported_types_with_keys(Some(idx));
+    let rename_kind = analysis.rename_kind_at(point, Some(idx))
+        .ok_or_else(|| format!("Nothing renameable at {}:{}", point.row, point.column))?;
     let mut all_edits: HashMap<String, Vec<serde_json::Value>> = HashMap::new();
-
     match &rename_kind {
         file_analysis::RenameKind::Variable
         | file_analysis::RenameKind::HashKey(_)
         | file_analysis::RenameKind::Handler { .. } => {
-            let source = std::fs::read_to_string(&file_path).expect("cannot read file");
+            let source = std::fs::read_to_string(&file_path).map_err(|e| e.to_string())?;
             let mut parser = module_resolver::create_parser();
-            let tree = parser.parse(&source, None).expect("parse failed");
-            if let Some(edits) = analysis_ref.rename_at(point, new_name, Some(&tree), Some(source.as_bytes())) {
+            let tree = parser.parse(&source, None).ok_or("parse failed")?;
+            if let Some(edits) = analysis.rename_at(point, new_name, Some(&tree), Some(source.as_bytes())) {
                 let json_edits: Vec<_> = edits.into_iter()
-                    .map(|(span, text)| span_to_json(span, text))
-                    .collect();
+                    .map(|(span, text)| span_to_json(span, text)).collect();
                 all_edits.insert(file_path.display().to_string(), json_edits);
             }
+            return Ok(serde_json::to_string_pretty(&serde_json::json!(all_edits)).unwrap());
         }
-        file_analysis::RenameKind::Function { .. } | file_analysis::RenameKind::Method { .. } => {
-            for entry in ws.workspace_raw().iter() {
-                let edits = match &rename_kind {
-                    file_analysis::RenameKind::Function { name, package } =>
-                        entry.value().rename_sub_in_package(name, package, new_name, None),
-                    file_analysis::RenameKind::Method { name, class } =>
-                        entry.value().rename_method_in_class(name, class, new_name, None),
-                    _ => unreachable!(),
-                };
-                if !edits.is_empty() {
-                    let json_edits: Vec<_> = edits.into_iter()
-                        .map(|(span, text)| span_to_json(span, text))
-                        .collect();
-                    all_edits.insert(entry.key().display().to_string(), json_edits);
-                }
-            }
-        }
-        file_analysis::RenameKind::Package(_) => {
-            let name = match &rename_kind {
-                file_analysis::RenameKind::Package(n) => n.clone(),
-                _ => unreachable!(),
+        _ => {}
+    }
+    let target = resolve::TargetRef::from_rename_kind(rename_kind, &analysis, Some(idx))
+        .ok_or("Function/Method/Package map to a target")?;
+    let _staged = ScopedWorkspaceEntry::insert(ws, file_path, analysis);
+    for loc in resolve::refs_to(ws, Some(idx), &target, resolve::RoleMask::EDITABLE) {
+        let path = match &loc.key {
+            file_store::FileKey::Path(p) => p.display().to_string(),
+            file_store::FileKey::Url(u) => u.to_file_path()
+                .map(|p| p.display().to_string()).unwrap_or_else(|_| u.to_string()),
+        };
+        all_edits.entry(path).or_default().push(span_to_json(loc.span, new_name.to_string()));
+    }
+    Ok(serde_json::to_string_pretty(&serde_json::json!(all_edits)).unwrap())
+}
+
+/// Whole-tree diagnostics as the pretty-JSON array string (warning+; shared by
+/// `--batch` diagnostics requests). Mirrors `cli_check`'s JSON path.
+fn batch_diagnostics(ws: &file_store::FileStore, idx: &module_index::ModuleIndex) -> String {
+    let options = symbols::DiagnosticOptions { unresolved_dispatch: false };
+    let mut all = Vec::new();
+    for entry in ws.workspace_raw().iter() {
+        let file = entry.key().display().to_string();
+        for d in symbols::collect_diagnostics(entry.value(), idx, options) {
+            let sev = match d.severity {
+                Some(s) if s == tower_lsp::lsp_types::DiagnosticSeverity::ERROR => "error",
+                Some(s) if s == tower_lsp::lsp_types::DiagnosticSeverity::WARNING => "warning",
+                Some(s) if s == tower_lsp::lsp_types::DiagnosticSeverity::INFORMATION => "info",
+                Some(s) if s == tower_lsp::lsp_types::DiagnosticSeverity::HINT => "hint",
+                _ => "warning",
             };
-            for entry in ws.workspace_raw().iter() {
-                let edits = entry.value().rename_package(&name, new_name);
-                if !edits.is_empty() {
-                    let json_edits: Vec<_> = edits.into_iter()
-                        .map(|(span, text)| span_to_json(span, text))
-                        .collect();
-                    all_edits.insert(entry.key().display().to_string(), json_edits);
-                }
-            }
+            all.push(serde_json::json!({
+                "file": file, "line": d.range.start.line, "col": d.range.start.character,
+                "severity": sev,
+                "code": d.code.map(|c| match c {
+                    tower_lsp::lsp_types::NumberOrString::String(s) => s,
+                    tower_lsp::lsp_types::NumberOrString::Number(n) => n.to_string(),
+                }).unwrap_or_default(),
+                "message": d.message,
+            }));
         }
-    };
+    }
+    serde_json::to_string_pretty(&all).unwrap()
+}
 
-    // Drop the ref before iterating
-    drop(analysis_ref);
+/// --batch <root> — read JSONL queries on stdin, share one startup, print one
+/// JSON response per line. The harness substrate: amortizes the workspace-index
+/// + @INC cost across every query instead of paying it per process.
+fn cli_batch(root: &str) {
+    use std::io::{BufRead, Write};
+    let (ws, idx) = cli_full_startup(root);
+    let stdin = std::io::stdin();
+    let stdout = std::io::stdout();
+    let mut out = stdout.lock();
+    for line in stdin.lock().lines() {
+        let line = match line { Ok(l) => l, Err(_) => break };
+        if line.trim().is_empty() { continue; }
+        let req: BatchReq = match serde_json::from_str(&line) {
+            Ok(r) => r,
+            Err(e) => {
+                let _ = writeln!(out, "{}", serde_json::json!({"ok": false, "err": format!("bad request: {}", e)}));
+                continue;
+            }
+        };
+        let resp = match run_one(&ws, &idx, &req) {
+            Ok(s)  => serde_json::json!({"id": req.id, "ok": true,  "out": s}),
+            Err(e) => serde_json::json!({"id": req.id, "ok": false, "err": e}),
+        };
+        let _ = writeln!(out, "{}", serde_json::to_string(&resp).unwrap());
+        let _ = out.flush();   // flush per line so a later abort still localizes
+    }
+}
 
-    println!("{}", serde_json::to_string_pretty(&serde_json::json!(all_edits)).unwrap());
+/// --rename <root> <file> <line> <col> <new_name> — Cross-file rename
+fn cli_rename(root: &str, file: &str, line_str: &str, col_str: &str, new_name: &str) {
+    let point = parse_point(line_str, col_str);
+    // Full startup so workspace files are built with the same plugins, type
+    // inference, and enrichment that the LSP backend would use.
+    let (ws, idx) = cli_full_startup(root);
+    match run_rename(&ws, &idx, file, point, new_name) {
+        Ok(s) => println!("{}", s),
+        Err(e) => {
+            eprintln!("{}", e);
+            std::process::exit(1);
+        }
+    }
 }
 
 /// --dump-package <root> <package> — Dump every sub in a package with
@@ -756,6 +1149,7 @@ fn cli_dump_package(root: &str, package_name: &str) {
             hide_in_outline,
             opaque_return,
             ref doc,
+            ..
         } = sym.detail
         else {
             continue;
@@ -789,7 +1183,7 @@ fn cli_dump_package(root: &str, package_name: &str) {
             .iter()
             .map(|p| {
                 let inferred = analysis
-                    .inferred_type_via_bag(&p.name, probe)
+                    .inferred_type_via_bag_ctx(&p.name, probe, Some(&module_index))
                     .as_ref()
                     .map(file_analysis::format_inferred_type);
                 serde_json::json!({
@@ -941,26 +1335,15 @@ fn cli_dump_package(root: &str, package_name: &str) {
 
 /// --workspace-symbol <root> <query> — Search symbols
 fn cli_workspace_symbol(root: &str, query: &str) {
-    let ws = index_workspace(root);
-    let query_lower = query.to_lowercase();
-    let mut results = Vec::new();
-
-    for entry in ws.workspace_raw().iter() {
-        for sym in &entry.value().symbols {
-            if sym.name.to_lowercase().contains(&query_lower) {
-                results.push(serde_json::json!({
-                    "name": sym.name,
-                    "kind": format!("{:?}", sym.kind),
-                    "file": entry.key().display().to_string(),
-                    "line": sym.selection_span.start.row,
-                    "col": sym.selection_span.start.column,
-                }));
-            }
-        }
-    }
-
-    eprintln!("{} symbols matching '{}'", results.len(), query);
-    println!("{}", serde_json::to_string_pretty(&results).unwrap());
+    // Full startup so workspace symbols reflect plugin-synthesized entities
+    // (helpers, routes, accessors), built with `root`'s plugins not cwd's.
+    let (ws, idx) = cli_full_startup(root);
+    let req = BatchReq {
+        id: String::new(), q: "workspace-symbol".into(),
+        file: String::new(), line: 0, col: 0,
+        query: Some(query.to_string()), newname: None,
+    };
+    print_run_one(&ws, &idx, &req);
 }
 
 /// --clear-cache [<root>] — Remove the SQLite module cache.

@@ -85,6 +85,15 @@ pub enum WitnessAttachment {
     /// have to exclude branch-arm witnesses from the shared `Expr` /
     /// `Variable` attachments.
     BranchArm(Span),
+    /// Typed-slot collector: "what type does instance slot `key` hold on
+    /// class `class`?" Seeded from typed hash-key WRITEs
+    /// (`$obj->{key} = <rhs>`) as one `Edge(Expr(rhs_span))` per write;
+    /// `SlotTypeFold` agrees the arms via `resolve_return_type` (1+ agree
+    /// → that type, disagree → None). Class-keyed so `$self->{h}` and a
+    /// differently-typed `$other->{h}` don't cross-contaminate. Nothing
+    /// consumes this yet — `$obj->{h}->m()` typing through it is a later
+    /// step.
+    SlotType { class: String, key: String },
 }
 
 /// Index into `FileAnalysis::refs`.
@@ -131,6 +140,17 @@ pub enum WitnessPayload {
     /// `InferredType` witness preserving source + span, then run reducers
     /// against the materialized list. A cycle guard breaks `A → B → A`.
     Edge(WitnessAttachment),
+    /// Edge fact for a **method call at a known arity**: "the value at my
+    /// attachment is `target`'s return type, dispatched at `arity` args."
+    /// Distinct from a plain `Edge` because the call site's arity is
+    /// intrinsic to the *call*, not to whatever outer query reached it —
+    /// a hint-less `$x` type query that chases here must still pick the
+    /// fluent-writer arm of `$obj->setter($v)` (arity ≥ 1), not the
+    /// getter arm a hint-less `UnionOnArgs` defaults to. Emitted by
+    /// `emit_method_call_return_edges` (`Expression(refidx)` → its
+    /// `MethodOnClass{class, method}` at the call's `count_call_args`);
+    /// chased like `Edge` but overrides `q.arity_hint` with `arity`.
+    CallReturn { target: WitnessAttachment, arity: u32 },
     /// **Symbol-declarative return type.** A receiver-relative /
     /// arity-relative expression that `ReturnExprReducer` substitutes at
     /// query time using `q.receiver` and `q.arity_hint`. Subsumes both
@@ -460,6 +480,11 @@ pub struct BagContext<'a> {
     pub package_framework: &'a HashMap<String, FrameworkFact>,
     pub module_index: Option<&'a crate::module_index::ModuleIndex>,
     pub package_parents: &'a HashMap<String, Vec<String>>,
+    /// Manifest-declared app-surface consumer classes — threaded so the
+    /// `MethodOnClass` inheritance walk injects the synthetic surface
+    /// parent via `parents_of`, matching the FA-side ancestor walks.
+    /// Empty for in-file callers that don't carry consumer state.
+    pub app_surface_consumers: &'a [String],
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -509,10 +534,21 @@ impl WitnessReducer for FrameworkAwareTypeFold {
     }
 
     fn reduce(&self, ws: &[&Witness], q: &ReducerQuery) -> ReducedValue {
+        // Point-narrowing is variable-lifetime semantics: at the query point,
+        // which assignment of `$x` is live. It only makes sense for `Variable`
+        // attachments. This reducer also claims `Expression` (a method call's
+        // resolved return type) — those carry one witness spanning the call,
+        // and filtering them by a point inherited from a chasing variable's
+        // scope wrongly discards them (`my $g = X->new->m` chased at `$g`'s
+        // scope-end, where the call span doesn't contain it). So only narrow
+        // for variables; expressions fold every witness.
+        let narrow_point = q
+            .point
+            .filter(|_| matches!(q.attachment, WitnessAttachment::Variable { .. }));
         // Narrowing: with a `point`, pick the narrowest-span
         // InferredType witness containing it (already post-narrowing).
         // Falls through to the full fold otherwise.
-        if let Some(point) = q.point {
+        if let Some(point) = narrow_point {
             let mut narrow: Option<(&Witness, u64)> = None;
             for w in ws {
                 if let WitnessPayload::InferredType(_) = w.payload {
@@ -531,8 +567,20 @@ impl WitnessReducer for FrameworkAwareTypeFold {
             }
         }
 
+        // Class assertions break ties on source priority first, then
+        // iteration order — a `Plugin`-sourced assertion (the helper-`$c`
+        // override) dominates a `Builder` one (`my $c = shift` typed as the
+        // enclosing class). Same axis as `PluginOverrideReducer` on Symbols.
         let mut class_assertion: Option<String> = None;
+        let mut class_assertion_priority: u8 = 0;
         let mut first_param_class: Option<String> = None;
+        // A `BrandedRoute` is a class identity that carries extra
+        // inherited-default data. It must dominate the bare
+        // `ClassName(base)` companion that the same assignment also
+        // pushes (so a partial route target reads the brand, not the
+        // brandless class). Track the latest brand separately and
+        // return it ahead of the class axis.
+        let mut branded: Option<InferredType> = None;
         let mut rep_obs: Option<Rep> = None;
         let mut bless_rep: Option<Rep> = None;
         let mut num = false;
@@ -544,7 +592,7 @@ impl WitnessReducer for FrameworkAwareTypeFold {
             // Temporal ordering: only consider witnesses emitted at or
             // before the query point — a later reassignment shouldn't
             // influence a lookup at an earlier line.
-            if let Some(point) = q.point {
+            if let Some(point) = narrow_point {
                 if w.span.start > point {
                     continue;
                 }
@@ -552,21 +600,33 @@ impl WitnessReducer for FrameworkAwareTypeFold {
             // Skip scoped InferredType witnesses that don't contain the
             // query point — narrowing facts for a different slice of the
             // variable's lifetime.
-            if let (Some(point), WitnessPayload::InferredType(_)) = (q.point, &w.payload) {
+            if let (Some(point), WitnessPayload::InferredType(_)) = (narrow_point, &w.payload) {
                 if !span_is_zero(&w.span) && !span_contains(&w.span, point) {
                     continue;
                 }
             }
+            let prio = w.source.priority();
             match &w.payload {
                 WitnessPayload::InferredType(t) => match t {
-                    InferredType::ClassName(name) => class_assertion = Some(name.clone()),
+                    InferredType::ClassName(name) => {
+                        if prio >= class_assertion_priority {
+                            class_assertion = Some(name.clone());
+                            class_assertion_priority = prio;
+                        }
+                    }
                     InferredType::FirstParam { package } => {
                         first_param_class = Some(package.clone())
                     }
+                    b @ InferredType::BrandedRoute { .. } => branded = Some(b.clone()),
                     other => plain_type = Some(other.clone()),
                 },
                 WitnessPayload::Observation(obs) => match obs {
-                    TypeObservation::ClassAssertion(name) => class_assertion = Some(name.clone()),
+                    TypeObservation::ClassAssertion(name) => {
+                        if prio >= class_assertion_priority {
+                            class_assertion = Some(name.clone());
+                            class_assertion_priority = prio;
+                        }
+                    }
                     TypeObservation::FirstParamInMethod { package } => {
                         first_param_class = Some(package.clone())
                     }
@@ -580,6 +640,12 @@ impl WitnessReducer for FrameworkAwareTypeFold {
                 },
                 _ => {}
             }
+        }
+
+        // A branded route dominates the bare-class companion: the
+        // brand IS the class identity plus inherited defaults.
+        if let Some(b) = branded {
+            return ReducedValue::Type(b);
         }
 
         // Class axis wins when consistent with the rep axis. On
@@ -735,6 +801,62 @@ impl WitnessReducer for SymbolReturnArmFold {
                 _ => None,
             })
             .collect();
+        match crate::file_analysis::resolve_return_type(&arms) {
+            Some(t) => ReducedValue::Type(t),
+            None => ReducedValue::None,
+        }
+    }
+}
+
+// ---- Typed-slot fold ----
+//
+// Claims `SlotType{class, key}` attachments carrying `InferredType`
+// payloads (per-write `Edge(Expr(rhs_span))` witnesses, materialized to
+// types by the registry). Each witness is one `$obj->{key} = <rhs>`
+// WRITE; the per-write arms agree via `resolve_return_type` (1+ agree →
+// that type, HashRef subsumed by an Object) with one added guard: two
+// DISTINCT concrete classes are honest disagreement → None. The guard
+// matters here because `resolve_return_type`'s Object/HashRef
+// subsumption was tuned for return arms (one Object absorbs sibling
+// HashRefs) and otherwise picks the last of two different classes —
+// the wrong answer when `$self->{h} = A->new` in one method and
+// `= B->new` in another genuinely conflict. Nothing consumes this
+// attachment yet — it's the typed half of the hash-key-write seed,
+// paired with the untyped `mutation` Fact.
+
+pub struct SlotTypeFold;
+
+impl WitnessReducer for SlotTypeFold {
+    fn name(&self) -> &str {
+        "slot_type_fold"
+    }
+
+    fn claims(&self, w: &Witness) -> bool {
+        matches!(w.attachment, WitnessAttachment::SlotType { .. })
+            && matches!(w.payload, WitnessPayload::InferredType(_))
+    }
+
+    fn reduce(&self, ws: &[&Witness], _q: &ReducerQuery) -> ReducedValue {
+        let arms: Vec<InferredType> = ws
+            .iter()
+            .filter_map(|w| match &w.payload {
+                WitnessPayload::InferredType(t) => Some(t.clone()),
+                _ => None,
+            })
+            .collect();
+        // Two distinct class identities never agree: a slot can't be
+        // both `A` and `B`. `class_name()` is the value's own "what
+        // class am I" answer (rule #10) — distinct answers → None.
+        let mut seen_class: Option<String> = None;
+        for t in &arms {
+            if let Some(cn) = t.class_name() {
+                match &seen_class {
+                    None => seen_class = Some(cn.to_string()),
+                    Some(prev) if prev != cn => return ReducedValue::None,
+                    _ => {}
+                }
+            }
+        }
         match crate::file_analysis::resolve_return_type(&arms) {
             Some(t) => ReducedValue::Type(t),
             None => ReducedValue::None,
@@ -916,9 +1038,19 @@ impl WitnessReducer for ReturnExprReducer {
     }
 
     fn claims(&self, w: &Witness) -> bool {
+        // The policy lives on the payload, not the attachment: a
+        // `ReturnExpr(_)` is a deferred (receiver/arity)-relative return
+        // wherever it's pushed. `Symbol(_)` / `MethodOnClass{..}` carry
+        // the class-keyed declarations; `Expr(_)` carries a method body's
+        // own deferred return (`sub me { return $_[0] }` → `Receiver` on
+        // the `$_[0]` body span), reached through the `SymbolReturnArm`
+        // edge chase. Claiming all three lets a self-returning method
+        // substitute the call's receiver at arbitrary chain depth.
         matches!(
             w.attachment,
-            WitnessAttachment::Symbol(_) | WitnessAttachment::MethodOnClass { .. }
+            WitnessAttachment::Symbol(_)
+                | WitnessAttachment::MethodOnClass { .. }
+                | WitnessAttachment::Expr(_)
         ) && matches!(w.payload, WitnessPayload::ReturnExpr(_))
     }
 
@@ -1003,35 +1135,95 @@ fn eval_return_expr(re: &ReturnExpr, q: &ReducerQuery) -> Option<InferredType> {
 
 // ---- Reducer registry ----
 
-/// Cycle guard for recursive bag queries, keyed by
-/// `(bag_ptr, attachment, receiver_disc, arity_hint)`. Per-bag entries
-/// stay separate so a legitimate cross-bag query for the same attachment
-/// (the common `MethodOnClass{C, m}` jump into C's own bag) isn't
-/// misread as a cycle. The receiver discriminant + arity hint widen the
-/// key so two queries differing only in `receiver` / `arity_hint` aren't
-/// treated as duplicates — `UnionOnArgs` and `Receiver` substitution can
-/// produce different answers, and the monotone bag makes re-asking safe.
-type VisitedKey = (usize, WitnessAttachment, u8, Option<u32>);
+/// Cycle guard + result memo key for recursive bag queries, keyed by
+/// `(bag_ptr, attachment, receiver_identity, arity_hint)`. Per-bag
+/// entries stay separate so a legitimate cross-bag query for the same
+/// attachment (the common `MethodOnClass{C, m}` jump into C's own bag)
+/// isn't misread as a cycle. The receiver **identity** + arity hint
+/// widen the key so two queries differing only in `receiver` /
+/// `arity_hint` aren't treated as duplicates — `UnionOnArgs` and
+/// `Receiver` substitution can produce different answers.
+///
+/// The receiver slot is the receiver's FULL structural identity, not a
+/// variant tag. `ReturnExpr::Receiver` substitutes the whole receiver,
+/// so `ClassName("Foo")` and `ClassName("Bar")` reaching one attachment
+/// resolve to different classes; a variant-only discriminant collapses
+/// them to one memo key and the memo hands Foo's answer to Bar (silent
+/// wrong type). A same-receiver diamond (the inheritance walk holds
+/// `q.receiver` constant within one `MethodOnClass` query) still hashes
+/// to one key, so memoization still kills the exponential re-chase.
+type VisitedKey = (usize, WitnessAttachment, Option<String>, Option<u32>);
 type VisitedSet = std::collections::HashSet<VisitedKey>;
 
-/// Cycle-guard discriminant for `q.receiver` — `0` for `None`, else the
-/// `InferredType` variant index. Values aren't load-bearing; only
-/// "different variants compare unequal" matters. Exhaustive match (no
-/// `_ =>`) so a new variant trips the compiler instead of colliding.
-fn receiver_discriminant(r: &Option<InferredType>) -> u8 {
-    let Some(t) = r else { return 0 };
-    match t {
-        InferredType::ClassName(_) => 1,
-        InferredType::FirstParam { .. } => 2,
-        InferredType::HashRef => 3,
-        InferredType::ArrayRef => 4,
-        InferredType::CodeRef { .. } => 5,
-        InferredType::Regexp => 6,
-        InferredType::Numeric => 7,
-        InferredType::String => 8,
-        InferredType::Parametric(_) => 9,
-        InferredType::Sequence(_) => 10,
+/// Per-top-level-`query` traversal state: the cycle guard plus a result
+/// memo. The bag forms a DAG of edges; without memoization a diamond
+/// (two paths reaching one shared sub-attachment) re-chases the shared
+/// subtree on every path, which is exponential on dense files
+/// (SQL::Abstract's method graph took minutes). The memo caches each
+/// attachment's resolved value *for the duration of one top-level query*
+/// so a re-reached node returns in O(1).
+///
+/// Soundness vs the cycle guard: `query_rec` only consults/stores the
+/// memo for a key that is NOT currently on the path (the visited-guard
+/// has already returned for on-path keys). A cached value is therefore
+/// the node's resolution computed with that node off the path — exactly
+/// what any other off-path reentry would compute. The memo is dropped
+/// when the top-level query returns, so it never leaks state across
+/// queries whose context (scopes / module_index / framework) differs.
+struct QueryState {
+    visited: VisitedSet,
+    // `Arc` so a memo store/hit clones one heap pointer, not the
+    // (String-bearing) `ReducedValue`. `HashMap::new()` pre-allocates
+    // no buckets, so a shallow query that never re-reaches a node (the
+    // common hover/completion 1–2-hop case) pays nothing for the memo —
+    // the table is lazily allocated on the first insert.
+    memo: std::collections::HashMap<VisitedKey, std::sync::Arc<ReducedValue>>,
+}
+
+impl QueryState {
+    fn new() -> Self {
+        QueryState {
+            visited: std::collections::HashSet::new(),
+            memo: std::collections::HashMap::new(),
+        }
     }
+}
+
+/// Hashable full-identity projection of `q.receiver` for the cycle/memo
+/// key. `None` stays `None`; otherwise the receiver's complete structural
+/// identity (Debug projection) so two distinct receivers — including two
+/// `ClassName(_)` with different class names — never share a key. This is
+/// the soundness-load-bearing slot: `ReturnExpr::Receiver` substitutes the
+/// whole receiver, so the memo must keep different receivers apart. Debug
+/// is structurally faithful for every `InferredType` variant (each field
+/// is itself `Debug`), so equality of the string implies equality of the
+/// receiver for keying purposes.
+fn receiver_key(r: &Option<InferredType>) -> Option<String> {
+    r.as_ref().map(|t| format!("{t:?}"))
+}
+
+/// Receiver to substitute when a chase reaches a *fresh* method dispatch
+/// on `MethodOnClass{class}` (an `Edge` or `CallReturn` into a class's
+/// method): the receiver is that call's invocant, i.e. `class`. A fluent
+/// `ReturnExpr(Receiver)` substitutes the dispatch class.
+///
+/// But when the outer query already carries the invocant's *resolved
+/// value* and that value's class identity IS `class`, prefer the richer
+/// value — it carries parametric structure (`Parametric(ResultSet{base,
+/// row})`) that a bare `ClassName(class)` drops, which is exactly what
+/// `Operator(RowOf(Receiver))` (DBIC `find`) needs to project the row
+/// class. Same class, strictly more information; the value answers the
+/// projection (rule #10), the chase never inspects the shape.
+fn fresh_dispatch_receiver(
+    incoming: &Option<InferredType>,
+    class: &str,
+) -> Option<InferredType> {
+    if let Some(t) = incoming {
+        if t.class_name() == Some(class) {
+            return Some(t.clone());
+        }
+    }
+    Some(InferredType::ClassName(class.to_string()))
 }
 
 /// Depth backstop for `query_rec`. The `(bag, attachment)` visited set is
@@ -1070,6 +1262,11 @@ impl ReducerRegistry {
         // shape; single-arm answers surface here, where BranchArmFold's
         // ≥2-arm rule would reject them.
         r.register(Box::new(SymbolReturnArmFold));
+        // SlotTypeFold claims the dedicated `SlotType{..}` shape. Nothing
+        // consumes it yet (typed `$obj->{k}` resolution is a later step),
+        // so placement here is non-load-bearing — grouped with the other
+        // arm-agreement folds for legibility.
+        r.register(Box::new(SlotTypeFold));
         // BranchArmFold claims the dedicated `BranchArm(_)` shape, so its
         // order relative to the Variable/Expr folds below is no longer
         // load-bearing — they no longer overlap.
@@ -1099,16 +1296,22 @@ impl ReducerRegistry {
     /// bag) and the inheritance fallback (which crosses bags), closing
     /// mutual-inheritance loops that span files.
     pub fn query(&self, bag: &WitnessBag, q: &ReducerQuery) -> ReducedValue {
-        let mut visited: VisitedSet = std::collections::HashSet::new();
-        self.query_rec(bag, q, &mut visited)
+        let mut state = QueryState::new();
+        // Sole boundary where an owned `ReducedValue` is required; the
+        // internal recursion threads `Arc` to avoid deep clones per hop.
+        (*self.query_rec(bag, q, &mut state)).clone()
     }
 
+    /// Returns an `Arc` so the memo, the cycle-guard early-outs, and the
+    /// edge-chase recursion all share one heap allocation per resolved
+    /// node instead of deep-cloning a (String-bearing) `ReducedValue` on
+    /// every store, hit, and return.
     fn query_rec(
         &self,
         bag: &WitnessBag,
         q: &ReducerQuery,
-        visited: &mut VisitedSet,
-    ) -> ReducedValue {
+        state: &mut QueryState,
+    ) -> std::sync::Arc<ReducedValue> {
         let depth = QUERY_REC_DEPTH.with(|c| {
             let d = c.get();
             c.set(d + 1);
@@ -1128,20 +1331,33 @@ impl ReducerRegistry {
                 }
             });
             QUERY_REC_DEPTH.with(|c| c.set(c.get() - 1));
-            return ReducedValue::None;
+            return std::sync::Arc::new(ReducedValue::None);
         }
         let key: VisitedKey = (
             bag as *const _ as usize,
             q.attachment.clone(),
-            receiver_discriminant(&q.receiver),
+            receiver_key(&q.receiver),
             q.arity_hint,
         );
-        if !visited.insert(key.clone()) {
+        // Memo hit: this key was fully resolved earlier in THIS query and
+        // isn't on the current path (cycle guard handles on-path keys).
+        if let Some(cached) = state.memo.get(&key) {
             QUERY_REC_DEPTH.with(|c| c.set(c.get() - 1));
-            return ReducedValue::None;
+            return std::sync::Arc::clone(cached);
         }
-        let result = self.query_rec_body(bag, q, visited);
-        visited.remove(&key);
+        // `key` has two owners (the visited set, transiently; the memo,
+        // for the rest of the query). Clone once for visited, then move
+        // the original into the memo store below.
+        if !state.visited.insert(key.clone()) {
+            QUERY_REC_DEPTH.with(|c| c.set(c.get() - 1));
+            return std::sync::Arc::new(ReducedValue::None);
+        }
+        let result = std::sync::Arc::new(self.query_rec_body(bag, q, state));
+        state.visited.remove(&key);
+        // Cache the off-path resolution. The query depends only on
+        // `(bag, attachment, receiver-class, arity)` (all in `key`) plus
+        // the static context, which is fixed for one top-level query.
+        state.memo.insert(key, std::sync::Arc::clone(&result));
         QUERY_REC_DEPTH.with(|c| c.set(c.get() - 1));
         result
     }
@@ -1150,9 +1366,9 @@ impl ReducerRegistry {
         &self,
         bag: &WitnessBag,
         q: &ReducerQuery,
-        visited: &mut VisitedSet,
+        state: &mut QueryState,
     ) -> ReducedValue {
-        let materialized = self.materialize(bag, q, visited);
+        let materialized = self.materialize(bag, q, state);
 
         for r in &self.reducers {
             let claimed: Vec<&Witness> =
@@ -1198,6 +1414,7 @@ impl ReducerRegistry {
                                 package_framework: &cached.analysis.package_framework,
                                 module_index: Some(idx),
                                 package_parents: &cached.analysis.package_parents,
+                                app_surface_consumers: &cached.analysis.app_surface_consumers,
                             };
                             let sub_q = ReducerQuery {
                                 attachment: q.attachment,
@@ -1210,24 +1427,24 @@ impl ReducerRegistry {
                             let v = self.query_rec(
                                 &cached.analysis.witnesses,
                                 &sub_q,
-                                visited,
+                                state,
                             );
-                            if v != ReducedValue::None {
-                                return v;
+                            if *v != ReducedValue::None {
+                                return (*v).clone();
                             }
                         }
                     }
                 }
-                // (2) Inheritance walk via package_parents.
-                let mut parents: Vec<String> =
-                    ctx.package_parents.get(class).cloned().unwrap_or_default();
-                if let Some(idx) = ctx.module_index {
-                    for p in idx.parents_cached(class) {
-                        if !parents.contains(&p) {
-                            parents.push(p);
-                        }
-                    }
-                }
+                // (2) Inheritance walk via package_parents (local ∪
+                // cross-file ∪ synthetic app-surface edge — `parents_of`
+                // is the single edge-injection site shared with the
+                // FA-side ancestor walks).
+                let parents = crate::file_analysis::parents_of(
+                    class,
+                    ctx.package_parents,
+                    ctx.module_index,
+                    ctx.app_surface_consumers,
+                );
                 for p in parents {
                     let parent_att = WitnessAttachment::MethodOnClass {
                         class: p,
@@ -1241,9 +1458,9 @@ impl ReducerRegistry {
                         receiver: q.receiver.clone(),
                         context: q.context,
                     };
-                    let v = self.query_rec(bag, &sub_q, visited);
-                    if v != ReducedValue::None {
-                        return v;
+                    let v = self.query_rec(bag, &sub_q, state);
+                    if *v != ReducedValue::None {
+                        return (*v).clone();
                     }
                 }
                 // (3) Cross-file plugin-namespace bridges. Plugin entities
@@ -1255,7 +1472,7 @@ impl ReducerRegistry {
                 // bridged Methods aren't arity-discriminated.
                 if let Some(idx) = ctx.module_index {
                     let mut found: Option<InferredType> = None;
-                    idx.for_each_entity_bridged_to(class, |cached, sym| {
+                    idx.for_each_entity_bridged_to(class, |_mod, cached, sym| {
                         if found.is_some() {
                             return;
                         }
@@ -1300,7 +1517,7 @@ impl ReducerRegistry {
         &self,
         bag: &WitnessBag,
         q: &ReducerQuery,
-        visited: &mut VisitedSet,
+        state: &mut QueryState,
     ) -> Vec<Witness> {
         let raw = bag.for_attachment(q.attachment);
         let mut out: Vec<Witness> = Vec::with_capacity(raw.len());
@@ -1317,23 +1534,47 @@ impl ReducerRegistry {
                                 bag,
                                 ctx.scopes,
                                 ctx.package_framework,
+                                ctx.package_parents,
+                                ctx.app_surface_consumers,
+                                ctx.module_index,
                                 name,
                                 *scope,
                                 point,
-                                visited,
+                                state,
                             )
                         }
                         _ => {
+                            // A `MethodOnClass{class,..}` reached through an edge is
+                            // a fresh method dispatch: its receiver is that call's
+                            // invocant (`class`), so a fluent `ReturnExpr(Receiver)`
+                            // substitutes the dispatch class — not whatever the outer
+                            // query carried. Mirrors `query_sub_return_type`'s
+                            // `effective_receiver`. The exception is an inheritance
+                            // hop (`MethodOnClass{child} → Edge(MethodOnClass{parent})`):
+                            // there the source is itself a `MethodOnClass`, and the
+                            // child's receiver must carry through so an inherited fluent
+                            // accessor returns the child, not where `has` was declared.
+                            let receiver = match target {
+                                WitnessAttachment::MethodOnClass { class, .. }
+                                    if !matches!(
+                                        q.attachment,
+                                        WitnessAttachment::MethodOnClass { .. }
+                                    ) =>
+                                {
+                                    fresh_dispatch_receiver(&q.receiver, class)
+                                }
+                                _ => q.receiver.clone(),
+                            };
                             let sub_q = ReducerQuery {
                                 attachment: target,
                                 point: q.point,
                                 framework: q.framework,
                                 arity_hint: q.arity_hint,
-                                receiver: q.receiver.clone(),
+                                receiver,
                                 context: q.context,
                             };
-                            if let ReducedValue::Type(t) = self.query_rec(bag, &sub_q, visited) {
-                                Some(t)
+                            if let ReducedValue::Type(t) = &*self.query_rec(bag, &sub_q, state) {
+                                Some(t.clone())
                             } else {
                                 None
                             }
@@ -1349,6 +1590,35 @@ impl ReducerRegistry {
                     }
                     // An edge that didn't resolve drops out — same as a
                     // witness no reducer claims.
+                }
+                WitnessPayload::CallReturn { target, arity } => {
+                    // A fresh method dispatch at the call's own arity. The
+                    // receiver is the dispatch class (`target`'s class, for
+                    // a `MethodOnClass`) so a fluent `Receiver` substitutes
+                    // it; the arity is the call site's, NOT the outer
+                    // query's — that's the whole point of this variant.
+                    let receiver = match target {
+                        WitnessAttachment::MethodOnClass { class, .. } => {
+                            fresh_dispatch_receiver(&q.receiver, class)
+                        }
+                        _ => q.receiver.clone(),
+                    };
+                    let sub_q = ReducerQuery {
+                        attachment: target,
+                        point: q.point,
+                        framework: q.framework,
+                        arity_hint: Some(*arity),
+                        receiver,
+                        context: q.context,
+                    };
+                    if let ReducedValue::Type(t) = &*self.query_rec(bag, &sub_q, state) {
+                        out.push(Witness {
+                            attachment: w.attachment.clone(),
+                            source: w.source.clone(),
+                            payload: WitnessPayload::InferredType(t.clone()),
+                            span: w.span,
+                        });
+                    }
                 }
                 _ => out.push(w.clone()),
             }
@@ -1366,10 +1636,13 @@ impl ReducerRegistry {
         bag: &WitnessBag,
         scopes: &[Scope],
         package_framework: &HashMap<String, FrameworkFact>,
+        package_parents: &HashMap<String, Vec<String>>,
+        app_surface_consumers: &[String],
+        module_index: Option<&crate::module_index::ModuleIndex>,
         var: &str,
         scope: ScopeId,
         point: Point,
-        visited: &mut VisitedSet,
+        state: &mut QueryState,
     ) -> Option<InferredType> {
         let mut chain: Vec<ScopeId> = Vec::new();
         let mut cur = Some(scope);
@@ -1382,12 +1655,16 @@ impl ReducerRegistry {
             .find_map(|sid| scopes[sid.0 as usize].package.as_ref())
             .and_then(|pkg| package_framework.get(pkg).copied())
             .unwrap_or(FrameworkFact::Plain);
-        let empty_parents: HashMap<String, Vec<String>> = HashMap::new();
+        // Preserve the caller's index + parents. Resolving a variable whose
+        // value is a cross-file method chain needs both; rebuilding them empty
+        // here is what dropped the index mid-chase and made `Variable` the lone
+        // attachment that couldn't resolve across files.
         let ctx = BagContext {
             scopes,
             package_framework,
-            module_index: None,
-            package_parents: &empty_parents,
+            module_index,
+            package_parents,
+            app_surface_consumers,
         };
         for sid in chain {
             let att = WitnessAttachment::Variable {
@@ -1402,8 +1679,8 @@ impl ReducerRegistry {
                 receiver: None,
                 context: Some(&ctx),
             };
-            if let ReducedValue::Type(t) = self.query_rec(bag, &q, visited) {
-                return Some(t);
+            if let ReducedValue::Type(t) = &*self.query_rec(bag, &q, state) {
+                return Some(t.clone());
             }
         }
         None
@@ -1516,6 +1793,7 @@ pub fn query_sub_return_type(
                     package_framework: &cached.analysis.package_framework,
                     module_index: Some(idx),
                     package_parents: &cached.analysis.package_parents,
+                    app_surface_consumers: &cached.analysis.app_surface_consumers,
                 };
                 let att = WitnessAttachment::Symbol(sym.id);
                 let q = ReducerQuery {
@@ -1547,20 +1825,26 @@ pub fn query_variable_type(
     bag: &WitnessBag,
     scopes: &[Scope],
     package_framework: &HashMap<String, FrameworkFact>,
+    package_parents: &HashMap<String, Vec<String>>,
+    app_surface_consumers: &[String],
+    module_index: Option<&crate::module_index::ModuleIndex>,
     var: &str,
     scope: ScopeId,
     point: Point,
 ) -> Option<InferredType> {
     let reg = ReducerRegistry::with_defaults();
-    let mut visited: VisitedSet = std::collections::HashSet::new();
+    let mut state = QueryState::new();
     reg.query_variable_with_visited(
         bag,
         scopes,
         package_framework,
+        package_parents,
+        app_surface_consumers,
+        module_index,
         var,
         scope,
         point,
-        &mut visited,
+        &mut state,
     )
 }
 

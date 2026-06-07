@@ -73,6 +73,70 @@ Application semantics:
   `--dump-package`. The free-form `reason` is how a future reader answers
   "why does the LSP think `_route` returns X?" without re-running the build.
 
+### Declarative manifests (the `overrides()` family)
+
+`overrides()` is the first of a family of **static, trigger-independent
+manifests** a plugin declares once (read at load, no per-call cost) and the
+*core* applies. They share a shape: the plugin owns the *vocabulary* (which
+names/verbs/types mean what); the core owns the *mechanism* (it walks the CST —
+rule #1 — and applies the rule). Use a manifest, not an imperative hook, when
+the rule is pure data and a plugin couldn't do the work anyway (it can't walk
+nodes). The registry unions each manifest across all plugins.
+
+Members today:
+
+- **`overrides()` → `[TypeOverride]`** — priority return-type assertions (above).
+- **`dispatch_verbs()` → `[DispatchVerb]`** — "method `verb` on a receiver that
+  `isa target_class` dispatches a named handler into `owner_class`'s registry"
+  (`enqueue`→Minion tasks). The builder records a per-call candidate as a
+  `ReceiverGated<DispatchCandidate>` (ungated, per-file, rides the cache); the
+  receiver isa-check runs at **query time** in
+  `FileAnalysis::applicable_dispatches` (which has the module index) — resolved
+  by *receiver type*, cross-file, not by the file's `use`s. That's why a
+  `Minion` subclass (`Clove::Minion`) or a helper-returned receiver
+  (`$c->minion->enqueue`) lights up where a file-level trigger never would, and
+  why a call site in a non-open workspace/dependency file surfaces the same as
+  an open one. The `ReceiverGated` type makes the inner handler payload
+  unreadable without the isa filter (drift = compile error). See
+  `docs/adr/receiver-gated-dispatch.md`.
+- **`type_constraint_names()` / `type_constraint_inner(name, params)`** — the
+  Type::Tiny `isa` vocabulary. Names gate which call expressions are constraint
+  constructors; the core extracts each constructor's params (rule #1) into a
+  `[ConstraintParam]` and the plugin *folds* them into the constrained inner
+  type. The core wraps the result as `TypeConstraintOf(inner)` and the `has`
+  isa path projects the inner onto the accessor. Arity lives in the fold, not
+  the core, so a constructor can take 0/1/N params. (`frameworks/type-tiny.rhai`:
+  `InstanceOf`/`ConsumerOf`.)
+- **`param_types()` → `[ParamType]`** — type a sub's parameter by selector. The
+  callback-arg case (`$job` in a Minion task, `$c` in a helper) and the
+  role-contract case (`$app` in `sub run_upgrade ($self, $app)` for a doer of
+  `Clove::Upgrade::OneTime`) are the same statement — *parameter N of a sub has
+  type T, determined by the sub's context* — differing only in the selector that
+  identifies the sub. A manifest (not an `on_sub` hook) because a plugin can't
+  walk nodes (rule #1) and the selector is pure data; the core does the single
+  sub-declaration observation and applies every plugin's rules at the
+  declaration walk.
+- **`app_surface_consumers()` → `[String]`** — the receiver classes that compose
+  the fictional app surface (`file_analysis::APP_SURFACE_CLASS`). Mojo helpers
+  conceptually belong to the *app*, reachable from a set of receivers
+  (`$app->h`, any `$c->h`, app subclasses, `$cmd->app->h`, `$job->app->h`) with
+  **no single real class** that is an ancestor of all of them — and they arrive
+  from many plugins *after* any class is "defined". So the home must be an open
+  namespace, not a closed class, and open on **both** axes: open contribution
+  (N plugins each bridge helpers to the surface; `bridges_index` unions them) and
+  open consumption (N receivers see the surface, declared once and extensible).
+  The encoding decouples the two: each listed class gains the surface as a
+  synthetic ancestor in the MRO walk (`file_analysis::parents_of`, the single
+  edge-injection seam shared by every parent-enumeration site), so adding a
+  consumer is one synthetic-parent edge and adding a helper is one bridge to the
+  surface. The builder bakes the union onto `FileAnalysis.app_surface_consumers`.
+  (`frameworks/mojo-helpers.rhai`.)
+
+The recurring rule: **a manifest entry is the plugin naming a property; the core
+asks the value the question** (rule #10). Adding a member is a trait method
+defaulting to empty + a registry union + a Rhai reader (mirror `overrides`),
+plus the one core application site.
+
 ### Lazy return types via `Edge`
 
 Plugins synthesize callables (`mojo-helpers` for `$app->helper(name => sub

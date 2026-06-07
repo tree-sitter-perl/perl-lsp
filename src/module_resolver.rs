@@ -214,6 +214,13 @@ pub fn spawn_resolver(
                         for imp in &m.analysis.imports {
                             enqueue(&mut pending, imp.module_name.clone());
                         }
+                        // Re-export edges — a re-exporting module (Test::Most →
+                        // Test::More) pulls its producers' surfaces transitively,
+                        // so those producers must be resolved even when no file
+                        // `use`s them directly.
+                        for re in &m.analysis.reexport_modules {
+                            enqueue(&mut pending, re.clone());
+                        }
                         // Parent classes — inheritance chain.
                         for parents in m.analysis.package_parents.values() {
                             for parent in parents {
@@ -428,14 +435,35 @@ fn insert_into_cache(
     result: Option<Arc<CachedModule>>,
 ) {
     if let Some(ref cached) = result {
-        for name in indexable_symbol_names(&cached.analysis) {
+        for name in reverse_index_names(&cached.analysis) {
             reverse_index
                 .entry(name)
                 .or_default()
                 .push(module_name.to_string());
         }
+    } else if matches!(cache.get(module_name).as_deref(), Some(Some(_))) {
+        // On-demand @INC resolution missed this module (`None`), but the
+        // workspace indexer already built it (e.g. a project module under a
+        // relative `use lib` the resolver's @INC doesn't cover). Don't let
+        // the miss clobber the indexed copy — and don't leave the reverse
+        // index pointing at a module the cache no longer holds (the orphan
+        // that broke cross-file Handler / dispatch lookup). Keep the Some.
+        return;
     }
     cache.insert(module_name.to_string(), result);
+}
+
+/// Every name `find_exporters` might need to locate this module by: declared
+/// symbols plus the export/export_ok lists. XS exporters (e.g. Scalar::Util's
+/// `weaken`) name functions with no Perl body, so they live only in the export
+/// lists, never in `symbols` — indexing symbols alone leaves a warmed module
+/// invisible to export-attribution diagnostics (B6).
+pub fn reverse_index_names(analysis: &crate::file_analysis::FileAnalysis) -> Vec<String> {
+    let mut names: std::collections::HashSet<String> =
+        indexable_symbol_names(analysis).into_iter().collect();
+    names.extend(analysis.export.iter().cloned());
+    names.extend(analysis.export_ok.iter().cloned());
+    names.into_iter().collect()
 }
 
 /// Rebuild reverse index from existing cache (e.g. after warming from SQLite).
@@ -445,7 +473,7 @@ fn rebuild_reverse_index(
 ) {
     for entry in cache.iter() {
         if let Some(ref cached) = *entry.value() {
-            for name in indexable_symbol_names(&cached.analysis) {
+            for name in reverse_index_names(&cached.analysis) {
                 reverse_index
                     .entry(name)
                     .or_default()
@@ -547,9 +575,16 @@ fn resolve_and_parse_inner(
     }
     let bytes = metadata.len();
     let source = std::fs::read_to_string(&path).ok()?;
-    let tree = parser.parse(&source, None)?;
 
+    let timing = crate::timings::is_enabled();
+    let t_parse = if timing { Some(std::time::Instant::now()) } else { None };
+    let tree = parser.parse(&source, None)?;
+    let parse_dur = t_parse.map(|s| s.elapsed()).unwrap_or_default();
+
+    let t_build = if timing { Some(std::time::Instant::now()) } else { None };
     let mut analysis = crate::builder::build(&tree, source.as_bytes());
+    let build_dur = t_build.map(|s| s.elapsed()).unwrap_or_default();
+    crate::timings::record_built(module_name, parse_dur, build_dur);
 
     // If this module has no exports but inherits via @ISA (e.g. DDP → Data::Printer),
     // fall back to the first parent's exports. This only patches `export`/`export_ok`;
@@ -612,16 +647,6 @@ pub fn add_project_lib_paths(inc_paths: &mut Vec<PathBuf>, workspace_root: &std:
 }
 
 
-/// Index all Perl files in a workspace directory using Rayon for parallelism.
-/// Populates the workspace role of the shared `FileStore`. Returns the number
-/// of successfully indexed files.
-pub fn index_workspace(
-    root: &std::path::Path,
-    files: &crate::file_store::FileStore,
-) -> usize {
-    index_workspace_with_index(root, files, None)
-}
-
 /// Variant that also registers each indexed file in the given
 /// `ModuleIndex` under its primary package name. Used so workspace
 /// modules participate in cross-file lookups (method resolution,
@@ -657,12 +682,25 @@ pub fn index_workspace_with_index(
 
     let count = AtomicUsize::new(0);
 
+    let timing = crate::timings::is_enabled();
     paths.par_iter().for_each(|path| {
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let source = std::fs::read_to_string(path).ok()?;
             let mut parser = create_parser();
+            let t_parse = if timing { Some(std::time::Instant::now()) } else { None };
             let tree = parser.parse(&source, None)?;
-            Some(crate::builder::build(&tree, source.as_bytes()))
+            let parse_dur = t_parse.map(|s| s.elapsed()).unwrap_or_default();
+            let t_build = if timing { Some(std::time::Instant::now()) } else { None };
+            let analysis = crate::builder::build(&tree, source.as_bytes());
+            let build_dur = t_build.map(|s| s.elapsed()).unwrap_or_default();
+            if timing {
+                crate::timings::record_built(
+                    path.strip_prefix(root).unwrap_or(path).display().to_string(),
+                    parse_dur,
+                    build_dur,
+                );
+            }
+            Some(analysis)
         }));
 
         match result {

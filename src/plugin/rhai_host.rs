@@ -20,8 +20,9 @@ use crate::file_analysis::{HashKeyOwner, InferredType, Span};
 use tree_sitter::Point;
 
 use super::{
-    CallContext, CompletionQueryContext, EmitAction, FrameworkPlugin, PluginCompletionAnswer,
-    PluginSigHelpAnswer, SigHelpQueryContext, Trigger, TypeOverride, UseContext,
+    CallContext, CompletionQueryContext, ConstraintParam, DispatchVerb, EmitAction,
+    FrameworkPlugin, ParamType, PluginCompletionAnswer, PluginSigHelpAnswer, SigHelpQueryContext,
+    Trigger, TypeOverride, UseContext,
 };
 
 /// An engine built with our helpers and type registrations. Engines are
@@ -71,6 +72,20 @@ pub fn make_engine() -> Engine {
         to_dynamic(InferredType::ClassName(class)).unwrap_or(Dynamic::UNIT)
     });
 
+    // Project a constraint type to what it constrains — the rhai mirror of
+    // `InferredType::constrained_inner`. A nested constructor param
+    // (`Maybe[InstanceOf['Foo']]`) arrives as a `ConstraintParam.ty` typed
+    // `TypeConstraintOf(inner)`; a passthrough fold (`Maybe[T]` → T's inner)
+    // asks the value for its inner without destructuring the serde shape.
+    // Unit for a non-constraint `ty` (or `()`), so the fold declines cleanly.
+    engine.register_fn("constrained_inner", |ty: Dynamic| -> Dynamic {
+        let Ok(t) = from_dynamic::<InferredType>(&ty) else { return Dynamic::UNIT; };
+        match t.constrained_inner() {
+            Some(inner) => to_dynamic(inner.clone()).unwrap_or(Dynamic::UNIT),
+            None => Dynamic::UNIT,
+        }
+    });
+
     // Mark a param-list's first element as the implicit invocant.
     // Framework callbacks typically receive the receiver as their
     // first positional (`$c` for Mojolicious helpers, `$self_in`
@@ -118,9 +133,14 @@ pub struct RhaiPlugin {
     id: String,
     triggers: Vec<Trigger>,
     overrides: Vec<TypeOverride>,
+    dispatch_verbs: Vec<DispatchVerb>,
+    param_types: Vec<ParamType>,
+    type_constraint_names: Vec<String>,
+    app_surface_consumers: Vec<String>,
     engine: Arc<Engine>,
     ast: Arc<AST>,
     has_on_function_call: bool,
+    has_type_constraint_inner: bool,
     has_on_method_call: bool,
     has_on_use: bool,
     has_on_signature_help: bool,
@@ -181,8 +201,90 @@ impl RhaiPlugin {
             }
         }
 
+        // `dispatch_verbs()` — same optional, fail-safe contract as overrides.
+        let mut dispatch_verbs: Vec<DispatchVerb> = Vec::new();
+        if signatures.iter().any(|n| n == "dispatch_verbs") {
+            match engine.call_fn::<Array>(&mut rhai::Scope::new(), &ast, "dispatch_verbs", ()) {
+                Ok(arr) => {
+                    for d in arr {
+                        match from_dynamic::<DispatchVerb>(&d) {
+                            Ok(v) => dispatch_verbs.push(v),
+                            Err(e) => log::error!(
+                                "plugin `{}` dispatch_verbs() bad entry: {}",
+                                id,
+                                e
+                            ),
+                        }
+                    }
+                }
+                Err(e) => log::error!("plugin `{}` dispatch_verbs() failed: {}", id, e),
+            }
+        }
+
+        // `param_types()` — role-contract parameter typing.
+        let mut param_types: Vec<ParamType> = Vec::new();
+        if signatures.iter().any(|n| n == "param_types") {
+            match engine.call_fn::<Array>(&mut rhai::Scope::new(), &ast, "param_types", ()) {
+                Ok(arr) => {
+                    for d in arr {
+                        match from_dynamic::<ParamType>(&d) {
+                            Ok(v) => param_types.push(v),
+                            Err(e) => log::error!(
+                                "plugin `{}` param_types() bad entry: {}",
+                                id,
+                                e
+                            ),
+                        }
+                    }
+                }
+                Err(e) => log::error!("plugin `{}` param_types() failed: {}", id, e),
+            }
+        }
+
+        // `type_constraint_names()` — the constraint-constructor dispatch gate.
+        let mut type_constraint_names: Vec<String> = Vec::new();
+        if signatures.iter().any(|n| n == "type_constraint_names") {
+            match engine.call_fn::<Array>(&mut rhai::Scope::new(), &ast, "type_constraint_names", ()) {
+                Ok(arr) => {
+                    for d in arr {
+                        match from_dynamic::<String>(&d) {
+                            Ok(s) => type_constraint_names.push(s),
+                            Err(e) => log::error!(
+                                "plugin `{}` type_constraint_names() bad entry: {}",
+                                id,
+                                e
+                            ),
+                        }
+                    }
+                }
+                Err(e) => log::error!("plugin `{}` type_constraint_names() failed: {}", id, e),
+            }
+        }
+
+        // `app_surface_consumers()` — the declared receiver set for the
+        // app surface; same optional, fail-safe array-of-strings shape.
+        let mut app_surface_consumers: Vec<String> = Vec::new();
+        if signatures.iter().any(|n| n == "app_surface_consumers") {
+            match engine.call_fn::<Array>(&mut rhai::Scope::new(), &ast, "app_surface_consumers", ()) {
+                Ok(arr) => {
+                    for d in arr {
+                        match from_dynamic::<String>(&d) {
+                            Ok(s) => app_surface_consumers.push(s),
+                            Err(e) => log::error!(
+                                "plugin `{}` app_surface_consumers() bad entry: {}",
+                                id,
+                                e
+                            ),
+                        }
+                    }
+                }
+                Err(e) => log::error!("plugin `{}` app_surface_consumers() failed: {}", id, e),
+            }
+        }
+
         Ok(Self {
             has_on_function_call: signatures.iter().any(|n| n == "on_function_call"),
+            has_type_constraint_inner: signatures.iter().any(|n| n == "type_constraint_inner"),
             has_on_method_call: signatures.iter().any(|n| n == "on_method_call"),
             has_on_use: signatures.iter().any(|n| n == "on_use"),
             has_on_signature_help: signatures.iter().any(|n| n == "on_signature_help"),
@@ -190,6 +292,10 @@ impl RhaiPlugin {
             id,
             triggers,
             overrides,
+            dispatch_verbs,
+            param_types,
+            type_constraint_names,
+            app_surface_consumers,
             engine,
             ast: Arc::new(ast),
         })
@@ -264,6 +370,60 @@ impl FrameworkPlugin for RhaiPlugin {
         &self.overrides
     }
 
+    fn dispatch_verbs(&self) -> &[DispatchVerb] {
+        &self.dispatch_verbs
+    }
+
+    fn param_types(&self) -> &[ParamType] {
+        &self.param_types
+    }
+
+    fn type_constraint_names(&self) -> &[String] {
+        &self.type_constraint_names
+    }
+
+    fn app_surface_consumers(&self) -> &[String] {
+        &self.app_surface_consumers
+    }
+
+    fn type_constraint_inner(
+        &self,
+        name: &str,
+        params: &[ConstraintParam],
+    ) -> Option<InferredType> {
+        if !self.has_type_constraint_inner {
+            return None;
+        }
+        let params_dyn = to_dynamic(params).ok()?;
+        let out: Result<Dynamic, _> = self.engine.call_fn(
+            &mut rhai::Scope::new(),
+            &self.ast,
+            "type_constraint_inner",
+            (name.to_string(), params_dyn),
+        );
+        let v = match out {
+            Ok(v) => v,
+            Err(e) => {
+                log::error!("plugin `{}`::type_constraint_inner failed: {}", self.id, e);
+                return None;
+            }
+        };
+        if v.is_unit() {
+            return None;
+        }
+        match from_dynamic::<InferredType>(&v) {
+            Ok(t) => Some(t),
+            Err(e) => {
+                log::error!(
+                    "plugin `{}`::type_constraint_inner bad return: {}",
+                    self.id,
+                    e
+                );
+                None
+            }
+        }
+    }
+
     fn on_function_call(&self, ctx: &CallContext) -> Vec<EmitAction> {
         if !self.has_on_function_call {
             return Vec::new();
@@ -327,6 +487,11 @@ const BUNDLED: &[(&str, &str)] = &[
     ("mojo-lite", include_str!("../../frameworks/mojo-lite.rhai")),
     ("minion", include_str!("../../frameworks/minion.rhai")),
     ("data-printer", include_str!("../../frameworks/data-printer.rhai")),
+    ("dbic-resultddl", include_str!("../../frameworks/dbic-resultddl.rhai")),
+    ("type-tiny", include_str!("../../frameworks/type-tiny.rhai")),
+    ("dancer", include_str!("../../frameworks/dancer.rhai")),
+    ("moo", include_str!("../../frameworks/moo.rhai")),
+    ("catalyst", include_str!("../../frameworks/catalyst.rhai")),
 ];
 
 pub fn load_bundled(engine: Arc<Engine>) -> Vec<Box<dyn FrameworkPlugin>> {
@@ -345,6 +510,63 @@ pub fn load_bundled(engine: Arc<Engine>) -> Vec<Box<dyn FrameworkPlugin>> {
     out
 }
 
+/// The workspace root, pinned from the SAME value the LSP/CLI hands
+/// `ModuleIndex::set_workspace_root` — so repo-local plugin discovery and
+/// the per-project SQLite cache agree on what "the project" is. If they
+/// were derived independently (e.g. a cwd ancestor-walk), a plugin set
+/// loaded against one root could invalidate a cache keyed on another.
+static WORKSPACE_ROOT: std::sync::RwLock<Option<std::path::PathBuf>> =
+    std::sync::RwLock::new(None);
+
+/// Record the workspace root for repo-local plugin discovery. Accepts the
+/// same `file://…` URI (or bare path) passed to the module index; `None`
+/// clears it (no project root → no repo-local plugins). Call this before
+/// the first `build()` so the process-wide registry sees it.
+pub fn set_workspace_root(root: Option<&str>) {
+    let path = root.map(|r| {
+        std::path::PathBuf::from(r.strip_prefix("file://").unwrap_or(r))
+    });
+    if let Ok(mut guard) = WORKSPACE_ROOT.write() {
+        *guard = path;
+    }
+}
+
+/// Directories to load user `.rhai` plugins from, in priority order.
+///
+/// 1. `$PERL_LSP_PLUGIN_DIR` — explicit global opt-in (a power user's
+///    personal plugin collection), honored whenever it points at a dir.
+/// 2. `<workspace-root>/.perl-lsp/` — a project shipping plugins for its
+///    own kits, with zero global config. The root is whatever the client
+///    sent at `initialize` (or the CLI's root arg), the exact value the
+///    SQLite cache is keyed on — pinned here, never re-derived, so the
+///    fingerprint that invalidates the cache and the plugins actually
+///    loaded stay in lockstep. With no root set (single-file CLI modes),
+///    falls back to `./.perl-lsp` so running inside a project still works.
+///
+/// Both the loader and the cache fingerprint call this, so "what gets
+/// loaded" and "what invalidates the cache" can't drift apart.
+pub fn plugin_search_dirs() -> Vec<std::path::PathBuf> {
+    let mut dirs: Vec<std::path::PathBuf> = Vec::new();
+    if let Ok(dir) = std::env::var("PERL_LSP_PLUGIN_DIR") {
+        let p = std::path::PathBuf::from(dir);
+        if p.is_dir() {
+            dirs.push(p);
+        }
+    }
+    let root = WORKSPACE_ROOT
+        .read()
+        .ok()
+        .and_then(|g| g.clone())
+        .or_else(|| std::env::current_dir().ok());
+    if let Some(root) = root {
+        let repo = root.join(".perl-lsp");
+        if repo.is_dir() && !dirs.contains(&repo) {
+            dirs.push(repo);
+        }
+    }
+    dirs
+}
+
 /// Stable hash of the plugin set the next `build()` will load. Used by the
 /// SQLite module cache to invalidate stored FileAnalysis blobs when the
 /// plugins that produced them have changed — without this, editing a
@@ -353,13 +575,14 @@ pub fn load_bundled(engine: Arc<Engine>) -> Vec<Box<dyn FrameworkPlugin>> {
 /// Inputs:
 ///   * Every bundled plugin's `(id, source)` pair — catches binary
 ///     rebuilds whose only change was a `frameworks/*.rhai` edit.
-///   * Every `.rhai` file in `$PERL_LSP_PLUGIN_DIR`, with its path —
-///     catches user-plugin add / remove / rename / edit across LSP
-///     restarts.
+///   * Every `.rhai` file in each `plugin_search_dirs()` entry, with its
+///     path — catches user-plugin add / remove / rename / edit across
+///     LSP restarts, whether the plugin lives in `$PERL_LSP_PLUGIN_DIR`
+///     or a repo-local `.perl-lsp/`.
 ///
 /// Read-only: no compile, no side effects, no log spam. Fails open
-/// (returns the bundled-only hash) if the user dir can't be read,
-/// matching the rest of the loader's silently-tolerant behavior.
+/// (returns the bundled-only hash) if a dir can't be read, matching
+/// the rest of the loader's silently-tolerant behavior.
 pub fn plugin_fingerprint() -> String {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
@@ -371,8 +594,7 @@ pub fn plugin_fingerprint() -> String {
         src.hash(&mut hasher);
     }
 
-    if let Ok(dir) = std::env::var("PERL_LSP_PLUGIN_DIR") {
-        let path = std::path::PathBuf::from(&dir);
+    for path in plugin_search_dirs() {
         // Sort entries by path so the hash is independent of readdir order.
         let mut entries: Vec<std::path::PathBuf> = match std::fs::read_dir(&path) {
             Ok(read) => read
@@ -474,12 +696,14 @@ mod tests {
             method_name: None,
             receiver_text: None,
             receiver_type: None,
+            receiver_route_defaults: Vec::new(),
             args: vec![],
             call_span: sp(0, 0, 0, 5),
             selection_span: sp(0, 0, 0, 5),
             current_package: Some("Demo::App".into()),
             current_package_parents: vec![],
             current_package_uses: vec!["Demo".into()],
+            has_options: None,
         };
 
         let emissions = plugin.on_function_call(&ctx);
@@ -552,6 +776,11 @@ mod tests {
             ("mojo-lite", include_str!("../../frameworks/mojo-lite.rhai")),
             ("minion", include_str!("../../frameworks/minion.rhai")),
             ("data-printer", include_str!("../../frameworks/data-printer.rhai")),
+            ("dbic-resultddl", include_str!("../../frameworks/dbic-resultddl.rhai")),
+            ("type-tiny", include_str!("../../frameworks/type-tiny.rhai")),
+            ("dancer", include_str!("../../frameworks/dancer.rhai")),
+            ("moo", include_str!("../../frameworks/moo.rhai")),
+            ("catalyst", include_str!("../../frameworks/catalyst.rhai")),
         ] {
             RhaiPlugin::from_source(src, engine.clone())
                 .unwrap_or_else(|e| panic!("{}.rhai failed to compile: {e}", id));
@@ -577,20 +806,21 @@ mod tests {
             method_name: Some("on".into()),
             receiver_text: Some("$self".into()),
             receiver_type: Some(InferredType::ClassName("My::Emitter".into())),
+            receiver_route_defaults: Vec::new(),
             args: vec![
                 ArgInfo {
                     text: "'connect'".into(),
                     string_value: Some("connect".into()),
                     span: evt_span,
                     content_span: None,
-                    inferred_type: Some(InferredType::String), sub_params: vec![], callable_return_edge: None,
+                    inferred_type: Some(InferredType::String), sub_params: vec![], callable_return_edge: None, ref_sub_name: None,
                 },
                 ArgInfo {
                     text: "sub { ... }".into(),
                     string_value: None,
                     span: cb_span,
                     content_span: None,
-                    inferred_type: Some(InferredType::CodeRef { return_edge: None }), sub_params: vec![], callable_return_edge: None,
+                    inferred_type: Some(InferredType::CodeRef { return_edge: None }), sub_params: vec![], callable_return_edge: None, ref_sub_name: None,
                 },
             ],
             call_span: sp(3, 4, 3, 45),
@@ -598,6 +828,7 @@ mod tests {
             current_package: Some("My::Emitter".into()),
             current_package_parents: vec!["Mojo::EventEmitter".into()],
             current_package_uses: vec![],
+            has_options: None,
         };
 
         let emissions = plugin.on_method_call(&ctx);
@@ -627,6 +858,98 @@ mod tests {
     }
 
     #[test]
+    fn bundled_dbic_resultddl_synthesizes_accessors() {
+        use crate::plugin::{ArgInfo, CallKind};
+
+        let engine = Arc::new(make_engine());
+        let bundled = load_bundled(engine);
+        let plugin = bundled
+            .into_iter()
+            .find(|p| p.id() == "dbic-resultddl")
+            .expect("dbic-resultddl is bundled");
+
+        // `col text => text;` and `has_many searches => {...};` each install
+        // an accessor named by the (autoquoted) first arg.
+        let cases = [("col", "text"), ("has_many", "searches"), ("belongs_to", "product")];
+        for (func, accessor) in cases {
+            let name_span = sp(1, 4, 1, 8);
+            let ctx = CallContext {
+                call_kind: CallKind::Function,
+                function_name: Some(func.into()),
+                method_name: None,
+                receiver_text: None,
+                receiver_type: None,
+                receiver_route_defaults: Vec::new(),
+                args: vec![ArgInfo {
+                    text: accessor.into(),
+                    string_value: Some(accessor.into()),
+                    span: name_span,
+                    content_span: None,
+                    inferred_type: Some(InferredType::String),
+                    sub_params: vec![],
+                    callable_return_edge: None,
+                    ref_sub_name: None,
+                }],
+                call_span: sp(1, 0, 1, 20),
+                selection_span: sp(1, 0, 1, 3),
+                current_package: Some("My::Schema::Result::Thing".into()),
+                current_package_parents: vec![],
+                current_package_uses: vec!["DBIx::Class::ResultDDL".into()],
+                has_options: None,
+            };
+
+            let emissions = plugin.on_function_call(&ctx);
+            let has_method = emissions.iter().any(|e| {
+                matches!(e, EmitAction::Method { name, is_method, .. }
+                    if name == accessor && *is_method)
+            });
+            assert!(has_method,
+                "{func} '{accessor}' should synthesize an accessor Method; got: {emissions:?}");
+        }
+    }
+
+    #[test]
+    fn dbic_resultddl_skips_dynamic_and_non_dsl() {
+        use crate::plugin::{ArgInfo, CallKind};
+
+        let engine = Arc::new(make_engine());
+        let bundled = load_bundled(engine);
+        let plugin = bundled.into_iter().find(|p| p.id() == "dbic-resultddl").unwrap();
+
+        let mk = |func: &str, string_value: Option<String>| CallContext {
+            call_kind: CallKind::Function,
+            function_name: Some(func.into()),
+            method_name: None,
+            receiver_text: None,
+            receiver_type: None,
+            receiver_route_defaults: Vec::new(),
+            args: vec![ArgInfo {
+                text: "x".into(),
+                string_value,
+                span: sp(1, 4, 1, 8),
+                content_span: None,
+                inferred_type: None,
+                sub_params: vec![],
+                callable_return_edge: None,
+                ref_sub_name: None,
+            }],
+            call_span: sp(1, 0, 1, 20),
+            selection_span: sp(1, 0, 1, 3),
+            current_package: Some("My::Schema::Result::Thing".into()),
+            current_package_parents: vec![],
+            current_package_uses: vec!["DBIx::Class::ResultDDL".into()],
+            has_options: None,
+        };
+
+        // Dynamic column name (`col $field => ...`) — nothing to synthesize.
+        assert!(plugin.on_function_call(&mk("col", None)).is_empty(),
+            "dynamic col name must be skipped");
+        // A non-DSL function with a string arg is not our concern.
+        assert!(plugin.on_function_call(&mk("table", Some("embeddings".into()))).is_empty(),
+            "`table` declares no accessor and must emit nothing");
+    }
+
+    #[test]
     fn mojo_events_skips_dynamic_event_name() {
         use crate::plugin::{ArgInfo, CallKind};
 
@@ -643,6 +966,7 @@ mod tests {
             method_name: Some("on".into()),
             receiver_text: Some("$self".into()),
             receiver_type: Some(InferredType::ClassName("Foo".into())),
+            receiver_route_defaults: Vec::new(),
             args: vec![
                 // Dynamic name — string_value is None, so plugin must skip.
                 ArgInfo {
@@ -650,14 +974,14 @@ mod tests {
                     string_value: None,
                     span: sp(0, 0, 0, 5),
                     content_span: None,
-                    inferred_type: None, sub_params: vec![], callable_return_edge: None,
+                    inferred_type: None, sub_params: vec![], callable_return_edge: None, ref_sub_name: None,
                 },
                 ArgInfo {
                     text: "sub {}".into(),
                     string_value: None,
                     span: sp(0, 6, 0, 12),
                     content_span: None,
-                    inferred_type: Some(InferredType::CodeRef { return_edge: None }), sub_params: vec![], callable_return_edge: None,
+                    inferred_type: Some(InferredType::CodeRef { return_edge: None }), sub_params: vec![], callable_return_edge: None, ref_sub_name: None,
                 },
             ],
             call_span: sp(0, 0, 0, 15),
@@ -665,6 +989,7 @@ mod tests {
             current_package: Some("Foo".into()),
             current_package_parents: vec!["Mojo::EventEmitter".into()],
             current_package_uses: vec![],
+            has_options: None,
         };
 
         let emissions = plugin.on_method_call(&ctx);
@@ -725,6 +1050,190 @@ mod tests {
     }
 
     #[test]
+    fn catalyst_plugin_loads_and_has_overrides() {
+        let engine = Arc::new(make_engine());
+        let bundled = load_bundled(engine);
+        let plugin = bundled
+            .into_iter()
+            .find(|p| p.id() == "catalyst")
+            .expect("catalyst plugin is bundled");
+
+        // Static overrides manifest must declare at least req/res/stash.
+        let ovs = plugin.overrides();
+        assert!(!ovs.is_empty(), "catalyst must ship return-type overrides");
+
+        let has_req = ovs.iter().any(|o| {
+            matches!(&o.target, crate::plugin::OverrideTarget::Method { class, name }
+                if class == "Catalyst" && name == "req")
+                && o.return_type == InferredType::ClassName("Catalyst::Request".into())
+        });
+        assert!(has_req, "missing req → Catalyst::Request override");
+
+        let has_res = ovs.iter().any(|o| {
+            matches!(&o.target, crate::plugin::OverrideTarget::Method { class, name }
+                if class == "Catalyst" && name == "res")
+                && o.return_type == InferredType::ClassName("Catalyst::Response".into())
+        });
+        assert!(has_res, "missing res → Catalyst::Response override");
+
+        let has_stash = ovs.iter().any(|o| {
+            matches!(&o.target, crate::plugin::OverrideTarget::Method { class, name }
+                if class == "Catalyst" && name == "stash")
+                && o.return_type == InferredType::HashRef
+        });
+        assert!(has_stash, "missing stash → HashRef override");
+
+        let has_log = ovs.iter().any(|o| {
+            matches!(&o.target, crate::plugin::OverrideTarget::Method { class, name }
+                if class == "Catalyst" && name == "log")
+                && o.return_type == InferredType::ClassName("Catalyst::Log".into())
+        });
+        assert!(has_log, "missing log → Catalyst::Log override");
+    }
+
+    #[test]
+    fn catalyst_model_call_emits_method_call_ref() {
+        use crate::plugin::{ArgInfo, CallKind};
+
+        let engine = Arc::new(make_engine());
+        let bundled = load_bundled(engine);
+        let plugin = bundled
+            .into_iter()
+            .find(|p| p.id() == "catalyst")
+            .expect("catalyst is bundled");
+
+        let name_span = sp(5, 20, 5, 23);
+        let ctx = CallContext {
+            call_kind: CallKind::Method,
+            function_name: None,
+            method_name: Some("model".into()),
+            receiver_text: Some("$c".into()),
+            receiver_type: Some(InferredType::ClassName("Catalyst".into())),
+            receiver_route_defaults: vec![],
+            args: vec![
+                ArgInfo {
+                    text: "'Foo'".into(),
+                    string_value: Some("Foo".into()),
+                    span: name_span,
+                    content_span: Some(name_span),
+                    inferred_type: Some(InferredType::String),
+                    sub_params: vec![],
+                    callable_return_edge: None,
+                    ref_sub_name: None,
+                },
+            ],
+            call_span: sp(5, 10, 5, 26),
+            selection_span: sp(5, 13, 5, 18),
+            current_package: Some("MyApp::Controller::Root".into()),
+            current_package_parents: vec!["Catalyst::Controller".into()],
+            current_package_uses: vec![],
+            has_options: None,
+        };
+
+        let emissions = plugin.on_method_call(&ctx);
+        // A MethodCallRef pointing at Foo::new (the component class).
+        let has_ref = emissions.iter().any(|e| {
+            matches!(e, EmitAction::MethodCallRef { method_name, invocant, .. }
+                if method_name == "new" && invocant == "Foo")
+        });
+        assert!(has_ref,
+            "model('Foo') must emit MethodCallRef into class Foo; got: {:?}", emissions);
+    }
+
+    #[test]
+    fn catalyst_forward_emits_dispatch_call() {
+        use crate::plugin::{ArgInfo, CallKind};
+
+        let engine = Arc::new(make_engine());
+        let bundled = load_bundled(engine);
+        let plugin = bundled
+            .into_iter()
+            .find(|p| p.id() == "catalyst")
+            .expect("catalyst is bundled");
+
+        let path_span = sp(7, 20, 7, 38);
+        let ctx = CallContext {
+            call_kind: CallKind::Method,
+            function_name: None,
+            method_name: Some("forward".into()),
+            receiver_text: Some("$c".into()),
+            receiver_type: Some(InferredType::ClassName("Catalyst".into())),
+            receiver_route_defaults: vec![],
+            args: vec![
+                ArgInfo {
+                    text: "'/Root/index'".into(),
+                    string_value: Some("/Root/index".into()),
+                    span: path_span,
+                    content_span: Some(path_span),
+                    inferred_type: Some(InferredType::String),
+                    sub_params: vec![],
+                    callable_return_edge: None,
+                    ref_sub_name: None,
+                },
+            ],
+            call_span: sp(7, 10, 7, 40),
+            selection_span: sp(7, 13, 7, 20),
+            current_package: Some("MyApp::Controller::Root".into()),
+            current_package_parents: vec!["Catalyst::Controller".into()],
+            current_package_uses: vec![],
+            has_options: None,
+        };
+
+        let emissions = plugin.on_method_call(&ctx);
+        let has_dispatch = emissions.iter().any(|e| {
+            matches!(e, EmitAction::DispatchCall { name, dispatcher, .. }
+                if name == "/Root/index" && dispatcher == "forward")
+        });
+        assert!(has_dispatch,
+            "forward('/Root/index') must emit DispatchCall; got: {:?}", emissions);
+    }
+
+    #[test]
+    fn catalyst_skips_non_catalyst_receiver() {
+        use crate::plugin::{ArgInfo, CallKind};
+
+        let engine = Arc::new(make_engine());
+        let bundled = load_bundled(engine);
+        let plugin = bundled
+            .into_iter()
+            .find(|p| p.id() == "catalyst")
+            .expect("catalyst is bundled");
+
+        // `$schema->model('Foo')` — DBIx::Class::Schema, NOT Catalyst.
+        // The plugin must not emit for non-Catalyst receivers.
+        let ctx = CallContext {
+            call_kind: CallKind::Method,
+            function_name: None,
+            method_name: Some("model".into()),
+            receiver_text: Some("$schema".into()),
+            receiver_type: Some(InferredType::ClassName("DBIx::Class::Schema".into())),
+            receiver_route_defaults: vec![],
+            args: vec![
+                ArgInfo {
+                    text: "'Foo'".into(),
+                    string_value: Some("Foo".into()),
+                    span: sp(0, 0, 0, 5),
+                    content_span: None,
+                    inferred_type: Some(InferredType::String),
+                    sub_params: vec![],
+                    callable_return_edge: None,
+                    ref_sub_name: None,
+                },
+            ],
+            call_span: sp(0, 0, 0, 20),
+            selection_span: sp(0, 10, 0, 15),
+            current_package: Some("MyApp::Controller::Root".into()),
+            current_package_parents: vec!["Catalyst::Controller".into()],
+            current_package_uses: vec![],
+            has_options: None,
+        };
+
+        let emissions = plugin.on_method_call(&ctx);
+        assert!(emissions.is_empty(),
+            "non-Catalyst receiver must not emit; got: {:?}", emissions);
+    }
+
+    #[test]
     fn non_matching_function_returns_empty() {
         let src = r#"
             fn id() { "demo2" }
@@ -743,12 +1252,14 @@ mod tests {
             method_name: None,
             receiver_text: None,
             receiver_type: None,
+            receiver_route_defaults: Vec::new(),
             args: vec![],
             call_span: sp(0, 0, 0, 0),
             selection_span: sp(0, 0, 0, 0),
             current_package: None,
             current_package_parents: vec![],
             current_package_uses: vec![],
+            has_options: None,
         };
         assert!(plugin.on_function_call(&ctx).is_empty());
     }

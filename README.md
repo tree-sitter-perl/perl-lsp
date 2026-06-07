@@ -167,7 +167,7 @@ perl-lsp --check [<root>] [--severity error|warning] [--format json|human]
 
 # Code exploration
 perl-lsp --outline <file>
-perl-lsp --hover <file> <line> <col>
+perl-lsp --hover [<root>] <file> <line> <col>   # <root> enables cross-file hover
 perl-lsp --type-at <file> <line> <col>
 perl-lsp --definition <root> <file> <line> <col>
 perl-lsp --references <root> <file> <line> <col>
@@ -182,6 +182,32 @@ perl-lsp --workspace-symbol <root> <query>
 ```bash
 perl-lsp --check . --severity warning
 ```
+
+## Plugins
+
+Framework intelligence (Mojolicious, Minion, …) ships as bundled
+[Rhai](https://rhai.rs) plugins. You can add your own: drop any
+`*.rhai` file into the directory named by `$PERL_LSP_PLUGIN_DIR` and
+restart the server. Plugin sources are fingerprinted, so editing one
+invalidates the cross-file cache automatically.
+
+### Generating a plugin for an `Import::Base` kit
+
+Most Perl shops centralize their import boilerplate behind a kit
+(`use Co::Base -Class;`). `perl-gen/` is a Perl script that reads such
+a kit's `@IMPORT_MODULES` / `%IMPORT_BUNDLES` tables and emits a
+ready-to-commit `.rhai` plugin so the LSP understands what the kit
+imports:
+
+```bash
+perl-gen/bin/perl-lsp-gen-importbase Co::Base::Local \
+  --lib /path/to/project/lib \
+  --alias Co::Base \
+  --out "$PERL_LSP_PLUGIN_DIR/co-base.rhai"
+```
+
+See `perl-gen/README.md` for full usage and
+`docs/adr/importbase-plugin-gen.md` for the design rationale.
 
 ## Building from Source
 

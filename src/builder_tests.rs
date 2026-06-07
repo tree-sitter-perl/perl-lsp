@@ -383,12 +383,31 @@ fn test_implicit_self_type_inference() {
 }
 
 #[test]
+fn test_self_completion_walks_ancestors_in_fallback() {
+    // Untyped `$self` (the fallback path, no bag type — e.g. assigned via
+    // `$class->SUPER::new`) must still resolve to the enclosing class AND walk
+    // its ancestors, so inherited methods are offered, not just own ones.
+    let source = "package Base;\nsub inherited_m { 1 }\npackage Child;\nuse parent -norequire, 'Base';\nsub own_m {\n  my $self = $class->SUPER::new;\n  $self->\n}\n";
+    let fa = build_fa(source);
+    let names: Vec<String> = fa
+        .complete_methods("$self", Point::new(6, 9), None)
+        .into_iter()
+        .map(|c| c.label)
+        .collect();
+    assert!(names.iter().any(|n| n == "own_m"), "own method missing: {names:?}");
+    assert!(
+        names.iter().any(|n| n == "inherited_m"),
+        "inherited (ancestor) method missing from untyped-$self fallback: {names:?}"
+    );
+}
+
+#[test]
 fn test_self_completion_inside_method() {
     // $self-> inside a method should complete with sibling methods
     let source = "use v5.38;\nclass Point {\n    field $x :param :reader;\n    method magnitude () { }\n    method to_string () {\n        $self->;\n    }\n}\n";
     let fa = build_fa(source);
 
-    let candidates = fa.complete_methods("$self", Point::new(5, 14));
+    let candidates = fa.complete_methods("$self", Point::new(5, 14), None);
     let names: Vec<&str> = candidates.iter().map(|c| c.label.as_str()).collect();
     assert!(
         names.contains(&"magnitude"),
@@ -429,7 +448,7 @@ fn test_field_writer_synthesizes_method() {
 fn test_complete_methods_in_class() {
     let fa = build_fa("use v5.38;\nclass Point {\n    field $x :param :reader;\n    field $y :param;\n    method magnitude() { }\n    method to_string() { }\n}\nmy $p = Point->new(x => 1);\n$p->;\n");
     // $p-> is at line 8, col 4
-    let candidates = fa.complete_methods("$p", Point::new(8, 4));
+    let candidates = fa.complete_methods("$p", Point::new(8, 4), None);
     let names: Vec<&str> = candidates.iter().map(|c| c.label.as_str()).collect();
     assert!(names.contains(&"new"), "missing new, got: {:?}", names);
     assert!(
@@ -464,7 +483,7 @@ $p->;
     let inferred = fa.inferred_type_via_bag("$p", Point::new(8, 4));
     assert!(inferred.is_some(), "type inference for $p should resolve");
 
-    let candidates = fa.complete_methods("$p", Point::new(10, 4));
+    let candidates = fa.complete_methods("$p", Point::new(10, 4), None);
     let names: Vec<&str> = candidates.iter().map(|c| c.label.as_str()).collect();
     assert!(
         names.contains(&"magnitude"),
@@ -497,7 +516,7 @@ $p->;
 "#;
     let fa = build_fa(source);
 
-    let candidates = fa.complete_methods("$p", Point::new(11, 4));
+    let candidates = fa.complete_methods("$p", Point::new(11, 4), None);
     let names: Vec<&str> = candidates.iter().map(|c| c.label.as_str()).collect();
     assert!(names.contains(&"new"), "missing new, got: {:?}", names);
     assert!(
@@ -518,7 +537,7 @@ fn test_complete_methods_flat_class() {
     // class Foo; (no block) — methods follow as siblings, like package
     let source = "use v5.38;\nclass Foo;\nmethod bar () { }\nmethod baz () { }\n";
     let fa = build_fa(source);
-    let candidates = fa.complete_methods("Foo", Point::new(3, 0));
+    let candidates = fa.complete_methods("Foo", Point::new(3, 0), None);
     let names: Vec<&str> = candidates.iter().map(|c| c.label.as_str()).collect();
     assert!(names.contains(&"bar"), "missing bar, got: {:?}", names);
     assert!(names.contains(&"baz"), "missing baz, got: {:?}", names);
@@ -550,6 +569,115 @@ fn test_field_reader_goto_def() {
     let span = def.unwrap();
     assert_eq!(span.start.row, 2, "should point to field declaration line");
 }
+
+/// NAV (a): goto-def on a method that does NOT exist on a known class
+/// must be an honest miss (None), NEVER a confident jump to the
+/// `package` decl. The `$self->{email}->method` shape used to over-type
+/// the invocant to the enclosing class and then jump to its package
+/// line when the method wasn't found — worse than a miss.
+#[test]
+fn test_goto_def_unknown_method_is_honest_miss_not_package_jump() {
+    let source = "package Foo;\nsub new { bless { email => undef }, shift }\nsub to { my $self = shift; $self->{email}->totallyunknownmethod(1); }\n1;\n";
+    let fa = build_fa(source);
+    // `totallyunknownmethod` starts at row 2, col 43 (after the `->`).
+    let def = fa.find_definition(Point::new(2, 48), None, None, None);
+    assert!(
+        def.is_none(),
+        "unknown method must return None (honest miss), not jump to package decl; got {:?}",
+        def
+    );
+}
+
+/// NAV regression (iv): goto-def on a typed same-file method still
+/// lands on the method declaration via the frozen dispatch edge.
+#[test]
+fn test_goto_def_typed_same_file_method_resolves() {
+    let source = "package Widget;\nsub new { bless {}, shift }\nsub frobnicate { 1 }\nsub run { my $w = Widget->new; $w->frobnicate; }\n1;\n";
+    let fa = build_fa(source);
+    // `frobnicate` in `$w->frobnicate` — row 3. Find its column.
+    let row = 3usize;
+    let line = source.lines().nth(row).unwrap();
+    let col = line.find("$w->frobnicate").unwrap() + "$w->".len() + 2;
+    let def = fa.find_definition(Point::new(row, col), None, None, None);
+    assert!(def.is_some(), "typed $w->frobnicate must resolve to the decl");
+    assert_eq!(
+        def.unwrap().start.row,
+        2,
+        "should land on `sub frobnicate` (row 2)"
+    );
+}
+
+/// OVER-TYPING PIN: a hash element extracted to a scalar must NOT be
+/// typed as the container's class. `my $h = $self->{helper}` carries
+/// the value of `$self->{helper}`, whose type is independent of
+/// `$self`'s class (Foo). The chain typer used to push a spurious
+/// `TypeConstraint $h = Foo` because `$self->{helper}` resolved to
+/// `$self`'s class. `$h` must be honest-UNTYPED (no real value type is
+/// known), and `$h->do_thing` must be an honest miss — not a
+/// confident-wrong jump to a Foo sub.
+#[test]
+fn test_hash_element_extracted_to_scalar_is_not_container_class() {
+    let source = "package Foo;\nsub new { bless {}, shift }\nsub use_it { my $self = shift; $self->{helper} = Helper->new; my $h = $self->{helper}; $h->do_thing(); }\n1;\n";
+    let fa = build_fa(source);
+
+    // `$h` is declared on row 2. Probe just past its declaration.
+    let line = source.lines().nth(2).unwrap();
+    let h_decl_col = line.find("my $h").unwrap();
+    let probe = tree_sitter::Point::new(2, h_decl_col + "my $h = $self->{helper}; ".len());
+
+    let ty = fa.inferred_type("$h", probe);
+    assert!(
+        !matches!(ty, Some(InferredType::ClassName(c)) if c == "Foo"),
+        "$h must NOT be typed as the container's class Foo; got {:?}",
+        ty
+    );
+
+    // goto-def on `$h->do_thing` must be an honest miss, never a jump
+    // to a Foo sub.
+    let do_thing_col = line.rfind("do_thing").unwrap();
+    let def = fa.find_definition(tree_sitter::Point::new(2, do_thing_col + 1), None, None, None);
+    assert!(
+        def.is_none(),
+        "$h->do_thing must be an honest miss, not a confident jump to a Foo sub; got {:?}",
+        def
+    );
+}
+
+/// A4 end-to-end (Step 3 consume join): a typed write into a slot, extracted
+/// to a scalar, types the scalar via `SlotType` — so a method call on it
+/// resolves. Helper is defined here so resolution can complete (contrast the
+/// honest-miss pin above, where it isn't).
+#[test]
+fn slot_type_write_then_extract_resolves_method() {
+    let source = "package Helper;\nsub new { bless {}, shift }\nsub do_thing { 1 }\npackage Foo;\nsub new { bless {}, shift }\nsub use_it { my $self = shift; $self->{helper} = Helper->new; my $h = $self->{helper}; $h->do_thing(); }\n1;\n";
+    let fa = build_fa(source);
+    let line = source.lines().nth(5).unwrap();
+
+    let probe = tree_sitter::Point::new(
+        5,
+        line.find("my $h").unwrap() + "my $h = $self->{helper}; ".len(),
+    );
+    let ty = fa.inferred_type("$h", probe);
+    assert_eq!(
+        ty.as_ref().and_then(|t| t.class_name()),
+        Some("Helper"),
+        "$h must type as Helper via the consumed SlotType; got {:?}",
+        ty
+    );
+
+    let def = fa.find_definition(
+        tree_sitter::Point::new(5, line.rfind("do_thing").unwrap() + 1),
+        None,
+        None,
+        None,
+    );
+    assert!(
+        matches!(&def, Some(d) if d.start.row == 2),
+        "$h->do_thing must resolve to Helper::do_thing on row 2; got {:?}",
+        def
+    );
+}
+
 
 #[test]
 fn test_use_symbol() {
@@ -588,6 +716,101 @@ fn test_function_call_ref() {
         .filter(|r| r.target_name == "foo" && matches!(r.kind, RefKind::FunctionCall { .. }))
         .collect();
     assert_eq!(call_refs.len(), 1);
+}
+
+/// Rule #7: a call that appears as an *operand* of a larger expression
+/// (string concatenation, ternary) must still emit its FunctionCall ref.
+/// AWStats shape `print "<td>".Format_Number($x)."</td>"` parses the call
+/// as a `function_call_expression` nested inside a `binary_expression`
+/// (the concat) which is itself the `print` verb's argument. The generic
+/// `_ => visit_children` traversal in `visit_node` reaches it; this test
+/// pins that so a future grammar/traversal change can't silently regress
+/// references to statement-level calls only.
+#[test]
+fn call_ref_in_concatenation_operand() {
+    let fa = build_fa("sub Format_Number { }\nprint \"<td>\".Format_Number($x).\"</td>\";\n");
+    let call_refs: Vec<_> = fa
+        .refs
+        .iter()
+        .filter(|r| r.target_name == "Format_Number" && matches!(r.kind, RefKind::FunctionCall { .. }))
+        .collect();
+    assert_eq!(
+        call_refs.len(),
+        1,
+        "a call inside `.`-concatenation must emit exactly one FunctionCall ref"
+    );
+    // The ref must pin the *call name*, not the surrounding concat/print.
+    assert!(call_refs[0].span.start.row == 1);
+}
+
+/// Rule #7: calls in both arms of a ternary are operands too.
+#[test]
+fn call_ref_in_ternary_operands() {
+    let fa = build_fa("sub foo { }\nsub bar { }\nmy $y = $cond ? foo() : bar();\n");
+    let foo_refs = fa
+        .refs
+        .iter()
+        .filter(|r| r.target_name == "foo" && matches!(r.kind, RefKind::FunctionCall { .. }))
+        .count();
+    let bar_refs = fa
+        .refs
+        .iter()
+        .filter(|r| r.target_name == "bar" && matches!(r.kind, RefKind::FunctionCall { .. }))
+        .count();
+    assert_eq!(foo_refs, 1, "ternary consequent call must emit a ref");
+    assert_eq!(bar_refs, 1, "ternary alternative call must emit a ref");
+}
+
+/// Method calls nested in expression operands must also emit a MethodCall ref.
+#[test]
+fn method_call_ref_in_concatenation_operand() {
+    let fa = build_fa("my $s = \"x\" . $obj->fmt($n) . \"y\";\n");
+    let m_refs: Vec<_> = fa
+        .refs
+        .iter()
+        .filter(|r| r.target_name == "fmt" && matches!(r.kind, RefKind::MethodCall { .. }))
+        .collect();
+    assert_eq!(m_refs.len(), 1, "method call inside concat must emit one MethodCall ref");
+}
+
+/// AWStats-shaped fixture: a def plus N call sites, every call embedded in a
+/// concatenation operand. Mirrors the real-world undercount (def→6 of 172).
+/// Asserts the call-ref count equals the textual occurrence count and that a
+/// bareword that is NOT a call (`Format_Number` as a hash key) is not counted.
+#[test]
+fn call_refs_count_across_expression_positions() {
+    let src = "\
+sub Format_Number { my $n = shift; return $n; }
+print \"<td>\".Format_Number($a).\"</td>\";
+print \"<td>\".Format_Number($b).\"</td><td>x</td>\";
+my $r = \"a\" . Format_Number($c) . \"b\" . Format_Number($d);
+my $t = $cond ? Format_Number($e) : 0;
+my %h = (Format_Number => 1);
+";
+    let fa = build_fa(src);
+    let call_refs = fa
+        .refs
+        .iter()
+        .filter(|r| r.target_name == "Format_Number" && matches!(r.kind, RefKind::FunctionCall { .. }))
+        .count();
+    // 5 genuine call sites (two single-call prints, two in one concat, one ternary).
+    assert_eq!(
+        call_refs, 5,
+        "every call-position occurrence must emit a FunctionCall ref; the hash-key bareword must not"
+    );
+}
+
+/// Regression guard: a plain statement-level call still emits exactly one
+/// ref (no double-emission from the operand-traversal path).
+#[test]
+fn statement_level_call_emits_single_ref() {
+    let fa = build_fa("sub debug { }\ndebug(\"hello\");\n");
+    let call_refs = fa
+        .refs
+        .iter()
+        .filter(|r| r.target_name == "debug" && matches!(r.kind, RefKind::FunctionCall { .. }))
+        .count();
+    assert_eq!(call_refs, 1, "statement-level call must emit exactly one ref");
 }
 
 #[test]
@@ -666,6 +889,98 @@ fn test_type_inference_first_param() {
     let fa = build_fa("package Calculator;\nsub new {\n    my ($self) = @_;\n}");
     let ty = fa.inferred_type_via_bag("$self", Point::new(2, 10));
     assert_eq!(ty, Some(InferredType::ClassName("Calculator".into())));
+}
+
+#[test]
+fn test_bless_promotes_var_to_class() {
+    // `my $self = {}; bless $self, $class;` — after the bless, $self is an
+    // instance of the enclosing class, not a bare HashRef.
+    let src = "package Point;\nsub new {\n  my $class = shift;\n  my $self = {};\n  bless $self, $class;\n  return $self;\n}\n";
+    let fa = build_fa(src);
+    // Query $self at the `return $self` line (after the bless).
+    let ty = fa.inferred_type_via_bag("$self", Point::new(5, 9));
+    assert_eq!(
+        ty,
+        Some(InferredType::ClassName("Point".into())),
+        "post-bless $self should be ClassName(Point), got {:?}",
+        ty
+    );
+}
+
+#[test]
+fn test_bless_fat_arrow_and_package() {
+    // `bless $self => __PACKAGE__` form.
+    let src = "package Widget;\nsub build {\n  my $self = {};\n  bless $self => __PACKAGE__;\n  return $self;\n}\n";
+    let fa = build_fa(src);
+    let ty = fa.inferred_type_via_bag("$self", Point::new(4, 9));
+    assert_eq!(ty, Some(InferredType::ClassName("Widget".into())));
+}
+
+#[test]
+fn test_bless_literal_class() {
+    // `bless $self, "Other"` — explicit literal class wins.
+    let src = "package Factory;\nsub mk {\n  my $self = {};\n  bless $self, \"Other\";\n  return $self;\n}\n";
+    let fa = build_fa(src);
+    let ty = fa.inferred_type_via_bag("$self", Point::new(4, 9));
+    assert_eq!(ty, Some(InferredType::ClassName("Other".into())));
+}
+
+#[test]
+fn test_return_bless_anon_hash_class() {
+    // `return bless {}, $class` — the sub returns a ClassName instance even
+    // though there's no variable to promote.
+    let src = "package Maker;\nsub new {\n  my $class = shift;\n  return bless {}, $class;\n}\n";
+    let fa = build_fa(src);
+    let ty = fa.sub_return_type_at_arity("new", Some(0));
+    assert_eq!(
+        ty,
+        Some(InferredType::ClassName("Maker".into())),
+        "return bless should type the sub return, got {:?}",
+        ty
+    );
+}
+
+#[test]
+fn test_bless_into_ref_invocant_types_clone_return() {
+    // `bless { ... }, ref $_[0]` (the clone idiom) blesses into the invocant's
+    // class, so the implicit-return value types as the enclosing class.
+    let src = "package DateTime;\nsub clone { bless { %{ $_[0] } }, ref $_[0] }\n";
+    let fa = build_fa(src);
+    let ty = fa.sub_return_type_at_arity("clone", Some(1));
+    assert_eq!(
+        ty,
+        Some(InferredType::ClassName("DateTime".into())),
+        "bless ..., ref $_[0] should type the clone return, got {:?}",
+        ty
+    );
+}
+
+#[test]
+fn test_forward_declaration_does_not_duplicate_symbol() {
+    // `sub foo;` is a forward declaration, not a definition: only the bodied
+    // `sub foo { ... }` should produce a symbol (no outline dup / goto-def shadow).
+    let fa = build_fa("package P;\nsub foo;\nsub foo { my ($self, $x) = @_; $x }\n");
+    let foos: Vec<_> = fa
+        .symbols
+        .iter()
+        .filter(|s| matches!(s.kind, SymKind::Sub | SymKind::Method) && s.name == "foo")
+        .collect();
+    assert_eq!(
+        foos.len(),
+        1,
+        "expected one `foo` symbol (the definition), got {:?}",
+        foos.iter().map(|s| s.span.start.row).collect::<Vec<_>>()
+    );
+    assert_eq!(foos[0].span.start.row, 2, "the symbol should be the bodied def on line 2");
+}
+
+#[test]
+fn test_non_bless_hashref_stays_hashref() {
+    // Regression: a hashref that's never blessed keeps its HashRef type.
+    let src = "sub mk {\n  my $h = {};\n  return $h;\n}\n";
+    let fa = build_fa(src);
+    let ty = fa.inferred_type_via_bag("$h", Point::new(2, 9));
+    assert_eq!(ty, Some(InferredType::HashRef), "unblessed hashref stays HashRef");
 }
 
 // ---- Literal constructor extraction tests (via build_fa) ----
@@ -1292,6 +1607,98 @@ $calc->get_self->get_config->{host};
     );
 }
 
+/// Acceptance for the unified, tree-free expression-type chase
+/// (`docs/prompt-unify-expr-type-resolution.md`): the ref-keyed,
+/// `tree: None` invocant-class path and the node-keyed
+/// `resolve_expression_type` path must produce identical answers for
+/// every invocant shape — scalar, chain, array-element, function-call,
+/// and hash-element. Both now route through `expr_type_at_span`.
+#[test]
+fn invocant_class_and_resolve_expression_type_agree_tree_free() {
+    let src = "\
+package Foo;
+sub new { bless {}, shift }
+sub kid { return Foo->new(); }
+sub cfg { return { host => 'x' }; }
+package main;
+sub mk { return Foo->new(); }
+my $f = Foo->new();
+my @arr;
+push @arr, Foo->new();
+my %h = (it => $f);
+$f->kid();
+$f->kid()->kid();
+$arr[0]->kid();
+mk()->kid();
+$h{it}->kid();
+";
+    let tree = parse(src);
+    let fa = build(&tree, src.as_bytes());
+
+    // For every MethodCall ref with an invocant span, the two paths
+    // must agree. The invocant-class path takes no tree; the
+    // expression-type path is fed the actual invocant CST node.
+    let mut checked_shapes = 0;
+    for r in &fa.refs {
+        let RefKind::MethodCall { invocant_span: Some(sp), .. } = &r.kind else {
+            continue;
+        };
+        let invocant_node = tree
+            .root_node()
+            .descendant_for_point_range(sp.start, sp.end)
+            .expect("invocant span maps to a node");
+        // Skip if the descendant doesn't exactly cover the invocant
+        // (parser quirk for some shapes) — we only compare where both
+        // paths see the same node.
+        if invocant_node.start_position() != sp.start
+            || invocant_node.end_position() != sp.end
+        {
+            continue;
+        }
+        let via_ref = fa.method_call_invocant_class(r, None);
+        let via_node = fa
+            .resolve_expression_type(invocant_node, src.as_bytes(), None)
+            .and_then(|t| t.class_name().map(|s| s.to_string()));
+        assert_eq!(
+            via_ref, via_node,
+            "invocant-class (tree-free) vs resolve_expression_type disagree \
+             for invocant `{}` (kind {})",
+            invocant_node.utf8_text(src.as_bytes()).unwrap_or("?"),
+            invocant_node.kind(),
+        );
+        checked_shapes += 1;
+    }
+    // Sanity: the source exercises scalar / chain / array-element /
+    // function-call / hash-element invocants, so we should have
+    // compared several.
+    assert!(
+        checked_shapes >= 5,
+        "expected to compare at least the 5 invocant shapes, got {}",
+        checked_shapes,
+    );
+
+    // Spot-check the concrete answers so a mutual `None` regression
+    // can't pass the agreement assert vacuously.
+    let kid_on_scalar = fa.refs.iter().find(|r| {
+        matches!(&r.kind, RefKind::MethodCall { invocant, .. } if invocant == "$f")
+            && r.target_name == "kid"
+    });
+    assert_eq!(
+        kid_on_scalar.and_then(|r| fa.method_call_invocant_class(r, None)).as_deref(),
+        Some("Foo"),
+        "scalar invocant `$f->kid` should type as Foo, tree-free",
+    );
+    let kid_on_array = fa.refs.iter().find(|r| {
+        matches!(&r.kind, RefKind::MethodCall { invocant, .. } if invocant.starts_with("$arr"))
+            && r.target_name == "kid"
+    });
+    assert_eq!(
+        kid_on_array.and_then(|r| fa.method_call_invocant_class(r, None)).as_deref(),
+        Some("Foo"),
+        "array-element invocant `$arr[0]->kid` should type as Foo, tree-free",
+    );
+}
+
 #[test]
 fn test_package_at() {
     let fa = build_fa("package Foo;\nsub bar { }");
@@ -1351,6 +1758,36 @@ fn test_two_packages_scoped() {
     // At the alpha sub, package should be "Foo"
     let pkg = fa.package_at(Point::new(1, 5));
     assert_eq!(pkg, Some("Foo"));
+}
+
+#[test]
+fn test_block_scoped_package_reverts() {
+    // A `package Inner;` inside a bare `{ }` block must NOT leak past the
+    // block close — `sub o` after the block belongs to Outer.
+    let src = "package Outer;\n{\n  package Inner;\n  sub i { }\n}\nsub o { }\n";
+    let fa = build_fa(src);
+
+    let o = fa.symbols.iter().find(|s| s.name == "o").expect("sub o");
+    assert_eq!(o.package.as_deref(), Some("Outer"), "sub o must be in Outer, not Inner");
+
+    let i = fa.symbols.iter().find(|s| s.name == "i").expect("sub i");
+    assert_eq!(i.package.as_deref(), Some("Inner"), "sub i must be in Inner");
+
+    // package_at must also revert: line 5 (`sub o`) is Outer.
+    assert_eq!(fa.package_at(Point::new(5, 4)), Some("Outer"));
+    // line 3 (`sub i`) is Inner.
+    assert_eq!(fa.package_at(Point::new(3, 6)), Some("Inner"));
+}
+
+#[test]
+fn test_non_block_package_unaffected() {
+    // Regression: a normal statement-form `package Bar;` (no block) still
+    // flows to end of file.
+    let fa = build_fa("package Foo;\nsub a { }\npackage Bar;\nsub b { }\nsub c { }\n");
+    let b = fa.symbols.iter().find(|s| s.name == "b").expect("sub b");
+    let c = fa.symbols.iter().find(|s| s.name == "c").expect("sub c");
+    assert_eq!(b.package.as_deref(), Some("Bar"));
+    assert_eq!(c.package.as_deref(), Some("Bar"));
 }
 
 // ---- High-level query tests ----
@@ -1577,8 +2014,11 @@ fn test_hash_key_def_in_return_gets_sub_owner() {
 }
 
 #[test]
-fn test_hash_key_refs_chained_tree_fallback() {
-    // Chained method calls produce refs with owner: None that need tree-based resolution
+fn test_hash_key_refs_chained_resolved_at_build() {
+    // Chained method calls returning a Sub-keyed hash: the build-time
+    // `emit_chained_hash_key_refs` pass resolves the owner to
+    // `Sub{Calculator, get_config}` (the implicit-return keys), so the
+    // stored ref carries it — no tree fallback needed.
     let src = r#"package Calculator;
 sub new { bless {}, shift }
 sub get_self { my ($self) = @_; return $self; }
@@ -1598,29 +2038,33 @@ $calc->get_self->get_config->{host};
         .collect();
     assert!(!host_defs.is_empty(), "should find HashKeyDef for 'host'");
 
-    // The chained ref should have owner: None (can't resolve at build time)
-    let chained_refs: Vec<_> = fa
+    // The chained ref now carries its resolved owner at build time.
+    let owner = fa
         .refs
         .iter()
-        .filter(|r| {
-            r.target_name == "host" && matches!(r.kind, RefKind::HashKeyAccess { owner: None, .. })
+        .find_map(|r| match &r.kind {
+            RefKind::HashKeyAccess { owner: Some(o), .. } if r.target_name == "host" => {
+                Some(o.clone())
+            }
+            _ => None,
         })
-        .collect();
-    assert!(
-        !chained_refs.is_empty(),
-        "chained hash access should have owner: None, refs: {:?}",
-        fa.refs
-            .iter()
-            .filter(|r| r.target_name == "host")
-            .collect::<Vec<_>>()
+        .expect("chained hash access should carry a resolved owner");
+    assert_eq!(
+        owner,
+        HashKeyOwner::Sub {
+            package: Some("Calculator".to_string()),
+            name: "get_config".to_string(),
+        },
+        "owner should be the return-hash sub of the last chain hop, got {:?}",
+        owner
     );
 
-    // find_references from the def should find the chained usage via tree fallback
+    // find_references from the def finds the chained usage.
     let host_def_point = host_defs[0].selection_span.start;
     let refs = fa.find_references(host_def_point, Some(&tree), Some(src.as_bytes()), None);
     assert!(
         refs.len() >= 1,
-        "should find chained usage via tree fallback, got {} refs",
+        "should find chained usage, got {} refs",
         refs.len()
     );
 }
@@ -1652,7 +2096,7 @@ fn test_highlights_read_write() {
 fn test_hover_variable() {
     let src = "my $greeting = 'hello';\nprint $greeting;";
     let fa = build_fa(src);
-    let hover = fa.hover_info(Point::new(1, 8), src, None, None);
+    let hover = fa.hover_info(Point::new(1, 8), src, None);
     assert!(hover.is_some(), "should have hover info");
     let text = hover.unwrap();
     assert!(
@@ -1666,7 +2110,7 @@ fn test_hover_variable() {
 fn test_hover_sub() {
     let src = "sub greet { }\ngreet();";
     let fa = build_fa(src);
-    let hover = fa.hover_info(Point::new(1, 1), src, None, None);
+    let hover = fa.hover_info(Point::new(1, 1), src, None);
     assert!(hover.is_some(), "should have hover info for function call");
     let text = hover.unwrap();
     assert!(
@@ -1682,7 +2126,7 @@ fn test_hover_shows_inferred_type() {
         "package Point;\nsub new { bless {}, shift }\npackage main;\nmy $p = Point->new();\n$p;";
     let fa = build_fa(src);
     // Hover on $p usage at line 4
-    let hover = fa.hover_info(Point::new(4, 1), src, None, None);
+    let hover = fa.hover_info(Point::new(4, 1), src, None);
     assert!(hover.is_some(), "should have hover info");
     let text = hover.unwrap();
     assert!(
@@ -1698,7 +2142,7 @@ fn test_hover_type_at_usage_after_reassignment() {
     let src = "package Point;\nsub new { bless {}, shift }\npackage Foo;\nsub new { bless {}, shift }\npackage main;\nmy $x = Point->new();\n$x;\n$x = Foo->new();\n$x;";
     let fa = build_fa(src);
     // line 6: $x; — should be Point
-    let hover1 = fa.hover_info(Point::new(6, 1), src, None, None);
+    let hover1 = fa.hover_info(Point::new(6, 1), src, None);
     assert!(hover1.is_some());
     let text1 = hover1.unwrap();
     assert!(
@@ -1707,7 +2151,7 @@ fn test_hover_type_at_usage_after_reassignment() {
         text1
     );
     // line 8: $x; — should be Foo (after reassignment)
-    let hover2 = fa.hover_info(Point::new(8, 1), src, None, None);
+    let hover2 = fa.hover_info(Point::new(8, 1), src, None);
     assert!(hover2.is_some());
     let text2 = hover2.unwrap();
     assert!(
@@ -1722,7 +2166,7 @@ fn test_hover_shows_return_type() {
     let src = "package Foo;\nsub make { return Foo->new() }\nsub new { bless {}, shift }\npackage main;\nmake();";
     let fa = build_fa(src);
     // Hover on sub make definition
-    let hover = fa.hover_info(Point::new(1, 5), src, None, None);
+    let hover = fa.hover_info(Point::new(1, 5), src, None);
     assert!(hover.is_some(), "should have hover info for sub");
     let text = hover.unwrap();
     assert!(
@@ -2594,6 +3038,137 @@ fn test_with_multiple_roles() {
     assert!(parents.contains(&"Role::B".to_string()));
 }
 
+// --- E4a: MooX::Options `option` ---
+
+/// `option 'name' => (is => 'ro', ...)` is a `has` with extra option-parsing
+/// keys; it synthesizes the same accessor Method symbol + constructor HashKeyDef.
+#[test]
+fn test_moox_option_synthesizes_accessor_and_ctor_key() {
+    let fa = build_fa(
+        "
+            package MyApp;
+            use Moo;
+            use MooX::Options;
+            option 'verbose' => (is => 'ro', format => 'i', doc => 'noisy');
+            option name => (is => 'rw', isa => 'Str');
+        ",
+    );
+    // Accessor Method symbols.
+    let methods: Vec<&str> = fa
+        .symbols
+        .iter()
+        .filter(|s| s.kind == crate::file_analysis::SymKind::Method)
+        .map(|s| s.name.as_str())
+        .collect();
+    assert!(methods.contains(&"verbose"), "ro accessor: {methods:?}");
+    assert!(methods.contains(&"name"), "rw accessor: {methods:?}");
+
+    // Constructor HashKeyDefs (`MyApp->new(verbose => ...)`).
+    let ctor_keys: Vec<&str> = fa
+        .symbols
+        .iter()
+        .filter(|s| {
+            matches!(
+                &s.detail,
+                crate::file_analysis::SymbolDetail::HashKeyDef {
+                    owner: crate::file_analysis::HashKeyOwner::Sub { name, .. },
+                    ..
+                } if name == "new"
+            )
+        })
+        .map(|s| s.name.as_str())
+        .collect();
+    assert!(ctor_keys.contains(&"verbose"), "ctor key verbose: {ctor_keys:?}");
+    assert!(ctor_keys.contains(&"name"), "ctor key name: {ctor_keys:?}");
+}
+
+/// `option` outside a MooX::Options package must NOT synthesize accessors — an
+/// unrelated `option(...)` sub call isn't an attribute declaration.
+#[test]
+fn test_option_without_moox_is_not_an_accessor() {
+    let fa = build_fa(
+        "
+            package MyApp;
+            use Moo;
+            option 'verbose' => (is => 'ro');
+        ",
+    );
+    let methods: Vec<&str> = fa
+        .symbols
+        .iter()
+        .filter(|s| s.kind == crate::file_analysis::SymKind::Method)
+        .map(|s| s.name.as_str())
+        .collect();
+    assert!(!methods.contains(&"verbose"), "no synthesis without MooX::Options: {methods:?}");
+}
+
+/// Regression: plain `has` in a package that also `use`s MooX::Options is
+/// unaffected (still synthesizes via the shared path).
+#[test]
+fn test_moox_options_plain_has_still_works() {
+    let fa = build_fa(
+        "
+            package MyApp;
+            use Moo;
+            use MooX::Options;
+            has plain => (is => 'ro', isa => 'Int');
+        ",
+    );
+    let methods: Vec<&str> = fa
+        .symbols
+        .iter()
+        .filter(|s| s.kind == crate::file_analysis::SymKind::Method)
+        .map(|s| s.name.as_str())
+        .collect();
+    assert!(methods.contains(&"plain"), "plain has accessor: {methods:?}");
+}
+
+// --- E4b: `with 'Role'` role-provided methods resolve cross-file ---
+
+/// A class `with 'SomeRole'` should resolve `$self->m` to the role's `sub m`
+/// cross-file. `with` already unifies into `package_parents`, and the
+/// ancestor walk + cross-file module_index do the rest — this is a lock test.
+#[test]
+fn test_with_role_method_resolves_cross_file() {
+    use crate::module_index::ModuleIndex;
+    use std::path::PathBuf;
+
+    let idx = ModuleIndex::new_for_test();
+    idx.set_workspace_root(None);
+
+    // The role provides `log_it`.
+    idx.insert_cache(
+        "My::Role::Logging",
+        Some(fake_cached_for_class(
+            "My::Role::Logging",
+            &PathBuf::from("/fake/My/Role/Logging.pm"),
+            &["log_it"],
+            &[],
+        )),
+    );
+
+    let fa = build_fa(
+        "
+            package MyApp;
+            use Moo;
+            with 'My::Role::Logging';
+            sub run { my $self = shift; }
+        ",
+    );
+
+    // Completion surfaces the role method.
+    let methods = fa.complete_methods_for_class("MyApp", Some(&idx));
+    let names: Vec<&str> = methods.iter().map(|c| c.label.as_str()).collect();
+    assert!(names.contains(&"log_it"), "role method in completion: {names:?}");
+
+    // resolve_method_in_ancestors finds it cross-file.
+    let res = fa.resolve_method_in_ancestors("MyApp", "log_it", Some(&idx));
+    assert!(
+        matches!(res, Some(crate::file_analysis::MethodResolution::CrossFile { ref class, .. }) if class == "My::Role::Logging"),
+        "expected CrossFile to the role, got {res:?}"
+    );
+}
+
 #[test]
 fn test_load_components_bare() {
     let fa = build_fa(
@@ -3216,6 +3791,51 @@ has 'status' => (is => 'rwp');
         .collect();
     assert_eq!(getter.len(), 1, "rwp should synthesize getter");
     assert_eq!(writer.len(), 1, "rwp should synthesize _set_name writer");
+}
+
+#[test]
+fn test_moo_has_accessor_keyword() {
+    // `accessor => 'get_set_x'` synthesizes a combined read/write method named
+    // `get_set_x` — distinct from the attr-named default accessor.
+    let fa = build_fa(
+        "
+package Foo;
+use Moo;
+has 'x' => (is => 'rw', accessor => 'get_set_x');
+",
+    );
+    let acc: Vec<_> = fa
+        .symbols
+        .iter()
+        .filter(|s| s.name == "get_set_x" && s.kind == SymKind::Method)
+        .collect();
+    assert_eq!(acc.len(), 1, "accessor keyword should synthesize get_set_x method");
+    // The default attr-named accessor ('x') still exists from `is => 'rw'`.
+    let default_acc: Vec<_> = fa
+        .symbols
+        .iter()
+        .filter(|s| s.name == "x" && s.kind == SymKind::Method)
+        .collect();
+    assert!(!default_acc.is_empty(), "default attr accessor still synthesized");
+}
+
+#[test]
+fn test_moo_has_ro_does_not_synthesize_ro_symbol() {
+    // `is => 'ro'` must NOT synthesize a method named `ro` — the gate that
+    // fixes the phantom-`ro` regression (names_a_method excludes `is`).
+    let fa = build_fa(
+        "
+package Foo;
+use Moo;
+has 'y' => (is => 'ro');
+",
+    );
+    let ro_sym: Vec<_> = fa
+        .symbols
+        .iter()
+        .filter(|s| s.name == "ro")
+        .collect();
+    assert!(ro_sym.is_empty(), "`is => 'ro'` must not mint a symbol named `ro`");
 }
 
 #[test]
@@ -3989,6 +4609,168 @@ push @EXPORT_OK, 'bar', 'baz';
 }
 
 #[test]
+fn test_exporter_extensible_export_call() {
+    // `export(qw( foo $bar @baz -tag ))` — only the plain sub name `foo`
+    // is recorded; sigil'd vars and `-tag` group names are skipped.
+    let fa = build_fa(
+        "
+package My::Ext;
+use Exporter::Extensible -exporter_setup => 1;
+export(qw( foo $bar @baz -tag ));
+sub foo { 1 }
+",
+    );
+    assert_eq!(fa.export_ok, vec!["foo"]);
+}
+
+#[test]
+fn test_exporter_extensible_attribute() {
+    // `sub foo :Export(...)` / `sub bar :Export` — the sub name is the export.
+    let fa = build_fa(
+        "
+package My::Ext;
+use Exporter::Extensible -exporter_setup => 1;
+sub foo : Export(-tag) { 1 }
+sub bar :Export { 2 }
+sub plain { 3 }
+",
+    );
+    assert!(fa.export_ok.contains(&"foo".to_string()));
+    assert!(fa.export_ok.contains(&"bar".to_string()));
+    assert!(!fa.export_ok.contains(&"plain".to_string()));
+}
+
+#[test]
+fn test_exporter_declare_export_pair() {
+    // `default_export NAME => sub {}` / `export NAME => sub {}` / `exports qw/../`.
+    let fa = build_fa(
+        "
+package My::Decl;
+use Exporter::Declare;
+default_export foo => sub { 1 };
+export bar => sub { 2 };
+exports qw/a b/;
+",
+    );
+    assert!(fa.export_ok.contains(&"foo".to_string()));
+    assert!(fa.export_ok.contains(&"bar".to_string()));
+    assert!(fa.export_ok.contains(&"a".to_string()));
+    assert!(fa.export_ok.contains(&"b".to_string()));
+}
+
+#[test]
+fn test_exporter_call_gated_on_use() {
+    // False-positive guard: a `sub export {}` (or a stray `export(...)`)
+    // in a package that didn't `use` an exporter-declare family module
+    // must NOT register exports.
+    let fa = build_fa(
+        "
+package Plain;
+sub export { 1 }
+export('not_an_export');
+",
+    );
+    assert!(fa.export_ok.is_empty());
+}
+
+/// Gate 5: `find_sub_for_call` (resolution path) must check `export_ok`, not
+/// just `export`. A name that Foo records only in `@EXPORT_OK` suppresses the
+/// diagnostic in symbols.rs (already checks both), but before this fix
+/// `signature_for_call` / goto-def would fall through because the resolution
+/// path only tested `export`. Now both lists are checked.
+#[test]
+fn test_export_ok_resolves_cross_file() {
+    use crate::module_index::ModuleIndex;
+    use std::path::PathBuf;
+
+    // Build a module that exports `fetch_data` via @EXPORT_OK only.
+    let provider_fa = build_fa(
+        "package Data::Fetcher;\nour @EXPORT_OK = qw(fetch_data);\nsub fetch_data { my ($url) = @_; }\n1;\n",
+    );
+    assert!(
+        provider_fa.export_ok.contains(&"fetch_data".to_string()),
+        "provider must record fetch_data in export_ok",
+    );
+
+    let idx = ModuleIndex::new_for_test();
+    idx.set_workspace_root(None);
+    idx.insert_cache(
+        "Data::Fetcher",
+        Some(std::sync::Arc::new(crate::module_index::CachedModule::new(
+            PathBuf::from("/fake/Data/Fetcher.pm"),
+            std::sync::Arc::new(provider_fa),
+        ))),
+    );
+
+    // Consumer: bare `use Data::Fetcher;` — calls `fetch_data(...)`.
+    let consumer_fa = build_fa(
+        "package My::App;\nuse Data::Fetcher;\nfetch_data('http://example.com');\n",
+    );
+
+    // signature_for_call exercises find_sub_for_call → bare-import path.
+    let sig = consumer_fa.signature_for_call(
+        "fetch_data",
+        false,
+        None,
+        tree_sitter::Point::new(2, 0),
+        Some(&idx),
+    );
+    assert!(
+        sig.is_some(),
+        "signature_for_call must resolve fetch_data via @EXPORT_OK, got None",
+    );
+}
+
+#[test]
+fn test_importer_consumer_retargets_source() {
+    // `use Importer 'M' => qw/foo bar/` imports foo/bar FROM M. The Import
+    // entry must point at M, not Importer, so goto-def crosses to M's subs.
+    let fa = build_fa(
+        "
+package My::Consumer;
+use Importer 'Some::Module' => qw/foo bar/;
+",
+    );
+    let imp = fa
+        .imports
+        .iter()
+        .find(|i| i.module_name == "Some::Module")
+        .expect("Import re-targeted to Some::Module");
+    let names: Vec<&str> = imp
+        .imported_symbols
+        .iter()
+        .map(|s| s.local_name.as_str())
+        .collect();
+    assert!(names.contains(&"foo"));
+    assert!(names.contains(&"bar"));
+    // No Import should pin to Importer itself.
+    assert!(fa.imports.iter().all(|i| i.module_name != "Importer"));
+}
+
+#[test]
+fn test_importer_menu_advertised_names() {
+    // IMPORTER_MENU advertises export lists; pull the `export`/`export_ok`
+    // name arrays. `export_anon` (name → coderef) is unmodeled.
+    let fa = build_fa(
+        "
+package My::Menu;
+sub IMPORTER_MENU {
+  return (
+    export => [qw/foo bar/],
+    export_ok => ['baz'],
+    export_anon => { quux => sub { 1 } },
+  );
+}
+sub foo { 1 }
+",
+    );
+    assert!(fa.export_ok.contains(&"foo".to_string()));
+    assert!(fa.export_ok.contains(&"bar".to_string()));
+    assert!(fa.export_ok.contains(&"baz".to_string()));
+    assert!(!fa.export_ok.contains(&"quux".to_string()));
+}
+
+#[test]
 fn test_use_constant_string() {
     let fa = build_fa(
         "
@@ -4178,6 +4960,110 @@ sub setup {
         fa.export.is_empty(),
         "should not export from non-import sub: {:?}",
         fa.export
+    );
+}
+
+#[test]
+fn test_mojo_has_accessor_writer_hidden_from_outline() {
+    // Mojo `has 'x'` synthesizes a getter + a same-named fluent writer (for
+    // arity-1 return typing). Only ONE should show in the outline; the writer
+    // carries hide_in_outline so it doesn't duplicate the getter.
+    let fa = build_fa("package Msg;\nuse Mojo::Base -base;\nhas 'content';\n");
+    let visible: Vec<_> = fa
+        .symbols
+        .iter()
+        .filter(|s| s.name == "content" && s.kind == SymKind::Method)
+        .filter(|s| !matches!(&s.detail, SymbolDetail::Sub { hide_in_outline: true, .. }))
+        .collect();
+    assert_eq!(
+        visible.len(),
+        1,
+        "exactly one visible `content` accessor expected, got {}",
+        visible.len()
+    );
+    // Both symbols still exist (writer hidden, not deleted) for arity typing.
+    let total = fa.symbols.iter().filter(|s| s.name == "content" && s.kind == SymKind::Method).count();
+    assert_eq!(total, 2, "getter + (hidden) writer both retained");
+}
+
+#[test]
+fn test_strict_mojo_base_shift_not_invocant() {
+    // `use Mojo::Base -strict` is a non-OO module: a bare `my $x = shift` is
+    // arg[0], NOT the invocant, so it must not type as the package (doing so
+    // produced bogus unresolved-method diagnostics, e.g. $tx->res in
+    // Mojo::WebSocket). A named invocant is still typed elsewhere.
+    let fa = build_fa(
+        "package MyStrict;\nuse Mojo::Base -strict;\nsub helper {\n  my $tx = shift;\n  return $tx->res;\n}\n",
+    );
+    assert_eq!(
+        fa.inferred_type_via_bag("$tx", Point::new(4, 9)),
+        None,
+        "shift in a -strict (non-OO) module must not type as the package"
+    );
+}
+
+#[test]
+fn test_mojo_base_base_and_strict_still_oo() {
+    // `-base` (in any order, even alongside the redundant `-strict`) makes the
+    // package a class, so a bare `shift` IS the invocant.
+    for src in [
+        "package C;\nuse Mojo::Base -base, -strict;\nsub greet {\n  my $x = shift;\n  return $x->name;\n}\n",
+        "package C;\nuse Mojo::Base -strict, -base;\nsub greet {\n  my $x = shift;\n  return $x->name;\n}\n",
+    ] {
+        let fa = build_fa(src);
+        assert_eq!(
+            fa.inferred_type_via_bag("$x", Point::new(4, 9)),
+            Some(InferredType::ClassName("C".into())),
+            "-base makes the package OO regardless of a redundant -strict: {src}"
+        );
+    }
+}
+
+#[test]
+fn test_list_shift_pair_params_extracted() {
+    // Mojo idiom `my ($self, $name) = (shift, shift)` — each shift binds the
+    // next @_ element, so the LHS vars are positional params. $self is the
+    // invocant; $name is a real param.
+    let fa = build_fa("package P;\nsub cookie {\n  my ($self, $name) = (shift, shift);\n}\n");
+    let sub = fa.symbols.iter().find(|s| s.name == "cookie").expect("cookie sym");
+    let params: Vec<&str> = match &sub.detail {
+        SymbolDetail::Sub { params, .. } => params.iter().map(|p| p.name.as_str()).collect(),
+        _ => panic!("cookie not a Sub"),
+    };
+    assert!(params.contains(&"$self") && params.contains(&"$name"),
+        "expected $self + $name from (shift, shift), got {params:?}");
+}
+
+#[test]
+fn test_goto_amp_fq_sub_emits_call_ref() {
+    // `goto &Foo::bar` — the `&` code-ref sigil is stripped so the FQ call
+    // resolves; a FunctionCall ref to Foo::bar is emitted (resolved_package Foo).
+    let fa = build_fa("package Child;\nsub import { goto &Parent::Thing::setup; }\n");
+    let r = fa.refs.iter().find(|r|
+        matches!(r.kind, RefKind::FunctionCall { .. }) && r.target_name == "Parent::Thing::setup");
+    assert!(r.is_some(), "expected FunctionCall ref to Parent::Thing::setup (& stripped), got {:?}",
+        fa.refs.iter().filter(|r| matches!(r.kind, RefKind::FunctionCall{..})).map(|r| &r.target_name).collect::<Vec<_>>());
+}
+
+#[test]
+fn test_glob_assigned_sub_ternary_rhs_registers() {
+    // Try::Tiny `*_subname = $su ? \&Sub::Util::set_subname : sub {...}` /
+    // Path::Tiny `*_same = IS_WIN32() ? sub{} : sub{}`: the glob holds a coderef
+    // in every branch, so the name is a registered sub. Without this, same-file
+    // calls were flagged unresolved-function (false positive).
+    let fa = build_fa(
+        r#"
+package Demo;
+sub bar { 1 }
+*_subname = $su ? \&Sub::Util::set_subname : sub { $_[1] };
+"#,
+    );
+    assert!(
+        fa.symbols
+            .iter()
+            .any(|s| s.kind == SymKind::Sub && s.name == "_subname"),
+        "ternary glob-assign should register `_subname` as a sub: {:?}",
+        fa.symbols.iter().filter(|s| s.kind == SymKind::Sub).map(|s| &s.name).collect::<Vec<_>>()
     );
 }
 
@@ -4448,6 +5334,7 @@ sub run {
                 owner: HandlerOwner::Class("Producer".to_string()),
                 name: "ready".to_string(),
             },
+            method_classes: Vec::new(),
         },
         RoleMask::EDITABLE,
     );
@@ -4510,8 +5397,8 @@ $app->helper(current_user => sub {
     let helper = helpers[0];
     assert_eq!(
         helper.package.as_deref(),
-        Some("Mojolicious::Controller"),
-        "canonical home is Mojolicious::Controller"
+        Some(crate::file_analysis::APP_SURFACE_CLASS),
+        "canonical home is the fictional app surface"
     );
 
     if let SymbolDetail::Sub {
@@ -4535,8 +5422,10 @@ $app->helper(current_user => sub {
         panic!("helper detail should be Sub");
     }
 
-    // The PluginNamespace owns the bridge visibility: its Class
-    // bridges cover both entry classes.
+    // The PluginNamespace owns the bridge visibility: a SINGLE bridge
+    // to the fictional app surface (docs/adr/plugin-system.md). The
+    // consumer classes reach it via the synthetic-parent edge in core,
+    // not via a per-helper bridge list.
     let ns = fa
         .plugin_namespaces
         .iter()
@@ -4547,13 +5436,155 @@ $app->helper(current_user => sub {
         .iter()
         .map(|Bridge::Class(c)| c.as_str())
         .collect();
-    assert!(
-        bridge_classes.contains("Mojolicious::Controller"),
-        "namespace bridges Controller"
+    assert_eq!(
+        bridge_classes,
+        std::iter::once(crate::file_analysis::APP_SURFACE_CLASS).collect(),
+        "namespace bridges ONLY the app surface — open consumer set lives in core"
     );
-    assert!(
-        bridge_classes.contains("Mojolicious"),
-        "namespace bridges Mojolicious (the app class)"
+
+    // The synthetic-ancestor edge: the helper resolves from BOTH the
+    // app class and the controller class through the SAME ancestor walk,
+    // even though neither is the helper's home package.
+    for consumer in ["Mojolicious", "Mojolicious::Controller"] {
+        let res = fa.resolve_method_in_ancestors(consumer, "current_user", None);
+        match res {
+            Some(crate::file_analysis::MethodResolution::Local { sym_id, .. }) => {
+                assert_eq!(
+                    sym_id, helper.id,
+                    "{consumer}->current_user must resolve to the helper via the app surface"
+                );
+            }
+            other => panic!(
+                "{consumer}->current_user should resolve to the helper Local; got {other:?}"
+            ),
+        }
+    }
+}
+
+/// Helper-fn `at` for `inferred_type_via_bag`: column past `my $c = shift;`
+/// (or anywhere inside the sub body) so the TC's scope contains the point.
+fn first_param_type(fa: &FileAnalysis, var: &str, body_line: usize, col: usize) -> Option<InferredType> {
+    fa.inferred_type_via_bag(var, Point::new(body_line, col))
+}
+
+/// Named-sub helper registration (`->helper(greet => \&_greet)`): the
+/// referenced sub's first positional is the controller, exactly like the
+/// inline `sub ($c) {...}` form. `my $c = shift` unpacking.
+#[test]
+fn plugin_mojo_helpers_named_sub_typed_via_shift() {
+    let src = r#"
+package MyApp::Lite;
+use Mojolicious::Lite;
+
+my $app = Mojolicious->new;
+$app->helper(greet => \&_greet);
+
+sub _greet {
+    my $c = shift;
+    $c->render(text => 'hi');
+}
+"#;
+    let fa = build_fa(src);
+    // `$c` is declared on line 8 (`my $c = shift;`); query just after it.
+    let ty = first_param_type(&fa, "$c", 8, 14);
+    assert_eq!(
+        ty,
+        Some(InferredType::ClassName("Mojolicious::Controller".into())),
+        "named-sub helper's first positional types as the controller"
+    );
+}
+
+/// Same, signature form `sub _greet ($c, $name) {...}`.
+#[test]
+fn plugin_mojo_helpers_named_sub_typed_via_signature() {
+    let src = r#"
+package MyApp::Lite;
+use Mojolicious::Lite;
+
+my $app = Mojolicious->new;
+$app->helper(greet => \&_greet);
+
+sub _greet ($c, $name) {
+    $c->render(text => $name);
+}
+"#;
+    let fa = build_fa(src);
+    let ty = first_param_type(&fa, "$c", 8, 8);
+    assert_eq!(
+        ty,
+        Some(InferredType::ClassName("Mojolicious::Controller".into())),
+        "signature-form named-sub helper's first positional types as the controller"
+    );
+}
+
+/// Plain-comma spelling `helper('greet', \&_greet)` is identical to the
+/// fat-comma form — fat-comma carries no code semantics (CLAUDE.md).
+#[test]
+fn plugin_mojo_helpers_named_sub_plain_comma() {
+    let src = r#"
+package MyApp::Lite;
+use Mojolicious::Lite;
+
+my $app = Mojolicious->new;
+$app->helper('greet', \&_greet);
+
+sub _greet {
+    my $c = shift;
+    $c->render;
+}
+"#;
+    let fa = build_fa(src);
+    let ty = first_param_type(&fa, "$c", 8, 14);
+    assert_eq!(
+        ty,
+        Some(InferredType::ClassName("Mojolicious::Controller".into())),
+        "plain-comma helper registration types the named sub identically"
+    );
+}
+
+/// Regression: the inline-callback form still types `$c`.
+#[test]
+fn plugin_mojo_helpers_inline_callback_still_typed() {
+    let src = r#"
+package MyApp::Lite;
+use Mojolicious::Lite;
+
+my $app = Mojolicious->new;
+$app->helper(greet => sub {
+    my $c = shift;
+    $c->render;
+});
+"#;
+    let fa = build_fa(src);
+    let ty = first_param_type(&fa, "$c", 6, 14);
+    assert_eq!(
+        ty,
+        Some(InferredType::ClassName("Mojolicious::Controller".into())),
+        "inline-callback helper still types its first positional"
+    );
+}
+
+/// A named sub NOT registered as a helper (referenced via `\&` elsewhere,
+/// plus a plain `sub`) gets no spurious controller typing.
+#[test]
+fn plugin_mojo_helpers_non_helper_named_sub_unaffected() {
+    let src = r#"
+package MyApp::Lite;
+use Mojolicious::Lite;
+
+my $cb = \&_other;
+
+sub _other {
+    my $c = shift;
+    return $c;
+}
+"#;
+    let fa = build_fa(src);
+    let ty = first_param_type(&fa, "$c", 7, 14);
+    assert_ne!(
+        ty,
+        Some(InferredType::ClassName("Mojolicious::Controller".into())),
+        "a non-helper named sub must not be typed as a controller"
     );
 }
 
@@ -4575,7 +5606,8 @@ $app->helper('thing.there' => sub { my ($c, $arg_b) = @_; });
 "#;
     let fa = build_fa(src);
 
-    // Exactly one `thing` method on Mojolicious::Controller,
+    // Exactly one `thing` method on the app surface (the chain root's
+    // home; consumer classes reach it via the synthetic-parent edge),
     // despite two dotted helpers sharing that prefix.
     let thing_syms: Vec<&Symbol> = fa
         .symbols
@@ -4583,7 +5615,7 @@ $app->helper('thing.there' => sub { my ($c, $arg_b) = @_; });
         .filter(|s| {
             s.name == "thing"
                 && s.kind == SymKind::Method
-                && s.package.as_deref() == Some("Mojolicious::Controller")
+                && s.package.as_deref() == Some(crate::file_analysis::APP_SURFACE_CLASS)
         })
         .collect();
     assert_eq!(
@@ -4650,9 +5682,9 @@ $app->helper('admin.users.purge' => sub { my ($c, $force) = @_; });
         .find(|s| {
             s.name == "admin"
                 && s.kind == SymKind::Method
-                && s.package.as_deref() == Some("Mojolicious::Controller")
+                && s.package.as_deref() == Some(crate::file_analysis::APP_SURFACE_CLASS)
         })
-        .expect("admin on Controller");
+        .expect("admin on app surface (chain root)");
     let users = fa
         .symbols
         .iter()
@@ -5260,7 +6292,7 @@ sub get { my $self = shift; return $self; }
     let point = tree_sitter::Point { row, column: col };
 
     let hover = app_fa
-        .hover_info(point, app_src, None, Some(&idx))
+        .hover_info(point, app_src, Some(&idx))
         .expect("hover on DSL verb `get` returns text");
 
     assert!(
@@ -5546,34 +6578,34 @@ use parent 'Mojolicious::Controller';
     let idx = ModuleIndex::new_for_test();
     idx.register_workspace_module(std::path::PathBuf::from("/tmp/MyApp.pm"), lite_fa.clone());
 
-    // bridges_index knows MyApp.pm declares a namespace bridged to
-    // Mojolicious::Controller (mojo-helpers' app namespace).
-    let mods = idx.modules_bridging_to("Mojolicious::Controller");
+    // bridges_index knows MyApp.pm declares a namespace bridged to the
+    // app surface (mojo-helpers' app namespace).
+    let mods = idx.modules_bridging_to(crate::file_analysis::APP_SURFACE_CLASS);
     assert!(
         mods.iter().any(|m| m == "MyApp"),
-        "MyApp module should be listed as bridged to \
-             Mojolicious::Controller; got: {:?}",
+        "MyApp module should be listed as bridged to the app surface; got: {:?}",
         mods
     );
 
     // Completion on MyApp::Controller::Home inheriting from
-    // Mojolicious::Controller should walk up and find `greet`.
+    // Mojolicious::Controller should walk up to the controller, cross
+    // the synthetic-parent edge to the app surface, and find `greet`.
     let candidates = ctrl_fa.complete_methods_for_class("MyApp::Controller::Home", Some(&idx));
     let labels: Vec<&str> = candidates.iter().map(|c| c.label.as_str()).collect();
     assert!(
         labels.contains(&"greet"),
-        "helper `greet` emitted on Mojolicious::Controller in \
-             MyApp.pm should complete on subclasses; got: {:?}",
+        "helper `greet` on the app surface in MyApp.pm should complete on \
+             controller subclasses via the synthetic-parent edge; got: {:?}",
         labels
     );
 }
 
 /// mojo-helpers cross-file: when a Lite script registers a helper
-/// `greet`, the resulting Method symbol's `package` is
-/// `Mojolicious::Controller`. Any consumer file — controller
-/// subclass or otherwise — finds it via the standard workspace
-/// walk + inheritance chain without a single mojo-helpers-aware
-/// line in the consumer-side code path.
+/// `greet`, the resulting Method symbol's `package` is the fictional
+/// app surface. Any consumer file — controller subclass, the app, or
+/// otherwise — finds it via the standard workspace walk + the
+/// synthetic-parent edge, without a single mojo-helpers-aware line in
+/// the consumer-side code path.
 #[test]
 fn plugin_mojo_helpers_land_on_controller_package() {
     let src = r#"
@@ -5594,11 +6626,93 @@ app->helper(greet => sub {
         .expect("helper must emit a Method named greet");
     assert_eq!(
         greet.package.as_deref(),
-        Some("Mojolicious::Controller"),
-        "helper Method must be packaged on the shared controller base; \
-             that's what lets every subclass pick it up via inheritance walk"
+        Some(crate::file_analysis::APP_SURFACE_CLASS),
+        "helper Method is packaged on the app surface; the synthetic-parent \
+             edge lets every consumer class pick it up via the inheritance walk"
     );
     assert!(matches!(&greet.namespace, Namespace::Framework { id } if id == "mojo-helpers"));
+}
+
+/// Synthetic-ancestor app surface (docs/adr/plugin-system.md): a helper
+/// that returns a concrete class resolves its RETURN type identically
+/// from the app, the controller, AND a user-written app subclass —
+/// proving the single bridge target + synthetic-parent edge composes with
+/// the MethodOnClass type-resolution walk and that subclasses inherit the
+/// surface for free.
+#[test]
+fn plugin_mojo_helpers_return_type_via_app_surface() {
+    let src = r#"
+package MyApp;
+use Mojolicious::Lite;
+
+my $app = Mojolicious->new;
+$app->helper(model => sub { my ($c) = @_; return MyApp::Model->new; });
+"#;
+    // Declare a user app subclass in the SAME file so its
+    // `package_parents` edge (MyApp::Web -> Mojolicious) is present;
+    // it must inherit the surface for free.
+    let src = format!("{src}\npackage MyApp::Web;\nuse parent 'Mojolicious';\n1;\n");
+    let fa = build_fa(&src);
+
+    // The helper resolves its return type from the app class, the
+    // controller class, AND the user app subclass.
+    for class in ["Mojolicious", "Mojolicious::Controller", "MyApp::Web"] {
+        let rt = fa.find_method_return_type(class, "model", None, None);
+        assert_eq!(
+            rt,
+            Some(crate::file_analysis::InferredType::ClassName("MyApp::Model".into())),
+            "`{class}->model` must return MyApp::Model via the app surface; got {rt:?}",
+        );
+    }
+}
+
+/// App surface (docs/adr/plugin-system.md): `$app->minion->enqueue`
+/// resolves once `$app` is typed. The `minion` helper (return type a
+/// Minion subclass) is reached from the locally-typed `$app` via the app
+/// surface; enrichment then resolves the `->enqueue` receiver and promotes
+/// the dispatch. Proves the surface composes with dispatch-verb promotion.
+#[test]
+fn plugin_app_surface_minion_enqueue_resolves_when_app_typed() {
+    use crate::file_analysis::HandlerOwner;
+    use std::path::PathBuf;
+    let idx = crate::module_index::ModuleIndex::new_for_test();
+    idx.register_workspace_module(
+        PathBuf::from("/tmp/as_acme_minion.pm"),
+        std::sync::Arc::new(build_fa("package Acme::Minion;\nuse Mojo::Base 'Minion';\n1;\n")),
+    );
+
+    // `$app` is locally typed (Mojolicious->new); the `minion` helper
+    // returns an Acme::Minion. `$app->minion` reaches the helper via the
+    // synthetic app-surface edge, so its return type is Acme::Minion.
+    let mut fa = build_fa(
+        "package MyApp;\nuse Mojolicious::Lite;\n\
+         my $app = Mojolicious->new;\n\
+         $app->helper(minion => sub { my ($c) = @_; return Acme::Minion->new; });\n\
+         $app->minion->enqueue('send_email' => ['alice']);\n1;\n",
+    );
+
+    let mref = fa.refs.iter().find(|r| {
+        matches!(&r.kind, RefKind::MethodCall { .. }) && r.target_name == "minion"
+    });
+    assert!(mref.is_some(), "an `$app->minion` MethodCall ref must exist");
+
+    fa.enrich_imported_types_with_keys(Some(&idx));
+
+    // `Mojolicious::Lite` is a trigger, so the emit-hook materializes the
+    // DispatchCall directly; `applicable_dispatches` de-dups the gated
+    // candidate against it. Either path surfaces the handler — exactly once.
+    let has_materialized = fa.refs.iter().any(|r|
+        matches!(&r.kind, RefKind::DispatchCall { dispatcher, owner: Some(HandlerOwner::Class(c)) }
+            if dispatcher == "enqueue" && c == "Minion")
+            && r.target_name == "send_email");
+    let has_gated = fa.applicable_dispatches(Some(&idx)).iter().any(|a|
+        a.name == "send_email" && a.owner == HandlerOwner::Class("Minion".into()));
+    assert!(
+        has_materialized ^ has_gated,
+        "`$app->minion->enqueue` must surface as a Minion dispatch exactly once — \
+         via the emit-hook ref OR the gated candidate; materialized={has_materialized} \
+         gated={has_gated}",
+    );
 }
 
 /// Helpers complete on both `$c` (Controller) and `$app` (the
@@ -6036,6 +7150,123 @@ $minion->enqueue_p(send_email => ['bob']);
     );
 }
 
+/// Option B: a `$minion->enqueue('T')` lights up by the RECEIVER's type,
+/// not the file's `use`s. `Worker` never `use`s Minion and isn't a Mojo
+/// app — so the bundled minion plugin's triggers never fire, and there's no
+/// `DispatchCall` after the plain build. But `$m` is a locally-constructed
+/// `Acme::Minion` (isa Minion, declared cross-file), so the builder records
+/// a gated candidate and `applicable_dispatches` — which has the module
+/// index, hence the cross-file `isa` — resolves it at QUERY time, with no
+/// enrichment. This is the "wherever the minion came from provides the magic"
+/// path the file-trigger model couldn't reach.
+#[test]
+fn gated_dispatch_resolves_on_subclass_receiver_query_time() {
+    use crate::file_analysis::HandlerOwner;
+    use std::path::PathBuf;
+    let base = build_fa("package Acme::Minion;\nuse Mojo::Base 'Minion';\n1;\n");
+    let idx = crate::module_index::ModuleIndex::new_for_test();
+    idx.register_workspace_module(
+        PathBuf::from("/tmp/b_acme_minion.pm"),
+        std::sync::Arc::new(base),
+    );
+
+    let fa = build_fa(
+        "package Worker;\nsub go {\n  my $m = Acme::Minion->new;\n  $m->enqueue('send_email' => ['a']);\n}\n1;\n",
+    );
+    // The triggers never fired, so nothing was materialized at parse time.
+    assert!(
+        !fa.refs.iter().any(|r| matches!(&r.kind, RefKind::DispatchCall { .. })),
+        "no DispatchCall ref should exist (plugin trigger didn't fire)",
+    );
+
+    // No enrichment — query-time resolution alone surfaces the dispatch,
+    // exactly as a non-open workspace file would be served.
+    let applied = fa.applicable_dispatches(Some(&idx));
+    assert_eq!(
+        applied.iter().filter(|a|
+            a.name == "send_email" && a.owner == HandlerOwner::Class("Minion".into())).count(),
+        1,
+        "query-time resolution must surface exactly one Minion dispatch for \
+         enqueue on a Minion-subclass receiver, even with no enrichment; got {:?}",
+        applied,
+    );
+}
+
+/// The receiver isn't locally typed — it's a cross-file method-call return
+/// (`$b->minion` where `Box::minion` returns an `Acme::Minion`). The
+/// build-time hint is `None`; query-time resolution resolves the invocant
+/// cross-file (via the module index) and, finding it isa Minion, surfaces the
+/// dispatch. This is the `$self->_minion->enqueue(...)` shape — works whenever
+/// the receiver's type is actually resolvable.
+#[test]
+fn gated_dispatch_resolves_cross_file_receiver_query_time() {
+    use crate::file_analysis::HandlerOwner;
+    use std::path::PathBuf;
+    let idx = crate::module_index::ModuleIndex::new_for_test();
+    idx.register_workspace_module(
+        PathBuf::from("/tmp/b_acme_minion.pm"),
+        std::sync::Arc::new(build_fa("package Acme::Minion;\nuse Mojo::Base 'Minion';\n1;\n")),
+    );
+    idx.register_workspace_module(
+        PathBuf::from("/tmp/b_box.pm"),
+        std::sync::Arc::new(build_fa(
+            "package Box;\nsub new { bless {}, shift }\nsub minion ($self) { return Acme::Minion->new; }\n1;\n",
+        )),
+    );
+
+    let fa = build_fa(
+        "package Worker;\nsub go {\n  my $b = Box->new;\n  $b->minion->enqueue('send_email' => ['a']);\n}\n1;\n",
+    );
+
+    // No enrichment: the gate resolves the cross-file receiver lazily.
+    let applied = fa.applicable_dispatches(Some(&idx));
+    assert!(
+        applied.iter().any(|a|
+            a.name == "send_email" && a.owner == HandlerOwner::Class("Minion".into())),
+        "query-time resolution must resolve the cross-file receiver `$b->minion` \
+         (Acme::Minion isa Minion) and surface the dispatch; got {:?}",
+        applied,
+    );
+}
+
+/// A Minion SUBCLASS receiver (`Acme::Minion` isa Minion, the crm
+/// `Clove::Minion` shape) must still register + dispatch tasks. The
+/// receiver types to `ClassName("Acme::Minion")`, which a name-prefix
+/// allowlist (`== "Minion" || starts_with("Minion::")`) silently rejects —
+/// the rule-#10 trap. The plugin no longer gates on receiver class, so the
+/// Handler (owner Minion) and the enqueue DispatchCall pair as usual.
+#[test]
+fn plugin_minion_subclass_receiver_still_wires() {
+    let src = r#"
+package MyApp;
+use Minion;
+
+my $minion = Acme::Minion->new;
+$minion->add_task(send_email => sub { my ($job) = @_; });
+$minion->enqueue(send_email => ['alice']);
+"#;
+    let fa = build_fa(src);
+
+    let handler = fa.symbols.iter().find(|s| {
+        s.kind == SymKind::Handler
+            && s.name == "send_email"
+            && matches!(&s.detail, SymbolDetail::Handler { owner: HandlerOwner::Class(c), .. } if c == "Minion")
+    });
+    assert!(
+        handler.is_some(),
+        "add_task on a Minion subclass receiver must still register a Minion-owned Handler",
+    );
+
+    let has_enqueue_dc = fa.refs.iter().any(|r| matches!(
+        &r.kind, RefKind::DispatchCall { dispatcher, .. }
+        if dispatcher == "enqueue" && r.target_name == "send_email"
+    ));
+    assert!(
+        has_enqueue_dc,
+        "enqueue on a Minion subclass receiver must still emit a DispatchCall",
+    );
+}
+
 /// $job inside an add_task callback is typed as Minion::Job so
 /// completion on $job-> resolves to Minion::Job methods.
 #[test]
@@ -6202,13 +7433,14 @@ sub session { my ($self, $key) = @_; }
         ctrl_fa,
     );
 
-    // The workspace knows the Lite file declares a namespace
-    // bridged to Mojolicious::Controller (the mojo-helpers app
-    // namespace emits `Bridge::Class("Mojolicious::Controller")`).
-    let mods = idx.modules_bridging_to("Mojolicious::Controller");
+    // The workspace knows the Lite file declares a namespace bridged
+    // to the app surface (the mojo-helpers app namespace emits
+    // `Bridge::Class(APP_SURFACE_CLASS)`). The controller reaches it
+    // through the synthetic-parent edge in the ancestor walk.
+    let mods = idx.modules_bridging_to(crate::file_analysis::APP_SURFACE_CLASS);
     assert!(
         mods.iter().any(|m| m == "MyApp"),
-        "workspace index must list MyApp.pm bridged to Controller; got: {:?}",
+        "workspace index must list MyApp.pm bridged to the app surface; got: {:?}",
         mods
     );
 
@@ -6290,7 +7522,7 @@ sub session { my ($self, $key) = @_; }
     // resolve_method_in_ancestors; our fix extends that to pick
     // up plugin-emitted methods on parent classes declared
     // elsewhere in the workspace.
-    let diags = crate::symbols::collect_diagnostics(&fa, &idx);
+    let diags = crate::symbols::collect_diagnostics(&fa, &idx, Default::default());
     for diag in &diags {
         let msg = &diag.message;
         assert!(
@@ -6844,7 +8076,7 @@ sub to { my $self = shift; return $self; }
     // back empty is a dead token — the user's reported symptom.
     // Print detailed per-probe status so failures pinpoint the hop.
     let check = |label: &str, point: tree_sitter::Point| {
-        let hover = fa.hover_info(point, &src, Some(&tree), Some(&idx));
+        let hover = fa.hover_info(point, &src, Some(&idx));
         let def = fa.find_definition(point, Some(&tree), Some(src.as_bytes()), Some(&idx));
         assert!(
             hover.is_some() || def.is_some(),
@@ -6888,7 +8120,7 @@ sub to { my $self = shift; return $self; }
     //      reported no highlight on `app->` in nvim; the narrow
     //      FunctionCall ref is what feeds semantic tokens.
     let app_point = probe(row_app_routes, col_of(line_app_routes, "app"));
-    let app_hover = fa.hover_info(app_point, &src, Some(&tree), Some(&idx));
+    let app_hover = fa.hover_info(app_point, &src, Some(&idx));
     let app_hover_text = app_hover.as_deref().unwrap_or("");
     assert!(
         app_hover_text.contains("The Mojolicious application instance"),
@@ -7438,11 +8670,11 @@ $minion->enqueue(task_x => ['a'], { priority => 10,  });
     );
 }
 
-/// mojo-helpers emits a PluginNamespace for the app, bridging to
-/// `Mojolicious::Controller` and `Mojolicious`. Each registered
-/// helper's name is an entity; the two fan-out Method symbols
-/// (one per entry class) both land in the namespace via name
-/// resolution. Multi-app workspaces get one namespace per app.
+/// mojo-helpers emits a PluginNamespace for the app, bridging to the
+/// single fictional app surface (docs/adr/plugin-system.md). Each
+/// registered helper's name is an entity. The consumer classes reach
+/// the surface via the synthetic-parent edge in core. Multi-app
+/// workspaces get one namespace per app.
 #[test]
 fn mojo_helpers_emits_app_plugin_namespace() {
     use crate::file_analysis::Bridge;
@@ -7454,20 +8686,19 @@ $app->helper('users.create' => sub { my ($c) = @_; });
 "#;
     let fa = build_fa(src);
 
-    // Identify by semantic shape (kind + bridges), not by plugin
-    // id — the contract is "there's an 'app' namespace bridging to
-    // both Controller and Mojolicious", not "a plugin literally
-    // called mojo-helpers emits it".
+    // Identify by semantic shape (kind + bridge to the app surface),
+    // not by plugin id — the contract is "there's an 'app' namespace
+    // bridging to the app surface", not "a plugin literally called
+    // mojo-helpers emits it".
     let ns = fa
         .plugin_namespaces
         .iter()
         .find(|n| {
             n.kind == "app"
                 && n.bridges
-                    .contains(&Bridge::Class("Mojolicious::Controller".into()))
-                && n.bridges.contains(&Bridge::Class("Mojolicious".into()))
+                    .contains(&Bridge::Class(crate::file_analysis::APP_SURFACE_CLASS.into()))
         })
-        .expect("an `app` namespace must bridge both Controller and Mojolicious");
+        .expect("an `app` namespace must bridge the app surface");
 
     // Entities cover both registered helpers, through the
     // name-keyed resolution that expands fan-out Methods.
@@ -8405,6 +9636,220 @@ fn plugin_data_printer_skips_unrelated_use_statements() {
     );
 }
 
+// ---- Dancer2 plugin tests ----
+
+/// `use Dancer2` autoimports ~90 DSL keywords — unresolved-function
+/// diagnostics must skip all of them. The plugin stashes a
+/// `FrameworkImport` per keyword into `framework_imports`.
+#[test]
+fn plugin_dancer2_autoimports_dsl_keywords() {
+    let src = r#"
+package main;
+use Dancer2;
+
+get '/users' => sub { return template 'users' };
+post '/login' => sub { my $u = param('user'); session user => $u; };
+"#;
+    let fa = build_fa(src);
+    for kw in &[
+        // Route verbs
+        "get", "post", "put", "del", "patch", "any", "options",
+        // Route organisation
+        "prefix",
+        // Lifecycle hooks
+        "hook",
+        // Request / response
+        "request", "response", "param", "params",
+        "body_parameters", "query_parameters", "route_parameters",
+        // Headers / status
+        "header", "headers", "content_type", "status",
+        // Response control
+        "redirect", "forward", "pass", "halt",
+        // Rendering
+        "template", "send_file", "send_as",
+        // Config
+        "config", "set", "setting",
+        // Session / cookie
+        "session", "cookie", "cookies",
+        // Serialisers
+        "to_json", "from_json", "to_yaml", "from_yaml",
+        // Misc
+        "var", "vars", "uri_for", "splat", "captures", "upload",
+        "push_response_header",
+        // App / DSL
+        "app", "dancer_app", "dsl", "engine",
+        // Async
+        "delayed", "flush",
+        // Logging
+        "debug", "info", "warning", "error",
+        // Boolean constants
+        "true", "false",
+        // Lifecycle
+        "dance", "to_app", "start",
+        // Keywords absent from the original set — verified against
+        // Dancer2::Core::DSL::dsl_keywords (the authoritative list).
+        "content", "send_error", "response_header", "request_header",
+        "uri_for_route", "prepare_app", "encode_json", "decode_json",
+        "to_dumper", "from_dumper", "push_header", "response_headers",
+        "psgi_app", "runner", "done", "context",
+        "dancer_version", "dancer_major_version",
+        "mime", "request_data",
+    ] {
+        assert!(
+            fa.framework_imports.contains(*kw),
+            "`{}` must be autoimported by `use Dancer2`; framework_imports={:?}",
+            kw,
+            fa.framework_imports,
+        );
+    }
+}
+
+/// `use Dancer2` synthesizes typed Sub symbols for high-value DSL
+/// functions so chained calls (`request->path`, `app->config`)
+/// resolve against the correct class.
+#[test]
+fn plugin_dancer2_typed_stubs_have_return_types() {
+    use crate::file_analysis::InferredType;
+
+    let src = r#"
+package main;
+use Dancer2;
+"#;
+    let fa = build_fa(src);
+
+    // `request` must resolve to Dancer2::Core::Request.
+    let request_sym = fa
+        .symbols
+        .iter()
+        .find(|s| s.name == "request" && matches!(s.kind, crate::file_analysis::SymKind::Sub));
+    assert!(
+        request_sym.is_some(),
+        "dancer plugin must synthesize a `request` Sub symbol"
+    );
+    let rt = fa.sub_return_type_at_arity("request", None);
+    assert_eq!(
+        rt,
+        Some(InferredType::ClassName("Dancer2::Core::Request".into())),
+        "`request` must return Dancer2::Core::Request; got {:?}",
+        rt
+    );
+
+    // `app` must resolve to Dancer2::Core::App.
+    let rt = fa.sub_return_type_at_arity("app", None);
+    assert_eq!(
+        rt,
+        Some(InferredType::ClassName("Dancer2::Core::App".into())),
+        "`app` must return Dancer2::Core::App; got {:?}",
+        rt
+    );
+
+    // `session` must resolve to Dancer2::Core::Session.
+    let rt = fa.sub_return_type_at_arity("session", None);
+    assert_eq!(
+        rt,
+        Some(InferredType::ClassName("Dancer2::Core::Session".into())),
+        "`session` must return Dancer2::Core::Session; got {:?}",
+        rt
+    );
+
+    // `config` returns a HashRef.
+    let rt = fa.sub_return_type_at_arity("config", None);
+    assert_eq!(
+        rt,
+        Some(InferredType::HashRef),
+        "`config` must return HashRef; got {:?}",
+        rt
+    );
+
+    // `uri_for_route` returns a String (URL).
+    let rt = fa.sub_return_type_at_arity("uri_for_route", None);
+    assert_eq!(
+        rt,
+        Some(InferredType::String),
+        "`uri_for_route` must return String; got {:?}",
+        rt
+    );
+
+    // `encode_json` returns a String (the serialized JSON).
+    let rt = fa.sub_return_type_at_arity("encode_json", None);
+    assert_eq!(
+        rt,
+        Some(InferredType::String),
+        "`encode_json` must return String; got {:?}",
+        rt
+    );
+
+    // `decode_json` returns a HashRef (the deserialized structure).
+    let rt = fa.sub_return_type_at_arity("decode_json", None);
+    assert_eq!(
+        rt,
+        Some(InferredType::HashRef),
+        "`decode_json` must return HashRef; got {:?}",
+        rt
+    );
+
+    // `runner` returns the Dancer2::Core::Runner singleton.
+    let rt = fa.sub_return_type_at_arity("runner", None);
+    assert_eq!(
+        rt,
+        Some(InferredType::ClassName("Dancer2::Core::Runner".into())),
+        "`runner` must return Dancer2::Core::Runner; got {:?}",
+        rt
+    );
+}
+
+/// `use Dancer2::Plugin` also gets the full DSL — plugins
+/// re-export via import and expect every DSL word to be in scope.
+#[test]
+fn plugin_dancer2_plugin_also_autoimports() {
+    let src = r#"
+package MyApp::Plugin::Foo;
+use Dancer2::Plugin;
+
+register my_keyword => sub { my $dsl = shift; $dsl->param('x') };
+"#;
+    let fa = build_fa(src);
+    for kw in &["get", "post", "param", "request", "session", "config", "debug"] {
+        assert!(
+            fa.framework_imports.contains(*kw),
+            "`{}` must be autoimported by `use Dancer2::Plugin`; got {:?}",
+            kw,
+            fa.framework_imports,
+        );
+    }
+}
+
+/// Unrelated `use` statements must NOT inject Dancer2 keywords.
+/// Guards against the trigger firing too broadly.
+#[test]
+fn plugin_dancer2_skips_unrelated_use() {
+    let src = r#"
+package main;
+use Mojolicious::Lite;
+"#;
+    let fa = build_fa(src);
+    // `param` is a Dancer2 keyword — it should NOT appear in
+    // framework_imports just because of Mojolicious::Lite.
+    // (Mojolicious::Lite does not expose `param` as a standalone function.)
+    // We verify via the synthesized Sub symbol: the dancer plugin
+    // should not have emitted one.
+    let dancer_stubs = fa
+        .symbols
+        .iter()
+        .filter(|s| {
+            s.name == "dancer_app"
+                && matches!(
+                    &s.namespace,
+                    crate::file_analysis::Namespace::Framework { id } if id == "dancer"
+                )
+        })
+        .count();
+    assert_eq!(
+        dancer_stubs, 0,
+        "dancer plugin must not emit stubs for `use Mojolicious::Lite`"
+    );
+}
+
 // ---- Red-pin: regressions caught against the rhai-plugins branch ----
 
 /// `my` is lexical and crosses statement-form `package X;`
@@ -9283,7 +10728,6 @@ sub action {
     let hover = app_fa.hover_info(
         method_node.start_position(),
         app_src,
-        Some(&tree),
         Some(&idx),
     );
     let hover_text = hover.expect("hover on `$users[0]->greet` returns text");
@@ -9297,4 +10741,3420 @@ sub action {
         "hover should include the method name; got: {}",
         hover_text,
     );
+}
+
+/// `has x => (isa => InstanceOf['Foo'])` — the constraint is `InstanceOf['Foo']`,
+/// a Type::Tiny constraint *value*, not a class. The core types that call
+/// expression as `TypeConstraintOf(ClassName(Foo))` (plugin fold), and the
+/// accessor projects the constrained inner, so `x` returns `Foo`.
+#[test]
+fn moo_instanceof_isa_types_accessor_to_inner_class() {
+    let fa = build_fa(
+        "package T;\nuse Moo;\nuse Types::Standard qw/InstanceOf/;\nhas thing => (is => 'ro', isa => InstanceOf['My::Thing']);\n1;\n",
+    );
+    assert_eq!(
+        fa.sub_return_type_at_arity("thing", Some(0)),
+        Some(InferredType::ClassName("My::Thing".to_string())),
+        "InstanceOf['My::Thing'] isa must give the getter a My::Thing return",
+    );
+}
+
+/// The constructor expression itself is a `TypeConstraintOf` — NOT the inner
+/// class. `$t->name` must see a constraint (so it can route to Type::Tiny
+/// later), and an `isa => $t` projects the inner. This guards against the
+/// lossy "InstanceOf['Foo'] == ClassName(Foo)" shortcut we rejected.
+#[test]
+fn instanceof_expression_is_a_type_constraint_not_the_class() {
+    let fa = build_fa(
+        "package T;\nuse Moo;\nuse Types::Standard qw/InstanceOf/;\nmy $t = InstanceOf['My::Thing'];\n1;\n",
+    );
+    let ty = fa
+        .inferred_type_via_bag("$t", Point::new(3, 20))
+        .expect("$t should carry a type");
+    assert!(
+        matches!(&ty, InferredType::TypeConstraintOf(inner)
+            if matches!(inner.as_ref(), InferredType::ClassName(c) if c == "My::Thing")),
+        "InstanceOf['My::Thing'] is a TypeConstraintOf(ClassName(My::Thing)), got {:?}",
+        ty,
+    );
+    assert!(
+        ty.constrained_inner().and_then(|i| i.class_name()) == Some("My::Thing"),
+        "constrained_inner projects the class for the isa→accessor path",
+    );
+}
+
+/// const-fold / variable path: `my $t = InstanceOf['Foo']; has x => (isa => $t)`.
+/// `has` edges to the RHS `$t`, whose type is the constraint, and projects the
+/// inner — no special handling of the variable form.
+#[test]
+fn moo_isa_via_constraint_variable_projects_inner() {
+    let fa = build_fa(
+        "package T;\nuse Moo;\nuse Types::Standard qw/InstanceOf/;\nmy $t = InstanceOf['My::Thing'];\nhas thing => (is => 'ro', isa => $t);\n1;\n",
+    );
+    assert_eq!(
+        fa.sub_return_type_at_arity("thing", Some(0)),
+        Some(InferredType::ClassName("My::Thing".to_string())),
+        "isa => $constraint_var must project the constrained inner onto the accessor",
+    );
+}
+
+// ---- isa coverage: the TypeConstraintOf path + the string/bareword split ----
+
+/// String/bareword isa (the Moose idiom + builtins) stays on the meaning-map,
+/// untouched by the constraint path. Regression guard that adding the node
+/// path didn't break the common forms.
+#[test]
+fn moo_string_isa_forms_still_resolve() {
+    let fa = build_fa(
+        "package T;\nuse Moo;\nhas s => (is=>'ro', isa=>'Str');\nhas i => (is=>'ro', isa=>'Int');\nhas h => (is=>'ro', isa=>'HashRef');\n1;\n",
+    );
+    assert_eq!(fa.sub_return_type_at_arity("s", Some(0)), Some(InferredType::String));
+    assert_eq!(fa.sub_return_type_at_arity("i", Some(0)), Some(InferredType::Numeric));
+    assert_eq!(fa.sub_return_type_at_arity("h", Some(0)), Some(InferredType::HashRef));
+}
+
+/// `is => 'rw'` synthesizes a writer too; both getter (arity 0) and writer
+/// (arity ≥1) return the constrained inner class.
+#[test]
+fn moo_instanceof_isa_types_both_getter_and_writer() {
+    let fa = build_fa(
+        "package T;\nuse Moo;\nuse Types::Standard qw/InstanceOf/;\nhas thing => (is=>'rw', isa=>InstanceOf['My::Thing']);\n1;\n",
+    );
+    let want = Some(InferredType::ClassName("My::Thing".to_string()));
+    assert_eq!(fa.sub_return_type_at_arity("thing", Some(0)), want.clone(), "getter");
+    assert_eq!(fa.sub_return_type_at_arity("thing", Some(1)), want, "rw writer");
+}
+
+/// `Maybe[InstanceOf['Foo']]` — the nested constructor is itself a constraint
+/// value. The core types the inner call (`TypeConstraintOf(ClassName(Foo))`)
+/// into the param's `ty`; the `Maybe` passthrough fold projects its inner, so
+/// the accessor returns `Foo` (optionalness unmodeled — unwrap for resolution).
+#[test]
+fn moo_maybe_instanceof_isa_unwraps_to_inner_class() {
+    let fa = build_fa(
+        "package T;\nuse Moo;\nuse Types::Standard qw/Maybe InstanceOf/;\nhas thing => (is=>'ro', isa=>Maybe[InstanceOf['My::Thing']]);\n1;\n",
+    );
+    assert_eq!(
+        fa.sub_return_type_at_arity("thing", Some(0)),
+        Some(InferredType::ClassName("My::Thing".to_string())),
+        "Maybe[InstanceOf['My::Thing']] must unwrap to a My::Thing accessor return",
+    );
+}
+
+/// `ConsumerOf['Role']` shares the ClassParam shape (you can call the role's
+/// methods on the value) — declared by the same plugin manifest entry.
+#[test]
+fn moo_consumerof_isa_types_accessor() {
+    let fa = build_fa(
+        "package T;\nuse Moo;\nuse Types::Standard qw/ConsumerOf/;\nhas r => (is=>'ro', isa=>ConsumerOf['My::Role']);\n1;\n",
+    );
+    assert_eq!(
+        fa.sub_return_type_at_arity("r", Some(0)),
+        Some(InferredType::ClassName("My::Role".to_string())),
+    );
+}
+
+/// crm writes `InstanceOf ['Class']` (space before the bracket). Both spacings
+/// parse as the same call node, so both must type.
+#[test]
+fn moo_instanceof_isa_handles_space_before_bracket() {
+    let fa = build_fa(
+        "package T;\nuse Moo;\nuse Types::Standard qw/InstanceOf/;\nhas thing => (is=>'ro', isa=>InstanceOf ['My::Thing']);\n1;\n",
+    );
+    assert_eq!(
+        fa.sub_return_type_at_arity("thing", Some(0)),
+        Some(InferredType::ClassName("My::Thing".to_string())),
+    );
+}
+
+/// Moose mode, not just Moo — same constraint vocabulary.
+#[test]
+fn moose_instanceof_isa_types_accessor() {
+    let fa = build_fa(
+        "package T;\nuse Moose;\nuse Types::Standard qw/InstanceOf/;\nhas thing => (is=>'ro', isa=>InstanceOf['My::Thing']);\n1;\n",
+    );
+    assert_eq!(
+        fa.sub_return_type_at_arity("thing", Some(0)),
+        Some(InferredType::ClassName("My::Thing".to_string())),
+    );
+}
+
+/// NEGATIVE: a coderef isa (`isa => sub {...}`) isn't a constraint — the
+/// accessor must stay untyped, never falsely a class. Guards the projection
+/// from over-firing on non-constraint complex RHS.
+#[test]
+fn moo_coderef_isa_leaves_accessor_untyped() {
+    let fa = build_fa(
+        "package T;\nuse Moo;\nhas thing => (is=>'ro', isa=>sub { die unless ref $_[0] });\n1;\n",
+    );
+    assert_eq!(
+        fa.sub_return_type_at_arity("thing", Some(0)),
+        None,
+        "a coderef constraint has no class denotation",
+    );
+}
+
+/// NEGATIVE: an undeclared constructor (`SomeType['X']`, not in any plugin's
+/// type_constraint_names) falls through cleanly — no TypeConstraintOf, no
+/// crash, accessor untyped.
+#[test]
+fn moo_unknown_constructor_isa_falls_through() {
+    let fa = build_fa(
+        "package T;\nuse Moo;\nhas thing => (is=>'ro', isa=>SomeUnknownType['X']);\n1;\n",
+    );
+    assert_eq!(fa.sub_return_type_at_arity("thing", Some(0)), None);
+}
+
+/// The chain payoff: an `InstanceOf` accessor's class flows into a downstream
+/// method call. `$self->other->greet` must resolve `->greet` against `Other`
+/// — this is the `$self->_minion->enqueue` shape that the crm fix turns on.
+#[test]
+fn instanceof_accessor_chains_into_method_call() {
+    let src = "package Other;\nuse Moo;\nsub greet ($self) { return 'hi'; }\n\npackage T;\nuse Moo;\nuse Types::Standard qw/InstanceOf/;\nhas other => (is=>'ro', isa=>InstanceOf['Other']);\nsub use_it ($self) { return $self->other->greet; }\n1;\n";
+    let tree = parse(src);
+    let fa = build(&tree, src.as_bytes());
+    let idx = crate::module_index::ModuleIndex::new_for_test();
+
+    // Find the `greet` method-call node in `$self->other->greet`.
+    fn find_call<'a>(n: tree_sitter::Node<'a>, src: &[u8], m: &str) -> Option<tree_sitter::Node<'a>> {
+        if n.kind() == "method_call_expression" {
+            if let Some(mn) = n.child_by_field_name("method") {
+                if mn.utf8_text(src).ok() == Some(m) { return Some(n); }
+            }
+        }
+        for i in 0..n.named_child_count() {
+            if let Some(c) = n.named_child(i) {
+                if let Some(f) = find_call(c, src, m) { return Some(f); }
+            }
+        }
+        None
+    }
+    let call = find_call(tree.root_node(), src.as_bytes(), "greet").expect("has $self->other->greet");
+    let method_node = call.child_by_field_name("method").unwrap();
+    let hover = fa
+        .hover_info(method_node.start_position(), src, Some(&idx))
+        .expect("hover on ->greet resolves");
+    assert!(
+        hover.contains("Other"),
+        "->greet on an InstanceOf['Other'] accessor must resolve against Other; got: {hover}",
+    );
+}
+
+/// Option B resolves a receiver whose type comes from a Mojo HELPER, not a
+/// plain method. `$c->minion` (a helper bridged to Mojolicious::Controller,
+/// returning a Minion subclass) → `$c->minion->enqueue('T')` must synthesize
+/// the dispatch. This is the gap that left `$app->minion`/`$c->minion`
+/// chains dark: option-B's enrichment receiver-resolution now threads the
+/// index (variable arm) and chases the helper bridge the way hover does.
+#[test]
+fn provisional_dispatch_resolves_helper_returned_receiver() {
+    use crate::file_analysis::HandlerOwner;
+    use std::path::PathBuf;
+    let idx = crate::module_index::ModuleIndex::new_for_test();
+    idx.register_workspace_module(
+        PathBuf::from("/tmp/b_hr_minion.pm"),
+        std::sync::Arc::new(build_fa("package Acme::Minion;\nuse Mojo::Base 'Minion';\n1;\n")),
+    );
+    idx.register_workspace_module(
+        PathBuf::from("/tmp/b_hr_plugin.pm"),
+        std::sync::Arc::new(build_fa(
+            "package Acme::Plugin;\nuse Mojo::Base 'Mojolicious::Plugin';\nsub register ($self, $app, $conf) {\n  my $m = Acme::Minion->new;\n  $app->helper(minion => sub {$m});\n  $app->minion->add_task('Task.go' => sub ($job) { 1 });\n}\n1;\n",
+        )),
+    );
+
+    let fa = build_fa(
+        "package Acme::Ctrl;\nuse Mojo::Base 'Mojolicious::Controller';\nsub act ($c) {\n  $c->minion->enqueue('Task.go');\n}\n1;\n",
+    );
+
+    // This file hits a Mojo trigger, so the emit-hook materializes the
+    // DispatchCall directly (it doesn't gate on the receiver). The handler
+    // is surfaced either way; `applicable_dispatches` de-dups the gated
+    // candidate against the materialized ref so there's no double-count.
+    let has_materialized = fa.refs.iter().any(|r|
+        matches!(&r.kind, RefKind::DispatchCall { dispatcher, owner: Some(HandlerOwner::Class(c)) }
+            if dispatcher == "enqueue" && c == "Minion")
+            && r.target_name == "Task.go");
+    let applied = fa.applicable_dispatches(Some(&idx));
+    let has_gated = applied.iter().any(|a|
+        a.name == "Task.go" && a.owner == HandlerOwner::Class("Minion".into()));
+    assert!(
+        has_materialized ^ has_gated,
+        "the helper-returned receiver $c->minion (Acme::Minion isa Minion) enqueue \
+         must surface exactly once — via the emit-hook ref OR the gated candidate, \
+         never both; materialized={has_materialized} gated={has_gated} applied={:?}",
+        applied,
+    );
+    assert!(
+        has_materialized,
+        "this file hits a Mojo trigger, so the emit-hook materializes the dispatch",
+    );
+}
+
+/// Role-contract parameter typing: a plugin's `param_types()` manifest types a
+/// named param of a sub declared in a class that does the rule's role. The
+/// motivating case is `Clove::Upgrade::OneTime`'s `run_upgrade ($self, $app)`,
+/// where `$app` is the Mojolicious app — a type the source can't express and
+/// no callback-arg hook can reach (it's a plain sub declaration).
+mod param_types_manifest {
+    use super::*;
+    use crate::plugin::{
+        CompletionQueryContext, FrameworkPlugin, ParamType, PluginCompletionAnswer,
+        PluginRegistry, PluginSigHelpAnswer, SigHelpQueryContext, Trigger,
+    };
+    use std::sync::Arc;
+
+    struct UpgradeRolePlugin;
+    impl FrameworkPlugin for UpgradeRolePlugin {
+        fn id(&self) -> &str { "upgrade-role-test" }
+        fn triggers(&self) -> &[Trigger] {
+            static T: [Trigger; 1] = [Trigger::Always];
+            &T
+        }
+        fn param_types(&self) -> &[ParamType] {
+            // Built lazily into a static so the &[] borrow is 'static.
+            use std::sync::OnceLock;
+            static PT: OnceLock<Vec<ParamType>> = OnceLock::new();
+            PT.get_or_init(|| {
+                vec![ParamType {
+                    method: Some("run_upgrade".into()),
+                    in_role: "My::Upgrade::Role".into(),
+                    param: 1,
+                    type_class: "Mojolicious".into(),
+                    requires_action_attr: false,
+                }]
+            })
+        }
+        fn on_signature_help(&self, _: &SigHelpQueryContext) -> Option<PluginSigHelpAnswer> { None }
+        fn on_completion(&self, _: &CompletionQueryContext) -> Option<PluginCompletionAnswer> { None }
+    }
+
+    fn build_with_upgrade(source: &str) -> FileAnalysis {
+        let mut reg = PluginRegistry::new();
+        reg.register(Box::new(UpgradeRolePlugin));
+        let mut parser = tree_sitter::Parser::new();
+        parser.set_language(&ts_parser_perl::LANGUAGE.into()).unwrap();
+        let tree = parser.parse(source, None).unwrap();
+        crate::builder::build_with_plugins(&tree, source.as_bytes(), Arc::new(reg))
+    }
+
+    #[test]
+    fn role_doer_run_upgrade_app_param_typed() {
+        // `use Moo; with 'Role'` populates package_parents (core framework
+        // handling); the manifest then types `$app` as Mojolicious.
+        let fa = build_with_upgrade(
+            "package My::Doer;\nuse Moo;\nwith 'My::Upgrade::Role';\nsub run_upgrade ($self, $app) {\n  my $x = $app;\n}\n1;\n",
+        );
+        let ty = fa
+            .inferred_type_via_bag("$app", Point::new(4, 10))
+            .expect("$app should be typed by the param_types manifest");
+        assert!(
+            matches!(&ty, InferredType::ClassName(c) if c == "Mojolicious"),
+            "role-contract param typing should make $app a Mojolicious, got {:?}",
+            ty,
+        );
+    }
+
+    #[test]
+    fn non_doer_same_method_name_not_typed() {
+        // Same method name, but the class does NOT do the role → no typing
+        // (the rule is role-gated, not name-gated).
+        let fa = build_with_upgrade(
+            "package Other;\nsub run_upgrade ($self, $app) {\n  my $x = $app;\n}\n1;\n",
+        );
+        assert_eq!(
+            fa.inferred_type_via_bag("$app", Point::new(2, 10)),
+            None,
+            "a class that doesn't do the role must not get the contract param type",
+        );
+    }
+
+    // ---- Cross-file manifest-applicability probes ----
+    // Whether build-time `transitive_parents`-gated plugin behavior reaches a
+    // class whose ancestry is established cross-file. See
+    // `docs/prompt-enrichment-inheritance-residual.md`.
+
+    /// `ClassIsa`-triggered plugin emission on a class whose trigger-class
+    /// ancestry is only established CROSS-FILE. `Leaf` extends `Mid` (a
+    /// cross-file module) which extends `Mojo::EventEmitter`. The
+    /// mojo-events plugin's `ClassIsa: "Mojo::EventEmitter"` trigger walks
+    /// local `transitive_parents` (builder is index-free during the walk),
+    /// which sees only `Mid` — not the cross-file `Mojo::EventEmitter`.
+    /// Enrichment can't help: plugin emit hooks fire at parse time, inside
+    /// `build()`, before any module index exists.
+    ///
+    /// Architectural gap, NOT a contained fix — documented as a latent
+    /// hazard. See the doc.
+    #[test]
+    #[ignore = "cross-file ClassIsa trigger: architectural, see docs/prompt-enrichment-inheritance-residual.md"]
+    fn probe_class_isa_trigger_through_cross_file_parent() {
+        use crate::module_index::ModuleIndex;
+        use std::path::PathBuf;
+        let idx = ModuleIndex::new_for_test();
+        idx.set_workspace_root(None);
+        idx.insert_cache(
+            "Mid",
+            Some(fake_cached_for_class(
+                "Mid",
+                &PathBuf::from("/fake/Mid.pm"),
+                &[],
+                &["Mojo::EventEmitter"],
+            )),
+        );
+        let src = "package Leaf;\nuse parent 'Mid';\nsub wire {\n  my $self = shift;\n  $self->on('ready', sub { 1 });\n}\n1;\n";
+        let mut parser = tree_sitter::Parser::new();
+        parser.set_language(&ts_parser_perl::LANGUAGE.into()).unwrap();
+        let tree = parser.parse(src, None).unwrap();
+        let mut fa = crate::builder::build(&tree, src.as_bytes());
+        fa.enrich_imported_types_with_keys(Some(&idx));
+        let ready = fa.symbols.iter().filter(|s| {
+            s.kind == SymKind::Handler && s.name == "ready"
+                && matches!(&s.namespace, Namespace::Framework { id } if id == "mojo-events")
+        }).count();
+        assert_eq!(
+            ready, 1,
+            "mojo-events ClassIsa trigger should fire via cross-file parent chain"
+        );
+    }
+
+    /// Dispatch-verb resolution in a NON-OPEN workspace/dependency file
+    /// whose dispatch receiver `isa Minion` only CROSS-FILE and which does
+    /// NOT `use Minion` itself. The minion plugin's emit-hook path
+    /// (`UsesModule`/`ClassIsa` trigger) doesn't fire — only the
+    /// trigger-independent `dispatch_verbs()` manifest captures a gated
+    /// candidate. Under the query-time `ReceiverGated` seam the file is built
+    /// WITHOUT enrichment (as the workspace indexer does) yet
+    /// `applicable_dispatches` resolves the receiver cross-file and surfaces
+    /// the call site. See `docs/adr/receiver-gated-dispatch.md`.
+    #[test]
+    fn dispatch_resolves_query_time_in_unenriched_workspace_file() {
+        use crate::module_index::ModuleIndex;
+        use std::path::PathBuf;
+        let idx = ModuleIndex::new_for_test();
+        idx.set_workspace_root(None);
+        // `My::Minion` isa Minion, cross-file. The worker file below never
+        // `use`s Minion — the emit-hook trigger can't fire, only the
+        // receiver-isa manifest candidate, gated and resolved at query time.
+        idx.insert_cache(
+            "My::Minion",
+            Some(fake_cached_for_class(
+                "My::Minion",
+                &PathBuf::from("/fake/My/Minion.pm"),
+                &["new"],
+                &["Minion"],
+            )),
+        );
+        let src = "package My::Worker;\nsub run {\n  my $self = shift;\n  my $minion = My::Minion->new;\n  $minion->enqueue('send_email');\n}\n1;\n";
+        // Build exactly as the workspace indexer does: no enrichment.
+        let fa = build_fa(src);
+        let applied = fa.applicable_dispatches(Some(&idx));
+        assert_eq!(
+            applied.len(), 1,
+            "workspace-indexed file (no enrichment) should resolve its enqueue \
+             dispatch at query time via the cross-file receiver isa — else \
+             cross-file handler references miss it; got {:?}",
+            applied,
+        );
+        assert_eq!(applied[0].name, "send_email");
+    }
+
+    // Wildcard-method param_types: a rule with `method: None` applies to every
+    // sub in the class — the Catalyst pattern where every action gets `$c` typed.
+    struct CatalystPlugin;
+    impl FrameworkPlugin for CatalystPlugin {
+        fn id(&self) -> &str { "catalyst-test" }
+        fn triggers(&self) -> &[Trigger] {
+            static T: [Trigger; 1] = [Trigger::Always];
+            &T
+        }
+        fn param_types(&self) -> &[ParamType] {
+            use std::sync::OnceLock;
+            static PT: OnceLock<Vec<ParamType>> = OnceLock::new();
+            PT.get_or_init(|| {
+                vec![ParamType {
+                    method: None, // wildcard: every ACTION method in the class
+                    in_role: "Catalyst::Controller".into(),
+                    param: 1,
+                    type_class: "Catalyst".into(),
+                    // Mirror the real catalyst.rhai: only attribute-carrying
+                    // actions get $c, not plain helper subs.
+                    requires_action_attr: true,
+                }]
+            })
+        }
+        fn on_signature_help(&self, _: &SigHelpQueryContext) -> Option<PluginSigHelpAnswer> { None }
+        fn on_completion(&self, _: &CompletionQueryContext) -> Option<PluginCompletionAnswer> { None }
+    }
+
+    fn build_with_catalyst(source: &str) -> FileAnalysis {
+        let mut reg = PluginRegistry::new();
+        reg.register(Box::new(CatalystPlugin));
+        let mut parser = tree_sitter::Parser::new();
+        parser.set_language(&ts_parser_perl::LANGUAGE.into()).unwrap();
+        let tree = parser.parse(source, None).unwrap();
+        crate::builder::build_with_plugins(&tree, source.as_bytes(), Arc::new(reg))
+    }
+
+    #[test]
+    fn catalyst_action_c_typed_via_wildcard_manifest() {
+        // A controller action: $c (param index 1) should type as Catalyst.
+        // The wildcard rule fires regardless of the action method's name.
+        let fa = build_with_catalyst(
+            "package MyApp::Controller::Foo;\nuse parent 'Catalyst::Controller';\nsub index :Local {\n    my ($self, $c) = @_;\n    my $req = $c;\n}\n1;\n",
+        );
+        let ty = fa
+            .inferred_type_via_bag("$c", Point::new(4, 14))
+            .expect("$c should be typed by wildcard param_types manifest");
+        assert!(
+            matches!(&ty, InferredType::ClassName(c) if c == "Catalyst"),
+            "wildcard param_types should make $c a Catalyst in every controller action, got {:?}",
+            ty,
+        );
+    }
+
+    #[test]
+    fn catalyst_wildcard_typed_for_any_action_name() {
+        // A differently-named action — the wildcard covers it too.
+        let fa = build_with_catalyst(
+            "package MyApp::Controller::Bar;\nuse parent 'Catalyst::Controller';\nsub list :Local {\n    my ($self, $c) = @_;\n    my $x = $c;\n}\n1;\n",
+        );
+        let ty = fa
+            .inferred_type_via_bag("$c", Point::new(4, 12))
+            .expect("$c should be typed regardless of action method name");
+        assert!(
+            matches!(&ty, InferredType::ClassName(c) if c == "Catalyst"),
+            "wildcard param_types must apply to any action name, got {:?}",
+            ty,
+        );
+    }
+
+    /// The Phase-2 cross-file case: a controller in file A `extends` a base in
+    /// file B which `isa Catalyst::Controller`. The controller's ancestry to
+    /// the wildcard rule's `in_role` is established only CROSS-FILE, so the old
+    /// build-time local-only `transitive_parents` gate dropped it. The gated TC
+    /// resolves at query time with the module index in hand → `$c` types.
+    #[test]
+    fn catalyst_wildcard_c_typed_through_cross_file_base() {
+        use crate::module_index::ModuleIndex;
+        use std::path::PathBuf;
+        let idx = ModuleIndex::new_for_test();
+        idx.set_workspace_root(None);
+        // `MyApp::ControllerBase` isa Catalyst::Controller, cross-file. The
+        // controller below `extends` it — its ancestry to the role is two hops,
+        // through a class in another file the builder never sees.
+        idx.insert_cache(
+            "MyApp::ControllerBase",
+            Some(fake_cached_for_class(
+                "MyApp::ControllerBase",
+                &PathBuf::from("/fake/MyApp/ControllerBase.pm"),
+                &[],
+                &["Catalyst::Controller"],
+            )),
+        );
+        let src = "package MyApp::Controller::Deep;\nuse parent 'MyApp::ControllerBase';\nsub show :Local {\n    my ($self, $c) = @_;\n    my $req = $c;\n}\n1;\n";
+        // Build as the workspace indexer does (no enrichment); the gated TC
+        // rides the FA and resolves cross-file at query time.
+        let fa = build_with_catalyst(src);
+        let ty = fa
+            .inferred_type_via_bag_ctx("$c", Point::new(4, 14), Some(&idx))
+            .expect("$c should type via the cross-file Catalyst::Controller ancestry");
+        assert!(
+            matches!(&ty, InferredType::ClassName(c) if c == "Catalyst"),
+            "wildcard param_types must type $c when Catalyst::Controller is a \
+             cross-file ancestor, got {:?}",
+            ty,
+        );
+    }
+
+    #[test]
+    fn catalyst_wildcard_not_applied_outside_controller() {
+        // A package without the Catalyst::Controller ancestor must not get $c typed.
+        let fa = build_with_catalyst(
+            "package OtherPackage;\nsub index {\n    my ($self, $c) = @_;\n    my $x = $c;\n}\n1;\n",
+        );
+        assert_eq!(
+            fa.inferred_type_via_bag("$c", Point::new(3, 12)),
+            None,
+            "wildcard rule must not type $c in a package that doesn't isa Catalyst::Controller",
+        );
+    }
+
+    /// P1.4 — the real metacpan shape, through the actual hover query path: a
+    /// controller reaches `Catalyst::Controller` through a *workspace
+    /// intermediate* base that is itself a child of the role class. The leaf's
+    /// local `package_parents` only knows its direct parent; reaching the role
+    /// requires `class_isa` to chase the intermediate's parents through the
+    /// module index. The bug was the hover path (`format_symbol_hover_at`)
+    /// dropping the index — this exercises `hover_info` end-to-end so it
+    /// fails on pre-fix code.
+    #[test]
+    fn catalyst_c_typed_through_workspace_intermediate_via_hover() {
+        use crate::module_index::ModuleIndex;
+        use std::path::PathBuf;
+        let idx = ModuleIndex::new_for_test();
+        idx.set_workspace_root(None);
+        // Intermediate base, registered as a workspace module (like a project
+        // `lib/.../Controller.pm`): its parent (`Catalyst::Controller`) lives
+        // only in the index, NOT in the leaf's local `package_parents`.
+        idx.register_workspace_module(
+            PathBuf::from("/fake/MetaCPAN/Web/Controller.pm"),
+            std::sync::Arc::new(build_fa(
+                "package MetaCPAN::Web::Controller;\nuse parent 'Catalyst::Controller';\nsub pageset {\n    my ($self, $page) = @_;\n}\n1;\n",
+            )),
+        );
+        // Leaf controller: extends only the workspace intermediate.
+        let src = "package MetaCPAN::Web::Controller::Author;\nuse parent 'MetaCPAN::Web::Controller';\nsub root :Chained {\n    my ($self, $c, $id) = @_;\n    my $x = $c;\n}\n1;\n";
+        let fa = build_with_catalyst(src);
+        // Hover on the `$c` usage (row 4, the `my $x = $c;` line). The hover
+        // path resolves the variable's type — only typed correctly if the
+        // index is threaded all the way to the gated-param query.
+        let hover = fa
+            .hover_info(Point::new(4, 12), src, Some(&idx))
+            .expect("hover should produce info for $c");
+        assert!(
+            hover.contains("type: Catalyst"),
+            "3-hop cross-file ancestry through a workspace base must type $c in \
+             hover (the path that dropped the index), got: {}",
+            hover,
+        );
+    }
+
+    /// P1.3 — the attribute gate: in the SAME controller, an action (`:Local`)
+    /// gets `$c`, but a plain helper sub (no action attribute) must NOT get its
+    /// 2nd param typed. The honest action signal is the attribute, not the
+    /// parameter position.
+    #[test]
+    fn catalyst_non_action_helper_second_param_not_typed() {
+        let fa = build_with_catalyst(
+            "package MyApp::Controller::Foo;\nuse parent 'Catalyst::Controller';\nsub show :Local {\n    my ($self, $c) = @_;\n    my $a = $c;\n}\nsub pageset {\n    my ($self, $page) = @_;\n    my $b = $page;\n}\n1;\n",
+        );
+        // The action's $c IS typed.
+        let c_ty = fa
+            .inferred_type_via_bag("$c", Point::new(4, 12))
+            .expect("action $c should be typed");
+        assert!(
+            matches!(&c_ty, InferredType::ClassName(c) if c == "Catalyst"),
+            "action method's $c must type as Catalyst, got {:?}",
+            c_ty,
+        );
+        // The plain helper's 2nd param ($page) must NOT be typed — no attribute.
+        assert_eq!(
+            fa.inferred_type_via_bag("$page", Point::new(8, 12)),
+            None,
+            "a non-action helper's 2nd param must NOT be typed Catalyst (P1.3 \
+             over-application); only attribute-carrying actions receive $c",
+        );
+    }
+
+    /// Catalyst private-action names (`begin`/`end`/`auto`/`default`/`index`)
+    /// are dispatched by name alone — no action attribute. The `requires_action_attr`
+    /// gate must not exclude them, so `$c` still types.
+    #[test]
+    fn catalyst_private_action_names_type_c_without_attr() {
+        // `sub end { my ($self,$c)=@_ }` in a controller — no attribute.
+        let fa = build_with_catalyst(
+            "package MyApp::Controller::Root;\nuse parent 'Catalyst::Controller';\nsub end {\n    my ($self, $c) = @_;\n    my $r = $c;\n}\n1;\n",
+        );
+        let ty = fa
+            .inferred_type_via_bag("$c", Point::new(4, 12))
+            .expect("private-action end: $c should be typed even without an attribute");
+        assert!(
+            matches!(&ty, InferredType::ClassName(c) if c == "Catalyst"),
+            "sub end without action attr must type $c as Catalyst, got {:?}",
+            ty,
+        );
+    }
+
+    /// A plain helper sub whose name happens to NOT be a private-action name
+    /// and carries no action attribute must still be excluded.
+    #[test]
+    fn catalyst_plain_helper_not_a_private_action() {
+        let fa = build_with_catalyst(
+            "package MyApp::Controller::Root;\nuse parent 'Catalyst::Controller';\nsub helper {\n    my ($self, $x) = @_;\n    my $r = $x;\n}\n1;\n",
+        );
+        assert_eq!(
+            fa.inferred_type_via_bag("$x", Point::new(4, 12)),
+            None,
+            "non-action, non-private-action helper must NOT have $x typed as Catalyst",
+        );
+    }
+}
+
+// ---- Fix #1: `not` operator ----
+
+/// `not $x` must never produce an unresolved-function diagnostic.
+/// Validated in symbols_tests; here we confirm the builder emits a
+/// FunctionCall ref (so the name is visible for filtering) whose name
+/// is "not" — the is_perl_builtin guard in collect_diagnostics then
+/// suppresses it.
+#[test]
+fn not_operator_emits_no_function_call_ref() {
+    // As of ts-parser-perl 1.1.0, `not` is the low-precedence logical-not
+    // OPERATOR (`logical_not_expression`), not a function call. So no `not`
+    // FunctionCall ref is emitted at all — which is the correct end state:
+    // nothing for the builtin-suppressor to filter, and no unresolved-function
+    // diagnostic for `not`.
+    let fa = build_fa("my $x = 1;\nmy $y = not $x;\n");
+    let not_refs: Vec<_> = fa
+        .refs
+        .iter()
+        .filter(|r| r.target_name == "not" && matches!(r.kind, RefKind::FunctionCall { .. }))
+        .collect();
+    assert!(
+        not_refs.is_empty(),
+        "`not` is an operator now; no FunctionCall ref should exist; got refs: {:?}",
+        fa.refs.iter().map(|r| (&r.target_name, &r.kind)).collect::<Vec<_>>(),
+    );
+    // The $x operand still gets its read ref.
+    assert!(
+        fa.refs.iter().any(|r| r.target_name == "$x"),
+        "operand $x should still be referenced",
+    );
+}
+
+// ---- Fix #2: `\&subname` code-ref ----
+
+/// `\&handler` must emit a FunctionCall ref pointing at `handler`
+/// so goto-def and references both work.
+#[test]
+fn refgen_bare_name_emits_function_call_ref() {
+    let fa = build_fa("sub handler { 1 }\nmy $cb = \\&handler;\n");
+    let refs: Vec<_> = fa
+        .refs
+        .iter()
+        .filter(|r| r.target_name == "handler" && matches!(r.kind, RefKind::FunctionCall { .. }))
+        .collect();
+    assert_eq!(
+        refs.len(),
+        1,
+        "\\&handler should emit exactly one FunctionCall ref for `handler`; got: {:?}",
+        fa.refs
+            .iter()
+            .filter(|r| r.target_name == "handler")
+            .map(|r| &r.kind)
+            .collect::<Vec<_>>(),
+    );
+}
+
+/// `\&Pkg::handler` (qualified form) must also emit a FunctionCall ref.
+#[test]
+fn refgen_qualified_name_emits_function_call_ref() {
+    let fa = build_fa("my $cb = \\&Foo::handler;\n");
+    let refs: Vec<_> = fa
+        .refs
+        .iter()
+        .filter(|r| {
+            r.target_name == "handler" || r.target_name == "Foo::handler"
+        })
+        .collect();
+    assert!(
+        !refs.is_empty(),
+        "\\&Foo::handler should emit a FunctionCall ref; got refs: {:?}",
+        fa.refs.iter().map(|r| (&r.target_name, &r.kind)).collect::<Vec<_>>(),
+    );
+}
+
+/// goto-def on `\&handler` should land on the `sub handler` definition.
+/// FunctionCall refs route goto-def through package+name matching, not
+/// `resolves_to`, so we check `find_definition` returns the sub's span.
+#[test]
+fn refgen_goto_def_lands_on_sub_definition() {
+    // sub handler on line 0, \&handler on line 1 col 9
+    let src = "sub handler { 1 }\nmy $cb = \\&handler;\n";
+    let fa = build_fa(src);
+    let sub_sym = fa
+        .symbols
+        .iter()
+        .find(|s| s.name == "handler" && matches!(s.kind, SymKind::Sub))
+        .expect("handler sub should be defined");
+    // Cursor at the `h` of `\&handler` on line 1 (0-indexed row=1, col≈11)
+    let def_span = fa.find_definition(
+        Point::new(1, 11),
+        None,
+        None,
+        None,
+    );
+    assert_eq!(
+        def_span,
+        Some(sub_sym.selection_span),
+        "goto-def on \\&handler should land on the handler sub; sym={:?}",
+        sub_sym,
+    );
+}
+
+// ---- Fully-qualified variable reads → (pkg, basename) ----
+
+#[test]
+fn split_qualified_basics() {
+    use crate::file_analysis::split_qualified;
+    assert_eq!(split_qualified("Foo::Bar::baz"), (Some("Foo::Bar"), "baz"));
+    assert_eq!(split_qualified("baz"), (None, "baz"));
+    assert_eq!(split_qualified("Foo::bar"), (Some("Foo"), "bar"));
+    // Leading `::` (main:: shorthand) → empty-string package, preserved.
+    assert_eq!(split_qualified("::foo"), (Some(""), "foo"));
+}
+
+#[test]
+fn fq_scalar_read_resolves_same_file() {
+    // `our $x` in package Pkg; `$Pkg::x` read in another package, same file.
+    let src = "package Pkg;\nour $x = 1;\npackage Main;\nmy $a = $Pkg::x;\n";
+    let fa = build_fa(src);
+    let decl = fa
+        .symbols
+        .iter()
+        .find(|s| s.name == "$x" && s.package.as_deref() == Some("Pkg"))
+        .expect("our $x in Pkg should be a symbol");
+    // Cursor on the `x` tail of `$Pkg::x` (line 3).
+    let read = fa
+        .refs
+        .iter()
+        .find(|r| r.target_name == "$Pkg::x")
+        .expect("$Pkg::x should emit a Variable ref");
+    assert_eq!(
+        read.resolves_to,
+        Some(decl.id),
+        "FQ scalar read should resolve to the Pkg::x declaration"
+    );
+    let def = fa.find_definition(read.span.start, None, None, None);
+    assert_eq!(def, Some(decl.selection_span));
+}
+
+#[test]
+fn fq_array_read_resolves_same_file() {
+    let src = "package Pkg;\nour @arr = (1, 2);\npackage Main;\nmy @b = @Pkg::arr;\n";
+    let fa = build_fa(src);
+    let decl = fa
+        .symbols
+        .iter()
+        .find(|s| s.name == "@arr" && s.package.as_deref() == Some("Pkg"))
+        .expect("our @arr in Pkg should be a symbol");
+    let read = fa
+        .refs
+        .iter()
+        .find(|r| r.target_name == "@Pkg::arr")
+        .expect("@Pkg::arr should emit a Variable ref");
+    assert_eq!(read.resolves_to, Some(decl.id));
+}
+
+#[test]
+fn fq_var_ref_span_narrowed_to_tail() {
+    // rule #7: rename/highlight token is the bare tail, not the whole path.
+    let src = "package Pkg;\nour $x = 1;\npackage Main;\nmy $a = $Pkg::x;\n";
+    let fa = build_fa(src);
+    let read = fa
+        .refs
+        .iter()
+        .find(|r| r.target_name == "$Pkg::x")
+        .expect("$Pkg::x ref");
+    // `$Pkg::x` on line 3: `my $a = ` is 8 cols, `$Pkg::` is 6 → `x` at col 14.
+    assert_eq!(read.span.start.row, 3);
+    assert_eq!(read.span.start.column, 14, "span should start at the `x` tail");
+}
+
+#[test]
+fn unqualified_var_still_resolves_lexically() {
+    // Regression: the FQ fast-path must not break plain lexical resolution.
+    let fa = build_fa("my $x = 1;\nprint $x;\n");
+    let read = fa
+        .refs
+        .iter()
+        .find(|r| r.target_name == "$x" && r.access == AccessKind::Read)
+        .expect("plain $x read");
+    assert!(read.resolves_to.is_some(), "unqualified read still resolves");
+}
+
+// ---- Fix #3: around/before/after modifier bodies ----
+
+/// In `around foo => sub { my ($orig, $self) = @_; ... }`, `$self` (param index 1)
+/// must be typed as the enclosing class so `$self->method` chains resolve.
+#[test]
+fn around_modifier_second_param_typed_as_class() {
+    let src = r#"
+package Dog;
+use Moo;
+
+sub speak { "woof" }
+
+around speak => sub {
+    my ($orig, $self) = @_;
+    return $self->speak_loudly();
+};
+
+sub speak_loudly { "WOOF" }
+"#;
+    let fa = build_fa(src);
+
+    // `$self` inside the around body should resolve to `Dog`
+    // (row=8 is the `return $self->speak_loudly()` line).
+    let ty = fa.inferred_type_via_bag("$self", Point::new(8, 12));
+    assert!(
+        ty.is_some(),
+        "$self inside `around` body should have an inferred type; got None.\
+         \nAll TCs: {:?}",
+        fa.refs
+            .iter()
+            .filter(|r| r.target_name == "$self")
+            .collect::<Vec<_>>(),
+    );
+    match ty.unwrap() {
+        InferredType::ClassName(name) => assert_eq!(name, "Dog", "$self should be Dog"),
+        InferredType::FirstParam { package } => {
+            assert_eq!(package, "Dog", "$self FirstParam should be Dog")
+        }
+        other => panic!("expected ClassName/FirstParam for $self, got {:?}", other),
+    }
+}
+
+/// In `before foo => sub { my ($self) = @_; ... }`, `$self` (param index 0)
+/// must be typed as the enclosing class.
+#[test]
+fn before_modifier_first_param_typed_as_class() {
+    let src = r#"
+package Cat;
+use Moo;
+
+sub meow { "mrrp" }
+
+before meow => sub {
+    my ($self) = @_;
+    $self->hiss();
+};
+
+sub hiss { "ssss" }
+"#;
+    let fa = build_fa(src);
+
+    // Row 8 = `$self->hiss()` line
+    let ty = fa.inferred_type_via_bag("$self", Point::new(8, 4));
+    assert!(
+        ty.is_some(),
+        "$self inside `before` body should have an inferred type",
+    );
+    match ty.unwrap() {
+        InferredType::ClassName(name) => assert_eq!(name, "Cat"),
+        InferredType::FirstParam { package } => assert_eq!(package, "Cat"),
+        other => panic!("expected ClassName/FirstParam, got {:?}", other),
+    }
+}
+
+// ---- Runtime exporter modeling ----
+//
+// Static analysis can't run import(); we model the declarative setup
+// shapes so exported names land in `export_ok` (same plumbing as
+// `@EXPORT_OK`), which then drives goto-def / refs / diagnostics.
+
+#[test]
+fn sub_exporter_use_setup_records_exports() {
+    let fa = build_fa(
+        "package My::Exporter;\n\
+         use Sub::Exporter -setup => { exports => [qw/alpha beta/] };\n\
+         sub alpha { 1 }\n\
+         sub beta { 2 }\n\
+         1;\n",
+    );
+    assert!(fa.export_ok.contains(&"alpha".to_string()),
+        "export_ok should contain alpha; got {:?}", fa.export_ok);
+    assert!(fa.export_ok.contains(&"beta".to_string()),
+        "export_ok should contain beta; got {:?}", fa.export_ok);
+}
+
+#[test]
+fn sub_exporter_setup_exporter_call_records_exports() {
+    let fa = build_fa(
+        "package My::Exporter;\n\
+         use Sub::Exporter ();\n\
+         Sub::Exporter::setup_exporter({ exports => [qw/gamma/] });\n\
+         sub gamma { 3 }\n\
+         1;\n",
+    );
+    assert!(fa.export_ok.contains(&"gamma".to_string()),
+        "export_ok should contain gamma; got {:?}", fa.export_ok);
+}
+
+#[test]
+fn sub_exporter_generator_hashref_records_keys() {
+    // Generators: best-effort — the hashref keys are the exported names.
+    let fa = build_fa(
+        "package My::Exporter;\n\
+         use Sub::Exporter -setup => { exports => { delta => \\&_gen_delta } };\n\
+         sub _gen_delta { sub { 4 } }\n\
+         1;\n",
+    );
+    assert!(fa.export_ok.contains(&"delta".to_string()),
+        "export_ok should contain generator name delta; got {:?}", fa.export_ok);
+}
+
+/// Sub::Exporter `exports` member collection is separator-agnostic: the
+/// fat-comma generator entry (`bar => \&gen`) and its plain-comma equivalent
+/// (`'bar', \&gen`) both put `bar` on the surface while skipping the opaque
+/// generator value.
+#[test]
+fn sub_exporter_exports_plain_comma_members_join_surface() {
+    for exports in [
+        "[ 'foo', bar => \\&_gen ]",
+        "[ 'foo', 'bar', \\&_gen ]",
+    ] {
+        let src = format!(
+            "package My::Exp;\n\
+             use Sub::Exporter -setup => {{ exports => {exports} }};\n\
+             sub foo {{}}\n\
+             sub bar {{}}\n\
+             sub _gen {{}}\n\
+             1;\n",
+        );
+        let fa = build_fa(&src);
+        for name in ["foo", "bar"] {
+            assert!(
+                fa.exports_name(name),
+                "exports `{exports}`: `{name}` must join the surface; export_ok={:?}",
+                fa.export_ok,
+            );
+        }
+    }
+}
+
+#[test]
+fn sub_exporter_setup_array_members_and_groups_join_surface() {
+    // `-setup => { exports => [ qw(foo bar), baz => \&_gen ], groups => {...} }`:
+    // every member name joins the export surface (incl. the `name => \&gen`
+    // generator entry's name and the group member arrays). The group keys
+    // (`default`/`extra`) are selectors, not subs — they must NOT join.
+    let fa = build_fa(
+        "package My::Exp;\n\
+         use Sub::Exporter -setup => {\n\
+           exports => [ qw(foo bar), baz => \\&_build_baz ],\n\
+           groups  => { default => [qw(foo)], extra => [qw(bar baz)] },\n\
+         };\n\
+         sub foo {}\n\
+         sub bar {}\n\
+         sub _build_baz {}\n\
+         1;\n",
+    );
+    for name in ["foo", "bar", "baz"] {
+        assert!(
+            fa.exports_name(name),
+            "exports_name({name}) should be true; export_ok={:?}",
+            fa.export_ok
+        );
+    }
+    assert!(
+        !fa.export_ok.contains(&"default".to_string())
+            && !fa.export_ok.contains(&"extra".to_string()),
+        "group selector keys must not join the surface; got {:?}",
+        fa.export_ok
+    );
+}
+
+#[test]
+fn sub_exporter_member_refs_local_subs() {
+    // Each member that names a local sub gets a FunctionCall ref at its
+    // export-list mention (rule #7); a member naming no local sub (the public
+    // generator name) gets none.
+    let fa = build_fa(
+        "package My::Exp;\n\
+         use Sub::Exporter -setup => {\n\
+           exports => [ qw(foo bar), baz => \\&_build_baz ],\n\
+           groups  => { extra => [qw(bar baz)] },\n\
+         };\n\
+         sub foo {}\n\
+         sub bar {}\n\
+         sub baz {}\n\
+         1;\n",
+    );
+    let count = |name: &str| {
+        fa.refs
+            .iter()
+            .filter(|r| {
+                r.target_name == name
+                    && matches!(
+                        &r.kind,
+                        RefKind::FunctionCall { resolved_package }
+                            if resolved_package.as_deref() == Some("My::Exp")
+                    )
+            })
+            .count()
+    };
+    // foo: exports list only = 1. bar: exports + group `extra` = 2.
+    // baz: exports + group `extra` = 2.
+    assert_eq!(count("foo"), 1, "foo member ref; got refs {:?}", fa.refs.iter().filter(|r| r.target_name=="foo").collect::<Vec<_>>());
+    assert_eq!(count("bar"), 2, "bar in exports + group extra");
+    assert_eq!(count("baz"), 2, "baz in exports + group extra");
+}
+
+#[test]
+fn sub_exporter_member_goto_def_and_references() {
+    use crate::file_store::FileStore;
+    use crate::resolve::{refs_to, RoleMask, TargetKind, TargetRef};
+    use std::path::PathBuf;
+
+    let src = "package My::Exp;\n\
+         use Sub::Exporter -setup => { exports => [ qw(foo bar) ] };\n\
+         sub foo {}\n\
+         sub bar {}\n\
+         1;\n";
+    let fa = build_fa(src);
+
+    let foo_def_span = fa
+        .symbols
+        .iter()
+        .find(|s| s.name == "foo")
+        .map(|s| s.selection_span)
+        .expect("foo sub symbol");
+    let export_ref = fa
+        .refs
+        .iter()
+        .find(|r| {
+            r.target_name == "foo"
+                && matches!(&r.kind, RefKind::FunctionCall { .. })
+                && r.span != foo_def_span
+        })
+        .expect("an export-list FunctionCall ref for foo");
+    let r = fa
+        .ref_at(export_ref.span.start)
+        .expect("ref_at the export member token");
+    assert_eq!(r.target_name, "foo");
+
+    let store = FileStore::new();
+    let path = PathBuf::from("/tmp/qa_sub_exporter.pm");
+    store.insert_workspace(path.clone(), fa);
+    let results = refs_to(
+        &store,
+        None,
+        &TargetRef {
+            name: "foo".to_string(),
+            kind: TargetKind::Sub {
+                package: Some("My::Exp".to_string()),
+            },
+            method_classes: Vec::new(),
+        },
+        RoleMask::EDITABLE,
+    );
+    // def + 1 exports-list mention = 2.
+    assert_eq!(
+        results.len(),
+        2,
+        "references on foo should list the def and its exports-list mention; got {results:?}"
+    );
+}
+
+#[test]
+fn sub_exporter_setup_exporter_call_with_groups() {
+    // The function-call setup form folds exports + groups the same way.
+    let fa = build_fa(
+        "package My::Exp;\n\
+         use Sub::Exporter ();\n\
+         Sub::Exporter::setup_exporter({\n\
+           exports => [qw/gamma delta/],\n\
+           groups  => { all => [qw/gamma delta/] },\n\
+         });\n\
+         sub gamma {}\n\
+         sub delta {}\n\
+         1;\n",
+    );
+    assert!(fa.exports_name("gamma") && fa.exports_name("delta"),
+        "setup_exporter exports should join surface; got {:?}", fa.export_ok);
+    assert!(!fa.export_ok.contains(&"all".to_string()),
+        "group selector `all` must not join the surface");
+}
+
+#[test]
+fn non_sub_exporter_use_unaffected() {
+    // Regression: a plain `use` of an unrelated module with a `-setup`-shaped
+    // arg must not record exports (only Sub::Exporter's use is folded).
+    let fa = build_fa(
+        "package My::Thing;\n\
+         use Some::Other -setup => { exports => [qw/leak/] };\n\
+         sub leak {}\n\
+         1;\n",
+    );
+    assert!(!fa.export_ok.contains(&"leak".to_string()),
+        "non-Sub::Exporter use must not record exports; got {:?}", fa.export_ok);
+    // And no spurious export-member ref on the local sub.
+    let leak_refs = fa.refs.iter().filter(|r| r.target_name == "leak"
+        && matches!(&r.kind, RefKind::FunctionCall { .. })).count();
+    assert_eq!(leak_refs, 0, "no member ref for an unrelated use's pseudo-export");
+}
+
+#[test]
+fn moose_exporter_setup_import_methods_records_exports() {
+    let fa = build_fa(
+        "package My::Sugar;\n\
+         use Moose::Exporter;\n\
+         Moose::Exporter->setup_import_methods(\n\
+             with_meta => ['has_table'],\n\
+             as_is     => [qw/col belongs_to/],\n\
+         );\n\
+         sub has_table { }\n\
+         sub col { }\n\
+         sub belongs_to { }\n\
+         1;\n",
+    );
+    for name in ["has_table", "col", "belongs_to"] {
+        assert!(fa.export_ok.contains(&name.to_string()),
+            "export_ok should contain {}; got {:?}", name, fa.export_ok);
+    }
+}
+
+#[test]
+fn type_library_add_type_records_named_export() {
+    let fa = build_fa(
+        "package My::Types;\n\
+         use Type::Library -base;\n\
+         __PACKAGE__->add_type({ name => 'PositiveInt' });\n\
+         __PACKAGE__->add_type({ name => 'Email' });\n\
+         1;\n",
+    );
+    assert!(fa.export_ok.contains(&"PositiveInt".to_string()),
+        "export_ok should contain PositiveInt; got {:?}", fa.export_ok);
+    assert!(fa.export_ok.contains(&"Email".to_string()),
+        "export_ok should contain Email; got {:?}", fa.export_ok);
+}
+
+#[test]
+fn non_exporter_setup_does_not_pollute_exports() {
+    // A plain method call named neither setup verb leaves exports empty.
+    let fa = build_fa(
+        "package My::Thing;\n\
+         My::Thing->configure({ name => 'nope', exports => [qw/leak/] });\n\
+         1;\n",
+    );
+    assert!(!fa.export_ok.contains(&"leak".to_string()),
+        "unrelated method call must not record exports; got {:?}", fa.export_ok);
+    assert!(!fa.export_ok.contains(&"nope".to_string()));
+}
+
+#[test]
+fn setup_verb_name_without_exporter_use_does_not_pollute_exports() {
+    // The verb name matches a real exporter setup call, but the package never
+    // `use`d an exporter that defines it — so it's an unrelated method call
+    // (`$x->add_type({name=>...})` on some domain object) and must not record
+    // exports. Without the package-use gate this would false-positive.
+    let fa = build_fa(
+        "package My::Registry;\n\
+         my $schema = build_schema();\n\
+         $schema->add_type({ name => 'Widget' });\n\
+         __PACKAGE__->setup_import_methods(as_is => [qw/leak/]);\n\
+         1;\n",
+    );
+    assert!(!fa.export_ok.contains(&"Widget".to_string()),
+        "add_type without Type::Library use must not record exports; got {:?}", fa.export_ok);
+    assert!(!fa.export_ok.contains(&"leak".to_string()),
+        "setup_import_methods without Moose::Exporter use must not record exports; got {:?}", fa.export_ok);
+}
+
+#[test]
+fn export_ok_array_assignment_unions_with_runtime_exports() {
+    // `:Export` attr records `attr_export` at the sub walk; a later
+    // `our @EXPORT_OK = (...)` must union, not clobber, so both survive.
+    let fa = build_fa(
+        "package My::Mixed;\n\
+         use Exporter::Extensible;\n\
+         sub attr_export :Export { }\n\
+         our @EXPORT_OK = ('array_export');\n\
+         sub array_export { }\n\
+         1;\n",
+    );
+    assert!(fa.export_ok.contains(&"attr_export".to_string()),
+        "runtime :Export attr survives the array assignment; got {:?}", fa.export_ok);
+    assert!(fa.export_ok.contains(&"array_export".to_string()),
+        "array-assigned name recorded; got {:?}", fa.export_ok);
+}
+
+// Moo/Moose non-default has options: predicate, clearer,
+// writer, reader, builder, handles
+// ============================================================
+
+#[test]
+fn test_moo_has_predicate_string() {
+    let fa = build_fa(
+        "
+package Foo;
+use Moo;
+has 'name' => (is => 'ro', predicate => 'has_name');
+",
+    );
+    let pred: Vec<_> = fa
+        .symbols
+        .iter()
+        .filter(|s| s.name == "has_name" && s.kind == SymKind::Method)
+        .collect();
+    assert_eq!(pred.len(), 1, "explicit predicate string synthesizes method");
+    if let SymbolDetail::Sub { ref params, is_method, .. } = pred[0].detail {
+        assert!(is_method);
+        assert!(params.is_empty(), "predicate takes no args");
+    }
+}
+
+#[test]
+fn test_moo_has_predicate_shorthand() {
+    // `predicate => 1` derives `has_<attr>` for public attrs.
+    let fa = build_fa(
+        "
+package Foo;
+use Moo;
+has 'email' => (is => 'ro', predicate => 1);
+",
+    );
+    let pred: Vec<_> = fa
+        .symbols
+        .iter()
+        .filter(|s| s.name == "has_email" && s.kind == SymKind::Method)
+        .collect();
+    assert_eq!(pred.len(), 1, "predicate => 1 derives has_<attr>");
+}
+
+#[test]
+fn test_moo_has_predicate_private_attr_shorthand() {
+    // Private attrs (leading `_`) get `_has_<rest>` not `has__<rest>`.
+    let fa = build_fa(
+        "
+package Foo;
+use Moo;
+has '_token' => (is => 'ro', predicate => 1);
+",
+    );
+    let pred: Vec<_> = fa
+        .symbols
+        .iter()
+        .filter(|s| s.name == "_has_token" && s.kind == SymKind::Method)
+        .collect();
+    assert_eq!(pred.len(), 1, "predicate => 1 on _attr derives _has_<rest>");
+}
+
+#[test]
+fn test_moo_has_clearer_string() {
+    let fa = build_fa(
+        "
+package Foo;
+use Moo;
+has 'cache' => (is => 'rw', clearer => 'clear_cache');
+",
+    );
+    let clearer: Vec<_> = fa
+        .symbols
+        .iter()
+        .filter(|s| s.name == "clear_cache" && s.kind == SymKind::Method)
+        .collect();
+    assert_eq!(clearer.len(), 1, "explicit clearer string synthesizes method");
+}
+
+#[test]
+fn test_moo_has_clearer_shorthand() {
+    // `clearer => 1` derives `clear_<attr>`.
+    let fa = build_fa(
+        "
+package Foo;
+use Moo;
+has 'items' => (is => 'rw', clearer => 1);
+",
+    );
+    let clearer: Vec<_> = fa
+        .symbols
+        .iter()
+        .filter(|s| s.name == "clear_items" && s.kind == SymKind::Method)
+        .collect();
+    assert_eq!(clearer.len(), 1, "clearer => 1 derives clear_<attr>");
+}
+
+#[test]
+fn test_moo_has_clearer_private_shorthand() {
+    let fa = build_fa(
+        "
+package Foo;
+use Moo;
+has '_session' => (is => 'rw', clearer => 1);
+",
+    );
+    let clearer: Vec<_> = fa
+        .symbols
+        .iter()
+        .filter(|s| s.name == "_clear_session" && s.kind == SymKind::Method)
+        .collect();
+    assert_eq!(clearer.len(), 1, "clearer => 1 on _attr derives _clear_<rest>");
+}
+
+#[test]
+fn test_moo_has_writer_option() {
+    let fa = build_fa(
+        "
+package Foo;
+use Moo;
+has 'color' => (is => 'ro', writer => 'set_color');
+",
+    );
+    let writer: Vec<_> = fa
+        .symbols
+        .iter()
+        .filter(|s| s.name == "set_color" && s.kind == SymKind::Method)
+        .collect();
+    assert_eq!(writer.len(), 1, "writer option synthesizes method");
+    if let SymbolDetail::Sub { ref params, .. } = writer[0].detail {
+        assert_eq!(params.len(), 1, "writer has one param");
+    }
+}
+
+#[test]
+fn test_moo_has_reader_option() {
+    let fa = build_fa(
+        "
+package Foo;
+use Moo;
+has 'size' => (is => 'ro', reader => 'get_size');
+",
+    );
+    let reader: Vec<_> = fa
+        .symbols
+        .iter()
+        .filter(|s| s.name == "get_size" && s.kind == SymKind::Method)
+        .collect();
+    assert_eq!(reader.len(), 1, "reader option synthesizes method");
+    if let SymbolDetail::Sub { ref params, is_method, .. } = reader[0].detail {
+        assert!(is_method);
+        assert!(params.is_empty(), "reader takes no args");
+    }
+}
+
+#[test]
+fn test_moo_has_builder_shorthand() {
+    // `builder => 1` → method symbol `_build_<attr>` so goto-def
+    // to the user-written sub resolves.
+    let fa = build_fa(
+        "
+package Foo;
+use Moo;
+has 'items' => (is => 'ro', builder => 1);
+sub _build_items { return [] }
+",
+    );
+    let builder_sym: Vec<_> = fa
+        .symbols
+        .iter()
+        .filter(|s| s.name == "_build_items" && s.kind == SymKind::Method)
+        .collect();
+    // The synthesized placeholder + the real sub definition both exist.
+    // At minimum one symbol with that name must be present.
+    assert!(
+        !builder_sym.is_empty(),
+        "_build_items must exist (synthesized or user-written)"
+    );
+}
+
+#[test]
+fn test_moo_has_builder_string() {
+    let fa = build_fa(
+        "
+package Foo;
+use Moo;
+has 'cache' => (is => 'lazy', builder => '_make_cache');
+",
+    );
+    let builder_sym: Vec<_> = fa
+        .symbols
+        .iter()
+        .filter(|s| s.name == "_make_cache" && s.kind == SymKind::Method)
+        .collect();
+    assert_eq!(builder_sym.len(), 1, "explicit builder name synthesizes method");
+}
+
+#[test]
+fn test_moo_has_auxiliaries_without_is() {
+    // predicate/clearer/builder are valid even when `is` is absent.
+    let fa = build_fa(
+        "
+package Foo;
+use Moo;
+has 'flag' => (predicate => 'has_flag', clearer => 'clear_flag');
+",
+    );
+    let pred: Vec<_> = fa
+        .symbols
+        .iter()
+        .filter(|s| s.name == "has_flag" && s.kind == SymKind::Method)
+        .collect();
+    let clearer: Vec<_> = fa
+        .symbols
+        .iter()
+        .filter(|s| s.name == "clear_flag" && s.kind == SymKind::Method)
+        .collect();
+    assert_eq!(pred.len(), 1, "predicate synthesized without is");
+    assert_eq!(clearer.len(), 1, "clearer synthesized without is");
+}
+
+#[test]
+fn test_moo_has_auxiliaries_with_bare() {
+    // `is => bare` suppresses default accessor but auxiliaries still appear.
+    let fa = build_fa(
+        "
+package Foo;
+use Moo;
+has 'secret' => (is => 'bare', predicate => 'has_secret');
+",
+    );
+    // Default accessor suppressed
+    let accessors: Vec<_> = fa
+        .symbols
+        .iter()
+        .filter(|s| s.name == "secret" && s.kind == SymKind::Method)
+        .collect();
+    assert_eq!(accessors.len(), 0, "bare suppresses default accessor");
+    // Predicate still synthesized
+    let pred: Vec<_> = fa
+        .symbols
+        .iter()
+        .filter(|s| s.name == "has_secret" && s.kind == SymKind::Method)
+        .collect();
+    assert_eq!(pred.len(), 1, "predicate synthesized even with is => bare");
+}
+
+#[test]
+fn test_moo_has_handles_hashref() {
+    let fa = build_fa(
+        "
+package Foo;
+use Moo;
+has 'logger' => (is => 'ro', isa => 'Log::Any', handles => { log => 'debug', warning => 'warn' });
+",
+    );
+    let log_sym: Vec<_> = fa
+        .symbols
+        .iter()
+        .filter(|s| s.name == "log" && s.kind == SymKind::Method)
+        .collect();
+    let warning_sym: Vec<_> = fa
+        .symbols
+        .iter()
+        .filter(|s| s.name == "warning" && s.kind == SymKind::Method)
+        .collect();
+    assert_eq!(log_sym.len(), 1, "handles hashref synthesizes 'log' method");
+    assert_eq!(warning_sym.len(), 1, "handles hashref synthesizes 'warning' method");
+}
+
+#[test]
+fn test_moose_has_handles_arrayref() {
+    let fa = build_fa(
+        "
+package Foo;
+use Moose;
+has 'db' => (is => 'ro', isa => 'DBI::db', handles => [qw(prepare execute)]);
+",
+    );
+    let prepare: Vec<_> = fa
+        .symbols
+        .iter()
+        .filter(|s| s.name == "prepare" && s.kind == SymKind::Method)
+        .collect();
+    let execute: Vec<_> = fa
+        .symbols
+        .iter()
+        .filter(|s| s.name == "execute" && s.kind == SymKind::Method)
+        .collect();
+    assert_eq!(prepare.len(), 1, "handles arrayref synthesizes 'prepare'");
+    assert_eq!(execute.len(), 1, "handles arrayref synthesizes 'execute'");
+}
+
+#[test]
+fn test_moo_has_handles_instanceof_edges_return_type() {
+    // When isa is InstanceOf['X'], handles delegation edges each local
+    // method's return through MethodOnClass{X, remote} so type inference
+    // chains through.
+    let fa = build_fa(
+        "
+package Foo;
+use Moo;
+has 'logger' => (is => 'ro', isa => \"InstanceOf['Log::Any']\", handles => { log => 'debug' });
+",
+    );
+    let log_sym: Vec<_> = fa
+        .symbols
+        .iter()
+        .filter(|s| s.name == "log" && s.kind == SymKind::Method)
+        .collect();
+    assert_eq!(log_sym.len(), 1, "handles delegation synthesizes method");
+    // Provenance confirms this came from framework synthesis
+    match fa.return_type_provenance(log_sym[0].id) {
+        TypeProvenance::FrameworkSynthesis { framework, reason } => {
+            assert!(
+                framework == "Moo" || framework == "Moose",
+                "provenance framework should be Moo/Moose, got {}",
+                framework
+            );
+            assert!(reason.contains("handles"), "reason should mention handles");
+        }
+        TypeProvenance::Inferred => {
+            // Acceptable: no witness was pushed if there was no isa type resolution.
+        }
+        other => panic!("unexpected provenance: {other:?}"),
+    }
+}
+
+/// Regression: an option keyword that carries DATA, not a method name
+/// (`is`/`isa`/`default`/`lazy`/…), must never mint a method named after its
+/// string value. The sprint that moved the accessor vocabulary into moo.rhai
+/// briefly synthesized phantom `ro`/`rw`/`lazy`/`bare` methods from every
+/// option's value — this pins the gate that stopped it.
+#[test]
+fn test_moo_has_no_phantom_method_from_data_options() {
+    let fa = build_fa(
+        "
+package Foo;
+use Moo;
+has 'name' => (is => 'ro', isa => 'Str', default => 'bob', lazy => 1, required => 1);
+",
+    );
+    for phantom in ["ro", "rw", "lazy", "bare", "Str", "bob", "1"] {
+        let hits: Vec<_> = fa
+            .symbols
+            .iter()
+            .filter(|s| s.name == phantom && s.kind == SymKind::Method)
+            .collect();
+        assert!(
+            hits.is_empty(),
+            "option value `{phantom}` must not become a method, got {} symbol(s)",
+            hits.len()
+        );
+    }
+    // The real accessor still lands.
+    let name: Vec<_> = fa
+        .symbols
+        .iter()
+        .filter(|s| s.name == "name" && s.kind == SymKind::Method)
+        .collect();
+    assert_eq!(name.len(), 1, "the real `name` accessor must still synthesize");
+}
+
+/// Moose `lazy_build => 1` implies a builder/clearer/predicate trio at runtime.
+#[test]
+fn test_moose_has_lazy_build_expands_trio() {
+    let fa = build_fa(
+        "
+package Foo;
+use Moose;
+has 'cache' => (is => 'ro', lazy_build => 1);
+",
+    );
+    for (name, what) in [
+        ("_build_cache", "builder"),
+        ("clear_cache", "clearer"),
+        ("has_cache", "predicate"),
+    ] {
+        let hits: Vec<_> = fa
+            .symbols
+            .iter()
+            .filter(|s| s.name == name && s.kind == SymKind::Method)
+            .collect();
+        assert_eq!(hits.len(), 1, "lazy_build must synthesize the {what} `{name}`");
+    }
+    // `lazy_build`/`is` themselves are not methods.
+    for phantom in ["lazy_build", "ro", "1"] {
+        assert!(
+            !fa.symbols.iter().any(|s| s.name == phantom && s.kind == SymKind::Method),
+            "`{phantom}` must not become a method"
+        );
+    }
+}
+
+/// goto-def on a `has` accessor must land on the attribute name token of the
+/// `has` declaration, not an option line (`is => 'ro'`) inside the body.
+#[test]
+fn test_moo_has_accessor_selection_span_is_attr_name() {
+    // `has` on line 3 (0-indexed), attr `name` at col 5; options on line 4.
+    let fa = build_fa("package Foo;\nuse Moo;\nhas name => (\n    is => 'ro',\n);\n");
+    let name = fa
+        .symbols
+        .iter()
+        .find(|s| s.name == "name" && s.kind == SymKind::Method)
+        .expect("name accessor");
+    assert_eq!(
+        name.selection_span.start.row, 2,
+        "selection_span must point at the `has name` line, not the options line"
+    );
+}
+
+/// Dancer2::Plugin re-exports Moo's `has`, so consumer plugins get accessor
+/// synthesis even though they never literally `use Moo`.
+#[test]
+fn test_dancer2_plugin_has_synthesizes_accessor() {
+    let fa = build_fa(
+        "
+package My::Plugin;
+use Dancer2::Plugin;
+has my_setting => (is => 'ro', isa => 'Str');
+",
+    );
+    let acc: Vec<_> = fa
+        .symbols
+        .iter()
+        .filter(|s| s.name == "my_setting" && s.kind == SymKind::Method)
+        .collect();
+    assert_eq!(acc.len(), 1, "Dancer2::Plugin `has` must synthesize the accessor");
+    // And no phantom from the `is`/`isa` data options.
+    for phantom in ["ro", "Str"] {
+        assert!(
+            !fa.symbols.iter().any(|s| s.name == phantom && s.kind == SymKind::Method),
+            "`{phantom}` must not become a method under Dancer2::Plugin either"
+        );
+    }
+}
+
+#[test]
+fn use_constant_scalar_form_registers_sub_symbol() {
+    // `use constant NAME => VAL` declares a package-global sub. Registering
+    // it as a Sub symbol silences the unresolved-function hint at callsites
+    // and gives goto-def.
+    let fa = build_fa("use constant DEBUG => 1;\nmy $y = DEBUG && 2;\n");
+    assert!(
+        fa.symbols.iter().any(|s| s.name == "DEBUG" && s.kind == SymKind::Sub),
+        "DEBUG must be registered as a Sub symbol; got: {:?}",
+        fa.symbols.iter().map(|s| (&s.name, s.kind)).collect::<Vec<_>>(),
+    );
+}
+
+#[test]
+fn use_constant_block_form_registers_each_name() {
+    let fa = build_fa("use constant { A => 1, B => 2, C => 3 };\n");
+    for n in ["A", "B", "C"] {
+        assert!(
+            fa.symbols.iter().any(|s| s.name == n && s.kind == SymKind::Sub),
+            "block-form constant `{n}` must be a Sub symbol; got: {:?}",
+            fa.symbols.iter().map(|s| s.name.clone()).collect::<Vec<_>>(),
+        );
+    }
+}
+
+#[test]
+fn use_constant_block_plain_comma_keys_register() {
+    // `=>` is just an autoquoting comma — `{ 'GAMMA', 3 }` is identical to
+    // `{ GAMMA => 3 }`. The block walker must pair positionally, so quoted
+    // plain-comma keys register as Sub symbols exactly like fat-comma keys.
+    let fa = build_fa("use constant { 'GAMMA', 3, 'DELTA', 4, A => 1, B => 2 };\n");
+    for n in ["GAMMA", "DELTA", "A", "B"] {
+        assert!(
+            fa.symbols.iter().any(|s| s.name == n && s.kind == SymKind::Sub),
+            "plain-comma block constant `{n}` must be a Sub symbol; got: {:?}",
+            fa.symbols.iter().map(|s| s.name.clone()).collect::<Vec<_>>(),
+        );
+    }
+}
+
+/// Plain-comma block constants get usage refs + goto-def/references, the same
+/// as fat-comma — the registration path is separator-agnostic end to end.
+#[test]
+fn use_constant_block_plain_comma_goto_def_and_references() {
+    use crate::file_store::FileStore;
+    use crate::resolve::{refs_to, RoleMask, TargetKind, TargetRef};
+    use std::path::PathBuf;
+
+    let src = r#"package Foo;
+use constant { 'GAMMA', 3, DELTA => 4 };
+sub go {
+    my $a = GAMMA;
+    return DELTA;
+}
+"#;
+    let fa = build_fa(src);
+    // Usage refs emitted for both spellings' keys.
+    for n in ["GAMMA", "DELTA"] {
+        assert!(
+            fa.refs.iter().any(|r| {
+                r.target_name == n
+                    && matches!(&r.kind, RefKind::FunctionCall { resolved_package }
+                        if resolved_package.as_deref() == Some("Foo"))
+            }),
+            "usage of plain/fat-comma constant `{n}` must get a FunctionCall ref; refs: {:?}",
+            fa.refs.iter().filter(|r| r.target_name == n).collect::<Vec<_>>(),
+        );
+    }
+    let store = FileStore::new();
+    store.insert_workspace(PathBuf::from("/tmp/qa_const_plain.pm"), fa);
+    for name in ["GAMMA", "DELTA"] {
+        let results = refs_to(
+            &store,
+            None,
+            &TargetRef {
+                name: name.to_string(),
+                kind: TargetKind::Sub { package: Some("Foo".to_string()) },
+                method_classes: Vec::new(),
+            },
+            RoleMask::EDITABLE,
+        );
+        assert_eq!(
+            results.len(), 2,
+            "references on `{name}` should list its def + 1 usage; got {results:?}",
+        );
+    }
+}
+
+/// Regression: positional pairing must not invent keys from a value position.
+/// In `use constant { A => 1 }` the `1` is a value, never a constant name — the
+/// walker pairs `A`→`1` and stops, so no `1`-named (or numeric) Sub appears.
+#[test]
+fn use_constant_block_does_not_mispair_values_as_keys() {
+    let fa = build_fa("use constant { A => 1, 'B', 2 };\n");
+    let const_subs: Vec<&str> = fa
+        .symbols
+        .iter()
+        .filter(|s| s.kind == SymKind::Sub)
+        .map(|s| s.name.as_str())
+        .collect();
+    assert!(
+        const_subs.contains(&"A") && const_subs.contains(&"B"),
+        "keys A and B must register; got {:?}",
+        const_subs,
+    );
+    // The value tokens (`1`, `2`) are not keys — no numeric-named Sub symbol.
+    assert!(
+        !const_subs.iter().any(|n| *n == "1" || *n == "2"),
+        "value tokens must never register as constant names; got {:?}",
+        const_subs,
+    );
+}
+
+#[test]
+fn use_constant_between_subs_at_file_scope() {
+    // Constants declared between subs must still register.
+    let src = "sub one {}\nuse constant MID => 'x';\nsub two {}\n";
+    let fa = build_fa(src);
+    assert!(
+        fa.symbols.iter().any(|s| s.name == "MID" && s.kind == SymKind::Sub),
+        "MID declared between subs must register as a Sub symbol",
+    );
+}
+
+#[test]
+fn multiple_name_form_use_constants_each_register() {
+    // Several separate NAME-form `use constant` statements in one package:
+    // each declares its own package-global sub. The use-dedup key carries the
+    // statement span, so identical work identity at different spans (the
+    // constant name isn't folded into `constant_strings` when `imports` is
+    // extracted, so it's empty for all of them) no longer collapses past the
+    // first.
+    let src = r#"package Foo;
+use constant ALPHA => 1;
+use constant BETA  => 2;
+use constant GAMMA => 3;
+sub go {
+    my $a = ALPHA;
+    my $b = BETA;
+    my $c = GAMMA;
+}
+"#;
+    let fa = build_fa(src);
+    for n in ["ALPHA", "BETA", "GAMMA"] {
+        assert!(
+            fa.symbols.iter().any(|s| s.name == n && s.kind == SymKind::Sub),
+            "every separate NAME-form constant must register a Sub symbol; `{n}` missing. got: {:?}",
+            fa.symbols.iter().map(|s| s.name.clone()).collect::<Vec<_>>(),
+        );
+        // Usages resolve: each name joins `declared_constants`, so the
+        // standalone bareword usage gets a FunctionCall ref to the def.
+        assert!(
+            fa.refs.iter().any(|r| {
+                r.target_name == n
+                    && matches!(
+                        &r.kind,
+                        RefKind::FunctionCall { resolved_package } if resolved_package.as_deref() == Some("Foo")
+                    )
+            }),
+            "usage of `{n}` must get a FunctionCall ref to its def; refs for {n}: {:?}",
+            fa.refs.iter().filter(|r| r.target_name == n).collect::<Vec<_>>(),
+        );
+    }
+}
+
+/// goto-def + references across THREE separate NAME-form `use constant`
+/// statements: every def is reachable and every usage lists.
+#[test]
+fn multiple_name_form_use_constants_goto_def_and_references() {
+    use crate::file_store::FileStore;
+    use crate::resolve::{refs_to, RoleMask, TargetKind, TargetRef};
+    use std::path::PathBuf;
+
+    let src = r#"package Foo;
+use constant ALPHA => 1;
+use constant BETA  => 2;
+use constant GAMMA => 3;
+sub go {
+    my $a = ALPHA;
+    my $b = BETA;
+    return GAMMA;
+}
+"#;
+    let fa = build_fa(src);
+    let store = FileStore::new();
+    store.insert_workspace(PathBuf::from("/tmp/qa_multi_const.pm"), fa);
+
+    // BETA: def + 1 usage = 2 hits. GAMMA: def + 1 usage = 2. ALPHA: def + 1.
+    for name in ["ALPHA", "BETA", "GAMMA"] {
+        let results = refs_to(
+            &store,
+            None,
+            &TargetRef {
+                name: name.to_string(),
+                kind: TargetKind::Sub { package: Some("Foo".to_string()) },
+                method_classes: Vec::new(),
+            },
+            RoleMask::EDITABLE,
+        );
+        assert_eq!(
+            results.len(),
+            2,
+            "references on `{name}` should list its def + 1 usage; got {results:?}"
+        );
+    }
+}
+
+#[test]
+fn indirect_object_filehandle_not_a_function_ref() {
+    // `print FH LIST` — the bareword filehandle must NOT become a
+    // FunctionCall ref (otherwise STDERR/STDOUT/DATA flag as unresolved).
+    for src in [
+        "print STDERR \"hi\";\n",
+        "printf STDERR \"%s\", $x;\n",
+        "say STDOUT \"hi\";\n",
+    ] {
+        let fa = build_fa(src);
+        let fh = src.split_whitespace().nth(1).unwrap().trim_matches(|c| c == '"');
+        assert!(
+            !fa.refs.iter().any(|r|
+                matches!(r.kind, RefKind::FunctionCall { .. }) && r.target_name == fh),
+            "filehandle `{fh}` must not be a FunctionCall ref for `{}`; refs: {:?}",
+            src.trim(),
+            fa.refs.iter().filter(|r| matches!(r.kind, RefKind::FunctionCall { .. }))
+                .map(|r| r.target_name.clone()).collect::<Vec<_>>(),
+        );
+    }
+}
+
+#[test]
+fn print_with_paren_call_still_emits_function_ref() {
+    // `print foo("x")` is a real call — foo must keep its FunctionCall ref.
+    let fa = build_fa("print foo(\"x\");\n");
+    assert!(
+        fa.refs.iter().any(|r|
+            matches!(r.kind, RefKind::FunctionCall { .. }) && r.target_name == "foo"),
+        "parenthesized call `foo(...)` inside print must keep its FunctionCall ref",
+    );
+}
+
+#[test]
+fn shift_invocant_typed_like_at_underscore() {
+    // `my $self = shift;` types $self as the enclosing class, exactly like
+    // `my ($self) = @_;` — so method calls on $self resolve in-package.
+    // Each body is on line 2 (0-indexed); query $self at its use point.
+    let at_point = tree_sitter::Point { row: 2, column: 28 };
+    let is_class_w = |fa: &FileAnalysis| {
+        matches!(
+            fa.inferred_type_via_bag("$self", at_point),
+            Some(InferredType::ClassName(ref c)) if c == "W"
+        )
+    };
+    let shift_fa =
+        build_fa("package W;\nsub go { 1 }\nsub f { my $self = shift; $self->go(); }\n");
+    let at_fa =
+        build_fa("package W;\nsub go { 1 }\nsub f { my ($self) = @_; $self->go(); }\n");
+    assert!(is_class_w(&shift_fa), "shift-extracted $self must type as ClassName(W)");
+    assert!(is_class_w(&at_fa), "@_-extracted $self must type as ClassName(W)");
+}
+
+// ---- Framework synthesis/detection: requires / Role::Tiny / DBIC ancestry /
+//      mk_group_accessors / Mojo -base parent / has comma-form ----
+
+#[test]
+fn test_moo_role_requires_is_framework_import() {
+    let fa = build_fa(
+        "
+package My::Role;
+use Moo::Role;
+requires 'must_implement';
+",
+    );
+    assert!(
+        fa.framework_imports.contains("requires"),
+        "Moo::Role exports `requires` — should register as a framework import"
+    );
+}
+
+#[test]
+fn test_moose_role_requires_is_framework_import() {
+    let fa = build_fa(
+        "
+package My::Role;
+use Moose::Role;
+requires 'foo';
+",
+    );
+    assert!(fa.framework_imports.contains("requires"));
+}
+
+#[test]
+fn test_role_tiny_behaves_like_moo_role() {
+    let fa = build_fa(
+        "
+package My::Role;
+use Role::Tiny;
+requires 'bar';
+with 'Other::Role';
+",
+    );
+    assert!(
+        fa.framework_imports.contains("requires"),
+        "Role::Tiny exports `requires`"
+    );
+    assert!(
+        fa.framework_imports.contains("with"),
+        "Role::Tiny exports `with`"
+    );
+}
+
+#[test]
+fn test_role_tiny_with_behaves_like_moo_role() {
+    let fa = build_fa(
+        "
+package My::Class;
+use Role::Tiny::With;
+with 'Some::Role';
+",
+    );
+    assert!(fa.framework_imports.contains("with"));
+}
+
+#[test]
+fn test_dbic_two_level_ancestry_synthesizes_columns() {
+    // Result → BaseResult → DBIx::Class::Core: the DBIC base is two hops up.
+    // The shallow direct-parent check missed this; full-ancestry walk catches it.
+    let fa = build_fa(
+        "
+package My::Schema::BaseResult;
+use base 'DBIx::Class::Core';
+
+package My::Schema::Result::User;
+use base 'My::Schema::BaseResult';
+__PACKAGE__->add_columns(qw/id username/);
+",
+    );
+    let id: Vec<_> = fa
+        .symbols
+        .iter()
+        .filter(|s| s.name == "id" && s.kind == SymKind::Method)
+        .collect();
+    let username: Vec<_> = fa
+        .symbols
+        .iter()
+        .filter(|s| s.name == "username" && s.kind == SymKind::Method)
+        .collect();
+    assert_eq!(id.len(), 1, "2-level DBIC inheritance should synthesize `id`");
+    assert_eq!(username.len(), 1, "and `username`");
+}
+
+#[test]
+fn test_mk_group_accessors_synthesizes_methods() {
+    let fa = build_fa(
+        "
+package My::Thing;
+use base 'Class::Accessor::Grouped';
+__PACKAGE__->mk_group_accessors('simple', qw/alpha beta/);
+__PACKAGE__->mk_group_ro_accessors('inflated', 'gamma', 'delta');
+",
+    );
+    for name in ["alpha", "beta", "gamma", "delta"] {
+        let hits: Vec<_> = fa
+            .symbols
+            .iter()
+            .filter(|s| s.name == name && s.kind == SymKind::Method)
+            .collect();
+        assert_eq!(hits.len(), 1, "mk_group accessor `{name}` should be synthesized");
+    }
+    // The group name itself is NOT an accessor.
+    assert!(
+        !fa.symbols.iter().any(|s| s.name == "simple" && s.kind == SymKind::Method),
+        "the leading group name must not become an accessor"
+    );
+}
+
+#[test]
+fn test_mk_classdata_synthesizes_method() {
+    let fa = build_fa(
+        "
+package My::Thing;
+use base 'Class::Accessor::Grouped';
+__PACKAGE__->mk_classdata('config');
+",
+    );
+    let hits: Vec<_> = fa
+        .symbols
+        .iter()
+        .filter(|s| s.name == "config" && s.kind == SymKind::Method)
+        .collect();
+    assert_eq!(hits.len(), 1, "mk_classdata should synthesize the named accessor");
+}
+
+#[test]
+fn test_use_module_dash_base_registers_parent_and_mojo_behavior() {
+    let fa = build_fa(
+        "
+package My::Emitter;
+use Mojo::EventEmitter -base;
+has 'value';
+",
+    );
+    // The module imported with -base becomes a parent...
+    assert!(
+        fa.package_parents
+            .get("My::Emitter")
+            .map(|v| v.iter().any(|p| p == "Mojo::EventEmitter"))
+            .unwrap_or(false),
+        "`use X -base` should register X as a parent"
+    );
+    // ...and Mojo::Base accessor synthesis (getter + setter) applies.
+    let methods: Vec<_> = fa
+        .symbols
+        .iter()
+        .filter(|s| s.name == "value" && s.kind == SymKind::Method)
+        .collect();
+    assert_eq!(methods.len(), 2, "`-base` pulls Mojo::Base has-synthesis");
+}
+
+#[test]
+fn test_mojo_base_dash_base_carries_mojo_base_as_parent() {
+    let fa = build_fa(
+        "
+package My::Class;
+use Mojo::Base -base;
+has 'x';
+",
+    );
+    assert!(
+        fa.package_parents
+            .get("My::Class")
+            .map(|v| v.iter().any(|p| p == "Mojo::Base"))
+            .unwrap_or(false),
+        "`Mojo::Base -base` should carry Mojo::Base itself as a parent so tap/attr/new resolve"
+    );
+}
+
+#[test]
+fn test_moo_has_comma_form_synthesizes_accessor() {
+    // The comma-separated option form (not the fat-arrow `name => (...)` form).
+    let fa = build_fa(
+        "
+package Foo;
+use Moo;
+has 'name', is => 'ro', default => sub { 1 };
+has age => (is => 'rw');
+",
+    );
+    let name_acc: Vec<_> = fa
+        .symbols
+        .iter()
+        .filter(|s| s.name == "name" && s.kind == SymKind::Method)
+        .collect();
+    assert_eq!(
+        name_acc.len(),
+        1,
+        "comma-form `has 'name', is => 'ro'` should synthesize a `name` accessor"
+    );
+    // The fat-arrow form on the next line still works (no regression).
+    // `is => 'rw'` synthesizes a getter + a writer (2 symbols named `age`).
+    let age_acc: Vec<_> = fa
+        .symbols
+        .iter()
+        .filter(|s| s.name == "age" && s.kind == SymKind::Method)
+        .collect();
+    assert_eq!(age_acc.len(), 2, "fat-arrow rw form still synthesizes getter+setter");
+    // `is`/`default` must not become phantom accessors.
+    assert!(
+        !fa.symbols.iter().any(|s| (s.name == "is" || s.name == "ro") && s.kind == SymKind::Method),
+        "option keywords/values must not mint phantom methods in comma form"
+    );
+}
+
+// ---- typeglob sub installation (CG-1) ----
+
+fn has_sub(fa: &FileAnalysis, name: &str) -> bool {
+    fa.symbols
+        .iter()
+        .any(|s| s.name == name && s.kind == SymKind::Sub)
+}
+
+#[test]
+fn glob_static_name_sub() {
+    let fa = build_fa("*greet = sub { return 'hi' };\n");
+    assert!(has_sub(&fa, "greet"), "static *name = sub {{...}} must mint a Sub symbol");
+}
+
+#[test]
+fn glob_alias_to_existing_sub() {
+    let fa = build_fa("*alias = \\&Other::func;\n*local_alias = \\&real;\n");
+    assert!(has_sub(&fa, "alias"), "*name = \\&Other::func glob alias must mint a Sub symbol");
+    assert!(has_sub(&fa, "local_alias"), "*name = \\&func glob alias must mint a Sub symbol");
+}
+
+#[test]
+fn glob_qualified_name_installs_tail() {
+    // `*Other::foo = sub {...}` installs `foo` into Other; the unqualified
+    // tail is what local call sites / nav use.
+    let fa = build_fa("*Other::foo = sub { 1 };\n");
+    assert!(has_sub(&fa, "foo"), "qualified glob must register the unqualified tail");
+    assert!(!has_sub(&fa, "Other::foo"), "must not register the fully-qualified string as a name");
+}
+
+#[test]
+fn glob_loop_over_qw() {
+    let src = "for my $m (qw/red green blue/) {\n  no strict 'refs';\n  *$m = sub { 1 };\n}\n";
+    let fa = build_fa(src);
+    for name in ["red", "green", "blue"] {
+        assert!(has_sub(&fa, name), "loop-installed glob `{name}` must mint a Sub symbol");
+    }
+}
+
+#[test]
+fn glob_begin_constant_style() {
+    let src = "BEGIN {\n  *_FORCE_WRITABLE = sub () { 1 };\n}\n";
+    let fa = build_fa(src);
+    assert!(
+        has_sub(&fa, "_FORCE_WRITABLE"),
+        "constant-style glob sub in BEGIN must mint a Sub symbol"
+    );
+}
+
+#[test]
+fn glob_literal_block_name() {
+    let fa = build_fa("*{ 'is_thing' } = sub { 1 };\n");
+    assert!(has_sub(&fa, "is_thing"), "`*{{ 'literal' }}` glob must mint a Sub symbol");
+}
+
+#[test]
+fn glob_scalar_rhs_coderef() {
+    let fa = build_fa("*handler = $coderef;\n");
+    assert!(has_sub(&fa, "handler"), "*name = $coderef must mint a Sub symbol");
+}
+
+#[test]
+fn glob_dynamic_name_skipped() {
+    // Fully runtime name — no static derivation, must NOT fabricate a symbol.
+    let fa = build_fa("*{ $runtime } = sub { 1 };\n");
+    // The anon `sub {...}` RHS mints an `(anon)` Sub symbol; the glob install
+    // itself must add no named Sub.
+    assert!(
+        !fa.symbols.iter().any(|s| s.kind == SymKind::Sub && s.name != "(anon)"),
+        "fully-dynamic glob name must be skipped, not guessed"
+    );
+}
+
+#[test]
+fn glob_unfoldable_concat_skipped() {
+    // `'is_' . $type` with an unknown $type is not derivable → skip.
+    let fa = build_fa("*{ 'is_' . $type } = sub { 1 };\n");
+    assert!(
+        !fa.symbols.iter().any(|s| s.kind == SymKind::Sub && s.name.starts_with("is_")),
+        "unfoldable concat name must be skipped, not guessed with a partial prefix"
+    );
+}
+
+#[test]
+fn glob_concat_with_loop_var_foldable() {
+    // `'is_' . $kind` where $kind ranges over a qw list → derivable names.
+    let src =
+        "for my $kind (qw/foo bar/) {\n  *{ 'is_' . $kind } = sub { 1 };\n}\n";
+    let fa = build_fa(src);
+    assert!(has_sub(&fa, "is_foo"), "foldable concat over loop var must mint is_foo");
+    assert!(has_sub(&fa, "is_bar"), "foldable concat over loop var must mint is_bar");
+}
+
+#[test]
+fn normal_assignment_unaffected() {
+    // Regression guard: a plain scalar assignment must not mint a Sub symbol,
+    // and `my $x = sub {...}` is a lexical coderef, not a glob install.
+    let fa = build_fa("my $x = 42;\nmy $cb = sub { 1 };\n");
+    assert!(
+        !fa.symbols.iter().any(|s| s.name == "x" && s.kind == SymKind::Sub),
+        "plain scalar assignment must not mint a Sub symbol"
+    );
+    assert!(
+        !fa.symbols.iter().any(|s| s.name == "cb" && s.kind == SymKind::Sub),
+        "lexical `my $cb = sub {{...}}` must not be treated as a glob install"
+    );
+}
+
+// ---- CG-3a: glob loop over a local literal-returning sub ----
+
+#[test]
+fn glob_loop_over_local_qw_sub() {
+    // CGI.pm shape: the loop source is a same-file sub returning a qw list.
+    // Each installed glob name must mint a Sub symbol.
+    let src = "\
+foreach my $tag (_all_html_tags()) {
+  no strict 'refs';
+  *$tag = sub { 1 };
+}
+sub _all_html_tags { return qw(div span br); }
+";
+    let fa = build_fa(src);
+    for name in ["div", "span", "br"] {
+        assert!(has_sub(&fa, name), "loop over local qw-returning sub must mint `{name}`");
+    }
+}
+
+#[test]
+fn glob_loop_over_local_list_sub() {
+    // Same, but the local sub returns a bare parenthesized string list
+    // (no `qw`, no explicit `return`).
+    let src = "\
+for my $m (_names()) {
+  *$m = sub { 1 };
+}
+sub _names { ('alpha', 'beta') }
+";
+    let fa = build_fa(src);
+    assert!(has_sub(&fa, "alpha"), "loop over local list-returning sub must mint alpha");
+    assert!(has_sub(&fa, "beta"), "loop over local list-returning sub must mint beta");
+}
+
+#[test]
+fn glob_loop_over_nonliteral_local_sub_skipped() {
+    // The local sub's body is computed (not a literal list) → fold yields
+    // nothing, loop var stays dynamic, no fabricated symbols.
+    let src = "\
+for my $m (_dynamic()) {
+  *$m = sub { 1 };
+}
+sub _dynamic { return map { lc } @ARGV; }
+";
+    let fa = build_fa(src);
+    assert!(
+        !fa.symbols.iter().any(|s| s.kind == SymKind::Sub && s.name != "(anon)" && s.name != "_dynamic"),
+        "non-literal local sub return must not synthesize glob names"
+    );
+}
+
+#[test]
+fn glob_loop_over_unknown_sub_skipped() {
+    // Cross-file / undefined callee — no same-file body to fold. Skip.
+    let src = "\
+for my $m (Some::Other::tags()) {
+  *$m = sub { 1 };
+}
+";
+    let fa = build_fa(src);
+    assert!(
+        !fa.symbols.iter().any(|s| s.kind == SymKind::Sub && s.name != "(anon)"),
+        "unresolvable loop-source sub must not synthesize glob names"
+    );
+}
+
+// ---- CG-3b: cross-package glob injection via ->can ----
+
+#[test]
+fn glob_loop_can_rhs_synthesizes_under_current_pkg() {
+    // DateTime::PP shape. `__PACKAGE__->can($sub)` is recognized as a
+    // sub-producing RHS; the qualified target name is synthesized as the
+    // unqualified tail under the current package (cross-package attribution
+    // deferred — see synthesize_glob_assigned_sub).
+    let src = "\
+for my $sub (qw/foo bar/) {
+  *{ 'DateTime::' . $sub } = __PACKAGE__->can($sub);
+}
+";
+    let fa = build_fa(src);
+    assert!(has_sub(&fa, "foo"), "->can RHS over loop var must mint foo (tail)");
+    assert!(has_sub(&fa, "bar"), "->can RHS over loop var must mint bar (tail)");
+    assert!(!has_sub(&fa, "DateTime::foo"), "must not register the fully-qualified name");
+}
+
+#[test]
+fn glob_can_on_package_invocant() {
+    // `Pkg->can('name')` static target also qualifies as sub-producing.
+    let fa = build_fa("*alias = Foo::Bar->can('helper');\n");
+    assert!(has_sub(&fa, "alias"), "*name = Pkg->can(...) must mint a Sub symbol");
+}
+
+#[test]
+fn glob_non_can_method_rhs_skipped() {
+    // A method call that isn't `->can` is not known to yield a coderef → skip.
+    let fa = build_fa("*thing = $obj->build_something();\n");
+    assert!(!has_sub(&fa, "thing"), "non-can method RHS must not mint a Sub symbol");
+}
+
+// ---- mk_classdata in a statement-modifier loop ----
+
+fn count_method(fa: &FileAnalysis, name: &str) -> usize {
+    fa.symbols.iter().filter(|s| s.name == name && s.kind == SymKind::Method).count()
+}
+
+#[test]
+fn mk_classdata_postfix_for_qw() {
+    // Catalyst.pm:176 shape.
+    let fa = build_fa(
+        "\
+package My::App;
+use base 'Class::Accessor::Grouped';
+__PACKAGE__->mk_classdata($_) for qw/setup_finished params/;
+",
+    );
+    assert_eq!(count_method(&fa, "setup_finished"), 1, "loop mk_classdata must mint setup_finished once");
+    assert_eq!(count_method(&fa, "params"), 1, "loop mk_classdata must mint params once");
+}
+
+#[test]
+fn mk_classdata_postfix_for_list() {
+    // `mk_classdata($_) for (LIST)` bare-call form (Controller.pm:123).
+    let fa = build_fa(
+        "\
+package My::Controller;
+use base 'Class::Accessor::Grouped';
+mk_classdata($_) for ('action_namespace', 'path_prefix');
+",
+    );
+    assert_eq!(count_method(&fa, "action_namespace"), 1, "bare-call loop must mint action_namespace");
+    assert_eq!(count_method(&fa, "path_prefix"), 1, "bare-call loop must mint path_prefix");
+}
+
+#[test]
+fn mk_classdata_postfix_for_nonliteral_skipped() {
+    // Loop over an array variable → no literal names → no synthesis.
+    let fa = build_fa(
+        "\
+package My::App;
+use base 'Class::Accessor::Grouped';
+__PACKAGE__->mk_classdata($_) for @dynamic_names;
+",
+    );
+    assert!(
+        !fa.symbols.iter().any(|s| s.kind == SymKind::Method),
+        "non-literal loop list must not synthesize accessors"
+    );
+}
+
+#[test]
+fn postfix_for_non_accessor_call_synthesizes_nothing() {
+    // Regression: a statement-modifier loop whose body is an unrelated call
+    // must not mint any accessor symbol.
+    let fa = build_fa(
+        "\
+package My::App;
+print(\"$_\\n\") for qw/a b c/;
+",
+    );
+    assert!(
+        !fa.symbols.iter().any(|s| s.kind == SymKind::Method),
+        "non-accessor postfix-for loop must not synthesize accessors"
+    );
+}
+
+// ---- Class::Tiny accessor synthesis (CG-2) ----
+
+#[test]
+fn test_class_tiny_list_form_synthesizes_accessors() {
+    let fa = build_fa(
+        "
+package Foo;
+use Class::Tiny qw( resolvers cache );
+",
+    );
+    for attr in ["resolvers", "cache"] {
+        let acc: Vec<_> = fa
+            .symbols
+            .iter()
+            .filter(|s| s.name == attr && s.kind == SymKind::Method)
+            .collect();
+        assert_eq!(
+            acc.len(),
+            1,
+            "Class::Tiny qw list should synthesize one rw accessor for `{attr}`"
+        );
+        // Constructor key so `Foo->new(resolvers => ...)` connects.
+        let key_def: Vec<_> = fa
+            .symbols
+            .iter()
+            .filter(|s| s.name == attr && matches!(s.detail, SymbolDetail::HashKeyDef { .. }))
+            .collect();
+        assert!(
+            !key_def.is_empty(),
+            "Class::Tiny attr `{attr}` should mint a constructor HashKeyDef"
+        );
+        if let SymbolDetail::HashKeyDef { ref owner, .. } = key_def[0].detail {
+            assert_eq!(
+                owner,
+                &HashKeyOwner::Sub {
+                    package: Some("Foo".to_string()),
+                    name: "new".to_string(),
+                }
+            );
+        }
+    }
+}
+
+#[test]
+fn test_class_tiny_hashref_form_synthesizes_accessors_from_keys() {
+    let fa = build_fa(
+        "
+package Foo;
+use Class::Tiny {
+  name => 'default',
+  builder => sub { [] },
+};
+",
+    );
+    // Keys are accessors; default values (string / coderef) are NOT.
+    for attr in ["name", "builder"] {
+        let acc: Vec<_> = fa
+            .symbols
+            .iter()
+            .filter(|s| s.name == attr && s.kind == SymKind::Method)
+            .collect();
+        assert_eq!(
+            acc.len(),
+            1,
+            "Class::Tiny hashref key `{attr}` should synthesize an accessor"
+        );
+    }
+    // The default value `'default'` must not become an accessor.
+    assert!(
+        !fa.symbols
+            .iter()
+            .any(|s| s.name == "default" && s.kind == SymKind::Method),
+        "hashref default value must not mint a phantom accessor"
+    );
+}
+
+#[test]
+fn test_class_tiny_combined_list_and_hashref() {
+    // `use Class::Tiny qw( ssn ), { name => undef };` — both shapes on one line.
+    let fa = build_fa(
+        "
+package Foo;
+use Class::Tiny qw( ssn ), { name => undef };
+",
+    );
+    for attr in ["ssn", "name"] {
+        assert!(
+            fa.symbols
+                .iter()
+                .any(|s| s.name == attr && s.kind == SymKind::Method),
+            "combined qw+hashref form should synthesize accessor `{attr}`"
+        );
+    }
+}
+
+#[test]
+fn test_non_class_tiny_use_unaffected() {
+    // Regression: an unrelated `use X qw(...)` must NOT synthesize accessors.
+    let fa = build_fa(
+        "
+package Foo;
+use List::Util qw( max min );
+",
+    );
+    assert!(
+        !fa.symbols
+            .iter()
+            .any(|s| (s.name == "max" || s.name == "min") && s.kind == SymKind::Method),
+        "non-Class::Tiny use must not synthesize accessor methods"
+    );
+}
+
+// ── Task A: rule #7 ref-emission for use-constant usages + export-list members ──
+
+/// `use constant NAME => ...` usage sites (plain expr + call arg) each get a
+/// FunctionCall ref back to the constant def, so goto-def and references work.
+#[test]
+fn const_usage_name_form_emits_function_call_ref() {
+    let src = r#"
+package QA::C;
+use constant MAX_RETRIES => 5;
+sub retry {
+    my $limit = MAX_RETRIES;
+    return _attempt($limit, MAX_RETRIES);
+}
+sub _attempt { return 1 }
+"#;
+    let fa = build_fa(src);
+    let usages: Vec<&Ref> = fa
+        .refs
+        .iter()
+        .filter(|r| {
+            r.target_name == "MAX_RETRIES"
+                && matches!(
+                    &r.kind,
+                    RefKind::FunctionCall { resolved_package } if resolved_package.as_deref() == Some("QA::C")
+                )
+        })
+        .collect();
+    assert_eq!(
+        usages.len(),
+        2,
+        "both MAX_RETRIES usages (plain + call-arg) should ref the const def; got {:?}",
+        fa.refs
+            .iter()
+            .filter(|r| r.target_name == "MAX_RETRIES")
+            .collect::<Vec<_>>()
+    );
+}
+
+/// Block form `use constant { TIMEOUT => 30, BACKOFF => 2 }` — usages of a
+/// block-declared constant get the same FunctionCall ref.
+#[test]
+fn const_usage_block_form_emits_function_call_ref() {
+    let src = r#"
+package QA::C;
+use constant {
+    TIMEOUT => 30,
+    BACKOFF => 2,
+};
+sub run {
+    my $t = TIMEOUT;
+    return $t + BACKOFF;
+}
+"#;
+    let fa = build_fa(src);
+    for name in ["TIMEOUT", "BACKOFF"] {
+        let n = fa
+            .refs
+            .iter()
+            .filter(|r| {
+                r.target_name == name
+                    && matches!(&r.kind, RefKind::FunctionCall { .. })
+            })
+            .count();
+        assert_eq!(n, 1, "{name} usage should ref the block-form const def");
+    }
+}
+
+/// goto-def from a constant usage lands on the const def via `ref_at` +
+/// `refs_to`; references on the const lists the def + every usage.
+#[test]
+fn const_usage_goto_def_and_references() {
+    use crate::file_store::FileStore;
+    use crate::resolve::{refs_to, RoleMask, TargetKind, TargetRef};
+    use std::path::PathBuf;
+
+    let src = r#"package QA::C;
+use constant MAX_RETRIES => 5;
+sub retry {
+    my $limit = MAX_RETRIES;
+    return MAX_RETRIES;
+}
+"#;
+    let fa = build_fa(src);
+
+    // ref_at the first usage (`my $limit = MAX_RETRIES;`) is a FunctionCall
+    // ref naming the const — that's the goto-def routing token.
+    let usage_pt = Point::new(3, 16); // inside MAX_RETRIES on the `my $limit` line
+    let r = fa
+        .ref_at(usage_pt)
+        .expect("a ref should sit on the constant usage");
+    assert_eq!(r.target_name, "MAX_RETRIES");
+    assert!(matches!(r.kind, RefKind::FunctionCall { .. }));
+
+    let store = FileStore::new();
+    let path = PathBuf::from("/tmp/qa_const.pm");
+    store.insert_workspace(path.clone(), fa);
+
+    let results = refs_to(
+        &store,
+        None,
+        &TargetRef {
+            name: "MAX_RETRIES".to_string(),
+            kind: TargetKind::Sub {
+                package: Some("QA::C".to_string()),
+            },
+            method_classes: Vec::new(),
+        },
+        RoleMask::EDITABLE,
+    );
+    // def + 2 usages = 3 hits.
+    assert_eq!(
+        results.len(),
+        3,
+        "references on MAX_RETRIES should list the def and both usages; got {results:?}"
+    );
+}
+
+/// Regression: a bareword that is NOT a declared constant gets no spurious
+/// constant-usage ref.
+#[test]
+fn non_constant_bareword_gets_no_const_ref() {
+    let src = r#"
+package QA::C;
+use constant MAX_RETRIES => 5;
+sub run {
+    my $x = SOME_OTHER;
+    return $x;
+}
+"#;
+    let fa = build_fa(src);
+    assert!(
+        !fa.refs
+            .iter()
+            .any(|r| r.target_name == "SOME_OTHER"),
+        "a non-constant bareword must not get a constant-usage ref"
+    );
+}
+
+/// `@EXPORT` / `@EXPORT_OK` / `%EXPORT_TAGS` member tokens that name a local
+/// sub each get a FunctionCall ref to that sub (forward-declared subs work).
+#[test]
+fn export_list_members_ref_local_subs() {
+    let src = r#"
+package QA::E;
+use Exporter 'import';
+our @EXPORT      = qw(always_on);
+our @EXPORT_OK   = qw(opt_a opt_b opt_c);
+our %EXPORT_TAGS = (
+    group_one => [qw(opt_a opt_b)],
+    group_two => [qw(opt_c)],
+);
+sub always_on { 1 }
+sub opt_a { 'a' }
+sub opt_b { 'b' }
+sub opt_c { 'c' }
+"#;
+    let fa = build_fa(src);
+    let count = |name: &str| {
+        fa.refs
+            .iter()
+            .filter(|r| {
+                r.target_name == name
+                    && matches!(
+                        &r.kind,
+                        RefKind::FunctionCall { resolved_package } if resolved_package.as_deref() == Some("QA::E")
+                    )
+            })
+            .count()
+    };
+    // always_on: 1 (@EXPORT). opt_a: @EXPORT_OK + %EXPORT_TAGS group_one = 2.
+    // opt_b: @EXPORT_OK + group_one = 2. opt_c: @EXPORT_OK + group_two = 2.
+    assert_eq!(count("always_on"), 1, "@EXPORT member should ref its sub");
+    assert_eq!(count("opt_a"), 2, "opt_a appears in @EXPORT_OK and a tag array");
+    assert_eq!(count("opt_b"), 2, "opt_b appears in @EXPORT_OK and a tag array");
+    assert_eq!(count("opt_c"), 2, "opt_c appears in @EXPORT_OK and a tag array");
+}
+
+/// goto-def / references on an export-list member resolve to the sub def.
+#[test]
+fn export_member_goto_def_and_references() {
+    use crate::file_store::FileStore;
+    use crate::resolve::{refs_to, RoleMask, TargetKind, TargetRef};
+    use std::path::PathBuf;
+
+    let src = r#"package QA::E;
+use Exporter 'import';
+our @EXPORT_OK = qw(opt_a opt_b);
+sub opt_a { 'a' }
+sub opt_b { 'b' }
+"#;
+    let fa = build_fa(src);
+
+    // ref_at the `opt_a` token in the export list.
+    let opt_a_def_span = fa
+        .symbols
+        .iter()
+        .find(|s| s.name == "opt_a")
+        .map(|s| s.selection_span)
+        .expect("opt_a sub symbol");
+    // The export-list member ref must NOT be the def span itself.
+    let export_ref = fa
+        .refs
+        .iter()
+        .find(|r| {
+            r.target_name == "opt_a"
+                && matches!(&r.kind, RefKind::FunctionCall { .. })
+                && r.span != opt_a_def_span
+        })
+        .expect("an export-list FunctionCall ref for opt_a");
+    let r = fa
+        .ref_at(export_ref.span.start)
+        .expect("ref_at the export member token");
+    assert_eq!(r.target_name, "opt_a");
+
+    let store = FileStore::new();
+    let path = PathBuf::from("/tmp/qa_export.pm");
+    store.insert_workspace(path.clone(), fa);
+    let results = refs_to(
+        &store,
+        None,
+        &TargetRef {
+            name: "opt_a".to_string(),
+            kind: TargetKind::Sub {
+                package: Some("QA::E".to_string()),
+            },
+            method_classes: Vec::new(),
+        },
+        RoleMask::EDITABLE,
+    );
+    // def + 1 export-list mention = 2.
+    assert_eq!(
+        results.len(),
+        2,
+        "references on opt_a should list the def and its @EXPORT_OK mention; got {results:?}"
+    );
+}
+
+/// Regression: a `%EXPORT_TAGS` tag-NAME key (`group_one`) is NOT a sub, so it
+/// gets no ref even though it sits in the export table.
+#[test]
+fn export_tag_name_key_gets_no_ref() {
+    let src = r#"
+package QA::E;
+use Exporter 'import';
+our %EXPORT_TAGS = (
+    group_one => [qw(opt_a)],
+);
+sub opt_a { 'a' }
+sub group_one { 'not a tag' }
+"#;
+    let fa = build_fa(src);
+    // The fixture defines a sub literally named `group_one` to make the test
+    // sharp: if the tag-name key were (wrongly) recorded as a member, it would
+    // resolve to this sub. The key must still get no ref — only the value-array
+    // member `opt_a` does.
+    let group_one_refs = fa
+        .refs
+        .iter()
+        .filter(|r| {
+            r.target_name == "group_one"
+                && matches!(&r.kind, RefKind::FunctionCall { .. })
+        })
+        .count();
+    assert_eq!(
+        group_one_refs, 0,
+        "a tag-name key must not be reffed even when a same-named sub exists"
+    );
+}
+
+/// Package-qualified `@Pkg::EXPORT` / `@Pkg::EXPORT_OK` / `%Pkg::EXPORT_TAGS`
+/// (Bugzilla's form) must populate the export surface exactly like the
+/// `our @EXPORT` spelling. Without this, `use Bugzilla::Util;` resolves nothing
+/// (the 1000+ Bugzilla FP cluster).
+#[test]
+fn qualified_export_globals_populate_surface() {
+    let src = r#"
+package Bugzilla::Util;
+@Bugzilla::Util::EXPORT = qw(trick_taint detaint_natural);
+@Bugzilla::Util::EXPORT_OK = qw(opt_util);
+%Bugzilla::Util::EXPORT_TAGS = (all => [qw(trick_taint opt_util)]);
+sub trick_taint { 1 }
+sub detaint_natural { 2 }
+sub opt_util { 3 }
+"#;
+    let fa = build_fa(src);
+    assert!(
+        fa.export.contains(&"trick_taint".to_string())
+            && fa.export.contains(&"detaint_natural".to_string()),
+        "qualified @Pkg::EXPORT must populate the default set; got export={:?}",
+        fa.export,
+    );
+    assert!(
+        fa.export_ok.contains(&"opt_util".to_string()),
+        "qualified @Pkg::EXPORT_OK must populate the optional set; got export_ok={:?}",
+        fa.export_ok,
+    );
+    // Tag membership is preserved per-tag for the `:tag` consumer selector.
+    let surface = fa.export_surface();
+    let all = surface.tag_members("all").expect("all tag present");
+    assert!(
+        all.contains(&"trick_taint") && all.contains(&"opt_util"),
+        "qualified %Pkg::EXPORT_TAGS must record per-tag members; got {:?}",
+        all,
+    );
+    // :DEFAULT is synthesized from @EXPORT.
+    let default = surface.tag_members("DEFAULT").expect(":DEFAULT synthesized");
+    assert!(
+        default.contains(&"trick_taint") && default.contains(&"detaint_natural"),
+        ":DEFAULT must equal @EXPORT; got {:?}",
+        default,
+    );
+}
+
+/// `%EXPORT_TAGS = ( all => [...] )` and the plain-comma `( 'all', [...] )`
+/// fold identically — `=>` is just an autoquoting comma, so the tag key/value
+/// pairing is positional. A `:all` import must bind the folded members in both
+/// spellings.
+#[test]
+fn export_tags_plain_comma_folds_members() {
+    for table in [
+        "( all => [qw(foo bar)] )",
+        "( 'all', [qw(foo bar)] )",
+    ] {
+        let src = format!(
+            "package P;\nour %EXPORT_TAGS = {table};\nsub foo {{ 1 }}\nsub bar {{ 2 }}\n",
+        );
+        let fa = build_fa(&src);
+        let surface = fa.export_surface();
+        let all = surface
+            .tag_members("all")
+            .unwrap_or_else(|| panic!("`all` tag must fold for table `{table}`"));
+        assert!(
+            all.contains(&"foo") && all.contains(&"bar"),
+            "table `{table}`: :all members foo+bar must fold; got {:?}",
+            all,
+        );
+        assert!(
+            fa.export_ok.contains(&"foo".to_string()),
+            "table `{table}`: tag members join the export surface; got export_ok={:?}",
+            fa.export_ok,
+        );
+    }
+}
+
+/// A constant invoked as a call (`MAX_RETRIES()`) is reffed once by the
+/// function-call path; the bareword arm must not double-emit at that span.
+#[test]
+fn const_call_form_not_double_reffed() {
+    let src = r#"
+package QA::C;
+use constant MAX_RETRIES => 5;
+sub run { return MAX_RETRIES(); }
+"#;
+    let fa = build_fa(src);
+    let n = fa
+        .refs
+        .iter()
+        .filter(|r| {
+            r.target_name == "MAX_RETRIES" && matches!(&r.kind, RefKind::FunctionCall { .. })
+        })
+        .count();
+    assert_eq!(n, 1, "MAX_RETRIES() call must get exactly one FunctionCall ref");
+}
+
+/// AutoLoader-backed package: subs after `__END__` live in the opaque
+/// `data_section`, but they are runtime-live via AUTOLOAD. They must surface
+/// as navigable Sub symbols with file-offset spans, with POD between them
+/// skipped, and goto-def from an in-package caller must reach them.
+#[test]
+fn autoloader_data_section_subs_synthesized() {
+    let src = "package My::AL;\n\
+               use AutoLoader qw(AUTOLOAD);\n\
+               sub uses_them { want_read(); }\n\
+               1;\n\
+               __END__\n\
+               sub want_read { return 42 }\n\
+               sub get_https { do_httpx2(GET => 1, @_) }\n\
+               =pod\n\
+               junk\n\
+               =cut\n\
+               sub after_pod ($;$) { return 1 }\n";
+    let fa = build_fa(src);
+
+    let names: std::collections::HashSet<&str> = fa
+        .symbols
+        .iter()
+        .filter(|s| s.kind == SymKind::Sub)
+        .map(|s| s.name.as_str())
+        .collect();
+    assert!(names.contains("want_read"), "want_read must be synthesized");
+    assert!(names.contains("get_https"), "get_https must be synthesized");
+    assert!(names.contains("after_pod"), "sub after POD must be synthesized");
+
+    // Spans land in the data section (row 5 = first sub after __END__).
+    let want_read = fa
+        .symbols
+        .iter()
+        .find(|s| s.name == "want_read" && s.kind == SymKind::Sub)
+        .expect("want_read symbol");
+    assert_eq!(want_read.selection_span.start.row, 5, "want_read at file row 5");
+    assert_eq!(want_read.package.as_deref(), Some("My::AL"));
+
+    // Goto-def from the in-package caller reaches the data-section def.
+    let def = fa.find_definition(Point::new(2, 16), None, None, None);
+    assert_eq!(
+        def.map(|s| s.start.row),
+        Some(5),
+        "goto-def on want_read() should land on the data-section sub"
+    );
+}
+
+/// The gate: a package that does NOT use AutoLoader/SelfLoader must not have
+/// its trailing `__END__` / `__DATA__` payload mined for subs — that text is
+/// genuine data or POD, not code.
+#[test]
+fn non_autoloader_data_section_synthesizes_nothing() {
+    let src = "package My::Plain;\n\
+               use strict;\n\
+               sub real_sub { 1 }\n\
+               1;\n\
+               __END__\n\
+               sub looks_like_a_sub { return 99 }\n\
+               =pod\n\
+               docs\n\
+               =cut\n\
+               plain documentation text\n";
+    let fa = build_fa(src);
+    assert!(
+        fa.symbols
+            .iter()
+            .all(|s| s.name != "looks_like_a_sub"),
+        "data-section subs must NOT be synthesized without AutoLoader/SelfLoader"
+    );
+    assert!(
+        fa.symbols.iter().any(|s| s.name == "real_sub"),
+        "the real pre-__END__ sub is still present"
+    );
+}
+
+/// Inheritance-form gate: `use base 'AutoLoader'` (parents, not a direct
+/// `use AutoLoader`) also enables data-section synthesis.
+#[test]
+fn autoloader_via_use_base_enables_synthesis() {
+    let src = "package My::Sub;\n\
+               use base 'AutoLoader';\n\
+               1;\n\
+               __END__\n\
+               sub inherited_loader_sub { return 1 }\n";
+    let fa = build_fa(src);
+    assert!(
+        fa.symbols
+            .iter()
+            .any(|s| s.name == "inherited_loader_sub" && s.kind == SymKind::Sub),
+        "use base 'AutoLoader' must enable data-section synthesis"
+    );
+}
+
+/// CHAINED hashref-key ref: `$obj->get_config->{host}` — get_config's
+/// return type is a known class (here a blessed Config), so the `host`
+/// key is knowable and must get its own narrow HashKeyAccess ref owned
+/// by that class. Without it, references/goto-def on `host` are dropped.
+#[test]
+fn chained_method_call_hash_key_emits_owned_ref() {
+    let src = "\
+package Config;
+sub new { bless { host => 'localhost', port => 5432 }, shift }
+package Foo;
+sub new { bless {}, shift }
+sub get_config { return Config->new() }
+package main;
+my $obj = Foo->new();
+$obj->get_config->{host};
+";
+    let tree = parse(src);
+    let fa = build(&tree, src.as_bytes());
+
+    // The `host` token (line 7, after `->{`) gets a HashKeyAccess ref
+    // owned by Config — the chain receiver's class.
+    let host_refs: Vec<_> = fa
+        .refs
+        .iter()
+        .filter(|r| r.target_name == "host" && matches!(r.kind, RefKind::HashKeyAccess { .. }))
+        .collect();
+    assert!(
+        !host_refs.is_empty(),
+        "chained hash-key access should emit a HashKeyAccess ref for 'host'"
+    );
+    let owner = host_refs
+        .iter()
+        .find_map(|r| match &r.kind {
+            RefKind::HashKeyAccess { owner: Some(o), .. } => Some(o.clone()),
+            _ => None,
+        })
+        .expect("chained hash-key ref should carry a resolved owner");
+    assert_eq!(
+        owner,
+        HashKeyOwner::Class("Config".to_string()),
+        "owner should be the chain receiver's class, got {:?}",
+        owner
+    );
+
+    // Goto-def from the `host` token reaches the bless'd key in Config::new.
+    let key_ref = host_refs[0];
+    let def = fa.find_definition(key_ref.span.start, Some(&tree), Some(src.as_bytes()), None);
+    assert!(
+        def.is_some(),
+        "goto-def on chained `->{{host}}` should resolve to Config's key def"
+    );
+    assert_eq!(def.unwrap().start.row, 1, "host def is the bless key on line 1");
+}
+
+/// Plain-comma blessed hash keys (`bless { 'host', $h }`) emit HashKeyDef
+/// symbols exactly like the fat-comma spelling — `collect_pair_keys` pairs
+/// positionally, so the key is the even-position element regardless of the
+/// separator that follows it.
+#[test]
+fn blessed_hash_plain_comma_keys_emit_hash_key_defs() {
+    let src = "\
+package Config;
+sub new { bless { 'host', 'localhost', port => 5432 }, shift }
+package main;
+my $c = Config->new();
+$c->{host};
+$c->{port};
+";
+    let tree = parse(src);
+    let fa = build(&tree, src.as_bytes());
+    // `bless { ... }` inside `sub new` owns its keys by the declaring sub
+    // (Config::new) — the same owner the fat-comma spelling produces.
+    let expected = HashKeyOwner::Sub { package: Some("Config".to_string()), name: "new".to_string() };
+    for key in ["host", "port"] {
+        assert!(
+            fa.symbols.iter().any(|s| s.name == key
+                && matches!(&s.detail, SymbolDetail::HashKeyDef { owner, .. } if *owner == expected)),
+            "plain/fat-comma bless key `{key}` must emit a HashKeyDef owned by Config::new; got: {:?}",
+            fa.symbols.iter()
+                .filter(|s| matches!(s.detail, SymbolDetail::HashKeyDef { .. }))
+                .map(|s| (s.name.clone(), s.detail.clone())).collect::<Vec<_>>(),
+        );
+    }
+}
+
+/// Regression: an untyped chain (`$obj->mystery->{host}` where `mystery`
+/// has no resolvable return type) must emit NO key ref — honest about
+/// ignorance rather than latching onto a wrong owner.
+#[test]
+fn untyped_chain_emits_no_hash_key_ref() {
+    let src = "\
+package main;
+my $obj = bless {}, 'Foo';
+$obj->totally_unknown_method->{host};
+";
+    let tree = parse(src);
+    let fa = build(&tree, src.as_bytes());
+    let host_refs: Vec<_> = fa
+        .refs
+        .iter()
+        .filter(|r| r.target_name == "host" && matches!(r.kind, RefKind::HashKeyAccess { .. }))
+        .collect();
+    assert!(
+        host_refs.is_empty(),
+        "untyped chain must not emit a hash-key ref, got {:?}",
+        host_refs
+    );
+}
+
+/// CG-3b cross-package glob attribution: `*{ 'DateTime::' . $sub } = …`
+/// inside `package DateTime::PP` synthesizes the tail (`_ymd2rd`) under
+/// the *named* package (`DateTime`), not the file's own package.
+#[test]
+fn cross_package_glob_synthesizes_under_target_package() {
+    let src = r#"package DateTime::PP;
+sub _ymd2rd { 1 }
+sub _rd2ymd { 2 }
+my @subs = qw( _ymd2rd _rd2ymd );
+for my $sub (@subs) {
+    no strict 'refs';
+    *{ 'DateTime::' . $sub } = __PACKAGE__->can($sub);
+}
+1;
+"#;
+    let fa = build_fa(src);
+    for tail in ["_ymd2rd", "_rd2ymd"] {
+        let under_datetime = fa.symbols.iter().any(|s| {
+            s.name == tail
+                && matches!(s.kind, SymKind::Sub)
+                && s.package.as_deref() == Some("DateTime")
+        });
+        assert!(
+            under_datetime,
+            "glob-synthesized `{}` should be attributed to DateTime, symbols: {:?}",
+            tail,
+            fa.symbols
+                .iter()
+                .filter(|s| s.name == tail)
+                .map(|s| (&s.name, &s.package))
+                .collect::<Vec<_>>()
+        );
+    }
+    // The real definitions (under DateTime::PP) are untouched.
+    assert!(
+        fa.symbols.iter().any(|s| s.name == "_ymd2rd"
+            && matches!(s.kind, SymKind::Sub)
+            && s.package.as_deref() == Some("DateTime::PP")),
+        "the original DateTime::PP::_ymd2rd sub must still exist"
+    );
+}
+
+/// Pins ARBITRARY DEPTH for the chained hash-key owner: build-time owner
+/// resolution must ride the recursive chain typer, so `host` carries the same
+/// `Config` owner whether the chain is one hop or three.
+#[test]
+fn chained_method_call_hash_key_owned_at_arbitrary_depth() {
+    let src = "\
+package Config;
+sub new { bless { host => 'localhost' }, shift }
+package Foo;
+sub new { bless {}, shift }
+sub me { return $_[0] }
+sub get_config { return Config->new() }
+package main;
+my $obj = Foo->new();
+$obj->get_config->{host};
+$obj->me->me->get_config->{host};
+";
+    let tree = parse(src);
+    let fa = build(&tree, src.as_bytes());
+    let owners: Vec<_> = fa.refs.iter().filter_map(|r| match &r.kind {
+        RefKind::HashKeyAccess { owner: Some(o), .. } if r.target_name == "host" => Some(o.clone()),
+        _ => None,
+    }).collect();
+    assert_eq!(owners.len(), 2, "both 1-hop and 3-hop chained ->{{host}} should emit an owned ref, got {:?}", owners);
+    assert!(owners.iter().all(|o| *o == HashKeyOwner::Class("Config".to_string())), "every depth's owner must be Config, got {:?}", owners);
+}
+
+/// Mixed-depth chain: a method-call value, then a hash-key, then a method,
+/// then a hash-key. `$obj->get_config->deep->cfg->{host}` — the final `host`
+/// resolves through (method → typed value → method → key).
+#[test]
+fn chained_hash_key_mixed_depth_method_key() {
+    let src = "\
+package Inner;
+sub new { bless { host => 'localhost' }, shift }
+package Deep;
+sub new { bless {}, shift }
+sub cfg { return Inner->new() }
+package Config;
+sub new { bless {}, shift }
+sub deep { return Deep->new() }
+package Foo;
+sub new { bless {}, shift }
+sub get_config { return Config->new() }
+package main;
+my $obj = Foo->new();
+$obj->get_config->deep->cfg->{host};
+";
+    let tree = parse(src);
+    let fa = build(&tree, src.as_bytes());
+    let owners: Vec<_> = fa.refs.iter().filter_map(|r| match &r.kind {
+        RefKind::HashKeyAccess { owner: Some(o), .. } if r.target_name == "host" => Some(o.clone()),
+        _ => None,
+    }).collect();
+    assert_eq!(owners, vec![HashKeyOwner::Class("Inner".to_string())],
+        "mixed-depth chain must resolve host's owner to Inner, got {:?}", owners);
+}
+
+/// Regression: an untyped deep chain emits NO owner — honest-about-ignorance,
+/// never a wrong-owner latch.
+#[test]
+fn chained_hash_key_untyped_deep_chain_no_owner() {
+    let src = "\
+package Foo;
+sub new { bless {}, shift }
+sub mystery { return $_[0]->some_unknown_thing() }
+package main;
+my $obj = Foo->new();
+$obj->mystery->mystery->{host};
+";
+    let tree = parse(src);
+    let fa = build(&tree, src.as_bytes());
+    let owned: Vec<_> = fa.refs.iter().filter(|r| matches!(&r.kind,
+        RefKind::HashKeyAccess { owner: Some(_), .. }) && r.target_name == "host").collect();
+    assert!(owned.is_empty(), "untyped deep chain must not latch a wrong owner, got {:?}",
+        owned.iter().map(|r| &r.kind).collect::<Vec<_>>());
+}
+
+/// Regression: a same-package glob (`*name = sub {…}`, no `::` prefix)
+/// still synthesizes under the current package.
+#[test]
+fn same_package_glob_synthesizes_under_current_package() {
+    let src = r#"package Acme::Widget;
+*frobnicate = sub { 42 };
+1;
+"#;
+    let fa = build_fa(src);
+    assert!(
+        fa.symbols.iter().any(|s| s.name == "frobnicate"
+            && matches!(s.kind, SymKind::Sub)
+            && s.package.as_deref() == Some("Acme::Widget")),
+        "same-package glob must stay under the current package, symbols: {:?}",
+        fa.symbols
+            .iter()
+            .filter(|s| s.name == "frobnicate")
+            .map(|s| (&s.name, &s.package))
+            .collect::<Vec<_>>()
+    );
+}
+
+// ---- ${@} block-interpolation token-stream bleed recovery (TASK-C / G1) ----
+//
+// `"${@}"` (the `@` sigil inside `${...}`) mis-lexes: the string's closing
+// quote is swallowed, wrapping the rest of the file in an ERROR and dissolving
+// every following `sub` into stray tokens — they survive NOWHERE in the tree.
+// Source-text recovery inside the ERROR span restores them. See
+// docs/parser-shortcomings.md (G1) and docs/adr/error-recovery.md.
+
+fn sub_names(fa: &FileAnalysis) -> Vec<String> {
+    fa.symbols
+        .iter()
+        .filter(|s| matches!(s.kind, SymKind::Sub | SymKind::Method))
+        .map(|s| s.name.clone())
+        .collect()
+}
+
+#[test]
+fn dollar_at_block_interp_bleed_recovers_following_subs() {
+    let src = r#"package Foo;
+my $x = "err ${@} more text here";
+sub alpha { return 1; }
+sub beta { return 2; }
+sub gamma { my $self = shift; return $self; }
+1;
+"#;
+    let fa = build_fa(src);
+    // The bleed produces zero subroutine_declaration_statement nodes; without
+    // text recovery this asserts 0 subs.
+    let names = sub_names(&fa);
+    for want in ["alpha", "beta", "gamma"] {
+        assert!(
+            names.iter().any(|n| n == want),
+            "sub `{want}` must survive the ${{@}} bleed; recovered: {names:?}"
+        );
+    }
+}
+
+#[test]
+fn dollar_at_block_interp_recovered_sub_has_correct_position() {
+    let src = r#"package Foo;
+my $x = "err ${@}";
+sub alpha { return 1; }
+1;
+"#;
+    let fa = build_fa(src);
+    let alpha = fa
+        .symbols
+        .iter()
+        .find(|s| s.name == "alpha" && matches!(s.kind, SymKind::Sub))
+        .expect("alpha recovered");
+    // `sub alpha` is on row 2 (0-based), name token at column 4.
+    assert_eq!(alpha.selection_span.start.row, 2, "alpha row");
+    assert_eq!(alpha.selection_span.start.column, 4, "alpha name column");
+    assert_eq!(alpha.package.as_deref(), Some("Foo"), "alpha package");
+}
+
+#[test]
+fn dollar_at_block_interp_bleed_keeps_package() {
+    // The package statement precedes the bleed and must still be indexed so the
+    // recovered subs key under the right package.
+    let src = r#"package Net::DNS::RR;
+my $e = "${@}in $stmnt\n";
+sub new { }
+sub decode { }
+sub encode { }
+1;
+"#;
+    let fa = build_fa(src);
+    assert!(
+        fa.symbols
+            .iter()
+            .any(|s| s.name == "Net::DNS::RR" && matches!(s.kind, SymKind::Package)),
+        "package survives the bleed"
+    );
+    for want in ["new", "decode", "encode"] {
+        assert!(
+            fa.symbols.iter().any(|s| s.name == want
+                && matches!(s.kind, SymKind::Sub | SymKind::Method)
+                && s.package.as_deref() == Some("Net::DNS::RR")),
+            "sub `{want}` recovered under Net::DNS::RR"
+        );
+    }
+}
+
+#[test]
+fn normal_parse_unaffected_by_error_text_recovery() {
+    // Regression: text recovery only runs inside ERROR spans, so a clean file
+    // must produce exactly the structurally-parsed subs with no duplicates.
+    let src = r#"package Foo;
+sub one { 1 }
+sub two { 2 }
+1;
+"#;
+    let fa = build_fa(src);
+    let mut names = sub_names(&fa);
+    names.sort();
+    assert_eq!(names, vec!["one".to_string(), "two".to_string()]);
+}
+
+#[test]
+fn error_text_recovery_does_not_duplicate_a_recovered_sub() {
+    // A sub inside an ERROR region must be recovered exactly once even when the
+    // structural loop and the text scan could fire on overlapping spans (the
+    // row-based dedup guards this). `if (` wraps the trailing sub in an ERROR;
+    // the sub mis-parses, so the text scan recovers it — and must do so once.
+    let src = "package Foo;\nif (\nsub kept { 1 }\n";
+    let fa = build_fa(src);
+    let kept: Vec<_> = fa
+        .symbols
+        .iter()
+        .filter(|s| s.name == "kept" && matches!(s.kind, SymKind::Sub | SymKind::Method))
+        .collect();
+    assert_eq!(kept.len(), 1, "no duplicate `kept`: {kept:?}");
+}
+
+// ---- Typed-slot witness (SlotType) ----
+//
+// These exercise the typed half of the hash-key-write seed in isolation:
+// build a fixture, then query the `SlotType{class, key}` attachment
+// through the registry. Nothing in the server consumes this attachment
+// yet (typed `$obj->{k}->m()` resolution is a later step), so the
+// registry query IS the whole validation surface.
+
+fn slot_type(fa: &FileAnalysis, class: &str, key: &str) -> Option<InferredType> {
+    use crate::witnesses::{
+        BagContext, FrameworkFact, ReducedValue, ReducerQuery, ReducerRegistry, WitnessAttachment,
+    };
+    let att = WitnessAttachment::SlotType {
+        class: class.to_string(),
+        key: key.to_string(),
+    };
+    let ctx = BagContext {
+        scopes: &fa.scopes,
+        package_framework: &fa.package_framework,
+        module_index: None,
+        package_parents: &fa.package_parents,
+        app_surface_consumers: &fa.app_surface_consumers,
+    };
+    let q = ReducerQuery {
+        attachment: &att,
+        point: None,
+        framework: FrameworkFact::Plain,
+        arity_hint: None,
+        receiver: None,
+        context: Some(&ctx),
+    };
+    let reg = ReducerRegistry::with_defaults();
+    match reg.query(&fa.witnesses, &q) {
+        ReducedValue::Type(t) => Some(t),
+        _ => None,
+    }
+}
+
+#[test]
+fn slot_type_single_typed_write() {
+    let src = "package Foo;\nsub init {\n  my $self = shift;\n  $self->{h} = Helper->new;\n}\n";
+    let fa = build_fa(src);
+    let t = slot_type(&fa, "Foo", "h").expect("SlotType{Foo,h} should fold");
+    assert_eq!(t.class_name(), Some("Helper"), "got {t:?}");
+}
+
+#[test]
+fn slot_type_two_agreeing_writes() {
+    let src = "package Foo;\nsub a {\n  my $self = shift;\n  $self->{h} = Helper->new;\n}\nsub b {\n  my $self = shift;\n  $self->{h} = Helper->new;\n}\n";
+    let fa = build_fa(src);
+    let t = slot_type(&fa, "Foo", "h").expect("agreeing writes fold to the agreed type");
+    assert_eq!(t.class_name(), Some("Helper"), "got {t:?}");
+}
+
+#[test]
+fn slot_type_two_disagreeing_writes_none() {
+    let src = "package Foo;\nsub a {\n  my $self = shift;\n  $self->{h} = Helper->new;\n}\nsub b {\n  my $self = shift;\n  $self->{h} = Other->new;\n}\n";
+    let fa = build_fa(src);
+    // Disagreeing writes → honest None (no guess).
+    assert_eq!(slot_type(&fa, "Foo", "h"), None);
+}
+
+#[test]
+fn slot_type_unknown_rhs_no_slot() {
+    // `= shift` / `= $param` carry no resolvable type — no SlotType seed,
+    // never a guess.
+    let src = "package Foo;\nsub init {\n  my $self = shift;\n  my $param = shift;\n  $self->{h} = $param;\n}\n";
+    let fa = build_fa(src);
+    assert_eq!(slot_type(&fa, "Foo", "h"), None);
+}
+
+#[test]
+fn slot_type_keyed_by_owner_class() {
+    // `$o->{h}` where `$o` is a typed local `Foo` keys the slot by the
+    // OWNER's class, distinct from `$self->{h}` of the enclosing package.
+    let src = "package Bar;\nsub mk {\n  my $self = shift;\n  my $o = Foo->new;\n  $o->{h} = Helper->new;\n  $self->{h} = Sidecar->new;\n}\n";
+    let fa = build_fa(src);
+    let foo_h = slot_type(&fa, "Foo", "h").expect("SlotType keyed by owner class Foo");
+    assert_eq!(foo_h.class_name(), Some("Helper"), "got {foo_h:?}");
+    // The enclosing-package write lands on Bar, not Foo — no cross-contamination.
+    let bar_h = slot_type(&fa, "Bar", "h").expect("SlotType{Bar,h} from $self write");
+    assert_eq!(bar_h.class_name(), Some("Sidecar"), "got {bar_h:?}");
 }

@@ -15,7 +15,20 @@
 fn id() { "mojo-events" }
 
 fn triggers() {
-    [ #{ ClassIsa: "Mojo::EventEmitter" } ]
+    [
+        #{ ClassIsa: "Mojo::EventEmitter" },
+        // Event wire-ups also happen inside Mojo plugins subscribing to an
+        // emitter they hold (`$minion->on(worker => ...)` in a plugin's
+        // `register`). The plugin package isn't itself an EventEmitter, so
+        // this trigger opens the door there. `resolve_event` does NOT gate on
+        // receiver class — it takes the receiver's class as the handler's
+        // owner (falling back to `current_package`), the same no-allowlist
+        // stance as minion: the `on`/`emit`/`subscribe` verb + a string first
+        // arg is the signal. A stray `$x->on('e', sub)` in such a file thus
+        // registers an owner-scoped handler; harmless (owner won't match an
+        // unrelated `emit`).
+        #{ ClassIsa: "Mojolicious::Plugin" },
+    ]
 }
 
 // Shared resolver: name + owner class + tight span around the name

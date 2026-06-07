@@ -76,6 +76,15 @@ pub struct ArgInfo {
     /// (params typed `CodeRef`, deref-shape narrowing, etc.).
     #[serde(default)]
     pub callable_return_edge: Option<crate::witnesses::WitnessAttachment>,
+    /// If this arg is a refgen of a named sub (`\&foo`, `\&Foo::bar`,
+    /// `\&$const_folded`), the referenced sub name (qualified or bare,
+    /// exactly as `extract_names_from_refgen` yields). Lets a
+    /// registration plugin (`->helper(name => \&_greet)`) carry the
+    /// callback's first-param typing to the *named* sub's body, the
+    /// same as it does for an inline `sub { ... }` via `sub_params`.
+    /// `None` for non-refgen args and unresolvable `\&$var` names.
+    #[serde(default)]
+    pub ref_sub_name: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -90,12 +99,69 @@ pub struct CallContext {
     pub receiver_text: Option<String>,
     /// Resolved receiver type if inference succeeded.
     pub receiver_type: Option<InferredType>,
+    /// Route defaults inherited by the receiver value, flattened to a
+    /// `[[key, value], ...]` list the Rhai side can read directly
+    /// (`controller` is the distinguished key). Filled from the
+    /// receiver's `InferredType::BrandedRoute` brand by the builder so
+    /// a partial `->to('#action')` plugin can recover the inherited
+    /// controller without inspecting the enum's serde shape. Empty for
+    /// non-route receivers. See `docs/adr/route-branding.md`.
+    #[serde(default)]
+    pub receiver_route_defaults: Vec<(String, String)>,
     pub args: Vec<ArgInfo>,
     pub call_span: Span,
     pub selection_span: Span,
     pub current_package: Option<String>,
     pub current_package_parents: Vec<String>,
     pub current_package_uses: Vec<String>,
+    /// Structurally-extracted Moo/Moose `has` options, present ONLY on the
+    /// `has` function call. The builder walks the option nodes (rule #1) and
+    /// hands the plugin the decision-ready shape — attribute name(s), the
+    /// resolved `isa` type, and each accessor option keyword with its value
+    /// already classified (shorthand `=> 1` vs explicit name vs `handles`
+    /// delegation pairs). The plugin owns the *vocabulary*: which keyword
+    /// synthesizes which method-name pattern and return behavior. See
+    /// `frameworks/moo.rhai`. `None` for every other call.
+    #[serde(default)]
+    pub has_options: Option<HasOptions>,
+}
+
+/// Decision-ready snapshot of a Moo/Moose `has` declaration's accessor
+/// options. The builder fills it from the CST; the plugin reads it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HasOptions {
+    /// `(attribute_name, name_token_span)` — one per attr (`has [qw/a b/]`
+    /// declares several). The span is the synthesized method's
+    /// selection_span so goto-def lands on the `has` line.
+    pub attr_names: Vec<(String, Span)>,
+    /// The attribute's resolved `isa` type, if any. When this is a
+    /// `ClassName`, a `handles` delegation can edge the delegated method's
+    /// return to the remote method on that class.
+    #[serde(default)]
+    pub isa_type: Option<InferredType>,
+    pub options: Vec<HasOption>,
+}
+
+/// One Moo/Moose `has` accessor option (`predicate`, `clearer`, `writer`,
+/// `reader`, `builder`, `handles`). The builder classifies the value
+/// shape; the plugin maps the keyword to a method-name pattern.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HasOption {
+    /// `"predicate"`, `"clearer"`, `"writer"`, `"reader"`, `"builder"`,
+    /// `"handles"`.
+    pub keyword: String,
+    /// The value was `=> 1` — the plugin derives the method name from the
+    /// attribute (`has_<attr>`, `clear_<attr>`, `_build_<attr>`, …).
+    #[serde(default)]
+    pub shorthand: bool,
+    /// The value was an explicit string — use it verbatim as the method name.
+    #[serde(default)]
+    pub explicit_name: Option<String>,
+    /// For `handles => {local => remote}` / `[qw/m.../]`: the
+    /// `(local_name, remote_name)` delegation pairs (local == remote for
+    /// the arrayref form). Empty for the non-`handles` keywords.
+    #[serde(default)]
+    pub handles: Vec<(String, String)>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -423,6 +489,24 @@ pub enum EmitAction {
         inferred_type: InferredType,
     },
 
+    /// Type the `param_index`-th positional of a *named* sub by name.
+    /// The named-sub analogue of `VarType`: `->helper(name => \&_greet)`
+    /// types `_greet`'s first positional as `Mojolicious::Controller`,
+    /// just as the inline `->helper(name => sub ($c) {...})` form types
+    /// the closure's first positional. The plugin can't anchor a
+    /// `VarType` at the sub's body — a `\&name` arg carries no body span,
+    /// and the sub may be a forward reference not yet walked. The builder
+    /// defers resolution to end-of-build (`deferred_named_sub_param_types`):
+    /// it finds the sub's scope + the named param's variable, then pushes
+    /// the TC. Independent of the sub's name allowlist — driven purely by
+    /// the registration shape (rule #10). `class` matches via the
+    /// enclosing package (bare names) or qualifier (`Foo::bar`).
+    NamedSubParamType {
+        sub_name: String,
+        param_index: usize,
+        inferred_type: InferredType,
+    },
+
     /// Inject a `use` statement as if it appeared in source at `span`.
     /// Equivalent in every respect to the user having written
     /// `use <module> <args>` at that point — same plugin dispatch,
@@ -522,6 +606,90 @@ pub struct TypeOverride {
     pub reason: String,
 }
 
+/// A plugin-declared "this method dispatches a named handler when its
+/// receiver is a `target_class` (or a subclass)" rule. Unlike the
+/// `on_method_call` emit hook — which fires only when the *file*'s
+/// triggers match and can't see cross-file inheritance — a dispatch verb
+/// is resolved at **enrichment** time, against the receiver's actual
+/// (cross-file-resolved) class. So `$minion->enqueue('T')` lights up
+/// wherever a `$minion` typed as a Minion subclass is in scope, no matter
+/// what `use` statements the surrounding file has. The builder records a
+/// provisional candidate for every call matching `verb`; enrichment keeps
+/// the ones whose receiver `isa target_class` and pairs them to the
+/// `owner_class` Handler.
+///
+/// Like `overrides`, this manifest is NOT trigger-gated — it's read from
+/// every loaded plugin and unioned.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DispatchVerb {
+    /// Method name that performs the dispatch (`enqueue`, `enqueue_p`).
+    pub verb: String,
+    /// Receiver class the verb belongs to; the call only counts when the
+    /// receiver's resolved class `isa` this (cross-file inheritance walk).
+    pub target_class: String,
+    /// Handler owner the synthesized `DispatchCall` pairs against —
+    /// usually the same as `target_class`, but kept distinct so a verb on
+    /// one class can dispatch into another's registry.
+    pub owner_class: String,
+    /// Positional index of the handler-name argument. Almost always 0;
+    /// some sugar passes a label first and the name second.
+    #[serde(default)]
+    pub name_arg_index: usize,
+}
+
+/// One extracted parameter of a parametric type-constraint constructor
+/// (`InstanceOf['Foo']` → one param with `string: "Foo"`). The builder
+/// fills exactly one of the two fields per param (rule #1 — it walked the
+/// node so the plugin doesn't have to): `string` for a string-literal
+/// param (class names, enum values), `ty` for a nested type param (`Int`,
+/// `InstanceOf[...]`, …) once nesting is resolved. Handed to
+/// `type_constraint_inner` so the plugin folds however many params there
+/// are into the constrained inner type.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConstraintParam {
+    #[serde(default)]
+    pub string: Option<String>,
+    #[serde(default)]
+    pub ty: Option<InferredType>,
+}
+
+/// A plugin-declared parameter type for a role-contract method: "in a class
+/// that does `in_role`, the sub `method`'s parameter at index `param` has type
+/// `ClassName(type_class)`." The motivating case is a framework role whose
+/// required method has a typed argument the source can't express — e.g.
+/// `Clove::Upgrade::OneTime`'s `sub run_upgrade ($self, $app)`, where `$app`
+/// is the `Mojolicious` app. The builder applies this at the sub-declaration
+/// walk (the one place that sees a sub's params, rule #1), pushing a Variable
+/// type constraint for the param — the same mechanism `detect_first_param_type`
+/// uses for `$self`. See `docs/adr/plugin-system.md` (`param_types()`).
+/// (Callback-arg param
+/// typing — `$job` in a Minion task — stays in the per-plugin `VarType` emit;
+/// this manifest is the *declaration*-site selector that has no hook.)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ParamType {
+    /// Method name to match. `None` matches every method in the class —
+    /// the "any action in a controller" case (Catalyst `$c`, PSGI handlers).
+    /// Plugin authors express this by omitting the `method` key in Rhai.
+    #[serde(default)]
+    pub method: Option<String>,
+    /// The enclosing package must do/inherit this role/class (matched against
+    /// the package's resolved ancestry — `with` / `extends` / `isa` / `does`).
+    pub in_role: String,
+    pub param: usize,
+    pub type_class: String,
+    /// Gate the rule on the sub carrying a declaration attribute (`:Local`,
+    /// `:Chained`, `:Args`, …). The Catalyst `$c` case: only *action* methods
+    /// receive the context object, and the only honest signal separating an
+    /// action from a plain helper is the attribute. A wildcard `param: 1` rule
+    /// without this gate types the 2nd param of EVERY sub in the controller —
+    /// `$page` in a pagination helper, `$path` in a request builder — all
+    /// falsely `Catalyst`. Plugins set `requires_action_attr: true` in Rhai;
+    /// `ACCEPT_CONTEXT`/`COMPONENT` (Models, which have no attribute) stay as
+    /// *named* rules that don't set this.
+    #[serde(default)]
+    pub requires_action_attr: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum OverrideTarget {
     /// Method `name` defined on the package `class`. Match is by exact
@@ -546,6 +714,54 @@ pub trait FrameworkPlugin: Send + Sync {
     /// is no overrides; only plugins that need them implement this.
     fn overrides(&self) -> &[TypeOverride] {
         &[]
+    }
+
+    /// Static dispatch-verb manifest. Read once at plugin load and applied
+    /// in the enrichment pass (cross-file receiver isa resolution) — see
+    /// `DispatchVerb`. Default empty; only dispatch-style plugins declare.
+    fn dispatch_verbs(&self) -> &[DispatchVerb] {
+        &[]
+    }
+
+    /// Static role-contract parameter-type manifest — see `ParamType`.
+    /// Applied at the sub-declaration walk. Default empty.
+    fn param_types(&self) -> &[ParamType] {
+        &[]
+    }
+
+    /// Names this plugin treats as type-constraint constructors
+    /// (`InstanceOf`, `ConsumerOf`, …). A cheap dispatch gate: the builder
+    /// only folds a call into a `TypeConstraintOf` when its name is in the
+    /// union of these across plugins. (First cut — a global gate; later
+    /// this moves to the import seam so it's package-scoped.)
+    fn type_constraint_names(&self) -> &[String] {
+        &[]
+    }
+
+    /// Receiver classes that compose the fictional app surface
+    /// (`file_analysis::APP_SURFACE_CLASS`) — the "open consumption" axis
+    /// of the helper/plugin model (see `docs/adr/plugin-system.md`). Each
+    /// listed class gains the surface as a synthetic ancestor in the MRO
+    /// walk, so entities a plugin bridges to the surface resolve from
+    /// every consumer (`$app->h`, `$c->h`, app subclasses) through the
+    /// existing ancestor + bridge resolution — one bridge target, an open
+    /// consumer set declared once. Default empty.
+    fn app_surface_consumers(&self) -> &[String] {
+        &[]
+    }
+
+    /// Fold a constraint constructor's extracted params into the
+    /// *constrained inner* type (the type a satisfying value has). The
+    /// builder wraps the result in `TypeConstraintOf`. Return `None` to
+    /// decline (`name` not ours, or unfoldable params). Arity lives here,
+    /// not in the core — see `ConstraintParam`.
+    #[allow(unused_variables)]
+    fn type_constraint_inner(
+        &self,
+        name: &str,
+        params: &[ConstraintParam],
+    ) -> Option<InferredType> {
+        None
     }
 
     // ---- Emit hooks (parse time) ----
@@ -805,6 +1021,51 @@ impl PluginRegistry {
         self.plugins
             .iter()
             .flat_map(|p| p.overrides().iter().map(move |o| (p.id(), o)))
+    }
+
+    /// Yield every dispatch-verb declaration across the registry.
+    /// Trigger-independent, same rationale as `overrides`.
+    pub fn dispatch_verbs<'a>(&'a self) -> impl Iterator<Item = &'a DispatchVerb> + 'a {
+        self.plugins.iter().flat_map(|p| p.dispatch_verbs().iter())
+    }
+
+    /// Yield every role-contract parameter-type rule across the registry.
+    pub fn param_types<'a>(&'a self) -> impl Iterator<Item = &'a ParamType> + 'a {
+        self.plugins.iter().flat_map(|p| p.param_types().iter())
+    }
+
+    /// Union of constraint-constructor names across the registry — the
+    /// builder's dispatch gate for which calls to fold into a constraint.
+    pub fn type_constraint_names<'a>(&'a self) -> impl Iterator<Item = &'a str> + 'a {
+        self.plugins
+            .iter()
+            .flat_map(|p| p.type_constraint_names().iter().map(|s| s.as_str()))
+    }
+
+    /// Union of app-surface consumer classes across the registry — the
+    /// declared receiver set that composes the app surface (one place,
+    /// open). The builder bakes this onto `FileAnalysis` so the
+    /// query-time ancestor walk can inject the synthetic-parent edge.
+    pub fn app_surface_consumers<'a>(&'a self) -> impl Iterator<Item = &'a str> + 'a {
+        self.plugins
+            .iter()
+            .flat_map(|p| p.app_surface_consumers().iter().map(|s| s.as_str()))
+    }
+
+    /// Fold a constraint constructor → its inner type, asking the plugin(s)
+    /// that claim `name`. First non-`None` wins.
+    pub fn type_constraint_inner(
+        &self,
+        name: &str,
+        params: &[ConstraintParam],
+    ) -> Option<InferredType> {
+        self.plugins.iter().find_map(|p| {
+            if p.type_constraint_names().iter().any(|n| n == name) {
+                p.type_constraint_inner(name, params)
+            } else {
+                None
+            }
+        })
     }
 
     /// Return plugins whose triggers match the current package context.

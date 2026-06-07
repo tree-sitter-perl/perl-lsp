@@ -317,6 +317,7 @@ $schema->resultset('Schema::Result::Users')->search({ name => 'X' });
     let target = TargetRef {
         name: "name".to_string(),
         kind: TargetKind::HashKeyOfClass("Schema::Result::Users".to_string()),
+        method_classes: Vec::new(),
     };
     let refs = refs_to(&store, Some(&idx), &target, RoleMask::WORKSPACE);
     let consumer_hit = refs
@@ -383,6 +384,73 @@ my $name = $schema->resultset('Schema::Result::Users')->find(1)->name;
          Parametric{{ResultSet, [Users]}} → ClassName(Users) at \
          the return-type. got: {:?}",
         def,
+    );
+}
+
+/// NAV chained-return edge: the `$rs->find(1)->name` dispatch must
+/// resolve through a REAL stamped `resolved_method_target` edge — not
+/// the deleted same-name fallback. The receiver of `->name` is the
+/// `find` method call (a chained method return, not a variable);
+/// `method_call_invocant_class` resolves it via `expr_type_at_span`
+/// (RowOf projection over the parametric `find` receiver) and freezes a
+/// `Local` edge to the Row accessor. Pins that the edge is present so
+/// the fallback's removal is provably safe; goto-def + references both
+/// ride the edge.
+#[test]
+fn chained_method_return_dispatch_resolves_via_stamped_edge() {
+    let src = format!(
+        "{}
+package main;
+my $schema;
+my $name = $schema->resultset('Schema::Result::Users')->find(1)->name;
+",
+        USERS_RESULT,
+    );
+    let (fa, _tree) = parse_with_tree(&src);
+    // The trailing `->name` MethodCall ref must carry a stamped Local
+    // edge (the load-bearing fact, not just the goto-def output).
+    let name_ref = fa
+        .refs
+        .iter()
+        .find(|r| matches!(&r.kind, RefKind::MethodCall { invocant, .. }
+            if invocant.ends_with("->find(1)"))
+            && r.target_name == "name")
+        .expect("trailing ->name MethodCall ref");
+    assert!(
+        matches!(
+            &name_ref.resolved_method_target,
+            Some(crate::file_analysis::MethodTarget::Local { invocant_class, .. })
+                if invocant_class == "Schema::Result::Users"
+        ),
+        "chained `$$rs->find(1)->name` must carry a stamped Local edge \
+         to the Row accessor (class Schema::Result::Users), proving \
+         resolution rides the edge not the deleted same-name fallback. \
+         got: {:?}",
+        name_ref.resolved_method_target,
+    );
+
+    // References for the Row's `name` method must include the chained
+    // call site — it resolves through the same frozen edge as goto-def.
+    let store = FileStore::new();
+    store.insert_workspace(PathBuf::from("/tmp/nav_chained_return.pm"), fa);
+    let refs = refs_to(
+        &store,
+        None,
+        &TargetRef {
+            name: "name".to_string(),
+            kind: TargetKind::Method {
+                class: "Schema::Result::Users".to_string(),
+            },
+            method_classes: Vec::new(),
+        },
+        RoleMask::EDITABLE,
+    );
+    let call_row = point_at(&src, "->name").row;
+    assert!(
+        refs.iter().any(|r| r.span.start.row == call_row),
+        "references for the Row `name` method must include the chained \
+         `->name` call site (row {call_row}). got: {:?}",
+        refs.iter().map(|r| r.span.start.row).collect::<Vec<_>>(),
     );
 }
 
@@ -690,6 +758,7 @@ sub action {
     let target = TargetRef {
         name: "name".to_string(),
         kind: TargetKind::HashKeyOfClass("Schema::Result::Sner".to_string()),
+        method_classes: Vec::new(),
     };
     let refs = refs_to(&store, Some(&idx), &target, RoleMask::WORKSPACE);
     let consumer_hit = refs
@@ -759,6 +828,7 @@ sub action {
     let target = TargetRef {
         name: "name".to_string(),
         kind: TargetKind::HashKeyOfClass("Schema::Result::Sner".to_string()),
+        method_classes: Vec::new(),
     };
     let refs = refs_to(&store, Some(&idx), &target, RoleMask::WORKSPACE);
     let consumer_hit = refs
@@ -773,4 +843,139 @@ sub action {
          column-key resolution finds the call site. hits: {:?}",
         refs.iter().map(|r| (&r.key, r.span.start.row)).collect::<Vec<_>>(),
     );
+}
+
+/// **CROSS-FILE fluent accessor inherited from a CPAN parent.** This
+/// is the real crm gap, not reproducible single-file: the fluent
+/// `app` accessor lives on CPAN `Minion` (a *workspace/dependency*
+/// module here), `Clove::Minion` inherits it, and the open file does
+/// `my $minion = Clove::Minion->new->app($app)`. The `->app(...)` hop
+/// must resolve the inherited fluent-writer return THROUGH the
+/// cross-file parent so the chain keeps ClassName(Clove::Minion).
+/// When this fails, `$minion` is untyped and the helper closure that
+/// returns it produces no type, so `$c->minion->enqueue` never
+/// dispatches.
+#[test]
+fn cross_file_inherited_fluent_chain_types_lexical() {
+    let parent_src = "
+package Minion;
+use Mojo::Base 'Mojo::EventEmitter';
+has app => sub { 1 }, weak => 1;
+has 'backend';
+sub enqueue { my $self = shift; return 1; }
+1;
+";
+    let child_src = "
+package Clove::Minion;
+use Mojo::Base 'Minion';
+sub class_for_task { my $self = shift; return 'X'; }
+1;
+";
+    let idx = ModuleIndex::new_for_test();
+    idx.register_workspace_module(
+        PathBuf::from("/tmp/cf_minion.pm"),
+        Arc::new(parse(parent_src)),
+    );
+    idx.register_workspace_module(
+        PathBuf::from("/tmp/cf_clove_minion.pm"),
+        Arc::new(parse(child_src)),
+    );
+
+    let consumer_src = "
+package MyApp::Plugin;
+use Mojo::Base 'Mojolicious::Plugin';
+sub register {
+    my ($self, $app) = @_;
+    my $minion = Clove::Minion->new(Pg => 1)->app($app);
+    my $after = 1;
+}
+1;
+";
+    let mut fa = parse(consumer_src);
+    fa.enrich_imported_types_with_keys(Some(&idx));
+    let pt = point_at(consumer_src, "$after");
+    let minion_t = fa.inferred_type_via_bag_ctx("$minion", pt, Some(&idx));
+    assert_eq!(
+        minion_t,
+        Some(InferredType::ClassName("Clove::Minion".to_string())),
+        "`my $$minion = Clove::Minion->new->app($$app)` must type $$minion as \
+         Clove::Minion — the inherited fluent `app` writer (on the cross-file \
+         parent Minion) returns the invocant class. got: {:?}",
+        minion_t,
+    );
+}
+
+/// In-file baseline for the cross-file pin above: a fluent Mojo::Base
+/// `has` accessor called with an arg (`->configured(1)`) returns the
+/// invocant class, so the chain `LocalThing->new->configured(1)` types
+/// `$thing` as LocalThing.
+#[test]
+fn fluent_chain_lexical_is_typed() {
+    let src = "
+package LocalThing;
+use Mojo::Base -base;
+has 'configured';
+sub greet { my $self = shift; return 'hi'; }
+
+package Main;
+my $thing = LocalThing->new->configured(1);
+my $after = 1;
+";
+    let fa = parse(src);
+    let pt = point_at(src, "$after");
+    assert_eq!(
+        fa.inferred_type_via_bag("$thing", pt),
+        Some(InferredType::ClassName("LocalThing".to_string())),
+        "`my $$thing = LocalThing->new->configured(1)` must type \
+         $$thing as LocalThing — the fluent `has` accessor returns \
+         ClassName(current_package). raw: {:?}",
+        fa.inferred_type_via_bag("$thing", pt),
+    );
+}
+
+/// **End-to-end: Mojo helper whose closure returns a closed-over
+/// fluent-chain lexical.** This is the crm `minion` shape, made
+/// self-contained: `my $thing = LocalThing->new->configure(...);
+/// $app->helper(thing => sub {{ $thing }})`. A controller's
+/// `$c->thing->greet` must reach `LocalThing::greet`. The helper's
+/// synthesized Method edges to the anon-sub body; the body's last
+/// (and only) expr is the closed-over `$thing`; so `$c->thing`
+/// resolves to LocalThing and `->greet` goto-defs into it. The
+/// load-bearing hop is the implicit-return Variable lookup
+/// scope-walking OUT of the anon-sub body to the enclosing `my
+/// $thing`.
+#[test]
+fn mojo_helper_returning_closed_over_lexical_composes() {
+    let src = "
+package LocalThing;
+use Mojo::Base -base;
+has 'configured';
+sub greet { my $self = shift; return 'hi'; }
+
+package MyApp;
+use Mojo::Base 'Mojolicious';
+my $app;
+my $thing = LocalThing->new->configured(1);
+$app->helper(thing => sub { $thing });
+
+package MyApp::Controller::X;
+use Mojo::Base 'Mojolicious::Controller';
+sub action {
+    my $c = shift;
+    $c->thing->greet;
+}
+1;
+";
+    let (fa, tree) = parse_with_tree(src);
+    let pt = point_at(src, "greet;");
+    let def = fa.find_definition(pt, Some(&tree), Some(src.as_bytes()), None);
+    assert!(
+        def.is_some(),
+        "`$$c->thing->greet` must resolve to LocalThing::greet — the \
+         helper's closure returns the closed-over fluent-chain lexical \
+         $$thing (typed LocalThing). got: {:?}",
+        def,
+    );
+    // `greet` is declared on `sub greet` (row 4, 0-based).
+    assert_eq!(def.unwrap().start.row, 4);
 }

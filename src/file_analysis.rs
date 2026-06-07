@@ -73,6 +73,25 @@ pub(crate) fn node_to_span(node: tree_sitter::Node) -> Span {
     }
 }
 
+/// Narrow `node`'s span to the bare tail after the last `::` in `text` (rule
+/// #7): for a qualified name (`Foo::Bar::baz`) the renamable / highlightable
+/// token is `baz`, not the whole path — so rename rewrites only the tail and
+/// the qualifier survives, while the ref's `target_name` keeps the full path. No
+/// `::` → the node's own span. FQ identifiers are single-line tokens, so the
+/// tail column is `start.column + byte_offset_of_tail`.
+pub(crate) fn fq_tail_span(node: tree_sitter::Node, text: &str) -> Span {
+    match text.rfind("::") {
+        Some(idx) => {
+            let s = node.start_position();
+            Span {
+                start: Point { row: s.row, column: s.column + idx + 2 },
+                end: node.end_position(),
+            }
+        }
+        None => node_to_span(node),
+    }
+}
+
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FoldRange {
@@ -291,6 +310,12 @@ pub enum SymbolDetail {
         /// no core heuristic on the type name.
         #[serde(default)]
         opaque_return: bool,
+        /// This Sub symbol is a `use constant` declaration, not an ordinary
+        /// sub. Set by `register_constant_symbol`. Consumers (semantic tokens)
+        /// ask the symbol whether it's a constant rather than re-deriving from
+        /// a name set (rule #10).
+        #[serde(default)]
+        is_constant: bool,
     },
     Class {
         parent: Option<String>,
@@ -381,6 +406,96 @@ pub struct Ref {
     pub access: AccessKind,
     /// For variable refs: which Symbol this resolves to (filled in post-pass).
     pub resolves_to: Option<SymbolId>,
+    /// For `MethodCall` refs: the build-time-resolved dispatch target.
+    /// Mirrors `resolves_to` for variables (build pipeline phase 6
+    /// `PostFold`): the PostFold invocant-fill already has the invocant
+    /// class in hand, so it resolves the method on that class once and
+    /// stamps the edge here. `refs_to` / `find_definition` / hover all
+    /// read this stored edge instead of re-deriving the invocant class at
+    /// query time, so they can never disagree (the NAV unification — a
+    /// call that resolved at build time stays matched regardless of
+    /// query-time inference flakiness). `None` means the invocant class
+    /// did not infer at build time — the call is honestly unresolved, no
+    /// name-only fallback (that re-introduces the `->new` over-collect).
+    #[serde(default)]
+    pub resolved_method_target: Option<MethodTarget>,
+}
+
+/// Split a possibly-qualified name into `(Option<package>, basename)`.
+///
+/// A name token may carry a `Pkg::` qualifier (`Foo::Bar::baz`, `@Pkg::EXPORT`,
+/// `$Foo::Bar::x`). Resolution is always `(qualifier ?? current_package,
+/// basename)`. This is the ONE place that decides "is this name qualified" —
+/// every per-construct stripper (`Ref::unqualified_target_name`,
+/// `Builder::export_var_basename`, FQ-variable ref emission) routes through it
+/// (rule #10: encode the "is qualified" property once).
+///
+/// Input must be sigil-free (callers strip `$`/`@`/`%`/`&` first). The text
+/// after the last `::` is the basename; everything before it is the package.
+/// An unqualified name yields `(None, name)`. A leading `::` (`::foo`, the
+/// `main::` shorthand) yields an empty-string package, preserved verbatim.
+pub fn split_qualified(name: &str) -> (Option<&str>, &str) {
+    match name.rsplit_once("::") {
+        Some((pkg, base)) => (Some(pkg), base),
+        None => (None, name),
+    }
+}
+
+impl Ref {
+    /// The unqualified callable name for a `FunctionCall` ref. A
+    /// fully-qualified call (`Foo::Bar::baz(...)`) keeps the whole path in
+    /// `target_name` (the qualified-name hash-key binding logic and rename
+    /// rely on it), while symbols are keyed by their bare name (`baz`)
+    /// inside their package. Resolution sites that match a call against a
+    /// `Sub` symbol pair this bare tail with the ref's `resolved_package`
+    /// (= the qualifier) so `Foo::baz()` lands on `sub baz` in package
+    /// `Foo`.
+    pub fn unqualified_target_name(&self) -> &str {
+        split_qualified(&self.target_name).1
+    }
+
+    /// For a fully-qualified variable read (`$Foo::Bar::x`, `@Pkg::arr`,
+    /// `%Pkg::h`) return `(package, sigil+basename)` — the package the
+    /// global lives in, paired with the sigil-bearing bare name that keys
+    /// the declaring symbol (`("Foo::Bar", "$x")`). `None` for unqualified
+    /// reads (those resolve lexically via `resolves_to`). The sigil rides
+    /// the basename because variable symbols are keyed with their sigil
+    /// (`$x`, `@arr`, `%h`); a leading-`::` `main::` spelling yields an
+    /// empty-string package, matching how package-globals in `main` key.
+    pub fn qualified_var_target(&self) -> Option<(&str, String)> {
+        let mut chars = self.target_name.chars();
+        let sigil = chars.next()?;
+        if !matches!(sigil, '$' | '@' | '%') {
+            return None;
+        }
+        let (pkg, base) = split_qualified(chars.as_str());
+        pkg.map(|p| (p, format!("{sigil}{base}")))
+    }
+}
+
+/// Build-time-resolved dispatch target for a `MethodCall` ref.
+/// `invocant_class` is the class the invocant resolved to at build time
+/// (frozen); it drives the inheritance rename-chain match in `refs_to`,
+/// replacing the query-time `method_call_invocant_class` re-derivation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum MethodTarget {
+    /// Method found on a local symbol in this file (via the ancestor walk).
+    Local { sym_id: SymbolId, invocant_class: String },
+    /// Method found cross-file (real method in the invocant's module, an
+    /// inherited ancestor, or a plugin bridge). The defining symbol lives
+    /// in another file; the LSP adapter resolves location via ModuleIndex.
+    CrossFile { invocant_class: String },
+}
+
+impl MethodTarget {
+    /// The invocant class this target resolved against (drives the
+    /// rename-chain match in `refs_to`).
+    pub fn invocant_class(&self) -> &str {
+        match self {
+            MethodTarget::Local { invocant_class, .. }
+            | MethodTarget::CrossFile { invocant_class } => invocant_class,
+        }
+    }
 }
 
 /// What kind of entity is being renamed — determines single-file vs cross-file scope.
@@ -539,6 +654,39 @@ pub enum InferredType {
     /// new variants in the middle would shift every subsequent
     /// variant's wire-format index and silently misread old blobs.
     Sequence(Vec<InferredType>),
+    /// A Type::Tiny / Types::Standard constraint *object* —
+    /// `InstanceOf['Foo']`, `ArrayRef[Int]`, … — carrying the type it
+    /// constrains values to. The constraint is a value in its own right:
+    /// method dispatch on it routes to `Type::Tiny` (deferred), NOT the
+    /// inner type. Its one job here is projection: an `isa => <constraint>`
+    /// gives its accessor the *constrained* (inner) type via
+    /// `constrained_inner()`. A plugin's `type_constraint_inner` fold
+    /// produces the inner; the core wraps it. See
+    /// `docs/adr/type-constraints.md`. Kept at the END for
+    /// bincode variant-index stability (bump `EXTRACT_VERSION`).
+    TypeConstraintOf(Box<InferredType>),
+    /// A Mojolicious route-builder value carrying the **accumulated
+    /// route defaults** in force at this point in the builder chain.
+    /// `base` is the class for method dispatch
+    /// (`Mojolicious::Routes::Route`); `controller` / `stash` are the
+    /// inherited `->to(...)` defaults a partial `->to('#action')`
+    /// reads. This is the "brand on the value" from
+    /// `docs/adr/route-branding.md` (option C, collapsed):
+    /// the defaults ride the type through assignment / chaining /
+    /// nesting via the witness bag for free, so there is no separate
+    /// brand-id + side-table to keep cache-stable — the resolved
+    /// defaults ARE the value, content-addressed. Inheritance is baked
+    /// in: each route method that sets a default produces a NEW
+    /// `BrandedRoute` that overlays its own keys onto the receiver's,
+    /// so children never mutate parents and a sibling group with its
+    /// own `->to('other#')` re-brands its descendants without leaking.
+    /// Kept at the END for bincode variant-index stability (bump
+    /// `EXTRACT_VERSION`).
+    BrandedRoute {
+        base: String,
+        controller: Option<String>,
+        stash: Vec<(String, String)>,
+    },
 }
 
 /// Concrete parametric flavors + type-level operators. Each
@@ -665,6 +813,43 @@ impl InferredType {
             InferredType::ClassName(name) => Some(name.as_str()),
             InferredType::FirstParam { package } => Some(package.as_str()),
             InferredType::Parametric(p) => p.class_name(),
+            // A branded route still dispatches methods against its
+            // base class — `$r->get(...)` works the same whether `$r`
+            // carries inherited defaults or not.
+            InferredType::BrandedRoute { base, .. } => Some(base.as_str()),
+            _ => None,
+        }
+    }
+
+    /// Read the inherited route default for `key` from a branded
+    /// route value, where `controller` is a distinguished key and
+    /// everything else lives in the stash. `None` for non-route
+    /// types or absent keys. This is the "ask the value" entry point
+    /// (rule #10): a partial `->to('#action')` consumer asks the
+    /// receiver value what controller is in force; it never inspects
+    /// the chain shape. The build-time consumer reads the flattened
+    /// `CallContext.receiver_route_defaults`; this is the query-time
+    /// surface for cursor-time stash lookups (hover/completion) — not
+    /// yet wired, hence `allow(dead_code)` for the spike.
+    #[allow(dead_code)]
+    pub fn route_default(&self, key: &str) -> Option<&str> {
+        let InferredType::BrandedRoute { controller, stash, .. } = self else {
+            return None;
+        };
+        if key == "controller" {
+            return controller.as_deref();
+        }
+        stash.iter().find(|(k, _)| k == key).map(|(_, v)| v.as_str())
+    }
+
+    /// Project a `TypeConstraintOf(inner)` to its constrained inner type —
+    /// the type a value satisfying this constraint has. `None` for any
+    /// non-constraint type. This is the rule-#10 "ask the value" entry
+    /// point: `has`'s isa→accessor projection calls it without ever
+    /// matching on the constraint's shape itself.
+    pub fn constrained_inner(&self) -> Option<&InferredType> {
+        match self {
+            InferredType::TypeConstraintOf(inner) => Some(inner),
             _ => None,
         }
     }
@@ -756,6 +941,14 @@ impl InferredType {
                 a == b
             }
             (InferredType::Parametric(a), InferredType::Parametric(b)) => a == b,
+            // A route with strictly more resolved defaults subsumes a
+            // plainer one (more keys = more informative). Keep the
+            // assignment chain from clobbering an accumulated brand
+            // with a freshly-typed bare `ClassName(Route)` re-derivation.
+            (
+                InferredType::BrandedRoute { controller: hc, stash: hs, .. },
+                InferredType::BrandedRoute { controller: wc, stash: ws, .. },
+            ) => (wc.is_none() || hc.is_some()) && ws.len() <= hs.len(),
             // Unit-shape variants subsume themselves; mismatched
             // discriminants don't subsume.
             (a, b) => std::mem::discriminant(a) == std::mem::discriminant(b),
@@ -970,6 +1163,219 @@ pub enum Bridge {
     Class(String),
 }
 
+/// Fictional "app surface" class — the synthetic ancestor that the
+/// Mojolicious app / controller / command classes (the manifest-declared
+/// consumer set, see `FrameworkPlugin::app_surface_consumers`) all
+/// inherit, so a single bridge target reaches every receiver that can see
+/// helpers (see `FrameworkPlugin::app_surface_consumers`, `docs/adr/plugin-system.md`).
+/// Helpers bridge to THIS one class;
+/// the consumer classes get it as a synthetic parent injected in the MRO
+/// walk (`parents_of`). The existing ancestor walk + bridge resolution
+/// then finds helpers with no per-receiver bridge list. Not a real Perl
+/// package — never resolves to a file, has no parents, so it's inert in
+/// the walk beyond contributing its bridge.
+pub const APP_SURFACE_CLASS: &str = "Mojolicious::_AppSurface";
+
+/// Inject the synthetic app-surface ancestor (`APP_SURFACE_CLASS`) when
+/// `class` is one of the declared `consumers`. The ONE place the
+/// synthetic-parent edge is added — every parent-enumeration site
+/// (`for_each_ancestor_class`, `collect_ancestor_methods`, and the
+/// `MethodOnClass` inheritance walk in `witnesses.rs`) routes through
+/// here so they can't drift. Real ancestors come first; the surface is
+/// appended last so same-name overrides on a real parent win. The
+/// surface has no parents of its own, so the walk's seen-set + depth cap
+/// bound it like any edge.
+pub fn parents_of(
+    class: &str,
+    package_parents: &HashMap<String, Vec<String>>,
+    module_index: Option<&ModuleIndex>,
+    consumers: &[String],
+) -> Vec<String> {
+    let mut parents: Vec<String> = package_parents.get(class).cloned().unwrap_or_default();
+    if let Some(idx) = module_index {
+        for p in idx.parents_cached(class) {
+            if !parents.contains(&p) {
+                parents.push(p);
+            }
+        }
+    }
+    if class != APP_SURFACE_CLASS
+        && consumers.iter().any(|c| c == class)
+        && !parents.iter().any(|p| p == APP_SURFACE_CLASS)
+    {
+        parents.push(APP_SURFACE_CLASS.to_string());
+    }
+    parents
+}
+
+/// Does `class` equal `target` or descend from it? Walks local
+/// `package_parents` first, then the cross-file inheritance graph via
+/// `module_index.parents_cached`. The single isa-walk seam — both the
+/// `ReceiverGated` gate and `FileAnalysis::class_isa` route here, so the
+/// MRO is enumerated in exactly one place. Cycle-guarded by `seen`;
+/// `budget` caps TOTAL classes visited (not ancestry depth) — a backstop
+/// against a pathological graph, set well above any real MRO.
+/// `parents_cached` is keyed by module name, which coincides with the
+/// class name here.
+pub fn class_isa(
+    class: &str,
+    target: &str,
+    package_parents: &HashMap<String, Vec<String>>,
+    module_index: Option<&ModuleIndex>,
+) -> bool {
+    if class == target {
+        return true;
+    }
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut stack: Vec<String> = vec![class.to_string()];
+    let mut budget = 0;
+    while let Some(cur) = stack.pop() {
+        if budget > 200 {
+            break;
+        }
+        budget += 1;
+        if !seen.insert(cur.clone()) {
+            continue;
+        }
+        if cur == target {
+            return true;
+        }
+        if let Some(parents) = package_parents.get(&cur) {
+            for p in parents {
+                stack.push(p.clone());
+            }
+        }
+        if let Some(idx) = module_index {
+            for p in idx.parents_cached(&cur) {
+                stack.push(p);
+            }
+        }
+    }
+    false
+}
+
+/// Walk `class`'s full MRO (local `package_parents` ∪ cross-file graph) and
+/// return `true` as soon as any class in the chain (including `class` itself)
+/// satisfies `pred`. The predicate-variant of [`class_isa`] — for "does any
+/// ancestor look like a DBIC base class" where the target isn't a single
+/// fixed name. Same cycle-guard + budget as `class_isa`.
+pub fn any_ancestor<F>(
+    class: &str,
+    package_parents: &HashMap<String, Vec<String>>,
+    module_index: Option<&ModuleIndex>,
+    mut pred: F,
+) -> bool
+where
+    F: FnMut(&str) -> bool,
+{
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut stack: Vec<String> = vec![class.to_string()];
+    let mut budget = 0;
+    while let Some(cur) = stack.pop() {
+        if budget > 200 {
+            break;
+        }
+        budget += 1;
+        if !seen.insert(cur.clone()) {
+            continue;
+        }
+        if pred(&cur) {
+            return true;
+        }
+        if let Some(parents) = package_parents.get(&cur) {
+            for p in parents {
+                stack.push(p.clone());
+            }
+        }
+        if let Some(idx) = module_index {
+            for p in idx.parents_cached(&cur) {
+                stack.push(p);
+            }
+        }
+    }
+    false
+}
+
+/// Three-way outcome of resolving a [`ReceiverGated`] value against a
+/// concrete receiver class. Splitting "doesn't apply" from "can't tell"
+/// is load-bearing: `DoesNotApply` is a settled negative (the receiver
+/// typed, it just isn't a descendant of the gate), while `ReceiverUntyped`
+/// is a *typing gap* — the receiver couldn't be pinned to any class, so
+/// applicability is unknown. The opt-in `unresolved-dispatch` diagnostic
+/// fires only on the latter; treating the two alike would either bury real
+/// gaps or spew noise on every unrelated receiver.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GateResult<U> {
+    /// Receiver `isa` the gate class — here is the inner value.
+    Applies(U),
+    /// Receiver typed to a concrete class that is NOT a descendant of the
+    /// gate. Settled negative; never diagnosed.
+    DoesNotApply,
+    /// Receiver class is unknown (`None` / unresolved). A genuine typing
+    /// gap — the only state the diagnostic surfaces.
+    ReceiverUntyped,
+}
+
+/// A value whose inner payload can be read ONLY through a cross-file isa
+/// check against a receiver class. The enforcement is structural, not a
+/// convention: `inner` is private with no `pub` field, no `Deref`, no
+/// `into_inner` — the sole reader is [`resolve_for`](Self::resolve_for),
+/// which gates on the receiver. A consumer therefore *cannot* observe
+/// gated content without first asking "does this receiver qualify?", so a
+/// future caller that forgets the isa filter is a compile error, not a
+/// silent drift (rule #10: the type carries the rule, the consumer can't
+/// re-decide it).
+///
+/// `gate` is a single `ClassName` today; widening it to a set later is a
+/// change to `resolve_for`'s internals, not to call sites — they already
+/// only ever see `Applies`/`DoesNotApply`/`ReceiverUntyped`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReceiverGated<T> {
+    /// The receiver must `isa` this class for `inner` to be readable.
+    gate: String,
+    /// Gated payload. PRIVATE by design — see the type's doc.
+    inner: T,
+}
+
+impl<T> ReceiverGated<T> {
+    /// Mint a gated value. The only constructor — pairs the payload with
+    /// the class the receiver must descend from to read it.
+    pub fn new(gate: impl Into<String>, inner: T) -> Self {
+        Self { gate: gate.into(), inner }
+    }
+
+    /// The gate class, exposed for diagnostics/observability. Reading the
+    /// gate is harmless — it's the *inner payload* that's protected.
+    pub fn gate(&self) -> &str {
+        &self.gate
+    }
+
+    /// The one reader. `receiver_class` is the concrete class of the
+    /// dispatch receiver as the bag resolved it (cross-file aware); `None`
+    /// or an unresolved name yields `ReceiverUntyped`. Otherwise the inner
+    /// value is handed back iff the receiver `isa` the gate, walking the
+    /// single `class_isa` seam (local `package_parents` ∪ cross-file
+    /// `parents_cached`).
+    pub fn resolve_for(
+        &self,
+        receiver_class: Option<&str>,
+        package_parents: &HashMap<String, Vec<String>>,
+        module_index: Option<&ModuleIndex>,
+    ) -> GateResult<&T> {
+        match receiver_class {
+            None => GateResult::ReceiverUntyped,
+            Some(recv) if recv.is_empty() => GateResult::ReceiverUntyped,
+            Some(recv) => {
+                if class_isa(recv, &self.gate, package_parents, module_index) {
+                    GateResult::Applies(&self.inner)
+                } else {
+                    GateResult::DoesNotApply
+                }
+            }
+        }
+    }
+}
+
 // ---- Hash key owner (for scope graph) ----
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -1027,6 +1433,83 @@ pub struct MethodCallBinding {
     pub method_name: String,
     pub scope: ScopeId,
     pub span: Span,
+}
+
+/// The readable half of a dispatch candidate — everything needed to
+/// synthesize a `DispatchCall` ref / handler link ONCE the receiver passes
+/// the gate. Carried as the inner payload of a [`ReceiverGated`], so the
+/// only way to reach these fields is `resolve_for(receiver_class, …)`:
+/// no consumer can mistake an unfiltered candidate for a confirmed
+/// dispatch. The gate class (`target_class`) lives on the wrapper.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DispatchCandidate {
+    /// The handler name (task / event) — the dispatch's first meaningful arg.
+    pub name: String,
+    /// Span of the name argument (the future `DispatchCall` ref span).
+    pub span: Span,
+    /// The verb (`enqueue`), kept for the `DispatchCall.dispatcher`.
+    pub dispatcher: String,
+    /// Handler owner the synthesized ref pairs against (e.g. `Minion`).
+    pub owner_class: String,
+    /// Receiver's class as resolved at build time, if any. `None` when the
+    /// receiver type wasn't known locally (e.g. a helper-returned value);
+    /// query-time resolution then re-resolves it cross-file via `call_span`'s
+    /// MethodCall ref + the module index.
+    #[serde(default)]
+    pub receiver_class: Option<String>,
+    /// Whole-call span of the dispatch call (`node_to_span` of the
+    /// `method_call_expression`). Matches the native MethodCall ref's `span`,
+    /// so the resolver can find that ref and resolve the receiver class with
+    /// the index when `receiver_class` is `None`.
+    pub call_span: Span,
+}
+
+/// A build-time dispatch candidate gated on its receiver type: a call to a
+/// plugin-declared dispatch verb (`$x->enqueue('T')`), recorded before we
+/// know whether the receiver actually `isa` the verb's target class. The
+/// gate (`target_class`) lives on the `ReceiverGated` wrapper; resolution
+/// is cross-file and happens at QUERY time in `resolve.rs`
+/// (`refs_to`) and dispatch goto-def — never eagerly materialized, so
+/// candidates in non-open workspace/dependency files surface the same as
+/// open ones. See `docs/adr/receiver-gated-dispatch.md`.
+pub type ProvisionalDispatch = ReceiverGated<DispatchCandidate>;
+
+impl ProvisionalDispatch {
+    /// Receiver-locator accessors. These three fields are gate *input*, not
+    /// gated *content*: the host needs the call site to resolve the receiver
+    /// class that the gate then checks (chicken-and-egg otherwise). Only the
+    /// handler-link payload (`name`, `owner_class`) stays behind
+    /// `resolve_for`. Defined ON the type so the type author — not an outside
+    /// consumer — draws the input/content line.
+    fn receiver_hint(&self) -> Option<&String> {
+        self.inner.receiver_class.as_ref()
+    }
+    fn call_span(&self) -> Span {
+        self.inner.call_span
+    }
+    fn dispatcher(&self) -> &str {
+        &self.inner.dispatcher
+    }
+}
+
+/// A confirmed dispatch — a gated candidate whose receiver isa-resolved at
+/// query time. The projection `refs_to` / goto-def consume to match a
+/// `Handler` target `(owner, name)` at `span`.
+#[derive(Debug, Clone)]
+pub struct AppliedDispatch {
+    pub name: String,
+    pub span: Span,
+    pub owner: HandlerOwner,
+}
+
+/// A dispatch candidate whose receiver couldn't be typed — a typing gap the
+/// opt-in diagnostic surfaces. Never `DoesNotApply` (that's a settled
+/// negative).
+#[derive(Debug, Clone)]
+pub struct UntypedDispatch {
+    pub call_span: Span,
+    pub dispatcher: String,
+    pub gate: String,
 }
 
 // ---- Import ----
@@ -1101,6 +1584,185 @@ pub struct Import {
     /// Used to insert new imports into an existing qw list.
     #[serde(with = "point_opt_serde")]
     pub qw_close_paren: Option<Point>,
+    /// `use Foo ();` — explicit empty parens. Suppresses even `@EXPORT`
+    /// (binds nothing), distinct from bare `use Foo;` (empty `imported_symbols`
+    /// too, but auto-imports the defaults).
+    #[serde(default)]
+    pub empty_import: bool,
+}
+
+/// A producer module's resolved export surface — see
+/// `FileAnalysis::export_surface`. The consumer-side `imported_names` evaluator
+/// reads it; it never sees whether a name is the module's own or re-exported.
+///
+/// **Transitivity.** A module's surface can fold in other modules' surfaces via
+/// `reexport_modules` (static `@Other::EXPORT` splice, loop-push, declarative
+/// `also`). When built with a `ModuleIndex` (`export_surface_with_index`), the
+/// re-export edges are walked transitively (cross-file, seen-set bounded for
+/// cycles, fan-out budget) and the producer's default / optional / tag sets are
+/// **materialized** to include the re-exported names. The closure is computed
+/// here at query time, never baked into `FileAnalysis` — depth stays a
+/// query-time edge property, exactly like the inheritance `parents_of` walk.
+/// Without an index (`export_surface`, the back-compat path) only the module's
+/// own surface is visible.
+pub struct ExportSurface<'a> {
+    analysis: &'a FileAnalysis,
+    /// `@EXPORT` ∪ re-exported defaults. `None` = own-only (no index walk).
+    default_set: Option<Vec<String>>,
+    /// `@EXPORT_OK` ∪ re-exported optionals.
+    optional_set: Option<Vec<String>>,
+    /// `%EXPORT_TAGS` ∪ re-exported tag members (per tag name).
+    tags: Option<HashMap<String, Vec<String>>>,
+    /// Union of all names on the (transitive) surface for `exports()`.
+    all_names: Option<HashSet<String>>,
+}
+
+
+impl<'a> ExportSurface<'a> {
+    /// `@EXPORT` (∪ re-exported defaults when index-walked) — auto-imported by a
+    /// bare `use M;`.
+    pub fn default_set(&self) -> &[String] {
+        self.default_set.as_deref().unwrap_or(&self.analysis.export)
+    }
+
+    /// `@EXPORT_OK` (∪ re-exported optionals) — opt-in only; never auto-imported.
+    pub fn optional_set(&self) -> &[String] {
+        self.optional_set.as_deref().unwrap_or(&self.analysis.export_ok)
+    }
+
+    /// Members of a `%EXPORT_TAGS` tag, with `:DEFAULT` synthesized as
+    /// `@EXPORT` (the Exporter special-case). The `tag` argument is the bare
+    /// tag name (no `:`/`-` prefix). `None` if the tag is unknown.
+    pub fn tag_members(&self, tag: &str) -> Option<Vec<&str>> {
+        if tag.eq_ignore_ascii_case("DEFAULT") {
+            return Some(self.default_set().iter().map(|s| s.as_str()).collect());
+        }
+        if let Some(tags) = &self.tags {
+            return tags.get(tag).map(|v| v.iter().map(|s| s.as_str()).collect());
+        }
+        self.analysis
+            .export_tags
+            .get(tag)
+            .map(|v| v.iter().map(|s| s.as_str()).collect())
+    }
+
+    /// True if `name` is anywhere on the (transitive) surface (default ∪
+    /// optional ∪ tags) — "the module exports it," independent of any
+    /// consumer's `use`.
+    pub fn exports(&self, name: &str) -> bool {
+        if let Some(all) = &self.all_names {
+            return all.contains(name);
+        }
+        self.analysis.exports_name(name)
+    }
+
+    /// Every name on the surface, materialized into an owned set with the same
+    /// membership `exports()` reports. Lets a caller resolving many names
+    /// against one producer snapshot the surface once instead of re-walking
+    /// re-export edges per name (the diagnostics hot path). Own-only mirrors
+    /// `export_lookup` (`@EXPORT ∪ @EXPORT_OK`); the transitive case returns the
+    /// precomputed union.
+    pub fn all_names(&self) -> HashSet<String> {
+        if let Some(all) = &self.all_names {
+            return all.clone();
+        }
+        self.analysis
+            .export
+            .iter()
+            .chain(self.analysis.export_ok.iter())
+            .cloned()
+            .collect()
+    }
+}
+
+/// One import selector parsed from a `use` statement's arg list. The consumer
+/// evaluator (`imported_names`) maps each selector against a producer
+/// `ExportSurface` to the locally-bound name set.
+enum ImportSelector<'a> {
+    /// A `:tag` / `-tag` group selector — expands to the tag's members.
+    Tag(&'a str),
+    /// A `name => { -as => 'local' }` rename — binds `local` to origin `name`.
+    Rename { local: &'a str, remote: &'a str },
+    /// A bare name — binds it iff it's on the surface (default ∪ optional ∪ tag).
+    Name(&'a str),
+}
+
+/// Evaluate a consumer's import against a producer's export surface, yielding
+/// the locally-bound `(local_name, origin_name)` pairs. The one place Perl
+/// import semantics live, so diagnostics and nav can never disagree on the
+/// bound set:
+///   - bare `use M;` (no selectors, not empty)   → binds `@EXPORT` (defaults).
+///   - `use M ();` (explicit empty parens)        → binds nothing.
+///   - `use M qw(a b);` / `'a','b'`               → binds those (if on surface).
+///   - `use M qw(:tag);` / `:DEFAULT`             → binds the tag's members.
+///   - `use M foo => { -as => 'bar' };`           → binds local `bar`→origin `foo`.
+///   - mixed specs                                → union.
+/// `@EXPORT_OK` is NEVER auto-imported by a bare `use M;` — an opt-in name
+/// reached only by a bare use is deliberately left unbound (the GATE-5 hint).
+pub fn imported_names(
+    import: &Import,
+    surface: &ExportSurface<'_>,
+) -> std::collections::HashSet<(String, String)> {
+    let mut bound = std::collections::HashSet::new();
+
+    // `use M ();` — explicit empty list suppresses even the defaults.
+    if import.empty_import {
+        return bound;
+    }
+
+    // Bare `use M;` — no selectors at all auto-imports the default set.
+    //
+    // Pure Perl binds `@EXPORT` only here. We also bind `@EXPORT_OK` because the
+    // builder cannot distinguish a runtime exporter's *defaults* from a
+    // traditional opt-in list: Moose::Exporter / Sub::Exporter / Exporter::Tiny
+    // install their default names at `import` time, and the static walker records
+    // every such name in `export_ok` (it has no parse-time signal for "runtime
+    // default"). Treating `@EXPORT_OK` as unbound on a bare use would flag those
+    // as unresolved-function — ~684 FPs across the corpus (Moose::Util::
+    // TypeConstraints &c.). The honest failure mode is the explicit `use M ();`
+    // above, which binds nothing. Named/`:tag`/`-as` specs below stay precise.
+    if import.imported_symbols.is_empty() {
+        for name in surface.default_set().iter().chain(surface.optional_set()) {
+            bound.insert((name.clone(), name.clone()));
+        }
+        return bound;
+    }
+
+    for sym in &import.imported_symbols {
+        let selector = if sym.remote_name.is_some() {
+            ImportSelector::Rename { local: &sym.local_name, remote: sym.remote() }
+        } else if let Some(tag) = sym
+            .local_name
+            .strip_prefix(':')
+            .or_else(|| sym.local_name.strip_prefix('-'))
+        {
+            ImportSelector::Tag(tag)
+        } else {
+            ImportSelector::Name(&sym.local_name)
+        };
+
+        match selector {
+            ImportSelector::Tag(tag) => {
+                if let Some(members) = surface.tag_members(tag) {
+                    for m in members {
+                        bound.insert((m.to_string(), m.to_string()));
+                    }
+                }
+            }
+            ImportSelector::Rename { local, remote } => {
+                // The rename is honored as written; the origin's presence on
+                // the surface is the producer's concern (an unknown origin
+                // simply won't resolve cross-file, same as a bare name).
+                bound.insert((local.to_string(), remote.to_string()));
+            }
+            ImportSelector::Name(name) => {
+                // An explicitly-named import binds it; the surface check is the
+                // producer's verdict, applied by the caller when known.
+                bound.insert((name.to_string(), name.to_string()));
+            }
+        }
+    }
+    bound
 }
 
 // ---- Outline ----
@@ -1130,8 +1792,8 @@ pub const TOK_METHOD: u32 = 3;
 pub const TOK_MACRO: u32 = 4;
 pub const TOK_PROPERTY: u32 = 5;
 pub const TOK_NAMESPACE: u32 = 6;
-#[allow(dead_code)] pub const TOK_REGEXP: u32 = 7;
-#[allow(dead_code)] pub const TOK_ENUM_MEMBER: u32 = 8;
+pub const TOK_REGEXP: u32 = 7;
+pub const TOK_ENUM_MEMBER: u32 = 8;
 pub const TOK_KEYWORD: u32 = 9;
 
 pub const MOD_DECLARATION: u32 = 0;
@@ -1190,9 +1852,25 @@ pub struct FileAnalysis {
     #[serde(default)]
     pub package_ranges: Vec<PackageRange>,
 
+    /// Spans of regex literals (`qr//`, `m//`, `s///`) for semantic-token
+    /// coloring (`TOK_REGEXP`). Populated by the builder; `semantic_tokens()`
+    /// is the only consumer. `#[serde(default)]` so older cache blobs
+    /// deserialize as empty.
+    #[serde(default)]
+    pub regex_spans: Vec<Span>,
+
     /// Parent classes for each package in this file.
     /// Populated by the builder from use parent/base, @ISA, and class :isa.
     pub package_parents: HashMap<String, Vec<String>>,
+
+    /// Manifest-declared app-surface consumer classes
+    /// (`FrameworkPlugin::app_surface_consumers`), baked from the plugin
+    /// registry at build so the query-time ancestor walk can inject the
+    /// synthetic `APP_SURFACE_CLASS` parent (`parents_of`) without
+    /// re-reading the registry. `#[serde(default)]` so older cache blobs
+    /// deserialize as empty.
+    #[serde(default)]
+    pub app_surface_consumers: Vec<String>,
 
     /// Modules `use`-d inside each package in this file. Parallel to
     /// `package_parents`: keyed by the enclosing package name, values are
@@ -1208,6 +1886,23 @@ pub struct FileAnalysis {
     pub export: Vec<String>,
     /// Exported function names from `@EXPORT_OK = ...` assignments.
     pub export_ok: Vec<String>,
+    /// `%EXPORT_TAGS` membership — tag name (no `:`/`-` prefix) → member subs.
+    /// Feeds the consumer-side `:tag` selector expansion (`ExportSurface`).
+    /// `:DEFAULT` is synthesized from `export` at query time, not stored.
+    #[serde(default)]
+    pub export_tags: HashMap<String, Vec<String>>,
+
+    /// Re-export edges: other modules whose export surface this module folds
+    /// into its own. Three statically-recognized idioms mint these (see
+    /// `docs/adr/reexport-surface.md`): a static `@Other::EXPORT` element in an
+    /// `@EXPORT` assignment, a loop-push over a statically-resolvable module
+    /// list (`push @EXPORT, @{"${m}::EXPORT"}`), and a declarative `also => [...]`
+    /// in `setup_import_methods`. `ExportSurface` walks these transitively at
+    /// query time (cross-file, seen-set bounded) — the closure is NOT baked here
+    /// (depth stays a query-time edge property, mirroring the inheritance
+    /// edge-walk). Runtime `import`-delegation is deliberately unmodeled.
+    #[serde(default)]
+    pub reexport_modules: Vec<String>,
 
     /// Plugin-declared namespaces. Each is a scope managed by a plugin
     /// (a Mojolicious app, a Minion instance, an event-emitter subclass,
@@ -1249,6 +1944,34 @@ pub struct FileAnalysis {
     base_symbol_count: usize,
     #[serde(default)]
     base_witness_count: usize,
+    /// Ref baseline — enrichment re-derives synthetic refs (imported hash
+    /// keys), so it truncates `refs` back to this length before re-deriving
+    /// to stay idempotent.
+    #[serde(default)]
+    base_ref_count: usize,
+
+    /// Build-time dispatch candidates, each gated on its receiver's class.
+    /// The builder records one per call matching a plugin `DispatchVerb`,
+    /// ungated and per-file; the gate (`isa target_class`) is checked at
+    /// QUERY time by `applicable_dispatches` (cross-file receiver isa), so
+    /// candidates in non-open files surface the same as open ones. The
+    /// `ReceiverGated` wrapper makes the inner handler payload unreadable
+    /// without that check. See `docs/adr/receiver-gated-dispatch.md`.
+    #[serde(default)]
+    pub provisional_dispatches: Vec<ProvisionalDispatch>,
+
+    /// Plugin `param_types()` role-contract TCs, each gated on the enclosing
+    /// package's `isa` the rule's `in_role` class. The builder emits one per
+    /// matching sub declaration UNCONDITIONALLY (no local-ancestry
+    /// precondition — it's index-free per rule #1), so a controller whose
+    /// `in_role` ancestor is reachable only CROSS-FILE still carries the
+    /// candidate. The gate (`isa in_role`) is checked at QUERY time in
+    /// `inferred_type_via_bag_ctx`, where the module index resolves the
+    /// enclosing package's ancestry cross-file. The `ReceiverGated` wrapper
+    /// keeps the typed TC unreadable without that check (rule #10). See
+    /// `docs/adr/receiver-gated-dispatch.md` (Phase 2).
+    #[serde(default)]
+    pub gated_param_types: Vec<ReceiverGated<TypeConstraint>>,
 
     // Indices (built in post-pass — skipped by serde; call rebuild_all_indices() after deserialize)
     #[serde(skip, default)]
@@ -1272,6 +1995,11 @@ pub struct FileAnalysis {
     /// keyed on those two kinds.
     #[serde(skip, default)]
     call_ref_by_start: HashMap<Point, usize>,
+    /// Union of `export` + `export_ok` for O(1) membership tests.
+    /// Rebuilt by `build_indices` (called from `new` and `after_deserialize`),
+    /// so it is valid for freshly-built and SQLite-cached modules alike.
+    #[serde(skip, default)]
+    export_lookup: HashSet<String>,
 }
 
 impl FileAnalysis {
@@ -1302,23 +2030,31 @@ impl FileAnalysis {
             call_bindings,
             method_call_bindings,
             package_ranges,
+            regex_spans: Vec::new(),
             package_parents,
+            app_surface_consumers: Vec::new(),
             package_uses,
             framework_imports,
             export,
             export_ok,
+            export_tags: HashMap::new(),
+            reexport_modules: Vec::new(),
             plugin_namespaces,
             type_provenance,
             witnesses: crate::witnesses::WitnessBag::new(),
             package_framework: HashMap::new(),
             base_symbol_count: 0,
             base_witness_count: 0,
+            base_ref_count: 0,
+            provisional_dispatches: Vec::new(),
+            gated_param_types: Vec::new(),
             scope_starts: Vec::new(),
             symbols_by_name: HashMap::new(),
             symbols_by_scope: HashMap::new(),
             refs_by_name: HashMap::new(),
             refs_by_target: HashMap::new(),
             call_ref_by_start: HashMap::new(),
+            export_lookup: HashSet::new(),
         };
         fa.build_indices();
         // The builder path overwrites `witnesses` with its already-populated
@@ -1348,8 +2084,60 @@ impl FileAnalysis {
         // `enrich_imported_types_with_keys` re-runs the same
         // routine with `module_index`.
         self.fix_chain_receiver_hash_key_owners(None);
+        // Stamp the build-time-resolved dispatch target on MethodCall
+        // refs (local-only here; enrichment re-stamps with the index
+        // for OPEN docs). Mutates existing refs in place, so it must run
+        // before sealing base_ref_count — the seal counts the refs, the
+        // stamp only sets a field on them.
+        self.stamp_method_call_targets(None);
         self.base_symbol_count = self.symbols.len();
         self.base_witness_count = self.witnesses.len();
+        self.base_ref_count = self.refs.len();
+    }
+
+    /// Stamp `resolved_method_target` on every `MethodCall` ref — the NAV
+    /// unification edge (build pipeline phase 6 `PostFold`, then re-stamped
+    /// at enrichment). The invocant class is resolved ONCE here (via the
+    /// bag-routed `method_call_invocant_class`) and frozen on the ref;
+    /// `refs_to` / `find_definition` / hover read the frozen edge instead of
+    /// re-deriving the class at query time, so they can never diverge.
+    ///
+    /// Contract: if the invocant class does not infer, store `None` (honest
+    /// miss). No name-only fallback — that re-introduces the `->new` flood.
+    pub(crate) fn stamp_method_call_targets(&mut self, module_index: Option<&ModuleIndex>) {
+        // Collect resolutions first; `method_call_invocant_class` /
+        // `resolve_method_in_ancestors` borrow `&self`, so we can't hold a
+        // `&mut self.refs[i]` while calling them.
+        let mut stamped: Vec<(usize, Option<MethodTarget>)> = Vec::new();
+        for (i, r) in self.refs.iter().enumerate() {
+            if !matches!(r.kind, RefKind::MethodCall { .. }) {
+                continue;
+            }
+            let target = self
+                .method_call_invocant_class(r, module_index)
+                .map(|cn| {
+                    match self.resolve_method_in_ancestors(&cn, &r.target_name, module_index) {
+                        Some(MethodResolution::Local { sym_id, .. }) => MethodTarget::Local {
+                            sym_id,
+                            invocant_class: cn,
+                        },
+                        // Method found cross-file, OR the invocant class is
+                        // known but the method isn't found on it locally and
+                        // the class has cross-file parents / a cross-file
+                        // body the index may carry. Either way the invocant
+                        // froze, so keep the edge (CrossFile); the rename
+                        // chain still gates which targets it matches. A class
+                        // with no method and no parents still resolved its
+                        // invocant — the edge records that fact; find_def's
+                        // method-not-found arm returns None honestly.
+                        _ => MethodTarget::CrossFile { invocant_class: cn },
+                    }
+                });
+            stamped.push((i, target));
+        }
+        for (i, target) in stamped {
+            self.refs[i].resolved_method_target = target;
+        }
     }
 
     /// Set the `owner` on `HashKeyAccess { owner: None, .. }` refs
@@ -1417,6 +2205,7 @@ impl FileAnalysis {
         self.refs_by_name.clear();
         self.refs_by_target.clear();
         self.call_ref_by_start.clear();
+        self.export_lookup.clear();
         self.build_indices();
     }
 
@@ -1549,12 +2338,106 @@ impl FileAnalysis {
                 }
             }
         }
+
+        // Export membership set — union of export + export_ok for O(1) lookup.
+        self.export_lookup = self.export.iter()
+            .chain(self.export_ok.iter())
+            .cloned()
+            .collect();
     }
 
     /// All refs that resolve to this symbol — O(1) lookup via the index.
     /// Callers typically combine this with a kind filter.
     pub fn refs_to_symbol(&self, sym_id: SymbolId) -> &[usize] {
         self.refs_by_target.get(&sym_id).map(|v| v.as_slice()).unwrap_or(&[])
+    }
+
+    /// True if `name` appears in `@EXPORT` or `@EXPORT_OK` for this module.
+    /// O(1) via `export_lookup` (built by `build_indices`).
+    pub fn exports_name(&self, name: &str) -> bool {
+        self.export_lookup.contains(name)
+    }
+
+    /// A producer module's export surface — the names a consumer's `use` can
+    /// bring into scope, split into the default set (`@EXPORT`, auto-imported by
+    /// a bare `use M;`), the optional set (`@EXPORT_OK`, opt-in only), and tags
+    /// (`%EXPORT_TAGS`, with `:DEFAULT` synthesized as `@EXPORT`). This is the
+    /// single structure `imported_names` evaluates a consumer's import spec
+    /// against, so diagnostics and nav share one notion of "what does this
+    /// module export, and what does this `use` bind."
+    pub fn export_surface(&self) -> ExportSurface<'_> {
+        ExportSurface {
+            analysis: self,
+            default_set: None,
+            optional_set: None,
+            tags: None,
+            all_names: None,
+        }
+    }
+
+    /// Like `export_surface`, but resolves `reexport_modules` transitively
+    /// through `module_index`: the materialized surface includes every
+    /// re-exported module's surface (default ∪ optional ∪ tags), walked
+    /// cross-file via `ModuleIndex::for_each_reexport_module` (seen-set for
+    /// cycles, fan-out cap). When this module has no re-export edges the
+    /// result is identical to `export_surface` (own-only, zero extra storage).
+    /// This is the one transitive-closure site — the consumer evaluator
+    /// (`imported_names`) is untouched; it binds whatever the surface reports.
+    pub fn export_surface_with_index(
+        &self,
+        module_index: &ModuleIndex,
+    ) -> ExportSurface<'_> {
+        if self.reexport_modules.is_empty() {
+            return self.export_surface();
+        }
+
+        let mut default_set: Vec<String> = self.export.clone();
+        let mut optional_set: Vec<String> = self.export_ok.clone();
+        let mut tags: HashMap<String, Vec<String>> = self.export_tags.clone();
+
+        // Merge every re-exported module's surface, walking the edges through the
+        // one shared traversal (cycle-bounded + fan-out-capped). Own surface is
+        // already seeded above, so we seed the queue with `reexport_modules`.
+        module_index.for_each_reexport_module(
+            self.reexport_modules.iter().cloned(),
+            |cached| {
+                let a = &cached.analysis;
+                for n in &a.export {
+                    if !default_set.contains(n) {
+                        default_set.push(n.clone());
+                    }
+                }
+                for n in &a.export_ok {
+                    if !optional_set.contains(n) {
+                        optional_set.push(n.clone());
+                    }
+                }
+                for (tag, members) in &a.export_tags {
+                    let bucket = tags.entry(tag.clone()).or_default();
+                    for m in members {
+                        if !bucket.contains(m) {
+                            bucket.push(m.clone());
+                        }
+                    }
+                }
+                std::ops::ControlFlow::Continue(())
+            },
+        );
+
+        let mut all_names: HashSet<String> = HashSet::new();
+        all_names.extend(default_set.iter().cloned());
+        all_names.extend(optional_set.iter().cloned());
+        for members in tags.values() {
+            all_names.extend(members.iter().cloned());
+        }
+
+        ExportSurface {
+            analysis: self,
+            default_set: Some(default_set),
+            optional_set: Some(optional_set),
+            tags: Some(tags),
+            all_names: Some(all_names),
+        }
     }
 
     // ---- Query methods ----
@@ -1682,15 +2565,70 @@ impl FileAnalysis {
     /// `inferred_type` reads the same Variable+InferredType slice
     /// without applying reducer rules.
     pub fn inferred_type_via_bag(&self, var_name: &str, point: Point) -> Option<InferredType> {
+        self.inferred_type_via_bag_ctx(var_name, point, None)
+    }
+
+    /// As `inferred_type_via_bag`, but with a `ModuleIndex` so a variable whose
+    /// value is a cross-file method chain (`my $x = Foo->new->bar`) resolves —
+    /// the chase keeps the index when it crosses the `Variable` edge instead of
+    /// dead-ending. Pass the index from query-time callers (hover/completion);
+    /// the bare wrapper keeps `None` for build-time / single-file callers. Both
+    /// now carry `package_parents` (previously dropped to empty).
+    pub fn inferred_type_via_bag_ctx(
+        &self,
+        var_name: &str,
+        point: Point,
+        module_index: Option<&ModuleIndex>,
+    ) -> Option<InferredType> {
         let scope = self.scope_at(point)?;
-        crate::witnesses::query_variable_type(
+        if let Some(t) = crate::witnesses::query_variable_type(
             &self.witnesses,
             &self.scopes,
             &self.package_framework,
+            &self.package_parents,
+            &self.app_surface_consumers,
+            module_index,
             var_name,
             scope,
             point,
-        )
+        ) {
+            return Some(t);
+        }
+        // Role-contract param types are gated on the enclosing package's
+        // cross-file ancestry, so they resolve here (index in hand), not in
+        // the bag the index-free builder seeded.
+        self.gated_param_type_for(var_name, scope, point, module_index)
+    }
+
+    /// Resolve a `param_types()` role-contract TC for `var` at `point`: find a
+    /// gated TC whose scope is on the chain and whose variable matches, then
+    /// read its inner type ONLY if the enclosing package `isa` the rule's
+    /// gate (`in_role`), resolved cross-file via `resolve_for`. The gate makes
+    /// a controller whose `Catalyst::Controller` ancestry is established
+    /// through a cross-file base type its `$c` — the build-time local-only
+    /// ancestry check this replaces would have dropped it.
+    fn gated_param_type_for(
+        &self,
+        var: &str,
+        scope: ScopeId,
+        point: Point,
+        module_index: Option<&ModuleIndex>,
+    ) -> Option<InferredType> {
+        if self.gated_param_types.is_empty() {
+            return None;
+        }
+        let chain = self.scope_chain(scope);
+        let pkg = self.package_at(point);
+        for gated in &self.gated_param_types {
+            if let GateResult::Applies(tc) =
+                gated.resolve_for(pkg, &self.package_parents, module_index)
+            {
+                if tc.variable == var && chain.contains(&tc.scope) {
+                    return Some(tc.inferred_type.clone());
+                }
+            }
+        }
+        None
     }
 
     /// Resolve the inferred return type of a method call by its ref index
@@ -1719,13 +2657,45 @@ impl FileAnalysis {
             package_framework: &self.package_framework,
             module_index,
             package_parents: &self.package_parents,
+            app_surface_consumers: &self.app_surface_consumers,
             };
+        // Thread the receiver's resolved type so a receiver-relative
+        // return (`Operator(RowOf(Receiver))` — DBIC `find`/`search`)
+        // projects at query time, exactly as the build-time chain typer
+        // threads `q.receiver`. The receiver lives at the call ref's
+        // `invocant_span`; resolve it tree-free via `expr_type_at_span`
+        // (recurses through inner chain hops). This is what lets a
+        // chained-method-return invocant — `$rs->find(1)->name`, where
+        // `->name`'s receiver is the `find` call, not a variable — type
+        // `find`'s return as the Row class without an intermediate var.
+        let own_span = self.refs[ref_idx].span;
+        let receiver = if let RefKind::MethodCall { invocant_span: Some(span), .. } =
+            &self.refs[ref_idx].kind
+        {
+            // Only chase a receiver whose span is STRICTLY inside the
+            // call's own span — a genuine inner chain hop. Equal-or-wider
+            // spans (degenerate overlapping refs route branding can emit)
+            // would recurse back onto this same call; skipping them keeps
+            // the receiver `None` (build-time chain typing already pinned
+            // those via `bag_query_expression`).
+            let strictly_inside = (span.start.row, span.start.column)
+                >= (own_span.start.row, own_span.start.column)
+                && (span.end.row, span.end.column) <= (own_span.end.row, own_span.end.column)
+                && *span != own_span;
+            if strictly_inside {
+                self.expr_type_at_span(*span, module_index)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
         let q = ReducerQuery {
             attachment: &att,
             point: None,
             framework: FrameworkFact::Plain,
             arity_hint: None,
-            receiver: None,
+            receiver,
             context: Some(&ctx),
         };
         match reg.query(&self.witnesses, &q) {
@@ -1741,6 +2711,128 @@ impl FileAnalysis {
             }
             _ => None,
         }
+    }
+
+    /// Registry query against `Expr(span)` — the bag attachment the
+    /// builder seeds at every meaningful expression node (literals,
+    /// variable reads, method-call invocants, ternaries). Mirror of the
+    /// build-time `Builder::bag_query_expr_span`. `module_index` lets a
+    /// recorded `Edge` (e.g. a method-call invocant pointing at an
+    /// `Expression(refidx)`) chase cross-file.
+    fn bag_query_expr_span(
+        &self,
+        span: Span,
+        module_index: Option<&ModuleIndex>,
+    ) -> Option<InferredType> {
+        use crate::witnesses::{
+            BagContext, FrameworkFact, ReducedValue, ReducerQuery, ReducerRegistry,
+            WitnessAttachment,
+        };
+        let att = WitnessAttachment::Expr(span);
+        let reg = ReducerRegistry::with_defaults();
+        let ctx = BagContext {
+            scopes: &self.scopes,
+            package_framework: &self.package_framework,
+            module_index,
+            package_parents: &self.package_parents,
+            app_surface_consumers: &self.app_surface_consumers,
+        };
+        let q = ReducerQuery {
+            attachment: &att,
+            point: None,
+            framework: FrameworkFact::Plain,
+            arity_hint: None,
+            receiver: None,
+            context: Some(&ctx),
+        };
+        match reg.query(&self.witnesses, &q) {
+            ReducedValue::Type(t) => Some(t),
+            _ => None,
+        }
+    }
+
+    /// The type of the expression occupying `span`, resolved tree-free
+    /// from the bag. This is the single query-time entry that
+    /// `method_call_invocant_class` and `resolve_expression_type` both
+    /// route through: structure was discovered once in the builder
+    /// (recorded as `Expr(span)` witnesses + the `Expression(refidx)`
+    /// call axis), and every consumer reads it back by span.
+    ///
+    /// Resolution order:
+    /// 1. A call ref starting at and contained in `span` (chain /
+    ///    function-call receiver) — its bag-resolved return type. This
+    ///    arm re-derives at enrichment, so cross-file chain receivers
+    ///    whose class only becomes known once other modules load still
+    ///    resolve here.
+    /// 2. The `Expr(span)` witness the builder recorded for the
+    ///    expression (variable reads via `Edge(Variable)`, `$arr[N]`
+    ///    projections, ternaries, literals).
+    pub fn expr_type_at_span(
+        &self,
+        span: Span,
+        module_index: Option<&ModuleIndex>,
+    ) -> Option<InferredType> {
+        // Depth backstop for the `expr_type_at_span` ⇄
+        // `method_call_return_type_via_bag` mutual recursion (the latter
+        // resolves a chained call's receiver by recursing here on the
+        // receiver's span). Spans shrink monotonically per hop, so a
+        // healthy chain bottoms out fast; this cap guards against a
+        // degenerate ref topology (overlapping same-span refs the
+        // builder can emit for route-branded chains) spinning the stack.
+        thread_local! {
+            static EXPR_SPAN_DEPTH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+        }
+        const EXPR_SPAN_DEPTH_CAP: u32 = 64;
+        let depth = EXPR_SPAN_DEPTH.with(|d| {
+            let n = d.get();
+            d.set(n + 1);
+            n
+        });
+        struct DepthGuard;
+        impl Drop for DepthGuard {
+            fn drop(&mut self) {
+                EXPR_SPAN_DEPTH.with(|d| d.set(d.get().saturating_sub(1)));
+            }
+        }
+        let _guard = DepthGuard;
+        if depth >= EXPR_SPAN_DEPTH_CAP {
+            return None;
+        }
+
+        // A call whose span IS this expression — its return type. The
+        // exact-span match is what distinguishes "the value of
+        // `$f->get_bar()->get_name()`" (the outer call's return) from
+        // "the inner receiver `$f->get_bar()`" (which has its own,
+        // narrower span). `call_ref_by_start` deliberately points at the
+        // innermost receiver, so we can't use it here — we want the ref
+        // that exactly spans the queried expression.
+        if let Some((recv_idx, kind)) = self.refs.iter().enumerate().find_map(|(i, r)| {
+            if r.span == span && matches!(r.kind, RefKind::MethodCall { .. } | RefKind::FunctionCall { .. }) {
+                Some((i, &r.kind))
+            } else {
+                None
+            }
+        }) {
+            match kind {
+                RefKind::MethodCall { .. } => {
+                    if let Some(t) =
+                        self.method_call_return_type_via_bag(recv_idx, module_index)
+                    {
+                        return Some(t);
+                    }
+                }
+                RefKind::FunctionCall { .. } => {
+                    if let Some(t) = self.sub_return_type_at_arity(
+                        &self.refs[recv_idx].target_name,
+                        Some(0),
+                    ) {
+                        return Some(t);
+                    }
+                }
+                _ => {}
+            }
+        }
+        self.bag_query_expr_span(span, module_index)
     }
 
     /// Resolve a sub's return type at a call site given the caller's arg
@@ -1760,6 +2852,7 @@ impl FileAnalysis {
             package_framework: &self.package_framework,
             module_index: None,
             package_parents: &self.package_parents,
+            app_surface_consumers: &self.app_surface_consumers,
             };
         crate::witnesses::query_sub_return_type(
             &self.witnesses,
@@ -1854,6 +2947,12 @@ impl FileAnalysis {
         // for imported-hash-key completion.
         self.symbols.truncate(self.base_symbol_count);
         self.witnesses.truncate(self.base_witness_count);
+        self.refs.truncate(self.base_ref_count);
+
+        // Dispatch promotion is NOT done here: gated candidates resolve at
+        // query time (`applicable_dispatches`), so a `$minion->enqueue('T')`
+        // surfaces by the receiver's type whether or not its file is open.
+        // See `docs/adr/receiver-gated-dispatch.md`.
 
         // Build the import → exported-name map inline from
         // `self.imports` + `module_index`. `imported_hash_keys` is
@@ -1869,9 +2968,7 @@ impl FileAnalysis {
                     if !matches!(sym.kind, SymKind::Sub | SymKind::Method) {
                         continue;
                     }
-                    if !cached.analysis.export.iter().any(|n| n == &sym.name)
-                        && !cached.analysis.export_ok.iter().any(|n| n == &sym.name)
-                    {
+                    if !cached.analysis.exports_name(&sym.name) {
                         continue;
                     }
                     if matches!(sym.detail, SymbolDetail::Sub { .. }) {
@@ -2052,6 +3149,13 @@ impl FileAnalysis {
         }
 
         self.resolve_method_call_types(module_index);
+        // Re-stamp the MethodCall dispatch-target edges now that the bag
+        // carries enriched cross-file invocant types. Enrichment truncated
+        // refs back to base_ref_count, wiping the build-time (local-only)
+        // edge; this re-derives it with the index so cross-file-typed
+        // invocants resolve. Single-sourced: refs_to / find_def / hover
+        // read this frozen edge, never re-derive at query time.
+        self.stamp_method_call_targets(module_index);
         self.rebuild_enrichment_indices();
     }
 
@@ -2125,6 +3229,140 @@ impl FileAnalysis {
             _ => {}
         }
     }
+
+    /// Resolve one gated dispatch candidate against its receiver, AT QUERY
+    /// TIME. Receiver resolution is two-tier: the build-time `receiver_class`
+    /// hint (a locally-constructed `My::Minion->new`, a typed `has`-attribute)
+    /// when present, else cross-file resolution of the call's invocant via
+    /// `method_call_invocant_class` with the module index — which lights up
+    /// helper-/attribute-returned receivers (`$c->minion->enqueue`,
+    /// `$self->_minion->enqueue`) that only type once other modules are in
+    /// scope. The gate (`isa target_class`) is applied by `resolve_for`; the
+    /// caller never reads the inner candidate without it.
+    fn resolve_dispatch_candidate<'a>(
+        &'a self,
+        gated: &'a ProvisionalDispatch,
+        module_index: Option<&ModuleIndex>,
+    ) -> GateResult<&'a DispatchCandidate> {
+        let recv = self.dispatch_receiver_class(gated, module_index);
+        gated.resolve_for(recv.as_deref(), &self.package_parents, module_index)
+    }
+
+    /// Resolve the receiver class for a gated dispatch candidate: the
+    /// build-time hint, else the call's invocant via the MethodCall ref at
+    /// `call_span` (cross-file aware through the bag). Uses only the gate-input
+    /// accessors, never the gated handler payload.
+    fn dispatch_receiver_class(
+        &self,
+        gated: &ProvisionalDispatch,
+        module_index: Option<&ModuleIndex>,
+    ) -> Option<String> {
+        gated.receiver_hint().cloned().or_else(|| {
+            let call_span = gated.call_span();
+            let dispatcher = gated.dispatcher();
+            self.refs
+                .iter()
+                .find(|r| {
+                    r.span == call_span
+                        && r.target_name == dispatcher
+                        && matches!(r.kind, RefKind::MethodCall { .. })
+                })
+                .and_then(|r| self.method_call_invocant_class(r, module_index))
+        })
+    }
+
+    /// Query-time handler call-sites in THIS file: every gated dispatch
+    /// candidate whose receiver isa-resolves the gate, projected to the data
+    /// `refs_to` and goto-def need. This is the single seam that replaces
+    /// enrichment-eager promotion — both `resolve.rs` (handler references)
+    /// and dispatch goto-def call it, so they can't drift. Candidates ride
+    /// the cache; resolution is lazy, so non-open workspace/dependency files
+    /// surface exactly like open ones (`docs/adr/receiver-gated-dispatch.md`).
+    pub fn applicable_dispatches(
+        &self,
+        module_index: Option<&ModuleIndex>,
+    ) -> Vec<AppliedDispatch> {
+        // Avoid double-counting a site the emit-hook path already materialized
+        // as a real `DispatchCall` ref (files whose triggers fired).
+        let materialized: HashSet<(Point, Point, String)> = self
+            .refs
+            .iter()
+            .filter_map(|r| match &r.kind {
+                RefKind::DispatchCall { dispatcher, .. } => {
+                    Some((r.span.start, r.span.end, dispatcher.clone()))
+                }
+                _ => None,
+            })
+            .collect();
+        let mut out = Vec::new();
+        for gated in &self.provisional_dispatches {
+            if let GateResult::Applies(c) = self.resolve_dispatch_candidate(gated, module_index) {
+                if materialized.contains(&(c.span.start, c.span.end, c.dispatcher.clone())) {
+                    continue;
+                }
+                out.push(AppliedDispatch {
+                    name: c.name.clone(),
+                    span: c.span,
+                    owner: HandlerOwner::Class(c.owner_class.clone()),
+                });
+            }
+        }
+        out
+    }
+
+    /// The applicable dispatch at a cursor point, if the cursor sits on a
+    /// gated dispatch verb call whose receiver isa-resolves. Drives
+    /// query-time dispatch goto-def — the same gate as `applicable_dispatches`,
+    /// so an open file with a cross-file receiver resolves the handler without
+    /// any eagerly-materialized `DispatchCall` ref. Matches on either the
+    /// name-arg span or the whole-call span so the cursor anywhere on the
+    /// `verb('name')` call lands.
+    pub fn dispatch_at(
+        &self,
+        point: Point,
+        module_index: Option<&ModuleIndex>,
+    ) -> Option<AppliedDispatch> {
+        for gated in &self.provisional_dispatches {
+            // `call_span` (a gate-input accessor) spans the whole `verb('name')`
+            // call, so it covers the name-arg too — cheap cursor pre-filter
+            // before resolving the gate.
+            if !contains_point(&gated.call_span(), point) {
+                continue;
+            }
+            if let GateResult::Applies(c) = self.resolve_dispatch_candidate(gated, module_index) {
+                return Some(AppliedDispatch {
+                    name: c.name.clone(),
+                    span: c.span,
+                    owner: HandlerOwner::Class(c.owner_class.clone()),
+                });
+            }
+        }
+        None
+    }
+
+    /// Gated dispatch candidates in THIS file whose receiver couldn't be
+    /// typed (`ReceiverUntyped`) — the genuine typing gaps the opt-in
+    /// `unresolved-dispatch` diagnostic surfaces. `DoesNotApply` is a settled
+    /// negative and never appears here.
+    pub fn untyped_dispatches(
+        &self,
+        module_index: Option<&ModuleIndex>,
+    ) -> Vec<UntypedDispatch> {
+        let mut out = Vec::new();
+        for gated in &self.provisional_dispatches {
+            if let GateResult::ReceiverUntyped =
+                self.resolve_dispatch_candidate(gated, module_index)
+            {
+                out.push(UntypedDispatch {
+                    call_span: gated.call_span(),
+                    dispatcher: gated.dispatcher().to_string(),
+                    gate: gated.gate().to_string(),
+                });
+            }
+        }
+        out
+    }
+
 
     /// Rebuild indices affected by enrichment (type constraints + symbols +
     /// refs_by_target + HashKeyAccess linkage).
@@ -2204,14 +3442,29 @@ impl FileAnalysis {
         source: &[u8],
         module_index: Option<&ModuleIndex>,
     ) -> Option<InferredType> {
+        // Tree-free first: the builder recorded the type of every
+        // meaningful expression at its span (`Expr(span)` + the
+        // `Expression(refidx)` call axis). Read it back by span — the
+        // same chase `method_call_invocant_class` uses. The node-kind
+        // walk below is the degradation path for the raw-cursor /
+        // incomplete-ERROR case completion hits where no witness was
+        // recorded (a node that never existed at build time).
+        let span = Span {
+            start: node.start_position(),
+            end: node.end_position(),
+        };
+        if let Some(t) = self.expr_type_at_span(span, module_index) {
+            return Some(t);
+        }
         let point = node.start_position();
         match node.kind() {
             "scalar" => {
                 let text = node.utf8_text(source).ok()?;
-                // Route scalar-type resolution through the witness
-                // bag so framework / branch / arity rules refine the
-                // answer. Legacy `inferred_type` is used as fallback.
-                self.inferred_type_via_bag(text, point)
+                // Route scalar-type resolution through the witness bag so
+                // framework / branch / arity rules refine the answer. Keep the
+                // index so a role-contract param (`$c`) resolves through
+                // cross-file ancestry, not just the local `package_parents`.
+                self.inferred_type_via_bag_ctx(text, point, module_index)
             }
             "package" | "bareword" => {
                 // Bareword = class name
@@ -2372,6 +3625,22 @@ impl FileAnalysis {
         sym_id: SymbolId,
         arg_count: Option<usize>,
     ) -> Option<InferredType> {
+        self.symbol_return_type_via_bag_ctx(sym_id, arg_count, None)
+    }
+
+    /// As `symbol_return_type_via_bag`, but with a `ModuleIndex` so the
+    /// reducer chase can cross module boundaries — the sub's body may return
+    /// a value typed by a cross-file method chain (`my $m = Foo->new->bar; …;
+    /// return $m`). Without the index that chain dies at the boundary and the
+    /// return type comes back `None`. Pass the index whenever the query has
+    /// one (hover/completion against a cached module); the bare wrapper above
+    /// keeps `None` for the many call sites that don't.
+    pub(crate) fn symbol_return_type_via_bag_ctx(
+        &self,
+        sym_id: SymbolId,
+        arg_count: Option<usize>,
+        module_index: Option<&ModuleIndex>,
+    ) -> Option<InferredType> {
         use crate::witnesses::{
             BagContext, FrameworkFact, ReducedValue, ReducerQuery, ReducerRegistry,
             WitnessAttachment,
@@ -2381,8 +3650,9 @@ impl FileAnalysis {
         let ctx = BagContext {
             scopes: &self.scopes,
             package_framework: &self.package_framework,
-            module_index: None,
+            module_index,
             package_parents: &self.package_parents,
+            app_surface_consumers: &self.app_surface_consumers,
             };
         // Default the arity hint from the sym's own param count when
         // the caller didn't supply one — the sym's params count IS its
@@ -2456,6 +3726,7 @@ impl FileAnalysis {
             package_framework: &self.package_framework,
             module_index,
             package_parents: &self.package_parents,
+            app_surface_consumers: &self.app_surface_consumers,
         };
         // Default receiver = `ClassName(class_name)` so that
         // `ReturnExpr::Receiver` evaluates correctly for class-keyed
@@ -2586,7 +3857,7 @@ impl FileAnalysis {
         }
         let Some(idx) = module_index else { return false };
         let mut found = false;
-        idx.for_each_entity_bridged_to(class_name, |_cached, sym| {
+        idx.for_each_entity_bridged_to(class_name, |_mod, _cached, sym| {
             if found { return; }
             if sym.name != method_name { return; }
             if !matches!(sym.kind, SymKind::Sub | SymKind::Method) { return; }
@@ -2694,16 +3965,9 @@ impl FileAnalysis {
             }
         }
 
-        // Walk local parents
-        if let Some(parents) = self.package_parents.get(class_name) {
-            for parent in parents {
-                self.collect_ancestor_methods(
-                    original_class, parent, module_index, candidates, seen_names, depth + 1,
-                );
-            }
-        }
-
-        // Walk cross-file parents
+        // Cross-file entity + own-class method collection. Parent
+        // recursion (local ∪ cross-file ∪ synthetic app-surface edge)
+        // is the single `parents_of` walk at the end of the fn.
         if let Some(idx) = module_index {
             // Two sources of candidates:
             //   (1) Plugin entities reached through bridges (helpers,
@@ -2716,7 +3980,7 @@ impl FileAnalysis {
             // Collect into a temporary list to avoid borrow-checker
             // issues with the closure capturing &mut seen_names/candidates.
             let mut bridged: Vec<(String, SymKind, Option<SymbolDetail>, Option<InferredType>)> = Vec::new();
-            idx.for_each_entity_bridged_to(class_name, |_cached, sym| {
+            idx.for_each_entity_bridged_to(class_name, |_mod, _cached, sym| {
                 if !matches!(sym.kind, SymKind::Sub | SymKind::Method) { return; }
                 bridged.push((
                     sym.name.clone(),
@@ -2771,16 +4035,20 @@ impl FileAnalysis {
                 }
             }
 
-            // Cross-file parents
-            let cross_parents = idx.parents_cached(class_name);
-            for parent in &cross_parents {
-                // Don't re-collect if it's a local package (already handled above)
-                if !self.package_parents.contains_key(parent.as_str()) {
-                    self.collect_ancestor_methods(
-                        original_class, parent, module_index, candidates, seen_names, depth + 1,
-                    );
-                }
-            }
+        }
+
+        // Walk parents: local ∪ cross-file ∪ synthetic app-surface edge,
+        // unioned + deduped by `parents_of` (the single edge-injection
+        // site). Name dedup across the recursion is the `seen_names` set.
+        for parent in parents_of(
+            class_name,
+            &self.package_parents,
+            module_index,
+            &self.app_surface_consumers,
+        ) {
+            self.collect_ancestor_methods(
+                original_class, &parent, module_index, candidates, seen_names, depth + 1,
+            );
         }
     }
 
@@ -2996,8 +4264,11 @@ impl FileAnalysis {
                     // local-package match), we MUST NOT jump to a
                     // same-named sub in a different package — that's
                     // the cross-class collision we're specifically
-                    // guarding against.
-                    for &sid in self.symbols_named(&r.target_name) {
+                    // guarding against. Qualified calls (`Foo::baz()`)
+                    // carry the full path in `target_name` but symbols are
+                    // keyed by bare name — match on the unqualified tail and
+                    // pin via `resolved_package` (the qualifier).
+                    for &sid in self.symbols_named(r.unqualified_target_name()) {
                         let sym = self.symbol(sid);
                         if sym.kind != SymKind::Sub { continue; }
                         if sym.package == *resolved_package {
@@ -3008,7 +4279,14 @@ impl FileAnalysis {
                     // the LSP adapter (symbols::find_definition).
                 }
                 RefKind::MethodCall { .. } => {
-                    let class_name = self.method_call_invocant_class(r, module_index);
+                    // Single-source the invocant class off the build-time
+                    // frozen dispatch edge (NAV unification) — the same edge
+                    // refs_to / hover read, so all three agree. `None` edge
+                    // means the invocant didn't infer: honest miss.
+                    let class_name = r
+                        .resolved_method_target
+                        .as_ref()
+                        .map(|t| t.invocant_class().to_string());
 
                     // Cursor on a named arg key (not the method name):
                     // resolve to its hash-key def or :param field.
@@ -3049,47 +4327,25 @@ impl FileAnalysis {
                         }
                     }
 
-                    if let Some(ref cn) = class_name {
-                        // Find method in the resolved class (walks inheritance)
-                        match self.resolve_method_in_ancestors(cn, &r.target_name, module_index) {
-                            Some(MethodResolution::Local { sym_id, .. }) => {
-                                return Some(self.symbol(sym_id).selection_span);
-                            }
-                            Some(MethodResolution::CrossFile { .. }) => {
-                                // Cross-file method — return None so the LSP adapter
-                                // can resolve it via ModuleIndex with the correct URI.
-                                return None;
-                            }
-                            None => {
-                                // If the class has known parents, the method might be
-                                // inherited but the module index hasn't resolved yet.
-                                // Return None so the cross-file block in symbols.rs
-                                // gets a chance, rather than jumping to the package decl.
-                                if self.package_parents.contains_key(cn) {
-                                    return None;
-                                }
-                            }
+                    // Method dispatch is the frozen edge, full stop.
+                    // `Local` lands on the local symbol; `CrossFile`
+                    // returns None so the LSP adapter resolves via the
+                    // ModuleIndex; a `None` edge (invocant didn't infer —
+                    // genuinely untyped receiver, e.g. `my $x = external();
+                    // $x->m`) returns None: honest miss. There is NO
+                    // same-name fallback — a typed OR chained-method-return
+                    // receiver now carries a real edge
+                    // (`method_call_invocant_class` resolves chain
+                    // receivers via `expr_type_at_span`), so jumping to an
+                    // arbitrary same-named sub when the class can't infer is
+                    // never right (the `->new` / `'Users#create'` flood, the
+                    // libwww untyped-receiver case).
+                    match &r.resolved_method_target {
+                        Some(MethodTarget::Local { sym_id, .. }) => {
+                            return Some(self.symbol(*sym_id).selection_span);
                         }
-                        // Method not found and no parents — go to class def
-                        if let Some(span) = self.find_package_or_class(cn) {
-                            return Some(span);
-                        }
-                    }
-                    // Last-resort "any sub/method with that name" fallback.
-                    // Only fires when we couldn't resolve the invocant at
-                    // all — if we knew the target class but couldn't find
-                    // the method there, jumping to an unrelated sub is
-                    // actively harmful (plugin-emitted MethodCallRefs
-                    // targeting `'Users#create'` would otherwise latch
-                    // onto a `create` helper synthesized on some unrelated
-                    // class). Returning None is better — the LSP adapter
-                    // can still try cross-file paths.
-                    if class_name.is_none() {
-                        for &sid in self.symbols_named(&r.target_name) {
-                            let sym = self.symbol(sid);
-                            if matches!(sym.kind, SymKind::Sub | SymKind::Method) {
-                                return Some(sym.selection_span);
-                            }
+                        Some(MethodTarget::CrossFile { .. }) | None => {
+                            return None;
                         }
                     }
                 }
@@ -3129,6 +4385,13 @@ impl FileAnalysis {
                             }
                         }
                     }
+                    // No LOCAL Handler — the registration is cross-file.
+                    // Return None (terminal) so the LSP adapter's cross-file
+                    // DispatchCall resolver runs. Falling through to the
+                    // `symbol_at` fallback below would wrongly grab whatever
+                    // symbol overlaps the call-arg string (e.g. a synthesized
+                    // hash-key def at the same span).
+                    return None;
                 }
                 RefKind::DispatchCall { owner: None, .. } => {}
             }
@@ -3259,15 +4522,21 @@ impl FileAnalysis {
         if matches!(sym.kind, SymKind::Sub | SymKind::Method | SymKind::Package | SymKind::Class | SymKind::Module) {
             let sym_package = sym.package.clone();
             for r in &self.refs {
-                if r.target_name == sym.name && r.resolves_to.is_none() {
-                    match (&r.kind, &sym.kind) {
+                if r.resolves_to.is_some() { continue; }
+                match (&r.kind, &sym.kind) {
                         (RefKind::FunctionCall { resolved_package }, SymKind::Sub) => {
-                            if *resolved_package == sym_package {
+                            // Match the bare callable name so qualified call
+                            // sites (`Foo::baz()`, target_name "Foo::baz")
+                            // pair with `sub baz`; `resolved_package` (the
+                            // qualifier) still isolates same-named subs
+                            // across packages.
+                            if r.unqualified_target_name() == sym.name
+                                && *resolved_package == sym_package {
                                 results.push((r.span, r.access));
                             }
                         }
                         (RefKind::MethodCall { method_name_span, .. },
-                         SymKind::Sub | SymKind::Method) => {
+                         SymKind::Sub | SymKind::Method) if r.target_name == sym.name => {
                             // Same-class match only; unresolved or
                             // different-class invocants are excluded.
                             // Method-call ref.span covers the whole
@@ -3281,9 +4550,10 @@ impl FileAnalysis {
                                 _ => {}
                             }
                         }
-                        (RefKind::PackageRef, SymKind::Package | SymKind::Class | SymKind::Module) => results.push((r.span, r.access)),
+                        (RefKind::PackageRef, SymKind::Package | SymKind::Class | SymKind::Module)
+                            if r.target_name == sym.name =>
+                            results.push((r.span, r.access)),
                         _ => {}
-                    }
                 }
             }
         }
@@ -3318,7 +4588,7 @@ impl FileAnalysis {
     }
 
     /// Hover info: return display text for the symbol at cursor.
-    pub fn hover_info(&self, point: Point, source: &str, tree: Option<&tree_sitter::Tree>, module_index: Option<&ModuleIndex>) -> Option<String> {
+    pub fn hover_info(&self, point: Point, source: &str, module_index: Option<&ModuleIndex>) -> Option<String> {
         // Check refs first
         if let Some(r) = self.ref_at(point) {
             match &r.kind {
@@ -3331,9 +4601,7 @@ impl FileAnalysis {
                             && mr.target_name != r.target_name);
                     if let Some(mr) = method_hover {
                         if matches!(mr.kind, RefKind::MethodCall { .. }) {
-                            let class_name = self.method_call_invocant_class_with_tree(
-                                mr, tree, Some(source.as_bytes()), module_index,
-                            );
+                            let class_name = self.method_call_invocant_class(mr, module_index);
                             if let Some(ref cn) = class_name {
                                 match self.resolve_method_in_ancestors(cn, &mr.target_name, module_index) {
                                     Some(MethodResolution::Local { sym_id, class: ref defining_class, .. }) => {
@@ -3355,13 +4623,16 @@ impl FileAnalysis {
                                         }
                                         return Some(text);
                                     }
-                                    Some(MethodResolution::CrossFile { ref class }) => {
+                                    Some(MethodResolution::CrossFile { ref class, ref def_module }) => {
                                         if let Some(idx) = module_index {
-                                            if let Some(cached) = idx.get_cached(class) {
+                                            // Bridged helper lives in `def_module`; real
+                                            // inherited method in `class`'s own module.
+                                            let module = def_module.as_deref().unwrap_or(class.as_str());
+                                            if let Some(cached) = idx.get_cached(module) {
                                                 if let Some(sub_info) = cached.sub_info(&mr.target_name) {
                                                     let sig = format_cross_file_signature(&mr.target_name, &sub_info);
                                                     let mut text = format!("```perl\n{}\n```\n\n*class {} — resolved from `{}`*", sig, class, r.target_name);
-                                                    if let Some(rt) = sub_info.return_type() {
+                                                    if let Some(rt) = sub_info.return_type(Some(idx)) {
                                                         text.push_str(&format!("\n\n*returns: {}*", format_inferred_type(&rt)));
                                                     }
                                                     if let Some(doc) = sub_info.doc() {
@@ -3379,21 +4650,23 @@ impl FileAnalysis {
                     }
                     if let Some(sym_id) = r.resolves_to {
                         let sym = self.symbol(sym_id);
-                        return Some(self.format_symbol_hover_at(sym, source, point));
+                        return Some(self.format_symbol_hover_at(sym, source, point, module_index));
                     }
                     // Unresolved variable — try resolve ourselves
                     if let Some(sym) = self.resolve_variable(&r.target_name, point) {
-                        return Some(self.format_symbol_hover_at(sym, source, point));
+                        return Some(self.format_symbol_hover_at(sym, source, point, module_index));
                     }
                 }
                 RefKind::FunctionCall { resolved_package } => {
                     // Package-scoped: hover shows the sub whose
-                    // package matches what the ref resolved to.
-                    for &sid in self.symbols_named(&r.target_name) {
+                    // package matches what the ref resolved to. Qualified
+                    // calls match on the bare tail (symbols are keyed by
+                    // bare name); `resolved_package` pins the package.
+                    for &sid in self.symbols_named(r.unqualified_target_name()) {
                         let sym = self.symbol(sid);
                         if sym.kind != SymKind::Sub { continue; }
                         if sym.package == *resolved_package {
-                            return Some(self.format_symbol_hover(sym, source));
+                            return Some(self.format_symbol_hover(sym, source, module_index));
                         }
                     }
                     // Fall-through: the name might be a function imported
@@ -3415,7 +4688,7 @@ impl FileAnalysis {
                                 .collect::<Vec<_>>()
                                 .join(", ");
                             let mut sig = format!("sub {}({})", r.target_name, sig_params);
-                            if let Some(rt) = sub_info.return_type() {
+                            if let Some(rt) = sub_info.return_type(Some(idx)) {
                                 sig.push_str(&format!(" → {}", format_inferred_type(&rt)));
                             }
                             let mut text = format!("```perl\n{}\n```", sig);
@@ -3438,9 +4711,13 @@ impl FileAnalysis {
                     }
                 }
                 RefKind::MethodCall { .. } => {
-                    let class_name = self.method_call_invocant_class_with_tree(
-                        r, tree, Some(source.as_bytes()), module_index,
-                    );
+                    // Single-source the invocant class off the frozen
+                    // dispatch edge (NAV unification) — same edge find_def /
+                    // refs_to read, so hover never diverges.
+                    let class_name = r
+                        .resolved_method_target
+                        .as_ref()
+                        .map(|t| t.invocant_class().to_string());
                     if let Some(ref cn) = class_name {
                         match self.resolve_method_in_ancestors(cn, &r.target_name, module_index) {
                             Some(MethodResolution::Local { sym_id, class: ref defining_class, .. }) => {
@@ -3457,9 +4734,12 @@ impl FileAnalysis {
                                 }
                                 return Some(text);
                             }
-                            Some(MethodResolution::CrossFile { ref class }) => {
+                            Some(MethodResolution::CrossFile { ref class, ref def_module }) => {
                                 if let Some(idx) = module_index {
-                                    if let Some(cached) = idx.get_cached(class) {
+                                    // Bridged helper lives in `def_module`; real
+                                    // inherited method in `class`'s own module.
+                                    let module = def_module.as_deref().unwrap_or(class.as_str());
+                                    if let Some(cached) = idx.get_cached(module) {
                                         if let Some(sub_info) = cached.sub_info(&r.target_name) {
                                             let class_label = if class != cn {
                                                 format!("{} (from {})", cn, class)
@@ -3468,7 +4748,7 @@ impl FileAnalysis {
                                             };
                                             let sig = format_cross_file_signature(&r.target_name, &sub_info);
                                             let mut text = format!("```perl\n{}\n```\n\n*class {}*", sig, class_label);
-                                            if let Some(rt) = sub_info.return_type() {
+                                            if let Some(rt) = sub_info.return_type(Some(idx)) {
                                                 text.push_str(&format!("\n\n*returns: {}*", format_inferred_type(&rt)));
                                             }
                                             if let Some(doc) = sub_info.doc() {
@@ -3486,7 +4766,7 @@ impl FileAnalysis {
                     for &sid in self.symbols_named(&r.target_name) {
                         let sym = self.symbol(sid);
                         if matches!(sym.kind, SymKind::Sub | SymKind::Method) {
-                            return Some(self.format_symbol_hover(sym, source));
+                            return Some(self.format_symbol_hover(sym, source, module_index));
                         }
                     }
                 }
@@ -3494,7 +4774,7 @@ impl FileAnalysis {
                     for &sid in self.symbols_named(&r.target_name) {
                         let sym = self.symbol(sid);
                         if matches!(sym.kind, SymKind::Package | SymKind::Class) {
-                            return Some(self.format_symbol_hover(sym, source));
+                            return Some(self.format_symbol_hover(sym, source, module_index));
                         }
                     }
                 }
@@ -3535,7 +4815,7 @@ impl FileAnalysis {
             if let SymbolDetail::Handler { owner, .. } = &sym.detail {
                 return Some(self.format_handler_hover(&sym.name, owner, None, module_index));
             }
-            return Some(self.format_symbol_hover(sym, source));
+            return Some(self.format_symbol_hover(sym, source, module_index));
         }
 
         None
@@ -3589,8 +4869,11 @@ impl FileAnalysis {
             match &r.kind {
                 RefKind::Variable | RefKind::ContainerAccess => return Some(RenameKind::Variable),
                 RefKind::FunctionCall { resolved_package } => {
+                    // A qualified call (`Foo::baz()`) carries the whole path
+                    // in `target_name`; the renamable identifier is the bare
+                    // tail, scoped by `resolved_package` (the qualifier).
                     return Some(RenameKind::Function {
-                        name: r.target_name.clone(),
+                        name: r.unqualified_target_name().to_string(),
                         package: resolved_package.clone(),
                     });
                 }
@@ -3659,6 +4942,12 @@ impl FileAnalysis {
     /// with no package; FunctionCall refs whose resolver didn't pin
     /// a package match those. MethodCall refs always need a class —
     /// `None` scope never matches them.
+    ///
+    /// Single-file rename primitive: exact-match on `scope`, no
+    /// inheritance fan-out. Cross-file callers go through `refs_to`
+    /// (which calls `method_rename_chain` for MethodCall fan-out) and
+    /// convert `RefLocation`s to edits directly.
+    #[allow(dead_code)]
     fn rename_callable_in_scope(
         &self,
         old_name: &str,
@@ -3698,10 +4987,10 @@ impl FileAnalysis {
         edits
     }
 
-    /// Package-scoped sub rename — public-API name used by the
-    /// Function rename path. Delegates to the unified
-    /// `rename_callable_in_scope`; the distinction between "function"
-    /// and "method" in Perl is just call shape, not identity.
+    /// Package-scoped sub rename. Single-file; callers that need
+    /// cross-file fan-out (including inheritance) go through `refs_to`
+    /// with `RoleMask::EDITABLE`. Tested by single-file rename pins.
+    #[allow(dead_code)]
     pub fn rename_sub_in_package(
         &self,
         old_name: &str,
@@ -3712,11 +5001,10 @@ impl FileAnalysis {
         self.rename_callable_in_scope(old_name, package, new_name, module_index)
     }
 
-    /// Class-scoped method rename — public-API name used by the
-    /// Method rename path. Same semantics as
-    /// `rename_sub_in_package(old, &Some(class), new)`: function and
-    /// method calls into the same package are two shapes of the same
-    /// callable.
+    /// Class-scoped method rename. Single-file; callers that need
+    /// cross-file fan-out (including inheritance) go through `refs_to`
+    /// with `RoleMask::EDITABLE`. Tested by single-file rename pins.
+    #[allow(dead_code)]
     pub fn rename_method_in_class(
         &self,
         old_name: &str,
@@ -3728,6 +5016,7 @@ impl FileAnalysis {
     }
 
     /// Find all occurrences of a package name (def + refs + use statements) for cross-file rename.
+    #[allow(dead_code)]
     pub fn rename_package(&self, old_name: &str, new_name: &str) -> Vec<(Span, String)> {
         let mut edits = Vec::new();
         for sym in &self.symbols {
@@ -3760,7 +5049,9 @@ impl FileAnalysis {
                     }
                 }
                 RefKind::FunctionCall { resolved_package } => {
-                    for &sid in self.symbols_named(&r.target_name) {
+                    // Qualified calls carry the full path in `target_name`;
+                    // symbols are keyed by bare name + `resolved_package`.
+                    for &sid in self.symbols_named(r.unqualified_target_name()) {
                         let sym = self.symbol(sid);
                         if sym.kind != SymKind::Sub { continue; }
                         if sym.package == *resolved_package {
@@ -3895,108 +5186,57 @@ impl FileAnalysis {
         r: &Ref,
         module_index: Option<&ModuleIndex>,
     ) -> Option<String> {
-        self.method_call_invocant_class_with_tree(r, None, None, module_index)
-    }
-
-    /// Tree-aware variant. When a `tree` + `source` are available
-    /// (every LSP-facing reader has them), this routes non-trivial
-    /// invocants (`$arr[N]`, future shapes) through
-    /// `resolve_expression_type` on the actual CST node — the same
-    /// arm the cursor-context completion path uses. Without the
-    /// tree, falls through to the string-based bag query.
-    /// One resolution rule, two entry points, no shape drift.
-    pub fn method_call_invocant_class_with_tree(
-        &self,
-        r: &Ref,
-        tree: Option<&tree_sitter::Tree>,
-        source: Option<&[u8]>,
-        module_index: Option<&ModuleIndex>,
-    ) -> Option<String> {
         let RefKind::MethodCall { invocant, invocant_span, .. } = &r.kind else {
             return None;
         };
         if invocant.is_empty() {
             return None;
         }
-        let point = invocant_span.map(|s| s.start).unwrap_or(r.span.start);
 
         // Pseudo-invocants for "$self at the method's first arg":
         // `shift` (no args; `sub m { my $self = shift; ... }`),
-        // `$_[0]` / `@_[0]` (positional). Tree-aware build-time
-        // resolver treats these as enclosing-class identity. The
-        // bag has no Variable witness for them — they aren't real
-        // variables — so we resolve here directly.
-        if invocant == "shift" || invocant == "$_[0]" || invocant == "@_[0]" {
+        // `$_[0]` / `@_[0]` (positional), and raw `__PACKAGE__` on
+        // synthesized refs. None are real variables, so the bag has no
+        // witness for them — resolve to enclosing-class identity here.
+        if invocant == "shift"
+            || invocant == "$_[0]"
+            || invocant == "@_[0]"
+            || invocant == "__PACKAGE__"
+        {
             return self.enclosing_class_for_scope(r.scope);
         }
 
-        // Tree-aware fast path: find the invocant's CST node and
-        // dispatch through `resolve_expression_type`. That arm
-        // already handles `array_element_expression` (and any
-        // future non-trivial invocant shape) — keeping hover /
-        // dispatch on the same projection logic completion uses.
-        if let (Some(tree), Some(source), Some(span)) = (tree, source, invocant_span) {
-            let node = tree.root_node().descendant_for_point_range(span.start, span.end);
-            if let Some(node) = node {
-                // Only take this path for shapes the string-based
-                // bag query can't handle. `scalar` / `array` /
-                // `hash` invocants are simple variables — the
-                // existing string lookup is fine and consistent
-                // with every other variable-typed call site.
-                let needs_tree = !matches!(
-                    node.kind(),
-                    "scalar" | "array" | "hash" | "bareword" | "package" | "scoped_identifier"
-                );
-                if needs_tree {
-                    if let Some(t) = self.resolve_expression_type(node, source, module_index) {
-                        if let Some(cn) = t.class_name() {
-                            return Some(cn.to_string());
-                        }
-                    }
-                }
+        // The invocant's type, resolved tree-free from the bag at its
+        // span. Covers every recorded shape: scalar/array/hash reads,
+        // chain receivers (the `Expression(refidx)` axis), function-call
+        // receivers, baked literals.
+        if let Some(span) = invocant_span {
+            if let Some(cn) = self
+                .expr_type_at_span(*span, module_index)
+                .and_then(|t| t.class_name().map(|s| s.to_string()))
+            {
+                return Some(cn);
             }
         }
 
-        // `__PACKAGE__` is rewritten to the enclosing package at
-        // walk time, but synthesized refs may still carry it raw.
-        if invocant == "__PACKAGE__" {
-            return self.enclosing_class_for_scope(r.scope);
-        }
-
-        // Chain / function-call receiver — checked BEFORE the
-        // simple-variable path because complex invocants like
-        // `$r->get('/x')` lead with `$` but aren't a variable
-        // lookup; they're a sub-expression whose type lives in
-        // another ref's bag answer. Index `call_ref_by_start`
-        // returns the *innermost* call-shaped ref starting at
-        // `invocant_span.start` (smallest-span tie-break in
-        // `build_indices`); we additionally require that ref's
-        // span be contained in `invocant_span` so we don't loop
-        // back on the outer ref itself for `Foo->m` where there's
-        // no real inner receiver.
+        // Cross-file chain-receiver fallback. When the inner receiver's
+        // class is only knowable once other modules load (`$c->minion->
+        // enqueue` at enrichment), the build-time `Expr(span)` witness
+        // is absent and `method_call_return_type_via_bag` has no edge to
+        // chase. Re-resolve the receiver's own invocant class fresh with
+        // the index, then chase `MethodOnClass{class, method}` through
+        // `find_method_return_type` (ancestors + cross-file bridges via
+        // the registry). This is the one structure-from-refs step the
+        // bag can't pre-record, so it lives here, not in the builder.
         if let Some(span) = invocant_span {
             if let Some(&recv_idx) = self.call_ref_by_start.get(&span.start) {
                 let recv_span = self.refs[recv_idx].span;
                 let contained = recv_span.start == span.start
                     && (recv_span.end.row, recv_span.end.column)
                         <= (span.end.row, span.end.column);
-                // Guard against the lookup returning the outer ref
-                // itself (no genuine inner receiver). Compare by
-                // pointer to handle the equal-span case.
                 let is_self = std::ptr::eq(&self.refs[recv_idx], r);
                 if contained && !is_self {
-                    match &self.refs[recv_idx].kind {
-                    RefKind::MethodCall { .. } => {
-                        // Recursive: resolve the receiver's own
-                        // invocant class fresh (so cross-file
-                        // enrichment-typed variables compose
-                        // through chain hops without depending on
-                        // a build-time-published Expression edge),
-                        // then chase MethodOnClass{class, method}
-                        // through `find_method_return_type` — the
-                        // single class-keyed entry point that walks
-                        // ancestors + cross-file bridges via the
-                        // registry's `query_rec`.
+                    if let RefKind::MethodCall { .. } = &self.refs[recv_idx].kind {
                         let recv = &self.refs[recv_idx];
                         if let Some(recv_class) =
                             self.method_call_invocant_class(recv, module_index)
@@ -4004,63 +5244,144 @@ impl FileAnalysis {
                             if recv.target_name == "new" {
                                 return Some(recv_class);
                             }
-                            if let Some(t) = self.find_method_return_type(
-                                &recv_class,
-                                &recv.target_name,
-                                module_index,
-                                None,
-                            ) {
-                                if let Some(cn) = t.class_name() {
-                                    return Some(cn.to_string());
-                                }
+                            if let Some(cn) = self
+                                .find_method_return_type(
+                                    &recv_class,
+                                    &recv.target_name,
+                                    module_index,
+                                    None,
+                                )
+                                .and_then(|t| t.class_name().map(|s| s.to_string()))
+                            {
+                                return Some(cn);
                             }
                         }
                         return None;
-                    }
-                    RefKind::FunctionCall { .. } => {
-                        let recv = &self.refs[recv_idx];
-                        if let Some(InferredType::ClassName(c)) =
-                            self.sub_return_type_at_arity(&recv.target_name, Some(0))
-                        {
-                            return Some(c);
-                        }
-                        return None;
-                    }
-                    _ => {}
                     }
                 }
             }
         }
 
-        // Variable invocant — bag query handles every typed shape
-        // (TC, FrameworkAware, BranchArm, ReturnExpr, cross-file
-        // Variable witnesses pushed by enrichment).
+        // Variable invocant. `expr_type_at_span` above only answers when
+        // the builder pre-recorded an `Expr(span)` — which it can't for a
+        // variable whose type flows from a cross-file source resolved
+        // only at enrichment (`my $x = $c->helper`, `$$x` re-typed once
+        // other modules load). Re-derive from the bag by the variable's
+        // name + position, threading the index so the chase follows the
+        // cross-file Variable edge. Same single bag query everything else
+        // uses; only the var name (which lives on the ref, not the span)
+        // brings us here instead of `expr_type_at_span`.
+        let point = invocant_span.map(|s| s.start).unwrap_or(r.span.start);
         let first = invocant.as_bytes()[0];
         if first == b'$' || first == b'@' || first == b'%' {
-            if let Some(t) = self.inferred_type_via_bag(invocant, point) {
-                if let Some(cn) = t.class_name() {
-                    return Some(cn.to_string());
-                }
+            if let Some(cn) = self
+                .inferred_type_via_bag_ctx(invocant, point, module_index)
+                .and_then(|t| t.class_name().map(|s| s.to_string()))
+            {
+                return Some(cn);
             }
-            // `$self` enclosing-class fallback. Other untyped
-            // variable invocants stay None — better than poisoning
-            // them with the surrounding package and pretending
-            // method calls land on it.
+            // `$self` enclosing-class fallback for an untyped variable
+            // invocant. Other untyped variable invocants stay None —
+            // better than poisoning them with the surrounding package.
             if invocant == "$self" {
                 return self.enclosing_class_for_scope(r.scope);
             }
             return None;
         }
 
-        // Bareword invocant. Could be a zero-arg sub returning
-        // ClassName (`app->routes` where `app` is plugin-emitted) —
-        // promote that case. Otherwise the bareword *is* the class
-        // name (`Foo->method`).
+        // Bareword invocant. Could be a zero-arg sub returning ClassName
+        // (`app->routes` where `app` is plugin-emitted); promote that.
+        // Otherwise the bareword text *is* the class (`Foo->method`).
         let bare = invocant.rsplit("::").next().unwrap_or(invocant);
         if let Some(InferredType::ClassName(c)) = self.sub_return_type_at_arity(bare, Some(0)) {
             return Some(c);
         }
+
+        // Controller-token invocant. A bareword that is *not class-shaped*
+        // — doesn't begin uppercase — can never be a Perl package name;
+        // Mojo's own `camelize` early-returns on `/^[A-Z]/` for exactly
+        // this reason. Such a token is a route controller key:
+        // `->to('login#act')` emits `MethodCall { invocant: "login",
+        // method_name: "act" }`. Camelize per Mojo::Util and workspace-
+        // search for the controller class that owns the action. The
+        // discriminator is the leading-char case (structural, mirrors
+        // camelize's gate), not a route name-allowlist (rule #10).
+        if invocant
+            .as_bytes()
+            .first()
+            .is_some_and(u8::is_ascii_lowercase)
+        {
+            if let Some(cls) =
+                self.resolve_controller_token(invocant, &r.target_name, module_index)
+            {
+                return Some(cls);
+            }
+        }
+
         Some(invocant.to_string())
+    }
+
+    /// Map a Mojolicious route controller token (`'login'`,
+    /// `'integrations-ads_api'`) to the controller class that owns
+    /// `action`. Camelizes the token (Mojo::Util `camelize`) then
+    /// searches the module index for a class whose name tail equals the
+    /// camelized token AND that defines (or inherits) `action`.
+    ///
+    /// Namespace-agnostic by design (rule #10): we do NOT hardcode
+    /// `*::Controller::*`. A workspace may have several controller roots
+    /// (`Clove::Controller`, `Billing::Controller`, …) sharing short
+    /// names; we disambiguate by "which candidate actually owns the
+    /// action." Among survivors we prefer the `*::Controller::<Camelized>`
+    /// shape (Mojo's default controller namespace) as a deterministic
+    /// tiebreak, but ownership is the gate.
+    fn resolve_controller_token(
+        &self,
+        token: &str,
+        action: &str,
+        module_index: Option<&ModuleIndex>,
+    ) -> Option<String> {
+        let camelized = camelize_controller(token);
+        if camelized.is_empty() {
+            return None;
+        }
+        let idx = module_index?;
+
+        // Primary candidates: modules whose own package defines a sub
+        // named `action` (reverse index, O(1)) and whose name tail is the
+        // camelized token. Widen to every tail-matching module when none
+        // define it locally, so a controller that *inherits* the action
+        // from a base still resolves.
+        let mut candidates: Vec<String> = idx
+            .modules_with_symbol(action)
+            .into_iter()
+            .filter(|m| module_tail_matches(m, &camelized))
+            .collect();
+        if candidates.is_empty() {
+            idx.for_each_cached(|name, _| {
+                if module_tail_matches(name, &camelized) {
+                    candidates.push(name.to_string());
+                }
+            });
+        }
+        candidates.sort();
+        candidates.dedup();
+
+        // Disambiguate by ownership: keep only classes that actually
+        // resolve `action` (locally / via ancestors / via bridges), then
+        // prefer the `*::Controller::<Camelized>` shape deterministically.
+        let mut owners: Vec<String> = candidates
+            .into_iter()
+            .filter(|cls| {
+                self.resolve_method_in_ancestors(cls, action, Some(idx))
+                    .is_some()
+            })
+            .collect();
+        owners.sort_by(|a, b| {
+            is_controller_shaped(b)
+                .cmp(&is_controller_shaped(a))
+                .then_with(|| a.cmp(b))
+        });
+        owners.into_iter().next()
     }
 
     /// Full `InferredType` of a `MethodCall` ref's invocant — same
@@ -4087,9 +5408,15 @@ impl FileAnalysis {
             return self.enclosing_class_for_scope(r.scope).map(InferredType::ClassName);
         }
 
-        // Chain / function-call receiver — same indexing path
-        // `method_call_invocant_class` uses, but we surface the
-        // full type instead of unwrapping to class_name.
+        // Chain / function-call receiver. Unlike the class-name path,
+        // this surfaces the full type so `Parametric` narrowing (DBIC
+        // `search`/`find` row-class) survives the hop — and that needs
+        // the *innermost* receiver ref (via `call_ref_by_start`), not an
+        // exact-span match, because the Parametric witness lands on the
+        // receiver-producing call's `Expression(refidx)`. `expr_type_at_
+        // span`'s exact-span chase intentionally collapses that flavor to
+        // a plain class, so the class-name path can route through it but
+        // this one cannot.
         if let Some(span) = invocant_span {
             if let Some(&recv_idx) = self.call_ref_by_start.get(&span.start) {
                 let recv_span = self.refs[recv_idx].span;
@@ -4117,7 +5444,7 @@ impl FileAnalysis {
         // Variable invocant.
         let first = invocant.as_bytes()[0];
         if first == b'$' || first == b'@' || first == b'%' {
-            if let Some(t) = self.inferred_type_via_bag(invocant, point) {
+            if let Some(t) = self.inferred_type_via_bag_ctx(invocant, point, module_index) {
                 return Some(t);
             }
             if invocant == "$self" {
@@ -4278,17 +5605,12 @@ impl FileAnalysis {
             if let std::ops::ControlFlow::Break(()) = visit(&cur) {
                 return;
             }
-            let mut parents: Vec<String> = Vec::new();
-            if let Some(ps) = self.package_parents.get(&cur) {
-                parents.extend(ps.iter().cloned());
-            }
-            if let Some(idx) = module_index {
-                for p in idx.parents_cached(&cur) {
-                    if !parents.contains(&p) {
-                        parents.push(p);
-                    }
-                }
-            }
+            let parents = parents_of(
+                &cur,
+                &self.package_parents,
+                module_index,
+                &self.app_surface_consumers,
+            );
             for p in parents.into_iter().rev() {
                 stack.push(p);
             }
@@ -4317,7 +5639,7 @@ impl FileAnalysis {
     ) -> Vec<String> {
         let defining = match self.resolve_method_in_ancestors(class_name, method_name, module_index) {
             Some(MethodResolution::Local { class, .. })
-            | Some(MethodResolution::CrossFile { class }) => class,
+            | Some(MethodResolution::CrossFile { class, .. }) => class,
             None => return vec![class_name.to_string()],
         };
         let mut chain = Vec::new();
@@ -4378,24 +5700,99 @@ impl FileAnalysis {
             if let Some(idx) = module_index {
                 if let Some(cached) = idx.get_cached(cls) {
                     if cached.has_sub(method_name) {
-                        result = Some(MethodResolution::CrossFile { class: cls.to_string() });
+                        // Real method in `cls`'s own module.
+                        result = Some(MethodResolution::CrossFile { class: cls.to_string(), def_module: None });
                         return std::ops::ControlFlow::Break(());
                     }
                 }
-                let mut bridged_hit = false;
-                idx.for_each_entity_bridged_to(cls, |_cached, sym| {
-                    if bridged_hit { return; }
+                // Cross-package typeglob install: the method is attributed
+                // to `cls` but lives in a differently-named module file
+                // (`*{'DateTime::'.$sub} = …` inside `package DateTime::PP`).
+                // The class's own module doesn't declare it; the symbol's
+                // package does. Record the actual home module so the def
+                // lookup hits the right file.
+                if let Some(home) = idx.module_declaring_method_in_package(method_name, cls) {
+                    result = Some(MethodResolution::CrossFile {
+                        class: cls.to_string(),
+                        def_module: Some(home),
+                    });
+                    return std::ops::ControlFlow::Break(());
+                }
+                // Plugin-bridged method (e.g. a Mojo helper synthesized in
+                // another file, bridged to `cls`). The SAME bridge walk
+                // completion uses — record which module the symbol actually
+                // lives in (its registration key, not a re-derived package
+                // name) so consumers don't re-look-it-up in `cls`'s module,
+                // where a bridged helper doesn't exist.
+                let mut bridged_module: Option<String> = None;
+                idx.for_each_entity_bridged_to(cls, |mod_name, _cached, sym| {
+                    if bridged_module.is_some() { return; }
                     if !matches!(sym.kind, SymKind::Sub | SymKind::Method) { return; }
-                    if sym.name == method_name { bridged_hit = true; }
+                    if sym.name == method_name {
+                        bridged_module = Some(mod_name.to_string());
+                    }
                 });
-                if bridged_hit {
-                    result = Some(MethodResolution::CrossFile { class: cls.to_string() });
+                if bridged_module.is_some() {
+                    result = Some(MethodResolution::CrossFile { class: cls.to_string(), def_module: bridged_module });
                     return std::ops::ControlFlow::Break(());
                 }
             }
             std::ops::ControlFlow::Continue(())
         });
         result
+    }
+
+    /// Does `class` (or any ancestor we CAN reach) name a parent that
+    /// resolves to nothing — not a package/class defined in this file,
+    /// not a cached module in `module_index`/@INC, and not the synthetic
+    /// app-surface edge? If so the ISA chain is incomplete: a method we
+    /// can't find locally might be inherited from the unresolvable parent,
+    /// so consumers (the `unresolved-method` diagnostic) must stay honest-
+    /// silent rather than emit a confident false positive.
+    ///
+    /// The SINGLE source of the "is the inheritance chain incomplete"
+    /// property, so every invocant-typing path (direct `Pkg->m`, `$self`/
+    /// FirstParam, variable-typed) asks the same question and can't drift
+    /// (rule #10). Walks via `for_each_ancestor_class` so the MRO + seen-set
+    /// + depth cap match `resolve_method_in_ancestors` exactly.
+    pub fn class_has_unresolved_ancestor(
+        &self,
+        class_name: &str,
+        module_index: Option<&ModuleIndex>,
+    ) -> bool {
+        let class_is_known = |name: &str| -> bool {
+            if name == APP_SURFACE_CLASS {
+                return true;
+            }
+            let local = self.symbols.iter().any(|s| {
+                matches!(s.kind, SymKind::Class | SymKind::Package | SymKind::Module)
+                    && s.name == name
+            });
+            if local {
+                return true;
+            }
+            module_index
+                .map(|idx| idx.get_cached(name).is_some())
+                .unwrap_or(false)
+        };
+
+        let mut incomplete = false;
+        self.for_each_ancestor_class(class_name, module_index, |cls| {
+            let parents = parents_of(
+                cls,
+                &self.package_parents,
+                module_index,
+                &self.app_surface_consumers,
+            );
+            for p in &parents {
+                if !class_is_known(p) {
+                    incomplete = true;
+                    return std::ops::ControlFlow::Break(());
+                }
+            }
+            std::ops::ControlFlow::Continue(())
+        });
+        incomplete
     }
 
     /// Collect every Handler visible from `class_name` whose `dispatchers`
@@ -4445,7 +5842,7 @@ impl FileAnalysis {
             }
             // (3) Cross-file plugin-namespace bridge.
             if let Some(idx) = module_index {
-                idx.for_each_entity_bridged_to(cls, |cached, sym| {
+                idx.for_each_entity_bridged_to(cls, |_mod, cached, sym| {
                     if let SymbolDetail::Handler { dispatchers, .. } = &sym.detail {
                         if disp_matches(dispatchers) {
                             let prov = cached.path.file_name()
@@ -4632,18 +6029,31 @@ impl FileAnalysis {
         None
     }
 
-    fn format_symbol_hover(&self, sym: &Symbol, source: &str) -> String {
-        self.format_symbol_hover_at(sym, source, sym.selection_span.end)
+    fn format_symbol_hover(
+        &self,
+        sym: &Symbol,
+        source: &str,
+        module_index: Option<&ModuleIndex>,
+    ) -> String {
+        self.format_symbol_hover_at(sym, source, sym.selection_span.end, module_index)
     }
 
-    fn format_symbol_hover_at(&self, sym: &Symbol, source: &str, at: Point) -> String {
+    fn format_symbol_hover_at(
+        &self,
+        sym: &Symbol,
+        source: &str,
+        at: Point,
+        module_index: Option<&ModuleIndex>,
+    ) -> String {
         let line = source_line_at(source, sym.span.start.row);
         let mut text = format!("```perl\n{}\n```", line.trim());
 
         // Append inferred type for variables/fields (bag-routed so
-        // framework / branch / arity rules refine the answer).
+        // framework / branch / arity rules refine the answer). The index lets
+        // a role-contract param type (`$c` in a Catalyst action) resolve
+        // through cross-file ancestry via the `ReceiverGated` gate.
         if matches!(sym.kind, SymKind::Variable | SymKind::Field) {
-            if let Some(it) = self.inferred_type_via_bag(&sym.name, at) {
+            if let Some(it) = self.inferred_type_via_bag_ctx(&sym.name, at, module_index) {
                 text.push_str(&format!("\n\n*type: {}*", format_inferred_type(&it)));
             }
         }
@@ -4688,6 +6098,26 @@ impl FileAnalysis {
         // helpers/routes/tasks themselves, which already render flat
         // with their `<word>` kind prefix.
         self.outline_children_of(ScopeId(0))
+    }
+
+    /// Whether a scope sits inside a sub/method body (directly or via nested
+    /// blocks). The single rule behind hiding working-state lexicals from the
+    /// outline: variables declared here are local scratch, not structure, so
+    /// only file/package- and class-body-scoped variables (`our`, class
+    /// `field`s) survive. A `Class` or `File` boundary reached first means
+    /// "structural"; a `Sub`/`Method` reached first means "working state".
+    /// Both the outline tree builder and the `--outline` CLI ask this.
+    pub fn scope_within_sub_body(&self, scope: ScopeId) -> bool {
+        let mut cur = Some(scope);
+        while let Some(id) = cur {
+            let Some(s) = self.scopes.iter().find(|s| s.id == id) else { return false };
+            match s.kind {
+                ScopeKind::Sub { .. } | ScopeKind::Method { .. } => return true,
+                ScopeKind::Class { .. } | ScopeKind::File => return false,
+                ScopeKind::Block | ScopeKind::ForLoop { .. } => cur = s.parent,
+            }
+        }
+        false
     }
 
     fn outline_children_of(&self, parent_scope: ScopeId) -> Vec<OutlineSymbol> {
@@ -4781,10 +6211,16 @@ impl FileAnalysis {
                 SymKind::Package => {
                     (sym.name.clone(), Some("package".to_string()), Vec::new())
                 }
-                SymKind::Module => {
-                    (format!("use {}", sym.name), None, Vec::new())
-                }
+                // `use` statements are not structure — mainstream language
+                // servers (rust-analyzer, pyright, tsserver, gopls, clangd)
+                // all keep imports out of the document outline. The synthetic
+                // expansions a kit plugin emits would be even worse (a dozen
+                // per `use Clove::Base 'Controller'`), but real ones are noise
+                // too. Modules still drive resolution; they're just not
+                // navigation targets.
+                SymKind::Module => continue,
                 SymKind::Variable => {
+                    if self.scope_within_sub_body(sym.scope) { continue; }
                     let detail = match &sym.detail {
                         SymbolDetail::Variable { decl_kind, .. } => match decl_kind {
                             DeclKind::My => "my",
@@ -4917,9 +6353,11 @@ impl FileAnalysis {
                     });
                 }
                 SymKind::Sub => {
+                    let is_constant = matches!(sym.detail, SymbolDetail::Sub { is_constant: true, .. });
+                    let token_type = if is_constant { TOK_ENUM_MEMBER } else { TOK_FUNCTION };
                     tokens.push(PerlSemanticToken {
                         span: sym.selection_span,
-                        token_type: TOK_FUNCTION,
+                        token_type,
                         modifiers: 1 << MOD_DECLARATION,
                     });
                 }
@@ -4939,6 +6377,18 @@ impl FileAnalysis {
             .flat_map(|imp| imp.imported_symbols.iter().map(|s| s.local_name.as_str()))
             .collect();
 
+        // Local `use constant` decls, keyed by (package, name) — usages color
+        // like the declaration. Package-keyed so a same-named non-constant sub
+        // in a different package isn't mis-colored as a constant (the recolor
+        // matches the call's resolved_package, not just the bare name).
+        let constant_names: std::collections::HashSet<(&str, &str)> = self.symbols.iter()
+            .filter_map(|s| match &s.detail {
+                SymbolDetail::Sub { is_constant: true, .. } =>
+                    s.package.as_deref().map(|p| (p, s.name.as_str())),
+                _ => None,
+            })
+            .collect();
+
         for r in &self.refs {
             // Skip declaration refs — the symbol loop already emits tokens for declarations
             if matches!(r.access, AccessKind::Declaration) {
@@ -4954,9 +6404,14 @@ impl FileAnalysis {
                     if matches!(r.access, AccessKind::Write) { mods |= 1 << MOD_MODIFICATION; }
                     tokens.push(PerlSemanticToken { span: r.span, token_type, modifiers: mods });
                 }
-                RefKind::FunctionCall { .. } => {
-                    // Framework DSL keywords → macro, otherwise function
-                    let token_type = if self.framework_imports.contains(r.target_name.as_str()) {
+                RefKind::FunctionCall { resolved_package } => {
+                    // Constant usages color like the decl; framework DSL keywords → macro.
+                    let is_const = resolved_package.as_deref().map_or(false, |pkg| {
+                        constant_names.contains(&(pkg, r.unqualified_target_name()))
+                    });
+                    let token_type = if is_const {
+                        TOK_ENUM_MEMBER
+                    } else if self.framework_imports.contains(r.target_name.as_str()) {
                         TOK_MACRO
                     } else {
                         TOK_FUNCTION
@@ -4997,6 +6452,11 @@ impl FileAnalysis {
             }
         }
 
+        // ---- Regex literals → regexp tokens ----
+        for span in &self.regex_spans {
+            tokens.push(PerlSemanticToken { span: *span, token_type: TOK_REGEXP, modifiers: 0 });
+        }
+
         tokens.sort_by_key(|t| (t.span.start.row, t.span.start.column));
         // Dedup by position — if two tokens start at the same (row, col), keep the first
         tokens.dedup_by(|b, a| a.span.start.row == b.span.start.row && a.span.start.column == b.span.start.column);
@@ -5034,8 +6494,14 @@ pub const PRIORITY_DYNAMIC: u8 = 50;
 pub enum MethodResolution {
     /// Found in a local class within this file.
     Local { class: String, sym_id: SymbolId },
-    /// Found in a cross-file module (use ModuleIndex to get details).
-    CrossFile { class: String },
+    /// Found in a cross-file module. `def_module` names the module the
+    /// definition actually lives in: `Some(m)` when the hit came through a
+    /// plugin BRIDGE (the synthesized symbol lives in bridging module `m`, not
+    /// in `class`'s own module); `None` for a real method in `class`'s module.
+    /// Every consumer resolves location/signature the same way —
+    /// `get_cached(def_module.unwrap_or(class)).sub_info(method)` — so bridged
+    /// helpers and real inherited methods share one code path.
+    CrossFile { class: String, def_module: Option<String> },
 }
 
 /// Result of resolving a sub/method call — local symbol or cross-file metadata.
@@ -5159,7 +6625,12 @@ impl FileAnalysis {
     }
 
     /// Complete methods for an invocant (variable or class name) at a point.
-    pub fn complete_methods(&self, invocant: &str, point: Point) -> Vec<CompletionCandidate> {
+    pub fn complete_methods(
+        &self,
+        invocant: &str,
+        point: Point,
+        module_index: Option<&ModuleIndex>,
+    ) -> Vec<CompletionCandidate> {
         let class_name = if !invocant.starts_with('$')
             && !invocant.starts_with('@')
             && !invocant.starts_with('%')
@@ -5174,7 +6645,12 @@ impl FileAnalysis {
         };
 
         if let Some(ref cn) = class_name {
-            let candidates = self.complete_methods_for_class(cn, None);
+            // Pass `module_index` so the ancestor walk reaches CROSS-FILE
+            // parents. Without it, an untyped `$self` (e.g. assigned via
+            // `$class->SUPER::new`, which the bag can't yet type) resolves to
+            // the enclosing class but offers only its OWN methods — inherited
+            // methods from a `use parent`/`-base` ancestor vanish.
+            let candidates = self.complete_methods_for_class(cn, module_index);
             if !candidates.is_empty() {
                 return candidates;
             }
@@ -5643,7 +7119,7 @@ impl FileAnalysis {
                 Some(MethodResolution::Local { sym_id, .. }) => {
                     return Some(ResolvedSub::Local(self.symbol(sym_id)));
                 }
-                Some(MethodResolution::CrossFile { ref class }) => {
+                Some(MethodResolution::CrossFile { ref class, .. }) => {
                     if let Some(idx) = module_index {
                         if let Some(cached) = idx.get_cached(class) {
                             if let Some(sub_info) = cached.sub_info(name) {
@@ -5664,23 +7140,24 @@ impl FileAnalysis {
             }
         }
 
-        // Fallback: imported function via ModuleIndex
+        // Fallback: imported function via ModuleIndex. Resolution routes
+        // through `imported_names` — the SAME bound-set evaluator the
+        // unresolved-function diagnostic reads (symbols.rs) — so goto-def and
+        // the diagnostic can never disagree on whether a name is brought in by
+        // this `use`. A bare `use M;` binds `@EXPORT`; `:tag` binds the tag's
+        // members; `-as` binds local→origin; `use M ();` binds nothing.
         if !is_method {
             if let Some(idx) = module_index {
                 for import in &self.imports {
-                    if let Some(is) = import.imported_symbols.iter().find(|s| s.local_name == *name) {
-                        if let Some(cached) = idx.get_cached(&import.module_name) {
-                            if let Some(sub_info) = cached.sub_info(is.remote()) {
-                                return Some(cross_file_resolved(&sub_info));
-                            }
-                        }
-                    }
-                }
-                // Also check @EXPORT (bare imports)
-                for import in &self.imports {
-                    if let Some(cached) = idx.get_cached(&import.module_name) {
-                        if cached.analysis.export.iter().any(|s| s == name) {
-                            if let Some(sub_info) = cached.sub_info(name) {
+                    let Some(cached) = idx.get_cached(&import.module_name) else { continue };
+                    let surface = cached.analysis.export_surface_with_index(idx);
+                    let bound = imported_names(import, &surface);
+                    if let Some((_local, remote)) = bound.iter().find(|(local, _)| local == name) {
+                        // The name may be defined in the directly-`use`d module
+                        // or in a module it re-exports. `defining_module_cached`
+                        // chases the same re-export edges (seen-set bounded).
+                        if let Some(cached) = idx.defining_module_cached(&import.module_name, remote) {
+                            if let Some(sub_info) = cached.sub_info(remote) {
                                 return Some(cross_file_resolved(&sub_info));
                             }
                         }
@@ -6004,6 +7481,71 @@ fn span_size(span: &Span) -> usize {
     rows * 10000 + cols
 }
 
+/// Camelize a Mojolicious controller token to its class-name fragment,
+/// matching `Mojo::Util::camelize` exactly:
+///
+/// ```text
+/// return $str if $str =~ /^[A-Z]/;
+/// return join '::', map {
+///   join('', map { ucfirst lc } split /_/)
+/// } split /-/, $str;
+/// ```
+///
+/// `-` splits into `::` namespace segments; within a segment `_` splits
+/// into pieces each `ucfirst lc`'d (lowercase the whole piece, then
+/// uppercase the first char) and concatenated. A leading-uppercase token
+/// is already a class fragment and passes through unchanged.
+///
+/// `login` → `Login`, `sales_reports` → `SalesReports`,
+/// `integrations-ads_api` → `Integrations::AdsApi`.
+fn camelize_controller(token: &str) -> String {
+    if token.chars().next().is_some_and(|c| c.is_ascii_uppercase()) {
+        return token.to_string();
+    }
+    token
+        .split('-')
+        .map(|segment| {
+            segment
+                .split('_')
+                .map(ucfirst_lc)
+                .collect::<Vec<_>>()
+                .join("")
+        })
+        .collect::<Vec<_>>()
+        .join("::")
+}
+
+/// Perl `ucfirst lc`: lowercase the whole string, then uppercase the
+/// first character. Empty input stays empty (so a stray `_` contributes
+/// nothing, as in Perl).
+fn ucfirst_lc(piece: &str) -> String {
+    let lower = piece.to_lowercase();
+    let mut chars = lower.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+        None => String::new(),
+    }
+}
+
+/// True when `module`'s `::`-delimited tail equals `camelized` — i.e.
+/// the camelized form is the trailing namespace segment(s) of the class.
+/// `Clove::Controller::Login` matches `Login`;
+/// `App::Controller::Integrations::AdsApi` matches `Integrations::AdsApi`.
+fn module_tail_matches(module: &str, camelized: &str) -> bool {
+    module == camelized
+        || module
+            .strip_suffix(camelized)
+            .is_some_and(|prefix| prefix.ends_with("::"))
+}
+
+/// True when a class name has a `::Controller::` segment — Mojo's default
+/// controller namespace convention. Used only as a deterministic tiebreak
+/// among candidates that already pass the ownership gate; never as a
+/// hardcoded namespace requirement.
+fn is_controller_shaped(class: &str) -> bool {
+    class.contains("::Controller::") || class.ends_with("::Controller")
+}
+
 /// Strip the implicit invocant param from a handler signature so hover
 /// and sig help don't include the `$self` the user never types.
 fn display_handler_params(params: &[ParamInfo]) -> Vec<String> {
@@ -6073,6 +7615,11 @@ pub fn inferred_type_to_tag(ty: &InferredType) -> String {
             None => "Parametric".to_string(),
         },
         InferredType::Sequence(_) => "Sequence".to_string(),
+        // A constraint is a Type::Tiny object; method dispatch (deferred)
+        // routes there, so tag it as such rather than as its inner type.
+        InferredType::TypeConstraintOf(_) => "Object:Type::Tiny".to_string(),
+        // Method dispatch is against the base; tag like any object.
+        InferredType::BrandedRoute { base, .. } => format!("Object:{}", base),
     }
 }
 
@@ -6121,6 +7668,13 @@ pub(crate) fn format_inferred_type(ty: &InferredType) -> String {
             let parts: Vec<String> = elems.iter().map(format_inferred_type).collect();
             format!("Sequence<{}>", parts.join(", "))
         }
+        InferredType::TypeConstraintOf(inner) => {
+            format!("TypeConstraint<{}>", format_inferred_type(inner))
+        }
+        InferredType::BrandedRoute { base, controller, .. } => match controller {
+            Some(c) => format!("{}<controller={}>", base, c),
+            None => base.clone(),
+        },
     }
 }
 

@@ -146,11 +146,6 @@ impl FileStore {
         &self.workspace
     }
 
-    /// Fetch a workspace-role analysis by path.
-    pub fn get_workspace(&self, path: &Path) -> Option<Arc<FileAnalysis>> {
-        self.workspace.get(path).map(|e| Arc::clone(e.value()))
-    }
-
     /// Count of workspace entries.
     pub fn workspace_len(&self) -> usize {
         self.workspace.len()

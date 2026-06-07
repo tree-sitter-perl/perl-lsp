@@ -1,0 +1,224 @@
+{
+  "capability": "semantic-tokens",
+  "rows": [
+    {
+      "id": "st-moo-pkgname-namespace",
+      "difficulty": "simple",
+      "semantic_area": "classic",
+      "file": "Moo/Object.pm",
+      "line": 0,
+      "col": 8,
+      "expect": {
+        "all": [
+          "1:8 len=11 namespace"
+        ],
+        "none": []
+      },
+      "status": "gold"
+    },
+    {
+      "id": "st-moo-class-keyword",
+      "difficulty": "simple",
+      "semantic_area": "oo-isa",
+      "file": "Moo/Object.pm",
+      "line": 12,
+      "col": 5,
+      "expect": {
+        "all": [
+          "13:5 len=6 keyword"
+        ],
+        "none": []
+      },
+      "status": "gold"
+    },
+    {
+      "id": "st-moo-self-keyword",
+      "difficulty": "simple",
+      "semantic_area": "oo-isa",
+      "file": "Moo/Object.pm",
+      "line": 46,
+      "col": 5,
+      "expect": {
+        "all": [
+          "47:5 len=5 keyword"
+        ],
+        "none": []
+      },
+      "status": "gold"
+    },
+    {
+      "id": "st-moo-methodcall-method",
+      "difficulty": "simple",
+      "semantic_area": "oo-isa",
+      "file": "Moo/Object.pm",
+      "line": 21,
+      "col": 22,
+      "expect": {
+        "all": [
+          "22:22 len=9 method"
+        ],
+        "none": []
+      },
+      "status": "gold"
+    },
+    {
+      "id": "st-moo-fqclass-and-new",
+      "difficulty": "tricky",
+      "semantic_area": "fq",
+      "file": "Moo/Object.pm",
+      "line": 17,
+      "col": 8,
+      "expect": {
+        "all": [
+          "18:8 len=29 namespace",
+          "18:39 len=3 method"
+        ],
+        "none": []
+      },
+      "status": "gold"
+    },
+    {
+      "id": "st-moo-carp-function",
+      "difficulty": "tricky",
+      "semantic_area": "classic",
+      "file": "Moo/Object.pm",
+      "line": 36,
+      "col": 14,
+      "expect": {
+        "all": [
+          "37:14 len=5 function"
+        ],
+        "none": []
+      },
+      "status": "gold"
+    },
+    {
+      "id": "st-moo-quoted-hashkey-property",
+      "difficulty": "tricky",
+      "semantic_area": "classic",
+      "file": "Moo/Object.pm",
+      "line": 63,
+      "col": 17,
+      "expect": {
+        "all": [
+          "64:17 len=15 property"
+        ],
+        "none": []
+      },
+      "status": "gold"
+    },
+    {
+      "id": "st-tt-hashkey-property",
+      "difficulty": "simple",
+      "semantic_area": "type-inference",
+      "file": "Type/Tiny.pm",
+      "line": 96,
+      "col": 15,
+      "expect": {
+        "all": [
+          "97:15 len=17 property"
+        ],
+        "none": []
+      },
+      "status": "gold"
+    },
+    {
+      "id": "st-tt-foreach-loopvar-parameter",
+      "difficulty": "tricky",
+      "semantic_area": "type-inference",
+      "file": "Type/Tiny.pm",
+      "line": 693,
+      "col": 8,
+      "expect": {
+        "all": [
+          "694:8 len=11 parameter"
+        ],
+        "none": []
+      },
+      "status": "provisional"
+    },
+    {
+      "id": "st-uri-constant-name-enummember",
+      "difficulty": "tricky",
+      "semantic_area": "constants",
+      "file": "URI/_punycode.pm",
+      "line": 14,
+      "col": 13,
+      "expect": {
+        "all": [
+          "15:13 len=4 enumMember"
+        ],
+        "none": [
+          "15:13 len=4 function"
+        ]
+      },
+      "status": "gold"
+    },
+    {
+      "id": "st-tt-regex-literal-regexp",
+      "difficulty": "tricky",
+      "semantic_area": "type-inference",
+      "file": "Type/Tiny.pm",
+      "line": 1509,
+      "col": 22,
+      "expect": {
+        "all": [
+          "1510:22 len=69 regexp"
+        ],
+        "none": []
+      },
+      "status": "gold"
+    },
+    {
+      "id": "st-ppi-use-constant-enummember",
+      "difficulty": "tricky",
+      "semantic_area": "constants",
+      "file": "PPI/Document.pm",
+      "line": 88,
+      "col": 11,
+      "expect": {
+        "all": [
+          "89:13 len=13 enumMember"
+        ],
+        "none": [
+          "89:13 len=13 function"
+        ]
+      },
+      "status": "gold",
+      "note": "use constant LOCATION_LINE tagged enumMember not function."
+    },
+    {
+      "id": "st-mojo-has-accessor-method",
+      "difficulty": "simple",
+      "semantic_area": "framework-accessor",
+      "file": "Mojo/Message.pm",
+      "line": 13,
+      "col": 4,
+      "expect": {
+        "all": [
+          "14:0 len=3 macro",
+          "14:4 len=7 method"
+        ],
+        "none": []
+      },
+      "status": "gold",
+      "note": "Mojo `has content` -> has tagged macro, accessor name tagged method."
+    },
+    {
+      "id": "st-specio-sub-name-function",
+      "difficulty": "simple",
+      "semantic_area": "sub-decl",
+      "file": "Specio/Library/Builtins.pm",
+      "line": 21,
+      "col": 8,
+      "expect": {
+        "all": [
+          "22:8 len=13 function"
+        ],
+        "none": []
+      },
+      "status": "gold",
+      "note": "constant-sub `sub _HAS_REF_UTIL ()` name tagged function."
+    }
+  ]
+}

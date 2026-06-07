@@ -60,7 +60,7 @@ fn test_diagnostics_skips_builtins() {
     let source = "use Carp qw(croak);\nprint 'hello';\ndie 'oops';\n";
     let analysis = parse_analysis(source);
     let module_index = crate::module_index::ModuleIndex::new_for_test();
-    let diags = collect_diagnostics(&analysis, &module_index);
+    let diags = collect_diagnostics(&analysis, &module_index, Default::default());
     // print and die are builtins, croak is explicitly imported — no diagnostics
     assert!(
         diags.is_empty(),
@@ -74,10 +74,59 @@ fn test_diagnostics_unresolved_function() {
     let source = "frobnicate();\n";
     let analysis = parse_analysis(source);
     let module_index = crate::module_index::ModuleIndex::new_for_test();
-    let diags = collect_diagnostics(&analysis, &module_index);
+    let diags = collect_diagnostics(&analysis, &module_index, Default::default());
     assert_eq!(diags.len(), 1);
     assert_eq!(diags[0].severity, Some(DiagnosticSeverity::INFORMATION));
     assert!(diags[0].message.contains("frobnicate"));
+}
+
+#[test]
+fn unresolved_dispatch_fires_only_when_enabled_and_only_on_untyped_receiver() {
+    use crate::symbols::DiagnosticOptions;
+    // `$minion` is a non-self sub param with no type annotation — genuinely
+    // untyped. The minion `enqueue` dispatch verb fires, but its receiver
+    // can't be pinned to any class → `ReceiverUntyped`.
+    let source = "package W;\nsub fire {\n  my ($self, $minion) = @_;\n  $minion->enqueue('send_email');\n}\n1;\n";
+    let analysis = parse_analysis(source);
+    let module_index = crate::module_index::ModuleIndex::new_for_test();
+
+    // Off by default: no dispatch diagnostic.
+    let default_diags = collect_diagnostics(&analysis, &module_index, Default::default());
+    assert!(
+        !default_diags.iter().any(|d|
+            matches!(&d.code, Some(NumberOrString::String(c)) if c == "unresolved-dispatch")),
+        "unresolved-dispatch must be off by default; got {:?}",
+        default_diags.iter().map(|d| &d.message).collect::<Vec<_>>(),
+    );
+
+    // Enabled: exactly one unresolved-dispatch on the untyped receiver.
+    let on = DiagnosticOptions { unresolved_dispatch: true };
+    let diags = collect_diagnostics(&analysis, &module_index, on);
+    let dispatch_diags: Vec<_> = diags.iter().filter(|d|
+        matches!(&d.code, Some(NumberOrString::String(c)) if c == "unresolved-dispatch")).collect();
+    assert_eq!(
+        dispatch_diags.len(), 1,
+        "expected one unresolved-dispatch on the untyped receiver; got {:?}",
+        diags.iter().map(|d| &d.message).collect::<Vec<_>>(),
+    );
+}
+
+#[test]
+fn unresolved_dispatch_silent_on_does_not_apply() {
+    use crate::symbols::DiagnosticOptions;
+    // Receiver typed to a concrete, unrelated class → DoesNotApply, NOT a
+    // typing gap. Even with the diagnostic enabled, it must stay silent.
+    let source = "package W;\nsub fire {\n  my $x = Some::Other->new;\n  $x->enqueue('send_email');\n}\npackage Some::Other;\nsub new { bless {}, shift }\nsub enqueue { 1 }\n1;\n";
+    let analysis = parse_analysis(source);
+    let module_index = crate::module_index::ModuleIndex::new_for_test();
+    let on = DiagnosticOptions { unresolved_dispatch: true };
+    let diags = collect_diagnostics(&analysis, &module_index, on);
+    assert!(
+        !diags.iter().any(|d|
+            matches!(&d.code, Some(NumberOrString::String(c)) if c == "unresolved-dispatch")),
+        "DoesNotApply (typed, unrelated receiver) must never diagnose; got {:?}",
+        diags.iter().map(|d| &d.message).collect::<Vec<_>>(),
+    );
 }
 
 #[test]
@@ -85,7 +134,7 @@ fn test_diagnostics_skips_local_sub() {
     let source = "sub helper { 1 }\nhelper();\n";
     let analysis = parse_analysis(source);
     let module_index = crate::module_index::ModuleIndex::new_for_test();
-    let diags = collect_diagnostics(&analysis, &module_index);
+    let diags = collect_diagnostics(&analysis, &module_index, Default::default());
     assert!(
         diags.is_empty(),
         "Locally defined sub should not produce diagnostic, got: {:?}",
@@ -98,10 +147,57 @@ fn test_diagnostics_skips_package_qualified() {
     let source = "Foo::Bar::baz();\n";
     let analysis = parse_analysis(source);
     let module_index = crate::module_index::ModuleIndex::new_for_test();
-    let diags = collect_diagnostics(&analysis, &module_index);
+    let diags = collect_diagnostics(&analysis, &module_index, Default::default());
     assert!(
         diags.is_empty(),
         "Package-qualified calls should not produce diagnostic",
+    );
+}
+
+// The `not` operator parses as `ambiguous_function_call_expression` because tree-sitter-perl
+// has no dedicated node type for it; it must be suppressed by the builtins list, not by CST shape.
+#[test]
+fn test_diagnostics_no_unresolved_for_not_operator() {
+    let source = "my $x = 1;\nmy $y = not $x;\nif (not $x) { }\n";
+    let analysis = parse_analysis(source);
+    let module_index = crate::module_index::ModuleIndex::new_for_test();
+    let diags = collect_diagnostics(&analysis, &module_index, Default::default());
+    let not_diags: Vec<_> = diags.iter().filter(|d| d.message.contains("not")).collect();
+    assert!(
+        not_diags.is_empty(),
+        "`not` should not produce an unresolved-function diagnostic; got: {:?}",
+        not_diags.iter().map(|d| &d.message).collect::<Vec<_>>(),
+    );
+}
+
+// SUPER::method calls store `target_name = "SUPER::method"` which can never be found
+// by a literal MRO walk; the `::` guard must suppress the diagnostic.
+#[test]
+fn test_diagnostics_no_unresolved_for_super_method() {
+    let source = r#"
+package Animal;
+sub speak { "..." }
+
+package Dog;
+use parent -norequire, 'Animal';
+sub speak {
+    my ($self) = @_;
+    my $parent = $self->SUPER::speak();
+    return "Woof! $parent";
+}
+1;
+"#;
+    let analysis = parse_analysis(source);
+    let module_index = crate::module_index::ModuleIndex::new_for_test();
+    let diags = collect_diagnostics(&analysis, &module_index, Default::default());
+    let super_diags: Vec<_> = diags
+        .iter()
+        .filter(|d| d.message.contains("SUPER"))
+        .collect();
+    assert!(
+        super_diags.is_empty(),
+        "`SUPER::speak` should not produce an unresolved-method diagnostic; got: {:?}",
+        super_diags.iter().map(|d| &d.message).collect::<Vec<_>>(),
     );
 }
 
@@ -610,7 +706,7 @@ fn test_hover_on_builtin_uses_module_index() {
         "```perl\npush ARRAY,LIST\n```\n\nAppends LIST to ARRAY.",
     );
 
-    let tree = crate::document::Document::new(source.to_string())
+    let _tree = crate::document::Document::new(source.to_string())
         .unwrap()
         .tree;
     let hover = hover_info(
@@ -618,7 +714,6 @@ fn test_hover_on_builtin_uses_module_index() {
         source,
         Position { line: 0, character: 0 },
         &module_index,
-        &tree,
     )
     .expect("expected hover on `push`");
     let text = match hover.contents {
@@ -2582,4 +2677,1614 @@ $r->get('/users')->
             labels
         );
     }
+}
+
+/// Pin: a Mojo helper registered in one file (`$app->helper(widget => ...)`)
+/// must be reachable by goto-definition from `$c->widget` in ANOTHER file.
+///
+/// The provider's `mojo-helpers` synthesis bridges `widget` to the app
+/// surface; the consumer's `$c` is a controller subclass that reaches the
+/// surface via the synthetic-parent edge. `resolve_method_in_ancestors`
+/// already finds the bridged symbol, but if its `CrossFile` result only
+/// carries the class name, the goto-def consumer re-looks-up the method in
+/// the bridged class's OWN module (where it doesn't exist) and the jump is
+/// lost. Same-file works; this is the cross-file hole that had no coverage.
+#[test]
+fn cross_file_plugin_helper_goto_def_resolves() {
+    let provider_src = "package My::Plugin;\n\
+use Mojo::Base 'Mojolicious::Plugin';\n\
+sub register ($self, $app, $conf) {\n\
+  $app->helper(widget => sub ($c) { return Widget->new; });\n\
+}\n\
+1;\n";
+    let provider = parse_analysis(provider_src);
+    // Sanity: the provider really did synthesize a `widget` Method bridged to
+    // the app surface (otherwise the test would pass vacuously once the bug is
+    // "fixed" by an unrelated path).
+    assert!(
+        provider.plugin_namespaces.iter().any(|ns| ns
+            .bridges
+            .iter()
+            .any(|b| matches!(b, crate::file_analysis::Bridge::Class(c) if c == crate::file_analysis::APP_SURFACE_CLASS))),
+        "provider must bridge a namespace to the app surface",
+    );
+
+    let idx = crate::module_index::ModuleIndex::new_for_test();
+    let provider_path = std::path::PathBuf::from("/tmp/perl_lsp_pin_My_Plugin.pm");
+    idx.register_workspace_module(provider_path.clone(), std::sync::Arc::new(provider));
+
+    let consumer_src = "package My::Ctrl;\n\
+use Mojo::Base 'Mojolicious::Controller';\n\
+sub action ($c) {\n\
+  my $w = $c->widget;\n\
+  return $w;\n\
+}\n\
+1;\n";
+    let consumer = parse_analysis(consumer_src);
+    let mut parser = tree_sitter::Parser::new();
+    parser.set_language(&ts_parser_perl::LANGUAGE.into()).unwrap();
+    let tree = parser.parse(consumer_src, None).unwrap();
+
+    // Cursor on the `widget` token in `$c->widget`.
+    let byte = consumer_src.find("widget;").expect("call site present");
+    let prefix = &consumer_src[..byte];
+    let pos = Position {
+        line: prefix.matches('\n').count() as u32,
+        character: (byte - prefix.rfind('\n').map(|i| i + 1).unwrap_or(0)) as u32,
+    };
+
+    let uri = Url::parse("file:///consumer.pl").unwrap();
+    let resp = find_definition(&consumer, pos, &uri, &idx, &tree, consumer_src);
+
+    let loc = match resp {
+        Some(GotoDefinitionResponse::Scalar(loc)) => loc,
+        Some(GotoDefinitionResponse::Array(mut v)) if !v.is_empty() => v.remove(0),
+        other => panic!("expected a goto-def location for cross-file helper, got {other:?}"),
+    };
+    assert!(
+        loc.uri.path().ends_with("My_Plugin.pm"),
+        "goto-def should land in the provider file, got {}",
+        loc.uri,
+    );
+}
+
+/// CG-3b cross-package glob attribution, cross-file: `DateTime::PP`
+/// installs `_ymd2rd` into `DateTime` via
+/// `*{ 'DateTime::' . $sub } = __PACKAGE__->can($sub)`. A `$self->_ymd2rd`
+/// call in `DateTime` (a different file) must goto-def to the real sub in
+/// PP.pm — the method is a DateTime method even though it's declared in a
+/// differently-named module file.
+#[test]
+fn cross_package_glob_method_resolves_cross_file() {
+    let provider_src = "package DateTime::PP;\n\
+sub _ymd2rd { my ($class, $y, $m, $d) = @_; return 1; }\n\
+my @subs = qw( _ymd2rd );\n\
+for my $sub (@subs) {\n\
+  no strict 'refs';\n\
+  *{ 'DateTime::' . $sub } = __PACKAGE__->can($sub);\n\
+}\n\
+1;\n";
+    let provider = parse_analysis(provider_src);
+    // Sanity: the glob really attributed `_ymd2rd` to DateTime.
+    assert!(
+        provider.symbols.iter().any(|s| s.name == "_ymd2rd"
+            && matches!(s.kind, crate::file_analysis::SymKind::Sub)
+            && s.package.as_deref() == Some("DateTime")),
+        "provider must attribute the glob-installed _ymd2rd to DateTime",
+    );
+
+    let idx = crate::module_index::ModuleIndex::new_for_test();
+    let provider_path = std::path::PathBuf::from("/tmp/perl_lsp_pin_DateTime_PP.pm");
+    idx.register_workspace_module(provider_path.clone(), std::sync::Arc::new(provider));
+
+    let consumer_src = "package DateTime;\n\
+sub new { my $class = shift; return bless {}, $class; }\n\
+sub day_of_week {\n\
+  my $self = shift;\n\
+  return $self->_ymd2rd( 2024, 1, 1 );\n\
+}\n\
+1;\n";
+    let consumer = parse_analysis(consumer_src);
+    let mut parser = tree_sitter::Parser::new();
+    parser.set_language(&ts_parser_perl::LANGUAGE.into()).unwrap();
+    let tree = parser.parse(consumer_src, None).unwrap();
+
+    let byte = consumer_src.find("_ymd2rd( 2024").expect("call site present");
+    let prefix = &consumer_src[..byte];
+    let pos = Position {
+        line: prefix.matches('\n').count() as u32,
+        character: (byte - prefix.rfind('\n').map(|i| i + 1).unwrap_or(0)) as u32,
+    };
+
+    let uri = Url::parse("file:///datetime.pl").unwrap();
+    let resp = find_definition(&consumer, pos, &uri, &idx, &tree, consumer_src);
+    let loc = match resp {
+        Some(GotoDefinitionResponse::Scalar(loc)) => loc,
+        Some(GotoDefinitionResponse::Array(mut v)) if !v.is_empty() => v.remove(0),
+        other => panic!("expected goto-def for cross-package glob method, got {other:?}"),
+    };
+    assert!(
+        loc.uri.path().ends_with("DateTime_PP.pm"),
+        "goto-def should land in the provider (PP) file, got {}",
+        loc.uri,
+    );
+    assert_eq!(
+        loc.range.start.line, 1,
+        "should land on the real `sub _ymd2rd` (line 1), got {}",
+        loc.range.start.line
+    );
+}
+
+/// Fully-qualified variable read across files: `$My::Vars::config` in one
+/// file must goto-def to `our $config` in My::Vars (another module). Mirrors
+/// the FQ-call cross-file path via `qualified_var_target()` + module_index.
+#[test]
+fn fq_variable_read_resolves_cross_file() {
+    let provider_src = "package My::Vars;\n\
+our $config = { host => 'localhost' };\n\
+our @servers = ('a', 'b');\n\
+1;\n";
+    let provider = parse_analysis(provider_src);
+    let idx = crate::module_index::ModuleIndex::new_for_test();
+    let provider_path = std::path::PathBuf::from("/tmp/perl_lsp_pin_My_Vars.pm");
+    idx.register_workspace_module(provider_path, std::sync::Arc::new(provider));
+
+    let consumer_src = "package Main;\n\
+my $h = $My::Vars::config;\n\
+my @s = @My::Vars::servers;\n\
+1;\n";
+    let consumer = parse_analysis(consumer_src);
+    let mut parser = tree_sitter::Parser::new();
+    parser.set_language(&ts_parser_perl::LANGUAGE.into()).unwrap();
+    let tree = parser.parse(consumer_src, None).unwrap();
+
+    // Cursor on the `config` tail of `$My::Vars::config`.
+    let byte = consumer_src.find("config;").expect("read site present");
+    let prefix = &consumer_src[..byte];
+    let pos = Position {
+        line: prefix.matches('\n').count() as u32,
+        character: (byte - prefix.rfind('\n').map(|i| i + 1).unwrap_or(0)) as u32,
+    };
+
+    let uri = Url::parse("file:///consumer.pl").unwrap();
+    let resp = find_definition(&consumer, pos, &uri, &idx, &tree, consumer_src);
+    let loc = match resp {
+        Some(GotoDefinitionResponse::Scalar(loc)) => loc,
+        other => panic!("expected goto-def for FQ var, got {other:?}"),
+    };
+    assert!(
+        loc.uri.path().ends_with("My_Vars.pm"),
+        "goto-def should land in the provider file, got {}",
+        loc.uri,
+    );
+    assert_eq!(
+        loc.range.start.line, 1,
+        "should land on `our $config` (line 1)"
+    );
+}
+
+/// Honest miss: an FQ read into an unknown package must not fabricate a jump.
+#[test]
+fn fq_variable_read_unknown_package_is_honest_miss() {
+    let idx = crate::module_index::ModuleIndex::new_for_test();
+    let consumer_src = "package Main;\nmy $x = $No::Such::Pkg::thing;\n";
+    let consumer = parse_analysis(consumer_src);
+    let mut parser = tree_sitter::Parser::new();
+    parser.set_language(&ts_parser_perl::LANGUAGE.into()).unwrap();
+    let tree = parser.parse(consumer_src, None).unwrap();
+    let byte = consumer_src.find("thing;").unwrap();
+    let prefix = &consumer_src[..byte];
+    let pos = Position {
+        line: prefix.matches('\n').count() as u32,
+        character: (byte - prefix.rfind('\n').map(|i| i + 1).unwrap_or(0)) as u32,
+    };
+    let uri = Url::parse("file:///consumer.pl").unwrap();
+    let resp = find_definition(&consumer, pos, &uri, &idx, &tree, consumer_src);
+    assert!(resp.is_none(), "unknown package must be an honest miss, got {resp:?}");
+}
+
+/// Pin: cross-file hover on a plugin-synthesized helper. Same shape as
+/// `cross_file_plugin_helper_goto_def_resolves` but exercises the hover
+/// consumer arm, which shared the same lossy `get_cached(class).sub_info`
+/// bug (looking the bridged helper up in the class's own module). Hover
+/// needs the symbol's signature, not just a location, so this guards the
+/// unified `def_module` path end-to-end.
+#[test]
+fn cross_file_plugin_helper_hover_resolves() {
+    let provider_src = "package My::Plugin;\n\
+use Mojo::Base 'Mojolicious::Plugin';\n\
+sub register ($self, $app, $conf) {\n\
+  $app->helper(widget => sub ($c) { return Widget->new; });\n\
+}\n\
+1;\n";
+    let idx = crate::module_index::ModuleIndex::new_for_test();
+    idx.register_workspace_module(
+        std::path::PathBuf::from("/tmp/perl_lsp_pin_hover_My_Plugin.pm"),
+        std::sync::Arc::new(parse_analysis(provider_src)),
+    );
+
+    let consumer_src = "package My::Ctrl;\n\
+use Mojo::Base 'Mojolicious::Controller';\n\
+sub action ($c) {\n\
+  my $w = $c->widget;\n\
+  return $w;\n\
+}\n\
+1;\n";
+    let consumer = parse_analysis(consumer_src);
+    let mut parser = tree_sitter::Parser::new();
+    parser.set_language(&ts_parser_perl::LANGUAGE.into()).unwrap();
+    let _tree = parser.parse(consumer_src, None).unwrap();
+
+    let byte = consumer_src.find("widget;").expect("call site present");
+    let prefix = &consumer_src[..byte];
+    let point = tree_sitter::Point {
+        row: prefix.matches('\n').count(),
+        column: byte - prefix.rfind('\n').map(|i| i + 1).unwrap_or(0),
+    };
+
+    let hover = consumer
+        .hover_info(point, consumer_src, Some(&idx))
+        .expect("cross-file hover should resolve the bridged helper");
+    assert!(hover.contains("widget"), "hover should mention the helper, got: {hover}");
+    // The helper now lives on the fictional app surface; the controller
+    // subclass reaches it through the synthetic-parent edge. Hover shows
+    // where the symbol is bridged from.
+    assert!(
+        hover.contains(crate::file_analysis::APP_SURFACE_CLASS),
+        "hover should show the app surface as the bridging class, got: {hover}",
+    );
+}
+
+/// Pin: cross-file hover return type that REQUIRES the module index — the
+/// helper returns `Other->new->fluent`, so typing the return means recursing
+/// into `My::Other`'s module to resolve `fluent`. With `module_index: None`
+/// in the return-type query (the old behavior) this came back untyped; the
+/// `_ctx` threading lights it up. Guards the return-position cross-file chain.
+#[test]
+fn cross_file_helper_return_type_needs_module_index() {
+    let other_src = "package My::Other;\n\
+use Mojo::Base -base;\n\
+sub fluent ($self) { return $self; }\n\
+1;\n";
+    let provider_src = "package My::Plugin;\n\
+use Mojo::Base 'Mojolicious::Plugin';\n\
+sub register ($self, $app, $conf) {\n\
+  $app->helper(thing => sub ($c) { return My::Other->new->fluent; });\n\
+}\n\
+1;\n";
+    let idx = crate::module_index::ModuleIndex::new_for_test();
+    idx.register_workspace_module(
+        std::path::PathBuf::from("/tmp/perl_lsp_pin_ret_Other.pm"),
+        std::sync::Arc::new(parse_analysis(other_src)),
+    );
+    idx.register_workspace_module(
+        std::path::PathBuf::from("/tmp/perl_lsp_pin_ret_Plugin.pm"),
+        std::sync::Arc::new(parse_analysis(provider_src)),
+    );
+
+    let consumer_src = "package My::Ctrl;\n\
+use Mojo::Base 'Mojolicious::Controller';\n\
+sub action ($c) {\n\
+  my $x = $c->thing;\n\
+  return $x;\n\
+}\n\
+1;\n";
+    let consumer = parse_analysis(consumer_src);
+    let mut parser = tree_sitter::Parser::new();
+    parser.set_language(&ts_parser_perl::LANGUAGE.into()).unwrap();
+    let _tree = parser.parse(consumer_src, None).unwrap();
+    let byte = consumer_src.find("thing;").expect("call site");
+    let prefix = &consumer_src[..byte];
+    let point = tree_sitter::Point {
+        row: prefix.matches('\n').count(),
+        column: byte - prefix.rfind('\n').map(|i| i + 1).unwrap_or(0),
+    };
+
+    let hover = consumer
+        .hover_info(point, consumer_src, Some(&idx))
+        .expect("cross-file hover should resolve");
+    assert!(
+        hover.contains("My::Other"),
+        "return type should resolve cross-file to My::Other, got: {hover}",
+    );
+}
+
+/// Like `cross_file_helper_return_type_needs_module_index`, but the helper
+/// routes the value through a LEXICAL (`my $g = chain; return $g`) — the common
+/// `my $x = …; return $x` shape. This is the end-to-end pin for unifying
+/// `Variable` into the canonical edge chase: the variable query path now
+/// carries the `module_index`, the cross-file chain assignment is stored as
+/// `Variable($g) → Edge(Expr(rhs))` ("Edges, not values"), and point-narrowing
+/// no longer wrongly filters the materialized `Expression` witness.
+#[test]
+fn cross_file_lexical_chain_return_type() {
+    let other_src = "package My::Other;\n\
+use Mojo::Base -base;\n\
+sub fluent ($self) { return $self; }\n\
+1;\n";
+    let provider_src = "package My::Plugin;\n\
+use Mojo::Base 'Mojolicious::Plugin';\n\
+sub register ($self, $app, $conf) {\n\
+  $app->helper(thing => sub ($c) { my $g = My::Other->new->fluent; return $g; });\n\
+}\n\
+1;\n";
+    let idx = crate::module_index::ModuleIndex::new_for_test();
+    idx.register_workspace_module(
+        std::path::PathBuf::from("/tmp/perl_lsp_pin_lex_Other.pm"),
+        std::sync::Arc::new(parse_analysis(other_src)),
+    );
+    idx.register_workspace_module(
+        std::path::PathBuf::from("/tmp/perl_lsp_pin_lex_Plugin.pm"),
+        std::sync::Arc::new(parse_analysis(provider_src)),
+    );
+
+    let consumer_src = "package My::Ctrl;\n\
+use Mojo::Base 'Mojolicious::Controller';\n\
+sub action ($c) {\n\
+  my $x = $c->thing;\n\
+  return $x;\n\
+}\n\
+1;\n";
+    let consumer = parse_analysis(consumer_src);
+    let mut parser = tree_sitter::Parser::new();
+    parser.set_language(&ts_parser_perl::LANGUAGE.into()).unwrap();
+    let _tree = parser.parse(consumer_src, None).unwrap();
+    let byte = consumer_src.find("thing;").expect("call site");
+    let prefix = &consumer_src[..byte];
+    let point = tree_sitter::Point {
+        row: prefix.matches('\n').count(),
+        column: byte - prefix.rfind('\n').map(|i| i + 1).unwrap_or(0),
+    };
+
+    let hover = consumer
+        .hover_info(point, consumer_src, Some(&idx))
+        .expect("cross-file hover should resolve");
+    assert!(
+        hover.contains("My::Other"),
+        "lexical-chain return type should resolve cross-file to My::Other, got: {hover}",
+    );
+}
+
+/// The fluent-accessor sibling of `cross_file_helper_return_type_needs_module_index`:
+/// the helper returns `My::Other->new->acc($x)` where `acc` is a Mojo::Base `has`
+/// accessor (fluent setter — returns the invocant), NOT a plain `return $self` sub.
+/// The fluent return is modeled as `ReturnExpr(Receiver)`, so its resolution
+/// substitutes the query's receiver. Before the receiver-reset fix, the consumer's
+/// call-site receiver (`Mojolicious::Controller`, the type of `$c`) leaked down the
+/// edge chase into `MethodOnClass{My::Other, acc}` and got substituted there. The
+/// receiver for a method-call return must be that call's invocant (`My::Other`).
+#[test]
+fn cross_file_fluent_accessor_chain_return_type() {
+    let other_src = "package My::Other;\n\
+use Mojo::Base -base;\n\
+has acc => sub { {} };\n\
+1;\n";
+    let provider_src = "package My::Plugin;\n\
+use Mojo::Base 'Mojolicious::Plugin';\n\
+sub register ($self, $app, $conf) {\n\
+  $app->helper(thing => sub ($c) { return My::Other->new->acc($x); });\n\
+}\n\
+1;\n";
+    let idx = crate::module_index::ModuleIndex::new_for_test();
+    idx.register_workspace_module(
+        std::path::PathBuf::from("/tmp/perl_lsp_pin_acc_Other.pm"),
+        std::sync::Arc::new(parse_analysis(other_src)),
+    );
+    idx.register_workspace_module(
+        std::path::PathBuf::from("/tmp/perl_lsp_pin_acc_Plugin.pm"),
+        std::sync::Arc::new(parse_analysis(provider_src)),
+    );
+
+    let consumer_src = "package My::Ctrl;\n\
+use Mojo::Base 'Mojolicious::Controller';\n\
+sub action ($c) {\n\
+  my $x = $c->thing;\n\
+  return $x;\n\
+}\n\
+1;\n";
+    let consumer = parse_analysis(consumer_src);
+    let mut parser = tree_sitter::Parser::new();
+    parser.set_language(&ts_parser_perl::LANGUAGE.into()).unwrap();
+    let _tree = parser.parse(consumer_src, None).unwrap();
+    let byte = consumer_src.find("thing;").expect("call site");
+    let prefix = &consumer_src[..byte];
+    let point = tree_sitter::Point {
+        row: prefix.matches('\n').count(),
+        column: byte - prefix.rfind('\n').map(|i| i + 1).unwrap_or(0),
+    };
+
+    let hover = consumer
+        .hover_info(point, consumer_src, Some(&idx))
+        .expect("cross-file hover should resolve");
+    assert!(
+        hover.contains("My::Other"),
+        "fluent-accessor chain return type should resolve to My::Other (not the \
+         consumer's call-site receiver), got: {hover}",
+    );
+}
+
+/// The MRO subtlety of the receiver-reset fix: a fluent `has` accessor declared
+/// on a PARENT but dispatched on a CHILD (`Child->new->acc($x)`) must return the
+/// *child*, not the class where `has` was declared. The receiver reset keys on the
+/// dispatch class (`MethodOnClass{Child}` → receiver `Child`); the inheritance hop
+/// to `MethodOnClass{Parent, acc}` must then carry that child receiver through so
+/// the parent's `ReturnExpr(Receiver)` substitutes `Child`.
+#[test]
+fn cross_file_inherited_fluent_accessor_returns_child() {
+    let base_src = "package My::Base;\n\
+use Mojo::Base -base;\n\
+has acc => sub { {} };\n\
+1;\n";
+    let child_src = "package My::Child;\n\
+use Mojo::Base 'My::Base';\n\
+1;\n";
+    let provider_src = "package My::Plugin;\n\
+use Mojo::Base 'Mojolicious::Plugin';\n\
+sub register ($self, $app, $conf) {\n\
+  $app->helper(thing => sub ($c) { return My::Child->new->acc($x); });\n\
+}\n\
+1;\n";
+    let idx = crate::module_index::ModuleIndex::new_for_test();
+    idx.register_workspace_module(
+        std::path::PathBuf::from("/tmp/perl_lsp_pin_inh_Base.pm"),
+        std::sync::Arc::new(parse_analysis(base_src)),
+    );
+    idx.register_workspace_module(
+        std::path::PathBuf::from("/tmp/perl_lsp_pin_inh_Child.pm"),
+        std::sync::Arc::new(parse_analysis(child_src)),
+    );
+    idx.register_workspace_module(
+        std::path::PathBuf::from("/tmp/perl_lsp_pin_inh_Plugin.pm"),
+        std::sync::Arc::new(parse_analysis(provider_src)),
+    );
+
+    let consumer_src = "package My::Ctrl;\n\
+use Mojo::Base 'Mojolicious::Controller';\n\
+sub action ($c) {\n\
+  my $x = $c->thing;\n\
+  return $x;\n\
+}\n\
+1;\n";
+    let consumer = parse_analysis(consumer_src);
+    let mut parser = tree_sitter::Parser::new();
+    parser.set_language(&ts_parser_perl::LANGUAGE.into()).unwrap();
+    let _tree = parser.parse(consumer_src, None).unwrap();
+    let byte = consumer_src.find("thing;").expect("call site");
+    let prefix = &consumer_src[..byte];
+    let point = tree_sitter::Point {
+        row: prefix.matches('\n').count(),
+        column: byte - prefix.rfind('\n').map(|i| i + 1).unwrap_or(0),
+    };
+
+    let hover = consumer
+        .hover_info(point, consumer_src, Some(&idx))
+        .expect("cross-file hover should resolve");
+    assert!(
+        hover.contains("My::Child"),
+        "inherited fluent accessor must return the dispatch (child) class, got: {hover}",
+    );
+}
+
+/// Spike: Mojo partial route targets inherit the controller down the
+/// route-builder chain via a value brand (`InferredType::BrandedRoute`).
+/// See `docs/adr/route-branding.md` (option C, collapsed:
+/// resolved defaults ride the type, no separate brand-id/side-table).
+///
+/// The brand carries the inherited `->to('ctrl#')` controller and rides
+/// the chain through assignment (`my $alerts_r = ...`), method chaining
+/// (`->get('/')->to`), and nesting (`$alerts_r->under(...)` → `$crud`).
+/// A partial `->to('#action')` reads the inherited controller off the
+/// receiver's brand; a sibling group with its own `->to('other#')`
+/// re-brands its descendants without leaking.
+///
+/// Controller-token → class mapping (camelize + workspace search) is
+/// orthogonal and decided elsewhere; here the controller packages are
+/// named to match the raw token so goto-def resolves end to end without
+/// that layer. The route class's fluent verbs return `$self` so the
+/// chain types as `Mojolicious::Routes::Route` locally.
+#[test]
+fn brand_partial_route_targets_inherit_controller() {
+    let src = r#"package Mojolicious::Routes::Route;
+sub new { my $class = shift; return bless {}, $class; }
+sub any { my $self = shift; return $self; }
+sub get { my $self = shift; return $self; }
+sub under { my $self = shift; return $self; }
+sub to { my $self = shift; return $self; }
+
+package alerts;
+sub list { my $c = shift; }
+sub get_alert { my $c = shift; }
+sub read_settings { my $c = shift; }
+
+package other;
+sub thing { my $c = shift; }
+
+package MyApp;
+use Mojolicious::Lite;
+sub startup {
+  my $self = shift;
+  my $r = Mojolicious::Routes::Route->new;
+  my $alerts_r = $r->any('/alerts')->to('alerts#', section => 'admin');
+  $alerts_r->get('/')->to('#list');
+  my $crud = $alerts_r->under('/:type')->to('#get_alert');
+  $crud->get('/settings')->to('#read_settings');
+  my $other_r = $r->any('/other')->to('other#');
+  $other_r->get('/x')->to('#thing');
+}
+1;
+"#;
+    let fa = parse_analysis(src);
+    let idx = crate::module_index::ModuleIndex::new_for_test();
+
+    // Helper: the plugin-emitted MethodCallRef for a partial target —
+    // its invocant class IS the inherited controller, its target the
+    // action.
+    let inherited = |action: &str| -> Option<String> {
+        fa.refs.iter().find_map(|r| {
+            if let crate::file_analysis::RefKind::MethodCall { .. } = &r.kind {
+                if r.target_name == action {
+                    return fa.method_call_invocant_class(r, Some(&idx));
+                }
+            }
+            None
+        })
+    };
+
+    // Direct child: `$alerts_r->get('/')->to('#list')` inherits 'alerts'.
+    assert_eq!(inherited("list").as_deref(), Some("alerts"),
+        "partial '#list' must inherit the parent's 'alerts' controller");
+    // Nested via `under`: `$crud` inherits 'alerts' from `$alerts_r`.
+    assert_eq!(inherited("get_alert").as_deref(), Some("alerts"),
+        "partial '#get_alert' on $crud (under $alerts_r) inherits 'alerts'");
+    // Two hops deep: `$crud->get('/settings')->to('#read_settings')`.
+    assert_eq!(inherited("read_settings").as_deref(), Some("alerts"),
+        "nested partial '#read_settings' still inherits 'alerts'");
+    // Sibling group re-brands; no leak from 'alerts'.
+    assert_eq!(inherited("thing").as_deref(), Some("other"),
+        "sibling group's '#thing' inherits 'other', not 'alerts'");
+
+    // The brand rides assignment + nesting: $alerts_r and $crud both
+    // carry the inherited controller in their type.
+    let ty_at = |needle: &str, var: &str| -> Option<crate::file_analysis::InferredType> {
+        let at = src.find(needle).unwrap();
+        let pre = &src[..at];
+        let pt = tree_sitter::Point {
+            row: pre.matches('\n').count(),
+            column: at - pre.rfind('\n').map(|i| i + 1).unwrap_or(0),
+        };
+        fa.inferred_type_via_bag(var, pt)
+    };
+    assert!(
+        matches!(ty_at("$alerts_r->get", "$alerts_r"),
+            Some(crate::file_analysis::InferredType::BrandedRoute { ref controller, .. })
+                if controller.as_deref() == Some("alerts")),
+        "$alerts_r must type as a BrandedRoute carrying controller='alerts'");
+    assert!(
+        matches!(ty_at("$crud->get", "$crud"),
+            Some(crate::file_analysis::InferredType::BrandedRoute { ref controller, .. })
+                if controller.as_deref() == Some("alerts")),
+        "$crud (nested under $alerts_r) inherits the 'alerts' brand");
+
+    // Stash (beyond controller/action) rides the brand too: the
+    // `section => 'admin'` default set on $alerts_r is queryable via
+    // the rule-#10 `route_default` accessor on a descendant's value.
+    assert_eq!(
+        ty_at("$crud->get", "$crud").as_ref().and_then(|t| t.route_default("section")),
+        Some("admin"),
+        "inherited stash default 'section' is readable off $crud's brand");
+    assert_eq!(
+        ty_at("$crud->get", "$crud").as_ref().and_then(|t| t.route_default("controller")),
+        Some("alerts"),
+        "route_default('controller') reads the distinguished controller key");
+
+    // End-to-end goto-def: cursor on the `list` action inside
+    // `->to('#list')` resolves to `alerts::list` (here the controller
+    // token maps directly to the package).
+    let uri = Url::parse("file:///app.pl").unwrap();
+    let mut parser = tree_sitter::Parser::new();
+    parser.set_language(&ts_parser_perl::LANGUAGE.into()).unwrap();
+    let tree = parser.parse(src, None).unwrap();
+    let list_at = src.find("'#list'").unwrap() + "'#".len();
+    let pre = &src[..list_at];
+    let pos = Position {
+        line: pre.matches('\n').count() as u32,
+        character: (list_at - pre.rfind('\n').map(|i| i + 1).unwrap_or(0)) as u32,
+    };
+    let resp = find_definition(&fa, pos, &uri, &idx, &tree, src);
+    let loc = match resp {
+        Some(GotoDefinitionResponse::Scalar(loc)) => loc,
+        Some(GotoDefinitionResponse::Array(mut v)) if !v.is_empty() => v.remove(0),
+        other => panic!("expected goto-def on partial '#list', got {other:?}"),
+    };
+    // `sub list` is declared on line index 9 (0-based) — `package alerts;`
+    // block. Just assert it landed on the `list` sub's line, not on the
+    // app's route line.
+    let list_line = src[..src.find("sub list").unwrap()].matches('\n').count() as u32;
+    assert_eq!(loc.range.start.line, list_line,
+        "goto-def on '#list' lands on `sub list` in the alerts controller");
+}
+
+// ---- Types::Standard / Types::Common import-scoped vocabulary ----
+
+/// `use Types::Standard qw/Str Int/; Str();` — Str is explicitly imported, so
+/// calling it as a function (with parens, producing a FunctionCall ref) must not
+/// raise an unresolved-function diagnostic. The plugin's on_use hook provides the
+/// import-scoped vocabulary; the builder's process_use already creates an Import
+/// entry for the qw-list, but this also exercises the plugin path.
+#[test]
+fn types_standard_explicit_import_suppresses_diagnostic() {
+    let source = "use Types::Standard qw/Str Int/;\nStr();\nInt();\n";
+    let analysis = parse_analysis(source);
+    let module_index = crate::module_index::ModuleIndex::new_for_test();
+    let diags = collect_diagnostics(&analysis, &module_index, Default::default());
+    let names: Vec<&str> = diags.iter()
+        .filter_map(|d| {
+            if matches!(&d.code, Some(NumberOrString::String(c)) if c == "unresolved-function") {
+                Some(d.message.as_str())
+            } else {
+                None
+            }
+        })
+        .collect();
+    assert!(
+        names.is_empty(),
+        "Str()/Int() explicitly imported from Types::Standard must not produce unresolved-function; got: {:?}",
+        names,
+    );
+}
+
+/// `-all` import flag: the plugin expands to the full vocabulary, so any type
+/// constant used as a function call is known even when the module isn't in the
+/// module_index. Without the plugin's on_use hook, `-all` would appear literally
+/// in imported_symbols and InstanceOf wouldn't match, producing a spurious diagnostic.
+#[test]
+fn types_standard_all_flag_suppresses_diagnostic() {
+    let source = "use Types::Standard '-all';\nInstanceOf(['Foo']);\n";
+    let analysis = parse_analysis(source);
+    let module_index = crate::module_index::ModuleIndex::new_for_test();
+    let diags = collect_diagnostics(&analysis, &module_index, Default::default());
+    let unresolved: Vec<&str> = diags.iter()
+        .filter_map(|d| {
+            if matches!(&d.code, Some(NumberOrString::String(c)) if c == "unresolved-function") {
+                Some(d.message.as_str())
+            } else {
+                None
+            }
+        })
+        .collect();
+    assert!(
+        unresolved.is_empty(),
+        "InstanceOf() with '-all' must not produce unresolved-function; got: {:?}",
+        unresolved,
+    );
+}
+
+/// Types::Common::String and Types::Common::Numeric vocabularies are similarly
+/// suppressed when explicitly imported.
+#[test]
+fn types_common_string_numeric_explicit_import_suppresses_diagnostic() {
+    let source = concat!(
+        "use Types::Common::String qw/NonEmptyStr/;\n",
+        "use Types::Common::Numeric qw/PositiveInt/;\n",
+        "NonEmptyStr();\nPositiveInt();\n",
+    );
+    let analysis = parse_analysis(source);
+    let module_index = crate::module_index::ModuleIndex::new_for_test();
+    let diags = collect_diagnostics(&analysis, &module_index, Default::default());
+    let unresolved: Vec<&str> = diags.iter()
+        .filter_map(|d| {
+            if matches!(&d.code, Some(NumberOrString::String(c)) if c == "unresolved-function") {
+                Some(d.message.as_str())
+            } else {
+                None
+            }
+        })
+        .collect();
+    assert!(
+        unresolved.is_empty(),
+        "Types::Common String/Numeric names must not produce unresolved-function; got: {:?}",
+        unresolved,
+    );
+}
+
+/// Regression: the existing InstanceOf['Foo'] constraint typing must still work
+/// after adding the on_use hook. The import suppression is additive; it must not
+/// disturb the type_constraint_names / type_constraint_inner machinery.
+#[test]
+fn types_standard_instanceof_constraint_typing_still_works() {
+    use crate::file_analysis::InferredType;
+    let source = concat!(
+        "package T;\nuse Moo;\n",
+        "use Types::Standard qw/Str Int InstanceOf/;\n",
+        "has x => (is => 'ro', isa => InstanceOf['Foo']);\n",
+        "my $t = Str;\n1;\n",
+    );
+    let analysis = parse_analysis(source);
+    // Accessor `x` must return Foo (constraint-projection)
+    assert_eq!(
+        analysis.sub_return_type_at_arity("x", Some(0)),
+        Some(InferredType::ClassName("Foo".to_string())),
+        "InstanceOf['Foo'] isa must give the accessor a Foo return type",
+    );
+    // No unresolved-function diagnostics for Str, Int, InstanceOf
+    let module_index = crate::module_index::ModuleIndex::new_for_test();
+    let diags = collect_diagnostics(&analysis, &module_index, Default::default());
+    let unresolved: Vec<&str> = diags.iter()
+        .filter_map(|d| {
+            if matches!(&d.code, Some(NumberOrString::String(c)) if c == "unresolved-function") {
+                Some(d.message.as_str())
+            } else {
+                None
+            }
+        })
+        .collect();
+    assert!(
+        unresolved.is_empty(),
+        "No unresolved-function expected for Types::Standard imports; got: {:?}",
+        unresolved,
+    );
+}
+
+// ── P1.2: bare-use export_ok suppression ────────────────────────────────────
+
+/// A bare `use Foo;` must suppress unresolved-function for names in export_ok.
+/// Runtime exporters (Moose::Exporter->setup_import_methods) write to export_ok,
+/// not export, so the suppression must cover both lists.
+#[test]
+fn bare_use_suppresses_export_ok_names() {
+    // Consumer: bare use, no qw list — should auto-suppress subtype/as/where/coerce.
+    let source = "use FakeTypeConstraints;\nsubtype('Foo', as => 'Str', where => sub { 1 });\nas('Str');\ncoerce('Foo', from => 'Int', via => sub { \"$_[0]\" });\n";
+    let analysis = parse_analysis(source);
+    let module_index = crate::module_index::ModuleIndex::new_for_test();
+    // Seed with a module whose names are ONLY in export_ok (runtime-exporter style).
+    let cached = fake_cached("/fake/FakeTypeConstraints.pm", &[], &["subtype", "as", "where", "coerce"]);
+    module_index.insert_cache("FakeTypeConstraints", Some(cached));
+    let diags = collect_diagnostics(&analysis, &module_index, Default::default());
+    let unresolved: Vec<&str> = diags.iter()
+        .filter_map(|d| {
+            if matches!(&d.code, Some(NumberOrString::String(c)) if c == "unresolved-function") {
+                Some(d.message.as_str())
+            } else {
+                None
+            }
+        })
+        .collect();
+    assert!(
+        unresolved.is_empty(),
+        "bare use of a runtime-exporter module must not produce unresolved-function for export_ok names; got: {:?}",
+        unresolved,
+    );
+}
+
+/// Genuinely-undefined functions must still produce a diagnostic even when a
+/// module seeded with export_ok is in scope via a bare use.
+#[test]
+fn genuinely_undefined_still_flags_with_export_ok_module_in_scope() {
+    let source = "use FakeTypeConstraints;\ntruly_undefined_fn();\n";
+    let analysis = parse_analysis(source);
+    let module_index = crate::module_index::ModuleIndex::new_for_test();
+    let cached = fake_cached("/fake/FakeTypeConstraints.pm", &[], &["subtype", "as"]);
+    module_index.insert_cache("FakeTypeConstraints", Some(cached));
+    let diags = collect_diagnostics(&analysis, &module_index, Default::default());
+    let unresolved: Vec<&str> = diags.iter()
+        .filter_map(|d| {
+            if matches!(&d.code, Some(NumberOrString::String(c)) if c == "unresolved-function") {
+                Some(d.message.as_str())
+            } else {
+                None
+            }
+        })
+        .collect();
+    assert!(
+        unresolved.iter().any(|m| m.contains("truly_undefined_fn")),
+        "truly_undefined_fn must still produce an unresolved-function diagnostic; got: {:?}",
+        unresolved,
+    );
+}
+
+// ── P3: lowercase `does` universal method ───────────────────────────────────
+
+/// `$obj->does(...)` must not be flagged as an unresolved method.
+/// Moose adds lowercase `does` to every class alongside UNIVERSAL's uppercase DOES.
+#[test]
+fn does_method_not_flagged_unresolved() {
+    let source = "package M;\nuse Moose;\nsub check {\n    my ($self, $role) = @_;\n    return $self->does($role);\n}\n1;\n";
+    let analysis = parse_analysis(source);
+    let module_index = crate::module_index::ModuleIndex::new_for_test();
+    let diags = collect_diagnostics(&analysis, &module_index, Default::default());
+    let unresolved_method: Vec<&str> = diags.iter()
+        .filter_map(|d| {
+            if matches!(&d.code, Some(NumberOrString::String(c)) if c == "unresolved-method") {
+                Some(d.message.as_str())
+            } else {
+                None
+            }
+        })
+        .collect();
+    assert!(
+        !unresolved_method.iter().any(|m| m.contains("does")),
+        "`does` must be in the universal-methods skip list and not flagged; got: {:?}",
+        unresolved_method,
+    );
+}
+
+// ── Incomplete ISA chain → honest-silent unresolved-method ───────────────────
+// A class whose `@ISA` names a parent we can't resolve (not in the workspace,
+// not in @INC) has an INCOMPLETE chain: the called method might be inherited
+// from the unresolvable parent. Every invocant-typing path must consult the
+// SAME `class_has_unresolved_ancestor` predicate so they can't drift (rule #10).
+
+fn unresolved_method_messages(diags: &[Diagnostic]) -> Vec<String> {
+    diags.iter()
+        .filter(|d| matches!(&d.code, Some(NumberOrString::String(c)) if c == "unresolved-method"))
+        .map(|d| d.message.clone())
+        .collect()
+}
+
+/// THE FIX: `$self = shift; $self->inherited()` where the class `use base`s an
+/// unresolvable parent must NOT emit unresolved-method. The `$self`/FirstParam
+/// path was the one that leaked before the shared guard.
+#[test]
+fn self_invocant_unresolvable_parent_no_unresolved_method_use_base() {
+    let source = "package Child;\nuse base qw(MyDep);\nsub new { bless {}, shift }\nsub local_thing {\n    my $self = shift;\n    return $self->dep_method();\n}\n1;\n";
+    let analysis = parse_analysis(source);
+    let module_index = crate::module_index::ModuleIndex::new_for_test();
+    let diags = collect_diagnostics(&analysis, &module_index, Default::default());
+    let um = unresolved_method_messages(&diags);
+    assert!(
+        um.is_empty(),
+        "$self->dep_method with unresolvable `use base` parent must stay silent; got: {:?}",
+        um,
+    );
+}
+
+/// Same gate via `use parent`.
+#[test]
+fn self_invocant_unresolvable_parent_no_unresolved_method_use_parent() {
+    let source = "package Child;\nuse parent -norequire, 'MyDep';\nsub new { bless {}, shift }\nsub local_thing {\n    my $self = shift;\n    return $self->dep_method();\n}\n1;\n";
+    let analysis = parse_analysis(source);
+    let module_index = crate::module_index::ModuleIndex::new_for_test();
+    let diags = collect_diagnostics(&analysis, &module_index, Default::default());
+    let um = unresolved_method_messages(&diags);
+    assert!(um.is_empty(), "unresolvable `use parent` parent must stay silent; got: {:?}", um);
+}
+
+/// Same gate via `our @ISA =`.
+#[test]
+fn self_invocant_unresolvable_parent_no_unresolved_method_at_isa() {
+    let source = "package Child;\nour @ISA = ('MyDep');\nsub new { bless {}, shift }\nsub local_thing {\n    my $self = shift;\n    return $self->dep_method();\n}\n1;\n";
+    let analysis = parse_analysis(source);
+    let module_index = crate::module_index::ModuleIndex::new_for_test();
+    let diags = collect_diagnostics(&analysis, &module_index, Default::default());
+    let um = unresolved_method_messages(&diags);
+    assert!(um.is_empty(), "unresolvable `our @ISA` parent must stay silent; got: {:?}", um);
+}
+
+/// Regression: the direct-invocant paths (`Pkg->new->m`, `Pkg->m`) on a class
+/// with an unresolvable parent must also stay silent — same predicate.
+#[test]
+fn direct_invocant_unresolvable_parent_no_unresolved_method() {
+    let source = "package Child;\nuse base qw(MyDep);\nsub new { bless {}, shift }\nsub callers {\n    Child->dep_method();\n    my $c = Child->new;\n    $c->dep_method();\n}\n1;\n";
+    let analysis = parse_analysis(source);
+    let module_index = crate::module_index::ModuleIndex::new_for_test();
+    let diags = collect_diagnostics(&analysis, &module_index, Default::default());
+    let um = unresolved_method_messages(&diags);
+    assert!(
+        um.is_empty(),
+        "direct-invocant calls on a class with an unresolvable parent must stay silent; got: {:?}",
+        um,
+    );
+}
+
+/// No over-suppression: a class with NO parents calling a genuinely missing
+/// method STILL flags. The chain is complete, so the FP is a real TP.
+#[test]
+fn no_parents_missing_method_still_flags() {
+    let source = "package Foo;\nsub new { bless {}, shift }\nsub real { 1 }\npackage main;\nmy $f = Foo->new;\n$f->totally_bogus_xyz();\n";
+    let analysis = parse_analysis(source);
+    let module_index = crate::module_index::ModuleIndex::new_for_test();
+    let diags = collect_diagnostics(&analysis, &module_index, Default::default());
+    let um = unresolved_method_messages(&diags);
+    assert!(
+        um.iter().any(|m| m.contains("totally_bogus_xyz")),
+        "a parentless class calling a missing method must still flag; got: {:?}",
+        um,
+    );
+}
+
+/// No over-suppression on a fully-resolved 2-hop chain: an inherited method
+/// resolves (silent) AND a genuinely missing one still flags. All packages are
+/// local here, so the whole chain is known.
+#[test]
+fn fully_resolved_two_hop_chain_resolves_inherited_and_flags_missing() {
+    let source = "package GrandPa;\nsub new { bless {}, shift }\nsub gp_method { 1 }\npackage Pa;\nuse parent -norequire, 'GrandPa';\npackage Kid;\nuse parent -norequire, 'Pa';\nsub use_things {\n    my $self = shift;\n    $self->gp_method();\n    $self->missing_method();\n}\n1;\n";
+    let analysis = parse_analysis(source);
+    let module_index = crate::module_index::ModuleIndex::new_for_test();
+    let diags = collect_diagnostics(&analysis, &module_index, Default::default());
+    let um = unresolved_method_messages(&diags);
+    assert!(
+        !um.iter().any(|m| m.contains("gp_method")),
+        "gp_method is inherited 2 hops on a fully-resolved chain — must NOT flag; got: {:?}",
+        um,
+    );
+    assert!(
+        um.iter().any(|m| m.contains("missing_method")),
+        "missing_method on a fully-resolved chain must still flag; got: {:?}",
+        um,
+    );
+}
+
+
+#[test]
+fn classic_perl_filehandle_fps_suppressed() {
+    // `print FH LIST` / `say FH` / `printf FH` must not flag the bareword
+    // filehandle as an unresolved function.
+    let module_index = crate::module_index::ModuleIndex::new_for_test();
+    for src in [
+        "print STDERR \"hi\";\n",
+        "printf STDERR \"%s\", $x;\n",
+        "say STDOUT \"hi\";\n",
+        "print DATA;\n",
+        "STDOUT->autoflush(1);\n",
+        "my $t = -t STDIN;\n",
+    ] {
+        let analysis = parse_analysis(src);
+        let diags = collect_diagnostics(&analysis, &module_index, Default::default());
+        assert!(
+            diags.is_empty(),
+            "filehandle FP for `{}`: {:?}",
+            src.trim(),
+            diags.iter().map(|d| d.message.clone()).collect::<Vec<_>>(),
+        );
+    }
+}
+
+#[test]
+fn print_with_real_call_in_list_still_flags() {
+    // The filehandle suppression must not swallow real calls in the list.
+    let module_index = crate::module_index::ModuleIndex::new_for_test();
+    let analysis = parse_analysis("print STDERR \"a\", frobnicate();\n");
+    let diags = collect_diagnostics(&analysis, &module_index, Default::default());
+    assert!(
+        diags.iter().any(|d| d.message.contains("frobnicate")),
+        "real call `frobnicate` in print list must still flag; got: {:?}",
+        diags.iter().map(|d| d.message.clone()).collect::<Vec<_>>(),
+    );
+}
+
+#[test]
+fn use_constant_callsites_not_flagged() {
+    // Both scalar and block forms register the constant as a local sub, so
+    // same-file callsites no longer flag as unresolved functions.
+    let module_index = crate::module_index::ModuleIndex::new_for_test();
+    for src in [
+        "use constant DEBUG => 1;\nmy $y = DEBUG && 2;\n",
+        "use constant { A => 1, B => 2 };\nmy $z = A() + B();\n",
+    ] {
+        let analysis = parse_analysis(src);
+        let diags = collect_diagnostics(&analysis, &module_index, Default::default());
+        assert!(
+            diags.is_empty(),
+            "use-constant callsite FP for `{}`: {:?}",
+            src.trim(),
+            diags.iter().map(|d| d.message.clone()).collect::<Vec<_>>(),
+        );
+    }
+}
+
+#[test]
+fn require_bareword_not_flagged() {
+    let module_index = crate::module_index::ModuleIndex::new_for_test();
+    for src in ["require Carp;\n", "require Foo::Bar;\n"] {
+        let analysis = parse_analysis(src);
+        let diags = collect_diagnostics(&analysis, &module_index, Default::default());
+        assert!(
+            diags.is_empty(),
+            "require-bareword FP for `{}`: {:?}",
+            src.trim(),
+            diags.iter().map(|d| d.message.clone()).collect::<Vec<_>>(),
+        );
+    }
+}
+
+// ---- NAV-B: %EXPORT_TAGS single export surface, goto-def + diagnostic agree ----
+
+/// Build a cached module from raw Perl source (lets tests seed `%EXPORT_TAGS`
+/// producers that `fake_cached` can't express).
+fn cached_from_source(path: &str, source: &str) -> std::sync::Arc<crate::module_index::CachedModule> {
+    std::sync::Arc::new(crate::module_index::CachedModule::new(
+        std::path::PathBuf::from(path),
+        std::sync::Arc::new(parse_analysis(source)),
+    ))
+}
+
+/// The Perl::Critic::Utils shape: `hashify` exported only via a
+/// `Readonly::Hash our %EXPORT_TAGS` member. A consumer importing the
+/// `:data_conversion` tag and calling `hashify` must NOT be flagged as
+/// unresolved (the diagnostic agrees with goto-def's resolution).
+#[test]
+fn export_tags_tag_import_diagnostic_agrees() {
+    let producer = r#"
+package Perl::Critic::Utils;
+Readonly::Array our @EXPORT_OK => qw( interpolate );
+Readonly::Hash our %EXPORT_TAGS => (
+    all             => [ @EXPORT_OK ],
+    data_conversion => [ qw{ hashify words_from_string interpolate } ],
+);
+sub hashify { 1 }
+sub words_from_string { 2 }
+sub interpolate { 3 }
+1;
+"#;
+    let consumer = "use Perl::Critic::Utils qw(:data_conversion);\nmy %h = hashify(@list);\n";
+    let analysis = parse_analysis(consumer);
+    let module_index = crate::module_index::ModuleIndex::new_for_test();
+    module_index.insert_cache(
+        "Perl::Critic::Utils",
+        Some(cached_from_source("/usr/lib/perl5/Perl/Critic/Utils.pm", producer)),
+    );
+
+    let diags = collect_diagnostics(&analysis, &module_index, Default::default());
+    let hashify_diags: Vec<_> = diags.iter().filter(|d| d.message.contains("hashify")).collect();
+    assert!(
+        hashify_diags.is_empty(),
+        "tag-imported `hashify` must not be flagged unresolved; got {:?}",
+        hashify_diags.iter().map(|d| &d.message).collect::<Vec<_>>(),
+    );
+
+    // Goto-def reaches the producer file via the same export surface.
+    let (_import, path, remote) =
+        resolve_imported_function(&analysis, "hashify", &module_index)
+            .expect("hashify resolves through the folded export surface");
+    assert_eq!(remote, "hashify");
+    assert!(path.ends_with("Perl/Critic/Utils.pm"));
+}
+
+/// A name in neither `@EXPORT*` nor any tag is still unresolved — the fold
+/// widens the surface only for genuine tag members.
+#[test]
+fn export_tags_non_member_still_unresolved() {
+    let producer = r#"
+package Util::Tagged;
+Readonly::Hash our %EXPORT_TAGS => (
+    data_conversion => [ qw{ hashify } ],
+);
+sub hashify { 1 }
+sub private_helper { 2 }
+1;
+"#;
+    let consumer = "use Util::Tagged qw(:data_conversion);\nprivate_helper();\n";
+    let analysis = parse_analysis(consumer);
+    let module_index = crate::module_index::ModuleIndex::new_for_test();
+    module_index.insert_cache(
+        "Util::Tagged",
+        Some(cached_from_source("/usr/lib/perl5/Util/Tagged.pm", producer)),
+    );
+
+    assert!(
+        resolve_imported_function(&analysis, "private_helper", &module_index).is_none(),
+        "non-exported sub must not resolve through the export surface",
+    );
+    let diags = collect_diagnostics(&analysis, &module_index, Default::default());
+    assert!(
+        diags.iter().any(|d| d.message.contains("private_helper")),
+        "non-exported sub must still be flagged; got {:?}",
+        diags.iter().map(|d| &d.message).collect::<Vec<_>>(),
+    );
+}
+
+/// TASK B.1 — goto-def on an imported-function CALL SITE one-hops to the
+/// DEFINING sub in the provider module, not the consumer's local `use` line.
+/// The producer module is cached, so `sub_info(remote).def_line()` resolves;
+/// the response must be a Scalar landing on that line in the .pm.
+#[test]
+fn imported_function_call_goto_def_reaches_module_sub() {
+    let provider_src = "package My::Util;\n\
+our @EXPORT_OK = qw(helper_fn);\n\
+sub helper_fn {\n\
+  my ($x) = @_;\n\
+  return $x * 2;\n\
+}\n\
+1;\n";
+    let idx = crate::module_index::ModuleIndex::new_for_test();
+    idx.register_workspace_module(
+        std::path::PathBuf::from("/tmp/perl_lsp_pin_My_Util.pm"),
+        std::sync::Arc::new(parse_analysis(provider_src)),
+    );
+
+    let consumer_src = "use My::Util qw(helper_fn);\n\
+my $v = helper_fn(21);\n";
+    let consumer = parse_analysis(consumer_src);
+    let mut parser = tree_sitter::Parser::new();
+    parser.set_language(&ts_parser_perl::LANGUAGE.into()).unwrap();
+    let tree = parser.parse(consumer_src, None).unwrap();
+
+    // Cursor on the `helper_fn` token at the call site (line 1, not the use line).
+    let byte = consumer_src.find("helper_fn(21)").expect("call site present");
+    let prefix = &consumer_src[..byte];
+    let pos = Position {
+        line: prefix.matches('\n').count() as u32,
+        character: (byte - prefix.rfind('\n').map(|i| i + 1).unwrap_or(0)) as u32,
+    };
+
+    let uri = Url::parse("file:///consumer.pl").unwrap();
+    let resp = find_definition(&consumer, pos, &uri, &idx, &tree, consumer_src);
+    let loc = match resp {
+        Some(GotoDefinitionResponse::Scalar(loc)) => loc,
+        other => panic!("expected a single-hop Scalar to the module sub, got {other:?}"),
+    };
+    assert!(
+        loc.uri.path().ends_with("My_Util.pm"),
+        "goto-def should land in the provider file, got {}",
+        loc.uri,
+    );
+    // `sub helper_fn` is the 3rd line (0-based row 2) of the provider source.
+    assert_eq!(
+        loc.range.start.line, 2,
+        "should land on the defining `sub helper_fn` line, not the consumer's use stmt",
+    );
+}
+
+/// TASK B.2 — goto-def on the INVOCANT class-name token in `Foo->bar()`
+/// resolves to the `package Foo` decl (a PackageRef), exactly like `use Foo`.
+/// The narrower PackageRef at the bareword span must win over the wider
+/// MethodCall ref describing `bar`.
+#[test]
+fn class_invocant_goto_def_reaches_package_decl() {
+    let source = "package Foo;\n\
+sub bar { 42 }\n\
+sub new { bless {}, shift }\n\
+package main;\n\
+Foo->bar();\n";
+    let analysis = parse_analysis(source);
+    let mut parser = tree_sitter::Parser::new();
+    parser.set_language(&ts_parser_perl::LANGUAGE.into()).unwrap();
+    let tree = parser.parse(source, None).unwrap();
+    let idx = crate::module_index::ModuleIndex::new_for_test();
+
+    // Cursor on the `Foo` invocant in `Foo->bar()`.
+    let byte = source.find("Foo->bar").expect("invocant present");
+    let prefix = &source[..byte];
+    let pos = Position {
+        line: prefix.matches('\n').count() as u32,
+        character: (byte - prefix.rfind('\n').map(|i| i + 1).unwrap_or(0)) as u32 + 1,
+    };
+    let uri = Url::parse("file:///test.pl").unwrap();
+    let resp = find_definition(&analysis, pos, &uri, &idx, &tree, source);
+    let loc = match resp {
+        Some(GotoDefinitionResponse::Scalar(loc)) => loc,
+        other => panic!("expected goto-def on class invocant, got {other:?}"),
+    };
+    assert_eq!(
+        loc.range.start.line, 0,
+        "`Foo` invocant should resolve to `package Foo;` (line 0), not the constructor or method",
+    );
+}
+
+/// TASK B.2 regression guard — the METHOD token (`bar`) in `Foo->bar()` must
+/// still resolve to the `sub bar` decl (NAV-A's precise method ref), NOT the
+/// package. Emitting the invocant PackageRef must not shadow the method token.
+#[test]
+fn method_token_goto_def_unaffected_by_invocant_package_ref() {
+    let source = "package Foo;\n\
+sub bar { 42 }\n\
+package main;\n\
+Foo->bar();\n";
+    let analysis = parse_analysis(source);
+    let mut parser = tree_sitter::Parser::new();
+    parser.set_language(&ts_parser_perl::LANGUAGE.into()).unwrap();
+    let tree = parser.parse(source, None).unwrap();
+    let idx = crate::module_index::ModuleIndex::new_for_test();
+
+    // Cursor on the `bar` method token.
+    let byte = source.rfind("bar()").expect("method token present");
+    let prefix = &source[..byte];
+    let pos = Position {
+        line: prefix.matches('\n').count() as u32,
+        character: (byte - prefix.rfind('\n').map(|i| i + 1).unwrap_or(0)) as u32,
+    };
+    let uri = Url::parse("file:///test.pl").unwrap();
+    let resp = find_definition(&analysis, pos, &uri, &idx, &tree, source);
+    let loc = match resp {
+        Some(GotoDefinitionResponse::Scalar(loc)) => loc,
+        other => panic!("expected goto-def on method token, got {other:?}"),
+    };
+    assert_eq!(
+        loc.range.start.line, 1,
+        "`bar` method token should resolve to `sub bar` (line 1), not the package decl",
+    );
+}
+
+// ---- Consumer import-binding evaluator (ExportSurface / imported_names) ----
+//
+// One bound set, every consumer reads it: the unresolved-function diagnostic
+// and goto-def both route through `imported_names`, so "found by goto-def,
+// flagged by diagnostic" is impossible. ModX has @EXPORT=always_here,
+// @EXPORT_OK=opt_here, %EXPORT_TAGS=(all=>[both]).
+
+fn modx_index() -> crate::module_index::ModuleIndex {
+    let idx = crate::module_index::ModuleIndex::new_for_test();
+    let src = "package ModX;\n\
+our @EXPORT = qw(always_here);\n\
+our @EXPORT_OK = qw(opt_here);\n\
+our %EXPORT_TAGS = (all => [qw(always_here opt_here)]);\n\
+sub always_here { 1 }\n\
+sub opt_here { 2 }\n\
+1;\n";
+    idx.register_workspace_module(
+        std::path::PathBuf::from("/tmp/perl_lsp_pin_ModX.pm"),
+        std::sync::Arc::new(parse_analysis(src)),
+    );
+    idx
+}
+
+/// Does the unresolved-function diagnostic flag `name` in `source`?
+fn flags_fn(source: &str, name: &str, idx: &crate::module_index::ModuleIndex) -> bool {
+    let analysis = parse_analysis(source);
+    collect_diagnostics(&analysis, idx, Default::default())
+        .iter()
+        .any(|d| {
+            matches!(&d.code, Some(NumberOrString::String(c)) if c == "unresolved-function")
+                && d.message.contains(&format!("'{}'", name))
+        })
+}
+
+/// Does goto-def resolve the LAST call to `name` in `source` to ModX.pm?
+fn gd_resolves(source: &str, name: &str, idx: &crate::module_index::ModuleIndex) -> bool {
+    let analysis = parse_analysis(source);
+    let mut parser = tree_sitter::Parser::new();
+    parser.set_language(&ts_parser_perl::LANGUAGE.into()).unwrap();
+    let tree = parser.parse(source, None).unwrap();
+    let byte = source.rfind(&format!("{}(", name)).expect("call site present");
+    let prefix = &source[..byte];
+    let pos = Position {
+        line: prefix.matches('\n').count() as u32,
+        character: (byte - prefix.rfind('\n').map(|i| i + 1).unwrap_or(0)) as u32,
+    };
+    let uri = Url::parse("file:///consumer.pl").unwrap();
+    let loc = match find_definition(&analysis, pos, &uri, idx, &tree, source) {
+        Some(GotoDefinitionResponse::Scalar(loc)) => Some(loc),
+        Some(GotoDefinitionResponse::Array(mut v)) if !v.is_empty() => Some(v.remove(0)),
+        _ => None,
+    };
+    loc.map_or(false, |l| l.uri.path().ends_with("ModX.pm"))
+}
+
+#[test]
+fn bare_use_binds_export_default_no_fp_and_gd_resolves() {
+    let idx = modx_index();
+    let src = "use ModX;\nalways_here();\n";
+    assert!(!flags_fn(src, "always_here", &idx), "bare use binds @EXPORT — no FP");
+    assert!(gd_resolves(src, "always_here", &idx), "goto-def resolves @EXPORT name");
+}
+
+#[test]
+fn named_import_still_works_regression() {
+    let idx = modx_index();
+    let src = "use ModX qw(opt_here);\nopt_here();\n";
+    assert!(!flags_fn(src, "opt_here", &idx), "named import binds the name");
+    assert!(gd_resolves(src, "opt_here", &idx), "goto-def resolves named import");
+}
+
+#[test]
+fn tag_selector_binds_members_no_fp_and_gd_resolves() {
+    let idx = modx_index();
+    let src = "use ModX qw(:all);\nopt_here();\n";
+    assert!(!flags_fn(src, "opt_here", &idx), ":all tag binds member opt_here");
+    assert!(gd_resolves(src, "opt_here", &idx), "goto-def resolves :tag member");
+}
+
+#[test]
+fn default_tag_equals_export() {
+    let idx = modx_index();
+    // :DEFAULT is the Exporter alias for @EXPORT — binds always_here, not opt_here.
+    let src = "use ModX qw(:DEFAULT);\nalways_here();\n";
+    assert!(!flags_fn(src, "always_here", &idx), ":DEFAULT binds @EXPORT member");
+    assert!(gd_resolves(src, "always_here", &idx), "goto-def resolves :DEFAULT member");
+}
+
+#[test]
+fn as_rename_binds_local_to_origin() {
+    let idx = modx_index();
+    // local `here` aliases origin `always_here`; goto-def on `here` reaches the origin.
+    let src = "use ModX always_here => { -as => 'here' };\nhere();\n";
+    let analysis = parse_analysis(src);
+    let renamed = analysis
+        .imports
+        .iter()
+        .flat_map(|i| i.imported_symbols.iter())
+        .find(|s| s.local_name == "here");
+    assert!(
+        renamed.map_or(false, |s| s.remote() == "always_here"),
+        "the -as rename must bind local `here` to origin `always_here`; imports: {:?}",
+        analysis.imports.iter().map(|i| i.imported_symbols.clone()).collect::<Vec<_>>(),
+    );
+    assert!(!flags_fn(src, "here", &idx), "renamed local `here` is bound — no FP");
+    assert!(gd_resolves(src, "here", &idx), "goto-def on `here` reaches origin sub");
+}
+
+#[test]
+fn as_rename_plain_comma_binds_local_to_origin() {
+    let idx = modx_index();
+    // `=>` is an autoquoting comma — `'always_here', { '-as', 'here' }` is
+    // identical to `always_here => { -as => 'here' }`. The rename parse must
+    // pair positionally so the plain-comma spelling binds the alias too.
+    let src = "use ModX 'always_here', { '-as', 'here' };\nhere();\n";
+    let analysis = parse_analysis(src);
+    let renamed = analysis
+        .imports
+        .iter()
+        .flat_map(|i| i.imported_symbols.iter())
+        .find(|s| s.local_name == "here");
+    assert!(
+        renamed.map_or(false, |s| s.remote() == "always_here"),
+        "plain-comma -as rename must bind local `here` to origin `always_here`; imports: {:?}",
+        analysis.imports.iter().map(|i| i.imported_symbols.clone()).collect::<Vec<_>>(),
+    );
+    assert!(!flags_fn(src, "here", &idx), "renamed local `here` is bound — no FP");
+    assert!(gd_resolves(src, "here", &idx), "goto-def on `here` reaches origin sub");
+}
+
+#[test]
+fn empty_import_binds_nothing_flags_export_name() {
+    let idx = modx_index();
+    // `use ModX ();` — explicit empty list suppresses even @EXPORT.
+    let src = "use ModX ();\nalways_here();\n";
+    assert!(
+        flags_fn(src, "always_here", &idx),
+        "empty `()` import binds nothing — @EXPORT name must flag (honest)",
+    );
+}
+
+#[test]
+fn export_ok_on_bare_use_is_suppressed_gate5() {
+    let idx = modx_index();
+    // GATE-5 (load-bearing): a bare `use M;` suppresses unresolved-function for
+    // @EXPORT_OK names. The builder cannot distinguish a runtime exporter's
+    // defaults (recorded in export_ok) from traditional opt-in, so flagging them
+    // would reintroduce the ~684-FP cluster. The honest "binds nothing" path is
+    // `use M ();` (empty parens), tested separately.
+    let src = "use ModX;\nopt_here();\n";
+    assert!(
+        !flags_fn(src, "opt_here", &idx),
+        "bare use must suppress unresolved-function for @EXPORT_OK names (684-FP guard)",
+    );
+}
+
+#[test]
+fn diagnostic_and_gotodef_agree_on_bound_set() {
+    let idx = modx_index();
+    // For every case, "flagged by diagnostic" must equal "NOT brought" — and a
+    // name the diagnostic stays silent on (brought) must goto-def resolve.
+    let cases: &[(&str, &str, bool)] = &[
+        // (source, name, should_flag_as_unresolved-function)
+        ("use ModX;\nalways_here();\n", "always_here", false),
+        ("use ModX qw(opt_here);\nopt_here();\n", "opt_here", false),
+        ("use ModX qw(:all);\nopt_here();\n", "opt_here", false),
+        ("use ModX ();\nalways_here();\n", "always_here", true),
+    ];
+    for (src, name, should_flag) in cases {
+        let flagged = flags_fn(src, name, &idx);
+        assert_eq!(
+            flagged, *should_flag,
+            "diagnostic verdict mismatch for `{}` in {:?}",
+            name, src,
+        );
+        // Brought names (not flagged) must be navigable.
+        if !should_flag {
+            assert!(
+                gd_resolves(src, name, &idx),
+                "a non-flagged (brought) name must goto-def resolve: `{}` in {:?}",
+                name, src,
+            );
+        }
+    }
+}
+
+// ---- Transitive export surface: re-export edges (forms 1/2/3) ----
+//
+// A re-exporting module M folds another module's surface into its own. The
+// consumer `imported_names` evaluator is UNCHANGED — it binds M's @EXPORT,
+// which `ExportSurface` now reports transitively. Each test registers the
+// producer(s) and M, then asserts the consumer's `use M;` binds the re-exported
+// names (no FP) and goto-def reaches the defining producer file.
+
+/// Register a module under a path derived from its name (`Pkg::Sub` →
+/// `/tmp/perl_lsp_re_Pkg_Sub.pm`) so goto-def assertions can pin the file.
+fn register_module(idx: &crate::module_index::ModuleIndex, pkg: &str, src: &str) {
+    let file = format!("/tmp/perl_lsp_re_{}.pm", pkg.replace("::", "_"));
+    idx.register_workspace_module(
+        std::path::PathBuf::from(file),
+        std::sync::Arc::new(parse_analysis(src)),
+    );
+}
+
+/// Like `gd_resolves`, but pins the resolved file to `target_file`.
+fn gd_resolves_to(
+    source: &str,
+    name: &str,
+    idx: &crate::module_index::ModuleIndex,
+    target_file: &str,
+) -> bool {
+    let analysis = parse_analysis(source);
+    let mut parser = tree_sitter::Parser::new();
+    parser.set_language(&ts_parser_perl::LANGUAGE.into()).unwrap();
+    let tree = parser.parse(source, None).unwrap();
+    let byte = source.rfind(&format!("{}(", name)).expect("call site present");
+    let prefix = &source[..byte];
+    let pos = Position {
+        line: prefix.matches('\n').count() as u32,
+        character: (byte - prefix.rfind('\n').map(|i| i + 1).unwrap_or(0)) as u32,
+    };
+    let uri = Url::parse("file:///consumer.pl").unwrap();
+    let loc = match find_definition(&analysis, pos, &uri, idx, &tree, source) {
+        Some(GotoDefinitionResponse::Scalar(loc)) => Some(loc),
+        Some(GotoDefinitionResponse::Array(mut v)) if !v.is_empty() => Some(v.remove(0)),
+        _ => None,
+    };
+    loc.map_or(false, |l| l.uri.path().ends_with(target_file))
+}
+
+#[test]
+fn reexport_static_splice_binds_transitively() {
+    // Form 1: `our @EXPORT = ('own_fn', @Base::EXPORT)` re-exports Base's surface.
+    let idx = crate::module_index::ModuleIndex::new_for_test();
+    register_module(&idx, "Base", "package Base;\nour @EXPORT = qw(base_fn);\nsub base_fn { 1 }\n1;\n");
+    register_module(
+        &idx,
+        "M",
+        "package M;\nour @EXPORT = ('own_fn', @Base::EXPORT);\nsub own_fn { 2 }\n1;\n",
+    );
+
+    let src = "use M;\nbase_fn();\nown_fn();\n";
+    assert!(!flags_fn(src, "base_fn", &idx), "re-exported base_fn binds, no FP");
+    assert!(!flags_fn(src, "own_fn", &idx), "own_fn binds, no FP");
+    assert!(
+        gd_resolves_to(src, "base_fn", &idx, "re_Base.pm"),
+        "goto-def base_fn reaches Base",
+    );
+    assert!(
+        gd_resolves_to(src, "own_fn", &idx, "re_M.pm"),
+        "goto-def own_fn reaches M",
+    );
+}
+
+#[test]
+fn reexport_loop_push_literal_qw_binds() {
+    // Form 2: loop-push over a literal qw module list.
+    let idx = crate::module_index::ModuleIndex::new_for_test();
+    register_module(&idx, "A", "package A;\nour @EXPORT = qw(a_fn);\nsub a_fn { 1 }\n1;\n");
+    register_module(&idx, "B", "package B;\nour @EXPORT = qw(b_fn);\nsub b_fn { 1 }\n1;\n");
+    register_module(
+        &idx,
+        "M",
+        "package M;\nour @EXPORT = ();\nfor my $m (qw(A B)) {\n    push @EXPORT, @{\"${m}::EXPORT\"};\n}\n1;\n",
+    );
+
+    let src = "use M;\na_fn();\nb_fn();\n";
+    assert!(!flags_fn(src, "a_fn", &idx), "loop-push re-exports A::a_fn");
+    assert!(!flags_fn(src, "b_fn", &idx), "loop-push re-exports B::b_fn");
+    assert!(gd_resolves_to(src, "a_fn", &idx, "re_A.pm"), "gd a_fn → A");
+    assert!(gd_resolves_to(src, "b_fn", &idx, "re_B.pm"), "gd b_fn → B");
+}
+
+#[test]
+fn reexport_loop_push_samefile_array_binds() {
+    // Form 2 variant: the loop list is a same-file `my @mods = (...)` we chase.
+    let idx = crate::module_index::ModuleIndex::new_for_test();
+    register_module(&idx, "A", "package A;\nour @EXPORT = qw(a_fn);\nsub a_fn { 1 }\n1;\n");
+    register_module(&idx, "B", "package B;\nour @EXPORT = qw(b_fn);\nsub b_fn { 1 }\n1;\n");
+    register_module(
+        &idx,
+        "M",
+        "package M;\nour @EXPORT = ();\nmy @mods = ('A', 'B');\nfor my $m (@mods) {\n    push @EXPORT, @{\"${m}::EXPORT\"};\n}\n1;\n",
+    );
+
+    let src = "use M;\na_fn();\nb_fn();\n";
+    assert!(!flags_fn(src, "a_fn", &idx), "same-file @mods list re-exports A");
+    assert!(!flags_fn(src, "b_fn", &idx), "same-file @mods list re-exports B");
+}
+
+#[test]
+fn reexport_loop_push_dynamic_list_mints_no_edge() {
+    // Form 2 honesty: a dynamic/unresolvable module list mints NO edge — the
+    // re-exported name stays unresolved (we don't fabricate).
+    let idx = crate::module_index::ModuleIndex::new_for_test();
+    register_module(&idx, "A", "package A;\nour @EXPORT = qw(a_fn);\nsub a_fn { 1 }\n1;\n");
+    register_module(
+        &idx,
+        "M",
+        "package M;\nour @EXPORT = ();\nfor my $m (@dynamic_runtime_list) {\n    push @EXPORT, @{\"${m}::EXPORT\"};\n}\n1;\n",
+    );
+    // Confirm no edge was minted on M.
+    let m = idx.get_cached("M").expect("M cached");
+    assert!(
+        m.analysis.reexport_modules.is_empty(),
+        "dynamic list must mint no re-export edge, got: {:?}",
+        m.analysis.reexport_modules,
+    );
+
+    let src = "use M;\na_fn();\n";
+    assert!(flags_fn(src, "a_fn", &idx), "dynamic list → a_fn stays unresolved (honest)");
+}
+
+#[test]
+fn reexport_declarative_also_binds() {
+    // Form 3: `setup_import_methods(also => ['Base'])` includes Base's surface.
+    let idx = crate::module_index::ModuleIndex::new_for_test();
+    register_module(&idx, "Base", "package Base;\nour @EXPORT = qw(base_fn);\nsub base_fn { 1 }\n1;\n");
+    register_module(
+        &idx,
+        "M",
+        "package M;\nuse Moose::Exporter;\nMoose::Exporter->setup_import_methods( also => [ 'Base' ] );\n1;\n",
+    );
+    let m = idx.get_cached("M").expect("M cached");
+    assert!(
+        m.analysis.reexport_modules.contains(&"Base".to_string()),
+        "also => ['Base'] mints a re-export edge, got: {:?}",
+        m.analysis.reexport_modules,
+    );
+
+    let src = "use M;\nbase_fn();\n";
+    assert!(!flags_fn(src, "base_fn", &idx), "also-re-exported base_fn binds");
+    assert!(gd_resolves_to(src, "base_fn", &idx, "re_Base.pm"), "gd base_fn → Base");
+}
+
+#[test]
+fn reexport_cycle_resolves_finitely() {
+    // A re-exports B, B re-exports A — the seen-set bounds the walk; the
+    // consumer's surface query must terminate and bind both names.
+    let idx = crate::module_index::ModuleIndex::new_for_test();
+    register_module(
+        &idx,
+        "A",
+        "package A;\nour @EXPORT = ('a_fn', @B::EXPORT);\nsub a_fn { 1 }\n1;\n",
+    );
+    register_module(
+        &idx,
+        "B",
+        "package B;\nour @EXPORT = ('b_fn', @A::EXPORT);\nsub b_fn { 1 }\n1;\n",
+    );
+
+    let src = "use A;\na_fn();\nb_fn();\n";
+    assert!(!flags_fn(src, "a_fn", &idx), "cycle: a_fn binds");
+    assert!(!flags_fn(src, "b_fn", &idx), "cycle: b_fn binds via A→B edge");
+}
+
+#[test]
+fn reexport_imported_names_evaluator_unchanged() {
+    // Consumer-unchanged guard: `imported_names` is NOT special-cased for
+    // re-exports — it binds whatever the surface reports. A surface built
+    // WITHOUT the index walk (own-only) sees just M's own @EXPORT; built WITH
+    // the index it sees the transitive set. Same evaluator, different surface.
+    let idx = crate::module_index::ModuleIndex::new_for_test();
+    register_module(&idx, "Base", "package Base;\nour @EXPORT = qw(base_fn);\nsub base_fn { 1 }\n1;\n");
+    register_module(
+        &idx,
+        "M",
+        "package M;\nour @EXPORT = ('own_fn', @Base::EXPORT);\nsub own_fn { 2 }\n1;\n",
+    );
+    let m = idx.get_cached("M").expect("M cached");
+
+    // A real bare `use M;` import, parsed from source (no Default on Import).
+    let consumer = parse_analysis("use M;\n");
+    let import = consumer.imports.iter().find(|i| i.module_name == "M").expect("use M import");
+
+    // Own-only surface: just M's own @EXPORT — base_fn NOT visible.
+    let own = m.analysis.export_surface();
+    let bound_own = crate::file_analysis::imported_names(import, &own);
+    assert!(bound_own.iter().any(|(l, _)| l == "own_fn"));
+    assert!(
+        !bound_own.iter().any(|(l, _)| l == "base_fn"),
+        "own-only surface must not include the re-exported name",
+    );
+
+    // Index-walked surface: same evaluator, transitive surface — base_fn binds.
+    let walked = m.analysis.export_surface_with_index(&idx);
+    let bound_walked = crate::file_analysis::imported_names(import, &walked);
+    assert!(bound_walked.iter().any(|(l, _)| l == "own_fn"));
+    assert!(
+        bound_walked.iter().any(|(l, _)| l == "base_fn"),
+        "transitive surface includes the re-exported name — via the SAME evaluator",
+    );
 }

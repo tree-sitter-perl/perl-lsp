@@ -50,6 +50,22 @@ fn enqueue_options() {
     ]
 }
 
+// Dispatch-verb manifest (resolved at enrichment, against the receiver's
+// cross-file class — NOT trigger-gated). This is how `$minion->enqueue('T')`
+// resolves to the task by the receiver's type alone, even in a plain class
+// that never `use`s Minion. The parse-time `on_method_call` branch below
+// still fires in triggered files (its emit is deduped against these), so an
+// index-less build (no receiver type yet) keeps working.
+fn dispatch_verbs() {
+    let verbs = ["enqueue", "enqueue_p", "perform_jobs",
+                 "perform_jobs_in_foreground", "foreground"];
+    let out = [];
+    for v in verbs {
+        out += #{ verb: v, target_class: "Minion", owner_class: "Minion", name_arg_index: 0 };
+    }
+    out
+}
+
 fn triggers() {
     [
         // Fire wherever Minion is in play. `use Minion;` covers
@@ -65,29 +81,34 @@ fn triggers() {
         #{ UsesModule: "Mojolicious::Lite" },
         #{ UsesModule: "Mojolicious" },
         #{ ClassIsa: "Mojolicious" },
+        // Tasks are most often registered in a Mojo plugin's `register`
+        // (`$app->minion->add_task(...)`), whose package isn't a Minion
+        // or Mojolicious subclass. The receiver-type gate below still
+        // confirms it's a Minion call.
+        #{ ClassIsa: "Mojolicious::Plugin" },
     ]
 }
 
-// Extract the task name, owner class, and tight name-span from a
-// method call. Returns () when the call isn't eligible (dynamic name,
-// unrecognized receiver, etc.).
+// Extract the task name and tight name-span from a method call. Returns
+// () when the call isn't eligible (dynamic name).
+//
+// We deliberately do NOT gate on the receiver class. A name-prefix match
+// (`== "Minion" || starts_with("Minion::")`) is the rule-#10 antipattern:
+// a real subclass like `Clove::Minion` (`use Mojo::Base 'Minion'`, often
+// overriding `enqueue`) isa Minion but fails the string test, so its
+// dispatch sites silently emit no ref. The cross-file ancestry that would
+// answer "isa Minion?" isn't resolved at emit time, and mojo-events takes
+// the same no-allowlist stance. The trigger filter (file uses Minion / is
+// a Mojo app or plugin) + the dispatcher method-name set + a string-literal
+// first arg are the signal. Owner is the global Minion task registry, not
+// the receiver's class, so every add_task / enqueue site pairs regardless
+// of which $minion instance (or subclass) it was called on.
 fn resolve_task(ctx) {
     let args = ctx.args;
     if args.len() < 1 { return (); }
 
     let name = args[0].string_value;
     if name == () { return (); }
-
-    // Gate on receiver class when we have one — Minion itself or any
-    // Minion:: subclass. Unknown-typed receivers get a pass so long as
-    // the dispatcher method name matched; the trigger filter plus the
-    // method-name check already narrow this to Minion-shaped calls.
-    let rtype = ctx.receiver_type;
-    if rtype != () && rtype.contains("ClassName") {
-        let rcn = rtype.ClassName;
-        let looks_minion = rcn == "Minion" || rcn.starts_with("Minion::");
-        if !looks_minion { return (); }
-    }
 
     #{
         name: name,

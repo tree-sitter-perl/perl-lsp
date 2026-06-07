@@ -6,7 +6,6 @@ use tower_lsp::lsp_types::*;
 use tower_lsp::lsp_types::{notification, request};
 use tower_lsp::{Client, LanguageServer};
 
-use crate::file_analysis::FileAnalysis;
 use crate::file_store::{FileKey, FileStore};
 use crate::module_index::ModuleIndex;
 use crate::symbols;
@@ -15,6 +14,21 @@ pub struct Backend {
     client: Client,
     files: Arc<FileStore>,
     module_index: Arc<ModuleIndex>,
+    /// Opt-in `unresolved-dispatch` diagnostic toggle, set from
+    /// `initializationOptions.diagnostics.unresolvedDispatch`. Shared with the
+    /// resolver refresh callback (which also publishes diagnostics), hence the
+    /// atomic. Default off — QA/plugin-author channel.
+    unresolved_dispatch: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl Backend {
+    fn diagnostic_options(&self) -> symbols::DiagnosticOptions {
+        symbols::DiagnosticOptions {
+            unresolved_dispatch: self
+                .unresolved_dispatch
+                .load(std::sync::atomic::Ordering::Relaxed),
+        }
+    }
 }
 
 impl Backend {
@@ -24,8 +38,11 @@ impl Backend {
         // We need Arc<ModuleIndex> so the refresh callback can access it.
         // Two-phase init: create ModuleIndex whose refresh callback references
         // a later-set Arc<ModuleIndex>, then wire up the Arc.
+        let unresolved_dispatch = Arc::new(std::sync::atomic::AtomicBool::new(false));
+
         let refresh_client = client.clone();
         let refresh_files = Arc::clone(&files);
+        let refresh_unresolved_dispatch = Arc::clone(&unresolved_dispatch);
 
         let module_index_holder: Arc<std::sync::OnceLock<Arc<ModuleIndex>>> =
             Arc::new(std::sync::OnceLock::new());
@@ -38,6 +55,7 @@ impl Backend {
             let client = refresh_client.clone();
             let files = Arc::clone(&refresh_files);
             let holder = Arc::clone(&holder_clone);
+            let unresolved_dispatch = Arc::clone(&refresh_unresolved_dispatch);
             tokio_handle.spawn(async move {
                 let module_index = match holder.get() {
                     Some(idx) => idx,
@@ -46,9 +64,13 @@ impl Backend {
                 // Collect (uri, diagnostics) first without holding the store lock
                 // across the await — publishing is async and could deadlock.
                 let mut pending: Vec<(Url, Vec<Diagnostic>)> = Vec::new();
+                let options = symbols::DiagnosticOptions {
+                    unresolved_dispatch: unresolved_dispatch
+                        .load(std::sync::atomic::Ordering::Relaxed),
+                };
                 files.for_each_open_mut(|uri, doc| {
                     doc.analysis.enrich_imported_types_with_keys(Some(module_index));
-                    let diagnostics = symbols::collect_diagnostics(&doc.analysis, module_index);
+                    let diagnostics = symbols::collect_diagnostics(&doc.analysis, module_index, options);
                     pending.push((uri.clone(), diagnostics));
                 });
                 for (uri, diags) in pending {
@@ -64,6 +86,7 @@ impl Backend {
             module_index,
             client,
             files,
+            unresolved_dispatch,
         }
     }
 
@@ -75,13 +98,57 @@ impl Backend {
 
     async fn publish_diagnostics(&self, uri: &Url) {
         self.enrich_analysis(uri);
+        let options = self.diagnostic_options();
         let diagnostics = match self.files.get_open(uri) {
-            Some(doc) => symbols::collect_diagnostics(&doc.analysis, &self.module_index),
+            Some(doc) => symbols::collect_diagnostics(&doc.analysis, &self.module_index, options),
             None => vec![],
         };
         self.client
             .publish_diagnostics(uri.clone(), diagnostics, None)
             .await;
+    }
+}
+
+/// Build a WorkspaceEdit by finding every reference to `target` in the editable
+/// workspace and replacing each ref's span with `new_name`.
+///
+/// Rename shares the same resolution path as references — both go through
+/// `refs_to(EDITABLE)`. This is the single place that decides which spans get
+/// edited, so rename and references can't diverge on which call sites qualify.
+/// `refs_to` handles inheritance fan-out for Method targets (via
+/// `method_rename_chain`) so callers on child classes of a base method are
+/// included without any special-casing here.
+fn rename_via_refs_to(
+    files: &FileStore,
+    module_index: Option<&crate::module_index::ModuleIndex>,
+    target: &crate::resolve::TargetRef,
+    new_name: &str,
+) -> Option<WorkspaceEdit> {
+    use crate::resolve::{refs_to, RoleMask};
+
+    // Rename must not touch deps — EDITABLE stops at workspace/open files.
+    let locations = refs_to(files, module_index, target, RoleMask::EDITABLE);
+    if locations.is_empty() {
+        return None;
+    }
+
+    let mut all_changes: std::collections::HashMap<Url, Vec<TextEdit>> =
+        std::collections::HashMap::new();
+    for loc in locations {
+        if let Some(uri) = loc.to_url() {
+            all_changes.entry(uri).or_default().push(TextEdit {
+                range: symbols::span_to_range(loc.span),
+                new_text: new_name.to_string(),
+            });
+        }
+    }
+    if all_changes.is_empty() {
+        None
+    } else {
+        Some(WorkspaceEdit {
+            changes: Some(all_changes),
+            ..Default::default()
+        })
     }
 }
 
@@ -126,6 +193,22 @@ impl LanguageServer for Backend {
                     .map(|f| f.uri.as_str())
             });
         self.module_index.set_workspace_root(root);
+        // Same root drives repo-local `.perl-lsp/` plugin discovery, so the
+        // plugin set and the per-project cache key can't disagree.
+        crate::plugin::rhai_host::set_workspace_root(root);
+
+        // Opt-in diagnostics from `initializationOptions.diagnostics`.
+        // `{ "diagnostics": { "unresolvedDispatch": true } }` enables the
+        // QA/plugin-author `unresolved-dispatch` channel; absent = off.
+        if let Some(opts) = &params.initialization_options {
+            let on = opts
+                .get("diagnostics")
+                .and_then(|d| d.get("unresolvedDispatch"))
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            self.unresolved_dispatch
+                .store(on, std::sync::atomic::Ordering::Relaxed);
+        }
 
         Ok(InitializeResult {
             server_info: Some(ServerInfo {
@@ -375,22 +458,23 @@ impl LanguageServer for Backend {
         // target is inherently local (variables), fall back to single-file
         // references — no cross-file walk to do.
         use crate::file_analysis::RenameKind;
-        use crate::resolve::{refs_to, RoleMask, TargetKind, TargetRef};
+        use crate::resolve::{refs_to, TargetKind, TargetRef};
 
         let point = symbols::position_to_point(pos);
-        let target = match doc.analysis.rename_kind_at(point, Some(&self.module_index)) {
-            Some(RenameKind::Function { name, package }) => TargetRef {
-                name,
-                kind: TargetKind::Sub { package },
-            },
-            Some(RenameKind::Method { name, class }) => TargetRef {
-                name,
-                kind: TargetKind::Method { class },
-            },
-            Some(RenameKind::Package(name)) => TargetRef {
-                name,
-                kind: TargetKind::Package,
-            },
+        let rk = doc.analysis.rename_kind_at(point, Some(&self.module_index));
+        let target = match rk {
+            Some(
+                kind @ (RenameKind::Function { .. }
+                | RenameKind::Method { .. }
+                | RenameKind::Package(_)
+                | RenameKind::Handler { .. }),
+            ) => {
+                // Single mapping shared with rename + CLI so references and
+                // rename agree on target identity, including the Method
+                // inheritance chain (rule #5).
+                TargetRef::from_rename_kind(kind, &doc.analysis, Some(&self.module_index))
+                    .expect("non-HashKey/Variable kinds map to a target")
+            }
             Some(RenameKind::HashKey(name)) => {
                 // If the cursor is on a HashKeyDef or a HashKeyAccess
                 // whose owner was resolved at build time, do a cross-file walk
@@ -417,30 +501,26 @@ impl LanguageServer for Backend {
                 match owner {
                     Some(HashKeyOwner::Sub { package, name: sub_name }) => {
                         drop(doc);
+                        let t = TargetRef::new(
+                            name,
+                            TargetKind::HashKeyOfSub { package, name: sub_name },
+                        );
+                        let mask = crate::resolve::references_mask_for(
+                            &self.files, Some(&self.module_index), &t,
+                        );
                         let results = crate::resolve::refs_to(
-                            &self.files,
-                            Some(&self.module_index),
-                            &crate::resolve::TargetRef {
-                                name,
-                                kind: crate::resolve::TargetKind::HashKeyOfSub {
-                                    package,
-                                    name: sub_name,
-                                },
-                            },
-                            crate::resolve::RoleMask::VISIBLE,
+                            &self.files, Some(&self.module_index), &t, mask,
                         );
                         return Ok(refs_to_locations(results));
                     }
                     Some(HashKeyOwner::Class(class_name)) => {
                         drop(doc);
+                        let t = TargetRef::new(name, TargetKind::HashKeyOfClass(class_name));
+                        let mask = crate::resolve::references_mask_for(
+                            &self.files, Some(&self.module_index), &t,
+                        );
                         let results = crate::resolve::refs_to(
-                            &self.files,
-                            Some(&self.module_index),
-                            &crate::resolve::TargetRef {
-                                name,
-                                kind: crate::resolve::TargetKind::HashKeyOfClass(class_name),
-                            },
-                            crate::resolve::RoleMask::VISIBLE,
+                            &self.files, Some(&self.module_index), &t, mask,
                         );
                         return Ok(refs_to_locations(results));
                     }
@@ -461,20 +541,18 @@ impl LanguageServer for Backend {
                 );
                 return Ok(if refs.is_empty() { None } else { Some(refs) });
             }
-            Some(RenameKind::Handler { owner, name }) => TargetRef {
-                name: name.clone(),
-                kind: TargetKind::Handler { owner, name },
-            },
         };
 
-        // Cross-file walk: workspace + open + deps.
+        // Cross-file walk. Scope to editable space when the target is a
+        // project symbol so "find references" never scans CPAN; widen to
+        // VISIBLE only for dependency-defined targets. See `references_mask_for`.
         drop(doc); // release the DashMap read lock before the resolve walk
-        let results = refs_to(
+        let mask = crate::resolve::references_mask_for(
             &self.files,
             Some(&self.module_index),
             &target,
-            RoleMask::VISIBLE,
         );
+        let results = refs_to(&self.files, Some(&self.module_index), &target, mask);
         Ok(refs_to_locations(results))
     }
 
@@ -503,6 +581,9 @@ impl LanguageServer for Backend {
     }
 
     async fn rename(&self, params: RenameParams) -> Result<Option<WorkspaceEdit>> {
+        use crate::file_analysis::RenameKind;
+        use crate::resolve::TargetRef;
+
         let uri = &params.text_document_position.text_document.uri;
         let pos = params.text_document_position.position;
         let new_name = &params.new_name;
@@ -515,96 +596,28 @@ impl LanguageServer for Backend {
         let rename_kind = doc.analysis.rename_kind_at(point, Some(&self.module_index));
 
         match rename_kind {
-            Some(crate::file_analysis::RenameKind::Variable) => {
-                // Single-file only — lexical scope doesn't cross files
+            Some(RenameKind::Variable) => {
+                // Single-file only — lexical scope doesn't cross files.
                 Ok(symbols::rename(&doc.analysis, pos, uri, new_name, Some(&doc.tree), Some(&doc.text)))
             }
-            Some(crate::file_analysis::RenameKind::Handler { .. }) => {
+            Some(RenameKind::Handler { .. }) => {
                 // Cross-file handler rename not yet wired — fall back to
-                // single-file for the moment. This will edit the Handler
-                // symbol + every DispatchCall ref in the current file.
+                // single-file for the moment.
                 Ok(symbols::rename(&doc.analysis, pos, uri, new_name, Some(&doc.tree), Some(&doc.text)))
             }
-            Some(crate::file_analysis::RenameKind::HashKey(_)) => {
-                // Hash keys: single-file for now
+            Some(RenameKind::HashKey(_)) => {
+                // Hash keys: single-file for now.
                 Ok(symbols::rename(&doc.analysis, pos, uri, new_name, Some(&doc.tree), Some(&doc.text)))
             }
-            Some(crate::file_analysis::RenameKind::Function { .. })
-            | Some(crate::file_analysis::RenameKind::Method { .. })
-            | Some(crate::file_analysis::RenameKind::Package(_)) => {
-                // Unpack per-kind name + build a per-kind rename closure.
-                let (name, rename_fn): (String, Box<dyn Fn(&FileAnalysis, &str, &str) -> Vec<(crate::file_analysis::Span, String)>>) = match rename_kind.as_ref().unwrap() {
-                    crate::file_analysis::RenameKind::Function { name, package } => {
-                        let p = package.clone();
-                        let mi = Arc::clone(&self.module_index);
-                        (name.clone(), Box::new(move |fa, old, new| {
-                            fa.rename_sub_in_package(old, &p, new, Some(&mi))
-                        }))
-                    }
-                    crate::file_analysis::RenameKind::Method { name, class } => {
-                        // Walk MyWorker → ... → BaseWorker (the actual
-                        // defining class). Each link is needed: the
-                        // call-site invocant class on `$worker->process`
-                        // (resolved via the bag-routed
-                        // `method_call_invocant_class`) is "MyWorker"
-                        // (the static type), while the `sub process`
-                        // definition lives in BaseWorker.
-                        // `rename_method_in_class` matches strict
-                        // class == scope, so without the chain we'd
-                        // pick up only one of the two ends.
-                        let chain = doc.analysis.method_rename_chain(
-                            class,
-                            name,
-                            Some(&self.module_index),
-                        );
-                        let mi = Arc::clone(&self.module_index);
-                        (name.clone(), Box::new(move |fa, old, new| {
-                            let mut all = Vec::new();
-                            for c in &chain {
-                                all.extend(fa.rename_method_in_class(old, c, new, Some(&mi)));
-                            }
-                            all
-                        }))
-                    }
-                    crate::file_analysis::RenameKind::Package(n) =>
-                        (n.clone(), Box::new(FileAnalysis::rename_package)),
-                    _ => unreachable!(),
-                };
-
-                let mut all_changes: std::collections::HashMap<Url, Vec<TextEdit>> =
-                    std::collections::HashMap::new();
-
-                let mut collect = |uri: Url, analysis: &FileAnalysis| {
-                    let edits = rename_fn(analysis, &name, new_name);
-                    if !edits.is_empty() {
-                        all_changes.entry(uri).or_default().extend(
-                            edits.into_iter().map(|(span, text)| TextEdit {
-                                range: symbols::span_to_range(span),
-                                new_text: text,
-                            })
-                        );
-                    }
-                };
-
-                // Iterate all file-backed analyses (open + workspace, deduped).
-                self.files.for_each_analysis(|key, analysis| {
-                    let entry_uri = match key {
-                        FileKey::Url(u) => u,
-                        FileKey::Path(p) => Url::from_file_path(&p).unwrap_or_else(|_| {
-                            Url::parse(&format!("file://{}", p.display())).unwrap()
-                        }),
-                    };
-                    collect(entry_uri, analysis);
-                });
-
-                if all_changes.is_empty() {
-                    Ok(None)
-                } else {
-                    Ok(Some(WorkspaceEdit {
-                        changes: Some(all_changes),
-                        ..Default::default()
-                    }))
-                }
+            Some(kind @ (RenameKind::Function { .. }
+            | RenameKind::Method { .. }
+            | RenameKind::Package(_))) => {
+                // Same mapping as references — the Method arm precomputes the
+                // inheritance chain so the parent `sub NAME` decl is collected.
+                let target = TargetRef::from_rename_kind(kind, &doc.analysis, Some(&self.module_index))
+                    .expect("Function/Method/Package map to a target");
+                drop(doc);
+                Ok(rename_via_refs_to(&self.files, Some(&self.module_index), &target, new_name))
             }
             None => Ok(None),
         }
@@ -622,7 +635,6 @@ impl LanguageServer for Backend {
             &doc.text,
             pos,
             &self.module_index,
-            &doc.tree,
         ))
     }
 
@@ -999,19 +1011,12 @@ impl LanguageServer for Backend {
             None => return Ok(None),
         };
 
-        let point = symbols::position_to_point(pos);
-        let refs = doc.analysis.find_references(point, None, None, Some(&self.module_index));
-        if refs.len() < 2 {
-            return Ok(None);
+        match symbols::linked_editing_ranges(&doc.analysis, pos, Some(&self.module_index)) {
+            Some(ranges) => Ok(Some(LinkedEditingRanges {
+                ranges,
+                word_pattern: None,
+            })),
+            None => Ok(None),
         }
-
-        let ranges: Vec<Range> = refs.into_iter()
-            .map(|span| symbols::span_to_range(span))
-            .collect();
-
-        Ok(Some(LinkedEditingRanges {
-            ranges,
-            word_pattern: None,
-        }))
     }
 }

@@ -72,10 +72,42 @@ impl CachedModule {
         })
     }
 
+    /// Locate a package-global variable declaration (`our $x` / `our @arr`
+    /// / `our %h`) by its sigil-bearing name within `package`. Powers
+    /// cross-file goto-def for a fully-qualified read (`$Foo::Bar::x`).
+    /// `name` includes the sigil (`$x`, `@arr`, `%h`) to match how variable
+    /// symbols are keyed.
+    pub fn package_var_def_line(&self, name: &str, package: &str) -> Option<u32> {
+        self.analysis
+            .symbols
+            .iter()
+            .find(|s| {
+                matches!(s.kind, SymKind::Variable | SymKind::Field)
+                    && s.name == name
+                    && s.package.as_deref() == Some(package)
+            })
+            .map(|s| s.span.start.row as u32)
+    }
+
     /// True if any sub/method with this name is declared in this module.
     pub fn has_sub(&self, name: &str) -> bool {
         self.analysis.symbols.iter().any(|s| {
             s.name == name && matches!(s.kind, SymKind::Sub | SymKind::Method)
+        })
+    }
+
+    /// True if a sub/method with this name is declared in this module
+    /// *attributed to `package`* — distinct from `has_sub`, which keys
+    /// on declaration only. Cross-package typeglob installs
+    /// (`*{'DateTime::'.$sub} = …` inside `package DateTime::PP`)
+    /// synthesize a symbol whose `package` (DateTime) differs from the
+    /// file's own module name (DateTime::PP), so a class-keyed method
+    /// lookup must ask by package, not by module-name match.
+    pub fn has_sub_in_package(&self, name: &str, package: &str) -> bool {
+        self.analysis.symbols.iter().any(|s| {
+            s.name == name
+                && matches!(s.kind, SymKind::Sub | SymKind::Method)
+                && s.package.as_deref() == Some(package)
         })
     }
 }
@@ -114,10 +146,12 @@ impl<'a> SubInfo<'a> {
         )
     }
 
-    pub fn return_type(&self) -> Option<InferredType> {
+    /// Pass `module_index` so a return type produced by a cross-file method
+    /// chain in the sub body resolves; `None` keeps it single-file.
+    pub fn return_type(&self, module_index: Option<&ModuleIndex>) -> Option<InferredType> {
         match &self.primary.detail {
             SymbolDetail::Sub { .. } => {
-                self.analysis.symbol_return_type_via_bag(self.primary.id, None)
+                self.analysis.symbol_return_type_via_bag_ctx(self.primary.id, None, module_index)
             }
             _ => None,
         }
@@ -148,11 +182,11 @@ impl<'a> SubInfo<'a> {
 
     /// Return type for an overload with the given arity, if any matches.
     #[allow(dead_code)] // public SubInfo accessor; consumed by tooling/future cross-file callers
-    pub fn return_type_for_arity(&self, arity: usize) -> Option<InferredType> {
+    pub fn return_type_for_arity(&self, arity: usize, module_index: Option<&ModuleIndex>) -> Option<InferredType> {
         for sym in std::iter::once(self.primary).chain(self.overloads.iter().copied()) {
             if let SymbolDetail::Sub { params, .. } = &sym.detail {
                 if params.len() == arity {
-                    return self.analysis.symbol_return_type_via_bag(sym.id, Some(arity));
+                    return self.analysis.symbol_return_type_via_bag_ctx(sym.id, Some(arity), module_index);
                 }
             }
         }
@@ -354,6 +388,64 @@ impl ModuleIndex {
         self.cache.get(module_name).and_then(|entry| entry.clone())
     }
 
+    /// Breadth-first walk over re-export edges (`reexport_modules`), starting
+    /// from `start` and visiting each reachable cached module — the start
+    /// modules first, then whatever they re-export. `visit` returns
+    /// `ControlFlow::Break` to stop early. Bounded by a seen-set (cycles) and a
+    /// fan-out cap; never does I/O. The single place the re-export edge
+    /// traversal lives — `defining_module_cached` (def location) and
+    /// `FileAnalysis::export_surface_with_index` (transitive surface) both ride
+    /// it instead of hand-copying the BFS.
+    pub fn for_each_reexport_module<F>(&self, start: impl IntoIterator<Item = String>, mut visit: F)
+    where
+        F: FnMut(&Arc<CachedModule>) -> std::ops::ControlFlow<()>,
+    {
+        const MAX: usize = 256;
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut queue: std::collections::VecDeque<String> = start.into_iter().collect();
+        let mut visited = 0usize;
+        while let Some(module) = queue.pop_front() {
+            if !seen.insert(module.clone()) {
+                continue;
+            }
+            visited += 1;
+            if visited > MAX {
+                break;
+            }
+            let Some(cached) = self.get_cached(&module) else { continue };
+            if visit(&cached).is_break() {
+                return;
+            }
+            for next in &cached.analysis.reexport_modules {
+                if !seen.contains(next) {
+                    queue.push_back(next.clone());
+                }
+            }
+        }
+    }
+
+    /// Find the cached module that actually defines sub `name`, starting at
+    /// `entry` and following re-export edges when `entry` re-exports another
+    /// module's surface. The directly-`use`d module is tried first;
+    /// re-exporters delegate the def location to whoever they re-export.
+    pub fn defining_module_cached(
+        &self,
+        entry: &str,
+        name: &str,
+    ) -> Option<Arc<CachedModule>> {
+        use std::ops::ControlFlow;
+        let mut found = None;
+        self.for_each_reexport_module(std::iter::once(entry.to_string()), |cached| {
+            if cached.sub_info(name).is_some() {
+                found = Some(Arc::clone(cached));
+                ControlFlow::Break(())
+            } else {
+                ControlFlow::Continue(())
+            }
+        });
+        found
+    }
+
     /// Return cached module path only — never does I/O.
     pub fn module_path_cached(&self, module_name: &str) -> Option<PathBuf> {
         self.cache
@@ -455,6 +547,27 @@ impl ModuleIndex {
             }
             None => Vec::new(),
         }
+    }
+
+    /// Find the module that declares method `name` *attributed to class*
+    /// `class` in a file whose own module name differs (cross-package
+    /// typeglob install). Returns the registration key for a follow-up
+    /// `get_cached`. The reverse index (keyed by symbol name) scopes the
+    /// scan; the per-module `has_sub_in_package` filter pins the package.
+    /// `None` when no such cross-package symbol exists — callers fall
+    /// back to the class's own module / bridges.
+    pub fn module_declaring_method_in_package(
+        &self,
+        name: &str,
+        class: &str,
+    ) -> Option<String> {
+        self.modules_with_symbol(name)
+            .into_iter()
+            .find(|mod_name| {
+                self.get_cached(mod_name)
+                    .map(|c| c.has_sub_in_package(name, class))
+                    .unwrap_or(false)
+            })
     }
 
     /// Create a minimal ModuleIndex for CLI mode (no resolver thread, no @INC scan).
@@ -610,6 +723,27 @@ impl ModuleIndex {
         self.cache.insert(module_name, Some(cached));
     }
 
+    /// Rebuild the reverse index (`func → modules`) from the current cache.
+    /// `warm_cache` writes straight into `cache_raw()` and never touches the
+    /// reverse index, so a CLI/full-startup warm path that skips this leaves
+    /// `find_exporters` blind to cached modules — the warm run then degrades
+    /// "exported by X (not yet imported)" hints to a bare "not defined"
+    /// (the B6 cold/warm attribution regression). The resolver thread already
+    /// calls the equivalent rebuild after its own warm.
+    pub fn rebuild_reverse_index_from_cache(&self) {
+        self.reverse_index.clear();
+        for entry in self.cache.iter() {
+            if let Some(ref cached) = *entry.value() {
+                for name in crate::module_resolver::reverse_index_names(&cached.analysis) {
+                    self.reverse_index
+                        .entry(name)
+                        .or_default()
+                        .push(entry.key().clone());
+                }
+            }
+        }
+    }
+
     /// Remove `module_name` from every `reverse_index` and `bridges_index`
     /// bucket it currently sits in. Called from
     /// `register_workspace_module` before the re-insert so stale edges
@@ -657,7 +791,11 @@ impl ModuleIndex {
     pub fn for_each_entity_bridged_to(
         &self,
         class_name: &str,
-        mut visit: impl FnMut(&Arc<CachedModule>, &crate::file_analysis::Symbol),
+        // `mod_name` is the cache key the bridging module is registered under
+        // — the authoritative handle for a follow-up `get_cached(mod_name)`.
+        // Don't re-derive it from the analysis: the registration name and the
+        // file's first `package` can differ.
+        mut visit: impl FnMut(&str, &Arc<CachedModule>, &crate::file_analysis::Symbol),
     ) {
         for mod_name in self.modules_bridging_to(class_name) {
             let Some(cached) = self.get_cached(&mod_name) else { continue };
@@ -675,7 +813,7 @@ impl ModuleIndex {
                 for sym_id in &ns.entities {
                     let idx = sym_id.0 as usize;
                     let Some(sym) = cached.analysis.symbols.get(idx) else { continue };
-                    visit(&cached, sym);
+                    visit(&mod_name, &cached, sym);
                 }
             }
         }

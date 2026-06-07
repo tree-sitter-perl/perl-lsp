@@ -11,8 +11,9 @@ use crate::file_analysis::*;
 use crate::plugin::{self, PluginRegistry};
 
 /// Process-wide plugin registry, built once with the bundled Rhai plugins
-/// (plus anything discovered under `$PERL_LSP_PLUGIN_DIR`). All `build()`
-/// calls share it; tests that need isolation use `build_with_plugins()`.
+/// plus anything in `plugin_search_dirs()` (`$PERL_LSP_PLUGIN_DIR` and the
+/// nearest repo-local `.perl-lsp/`). All `build()` calls share it; tests
+/// that need isolation use `build_with_plugins()`.
 pub fn default_plugin_registry() -> Arc<PluginRegistry> {
     static REG: OnceLock<Arc<PluginRegistry>> = OnceLock::new();
     REG.get_or_init(|| {
@@ -21,9 +22,8 @@ pub fn default_plugin_registry() -> Arc<PluginRegistry> {
         for p in plugin::rhai_host::load_bundled(engine.clone()) {
             reg.register(p);
         }
-        if let Ok(dir) = std::env::var("PERL_LSP_PLUGIN_DIR") {
-            let path = std::path::PathBuf::from(dir);
-            for p in plugin::rhai_host::load_plugin_dir(&path, engine) {
+        for dir in plugin::rhai_host::plugin_search_dirs() {
+            for p in plugin::rhai_host::load_plugin_dir(&dir, engine.clone()) {
                 reg.register(p);
             }
         }
@@ -77,6 +77,18 @@ struct ChainTypingIndex<'a> {
     return_nodes: std::collections::HashMap<(Point, Point), Node<'a>>,
     invocant_nodes: std::collections::HashMap<(Point, Point), Node<'a>>,
     method_call_args: std::collections::HashMap<(Point, Point), Node<'a>>,
+    /// Every `method_call_expression` node. The partial-route pass
+    /// (`emit_partial_route_targets`) filters this to `->to(...)`
+    /// calls post-fold, when the receiver's brand has resolved.
+    method_call_nodes: Vec<Node<'a>>,
+    /// `hash_element_expression` nodes whose container is itself a
+    /// method-call result (`$obj->get_config->{host}`). The container
+    /// type — and thus the key's owner class — is only knowable after
+    /// the fold resolves the method's return type, so the chained-key
+    /// HashKeyAccess emission (`emit_chained_hash_key_refs`) waits for
+    /// it. Plain `$var->{key}` keys are emitted during the walk
+    /// (`visit_hash_element`) and owner-resolved at phase 3.
+    chained_hash_elements: Vec<Node<'a>>,
 }
 
 /// Which chain-typing tasks the reducer should apply on this call.
@@ -107,6 +119,8 @@ fn build_chain_typing_index<'a>(tree: &'a Tree) -> ChainTypingIndex<'a> {
         return_nodes: std::collections::HashMap::new(),
         invocant_nodes: std::collections::HashMap::new(),
         method_call_args: std::collections::HashMap::new(),
+        method_call_nodes: Vec::new(),
+        chained_hash_elements: Vec::new(),
     };
     fn walk<'t>(node: Node<'t>, idx: &mut ChainTypingIndex<'t>) {
         match node.kind() {
@@ -118,6 +132,7 @@ fn build_chain_typing_index<'a>(tree: &'a Tree) -> ChainTypingIndex<'a> {
                     .insert((node.start_position(), node.end_position()), node);
             }
             "method_call_expression" => {
+                idx.method_call_nodes.push(node);
                 if let Some(inv) = node.child_by_field_name("invocant") {
                     idx.invocant_nodes
                         .insert((inv.start_position(), inv.end_position()), inv);
@@ -125,6 +140,18 @@ fn build_chain_typing_index<'a>(tree: &'a Tree) -> ChainTypingIndex<'a> {
                 if let Some(args) = node.child_by_field_name("arguments") {
                     idx.method_call_args
                         .insert((node.start_position(), node.end_position()), args);
+                }
+            }
+            "hash_element_expression" => {
+                // Container is the first named child; index only the
+                // chained shape where it's a method call — plain
+                // `$var->{key}` is handled by the walk.
+                if node
+                    .named_child(0)
+                    .map(|c| c.kind() == "method_call_expression")
+                    .unwrap_or(false)
+                {
+                    idx.chained_hash_elements.push(node);
                 }
             }
             _ => {}
@@ -187,28 +214,36 @@ fn build_with_plugins_inner(
         symbols: Vec::new(),
         refs: Vec::new(),
         deferred_var_types: Vec::new(),
+        deferred_named_sub_param_types: Vec::new(),
         fold_ranges: Vec::new(),
         imports: Vec::new(),
         return_infos: Vec::new(),
         pending_array_pushes: Vec::new(),
         last_expr_span: std::collections::HashMap::new(),
+        slot_write_rhs_span: std::collections::HashMap::new(),
         call_bindings: Vec::new(),
         method_call_bindings: Vec::new(),
         pod_texts: Vec::new(),
         package_parents: std::collections::HashMap::new(),
         package_uses: std::collections::HashMap::new(),
         use_dedup: std::collections::HashSet::new(),
+        dispatch_dedup: std::collections::HashSet::new(),
         sub_return_delegations: std::collections::HashMap::new(),
         framework_modes: std::collections::HashMap::new(),
         framework_imports: std::collections::HashSet::new(),
         constant_strings: std::collections::HashMap::new(),
+        declared_constants: std::collections::HashMap::new(),
+        export_member_sites: Vec::new(),
         export: Vec::new(),
         export_ok: Vec::new(),
+        export_tags: std::collections::HashMap::new(),
+        reexport_modules: Vec::new(),
         plugin_namespaces: Vec::new(),
         type_provenance: std::collections::HashMap::new(),
         bag: crate::witnesses::WitnessBag::new(),
         unresolved_expr_nodes: Vec::new(),
         package_framework: std::collections::HashMap::new(),
+        non_oo_packages: std::collections::HashSet::new(),
         scope_stack: Vec::new(),
         // Perl's implicit top-level package. Without this seed,
         // top-level scripts (`Mojolicious::Lite` apps, one-off
@@ -221,16 +256,70 @@ fn build_with_plugins_inner(
         next_scope_id: 0,
         next_symbol_id: 0,
         package_ranges: Vec::new(),
+        regex_spans: Vec::new(),
         open_statement_package: None,
         plugins,
+        dispatch_manifest: std::collections::HashMap::new(),
+        type_constraint_names: std::collections::HashSet::new(),
+        app_surface_consumers: Vec::new(),
+        param_type_manifest: std::collections::HashMap::new(),
+        param_type_wildcards: Vec::new(),
+        any_requires_action_attr: false,
+        provisional_dispatches: Vec::new(),
+        gated_param_types: Vec::new(),
         method_call_invocant: std::collections::HashMap::new(),
+        method_call_arity: std::collections::HashMap::new(),
         parametric_emitted_refs: std::collections::HashSet::new(),
+        method_call_ref_dedup: std::collections::HashSet::new(),
+        route_branded_refs: std::collections::HashSet::new(),
         anon_sub_symbol_by_span: std::collections::HashMap::new(),
+        modifier_invocant_pos: None,
     };
+    b.dispatch_manifest = b
+        .plugins
+        .dispatch_verbs()
+        .map(|d| (d.verb.clone(), d.clone()))
+        .collect();
+    b.type_constraint_names = b
+        .plugins
+        .type_constraint_names()
+        .map(|s| s.to_string())
+        .collect();
+    b.app_surface_consumers = b
+        .plugins
+        .app_surface_consumers()
+        .map(|s| s.to_string())
+        .collect();
+    for pt in b.plugins.param_types() {
+        match &pt.method {
+            Some(name) => {
+                b.param_type_manifest
+                    .entry(name.clone())
+                    .or_default()
+                    .push(pt.clone());
+            }
+            None => b.param_type_wildcards.push(pt.clone()),
+        }
+    }
+    b.any_requires_action_attr = b
+        .param_type_manifest
+        .values()
+        .flatten()
+        .any(|r| r.requires_action_attr)
+        || b.param_type_wildcards
+            .iter()
+            .any(|r| r.requires_action_attr);
 
     // Create file-level scope and walk
     let file_scope = b.push_scope(ScopeKind::File, node_to_span(tree.root_node()), None);
     b.visit_children(tree.root_node());
+    // Still inside the file scope: synthesize Sub symbols for AutoLoader /
+    // SelfLoader packages whose real definitions live in the `data_section`
+    // after `__END__` (or `__DATA__`). Runs here so `package_uses` /
+    // `package_parents` (the AutoLoader-backed gate) are fully populated and
+    // the synthesized symbols attach to the file scope, like every other
+    // top-level sub.
+    b.synthesize_autoloader_data_subs(tree);
     b.pop_scope();
     let _ = file_scope;
 
@@ -247,16 +336,34 @@ fn build_with_plugins_inner(
             .find(|s| crate::file_analysis::contains_point(&s.span, d.at.start))
             .map(|s| s.id)
             .unwrap_or(ScopeId(0));
-        b.push_type_constraint(TypeConstraint {
-            variable: d.variable,
-            scope,
-            constraint_span: d.at,
-            inferred_type: d.inferred_type,
-        });
+        b.push_plugin_type_constraint(
+            TypeConstraint {
+                variable: d.variable,
+                scope,
+                constraint_span: d.at,
+                inferred_type: d.inferred_type,
+            },
+            d.plugin_id,
+        );
     }
+
+    // Named-sub param typing (`->helper(_ => \&sub)`): same flush window —
+    // every sub scope + its params now exist, including forward-declared
+    // ones.
+    b.flush_deferred_named_sub_param_types();
 
     // Post-pass 1: resolve variable refs -> resolves_to
     b.resolve_variable_refs();
+
+    // Export-list member refs: a `@EXPORT` / `@EXPORT_OK` / `%EXPORT_TAGS`
+    // member naming a local sub gets a FunctionCall ref back to it. Runs
+    // post-walk because subs are usually declared after the export list.
+    b.emit_export_member_refs();
+
+    // Pin forward-reference calls (call above its `sub`) to the local def's
+    // package — order-independent, so goto-def/references/rename match them
+    // like backward calls (the walk-time pin only saw subs declared earlier).
+    b.pin_unresolved_call_packages();
 
     // Post-pass 2: resolve hash key owners from type constraints
     b.resolve_hash_key_owners();
@@ -335,6 +442,21 @@ fn build_with_plugins_inner(
     // freshly-published edges.
     b.emit_method_call_return_edges();
     b.emit_array_push_witnesses();
+    // Record each method-call invocant's resolved type at its span so
+    // the tree-free query entry (`FileAnalysis::expr_type_at_span`) can
+    // answer "what is this expression?" without a CST. Runs after array
+    // pushes so `$arr[N]` invocants project against the settled
+    // `Variable{@arr}` Sequence. The build-time symbolic executor
+    // (`invocant_type_at_node`) is the single structure-discovery site;
+    // this pass records its answer.
+    b.emit_invocant_expr_witnesses(&chain_idx);
+
+    // Partial Mojo route targets (`->to('#action')`) inherit their
+    // controller from a parent `->to('ctrl#')` via the route value's
+    // brand, which only settles after the fold. Re-dispatch the route
+    // plugins now that the brand is resolved. See
+    // `docs/adr/route-branding.md`.
+    b.emit_partial_route_targets(&chain_idx);
 
     // Test-only: re-run the worklist fold one more time to pin
     // idempotency. Production callers always pass `false`; only
@@ -355,6 +477,11 @@ fn build_with_plugins_inner(
     // a single post-walk pass that joins refs to args via the chain
     // typing index.
     b.emit_method_call_arg_keys(&chain_idx);
+
+    // Post-pass: chained hashref-key accesses (`$obj->get_config->{host}`).
+    // Runs post-fold so the method's return type is canonical — the
+    // owner class is the chain receiver's type, unknowable until then.
+    b.emit_chained_hash_key_refs(&chain_idx);
 
     // Post-pass 5: fill in tail POD docs for subs that didn't get preceding doc
     b.resolve_tail_pod_docs();
@@ -380,8 +507,14 @@ fn build_with_plugins_inner(
         b.package_ranges,
     );
     fa.package_framework = package_framework;
+    fa.export_tags = std::mem::take(&mut b.export_tags);
+    fa.reexport_modules = std::mem::take(&mut b.reexport_modules);
+    fa.app_surface_consumers = b.app_surface_consumers.clone();
+    fa.regex_spans = b.regex_spans;
     fa.witnesses = bag;
     fa.witnesses.rebuild_index();
+    fa.provisional_dispatches = std::mem::take(&mut b.provisional_dispatches);
+    fa.gated_param_types = std::mem::take(&mut b.gated_param_types);
     // Finalize: run the legacy text-based MCB resolver as a fallback.
     // For every assignment the unified typer (run before
     // `resolve_return_types` above) couldn't handle, MCB fills in.
@@ -400,13 +533,32 @@ impl<'a> Builder<'a> {
     /// shape (the FA helper handles enrichment-time pushes after the
     /// builder's bag has been moved into the FA).
     pub(crate) fn push_type_constraint(&mut self, tc: TypeConstraint) {
+        self.push_type_constraint_from(tc, crate::witnesses::WitnessSource::Builder("type_constraint".into()));
+    }
+
+    /// `push_type_constraint` with a plugin source so the witness carries
+    /// `Plugin` priority. A plugin that knows a variable's type
+    /// (`->helper(_ => sub/\&sub)` → `$c` is a controller) must dominate
+    /// builder heuristics for that variable — the `my $c = shift` idiom
+    /// otherwise types `$c` as the enclosing class. `FrameworkAwareTypeFold`
+    /// prefers the higher-priority class assertion (source-priority axis,
+    /// CLAUDE.md "Source priority breaks ties").
+    pub(crate) fn push_plugin_type_constraint(&mut self, tc: TypeConstraint, plugin_id: String) {
+        self.push_type_constraint_from(tc, crate::witnesses::WitnessSource::Plugin(plugin_id));
+    }
+
+    fn push_type_constraint_from(
+        &mut self,
+        tc: TypeConstraint,
+        source: crate::witnesses::WitnessSource,
+    ) {
         use crate::witnesses::{
-            TypeObservation, Witness, WitnessAttachment, WitnessPayload, WitnessSource,
+            TypeObservation, Witness, WitnessAttachment, WitnessPayload,
         };
         let TypeConstraint { variable, scope, constraint_span: span, inferred_type: ty } = tc;
         self.bag.push(Witness {
             attachment: WitnessAttachment::Variable { name: variable.clone(), scope },
-            source: WitnessSource::Builder("type_constraint".into()),
+            source: source.clone(),
             payload: WitnessPayload::InferredType(ty.clone()),
             span: Span { start: span.start, end: span.start },
         });
@@ -414,7 +566,7 @@ impl<'a> Builder<'a> {
             InferredType::ClassName(n) => {
                 self.bag.push(Witness {
                     attachment: WitnessAttachment::Variable { name: variable, scope },
-                    source: WitnessSource::Builder("type_constraint".into()),
+                    source,
                     payload: WitnessPayload::Observation(TypeObservation::ClassAssertion(n)),
                     span,
                 });
@@ -422,7 +574,7 @@ impl<'a> Builder<'a> {
             InferredType::FirstParam { package } => {
                 self.bag.push(Witness {
                     attachment: WitnessAttachment::Variable { name: variable, scope },
-                    source: WitnessSource::Builder("type_constraint".into()),
+                    source,
                     payload: WitnessPayload::Observation(TypeObservation::FirstParamInMethod {
                         package,
                     }),
@@ -473,7 +625,18 @@ impl<'a> Builder<'a> {
         }
 
         // Invocant mutations on hash keys.
+        //
+        // Two seeds per typed-owner write: the untyped `mutation` Fact
+        // (key-name completion via `mutated_keys_on_class`) and — when
+        // the owner resolves to a CLASS and the RHS has a recorded span
+        // and a bag-resolved type — a typed `SlotType{class, key} →
+        // Edge(Expr(rhs_span))`. The edge routes through the same
+        // canonical chase as implicit-return chains; `SlotTypeFold`
+        // agrees the per-write arms. Honest-skip if the owner is a
+        // `Sub` (not a class), or the RHS is unknown — never a bare
+        // SlotType seed.
         let mut mutations: Vec<(HashKeyOwner, String, Span)> = Vec::new();
+        let mut slot_writes: Vec<(String, String, Span, Span)> = Vec::new();
         for r in &self.refs {
             if let (RefKind::HashKeyAccess { owner, var_text }, AccessKind::Write) =
                 (&r.kind, r.access)
@@ -490,6 +653,16 @@ impl<'a> Builder<'a> {
                     }
                 };
                 if let Some(o) = resolved_owner {
+                    if let HashKeyOwner::Class(class) = &o {
+                        if let Some(rhs_span) = self.slot_write_rhs_span.get(&r.span) {
+                            slot_writes.push((
+                                class.clone(),
+                                r.target_name.clone(),
+                                r.span,
+                                *rhs_span,
+                            ));
+                        }
+                    }
                     mutations.push((o, r.target_name.clone(), r.span));
                 }
             }
@@ -503,6 +676,21 @@ impl<'a> Builder<'a> {
                     key: "written_at".into(),
                     value: crate::witnesses::FactValue::Str(key),
                 },
+                span,
+            });
+        }
+        for (class, key, span, rhs_span) in slot_writes {
+            // Only seed when the RHS actually resolves to a type — a bare
+            // `Edge(Expr(rhs_span))` to an unresolved span folds to None,
+            // which is honest, but emitting nothing for `= shift` / `= $param`
+            // keeps the attachment absent entirely (no guess).
+            if self.bag_query_expr_span(rhs_span).is_none() {
+                continue;
+            }
+            self.bag.push(Witness {
+                attachment: WitnessAttachment::SlotType { class, key },
+                source: WitnessSource::Builder("slot_type".into()),
+                payload: WitnessPayload::Edge(WitnessAttachment::Expr(rhs_span)),
                 span,
             });
         }
@@ -840,6 +1028,38 @@ fn find_varname_child<'a>(node: Node<'a>) -> Option<Node<'a>> {
     None
 }
 
+/// Find a directly-contained `code_deref_expression` in `node` (the grammar
+/// wraps it in a `function` node inside a call's `function` field).
+fn code_deref_in<'a>(node: Node<'a>) -> Option<Node<'a>> {
+    if node.kind() == "code_deref_expression" {
+        return Some(node);
+    }
+    for i in 0..node.named_child_count() {
+        let child = node.named_child(i)?;
+        if child.kind() == "code_deref_expression" {
+            return Some(child);
+        }
+    }
+    None
+}
+
+/// The deref operand inside `&{ EXPR }` — `code_deref_expression`'s child is a
+/// `block` wrapping `expression_statement(EXPR)`. Returns the inner EXPR node
+/// (typically a `scalar`) so callers can type/navigate the symbolic target.
+fn code_deref_operand<'a>(code_deref: Node<'a>) -> Option<Node<'a>> {
+    let block = code_deref.named_child(0)?;
+    if block.kind() != "block" {
+        // Defensive: future grammar may inline the expression.
+        return Some(block);
+    }
+    let stmt = block.named_child(0)?;
+    if stmt.kind() == "expression_statement" {
+        stmt.named_child(0)
+    } else {
+        Some(stmt)
+    }
+}
+
 /// Re-parse an `isa` value as Perl and extract the class name from
 /// `InstanceOf['Foo::Bar']` / `InstanceOf["Foo::Bar"]`. Tree-sitter-perl
 /// parses this as `ambiguous_function_call_expression` with function
@@ -892,6 +1112,67 @@ fn parse_instance_of(isa: &str) -> Option<String> {
     None
 }
 
+/// Find the `data_section` node (the region after `__END__` / `__DATA__`)
+/// among a `source_file`'s direct children, if any.
+fn find_data_section<'a>(root: Node<'a>) -> Option<Node<'a>> {
+    for i in 0..root.child_count() {
+        let child = root.child(i)?;
+        if child.kind() == "data_section" {
+            return Some(child);
+        }
+    }
+    None
+}
+
+/// Collect `subroutine_declaration_statement` nodes from a re-parsed
+/// data-section tree. Recurses through wrappers (a second `__END__` inside
+/// the section parks its tail in a nested `data_section`, which we don't
+/// descend — it isn't Perl). POD blocks parse as `pod` nodes and are
+/// skipped by virtue of not being subroutine declarations.
+fn collect_data_section_subs<'a>(node: Node<'a>, out: &mut Vec<Node<'a>>) {
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        match child.kind() {
+            "subroutine_declaration_statement" => out.push(child),
+            // Don't mine a nested data_section — its bytes are payload, not code.
+            "data_section" => {}
+            _ => collect_data_section_subs(child, out),
+        }
+    }
+}
+
+/// Extract positional `ParamInfo`s from a re-parsed data-section sub. Reads
+/// the sub's own `(...)` signature when present (Perl 5.20+ signatures); the
+/// classic `my ($a, $b) = @_;` idiom is left to the empty-params default —
+/// data-section subs only need navigability, not full type inference.
+fn extract_data_section_params(sub_node: Node, source: &[u8]) -> Vec<ParamInfo> {
+    let mut params = Vec::new();
+    let mut sig = None;
+    for i in 0..sub_node.child_count() {
+        if let Some(c) = sub_node.child(i) {
+            if c.kind() == "signature" {
+                sig = Some(c);
+                break;
+            }
+        }
+    }
+    let Some(sig) = sig else { return params };
+    for i in 0..sig.named_child_count() {
+        let Some(p) = sig.named_child(i) else { continue };
+        if matches!(p.kind(), "scalar" | "array" | "hash") {
+            if let Ok(text) = p.utf8_text(source) {
+                params.push(ParamInfo {
+                    name: text.to_string(),
+                    default: None,
+                    is_slurpy: matches!(p.kind(), "array" | "hash"),
+                    is_invocant: false,
+                });
+            }
+        }
+    }
+    params
+}
+
 /// Walk the delegation chain starting at `start` until we find a sub that
 /// actually owns HashKeyDefs, or run out of links. Cycle-safe via a visited
 /// set; caps at a small depth since delegation chains in real code are short.
@@ -921,6 +1202,27 @@ struct DeferredVarType {
     variable: String,
     at: Span,
     inferred_type: InferredType,
+    /// Emitting plugin id — the flushed TC rides a `Plugin`-priority
+    /// witness so the plugin's explicit knowledge (`$c` is a controller)
+    /// dominates builder heuristics (`my $c = shift` typing `$c` as the
+    /// enclosing class).
+    plugin_id: String,
+}
+
+/// Plugin-emitted `NamedSubParamType` request, resolved at end-of-build.
+/// Keyed by sub name + positional index rather than a span: a `\&name`
+/// registration arg carries no callback body span, and the named sub may
+/// be a forward reference not yet walked when the plugin fires.
+struct DeferredNamedSubParamType {
+    sub_name: String,
+    /// `None` for a bare `\&name` (current package), `Some(pkg)` for a
+    /// qualified `\&Foo::bar`. The resolver matches the sub's enclosing
+    /// package against this.
+    package: Option<String>,
+    param_index: usize,
+    inferred_type: InferredType,
+    /// Emitting plugin id — see `DeferredVarType::plugin_id`.
+    plugin_id: String,
 }
 
 struct Builder<'a> {
@@ -934,6 +1236,10 @@ struct Builder<'a> {
     /// before we recurse into call args, so at emit-time the target
     /// scope usually doesn't exist yet).
     deferred_var_types: Vec<DeferredVarType>,
+    /// Plugin-emitted `NamedSubParamType` requests (`->helper(_ => \&sub)`),
+    /// resolved by sub name + index at end-of-build alongside
+    /// `deferred_var_types`.
+    deferred_named_sub_param_types: Vec<DeferredNamedSubParamType>,
     fold_ranges: Vec<FoldRange>,
     imports: Vec<Import>,
     /// Return values collected during the walk (explicit `return` + implicit last expr).
@@ -954,6 +1260,13 @@ struct Builder<'a> {
     /// Types ride the bag; this map only carries the structural
     /// pointer to the source span.
     last_expr_span: std::collections::HashMap<ScopeId, Span>,
+    /// For each `$obj->{k} = <rhs>` hash-key WRITE, maps the key node's
+    /// span (the span the matching `HashKeyAccess` Write ref carries) to
+    /// the RHS expression's span. `populate_witness_bag`'s mutation loop
+    /// reads it to seed `SlotType{class, key} → Edge(Expr(rhs_span))`
+    /// alongside the untyped mutation Fact. Hash-element LHS only; plain
+    /// variable assignments never enter it.
+    slot_write_rhs_span: std::collections::HashMap<Span, Span>,
     /// Assignments where RHS is a function call — resolved in return-type post-pass.
     call_bindings: Vec<CallBinding>,
     /// Assignments where RHS is a method call — resolved in FileAnalysis post-pass.
@@ -965,13 +1278,23 @@ struct Builder<'a> {
     /// Modules the current package has `use`d, in source order. Used by
     /// `PluginRegistry::applicable` for `Trigger::UsesModule` matching.
     package_uses: std::collections::HashMap<String, Vec<String>>,
-    /// `(current_package, module, raw_args, imports)` tuples already
+    /// `(span, current_package, module, raw_args, imports)` tuples already
     /// processed by `process_use` in this build. Both real `use`
     /// statements (from `visit_use`) and plugin-emitted `SyntheticUse`
     /// actions go through the same gate, so a second `use Moo` — real
     /// or synthetic — is a no-op. Cleared between files (lives on
     /// Builder, not FileAnalysis). Also breaks cycles when a kit
-    /// plugin's SyntheticUse re-triggers the same kit plugin's `on_use`.
+    /// plugin's SyntheticUse re-triggers the same kit plugin's `on_use`
+    /// (the re-fired synthetic carries the originating use's span, so the
+    /// key still collides and the cycle terminates).
+    ///
+    /// `span` leads the key because two distinct source statements with
+    /// otherwise-identical work identity are genuinely separate work:
+    /// `use constant ALPHA => 1; use constant BETA => 2;` share
+    /// `(pkg, "constant", [], [])` — the constant name isn't yet folded
+    /// into `constant_strings` when `imports` is extracted, so it's empty
+    /// for every such line. Without the span the second statement would
+    /// short-circuit and its symbol never register.
     ///
     /// `imports` lives in the key because the synthetic shape carries
     /// `args` and `imports` as separate fields, and real `use Foo qw(a)`
@@ -979,7 +1302,13 @@ struct Builder<'a> {
     /// `imports` here, `SyntheticUse { args: [], imports: ["a"] }` and
     /// `SyntheticUse { args: [], imports: ["b"] }` would collide on the
     /// args-only key and silently drop the second emission.
-    use_dedup: std::collections::HashSet<(Option<String>, String, Vec<String>, Vec<String>)>,
+    use_dedup: std::collections::HashSet<(Span, Option<String>, String, Vec<String>, Vec<String>)>,
+    /// (span_start, span_end, dispatcher, target_name) of DispatchCall refs
+    /// already emitted. Two plugins can legitimately both claim a dispatch
+    /// site (e.g. the bundled `minion` plugin and a project plugin that adds
+    /// the same verb for a Minion subclass); identical refs at one span are
+    /// pure noise that would double-count in `refs_to`. First write wins.
+    dispatch_dedup: std::collections::HashSet<(Point, Point, String, String)>,
     /// sub_name → delegated sub name, for bodies that are `return other()` or
     /// a bare trailing call. Used to propagate hash-key ownership through
     /// intermediate subs so `sub chain { return get_config() }` doesn't
@@ -992,10 +1321,33 @@ struct Builder<'a> {
     /// Known compile-time string values, accumulated during the walk.
     /// Keyed by variable/constant name (e.g. "@COMMON", "BASE_CLASS", "$PREFIX").
     constant_strings: std::collections::HashMap<String, Vec<String>>,
+    /// Names declared via `use constant` (NAME and block forms), per the
+    /// enclosing package. A standalone bareword whose text is in this set is
+    /// a usage of the constant sub, so it earns a `FunctionCall` ref back to
+    /// the def (rule #7). Recognized by set membership, never by name pattern.
+    declared_constants: std::collections::HashMap<String, std::collections::HashSet<String>>,
+    /// Export-list member token sites: (member name, span, enclosing package).
+    /// Each member of `@EXPORT` / `@EXPORT_OK` / `%EXPORT_TAGS` value arrays
+    /// that names a local sub earns a `FunctionCall` ref to that sub, emitted
+    /// in a post-walk pass (subs are typically declared after the export list,
+    /// so the local-sub filter can't run live). Tag-name keys never enter this
+    /// list, so they get no ref (rule #7 narrow scope).
+    export_member_sites: Vec<(String, Span, Option<String>)>,
     /// Exported function names from @EXPORT assignments.
     export: Vec<String>,
     /// Exported function names from @EXPORT_OK assignments.
     export_ok: Vec<String>,
+    /// `%EXPORT_TAGS` membership: tag name (without the `:`/`-` selector
+    /// prefix) → member sub names. Feeds the consumer-side `:tag` selector
+    /// expansion in `ExportSurface`; `:DEFAULT` is synthesized there from
+    /// `export`, so it is not stored here.
+    export_tags: std::collections::HashMap<String, Vec<String>>,
+    /// Re-export edges minted during the walk: module names whose export
+    /// surface this module folds into its own (static `@Other::EXPORT` splice,
+    /// loop-push over a resolvable module list, declarative `also => [...]`).
+    /// Flushed into `FileAnalysis.reexport_modules`; the surface walks them
+    /// transitively at query time. Dedup'd on insert via `record_reexport_edge`.
+    reexport_modules: Vec<String>,
     /// Plugin-declared namespaces collected during the walk via
     /// `EmitAction::PluginNamespace`. Flushed into the final
     /// `FileAnalysis.plugin_namespaces`.
@@ -1037,6 +1389,11 @@ struct Builder<'a> {
     /// reducer with the right context.
     package_framework: std::collections::HashMap<String, crate::witnesses::FrameworkFact>,
 
+    /// Packages that explicitly opted out of class machinery (`use Mojo::Base
+    /// -strict`). In these, a bare `shift` / `$_[0]` is an ordinary argument,
+    /// not the method invocant — see `shift_is_invocant_here`.
+    non_oo_packages: std::collections::HashSet<String>,
+
     // Walk state
     scope_stack: Vec<ScopeId>,
     current_package: Option<String>,
@@ -1050,6 +1407,9 @@ struct Builder<'a> {
     /// the file end and gets trimmed when a same-level successor
     /// appears.
     package_ranges: Vec<crate::file_analysis::PackageRange>,
+    /// Spans of regex literals (`qr//`, `m//`, `s///`), collected during the
+    /// walk and copied onto `FileAnalysis.regex_spans` for `TOK_REGEXP`.
+    regex_spans: Vec<Span>,
     /// Index in `package_ranges` of the currently-open statement-form
     /// declaration (the one a successor `package X;` / `class X;`
     /// would supplant), if any.
@@ -1058,6 +1418,40 @@ struct Builder<'a> {
     /// Framework plugin registry. Shared Arc so multiple builders in one
     /// process avoid re-compiling the same Rhai scripts.
     plugins: Arc<PluginRegistry>,
+
+    /// Plugin `dispatch_verbs()` manifest, flattened to verb → spec once at
+    /// construction (trigger-independent, like overrides). Drives provisional
+    /// dispatch collection in the method-call walk.
+    dispatch_manifest: std::collections::HashMap<String, plugin::DispatchVerb>,
+    /// Constraint-constructor name gate from plugin `type_constraint_names()`
+    /// (`InstanceOf`, …), flattened once. A call to one of these is typed as
+    /// `TypeConstraintOf` via the plugin's fold rather than its callee return.
+    type_constraint_names: std::collections::HashSet<String>,
+    /// Plugin `app_surface_consumers()` manifest union, flattened once.
+    /// Threaded into `BagContext` so the build-time `MethodOnClass`
+    /// inheritance walk injects the synthetic app-surface parent the same
+    /// way the query-time walks do (`file_analysis::parents_of`).
+    app_surface_consumers: Vec<String>,
+    /// Plugin `param_types()` manifest, grouped by method name. At a matching
+    /// sub declaration in a role-doer, the named param gets a typed TC.
+    param_type_manifest: std::collections::HashMap<String, Vec<plugin::ParamType>>,
+    /// Rules from `param_types()` with `method: None` — applied to every sub
+    /// declaration in a matching class, regardless of method name. The
+    /// "every action in a controller" case (Catalyst `$c`).
+    param_type_wildcards: Vec<plugin::ParamType>,
+    /// True when any rule in `param_type_manifest` or `param_type_wildcards`
+    /// has `requires_action_attr: true`. Precomputed after manifest load so
+    /// `apply_param_type_manifest` can skip `collect_attributes` (a CST walk
+    /// + Vec alloc per sub) for projects with no attribute-gated rules.
+    any_requires_action_attr: bool,
+    /// Dispatch candidates recorded during the walk, promoted to refs in
+    /// enrichment once the receiver's cross-file class is known. See
+    /// `file_analysis::ProvisionalDispatch`.
+    provisional_dispatches: Vec<crate::file_analysis::ProvisionalDispatch>,
+    /// `param_types()` role-contract TCs, emitted ungated at the sub walk and
+    /// gated on the enclosing package's `isa in_role` (checked cross-file at
+    /// query time). See `FileAnalysis::gated_param_types`.
+    gated_param_types: Vec<crate::file_analysis::ReceiverGated<crate::file_analysis::TypeConstraint>>,
 
     /// Build-time chain-typing cache for MethodCall ref invocants.
     /// Keyed by `refs[idx]`. Walk-time fills it for syntactic cases
@@ -1073,6 +1467,14 @@ struct Builder<'a> {
     /// enrichment automatically.
     method_call_invocant: std::collections::HashMap<usize, String>,
 
+    /// Per-MethodCall-ref arg count, keyed by ref index. Lets
+    /// `emit_method_call_return_edges` pin the call site's arity onto its
+    /// `Expression(refidx)` return edge (`CallReturn`), so a fluent
+    /// writer `$obj->setter($v)` resolves the writer arm even when the
+    /// type query that reaches the edge is hint-less (`my $x = …`).
+    /// **Build-only**, like `method_call_invocant`.
+    method_call_arity: std::collections::HashMap<usize, u32>,
+
     /// MethodCall ref indices for which we've published an
     /// `InferredType::Parametric` witness on `Expression(refidx)`
     /// — `recv->resultset('Foo')` and search-family threading
@@ -1082,6 +1484,21 @@ struct Builder<'a> {
     /// class's plain return-type entry. **Build-only**, like
     /// `method_call_invocant`.
     parametric_emitted_refs: std::collections::HashSet<usize>,
+
+    /// Dedup for plugin-emitted `MethodCallRef`s, keyed by
+    /// `(span, method_name)`. The partial-route post-fold re-dispatch
+    /// (`emit_partial_route_targets`) re-runs `->to(...)` plugins after
+    /// the receiver brand resolves; this set keeps the walk-time
+    /// emission (full forms) from being duplicated by the re-run.
+    method_call_ref_dedup: std::collections::HashSet<(Point, Point, String)>,
+
+    /// Refs whose `Expression(refidx)` carries a `route_brand`
+    /// `BrandedRoute` witness. `emit_method_call_return_edges` skips
+    /// these so its `Edge(MethodOnClass{Route, to})` (which folds to a
+    /// brandless `ClassName(Route)`) doesn't mask the brand. Same role
+    /// as `parametric_emitted_refs`. Cleared+refilled each fold
+    /// iteration by `emit_route_brand_witnesses`.
+    route_branded_refs: std::collections::HashSet<usize>,
 
     /// Span (of the `anonymous_subroutine_expression` node) →
     /// SymbolId of the synthesized `(anon)` Sub symbol. Populated by
@@ -1093,6 +1510,14 @@ struct Builder<'a> {
     /// placeholders without any per-shape dispatch in the chase
     /// site.
     anon_sub_symbol_by_span: std::collections::HashMap<Span, SymbolId>,
+
+    /// Invocant parameter index for the next anonymous sub to be visited.
+    /// Set by `visit_function_call` when it detects a Moose/Moo method
+    /// modifier (`around`/`before`/`after`): 1 for `around` (first param
+    /// is `$orig`), 0 for `before`/`after`. Consumed and cleared by
+    /// `visit_anonymous_sub` so it applies only to the immediately
+    /// following anon sub, not to nested lambdas.
+    modifier_invocant_pos: Option<usize>,
 }
 
 /// Owner-and-gating discriminator for `emit_call_arg_key_accesses`.
@@ -1176,6 +1601,22 @@ impl<'a> Builder<'a> {
         None
     }
 
+    /// Is a bare `shift` / `$_[0]` here the method invocant (→ enclosing class),
+    /// or just `arg[0]`? OO-by-convention is the default (a base class like
+    /// `DateTime` types `bless {...}, ref $_[0]` even without declared parents),
+    /// EXCEPT in a package that explicitly opted out of class machinery via
+    /// `use Mojo::Base -strict`. There the first `@_` element is an ordinary
+    /// argument, so typing it as the class produced bogus `unresolved-method`
+    /// diagnostics (`$tx = shift; $tx->res` in `Mojo::WebSocket`). (rule #10:
+    /// the opt-out is recorded as a package property at the `use` site, not
+    /// re-derived from the `shift` shape here.)
+    fn shift_is_invocant_here(&self, node: Node<'a>) -> bool {
+        match self.package_for_node(node) {
+            Some(pkg) => !self.non_oo_packages.contains(&pkg),
+            None => true,
+        }
+    }
+
     /// Innermost scope containing `point`. Mirrors
     /// `FileAnalysis::scope_at` but reads `&self.scopes` directly so
     /// it's callable from within Builder during and after the walk.
@@ -1217,6 +1658,28 @@ impl<'a> Builder<'a> {
         detail: SymbolDetail,
         namespace: Namespace,
     ) -> SymbolId {
+        let pkg = self.current_package.clone();
+        self.add_symbol_in_package(name, kind, span, selection_span, detail, namespace, pkg)
+    }
+
+    /// `add_symbol` with an explicit package override. Cross-package
+    /// glob installs (`*{'DateTime::'.$sub} = …`) name a target package
+    /// in the glob string that differs from `current_package` (the file
+    /// declares e.g. `package DateTime::PP`). The synthesized tail
+    /// (`_ymd2rd`) must be keyed under the *named* package so
+    /// `MethodOnClass{DateTime, _ymd2rd}` resolves — not the file's
+    /// own package. Every other caller keeps `current_package` via
+    /// `add_symbol_ns`.
+    fn add_symbol_in_package(
+        &mut self,
+        name: String,
+        kind: SymKind,
+        span: Span,
+        selection_span: Span,
+        detail: SymbolDetail,
+        namespace: Namespace,
+        package: Option<String>,
+    ) -> SymbolId {
         let id = SymbolId(self.next_symbol_id);
         self.next_symbol_id += 1;
         // Every symbol attaches to the current lexical scope. Package
@@ -1231,7 +1694,7 @@ impl<'a> Builder<'a> {
             span,
             selection_span,
             scope: self.current_scope(),
-            package: self.current_package.clone(),
+            package,
             detail,
             namespace,
             outline_label: None,
@@ -1319,6 +1782,7 @@ impl<'a> Builder<'a> {
             target_name,
             access,
             resolves_to: None,
+            resolved_method_target: None,
         });
     }
 
@@ -1416,6 +1880,15 @@ impl<'a> Builder<'a> {
                     .and_then(InferredType::callable_return_edge)
                     .cloned()
             });
+        // `\&name` refgen — the named sub a registration plugin may want to
+        // type the first param of. Same name extraction the return-edge path
+        // uses; bare names stay bare so the deferred resolver scopes them to
+        // the current package.
+        let ref_sub_name = if arg.kind() == "refgen_expression" {
+            self.extract_names_from_refgen(arg).into_iter().next()
+        } else {
+            None
+        };
         plugin::ArgInfo {
             text,
             string_value,
@@ -1424,6 +1897,7 @@ impl<'a> Builder<'a> {
             inferred_type,
             sub_params,
             callable_return_edge,
+            ref_sub_name,
         }
     }
 
@@ -1542,8 +2016,8 @@ impl<'a> Builder<'a> {
     /// than falling back to name-only union.
     fn resolve_call_package(&self, call_name: &str) -> Option<String> {
         // (1) Qualified: `Foo::bar` → `Foo`.
-        if let Some(idx) = call_name.rfind("::") {
-            return Some(call_name[..idx].to_string());
+        if let (Some(pkg), _) = crate::file_analysis::split_qualified(call_name) {
+            return Some(pkg.to_string());
         }
         // (2) Enclosing package defines the sub locally.
         if let Some(ref pkg) = self.current_package {
@@ -1648,11 +2122,23 @@ impl<'a> Builder<'a> {
                 let invocant_ty = node
                     .child_by_field_name("invocant")
                     .and_then(|inv| self.invocant_type_at_node(inv));
-                self.bag_query_expression(
+                let call_ty = self.bag_query_expression(
                     crate::witnesses::RefIdx(idx as u32),
                     Some(arity),
-                    invocant_ty,
-                )
+                    invocant_ty.clone(),
+                );
+                // Mojo route brand: when this call's value is a route
+                // builder, overlay the accumulated defaults from the
+                // receiver (and this call's own `->to(...)`) onto the
+                // type so a downstream partial `->to('#action')` reads
+                // the inherited controller. The brand IS the type, so
+                // it rides assignment / chaining / nesting through the
+                // bag for free — see
+                // `docs/adr/route-branding.md`.
+                if Self::is_route_type(call_ty.as_ref()) {
+                    return Some(self.brand_route_call(node, invocant_ty.as_ref(), call_ty));
+                }
+                call_ty
             }
             "coderef_call_expression" => {
                 // `$cb->(args)` — value-type IS whatever the operand's
@@ -1750,16 +2236,51 @@ impl<'a> Builder<'a> {
             // post-walk correctness; same reason as the `$self`
             // case above.
             "func1op_call_expression" if self.is_shift_call(node) => {
+                if !self.shift_is_invocant_here(node) {
+                    return None;
+                }
                 self.package_for_node(node).map(InferredType::ClassName)
             }
             "array_element_expression" => {
                 let array = node.child_by_field_name("array")?;
-                if array.kind() != "container_variable" { return None; }
                 let varname = array.named_child(0)?;
-                if varname.utf8_text(self.source).ok() != Some("_") { return None; }
                 let index = node.child_by_field_name("index")?;
-                if index.utf8_text(self.source).ok() != Some("0") { return None; }
-                self.package_for_node(node).map(InferredType::ClassName)
+                // `$_[0]` is the positional-receiver pseudo-invocant
+                // (`sub m { $_[0]->... }`) — enclosing-class identity,
+                // not a real array read.
+                if self.is_positional_receiver(node) {
+                    if !self.shift_is_invocant_here(node) {
+                        return None;
+                    }
+                    return self.package_for_node(node).map(InferredType::ClassName);
+                }
+                // General `$arr[N]`: read `@arr`'s Sequence shape from
+                // the bag and project the index. Mirror of
+                // `FileAnalysis::resolve_expression_type`'s array arm.
+                let name = varname.utf8_text(self.source).ok()?;
+                let idx: i32 = index.utf8_text(self.source).ok()?.parse().ok()?;
+                let arr_var = format!("@{}", name);
+                let scope = self.scope_at_point(node.start_position());
+                self.bag_query_variable(&arr_var, scope, node.start_position())
+                    .and_then(|t| t.element_at(idx).cloned())
+            }
+            "hash_element_expression" => {
+                // A hash element's VALUE type is independent of the
+                // container's class — never `$self`'s class. If a typed
+                // write to this slot was recorded (`SlotType{class,key}`,
+                // seeded at the write site, agreed by `SlotTypeFold`),
+                // that is the honest answer; otherwise untyped.
+                let base = node.named_child(0)?;
+                let class = self.invocant_type_at_node(base)?.class_name()?.to_string();
+                let key_node = node.child_by_field_name("key")?;
+                let (key, is_dynamic) = self.extract_key_text(key_node)?;
+                if is_dynamic {
+                    return None;
+                }
+                self.bag_query_attachment(&crate::witnesses::WitnessAttachment::SlotType {
+                    class,
+                    key,
+                })
             }
             "function_call_expression" | "ambiguous_function_call_expression" => {
                 if self.is_shift_call(node) {
@@ -1770,6 +2291,145 @@ impl<'a> Builder<'a> {
                 let bare = bare_name(name);
                 let arg_count = self.extract_call_args(node).len() as u32;
                 self.bag_query_named_sub(bare, Some(arg_count))
+            }
+            _ => None,
+        }
+    }
+
+    /// The Mojolicious route-builder base class — the class every
+    /// `$r->get/any/under/to/name(...)` value dispatches against.
+    /// Centralized so the brand-overlay logic and any future route
+    /// case agree on one string.
+    const ROUTE_CLASS: &'static str = "Mojolicious::Routes::Route";
+
+    /// True when a resolved call type is a route builder — either a
+    /// plain `ClassName(Route)` (the `_route` override / fluent
+    /// Mojo::Base accessor result) or an already-branded route. The
+    /// brand asks the type, never the method name (rule #10): any
+    /// method whose return types as the route base inherits the brand.
+    fn is_route_type(ty: Option<&InferredType>) -> bool {
+        ty.and_then(|t| t.class_name()) == Some(Self::ROUTE_CLASS)
+    }
+
+    /// Project a `BrandedRoute` to its base `ClassName`. A brand is a
+    /// route-value identity (carries inherited `->to` defaults for a
+    /// partial target to read); it is never a sub-return contract or a
+    /// hover/dispatch type. Sub-return materialization and the
+    /// fixed-point snapshot debrand so the chain-internal artifact
+    /// doesn't leak out or oscillate. Other types pass through.
+    fn debrand(t: InferredType) -> InferredType {
+        match t {
+            InferredType::BrandedRoute { base, .. } => InferredType::ClassName(base),
+            other => other,
+        }
+    }
+
+    /// Overlay this `->...(...)` call's own route defaults onto the
+    /// receiver's accumulated brand, producing the `BrandedRoute` the
+    /// call's value carries. Inheritance is structural: we seed from
+    /// the receiver's brand (its `controller` + `stash`), then a
+    /// `->to(...)` on THIS call overlays its keys. Non-`to` route
+    /// methods (`get`, `any`, `under`, `name`, …) just propagate the
+    /// receiver's brand unchanged — `under` nesting therefore inherits
+    /// the parent's controller automatically, and a sibling group's
+    /// own `->to('other#')` overlays a fresh controller without
+    /// touching the parent (defaults flow down only).
+    fn brand_route_call(
+        &self,
+        node: Node<'a>,
+        invocant_ty: Option<&InferredType>,
+        call_ty: Option<InferredType>,
+    ) -> InferredType {
+        // Seed from the receiver's brand if it had one.
+        let (mut controller, mut stash) = match invocant_ty {
+            Some(InferredType::BrandedRoute { controller, stash, .. }) => {
+                (controller.clone(), stash.clone())
+            }
+            _ => (None, Vec::new()),
+        };
+
+        let method = node
+            .child_by_field_name("method")
+            .and_then(|m| m.utf8_text(self.source).ok());
+        if method == Some("to") {
+            self.merge_to_defaults(node, &mut controller, &mut stash);
+        }
+
+        let base = call_ty
+            .as_ref()
+            .and_then(|t| t.class_name())
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| Self::ROUTE_CLASS.to_string());
+        // An empty brand carries no inherited defaults — it's
+        // indistinguishable from a plain `ClassName(base)` and only
+        // adds churn to the fold (a `BrandedRoute{None,[]}` return type
+        // oscillates against `ClassName` in the snapshot). Collapse it.
+        if controller.is_none() && stash.is_empty() {
+            return InferredType::ClassName(base);
+        }
+        InferredType::BrandedRoute { base, controller, stash }
+    }
+
+    /// Parse a `->to(...)` call's args into controller + stash
+    /// overlays. Mirrors mojo-routes.rhai's `to` parsing but on the
+    /// value side: `'ctrl#act'` / `'ctrl#'` set controller;
+    /// `'#act'` leaves the inherited controller intact (action is
+    /// per-route, not inherited); `key => val` pairs (including
+    /// `controller => 'x'`) merge into the stash / controller.
+    fn merge_to_defaults(
+        &self,
+        node: Node<'a>,
+        controller: &mut Option<String>,
+        stash: &mut Vec<(String, String)>,
+    ) {
+        let args = self.extract_call_args(node);
+        if args.is_empty() {
+            return;
+        }
+        // A leading `'ctrl#act'` / `'#act'` string sets the controller
+        // (action is per-route, never inherited). Mojo allows trailing
+        // `key => val` stash pairs after it (`->to('a#', section =>
+        // 'x')`), so consume the string then fall through to the
+        // key/value loop starting one arg later.
+        let mut start = 0;
+        if let Some(first) = args.first() {
+            if matches!(first.kind(), "string_literal" | "interpolated_string_literal") {
+                if let Some(s) = self.extract_string_content(*first) {
+                    if let Some((ctrl, _act)) = s.split_once('#') {
+                        if !ctrl.is_empty() {
+                            *controller = Some(ctrl.to_string());
+                        }
+                        start = 1;
+                    }
+                }
+            }
+        }
+        // Key => value form (controller / arbitrary stash defaults).
+        let mut i = start;
+        while i + 1 < args.len() {
+            let key = self.literal_arg_string(args[i]);
+            let val = self.literal_arg_string(args[i + 1]);
+            if let (Some(k), Some(v)) = (key, val) {
+                if k == "controller" {
+                    *controller = Some(v);
+                } else if k != "action" {
+                    stash.retain(|(ek, _)| ek != &k);
+                    stash.push((k, v));
+                }
+            }
+            i += 2;
+        }
+    }
+
+    /// Read a string-ish arg node's literal value (string content or
+    /// bareword/autoquoted key text). `None` for non-literal args.
+    fn literal_arg_string(&self, arg: Node<'a>) -> Option<String> {
+        match arg.kind() {
+            "string_literal" | "interpolated_string_literal" => {
+                self.extract_string_content(arg)
+            }
+            "autoquoted_bareword" | "bareword" => {
+                arg.utf8_text(self.source).ok().map(|s| s.to_string())
             }
             _ => None,
         }
@@ -1864,12 +2524,14 @@ impl<'a> Builder<'a> {
             method_name: None,
             receiver_text: None,
             receiver_type: None,
+            receiver_route_defaults: Vec::new(),
             args,
             call_span,
             selection_span,
             current_package: self.current_package.clone(),
             current_package_parents: parents,
             current_package_uses: uses,
+            has_options: None,
         }
     }
 
@@ -1952,6 +2614,40 @@ impl<'a> Builder<'a> {
         }
     }
 
+    /// Record a provisional dispatch when a method call matches a plugin
+    /// `dispatch_verbs()` declaration. The receiver isa check happens later,
+    /// at enrichment, against the cross-file-resolved receiver class — here
+    /// we just capture the candidate (name + span + the build-time receiver
+    /// class hint, if any). Trigger-independent: keyed off the global verb
+    /// manifest, not the file's `use`s, so a `$minion->enqueue('T')` in a
+    /// plain class is captured the same as one in a Mojo app.
+    fn record_provisional_dispatch(&mut self, method: &str, ctx: &plugin::CallContext) {
+        let Some(spec) = self.dispatch_manifest.get(method) else { return };
+        let Some(arg) = ctx.args.get(spec.name_arg_index) else { return };
+        let Some(name) = arg.string_value.clone() else { return };
+        if name.is_empty() {
+            return;
+        }
+        let span = arg.span;
+        let receiver_class = match &ctx.receiver_type {
+            Some(InferredType::ClassName(c)) => Some(c.clone()),
+            _ => None,
+        };
+        // Gate the candidate on the verb's `target_class`: the inner
+        // payload is unreadable until a receiver isa-resolves at query time.
+        self.provisional_dispatches.push(crate::file_analysis::ReceiverGated::new(
+            spec.target_class.clone(),
+            crate::file_analysis::DispatchCandidate {
+                name,
+                span,
+                dispatcher: method.to_string(),
+                owner_class: spec.owner_class.clone(),
+                receiver_class,
+                call_span: ctx.call_span,
+            },
+        ));
+    }
+
     /// Convert a plugin-produced `EmitAction` into real builder state. All
     /// emitted symbols carry a `Namespace::Framework { id }` tag so downstream
     /// queries can distinguish plugin-synthesized entities from native ones.
@@ -1981,6 +2677,7 @@ impl<'a> Builder<'a> {
                     display,
                     hide_in_outline,
                     opaque_return,
+                    is_constant: false,
                 };
                 let target_pkg = on_class.clone().or_else(|| self.current_package.clone());
 
@@ -2069,12 +2766,25 @@ impl<'a> Builder<'a> {
                     target_name: name,
                     access,
                     resolves_to: None,
+                    resolved_method_target: None,
                 });
             }
             plugin::EmitAction::Handler {
                 name, owner, dispatchers, params, span, selection_span, display,
                 hide_in_outline, outline_label,
             } => {
+                // Dedup: the partial-route re-dispatch re-runs `->to`
+                // plugins post-fold, so the same Handler (same name +
+                // span) can be produced twice. Keep one.
+                let already = self.symbols.iter().any(|s| {
+                    s.name == name
+                        && s.kind == SymKind::Handler
+                        && s.span == span
+                        && s.namespace == ns
+                });
+                if already {
+                    return;
+                }
                 let detail = SymbolDetail::Handler {
                     owner,
                     dispatchers,
@@ -2106,6 +2816,13 @@ impl<'a> Builder<'a> {
                 } else {
                     Some(invocant.clone())
                 };
+                if !self.method_call_ref_dedup.insert((
+                    span.start,
+                    span.end,
+                    method_name.clone(),
+                )) {
+                    return;
+                }
                 let ref_idx = self.refs.len();
                 self.refs.push(Ref {
                     kind: RefKind::MethodCall {
@@ -2118,6 +2835,7 @@ impl<'a> Builder<'a> {
                     target_name: method_name,
                     access: AccessKind::Read,
                     resolves_to: None,
+                    resolved_method_target: None,
                 });
                 if let Some(c) = invocant_class {
                     self.method_call_invocant.insert(ref_idx, c);
@@ -2130,14 +2848,22 @@ impl<'a> Builder<'a> {
                 // (owner, name). The var_text lives on the kind for
                 // features that want to show the receiver in hover.
                 let _ = var_text; // reserved for future hover enrichment
-                self.refs.push(Ref {
-                    kind: RefKind::DispatchCall { dispatcher, owner: Some(owner) },
-                    span,
-                    scope: self.current_scope(),
-                    target_name: name,
-                    access: AccessKind::Read,
-                    resolves_to: None,
-                });
+                if self.dispatch_dedup.insert((
+                    span.start,
+                    span.end,
+                    dispatcher.clone(),
+                    name.clone(),
+                )) {
+                    self.refs.push(Ref {
+                        kind: RefKind::DispatchCall { dispatcher, owner: Some(owner) },
+                        span,
+                        scope: self.current_scope(),
+                        target_name: name,
+                        access: AccessKind::Read,
+                        resolves_to: None,
+                        resolved_method_target: None,
+                    });
+                }
             }
             plugin::EmitAction::Symbol { name, kind, span, selection_span, detail, return_type } => {
                 // The per-symbol return type rides at the action
@@ -2178,6 +2904,7 @@ impl<'a> Builder<'a> {
                     imported_symbols,
                     span,
                     qw_close_paren: None,
+                    empty_import: false,
                 });
             }
             plugin::EmitAction::VarType { variable, at, inferred_type } => {
@@ -2190,6 +2917,25 @@ impl<'a> Builder<'a> {
                     variable,
                     at,
                     inferred_type,
+                    plugin_id: plugin_id.clone(),
+                });
+            }
+            plugin::EmitAction::NamedSubParamType { sub_name, param_index, inferred_type } => {
+                // `->helper(_ => \&sub)` — type the named sub's positional.
+                // A qualifier (`Foo::bar`) pins the enclosing package; a bare
+                // name defaults to the package the registration sits in (the
+                // sub is local to it). Resolution is deferred so a forward-
+                // declared sub still resolves.
+                let (package, sub_name) = match sub_name.rsplit_once("::") {
+                    Some((pkg, n)) => (Some(pkg.to_string()), n.to_string()),
+                    None => (self.current_package.clone(), sub_name),
+                };
+                self.deferred_named_sub_param_types.push(DeferredNamedSubParamType {
+                    sub_name,
+                    package,
+                    param_index,
+                    inferred_type,
+                    plugin_id: plugin_id.clone(),
                 });
             }
             plugin::EmitAction::SyntheticUse { module, args, imports, span } => {
@@ -2281,8 +3027,18 @@ impl<'a> Builder<'a> {
             "method_declaration_statement" => self.visit_sub(node, true),
             "variable_declaration" => self.visit_variable_decl(node),
             "for_statement" => self.visit_for(node),
+            "postfix_for_expression" => self.visit_postfix_for(node),
             "use_statement" => self.visit_use(node),
             "assignment_expression" => self.visit_assignment(node),
+
+            // A bare `{ ... }` statement is its own block node in this
+            // grammar (no separate `block` child). It's a hard package
+            // boundary like any other block — `{ package Inner; }` must not
+            // leak Inner to following statements.
+            "block_statement" => {
+                self.add_fold_range(node);
+                self.walk_block_package_scoped(node);
+            }
 
             // Blocks create scopes (but only standalone blocks, not sub/class/for bodies)
             "block" | "do_block" => {
@@ -2295,7 +3051,7 @@ impl<'a> Builder<'a> {
                 ) {
                     self.add_fold_range(node);
                     self.push_scope(ScopeKind::Block, node_to_span(node), None);
-                    self.visit_children(node);
+                    self.walk_block_package_scoped(node);
                     self.pop_scope();
                     return;
                 }
@@ -2328,6 +3084,13 @@ impl<'a> Builder<'a> {
             }
             "method_call_expression" => self.visit_method_call(node),
 
+            // Code-ref capture: `\&handler` or `\&Pkg::handler`.
+            // Emits a FunctionCall ref at the name span so goto-def /
+            // references resolve to the sub definition. The `expr_payload`
+            // path handles the CodeRef type witness; this arm adds the
+            // navigation ref that `expr_payload` doesn't emit.
+            "refgen_expression" => self.visit_refgen(node),
+
             // Hash access
             "hash_element_expression" => self.visit_hash_element(node),
 
@@ -2349,6 +3112,29 @@ impl<'a> Builder<'a> {
                 // the lattice settles. No witness emission here;
                 // no post-walk pass.
                 self.infer_deref_type(node, InferredType::CodeRef { return_edge: None });
+                self.visit_children(node);
+            }
+            // Symbolic code-deref: `&{ EXPR }` / `&{ EXPR }(...)`. The operand
+            // (the EXPR inside the block) is a coderef. Narrow it, then visit
+            // children so the inner scalar still gets its read ref.
+            "code_deref_expression" => {
+                if let Some(operand) = code_deref_operand(node) {
+                    if let Some(existing) = self.invocant_type_at_node(operand) {
+                        if !existing.subsumes_narrowing(&InferredType::CodeRef { return_edge: None }) {
+                            self.push_var_type_constraint(
+                                operand,
+                                node,
+                                InferredType::CodeRef { return_edge: None },
+                            );
+                        }
+                    } else {
+                        self.push_var_type_constraint(
+                            operand,
+                            node,
+                            InferredType::CodeRef { return_edge: None },
+                        );
+                    }
+                }
                 self.visit_children(node);
             }
             "array_deref_expression" => {
@@ -2454,6 +3240,16 @@ impl<'a> Builder<'a> {
                 }
             }
 
+            // Standalone bareword usage of a `use constant` name:
+            // `my $n = MAX_RETRIES`, `foo(TIMEOUT)`, `$n > MAX_RETRIES`.
+            // The def is a local parameterless Sub symbol; emit a FunctionCall
+            // ref so goto-def reaches it and references lists the usage (rule
+            // #7). Recognized by membership in `declared_constants`, never by
+            // name pattern (rule #10). The call-name position (`MAX_RETRIES()`)
+            // is already reffed by `visit_function_call`; skip it here so the
+            // narrowest-span ref isn't duplicated.
+            "bareword" => self.visit_const_usage(node),
+
             // Hash construction
             "anonymous_hash_expression" => self.visit_anon_hash(node),
 
@@ -2462,6 +3258,39 @@ impl<'a> Builder<'a> {
                 if let Ok(text) = node.utf8_text(self.source) {
                     self.pod_texts.push(text.to_string());
                 }
+            }
+
+            // Regex literals → TOK_REGEXP. Record the whole literal span,
+            // then descend so interpolated variables inside still get refs.
+            "quoted_regexp" | "match_regexp" => {
+                self.regex_spans.push(node_to_span(node));
+                self.visit_children(node);
+            }
+            "substitution_regexp" => {
+                // `s///e`: the replacement is Perl *code*, but the grammar
+                // emits it as a plain `replacement` node (not parsed as code).
+                // Re-parse it so calls/vars inside resolve (rule #7), mapping
+                // spans back to the file. Same idea as the __END__/ISA re-parses.
+                let repl = self.subst_replacement_is_eval(node).then(|| {
+                    (0..node.named_child_count())
+                        .filter_map(|i| node.named_child(i))
+                        .find(|c| c.kind() == "replacement")
+                }).flatten();
+                if let Some(repl) = repl {
+                    // Color only the pattern region as a regex literal, stopping
+                    // where the code replacement begins — the replacement's own
+                    // refs color the code, and overlapping semantic tokens are
+                    // invalid LSP. (Non-/e keeps the whole-literal span: the
+                    // replacement there is a plain string, not code.)
+                    self.regex_spans.push(Span {
+                        start: node_to_span(node).start,
+                        end: node_to_span(repl).start,
+                    });
+                    self.emit_refs_in_eval_replacement(repl);
+                } else {
+                    self.regex_spans.push(node_to_span(node));
+                }
+                self.visit_children(node);
             }
 
             // ERROR nodes: recover structural declarations (the file's skeleton)
@@ -2490,6 +3319,124 @@ impl<'a> Builder<'a> {
                 }
             }
         }
+        // Token-stream bleed insurance: when a mis-lexed string (`"${@}…"`,
+        // an unterminated heredoc, etc.) swallows the closing delimiter, the
+        // bleed dissolves every `sub`/`method` declaration in the trailing
+        // region into stray tokens — they survive neither as
+        // subroutine_declaration_statement children (the structural loop
+        // above) nor anywhere else in the tree. The file is "decapitated":
+        // a 36-sub module indexes 0 subs, cascading to total loss of
+        // inherited goto-def/references across subclasses. Recover those
+        // declarations from raw source text inside the ERROR span. Generic:
+        // gated only on "we are inside a parse ERROR", never on any module.
+        // See docs/parser-shortcomings.md (G7 — `"${@}"` bleed) and
+        // docs/adr/error-recovery.md. KLUDGE: removable once upstream fixes G7.
+        self.recover_subs_from_error_text(error_node);
+    }
+
+    /// Source-text fallback for declarations a token-stream bleed destroyed.
+    /// Scans the ERROR node's raw bytes for statement-position `sub NAME` /
+    /// `method NAME` and synthesizes minimal Sub/Method symbols for any not
+    /// already captured (structurally, or on this row). Only declarations
+    /// inside the ERROR span are considered — outside it tree-sitter parsed
+    /// correctly and owns the symbol.
+    ///
+    /// KLUDGE (medium, re-evaluate) — this is a regex-ish raw-byte rescue for
+    /// the `"${@}"` block-interp lexer bleed (docs/parser-shortcomings.md G7).
+    /// It only recovers the declaration *skeleton* (params/return/POD are lost
+    /// because the bodies are dissolved). It exists only because the bug
+    /// dissolves subs entirely rather than leaving them as ERROR children, so
+    /// the normal structural recovery can't see them. **Delete / re-evaluate
+    /// once upstream tree-sitter-perl fixes the `"${@}"` lex** — at that point
+    /// the subs parse normally and this byte-scan is dead weight (and a latent
+    /// source of false-positive "sub" matches in pathological ERROR text).
+    fn recover_subs_from_error_text(&mut self, error_node: Node<'a>) {
+        let start_row = error_node.start_position().row;
+        let start_col = error_node.start_position().column;
+        let text = match error_node.utf8_text(self.source) {
+            Ok(t) => t,
+            Err(_) => return,
+        };
+        let pkg_is_subclass = self.current_package
+            .as_ref()
+            .map_or(false, |p| self.package_parents.contains_key(p));
+
+        for (line_off, line) in text.lines().enumerate() {
+            let row = start_row + line_off;
+            // The ERROR text's first line starts at the node's column; later
+            // lines start at column 0. Offset the recovered spans so they map
+            // back to true file columns.
+            let col_base = if line_off == 0 { start_col } else { 0 };
+            let trimmed = line.trim_start();
+            let indent = line.len() - trimmed.len();
+            let (kw_is_method, rest) = if let Some(r) = trimmed.strip_prefix("sub ") {
+                (false, r)
+            } else if let Some(r) = trimmed.strip_prefix("method ") {
+                (true, r)
+            } else {
+                continue;
+            };
+            let name_pad = rest.len() - rest.trim_start().len();
+            let rest = rest.trim_start();
+            let name: String = rest
+                .chars()
+                .take_while(|c| c.is_alphanumeric() || *c == '_')
+                .collect();
+            if name.is_empty() {
+                continue;
+            }
+            // The next non-space char after the name must look like a
+            // declaration: `{` (body), `(` (signature/prototype), `:`
+            // (attribute), `;` (forward decl), or EOL. Filters bareword noise
+            // like `$x->sub foo` that is not a real declaration.
+            let after = rest[name.len()..].trim_start();
+            let looks_decl = after.is_empty()
+                || after.starts_with('{')
+                || after.starts_with('(')
+                || after.starts_with(':')
+                || after.starts_with(';');
+            if !looks_decl {
+                continue;
+            }
+
+            // Dedup: skip if a Sub/Method symbol already lands on this row
+            // (recovered structurally above, or by an overlapping ERROR).
+            if self.symbols.iter().any(|s| {
+                matches!(s.kind, SymKind::Sub | SymKind::Method)
+                    && s.selection_span.start.row == row
+            }) {
+                continue;
+            }
+
+            let kw_len = if kw_is_method { "method ".len() } else { "sub ".len() };
+            let name_col = col_base + indent + kw_len + name_pad;
+            let name_span = Span {
+                start: Point { row, column: name_col },
+                end: Point { row, column: name_col + name.len() },
+            };
+            // The bleed makes the true body extent unknowable; a single-line
+            // declaration span is enough for goto-def / references / outline.
+            let decl_span = Span {
+                start: Point { row, column: col_base + indent },
+                end: Point { row, column: col_base + line.len() },
+            };
+            let is_method = kw_is_method || pkg_is_subclass;
+            self.add_symbol(
+                name,
+                if is_method { SymKind::Method } else { SymKind::Sub },
+                decl_span,
+                name_span,
+                SymbolDetail::Sub {
+                    params: Vec::new(),
+                    is_method,
+                    doc: None,
+                    display: None,
+                    hide_in_outline: false,
+                    opaque_return: false,
+                    is_constant: false,
+                },
+            );
+        }
     }
 
     fn visit_children(&mut self, node: Node<'a>) {
@@ -2498,6 +3445,38 @@ impl<'a> Builder<'a> {
                 self.visit_node(child);
             }
         }
+    }
+
+    /// Walk a `{ ... }` block's children, reverting package context at block
+    /// close. `package Foo;` is file-scoped in Perl, but a `{ }` block is a
+    /// hard boundary: `{ package Inner; }` must not leak Inner to the
+    /// statements that follow. Saves the walk-time package name and the open
+    /// statement-range cursor, restores both on exit, and repairs the
+    /// `package_ranges` spans so `package_at` reverts past the block too.
+    fn walk_block_package_scoped(&mut self, node: Node<'a>) {
+        let saved_pkg = self.current_package.clone();
+        let saved_stmt_range = self.open_statement_package;
+        self.visit_children(node);
+        if self.open_statement_package != saved_stmt_range {
+            // A `package Inner;` inside the block opened a range to file-end;
+            // trim it to block close so it doesn't shadow the enclosing pkg.
+            if let Some(idx) = self.open_statement_package {
+                self.package_ranges[idx].span.end = node.end_position();
+            }
+            // The enclosing `package Outer;` range (if any) was truncated to
+            // Inner's start when Inner opened — resume it to file-end so
+            // Outer covers the post-block tail.
+            if let Some(idx) = saved_stmt_range {
+                let file_end = self
+                    .scope_stack
+                    .first()
+                    .map(|id| self.scopes[id.0 as usize].span.end)
+                    .unwrap_or_else(|| node.end_position());
+                self.package_ranges[idx].span.end = file_end;
+            }
+            self.open_statement_package = saved_stmt_range;
+        }
+        self.current_package = saved_pkg;
     }
 
     // ---- Node visitors ----
@@ -2709,6 +3688,16 @@ impl<'a> Builder<'a> {
             Err(_) => { self.visit_children(node); return; }
         };
 
+        // A bodyless `sub NAME;` / `method NAME;` is a forward declaration, not
+        // a definition (ts-parser-perl 1.1.1 parses these as real decl
+        // statements). Emitting a symbol would duplicate the real definition in
+        // the outline and shadow it in goto-def with a body-less target. Skip
+        // it — the navigable symbol is the actual definition (in this file,
+        // cross-file, or installed via AUTOLOAD/XS).
+        if node.child_by_field_name("body").is_none() {
+            return;
+        }
+
         // Extract params
         let mut params = self.extract_params(node);
 
@@ -2744,8 +3733,24 @@ impl<'a> Builder<'a> {
             if is_method { SymKind::Method } else { SymKind::Sub },
             node_to_span(node),
             node_to_span(name_node),
-            SymbolDetail::Sub { params: params.clone(), is_method, doc, display: None, hide_in_outline: false, opaque_return: false },
+            SymbolDetail::Sub { params: params.clone(), is_method, doc, display: None, hide_in_outline: false, opaque_return: false, is_constant: false },
         );
+
+        // Exporter::Extensible method-attribute export form: `sub foo :Export`.
+        // The sub's name is the export; recognizing the attribute is builder
+        // parsing of framework syntax. The attribute can appear before the
+        // package's `use Exporter::Extensible` is seen in source order, so we
+        // don't gate on package_uses here — `:Export` is unambiguous enough.
+        self.detect_export_attribute(node, &name);
+
+        // Importer's advertise hook: a module implements `IMPORTER_MENU` to
+        // tell `Importer` (and Exporter::Tiny) its export list. Best-effort:
+        // pull the `export` / `export_ok` keys' name arrays from the return
+        // list when statically present. `export_anon` (name → coderef) and
+        // any computed menu are unmodeled (runtime).
+        if name == "IMPORTER_MENU" {
+            self.detect_importer_menu(node);
+        }
 
         // Push sub scope
         let scope_kind = if is_method {
@@ -2781,6 +3786,11 @@ impl<'a> Builder<'a> {
         // Detect first-param-is-self pattern
         self.detect_first_param_type(&params, node);
 
+        // Role-contract param typing: a plugin `param_types()` rule may type
+        // a named param (e.g. `$app` in a `Clove::Upgrade::OneTime` doer's
+        // `run_upgrade`). Same mechanism as `detect_first_param_type`.
+        self.apply_param_type_manifest(&name, &params, node);
+
         // Visit children (body, etc.)
         self.visit_children(node);
         self.pop_scope();
@@ -2809,7 +3819,20 @@ impl<'a> Builder<'a> {
     /// with a paren), so a workspace search for `(anon)` won't
     /// surface them.
     fn visit_anonymous_sub(&mut self, node: Node<'a>) {
-        let params = self.extract_params(node);
+        let mut params = self.extract_params(node);
+        // If the caller set `modifier_invocant_pos` (from `around`/`before`/`after`
+        // in a Moo/Moose context), mark the designated param as the invocant so
+        // `detect_first_param_type` types it as the enclosing class. Consume the
+        // position immediately — it applies only to this next anon sub, not to any
+        // nested lambdas the body might contain.
+        let modifier_pos = self.modifier_invocant_pos.take();
+        if let Some(pos) = modifier_pos {
+            if let Some(p) = params.get_mut(pos) {
+                if p.name.starts_with('$') {
+                    p.is_invocant = true;
+                }
+            }
+        }
         let span = node_to_span(node);
         self.ensure_anon_sub_symbol(node, &params);
         self.push_scope(
@@ -2852,6 +3875,7 @@ impl<'a> Builder<'a> {
                 display: None,
                 hide_in_outline: true,
                 opaque_return: false,
+                is_constant: false,
             },
         );
         self.anon_sub_symbol_by_span.insert(span, sym_id);
@@ -2922,6 +3946,39 @@ impl<'a> Builder<'a> {
                                 return shift_params;
                             }
                             return at_params;
+                        }
+                    }
+
+                    // Pattern: my ($a, $b, ...) = (shift, shift, ...) — Mojo's
+                    // `my ($self, $name) = (shift, shift)`. Each `shift` binds
+                    // the next @_ element, so the LHS vars are positional params
+                    // in order. Gate on every RHS element being a shift call so
+                    // a real list value (`my ($a,$b) = foo()`) isn't misread.
+                    // The RHS is the last named child, NOT `child_by_field_name
+                    // ("right")` — for a parenthesized RHS that field points at
+                    // the `(` token (the documented assignment-field gotcha).
+                    let rhs_list = assign
+                        .named_child(assign.named_child_count().saturating_sub(1))
+                        .filter(|n| n.kind() == "list_expression");
+                    let all_shifts = rhs_list.is_some_and(|list| {
+                        list.named_child_count() > 0
+                            && (0..list.named_child_count())
+                                .filter_map(|j| list.named_child(j))
+                                .all(|c| self.is_shift_call(c))
+                    });
+                    if all_shifts {
+                        if let Some(left) = assign.child_by_field_name("left") {
+                            let list_params: Vec<ParamInfo> = self.collect_vars_from_decl(left)
+                                .into_iter()
+                                .map(|(name, _)| {
+                                    let is_slurpy = name.starts_with('@') || name.starts_with('%');
+                                    ParamInfo { name, default: None, is_slurpy, is_invocant: false }
+                                })
+                                .collect();
+                            if !list_params.is_empty() {
+                                shift_params.extend(list_params);
+                                return shift_params;
+                            }
                         }
                     }
 
@@ -3099,21 +4156,104 @@ impl<'a> Builder<'a> {
         // Legacy params: they'll be picked up as normal variable_declaration nodes
     }
 
-    fn detect_first_param_type(&mut self, params: &[ParamInfo], node: Node<'a>) {
-        if params.is_empty() { return; }
-        let first = &params[0];
-        if !first.name.starts_with('$') { return; }
+    /// Apply plugin `param_types()` rules to a sub declaration: for every rule
+    /// whose `method` matches (or is `None` = any method) and whose named param
+    /// is present, emit a `ReceiverGated` typed TC gated on the enclosing
+    /// package's `isa` the rule's `in_role`. The gate is NOT checked here — the
+    /// builder is index-free (rule #1), so a class whose `in_role` ancestor is
+    /// reachable only cross-file can't be confirmed at parse time. Resolution
+    /// is deferred to query time (`FileAnalysis::gated_param_type_for`), where
+    /// the module index walks the ancestry cross-file. Called inside the sub
+    /// scope (like `detect_first_param_type`).
+    fn apply_param_type_manifest(&mut self, method: &str, params: &[ParamInfo], node: Node<'a>) {
+        // No rules → skip the alloc every sub declaration would otherwise pay.
+        if self.param_type_manifest.is_empty() && self.param_type_wildcards.is_empty() {
+            return;
+        }
+        // Action attributes (`:Local`, `:Chained`, `:Args`, …) are the only
+        // honest signal that a controller sub is a dispatch *action* — the slot
+        // that actually receives `$c`. `requires_action_attr` rules gate on it.
+        // Skip the CST walk + Vec alloc entirely when no loaded rule uses it.
+        let has_action_attr = self.any_requires_action_attr
+            && node
+                .child_by_field_name("attributes")
+                .map_or(false, |a| a.named_child_count() > 0);
 
-        // Use the `is_invocant` flag set at extract time rather than
-        // matching on names. This way `sub list { my ($c) = @_ }` in a
-        // controller types `$c` as the current package the same way
-        // `sub new { my ($self) = @_ }` always has — the caller side
-        // (builder or plugin) owns the invocancy decision.
-        if !first.is_invocant { return; }
+        // Collect (variable, gate-class, type-class) before mutating self —
+        // can't hold the manifest borrow while pushing into `gated_param_types`.
+        let mut to_gate: Vec<(String, String, String)> = Vec::new();
+
+        // Named rules: only those keyed to exactly this method name.
+        if let Some(rules) = self.param_type_manifest.get(method) {
+            Self::collect_param_type_matches(rules, params, has_action_attr, method, &mut to_gate);
+        }
+
+        // Wildcard rules: method is None — apply to every sub in the class.
+        let wildcards = std::mem::take(&mut self.param_type_wildcards);
+        Self::collect_param_type_matches(&wildcards, params, has_action_attr, method, &mut to_gate);
+        self.param_type_wildcards = wildcards;
+
+        let scope = self.current_scope();
+        let span = node_to_span(node);
+        for (variable, in_role, class) in to_gate {
+            self.gated_param_types.push(crate::file_analysis::ReceiverGated::new(
+                in_role,
+                TypeConstraint {
+                    variable,
+                    scope,
+                    constraint_span: span,
+                    inferred_type: InferredType::ClassName(class),
+                },
+            ));
+        }
+    }
+
+    /// Inner fold for `apply_param_type_manifest`: collect matching
+    /// (variable_name, in_role, type_class) triples into `out`. Pure — no self
+    /// borrow, so it can be called while `param_type_wildcards` is temporarily
+    /// moved out. The `in_role` gate rides each triple; ancestry is checked at
+    /// query time, not here.
+    fn collect_param_type_matches(
+        rules: &[plugin::ParamType],
+        params: &[ParamInfo],
+        has_action_attr: bool,
+        sub_name: &str,
+        out: &mut Vec<(String, String, String)>,
+    ) {
+        // Catalyst dispatches these private actions by name; over-inclusion of
+        // non-action-attributed subs is a documented follow-up (qa-findings P1.3).
+        const CATALYST_PRIVATE_ACTIONS: &[&str] =
+            &["begin", "end", "auto", "default", "index"];
+        let is_private_action = CATALYST_PRIVATE_ACTIONS.contains(&sub_name);
+        for r in rules {
+            if r.requires_action_attr && !has_action_attr && !is_private_action {
+                continue;
+            }
+            if let Some(p) = params.get(r.param) {
+                if p.name.starts_with('$') {
+                    out.push((p.name.clone(), r.in_role.clone(), r.type_class.clone()));
+                }
+            }
+        }
+    }
+
+    fn detect_first_param_type(&mut self, params: &[ParamInfo], node: Node<'a>) {
+        // Find the first param with `is_invocant = true` — normally params[0] for
+        // regular methods, but params[1] for `around` modifiers (params[0] is $orig).
+        // The caller that sets up the param list (visit_sub for named subs,
+        // visit_anonymous_sub for modifier bodies) is responsible for marking the
+        // correct param as the invocant.
+        let invocant = params
+            .iter()
+            .find(|p| p.is_invocant && p.name.starts_with('$'));
+        let invocant = match invocant {
+            Some(p) => p,
+            None => return,
+        };
 
         if let Some(ref pkg) = self.current_package {
             self.push_type_constraint(TypeConstraint {
-                variable: first.name.clone(),
+                variable: invocant.name.clone(),
                 scope: self.current_scope(),
                 constraint_span: node_to_span(node),
                 inferred_type: InferredType::FirstParam { package: pkg.clone() },
@@ -3180,7 +4320,7 @@ impl<'a> Builder<'a> {
                         SymKind::Method,
                         node_to_span(node),
                         *var_span,
-                        SymbolDetail::Sub { params: vec![], is_method: true, doc: None, display: None, hide_in_outline: false, opaque_return: false },
+                        SymbolDetail::Sub { params: vec![], is_method: true, doc: None, display: None, hide_in_outline: false, opaque_return: false, is_constant: false },
                     );
                 }
                 if has_writer {
@@ -3202,6 +4342,7 @@ impl<'a> Builder<'a> {
                             display: None,
                     hide_in_outline: false,
                     opaque_return: false,
+                    is_constant: false,
                         },
                     );
                 }
@@ -3274,7 +4415,35 @@ impl<'a> Builder<'a> {
                 // Accumulate loop variable values for constant folding
                 // for my $x (qw(a b c)) → $x => ["a", "b", "c"]
                 if let Some(list_node) = node.child_by_field_name("list") {
-                    let values = self.extract_string_names(list_node);
+                    let mut values = self.extract_string_names(list_node);
+                    // CG-3a: `for my $tag (_all_html_tags()) { *$tag = sub {...} }`
+                    // (CGI.pm). When the loop source is a call to a same-file sub
+                    // whose body is a literal qw/list return, fold that sub's
+                    // literal return into the loop var so the glob-install names
+                    // resolve. Non-literal local subs (or a cross-file callee)
+                    // yield nothing → loop var stays dynamic and glob synthesis
+                    // skips (no fabrication).
+                    if values.is_empty() {
+                        values = self.fold_local_sub_literal_return(list_node);
+                    }
+                    // Form 2 (loop-push re-export): a body that does
+                    // `push @EXPORT, @{"${var}::EXPORT"}` re-exports each module
+                    // the loop iterates over. Mint an edge per statically
+                    // resolvable list element. Dynamic lists fold to `values`
+                    // empty → no edge (honest). Done before the move of
+                    // `values` into `constant_strings`.
+                    if !values.is_empty() {
+                        if let Some(body) = node
+                            .child_by_field_name("block")
+                            .or_else(|| node.child_by_field_name("body"))
+                        {
+                            if self.body_has_symbolic_export_push(body, &var_name) {
+                                for module in &values {
+                                    self.record_reexport_edge(module);
+                                }
+                            }
+                        }
+                    }
                     if !values.is_empty() {
                         self.constant_strings.insert(var_name, values);
                     }
@@ -3290,6 +4459,57 @@ impl<'a> Builder<'a> {
         self.visit_children(node);
     }
 
+    /// Statement-modifier loop: `EXPR for LIST` / `EXPR foreach LIST`.
+    ///
+    /// mk_classdata-in-LOOP (Catalyst.pm/Controller.pm, ~205 FPs):
+    /// `__PACKAGE__->mk_classdata($_) for qw/a b c/` and
+    /// `mk_classdata($_) for (LIST)` install one class-data accessor per list
+    /// element. The implicit loop var (`$_`) is the call arg; the literal qw/
+    /// list is the authoritative name source — same producer as the direct
+    /// `mk_classdata('name')` form, just driven by the loop list. Non-literal
+    /// lists (an array var, computed) fold to nothing → no synthesis.
+    fn visit_postfix_for(&mut self, node: Node<'a>) {
+        // The `list` field can point at the `(` paren for the
+        // `... for (LIST)` form (the child_by_field_name paren gotcha), so the
+        // list payload is read off the second named child instead — `[call,
+        // list]`. `extract_string_list` folds qw / paren-list / constants.
+        if let (Some(call), Some(list_node)) = (node.named_child(0), node.named_child(1)) {
+            let names = self.extract_string_list(list_node);
+            if !names.is_empty() && self.is_class_accessor_loop_body(call) {
+                self.emit_class_accessor_symbols(call, &names);
+            }
+        }
+        self.visit_children(node);
+    }
+
+    /// Is `node` a `mk_classdata`/`mk_classaccessor` call whose single arg is the
+    /// loop var (`$_` or a named scalar)? The shape that, under a statement-
+    /// modifier loop, installs one accessor per list element. Both the bare
+    /// `mk_classdata($_)` and `__PACKAGE__->mk_classdata($_)` forms qualify;
+    /// the callee name is the signal (rule #10), not the invocant.
+    fn is_class_accessor_loop_body(&self, node: Node<'a>) -> bool {
+        let (callee, args) = match node.kind() {
+            "function_call_expression" | "ambiguous_function_call_expression" => {
+                (node.child_by_field_name("function"), node.child_by_field_name("arguments"))
+            }
+            "method_call_expression" => {
+                (node.child_by_field_name("method"), node.child_by_field_name("arguments"))
+            }
+            _ => return false,
+        };
+        let Some(callee) = callee else { return false };
+        if !matches!(
+            callee.utf8_text(self.source).ok(),
+            Some("mk_classdata") | Some("mk_classaccessor")
+        ) {
+            return false;
+        }
+        // Single scalar arg — the loop var the list feeds. Anything else
+        // (a literal name, multiple args) is the non-loop form handled by
+        // `visit_group_accessors` directly, or not a per-element install.
+        matches!(args.map(|a| a.kind()), Some("scalar"))
+    }
+
     fn visit_use(&mut self, node: Node<'a>) {
         // Thin shim: pull the value triple off the CST node and hand it
         // to the value-taking worker. `process_use` runs the actual
@@ -3302,6 +4522,31 @@ impl<'a> Builder<'a> {
         let Ok(module_name) = module_node.utf8_text(self.source) else { return };
         let raw_args = self.extract_mojo_base_args(node);
         let (imports, _qw_close) = self.extract_use_import_list(node);
+
+        // Importer consumer form: `use Importer 'M' => qw/foo bar/` imports
+        // foo/bar *from M*, not from Importer. Re-target so the import refs
+        // and the `Import` entry pin to M — then the existing imported-symbol
+        // resolution (goto-def → M's sub; cross-file refs_to) crosses to M.
+        // The first stringy arg is the source module; the rest are names.
+        // Honest limit: `Importer->import(...)`-style or hashref menu forms
+        // aren't covered — only the `use Importer 'M' => @names` line.
+        if module_name == "Importer" {
+            if let Some((source_module, names)) = imports.split_first() {
+                if !source_module.is_empty() && source_module.contains("::") {
+                    self.process_use(
+                        source_module.clone(),
+                        raw_args,
+                        names.to_vec(),
+                        node_to_span(node),
+                        node_to_span(module_node),
+                        Some(node),
+                        None,
+                    );
+                    return;
+                }
+            }
+        }
+
         self.process_use(
             module_name.to_string(),
             raw_args,
@@ -3311,7 +4556,136 @@ impl<'a> Builder<'a> {
             Some(node),
             None, // real source — default `Namespace::Language` on the Module
         );
+        // `use Sub::Exporter -setup => { exports => [...] }` declares this
+        // package's exports inline — model them so consumers' imports resolve.
+        if module_name == "Sub::Exporter" {
+            self.detect_sub_exporter_use(node);
+        }
+        // `use Class::Tiny qw/a b/` / `use Class::Tiny { a => ..., b => ... }`
+        // declares rw accessors at the use site (no `has` keyword), so
+        // synthesis hangs off the `use` node rather than a framework-mode
+        // `has` dispatch. Recognized by the import shape, not a name list.
+        if module_name == "Class::Tiny" {
+            self.visit_class_tiny_use(node);
+        }
         // Don't recurse — use statements don't contain interesting sub-nodes
+    }
+
+    /// `use Class::Tiny` synthesizes a rw accessor per attribute name plus the
+    /// constructor hash key, mirroring the Moo/Moose `has 'x' => (is=>'rw')`
+    /// artifacts (Method symbol + constructor `HashKeyDef`). Class::Tiny
+    /// accessors carry no isa constraint, so there's no return type to
+    /// publish — just provenance, so `--dump-package` shows the synth origin.
+    ///
+    /// Two import shapes, both rw:
+    ///   `use Class::Tiny qw( a b c );`            — qw list, each word an attr
+    ///   `use Class::Tiny { a => $def, b => sub };` — hashref, each KEY an attr
+    fn visit_class_tiny_use(&mut self, node: Node<'a>) {
+        let Some(pkg) = self.current_package.clone() else { return };
+        let mut attr_names: Vec<(String, Span)> = Vec::new();
+        // The combined form `use Class::Tiny qw(a), { b => ... }` wraps both
+        // arg shapes in a `list_expression`, so descend into it.
+        self.collect_class_tiny_attrs(node, &mut attr_names);
+        if attr_names.is_empty() {
+            return;
+        }
+
+        let owner = HashKeyOwner::Sub {
+            package: Some(pkg),
+            name: "new".to_string(),
+        };
+        for (name, sel_span) in &attr_names {
+            // rw accessor: one Method symbol serves getter and writer. No isa
+            // → no return type, so no accessor witness (only provenance).
+            let acc_id = self.add_symbol(
+                name.clone(),
+                SymKind::Method,
+                node_to_span(node),
+                *sel_span,
+                SymbolDetail::Sub {
+                    params: vec![],
+                    is_method: true,
+                    doc: None,
+                    display: None,
+                    hide_in_outline: false,
+                    opaque_return: false,
+                    is_constant: false,
+                },
+            );
+            self.record_framework_accessor_witness(
+                acc_id,
+                name,
+                None,
+                "Class::Tiny",
+                format!("Class::Tiny `use` accessor `{}` (rw)", name),
+            );
+            // Constructor key: `Pkg->new(name => ...)` connects to the attr.
+            self.add_symbol(
+                name.clone(),
+                SymKind::HashKeyDef,
+                node_to_span(node),
+                *sel_span,
+                SymbolDetail::HashKeyDef {
+                    owner: owner.clone(),
+                    is_dynamic: false,
+                },
+            );
+        }
+    }
+
+    /// Walk a `use Class::Tiny ...` node's args for attribute names, handling
+    /// the qw-list, hashref, and combined (`qw(a), { b => ... }`) shapes. The
+    /// combined form nests both arg shapes under a `list_expression`, so recurse.
+    fn collect_class_tiny_attrs(&self, node: Node<'a>, names: &mut Vec<(String, Span)>) {
+        for i in 0..node.named_child_count() {
+            let Some(child) = node.named_child(i) else { continue };
+            match child.kind() {
+                "quoted_word_list" => self.extract_qw_word_spans(child, names),
+                "anonymous_hash_expression" => self.extract_class_tiny_hash_keys(child, names),
+                "list_expression" => self.collect_class_tiny_attrs(child, names),
+                _ => {}
+            }
+        }
+    }
+
+    /// Collect the KEYS of a Class::Tiny hashref-form `use` (`{ a => $def, ... }`)
+    /// as attribute names. Only every other element is a key; the value after
+    /// each (default scalar / coderef) is skipped. The grammar nests trailing
+    /// pairs as a right-leaning `list_expression`, so recurse into those.
+    fn extract_class_tiny_hash_keys(&self, node: Node<'a>, names: &mut Vec<(String, Span)>) {
+        // Flatten the (possibly right-nested) list of pair elements.
+        let mut elems: Vec<Node<'a>> = Vec::new();
+        fn flatten<'a>(n: Node<'a>, out: &mut Vec<Node<'a>>) {
+            for i in 0..n.named_child_count() {
+                if let Some(c) = n.named_child(i) {
+                    if c.kind() == "list_expression" {
+                        flatten(c, out);
+                    } else {
+                        out.push(c);
+                    }
+                }
+            }
+        }
+        flatten(node, &mut elems);
+        // Keys are at even indices (key, value, key, value, ...).
+        let mut i = 0;
+        while i < elems.len() {
+            let key = elems[i];
+            match key.kind() {
+                "autoquoted_bareword" | "bareword" => {
+                    if let Ok(text) = key.utf8_text(self.source) {
+                        names.push((text.to_string(), node_to_span(key)));
+                    }
+                }
+                "string_literal" | "interpolated_string_literal" => {
+                    if let Some(text) = self.extract_string_content(key) {
+                        names.push((text, self.string_content_span(key)));
+                    }
+                }
+                _ => {}
+            }
+            i += 2; // skip the value element
+        }
     }
 
     /// Value-taking core of `use` handling. Shared by real source uses
@@ -3344,10 +4718,11 @@ impl<'a> Builder<'a> {
     /// inner emissions get their own emitter's namespace through the
     /// regular `apply_emit_action` path.
     ///
-    /// Dedup gate: `(current_package, module, raw_args, imports)` is
-    /// the work identity. A second real `use Moo;` after a synthetic
-    /// one — or vice versa, or two real ones, or a SyntheticUse cycle
-    /// (kit plugin reacting to its own emission) — short-circuits here.
+    /// Dedup gate: `(span, current_package, module, raw_args, imports)`
+    /// is the work identity. A second real `use Moo;` at a different
+    /// span still re-runs (distinct source statements are distinct work);
+    /// a SyntheticUse cycle (kit plugin reacting to its own emission,
+    /// re-firing with the SAME propagated span) short-circuits here.
     fn process_use(
         &mut self,
         module_name: String,
@@ -3359,6 +4734,7 @@ impl<'a> Builder<'a> {
         synthesized_by: Option<String>,
     ) {
         let key = (
+            span,
             self.current_package.clone(),
             module_name.clone(),
             raw_args.clone(),
@@ -3395,10 +4771,30 @@ impl<'a> Builder<'a> {
         // Detect framework mode from use statements
         if let Some(pkg) = self.current_package.as_ref().cloned() {
             match module_name.as_str() {
-                "Moo" | "Moo::Role" => {
+                // Dancer2::Plugin re-exports Moo's `has`/`with`/etc. into the
+                // consuming plugin package, so it gets Moo-mode accessor synthesis.
+                // Role::Tiny / Role::Tiny::With behave like Moo::Role for our
+                // purposes: they export `with` (and `requires`, via the role
+                // sugar) into the consuming package.
+                // MooX::Options re-exports `option` (a `has` with extra
+                // option-parsing keys) into a Moo class, so it gets Moo-mode
+                // accessor/constructor-key synthesis; the `option` keyword
+                // routes through the shared `has` path at the call site.
+                "Moo" | "Moo::Role" | "Dancer2::Plugin"
+                | "Role::Tiny" | "Role::Tiny::With" | "MooX::Options" => {
                     self.framework_modes.insert(pkg, FrameworkMode::Moo);
                     for kw in &["has", "with", "extends", "around", "before", "after"] {
                         self.framework_imports.insert(kw.to_string());
+                    }
+                    if module_name == "MooX::Options" {
+                        self.framework_imports.insert("option".to_string());
+                    }
+                    // `requires` is role-only sugar; harmless to register for
+                    // plain Moo too (a class never calls it).
+                    if matches!(module_name.as_str(),
+                        "Moo::Role" | "Role::Tiny" | "Role::Tiny::With")
+                    {
+                        self.framework_imports.insert("requires".to_string());
                     }
                 }
                 "Moose" | "Moose::Role" => {
@@ -3407,29 +4803,40 @@ impl<'a> Builder<'a> {
                                 "override", "super", "inner", "augment", "confess", "blessed"] {
                         self.framework_imports.insert(kw.to_string());
                     }
+                    if module_name == "Moose::Role" {
+                        self.framework_imports.insert("requires".to_string());
+                    }
                 }
                 "Mojo::Base" => {
-                    // Check args: -strict means no accessors, -base or 'Parent' means MojoBase mode
-                    let is_strict = raw_args.iter().any(|a| a == "-strict");
-                    if !is_strict {
-                        self.framework_modes.insert(pkg.clone(), FrameworkMode::MojoBase);
-                        self.framework_imports.insert("has".to_string());
-                        // 'Parent' arg (not starting with -) is an inheritance declaration
-                        let parents: Vec<String> = raw_args.iter()
-                            .filter(|s| !s.starts_with('-'))
-                            .cloned()
-                            .collect();
-                        if !parents.is_empty() {
-                            if let Some(node) = node {
-                                let parent_set: std::collections::HashSet<&str> = parents.iter().map(|s| s.as_str()).collect();
-                                self.emit_refs_for_strings(node, &parent_set, RefKind::PackageRef);
-                            }
-                            self.package_parents
-                                .entry(pkg)
-                                .or_default()
-                                .extend(parents);
+                    // OO-ness is decided by `-base` or a parent-class arg, NOT by
+                    // `-strict` — `-base` implies strict, and `use Mojo::Base
+                    // -base, -strict` (redundant but legal) is still a class. The
+                    // package IS-A its parents (or Mojo::Base for `-base`), so
+                    // `tap` / `attr` / `new` resolve through the inheritance walk.
+                    let mut parents: Vec<String> = raw_args.iter()
+                        .filter(|s| !s.starts_with('-'))
+                        .cloned()
+                        .collect();
+                    let has_base = raw_args.iter().any(|a| a == "-base");
+                    if has_base {
+                        parents.push("Mojo::Base".to_string());
+                    }
+                    if !parents.is_empty() {
+                        self.apply_mojo_base_mode(pkg, parents, node);
+                    } else if raw_args.iter().any(|a| a == "-strict") {
+                        // Pure `-strict` (no `-base`, no parent): strict-mode only,
+                        // no class machinery. A bare `shift` here is arg[0], not the
+                        // invocant (see `shift_is_invocant_here`).
+                        if let Some(p) = self.current_package.clone() {
+                            self.non_oo_packages.insert(p);
                         }
                     }
+                }
+                // `use Mojo::EventEmitter -base` / any `use X -base`: X becomes a
+                // parent AND the package inherits Mojo::Base's `has`/`attr`/`tap`/
+                // `new` (the `-base` flag is Mojo::Base's "inherit from me" sugar).
+                _ if raw_args.iter().any(|a| a == "-base") => {
+                    self.apply_mojo_base_mode(pkg, vec![module_name.clone()], node);
                 }
                 _ => {}
             }
@@ -3480,7 +4887,15 @@ impl<'a> Builder<'a> {
         if module_name != "parent" && module_name != "base" {
             if !imports.is_empty() {
                 if let Some(node) = node {
-                    let sym_set: std::collections::HashSet<&str> = imports.iter().map(|s| s.as_str()).collect();
+                    // `:tag` / `-tag` group selectors name a `%EXPORT_TAGS`
+                    // entry, not a sub — they must not earn a FunctionCall ref
+                    // (rule #7: a ref only on a real call target), or the
+                    // unresolved-function diagnostic flags the selector itself.
+                    let sym_set: std::collections::HashSet<&str> = imports
+                        .iter()
+                        .filter(|s| !s.starts_with(':') && !s.starts_with('-'))
+                        .map(|s| s.as_str())
+                        .collect();
                     let kind = RefKind::FunctionCall {
                         resolved_package: Some(module_name.clone()),
                     };
@@ -3488,19 +4903,38 @@ impl<'a> Builder<'a> {
                 }
             }
         }
-        // Tree-sitter parses `qw(a b)` as same-name imports — no
-        // syntactic support for `use Foo ( a => { -as => 'b' } )`
-        // yet, so this loop is pure `ImportedSymbol::same`. Plugin
-        // emissions (below) can produce renaming imports.
-        let imported_symbols: Vec<ImportedSymbol> = imports
+        // Base spec: every `qw(a b)` / string-list name is a same-name import.
+        // The `name => { -as => 'local' }` rename form (Sub::Exporter /
+        // Exporter::Tiny / Exporter `-as`) overrides matching entries with the
+        // renamed local→remote binding so goto-def on the local name reaches the
+        // origin sub and references bridge the rename.
+        let mut imported_symbols: Vec<ImportedSymbol> = imports
             .iter()
             .map(|n| ImportedSymbol::same(n.clone()))
             .collect();
+        let mut empty_import = false;
+        if let Some(node) = node {
+            for (local, remote) in self.extract_as_renames(node) {
+                // The `-as` arg already appears as a bare name in `imports`
+                // (the origin) and a string in the hashref (the local); drop
+                // both flat entries and replace with the renamed binding.
+                imported_symbols.retain(|s| s.local_name != remote && s.local_name != local);
+                imported_symbols.push(ImportedSymbol::renamed(local, remote));
+            }
+            // `use Foo ();` — explicit empty parens suppress even `@EXPORT`.
+            // Distinct from bare `use Foo;` (no arg child at all), which
+            // auto-imports the defaults. The parser models the empty list as a
+            // `stub_expression`.
+            empty_import = (0..node.named_child_count())
+                .filter_map(|i| node.named_child(i))
+                .any(|c| c.kind() == "stub_expression");
+        }
         self.imports.push(Import {
             module_name: module_name.clone(),
             imported_symbols,
             span,
             qw_close_paren,
+            empty_import,
         });
 
         // Plugin dispatch for use-statements. Mojolicious::Lite
@@ -3522,55 +4956,189 @@ impl<'a> Builder<'a> {
         }
     }
 
-    /// Check if we're at package scope (file scope or class block, not inside a sub).
-    #[allow(dead_code)]
-    fn is_package_scope(&self) -> bool {
-        for &scope_id in self.scope_stack.iter().rev() {
-            match &self.scopes[scope_id.0 as usize].kind {
-                ScopeKind::File => return true,
-                ScopeKind::Sub { .. } | ScopeKind::Method { .. } => return false,
-                _ => continue, // class/block/for-loop at package level are OK
+    /// Accumulate `use constant NAME => value` into constant_strings and
+    /// register each declared constant as a local Sub symbol.
+    ///
+    /// Two source shapes, both handled:
+    ///   * scalar form `use constant NAME => VAL` → `list_expression`
+    ///     child whose first named entry is the name, rest the value.
+    ///   * block form `use constant { A => 1, B => 2 }` →
+    ///     `anonymous_hash_expression` wrapping a flat name/value list.
+    ///
+    /// `constant`-declared names are package-global subs (no params, no
+    /// return shape we track), so emitting a `Sub` symbol satisfies
+    /// goto-def and silences the unresolved-function hint at every
+    /// same-file callsite.
+    fn accumulate_use_constant(&mut self, node: Node<'a>) {
+        for i in 0..node.child_count() {
+            let child = match node.child(i) {
+                Some(c) if c.is_named() => c,
+                _ => continue,
+            };
+            match child.kind() {
+                "list_expression" => {
+                    self.accumulate_constant_pair(child);
+                    return;
+                }
+                "anonymous_hash_expression" => {
+                    self.accumulate_constant_block(child);
+                    return;
+                }
+                _ => {}
             }
         }
-        true // empty stack = file scope
     }
 
-    /// Accumulate `use constant NAME => value` into constant_strings.
-    fn accumulate_use_constant(&mut self, node: Node<'a>) {
-        // CST: use_statement → module:"constant", list_expression(autoquoted_bareword, value...)
-        // Find the list_expression child that contains the constant definition
-        for i in 0..node.child_count() {
-            if let Some(child) = node.child(i) {
-                if child.kind() == "list_expression" {
-                    // First named child should be the constant name (autoquoted_bareword)
-                    let mut name = None;
-                    let mut saw_name = false;
-                    for j in 0..child.child_count() {
-                        if let Some(c) = child.child(j) {
-                            if !c.is_named() { continue; }
-                            if !saw_name {
-                                if c.kind() == "autoquoted_bareword" || c.kind() == "bareword" {
-                                    name = c.utf8_text(self.source).ok().map(|s| s.to_string());
-                                }
-                                saw_name = true;
-                                continue;
-                            }
-                            // Everything after the name is the value — extract strings
-                            if let Some(ref n) = name {
-                                let values = self.extract_string_names(c);
-                                if !values.is_empty() {
-                                    self.constant_strings
-                                        .entry(n.clone())
-                                        .or_default()
-                                        .extend(values);
-                                }
-                            }
+    /// Scalar `use constant`: first named entry is the name, the rest is
+    /// the value side (extracted into `constant_strings`).
+    fn accumulate_constant_pair(&mut self, list: Node<'a>) {
+        let mut name: Option<(String, Node)> = None;
+        for j in 0..list.child_count() {
+            let c = match list.child(j) {
+                Some(c) if c.is_named() => c,
+                _ => continue,
+            };
+            match &name {
+                None => {
+                    if matches!(c.kind(), "autoquoted_bareword" | "bareword") {
+                        if let Ok(text) = c.utf8_text(self.source) {
+                            name = Some((text.to_string(), c));
                         }
                     }
-                    return;
+                }
+                Some((n, _)) => {
+                    let values = self.extract_string_names(c);
+                    if !values.is_empty() {
+                        self.constant_strings.entry(n.clone()).or_default().extend(values);
+                    }
                 }
             }
         }
+        if let Some((n, name_node)) = name {
+            self.register_constant_symbol(&n, name_node);
+        }
+    }
+
+    /// Block `use constant { ... }`: a flat pair list of name/value entries.
+    /// Register every name as a Sub symbol and accumulate string values keyed
+    /// by name. The separator is irrelevant — `{ A => 1 }` and `{ 'A', 1 }` are
+    /// the same positional sequence (autoquoting a bareword key changes its CST
+    /// node, not its role), so names come from `extract_node_string` (bareword
+    /// *or* quoted string), never from a `=>`-presence gate.
+    fn accumulate_constant_block(&mut self, hash: Node<'a>) {
+        let list = (0..hash.named_child_count())
+            .filter_map(|i| hash.named_child(i))
+            .find(|c| c.kind() == "list_expression")
+            .unwrap_or(hash);
+        let mut flat: Vec<Node<'a>> = Vec::new();
+        Self::flatten_pair_list_children(list, &mut flat);
+        let mut decls: Vec<(String, Node<'a>, Vec<String>)> = Vec::new();
+        self.for_each_pair_node_in_children(&flat, |name_node, val_node| {
+            if let Some(n) = self.extract_node_string(name_node) {
+                decls.push((n, name_node, self.extract_string_names(val_node)));
+            }
+            true
+        });
+        for (name, name_node, values) in decls {
+            self.register_constant_symbol(&name, name_node);
+            if !values.is_empty() {
+                self.constant_strings.entry(name).or_default().extend(values);
+            }
+        }
+    }
+
+    /// Emit a `FunctionCall` ref for a standalone value-position bareword that
+    /// names a `use constant`: the unqualified form when declared in the
+    /// enclosing package, the fully-qualified form (`Pkg::NAME`) unconditionally
+    /// (it names a constant sub in another package, mirroring an FQ function
+    /// call). Resolution is by-name post-walk (same as any FunctionCall ref),
+    /// so it points at the constant's Sub symbol — goto-def and references on
+    /// the usage, cross-file for the FQ spelling.
+    fn visit_const_usage(&mut self, node: Node<'a>) {
+        let name = match node.utf8_text(self.source) {
+            Ok(t) => t,
+            Err(_) => return,
+        };
+        // A `MAX_RETRIES()` call already gets its FunctionCall ref from
+        // `visit_function_call` (the `function` field). Don't double-emit.
+        if let Some(parent) = node.parent() {
+            if matches!(
+                parent.kind(),
+                "function_call_expression" | "ambiguous_function_call_expression"
+            ) && parent.child_by_field_name("function").map(|f| f.id()) == Some(node.id())
+            {
+                return;
+            }
+        }
+        // A fully-qualified value-position bareword (`URI::HAS_RESERVED_...`)
+        // names a constant sub in another package. Mirror the FQ function-call
+        // ref shape so it resolves cross-file to that sub: `target_name` keeps
+        // the full path, `resolved_package` = the qualifier, span = bare tail
+        // (narrowest renamable token, rule #7).
+        //
+        // BUT the method-invocant slot DOES reach this arm — `Foo::Bar->new`
+        // recurses the `Foo::Bar` bareword via visit_method_call's children.
+        // That's a class name, not a constant call; skip it (visit_method_call
+        // already emits the PackageRef for the invocant). Without this guard,
+        // references/rename on a sub `Bar` in package `Foo` wrongly matched the
+        // `Foo::Bar->new` class invocant.
+        if let Some(parent) = node.parent() {
+            if parent.kind() == "method_call_expression"
+                && parent.child_by_field_name("invocant").map(|i| i.id()) == Some(node.id())
+            {
+                return;
+            }
+        }
+        if let (Some(qualifier), _) = crate::file_analysis::split_qualified(name) {
+            let ref_span = fq_tail_span(node, name);
+            self.add_ref(
+                RefKind::FunctionCall { resolved_package: Some(qualifier.to_string()) },
+                ref_span,
+                name.to_string(),
+                AccessKind::Read,
+            );
+            return;
+        }
+        let pkg = match self.current_package.as_ref() {
+            Some(p) => p.clone(),
+            None => return,
+        };
+        let is_declared = self
+            .declared_constants
+            .get(&pkg)
+            .is_some_and(|set| set.contains(name));
+        if !is_declared {
+            return;
+        }
+        self.add_ref(
+            RefKind::FunctionCall { resolved_package: Some(pkg) },
+            node_to_span(node),
+            name.to_string(),
+            AccessKind::Read,
+        );
+    }
+
+    /// Register a single `use constant` name as a parameterless Sub symbol.
+    fn register_constant_symbol(&mut self, name: &str, name_node: Node<'a>) {
+        if let Some(pkg) = self.current_package.clone() {
+            self.declared_constants.entry(pkg).or_default().insert(name.to_string());
+        }
+        let span = node_to_span(name_node);
+        self.add_symbol(
+            name.to_string(),
+            SymKind::Sub,
+            span,
+            span,
+            SymbolDetail::Sub {
+                params: Vec::new(),
+                is_method: false,
+                doc: None,
+                display: None,
+                hide_in_outline: false,
+                opaque_return: false,
+                is_constant: true,
+            },
+        );
     }
 
     /// Extract strings from a node's children: qw(), paren lists, bare strings.
@@ -3733,6 +5301,106 @@ impl<'a> Builder<'a> {
         None
     }
 
+    /// CG-3a: when a foreach list is a call to a SAME-FILE sub whose body is a
+    /// literal qw/list return, fold that sub's literal return into name(s). The
+    /// loop var then constant-folds and downstream glob synthesis (`*$tag = sub`)
+    /// installs one symbol per name. Returns empty for anything not a
+    /// literal-returning local sub (cross-file callee, computed return, no
+    /// match) — the "don't fabricate" boundary; the loop var stays dynamic.
+    ///
+    /// Tree-walk (rule #1): ascends `call_node` to the file root, scans
+    /// top-level `subroutine_declaration_statement`s for the called name. No
+    /// symbol-table lookup because the callee may be declared after the loop in
+    /// source order (CGI.pm: `_all_html_tags` is defined further down).
+    fn fold_local_sub_literal_return(&self, call_node: Node<'a>) -> Vec<String> {
+        let fname = match call_node.kind() {
+            "function_call_expression" | "ambiguous_function_call_expression" => {
+                call_node.child_by_field_name("function")
+            }
+            _ => return vec![],
+        };
+        let Some(fname) = fname else { return vec![] };
+        // Bare callee name only — `&Pkg::foo()` / computed callees are not
+        // same-file literal subs we can statically fold.
+        if fname.named_child_count() != 0 {
+            return vec![];
+        }
+        let Ok(name) = fname.utf8_text(self.source) else { return vec![] };
+        if name.is_empty() {
+            return vec![];
+        }
+
+        let mut root = call_node;
+        while let Some(p) = root.parent() {
+            root = p;
+        }
+        let Some(body) = self.find_local_sub_body(root, name) else { return vec![] };
+        self.literal_list_return_names(body)
+    }
+
+    /// Find a top-level sub's `body` block by name within `root`'s subtree.
+    /// First match wins (Perl's last-decl-wins is irrelevant for the literal
+    /// folds this feeds — redefinition of a qw-returning helper is not a shape
+    /// we model).
+    fn find_local_sub_body(&self, root: Node<'a>, name: &str) -> Option<Node<'a>> {
+        let mut cursor = root.walk();
+        let mut stack: Vec<Node<'a>> = root.children(&mut cursor).collect();
+        while let Some(n) = stack.pop() {
+            if matches!(
+                n.kind(),
+                "subroutine_declaration_statement" | "method_declaration_statement"
+            ) {
+                if let Some(name_node) = n.child_by_field_name("name") {
+                    if name_node.utf8_text(self.source).ok() == Some(name) {
+                        return n.child_by_field_name("body");
+                    }
+                }
+            }
+            let mut c = n.walk();
+            stack.extend(n.children(&mut c));
+        }
+        None
+    }
+
+    /// Extract the literal name list a sub body returns, when its tail/return
+    /// expression is a literal list (`return qw(...)`, `return ('a','b')`, a
+    /// bare trailing `qw(...)` / list). Empty if the body does anything beyond a
+    /// literal list (computed, conditional, interpolated-with-unknown-vars).
+    fn literal_list_return_names(&self, body: Node<'a>) -> Vec<String> {
+        // The return source is either an explicit `return EXPR` or the body's
+        // tail expression statement. Probe each statement; a `return_expression`
+        // anywhere is authoritative, else the last expression_statement.
+        let mut return_expr: Option<Node<'a>> = None;
+        let mut tail_expr: Option<Node<'a>> = None;
+        for i in 0..body.named_child_count() {
+            let Some(stmt) = body.named_child(i) else { continue };
+            if stmt.kind() == "expression_statement" {
+                if let Some(inner) = stmt.named_child(0) {
+                    if inner.kind() == "return_expression" {
+                        return_expr = Some(inner);
+                    } else {
+                        tail_expr = Some(inner);
+                    }
+                }
+            }
+        }
+        let source = return_expr.or(tail_expr);
+        let Some(source) = source else { return vec![] };
+        let list_node = if source.kind() == "return_expression" {
+            source.named_child(0)
+        } else {
+            Some(source)
+        };
+        let Some(list_node) = list_node else { return vec![] };
+        match list_node.kind() {
+            "quoted_word_list" | "list_expression" | "parenthesized_expression"
+            | "string_literal" | "interpolated_string_literal" => {
+                self.extract_string_names(list_node)
+            }
+            _ => vec![],
+        }
+    }
+
     /// Resolve a name to its known constant string values.
     /// Recurses through constant references up to max_depth.
     fn resolve_constant_strings(&self, name: &str, depth: u8) -> Option<Vec<String>> {
@@ -3818,6 +5486,100 @@ impl<'a> Builder<'a> {
         result
     }
 
+    /// Extract `name => { -as => 'local' }` renames from a use statement's
+    /// args. Returns `(local_name, remote_name)` pairs. Recognized by shape: a
+    /// bareword/string `name` immediately followed by a hashref whose `-as`
+    /// (or `as`) key names the local alias. Sub::Exporter / Exporter::Tiny /
+    /// Exporter's `-as` all spell it this way, so one shape covers them.
+    fn extract_as_renames(&self, node: Node<'a>) -> Vec<(String, String)> {
+        let mut out = Vec::new();
+        // The args live in a `list_expression` (multiple) or directly under the
+        // use node. Walk every descendant list once, pairing a name token with
+        // the following hashref.
+        self.collect_as_renames(node, &mut None, &mut out);
+        out
+    }
+
+    /// Recurse for `name => { -as => 'local' }` pairs. `pending_name` carries a
+    /// just-seen bareword/string awaiting its hashref; when a hashref follows,
+    /// its `-as` value becomes the local alias for that name.
+    fn collect_as_renames(
+        &self,
+        node: Node<'a>,
+        pending_name: &mut Option<String>,
+        out: &mut Vec<(String, String)>,
+    ) {
+        for i in 0..node.named_child_count() {
+            let Some(child) = node.named_child(i) else { continue };
+            match child.kind() {
+                "anonymous_hash_expression" => {
+                    if let Some(remote) = pending_name.take() {
+                        if let Some(local) = self.extract_as_alias(child) {
+                            out.push((local, remote));
+                        }
+                    }
+                }
+                "autoquoted_bareword" | "string_literal" | "bareword" => {
+                    let text = child.utf8_text(self.source).unwrap_or("");
+                    let name = text.trim().trim_matches(|c| c == '\'' || c == '"').to_string();
+                    // Skip option flags (`-as` appears at top level too in some
+                    // forms) — only real names seed a pending rename.
+                    if !name.is_empty() && !name.starts_with('-') {
+                        *pending_name = Some(name);
+                    }
+                }
+                "list_expression" | "parenthesized_expression" => {
+                    self.collect_as_renames(child, pending_name, out);
+                }
+                _ => {
+                    *pending_name = None;
+                }
+            }
+        }
+    }
+
+    /// Pull the local alias from a `{ -as => 'local' }` hashref: find the `-as`
+    /// (or `as`) key and return its value as the local alias. Pairs positionally
+    /// through the shared walker, so the plain-comma `{ '-as', 'local' }` spelling
+    /// binds identically to the fat-comma form (`=>` is just an autoquoting comma).
+    /// The key is matched on its *normalized text* (`-as` parses as a
+    /// `unary_expression` wrapping `as` in the fat-comma form, a `string_literal`
+    /// in the plain-comma form), never on a `=>` gate.
+    fn extract_as_alias(&self, hashref: Node<'a>) -> Option<String> {
+        let body = (0..hashref.named_child_count())
+            .filter_map(|i| hashref.named_child(i))
+            .find(|c| c.kind() == "list_expression")
+            .unwrap_or(hashref);
+        let children: Vec<Node<'a>> = (0..body.child_count())
+            .filter_map(|i| body.child(i))
+            .collect();
+        let mut alias = None;
+        self.for_each_pair_node_in_children(&children, |k_node, v_node| {
+            let key = k_node
+                .utf8_text(self.source)
+                .unwrap_or("")
+                .trim()
+                .trim_matches(|c| c == '\'' || c == '"')
+                .trim_start_matches('-')
+                .to_string();
+            if key == "as" {
+                let local = v_node
+                    .utf8_text(self.source)
+                    .unwrap_or("")
+                    .trim()
+                    .trim_matches(|c| c == '\'' || c == '"')
+                    .trim_start_matches('-')
+                    .to_string();
+                if !local.is_empty() {
+                    alias = Some(local);
+                    return false;
+                }
+            }
+            true
+        });
+        alias
+    }
+
     /// Extract the import list from a use statement.
     /// Returns (imported_symbols, qw_close_paren_position).
     fn extract_use_import_list(&self, node: Node<'a>) -> (Vec<String>, Option<Point>) {
@@ -3827,6 +5589,59 @@ impl<'a> Builder<'a> {
             return (names, qw_close);
         }
         (vec![], None)
+    }
+
+    /// Classify an assignment LHS as an export package-variable, tolerating a
+    /// package qualifier. Perl exporters write either the lexical-to-package
+    /// `our @EXPORT` form or the fully-qualified `@Bugzilla::Error::EXPORT`
+    /// form (Bugzilla, many CPAN modules). Both name the *same* package global;
+    /// the qualifier is just an explicit spelling. We strip `our `/`my ` and the
+    /// sigil, then compare the trailing identifier after the last `::` against
+    /// the export-variable basename — so `@EXPORT`, `@Pkg::EXPORT`,
+    /// `%Pkg::EXPORT_TAGS` all match without a per-package branch (rule #10).
+    fn export_var_basename(lhs_text: &str) -> Option<&'static str> {
+        let trimmed = lhs_text.trim();
+        let stripped = trimmed
+            .strip_prefix("our ")
+            .or_else(|| trimmed.strip_prefix("my "))
+            .unwrap_or(trimmed)
+            .trim_start();
+        let no_sigil = stripped
+            .strip_prefix('@')
+            .or_else(|| stripped.strip_prefix('%'))
+            .unwrap_or(stripped);
+        match crate::file_analysis::split_qualified(no_sigil).1 {
+            "EXPORT_OK" => Some("@EXPORT_OK"),
+            "EXPORT" => Some("@EXPORT"),
+            "EXPORT_TAGS" => Some("%EXPORT_TAGS"),
+            _ => None,
+        }
+    }
+
+    /// The real RHS expression of an assignment. tree-sitter-perl maps the
+    /// `right` field to the opening `(` paren when the rvalue is parenthesized
+    /// (`$w *= (EXPR)`, `my %h = ( ... )`), so descending the field directly
+    /// walks a bare token and skips the entire rvalue (this dropped refs for
+    /// any constant/variable inside a parenthesized RHS). When the field is an
+    /// unnamed token, fall back to the assignment's last named child that
+    /// isn't the `left` field — the parser keeps the rvalue as a sibling.
+    fn assignment_rhs(&self, node: Node<'a>) -> Option<Node<'a>> {
+        let field = node.child_by_field_name("right");
+        if let Some(f) = field {
+            if f.is_named() {
+                return Some(f);
+            }
+        }
+        let left_id = node.child_by_field_name("left").map(|l| l.id());
+        let mut rhs = None;
+        for i in 0..node.named_child_count() {
+            if let Some(c) = node.named_child(i) {
+                if Some(c.id()) != left_id {
+                    rhs = Some(c);
+                }
+            }
+        }
+        rhs
     }
 
     fn visit_assignment(&mut self, node: Node<'a>) {
@@ -3850,26 +5665,58 @@ impl<'a> Builder<'a> {
                 }
             }
 
+            // Export package-variable assignment — `our @EXPORT`, the qualified
+            // `@Pkg::EXPORT`, `%EXPORT_TAGS`, etc. `export_var_basename` strips
+            // the `our`/`my`, sigil, and any `Pkg::` qualifier so all spellings
+            // map to one of the three export basenames (rule #10).
+            let export_var = Self::export_var_basename(lhs_text);
+
+            // Fold `%EXPORT_TAGS = ( tag => [names...], ... )` membership into
+            // the export surface. The RHS list is the table literal; tag
+            // members join `export_ok` like `@EXPORT_OK` names. The
+            // call-wrapped `Readonly::Hash %EXPORT_TAGS => (...)` form is an
+            // `ambiguous_function_call_expression`, handled in `visit_function_call`.
+            if export_var == Some("%EXPORT_TAGS") {
+                for i in 0..node.named_child_count() {
+                    if let Some(child) = node.named_child(i) {
+                        if child.kind() == "list_expression"
+                            || child.kind() == "parenthesized_expression"
+                        {
+                            self.fold_export_tags_table(child);
+                        }
+                    }
+                }
+            }
+
             // Accumulate @EXPORT / @EXPORT_OK assignments
-            let var_name = if lhs_text.ends_with("@EXPORT_OK") {
-                Some("@EXPORT_OK")
-            } else if lhs_text.ends_with("@EXPORT") && !lhs_text.ends_with("@EXPORT_OK") {
-                Some("@EXPORT")
-            } else {
-                None
+            let var_name = match export_var {
+                Some("@EXPORT_OK") => Some("@EXPORT_OK"),
+                Some("@EXPORT") => Some("@EXPORT"),
+                _ => None,
             };
             if let Some(export_var) = var_name {
                 let mut names = Vec::new();
                 for i in 0..node.named_child_count() {
                     if let Some(child) = node.named_child(i) {
                         names.extend(self.extract_string_names(child));
+                        self.record_export_member_sites(child);
+                        // Form 1: `@EXPORT = ( 'own', @Other::EXPORT )` — any
+                        // qualified export-var deref in the RHS is a re-export edge.
+                        self.record_static_splice_reexports(child);
                     }
                 }
-                if !names.is_empty() {
-                    if export_var == "@EXPORT" {
-                        self.export = names;
-                    } else {
-                        self.export_ok = names;
+                // Union, not clobber: runtime-exporter discovery (`:Export`
+                // attrs, Sub::Exporter / Exporter::Declare setup) may have
+                // recorded names earlier in this package walk. An overwrite
+                // would drop them; the two mechanisms compose.
+                let target = if export_var == "@EXPORT" {
+                    &mut self.export
+                } else {
+                    &mut self.export_ok
+                };
+                for name in names {
+                    if !target.contains(&name) {
+                        target.push(name);
                     }
                 }
             }
@@ -3884,6 +5731,13 @@ impl<'a> Builder<'a> {
                         }
                     }
                 }
+                // Typeglob sub installation: `*name = sub {...}`, `*name = \&other`,
+                // `*{ 'literal' } = $coderef`, loop `*$m = sub {...}`. The builder
+                // would otherwise never register these as symbols, so every call site
+                // flags unresolved. Recognize by shape (rule #10): synthesize only
+                // when the RHS produces a sub/coderef AND the LHS name is statically
+                // derivable. Truly-dynamic names (`*{$runtime}`) stay out of scope.
+                self.synthesize_glob_assigned_sub(left, node);
             }
 
             // Accumulate array/scalar assignments as constants
@@ -3932,7 +5786,7 @@ impl<'a> Builder<'a> {
                 // Visit the declaration
                 self.visit_variable_decl(left);
             }
-            if let Some(right) = node.child_by_field_name("right") {
+            if let Some(right) = self.assignment_rhs(node) {
                 // Visit RHS children FIRST so any side-effecting walk
                 // steps (anon-sub Symbol creation in
                 // `visit_anonymous_sub`, ref/scope allocation, plugin
@@ -3966,6 +5820,29 @@ impl<'a> Builder<'a> {
                             inferred_type: it,
                         });
                     }
+                } else if let Some(vt) = self.get_var_text_from_lhs(left) {
+                    // RHS didn't resolve at build time — typically a cross-file
+                    // method chain whose type needs the module index, absent
+                    // during the parallel per-file workspace build. Don't drop
+                    // it to a dead end: link the variable to the RHS expr as an
+                    // EDGE so a query that carries the index chases it lazily
+                    // ("Edges, not values"). In-file chains never reach here —
+                    // they resolved above and materialized.
+                    use crate::witnesses::{Witness, WitnessAttachment, WitnessPayload, WitnessSource};
+                    let scope = self.current_scope();
+                    let rhs_span = node_to_span(right);
+                    // Zero-extent span at the assignment start — same convention
+                    // as `push_type_constraint`. A non-zero span would make the
+                    // resolved Variable witness subject to point-containment
+                    // narrowing and get skipped at any query point past the
+                    // assignment (which is every real use of the variable).
+                    let at = node_to_span(node).start;
+                    self.bag.push(Witness {
+                        attachment: WitnessAttachment::Variable { name: vt, scope },
+                        source: WitnessSource::Builder("assign_edge".into()),
+                        payload: WitnessPayload::Edge(WitnessAttachment::Expr(rhs_span)),
+                        span: Span { start: at, end: at },
+                    });
                 }
                 // Always record call/method-call bindings (independent
                 // of whether the bag resolved a type) — they're the
@@ -4027,6 +5904,18 @@ impl<'a> Builder<'a> {
                 if right.kind() == "conditional_expression" {
                     if let Some(vt) = self.get_var_text_from_lhs(left) {
                         self.emit_branch_arm_witnesses_for_ternary(&vt, right, node);
+                    }
+                }
+                // `$obj->{k} = <rhs>` slot-type seed. Record key-span →
+                // rhs-span so `populate_witness_bag` can mint
+                // `SlotType{owner_class, k} → Edge(Expr(rhs_span))`
+                // keyed off the matching HashKeyAccess Write ref (whose
+                // span is this key node's span). `emit_expr_witness(right)`
+                // already published the RHS's `Expr(rhs_span)`.
+                if left.kind() == "hash_element_expression" {
+                    if let Some(key_node) = left.child_by_field_name("key") {
+                        self.slot_write_rhs_span
+                            .insert(node_to_span(key_node), node_to_span(right));
                     }
                 }
             }
@@ -4110,6 +5999,68 @@ impl<'a> Builder<'a> {
         None
     }
 
+    /// Resolve plugin-queued `NamedSubParamType` requests once the whole CST
+    /// is walked. For each `(sub_name, package, param_index)` find the
+    /// matching local Sub/Method symbol, read its `param_index`-th positional
+    /// variable name, locate that sub's scope, and push the requested TC —
+    /// the same `push_type_constraint` path the inline `VarType` form uses,
+    /// just keyed by name instead of an anchor span. Forward-declared subs
+    /// resolve because every symbol + scope exists by now.
+    fn flush_deferred_named_sub_param_types(&mut self) {
+        let deferred = std::mem::take(&mut self.deferred_named_sub_param_types);
+        for d in deferred {
+            // Pick the sub symbol matching name + (when known) package, so a
+            // qualified `\&Foo::bar` only types a sub that actually lives in
+            // `Foo`. A bare name resolved to a package at emit time (the
+            // registration's enclosing package); match that too.
+            let target = self.symbols.iter().find(|sym| {
+                sym.name == d.sub_name
+                    && matches!(sym.kind, SymKind::Sub | SymKind::Method)
+                    && match &d.package {
+                        Some(pkg) => sym.package.as_deref() == Some(pkg.as_str()),
+                        None => true,
+                    }
+            });
+            let target = match target {
+                Some(t) => t,
+                None => continue,
+            };
+            let params = match &target.detail {
+                SymbolDetail::Sub { params, .. } => params,
+                _ => continue,
+            };
+            let var_name = match params.get(d.param_index) {
+                Some(p) if p.name.starts_with('$') => p.name.clone(),
+                _ => continue,
+            };
+            let sub_span = target.span;
+            // The sub's body scope: a Sub/Method scope whose span matches the
+            // declaration span. `record_signature_params` / `my $c = shift`
+            // both put the param variable in this scope.
+            let scope = self
+                .scopes
+                .iter()
+                .find(|s| {
+                    matches!(&s.kind, ScopeKind::Sub { name } | ScopeKind::Method { name } if *name == d.sub_name)
+                        && s.span == sub_span
+                })
+                .map(|s| s.id);
+            let scope = match scope {
+                Some(s) => s,
+                None => continue,
+            };
+            self.push_plugin_type_constraint(
+                TypeConstraint {
+                    variable: var_name,
+                    scope,
+                    constraint_span: sub_span,
+                    inferred_type: d.inferred_type.clone(),
+                },
+                d.plugin_id.clone(),
+            );
+        }
+    }
+
     /// Compute the right `WitnessPayload` shape for an expression node.
     /// Single dispatch — every rvalue node, whether it appears as a
     /// return body, ternary arm, RHS of assignment, or anywhere else,
@@ -4174,7 +6125,11 @@ impl<'a> Builder<'a> {
                 let name = node.utf8_text(self.source).ok()?;
                 Some(WitnessPayload::Edge(WitnessAttachment::Variable {
                     name: name.to_string(),
-                    scope: self.current_scope(),
+                    // `expr_payload` re-runs post-walk (forward-ref recovery,
+                    // nested-constraint param typing) when the live scope stack
+                    // is gone; recover the scope from the node's position.
+                    scope: self.scope_stack.last().copied()
+                        .unwrap_or_else(|| self.scope_at_point(node.start_position())),
                 }))
             }
 
@@ -4209,13 +6164,56 @@ impl<'a> Builder<'a> {
             // (target not yet in symbol table) are recovered post-walk by
             // `resolve_forward_expr_witnesses`, which re-calls this same
             // `expr_payload` against the final symbol table.
+            // `bless $ref, $class` is a value of type `ClassName($class)`
+            // — closed under syntax when the class resolves. Covers the
+            // anonymous-ref forms (`return bless {}, $class`) that have no
+            // variable to promote; the variable form is additionally
+            // promoted via `visit_bless_call`'s TC. Honest-miss (fall
+            // through) when the class isn't determinable.
+            "function_call_expression" | "ambiguous_function_call_expression"
+                if self.is_bless_call(node) =>
+            {
+                let args = self.extract_call_args(node);
+                let class = match args.get(1) {
+                    Some(c) => self.bless_class_of(*c),
+                    None => self.current_package.clone(),
+                };
+                class.map(|c| WitnessPayload::InferredType(InferredType::ClassName(c)))
+            }
+
             "function_call_expression"
             | "ambiguous_function_call_expression"
             | "bareword"
             | "scoped_identifier" => {
                 let bare = self.forward_callee_name(node)?;
+                // Type::Tiny constraint constructor (`InstanceOf['Foo']`): the
+                // call is a *value* of type `TypeConstraintOf(inner)` — you
+                // call `->check` on it, not Foo's methods. The plugin folds the
+                // params (core extracts them, rule #1); we wrap.
+                if self.type_constraint_names.contains(&bare) {
+                    let params = self.extract_constraint_params(node);
+                    if let Some(inner) = self.plugins.type_constraint_inner(&bare, &params) {
+                        return Some(WitnessPayload::InferredType(
+                            InferredType::TypeConstraintOf(Box::new(inner)),
+                        ));
+                    }
+                }
                 let sid = self.find_callee_symbol(&bare)?;
                 Some(WitnessPayload::Edge(WitnessAttachment::Symbol(sid)))
+            }
+
+            // `$_[0]` in value position is the positional-receiver
+            // pseudo-invocant (`sub me { return $_[0] }` — the
+            // self-returning idiom). Its return value IS the call's
+            // receiver, so emit the deferred `Receiver` placeholder:
+            // `ReturnExprReducer` substitutes `q.receiver` at the call
+            // site, letting `Symbol(me)` / `MethodOnClass{C, me}` type
+            // a *chained* `$obj->me->me->...` to the receiver class at
+            // arbitrary depth. A general `$arr[N]` read carries no
+            // receiver semantics — leave it to the chain typer's
+            // element-projection arm (no Expr payload).
+            "array_element_expression" if self.is_positional_receiver(node) => {
+                Some(WitnessPayload::ReturnExpr(crate::witnesses::ReturnExpr::Receiver))
             }
 
             // Ternary — Edge to its own Expr(span). The per-arm
@@ -4227,6 +6225,17 @@ impl<'a> Builder<'a> {
 
             _ => None,
         }
+    }
+
+    /// `$_[0]` — the positional-receiver pseudo-invocant of a method
+    /// body. Shared by `invocant_type_at_node`'s array-element arm and
+    /// `expr_payload`'s `Receiver` emission so both agree on the shape.
+    fn is_positional_receiver(&self, node: Node<'a>) -> bool {
+        let Some(array) = node.child_by_field_name("array") else { return false };
+        let Some(index) = node.child_by_field_name("index") else { return false };
+        array.kind() == "container_variable"
+            && array.named_child(0).and_then(|v| v.utf8_text(self.source).ok()) == Some("_")
+            && index.utf8_text(self.source).ok() == Some("0")
     }
 
     /// Emit the `Expr(span)` witnesses for `node` and (recursively)
@@ -4593,6 +6602,17 @@ impl<'a> Builder<'a> {
             return;
         }
 
+        // Sigil-deref of a scalar: `%$x` / `@$x` / `$$x` parses as the outer
+        // sigil node (hash/array/scalar) whose varname child wraps an inner
+        // `scalar` node naming the dereferenced variable. The inner scalar is
+        // the renamable/highlightable token (rule #7) — emit its Variable ref
+        // and stop, since the outer node's own text (`%$x`) isn't a variable
+        // name. Block-derefs (`%{...}`) are handled above.
+        if let Some(inner) = self.sigil_deref_inner_scalar(node) {
+            self.visit_var_ref(inner);
+            return;
+        }
+
         // If this scalar is inside a block-deref, infer the type from the outer sigil.
         // Parent chain: scalar → expression_statement → block → varname → outer_node
         if node.kind() == "scalar" {
@@ -4603,13 +6623,43 @@ impl<'a> Builder<'a> {
 
         if let Ok(text) = node.utf8_text(self.source) {
             let access = self.determine_access(node);
+            // Fully-qualified read (`$Foo::Bar::x`): narrow the span to the
+            // bare tail (rule #7) so rename rewrites only `x` and the
+            // qualifier survives, mirroring the FQ-call narrowing. The full
+            // `target_name` keeps the path; `qualified_var_target()` decodes
+            // `(pkg, sigil+basename)` for cross-package resolution.
+            let ref_span = fq_tail_span(node, text);
             self.add_ref(
                 RefKind::Variable,
-                node_to_span(node),
+                ref_span,
                 text.to_string(),
                 access,
             );
         }
+    }
+
+    /// Sigil-deref of a scalar (`%$x` / `@$x` / `$$x`): the outer sigil node
+    /// (hash/array/scalar) wraps `(varname (scalar (varname)))`. Returns the
+    /// inner `scalar` node — the dereferenced variable — so its own Variable
+    /// ref is emitted. Excludes the plain non-deref case (a `scalar` whose
+    /// varname holds only a leaf varname) and block-derefs (handled separately).
+    fn sigil_deref_inner_scalar(&self, node: Node<'a>) -> Option<Node<'a>> {
+        if !matches!(node.kind(), "scalar" | "array" | "hash") {
+            return None;
+        }
+        for i in 0..node.child_count() {
+            let child = node.child(i)?;
+            if child.kind() != "varname" {
+                continue;
+            }
+            for j in 0..child.child_count() {
+                let gc = child.child(j)?;
+                if gc.kind() == "scalar" {
+                    return Some(gc);
+                }
+            }
+        }
+        None
     }
 
     /// Check if this node is a block-deref outer node (e.g. @{...} or %{...}).
@@ -4694,12 +6744,53 @@ impl<'a> Builder<'a> {
     }
 
     fn visit_function_call(&mut self, node: Node<'a>) {
+        // Indirect-object filehandle: `print FH LIST` / `say FH ...` /
+        // `printf FH ...` parses as the print verb whose `arguments` is a
+        // nested call with `function` = the bareword filehandle. The
+        // bareword is a filehandle, not a sub — don't emit a FunctionCall
+        // ref for it (otherwise every `print STDERR ...` flags STDERR as
+        // unresolved). Visit the real payload args; skip the verb-as-func.
+        if self.is_indirect_object_filehandle_call(node) {
+            self.visit_children(node);
+            return;
+        }
+        // Symbolic-code-deref call: `&{ EXPR }(...)`. The `function` field is
+        // a `function` wrapping a `code_deref_expression`, NOT a sub name —
+        // its text is `&{$z}`, not a callable identifier. Emitting a
+        // FunctionCall ref here would flag the deref text as an unresolved
+        // sub. The `code_deref_expression` arm in `visit_node` narrows the
+        // operand to CodeRef; just descend so it runs.
+        if node
+            .child_by_field_name("function")
+            .map(|f| f.kind() == "code_deref_expression" || code_deref_in(f).is_some())
+            .unwrap_or(false)
+        {
+            self.visit_children(node);
+            return;
+        }
         if let Some(func_node) = node.child_by_field_name("function") {
-            if let Ok(name) = func_node.utf8_text(self.source) {
+            if let Ok(raw) = func_node.utf8_text(self.source) {
+                // `goto &Foo::bar` / `&Foo::bar()` — the leading `&` is the
+                // code-ref sigil; the call targets sub `Foo::bar`. Strip it so
+                // FQ resolution and the ref's `target_name` see the real sub
+                // name (`&{...}` derefs and `&$var` are handled / skipped
+                // above — only a static `&name` reaches here). `raw` keeps the
+                // node-aligned text for span math.
+                let name = raw
+                    .strip_prefix('&')
+                    .filter(|n| n.chars().all(|c| c.is_alphanumeric() || c == '_' || c == ':'))
+                    .unwrap_or(raw);
                 let resolved_package = self.resolve_call_package(name);
+                // Narrowest span (rule #7): for a qualified call
+                // (`Foo::Bar::baz()`) the renamable/highlightable token is
+                // the bare tail, not the whole `::` path — so rename rewrites
+                // only `baz` and the qualifier survives. `target_name` keeps
+                // the full path (the hash-key binding + provenance rely on
+                // it); resolution sites read `unqualified_target_name()`.
+                let ref_span = fq_tail_span(func_node, raw);
                 self.add_ref(
                     RefKind::FunctionCall { resolved_package: resolved_package.clone() },
-                    node_to_span(func_node),
+                    ref_span,
                     name.to_string(),
                     AccessKind::Read,
                 );
@@ -4721,6 +6812,11 @@ impl<'a> Builder<'a> {
                         self.push_var_type_constraint(first_arg, node, arg_type);
                     }
                 }
+                // `bless $self, $class` promotes $self to ClassName($class)
+                // so post-bless `$self->method` resolves (H4).
+                if name == "bless" {
+                    self.visit_bless_call(node);
+                }
                 // Framework accessor synthesis: `has` calls in Moo/Moose/Mojo::Base packages
                 if name == "has" {
                     if let Some(mode) = self.current_package.as_ref()
@@ -4728,6 +6824,14 @@ impl<'a> Builder<'a> {
                     {
                         self.visit_has_call(node, mode);
                     }
+                }
+                // MooX::Options `option` is a `has` with extra option-parsing
+                // keys (format/doc/...). Synthesis is identical, so route it
+                // through the same path in Moo mode. Gated on the package
+                // actually using MooX::Options so an unrelated `option(...)`
+                // sub elsewhere isn't read as an attribute declaration.
+                if name == "option" && self.package_uses_moox_options() {
+                    self.visit_has_call(node, FrameworkMode::Moo);
                 }
                 // Moose/Moo `extends 'Parent'` — register parent classes
                 if name == "extends" {
@@ -4750,6 +6854,78 @@ impl<'a> Builder<'a> {
                     self.visit_push_call(node);
                 }
 
+                // Call-wrapped `%EXPORT_TAGS` table:
+                // `Readonly::Hash our %EXPORT_TAGS => ( tag => [...], ... )`
+                // (and Const::Fast / any wrapper). The args are
+                // `<%EXPORT_TAGS declaration> => <table list>`; we recognize the
+                // declared variable, not the wrapper function (rule #10), and
+                // fold the trailing table list the same as a plain assignment.
+                self.fold_call_wrapped_export_tags(node);
+
+                // Moose/Moo method modifiers: `around`/`before`/`after foo => sub {...}`.
+                // The anonymous sub body is a method body — its invocant parameter needs to
+                // be typed as the enclosing class. `around` takes `($orig, $self, @args)`,
+                // so the invocant is at position 1; `before`/`after` take `($self, @args)`,
+                // position 0. Set `modifier_invocant_pos` so `visit_anonymous_sub` (called
+                // when `visit_children` descends into the sub arg) marks the right param.
+                // Only applies in Moo/Moose contexts; other frameworks/plain-Perl `around`
+                // calls aren't affected because `framework_modes` won't contain the package.
+                let is_modifier = matches!(name, "around" | "before" | "after");
+                if is_modifier {
+                    if let Some(pkg) = self.current_package.as_ref() {
+                        if matches!(
+                            self.framework_modes.get(pkg),
+                            Some(FrameworkMode::Moo | FrameworkMode::Moose)
+                        ) {
+                            self.modifier_invocant_pos = Some(if name == "around" { 1 } else { 0 });
+                        }
+                    }
+                }
+
+                // Runtime-exporter setup in function-call form:
+                // `Sub::Exporter::setup_exporter({ exports => [...] })`.
+                // Match on the unqualified tail so the package prefix
+                // (which the caller may have aliased) isn't load-bearing.
+                if let Some(tail) = name.rsplit("::").next() {
+                    if tail == "setup_exporter" {
+                        if let Some(args) = node.child_by_field_name("arguments") {
+                            self.detect_exporter_setup_call(tail, args);
+                        }
+                    }
+                }
+
+                // Runtime-exporter declaration calls (recognizing literal
+                // setup syntax, same idiom as the `has`/`extends` branches
+                // above — builder parsing of framework syntax, not
+                // consumer-side shape-branching). Exporter::Extensible's
+                // `export(...)` and Exporter::Declare's `exports(...)` take
+                // a flat name list; Exporter::Declare's `export NAME => sub`
+                // and `default_export NAME => sub` take a name + coderef.
+                // Gated on the package having `use`d the relevant exporter
+                // so an unrelated `sub export {}` in some other module isn't
+                // mistaken for a declaration.
+                if matches!(name, "export" | "exports" | "default_export")
+                    && self.package_uses_exporter_declare_family()
+                {
+                    match name {
+                        "exports" => self.detect_export_name_list_call(node),
+                        // `export(qw/.../)` (Extensible, parens + qw) vs
+                        // `export NAME => sub` (Declare, fat-comma pair):
+                        // the qw / pure-name-list form has no fat comma, the
+                        // pair form's second arg is a coderef. Try the pair
+                        // form first; fall back to the list form.
+                        "export" => {
+                            if self.is_export_pair_call(node) {
+                                self.detect_export_pair_call(node);
+                            } else {
+                                self.detect_export_name_list_call(node);
+                            }
+                        }
+                        "default_export" => self.detect_export_pair_call(node),
+                        _ => {}
+                    }
+                }
+
                 // Framework plugin dispatch for function calls. Mirrors
                 // the method-call path so plugins (e.g. Mojolicious::Lite
                 // routes: `get '/path' => sub {}`) get the same
@@ -4764,11 +6940,82 @@ impl<'a> Builder<'a> {
                     );
                     ctx.call_kind = plugin::CallKind::Function;
                     ctx.function_name = Some(name.to_string());
+                    // The accessor-option vocabulary (predicate/clearer/writer/
+                    // reader/builder/handles) lives in the moo plugin. Core does
+                    // the node walk (rule #1) and hands over the decision-ready
+                    // option shape; the plugin maps keywords to method names.
+                    if name == "has" || name == "option" {
+                        if let Some(mode) = self.current_package.as_ref()
+                            .and_then(|pkg| self.framework_modes.get(pkg).copied())
+                        {
+                            ctx.has_options = self.extract_has_options(node, mode);
+                        }
+                    }
                     self.dispatch_function_call_plugins(ctx);
                 }
             }
         }
         self.visit_children(node);
+        // If `modifier_invocant_pos` wasn't consumed by a nested `visit_anonymous_sub`
+        // (malformed or modifier-without-sub-body code), clear it so it doesn't leak
+        // to the next anonymous sub in the file.
+        self.modifier_invocant_pos = None;
+    }
+
+    /// True when `node` is the bareword-filehandle argument of a
+    /// `print`/`printf`/`say` call: `print FH LIST`. Perl parses the
+    /// leading no-paren bareword as the indirect-object filehandle, which
+    /// tree-sitter models as a nested `ambiguous_function_call_expression`
+    /// (function = the filehandle, arguments = the print list) sitting in
+    /// the verb's `arguments` slot. The parenthesized form `print foo(...)`
+    /// parses as a `function_call_expression` instead, so it's a real call
+    /// and never matches here.
+    ///
+    /// KLUDGE — works around a parser gap (docs/parser-shortcomings.md G4):
+    /// the grammar already emits an `indirect_object` node for `print $fh`
+    /// and `print {$fh}`, but NOT for the bareword form, which degrades to
+    /// the function-call shape this guard sniffs out. Once upstream extends
+    /// `indirect_object` to accept a bareword filehandle, delete this guard
+    /// and consume the `indirect_object` node directly.
+    fn is_indirect_object_filehandle_call(&self, node: Node<'a>) -> bool {
+        if node.kind() != "ambiguous_function_call_expression" {
+            return false;
+        }
+        // The filehandle must be a plain bareword identifier (no sigil).
+        let func = match node.child_by_field_name("function") {
+            Some(f) => f,
+            None => return false,
+        };
+        let fh_text = match func.utf8_text(self.source) {
+            Ok(t) => t,
+            Err(_) => return false,
+        };
+        if fh_text.is_empty()
+            || !fh_text.chars().next().map_or(false, |c| c.is_ascii_alphabetic() || c == '_')
+            || !fh_text.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == ':')
+        {
+            return false;
+        }
+        // Parent must be a print-family verb, with `node` in its argument slot.
+        let parent = match node.parent() {
+            Some(p) => p,
+            None => return false,
+        };
+        if !matches!(
+            parent.kind(),
+            "ambiguous_function_call_expression" | "function_call_expression"
+        ) {
+            return false;
+        }
+        if parent.child_by_field_name("arguments").map(|a| a.id()) != Some(node.id()) {
+            return false;
+        }
+        matches!(
+            parent
+                .child_by_field_name("function")
+                .and_then(|f| f.utf8_text(self.source).ok()),
+            Some("print" | "printf" | "say")
+        )
     }
 
     /// Handle `push @EXPORT, 'foo', 'bar'` — append to export lists.
@@ -4813,6 +7060,680 @@ impl<'a> Builder<'a> {
                 self.export.extend(values);
             } else {
                 self.export_ok.extend(values);
+            }
+        }
+    }
+
+    // ---- Runtime exporter modeling ----
+    //
+    // Static analysis can't run an exporter's `import()`, so we model the
+    // declarative *setup* shapes: the names a package registers as exports
+    // map to same-named subs in the package. We feed the discovered names
+    // into `export_ok` — the existing `@EXPORT_OK` plumbing then drives
+    // goto-def (`resolve_imported_function` → same-named sub), cross-file
+    // `refs_to` (the consumer's `use X 'name'` FunctionCall ref pins to X;
+    // the def is a `Sub { package: X }` symbol), and diagnostic suppression
+    // (`find_exporters`). Generators (Exporter::Extensible `-name` entries,
+    // inline coderefs) are best-effort: the name resolves to a same-named
+    // sub if one exists, else goto-def stops at the `use` line. Tags
+    // (`-tag`, `:tag`) and sigil'd vars (`$x`, `@y`) are group/var
+    // vocabulary, not subs — skipped. Conditional/computed exports built
+    // at runtime are unmodeled.
+
+    /// Add `names` to `export_ok` (the package's exported vocabulary),
+    /// deduped against what's already there. The defining sub is the
+    /// same-named symbol — no separate provenance, matching how `@EXPORT_OK`
+    /// names already trace to their subs via the resolver.
+    fn record_runtime_exports(&mut self, names: impl IntoIterator<Item = String>) {
+        for name in names {
+            if name.is_empty() { continue; }
+            if !self.export_ok.contains(&name) && !self.export.contains(&name) {
+                self.export_ok.push(name);
+            }
+        }
+    }
+
+    /// Form 2 recognizer: does `body` contain a `push @EXPORT, @{"${var}::EXPORT"}`
+    /// (or `@EXPORT_OK`) where the symbolic deref interpolates the loop variable
+    /// `loop_var`? Matched by shape (rule #10): a `push` whose first arg is an
+    /// `@EXPORT`/`@EXPORT_OK` array and whose later args include a symbolic
+    /// array-deref naming `${loop_var}...::EXPORT[_OK]`. The loop-list resolution
+    /// (caller) decides which modules; this only confirms the re-export pattern.
+    fn body_has_symbolic_export_push(&self, body: Node<'a>, loop_var: &str) -> bool {
+        // The interpolated scalar is the bare varname (`m` for `$m`/`${m}`).
+        let bare = loop_var.trim_start_matches('$');
+        self.find_symbolic_export_push(body, bare)
+    }
+
+    fn find_symbolic_export_push(&self, node: Node<'a>, loop_var_bare: &str) -> bool {
+        if matches!(
+            node.kind(),
+            "function_call_expression" | "ambiguous_function_call_expression"
+        ) {
+            if let Some(func) = node.child_by_field_name("function") {
+                if func.utf8_text(self.source) == Ok("push") {
+                    if let Some(args) = node.child_by_field_name("arguments") {
+                        if self.push_args_reexport_export(args, loop_var_bare) {
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+        for i in 0..node.named_child_count() {
+            if let Some(child) = node.named_child(i) {
+                if self.find_symbolic_export_push(child, loop_var_bare) {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    /// `push @EXPORT, @{"${m}::EXPORT"}` arg list: first arg an `@EXPORT`/
+    /// `@EXPORT_OK` array, a later arg a symbolic deref of `${m}...::EXPORT[_OK]`.
+    fn push_args_reexport_export(&self, args: Node<'a>, loop_var_bare: &str) -> bool {
+        let first = args.named_child(0);
+        let target_is_export = first
+            .and_then(|f| if f.kind() == "array" { f.named_child(0) } else { None })
+            .filter(|v| v.kind() == "varname")
+            .and_then(|v| v.utf8_text(self.source).ok())
+            .map(|t| matches!(t, "EXPORT" | "EXPORT_OK"))
+            .unwrap_or(false);
+        if !target_is_export {
+            return false;
+        }
+        for i in 1..args.named_child_count() {
+            if let Some(arg) = args.named_child(i) {
+                if self.is_symbolic_export_deref(arg, loop_var_bare) {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    /// True if `node` is `@{"${var}::EXPORT"}` / `@{"${var}::EXPORT_OK"}` — a
+    /// symbolic array-deref whose interpolated string both references the loop
+    /// scalar `loop_var_bare` and targets an `::EXPORT`/`::EXPORT_OK` package var.
+    fn is_symbolic_export_deref(&self, node: Node<'a>, loop_var_bare: &str) -> bool {
+        if node.kind() != "array" {
+            return false;
+        }
+        // `@{ "..." }` parses as array > varname > block > ... interpolated string.
+        let mut refs_loop_var = false;
+        let mut targets_export = false;
+        Self::scan_interpolated_export_target(
+            node,
+            self.source,
+            loop_var_bare,
+            &mut refs_loop_var,
+            &mut targets_export,
+        );
+        refs_loop_var && targets_export
+    }
+
+    fn scan_interpolated_export_target(
+        node: Node<'a>,
+        source: &[u8],
+        loop_var_bare: &str,
+        refs_loop_var: &mut bool,
+        targets_export: &mut bool,
+    ) {
+        if node.kind() == "interpolated_string_literal" {
+            if let Some(content) = node.named_child(0) {
+                if let Ok(text) = content.utf8_text(source) {
+                    // Static literal portion holds `::EXPORT[_OK]`; the
+                    // interpolated scalar is a child node, so check raw text.
+                    if text.contains("::EXPORT") {
+                        *targets_export = true;
+                    }
+                }
+                // The interpolated scalar (`${m}`) is a `scalar` child whose
+                // varname is the loop var.
+                for i in 0..content.named_child_count() {
+                    if let Some(child) = content.named_child(i) {
+                        if child.kind() == "scalar" {
+                            if let Some(vn) = child.named_child(0) {
+                                if vn.utf8_text(source) == Ok(loop_var_bare) {
+                                    *refs_loop_var = true;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        for i in 0..node.named_child_count() {
+            if let Some(child) = node.named_child(i) {
+                Self::scan_interpolated_export_target(
+                    child, source, loop_var_bare, refs_loop_var, targets_export,
+                );
+            }
+        }
+    }
+
+    /// Record a re-export edge to `module` — "this module's surface includes
+    /// `module`'s surface." Deduped; the package's own name and empty/sigil'd
+    /// junk are skipped. `ExportSurface` walks these transitively at query time.
+    fn record_reexport_edge(&mut self, module: &str) {
+        let module = module.trim();
+        if module.is_empty() {
+            return;
+        }
+        // A package re-exporting itself is a no-op edge (and a cycle the
+        // query-time seen-set would absorb anyway); drop it here for cleanliness.
+        if self.current_package.as_deref() == Some(module) {
+            return;
+        }
+        if !self.reexport_modules.iter().any(|m| m == module) {
+            self.reexport_modules.push(module.to_string());
+        }
+    }
+
+    /// Form 1 (static splice): scan an `@EXPORT`/`@EXPORT_OK` assignment RHS for
+    /// `@OtherPkg::EXPORT` / `@OtherPkg::EXPORT_OK` array-deref elements and mint
+    /// a re-export edge to each `OtherPkg`. The CST shape is an `array` node
+    /// whose `varname` text is the fully-qualified `Pkg::EXPORT[_OK]`; we strip
+    /// the trailing `::EXPORT`/`::EXPORT_OK` to recover the package. Recognized
+    /// by shape (rule #10): any qualified export-var deref in the list is an edge.
+    fn record_static_splice_reexports(&mut self, node: Node<'a>) {
+        let mut edges = Vec::new();
+        Self::collect_export_var_derefs(node, self.source, &mut edges);
+        for pkg in edges {
+            self.record_reexport_edge(&pkg);
+        }
+    }
+
+    /// Walk `node` for `array` deref elements whose varname is `Pkg::EXPORT` or
+    /// `Pkg::EXPORT_OK`, pushing the bare `Pkg` onto `out`.
+    fn collect_export_var_derefs(node: Node<'a>, source: &[u8], out: &mut Vec<String>) {
+        if node.kind() == "array" {
+            if let Some(varname) = node.named_child(0) {
+                if varname.kind() == "varname" {
+                    if let Ok(text) = varname.utf8_text(source) {
+                        if let Some(pkg) = Self::package_from_export_var(text) {
+                            out.push(pkg);
+                        }
+                    }
+                }
+            }
+        }
+        for i in 0..node.named_child_count() {
+            if let Some(child) = node.named_child(i) {
+                Self::collect_export_var_derefs(child, source, out);
+            }
+        }
+    }
+
+    /// `Foo::Bar::EXPORT` / `Foo::Bar::EXPORT_OK` → `Some("Foo::Bar")`.
+    /// Anything else (an unqualified `EXPORT`, a non-export var) → `None`.
+    fn package_from_export_var(var: &str) -> Option<String> {
+        for suffix in ["::EXPORT_OK", "::EXPORT"] {
+            if let Some(pkg) = var.strip_suffix(suffix) {
+                if !pkg.is_empty() {
+                    return Some(pkg.to_string());
+                }
+            }
+        }
+        None
+    }
+
+    /// Fold `%EXPORT_TAGS` membership into the export surface. A tag table is
+    /// a `tag => [ name, ... ], ...` literal: a flat list alternating tag-name
+    /// keys (`autoquoted_bareword`/string at even positions) with member-array
+    /// values (`anonymous_array_expression` at odd positions). Only the *member*
+    /// names are exports — the tag names are selectors, not subs — so we pull
+    /// names from the value arrays only and feed them into `export_ok` (same
+    /// surface as `@EXPORT_OK`; `exports_name` / `find_exporters` then answer
+    /// `true`). Recognized by shape, so the plain `our %EXPORT_TAGS = (...)`
+    /// assignment and the call-wrapped `Readonly::Hash our %EXPORT_TAGS => (...)`
+    /// (and Const::Fast and friends) ride the same path — `table` is just the
+    /// list literal, whatever produced it.
+    fn fold_export_tags_table(&mut self, table: Node<'a>) {
+        let mut names = Vec::new();
+        // Track the most recent tag-name key so each value array attributes its
+        // members to the right tag for the `:tag` consumer selector. The table
+        // is a flat `key => [..], key2 => [..]` list, so the key precedes its
+        // array in named-child order.
+        let mut pending_tag: Option<String> = None;
+        for i in 0..table.named_child_count() {
+            let Some(child) = table.named_child(i) else { continue };
+            // Member names live in the value arrays (after each tag key); the
+            // bareword/string keys are selectors, not subs, so they're skipped.
+            if child.kind() == "anonymous_array_expression" {
+                let members = Self::keep_sub_export_names(self.extract_string_names(child));
+                if let Some(tag) = pending_tag.take() {
+                    self.export_tags.entry(tag).or_default().extend(members.iter().cloned());
+                }
+                names.extend(members);
+                self.record_export_member_sites(child);
+            } else if let Ok(text) = child.utf8_text(self.source) {
+                // A tag-name key: a bareword/string before its member array.
+                // `:DEFAULT` is the Exporter alias for `@EXPORT`, synthesized in
+                // `ExportSurface`, so don't store it as a literal tag here.
+                let tag = text.trim().trim_matches(|c| c == '\'' || c == '"').trim_start_matches([':', '-']);
+                if !tag.is_empty() {
+                    pending_tag = Some(tag.to_string());
+                }
+            }
+        }
+        // Tag members are sub names exactly like `@EXPORT_OK` entries; drop
+        // sigil'd globals / nested tag refs the array might have contributed.
+        let names = Self::keep_sub_export_names(names);
+        self.record_runtime_exports(names);
+    }
+
+    /// Recognize a call whose args declare `%EXPORT_TAGS` and fold the trailing
+    /// table — the `Readonly::Hash our %EXPORT_TAGS => (...)` shape (Const::Fast
+    /// and any other wrapper ride the same path). The wrapper function is not
+    /// load-bearing; the witness is the declared variable. The args are a flat
+    /// list `<%EXPORT_TAGS declaration>, <table list>`; fold every following
+    /// list once we've seen the declaration.
+    fn fold_call_wrapped_export_tags(&mut self, node: Node<'a>) {
+        let Some(args) = node.child_by_field_name("arguments") else { return };
+        let mut saw_export_tags_decl = false;
+        for i in 0..args.named_child_count() {
+            let Some(child) = args.named_child(i) else { continue };
+            if !saw_export_tags_decl {
+                if child.kind() == "variable_declaration"
+                    && child
+                        .utf8_text(self.source)
+                        .map_or(false, |t| t.trim_end().ends_with("%EXPORT_TAGS"))
+                {
+                    saw_export_tags_decl = true;
+                }
+                continue;
+            }
+            if child.kind() == "list_expression"
+                || child.kind() == "parenthesized_expression"
+                || child.kind() == "anonymous_array_expression"
+            {
+                self.fold_export_tags_table(child);
+            }
+        }
+    }
+
+    /// Record export-list member tokens under `node` (their per-word spans)
+    /// so the post-walk pass can ref the ones that name a local sub. Applies
+    /// the same sub-name filter as the export-surface folds: sigil'd globals
+    /// and `-tag` / `:group` selectors aren't subs and never get a ref.
+    fn record_export_member_sites(&mut self, node: Node<'a>) {
+        let pkg = self.current_package.clone();
+        for (text, span) in self.extract_string_list(node) {
+            if text
+                .chars()
+                .next()
+                .map_or(false, |c| c == '_' || c.is_ascii_alphabetic())
+            {
+                self.export_member_sites.push((text, span, pkg.clone()));
+            }
+        }
+    }
+
+    /// Emit a `FunctionCall` ref for each recorded export-member site whose
+    /// name matches a local `Sub`/`Method` symbol in the same package. Runs
+    /// post-walk so forward-declared subs (the export list precedes them) are
+    /// visible. A member that names no local sub (or a tag-name key, which is
+    /// never recorded) produces no ref — so references/goto-def stay clean.
+    fn emit_export_member_refs(&mut self) {
+        let sites = std::mem::take(&mut self.export_member_sites);
+        for (name, span, pkg) in sites {
+            let is_local_sub = self.symbols.iter().any(|s| {
+                s.name == name
+                    && matches!(s.kind, SymKind::Sub | SymKind::Method)
+                    && s.package == pkg
+            });
+            if !is_local_sub {
+                continue;
+            }
+            // Post-walk: the scope stack is empty, so `add_ref`'s
+            // `current_scope()` would panic. The file scope is the right home
+            // for an export-list ref anyway (it sits at package top level).
+            let scope = self.scopes.first().map(|s| s.id).unwrap_or(ScopeId(0));
+            self.refs.push(Ref {
+                kind: RefKind::FunctionCall { resolved_package: pkg },
+                span,
+                scope,
+                target_name: name,
+                access: AccessKind::Read,
+                resolves_to: None,
+                resolved_method_target: None,
+            });
+        }
+    }
+
+    /// Pin FunctionCall refs the walk left unresolved (`resolved_package:
+    /// None`) to a local sub of the same name in the call's enclosing package.
+    /// The walk-time `resolve_call_package` only sees subs declared *before*
+    /// the call (it scans `self.symbols` as-collected), so a forward reference
+    /// — a call above its `sub` — never pinned. That made goto-def /
+    /// references / rename silently miss every forward call, while diagnostics
+    /// (post-walk name lookup) did not — a resolution asymmetry. This
+    /// post-walk pass closes it so forward and backward calls resolve
+    /// identically; order-independent by construction (every sub + ref exists).
+    fn pin_unresolved_call_packages(&mut self) {
+        use std::collections::HashMap;
+        // Local sub/method name → the package(s) that define it.
+        let mut sub_pkgs: HashMap<&str, Vec<&str>> = HashMap::new();
+        for s in &self.symbols {
+            if matches!(s.kind, SymKind::Sub | SymKind::Method) {
+                if let Some(pkg) = s.package.as_deref() {
+                    sub_pkgs.entry(s.name.as_str()).or_default().push(pkg);
+                }
+            }
+        }
+        if sub_pkgs.is_empty() {
+            return;
+        }
+        let mut pins: Vec<(usize, String)> = Vec::new();
+        for (i, r) in self.refs.iter().enumerate() {
+            let RefKind::FunctionCall { resolved_package: None } = &r.kind else { continue };
+            if r.target_name.contains("::") {
+                continue; // qualified calls already pin at walk time (step 1)
+            }
+            let Some(pkgs) = sub_pkgs.get(r.target_name.as_str()) else { continue };
+            // Pin ONLY to a local sub in the call's OWN enclosing package
+            // (`package_at_pos` is the canonical span-containment query — block-
+            // scoped `{ package X; }` aware). A same-named sub in a DIFFERENT
+            // local package is NOT this call's target: it may be an imported sub
+            // of that name, which cross-file resolution owns. (An earlier
+            // unique-local fallback pinned to it and hijacked the import.)
+            let Some(encl) = self.package_at_pos(r.span.start) else { continue };
+            if pkgs.iter().any(|p| *p == encl) {
+                pins.push((i, encl.to_string()));
+            }
+        }
+        for (i, pkg) in pins {
+            if let RefKind::FunctionCall { resolved_package } = &mut self.refs[i].kind {
+                *resolved_package = Some(pkg);
+            }
+        }
+    }
+
+    /// Does this `substitution_regexp` carry the `/e` modifier (replacement is
+    /// evaluated as Perl code)?
+    fn subst_replacement_is_eval(&self, node: Node<'a>) -> bool {
+        for i in 0..node.named_child_count() {
+            if let Some(c) = node.named_child(i) {
+                if c.kind() == "substitution_regexp_modifiers" {
+                    return c.utf8_text(self.source).map_or(false, |t| t.contains('e'));
+                }
+            }
+        }
+        false
+    }
+
+    /// Re-parse an `s///e` replacement as Perl and emit refs for the entities
+    /// inside it — function calls, method calls, and variables — so the code in
+    /// the replacement gets the same navigation (goto-def / references / rename /
+    /// highlight) as code anywhere else (rule #7: every meaningful token gets a
+    /// ref). The snippet is padded with the replacement's leading rows/cols so
+    /// the re-parsed nodes carry the *original* file coordinates — no per-node
+    /// offset math, spans drop straight in. (`s///ee` double-eval is the
+    /// documented edge; one level covers it.)
+    ///
+    /// This is a deliberate secondary-parse emitter, not the main walker (its
+    /// `Node<'a>` is bound to the primary tree's lifetime, so the snippet nodes
+    /// can't flow through `visit_*`). It emits the ref shapes directly; the
+    /// downstream resolution passes (`resolve_variable_refs`, MCB) wire them up
+    /// from `(scope, name)` exactly as for natively-walked refs.
+    fn emit_refs_in_eval_replacement(&mut self, repl: Node<'a>) {
+        let Ok(text) = repl.utf8_text(self.source) else { return };
+        if text.trim().is_empty() {
+            return;
+        }
+        let start = repl.start_position();
+        let mut snippet = String::with_capacity(start.row + start.column + text.len());
+        for _ in 0..start.row { snippet.push('\n'); }
+        for _ in 0..start.column { snippet.push(' '); }
+        snippet.push_str(text);
+        let bytes = snippet.into_bytes();
+        let mut parser = crate::module_resolver::create_parser();
+        let Some(tree) = parser.parse(&bytes, None) else { return };
+        let scope = self.current_scope();
+
+        // A `scalar`/`array`/`hash` node is a plain variable only when its text
+        // is sigil + identifier path: `$x`, `@a`, `%h`, `$Foo::bar`. Deref
+        // wrappers (`${...}`, `@{...}`, `$$x`) don't match here — their inner
+        // `scalar` child is a named child and gets matched on its own.
+        let plain_var = |t: &str| {
+            let mut cs = t.chars();
+            matches!(cs.next(), Some('$' | '@' | '%'))
+                && t.len() > 1
+                && cs.all(|c| c.is_alphanumeric() || c == '_' || c == ':')
+        };
+
+        let mut stack = vec![tree.root_node()];
+        while let Some(n) = stack.pop() {
+            match n.kind() {
+                "function_call_expression" | "ambiguous_function_call_expression" => {
+                    if let Some(func) = n.child_by_field_name("function") {
+                        if let Ok(name) = func.utf8_text(&bytes) {
+                            let name = name.to_string();
+                            let resolved_package = self.resolve_call_package(&name);
+                            self.refs.push(Ref {
+                                kind: RefKind::FunctionCall { resolved_package },
+                                span: node_to_span(func),
+                                scope,
+                                target_name: name,
+                                access: AccessKind::Read,
+                                resolves_to: None,
+                                resolved_method_target: None,
+                            });
+                        }
+                    }
+                }
+                "method_call_expression" => {
+                    let method = n.child_by_field_name("method");
+                    let invocant = n.child_by_field_name("invocant");
+                    // Bareword method only — `$obj->$dynamic(...)` has a sigil'd
+                    // method node and isn't a nameable target.
+                    if let Some(method) = method {
+                        if let Ok(name) = method.utf8_text(&bytes) {
+                            if name.chars().next().map_or(false, |c| c == '_' || c.is_alphabetic()) {
+                                self.refs.push(Ref {
+                                    kind: RefKind::MethodCall {
+                                        invocant: invocant
+                                            .and_then(|i| i.utf8_text(&bytes).ok())
+                                            .unwrap_or("")
+                                            .to_string(),
+                                        invocant_span: invocant.map(node_to_span),
+                                        method_name_span: node_to_span(method),
+                                    },
+                                    span: node_to_span(n),
+                                    scope,
+                                    target_name: name.to_string(),
+                                    access: AccessKind::Read,
+                                    resolves_to: None,
+                                    resolved_method_target: None,
+                                });
+                            }
+                        }
+                    }
+                }
+                "scalar" | "array" | "hash" => {
+                    if let Ok(t) = n.utf8_text(&bytes) {
+                        if plain_var(t) {
+                            let ref_span = fq_tail_span(n, t);
+                            self.refs.push(Ref {
+                                kind: RefKind::Variable,
+                                span: ref_span,
+                                scope,
+                                target_name: t.to_string(),
+                                access: AccessKind::Read,
+                                resolves_to: None,
+                                resolved_method_target: None,
+                            });
+                        }
+                    }
+                }
+                _ => {}
+            }
+            for i in 0..n.named_child_count() {
+                if let Some(c) = n.named_child(i) {
+                    stack.push(c);
+                }
+            }
+        }
+    }
+
+    /// Keep only entries that name a sub: a plain bareword. Sigil'd vars
+    /// (`$x`/`@y`/`%z` — exported package globals, not subs) and tags
+    /// (`-tag`/`:group` — Exporter::Extensible export groups) are dropped.
+    /// The same-named-sub resolution only makes sense for sub names.
+    fn keep_sub_export_names(names: impl IntoIterator<Item = String>) -> Vec<String> {
+        names
+            .into_iter()
+            .filter(|n| {
+                n.chars()
+                    .next()
+                    .map_or(false, |c| c == '_' || c.is_ascii_alphabetic())
+            })
+            .collect()
+    }
+
+    /// True if the current package `use`d an exporter whose vocabulary
+    /// includes `export` / `exports` / `default_export` as declaration
+    /// verbs — Exporter::Extensible or Exporter::Declare (incl. its
+    /// `-magic` / role variants whose names start with that prefix).
+    /// Gates the call-name detection so a plain `sub export {}` elsewhere
+    /// isn't read as an export declaration.
+    fn package_uses_moox_options(&self) -> bool {
+        let Some(pkg) = self.current_package.as_ref() else { return false };
+        let Some(uses) = self.package_uses.get(pkg) else { return false };
+        uses.iter().any(|m| m == "MooX::Options")
+    }
+
+    fn package_uses_exporter_declare_family(&self) -> bool {
+        let Some(pkg) = self.current_package.as_ref() else { return false };
+        let Some(uses) = self.package_uses.get(pkg) else { return false };
+        uses.iter().any(|m| {
+            m == "Exporter::Extensible"
+                || m == "Exporter::Declare"
+                || m.starts_with("Exporter::Declare::")
+        })
+    }
+
+    /// True if the current package `use`d an exporter that defines the
+    /// method-call setup verbs `setup_import_methods` (Moose::Exporter) /
+    /// `add_type` (Type::Library, Exporter::Tiny, Type::Tiny). Gates those
+    /// method-call detections so an unrelated `$x->add_type({name=>...})`
+    /// or `$x->setup_import_methods(...)` elsewhere isn't read as an export
+    /// declaration (false cross-file goto-def + suppressed diagnostics).
+    fn package_uses_moose_exporter_or_type_library(&self) -> bool {
+        let Some(pkg) = self.current_package.as_ref() else { return false };
+        let Some(uses) = self.package_uses.get(pkg) else { return false };
+        uses.iter().any(|m| {
+            m == "Moose::Exporter"
+                || m == "Type::Library"
+                || m == "Type::Tiny"
+                || m == "Exporter::Tiny"
+                || m.starts_with("Type::Library::")
+        })
+    }
+
+    /// Distinguish `export NAME => sub {...}` (Exporter::Declare pair form)
+    /// from `export(qw/.../)` / `export('a', 'b')` (name-list form). The
+    /// pair form's second positional is a coderef; the list form's args are
+    /// all names. We treat presence of an `anonymous_subroutine_expression`
+    /// (or `\&sub` reference) among the args as the pair-form signal.
+    fn is_export_pair_call(&self, node: Node<'a>) -> bool {
+        let Some(args) = node.child_by_field_name("arguments") else { return false };
+        for i in 0..args.named_child_count() {
+            if let Some(c) = args.named_child(i) {
+                if matches!(c.kind(), "anonymous_subroutine_expression" | "refgen_expression") {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    /// `export( qw( foo $bar -tag ) )` / `exports(qw/a b/)` — Exporter::
+    /// Extensible's `export(...)` and Exporter::Declare's `exports(...)`.
+    /// Both take a flat name list; only the sub-name entries are kept.
+    fn detect_export_name_list_call(&mut self, node: Node<'a>) {
+        let Some(args) = node.child_by_field_name("arguments") else { return };
+        let names = Self::keep_sub_export_names(self.extract_string_names(args));
+        self.record_runtime_exports(names);
+    }
+
+    /// `export NAME => sub {...}` / `default_export NAME => sub {...}`
+    /// (Exporter::Declare). The first positional is the exported name; the
+    /// value is an inline coderef (or, if absent, a same-named sub). We
+    /// model the name → same-named sub edge; the inline coderef body isn't
+    /// a separately-addressable symbol, so goto-def lands on a `sub NAME`
+    /// if the author also defined one (common) and otherwise on the `use`
+    /// line. Honest limit: anonymous-only exports aren't resolvable.
+    fn detect_export_pair_call(&mut self, node: Node<'a>) {
+        let Some(args) = node.child_by_field_name("arguments") else { return };
+        // First named child is the export name (bareword or string).
+        let Some(first) = args.named_child(0) else { return };
+        let names: Vec<String> = self.extract_node_string(first).into_iter().collect();
+        self.record_runtime_exports(Self::keep_sub_export_names(names));
+    }
+
+    /// `sub foo : Export(...)` / `sub foo :Export` — Exporter::Extensible's
+    /// method-attribute export form. The sub's own name is the export; the
+    /// attribute's args are tags/options, not names. Called from `visit_sub`
+    /// with the sub name already known.
+    fn detect_export_attribute(&mut self, node: Node<'a>, sub_name: &str) {
+        let Some(attrs) = node.child_by_field_name("attributes") else { return };
+        let mut has_export_attr = false;
+        for i in 0..attrs.named_child_count() {
+            let Some(attr) = attrs.named_child(i) else { continue };
+            if attr.kind() != "attribute" { continue; }
+            let attr_name = attr
+                .child_by_field_name("name")
+                .and_then(|n| n.utf8_text(self.source).ok());
+            if attr_name == Some("Export") {
+                has_export_attr = true;
+                break;
+            }
+        }
+        if has_export_attr {
+            self.record_runtime_exports(Self::keep_sub_export_names([sub_name.to_string()]));
+        }
+    }
+
+    /// Scan an `IMPORTER_MENU` sub body for `export => [...]` /
+    /// `export_ok => [...]` fat-comma pairs in its return list and record
+    /// the named subs. Walks the body for a `return` (or trailing) list;
+    /// for each `export`/`export_ok` bareword key, pulls names from the
+    /// following arrayref. Best-effort static read — a menu built at
+    /// runtime (loops, conditionals, computed keys) isn't covered.
+    fn detect_importer_menu(&mut self, sub_node: Node<'a>) {
+        let Some(body) = sub_node.child_by_field_name("body") else { return };
+        // Collect every list_expression under the body (the return list and
+        // its operands). We look at the immediate children of each list for
+        // `key => [...]` pairs rather than recursing into the arrayrefs.
+        let mut lists: Vec<Node<'a>> = Vec::new();
+        Self::collect_list_expressions(body, &mut lists);
+        // Collect first, record after — `for_each_pair_in_list` holds a
+        // shared borrow of self that `record_runtime_exports` (mut) can't
+        // overlap.
+        let mut names: Vec<String> = Vec::new();
+        for list in lists {
+            self.for_each_pair_in_list(list, |key, val| {
+                if matches!(key, "export" | "export_ok") {
+                    names.extend(Self::keep_sub_export_names(self.extract_string_names(val)));
+                }
+                true
+            });
+        }
+        self.record_runtime_exports(names);
+    }
+
+    /// Depth-first collect every `list_expression` node reachable from
+    /// `node` (used to find the menu pairs anywhere in a return body).
+    fn collect_list_expressions(node: Node<'a>, out: &mut Vec<Node<'a>>) {
+        if node.kind() == "list_expression" {
+            out.push(node);
+        }
+        for i in 0..node.named_child_count() {
+            if let Some(c) = node.named_child(i) {
+                Self::collect_list_expressions(c, out);
             }
         }
     }
@@ -4886,6 +7807,42 @@ impl<'a> Builder<'a> {
         }
     }
 
+    /// Record each method-call invocant's resolved type on
+    /// `Expr(invocant_span)`. The query-time mirror
+    /// (`FileAnalysis::expr_type_at_span`) reads these to type an
+    /// expression without re-walking the CST. Materializes the answer
+    /// from `invocant_type_at_node` (the single build-time symbolic
+    /// executor) rather than an edge: the invocant's span is its own
+    /// attachment, no edge mirrors it, so this is a source value the
+    /// walker uniquely computes — not a parallel cache of an
+    /// edge-reachable result. Chain receivers whose class is only
+    /// knowable cross-file resolve to `None` here and stay unrecorded;
+    /// the query side's chain recursion fills them at enrichment.
+    fn emit_invocant_expr_witnesses(&mut self, idx: &ChainTypingIndex<'a>) {
+        use crate::witnesses::{Witness, WitnessAttachment, WitnessPayload, WitnessSource};
+        let mut pending: Vec<(Span, Node<'a>)> = Vec::new();
+        for r in &self.refs {
+            if let RefKind::MethodCall {
+                invocant_span: Some(sp),
+                ..
+            } = &r.kind
+            {
+                if let Some(n) = idx.invocant_nodes.get(&(sp.start, sp.end)).copied() {
+                    pending.push((*sp, n));
+                }
+            }
+        }
+        for (span, node) in pending {
+            let Some(ty) = self.invocant_type_at_node(node) else { continue };
+            self.bag.push(Witness {
+                attachment: WitnessAttachment::Expr(span),
+                source: WitnessSource::Builder("invocant_expr".into()),
+                payload: WitnessPayload::InferredType(ty),
+                span,
+            });
+        }
+    }
+
     /// Extract exported function name(s) from a glob assignment in `sub import`.
     /// Handles: `*{"${caller}::np"} = \&np`, `*{"$caller\::$imported"} = \&p`,
     /// `*{$caller . '::confess'} = \&confess`, and loop patterns.
@@ -4907,12 +7864,216 @@ impl<'a> Builder<'a> {
         vec![]
     }
 
+    /// Synthesize a local Sub symbol for each name installed via typeglob
+    /// assignment whose RHS produces a sub/coderef. Shape-driven (rule #10),
+    /// mirroring the DBIC `add_columns` / `mk_group_accessors` producers: the
+    /// LHS glob name is the authoritative source, the RHS is the "is this a
+    /// sub?" gate. Without this, glob-installed subs (File::Fetch, IPC::Cmd,
+    /// File::Path, Type::Tiny) never become symbols and every call site flags
+    /// unresolved. Dynamic names (`*{$runtime}`, unfoldable concat) are skipped
+    /// rather than guessed.
+    fn synthesize_glob_assigned_sub(&mut self, glob_node: Node<'a>, assign_node: Node<'a>) {
+        // Gate on RHS shape: only a sub-producing rvalue installs a callable.
+        let Some(right) = assign_node.child_by_field_name("right") else { return };
+        if !self.glob_rhs_is_sub(right) {
+            return;
+        }
+        let names = self.glob_install_names(glob_node, assign_node);
+        let sel_span = node_to_span(glob_node);
+        let def_span = node_to_span(assign_node);
+        for name in names {
+            // Glob into another package (`*Other::foo = ...`) installs `foo`;
+            // local call sites and goto use the unqualified tail. The glob
+            // string's package prefix is authoritative for attribution:
+            // `*{ 'DateTime::' . $sub } = __PACKAGE__->can($sub)` synthesizes
+            // the tail under `DateTime`, not the file's own `current_package`
+            // (`DateTime::PP`), so `MethodOnClass{DateTime, _ymd2rd}` resolves.
+            // Unqualified names stay under the current package.
+            let (target_pkg, local) = match name.rsplit_once("::") {
+                Some((prefix, tail)) if !prefix.is_empty() => {
+                    (Some(prefix.to_string()), tail.to_string())
+                }
+                _ => (self.current_package.clone(), name.clone()),
+            };
+            if local.is_empty() {
+                continue;
+            }
+            self.add_symbol_in_package(
+                local,
+                SymKind::Sub,
+                def_span,
+                sel_span,
+                SymbolDetail::Sub {
+                    params: vec![],
+                    is_method: false,
+                    doc: None,
+                    display: None,
+                    hide_in_outline: false,
+                    opaque_return: false,
+                    is_constant: false,
+                },
+                Namespace::Language,
+                target_pkg,
+            );
+        }
+    }
+
+    /// Is this RHS node a sub/coderef rvalue (anon sub, `\&name` alias, or a
+    /// scalar holding a coderef)? The gate for glob-assign symbol synthesis.
+    fn glob_rhs_is_sub(&self, right: Node<'a>) -> bool {
+        match right.kind() {
+            "anonymous_subroutine_expression" => true,
+            // `\&name` / `\&$var` — a code ref. `refgen_expression > function`.
+            "refgen_expression" => right
+                .named_child(0)
+                .map(|c| c.kind() == "function")
+                .unwrap_or(false),
+            // `*name = $coderef;` — a scalar presumed to hold a code ref. The
+            // LHS-name gate keeps this from over-firing on truly-dynamic globs.
+            "scalar" => true,
+            // CG-3b: `*{ 'Pkg::' . $sub } = __PACKAGE__->can($sub)` (DateTime::PP)
+            // — `->can(...)` yields a coderef. Recognize as sub-producing so the
+            // glob installs a symbol. `can` on any package/`__PACKAGE__`/class
+            // invocant qualifies; the LHS-name gate still requires a
+            // statically-derivable target name.
+            "method_call_expression" => self.method_call_yields_coderef(right),
+            // Conditional install: `*name = $cond ? \&a : sub {...}` (Try::Tiny's
+            // `*_subname = $su ? \&Sub::Util::set_subname : sub {...}`, Path::Tiny's
+            // `*_same = IS_WIN32() ? sub{} : sub{}`). The glob holds a coderef in
+            // every branch, so the name is callable iff BOTH arms are sub-producing.
+            "conditional_expression" => {
+                let arm = |f| {
+                    right
+                        .child_by_field_name(f)
+                        .is_some_and(|n| self.glob_rhs_is_sub(n))
+                };
+                arm("consequent") && arm("alternative")
+            }
+            _ => false,
+        }
+    }
+
+    /// Does this method call yield a coderef? Today: the universal `->can(NAME)`
+    /// (UNIVERSAL::can returns the method's coderef or undef). Invocant must be a
+    /// class-ish receiver (`Pkg`, `__PACKAGE__`, a bareword/package node) — not a
+    /// `$obj` instance, where `->can` is equally valid but the name list it feeds
+    /// (cross-package glob targets) only makes sense for class injection.
+    fn method_call_yields_coderef(&self, node: Node<'a>) -> bool {
+        let Some(method) = node.child_by_field_name("method") else { return false };
+        if method.utf8_text(self.source).ok() != Some("can") {
+            return false;
+        }
+        match node.child_by_field_name("invocant").map(|n| n.kind()) {
+            Some("package" | "bareword" | "func0op_call_expression") => true,
+            _ => false,
+        }
+    }
+
+    /// Resolve the statically-derivable name(s) the glob LHS installs into.
+    /// Returns empty when fully dynamic (no fabrication).
+    ///
+    /// Shapes: `*name` (static), `*{ 'literal' }` (string block),
+    /// `*$m` (loop var, via constant folding), `*{ $runtime }` / unfoldable
+    /// concat → empty.
+    fn glob_install_names(&self, glob_node: Node<'a>, assign_node: Node<'a>) -> Vec<String> {
+        // First child is `varname` for the bare form (`*name`) or a
+        // `glob_deref_expression` wrapping the block for `*{ EXPR }` — both
+        // expose the operand as their first named child, so the index walk
+        // below is shape-agnostic.
+        let Some(head) = glob_node.named_child(0) else { return vec![] };
+
+        // Bare static name: `*name` / `*Foo::bar` — varname has no inner block.
+        if head.named_child_count() == 0 {
+            if let Ok(text) = head.utf8_text(self.source) {
+                if !text.is_empty() {
+                    return vec![text.to_string()];
+                }
+            }
+            return vec![];
+        }
+
+        let Some(inner) = head.named_child(0) else { return vec![] };
+        match inner.kind() {
+            // `*$m = ...` — scalar (loop var). Resolve via constant folding so
+            // `for my $m (qw/a b/)` installs both names; bail on unknown vars.
+            "scalar" => self.glob_name_from_scalar(inner),
+            // `*{ ... }` — block expression. Derive only when literal-ish.
+            "block" => self.glob_name_from_block(inner, assign_node),
+            _ => vec![],
+        }
+    }
+
+    /// `*$m` — resolve the scalar to concrete name(s) via constant folding.
+    fn glob_name_from_scalar(&self, scalar: Node<'a>) -> Vec<String> {
+        let Some(varname) = scalar.named_child(0) else { return vec![] };
+        let bare = varname.utf8_text(self.source).unwrap_or("");
+        if bare.is_empty() {
+            return vec![];
+        }
+        self.resolve_constant_strings(&format!("${}", bare), 0).unwrap_or_default()
+    }
+
+    /// `*{ EXPR }` — derive name(s) from the block's single expression.
+    /// Handles a bare string literal and a constant-foldable interpolated
+    /// string / concat; bails (empty) on anything runtime-dynamic.
+    fn glob_name_from_block(&self, block: Node<'a>, _assign_node: Node<'a>) -> Vec<String> {
+        let inner = (|| {
+            let stmt = block.named_child(0)?;
+            stmt.named_child(0)
+        })();
+        let Some(expr) = inner else { return vec![] };
+        match expr.kind() {
+            "string_literal" => self.extract_string_content(expr).into_iter().collect(),
+            "interpolated_string_literal" => self.try_fold_interpolated_string(expr),
+            // `'is_' . $type` — fold both operands; if any operand is dynamic
+            // and unresolvable, the fold yields empty and we skip (don't guess).
+            "binary_expression" => self.try_fold_string_concat(expr),
+            _ => vec![],
+        }
+    }
+
+    /// Fold a `.`-concatenation of constant-resolvable operands into name(s).
+    /// Returns empty if any operand can't be resolved to a concrete string —
+    /// the "don't fabricate a partial name" boundary.
+    fn try_fold_string_concat(&self, node: Node<'a>) -> Vec<String> {
+        // Cartesian product across operands so a loop-var operand expands.
+        let mut acc: Vec<String> = vec![String::new()];
+        for i in 0..node.named_child_count() {
+            let Some(child) = node.named_child(i) else { return vec![] };
+            let pieces: Vec<String> = match child.kind() {
+                "string_literal" => self.extract_string_content(child).into_iter().collect(),
+                "interpolated_string_literal" => self.try_fold_interpolated_string(child),
+                "binary_expression" => self.try_fold_string_concat(child),
+                "scalar" => {
+                    let varname = child.named_child(0);
+                    match varname.and_then(|v| v.utf8_text(self.source).ok()) {
+                        Some(bare) if !bare.is_empty() => self
+                            .resolve_constant_strings(&format!("${}", bare), 0)
+                            .unwrap_or_default(),
+                        _ => vec![],
+                    }
+                }
+                _ => vec![],
+            };
+            if pieces.is_empty() {
+                return vec![]; // unresolvable operand → don't guess
+            }
+            acc = acc
+                .iter()
+                .flat_map(|prefix| pieces.iter().map(move |p| format!("{}{}", prefix, p)))
+                .collect();
+        }
+        acc.into_iter().filter(|s| !s.is_empty()).collect()
+    }
+
     /// Walk the glob's interpolated string AST to find the exported name(s) after "::".
     fn extract_names_from_glob(&self, glob_node: Node<'a>) -> Vec<String> {
-        // glob > varname > block > expression_statement > interpolated_string_literal
+        // glob > (varname | glob_deref_expression) > block > expression_statement
+        //   > interpolated_string_literal — the head node differs by spelling
+        //   (`*name` vs `*{ EXPR }`) but the index walk is the same.
         let content = (|| {
-            let varname = glob_node.named_child(0)?;
-            let block = varname.named_child(0)?;
+            let head = glob_node.named_child(0)?;
+            let block = head.named_child(0)?;
             let expr_stmt = block.named_child(0)?;
             let interp = expr_stmt.named_child(0)?;
             if interp.kind() != "interpolated_string_literal" { return None; }
@@ -4979,6 +8140,23 @@ impl<'a> Builder<'a> {
             Some(f) if f.kind() == "function" => f,
             _ => return vec![],
         };
+        // `\&{ EXPR }` — symbolic code-deref. The operand is the target
+        // (e.g. `\&{$name}` resolves through `$name`'s constant value,
+        // `\&{"$pkg::$sym"}` is a runtime string we can't statically name).
+        if let Some(code_deref) = code_deref_in(func) {
+            if let Some(operand) = code_deref_operand(code_deref) {
+                if operand.kind() == "scalar" {
+                    if let Some(scalar_varname) = operand.named_child(0) {
+                        let bare_name = scalar_varname.utf8_text(self.source).unwrap_or("");
+                        let lookup_key = format!("${}", bare_name);
+                        if let Some(values) = self.resolve_constant_strings(&lookup_key, 0) {
+                            return values;
+                        }
+                    }
+                }
+            }
+            return vec![];
+        }
         // function > varname, possibly containing a scalar child (for \&$name)
         let varname = match func.named_child(0) {
             Some(v) => v,
@@ -5172,6 +8350,11 @@ impl<'a> Builder<'a> {
         let mut attr_names: Vec<(String, Span)> = Vec::new();
         let mut is_value: Option<String> = None;
         let mut isa_value: Option<String> = None;
+        // The `isa` value NODE — for a parametric constraint
+        // (`InstanceOf['Foo']`) `extract_node_string` drops the value
+        // (it isn't a bareword/string), so the node is the only handle.
+        // Read structurally, never re-parsed.
+        let mut isa_value_node: Option<Node<'a>> = None;
         let mut mojo_default_node: Option<Node<'a>> = None;
 
         // Get the arguments node
@@ -5188,62 +8371,81 @@ impl<'a> Builder<'a> {
             vec![args]
         };
 
-        let mut found_first_arg = false;
-        for child in &args_children {
+        let mut first_named_idx: Option<usize> = None;
+        for (idx, child) in args_children.iter().enumerate() {
             if !child.is_named() { continue; }
-
-            if !found_first_arg {
-                found_first_arg = true;
-                match child.kind() {
-                    "string_literal" | "interpolated_string_literal" => {
-                        if let Some(text) = self.extract_string_content(*child) {
-                            if !text.starts_with('+') {
-                                attr_names.push((text, self.string_content_span(*child)));
-                            }
+            first_named_idx = Some(idx);
+            match child.kind() {
+                "string_literal" | "interpolated_string_literal" => {
+                    if let Some(text) = self.extract_string_content(*child) {
+                        if !text.starts_with('+') {
+                            attr_names.push((text, self.string_content_span(*child)));
                         }
                     }
-                    "bareword" | "autoquoted_bareword" => {
-                        if let Ok(text) = child.utf8_text(self.source) {
-                            attr_names.push((text.to_string(), node_to_span(*child)));
-                        }
-                    }
-                    "array_ref_expression" | "anonymous_array_expression" => {
-                        self.extract_array_attr_names(*child, &mut attr_names);
-                    }
-                    _ => {}
                 }
-                continue;
+                "bareword" | "autoquoted_bareword" => {
+                    if let Ok(text) = child.utf8_text(self.source) {
+                        attr_names.push((text.to_string(), node_to_span(*child)));
+                    }
+                }
+                "array_ref_expression" | "anonymous_array_expression" => {
+                    self.extract_array_attr_names(*child, &mut attr_names);
+                }
+                _ => {}
             }
-
-            // After first arg: options (Moo/Moose) or default value (Mojo::Base)
-            if mode == FrameworkMode::MojoBase {
-                // Capture default value node for type inference
-                if mojo_default_node.is_none() {
-                    mojo_default_node = Some(*child);
-                }
-            } else {
-                match child.kind() {
-                    "list_expression" | "parenthesized_expression" => {
-                        let pairs = self.extract_fat_comma_pairs(*child);
-                        for (key, val) in &pairs {
-                            match key.as_str() {
-                                "is" => is_value = Some(val.clone()),
-                                "isa" => isa_value = Some(val.clone()),
-                                _ => {}
-                            }
-                        }
-                    }
-                    _ => {}
-                }
-            }
+            break;
         }
 
         if attr_names.is_empty() { return; }
 
+        // After first arg: options (Moo/Moose) or default value (Mojo::Base).
+        // Both the nested `=> (is => ...)` and the flat `, is => ...` forms
+        // route through `for_each_has_option_pair`.
+        let rest: Vec<Node> = first_named_idx
+            .map(|first| args_children[first + 1..].to_vec())
+            .unwrap_or_default();
+        if mode == FrameworkMode::MojoBase {
+            mojo_default_node = rest.iter().copied().find(|c| c.is_named());
+        } else {
+            self.for_each_has_option_pair(&rest, |key, val_node| {
+                match key {
+                    "is" => {
+                        if is_value.is_none() {
+                            is_value = self.extract_node_string(val_node);
+                        }
+                    }
+                    "isa" => {
+                        if isa_value.is_none() {
+                            isa_value = self.extract_node_string(val_node);
+                        }
+                        if isa_value_node.is_none() {
+                            isa_value_node = Some(val_node);
+                        }
+                    }
+                    _ => {}
+                }
+                true
+            });
+        }
+
         // Map isa value to InferredType
         let return_type = match mode {
             FrameworkMode::Moo | FrameworkMode::Moose => {
-                isa_value.as_deref().and_then(|isa| self.map_isa_to_type(isa, mode))
+                // String / bareword isa (`'Str'`, `'My::Class'`) → meaning-map.
+                // A parametric constraint (`InstanceOf['Foo']`) isn't a string,
+                // so resolve its expression type and ask the *constraint* what
+                // it constrains to (rule #10 — the type answers). Same path
+                // covers `isa => $t` where `$t` is a constraint-typed variable.
+                isa_value
+                    .as_deref()
+                    .and_then(|isa| self.map_isa_to_type(isa, mode))
+                    .or_else(|| {
+                        let n = isa_value_node?;
+                        self.emit_expr_witness(n);
+                        self.bag_query_expr_span(node_to_span(n))?
+                            .constrained_inner()
+                            .cloned()
+                    })
             }
             FrameworkMode::MojoBase => {
                 // Fluent return: ClassName(current_package)
@@ -5282,6 +8484,7 @@ impl<'a> Builder<'a> {
                             display: None,
                     hide_in_outline: false,
                     opaque_return: false,
+                    is_constant: false,
                         },
                     );
                     // Moo/Moose getter: arity 0 → isa-derived type
@@ -5320,8 +8523,11 @@ impl<'a> Builder<'a> {
                                 is_method: true,
                                 doc: None,
                                 display: None,
-                    hide_in_outline: false,
+                    // Same name+span as the getter — hide so the outline shows
+                    // one entry per `has` attribute, not a reader+writer pair.
+                    hide_in_outline: true,
                     opaque_return: false,
+                    is_constant: false,
                             },
                         );
                         let writer_arm = return_type.clone().map(|t| {
@@ -5359,6 +8565,7 @@ impl<'a> Builder<'a> {
                                 display: None,
                     hide_in_outline: false,
                     opaque_return: false,
+                    is_constant: false,
                             },
                         );
                         let writer_arm = return_type.clone().map(|t| {
@@ -5432,6 +8639,7 @@ impl<'a> Builder<'a> {
                             display: None,
                     hide_in_outline: false,
                     opaque_return: false,
+                    is_constant: false,
                         },
                     );
                     let getter_arm = getter_type.clone().map(|t| {
@@ -5463,8 +8671,11 @@ impl<'a> Builder<'a> {
                             is_method: true,
                             doc: None,
                             display: None,
-                    hide_in_outline: false,
+                    // Same name+span as the getter — hide so the outline shows
+                    // one entry per `has` attribute, not a reader+writer pair.
+                    hide_in_outline: true,
                     opaque_return: false,
+                    is_constant: false,
                         },
                     );
                     // Mojo writer: arity ≥ 1 → fluent return
@@ -5533,7 +8744,271 @@ impl<'a> Builder<'a> {
         }
     }
 
+    /// Walk a `has` call's CST into the decision-ready `HasOptions` the moo
+    /// plugin reads. The split is deliberate: core owns the node walk
+    /// (rule #1) and value *classification* (shorthand `=> 1` vs explicit
+    /// string vs `handles` delegation pairs); the plugin owns the accessor
+    /// *vocabulary* (which keyword → which method-name pattern). Only the
+    /// non-default options live here — the default accessor / isa /
+    /// constructor-key synthesis stays native in `visit_has_call`. New Moo
+    /// behavior wants the plugin; this seam is where structured option data
+    /// crosses over.
+    fn extract_has_options(&mut self, node: Node<'a>, mode: FrameworkMode) -> Option<plugin::HasOptions> {
+        // Mojo::Base has no accessor-option vocabulary — its `has` is just
+        // getter/setter + default value, all native.
+        if mode == FrameworkMode::MojoBase {
+            return None;
+        }
+        let args = node.child_by_field_name("arguments")?;
+        let args_children: Vec<Node> = if matches!(args.kind(), "list_expression" | "parenthesized_expression") {
+            (0..args.child_count()).filter_map(|i| args.child(i)).collect()
+        } else {
+            vec![args]
+        };
+
+        let mut attr_names: Vec<(String, Span)> = Vec::new();
+        let mut isa_value: Option<String> = None;
+        let mut isa_value_node: Option<Node<'a>> = None;
+        let mut option_nodes: Vec<(String, Node<'a>)> = Vec::new();
+
+        let mut first_named_idx: Option<usize> = None;
+        for (idx, child) in args_children.iter().enumerate() {
+            if !child.is_named() { continue; }
+            first_named_idx = Some(idx);
+            match child.kind() {
+                "string_literal" | "interpolated_string_literal" => {
+                    if let Some(text) = self.extract_string_content(*child) {
+                        if !text.starts_with('+') {
+                            attr_names.push((text, self.string_content_span(*child)));
+                        }
+                    }
+                }
+                "bareword" | "autoquoted_bareword" => {
+                    if let Ok(text) = child.utf8_text(self.source) {
+                        attr_names.push((text.to_string(), node_to_span(*child)));
+                    }
+                }
+                "array_ref_expression" | "anonymous_array_expression" => {
+                    self.extract_array_attr_names(*child, &mut attr_names);
+                }
+                _ => {}
+            }
+            break;
+        }
+
+        if attr_names.is_empty() { return None; }
+
+        if let Some(first) = first_named_idx {
+            let rest = &args_children[first + 1..];
+            self.collect_has_option_value_nodes(
+                rest, &mut isa_value, &mut isa_value_node, &mut option_nodes,
+            );
+        }
+
+        let isa_type = isa_value
+            .as_deref()
+            .and_then(|isa| self.map_isa_to_type(isa, mode))
+            .or_else(|| {
+                let n = isa_value_node?;
+                self.emit_expr_witness(n);
+                self.bag_query_expr_span(node_to_span(n))?.constrained_inner().cloned()
+            });
+
+        // Classify each option by VALUE shape, not by keyword — the keyword
+        // vocabulary is the plugin's (rule #10). `shorthand` (`=> 1`),
+        // `explicit_name` (`=> 'name'`), and `handles` (`=> {..}` / `[..]`)
+        // are mutually exclusive value shapes; an option whose value matches
+        // none still passes through with all fields empty (the plugin's arms
+        // ignore keywords / shapes it doesn't act on).
+        let mut options: Vec<plugin::HasOption> = Vec::new();
+        for (keyword, val_node) in option_nodes {
+            let shorthand = self.node_is_numeric_one(val_node);
+            let explicit_name = if shorthand {
+                None
+            } else {
+                self.extract_node_string(val_node)
+            };
+            let handles = if shorthand || explicit_name.is_some() {
+                Vec::new()
+            } else {
+                self.extract_handles_delegation(val_node)
+            };
+            options.push(plugin::HasOption {
+                keyword,
+                shorthand,
+                explicit_name,
+                handles,
+            });
+        }
+
+        if options.is_empty() { return None; }
+        Some(plugin::HasOptions { attr_names, isa_type, options })
+    }
+
+    /// Walk a `has` options fat-comma list, capturing the `isa` value (its
+    /// string and node) and the value node for *every other* option keyword —
+    /// no allowlist. The accessor-keyword vocabulary lives in `moo.rhai`
+    /// (rule #10); core only does the CST walk (rule #1) and hands the full
+    /// option list to the plugin, which decides which keywords matter. Keeps
+    /// the raw value nodes so the classifier can read the value shape.
+    /// Drive `f(key, value_node)` over a `has` call's option tail, regardless
+    /// of which surface form was written:
+    ///   `has 'name' => (is => 'ro')`  — options live in one nested list node
+    ///   `has 'name', is => 'ro'`      — options are flat siblings of the name
+    /// `rest` is the slice of `arguments` children *after* the first (name)
+    /// arg. A single nested list/paren delegates to the container walker; any
+    /// other shape is read as a flat fat-comma run.
+    fn for_each_has_option_pair<F>(&self, rest: &[Node<'a>], f: F)
+    where
+        F: FnMut(&str, Node<'a>) -> bool,
+    {
+        let named: Vec<Node<'a>> = rest.iter().copied().filter(|n| n.is_named()).collect();
+        if let [only] = named.as_slice() {
+            if matches!(only.kind(), "list_expression" | "parenthesized_expression") {
+                self.for_each_pair_in_list(*only, f);
+                return;
+            }
+        }
+        self.for_each_pair_in_children(rest, f);
+    }
+
+    fn collect_has_option_value_nodes(
+        &self,
+        rest: &[Node<'a>],
+        isa_value: &mut Option<String>,
+        isa_value_node: &mut Option<Node<'a>>,
+        option_nodes: &mut Vec<(String, Node<'a>)>,
+    ) {
+        self.for_each_has_option_pair(rest, |key, val_node| {
+            // `isa` feeds the resolved attribute type, not an accessor option.
+            if key == "isa" {
+                if isa_value.is_none() {
+                    *isa_value = self.extract_node_string(val_node);
+                }
+                if isa_value_node.is_none() {
+                    *isa_value_node = Some(val_node);
+                }
+            } else {
+                option_nodes.push((key.to_string(), val_node));
+            }
+            true
+        });
+    }
+
+    /// `true` when the node is the integer literal `1` (the `=> 1` shorthand).
+    fn node_is_numeric_one(&self, node: Node<'_>) -> bool {
+        node.kind() == "number" && matches!(node.utf8_text(self.source), Ok("1"))
+    }
+
+    /// Extract a string from a bareword or string-literal node.
+    fn extract_node_string(&self, node: Node<'_>) -> Option<String> {
+        match node.kind() {
+            "bareword" | "autoquoted_bareword" => node.utf8_text(self.source).ok().map(|s| s.to_string()),
+            "string_literal" | "interpolated_string_literal" => self.extract_string_content(node),
+            _ => None,
+        }
+    }
+
+    /// Parse a `handles` value into `(local, remote)` delegation pairs.
+    /// Hashref `{ local => 'remote' }` maps local→remote; arrayref / qw list
+    /// uses the same name for both. tree-sitter-perl nests fat-comma pairs
+    /// right-associatively inside a `list_expression`, so the hashref form
+    /// flattens the token stream and re-pairs.
+    fn extract_handles_delegation(&self, node: Node<'_>) -> Vec<(String, String)> {
+        let mut pairs = Vec::new();
+        match node.kind() {
+            "anonymous_hash_expression" => {
+                let mut tokens: Vec<String> = Vec::new();
+                self.collect_hash_tokens(node, &mut tokens);
+                let mut i = 0;
+                while i + 1 < tokens.len() {
+                    pairs.push((tokens[i].clone(), tokens[i + 1].clone()));
+                    i += 2;
+                }
+            }
+            "array_ref_expression" | "anonymous_array_expression" => {
+                for (name, _span) in self.extract_string_list(node) {
+                    pairs.push((name.clone(), name));
+                }
+            }
+            "quoted_word_list" => {
+                let mut names = Vec::new();
+                self.extract_qw_word_spans(node, &mut names);
+                for (name, _span) in names {
+                    pairs.push((name.clone(), name));
+                }
+            }
+            _ => {}
+        }
+        pairs
+    }
+
+    /// Flatten a fat-comma hash node into alternating key/value strings,
+    /// recursing into tree-sitter-perl's right-associative nested
+    /// `list_expression` wrappers.
+    fn collect_hash_tokens(&self, node: Node<'_>, out: &mut Vec<String>) {
+        match node.kind() {
+            "anonymous_hash_expression" => {
+                for i in 0..node.child_count() {
+                    if let Some(child) = node.child(i) {
+                        if matches!(child.kind(), "list_expression" | "parenthesized_expression") {
+                            self.collect_hash_tokens(child, out);
+                            return;
+                        }
+                    }
+                }
+                self.collect_hash_tokens_flat(node, out);
+            }
+            "list_expression" | "parenthesized_expression" => {
+                self.collect_hash_tokens_flat(node, out);
+            }
+            _ => {
+                if let Some(s) = self.extract_node_string(node) {
+                    out.push(s);
+                }
+            }
+        }
+    }
+
+    fn collect_hash_tokens_flat(&self, node: Node<'_>, out: &mut Vec<String>) {
+        let count = node.child_count();
+        let mut i = 0;
+        while i < count {
+            if let Some(child) = node.child(i) {
+                match child.kind() {
+                    "=>" | "," => {}
+                    "list_expression" | "parenthesized_expression" => {
+                        self.collect_hash_tokens_flat(child, out);
+                    }
+                    _ if child.is_named() => {
+                        if let Some(s) = self.extract_node_string(child) {
+                            out.push(s);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            i += 1;
+        }
+    }
+
     /// Extract arguments from `use Mojo::Base ...` including barewords like -strict, -base.
+    /// Put `pkg` into Mojo::Base mode (accessor synthesis via `has`) and wire
+    /// `parents` into `package_parents` so the universal Mojo::Base methods
+    /// (`tap`/`attr`/`new`) resolve through inheritance. Shared by the literal
+    /// `use Mojo::Base ...` arm and the generic `use X -base` arm.
+    fn apply_mojo_base_mode(&mut self, pkg: String, parents: Vec<String>, node: Option<Node<'a>>) {
+        self.framework_modes.insert(pkg.clone(), FrameworkMode::MojoBase);
+        self.framework_imports.insert("has".to_string());
+        if parents.is_empty() { return; }
+        if let Some(node) = node {
+            let parent_set: std::collections::HashSet<&str> =
+                parents.iter().map(|s| s.as_str()).collect();
+            self.emit_refs_for_strings(node, &parent_set, RefKind::PackageRef);
+        }
+        self.package_parents.entry(pkg).or_default().extend(parents);
+    }
+
     fn extract_mojo_base_args(&self, node: Node<'a>) -> Vec<String> {
         let mut args = Vec::new();
         let module_end = node.child_by_field_name("module")
@@ -5542,18 +9017,8 @@ impl<'a> Builder<'a> {
         for i in 0..node.child_count() {
             if let Some(child) = node.child(i) {
                 if child.start_byte() <= module_end { continue; }
-                match child.kind() {
-                    "autoquoted_bareword" | "bareword" => {
-                        if let Ok(text) = child.utf8_text(self.source) {
-                            args.push(text.to_string());
-                        }
-                    }
-                    "string_literal" | "interpolated_string_literal" => {
-                        if let Some(text) = self.extract_string_content(child) {
-                            args.push(text);
-                        }
-                    }
-                    _ => {}
+                if let Some(text) = self.extract_node_string(child) {
+                    args.push(text);
                 }
             }
         }
@@ -5599,62 +9064,444 @@ impl<'a> Builder<'a> {
         names.extend(self.extract_string_list(node));
     }
 
-    /// Extract key-value pairs from a fat-comma list expression.
-    /// Returns pairs like [("is", "ro"), ("isa", "Str")].
-    fn extract_fat_comma_pairs(&self, node: Node<'a>) -> Vec<(String, String)> {
-        let mut pairs = Vec::new();
+    /// Walk a constraint constructor's args (`InstanceOf['Foo']`,
+    /// `Enum['a','b']`, `Maybe[InstanceOf['Foo']]`) into a flat param list
+    /// for the plugin fold. The arg is the parameterizing arrayref
+    /// `['Foo', ...]`; we flatten its elements via `constraint_param_for`
+    /// (string → `string`, nested constructor → `ty`). Rule #1: only the
+    /// builder walks these nodes — the plugin gets the structured params.
+    fn extract_constraint_params(&mut self, call_node: Node<'a>) -> Vec<plugin::ConstraintParam> {
+        let mut params = Vec::new();
+        let Some(args) = call_node.child_by_field_name("arguments") else {
+            return params;
+        };
+        // The `arguments` field is the `[...]` arrayref itself (`Name[p, ...]`),
+        // or a paren list for the `Name(p, ...)` form. Each named child is one
+        // param — a string literal, or a nested constructor (`Maybe[InstanceOf
+        // ['Foo']]`). A nested arrayref (`Tuple[[...]]`) flattens one level.
+        for i in 0..args.named_child_count() {
+            let Some(child) = args.named_child(i) else { continue };
+            match child.kind() {
+                "anonymous_array_expression" | "array_ref_expression" => {
+                    for j in 0..child.named_child_count() {
+                        if let Some(el) = child.named_child(j) {
+                            params.push(self.constraint_param_for(el));
+                        }
+                    }
+                }
+                _ => params.push(self.constraint_param_for(child)),
+            }
+        }
+        params
+    }
+
+    /// One arrayref element of a constraint constructor → a `ConstraintParam`.
+    /// A string-literal param fills `string` (class names, enum values); a
+    /// nested constructor (`Maybe[InstanceOf['Foo']]`, `ArrayRef[Int]`) is a
+    /// *value* in its own right, so we type its expression through the bag —
+    /// the same `expr_payload` path the outer call walks, hence any nesting
+    /// depth resolves — and fill `ty` with the resulting `TypeConstraintOf`.
+    /// The plugin's fold then projects (a `Maybe` passthrough asks the param's
+    /// `ty` for its `constrained_inner`). rule #1: the builder walks the node.
+    fn constraint_param_for(&mut self, el: Node<'a>) -> plugin::ConstraintParam {
+        if matches!(el.kind(), "string_literal" | "interpolated_string_literal") {
+            return plugin::ConstraintParam {
+                string: self.extract_string_content(el),
+                ty: None,
+            };
+        }
+        self.emit_expr_witness(el);
+        plugin::ConstraintParam {
+            string: None,
+            ty: self.bag_query_expr_span(node_to_span(el)),
+        }
+    }
+
+    // ---- Runtime exporter modeling ----
+    //
+    // Static analysis can't run an exporter's import(), so we model the
+    // declarative *setup* shapes: the names a package registers as exports
+    // map to same-named subs defined in the package. We feed the discovered
+    // names into `export_ok` — the existing `@EXPORT_OK` plumbing then drives
+    // goto-def (`resolve_imported_function` → same-named sub), cross-file
+    // `refs_to` (the consumer's `use X 'name'` FunctionCall ref pins to X;
+    // the def is a `Sub { package: X }` symbol), and diagnostic suppression
+    // (`find_exporters`). Generators (`exports => { a => \&gen }`) are
+    // best-effort: the name resolves to a same-named sub if one exists,
+    // otherwise goto-def stops at the `use` line. Conditional/dynamic
+    // exports built at runtime are unmodeled.
+
+    /// Walk a pair list, invoking `f(key_string, value_node)` for each
+    /// positional `key, value` pair. The single pair scanner — every "find the
+    /// value after a key" caller routes here. The separator is irrelevant: `=>`
+    /// is a comma that autoquotes a bareword LHS, so `a => 1` and `'a', 1` are
+    /// the same flat sequence (elem[2k]→key, elem[2k+1]→value). Accepts a bare
+    /// `list_expression` / `parenthesized_expression` or an
+    /// `anonymous_hash_expression` (its inner list is unwrapped). Keys are
+    /// barewords, autoquoted barewords (`-setup`), or strings; the inter-token
+    /// commas / `=>` are skipped positionally. Stops early when `f` returns
+    /// `false`.
+    fn for_each_pair_in_list<F>(&self, container: Node<'a>, f: F)
+    where
+        F: FnMut(&str, Node<'a>) -> bool,
+    {
+        let list = if container.kind() == "anonymous_hash_expression" {
+            (0..container.named_child_count())
+                .filter_map(|i| container.named_child(i))
+                .find(|c| c.kind() == "list_expression")
+                .unwrap_or(container)
+        } else {
+            container
+        };
+        let mut children: Vec<Node<'a>> = Vec::new();
+        Self::flatten_pair_list_children(list, &mut children);
+        self.for_each_pair_in_children(&children, f);
+    }
+
+    /// Flatten a pair-list container's children into one token stream,
+    /// descending tree-sitter-perl's right-associative nesting: `a => 1, b =>
+    /// 2` parses as `a, =>, 1, (b, =>, 2)` — the tail pairs hide inside a
+    /// nested `list_expression`. We splice that nested list's children inline
+    /// (in place of the wrapper node) so a single linear scan sees every pair.
+    /// A `list_expression` that is itself a *value* (e.g. `key => (a, b)`) only
+    /// nests when it's the last child, so descending the trailing wrapper is
+    /// safe — a non-trailing list is a genuine multi-element value and is kept
+    /// whole.
+    fn flatten_pair_list_children(list: Node<'a>, out: &mut Vec<Node<'a>>) {
+        let count = list.child_count();
+        for i in 0..count {
+            let Some(child) = list.child(i) else { continue };
+            // The trailing `list_expression` is the right-assoc continuation of
+            // the pair stream; everything else (including a non-trailing list
+            // that is a real value) stays as-is.
+            if child.kind() == "list_expression" && i + 1 == count {
+                Self::flatten_pair_list_children(child, out);
+            } else {
+                out.push(child);
+            }
+        }
+    }
+
+    /// Slice variant of `for_each_pair_in_list`: walk a flat sequence of
+    /// sibling nodes (including the inter-token commas / `=>`) as positional
+    /// pairs. Lets callers feed a *sub-range* of a container's children —
+    /// e.g. the option tail of `has 'name', is => 'ro', ...`, where the name
+    /// and the options share one `list_expression` parent and there's no
+    /// nested options node to hand to the container variant. String-key
+    /// projection over `for_each_pair_node_in_children`.
+    fn for_each_pair_in_children<F>(&self, children: &[Node<'a>], mut f: F)
+    where
+        F: FnMut(&str, Node<'a>) -> bool,
+    {
+        self.for_each_pair_node_in_children(children, |k_node, val| {
+            match self.extract_node_string(k_node) {
+                Some(key) => f(&key, val),
+                None => true,
+            }
+        });
+    }
+
+    /// Node-level pair walker: walk a flat sibling sequence as positional
+    /// `(key_node, value_node)` pairs, separator-agnostic (the `,` / `=>`
+    /// between tokens is skipped by position, never matched). The canonical
+    /// pairing primitive — `for_each_pair_in_children` is its string-key
+    /// projection, and span-needing callers (constant block, hash-key defs)
+    /// read the key node directly. Stops early when `f` returns `false`.
+    fn for_each_pair_node_in_children<F>(&self, children: &[Node<'a>], mut f: F)
+    where
+        F: FnMut(Node<'a>, Node<'a>) -> bool,
+    {
+        let count = children.len();
         let mut i = 0;
-        let count = node.child_count();
         while i < count {
-            let key_node = match node.child(i) {
-                Some(c) if c.is_named() => c,
-                _ => { i += 1; continue; }
-            };
-
-            // Key: bareword/autoquoted_bareword or string
-            let key = match key_node.kind() {
-                "bareword" | "autoquoted_bareword" => key_node.utf8_text(self.source).ok().map(|s| s.to_string()),
-                "string_literal" | "interpolated_string_literal" => self.extract_string_content(key_node),
-                _ => { i += 1; continue; }
-            };
-
-            let key = match key {
-                Some(k) => k,
-                None => { i += 1; continue; }
-            };
-
-            // Skip '=>'
+            let k_node = children[i];
             i += 1;
-            while i < count {
-                match node.child(i) {
-                    Some(c) if c.kind() == "=>" => { i += 1; break; }
-                    Some(c) if !c.is_named() => { i += 1; }
-                    _ => break,
+            if !k_node.is_named() { continue; }
+            // Skip the comma / fat comma to the next named node (the value).
+            let val = loop {
+                match children.get(i) {
+                    Some(c) if c.is_named() => break Some(*c),
+                    Some(_) => i += 1,
+                    None => break None,
+                }
+            };
+            let Some(val) = val else { break; };
+            i += 1; // step past the value so the next key isn't read off it
+            if !f(k_node, val) { return; }
+        }
+    }
+
+    /// Find the value node following a `key` in a list-like container. Thin
+    /// single-key lookup over `for_each_pair_in_list`. Pairs positionally —
+    /// works for both `key => value` and the plain-comma `'key', value`.
+    fn value_node_after_key(&self, container: Node<'a>, key: &str) -> Option<Node<'a>> {
+        let mut found = None;
+        self.for_each_pair_in_list(container, |k, v| {
+            if k == key {
+                found = Some(v);
+                false
+            } else {
+                true
+            }
+        });
+        found
+    }
+
+    /// `use Sub::Exporter -setup => { exports => [...], groups => {...} }` —
+    /// fold the `exports` and `groups` member names into the export surface
+    /// and record per-member sites so the post-walk pass refs the ones that
+    /// name a local sub. Also accepts a bare `exports => [...]` at the top of
+    /// the use args (the common minimal form).
+    fn detect_sub_exporter_use(&mut self, use_node: Node<'a>) {
+        // The args live in the use statement's list_expression child.
+        let args = (0..use_node.named_child_count())
+            .filter_map(|i| use_node.named_child(i))
+            .find(|c| c.kind() == "list_expression");
+        let Some(args) = args else { return; };
+        let setup = self.value_node_after_key(args, "-setup");
+        // `-setup => { exports => [...] }` or top-level `exports => [...]`.
+        let config = setup.unwrap_or(args);
+        self.fold_sub_exporter_config(config);
+    }
+
+    /// Fold a Sub::Exporter config (the `{ exports => ..., groups => ... }`
+    /// hashref, or the bare top-level use args) into the export surface.
+    /// `exports` members are the public export names; `groups` member arrays
+    /// list exports that make up each named group (the group name itself is a
+    /// `:tag` selector, not a sub, so it never joins the surface — only its
+    /// members do). Records per-member sites for the post-walk ref pass.
+    fn fold_sub_exporter_config(&mut self, config: Node<'a>) {
+        if let Some(list) = self.value_node_after_key(config, "exports") {
+            let members = self.sub_exporter_member_sites(list);
+            self.record_sub_exporter_members(members);
+        }
+        // Group definitions list the exports that compose each group; those
+        // member names join the same surface as `exports`. The group key is a
+        // selector, never folded — it's a fat-comma key we descend past to its
+        // value (the member array), not a member itself.
+        if let Some(groups) = self.value_node_after_key(config, "groups") {
+            // `for_each_pair_in_list` holds a shared borrow; collect the
+            // group member nodes first, then fold them.
+            let mut member_nodes: Vec<Node<'a>> = Vec::new();
+            self.for_each_pair_in_list(groups, |_group_name, members_node| {
+                member_nodes.push(members_node);
+                true
+            });
+            for members_node in member_nodes {
+                let members = self.sub_exporter_member_sites(members_node);
+                self.record_sub_exporter_members(members);
+            }
+        }
+    }
+
+    /// Feed Sub::Exporter member `(name, span)` pairs into the export surface
+    /// (`export_ok`) and queue per-member sites for the ref pass.
+    fn record_sub_exporter_members(&mut self, members: Vec<(String, Span)>) {
+        let pkg = self.current_package.clone();
+        let names: Vec<String> = members.iter().map(|(n, _)| n.clone()).collect();
+        self.record_runtime_exports(names);
+        for (name, span) in members {
+            self.export_member_sites.push((name, span, pkg.clone()));
+        }
+    }
+
+    /// Collect `(name, span)` for every exported member under a Sub::Exporter
+    /// `exports` / `groups`-member value. The value is either an arrayref
+    /// (`[ qw(foo bar), baz => \&_gen ]`) or a hashref of name→generator pairs
+    /// (`{ name => \&gen }`). The NAME is the export in every case — the
+    /// generator coderef / sub body is opaque. `quoted_word_list`, string
+    /// literals, and barewords are names directly (unlike `extract_string_list`
+    /// we do NOT gate barewords on constant resolution — an export name written
+    /// bare is a literal name, not a folded constant). Fat-comma generator
+    /// values (`\&gen`, `sub {...}`, `undef`) are skipped: only their keys are
+    /// exports. Recurses into nested list/array nodes.
+    fn sub_exporter_member_sites(&self, node: Node<'a>) -> Vec<(String, Span)> {
+        let mut out = Vec::new();
+        self.collect_sub_exporter_members(node, &mut out);
+        out
+    }
+
+    fn collect_sub_exporter_members(&self, node: Node<'a>, out: &mut Vec<(String, Span)>) {
+        match node.kind() {
+            "quoted_word_list" => self.extract_qw_word_spans(node, out),
+            "string_literal" | "interpolated_string_literal" => {
+                if let Some(text) = self.extract_string_content(node) {
+                    out.push((text, self.string_content_span(node)));
                 }
             }
+            "bareword" | "autoquoted_bareword" => {
+                if let Ok(text) = node.utf8_text(self.source) {
+                    out.push((text.to_string(), node_to_span(node)));
+                }
+            }
+            "anonymous_hash_expression" => {
+                // Generator hashref: keys are export names, values opaque.
+                self.collect_sub_exporter_hash_keys(node, out);
+            }
+            "parenthesized_expression" | "list_expression"
+            | "anonymous_array_expression" => {
+                self.collect_sub_exporter_list_members(node, out);
+            }
+            _ => {}
+        }
+    }
 
-            // Value: string, bareword, or skip complex values
-            if i < count {
-                if let Some(val_node) = node.child(i) {
-                    if val_node.is_named() {
-                        let val = match val_node.kind() {
-                            "bareword" | "autoquoted_bareword" => val_node.utf8_text(self.source).ok().map(|s| s.to_string()),
-                            "string_literal" | "interpolated_string_literal" => self.extract_string_content(val_node),
-                            _ => None,
-                        };
-                        if let Some(v) = val {
-                            pairs.push((key, v));
-                        }
-                        i += 1;
+    /// Generator-hashref keys (`{ name => \&gen }`) → `(name, key-span)`. The
+    /// key token carries the right span for a member ref; the value is opaque.
+    fn collect_sub_exporter_hash_keys(&self, node: Node<'a>, out: &mut Vec<(String, Span)>) {
+        let list = (0..node.named_child_count())
+            .filter_map(|i| node.named_child(i))
+            .find(|c| c.kind() == "list_expression")
+            .unwrap_or(node);
+        let children: Vec<Node<'a>> = (0..list.child_count())
+            .filter_map(|i| list.child(i))
+            .collect();
+        let mut i = 0;
+        while i < children.len() {
+            let k = children[i];
+            i += 1;
+            if !k.is_named() {
+                continue;
+            }
+            if let Some((name, span)) = self.sub_exporter_name_token(k) {
+                out.push((name, span));
+            }
+            // Skip past this key's value to the next key.
+            while let Some(c) = children.get(i) {
+                if c.is_named() {
+                    i += 1;
+                    break;
+                }
+                i += 1;
+            }
+        }
+    }
+
+    /// Walk a Sub::Exporter array/list, treating `name => <opaque>` fat-comma
+    /// pairs by keeping the key and skipping the value, and bare `qw()` /
+    /// string / bareword entries as standalone names.
+    fn collect_sub_exporter_list_members(&self, list: Node<'a>, out: &mut Vec<(String, Span)>) {
+        let children: Vec<Node<'a>> = (0..list.child_count())
+            .filter_map(|i| list.child(i))
+            .collect();
+        let mut i = 0;
+        while i < children.len() {
+            let c = children[i];
+            if !c.is_named() {
+                i += 1;
+                continue;
+            }
+            if matches!(
+                c.kind(),
+                "parenthesized_expression" | "list_expression" | "anonymous_array_expression"
+            ) {
+                self.collect_sub_exporter_list_members(c, out);
+                i += 1;
+                continue;
+            }
+            if c.kind() == "quoted_word_list" {
+                self.extract_qw_word_spans(c, out);
+                i += 1;
+                continue;
+            }
+            if let Some((name, span)) = self.sub_exporter_name_token(c) {
+                // Look ahead for a fat-comma generator value to skip.
+                let mut j = i + 1;
+                let next_named = loop {
+                    match children.get(j) {
+                        Some(n) if n.is_named() => break Some(*n),
+                        Some(_) => j += 1,
+                        None => break None,
+                    }
+                };
+                out.push((name, span));
+                if let Some(nv) = next_named {
+                    if matches!(
+                        nv.kind(),
+                        "refgen_expression"
+                            | "anonymous_subroutine_expression"
+                            | "undef_expression"
+                            | "anonymous_hash_expression"
+                            | "scalar"
+                    ) {
+                        i = j + 1;
                         continue;
                     }
                 }
             }
             i += 1;
         }
-        pairs
     }
 
+    /// A standalone export-name token (bareword / autoquoted bareword / string
+    /// literal) → its literal name + span. Barewords are NOT constant-folded:
+    /// an export name written bare is a literal name.
+    fn sub_exporter_name_token(&self, node: Node<'a>) -> Option<(String, Span)> {
+        match node.kind() {
+            "bareword" | "autoquoted_bareword" => node
+                .utf8_text(self.source)
+                .ok()
+                .map(|t| (t.to_string(), node_to_span(node))),
+            "string_literal" | "interpolated_string_literal" => self
+                .extract_string_content(node)
+                .map(|t| (t, self.string_content_span(node))),
+            _ => None,
+        }
+    }
+
+    /// `Moose::Exporter->setup_import_methods(with_meta => [...], as_is => [...])`
+    /// or `Sub::Exporter::setup_exporter({ exports => [...] })`. `args` is the
+    /// call's argument node. Pull names from the export-bearing keys.
+    fn detect_exporter_setup_call(&mut self, callee: &str, args: Node<'a>) {
+        match callee {
+            "setup_import_methods" => {
+                // Moose::Exporter: with_meta + as_is are exported names.
+                let mut names = Vec::new();
+                for key in ["with_meta", "as_is"] {
+                    if let Some(list) = self.value_node_after_key(args, key) {
+                        names.extend(self.extract_string_names(list));
+                    }
+                }
+                self.record_runtime_exports(names);
+                // Form 3: `also => [ 'Moose', ... ]` re-exports each named
+                // module's surface. The value is a literal module-name list
+                // (string/bareword elements); each is a re-export edge. The
+                // Exporter::Tiny equivalent uses the same `also =>` key shape,
+                // so recognizing by the key (not a module allowlist, rule #10)
+                // covers both.
+                if let Some(list) = self.value_node_after_key(args, "also") {
+                    for module in self.extract_string_names(list) {
+                        self.record_reexport_edge(&module);
+                    }
+                }
+            }
+            "setup_exporter" => {
+                // Sub::Exporter::setup_exporter({ exports => [...], groups => {...} }).
+                // The config hashref is the first positional; fold it the same
+                // as the `-setup` use form so exports + groups + member refs
+                // ride one path.
+                let config = args
+                    .named_child(0)
+                    .filter(|c| c.kind() == "anonymous_hash_expression")
+                    .unwrap_or(args);
+                self.fold_sub_exporter_config(config);
+            }
+            "add_type" => {
+                // Type::Library / Exporter::Tiny: __PACKAGE__->add_type({ name => 'X' })
+                // registers `X` as an exported constant sub. Bare-name form
+                // `add_type(Foo => ...)` / `add_type('Foo')` also seen.
+                if let Some(name_node) = self.value_node_after_key(args, "name") {
+                    self.record_runtime_exports(self.extract_string_names(name_node));
+                } else if let Some(first) = args.named_child(0) {
+                    // `add_type Foo, ...` — first positional is the name.
+                    if matches!(first.kind(), "string_literal" | "interpolated_string_literal" | "bareword" | "autoquoted_bareword") {
+                        self.record_runtime_exports(self.extract_string_names(first));
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
 
     /// Map a Moo/Moose `isa` type constraint string to an InferredType.
     fn map_isa_to_type(&self, isa: &str, mode: FrameworkMode) -> Option<InferredType> {
@@ -5698,6 +9545,37 @@ impl<'a> Builder<'a> {
                 self.push_var_type_constraint(arg, node, arg_type);
             }
         }
+        self.visit_children(node);
+    }
+
+    /// Handle `\&name` and `\&Pkg::name` refgen expressions.
+    /// Emits a FunctionCall ref at the sub-name span so goto-def and references
+    /// resolve to the sub definition. The `expr_payload` / `coderef_return_edge_for`
+    /// paths own the CodeRef type witness; this visitor owns the navigation ref.
+    fn visit_refgen(&mut self, node: Node<'a>) {
+        // Extract name(s) — `extract_names_from_refgen` handles plain names,
+        // qualified names, and const-foldable `\&$var` cases.
+        let names = self.extract_names_from_refgen(node);
+        if !names.is_empty() {
+            // The `function` child wraps the `&name` form; use the varname
+            // node's span so the ref lands on the identifier, not the `&`.
+            let name_span = node.named_child(0).and_then(|func_node| {
+                // func_node is aliased as "function"; its named child is "varname".
+                func_node.named_child(0).map(node_to_span)
+            }).unwrap_or_else(|| node_to_span(node));
+
+            for name in names {
+                let pkg = self.resolve_call_package(&name);
+                self.add_ref(
+                    RefKind::FunctionCall { resolved_package: pkg },
+                    name_span,
+                    name,
+                    AccessKind::Read,
+                );
+            }
+        }
+        // Still descend: `\@array`, `\%hash`, `\$scalar` children may carry
+        // variable refs that the walk needs to see.
         self.visit_children(node);
     }
 
@@ -5763,6 +9641,8 @@ impl<'a> Builder<'a> {
             _ => None,
         });
 
+        let args = self.extract_call_args(node);
+
         if let Some(ref name) = method_name {
             // Dynamic method dispatch: $self->$method() — resolve $method if known
             if name.starts_with('$') {
@@ -5782,6 +9662,8 @@ impl<'a> Builder<'a> {
                         if let Some(c) = invocant_class.clone() {
                             self.method_call_invocant.insert(idx, c);
                         }
+                        self.method_call_arity
+                            .insert(idx, args.len() as u32);
                     }
                 }
             } else {
@@ -5798,6 +9680,23 @@ impl<'a> Builder<'a> {
                 );
                 if let Some(c) = invocant_class.clone() {
                     self.method_call_invocant.insert(idx, c);
+                }
+                self.method_call_arity
+                    .insert(idx, args.len() as u32);
+
+                // Runtime-exporter setup in method-call form:
+                // `Moose::Exporter->setup_import_methods(...)`,
+                // `__PACKAGE__->add_type({ name => 'X' })`. The invocant
+                // package isn't load-bearing (Type::Library subclasses inherit
+                // `add_type`), so gate on the enclosing package having `use`d
+                // the relevant exporter — otherwise an unrelated
+                // `$x->add_type(...)` would pollute `export_ok`.
+                if matches!(name.as_str(), "setup_import_methods" | "add_type")
+                    && self.package_uses_moose_exporter_or_type_library()
+                {
+                    if let Some(args) = node.child_by_field_name("arguments") {
+                        self.detect_exporter_setup_call(name, args);
+                    }
                 }
 
                 // Part 5c — `recv->resultset('Foo')` is closed
@@ -5852,7 +9751,7 @@ impl<'a> Builder<'a> {
         // wins), which lets the existing FunctionCall paths (semantic
         // tokens, hover, gd) light up the bareword as the call it is.
         if let Some(inv_node) = invocant_node {
-            if inv_node.kind() == "bareword" {
+            if matches!(inv_node.kind(), "bareword" | "package") {
                 if let Ok(bw_text) = inv_node.utf8_text(self.source) {
                     // Find the matching sub and capture its package so
                     // the FunctionCall ref's `resolved_package` points
@@ -5866,6 +9765,22 @@ impl<'a> Builder<'a> {
                     if let Some(pkg) = matched_pkg {
                         self.add_ref(
                             RefKind::FunctionCall { resolved_package: pkg },
+                            node_to_span(inv_node),
+                            bw_text.to_string(),
+                            AccessKind::Read,
+                        );
+                    } else if bw_text != "__PACKAGE__" {
+                        // Class-name invocant (`Foo->bar`): the bareword is a
+                        // package, not a local sub. Emit a narrower PackageRef
+                        // at the invocant span so cursor-on-`Foo` resolves to
+                        // the `package Foo` decl (local via find_package_or_class,
+                        // cross-file via the module index) exactly like `use Foo`,
+                        // instead of falling through to the wider MethodCall ref
+                        // that describes `bar`. ref_at prefers the narrower span,
+                        // so the `bar` method-token goto-def (NAV-A) is untouched.
+                        // `__PACKAGE__` is excluded — it's a keyword, not a name.
+                        self.add_ref(
+                            RefKind::PackageRef,
                             node_to_span(inv_node),
                             bw_text.to_string(),
                             AccessKind::Read,
@@ -5890,6 +9805,12 @@ impl<'a> Builder<'a> {
                 if self.is_dbic_class() {
                     self.visit_dbic_class_method(node, name);
                 }
+                // Class::Accessor::Grouped accessor synthesis. Not DBIC-gated:
+                // any package can `use parent 'Class::Accessor::Grouped'`. The
+                // call shape is the signal — `mk_*_accessors('group', @names)`
+                // (first arg is the group, the rest are accessor names) and
+                // `mk_classdata('name')` (single name).
+                self.visit_group_accessors(node, name);
             }
         }
 
@@ -5910,9 +9831,8 @@ impl<'a> Builder<'a> {
         // `->on()` can't accidentally break DBIC `->add_columns()`.
         if !self.plugins.is_empty() {
             if let Some(ref name) = method_name {
-                let args_raw = self.extract_call_args(node);
                 let mut ctx = self.base_call_context(
-                    args_raw,
+                    args.clone(),
                     node_to_span(node),
                     method_name_span,
                 );
@@ -5920,6 +9840,16 @@ impl<'a> Builder<'a> {
                 ctx.method_name = Some(name.clone());
                 ctx.receiver_text = invocant_text.clone();
                 ctx.receiver_type = self.receiver_type_for(invocant_node);
+                if let Some(InferredType::BrandedRoute { controller, stash, .. }) =
+                    &ctx.receiver_type
+                {
+                    let mut defaults: Vec<(String, String)> = stash.clone();
+                    if let Some(c) = controller {
+                        defaults.push(("controller".to_string(), c.clone()));
+                    }
+                    ctx.receiver_route_defaults = defaults;
+                }
+                self.record_provisional_dispatch(name, &ctx);
                 self.dispatch_method_call_plugins(ctx);
             }
         }
@@ -5927,14 +9857,21 @@ impl<'a> Builder<'a> {
         self.visit_children(node);
     }
 
-    /// Check if the current package inherits from a DBIx::Class package.
+    /// Check if the current package inherits from a DBIx::Class package,
+    /// at any depth. Walks the full local ancestry (`package_parents`),
+    /// so multi-level chains (`Result → BaseResult → DBIx::Class::Core`)
+    /// still get column/relationship synthesis — not just direct parents.
+    /// The builder has no `module_index` during the live walk, but the
+    /// resolver re-runs the full builder per file, so each file's own
+    /// `package_parents` carries the edges it declares.
     fn is_dbic_class(&self) -> bool {
-        if let Some(ref pkg) = self.current_package {
-            if let Some(parents) = self.package_parents.get(pkg) {
-                return parents.iter().any(|p| p.starts_with("DBIx::Class"));
-            }
-        }
-        false
+        let Some(ref pkg) = self.current_package else { return false };
+        crate::file_analysis::any_ancestor(
+            pkg,
+            &self.package_parents,
+            None,
+            |c| c.starts_with("DBIx::Class"),
+        )
     }
 
     /// Synthesize accessor methods from DBIC class method calls.
@@ -5950,6 +9887,84 @@ impl<'a> Builder<'a> {
                 self.visit_dbic_relationship(node, false);
             }
             _ => {}
+        }
+    }
+
+    /// Class::Accessor::Grouped accessor synthesis. The `mk_group_*_accessors`
+    /// family takes a leading group name and then a list of accessor names
+    /// (strings / barewords / qw lists); `mk_classdata` is just a name list.
+    /// We synthesize a stub `Method` symbol per accessor name — same as DBIC
+    /// `add_columns`. The accessor-name list is the authoritative source.
+    fn visit_group_accessors(&mut self, node: Node<'a>, method_name: &str) {
+        let skip_first = match method_name {
+            "mk_group_accessors"
+            | "mk_group_ro_accessors"
+            | "mk_group_rw_accessors"
+            | "mk_group_wo_accessors" => true,
+            "mk_classdata" | "mk_classaccessor" => false,
+            _ => return,
+        };
+        let Some(args) = node.child_by_field_name("arguments") else { return };
+        let arg_nodes: Vec<Node> = match args.kind() {
+            "list_expression" | "parenthesized_expression" => {
+                (0..args.named_child_count())
+                    .filter_map(|i| args.named_child(i))
+                    .collect()
+            }
+            // Single bare arg, e.g. `mk_classdata('config')`.
+            _ => vec![args],
+        };
+
+        let mut names: Vec<(String, Span)> = Vec::new();
+        for child in arg_nodes.iter().skip(skip_first as usize) {
+            match child.kind() {
+                "string_literal" | "interpolated_string_literal" => {
+                    if let Some(text) = self.extract_string_content(*child) {
+                        names.push((text, self.string_content_span(*child)));
+                    }
+                }
+                "bareword" | "autoquoted_bareword" => {
+                    if let Ok(text) = child.utf8_text(self.source) {
+                        names.push((text.to_string(), node_to_span(*child)));
+                    }
+                }
+                "quoted_word_list" | "array_ref_expression" | "anonymous_array_expression" => {
+                    self.extract_array_attr_names(*child, &mut names);
+                }
+                _ => {}
+            }
+        }
+
+        self.emit_class_accessor_symbols(node, &names);
+    }
+
+    /// Synthesize a stub class-data `Method` symbol per `(name, selection-span)`.
+    /// Shared by `visit_group_accessors` (direct `mk_*` call args) and the
+    /// statement-modifier loop path (`mk_classdata($_) for qw/.../`); `def_node`
+    /// anchors the definition span (the call), each name carries its own select
+    /// span so rename/goto land on the source token.
+    fn emit_class_accessor_symbols(&mut self, def_node: Node<'a>, names: &[(String, Span)]) {
+        for (name, sel_span) in names {
+            self.add_symbol(
+                name.clone(),
+                SymKind::Method,
+                node_to_span(def_node),
+                *sel_span,
+                SymbolDetail::Sub {
+                    params: vec![ParamInfo {
+                        name: "$val".into(),
+                        default: None,
+                        is_slurpy: false,
+                        is_invocant: false,
+                    }],
+                    is_method: true,
+                    doc: None,
+                    display: None,
+                    hide_in_outline: false,
+                    opaque_return: false,
+                    is_constant: false,
+                },
+            );
         }
     }
 
@@ -5993,6 +10008,7 @@ impl<'a> Builder<'a> {
                     display: None,
                     hide_in_outline: false,
                     opaque_return: false,
+                    is_constant: false,
                 },
             );
         }
@@ -6104,6 +10120,7 @@ impl<'a> Builder<'a> {
                     display: None,
                     hide_in_outline: false,
                     opaque_return: false,
+                    is_constant: false,
                 },
             );
             // DBIC relationship accessor — arity 0 (no arg form is
@@ -6178,19 +10195,33 @@ impl<'a> Builder<'a> {
         // Write. Needed for invocant mutations.
         let element_access = self.determine_access(node);
 
+        // A method-call container (`$obj->get_config->{host}`) has no
+        // variable identity to anchor the key on — its owner is the
+        // chain receiver's *return type*, knowable only post-fold. The
+        // `emit_chained_hash_key_refs` pass owns that shape: it emits a
+        // ref only when the type resolves (and stays silent otherwise,
+        // so no orphan owner-`None` ref is left behind). Emit here only
+        // for the variable-container shape.
+        let container_is_method_call = node
+            .named_child(0)
+            .map(|c| c.kind() == "method_call_expression")
+            .unwrap_or(false);
+
         // Record the key access
-        if let Some(key_node) = node.child_by_field_name("key") {
-            if let Some((key_text, is_dynamic)) = self.extract_key_text(key_node) {
-                if !is_dynamic {
-                    self.add_ref(
-                        RefKind::HashKeyAccess {
-                            var_text: var_text.clone().unwrap_or_default(),
-                            owner: None, // resolved in post-pass
-                        },
-                        node_to_span(key_node),
-                        key_text,
-                        element_access,
-                    );
+        if !container_is_method_call {
+            if let Some(key_node) = node.child_by_field_name("key") {
+                if let Some((key_text, is_dynamic)) = self.extract_key_text(key_node) {
+                    if !is_dynamic {
+                        self.add_ref(
+                            RefKind::HashKeyAccess {
+                                var_text: var_text.clone().unwrap_or_default(),
+                                owner: None, // resolved in post-pass
+                            },
+                            node_to_span(key_node),
+                            key_text,
+                            element_access,
+                        );
+                    }
                 }
             }
         }
@@ -6203,9 +10234,9 @@ impl<'a> Builder<'a> {
         // Detect bless context for hash key ownership
         let owner = self.detect_anon_hash_owner(node);
 
-        // Collect fat-comma keys as HashKeyDef symbols
+        // Collect hash-literal keys as HashKeyDef symbols
         if let Some(ref owner) = owner {
-            self.collect_fat_comma_keys(node, owner);
+            self.collect_pair_keys(node, owner);
         }
 
         self.visit_children(node);
@@ -6717,12 +10748,76 @@ impl<'a> Builder<'a> {
         false
     }
 
+    /// `bless $ref, $class` promotes `$ref`'s type from its hashref/
+    /// arrayref rep to `ClassName($class)` — after the bless the value IS
+    /// an instance, so `$self->method` resolves. We push a `ClassName` TC
+    /// on the first arg scoped at the bless statement; the temporal fold
+    /// makes it win for queries past this point. Honest-miss when the class
+    /// isn't statically determinable (a computed `$class` that doesn't
+    /// resolve to a class name) — no TC, the value keeps its rep type.
+    ///
+    /// Class resolution for the 2nd arg: `$class`/`shift`/`$_[0]` →
+    /// enclosing class via the bag's FirstParam projection; `__PACKAGE__`
+    /// → current package; a string/bareword literal → its text; a missing
+    /// 2nd arg (`bless {}`) → current package (Perl's one-arg bless blesses
+    /// into the caller's package).
+    fn visit_bless_call(&mut self, node: Node<'a>) {
+        let args = self.extract_call_args(node);
+        let obj = match args.first() {
+            Some(n) => *n,
+            None => return,
+        };
+        let class = match args.get(1) {
+            Some(class_node) => match self.bless_class_of(*class_node) {
+                Some(c) => c,
+                None => return, // honest miss — class undeterminable
+            },
+            // One-arg `bless {}` blesses into the current package.
+            None => match self.current_package.clone() {
+                Some(p) => p,
+                None => return,
+            },
+        };
+        self.push_var_type_constraint(obj, node, InferredType::ClassName(class));
+    }
+
+    /// Resolve a `bless`'s class argument to a class name. String/bareword
+    /// literals read directly; everything else routes through the same
+    /// invocant-class resolver used for method receivers (so `$class` from
+    /// `shift`, `__PACKAGE__`, etc. resolve identically).
+    fn bless_class_of(&self, class_node: Node<'a>) -> Option<String> {
+        // `__PACKAGE__` parses as a func0op call here (not a bareword), so
+        // `invocant_type_at_node`'s bareword arm doesn't catch it — resolve
+        // it to the enclosing package directly.
+        if class_node.utf8_text(self.source).ok() == Some("__PACKAGE__") {
+            return self.package_for_node(class_node);
+        }
+        // `bless $r, ref $x` (the clone idiom) blesses into `$x`'s class: the
+        // 2nd arg `ref EXPR` yields EXPR's class *name*, so the bless target is
+        // EXPR's resolved class. `ref EXPR` as a general value is a String, so
+        // this unwrap lives here (the class slot) rather than in the generic
+        // invocant resolver.
+        if class_node.kind() == "func1op_call_expression"
+            && class_node.child(0).and_then(|c| c.utf8_text(self.source).ok()) == Some("ref")
+        {
+            return class_node
+                .named_child(0)
+                .and_then(|operand| self.resolve_invocant_class_tree(operand));
+        }
+        if let Some(s) = self.literal_arg_string(class_node) {
+            if !s.is_empty() {
+                return Some(s);
+            }
+        }
+        self.resolve_invocant_class_tree(class_node)
+    }
+
     /// Emit a `HashKeyAccess` ref at every odd-indexed (1st, 3rd, …)
     /// stringy arg inside a call's args node, owned by `owner`. In
     /// Perl, `foo(a => 1, "b", 2, c => 3)` is `foo("a", 1, "b", 2,
     /// "c", 3)` — `=>` is just an autoquoting comma. The keys are
     /// the even-position named args, regardless of which separator
-    /// comes after them. Mirrors `collect_fat_comma_keys` (callee
+    /// comes after them. Mirrors `collect_pair_keys` (callee
     /// side, emits HashKeyDef symbols); this is the caller side, so
     /// `ref_at` on the key token picks the narrow span over the
     /// broad MethodCall/FunctionCall ref. Without this, cursor on
@@ -6808,6 +10903,7 @@ impl<'a> Builder<'a> {
                 target_name: key,
                 access,
                 resolves_to: None,
+                resolved_method_target: None,
             });
         }
     }
@@ -6825,38 +10921,182 @@ impl<'a> Builder<'a> {
         })
     }
 
-    fn collect_fat_comma_keys(&mut self, node: Node<'a>, owner: &HashKeyOwner) {
-        // Walk children looking for `bareword => ...` or `'string' => ...`
-        for i in 0..node.child_count() {
-            if let Some(child) = node.child(i) {
-                // Check if next sibling is =>
-                if let Some(next) = child.next_sibling() {
-                    if next.kind() == "=>" {
-                        if matches!(child.kind(), "autoquoted_bareword" | "string_literal" | "interpolated_string_literal") {
-                            if let Some((key, is_dynamic)) = self.extract_key_text(child) {
-                                if !is_dynamic {
-                                    self.add_symbol(
-                                        key,
-                                        SymKind::HashKeyDef,
-                                        node_to_span(child),
-                                        node_to_span(child),
-                                        SymbolDetail::HashKeyDef {
-                                            owner: owner.clone(),
-                                            is_dynamic: false,
-                    
-                                        },
-                                    );
-                                }
-                            }
-                        }
+    /// Emit a `HashKeyDef` symbol for every key in a hash literal owned by
+    /// `owner` (e.g. a blessed `{ ... }`). Keys are the even-position elements
+    /// of the flat pair sequence — `{ a => 1, 'b', 2 }` is `{ 'a', 1, 'b', 2 }`,
+    /// so the separator (`,` vs `=>`) is irrelevant; we pair positionally via
+    /// the shared node-level walker and take each key node.
+    fn collect_pair_keys(&mut self, node: Node<'a>, owner: &HashKeyOwner) {
+        // Unwrap the hash wrapper to its inner list, then flatten the
+        // right-associative pair nesting into one stream so positional pairing
+        // sees every key/value across the `(b, =>, 2)` continuation boundary —
+        // the value side is a real value, never re-scanned as a key.
+        let list = if node.kind() == "anonymous_hash_expression" {
+            (0..node.named_child_count())
+                .filter_map(|i| node.named_child(i))
+                .find(|c| c.kind() == "list_expression")
+                .unwrap_or(node)
+        } else {
+            node
+        };
+        let mut flat: Vec<Node<'a>> = Vec::new();
+        Self::flatten_pair_list_children(list, &mut flat);
+        let mut defs: Vec<(String, Span)> = Vec::new();
+        self.for_each_pair_node_in_children(&flat, |k_node, _val| {
+            if matches!(
+                k_node.kind(),
+                "autoquoted_bareword" | "string_literal" | "interpolated_string_literal"
+            ) {
+                if let Some((key, is_dynamic)) = self.extract_key_text(k_node) {
+                    if !is_dynamic {
+                        defs.push((key, node_to_span(k_node)));
                     }
                 }
-                // Recurse into nested list_expressions
-                if child.kind() == "list_expression" {
-                    self.collect_fat_comma_keys(child, owner);
+            }
+            true
+        });
+        for (key, span) in defs {
+            self.add_symbol(
+                key,
+                SymKind::HashKeyDef,
+                span,
+                span,
+                SymbolDetail::HashKeyDef { owner: owner.clone(), is_dynamic: false },
+            );
+        }
+    }
+
+    /// Synthesize `Sub` symbols for AutoLoader / SelfLoader packages whose
+    /// real sub definitions live in the file's `data_section` (the text after
+    /// `__END__` / `__DATA__`). Those subs are loaded on demand at runtime by
+    /// `AUTOLOAD`, so they are live code — but tree-sitter parks the whole
+    /// region in one opaque `data_section` node, leaving them un-navigable.
+    ///
+    /// Gate: only packages that actually use AutoLoader/SelfLoader (via `use`
+    /// or `@ISA`/`use base`/`use parent`) get this treatment, so genuine
+    /// `__DATA__` payloads and trailing POD on ordinary modules synthesize
+    /// nothing. This is a framework semantic (like Moo/Mojo detection), not a
+    /// shape-branch: the property "package is autoload-backed" rides on the
+    /// package's recorded uses/parents, and the data section is only mined when
+    /// the owning package answers yes.
+    ///
+    /// Re-parsing the data-section text as Perl is the single-build-entry way
+    /// to recover the sub shapes (rule #1: all CST traversal stays in build()).
+    /// Spans are offset back to real file coordinates so goto-def lands.
+    fn synthesize_autoloader_data_subs(&mut self, tree: &Tree) {
+        let Some(data) = find_data_section(tree.root_node()) else { return };
+
+        // Which package is in effect at the data section? `__END__`/`__DATA__`
+        // terminates compilation, so the owning package is whichever range
+        // brackets the marker — for the typical single-package AutoLoader
+        // module that's the only package in the file.
+        let data_start = data.start_position();
+        let owner_pkg = self
+            .package_ranges
+            .iter()
+            .rev()
+            .find(|r| crate::file_analysis::contains_point(&r.span, data_start))
+            .map(|r| r.package.clone())
+            .or_else(|| self.current_package.clone());
+
+        let Some(pkg) = owner_pkg else { return };
+        if !self.is_autoload_backed(&pkg) {
+            return;
+        }
+
+        let section_text = match data.utf8_text(self.source) {
+            Ok(s) => s.to_string(),
+            Err(_) => return,
+        };
+
+        let mut parser = tree_sitter::Parser::new();
+        if parser.set_language(&ts_parser_perl::LANGUAGE.into()).is_err() {
+            return;
+        }
+        let Some(sub_tree) = parser.parse(&section_text, None) else { return };
+        let sub_src = section_text.as_bytes();
+
+        // tree-sitter reports re-parse positions relative to the section text;
+        // map them back to file coordinates. Row N of the section is file row
+        // (data_start.row + N); the section's first row continues the
+        // `__END__` line, so its column carries the marker offset.
+        let offset = |p: Point| -> Point {
+            if p.row == 0 {
+                Point { row: data_start.row, column: data_start.column + p.column }
+            } else {
+                Point { row: data_start.row + p.row, column: p.column }
+            }
+        };
+        let offset_span = |s: Span| -> Span {
+            Span { start: offset(s.start), end: offset(s.end) }
+        };
+
+        let prev_pkg = self.current_package.take();
+        self.current_package = Some(pkg.clone());
+
+        let mut found: Vec<Node> = Vec::new();
+        collect_data_section_subs(sub_tree.root_node(), &mut found);
+        let mut synth_names: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for sub_node in found {
+            let Some(name_node) = sub_node.child_by_field_name("name") else { continue };
+            let Ok(name) = name_node.utf8_text(sub_src) else { continue };
+            let params = extract_data_section_params(sub_node, sub_src);
+            self.add_symbol(
+                name.to_string(),
+                SymKind::Sub,
+                offset_span(node_to_span(sub_node)),
+                offset_span(node_to_span(name_node)),
+                SymbolDetail::Sub {
+                    params,
+                    is_method: false,
+                    doc: None,
+                    display: None,
+                    hide_in_outline: false,
+                    opaque_return: false,
+                    is_constant: false,
+                },
+            );
+            synth_names.insert(name.to_string());
+        }
+
+        self.current_package = prev_pkg;
+
+        // Bareword calls to these subs were visited during the walk before the
+        // synthesized symbols existed, so `resolve_call_package` left their
+        // `FunctionCall` ref unresolved (`resolved_package: None`). Pin any such
+        // ref — within the owning package's source region and naming a sub we
+        // just synthesized — to `pkg`, so goto-def lands on the data-section
+        // definition. Scoped to autoload-backed packages: we only touch refs
+        // whose target is one of the freshly minted names.
+        for r in self.refs.iter_mut() {
+            if let RefKind::FunctionCall { resolved_package } = &mut r.kind {
+                if resolved_package.is_none() && synth_names.contains(&r.target_name) {
+                    let in_pkg = self
+                        .package_ranges
+                        .iter()
+                        .rev()
+                        .find(|pr| crate::file_analysis::contains_point(&pr.span, r.span.start))
+                        .is_some_and(|pr| pr.package == pkg);
+                    if in_pkg {
+                        *resolved_package = Some(pkg.clone());
+                    }
                 }
             }
         }
+    }
+
+    /// True when `pkg` pulls in AutoLoader or SelfLoader — either via a `use`
+    /// line or by inheriting from it (`@ISA`/`use base`/`use parent`). Both
+    /// reach `package_parents`; `use` lines reach `package_uses`.
+    fn is_autoload_backed(&self, pkg: &str) -> bool {
+        let is_loader = |m: &str| m == "AutoLoader" || m == "SelfLoader";
+        self.package_uses
+            .get(pkg)
+            .map_or(false, |us| us.iter().any(|m| is_loader(m)))
+            || self
+                .package_parents
+                .get(pkg)
+                .map_or(false, |ps| ps.iter().any(|p| is_loader(p)))
     }
 
     /// Find the nearest enclosing Sub or Method scope from the current scope stack.
@@ -7028,6 +11268,26 @@ impl<'a> Builder<'a> {
             let ref_target = self.refs[idx].target_name.clone();
             let ref_scope = self.refs[idx].scope;
 
+            // Fully-qualified read (`$Foo::Bar::x`): resolve by
+            // `(package, sigil+basename)` against the declaring symbol, not
+            // by lexical scope — the qualifier names the package directly,
+            // so the lexical chain is irrelevant (same seam as FQ calls).
+            // Cross-package goto-def for non-local packages happens at query
+            // time via `qualified_var_target()` + module_index.
+            if let Some((pkg, name)) = self.refs[idx]
+                .qualified_var_target()
+                .map(|(p, n)| (p.to_string(), n))
+            {
+                if let Some(sym) = self.symbols.iter().find(|s| {
+                    matches!(s.kind, SymKind::Variable | SymKind::Field)
+                        && s.name == name
+                        && s.package.as_deref() == Some(pkg.as_str())
+                }) {
+                    self.refs[idx].resolves_to = Some(sym.id);
+                }
+                continue;
+            }
+
             let use_pkg = self.package_at_pos(ref_span_start).map(|s| s.to_string());
 
             // Walk scope chain to find the innermost matching declaration
@@ -7096,6 +11356,35 @@ impl<'a> Builder<'a> {
         }
     }
 
+    /// Build the per-iteration lookup maps the fold passes reuse.
+    /// `refs`/`symbols` are stable across the fold, so this runs once.
+    /// Returns `(ref_by_span, method_sym_by_name)` as locals owned by
+    /// `fold_to_fixed_point`; callers that need them receive `&`-refs.
+    fn build_fold_lookup_indices(
+        &self,
+    ) -> (
+        std::collections::HashMap<(Point, Point), usize>,
+        std::collections::HashMap<String, Vec<usize>>,
+    ) {
+        let mut ref_by_span = std::collections::HashMap::with_capacity(self.refs.len());
+        for (i, r) in self.refs.iter().enumerate() {
+            if matches!(r.kind, RefKind::MethodCall { .. }) {
+                // First-wins matches the prior `position(...)` semantics.
+                ref_by_span
+                    .entry((r.span.start, r.span.end))
+                    .or_insert(i);
+            }
+        }
+        let mut sym_by_name: std::collections::HashMap<String, Vec<usize>> =
+            std::collections::HashMap::new();
+        for (i, s) in self.symbols.iter().enumerate() {
+            if matches!(s.kind, SymKind::Sub | SymKind::Method) {
+                sym_by_name.entry(s.name.clone()).or_default().push(i);
+            }
+        }
+        (ref_by_span, sym_by_name)
+    }
+
     /// Fixed-point loop driving chain typing + reducer dispatch. Each
     /// iteration runs `ChainPassMode::PreFold` (assignment typing +
     /// return-arm refresh) followed by `resolve_return_types` (the
@@ -7126,9 +11415,14 @@ impl<'a> Builder<'a> {
     /// into the bag — a single pass against the now-final symbol
     /// table is sufficient.
     fn fold_to_fixed_point(&mut self, idx: &ChainTypingIndex<'a>) {
+        use crate::witnesses::ReducerRegistry;
         const MAX_FOLD_ITERATIONS: usize = 64;
+        let (ref_by_span, method_sym_by_name) = self.build_fold_lookup_indices();
+        // One registry for the entire fold — stateless/immutable, so sharing
+        // across snapshot queries and seed pass is safe.
+        let reg = ReducerRegistry::with_defaults();
         let mut iters = 0usize;
-        let mut prev = self.fold_state_snapshot();
+        let mut prev = self.fold_state_snapshot(&reg);
         loop {
             iters += 1;
             debug_assert!(
@@ -7144,8 +11438,8 @@ impl<'a> Builder<'a> {
                 break;
             }
             self.run_chain_typing_reducer(idx, ChainPassMode::PreFold);
-            self.resolve_return_types();
-            let cur = self.fold_state_snapshot();
+            self.resolve_return_types(idx, &reg, &ref_by_span, &method_sym_by_name);
+            let cur = self.fold_state_snapshot(&reg);
             if cur == prev {
                 break;
             }
@@ -7165,18 +11459,44 @@ impl<'a> Builder<'a> {
     /// call-binding) are clear-and-emit, so their bag contribution is
     /// stable across iterations and a flat total bag length means no
     /// new chain-assignment pushes either.
-    fn fold_state_snapshot(&self) -> (Vec<(SymbolId, Option<InferredType>)>, usize, usize) {
+    fn fold_state_snapshot(
+        &self,
+        reg: &crate::witnesses::ReducerRegistry,
+    ) -> (Vec<(SymbolId, Option<InferredType>)>, usize, usize) {
+        use crate::witnesses::{
+            BagContext, FrameworkFact, ReducedValue, ReducerQuery, WitnessAttachment,
+        };
+        let ctx = BagContext {
+            scopes: &self.scopes,
+            package_framework: &self.package_framework,
+            module_index: None,
+            package_parents: &self.package_parents,
+            app_surface_consumers: &self.app_surface_consumers,
+        };
         let mut answers: Vec<(SymbolId, Option<InferredType>)> = self
             .symbols
             .iter()
             .filter(|s| matches!(s.kind, SymKind::Sub | SymKind::Method))
             .map(|s| {
-                (
-                    s.id,
-                    self.bag_query_attachment(
-                        &crate::witnesses::WitnessAttachment::Symbol(s.id),
-                    ),
-                )
+                let att = WitnessAttachment::Symbol(s.id);
+                let q = ReducerQuery {
+                    attachment: &att,
+                    point: None,
+                    framework: FrameworkFact::Plain,
+                    arity_hint: None,
+                    receiver: None,
+                    context: Some(&ctx),
+                };
+                let resolved = match reg.query(&self.bag, &q) {
+                    ReducedValue::Type(t) => Some(t),
+                    _ => None,
+                };
+                // A brand is a route VALUE identity, never a sub
+                // return contract. Project it to its base class for
+                // the fixed-point snapshot so a branded
+                // implicit-return doesn't oscillate against the
+                // brandless writeback push.
+                (s.id, resolved.map(Self::debrand))
             })
             .collect();
         answers.sort_by_key(|(id, _)| id.0);
@@ -7238,12 +11558,30 @@ impl<'a> Builder<'a> {
             ) else { continue };
             let Some(var) = self.get_var_text_from_lhs(left) else { continue };
             let span = node_to_span(node);
-            // Idempotency: skip if a Variable witness for this var was
-            // already pushed at the assignment's start point.
+            // Compute the fresh type up front so the idempotency check
+            // can compare informativeness. (Cheap: a bag chase on the
+            // already-resolved RHS.)
+            let saved_pkg_probe = self.current_package.clone();
+            self.current_package = self.package_at_pos(span.start).map(|s| s.to_string());
+            let fresh = self
+                .invocant_type_at_node(right)
+                .or_else(|| self.resolve_invocant_class_tree(right).map(InferredType::ClassName));
+            self.current_package = saved_pkg_probe;
+
+            // Idempotency: skip if an already-pushed Variable witness at
+            // this assignment's start is at least as informative as the
+            // fresh answer. A plain `ClassName(Route)` does NOT subsume a
+            // `BrandedRoute`, so the route brand legitimately upgrades the
+            // walk-time materialization on a later fold iteration; once
+            // the brand is in the bag it subsumes the next (identical)
+            // brand and the loop settles.
             let already_typed = self.bag.all().iter().any(|w| {
+                let crate::witnesses::WitnessPayload::InferredType(t) = &w.payload else {
+                    return false;
+                };
                 matches!(&w.attachment, crate::witnesses::WitnessAttachment::Variable { name, .. } if name == &var)
-                    && matches!(w.payload, crate::witnesses::WitnessPayload::InferredType(_))
                     && w.span.start == span.start
+                    && fresh.as_ref().map_or(true, |f| t.subsumes_narrowing(f))
             });
             if already_typed {
                 continue;
@@ -7280,7 +11618,8 @@ impl<'a> Builder<'a> {
             // class") which the type-aware path doesn't model.
             let ty_opt = self
                 .invocant_type_at_node(right)
-                .or_else(|| self.resolve_invocant_class_tree(right).map(InferredType::ClassName));
+                .or_else(|| self.resolve_invocant_class_tree(right).map(InferredType::ClassName))
+                .or(fresh);
             self.current_package = saved_pkg;
 
             if let Some(ty) = ty_opt {
@@ -7332,6 +11671,89 @@ impl<'a> Builder<'a> {
                 self.method_call_invocant.insert(i, class);
             }
         }
+    }
+
+    /// Post-fold: re-dispatch the route plugins for every `->to(...)`
+    /// call now that the receiver's `BrandedRoute` has resolved.
+    ///
+    /// Walk-time plugin dispatch can't resolve a partial
+    /// `->to('#action')` — the inherited controller rides the chain
+    /// brand, which only settles during the worklist fold (variable
+    /// TCs, chained-method types). So the partial emits NOTHING at walk
+    /// time and we re-run the route `on_method_call` here with the
+    /// brand flattened into `ctx.receiver_route_defaults`. Full forms
+    /// (`->to('ctrl#act')`) already emitted at walk time and are kept
+    /// out by `method_call_ref_dedup` / the Handler dedup, so the
+    /// re-run is purely additive for the partials it newly resolves.
+    ///
+    /// This is the consumer side of the brand-on-the-value design
+    /// (`docs/adr/route-branding.md`). The
+    /// brand itself is produced in `invocant_type_at_node`'s route
+    /// arm; this pass turns a resolved brand into the cross-file
+    /// MethodCallRef a partial target needs.
+    fn emit_partial_route_targets(&mut self, idx: &ChainTypingIndex<'a>) {
+        if self.plugins.is_empty() {
+            return;
+        }
+        // Snapshot the `->to` call nodes first; dispatching borrows
+        // `self` mutably.
+        let to_calls: Vec<Node<'a>> = idx
+            .method_call_nodes
+            .iter()
+            .copied()
+            .filter(|n| {
+                n.child_by_field_name("method")
+                    .and_then(|m| m.utf8_text(self.source).ok())
+                    == Some("to")
+            })
+            .collect();
+
+        // The walk's scope stack is empty post-walk; emission helpers
+        // (`current_scope`) expect one entry. Seed it with the file
+        // root for the whole pass; the per-node scope is set below.
+        let root_scope = self.scopes.first().map(|s| s.id).unwrap_or(ScopeId(0));
+        self.scope_stack.push(root_scope);
+
+        for node in to_calls {
+            let invocant_node = node.child_by_field_name("invocant");
+            // Restore the package + scope context for this node —
+            // post-walk both are stale (the walk left them at the last
+            // package/scope it visited).
+            let saved_pkg = self.current_package.clone();
+            self.current_package = self.package_for_node(node);
+            let node_scope = self.scope_at_point(node.start_position());
+            *self.scope_stack.last_mut().unwrap() = node_scope;
+
+            let recv_ty = self.receiver_type_for(invocant_node);
+            // Only re-dispatch when the receiver actually carries an
+            // inherited brand — a full-form `->to('ctrl#act')` on an
+            // unbranded root has nothing new to add and already
+            // emitted at walk time.
+            if let Some(InferredType::BrandedRoute { controller, stash, .. }) = &recv_ty {
+                let mut defaults: Vec<(String, String)> = stash.clone();
+                if let Some(c) = controller {
+                    defaults.push(("controller".to_string(), c.clone()));
+                }
+                let method_name_span = node
+                    .child_by_field_name("method")
+                    .map(node_to_span)
+                    .unwrap_or_else(|| node_to_span(node));
+                let args_raw = self.extract_call_args(node);
+                let mut ctx =
+                    self.base_call_context(args_raw, node_to_span(node), method_name_span);
+                ctx.call_kind = plugin::CallKind::Method;
+                ctx.method_name = Some("to".to_string());
+                ctx.receiver_text = invocant_node
+                    .and_then(|n| n.utf8_text(self.source).ok())
+                    .map(|s| s.to_string());
+                ctx.receiver_type = recv_ty;
+                ctx.receiver_route_defaults = defaults;
+                self.dispatch_method_call_plugins(ctx);
+            }
+
+            self.current_package = saved_pkg;
+        }
+        self.scope_stack.pop();
     }
 
     /// Post-walk: emit even-position stringy args of every resolved
@@ -7449,6 +11871,99 @@ impl<'a> Builder<'a> {
         }
     }
 
+    /// Emit a `HashKeyAccess` ref for a hash-key access applied to a
+    /// method-call result whose return type is known
+    /// (`$obj->get_config->{host}`). Mirrors `resolve_hash_owner_from_tree`'s
+    /// query-time logic at build time so the stored ref carries a
+    /// resolvable owner (cross-file `refs_to` + the O(1) `resolves_to`
+    /// link both consult the stored owner, not the tree fallback):
+    ///   - method returns a Sub-keyed hash (`return { host => … }`) →
+    ///     `Sub{package, method}` owner, matching the implicit-return
+    ///     HashKeyDefs.
+    ///   - method returns a class instance → `Class(C)` via
+    ///     `hash_key_class()` (Parametric row-class or dispatch class).
+    /// Honest about ignorance: a chain whose return type doesn't resolve
+    /// to either emits nothing, so a should-miss stays a miss rather
+    /// than a wrong-owner latch.
+    ///
+    /// Runs post-fold (after `emit_method_call_arg_keys`) so
+    /// `invocant_type_at_node` answers against the canonical bag.
+    fn emit_chained_hash_key_refs(&mut self, idx: &ChainTypingIndex<'a>) {
+        // Snapshot resolved (key_span, key_text, access, owner) first
+        // so the emit loop can `&mut self`.
+        let mut pending: Vec<(Span, String, AccessKind, HashKeyOwner)> = Vec::new();
+        for &node in &idx.chained_hash_elements {
+            let Some(container) = node.named_child(0) else { continue };
+            let Some(key_node) = node.child_by_field_name("key") else { continue };
+            let Some((key_text, is_dynamic)) = self.extract_key_text(key_node) else { continue };
+            if is_dynamic { continue; }
+
+            // First the Sub-keyed-return path: the called method's
+            // implicit/explicit `return { k => … }` registers its keys
+            // under `Sub{package, method}`. If such a def exists for our
+            // key name, that's the precise owner. This case has no class
+            // identity (the value is a plain HashRef), so it must be
+            // tried before the `hash_key_class()` fallback.
+            let method_name = container
+                .child_by_field_name("method")
+                .and_then(|n| n.utf8_text(self.source).ok())
+                .map(|s| s.to_string());
+            let sub_owner = method_name.as_ref().and_then(|name| {
+                let mut candidates: Vec<HashKeyOwner> = self
+                    .symbols
+                    .iter()
+                    .filter(|s| {
+                        matches!(s.kind, SymKind::Sub | SymKind::Method) && &s.name == name
+                    })
+                    .map(|s| HashKeyOwner::Sub {
+                        package: s.package.clone(),
+                        name: name.clone(),
+                    })
+                    .collect();
+                // Imported synthetic defs carry a None package.
+                candidates.push(HashKeyOwner::Sub { package: None, name: name.clone() });
+                candidates
+                    .into_iter()
+                    .find(|owner| self.has_hash_key_def(&key_text, owner))
+            });
+
+            let owner = match sub_owner {
+                Some(o) => o,
+                None => {
+                    // Class-instance return: project to the hash-key
+                    // class (Parametric row-class else dispatch class).
+                    let Some(class) = self
+                        .invocant_type_at_node(container)
+                        .and_then(|ty| ty.hash_key_class().map(|s| s.to_string()))
+                    else {
+                        continue;
+                    };
+                    HashKeyOwner::Class(class)
+                }
+            };
+            pending.push((
+                node_to_span(key_node),
+                key_text,
+                self.determine_access(node),
+                owner,
+            ));
+        }
+        for (span, key_text, access, owner) in pending {
+            self.refs.push(Ref {
+                kind: RefKind::HashKeyAccess {
+                    var_text: String::new(),
+                    owner: Some(owner),
+                },
+                span,
+                scope: self.scope_at_point(span.start),
+                target_name: key_text,
+                access,
+                resolves_to: None,
+                resolved_method_target: None,
+            });
+        }
+    }
+
 
     /// The tiny reducer-dispatch driver. Each step is a named helper
     /// below. The call-binding propagator and hash-key-owner fixup are
@@ -7458,13 +11973,74 @@ impl<'a> Builder<'a> {
     /// (`PluginOverrideReducer`, `ReturnExprReducer`,
     /// `MethodOnClassReducer`, `SubReturnReducer`) lives in
     /// `witnesses.rs` and folds the bag at query time.
-    fn resolve_return_types(&mut self) {
+    fn resolve_return_types(
+        &mut self,
+        idx: &ChainTypingIndex<'a>,
+        reg: &crate::witnesses::ReducerRegistry,
+        ref_by_span: &std::collections::HashMap<(Point, Point), usize>,
+        method_sym_by_name: &std::collections::HashMap<String, Vec<usize>>,
+    ) {
         self.emit_arity_return_witnesses();
+        // Brand BEFORE method-call edges so `route_branded_refs` is
+        // current when `emit_method_call_return_edges` consults it to
+        // skip route calls — otherwise the skip set lags one iteration
+        // and the bag oscillates (the fold never reaches a fixed point).
+        self.emit_route_brand_witnesses(idx, ref_by_span);
         self.emit_method_call_return_edges();
-        let (return_types, return_provenance) = self.seed_return_types_from_bag();
+        let (return_types, return_provenance) = self.seed_return_types_from_bag(reg, method_sym_by_name);
         self.write_back_sub_return_types(&return_provenance);
         self.propagate_call_bindings_to_constraints(&return_types);
         self.fixup_call_bound_hash_key_owners(&return_types);
+    }
+
+    /// Re-emittable: stamp the resolved `BrandedRoute` onto the
+    /// `Expression(refidx)` of every route-builder `method_call_expression`,
+    /// so a `my $x = $r->...->to('ctrl#')` declaration (which types via
+    /// `Edge(Expression(refidx))`) carries the brand, and the next
+    /// iteration's chained calls / partial `->to('#action')` read the
+    /// inherited controller off it. The brand is computed by the single
+    /// build-time symbolic executor (`invocant_type_at_node`); this pass
+    /// only publishes its answer onto the bag. Recomputed each iteration
+    /// (clear-and-emit on tag `route_brand`) because the receiver type it
+    /// reads converges as the fold progresses.
+    fn emit_route_brand_witnesses(
+        &mut self,
+        idx: &ChainTypingIndex<'a>,
+        ref_by_span: &std::collections::HashMap<(Point, Point), usize>,
+    ) {
+        use crate::witnesses::{Witness, WitnessAttachment, WitnessPayload, WitnessSource};
+        self.bag.remove_by_source_tag("route_brand");
+        self.route_branded_refs.clear();
+
+        // Snapshot (refidx, brand) first — `invocant_type_at_node`
+        // borrows `&self`, so we can't push while iterating.
+        let mut brands: Vec<(usize, InferredType)> = Vec::new();
+        for &node in &idx.method_call_nodes {
+            let span = node_to_span(node);
+            let Some(&refidx) = ref_by_span.get(&(span.start, span.end)) else {
+                continue;
+            };
+            let ty = self.invocant_type_at_node(node);
+            if let Some(b @ InferredType::BrandedRoute { .. }) = ty {
+                brands.push((refidx, b));
+            }
+        }
+        for (refidx, brand) in brands {
+            let r_span = self.refs[refidx].span;
+            // Claim this ref so `emit_method_call_return_edges` skips
+            // its `Edge(MethodOnClass{Route, to})` — that edge folds to
+            // a plain `ClassName(Route)` and `FrameworkAwareTypeFold`
+            // (which runs before `ExprReturn`) would answer with it,
+            // masking the brand. Same precedent as
+            // `parametric_emitted_refs`.
+            self.route_branded_refs.insert(refidx);
+            self.bag.push(Witness {
+                attachment: WitnessAttachment::Expression(crate::witnesses::RefIdx(refidx as u32)),
+                source: WitnessSource::Builder("route_brand".into()),
+                payload: WitnessPayload::InferredType(brand),
+                span: r_span,
+            });
+        }
     }
 
     /// Re-emittable: for every `MethodCall` ref whose
@@ -7497,16 +12073,33 @@ impl<'a> Builder<'a> {
             if self.parametric_emitted_refs.contains(&i) {
                 continue;
             }
+            // Route-branded calls own their `Expression(refidx)` type
+            // (the `BrandedRoute` from `emit_route_brand_witnesses`);
+            // the method-on-class edge would fold to a brandless
+            // `ClassName(Route)` and mask it.
+            if self.route_branded_refs.contains(&i) {
+                continue;
+            }
             let Some(class) = self.method_call_invocant.get(&i) else {
                 continue;
+            };
+            let target = WitnessAttachment::MethodOnClass {
+                class: class.clone(),
+                name: r.target_name.clone(),
+            };
+            // Pin the call's arity so the chase dispatches the right
+            // overload arm (fluent writer vs getter) regardless of the
+            // outer query's hint. Plugin-emitted refs that never went
+            // through `visit_method_call` have no recorded arity — fall
+            // back to a plain edge (hint-less union dispatch) for them.
+            let payload = match self.method_call_arity.get(&i) {
+                Some(&arity) => WitnessPayload::CallReturn { target, arity },
+                None => WitnessPayload::Edge(target),
             };
             edges.push(Witness {
                 attachment: WitnessAttachment::Expression(crate::witnesses::RefIdx(i as u32)),
                 source: WitnessSource::Builder("method_call_return".into()),
-                payload: WitnessPayload::Edge(WitnessAttachment::MethodOnClass {
-                    class: class.clone(),
-                    name: r.target_name.clone(),
-                }),
+                payload,
                 span: r.span,
             });
         }
@@ -7560,6 +12153,7 @@ impl<'a> Builder<'a> {
             package_framework: &self.package_framework,
             module_index: None,
             package_parents: &self.package_parents,
+            app_surface_consumers: &self.app_surface_consumers,
         };
         let q = ReducerQuery {
             attachment: att,
@@ -7589,6 +12183,9 @@ impl<'a> Builder<'a> {
             &self.bag,
             &self.scopes,
             &self.package_framework,
+            &self.package_parents,
+            &self.app_surface_consumers,
+            None, // build time: no module index (single-file)
             name,
             scope,
             point,
@@ -7612,6 +12209,7 @@ impl<'a> Builder<'a> {
             package_framework: &self.package_framework,
             module_index: None,
             package_parents: &self.package_parents,
+            app_surface_consumers: &self.app_surface_consumers,
             };
         crate::witnesses::query_sub_return_type(
             &self.bag,
@@ -7651,6 +12249,7 @@ impl<'a> Builder<'a> {
             package_framework: &self.package_framework,
             module_index: None,
             package_parents: &self.package_parents,
+            app_surface_consumers: &self.app_surface_consumers,
             };
         let q = ReducerQuery {
             attachment: &att,
@@ -7809,13 +12408,14 @@ impl<'a> Builder<'a> {
     /// "why did this come from a plugin?" story.
     fn seed_return_types_from_bag(
         &mut self,
+        reg: &crate::witnesses::ReducerRegistry,
+        method_sym_by_name: &std::collections::HashMap<String, Vec<usize>>,
     ) -> (
         std::collections::HashMap<String, InferredType>,
         std::collections::HashMap<String, crate::file_analysis::TypeProvenance>,
     ) {
         use crate::witnesses::{
-            BagContext, FrameworkFact, ReducedValue, ReducerQuery, ReducerRegistry,
-            WitnessAttachment,
+            BagContext, FrameworkFact, ReducedValue, ReducerQuery, WitnessAttachment,
         };
         let mut return_types: std::collections::HashMap<String, InferredType> =
             std::collections::HashMap::new();
@@ -7824,13 +12424,12 @@ impl<'a> Builder<'a> {
             crate::file_analysis::TypeProvenance,
         > = std::collections::HashMap::new();
 
-        let reg = ReducerRegistry::with_defaults();
-
         let ctx = BagContext {
             scopes: &self.scopes,
             package_framework: &self.package_framework,
             module_index: None,
             package_parents: &self.package_parents,
+            app_surface_consumers: &self.app_surface_consumers,
         };
 
         let mut updates: Vec<(SymbolId, String, InferredType)> = Vec::new();
@@ -7841,14 +12440,12 @@ impl<'a> Builder<'a> {
                 _ => continue,
             };
 
-            let sub_sym_id = self
-                .symbols
-                .iter()
-                .find(|s| {
-                    s.name == sub_name
-                        && matches!(s.kind, SymKind::Sub | SymKind::Method)
-                        && s.span.start <= scope.span.start
-                        && scope.span.end <= s.span.end
+            let sub_sym_id = method_sym_by_name
+                .get(&sub_name)
+                .and_then(|cands| {
+                    cands.iter().map(|&i| &self.symbols[i]).find(|s| {
+                        s.span.start <= scope.span.start && scope.span.end <= s.span.end
+                    })
                 })
                 .map(|s| s.id);
 
@@ -8288,7 +12885,34 @@ impl<'a> Builder<'a> {
         if pairs.is_empty() {
             return;
         }
+        let zero = Span {
+            start: Point { row: 0, column: 0 },
+            end: Point { row: 0, column: 0 },
+        };
         for (plugin_id, ov) in pairs {
+            // A `Method` override is a framework fact about a class —
+            // "method `name` on `class` returns T" — independent of
+            // whether that class is defined locally. Publish it on the
+            // class-keyed attachment so a method call resolves through
+            // `MethodOnClassReducer` even when the home class (e.g.
+            // `Mojolicious::Routes::Route`) lives in external @INC and
+            // isn't indexed: the declarative type IS the answer, no
+            // local symbol required. This is what lets a route-builder
+            // chain (`$r->any(...)->to(...)`) keep its receiver typed —
+            // and therefore brand — without a vendored Mojolicious.
+            // Sub overrides stay symbol-keyed (they name a package
+            // function, not a class method).
+            if let plugin::OverrideTarget::Method { class, name } = &ov.target {
+                self.bag.push(Witness {
+                    attachment: WitnessAttachment::MethodOnClass {
+                        class: class.clone(),
+                        name: name.clone(),
+                    },
+                    source: WitnessSource::Plugin(plugin_id.clone()),
+                    payload: WitnessPayload::InferredType(ov.return_type.clone()),
+                    span: zero,
+                });
+            }
             // Collect target SymbolIds in a snapshot so we can mutate
             // self.bag + self.type_provenance below without holding
             // an aliasing borrow on self.symbols.
@@ -8312,10 +12936,6 @@ impl<'a> Builder<'a> {
                 // Zero-extent span — core-synthesized witness, no
                 // user-visible "because: …" anchor needed beyond the
                 // provenance entry below.
-                let zero = Span {
-                    start: Point { row: 0, column: 0 },
-                    end: Point { row: 0, column: 0 },
-                };
                 self.bag.push(Witness {
                     attachment: WitnessAttachment::Symbol(sym_id),
                     source: WitnessSource::Plugin(plugin_id.clone()),

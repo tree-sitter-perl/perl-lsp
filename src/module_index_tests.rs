@@ -114,6 +114,62 @@ fn test_find_exporters_uses_reverse_index() {
 }
 
 #[test]
+fn test_rebuild_reverse_index_recovers_warm_path_exporters() {
+    // The warm path (`warm_cache`) writes straight into `cache_raw()` and
+    // never touches the reverse index, so `find_exporters` is blind until a
+    // rebuild. The export-only name (`weaken`-style XS export with no Perl
+    // body, hence no `symbols` entry) is the case `indexable_symbol_names`
+    // alone misses — the B6 cold/warm attribution regression.
+    let idx = ModuleIndex::new_for_test();
+    let src = "package Scalar::Util;\nour @EXPORT_OK = qw(weaken blessed);\n1;";
+    let cached = parse_source_to_cached(src, "Scalar::Util");
+
+    // Simulate warm_cache: direct insert, no reverse-index update.
+    idx.cache_raw().insert("Scalar::Util".to_string(), Some(cached));
+    assert!(
+        idx.find_exporters("weaken").is_empty(),
+        "warm insert must not populate the reverse index on its own"
+    );
+
+    idx.rebuild_reverse_index_from_cache();
+    assert_eq!(idx.find_exporters("weaken"), vec!["Scalar::Util"]);
+    assert_eq!(idx.find_exporters("blessed"), vec!["Scalar::Util"]);
+}
+
+#[test]
+fn test_find_exporters_exporter_extensible() {
+    // Names declared via `export(...)` and `:Export` attributes are
+    // discoverable cross-file — the goto-def proxy for a consumer's import.
+    let idx = ModuleIndex::new_for_test();
+    let src = "package My::Ext;\nuse Exporter::Extensible -exporter_setup => 1;\nexport(qw( foo $bar -tag ));\nsub foo {}\nsub bar :Export {}\n1;";
+    idx.insert_cache("My::Ext", Some(parse_source_to_cached(src, "My::Ext")));
+    assert_eq!(idx.find_exporters("foo"), vec!["My::Ext"]);
+    assert_eq!(idx.find_exporters("bar"), vec!["My::Ext"]);
+    // Sigil'd / tag entries aren't subs — not advertised.
+    assert!(idx.find_exporters("$bar").is_empty());
+    assert!(idx.find_exporters("-tag").is_empty());
+}
+
+#[test]
+fn test_find_exporters_exporter_declare() {
+    let idx = ModuleIndex::new_for_test();
+    let src = "package My::Decl;\nuse Exporter::Declare;\ndefault_export foo => sub { 1 };\nexport bar => sub { 2 };\nexports qw/a b/;\nsub bar {}\n1;";
+    idx.insert_cache("My::Decl", Some(parse_source_to_cached(src, "My::Decl")));
+    assert_eq!(idx.find_exporters("foo"), vec!["My::Decl"]);
+    assert_eq!(idx.find_exporters("bar"), vec!["My::Decl"]);
+    assert_eq!(idx.find_exporters("a"), vec!["My::Decl"]);
+}
+
+#[test]
+fn test_find_exporters_importer_menu() {
+    let idx = ModuleIndex::new_for_test();
+    let src = "package My::Menu;\nsub IMPORTER_MENU {\n  return ( export => [qw/foo bar/], export_ok => ['baz'] );\n}\nsub foo {}\n1;";
+    idx.insert_cache("My::Menu", Some(parse_source_to_cached(src, "My::Menu")));
+    assert_eq!(idx.find_exporters("foo"), vec!["My::Menu"]);
+    assert_eq!(idx.find_exporters("baz"), vec!["My::Menu"]);
+}
+
+#[test]
 fn test_get_return_type_cached() {
     use crate::file_analysis::InferredType;
 
@@ -148,4 +204,33 @@ sub make_obj {
         Some(InferredType::ClassName("MyClass".into()))
     );
     assert_eq!(idx.get_return_type_cached("nonexistent"), None);
+}
+
+#[test]
+fn runtime_exporter_names_resolve_as_exporters() {
+    // A package whose exports come from a runtime exporter setup
+    // (Sub::Exporter / Moose::Exporter / Type::Library) must be found
+    // by `find_exporters` so consumer goto-def / diagnostics resolve.
+    let idx = ModuleIndex::new_for_test();
+
+    let sub_exp = "package Sugar::Sub;\n\
+        use Sub::Exporter -setup => { exports => [qw/sweeten/] };\n\
+        sub sweeten { }\n1;";
+    idx.insert_cache("Sugar::Sub", Some(parse_source_to_cached(sub_exp, "Sugar::Sub")));
+
+    let moose_exp = "package Sugar::Moose;\n\
+        use Moose::Exporter;\n\
+        Moose::Exporter->setup_import_methods(as_is => [qw/has_column/]);\n\
+        sub has_column { }\n1;";
+    idx.insert_cache("Sugar::Moose", Some(parse_source_to_cached(moose_exp, "Sugar::Moose")));
+
+    let type_lib = "package My::Types;\n\
+        use Type::Library -base;\n\
+        __PACKAGE__->add_type({ name => 'PositiveInt' });\n\
+        sub PositiveInt { }\n1;";
+    idx.insert_cache("My::Types", Some(parse_source_to_cached(type_lib, "My::Types")));
+
+    assert_eq!(idx.find_exporters("sweeten"), vec!["Sugar::Sub"]);
+    assert_eq!(idx.find_exporters("has_column"), vec!["Sugar::Moose"]);
+    assert_eq!(idx.find_exporters("PositiveInt"), vec!["My::Types"]);
 }

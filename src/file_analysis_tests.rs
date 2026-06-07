@@ -163,6 +163,7 @@ fn test_resolve_sub_return_type() {
                 display: None,
                 hide_in_outline: false,
                 opaque_return: false,
+                is_constant: false,
             },
             namespace: Namespace::Language,
             outline_label: None,
@@ -296,6 +297,53 @@ fn build_fa_from_source(source: &str) -> FileAnalysis {
         .unwrap();
     let tree = parser.parse(source, None).unwrap();
     crate::builder::build(&tree, source.as_bytes())
+}
+
+/// Fully-qualified same-file call (`Foo::baz()`) — goto-def lands on the
+/// local `sub baz` in package Foo, and references on the def includes the
+/// qualified call site. The ref's `target_name` is the whole `Foo::baz`
+/// path; resolution matches on the bare tail + `resolved_package`.
+#[test]
+fn test_qualified_call_local_goto_def_and_references() {
+    let src = "package Foo;\nsub baz { 42 }\npackage main;\nFoo::baz();\n";
+    let fa = build_fa_from_source(src);
+
+    // Cursor on `baz` in `Foo::baz()` (line 3 = 0-indexed; `baz` starts
+    // at col 5 after `Foo::`).
+    let def = fa
+        .find_definition(Point::new(3, 6), None, None, None)
+        .expect("goto-def on Foo::baz() should resolve to the local sub");
+    // The def is `sub baz` on line 1.
+    assert_eq!(def.start.row, 1, "should land on `sub baz`, got {:?}", def);
+
+    // References anchored on the call site must include the call span.
+    let refs = fa.find_references(Point::new(3, 6), None, None, None);
+    assert!(
+        refs.iter().any(|s| s.start.row == 3),
+        "references should include the Foo::baz() call site, got {:?}",
+        refs,
+    );
+    // And the declaration.
+    assert!(
+        refs.iter().any(|s| s.start.row == 1),
+        "references should include the sub baz declaration, got {:?}",
+        refs,
+    );
+}
+
+/// A qualified call to package Foo's `baz` must not resolve to a same-named
+/// `baz` in another package — `resolved_package` isolates the qualifier.
+#[test]
+fn test_qualified_call_does_not_cross_package() {
+    let src = "package Foo;\nsub baz { 1 }\npackage Bar;\nsub baz { 2 }\npackage main;\nBar::baz();\n";
+    let fa = build_fa_from_source(src);
+
+    // Cursor on `baz` in `Bar::baz()` (line 5, col 5).
+    let def = fa
+        .find_definition(Point::new(5, 6), None, None, None)
+        .expect("Bar::baz() should resolve");
+    // Bar's `sub baz` is on line 3, not Foo's on line 1.
+    assert_eq!(def.start.row, 3, "should land on Bar's sub baz, got {:?}", def);
 }
 
 /// Dynamic method dispatch: `my $m = 'get_config'; __PACKAGE__->$m()`.
@@ -652,10 +700,6 @@ fn plugin_mojo_demo_outline_pinned() {
     let rendered = render_outline(&fa.document_symbols());
     let expected = "\
 [NAMESPACE] MyApp @L34
-[MODULE] use strict @L35
-[MODULE] use warnings @L36
-[MODULE] use Mojolicious::Lite @L37
-[MODULE] use Mojolicious @L38
 [VARIABLE] $app @L44
 [FUNCTION] <helper> current_user ($fallback) @L45
 [FUNCTION] <helper> users.create ($name, $email) @L52
@@ -668,22 +712,19 @@ fn plugin_mojo_demo_outline_pinned() {
 [FUNCTION] <route> GET /users/profile @L79
 [FUNCTION] <route> POST /users/profile ($form_data) @L84
 [FUNCTION] <route> ANY /fallback @L90
-[MODULE] use Minion @L104
 [VARIABLE] $minion @L105
 [FUNCTION] <task> send_email ($to, $subject, $body) @L107
 [FUNCTION] <task> resize_image ($path, $width, $height) @L113
 [NAMESPACE] MyApp::Progress @L131
-[MODULE] use parent @L132
 [FUNCTION] new @L134
-  [VARIABLE] $class @L135
-  [VARIABLE] $self @L136
   [EVENT] <event> ready ($ctx) @L137
   [EVENT] <event> step ($n, $total) @L138
   [EVENT] <event> done ($result) @L139
 [FUNCTION] tick @L143
-  [VARIABLE] $self @L144
-  [VARIABLE] $n @L144
 ";
+    // `use` lines absent: outlines show structure, not imports. File-scope
+    // `my` vars ($app, $r, $minion) survive; sub-body lexicals ($class/$self
+    // in new, $self/$n in tick) are dropped as working state.
     assert_eq!(
         rendered, expected,
         "\n---- ACTUAL ----\n{}\n---- EXPECTED ----\n{}",
@@ -1420,4 +1461,390 @@ $dog->speak();
     // backend's per-class rename still runs (no edits, no harm).
     let chain = fa.method_rename_chain("Dog", "nonexistent", None);
     assert_eq!(chain, vec!["Dog".to_string()]);
+}
+
+// ---- Mojolicious route controller-token → class ----
+
+/// Camelize matches `Mojo::Util::camelize` exactly (verified against
+/// the crm-vendored Mojo::Util source): `-` → `::`, `_` within a
+/// segment → `ucfirst lc` pieces concatenated, leading-uppercase token
+/// passes through unchanged.
+#[test]
+fn test_camelize_controller_matches_mojo_util() {
+    let cases = [
+        ("login", "Login"),
+        ("sales_reports", "SalesReports"),
+        ("integrations-ads_api", "Integrations::AdsApi"),
+        ("foo_bar-baz", "FooBar::Baz"),
+        ("users", "Users"),
+        // Already class-shaped: untouched (camelize's `/^[A-Z]/` gate).
+        ("FooBar", "FooBar"),
+        ("Foo::Bar", "Foo::Bar"),
+        // Mixed-case piece is lowercased first, then ucfirst'd.
+        ("sales_REPORTS", "SalesReports"),
+    ];
+    for (input, want) in cases {
+        assert_eq!(
+            camelize_controller(input),
+            want,
+            "camelize_controller({input:?})",
+        );
+    }
+}
+
+#[test]
+fn test_module_tail_matches() {
+    assert!(module_tail_matches("Clove::Controller::Login", "Login"));
+    assert!(module_tail_matches(
+        "App::Controller::Integrations::AdsApi",
+        "Integrations::AdsApi",
+    ));
+    assert!(module_tail_matches("Login", "Login"));
+    // Tail must align on a `::` boundary — not a substring.
+    assert!(!module_tail_matches("Clove::Controller::AdminLogin", "Login"));
+    assert!(!module_tail_matches("Clove::Controller::Logins", "Login"));
+}
+
+/// Cross-file pin: a route `->to('users#list')` (controller token
+/// `users`, lowercase, never a Perl package name on its own) resolves
+/// its MethodCall invocant to the controller class under the app's
+/// namespace that owns `list`.
+#[test]
+fn test_route_controller_token_resolves_cross_file() {
+    use crate::module_index::ModuleIndex;
+    use std::sync::Arc;
+
+    // App file declaring the route. The mojo-routes plugin turns the
+    // `->to('users#list')` string into a `MethodCall { invocant: "users",
+    // method_name: "list" }` — the token is passed raw.
+    let app = build_fa_from_source(
+        r#"
+        package Some::App;
+        use Mojolicious::Lite;
+        sub startup {
+            my $self = shift;
+            $self->routes->get('/users')->to('users#list');
+        }
+        1;
+        "#,
+    );
+
+    // The controller class lives in another file under the app's
+    // controller namespace and defines `list`.
+    let controller = build_fa_from_source(
+        r#"
+        package Some::App::Controller::Users;
+        use Mojo::Base 'Mojolicious::Controller';
+        sub list { my $c = shift; }
+        1;
+        "#,
+    );
+
+    let idx = ModuleIndex::new_for_test();
+    idx.register_workspace_module(
+        std::path::PathBuf::from("/tmp/Some_App_Controller_Users.pm"),
+        Arc::new(controller),
+    );
+
+    let to_ref = app
+        .refs
+        .iter()
+        .find(|r| {
+            r.target_name == "list"
+                && matches!(&r.kind, RefKind::MethodCall { invocant, .. } if invocant == "users")
+        })
+        .expect("plugin emits MethodCall {invocant: users, method: list} for ->to('users#list')");
+
+    let class = app.method_call_invocant_class(to_ref, Some(&idx));
+    assert_eq!(
+        class.as_deref(),
+        Some("Some::App::Controller::Users"),
+        "controller token `users` should camelize + workspace-resolve to the owning controller class",
+    );
+}
+
+/// Composition pin (crm's Alerts.pm shape): a partial `->to('#list')`
+/// off a route whose controller default was set by an ancestor
+/// `->to('alerts#')` must inherit `alerts`, camelize it, and resolve
+/// cross-file to the owning controller class — exactly like the full
+/// form `->to('alerts#list')` does. Mirrors:
+///
+/// ```text
+/// my $alerts_r = $r->any('/alerts')->to('alerts#');  # brand controller=alerts
+/// $alerts_r->get('/')->to('#list');                  # partial: inherits alerts
+/// my $crud = $alerts_r->under('/:type')->to('#get'); # nested: inherits alerts
+/// $crud->get('/x')->to('#read');                     # partial off nested
+/// ```
+#[test]
+fn test_partial_route_brand_composes_with_camelize_cross_file() {
+    use crate::module_index::ModuleIndex;
+    use std::sync::Arc;
+
+    let app = build_fa_from_source(
+        r#"
+        package Clove::App;
+        use Mojo::Base 'Mojolicious';
+        sub startup {
+            my $self = shift;
+            my $r = $self->routes;
+            my $alerts_r = $r->any('/alerts')->to('alerts#');
+            $alerts_r->get('/')->to('#list');
+            my $crud = $alerts_r->under('/:type')->to('#get_alert');
+            $crud->get('/settings')->to('#read_settings');
+            my $billing_r = $r->any('/billing')->to('billing#');
+            $billing_r->get('/')->to('#index');
+        }
+        1;
+        "#,
+    );
+
+    let alerts = build_fa_from_source(
+        r#"
+        package Clove::Controller::Alerts;
+        use Mojo::Base 'Mojolicious::Controller';
+        sub list { my $c = shift; }
+        sub get_alert { my $c = shift; }
+        sub read_settings { my $c = shift; }
+        1;
+        "#,
+    );
+    let billing = build_fa_from_source(
+        r#"
+        package Clove::Controller::Billing;
+        use Mojo::Base 'Mojolicious::Controller';
+        sub index { my $c = shift; }
+        1;
+        "#,
+    );
+
+    let idx = ModuleIndex::new_for_test();
+    idx.register_workspace_module(
+        std::path::PathBuf::from("/tmp/Clove_Controller_Alerts.pm"),
+        Arc::new(alerts),
+    );
+    idx.register_workspace_module(
+        std::path::PathBuf::from("/tmp/Clove_Controller_Billing.pm"),
+        Arc::new(billing),
+    );
+
+    // Direct child (`$alerts_r->get('/')->to('#list')`), nested via
+    // `under` (`$crud` inherits `alerts`), and a partial off the nested
+    // group all resolve to the same controller class as the full form.
+    for action in ["list", "get_alert", "read_settings"] {
+        let to_ref = app
+            .refs
+            .iter()
+            .find(|r| {
+                r.target_name == action
+                    && matches!(&r.kind, RefKind::MethodCall { invocant, .. } if invocant == "alerts")
+            })
+            .unwrap_or_else(|| {
+                panic!("partial ->to('#{action}') should emit MethodCall {{invocant: alerts, method: {action}}}")
+            });
+
+        let class = app.method_call_invocant_class(to_ref, Some(&idx));
+        assert_eq!(
+            class.as_deref(),
+            Some("Clove::Controller::Alerts"),
+            "partial ->to('#{action}') should inherit controller `alerts`, camelize, and resolve cross-file",
+        );
+    }
+
+    // Sibling group re-brands its own descendants — no leak from
+    // `alerts`. The partial `#index` inherits `billing`, not `alerts`.
+    let index_ref = app
+        .refs
+        .iter()
+        .find(|r| {
+            r.target_name == "index"
+                && matches!(&r.kind, RefKind::MethodCall { invocant, .. } if invocant == "billing")
+        })
+        .expect("sibling group partial ->to('#index') should inherit `billing`");
+    assert_eq!(
+        app.method_call_invocant_class(index_ref, Some(&idx)).as_deref(),
+        Some("Clove::Controller::Billing"),
+        "sibling group must re-brand to `billing`, not leak `alerts`",
+    );
+}
+
+/// When the same short controller name exists under multiple controller
+/// roots, ownership of the action disambiguates: only the class that
+/// actually defines the method is chosen.
+#[test]
+fn test_route_controller_token_disambiguates_by_ownership() {
+    use crate::module_index::ModuleIndex;
+    use std::sync::Arc;
+
+    let app = build_fa_from_source(
+        r#"
+        package Some::App;
+        use Mojolicious::Lite;
+        sub startup {
+            my $self = shift;
+            $self->routes->get('/r')->to('reports#monthly');
+        }
+        1;
+        "#,
+    );
+
+    // Two `*::Controller::Reports` classes; only the second defines
+    // `monthly`. The first is a decoy with a different action.
+    let decoy = build_fa_from_source(
+        r#"
+        package Alpha::Controller::Reports;
+        sub daily { }
+        1;
+        "#,
+    );
+    let owner = build_fa_from_source(
+        r#"
+        package Beta::Controller::Reports;
+        sub monthly { }
+        1;
+        "#,
+    );
+
+    let idx = ModuleIndex::new_for_test();
+    idx.register_workspace_module(
+        std::path::PathBuf::from("/tmp/Alpha_Reports.pm"),
+        Arc::new(decoy),
+    );
+    idx.register_workspace_module(
+        std::path::PathBuf::from("/tmp/Beta_Reports.pm"),
+        Arc::new(owner),
+    );
+
+    let to_ref = app
+        .refs
+        .iter()
+        .find(|r| {
+            r.target_name == "monthly"
+                && matches!(&r.kind, RefKind::MethodCall { invocant, .. } if invocant == "reports")
+        })
+        .expect("MethodCall for ->to('reports#monthly')");
+
+    let class = app.method_call_invocant_class(to_ref, Some(&idx));
+    assert_eq!(
+        class.as_deref(),
+        Some("Beta::Controller::Reports"),
+        "ownership of `monthly` should pick Beta over the Alpha decoy",
+    );
+}
+
+// ---- ReceiverGated seam ----
+
+#[test]
+fn receiver_gated_applies_on_exact_gate() {
+    let pp: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
+    let gated = ReceiverGated::new("Minion", 7u32);
+    assert_eq!(
+        gated.resolve_for(Some("Minion"), &pp, None),
+        GateResult::Applies(&7u32),
+    );
+}
+
+#[test]
+fn receiver_gated_applies_through_local_ancestry() {
+    let mut pp: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
+    pp.insert("My::Minion".into(), vec!["Minion".into()]);
+    let gated = ReceiverGated::new("Minion", "payload");
+    // A descendant resolves through the single `class_isa` walk.
+    assert_eq!(
+        gated.resolve_for(Some("My::Minion"), &pp, None),
+        GateResult::Applies(&"payload"),
+    );
+}
+
+#[test]
+fn receiver_gated_does_not_apply_for_unrelated_class() {
+    let pp: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
+    let gated = ReceiverGated::new("Minion", 1u8);
+    // A concrete, unrelated receiver is a settled negative — NOT untyped.
+    assert_eq!(
+        gated.resolve_for(Some("Some::Other"), &pp, None),
+        GateResult::DoesNotApply,
+    );
+}
+
+#[test]
+fn receiver_gated_untyped_for_unknown_receiver() {
+    let pp: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
+    let gated = ReceiverGated::new("Minion", 1u8);
+    assert_eq!(gated.resolve_for(None, &pp, None), GateResult::ReceiverUntyped);
+    assert_eq!(gated.resolve_for(Some(""), &pp, None), GateResult::ReceiverUntyped);
+}
+
+// ---- %EXPORT_TAGS membership folds into the export surface (B-tag / NAV-B) ----
+
+#[test]
+fn export_tags_plain_hash_members_are_exported() {
+    let fa = build_fa_from_source(
+        r#"
+        package M;
+        our @EXPORT_OK = qw( foo );
+        our %EXPORT_TAGS = (
+            all             => [ @EXPORT_OK ],
+            data_conversion => [ qw{ hashify words_from_string } ],
+        );
+        sub foo { 1 }
+        sub hashify { 2 }
+        sub words_from_string { 3 }
+        1;
+        "#,
+    );
+    // Members reached only via a tag list join the same surface as @EXPORT_OK.
+    assert!(fa.exports_name("hashify"), "tag member hashify should export");
+    assert!(fa.exports_name("words_from_string"));
+    assert!(fa.exports_name("foo"));
+    // The tag *names* are selectors, not subs — never exports.
+    assert!(!fa.exports_name("data_conversion"));
+    assert!(!fa.exports_name("all"));
+}
+
+#[test]
+fn export_tags_readonly_wrapped_members_are_exported() {
+    // The Perl::Critic::Utils shape: the table is hidden inside a
+    // `Readonly::Hash our %EXPORT_TAGS => (...)` call. The wrapper function is
+    // not load-bearing; the declared variable is the witness.
+    let fa = build_fa_from_source(
+        r#"
+        package M;
+        Readonly::Array our @EXPORT_OK => qw( interpolate );
+        Readonly::Hash our %EXPORT_TAGS => (
+            all             => [ @EXPORT_OK ],
+            data_conversion => [ qw{ hashify words_from_string interpolate } ],
+        );
+        sub interpolate { 1 }
+        sub hashify { 2 }
+        sub words_from_string { 3 }
+        1;
+        "#,
+    );
+    assert!(fa.exports_name("hashify"), "Readonly-wrapped tag member should export");
+    assert!(fa.exports_name("words_from_string"));
+    assert!(fa.exports_name("interpolate"));
+    assert!(!fa.exports_name("data_conversion"));
+    assert!(!fa.exports_name("all"));
+}
+
+#[test]
+fn name_in_no_export_or_tag_is_not_exported() {
+    // Regression guard: a sub that is neither in @EXPORT* nor any tag list
+    // stays unexported — the fold widens the surface only for tag members.
+    let fa = build_fa_from_source(
+        r#"
+        package M;
+        our @EXPORT_OK = qw( foo );
+        our %EXPORT_TAGS = (
+            data_conversion => [ qw{ hashify } ],
+        );
+        sub foo { 1 }
+        sub hashify { 2 }
+        sub private_helper { 3 }
+        1;
+        "#,
+    );
+    assert!(fa.exports_name("hashify"));
+    assert!(fa.exports_name("foo"));
+    assert!(!fa.exports_name("private_helper"), "non-exported sub must stay unexported");
 }
