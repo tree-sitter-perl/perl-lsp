@@ -1641,6 +1641,24 @@ impl<'a> ExportSurface<'a> {
         }
         self.analysis.exports_name(name)
     }
+
+    /// Every name on the surface, materialized into an owned set with the same
+    /// membership `exports()` reports. Lets a caller resolving many names
+    /// against one producer snapshot the surface once instead of re-walking
+    /// re-export edges per name (the diagnostics hot path). Own-only mirrors
+    /// `export_lookup` (`@EXPORT ∪ @EXPORT_OK`); the transitive case returns the
+    /// precomputed union.
+    pub fn all_names(&self) -> HashSet<String> {
+        if let Some(all) = &self.all_names {
+            return all.clone();
+        }
+        self.analysis
+            .export
+            .iter()
+            .chain(self.analysis.export_ok.iter())
+            .cloned()
+            .collect()
+    }
 }
 
 /// One import selector parsed from a `use` statement's arg list. The consumer
