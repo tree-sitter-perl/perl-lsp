@@ -41,6 +41,7 @@ use FindBin qw($RealBin);
 use File::Spec;
 use JSON::PP;
 use POSIX qw(WIFSIGNALED);
+use File::Temp qw(tempfile);
 
 my $bin    = $ENV{BIN}    || File::Spec->rel2abs("$RealBin/../target/release/perl-lsp");
 my $corpus = $ENV{CORPUS} || "$RealBin/local/lib/perl5";
@@ -134,18 +135,22 @@ sub run_batch {
     $root  //= $corpus;
     $p5lib //= p5lib_for($root);
     my $jsonl = join("\n", map { encode_json($_) } @$reqs) . "\n";
-    my ($rd, $wr);
-    pipe($rd, $wr) or die "pipe: $!";
+    # Stage the requests in a temp file and redirect the child's STDIN from it,
+    # rather than writing them down a pipe before reading the response. A
+    # write-then-read pipe deadlocks once the child's stdout fills the OS pipe
+    # buffer (~64KB): the child blocks writing stdout (we're not reading yet)
+    # while we block writing stdin (it's not reading). The temp file makes
+    # request delivery non-blocking, so we only ever read on the parent side.
+    my ($tfh, $tpath) = tempfile('corpus-batch-XXXXXX', TMPDIR => 1, UNLINK => 1);
+    print $tfh $jsonl; close $tfh;
     my $pid = open(my $out, '-|');
     die "fork: $!" unless defined $pid;
     if ($pid == 0) {
-        open(STDIN, '<&', $rd); close $wr;
+        open(STDIN, '<', $tpath) or exit 127;
         open(STDERR, '>', '/dev/null');
         $ENV{PERL5LIB} = $p5lib if defined $p5lib;
         exec($bin, '--batch', $root) or exit 127;
     }
-    close $rd;
-    print $wr $jsonl; close $wr;       # feed all requests, then EOF
     local $/; my $resp = <$out> // ''; close($out);
     my %by_id;
     for my $line (split /\n/, $resp) {
