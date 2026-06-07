@@ -635,7 +635,40 @@ struct BatchReq {
 /// single-mode `cli_*` wrappers and `--batch` call this, so their stdout can
 /// never drift. The expensive startup state (`ws` + `idx`) is built once by the
 /// caller and shared; this re-parses only the one target file per call. Returns
-/// the exact text the command prints (Ok) or the stderr message (Err).
+/// Stage an analysis in the workspace store for the lifetime of one cross-file
+/// query (references/rename need `refs_to` to see the freshly-enriched target),
+/// restoring the prior entry on drop. `--batch` shares one FileStore across all
+/// requests; without this restore a references/rename request would leave its
+/// enrichment-synthesized symbols in the store, so a later workspace-symbol or
+/// diagnostics request in the same batch would see different results depending
+/// on ordering.
+struct ScopedWorkspaceEntry<'a> {
+    ws: &'a file_store::FileStore,
+    path: std::path::PathBuf,
+    prior: Option<std::sync::Arc<file_analysis::FileAnalysis>>,
+}
+
+impl<'a> ScopedWorkspaceEntry<'a> {
+    fn insert(
+        ws: &'a file_store::FileStore,
+        path: std::path::PathBuf,
+        analysis: file_analysis::FileAnalysis,
+    ) -> Self {
+        let prior = ws.workspace_raw().get(&path).map(|r| r.value().clone());
+        ws.insert_workspace(path.clone(), analysis);
+        Self { ws, path, prior }
+    }
+}
+
+impl Drop for ScopedWorkspaceEntry<'_> {
+    fn drop(&mut self) {
+        match self.prior.take() {
+            Some(arc) => self.ws.insert_workspace_arc(self.path.clone(), arc),
+            None => self.ws.remove_workspace(&self.path),
+        }
+    }
+}
+
 fn run_one(
     ws: &file_store::FileStore,
     idx: &module_index::ModuleIndex,
@@ -696,7 +729,7 @@ fn run_one(
                     }
                 }
                 Some(target) => {
-                    ws.insert_workspace(file_path.clone(), analysis);
+                    let _staged = ScopedWorkspaceEntry::insert(ws, file_path.clone(), analysis);
                     let mask = resolve::references_mask_for(ws, Some(idx), &target);
                     for loc in resolve::refs_to(ws, Some(idx), &target, mask) {
                         let path = match &loc.key {
@@ -960,7 +993,7 @@ fn run_rename(
     }
     let target = resolve::TargetRef::from_rename_kind(rename_kind, &analysis, Some(idx))
         .ok_or("Function/Method/Package map to a target")?;
-    ws.insert_workspace(file_path, analysis);
+    let _staged = ScopedWorkspaceEntry::insert(ws, file_path, analysis);
     for loc in resolve::refs_to(ws, Some(idx), &target, resolve::RoleMask::EDITABLE) {
         let path = match &loc.key {
             file_store::FileKey::Path(p) => p.display().to_string(),
