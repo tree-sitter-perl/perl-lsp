@@ -7858,6 +7858,18 @@ impl<'a> Builder<'a> {
             // invocant qualifies; the LHS-name gate still requires a
             // statically-derivable target name.
             "method_call_expression" => self.method_call_yields_coderef(right),
+            // Conditional install: `*name = $cond ? \&a : sub {...}` (Try::Tiny's
+            // `*_subname = $su ? \&Sub::Util::set_subname : sub {...}`, Path::Tiny's
+            // `*_same = IS_WIN32() ? sub{} : sub{}`). The glob holds a coderef in
+            // every branch, so the name is callable iff BOTH arms are sub-producing.
+            "conditional_expression" => {
+                let arm = |f| {
+                    right
+                        .child_by_field_name(f)
+                        .is_some_and(|n| self.glob_rhs_is_sub(n))
+                };
+                arm("consequent") && arm("alternative")
+            }
             _ => false,
         }
     }

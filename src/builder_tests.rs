@@ -4945,6 +4945,28 @@ sub setup {
 }
 
 #[test]
+fn test_glob_assigned_sub_ternary_rhs_registers() {
+    // Try::Tiny `*_subname = $su ? \&Sub::Util::set_subname : sub {...}` /
+    // Path::Tiny `*_same = IS_WIN32() ? sub{} : sub{}`: the glob holds a coderef
+    // in every branch, so the name is a registered sub. Without this, same-file
+    // calls were flagged unresolved-function (false positive).
+    let fa = build_fa(
+        r#"
+package Demo;
+sub bar { 1 }
+*_subname = $su ? \&Sub::Util::set_subname : sub { $_[1] };
+"#,
+    );
+    assert!(
+        fa.symbols
+            .iter()
+            .any(|s| s.kind == SymKind::Sub && s.name == "_subname"),
+        "ternary glob-assign should register `_subname` as a sub: {:?}",
+        fa.symbols.iter().filter(|s| s.kind == SymKind::Sub).map(|s| &s.name).collect::<Vec<_>>()
+    );
+}
+
+#[test]
 fn test_loop_variable_constant_folding() {
     let fa = build_fa(
         "
