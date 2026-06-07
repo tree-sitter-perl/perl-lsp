@@ -5011,16 +5011,7 @@ impl<'a> Builder<'a> {
             }
         }
         if let (Some(qualifier), _) = crate::file_analysis::split_qualified(name) {
-            let ref_span = match name.rfind("::") {
-                Some(idx) => {
-                    let s = node.start_position();
-                    Span {
-                        start: Point { row: s.row, column: s.column + idx + 2 },
-                        end: node.end_position(),
-                    }
-                }
-                None => node_to_span(node),
-            };
+            let ref_span = fq_tail_span(node, name);
             self.add_ref(
                 RefKind::FunctionCall { resolved_package: Some(qualifier.to_string()) },
                 ref_span,
@@ -6558,16 +6549,7 @@ impl<'a> Builder<'a> {
             // qualifier survives, mirroring the FQ-call narrowing. The full
             // `target_name` keeps the path; `qualified_var_target()` decodes
             // `(pkg, sigil+basename)` for cross-package resolution.
-            let ref_span = match text.rfind("::") {
-                Some(idx) => {
-                    let s = node.start_position();
-                    Span {
-                        start: Point { row: s.row, column: s.column + idx + 2 },
-                        end: node.end_position(),
-                    }
-                }
-                None => node_to_span(node),
-            };
+            let ref_span = fq_tail_span(node, text);
             self.add_ref(
                 RefKind::Variable,
                 ref_span,
@@ -6716,16 +6698,7 @@ impl<'a> Builder<'a> {
                 // only `baz` and the qualifier survives. `target_name` keeps
                 // the full path (the hash-key binding + provenance rely on
                 // it); resolution sites read `unqualified_target_name()`.
-                let ref_span = match name.rfind("::") {
-                    Some(idx) => {
-                        let s = func_node.start_position();
-                        Span {
-                            start: Point { row: s.row, column: s.column + idx + 2 },
-                            end: func_node.end_position(),
-                        }
-                    }
-                    None => node_to_span(func_node),
-                };
+                let ref_span = fq_tail_span(func_node, name);
                 self.add_ref(
                     RefKind::FunctionCall { resolved_package: resolved_package.clone() },
                     ref_span,
@@ -7493,17 +7466,7 @@ impl<'a> Builder<'a> {
                 "scalar" | "array" | "hash" => {
                     if let Ok(t) = n.utf8_text(&bytes) {
                         if plain_var(t) {
-                            // FQ tail narrowing mirrors `visit_var_ref` (rule #7).
-                            let ref_span = match t.rfind("::") {
-                                Some(idx) => {
-                                    let s = n.start_position();
-                                    Span {
-                                        start: Point { row: s.row, column: s.column + idx + 2 },
-                                        end: node_to_span(n).end,
-                                    }
-                                }
-                                None => node_to_span(n),
-                            };
+                            let ref_span = fq_tail_span(n, t);
                             self.refs.push(Ref {
                                 kind: RefKind::Variable,
                                 span: ref_span,

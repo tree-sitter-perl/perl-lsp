@@ -73,6 +73,25 @@ pub(crate) fn node_to_span(node: tree_sitter::Node) -> Span {
     }
 }
 
+/// Narrow `node`'s span to the bare tail after the last `::` in `text` (rule
+/// #7): for a qualified name (`Foo::Bar::baz`) the renamable / highlightable
+/// token is `baz`, not the whole path — so rename rewrites only the tail and
+/// the qualifier survives, while the ref's `target_name` keeps the full path. No
+/// `::` → the node's own span. FQ identifiers are single-line tokens, so the
+/// tail column is `start.column + byte_offset_of_tail`.
+pub(crate) fn fq_tail_span(node: tree_sitter::Node, text: &str) -> Span {
+    match text.rfind("::") {
+        Some(idx) => {
+            let s = node.start_position();
+            Span {
+                start: Point { row: s.row, column: s.column + idx + 2 },
+                end: node.end_position(),
+            }
+        }
+        None => node_to_span(node),
+    }
+}
+
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FoldRange {
@@ -1598,11 +1617,6 @@ pub struct ExportSurface<'a> {
     all_names: Option<HashSet<String>>,
 }
 
-/// Fan-out / depth budget for the re-export edge walk. Cycles are bounded by the
-/// seen-set; this caps pathological fan-out (a module re-exporting hundreds of
-/// modules) so a single surface query can't blow up. Mirrors the inheritance
-/// walk's bounded-traversal discipline.
-const MAX_REEXPORT_MODULES: usize = 256;
 
 impl<'a> ExportSurface<'a> {
     /// `@EXPORT` (∪ re-exported defaults when index-walked) — auto-imported by a
@@ -2364,8 +2378,8 @@ impl FileAnalysis {
     /// Like `export_surface`, but resolves `reexport_modules` transitively
     /// through `module_index`: the materialized surface includes every
     /// re-exported module's surface (default ∪ optional ∪ tags), walked
-    /// cross-file with a seen-set (cycles) and a fan-out budget
-    /// (`MAX_REEXPORT_MODULES`). When this module has no re-export edges the
+    /// cross-file via `ModuleIndex::for_each_reexport_module` (seen-set for
+    /// cycles, fan-out cap). When this module has no re-export edges the
     /// result is identical to `export_surface` (own-only, zero extra storage).
     /// This is the one transitive-closure site — the consumer evaluator
     /// (`imported_names`) is untouched; it binds whatever the surface reports.
@@ -2381,47 +2395,34 @@ impl FileAnalysis {
         let mut optional_set: Vec<String> = self.export_ok.clone();
         let mut tags: HashMap<String, Vec<String>> = self.export_tags.clone();
 
-        // BFS over re-export edges. The seen-set bounds cycles (A→B→A); the
-        // budget bounds fan-out. Edge walk mirrors `for_each_ancestor_class`.
-        let mut seen: HashSet<String> = HashSet::new();
-        let mut queue: std::collections::VecDeque<String> =
-            self.reexport_modules.iter().cloned().collect();
-        let mut visited = 0usize;
-
-        while let Some(module) = queue.pop_front() {
-            if !seen.insert(module.clone()) {
-                continue;
-            }
-            visited += 1;
-            if visited > MAX_REEXPORT_MODULES {
-                break;
-            }
-            let Some(cached) = module_index.get_cached(&module) else { continue };
-            let a = &cached.analysis;
-            for n in &a.export {
-                if !default_set.contains(n) {
-                    default_set.push(n.clone());
-                }
-            }
-            for n in &a.export_ok {
-                if !optional_set.contains(n) {
-                    optional_set.push(n.clone());
-                }
-            }
-            for (tag, members) in &a.export_tags {
-                let bucket = tags.entry(tag.clone()).or_default();
-                for m in members {
-                    if !bucket.contains(m) {
-                        bucket.push(m.clone());
+        // Merge every re-exported module's surface, walking the edges through the
+        // one shared traversal (cycle-bounded + fan-out-capped). Own surface is
+        // already seeded above, so we seed the queue with `reexport_modules`.
+        module_index.for_each_reexport_module(
+            self.reexport_modules.iter().cloned(),
+            |cached| {
+                let a = &cached.analysis;
+                for n in &a.export {
+                    if !default_set.contains(n) {
+                        default_set.push(n.clone());
                     }
                 }
-            }
-            for next in &a.reexport_modules {
-                if !seen.contains(next) {
-                    queue.push_back(next.clone());
+                for n in &a.export_ok {
+                    if !optional_set.contains(n) {
+                        optional_set.push(n.clone());
+                    }
                 }
-            }
-        }
+                for (tag, members) in &a.export_tags {
+                    let bucket = tags.entry(tag.clone()).or_default();
+                    for m in members {
+                        if !bucket.contains(m) {
+                            bucket.push(m.clone());
+                        }
+                    }
+                }
+                std::ops::ControlFlow::Continue(())
+            },
+        );
 
         let mut all_names: HashSet<String> = HashSet::new();
         all_names.extend(default_set.iter().cloned());

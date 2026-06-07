@@ -388,21 +388,21 @@ impl ModuleIndex {
         self.cache.get(module_name).and_then(|entry| entry.clone())
     }
 
-    /// Find the cached module that actually defines sub `name`, starting at
-    /// `entry` and following re-export edges (`reexport_modules`) when `entry`
-    /// re-exports another module's surface. The directly-`use`d module is tried
-    /// first; re-exporters delegate the def location to whoever they re-export.
-    /// Bounded like the export-surface walk: seen-set for cycles, fan-out cap.
-    /// Never does I/O.
-    pub fn defining_module_cached(
-        &self,
-        entry: &str,
-        name: &str,
-    ) -> Option<Arc<CachedModule>> {
+    /// Breadth-first walk over re-export edges (`reexport_modules`), starting
+    /// from `start` and visiting each reachable cached module — the start
+    /// modules first, then whatever they re-export. `visit` returns
+    /// `ControlFlow::Break` to stop early. Bounded by a seen-set (cycles) and a
+    /// fan-out cap; never does I/O. The single place the re-export edge
+    /// traversal lives — `defining_module_cached` (def location) and
+    /// `FileAnalysis::export_surface_with_index` (transitive surface) both ride
+    /// it instead of hand-copying the BFS.
+    pub fn for_each_reexport_module<F>(&self, start: impl IntoIterator<Item = String>, mut visit: F)
+    where
+        F: FnMut(&Arc<CachedModule>) -> std::ops::ControlFlow<()>,
+    {
         const MAX: usize = 256;
         let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-        let mut queue: std::collections::VecDeque<String> = std::collections::VecDeque::new();
-        queue.push_back(entry.to_string());
+        let mut queue: std::collections::VecDeque<String> = start.into_iter().collect();
         let mut visited = 0usize;
         while let Some(module) = queue.pop_front() {
             if !seen.insert(module.clone()) {
@@ -413,8 +413,8 @@ impl ModuleIndex {
                 break;
             }
             let Some(cached) = self.get_cached(&module) else { continue };
-            if cached.sub_info(name).is_some() {
-                return Some(cached);
+            if visit(&cached).is_break() {
+                return;
             }
             for next in &cached.analysis.reexport_modules {
                 if !seen.contains(next) {
@@ -422,7 +422,28 @@ impl ModuleIndex {
                 }
             }
         }
-        None
+    }
+
+    /// Find the cached module that actually defines sub `name`, starting at
+    /// `entry` and following re-export edges when `entry` re-exports another
+    /// module's surface. The directly-`use`d module is tried first;
+    /// re-exporters delegate the def location to whoever they re-export.
+    pub fn defining_module_cached(
+        &self,
+        entry: &str,
+        name: &str,
+    ) -> Option<Arc<CachedModule>> {
+        use std::ops::ControlFlow;
+        let mut found = None;
+        self.for_each_reexport_module(std::iter::once(entry.to_string()), |cached| {
+            if cached.sub_info(name).is_some() {
+                found = Some(Arc::clone(cached));
+                ControlFlow::Break(())
+            } else {
+                ControlFlow::Continue(())
+            }
+        });
+        found
     }
 
     /// Return cached module path only — never does I/O.
