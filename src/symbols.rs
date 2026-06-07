@@ -2430,20 +2430,20 @@ pub fn collect_diagnostics(
     // this snapshot — the same logic as `classify_import`, but the surface walk
     // and `imported_names` allocation happen once per import instead of once per
     // (unresolved-ref × import) on every diagnostics publish (every keystroke).
-    let import_bindings: Vec<(
-        &crate::file_analysis::Import,
-        Option<std::path::PathBuf>,
-        HashMap<String, String>,
-        Option<std::collections::HashSet<String>>,
-    )> = analysis
+    // Diagnostics need only the import + verdict, not the producer path or the
+    // remote name `classify_import` also returns — so neither is computed here.
+    struct ImportBinding<'a> {
+        import: &'a crate::file_analysis::Import,
+        /// local → remote for everything this `use` brings into scope.
+        bound: HashMap<String, String>,
+        /// Names on the producer's export surface; `None` when not yet cached.
+        exported: Option<std::collections::HashSet<String>>,
+    }
+    let import_bindings: Vec<ImportBinding> = analysis
         .imports
         .iter()
         .map(|import| {
             let cached = module_index.get_cached(&import.module_name);
-            let path = cached
-                .as_ref()
-                .map(|c| c.path.clone())
-                .or_else(|| module_index.module_path_cached(&import.module_name));
             let (bound, exported) = if let Some(c) = &cached {
                 let surface = c.analysis.export_surface_with_index(module_index);
                 let bound = crate::file_analysis::imported_names(import, &surface)
@@ -2460,33 +2460,27 @@ pub fn collect_diagnostics(
                     .collect();
                 (bound, None)
             };
-            (import, path, bound, exported)
+            ImportBinding { import, bound, exported }
         })
         .collect();
 
     // Best resolution of a call name across all imports: `Brought` dominates
     // `ExportedNotBrought`. Mirrors `resolve_imported_function_classified` over
     // the precomputed snapshot.
-    let resolve_name = |name: &str| -> Option<(
-        &crate::file_analysis::Import,
-        Option<std::path::PathBuf>,
-        String,
-        ImportResolution,
-    )> {
-        let mut best: Option<(_, _, _, ImportResolution)> = None;
-        for (import, path, bound, exported) in &import_bindings {
-            let verdict = if let Some(remote) = bound.get(name) {
-                Some((ImportResolution::Brought, remote.clone()))
-            } else if exported.as_ref().is_some_and(|e| e.contains(name)) {
-                Some((ImportResolution::ExportedNotBrought, name.to_string()))
+    let resolve_name = |name: &str| -> Option<(&crate::file_analysis::Import, ImportResolution)> {
+        let mut best: Option<(&crate::file_analysis::Import, ImportResolution)> = None;
+        for b in &import_bindings {
+            let res = if b.bound.contains_key(name) {
+                ImportResolution::Brought
+            } else if b.exported.as_ref().is_some_and(|e| e.contains(name)) {
+                ImportResolution::ExportedNotBrought
             } else {
-                None
+                continue;
             };
-            let Some((res, remote)) = verdict else { continue };
-            if matches!(best, Some((_, _, _, ImportResolution::Brought))) {
+            if matches!(best, Some((_, ImportResolution::Brought))) {
                 continue;
             }
-            best = Some((*import, path.clone(), remote, res));
+            best = Some((b.import, res));
         }
         best
     };
@@ -2538,8 +2532,8 @@ pub fn collect_diagnostics(
         let range = span_to_range(r.span);
         let resolution = resolve_name(name);
         match resolution {
-            Some((_, _, _, ImportResolution::Brought)) => continue,
-            Some((import, _path, _remote, ImportResolution::ExportedNotBrought)) => {
+            Some((_, ImportResolution::Brought)) => continue,
+            Some((import, ImportResolution::ExportedNotBrought)) => {
                 diagnostics.push(Diagnostic {
                     range,
                     severity: Some(DiagnosticSeverity::HINT),
