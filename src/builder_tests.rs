@@ -4945,6 +4945,39 @@ sub setup {
 }
 
 #[test]
+fn test_strict_mojo_base_shift_not_invocant() {
+    // `use Mojo::Base -strict` is a non-OO module: a bare `my $x = shift` is
+    // arg[0], NOT the invocant, so it must not type as the package (doing so
+    // produced bogus unresolved-method diagnostics, e.g. $tx->res in
+    // Mojo::WebSocket). A named invocant is still typed elsewhere.
+    let fa = build_fa(
+        "package MyStrict;\nuse Mojo::Base -strict;\nsub helper {\n  my $tx = shift;\n  return $tx->res;\n}\n",
+    );
+    assert_eq!(
+        fa.inferred_type_via_bag("$tx", Point::new(4, 9)),
+        None,
+        "shift in a -strict (non-OO) module must not type as the package"
+    );
+}
+
+#[test]
+fn test_mojo_base_base_and_strict_still_oo() {
+    // `-base` (in any order, even alongside the redundant `-strict`) makes the
+    // package a class, so a bare `shift` IS the invocant.
+    for src in [
+        "package C;\nuse Mojo::Base -base, -strict;\nsub greet {\n  my $x = shift;\n  return $x->name;\n}\n",
+        "package C;\nuse Mojo::Base -strict, -base;\nsub greet {\n  my $x = shift;\n  return $x->name;\n}\n",
+    ] {
+        let fa = build_fa(src);
+        assert_eq!(
+            fa.inferred_type_via_bag("$x", Point::new(4, 9)),
+            Some(InferredType::ClassName("C".into())),
+            "-base makes the package OO regardless of a redundant -strict: {src}"
+        );
+    }
+}
+
+#[test]
 fn test_glob_assigned_sub_ternary_rhs_registers() {
     // Try::Tiny `*_subname = $su ? \&Sub::Util::set_subname : sub {...}` /
     // Path::Tiny `*_same = IS_WIN32() ? sub{} : sub{}`: the glob holds a coderef

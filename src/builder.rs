@@ -243,6 +243,7 @@ fn build_with_plugins_inner(
         bag: crate::witnesses::WitnessBag::new(),
         unresolved_expr_nodes: Vec::new(),
         package_framework: std::collections::HashMap::new(),
+        non_oo_packages: std::collections::HashSet::new(),
         scope_stack: Vec::new(),
         // Perl's implicit top-level package. Without this seed,
         // top-level scripts (`Mojolicious::Lite` apps, one-off
@@ -1388,6 +1389,11 @@ struct Builder<'a> {
     /// reducer with the right context.
     package_framework: std::collections::HashMap<String, crate::witnesses::FrameworkFact>,
 
+    /// Packages that explicitly opted out of class machinery (`use Mojo::Base
+    /// -strict`). In these, a bare `shift` / `$_[0]` is an ordinary argument,
+    /// not the method invocant — see `shift_is_invocant_here`.
+    non_oo_packages: std::collections::HashSet<String>,
+
     // Walk state
     scope_stack: Vec<ScopeId>,
     current_package: Option<String>,
@@ -1593,6 +1599,22 @@ impl<'a> Builder<'a> {
             cur = s.parent;
         }
         None
+    }
+
+    /// Is a bare `shift` / `$_[0]` here the method invocant (→ enclosing class),
+    /// or just `arg[0]`? OO-by-convention is the default (a base class like
+    /// `DateTime` types `bless {...}, ref $_[0]` even without declared parents),
+    /// EXCEPT in a package that explicitly opted out of class machinery via
+    /// `use Mojo::Base -strict`. There the first `@_` element is an ordinary
+    /// argument, so typing it as the class produced bogus `unresolved-method`
+    /// diagnostics (`$tx = shift; $tx->res` in `Mojo::WebSocket`). (rule #10:
+    /// the opt-out is recorded as a package property at the `use` site, not
+    /// re-derived from the `shift` shape here.)
+    fn shift_is_invocant_here(&self, node: Node<'a>) -> bool {
+        match self.package_for_node(node) {
+            Some(pkg) => !self.non_oo_packages.contains(&pkg),
+            None => true,
+        }
     }
 
     /// Innermost scope containing `point`. Mirrors
@@ -2214,6 +2236,9 @@ impl<'a> Builder<'a> {
             // post-walk correctness; same reason as the `$self`
             // case above.
             "func1op_call_expression" if self.is_shift_call(node) => {
+                if !self.shift_is_invocant_here(node) {
+                    return None;
+                }
                 self.package_for_node(node).map(InferredType::ClassName)
             }
             "array_element_expression" => {
@@ -2224,6 +2249,9 @@ impl<'a> Builder<'a> {
                 // (`sub m { $_[0]->... }`) — enclosing-class identity,
                 // not a real array read.
                 if self.is_positional_receiver(node) {
+                    if !self.shift_is_invocant_here(node) {
+                        return None;
+                    }
                     return self.package_for_node(node).map(InferredType::ClassName);
                 }
                 // General `$arr[N]`: read `@arr`'s Sequence shape from
@@ -4747,20 +4775,28 @@ impl<'a> Builder<'a> {
                     }
                 }
                 "Mojo::Base" => {
-                    // `-strict` means strict-mode only, no accessor machinery.
-                    let is_strict = raw_args.iter().any(|a| a == "-strict");
-                    if !is_strict {
-                        // `Mojo::Base -base` (or `'Parent'`) — the package IS-A
-                        // Mojo::Base, so register it as a parent too: `tap` /
-                        // `attr` / `new` resolve through the inheritance walk.
-                        let mut parents: Vec<String> = raw_args.iter()
-                            .filter(|s| !s.starts_with('-'))
-                            .cloned()
-                            .collect();
-                        if raw_args.iter().any(|a| a == "-base") {
-                            parents.push("Mojo::Base".to_string());
-                        }
+                    // OO-ness is decided by `-base` or a parent-class arg, NOT by
+                    // `-strict` — `-base` implies strict, and `use Mojo::Base
+                    // -base, -strict` (redundant but legal) is still a class. The
+                    // package IS-A its parents (or Mojo::Base for `-base`), so
+                    // `tap` / `attr` / `new` resolve through the inheritance walk.
+                    let mut parents: Vec<String> = raw_args.iter()
+                        .filter(|s| !s.starts_with('-'))
+                        .cloned()
+                        .collect();
+                    let has_base = raw_args.iter().any(|a| a == "-base");
+                    if has_base {
+                        parents.push("Mojo::Base".to_string());
+                    }
+                    if !parents.is_empty() {
                         self.apply_mojo_base_mode(pkg, parents, node);
+                    } else if raw_args.iter().any(|a| a == "-strict") {
+                        // Pure `-strict` (no `-base`, no parent): strict-mode only,
+                        // no class machinery. A bare `shift` here is arg[0], not the
+                        // invocant (see `shift_is_invocant_here`).
+                        if let Some(p) = self.current_package.clone() {
+                            self.non_oo_packages.insert(p);
+                        }
                     }
                 }
                 // `use Mojo::EventEmitter -base` / any `use X -base`: X becomes a
