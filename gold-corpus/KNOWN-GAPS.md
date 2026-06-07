@@ -173,18 +173,6 @@ carried across `my $clone = $self->new; ...; return $clone`. (Contrast the direc
 `return $self` setters and the `bless …, ref $_[0]` clone, which both type fine.)
 **Subsystem:** chain typing across an intermediate `$x = $self->new`. **Difficulty:** medium.
 
-### `completion-inherited-http-message` / `completion-inherited-mojo-base-controller` — inherited methods absent from `$self->` completion
-`$self->` inside a method offers the package's OWN methods but NOT those inherited
-via `use parent 'HTTP::Message'` or `use Mojo::Base -base` (e.g. `content`/`header`,
-`tap`/`with_roles`). goto-def/hover already walk ancestors; completion candidate
-collection doesn't. **Subsystem:** completion ancestor walk. **Difficulty:** low–medium.
-
-### `ref-try-tiny-try-bareword-blockcalls` — bareword block-prototype calls not found as refs
-`references` on `sub try (&;@)` finds the `@EXPORT` entry, import-list spellings,
-and fully-qualified `Try::Tiny::try` calls — but NOT the `try { ... }` bareword call
-sites (the prototyped-block invocation form). **Subsystem:** ref graph for
-`(&;@)`-prototyped sub calls. **Difficulty:** medium.
-
 ### `def-moo-role-goto-amp-fq-import` — `goto &Role::Tiny::import` doesn't resolve
 goto-def on the target of `goto &Role::Tiny::import` finds nothing. tree-sitter
 parses the `&`-call name as a single `varname` spanning `Role::Tiny::import`, so the
@@ -223,8 +211,6 @@ class. **Subsystem:** first-param-self heuristic (`detect_first_param_type`).
 | ti-12 (`shift->SUPER::new`) | parser 1.1.0 regression | **open (root cause)** |
 | sig-mojo-controller-cookie-shift | `(shift,shift)` param extraction | **low** |
 | def-moo-role-goto-amp-fq-import | `&`-deref FQ call ref | low–medium |
-| completion-inherited-* | completion ancestor walk | low–medium |
-| ref-try-tiny-try-bareword-blockcalls | `(&;@)` block-call refs | medium |
 | hover/ti mojo-url clone-via-new | chain typing across `$x=$self->new` | medium |
 | diag-mojo-cookiejar/daemon first-param-self | invocant heuristic in OO class | **high** (ambiguous) |
 

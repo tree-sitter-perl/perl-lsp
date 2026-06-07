@@ -6625,7 +6625,12 @@ impl FileAnalysis {
     }
 
     /// Complete methods for an invocant (variable or class name) at a point.
-    pub fn complete_methods(&self, invocant: &str, point: Point) -> Vec<CompletionCandidate> {
+    pub fn complete_methods(
+        &self,
+        invocant: &str,
+        point: Point,
+        module_index: Option<&ModuleIndex>,
+    ) -> Vec<CompletionCandidate> {
         let class_name = if !invocant.starts_with('$')
             && !invocant.starts_with('@')
             && !invocant.starts_with('%')
@@ -6640,7 +6645,12 @@ impl FileAnalysis {
         };
 
         if let Some(ref cn) = class_name {
-            let candidates = self.complete_methods_for_class(cn, None);
+            // Pass `module_index` so the ancestor walk reaches CROSS-FILE
+            // parents. Without it, an untyped `$self` (e.g. assigned via
+            // `$class->SUPER::new`, which the bag can't yet type) resolves to
+            // the enclosing class but offers only its OWN methods — inherited
+            // methods from a `use parent`/`-base` ancestor vanish.
+            let candidates = self.complete_methods_for_class(cn, module_index);
             if !candidates.is_empty() {
                 return candidates;
             }

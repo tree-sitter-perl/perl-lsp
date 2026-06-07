@@ -322,22 +322,6 @@
       "note": "refs from `sub try` find the @EXPORT entry + cross-file callers (import list + FQ Try::Tiny::try)."
     },
     {
-      "id": "ref-try-tiny-try-bareword-blockcalls",
-      "difficulty": "tricky",
-      "semantic_area": "exporter",
-      "file": "Try/Tiny.pm",
-      "line": 37,
-      "col": 4,
-      "expect": {
-        "all": [
-          "\"file\":\"Protocol.pm\",\"line\":\"70\""
-        ],
-        "none": []
-      },
-      "status": "xfail",
-      "note": "GAP: refs to `try` miss bareword block-prototype call sites (`try { ... }`). Only import-list + FQ calls indexed."
-    },
-    {
       "id": "ref-try-tiny-catch-callers",
       "difficulty": "tricky",
       "semantic_area": "exporter",

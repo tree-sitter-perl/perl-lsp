@@ -227,12 +227,12 @@
       "expect": {
         "all": [
           "content\t",
-          "header\t"
+          "headers\t"
         ],
         "none": []
       },
-      "status": "xfail",
-      "note": "GAP: $self-> omits methods inherited via `use parent HTTP::Message`."
+      "status": "gold",
+      "note": "$self-> completion offers methods inherited via `use parent HTTP::Message` (content/headers). Untyped $self (assigned via $class->SUPER::new) still resolves the enclosing class + walks cross-file ancestors."
     },
     {
       "id": "completion-inherited-mojo-base-controller",
@@ -248,8 +248,8 @@
         ],
         "none": []
       },
-      "status": "xfail",
-      "note": "GAP: $self-> omits methods inherited from Mojo::Base via `use Mojo::Base -base`."
+      "status": "gold",
+      "note": "$self-> completion offers methods inherited from Mojo::Base via `use Mojo::Base -base` (tap/with_roles)."
     }
   ]
 }

@@ -700,7 +700,7 @@ fn completion_items_native(
                     Vec::new()
                 }
             } else {
-                analysis.complete_methods(invocant_text, point)
+                analysis.complete_methods(invocant_text, point, Some(module_index))
             }
         }
         CursorContext::HashKey { ref owner_type, ref var_text, ref source_sub } => {

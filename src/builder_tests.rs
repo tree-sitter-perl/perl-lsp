@@ -383,12 +383,31 @@ fn test_implicit_self_type_inference() {
 }
 
 #[test]
+fn test_self_completion_walks_ancestors_in_fallback() {
+    // Untyped `$self` (the fallback path, no bag type — e.g. assigned via
+    // `$class->SUPER::new`) must still resolve to the enclosing class AND walk
+    // its ancestors, so inherited methods are offered, not just own ones.
+    let source = "package Base;\nsub inherited_m { 1 }\npackage Child;\nuse parent -norequire, 'Base';\nsub own_m {\n  my $self = $class->SUPER::new;\n  $self->\n}\n";
+    let fa = build_fa(source);
+    let names: Vec<String> = fa
+        .complete_methods("$self", Point::new(6, 9), None)
+        .into_iter()
+        .map(|c| c.label)
+        .collect();
+    assert!(names.iter().any(|n| n == "own_m"), "own method missing: {names:?}");
+    assert!(
+        names.iter().any(|n| n == "inherited_m"),
+        "inherited (ancestor) method missing from untyped-$self fallback: {names:?}"
+    );
+}
+
+#[test]
 fn test_self_completion_inside_method() {
     // $self-> inside a method should complete with sibling methods
     let source = "use v5.38;\nclass Point {\n    field $x :param :reader;\n    method magnitude () { }\n    method to_string () {\n        $self->;\n    }\n}\n";
     let fa = build_fa(source);
 
-    let candidates = fa.complete_methods("$self", Point::new(5, 14));
+    let candidates = fa.complete_methods("$self", Point::new(5, 14), None);
     let names: Vec<&str> = candidates.iter().map(|c| c.label.as_str()).collect();
     assert!(
         names.contains(&"magnitude"),
@@ -429,7 +448,7 @@ fn test_field_writer_synthesizes_method() {
 fn test_complete_methods_in_class() {
     let fa = build_fa("use v5.38;\nclass Point {\n    field $x :param :reader;\n    field $y :param;\n    method magnitude() { }\n    method to_string() { }\n}\nmy $p = Point->new(x => 1);\n$p->;\n");
     // $p-> is at line 8, col 4
-    let candidates = fa.complete_methods("$p", Point::new(8, 4));
+    let candidates = fa.complete_methods("$p", Point::new(8, 4), None);
     let names: Vec<&str> = candidates.iter().map(|c| c.label.as_str()).collect();
     assert!(names.contains(&"new"), "missing new, got: {:?}", names);
     assert!(
@@ -464,7 +483,7 @@ $p->;
     let inferred = fa.inferred_type_via_bag("$p", Point::new(8, 4));
     assert!(inferred.is_some(), "type inference for $p should resolve");
 
-    let candidates = fa.complete_methods("$p", Point::new(10, 4));
+    let candidates = fa.complete_methods("$p", Point::new(10, 4), None);
     let names: Vec<&str> = candidates.iter().map(|c| c.label.as_str()).collect();
     assert!(
         names.contains(&"magnitude"),
@@ -497,7 +516,7 @@ $p->;
 "#;
     let fa = build_fa(source);
 
-    let candidates = fa.complete_methods("$p", Point::new(11, 4));
+    let candidates = fa.complete_methods("$p", Point::new(11, 4), None);
     let names: Vec<&str> = candidates.iter().map(|c| c.label.as_str()).collect();
     assert!(names.contains(&"new"), "missing new, got: {:?}", names);
     assert!(
@@ -518,7 +537,7 @@ fn test_complete_methods_flat_class() {
     // class Foo; (no block) — methods follow as siblings, like package
     let source = "use v5.38;\nclass Foo;\nmethod bar () { }\nmethod baz () { }\n";
     let fa = build_fa(source);
-    let candidates = fa.complete_methods("Foo", Point::new(3, 0));
+    let candidates = fa.complete_methods("Foo", Point::new(3, 0), None);
     let names: Vec<&str> = candidates.iter().map(|c| c.label.as_str()).collect();
     assert!(names.contains(&"bar"), "missing bar, got: {:?}", names);
     assert!(names.contains(&"baz"), "missing baz, got: {:?}", names);
