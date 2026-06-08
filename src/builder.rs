@@ -10820,10 +10820,12 @@ impl<'a> Builder<'a> {
             return true;
         }
         match node.kind() {
-            "scalar" => matches!(
-                node.utf8_text(self.source).ok(),
-                Some("$self") | Some("$class") | Some("$this") | Some("$proto")
-            ),
+            // Compare the canonical varname (bare identifier), not the raw node
+            // text — so the braced spellings `${self}` / `${ class }` match too,
+            // and a deref (`${$ref}`, whose varname child is a `block`) does not.
+            "scalar" => find_varname_child(node)
+                .and_then(|v| v.utf8_text(self.source).ok())
+                .is_some_and(|n| matches!(n, "self" | "class" | "this" | "proto")),
             "array_element_expression" => self.is_positional_receiver(node),
             // `ref <invocant>`
             "func1op_call_expression" => {
