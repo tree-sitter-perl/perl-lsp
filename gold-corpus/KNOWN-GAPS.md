@@ -199,9 +199,21 @@ Two-part fix:
      `ReturnExpr::ReceiverOr` substitutes the caller's class. Needs the inheritance
      check via `q.context` (it carries `module_index` + `package_parents`).
 
-**Subsystem:** `SUPER::` dispatch in method-call-return edges + inheritance-aware
-receiver preservation. **Difficulty:** high — change (2) touches the receiver
-semantics of every dispatch, so it warrants its own PR + full regression pass.
+**Attempted (and backed out) — necessary but NOT sufficient.** Both parts were
+implemented and part (1) verified firing correctly (`SUPER::new` → emits
+`MethodOnClass{Base, new}`, `encl=Child`). But it surfaced a deeper blocker: with
+the SUPER edge present, even a *direct* `find_method_return_type("Base", "new")`
+on the same FA returns `None` — i.e. the presence of a sibling SUPER-delegating
+`new` **corrupts the base class's own resolution**. The CallReturn chase reaches
+`MethodOnClass{Base, new}` with `receiver=Child` but the nested `query_rec`
+returns `None` while the standalone query returns `Base`, which points at a
+shared-`QueryState` memo / cycle-guard interaction in the fold's write-back (the
+SUPER edge is processed at build time, feeding `seed_return_types_from_bag`).
+**So the real prerequisite is understanding that registry/fold interaction** — the
+two-part change alone regresses base resolution. **Subsystem:** `SUPER::` dispatch
++ the shared-state memo/cycle behavior in `query_rec` during the fold.
+**Difficulty:** high — needs the memo/cycle interaction nailed before the
+two-part change is safe.
 
 ### `diag-mojo-cookiejar-helper-fp` / `diag-mojo-daemon-callback-fp` — first-param-self over-reach in OO classes
 In an OO class, a plain helper (`sub _compare { my ($cookie,…)=@_ }`) or an
