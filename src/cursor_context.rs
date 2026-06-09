@@ -364,6 +364,29 @@ pub fn detect_cursor_context_tree_with_index(
                 // Check if cursor is after -> (in the method position)
                 if let Some(invocant_node) = current.child_by_field_name("invocant") {
                     if invocant_node.end_position() < point {
+                        // `$obj->Foo::Bar::` / `$obj->Foo::ba` — a fully-qualified
+                        // method is being typed. The qualifier names the dispatch
+                        // PACKAGE, so complete its subs (same as a bare `Foo::Bar::`),
+                        // not the invocant's own methods. SUPER isn't a package, so
+                        // it falls through to ordinary method completion.
+                        if let Some(method) = current.child_by_field_name("method") {
+                            if let Ok(mtext) = method.utf8_text(source) {
+                                if let Some(idx) = mtext.rfind("::") {
+                                    let qualifier = &mtext[..idx];
+                                    let ms = method.start_position();
+                                    let past_qualifier = point.row == ms.row
+                                        && point.column >= ms.column + idx + 2;
+                                    if qualifier != "SUPER"
+                                        && past_qualifier
+                                        && is_perl_package_name(qualifier)
+                                    {
+                                        return Some(CursorContext::QualifiedPath {
+                                            package: qualifier.to_string(),
+                                        });
+                                    }
+                                }
+                            }
+                        }
                         // stub_expression means the parser absorbed "()" from a function
                         // call like `get_config()->`. The real invocant is the parent
                         // ambiguous_function_call_expression (i.e. the full `get_config()` call).

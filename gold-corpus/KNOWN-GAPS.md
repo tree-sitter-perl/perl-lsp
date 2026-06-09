@@ -219,20 +219,24 @@ mirror how FunctionCall already treats `Foo::Bar::baz()`:
   (`fq_tail_span`) so rename rewrites only `m`. This single class seam +
   bare-name projection drives goto-def, references, rename/prepareRename, hover,
   document-highlight, and signature-help.
-- **Completion** — `Foo::Bar::` (package-qualified) completes the package's subs
-  natively.
+- **Completion** — both `Foo::Bar::` (bare) and `$obj->Foo::Bar::` (on a variable
+  invocant) complete the qualifier package's subs; the tree cursor-context detects
+  a `::`-bearing method token after `->` and routes to `QualifiedPath`.
+- **SUPER navigation** — `$self->SUPER::m` resolves to the enclosing package's
+  parent method: `qualified_dispatch_class` maps `SUPER` → first parent, so
+  goto-def jumps to the parent's `m`, hover shows it, and renaming the parent
+  method rewrites the SUPER call (a dangling SUPER call would be a broken rename —
+  see the updated `rename-11-urn-canonical-precision`, which now asserts the isbn
+  SUPER call IS renamed while the subclass override and unrelated `_generic.pm`
+  are not). `$self->SUPER::` completion falls through to ordinary method
+  completion (SUPER isn't a package), so inherited methods still show.
 
-Proven by `test_fq_method_call_dispatches_from_named_class` (return typing) and
+Proven by `test_fq_method_call_dispatches_from_named_class` (return typing),
 `test_fq_method_call_nav_dispatches_from_named_class` (goto-def / rename / class
-resolution / tail-span). **Minor residuals:**
-- **SUPER navigation** (`$self->SUPER::m` goto-def/refs/rename) is deliberately
-  NOT swept: `qualified_dispatch_class` returns `None` for `SUPER` so a subclass
-  SUPER call isn't pulled into a rename of the parent's method (precision — see
-  `rename-11-urn-canonical-precision`). SUPER *return typing* works; SUPER nav is
-  a tracked follow-up that needs override-vs-call rename policy first.
-- **`$obj->Foo::Bar::` completion** on a *variable* invocant (vs the common
-  `Foo::Bar::`) — rare, returns nothing; the cursor-context method-vs-qualified
-  detection picks the unresolved-invocant method path first.
+resolution / tail-span), `test_super_method_nav_resolves_to_parent` (SUPER nav),
+and `test_tree_context_fq_method_is_qualified_path` (completion context).
+**Residual:** multi-parent `SUPER::m` nav resolves only the *first* parent (Perl
+walks the full parent MRO); single inheritance — the common case — is exact.
 
 ### `return bless {BLOCK}, CLASS` class arg stranding — **FIXED**
 tree-sitter-perl parses `return bless {}, $class` as `return((bless {}), $class)`:
@@ -270,8 +274,7 @@ class. **Subsystem:** first-param-self heuristic (`detect_first_param_type`).
 | diag-08 (loader call) | XS loader recognition | **low** |
 | diag-09 / diag-10 | typeglob-codegen synthesis | medium |
 | def-16-codegen-type-function | Type::Library synthesis | medium |
-| SUPER navigation (`$self->SUPER::m` goto-def/refs/rename) — return typing done | needs override-vs-call rename policy | medium |
-| `$obj->Foo::Bar::` completion on a variable invocant (`Foo::Bar::` works) | cursor-context method-vs-qualified detection | low |
+| multi-parent `SUPER::m` nav (single-inheritance is exact) | first-parent only vs full parent MRO | low |
 | completion-datetime-hashkey | slot-write harvest (A4 tail) | medium–high |
 | mojo-url clone *sub-return* (variable is fixed) | build-time `return_types` seed vs query-time cross-file method-return | medium–high |
 | diag-mojo-cookiejar/daemon first-param-self | invocant heuristic in OO class | **high** (ambiguous) |

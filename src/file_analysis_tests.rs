@@ -377,6 +377,45 @@ fn test_fq_method_call_nav_dispatches_from_named_class() {
     }
 }
 
+/// `$self->SUPER::m` dispatches to the enclosing package's PARENT method —
+/// goto-def jumps to it and renaming the parent method rewrites the SUPER call
+/// (a dangling SUPER call would be a broken rename).
+#[test]
+fn test_super_method_nav_resolves_to_parent() {
+    use crate::file_analysis::{RefKind, RenameKind};
+    let src = "package Base;\nsub greet { return 1 }\npackage Child;\nuse parent -norequire, 'Base';\nsub greet { my $self = shift; return $self->SUPER::greet }\n";
+    let fa = build_fa_from_source(src);
+
+    let sref = fa
+        .refs
+        .iter()
+        .find(|r| matches!(r.kind, RefKind::MethodCall { .. }) && r.target_name == "SUPER::greet")
+        .expect("SUPER method ref present");
+    assert_eq!(
+        fa.method_call_invocant_class(sref, None).as_deref(),
+        Some("Base"),
+        "SUPER dispatches to the enclosing package's parent"
+    );
+    let span = if let RefKind::MethodCall { method_name_span, .. } = &sref.kind {
+        *method_name_span
+    } else {
+        unreachable!()
+    };
+    // goto-def on the SUPER call lands on `Base::greet` (line 1).
+    let def = fa
+        .find_definition(span.start, None, None, None)
+        .expect("SUPER goto-def resolves");
+    assert_eq!(def.start.row, 1, "SUPER::greet resolves to Base::greet, got {:?}", def);
+    // Renaming targets the parent method on `Base` (so the SUPER call tracks).
+    match fa.rename_kind_at(span.start, None) {
+        Some(RenameKind::Method { name, class }) => {
+            assert_eq!(name, "greet");
+            assert_eq!(class, "Base");
+        }
+        other => panic!("expected Method rename on Base, got {:?}", other),
+    }
+}
+
 /// A qualified call to package Foo's `baz` must not resolve to a same-named
 /// `baz` in another package — `resolved_package` isolates the qualifier.
 #[test]

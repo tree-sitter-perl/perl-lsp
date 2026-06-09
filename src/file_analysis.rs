@@ -5195,17 +5195,18 @@ impl FileAnalysis {
     /// Resolve the dispatch class named by a method token's `::` qualifier
     /// (`$obj->Foo::Bar::m` → `Foo::Bar`). A leading `::` (`->::m`) is `main`.
     ///
-    /// `SUPER` is deliberately NOT resolved here: it's a keyword, not a literal
-    /// class, and sweeping `$self->SUPER::m` calls into a rename of the
-    /// parent's `m` would break method-rename precision (a subclass's SUPER
-    /// call is a reference to a *specific* parent method, distinct from plain
-    /// dispatch — see gold `rename-11-urn-canonical-precision`). Returning
-    /// `None` keeps SUPER nav an honest miss; SUPER *return typing* is handled
-    /// separately on the witness seam (`QualifiedCallReturn`). SUPER navigation
-    /// is a tracked follow-up.
-    fn qualified_dispatch_class(&self, qualifier: &str, _scope: ScopeId) -> Option<String> {
+    /// `SUPER::m` dispatches to the enclosing package's parent — `$self->
+    /// SUPER::m` is a reference to that *specific* parent method (so goto-def
+    /// jumps to it, and renaming the parent method rewrites the SUPER call;
+    /// leaving it dangling would be a broken rename). First parent only: Perl's
+    /// SUPER walks the full parent MRO, but single inheritance is the common
+    /// case; multi-parent SUPER nav is a rare residual.
+    fn qualified_dispatch_class(&self, qualifier: &str, scope: ScopeId) -> Option<String> {
         match qualifier {
-            "SUPER" => None,
+            "SUPER" => {
+                let encl = self.enclosing_class_for_scope(scope)?;
+                self.package_parents.get(&encl).and_then(|ps| ps.first().cloned())
+            }
             "" => Some("main".to_string()),
             class => Some(class.to_string()),
         }
