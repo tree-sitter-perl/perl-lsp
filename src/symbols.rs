@@ -1829,8 +1829,12 @@ pub fn signature_help(
                 } else {
                     p.name.clone()
                 };
-                // Skip $self/$class — type is obvious
-                if p.name == "$self" || p.name == "$class" {
+                // Skip the invocant — its type is obvious. Flag first (covers
+                // plugin-marked invocants like a helper's `$c`); name
+                // convention as backstop for pre-flag cache blobs.
+                if p.is_invocant
+                    || crate::conventions::is_conventional_invocant_name(&p.name)
+                {
                     return base;
                 }
                 // Cross-file: use pre-resolved param types
@@ -1927,8 +1931,8 @@ pub fn inlay_hints(analysis: &FileAnalysis, range: Range) -> Vec<InlayHint> {
 
         match sym.kind {
             FaSymKind::Variable => {
-                // Skip $self — always the enclosing class, too noisy
-                if sym.name == "$self" {
+                // Skip conventional invocants — always the enclosing class.
+                if crate::conventions::is_conventional_invocant_name(&sym.name) {
                     continue;
                 }
                 if let Some(ty) = analysis.inferred_type_via_bag(&sym.name, sym.span.start) {

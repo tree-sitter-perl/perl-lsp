@@ -4156,7 +4156,7 @@ impl FileAnalysis {
     /// compose this; they don't repeat the rules.
     pub fn invocant_text_to_class(&self, invocant: Option<&str>, point: Point) -> Option<String> {
         let text = invocant?;
-        if text == "$self" || text == "__PACKAGE__" {
+        if crate::conventions::is_conventional_invocant_name(text) || text == "__PACKAGE__" {
             return self.package_at(point).map(|s| s.to_string());
         }
         if text.starts_with('$') {
@@ -5339,10 +5339,10 @@ impl FileAnalysis {
             {
                 return Some(cn);
             }
-            // `$self` enclosing-class fallback for an untyped variable
-            // invocant. Other untyped variable invocants stay None —
+            // Conventional-invocant enclosing-class fallback for an untyped
+            // variable invocant. Other untyped variable invocants stay None —
             // better than poisoning them with the surrounding package.
-            if invocant == "$self" {
+            if crate::conventions::is_conventional_invocant_name(invocant) {
                 return self.enclosing_class_for_scope(r.scope);
             }
             return None;
@@ -5506,7 +5506,7 @@ impl FileAnalysis {
             if let Some(t) = self.inferred_type_via_bag_ctx(invocant, point, module_index) {
                 return Some(t);
             }
-            if invocant == "$self" {
+            if crate::conventions::is_conventional_invocant_name(invocant) {
                 return self.enclosing_class_for_scope(r.scope).map(InferredType::ClassName);
             }
             return None;
@@ -5569,7 +5569,7 @@ impl FileAnalysis {
                     // goto-def on the method name lands on
                     // `package MyApp;`. The comment here described
                     // this guard but the code didn't actually check.
-                    if invocant != "$self" {
+                    if !crate::conventions::is_conventional_invocant_name(invocant) {
                         return None;
                     }
                     let chain = self.scope_chain(scope);
@@ -6413,7 +6413,7 @@ impl FileAnalysis {
         for sym in &self.symbols {
             match sym.kind {
                 SymKind::Variable | SymKind::Field => {
-                    let is_self = sym.name == "$self" || sym.name == "$class";
+                    let is_self = crate::conventions::is_conventional_invocant_name(&sym.name);
                     let (sigil, is_readonly, is_param) = match &sym.detail {
                         SymbolDetail::Variable { sigil, decl_kind } => {
                             let readonly = matches!(decl_kind, DeclKind::Field);
@@ -6492,7 +6492,8 @@ impl FileAnalysis {
             match &r.kind {
                 RefKind::Variable | RefKind::ContainerAccess => {
                     let sigil = r.target_name.chars().next().unwrap_or('$');
-                    let is_self = r.target_name == "$self" || r.target_name == "$class";
+                    let is_self =
+                        crate::conventions::is_conventional_invocant_name(&r.target_name);
                     let token_type = if is_self { TOK_KEYWORD } else { TOK_VARIABLE };
                     // Don't add sigil modifier for $self/$class — it would override the keyword color
                     let mut mods = if is_self { 0 } else { sigil_modifier(sigil) };
@@ -7129,9 +7130,9 @@ impl FileAnalysis {
                 let mut params = params;
                 let is_method = is_method
                     || sym_is_method
-                    || params
-                        .first()
-                        .map_or(false, |p| p.name == "$self" || p.name == "$class");
+                    || params.first().map_or(false, |p| {
+                        crate::conventions::is_conventional_invocant_name(&p.name)
+                    });
 
                 // Strip the implicit invocant from the display list.
                 // `is_invocant` covers both Perl-native `$self`/`$class`
@@ -7161,8 +7162,11 @@ impl FileAnalysis {
                     .map(|t| t.as_ref().map(inferred_type_to_tag))
                     .collect();
 
-                let is_method = is_method || cf_is_method
-                    || params.first().map_or(false, |p| p.name == "$self" || p.name == "$class");
+                let is_method = is_method
+                    || cf_is_method
+                    || params.first().map_or(false, |p| {
+                        crate::conventions::is_conventional_invocant_name(&p.name)
+                    });
 
                 // Same invocant-strip as the local branch — by flag,
                 // not by name. Cross-file ParamInfo carries the flag
