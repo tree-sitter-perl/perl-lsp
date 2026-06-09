@@ -130,14 +130,17 @@ assertion is "no diagnostic at this site."
 ### `ti-12` — `$self = shift->SUPER::new` types only via the cross-file path
 - **Cursor:** `Minion.pm:108:6` (the `$self` in `my $self = shift->SUPER::new;`)
 - **Expect:** `$self` typed `Minion` (the enclosing class).
-- **Resolved in the LSP.** `SUPER::X` return typing now composes end-to-end:
-  `emit_method_call_return_edges` emits a `SuperCallReturn` witness (look `X` up
-  on the *enclosing package's parent*, default the receiver to the invocant /
-  enclosing class). `Mojo::Base::new` is receiver-polymorphic
-  (`bless …, ref $class || $class` → `ReturnExpr::ReceiverOr`), so the parent
-  ctor blesses into `Minion` and `$self` types `Minion`. Locked in by the **gold**
-  `hover-minion-super-new` (same cursor, full LSP startup) and the unit test
-  `test_super_new_types_to_calling_class`.
+- **Resolved in the LSP.** Explicitly-qualified method dispatch (`SUPER::X` and
+  fully-qualified `Foo::Bar::X`) now composes end-to-end. `emit_method_call_
+  return_edges` peels the dispatch class from any `::`-bearing method token via
+  one seam — `SUPER` → the *enclosing package's parents*, any other qualifier →
+  that literal class — and emits a `QualifiedCallReturn` witness that looks the
+  method up on the named class while typing the result relative to the invocant.
+  `Mojo::Base::new` is receiver-polymorphic (`bless …, ref $class || $class` →
+  `ReturnExpr::ReceiverOr`), so the parent ctor blesses into `Minion` and `$self`
+  types `Minion`. Locked in by the **gold** `hover-minion-super-new` and the
+  unit tests `test_super_new_types_to_calling_class`,
+  `test_fq_method_call_dispatches_from_named_class`.
 - **Why this row stays xfail:** the `--type-at` CLI mode is *single-file*
   (`cli_type_at` parses one file, no module index), so it cannot reach
   `Mojo::Base` cross-file to resolve `SUPER::new`. This is an inherent boundary
@@ -203,6 +206,35 @@ SUPER resolving with no cross-query contamination. The memo is per-top-level
 query (dropped on return) and keyed on `(bag, attachment, receiver, arity)`, so
 it never leaks across queries — the corruption never existed.
 
+### Fully-qualified method calls (`$obj->Foo::Bar::m`) — **return typing FIXED, goto-def still a follow-up**
+Perl dispatches `$obj->Foo::Bar::m` from the *named* class `Foo::Bar` (its MRO),
+not the invocant's class. The qualifier-peeling seam in `emit_method_call_
+return_edges` (shared with `SUPER`) now routes FQ calls through
+`QualifiedCallReturn{MethodOnClass{Foo::Bar, m}, …}`, so **return typing** works:
+`$obj->Maker::build()` types to `Maker::build`'s return (proven by
+`test_fq_method_call_dispatches_from_named_class` — it discriminates "dispatched
+from `Maker`" from "dispatched from the invocant", which would pick a different
+`build`). **Residual:** goto-def / references / rename for a FQ method token
+(`Foo::Bar::m`) still resolve against the invocant's class with the whole token
+as the method name, so they return empty — a separate seam (`refs_to` / method
+resolution) from return typing. **Subsystem:** method-call ref resolution.
+**Difficulty:** medium.
+
+### `return bless {BLOCK}, CLASS` class arg stranding — **FIXED**
+tree-sitter-perl parses `return bless {}, $class` as `return((bless {}), $class)`:
+the brace block greedily ends the parenless `bless`, stranding the class arg as a
+sibling of the `return_expression` in the enclosing `list_expression`. Perl parses
+`bless` as a list operator (the comma binds to bless), so that sibling IS the
+class. `bless_args` splices it back (gated to the parenless `ambiguous_function_
+call_expression` so an explicit `bless({}), $x` 2-element return isn't misread).
+This masked for non-inherited ctors (enclosing package == the class) but broke
+foreign-literal (`bless {}, 'Other'` → enclosing, not `Other`) and bare-`{}`
+receiver-poly ctors (`return bless {}, ref $class || $class` → enclosing, not
+`ReceiverOr`, so inherited/SUPER ctors lost the subclass). Locked in by
+`test_bless_return_strands_class_arg_recovered`,
+`test_bless_positional_self_is_receiver` (`$_[0]` is the positional invocant,
+already recognised via `is_positional_receiver`).
+
 ### `diag-mojo-cookiejar-helper-fp` / `diag-mojo-daemon-callback-fp` — first-param-self over-reach in OO classes
 In an OO class, a plain helper (`sub _compare { my ($cookie,…)=@_ }`) or an
 anonymous callback (`on(request => sub { my $tx = shift; … })` ) has its first
@@ -224,6 +256,7 @@ class. **Subsystem:** first-param-self heuristic (`detect_first_param_type`).
 | diag-08 (loader call) | XS loader recognition | **low** |
 | diag-09 / diag-10 | typeglob-codegen synthesis | medium |
 | def-16-codegen-type-function | Type::Library synthesis | medium |
+| FQ method goto-def/refs/rename (`$obj->Foo::Bar::m`) — return typing done | method-call ref resolution (`refs_to`) | medium |
 | completion-datetime-hashkey | slot-write harvest (A4 tail) | medium–high |
 | mojo-url clone *sub-return* (variable is fixed) | build-time `return_types` seed vs query-time cross-file method-return | medium–high |
 | diag-mojo-cookiejar/daemon first-param-self | invocant heuristic in OO class | **high** (ambiguous) |

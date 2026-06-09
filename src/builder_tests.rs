@@ -14224,3 +14224,59 @@ fn test_super_new_types_to_calling_class() {
         "clone's $self->new composes through the SUPER hop back to the subclass"
     );
 }
+
+#[test]
+fn test_fq_method_call_dispatches_from_named_class() {
+    // `$obj->Maker::build()` is a fully-qualified method call: Perl dispatches
+    // `build` from `Maker`, NOT from the invocant's class. `Maker::build` is
+    // receiver-polymorphic (returns the invocant's class), so the FQ call types
+    // to `Invoker` (the invocant). If we wrongly dispatched from the invocant's
+    // class, we'd pick `Invoker::build` → `Numeric` — so asserting `Invoker`
+    // also proves the named class won.
+    let fa = build_fa(
+        "package Maker;\nsub build { my $class = shift; return bless {}, ref $class || $class }\npackage Invoker;\nsub new { my $c = shift; return bless {}, ref $c || $c }\nsub build { return 42 }\npackage main;\nmy $obj = Invoker->new;\nmy $r = $obj->Maker::build();\n",
+    );
+    assert_eq!(
+        fa.inferred_type_via_bag("$r", Point::new(7, 4)),
+        Some(InferredType::ClassName("Invoker".into())),
+        "FQ call dispatches build from Maker (receiver-poly → invocant), not from Invoker"
+    );
+}
+
+#[test]
+fn test_bless_return_strands_class_arg_recovered() {
+    // tree-sitter-perl strands the class arg of `return bless {BLOCK}, CLASS`
+    // (the brace block greedily ends the parenless call). We splice it back, so
+    // the foreign literal class is honored instead of falling to the enclosing
+    // package.
+    let lit = build_fa("package P;\nsub make { return bless {}, 'Widget' }\n");
+    assert_eq!(
+        lit.find_method_return_type("P", "make", None, Some(0)),
+        Some(InferredType::ClassName("Widget".into())),
+        "return bless {{}}, 'Widget' must type to Widget, not the enclosing package"
+    );
+    // The receiver-polymorphic spelling with `return` is the common inherited
+    // ctor — recovery makes it ReceiverOr so a subclass types to itself.
+    let poly = build_fa(
+        "package Base;\nsub new { my $class = shift; return bless {}, ref $class || $class }\npackage Child;\nuse parent -norequire, 'Base';\nsub make { my $self = shift; return $self->new }\n",
+    );
+    assert_eq!(
+        poly.find_method_return_type("Child", "make", None, Some(0)),
+        Some(InferredType::ClassName("Child".into())),
+        "inherited receiver-poly ctor (return bless {{}}, ref $class || $class) types to the subclass"
+    );
+}
+
+#[test]
+fn test_bless_positional_self_is_receiver() {
+    // `$_[0]` is the positional spelling of the invocant — a receiver-poly ctor
+    // written `bless {}, ref $_[0] || $_[0]` types to the calling subclass.
+    let fa = build_fa(
+        "package Base;\nsub new { return bless {}, ref $_[0] || $_[0] }\npackage Child;\nuse parent -norequire, 'Base';\nsub make { my $self = shift; return $self->new }\n",
+    );
+    assert_eq!(
+        fa.find_method_return_type("Child", "make", None, Some(0)),
+        Some(InferredType::ClassName("Child".into())),
+        "bless {{}}, ref $_[0] || $_[0] is receiver-polymorphic via the positional self"
+    );
+}

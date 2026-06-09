@@ -6173,7 +6173,7 @@ impl<'a> Builder<'a> {
             "function_call_expression" | "ambiguous_function_call_expression"
                 if self.is_bless_call(node) =>
             {
-                let args = self.extract_call_args(node);
+                let args = self.bless_args(node);
                 match args.get(1) {
                     // Receiver-polymorphic: `bless X, $class` / `bless X, ref
                     // $self || $self` returns the class it was CALLED ON, so
@@ -10783,8 +10783,55 @@ impl<'a> Builder<'a> {
     /// → current package; a string/bareword literal → its text; a missing
     /// 2nd arg (`bless {}`) → current package (Perl's one-arg bless blesses
     /// into the caller's package).
+    /// `bless`'s effective arguments, recovering the class arg that
+    /// tree-sitter-perl strands in `return bless {BLOCK}, CLASS`. The brace
+    /// block greedily ends the (parenless) call, so `CLASS` lands as a sibling
+    /// of the `return_expression` in the enclosing `list_expression`. Perl
+    /// parses `bless` as a list operator (the comma binds to bless, not
+    /// return), so that stranded sibling IS the class — splice it back. Only
+    /// the parenless `ambiguous_function_call_expression` strands; an explicit
+    /// `bless({}), $x` delimits its args, so its trailing list element is a
+    /// genuine second return value, not a dropped class.
+    fn bless_args(&self, node: Node<'a>) -> Vec<Node<'a>> {
+        let mut args = self.extract_call_args(node);
+        if node.kind() == "ambiguous_function_call_expression"
+            && args.len() == 1
+            && args[0].kind() == "anonymous_hash_expression"
+        {
+            if let Some(class) = self.bless_stranded_class(node) {
+                args.push(class);
+            }
+        }
+        args
+    }
+
+    /// The class arg stranded after `return bless {BLOCK}` — the head's next
+    /// named sibling in the `list_expression` that captured the tail (walking
+    /// past an optional `return_expression`). See `bless_args`.
+    fn bless_stranded_class(&self, node: Node<'a>) -> Option<Node<'a>> {
+        let head = match node.parent() {
+            Some(p) if p.kind() == "return_expression" => p,
+            _ => node,
+        };
+        let list = head.parent()?;
+        if list.kind() != "list_expression" {
+            return None;
+        }
+        let mut take_next = false;
+        for i in 0..list.named_child_count() {
+            let c = list.named_child(i)?;
+            if take_next {
+                return Some(c);
+            }
+            if c.id() == head.id() {
+                take_next = true;
+            }
+        }
+        None
+    }
+
     fn visit_bless_call(&mut self, node: Node<'a>) {
-        let args = self.extract_call_args(node);
+        let args = self.bless_args(node);
         let obj = match args.first() {
             Some(n) => *n,
             None => return,
@@ -12112,6 +12159,19 @@ impl<'a> Builder<'a> {
     /// attachment. Refs without a filled class skip emission —
     /// without a known class there's no class-keyed slot to target.
     ///
+    /// Resolve the qualifier of a `::`-bearing method token to the class(es)
+    /// the lookup starts at. `SUPER` is the one language keyword that does NOT
+    /// name a literal class: it means "the parents of the package the call is
+    /// written in" (and may have several). Every other qualifier IS the literal
+    /// class (`Foo::Bar`); a leading-`::` token (`->::m`) means `main`.
+    fn qualified_dispatch_classes(&self, qualifier: &str, enclosing: &str) -> Vec<String> {
+        match qualifier {
+            "SUPER" => self.package_parents.get(enclosing).cloned().unwrap_or_default(),
+            "" => vec!["main".to_string()],
+            class => vec![class.to_string()],
+        }
+    }
+
     /// Clear-and-emit on tag `method_call_return` so repeat calls
     /// inside the worklist driver stay idempotent.
     fn emit_method_call_return_edges(&mut self) {
@@ -12140,29 +12200,32 @@ impl<'a> Builder<'a> {
             if self.route_branded_refs.contains(&i) {
                 continue;
             }
-            // `$obj->SUPER::X` dispatches X on the parents of the package where
-            // the call is WRITTEN, skipping that package.
-            if let Some(method) = r.target_name.strip_prefix("SUPER::") {
+            // A `::`-bearing method token names an EXPLICIT dispatch class —
+            // Perl looks the method up on the named class, not the invocant's:
+            //   `SUPER::m`     → the parents of the package the call is WRITTEN
+            //                    in (SUPER skips the writing package);
+            //   `Foo::Bar::m`  → the fully-qualified class `Foo::Bar`.
+            // Either way the call still blesses into the INVOCANT's class, so
+            // the result is typed relative to the invocant (falling back to the
+            // enclosing package). One seam, both spellings.
+            if let Some((qualifier, method)) = r.target_name.rsplit_once("::") {
                 let Some(encl) = self.package_at_pos(r.span.start) else { continue };
-                // SUPER blesses into the INVOCANT's class (the caller), not the
-                // parent — default the receiver to the call's invocant class,
-                // falling back to the enclosing package.
                 let receiver_class = self
                     .method_call_invocant
                     .get(&i)
                     .cloned()
                     .unwrap_or_else(|| encl.to_string());
-                let parents = self.package_parents.get(encl).cloned().unwrap_or_default();
                 let arity = self.method_call_arity.get(&i).copied().unwrap_or(0);
-                for parent in parents {
+                let lookup_classes = self.qualified_dispatch_classes(qualifier, encl);
+                for class in lookup_classes {
                     edges.push(Witness {
                         attachment: WitnessAttachment::Expression(crate::witnesses::RefIdx(
                             i as u32,
                         )),
                         source: WitnessSource::Builder("method_call_return".into()),
-                        payload: WitnessPayload::SuperCallReturn {
+                        payload: WitnessPayload::QualifiedCallReturn {
                             method_lookup: WitnessAttachment::MethodOnClass {
-                                class: parent,
+                                class,
                                 name: method.to_string(),
                             },
                             receiver_class: receiver_class.clone(),
