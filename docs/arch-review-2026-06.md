@@ -138,17 +138,48 @@ correct.
   Openness) is coherent; the pluggability decision gating phase 1 is a real
   decision, not procrastination.
 
+## Audit corrections (where the rule-10 sweep over-fired)
+
+`ParametricType::method_arg_owner` / `return_method_declarations` were
+flagged as DBIC allowlists in core — they are actually rule-10 *compliant*:
+the lists are methods **on the type**, which is exactly where the
+parametric-types ADR puts them. The residual issue is only that the DBIC
+flavor is native instead of plugin-declared (`prompt-dbic-as-plugin.md`).
+Similarly, `resolve_invocant_class_tree` and `method_call_invocant_class`
+are not retirable back-compat shims — they're the canonical build-time and
+query-time entry points respectively.
+
 ## What landed from this review
 
 1. `resolve_symbol` in `resolve.rs` — single cursor→target entry point;
    backend references/rename + CLI references/rename all route through it.
-   Cross-file rename policy moved onto `TargetRef` (ask the value, rule #10
-   style). Fixes the CLI/LSP hash-key references divergence.
-2. `src/cst.rs` typed-node layer + macro; pair-walking and the semantic
-   predicates (canonical varname, conventional-invocant, constructor-name)
-   live there; high-noise call sites migrated.
-3. Rule-10 interim consolidation: one named table per DBIC list, invocant
-   checks routed through the one predicate, `is_invocant` used where it
-   already existed.
-4. CLAUDE.md updated to stop lying (rules restated to match enforced
-   reality, typed-layer rule added).
+   Cross-file rename policy moved onto `TargetRef::supports_cross_file_
+   rename` (ask the value). Fixes the CLI/LSP owned-hash-key references
+   divergence. Owner extraction became `FileAnalysis::hash_key_owner_at`.
+2. `src/cst.rs` typed-node layer (`typed_node!` macro, `NodeExt`,
+   `pair_nodes`, `call_args`, `varname_child`, `canonical_container_name`,
+   `is_conventional_invocant_scalar`) + `src/conventions.rs` (pure-string
+   convention predicates, importable by tree-free layers). Builder's
+   pair-walking trio, `extract_call_args`, `canonicalize_container`, and
+   `visit_method_call` migrated; remaining visitors migrate strangler-style.
+3. Rule-10: ten invocant-name compare sites routed through the one
+   predicate (sig-help now prefers the authoritative `is_invocant` flag);
+   five `== "new"` sites routed through `is_constructor_name`; the
+   `universal_methods` framework entries pinned as debt with owning docs.
+4. `default_plugin_registry` moved to `plugin` (kills the only
+   adapter→builder dependency edge).
+5. Prose-cutting pass: spec-part labels and history narration removed,
+   the worst multi-paragraph comment blocks restated at a third the size.
+6. CLAUDE.md updated: `resolve_symbol` documented as landed, typed-layer
+   rule added under rule #1, new modules in the file map.
+
+## Recommended next moves (not landed)
+
+1. Evict the ~180 tree-walk lines from `file_analysis.rs` (§3) — also the
+   first crate-split prerequisite.
+2. `CrossFileLookup` trait inversion for the `file_analysis ↔ module_index`
+   cycle (§4).
+3. Then the workspace split (§4) — compiler-enforced layering.
+4. DBIC-as-plugin (`prompt-dbic-as-plugin.md`) retires the genuine
+   framework knowledge still in core (`::Result::` rewriting,
+   `visit_dbic_class_method` dispatch, diagnostics meta-method entries).
