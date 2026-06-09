@@ -2116,7 +2116,7 @@ impl FileAnalysis {
             let target = self
                 .method_call_invocant_class(r, module_index)
                 .map(|cn| {
-                    match self.resolve_method_in_ancestors(&cn, &r.target_name, module_index) {
+                    match self.resolve_method_in_ancestors(&cn, r.unqualified_target_name(), module_index) {
                         Some(MethodResolution::Local { sym_id, .. }) => MethodTarget::Local {
                             sym_id,
                             invocant_class: cn,
@@ -4306,7 +4306,7 @@ impl FileAnalysis {
                                 .method_call_invocant_type(r, module_index)
                                 .as_ref()
                                 .and_then(|ty| ty.as_parametric())
-                                .and_then(|p| p.method_arg_owner(&r.target_name))
+                                .and_then(|p| p.method_arg_owner(r.unqualified_target_name()))
                                 .or_else(|| {
                                     class_name
                                         .as_ref()
@@ -4455,7 +4455,10 @@ impl FileAnalysis {
                     results.push((*method_name_span, r.access));
                     for other in &self.refs {
                         if std::ptr::eq(other, r) { continue; }
-                        if other.target_name != r.target_name { continue; }
+                        // Match on the bare method tail so a plain `$x->m()` and
+                        // a fully-qualified `$y->Foo::Bar::m()` group together
+                        // (the class check below still pins same-class dispatch).
+                        if other.unqualified_target_name() != r.unqualified_target_name() { continue; }
                         if !matches!(other.kind, RefKind::MethodCall { .. }) { continue; }
                         let Some(ocn) = self.method_call_invocant_class(other, module_index) else { continue };
                         if ocn != wanted_class { continue; }
@@ -4536,7 +4539,7 @@ impl FileAnalysis {
                             }
                         }
                         (RefKind::MethodCall { method_name_span, .. },
-                         SymKind::Sub | SymKind::Method) if r.target_name == sym.name => {
+                         SymKind::Sub | SymKind::Method) if r.unqualified_target_name() == sym.name => {
                             // Same-class match only; unresolved or
                             // different-class invocants are excluded.
                             // Method-call ref.span covers the whole
@@ -4602,8 +4605,9 @@ impl FileAnalysis {
                     if let Some(mr) = method_hover {
                         if matches!(mr.kind, RefKind::MethodCall { .. }) {
                             let class_name = self.method_call_invocant_class(mr, module_index);
+                            let mname = mr.unqualified_target_name();
                             if let Some(ref cn) = class_name {
-                                match self.resolve_method_in_ancestors(cn, &mr.target_name, module_index) {
+                                match self.resolve_method_in_ancestors(cn, mname, module_index) {
                                     Some(MethodResolution::Local { sym_id, class: ref defining_class, .. }) => {
                                         let sym = self.symbol(sym_id);
                                         let line = source_line_at(source, sym.selection_span.start.row);
@@ -4613,7 +4617,7 @@ impl FileAnalysis {
                                             cn.to_string()
                                         };
                                         let mut text = format!("```perl\n{}\n```\n\n*class {} — resolved from `{}`*", line.trim(), class_label, r.target_name);
-                                        if let Some(ref rt) = self.find_method_return_type(cn, &mr.target_name, module_index, None) {
+                                        if let Some(ref rt) = self.find_method_return_type(cn, mname, module_index, None) {
                                             text.push_str(&format!("\n\n*returns: {}*", format_inferred_type(&rt)));
                                         }
                                         if let SymbolDetail::Sub { ref doc, .. } = sym.detail {
@@ -4629,8 +4633,8 @@ impl FileAnalysis {
                                             // inherited method in `class`'s own module.
                                             let module = def_module.as_deref().unwrap_or(class.as_str());
                                             if let Some(cached) = idx.get_cached(module) {
-                                                if let Some(sub_info) = cached.sub_info(&mr.target_name) {
-                                                    let sig = format_cross_file_signature(&mr.target_name, &sub_info);
+                                                if let Some(sub_info) = cached.sub_info(mname) {
+                                                    let sig = format_cross_file_signature(mname, &sub_info);
                                                     let mut text = format!("```perl\n{}\n```\n\n*class {} — resolved from `{}`*", sig, class, r.target_name);
                                                     if let Some(rt) = sub_info.return_type(Some(idx)) {
                                                         text.push_str(&format!("\n\n*returns: {}*", format_inferred_type(&rt)));
@@ -4718,8 +4722,10 @@ impl FileAnalysis {
                         .resolved_method_target
                         .as_ref()
                         .map(|t| t.invocant_class().to_string());
+                    // The bare method name (FQ `$o->Foo::Bar::m` resolves `m`).
+                    let method = r.unqualified_target_name();
                     if let Some(ref cn) = class_name {
-                        match self.resolve_method_in_ancestors(cn, &r.target_name, module_index) {
+                        match self.resolve_method_in_ancestors(cn, method, module_index) {
                             Some(MethodResolution::Local { sym_id, class: ref defining_class, .. }) => {
                                 let sym = self.symbol(sym_id);
                                 let line = source_line_at(source, sym.selection_span.start.row);
@@ -4729,7 +4735,7 @@ impl FileAnalysis {
                                     cn.to_string()
                                 };
                                 let mut text = format!("```perl\n{}\n```\n\n*class {}*", line.trim(), class_label);
-                                if let Some(ref rt) = self.find_method_return_type(cn, &r.target_name, module_index, None) {
+                                if let Some(ref rt) = self.find_method_return_type(cn, method, module_index, None) {
                                     text.push_str(&format!("\n\n*returns: {}*", format_inferred_type(&rt)));
                                 }
                                 return Some(text);
@@ -4740,13 +4746,13 @@ impl FileAnalysis {
                                     // inherited method in `class`'s own module.
                                     let module = def_module.as_deref().unwrap_or(class.as_str());
                                     if let Some(cached) = idx.get_cached(module) {
-                                        if let Some(sub_info) = cached.sub_info(&r.target_name) {
+                                        if let Some(sub_info) = cached.sub_info(method) {
                                             let class_label = if class != cn {
                                                 format!("{} (from {})", cn, class)
                                             } else {
                                                 cn.to_string()
                                             };
-                                            let sig = format_cross_file_signature(&r.target_name, &sub_info);
+                                            let sig = format_cross_file_signature(method, &sub_info);
                                             let mut text = format!("```perl\n{}\n```\n\n*class {}*", sig, class_label);
                                             if let Some(rt) = sub_info.return_type(Some(idx)) {
                                                 text.push_str(&format!("\n\n*returns: {}*", format_inferred_type(&rt)));
@@ -4763,7 +4769,7 @@ impl FileAnalysis {
                         }
                     }
                     // Fallback
-                    for &sid in self.symbols_named(&r.target_name) {
+                    for &sid in self.symbols_named(method) {
                         let sym = self.symbol(sid);
                         if matches!(sym.kind, SymKind::Sub | SymKind::Method) {
                             return Some(self.format_symbol_hover(sym, source, module_index));
@@ -4879,8 +4885,10 @@ impl FileAnalysis {
                 }
                 RefKind::MethodCall { .. } => {
                     if let Some(class) = self.method_call_invocant_class(r, module_index) {
+                        // FQ `$o->Foo::Bar::m` renames the bare `m` tail; the
+                        // qualifier scopes the class (same as Function above).
                         return Some(RenameKind::Method {
-                            name: r.target_name.clone(),
+                            name: r.unqualified_target_name().to_string(),
                             class,
                         });
                     }
@@ -5061,9 +5069,11 @@ impl FileAnalysis {
                 }
                 RefKind::MethodCall { .. } => {
                     let class_name = self.method_call_invocant_class(r, module_index);
+                    // Bare method name (FQ `$o->Foo::Bar::m` resolves `m`).
+                    let method = r.unqualified_target_name();
                     // Try inheritance-aware resolution first
                     if let Some(ref cn) = class_name {
-                        match self.resolve_method_in_ancestors(cn, &r.target_name, module_index) {
+                        match self.resolve_method_in_ancestors(cn, method, module_index) {
                             Some(MethodResolution::Local { sym_id, .. }) => {
                                 return Some((sym_id, true));
                             }
@@ -5072,7 +5082,7 @@ impl FileAnalysis {
                                 // a local symbol only when its package
                                 // equals the resolved class — no
                                 // same-name cross-class latching.
-                                for &sid in self.symbols_named(&r.target_name) {
+                                for &sid in self.symbols_named(method) {
                                     let sym = self.symbol(sid);
                                     if !matches!(sym.kind, SymKind::Sub | SymKind::Method) { continue; }
                                     if sym.package.as_deref() == Some(cn.as_str()) {
@@ -5090,7 +5100,7 @@ impl FileAnalysis {
                         // the class locally, produce no target —
                         // better than cross-linking a same-named
                         // method on a different class.
-                        for &sid in self.symbols_named(&r.target_name) {
+                        for &sid in self.symbols_named(method) {
                             let sym = self.symbol(sid);
                             if !matches!(sym.kind, SymKind::Sub | SymKind::Method) { continue; }
                             if sym.package.as_deref() == Some(cn.as_str()) {
@@ -5108,7 +5118,7 @@ impl FileAnalysis {
                     // last-resort name match. Only reaches here for
                     // refs the builder AND the runtime resolver both
                     // failed on (rare: ERROR-recovered invocants).
-                    for &sid in self.symbols_named(&r.target_name) {
+                    for &sid in self.symbols_named(method) {
                         if matches!(self.symbol(sid).kind, SymKind::Sub | SymKind::Method) {
                             return Some((sid, true));
                         }
@@ -5181,6 +5191,26 @@ impl FileAnalysis {
     /// `module_index` lets chain receivers whose return type lives in
     /// another package resolve (e.g. `$r->get('/x')->to(...)`). Pass
     /// `None` only for CLI debug / isolated tests.
+    ///
+    /// Resolve the dispatch class named by a method token's `::` qualifier
+    /// (`$obj->Foo::Bar::m` → `Foo::Bar`). A leading `::` (`->::m`) is `main`.
+    ///
+    /// `SUPER` is deliberately NOT resolved here: it's a keyword, not a literal
+    /// class, and sweeping `$self->SUPER::m` calls into a rename of the
+    /// parent's `m` would break method-rename precision (a subclass's SUPER
+    /// call is a reference to a *specific* parent method, distinct from plain
+    /// dispatch — see gold `rename-11-urn-canonical-precision`). Returning
+    /// `None` keeps SUPER nav an honest miss; SUPER *return typing* is handled
+    /// separately on the witness seam (`QualifiedCallReturn`). SUPER navigation
+    /// is a tracked follow-up.
+    fn qualified_dispatch_class(&self, qualifier: &str, _scope: ScopeId) -> Option<String> {
+        match qualifier {
+            "SUPER" => None,
+            "" => Some("main".to_string()),
+            class => Some(class.to_string()),
+        }
+    }
+
     pub fn method_call_invocant_class(
         &self,
         r: &Ref,
@@ -5189,6 +5219,13 @@ impl FileAnalysis {
         let RefKind::MethodCall { invocant, invocant_span, .. } = &r.kind else {
             return None;
         };
+        // Fully-qualified / SUPER dispatch: `$obj->Foo::Bar::m` looks `m` up on
+        // the NAMED class — Perl ignores the invocant's class for the lookup.
+        // The qualifier rides the method token (`target_name`), independent of
+        // the invocant expression, so it wins ahead of invocant resolution.
+        if let Some((qualifier, _)) = r.target_name.rsplit_once("::") {
+            return self.qualified_dispatch_class(qualifier, r.scope);
+        }
         if invocant.is_empty() {
             return None;
         }
@@ -5241,13 +5278,14 @@ impl FileAnalysis {
                         if let Some(recv_class) =
                             self.method_call_invocant_class(recv, module_index)
                         {
-                            if recv.target_name == "new" {
+                            let recv_method = recv.unqualified_target_name();
+                            if recv_method == "new" {
                                 return Some(recv_class);
                             }
                             if let Some(cn) = self
                                 .find_method_return_type(
                                     &recv_class,
-                                    &recv.target_name,
+                                    recv_method,
                                     module_index,
                                     None,
                                 )
@@ -7096,17 +7134,24 @@ impl FileAnalysis {
         point: Point,
         module_index: Option<&ModuleIndex>,
     ) -> Option<ResolvedSub<'s>> {
+        let scope = self.scope_at(point).unwrap_or(ScopeId(0));
+        // A fully-qualified / SUPER call token (`$o->Foo::Bar::m`, `SUPER::m`)
+        // names its dispatch class explicitly — split it so lookups use the
+        // bare tail scoped to the qualifier, overriding the invocant-derived
+        // class (Perl ignores the invocant's class for the lookup).
+        let (fq_class, name) = match name.rsplit_once("::") {
+            Some((qual, tail)) => (self.qualified_dispatch_class(qual, scope), tail),
+            None => (None, name),
+        };
         // Resolve class name for scoped lookup
-        let class_name = if is_method {
+        let class_name = if fq_class.is_some() {
+            fq_class
+        } else if is_method {
             invocant.and_then(|inv| {
                 if !inv.starts_with('$') && !inv.starts_with('@') && !inv.starts_with('%') {
                     Some(inv.to_string())
                 } else {
-                    self.resolve_invocant_class(
-                        inv,
-                        self.scope_at(point).unwrap_or(ScopeId(0)),
-                        point,
-                    )
+                    self.resolve_invocant_class(inv, scope, point)
                 }
             })
         } else {

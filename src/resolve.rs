@@ -375,11 +375,11 @@ fn collect_from_analysis(
         _ => None,
     };
     for r in &analysis.refs {
-        // A qualified call (`Foo::baz()`) keeps its whole path in
-        // `target_name`; match it on the bare callable tail (the
-        // `resolved_package` check in the FunctionCall arm below still pins
-        // the right package). Every other ref kind matches by exact name.
-        let name_matches = if matches!(r.kind, RefKind::FunctionCall { .. }) {
+        // A qualified call (`Foo::baz()` / `$o->Foo::Bar::baz()`) keeps its
+        // whole path in `target_name`; match it on the bare callable tail (the
+        // dispatch-class checks in the call arms below still pin the right
+        // package/class). Every other ref kind matches by exact name.
+        let name_matches = if matches!(r.kind, RefKind::FunctionCall { .. } | RefKind::MethodCall { .. }) {
             r.unqualified_target_name() == target.name
         } else {
             r.target_name == target.name
@@ -423,7 +423,7 @@ fn collect_from_analysis(
                         cn == pkg || rename_chain_cache
                             .entry(cn.to_string())
                             .or_insert_with(|| {
-                                analysis.method_rename_chain(cn, &r.target_name, module_index)
+                                analysis.method_rename_chain(cn, r.unqualified_target_name(), module_index)
                             })
                             .iter()
                             .any(|c| c == pkg)

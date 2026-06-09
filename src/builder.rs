@@ -7561,7 +7561,11 @@ impl<'a> Builder<'a> {
                                             .unwrap_or("")
                                             .to_string(),
                                         invocant_span: invocant.map(node_to_span),
-                                        method_name_span: node_to_span(method),
+                                        // A fully-qualified call (`$o->Foo::Bar::m`)
+                                        // keeps the full path in `target_name` but
+                                        // narrows the renamable span to the `m` tail
+                                        // (rule #7), mirroring FunctionCall.
+                                        method_name_span: crate::file_analysis::fq_tail_span(method, name),
                                     },
                                     span: node_to_span(n),
                                     scope,
@@ -9615,8 +9619,13 @@ impl<'a> Builder<'a> {
         let method_name = method_node
             .and_then(|n| n.utf8_text(self.source).ok())
             .map(|s| s.to_string());
-        let method_name_span = method_node.map(|n| node_to_span(n))
-            .unwrap_or_else(|| node_to_span(node));
+        // A fully-qualified call (`$o->Foo::Bar::m`) keeps the full path in
+        // `target_name` but narrows the renamable span to the `m` tail (rule
+        // #7), mirroring FunctionCall — so rename rewrites only the method.
+        let method_name_span = match (method_node, method_name.as_deref()) {
+            (Some(n), Some(name)) => crate::file_analysis::fq_tail_span(n, name),
+            _ => node_to_span(node),
+        };
         let invocant_node = node.child_by_field_name("invocant");
         let invocant_text = invocant_node
             .and_then(|n| n.utf8_text(self.source).ok())
@@ -10792,6 +10801,13 @@ impl<'a> Builder<'a> {
     /// the parenless `ambiguous_function_call_expression` strands; an explicit
     /// `bless({}), $x` delimits its args, so its trailing list element is a
     /// genuine second return value, not a dropped class.
+    ///
+    /// KLUDGE (tree-sitter-perl parser bug): the correct parse is `bless` as a
+    /// list operator grabbing the whole `{BLOCK}, CLASS` list. A fix is going
+    /// upstream; once a tree-sitter-perl release parses `return bless {}, X`
+    /// with both args under the call, DELETE `bless_args` + `bless_stranded_
+    /// class` and call `extract_call_args` directly at both bless sites. See
+    /// mem `tree-sitter-perl-parse-gotcha-return`.
     fn bless_args(&self, node: Node<'a>) -> Vec<Node<'a>> {
         let mut args = self.extract_call_args(node);
         if node.kind() == "ambiguous_function_call_expression"

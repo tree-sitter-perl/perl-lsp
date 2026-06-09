@@ -331,6 +331,52 @@ fn test_qualified_call_local_goto_def_and_references() {
     );
 }
 
+/// Fully-qualified METHOD call (`$obj->Widget::build()`): Perl dispatches
+/// `build` from the NAMED class `Widget`, ignoring the invocant's class. So
+/// goto-def / hover / rename resolve against `Widget` even when `$obj` is
+/// untyped, the rename narrows to the `build` tail, and references find the
+/// call site.
+#[test]
+fn test_fq_method_call_nav_dispatches_from_named_class() {
+    use crate::file_analysis::{RefKind, RenameKind};
+    // `$obj` is deliberately untyped — only the qualifier names the class.
+    let src = "package Widget;\nsub build { my ($class, $n) = @_; return 1 }\npackage main;\nmy $obj = get_thing();\nmy $r = $obj->Widget::build();\n";
+    let fa = build_fa_from_source(src);
+
+    // The FQ method ref keeps the full path in target_name but resolves its
+    // dispatch class to the qualifier.
+    let mref = fa
+        .refs
+        .iter()
+        .find(|r| matches!(r.kind, RefKind::MethodCall { .. }) && r.target_name == "Widget::build")
+        .expect("FQ method ref present");
+    assert_eq!(
+        fa.method_call_invocant_class(mref, None).as_deref(),
+        Some("Widget"),
+        "FQ call dispatches from the named class, not the (untyped) invocant"
+    );
+    // method_name_span is narrowed to the `build` tail (col 22), not the
+    // whole `Widget::build` token (col 14) — so rename rewrites only `build`.
+    if let RefKind::MethodCall { method_name_span, .. } = &mref.kind {
+        assert_eq!(method_name_span.start.column, 22, "rename span is the bare tail");
+    }
+
+    // goto-def on the `build` tail (line 4, col 22) lands on `sub build`.
+    let def = fa
+        .find_definition(Point::new(4, 22), None, None, None)
+        .expect("FQ method goto-def resolves to the local sub");
+    assert_eq!(def.start.row, 1, "should land on `sub build`, got {:?}", def);
+
+    // rename resolves to the bare method on the qualifier class.
+    match fa.rename_kind_at(Point::new(4, 22), None) {
+        Some(RenameKind::Method { name, class }) => {
+            assert_eq!(name, "build");
+            assert_eq!(class, "Widget");
+        }
+        other => panic!("expected Method rename, got {:?}", other),
+    }
+}
+
 /// A qualified call to package Foo's `baz` must not resolve to a same-named
 /// `baz` in another package — `resolved_package` isolates the qualifier.
 #[test]

@@ -206,19 +206,33 @@ SUPER resolving with no cross-query contamination. The memo is per-top-level
 query (dropped on return) and keyed on `(bag, attachment, receiver, arity)`, so
 it never leaks across queries — the corruption never existed.
 
-### Fully-qualified method calls (`$obj->Foo::Bar::m`) — **return typing FIXED, goto-def still a follow-up**
+### Fully-qualified method calls (`$obj->Foo::Bar::m`) — **supported across the LSP**
 Perl dispatches `$obj->Foo::Bar::m` from the *named* class `Foo::Bar` (its MRO),
-not the invocant's class. The qualifier-peeling seam in `emit_method_call_
-return_edges` (shared with `SUPER`) now routes FQ calls through
-`QualifiedCallReturn{MethodOnClass{Foo::Bar, m}, …}`, so **return typing** works:
-`$obj->Maker::build()` types to `Maker::build`'s return (proven by
-`test_fq_method_call_dispatches_from_named_class` — it discriminates "dispatched
-from `Maker`" from "dispatched from the invocant", which would pick a different
-`build`). **Residual:** goto-def / references / rename for a FQ method token
-(`Foo::Bar::m`) still resolve against the invocant's class with the whole token
-as the method name, so they return empty — a separate seam (`refs_to` / method
-resolution) from return typing. **Subsystem:** method-call ref resolution.
-**Difficulty:** medium.
+not the invocant's class. Now handled across every feature on two seams that
+mirror how FunctionCall already treats `Foo::Bar::baz()`:
+- **Return typing** — `emit_method_call_return_edges` peels the qualifier off
+  any `::`-bearing method token and emits `QualifiedCallReturn{MethodOnClass{
+  Foo::Bar, m}, …}`.
+- **Navigation** — `method_call_invocant_class` returns the qualifier as the
+  dispatch class; consumers resolve the method on the bare tail
+  (`unqualified_target_name()`), and `method_name_span` narrows to the tail
+  (`fq_tail_span`) so rename rewrites only `m`. This single class seam +
+  bare-name projection drives goto-def, references, rename/prepareRename, hover,
+  document-highlight, and signature-help.
+- **Completion** — `Foo::Bar::` (package-qualified) completes the package's subs
+  natively.
+
+Proven by `test_fq_method_call_dispatches_from_named_class` (return typing) and
+`test_fq_method_call_nav_dispatches_from_named_class` (goto-def / rename / class
+resolution / tail-span). **Minor residuals:**
+- **SUPER navigation** (`$self->SUPER::m` goto-def/refs/rename) is deliberately
+  NOT swept: `qualified_dispatch_class` returns `None` for `SUPER` so a subclass
+  SUPER call isn't pulled into a rename of the parent's method (precision — see
+  `rename-11-urn-canonical-precision`). SUPER *return typing* works; SUPER nav is
+  a tracked follow-up that needs override-vs-call rename policy first.
+- **`$obj->Foo::Bar::` completion** on a *variable* invocant (vs the common
+  `Foo::Bar::`) — rare, returns nothing; the cursor-context method-vs-qualified
+  detection picks the unresolved-invocant method path first.
 
 ### `return bless {BLOCK}, CLASS` class arg stranding — **FIXED**
 tree-sitter-perl parses `return bless {}, $class` as `return((bless {}), $class)`:
@@ -256,7 +270,8 @@ class. **Subsystem:** first-param-self heuristic (`detect_first_param_type`).
 | diag-08 (loader call) | XS loader recognition | **low** |
 | diag-09 / diag-10 | typeglob-codegen synthesis | medium |
 | def-16-codegen-type-function | Type::Library synthesis | medium |
-| FQ method goto-def/refs/rename (`$obj->Foo::Bar::m`) — return typing done | method-call ref resolution (`refs_to`) | medium |
+| SUPER navigation (`$self->SUPER::m` goto-def/refs/rename) — return typing done | needs override-vs-call rename policy | medium |
+| `$obj->Foo::Bar::` completion on a variable invocant (`Foo::Bar::` works) | cursor-context method-vs-qualified detection | low |
 | completion-datetime-hashkey | slot-write harvest (A4 tail) | medium–high |
 | mojo-url clone *sub-return* (variable is fixed) | build-time `return_types` seed vs query-time cross-file method-return | medium–high |
 | diag-mojo-cookiejar/daemon first-param-self | invocant heuristic in OO class | **high** (ambiguous) |

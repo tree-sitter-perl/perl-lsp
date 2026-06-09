@@ -334,15 +334,17 @@ pub fn find_definition(
         // Cross-file method goto-def: resolve inherited methods through module index
         if matches!(r.kind, RefKind::MethodCall { .. }) {
             use crate::file_analysis::MethodResolution;
+            // FQ `$o->Foo::Bar::m` dispatches the bare `m` on the named class.
+            let method = r.unqualified_target_name();
             let class_name = analysis.method_call_invocant_class(r, Some(module_index));
             if let Some(ref cn) = class_name {
-                if let Some(MethodResolution::CrossFile { ref class, ref def_module }) = analysis.resolve_method_in_ancestors(cn, &r.target_name, Some(module_index)) {
+                if let Some(MethodResolution::CrossFile { ref class, ref def_module }) = analysis.resolve_method_in_ancestors(cn, method, Some(module_index)) {
                     // One path for both: a real inherited method lives in
                     // `class`'s own module; a plugin-bridged helper lives in
                     // `def_module` (the bridging file). Same lookup either way.
                     let module = def_module.as_deref().unwrap_or(class);
                     if let Some(cached) = module_index.get_cached(module) {
-                        if let Some(sub_info) = cached.sub_info(&r.target_name) {
+                        if let Some(sub_info) = cached.sub_info(method) {
                             if let Ok(module_uri) = Url::from_file_path(&cached.path) {
                                 let line = sub_info.def_line();
                                 let def_range = Range {
