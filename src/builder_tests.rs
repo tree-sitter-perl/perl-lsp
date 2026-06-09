@@ -975,6 +975,26 @@ fn test_forward_declaration_does_not_duplicate_symbol() {
 }
 
 #[test]
+fn test_receiver_polymorphic_ctor_types_to_subclass() {
+    // An inherited `bless {}, ref $class || $class` constructor returns whatever
+    // class it was CALLED ON — Child->new is a Child, not a Base. The bless arm
+    // emits ReturnExpr::ReceiverOr; the call's receiver substitutes.
+    let fa = build_fa(
+        "package Base;\nsub new { my $class = shift; bless {}, ref $class || $class }\npackage Child;\nuse parent -norequire, 'Base';\n",
+    );
+    assert_eq!(
+        fa.find_method_return_type("Child", "new", None, Some(0)),
+        Some(InferredType::ClassName("Child".into())),
+        "Child->new (inherited ctor) must type as Child, not Base"
+    );
+    assert_eq!(
+        fa.find_method_return_type("Base", "new", None, Some(0)),
+        Some(InferredType::ClassName("Base".into())),
+        "Base->new still types as Base"
+    );
+}
+
+#[test]
 fn test_non_bless_hashref_stays_hashref() {
     // Regression: a hashref that's never blessed keeps its HashRef type.
     let src = "sub mk {\n  my $h = {};\n  return $h;\n}\n";
@@ -14157,4 +14177,28 @@ fn slot_type_keyed_by_owner_class() {
     // The enclosing-package write lands on Bar, not Foo — no cross-contamination.
     let bar_h = slot_type(&fa, "Bar", "h").expect("SlotType{Bar,h} from $self write");
     assert_eq!(bar_h.class_name(), Some("Sidecar"), "got {bar_h:?}");
+}
+
+
+#[test]
+fn test_braced_invocant_bless_is_receiver_poly() {
+    // The braced spelling `${self}` / `${class}` must be recognized as the
+    // receiver-polymorphic ctor idiom (canonical varname, not raw `$self` text).
+    let fa = build_fa(
+        "package Base;\nsub new { my $class = shift; bless {}, ref ${class} || ${class} }\npackage Child;\nuse parent -norequire, 'Base';\n",
+    );
+    assert_eq!(
+        fa.find_method_return_type("Child", "new", None, Some(0)),
+        Some(InferredType::ClassName("Child".into())),
+        "braced-self inherited ctor must type Child->new as Child"
+    );
+    // a real deref `bless {}, ${$ref}` is NOT receiver-poly -> not Child
+    let fa2 = build_fa(
+        "package Base;\nsub new { my $ref = \\'X'; bless {}, ${$ref} }\npackage Child;\nuse parent -norequire, 'Base';\n",
+    );
+    assert_ne!(
+        fa2.find_method_return_type("Child", "new", None, Some(0)),
+        Some(InferredType::ClassName("Child".into())),
+        "a sigil-deref bless target must NOT be treated as the receiver"
+    );
 }
