@@ -125,6 +125,20 @@ After those, the split is a mechanical move. Don't split before — you'd just
 relocate the violations. No other inversion is needed; the layer *order* is
 correct.
 
+**Status (June 2026):** (2) and (3) are DONE — `file_analysis.rs` /
+`witnesses.rs` no longer name `ModuleIndex` (object-safe `CrossFileLookup`
+trait in `file_analysis`, `CachedModule`/`SubInfo` moved there,
+`BagContext.module_index` is `Option<&dyn CrossFileLookup>`). (1) is done
+for the pure node utils (`node_to_span` & co. live in `cst.rs`), but the
+three lazy walkers (`resolve_expression_type`'s degradation walk,
+`resolve_hash_owner_from_tree`, `call_arg_key_at`) are called from
+`find_definition` / `collect_refs_for_target` / `resolve_target_at`'s lazy
+tree paths and **cannot move until phase 5 (eager `Ref.target`) retires
+lazy tree resolution**. The split is therefore gated on phase 5; executing
+it earlier means the model crate keeps a tree-sitter dependency and the
+headline guarantee (a model that *cannot* walk trees) isn't delivered.
+Phase 5 is the next big rock.
+
 ## 5. What's actually fine (don't touch)
 
 - The witness bag + reducer registry. Monotone, edge-based, single query
