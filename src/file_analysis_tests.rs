@@ -5,8 +5,8 @@ use tree_sitter::Point;
 /// Constraints are pushed via `push_type_constraint` so the witness bag carries them —
 /// the bag is the sole store post-D4-followup.
 fn fa_with_constraints(constraints: Vec<TypeConstraint>) -> FileAnalysis {
-    let mut fa = FileAnalysis::new(
-        vec![Scope {
+    let mut fa = FileAnalysis::new(FileAnalysisParts {
+        scopes: vec![Scope {
             id: ScopeId(0),
             parent: None,
             kind: ScopeKind::File,
@@ -16,21 +16,8 @@ fn fa_with_constraints(constraints: Vec<TypeConstraint>) -> FileAnalysis {
             },
             package: None,
         }],
-        vec![],
-        vec![],
-        vec![],
-        vec![],
-        vec![],
-        HashMap::new(),
-        vec![],
-        HashSet::new(),
-        vec![],
-        vec![],
-        vec![],
-        HashMap::new(),
-        HashMap::new(),
-        vec![],
-    );
+        ..Default::default()
+    });
     for tc in constraints {
         fa.push_type_constraint(tc);
     }
@@ -131,8 +118,8 @@ fn test_resolve_sub_return_type() {
     // Hand-craft a FileAnalysis with a sub that has a return type.
     // Post-D3, return types live on `Symbol(_)` only — seed
     // `Symbol(0)` directly so the bag-routed query picks it up.
-    let mut fa = FileAnalysis::new(
-        vec![Scope {
+    let mut fa = FileAnalysis::new(FileAnalysisParts {
+        scopes: vec![Scope {
             id: ScopeId(0),
             parent: None,
             kind: ScopeKind::File,
@@ -142,7 +129,7 @@ fn test_resolve_sub_return_type() {
             },
             package: None,
         }],
-        vec![Symbol {
+        symbols: vec![Symbol {
             id: SymbolId(0),
             name: "get_config".to_string(),
             kind: SymKind::Sub,
@@ -168,20 +155,8 @@ fn test_resolve_sub_return_type() {
             namespace: Namespace::Language,
             outline_label: None,
         }],
-        vec![],
-        vec![],
-        vec![],
-        vec![],
-        HashMap::new(),
-        vec![],
-        HashSet::new(),
-        vec![],
-        vec![],
-        vec![],
-        HashMap::new(),
-        HashMap::new(),
-        vec![],
-    );
+        ..Default::default()
+    });
     let zero_span = Span {
         start: Point::new(0, 0),
         end: Point::new(0, 0),

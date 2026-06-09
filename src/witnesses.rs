@@ -1597,16 +1597,7 @@ impl ReducerRegistry {
                         ) => {
                             let point = scope_point(ctx.scopes, *scope);
                             self.query_variable_with_visited(
-                                bag,
-                                ctx.scopes,
-                                ctx.package_framework,
-                                ctx.package_parents,
-                                ctx.app_surface_consumers,
-                                ctx.module_index,
-                                name,
-                                *scope,
-                                point,
-                                state,
+                                bag, ctx, name, *scope, point, state,
                             )
                         }
                         _ => {
@@ -1724,11 +1715,7 @@ impl ReducerRegistry {
     fn query_variable_with_visited(
         &self,
         bag: &WitnessBag,
-        scopes: &[Scope],
-        package_framework: &HashMap<String, FrameworkFact>,
-        package_parents: &HashMap<String, Vec<String>>,
-        app_surface_consumers: &[String],
-        module_index: Option<&crate::module_index::ModuleIndex>,
+        ctx: &BagContext,
         var: &str,
         scope: ScopeId,
         point: Point,
@@ -1738,24 +1725,13 @@ impl ReducerRegistry {
         let mut cur = Some(scope);
         while let Some(sid) = cur {
             chain.push(sid);
-            cur = scopes[sid.0 as usize].parent;
+            cur = ctx.scopes[sid.0 as usize].parent;
         }
         let framework = chain
             .iter()
-            .find_map(|sid| scopes[sid.0 as usize].package.as_ref())
-            .and_then(|pkg| package_framework.get(pkg).copied())
+            .find_map(|sid| ctx.scopes[sid.0 as usize].package.as_ref())
+            .and_then(|pkg| ctx.package_framework.get(pkg).copied())
             .unwrap_or(FrameworkFact::Plain);
-        // Preserve the caller's index + parents. Resolving a variable whose
-        // value is a cross-file method chain needs both; rebuilding them empty
-        // here is what dropped the index mid-chase and made `Variable` the lone
-        // attachment that couldn't resolve across files.
-        let ctx = BagContext {
-            scopes,
-            package_framework,
-            module_index,
-            package_parents,
-            app_surface_consumers,
-        };
         for sid in chain {
             let att = WitnessAttachment::Variable {
                 name: var.to_string(),
@@ -1767,7 +1743,7 @@ impl ReducerRegistry {
                 framework,
                 arity_hint: None,
                 receiver: None,
-                context: Some(&ctx),
+                context: Some(ctx),
             };
             if let ReducedValue::Type(t) = &*self.query_rec(bag, &q, state) {
                 return Some(t.clone());
@@ -1913,29 +1889,14 @@ pub fn query_sub_return_type(
 /// loops.
 pub fn query_variable_type(
     bag: &WitnessBag,
-    scopes: &[Scope],
-    package_framework: &HashMap<String, FrameworkFact>,
-    package_parents: &HashMap<String, Vec<String>>,
-    app_surface_consumers: &[String],
-    module_index: Option<&crate::module_index::ModuleIndex>,
+    ctx: &BagContext,
     var: &str,
     scope: ScopeId,
     point: Point,
 ) -> Option<InferredType> {
     let reg = ReducerRegistry::with_defaults();
     let mut state = QueryState::new();
-    reg.query_variable_with_visited(
-        bag,
-        scopes,
-        package_framework,
-        package_parents,
-        app_surface_consumers,
-        module_index,
-        var,
-        scope,
-        point,
-        &mut state,
-    )
+    reg.query_variable_with_visited(bag, ctx, var, scope, point, &mut state)
 }
 
 // ---------------------------------------------------------------

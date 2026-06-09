@@ -347,8 +347,8 @@ fn equal_span_first_write_wins() {
         },
     ];
 
-    let fa = FileAnalysis::new(
-        vec![Scope {
+    let fa = FileAnalysis::new(crate::file_analysis::FileAnalysisParts {
+        scopes: vec![Scope {
             id: ScopeId(0),
             parent: None,
             kind: ScopeKind::File,
@@ -358,21 +358,9 @@ fn equal_span_first_write_wins() {
             },
             package: None,
         }],
-        vec![],
         refs,
-        vec![],
-        vec![],
-        vec![],
-        HashMap::new(),
-        vec![],
-        HashSet::new(),
-        vec![],
-        vec![],
-        vec![],
-        HashMap::new(),
-        HashMap::new(),
-        vec![],
-    );
+        ..Default::default()
+    });
 
     let resolved = fa.call_ref_by_start.get(&span.start).copied();
     assert_eq!(

@@ -467,35 +467,31 @@ fn build_with_plugins_inner(
     // Post-pass 5: fill in tail POD docs for subs that didn't get preceding doc
     b.resolve_tail_pod_docs();
 
-    let bag = std::mem::take(&mut b.bag);
-    let package_framework = std::mem::take(&mut b.package_framework);
-
-    let mut fa = FileAnalysis::new(
-        b.scopes,
-        b.symbols,
-        b.refs,
-        b.fold_ranges,
-        b.imports,
-        b.call_bindings,
-        b.package_parents,
-        b.method_call_bindings,
-        b.framework_imports,
-        b.export,
-        b.export_ok,
-        b.plugin_namespaces,
-        b.package_uses,
-        b.type_provenance,
-        b.package_ranges,
-    );
-    fa.package_framework = package_framework;
-    fa.export_tags = std::mem::take(&mut b.export_tags);
-    fa.reexport_modules = std::mem::take(&mut b.reexport_modules);
-    fa.app_surface_consumers = b.app_surface_consumers.clone();
-    fa.regex_spans = b.regex_spans;
-    fa.witnesses = bag;
-    fa.witnesses.rebuild_index();
-    fa.provisional_dispatches = std::mem::take(&mut b.provisional_dispatches);
-    fa.gated_param_types = std::mem::take(&mut b.gated_param_types);
+    let mut fa = FileAnalysis::new(crate::file_analysis::FileAnalysisParts {
+        scopes: b.scopes,
+        symbols: b.symbols,
+        refs: b.refs,
+        fold_ranges: b.fold_ranges,
+        imports: b.imports,
+        call_bindings: b.call_bindings,
+        package_parents: b.package_parents,
+        method_call_bindings: b.method_call_bindings,
+        framework_imports: b.framework_imports,
+        export: b.export,
+        export_ok: b.export_ok,
+        export_tags: b.export_tags,
+        reexport_modules: b.reexport_modules,
+        plugin_namespaces: b.plugin_namespaces,
+        package_uses: b.package_uses,
+        type_provenance: b.type_provenance,
+        package_ranges: b.package_ranges,
+        regex_spans: b.regex_spans,
+        app_surface_consumers: b.app_surface_consumers,
+        witnesses: b.bag,
+        package_framework: b.package_framework,
+        provisional_dispatches: b.provisional_dispatches,
+        gated_param_types: b.gated_param_types,
+    });
     // Finalize: run the legacy text-based MCB resolver as a fallback.
     // For every assignment the unified typer (run before
     // `resolve_return_types` above) couldn't handle, MCB fills in.
@@ -4039,9 +4035,8 @@ impl<'a> Builder<'a> {
                     == Some("shift")
             }
             "ambiguous_function_call_expression" | "function_call_expression" => {
-                node.child_by_field_name("function")
-                    .and_then(|f| f.utf8_text(self.source).ok())
-                    == Some("shift")
+                use crate::cst::NodeExt;
+                node.field_text("function", self.source) == Some("shift")
             }
             _ => false,
         }
@@ -11435,15 +11430,9 @@ impl<'a> Builder<'a> {
         reg: &crate::witnesses::ReducerRegistry,
     ) -> (Vec<(SymbolId, Option<InferredType>)>, usize, usize) {
         use crate::witnesses::{
-            BagContext, FrameworkFact, ReducedValue, ReducerQuery, WitnessAttachment,
+            FrameworkFact, ReducedValue, ReducerQuery, WitnessAttachment,
         };
-        let ctx = BagContext {
-            scopes: &self.scopes,
-            package_framework: &self.package_framework,
-            module_index: None,
-            package_parents: &self.package_parents,
-            app_surface_consumers: &self.app_surface_consumers,
-        };
+        let ctx = self.bag_context();
         let mut answers: Vec<(SymbolId, Option<InferredType>)> = self
             .symbols
             .iter()
@@ -12165,16 +12154,10 @@ impl<'a> Builder<'a> {
         receiver: Option<InferredType>,
     ) -> Option<InferredType> {
         use crate::witnesses::{
-            BagContext, FrameworkFact, ReducedValue, ReducerQuery, ReducerRegistry,
+            FrameworkFact, ReducedValue, ReducerQuery, ReducerRegistry,
         };
         let reg = ReducerRegistry::with_defaults();
-        let ctx = BagContext {
-            scopes: &self.scopes,
-            package_framework: &self.package_framework,
-            module_index: None,
-            package_parents: &self.package_parents,
-            app_surface_consumers: &self.app_surface_consumers,
-        };
+        let ctx = self.bag_context();
         let q = ReducerQuery {
             attachment: att,
             point: None,
@@ -12193,23 +12176,25 @@ impl<'a> Builder<'a> {
     /// scope chain via `query_variable_type` (FrameworkAwareTypeFold,
     /// branch-arm fold, etc. all apply). Used by the post-walk chain
     /// typer once the bag is fully populated by `populate_witness_bag`.
+    /// The registry-query context at build time: same field set every bag
+    /// query threads, always index-free (single-file until enrichment).
+    fn bag_context(&self) -> crate::witnesses::BagContext<'_> {
+        crate::witnesses::BagContext {
+            scopes: &self.scopes,
+            package_framework: &self.package_framework,
+            module_index: None,
+            package_parents: &self.package_parents,
+            app_surface_consumers: &self.app_surface_consumers,
+        }
+    }
+
     fn bag_query_variable(
         &self,
         name: &str,
         scope: ScopeId,
         point: Point,
     ) -> Option<InferredType> {
-        crate::witnesses::query_variable_type(
-            &self.bag,
-            &self.scopes,
-            &self.package_framework,
-            &self.package_parents,
-            &self.app_surface_consumers,
-            None, // build time: no module index (single-file)
-            name,
-            scope,
-            point,
-        )
+        crate::witnesses::query_variable_type(&self.bag, &self.bag_context(), name, scope, point)
     }
 
     /// Bag-routed lookup for a sub's return type by name. Goes through
@@ -12224,13 +12209,7 @@ impl<'a> Builder<'a> {
     /// zero-arg form (a chain like `app->routes` calls `app()` then
     /// `routes()` on its return).
     fn bag_query_named_sub(&self, name: &str, arity_hint: Option<u32>) -> Option<InferredType> {
-        let ctx = crate::witnesses::BagContext {
-            scopes: &self.scopes,
-            package_framework: &self.package_framework,
-            module_index: None,
-            package_parents: &self.package_parents,
-            app_surface_consumers: &self.app_surface_consumers,
-            };
+        let ctx = self.bag_context();
         crate::witnesses::query_sub_return_type(
             &self.bag,
             &self.symbols,
@@ -12259,18 +12238,12 @@ impl<'a> Builder<'a> {
         receiver: Option<InferredType>,
     ) -> Option<InferredType> {
         use crate::witnesses::{
-            BagContext, FrameworkFact, ReducedValue, ReducerQuery, ReducerRegistry,
+            FrameworkFact, ReducedValue, ReducerQuery, ReducerRegistry,
             WitnessAttachment,
         };
         let att = WitnessAttachment::Expression(ref_idx);
         let reg = ReducerRegistry::with_defaults();
-        let ctx = BagContext {
-            scopes: &self.scopes,
-            package_framework: &self.package_framework,
-            module_index: None,
-            package_parents: &self.package_parents,
-            app_surface_consumers: &self.app_surface_consumers,
-            };
+        let ctx = self.bag_context();
         let q = ReducerQuery {
             attachment: &att,
             point: None,
@@ -12435,7 +12408,7 @@ impl<'a> Builder<'a> {
         std::collections::HashMap<String, crate::file_analysis::TypeProvenance>,
     ) {
         use crate::witnesses::{
-            BagContext, FrameworkFact, ReducedValue, ReducerQuery, WitnessAttachment,
+            FrameworkFact, ReducedValue, ReducerQuery, WitnessAttachment,
         };
         let mut return_types: std::collections::HashMap<String, InferredType> =
             std::collections::HashMap::new();
@@ -12444,13 +12417,7 @@ impl<'a> Builder<'a> {
             crate::file_analysis::TypeProvenance,
         > = std::collections::HashMap::new();
 
-        let ctx = BagContext {
-            scopes: &self.scopes,
-            package_framework: &self.package_framework,
-            module_index: None,
-            package_parents: &self.package_parents,
-            app_surface_consumers: &self.app_surface_consumers,
-        };
+        let ctx = self.bag_context();
 
         let mut updates: Vec<(SymbolId, String, InferredType)> = Vec::new();
 

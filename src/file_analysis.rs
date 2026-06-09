@@ -2002,25 +2002,69 @@ pub struct FileAnalysis {
     export_lookup: HashSet<String>,
 }
 
+/// Everything the builder hands over to construct a `FileAnalysis`.
+/// Field-named so a swapped pair of same-typed tables can't compile
+/// silently the way positional args could, and hand-crafted test FAs
+/// spell only the tables they use (`..Default::default()`).
+#[derive(Default)]
+pub struct FileAnalysisParts {
+    pub scopes: Vec<Scope>,
+    pub symbols: Vec<Symbol>,
+    pub refs: Vec<Ref>,
+    pub fold_ranges: Vec<FoldRange>,
+    pub imports: Vec<Import>,
+    pub call_bindings: Vec<CallBinding>,
+    pub package_parents: HashMap<String, Vec<String>>,
+    pub method_call_bindings: Vec<MethodCallBinding>,
+    pub framework_imports: HashSet<String>,
+    pub export: Vec<String>,
+    pub export_ok: Vec<String>,
+    pub export_tags: HashMap<String, Vec<String>>,
+    pub reexport_modules: Vec<String>,
+    pub plugin_namespaces: Vec<PluginNamespace>,
+    pub package_uses: HashMap<String, Vec<String>>,
+    pub type_provenance: HashMap<SymbolId, TypeProvenance>,
+    pub package_ranges: Vec<PackageRange>,
+    pub regex_spans: Vec<Span>,
+    pub app_surface_consumers: Vec<String>,
+    pub witnesses: crate::witnesses::WitnessBag,
+    pub package_framework: HashMap<String, crate::witnesses::FrameworkFact>,
+    pub provisional_dispatches: Vec<ProvisionalDispatch>,
+    pub gated_param_types: Vec<ReceiverGated<TypeConstraint>>,
+}
+
 impl FileAnalysis {
     /// Create a new FileAnalysis with indices built from the raw tables.
-    pub fn new(
-        scopes: Vec<Scope>,
-        symbols: Vec<Symbol>,
-        refs: Vec<Ref>,
-        fold_ranges: Vec<FoldRange>,
-        imports: Vec<Import>,
-        call_bindings: Vec<CallBinding>,
-        package_parents: HashMap<String, Vec<String>>,
-        method_call_bindings: Vec<MethodCallBinding>,
-        framework_imports: HashSet<String>,
-        export: Vec<String>,
-        export_ok: Vec<String>,
-        plugin_namespaces: Vec<PluginNamespace>,
-        package_uses: HashMap<String, Vec<String>>,
-        type_provenance: HashMap<SymbolId, TypeProvenance>,
-        package_ranges: Vec<PackageRange>,
-    ) -> Self {
+    /// `finalize_post_walk` runs on the builder path to seal baseline
+    /// counts and resolve text-based MCB; hand-crafted test FAs skip it
+    /// and push witnesses directly.
+    pub fn new(parts: FileAnalysisParts) -> Self {
+        let FileAnalysisParts {
+            scopes,
+            symbols,
+            refs,
+            fold_ranges,
+            imports,
+            call_bindings,
+            package_parents,
+            method_call_bindings,
+            framework_imports,
+            export,
+            export_ok,
+            export_tags,
+            reexport_modules,
+            plugin_namespaces,
+            package_uses,
+            type_provenance,
+            package_ranges,
+            regex_spans,
+            app_surface_consumers,
+            mut witnesses,
+            package_framework,
+            provisional_dispatches,
+            gated_param_types,
+        } = parts;
+        witnesses.rebuild_index();
         let mut fa = FileAnalysis {
             scopes,
             symbols,
@@ -2030,24 +2074,24 @@ impl FileAnalysis {
             call_bindings,
             method_call_bindings,
             package_ranges,
-            regex_spans: Vec::new(),
+            regex_spans,
             package_parents,
-            app_surface_consumers: Vec::new(),
+            app_surface_consumers,
             package_uses,
             framework_imports,
             export,
             export_ok,
-            export_tags: HashMap::new(),
-            reexport_modules: Vec::new(),
+            export_tags,
+            reexport_modules,
             plugin_namespaces,
             type_provenance,
-            witnesses: crate::witnesses::WitnessBag::new(),
-            package_framework: HashMap::new(),
+            witnesses,
+            package_framework,
             base_symbol_count: 0,
             base_witness_count: 0,
             base_ref_count: 0,
-            provisional_dispatches: Vec::new(),
-            gated_param_types: Vec::new(),
+            provisional_dispatches,
+            gated_param_types,
             scope_starts: Vec::new(),
             symbols_by_name: HashMap::new(),
             symbols_by_scope: HashMap::new(),
@@ -2057,11 +2101,6 @@ impl FileAnalysis {
             export_lookup: HashSet::new(),
         };
         fa.build_indices();
-        // The builder path overwrites `witnesses` with its already-populated
-        // bag after construction. Hand-crafted FAs (tests) push witnesses
-        // directly via `fa.witnesses.push(...)` or `push_type_constraint`.
-        // `finalize_post_walk` runs on the builder path to seal baseline
-        // counts and resolve text-based MCB; tests skip it.
         fa
     }
 
@@ -2573,6 +2612,22 @@ impl FileAnalysis {
     /// the chase keeps the index when it crosses the `Variable` edge instead of
     /// dead-ending. Pass the index from query-time callers (hover/completion);
     /// the bare wrapper keeps `None` for build-time / single-file callers.
+    /// The registry-query context over this analysis. Every bag query
+    /// threads the same field set; build it here so adding a field is one
+    /// edit, not one per call site.
+    pub(crate) fn bag_context<'a>(
+        &'a self,
+        module_index: Option<&'a ModuleIndex>,
+    ) -> crate::witnesses::BagContext<'a> {
+        crate::witnesses::BagContext {
+            scopes: &self.scopes,
+            package_framework: &self.package_framework,
+            module_index,
+            package_parents: &self.package_parents,
+            app_surface_consumers: &self.app_surface_consumers,
+        }
+    }
+
     pub fn inferred_type_via_bag_ctx(
         &self,
         var_name: &str,
@@ -2582,11 +2637,7 @@ impl FileAnalysis {
         let scope = self.scope_at(point)?;
         if let Some(t) = crate::witnesses::query_variable_type(
             &self.witnesses,
-            &self.scopes,
-            &self.package_framework,
-            &self.package_parents,
-            &self.app_surface_consumers,
-            module_index,
+            &self.bag_context(module_index),
             var_name,
             scope,
             point,
@@ -2644,19 +2695,13 @@ impl FileAnalysis {
         module_index: Option<&ModuleIndex>,
     ) -> Option<InferredType> {
         use crate::witnesses::{
-            BagContext, FrameworkFact, ReducedValue, ReducerQuery, ReducerRegistry,
+            FrameworkFact, ReducedValue, ReducerQuery, ReducerRegistry,
             WitnessAttachment,
         };
 
         let att = WitnessAttachment::Expression(crate::witnesses::RefIdx(ref_idx as u32));
         let reg = ReducerRegistry::with_defaults();
-        let ctx = BagContext {
-            scopes: &self.scopes,
-            package_framework: &self.package_framework,
-            module_index,
-            package_parents: &self.package_parents,
-            app_surface_consumers: &self.app_surface_consumers,
-            };
+        let ctx = self.bag_context(module_index);
         // Thread the receiver's resolved type so a receiver-relative
         // return (`Operator(RowOf(Receiver))` — DBIC `find`/`search`)
         // projects at query time, exactly as the build-time chain typer
@@ -2723,18 +2768,12 @@ impl FileAnalysis {
         module_index: Option<&ModuleIndex>,
     ) -> Option<InferredType> {
         use crate::witnesses::{
-            BagContext, FrameworkFact, ReducedValue, ReducerQuery, ReducerRegistry,
+            FrameworkFact, ReducedValue, ReducerQuery, ReducerRegistry,
             WitnessAttachment,
         };
         let att = WitnessAttachment::Expr(span);
         let reg = ReducerRegistry::with_defaults();
-        let ctx = BagContext {
-            scopes: &self.scopes,
-            package_framework: &self.package_framework,
-            module_index,
-            package_parents: &self.package_parents,
-            app_surface_consumers: &self.app_surface_consumers,
-        };
+        let ctx = self.bag_context(module_index);
         let q = ReducerQuery {
             attachment: &att,
             point: None,
@@ -2845,13 +2884,7 @@ impl FileAnalysis {
         sub_name: &str,
         arity: Option<u32>,
     ) -> Option<InferredType> {
-        let ctx = crate::witnesses::BagContext {
-            scopes: &self.scopes,
-            package_framework: &self.package_framework,
-            module_index: None,
-            package_parents: &self.package_parents,
-            app_surface_consumers: &self.app_surface_consumers,
-            };
+        let ctx = self.bag_context(None);
         crate::witnesses::query_sub_return_type(
             &self.witnesses,
             &self.symbols,
@@ -3640,18 +3673,12 @@ impl FileAnalysis {
         module_index: Option<&ModuleIndex>,
     ) -> Option<InferredType> {
         use crate::witnesses::{
-            BagContext, FrameworkFact, ReducedValue, ReducerQuery, ReducerRegistry,
+            FrameworkFact, ReducedValue, ReducerQuery, ReducerRegistry,
             WitnessAttachment,
         };
         let att = WitnessAttachment::Symbol(sym_id);
         let reg = ReducerRegistry::with_defaults();
-        let ctx = BagContext {
-            scopes: &self.scopes,
-            package_framework: &self.package_framework,
-            module_index,
-            package_parents: &self.package_parents,
-            app_surface_consumers: &self.app_surface_consumers,
-            };
+        let ctx = self.bag_context(module_index);
         // Default the arity hint from the sym's own param count when
         // the caller didn't supply one — the sym's params count IS its
         // native arity. Mojo writer (params=1) answers its
@@ -3707,7 +3734,7 @@ impl FileAnalysis {
         arg_count: Option<usize>,
     ) -> Option<InferredType> {
         use crate::witnesses::{
-            BagContext, FrameworkFact, ReducedValue, ReducerQuery, ReducerRegistry,
+            FrameworkFact, ReducedValue, ReducerQuery, ReducerRegistry,
             WitnessAttachment,
         };
         let framework = self
@@ -3719,13 +3746,7 @@ impl FileAnalysis {
             class: class_name.to_string(),
             name: method_name.to_string(),
         };
-        let ctx = BagContext {
-            scopes: &self.scopes,
-            package_framework: &self.package_framework,
-            module_index,
-            package_parents: &self.package_parents,
-            app_surface_consumers: &self.app_surface_consumers,
-        };
+        let ctx = self.bag_context(module_index);
         // Default receiver = `ClassName(class_name)` so that
         // `ReturnExpr::Receiver` evaluates correctly for class-keyed
         // method-return queries that don't have a specific
