@@ -2599,7 +2599,11 @@ pub fn collect_diagnostics(
         }
     }
 
-    // 5e: Unresolved method diagnostics for locally-defined classes
+    // 5e: Unresolved method diagnostics for locally-defined classes.
+    // Rule-#10 debt: the framework entries below (DBIC/Moose) belong to the
+    // frameworks, not core diagnostics — they move out when plugins can
+    // register meta-methods (docs/prompt-dbic-as-plugin.md) or the Openness
+    // rule lands (docs/prompt-unification-residual.md phase 6).
     let universal_methods = [
         "new", "AUTOLOAD", "DESTROY", "can", "isa", "DOES",
         // Moose adds lowercase `does` alongside UNIVERSAL's uppercase DOES.
