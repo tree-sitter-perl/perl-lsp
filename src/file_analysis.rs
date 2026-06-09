@@ -3081,7 +3081,7 @@ impl FileAnalysis {
             .collect();
         let binding_by_var: std::collections::HashMap<String, String> = self.call_bindings.iter()
             .filter_map(|b| {
-                let bare = b.func_name.rsplit("::").next().unwrap_or(&b.func_name).to_string();
+                let bare = split_qualified(&b.func_name).1.to_string();
                 if imported_keyed_subs.contains(&bare) {
                     Some((b.variable.clone(), bare))
                 } else {
@@ -5226,18 +5226,6 @@ impl FileAnalysis {
     /// `module_index` lets chain receivers whose return type lives in
     /// another package resolve (e.g. `$r->get('/x')->to(...)`). Pass
     /// `None` only for CLI debug / isolated tests.
-    ///
-    /// Resolve the dispatch class named by a *literal* `::` qualifier
-    /// (`$obj->Foo::Bar::m` → `Foo::Bar`). A leading `::` (`->::m`) is `main`.
-    /// `SUPER` is not a literal class — it's resolved by `resolve_super_method`
-    /// (the enclosing package's parent MRO), not here.
-    fn qualified_dispatch_class(&self, qualifier: &str, _scope: ScopeId) -> Option<String> {
-        match qualifier {
-            "" => Some("main".to_string()),
-            class => Some(class.to_string()),
-        }
-    }
-
     pub fn method_call_invocant_class(
         &self,
         r: &Ref,
@@ -5246,25 +5234,30 @@ impl FileAnalysis {
         let RefKind::MethodCall { invocant, invocant_span, .. } = &r.kind else {
             return None;
         };
-        // Fully-qualified / SUPER dispatch: `$obj->Foo::Bar::m` looks `m` up on
-        // the NAMED class — Perl ignores the invocant's class for the lookup.
-        // The qualifier rides the method token (`target_name`), independent of
-        // the invocant expression, so it wins ahead of invocant resolution.
-        if let Some((qualifier, _)) = r.target_name.rsplit_once("::") {
-            if qualifier == "SUPER" {
+        // A qualified method token names its dispatch class explicitly —
+        // Perl ignores the invocant's class for the lookup, so the token
+        // wins ahead of invocant resolution.
+        use crate::conventions::MethodToken;
+        match MethodToken::parse(&r.target_name) {
+            MethodToken::Super(name) => {
                 // SUPER searches the enclosing package's parents' MRO; the
                 // dispatch class is whichever ancestor actually defines it
                 // (multi-parent safe). `None` when the index isn't available
                 // yet (build-time stamp of a dependency file, cross-file
                 // parent) — every query-time consumer re-resolves with the
-                // index: open docs via the enrichment re-stamp, goto-def via the
-                // cross-file path, references/rename via `refs_to`'s SUPER arm.
+                // index: open docs via the enrichment re-stamp, goto-def via
+                // the cross-file path, references/rename via `refs_to`'s
+                // SUPER arm.
                 let encl = self.enclosing_class_for_scope(r.scope)?;
                 return self
-                    .resolve_super_method(&encl, r.unqualified_target_name(), module_index)
+                    .resolve_super_method(&encl, name, module_index)
                     .map(|res| res.class().to_string());
             }
-            return self.qualified_dispatch_class(qualifier, r.scope);
+            token => {
+                if let Some(pkg) = token.literal_package() {
+                    return Some(pkg.to_string());
+                }
+            }
         }
         if invocant.is_empty() {
             return None;
@@ -5370,7 +5363,7 @@ impl FileAnalysis {
         // Bareword invocant. Could be a zero-arg sub returning ClassName
         // (`app->routes` where `app` is plugin-emitted); promote that.
         // Otherwise the bareword text *is* the class (`Foo->method`).
-        let bare = invocant.rsplit("::").next().unwrap_or(invocant);
+        let bare = split_qualified(invocant).1;
         if let Some(InferredType::ClassName(c)) = self.sub_return_type_at_arity(bare, Some(0)) {
             return Some(c);
         }
@@ -5534,7 +5527,7 @@ impl FileAnalysis {
         // Bareword: the bareword *is* the class (or a zero-arg
         // ClassName-returning sub — same rule as
         // `method_call_invocant_class`'s bareword branch).
-        let bare = invocant.rsplit("::").next().unwrap_or(invocant);
+        let bare = split_qualified(invocant).1;
         if let Some(InferredType::ClassName(c)) = self.sub_return_type_at_arity(bare, Some(0)) {
             return Some(InferredType::ClassName(c));
         }
@@ -5611,7 +5604,7 @@ impl FileAnalysis {
             // bareword as the call and use that class. Mirrors the
             // same rule in `receiver_type_for` and
             // `resolve_invocant_class_tree`.
-            let bare = invocant.rsplit("::").next().unwrap_or(invocant);
+            let bare = split_qualified(invocant).1;
             if let Some(InferredType::ClassName(c)) =
                 self.sub_return_type_at_arity(bare, Some(0))
             {
@@ -7229,16 +7222,14 @@ impl FileAnalysis {
         // bare tail scoped to the qualifier, overriding the invocant-derived
         // class (Perl ignores the invocant's class for the lookup). SUPER
         // resolves over the enclosing package's parent MRO.
-        let (fq_class, name) = match name.rsplit_once("::") {
-            Some(("SUPER", tail)) => {
-                let c = self
-                    .enclosing_class_for_scope(scope)
-                    .and_then(|e| self.resolve_super_method(&e, tail, module_index))
-                    .map(|r| r.class().to_string());
-                (c, tail)
-            }
-            Some((qual, tail)) => (self.qualified_dispatch_class(qual, scope), tail),
-            None => (None, name),
+        let token = crate::conventions::MethodToken::parse(name);
+        let name = token.name();
+        let fq_class = match token {
+            crate::conventions::MethodToken::Super(tail) => self
+                .enclosing_class_for_scope(scope)
+                .and_then(|e| self.resolve_super_method(&e, tail, module_index))
+                .map(|r| r.class().to_string()),
+            t => t.literal_package().map(str::to_string),
         };
         // Resolve class name for scoped lookup
         let class_name = if fq_class.is_some() {

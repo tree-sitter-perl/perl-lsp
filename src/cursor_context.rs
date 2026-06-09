@@ -371,17 +371,16 @@ pub fn detect_cursor_context_tree_with_index(
                         // it falls through to ordinary method completion.
                         if let Some(method) = current.child_by_field_name("method") {
                             if let Ok(mtext) = method.utf8_text(source) {
-                                if let Some(idx) = mtext.rfind("::") {
-                                    let qualifier = &mtext[..idx];
+                                if let crate::conventions::MethodToken::Qualified {
+                                    package, ..
+                                } = crate::conventions::MethodToken::parse(mtext)
+                                {
                                     let ms = method.start_position();
                                     let past_qualifier = point.row == ms.row
-                                        && point.column >= ms.column + idx + 2;
-                                    if qualifier != "SUPER"
-                                        && past_qualifier
-                                        && is_perl_package_name(qualifier)
-                                    {
+                                        && point.column >= ms.column + package.len() + 2;
+                                    if past_qualifier && is_perl_package_name(package) {
                                         return Some(CursorContext::QualifiedPath {
-                                            package: qualifier.to_string(),
+                                            package: package.to_string(),
                                         });
                                     }
                                 }

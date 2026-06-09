@@ -961,7 +961,7 @@ struct ReturnInfo {
 /// trailing component. `"Foo::Bar::baz"` → `"baz"`; `"baz"` → `"baz"`. Pure
 /// string op — does not consult the symbol table or package state.
 fn bare_name(s: &str) -> &str {
-    s.rsplit("::").next().unwrap_or(s)
+    crate::file_analysis::split_qualified(s).1
 }
 
 /// If `return_node` is `return CALL`, where CALL is a simple named function
@@ -1935,9 +1935,9 @@ impl<'a> Builder<'a> {
             "refgen_expression" => {
                 let names = self.extract_names_from_refgen(node);
                 let raw = names.into_iter().next()?;
-                let (class, name) = match raw.rsplit_once("::") {
-                    Some((c, n)) => (c.to_string(), n.to_string()),
-                    None => (self.current_package.clone()?, raw),
+                let (class, name) = match crate::file_analysis::split_qualified(&raw) {
+                    (Some(c), n) => (c.to_string(), n.to_string()),
+                    (None, _) => (self.current_package.clone()?, raw),
                 };
                 Some(crate::witnesses::WitnessAttachment::MethodOnClass { class, name })
             }
@@ -2886,9 +2886,9 @@ impl<'a> Builder<'a> {
                 // name defaults to the package the registration sits in (the
                 // sub is local to it). Resolution is deferred so a forward-
                 // declared sub still resolves.
-                let (package, sub_name) = match sub_name.rsplit_once("::") {
-                    Some((pkg, n)) => (Some(pkg.to_string()), n.to_string()),
-                    None => (self.current_package.clone(), sub_name),
+                let (package, sub_name) = match crate::file_analysis::split_qualified(&sub_name) {
+                    (Some(pkg), n) => (Some(pkg.to_string()), n.to_string()),
+                    (None, _) => (self.current_package.clone(), sub_name),
                 };
                 self.deferred_named_sub_param_types.push(DeferredNamedSubParamType {
                     sub_name,
@@ -7865,8 +7865,8 @@ impl<'a> Builder<'a> {
             // the tail under `DateTime`, not the file's own `current_package`
             // (`DateTime::PP`), so `MethodOnClass{DateTime, _ymd2rd}` resolves.
             // Unqualified names stay under the current package.
-            let (target_pkg, local) = match name.rsplit_once("::") {
-                Some((prefix, tail)) if !prefix.is_empty() => {
+            let (target_pkg, local) = match crate::file_analysis::split_qualified(&name) {
+                (Some(prefix), tail) if !prefix.is_empty() => {
                     (Some(prefix.to_string()), tail.to_string())
                 }
                 _ => (self.current_package.clone(), name.clone()),
@@ -12012,16 +12012,20 @@ impl<'a> Builder<'a> {
     /// attachment. Refs without a filled class skip emission —
     /// without a known class there's no class-keyed slot to target.
     ///
-    /// Resolve the qualifier of a `::`-bearing method token to the class(es)
-    /// the lookup starts at. `SUPER` is the one language keyword that does NOT
-    /// name a literal class: it means "the parents of the package the call is
-    /// written in" (and may have several). Every other qualifier IS the literal
-    /// class (`Foo::Bar`); a leading-`::` token (`->::m`) means `main`.
-    fn qualified_dispatch_classes(&self, qualifier: &str, enclosing: &str) -> Vec<String> {
-        match qualifier {
-            "SUPER" => self.package_parents.get(enclosing).cloned().unwrap_or_default(),
-            "" => vec!["main".to_string()],
-            class => vec![class.to_string()],
+    /// Resolve a qualified method token to the class(es) the lookup starts
+    /// at. Qualifier semantics live on `MethodToken`; the SUPER arm is the
+    /// only one needing builder state (the enclosing package's parents —
+    /// possibly several). `Bare` has no qualifier → empty.
+    fn qualified_dispatch_classes(
+        &self,
+        token: crate::conventions::MethodToken<'_>,
+        enclosing: &str,
+    ) -> Vec<String> {
+        match token {
+            crate::conventions::MethodToken::Super(_) => {
+                self.package_parents.get(enclosing).cloned().unwrap_or_default()
+            }
+            t => t.literal_package().map(|p| vec![p.to_string()]).unwrap_or_default(),
         }
     }
 
@@ -12053,15 +12057,14 @@ impl<'a> Builder<'a> {
             if self.route_branded_refs.contains(&i) {
                 continue;
             }
-            // A `::`-bearing method token names an EXPLICIT dispatch class —
-            // Perl looks the method up on the named class, not the invocant's:
-            //   `SUPER::m`     → the parents of the package the call is WRITTEN
-            //                    in (SUPER skips the writing package);
-            //   `Foo::Bar::m`  → the fully-qualified class `Foo::Bar`.
-            // Either way the call still blesses into the INVOCANT's class, so
-            // the result is typed relative to the invocant (falling back to the
-            // enclosing package). One seam, both spellings.
-            if let Some((qualifier, method)) = r.target_name.rsplit_once("::") {
+            // A qualified method token names an EXPLICIT dispatch class —
+            // Perl looks the method up on the named class, not the
+            // invocant's. Either way the call still blesses into the
+            // INVOCANT's class, so the result is typed relative to the
+            // invocant (falling back to the enclosing package).
+            let token = crate::conventions::MethodToken::parse(&r.target_name);
+            if !matches!(token, crate::conventions::MethodToken::Bare(_)) {
+                let method = token.name();
                 let Some(encl) = self.package_at_pos(r.span.start) else { continue };
                 let receiver_class = self
                     .method_call_invocant
@@ -12069,7 +12072,7 @@ impl<'a> Builder<'a> {
                     .cloned()
                     .unwrap_or_else(|| encl.to_string());
                 let arity = self.method_call_arity.get(&i).copied().unwrap_or(0);
-                let lookup_classes = self.qualified_dispatch_classes(qualifier, encl);
+                let lookup_classes = self.qualified_dispatch_classes(token, encl);
                 for class in lookup_classes {
                     edges.push(Witness {
                         attachment: WitnessAttachment::Expression(crate::witnesses::RefIdx(
