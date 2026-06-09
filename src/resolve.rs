@@ -398,49 +398,40 @@ fn collect_from_analysis(
             }
             (TargetKind::Sub { .. } | TargetKind::Method { .. },
              RefKind::MethodCall { .. }) => {
-                // Method-shaped call: match on the build-time-frozen
-                // dispatch edge (`resolved_method_target`), NOT a
-                // query-time re-derivation of the invocant class. The
-                // edge was stamped once (PostFold / enrichment) by the
-                // bag-routed resolver, so a call that resolved at build
-                // time stays matched regardless of query-time inference
-                // flakiness, and genuinely unresolved sites (no edge)
-                // are honestly excluded. This is the NAV unification —
-                // references read a stored edge, the same discipline
-                // `Variable` refs use with `resolves_to`.
+                // Method-shaped call: prefer the build-time-frozen dispatch
+                // edge (`resolved_method_target`) — stamped once (PostFold /
+                // enrichment) by the bag-routed resolver, so a call that
+                // resolved at build time stays matched regardless of query-time
+                // inference flakiness. This is the NAV unification — references
+                // read a stored edge, the same discipline `Variable` refs use
+                // with `resolves_to`.
                 //
-                // Inheritance: the edge carries the frozen invocant
-                // class; `method_rename_chain` (deterministic over
-                // package_parents + module_index) yields
-                // `[invocant_class, ..., defining_class]`, so `$child->m`
-                // matches a target on any class T on that chain, and
-                // unrelated same-named methods on other classes stay out
-                // (never on the chain).
+                // Inheritance: the edge carries the frozen invocant class;
+                // `method_rename_chain` yields `[invocant_class, ...,
+                // defining_class]`, so `$child->m` matches a target on any class
+                // on that chain, and unrelated same-named methods stay out.
+                //
+                // When the edge is ABSENT, the build-time stamp couldn't name
+                // the dispatch class — which for a DEPENDENCY file means the
+                // invocant needed cross-file info the build-time pass lacks (a
+                // SUPER call into a cross-file parent, a chain receiver typed
+                // from another module; enrichment re-stamps OPEN docs only). We
+                // re-resolve lazily here — `refs_to` runs with the index —
+                // rather than silently excluding the site. `method_call_
+                // invocant_class` resolves SUPER via the full parent MRO too.
                 let scope = callable_scope_for_refs.as_ref().unwrap();
                 let method = r.unqualified_target_name();
-                // SUPER calls resolve LAZILY here, not off the frozen edge: the
-                // build-time stamp can't name the dispatch class for a SUPER
-                // call into a CROSS-FILE parent (dependency files stamp without
-                // the index), and the answer needs the full parent MRO anyway.
-                // The ref already carries the SUPER marker (`target_name`) and
-                // its enclosing class (`scope`), and `refs_to` runs with the
-                // index — so resolve the defining ancestor on demand. It IS the
-                // referenced method, so a plain class equality is the match.
-                if r.target_name.starts_with("SUPER::") {
-                    match (analysis.enclosing_class_for_scope(r.scope), scope) {
-                        (Some(encl), Some(pkg)) => analysis
-                            .resolve_super_method(&encl, method, module_index)
-                            .is_some_and(|res| res.class() == pkg.as_str()),
-                        _ => false,
-                    }
-                } else {
-                    match (r.resolved_method_target.as_ref(), scope) {
-                        (Some(edge), Some(pkg)) => {
-                            let cn = edge.invocant_class();
-                            cn == pkg || rename_chain_cache
-                                .entry(cn.to_string())
+                {
+                    let resolved_class = match r.resolved_method_target.as_ref() {
+                        Some(edge) => Some(edge.invocant_class().to_string()),
+                        None => analysis.method_call_invocant_class(r, module_index),
+                    };
+                    match (resolved_class, scope) {
+                        (Some(cn), Some(pkg)) => {
+                            cn == *pkg || rename_chain_cache
+                                .entry(cn.clone())
                                 .or_insert_with(|| {
-                                    analysis.method_rename_chain(cn, method, module_index)
+                                    analysis.method_rename_chain(&cn, method, module_index)
                                 })
                                 .iter()
                                 .any(|c| c == pkg)
