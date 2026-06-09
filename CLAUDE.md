@@ -8,8 +8,18 @@ A Perl LSP server built on ts-parser-perl (crates.io) and tower-lsp.
 cargo build --release
 cargo test                              # unit tests
 ./run_e2e.sh                            # e2e tests (needs nvim + release build)
+gold-corpus/run.pl                      # gold harness (needs release build + installed substrate)
 perl-lsp --dump-package <root> <pkg>    # debug type inference for a package
 ```
+
+The gold harness (`gold-corpus/README.md`) is an exact-assertion regression
+net over real CPAN modules from a snapshot-pinned substrate
+(`gold-corpus/local/`). `fixtures/*.json` is the source of truth; statuses:
+gold (must hold → FAIL on regression), xfail (known gap → XPASS when a fix
+lands, promote the row), provisional (reported, never fails). A crash is
+always a hard fail. Run it alongside `cargo test` + `./run_e2e.sh` before
+calling a change verified; `gold-corpus/run.pl --emit <cap> <file> <row>
+<col>` authors new rows. Known gaps live in `gold-corpus/KNOWN-GAPS.md`.
 
 ## Architecture
 
