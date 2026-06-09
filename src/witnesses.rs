@@ -505,7 +505,7 @@ pub struct ReducerQuery<'a> {
 pub struct BagContext<'a> {
     pub scopes: &'a [Scope],
     pub package_framework: &'a HashMap<String, FrameworkFact>,
-    pub module_index: Option<&'a crate::module_index::ModuleIndex>,
+    pub module_index: Option<&'a dyn crate::file_analysis::CrossFileLookup>,
     pub package_parents: &'a HashMap<String, Vec<String>>,
     /// Manifest-declared app-surface consumer classes — threaded so the
     /// `MethodOnClass` inheritance walk injects the synthetic surface
@@ -1538,7 +1538,7 @@ impl ReducerRegistry {
                 // bridged Methods aren't arity-discriminated.
                 if let Some(idx) = ctx.module_index {
                     let mut found: Option<InferredType> = None;
-                    idx.for_each_entity_bridged_to(class, |_mod, cached, sym| {
+                    idx.for_each_entity_bridged_to(class, &mut |_mod, cached, sym| {
                         if found.is_some() {
                             return;
                         }

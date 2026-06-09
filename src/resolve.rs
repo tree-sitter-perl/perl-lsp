@@ -14,9 +14,8 @@ use std::path::PathBuf;
 
 use tower_lsp::lsp_types::Url;
 
-use crate::file_analysis::{AccessKind, FileAnalysis, HandlerOwner, RefKind, Span, SymKind};
+use crate::file_analysis::{AccessKind, CrossFileLookup, FileAnalysis, HandlerOwner, RefKind, Span, SymKind};
 use crate::file_store::{FileKey, FileStore};
-use crate::module_index::ModuleIndex;
 
 bitflags::bitflags! {
     /// Which file roles a query should search. Handlers pick the mask that
@@ -59,7 +58,7 @@ impl TargetRef {
         name: String,
         class: String,
         origin: &FileAnalysis,
-        module_index: Option<&ModuleIndex>,
+        module_index: Option<&dyn CrossFileLookup>,
     ) -> Self {
         let method_classes = origin.method_rename_chain(&class, &name, module_index);
         TargetRef {
@@ -98,7 +97,7 @@ impl TargetRef {
     pub fn from_rename_kind(
         kind: crate::file_analysis::RenameKind,
         origin: &FileAnalysis,
-        module_index: Option<&ModuleIndex>,
+        module_index: Option<&dyn CrossFileLookup>,
     ) -> Option<Self> {
         use crate::file_analysis::RenameKind;
         Some(match kind {
@@ -135,7 +134,7 @@ pub enum ResolvedTarget {
 pub fn resolve_symbol(
     analysis: &FileAnalysis,
     point: tree_sitter::Point,
-    module_index: Option<&ModuleIndex>,
+    module_index: Option<&dyn CrossFileLookup>,
 ) -> Option<ResolvedTarget> {
     use crate::file_analysis::{HashKeyOwner, RenameKind};
     Some(match analysis.rename_kind_at(point, module_index)? {
@@ -214,7 +213,7 @@ impl RefLocation {
 /// - `module_index` — dep cache (consulted only if mask includes Dependency)
 pub fn refs_to(
     files: &FileStore,
-    module_index: Option<&ModuleIndex>,
+    module_index: Option<&dyn CrossFileLookup>,
     target: &TargetRef,
     mask: RoleMask,
 ) -> Vec<RefLocation> {
@@ -253,7 +252,7 @@ pub fn refs_to(
     // Dependencies (read-only modules from @INC).
     if mask.contains(RoleMask::DEPENDENCY) {
         if let Some(idx) = module_index {
-            idx.for_each_cached(|_module_name, cached| {
+            idx.for_each_cached(&mut |_module_name, cached| {
                 let key = FileKey::Path(cached.path.clone());
                 collect_from_analysis(&key, &cached.analysis, target, module_index, &mut out);
             });
@@ -348,7 +347,7 @@ fn symbol_defines_target(sym: &crate::file_analysis::Symbol, target: &TargetRef)
 /// see the file-store ADR's RoleMask discipline.
 pub fn references_mask_for(
     files: &FileStore,
-    module_index: Option<&ModuleIndex>,
+    module_index: Option<&dyn CrossFileLookup>,
     target: &TargetRef,
 ) -> RoleMask {
     let mut found_in_editable = false;
@@ -398,7 +397,7 @@ fn collect_from_analysis(
     key: &FileKey,
     analysis: &FileAnalysis,
     target: &TargetRef,
-    module_index: Option<&ModuleIndex>,
+    module_index: Option<&dyn CrossFileLookup>,
     out: &mut Vec<RefLocation>,
 ) {
     use crate::file_analysis::HashKeyOwner;

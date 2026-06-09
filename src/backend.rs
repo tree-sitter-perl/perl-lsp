@@ -69,7 +69,7 @@ impl Backend {
                         .load(std::sync::atomic::Ordering::Relaxed),
                 };
                 files.for_each_open_mut(|uri, doc| {
-                    doc.analysis.enrich_imported_types_with_keys(Some(module_index));
+                    doc.analysis.enrich_imported_types_with_keys(Some(module_index.as_ref()));
                     let diagnostics = symbols::collect_diagnostics(&doc.analysis, module_index, options);
                     pending.push((uri.clone(), diagnostics));
                 });
@@ -92,7 +92,7 @@ impl Backend {
 
     fn enrich_analysis(&self, uri: &Url) {
         if let Some(mut doc) = self.files.get_open_mut(uri) {
-            doc.analysis.enrich_imported_types_with_keys(Some(&self.module_index));
+            doc.analysis.enrich_imported_types_with_keys(Some(&*self.module_index));
         }
     }
 
@@ -120,7 +120,7 @@ impl Backend {
 /// included without any special-casing here.
 fn rename_via_refs_to(
     files: &FileStore,
-    module_index: Option<&crate::module_index::ModuleIndex>,
+    module_index: Option<&dyn crate::file_analysis::CrossFileLookup>,
     target: &crate::resolve::TargetRef,
     new_name: &str,
 ) -> Option<WorkspaceEdit> {
@@ -457,12 +457,12 @@ impl LanguageServer for Backend {
         use crate::resolve::{refs_to, resolve_symbol, ResolvedTarget};
 
         let point = symbols::position_to_point(pos);
-        let target = match resolve_symbol(&doc.analysis, point, Some(&self.module_index)) {
+        let target = match resolve_symbol(&doc.analysis, point, Some(&*self.module_index)) {
             Some(ResolvedTarget::Target(t)) => t,
             // Lexical / unowned — single-file references.
             Some(ResolvedTarget::Local) | None => {
                 let refs = symbols::find_references(
-                    &doc.analysis, pos, uri, &doc.tree, &doc.text, Some(&self.module_index),
+                    &doc.analysis, pos, uri, &doc.tree, &doc.text, Some(&*self.module_index),
                 );
                 return Ok(if refs.is_empty() { None } else { Some(refs) });
             }
@@ -474,10 +474,10 @@ impl LanguageServer for Backend {
         drop(doc); // release the DashMap read lock before the resolve walk
         let mask = crate::resolve::references_mask_for(
             &self.files,
-            Some(&self.module_index),
+            Some(&*self.module_index),
             &target,
         );
-        let results = refs_to(&self.files, Some(&self.module_index), &target, mask);
+        let results = refs_to(&self.files, Some(&*self.module_index), &target, mask);
         Ok(refs_to_locations(results))
     }
 
@@ -517,10 +517,10 @@ impl LanguageServer for Backend {
         };
 
         let point = symbols::position_to_point(pos);
-        match resolve_symbol(&doc.analysis, point, Some(&self.module_index)) {
+        match resolve_symbol(&doc.analysis, point, Some(&*self.module_index)) {
             Some(ResolvedTarget::Target(target)) if target.supports_cross_file_rename() => {
                 drop(doc);
-                Ok(rename_via_refs_to(&self.files, Some(&self.module_index), &target, new_name))
+                Ok(rename_via_refs_to(&self.files, Some(&*self.module_index), &target, new_name))
             }
             // Lexical variables, hash keys, handlers: single-file rename
             // (policy lives on `TargetRef::supports_cross_file_rename`).
@@ -614,7 +614,7 @@ impl LanguageServer for Backend {
             Some(doc) => doc,
             None => return Ok(None),
         };
-        let highlights = symbols::document_highlights(&doc.analysis, pos, &doc.tree, &doc.text, Some(&self.module_index));
+        let highlights = symbols::document_highlights(&doc.analysis, pos, &doc.tree, &doc.text, Some(&*self.module_index));
         if highlights.is_empty() {
             Ok(None)
         } else {
@@ -919,7 +919,7 @@ impl LanguageServer for Backend {
             None => return Ok(None),
         };
 
-        match symbols::linked_editing_ranges(&doc.analysis, pos, Some(&self.module_index)) {
+        match symbols::linked_editing_ranges(&doc.analysis, pos, Some(&*self.module_index)) {
             Some(ranges) => Ok(Some(LinkedEditingRanges {
                 ranges,
                 word_pattern: None,

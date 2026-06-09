@@ -4,7 +4,7 @@ use tree_sitter::{Point, Tree};
 
 use crate::cursor_context::{self, CursorContext};
 use crate::file_analysis::{
-    contains_point, format_inferred_type, CompletionCandidate, FileAnalysis, FoldKind,
+    contains_point, format_inferred_type, CompletionCandidate, CrossFileLookup, FileAnalysis, FoldKind,
     HandlerOwner, InferredType, OutlineSymbol, ParamInfo, RefKind, Span,
     SymKind as FaSymKind, SymbolDetail, PRIORITY_AUTO_ADD_QW, PRIORITY_BARE_IMPORT,
     PRIORITY_EXPLICIT_IMPORT, PRIORITY_UNIMPORTED,
@@ -404,7 +404,7 @@ fn dispatch_handler_locations(
     })
 }
 
-pub fn find_references(analysis: &FileAnalysis, pos: Position, uri: &Url, tree: &Tree, source: &str, module_index: Option<&ModuleIndex>) -> Vec<Location> {
+pub fn find_references(analysis: &FileAnalysis, pos: Position, uri: &Url, tree: &Tree, source: &str, module_index: Option<&dyn CrossFileLookup>) -> Vec<Location> {
     analysis.find_references(position_to_point(pos), Some(tree), Some(source.as_bytes()), module_index)
         .into_iter()
         .map(|span| Location {
@@ -1087,7 +1087,7 @@ pub fn hover_info(
     None
 }
 
-pub fn document_highlights(analysis: &FileAnalysis, pos: Position, tree: &tree_sitter::Tree, source: &str, module_index: Option<&ModuleIndex>) -> Vec<DocumentHighlight> {
+pub fn document_highlights(analysis: &FileAnalysis, pos: Position, tree: &tree_sitter::Tree, source: &str, module_index: Option<&dyn CrossFileLookup>) -> Vec<DocumentHighlight> {
     use crate::file_analysis::AccessKind;
     analysis.find_highlights(position_to_point(pos), Some(tree), Some(source.as_bytes()), module_index)
         .into_iter()
@@ -1109,7 +1109,7 @@ pub fn document_highlights(analysis: &FileAnalysis, pos: Position, tree: &tree_s
 pub fn linked_editing_ranges(
     analysis: &FileAnalysis,
     pos: Position,
-    module_index: Option<&ModuleIndex>,
+    module_index: Option<&dyn CrossFileLookup>,
 ) -> Option<Vec<Range>> {
     let refs = analysis.find_references(position_to_point(pos), None, None, module_index);
     if refs.len() < 2 {
@@ -1593,7 +1593,7 @@ fn span_contains_span(outer: &crate::file_analysis::Span, inner: &crate::file_an
 /// agree — same abstraction, same reach).
 fn string_dispatch_signature_for(
     analysis: &FileAnalysis,
-    module_index: Option<&ModuleIndex>,
+    module_index: Option<&dyn CrossFileLookup>,
     class: &str,
     dispatcher: &str,
     handler_name: &str,
@@ -1680,7 +1680,7 @@ fn string_dispatch_signature_for(
 /// no DispatchCall ref exists yet.
 fn string_dispatch_signature(
     analysis: &FileAnalysis,
-    module_index: Option<&ModuleIndex>,
+    module_index: Option<&dyn CrossFileLookup>,
     invocant: Option<&str>,
     dispatcher: &str,
     handler_name: &str,

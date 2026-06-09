@@ -349,7 +349,7 @@ pub fn detect_cursor_context_tree_with_index(
     source: &[u8],
     point: Point,
     analysis: &FileAnalysis,
-    module_index: Option<&crate::module_index::ModuleIndex>,
+    module_index: Option<&dyn crate::file_analysis::CrossFileLookup>,
 ) -> Option<CursorContext> {
     // Find the node at/just before the cursor
     let check_point = if point.column > 0 {
@@ -498,7 +498,7 @@ fn resolve_node_type(
     source: &[u8],
     analysis: &FileAnalysis,
     point: Point,
-    module_index: Option<&crate::module_index::ModuleIndex>,
+    module_index: Option<&dyn crate::file_analysis::CrossFileLookup>,
 ) -> Option<InferredType> {
     match node.kind() {
         "scalar" | "array" | "hash" => {
@@ -524,7 +524,7 @@ fn detect_from_error_node(
     source: &[u8],
     point: Point,
     analysis: &FileAnalysis,
-    module_index: Option<&crate::module_index::ModuleIndex>,
+    module_index: Option<&dyn crate::file_analysis::CrossFileLookup>,
 ) -> Option<CursorContext> {
     let mut last_expr: Option<Node> = None;
     let mut saw_arrow = false;
