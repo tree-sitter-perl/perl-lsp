@@ -54,6 +54,27 @@ A process abort (the scanner-overflow class) is always a hard **CRASH** fail. Ou
 
 The substrate is installed lib content only — it contains **no test files (`t/*.t`), `bin/`, or examples**. Rows whose original cursor lived in a test file, or whose module is not in the snapshot (e.g. JSON::PP, Time::HiRes), are listed in each capability's "Dropped" section. Rows that leaned on test-file call sites were re-authored to the surviving in-lib locations.
 
+**Cost report.** Every suite run ends with a per-capability timing table
+(wall-time per query, attributed by row id), per-root startup latency
+(first-response time: workspace index + cache warm), child CPU
+(user/sys), and peak RSS (`/proc` VmHWM, Linux-only) — so feature work
+sees what it costs as it lands. Set `METRICS_OUT=<file>` to also write
+the numbers as JSON for run-over-run comparison.
+
+**Nested-hashkey fixture.** Rows under `fixtures/nested-*.json` run
+against the committed workspace at `nested-fixture/` (per-row `root`,
+same mechanism as re-export below) and exercise the structural typing
+tiers: the mixed drill `$obj->{users}->[0]->{name}` (type-at), imported
+array-literal tuples (`Sequence<…>` hover), drill hops through an
+imported literal (`my $db = $config->{db}` hover — the `Projected`
+edge payload), `$row->{name}` → column def (definition + references,
+cross-file), and the closed-shape unknown-key hint (diagnostics: the
+local-literal typo is gold; the cross-file-typed typo is xfail — batch
+diagnostics have no enrichment parity, see KNOWN-GAPS.md; the
+mutation-extension rows pin that an unconditional write joins the
+shape — the written key reads back typed, the typo beside it still
+hints; the literal-hash rows pin the `%plain` spelling of both).
+
 **Re-export fixture.** Three rows (`fixtures/reexport.json`, capability `definition` — folded under `definition` in `--list`) run against a small **committed, self-contained workspace** at `reexport-fixture/` instead of the snapshot substrate, via a per-row `root`. They flex the transitive export-surface feature: `goto-def` from a consumer of a re-exporter resolves to the *original* sub through both re-export forms — static splice (`our @EXPORT = (@RexBase::EXPORT)`) and loop-push (`push @EXPORT, @{"${m}::EXPORT"}`). The harness groups rows by `root` and runs one `--batch` per root.
 
 ## Already in corpus

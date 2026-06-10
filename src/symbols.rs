@@ -196,30 +196,40 @@ pub fn find_definition(
         }));
     }
 
-    // Deferred constructor-key (`owner: None`): the class lives in another
-    // file, so the build-time gate couldn't pin the owner. Derive it now
-    // (enclosing call's invocant class, index in hand) and jump to the def
-    // the class file carries — `field $x :param` / Moo `has x` synthesize
-    // the HashKeyDef there.
+    // Cross-file hash-key defs. Two shapes share the lookup:
+    //   * deferred ctor key (`owner: None`) — the build-time gate
+    //     couldn't see the class; derive the owner now (enclosing call's
+    //     invocant class, index in hand);
+    //   * resolved Class owner (`$row->{name}` upgraded post-fold to
+    //     `Class(NestedRow)`) whose class — and therefore its
+    //     `add_columns` / `has` / `:param` HashKeyDef — lives elsewhere.
+    // Either way: the class's cached analysis carries the def.
     if let Some(r) = analysis.ref_at(point) {
-        if matches!(r.kind, RefKind::HashKeyAccess { owner: None, .. }) {
-            if let Some(owner) = analysis.deferred_hash_key_owner(r, Some(module_index)) {
-                if let crate::file_analysis::HashKeyOwner::Sub { package: Some(ref class), .. } =
-                    owner
-                {
-                    if let Some(cached) = module_index.get_cached(class) {
-                        if let Some(def) = cached
-                            .analysis
-                            .hash_key_defs_for_owner(&owner)
-                            .into_iter()
-                            .find(|d| d.name == r.target_name)
-                        {
-                            if let Ok(module_uri) = Url::from_file_path(&cached.path) {
-                                return Some(GotoDefinitionResponse::Scalar(Location {
-                                    uri: module_uri,
-                                    range: span_to_range(def.selection_span),
-                                }));
-                            }
+        if let RefKind::HashKeyAccess { ref owner, .. } = r.kind {
+            let owner = match owner {
+                Some(o) => Some(o.clone()),
+                None => analysis.deferred_hash_key_owner(r, Some(module_index)),
+            };
+            let class = match &owner {
+                Some(crate::file_analysis::HashKeyOwner::Sub { package: Some(c), .. }) => {
+                    Some(c.clone())
+                }
+                Some(crate::file_analysis::HashKeyOwner::Class(c)) => Some(c.clone()),
+                _ => None,
+            };
+            if let (Some(owner), Some(class)) = (owner, class) {
+                if let Some(cached) = module_index.get_cached(&class) {
+                    if let Some(def) = cached
+                        .analysis
+                        .hash_key_defs_for_owner(&owner)
+                        .into_iter()
+                        .find(|d| d.name == r.target_name)
+                    {
+                        if let Ok(module_uri) = Url::from_file_path(&cached.path) {
+                            return Some(GotoDefinitionResponse::Scalar(Location {
+                                uri: module_uri,
+                                range: span_to_range(def.selection_span),
+                            }));
                         }
                     }
                 }
@@ -2745,6 +2755,56 @@ pub fn collect_diagnostics(
                 ..Default::default()
             });
         }
+    }
+
+    // Closed-shape hash-key typo: a READ of `$config->{typo}` where
+    // `$config`'s structural literal is CLOSED (no spread, no dynamic
+    // key) and doesn't define the key. Writes are skipped — assigning a
+    // new key extends the shape, it isn't a typo. Open shapes are
+    // skipped — the spread may carry the key. The whole-story gate
+    // skips reassigned/escaped vars (the trust-gate stand-in for the
+    // unmodeled lattice widenings — docs/adr/structural-shapes.md).
+    // HINT severity, per the quiet-by-design diagnostics convention.
+    use crate::file_analysis::InferredType;
+    for r in &analysis.refs {
+        let RefKind::HashKeyAccess { ref var_text, .. } = r.kind else { continue };
+        // `$config->{k}` (scalar holding a hashref) and `$config{k}`
+        // (literal `%config`, canonical var_text) — same model, both
+        // spellings.
+        if !(var_text.starts_with('$') || var_text.starts_with('%')) {
+            continue;
+        }
+        if matches!(r.access, crate::file_analysis::AccessKind::Write) {
+            continue;
+        }
+        let Some(t) =
+            analysis.inferred_type_via_bag_ctx(var_text, r.span.start, Some(module_index))
+        else {
+            continue;
+        };
+        let InferredType::HashWithKeys { ref keys, open: false } = t else { continue };
+        if keys.iter().any(|(k, _)| k == &r.target_name) {
+            continue;
+        }
+        if !analysis.closed_shape_is_whole_story(var_text) {
+            continue;
+        }
+        let mut known: Vec<&str> = keys.iter().map(|(k, _)| k.as_str()).take(5).collect();
+        if keys.len() > 5 {
+            known.push("...");
+        }
+        diagnostics.push(Diagnostic {
+            range: span_to_range(r.span),
+            severity: Some(DiagnosticSeverity::HINT),
+            code: Some(NumberOrString::String("unknown-hash-key".into())),
+            message: format!(
+                "key '{}' is not in {}'s literal shape (keys: {})",
+                r.target_name,
+                var_text,
+                known.join(", "),
+            ),
+            ..Default::default()
+        });
     }
 
     diagnostics

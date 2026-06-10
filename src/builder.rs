@@ -250,6 +250,9 @@ fn build_with_plugins_inner(
         gated_param_types: Vec::new(),
         method_call_invocant: std::collections::HashMap::new(),
         attr_projections: Vec::new(),
+        escaped_scalars: std::collections::HashSet::new(),
+        reassigned_scalars: std::collections::HashSet::new(),
+        key_writes: Vec::new(),
         method_call_arity: std::collections::HashMap::new(),
         parametric_emitted_refs: std::collections::HashSet::new(),
         method_call_ref_dedup: std::collections::HashSet::new(),
@@ -465,6 +468,14 @@ fn build_with_plugins_inner(
     // owner class is the chain receiver's type, unknowable until then.
     b.emit_chained_hash_key_refs(&chain_idx);
 
+    // Post-pass: upgrade Variable-owned hash-key derefs whose variable's
+    // type settled to a class DURING the fold (`my $row = $rs->find(1);
+    // $row->{name}` — the RowOf projection lands mid-fold, after
+    // resolve_hash_key_owners ran). A Class owner routes the key to the
+    // class's defs (DBIC columns, Moo slots); variables without a class
+    // type keep their lexical grouping.
+    b.upgrade_variable_hash_key_owners();
+
     // Post-pass 5: fill in tail POD docs for subs that didn't get preceding doc
     b.resolve_tail_pod_docs();
 
@@ -493,6 +504,9 @@ fn build_with_plugins_inner(
         provisional_dispatches: b.provisional_dispatches,
         attr_projections: b.attr_projections,
         gated_param_types: b.gated_param_types,
+        escaped_scalars: b.escaped_scalars,
+        reassigned_scalars: b.reassigned_scalars,
+        key_writes: b.key_writes,
     });
     // Finalize: run the legacy text-based MCB resolver as a fallback.
     // For every assignment the unified typer (run before
@@ -1443,6 +1457,24 @@ struct Builder<'a> {
     /// `FileAnalysis.attr_accessors`.
     attr_projections: Vec<crate::file_analysis::AttrProjection>,
 
+    /// Scalars read in any position other than an element-access base
+    /// (`func($c)`, `my $z = $c`, `$c->method`, `%$c`) — the reference
+    /// escaped to code that may mutate the referent, so a closed literal
+    /// shape is no longer the variable's whole story. Flushed into
+    /// `FileAnalysis.escaped_scalars`; consumed by
+    /// `closed_shape_is_whole_story`.
+    escaped_scalars: std::collections::HashSet<String>,
+
+    /// Scalars reassigned after declaration (`$v = …` targeting the
+    /// variable itself; element writes go to `key_writes` instead).
+    /// Flushed into `FileAnalysis.reassigned_scalars`.
+    reassigned_scalars: std::collections::HashSet<String>,
+
+    /// `$var->{key} = …` writes in walk order — input to the
+    /// mutation-extension pass (shape extension / open-widening).
+    /// Flushed into `FileAnalysis.key_writes`.
+    key_writes: Vec<crate::file_analysis::KeyWrite>,
+
     /// Per-MethodCall-ref arg count, keyed by ref index. Lets
     /// `emit_method_call_return_edges` pin the call site's arity onto its
     /// `Expression(refidx)` return edge (`CallReturn`), so a fluent
@@ -2227,7 +2259,15 @@ impl<'a> Builder<'a> {
                 self.package_for_node(node).map(InferredType::ClassName)
             }
             "array_element_expression" => {
-                let array = node.child_by_field_name("array")?;
+                // Arrow deref on an expression (`$x->[0]`,
+                // `$obj->{users}->[0]`) has no `array` field — the base is
+                // the first named child; its Sequence projects the element.
+                let Some(array) = node.child_by_field_name("array") else {
+                    let base = node.named_child(0)?;
+                    let idx_node = node.child_by_field_name("index")?;
+                    let idx: i32 = idx_node.utf8_text(self.source).ok()?.parse().ok()?;
+                    return self.invocant_type_at_node(base)?.element_at(idx).cloned();
+                };
                 let varname = array.named_child(0)?;
                 let index = node.child_by_field_name("index")?;
                 // `$_[0]` is the positional-receiver pseudo-invocant
@@ -2251,17 +2291,26 @@ impl<'a> Builder<'a> {
             }
             "hash_element_expression" => {
                 // A hash element's VALUE type is independent of the
-                // container's class — never `$self`'s class. If a typed
-                // write to this slot was recorded (`SlotType{class,key}`,
-                // seeded at the write site, agreed by `SlotTypeFold`),
-                // that is the honest answer; otherwise untyped.
+                // container's class — never `$self`'s class.
                 let base = node.named_child(0)?;
-                let class = self.invocant_type_at_node(base)?.class_name()?.to_string();
+                let base_ty = self.invocant_type_at_node(base)?;
                 let key_node = node.child_by_field_name("key")?;
                 let (key, is_dynamic) = self.extract_key_text(key_node)?;
                 if is_dynamic {
                     return None;
                 }
+                // Structurally-typed hash: the literal told us the per-key
+                // type — `$config->{db}` narrows to it, and nesting recurses
+                // for free (the inner literal's HashWithKeys rides in the
+                // value slot).
+                if let Some(v) = base_ty.key_value_type(&key) {
+                    return v.cloned();
+                }
+                // Class-typed base: a typed write to this slot
+                // (`SlotType{class,key}`, seeded at the write site, agreed
+                // by `SlotTypeFold`) is the honest answer; otherwise
+                // untyped.
+                let class = base_ty.class_name()?.to_string();
                 self.bag_query_attachment(&crate::witnesses::WitnessAttachment::SlotType {
                     class,
                     key,
@@ -5843,7 +5892,19 @@ impl<'a> Builder<'a> {
                 // ternaries; Edge payloads resolve through the
                 // registry's materialization.
                 self.emit_expr_witness(right);
-                let inferred = self.bag_query_expr_span(node_to_span(right));
+                let mut inferred = self.bag_query_expr_span(node_to_span(right));
+                // `my %h = (k => v, …)` — the list IS a hash literal in
+                // this position, the hashref's second spelling. The
+                // list's own Expr witness can't carry that (its meaning
+                // depends on the LHS sigil), so type it from the LHS
+                // side through the same shape builder.
+                if inferred.is_none() && right.kind() == "list_expression" {
+                    if let Some(vt) = self.get_var_text_from_lhs(left) {
+                        if vt.starts_with('%') {
+                            inferred = Some(self.hash_literal_type(right));
+                        }
+                    }
+                }
                 if let Some(it) = inferred {
                     if let Some(vt) = self.get_var_text_from_lhs(left) {
                         self.push_type_constraint(TypeConstraint {
@@ -5949,6 +6010,58 @@ impl<'a> Builder<'a> {
                     if let Some(key_node) = left.child_by_field_name("key") {
                         self.slot_write_rhs_span
                             .insert(node_to_span(key_node), node_to_span(right));
+                    }
+                }
+                if matches!(
+                    left.kind(),
+                    "hash_element_expression" | "array_element_expression"
+                ) {
+                    self.record_key_write(left, Some(right));
+                }
+                // Slice / keyval writes (`@h{qw(a b)} = …`, `%h{k} = …`,
+                // `@$h{…}`) land several keys at once — record an
+                // open-switching write (`key: None`) on the container so
+                // a closed shape can't claim the slice-written keys as
+                // misses.
+                if matches!(left.kind(), "slice_expression" | "keyval_expression") {
+                    {
+                        // Three container spellings: sigil (`@h{…}` →
+                        // canonical `%h`), sigil-deref (`@$h{…}` — the
+                        // varname wraps the scalar; canonical would mint
+                        // a garbage `%$h`, so the inner scalar wins),
+                        // and postfix deref (`$h->@{…}` / `$h->%{…}` —
+                        // grammar field `hashref:`, a plain scalar).
+                        let name = match left.child_by_field_name("hash") {
+                            Some(container) => {
+                                crate::cst::varname_inner_scalar_text(container, self.source)
+                                    .or_else(|| {
+                                        crate::cst::canonical_container_name(
+                                            container,
+                                            self.source,
+                                        )
+                                    })
+                            }
+                            None => left
+                                .child_by_field_name("hashref")
+                                .filter(|c| c.kind() == "scalar")
+                                .and_then(|c| c.utf8_text(self.source).ok())
+                                .map(|s| s.to_string()),
+                        };
+                        if let Some(var_text) = name {
+                            let span = node_to_span(left);
+                            self.key_writes.push(crate::file_analysis::KeyWrite {
+                                var_text,
+                                key: None,
+                                scope: self
+                                    .scope_stack
+                                    .last()
+                                    .copied()
+                                    .unwrap_or(crate::file_analysis::ScopeId(0)),
+                                span,
+                                rhs_span: None,
+                                conditional: true,
+                            });
+                        }
                     }
                 }
             }
@@ -6108,6 +6221,95 @@ impl<'a> Builder<'a> {
     ///   resolved type. Registry materialization chases at query
     ///   time. Ternaries Edge to their own `Expr(span)` since the
     ///   per-arm witnesses live there.
+    /// Type a hash literal structurally: literal keys carry their
+    /// values' types (`{ host => 'x' }` →
+    /// `HashWithKeys{[("host", String)], closed}`). A spread element
+    /// (`%$other`, `%other`) or a dynamic key flips `open` — the key
+    /// set is no longer exhaustive, so consumers can't treat unknown
+    /// keys as misses. No literal keys at all → plain `HashRef`
+    /// (back-compat: `{}` and fully-dynamic hashes keep today's type).
+    fn hash_literal_type(&mut self, node: Node<'a>) -> InferredType {
+        // A spread occupies ONE list slot but flattens to an even count
+        // at runtime, so pairing must skip it as a unit — `pair_nodes`'
+        // strict k/v alternation would mispair everything after it.
+        let list = node
+            .named_child(0)
+            .filter(|c| c.kind() == "list_expression")
+            .unwrap_or(node);
+        let mut flat: Vec<Node<'a>> = Vec::new();
+        crate::cst::flatten_list(list, &mut flat);
+        let named: Vec<Node<'a>> = flat.into_iter().filter(|n| n.is_named()).collect();
+
+        let mut keys: Vec<(String, Option<Box<InferredType>>)> = Vec::new();
+        let mut open = false;
+        let mut i = 0;
+        while i < named.len() {
+            let elem = named[i];
+            if matches!(
+                elem.kind(),
+                "hash" | "hash_deref_expression" | "container_variable"
+                    | "array" | "array_deref_expression"
+            ) {
+                // Spread (`%other` / `%$ref` / `@_` / `@rest`) — the
+                // key set is no longer exhaustive. Arrays included:
+                // `my %h = (default => 1, @_)` is the canonical
+                // args-with-defaults idiom.
+                open = true;
+                i += 1;
+                continue;
+            }
+            let Some(v_node) = named.get(i + 1).copied() else {
+                open = true;
+                break;
+            };
+            i += 2;
+            let Some((key, is_dynamic)) = self.extract_key_text(elem) else {
+                open = true;
+                continue;
+            };
+            if is_dynamic {
+                open = true;
+                continue;
+            }
+            self.emit_expr_witness(v_node);
+            let vt = self.bag_query_expr_span(node_to_span(v_node));
+            keys.push((key, vt.map(Box::new)));
+        }
+        if keys.is_empty() && !open {
+            return InferredType::HashRef;
+        }
+        InferredType::HashWithKeys { keys, open }
+    }
+
+    /// Type an array literal positionally: `[1, 'x']` →
+    /// `Sequence([Numeric, String])`, so `->[N]` projects per index
+    /// (tuple semantics — the homogeneous case is just every slot
+    /// agreeing). Degrades to plain `ArrayRef` when any element's type
+    /// is unknown or the literal is huge (`Sequence` is a type-per-slot
+    /// tuple, not a summary).
+    fn array_literal_type(&mut self, node: Node<'a>) -> InferredType {
+        const MAX_TUPLE: usize = 64;
+        let list = node
+            .named_child(0)
+            .filter(|c| c.kind() == "list_expression")
+            .unwrap_or(node);
+        let mut flat: Vec<Node<'a>> = Vec::new();
+        crate::cst::flatten_list(list, &mut flat);
+        let elems: Vec<Node<'a>> = flat.into_iter().filter(|n| n.is_named()).collect();
+        if elems.is_empty() || elems.len() > MAX_TUPLE {
+            return InferredType::ArrayRef;
+        }
+        let mut types = Vec::with_capacity(elems.len());
+        for e in &elems {
+            self.emit_expr_witness(*e);
+            match self.bag_query_expr_span(node_to_span(*e)) {
+                Some(t) => types.push(t),
+                None => return InferredType::ArrayRef,
+            }
+        }
+        InferredType::Sequence(types)
+    }
+
     fn expr_payload(&mut self, node: Node<'a>) -> Option<crate::witnesses::WitnessPayload> {
         use crate::witnesses::{RefIdx, WitnessAttachment, WitnessPayload};
         match node.kind() {
@@ -6117,10 +6319,53 @@ impl<'a> Builder<'a> {
             }
             "number" => Some(WitnessPayload::InferredType(InferredType::Numeric)),
             "anonymous_hash_expression" => {
-                Some(WitnessPayload::InferredType(InferredType::HashRef))
+                Some(WitnessPayload::InferredType(self.hash_literal_type(node)))
+            }
+            // Drill expressions edge to their base with a projection step,
+            // so `$config->{db}` resolves at QUERY time through whatever the
+            // base materializes to — including an imported literal's
+            // structural type the build-time chain pass can't see.
+            "hash_element_expression" => {
+                let key_node = node.child_by_field_name("key")?;
+                let (key, is_dynamic) = self.extract_key_text(key_node)?;
+                if is_dynamic {
+                    return None;
+                }
+                // Container form `$h{k}` (grammar field `hash:`) — the
+                // subject is `%h`, not scalar `$h`; project off the
+                // hash variable's own attachment (the registry scope-
+                // walks Variable bases the same as Edge(Variable)).
+                if let Some(container) = node.child_by_field_name("hash") {
+                    let name =
+                        crate::cst::canonical_container_name(container, self.source)?;
+                    let scope = self.scope_stack.last().copied()
+                        .unwrap_or_else(|| self.scope_at_point(node.start_position()));
+                    return Some(WitnessPayload::Projected {
+                        base: WitnessAttachment::Variable { name, scope },
+                        step: crate::witnesses::ProjectionStep::HashKey(key),
+                    });
+                }
+                let base = node.named_child(0)?;
+                self.emit_expr_witness(base);
+                Some(WitnessPayload::Projected {
+                    base: WitnessAttachment::Expr(node_to_span(base)),
+                    step: crate::witnesses::ProjectionStep::HashKey(key),
+                })
+            }
+            // Arrow-deref element only (`$x->[0]`); the container form
+            // `$arr[N]` keeps its variable-keyed handling.
+            "array_element_expression" if node.child_by_field_name("array").is_none() => {
+                let base = node.named_child(0)?;
+                let idx_node = node.child_by_field_name("index")?;
+                let idx: i32 = idx_node.utf8_text(self.source).ok()?.parse().ok()?;
+                self.emit_expr_witness(base);
+                Some(WitnessPayload::Projected {
+                    base: WitnessAttachment::Expr(node_to_span(base)),
+                    step: crate::witnesses::ProjectionStep::ArrayIndex(idx),
+                })
             }
             "anonymous_array_expression" => {
-                Some(WitnessPayload::InferredType(InferredType::ArrayRef))
+                Some(WitnessPayload::InferredType(self.array_literal_type(node)))
             }
             "quoted_regexp" => Some(WitnessPayload::InferredType(InferredType::Regexp)),
             "anonymous_subroutine_expression" | "refgen_expression" => {
@@ -6678,6 +6923,36 @@ impl<'a> Builder<'a> {
 
         if let Ok(text) = node.utf8_text(self.source) {
             let access = self.determine_access(node);
+            // A scalar READ anywhere but an element-access base hands the
+            // reference to code that may mutate the referent (call arg,
+            // alias, invocant, deref) — record the escape so closed-shape
+            // consumers know the literal isn't the whole story.
+            if access == AccessKind::Read
+                && text.starts_with('$')
+                && !crate::cst::is_element_access_base(node)
+            {
+                self.escaped_scalars.insert(text.to_string());
+            }
+            // Write with the variable itself as assignment target =
+            // reassignment. An element write (`$v->{k} = …`, where this
+            // scalar is the access base and the Write came from the
+            // grandparent rule) is a shape mutation instead — modeled by
+            // the mutation-extension pass, not a trust break.
+            if access == AccessKind::Write
+                && (text.starts_with('$') || text.starts_with('%'))
+                && !crate::cst::is_element_access_base(node)
+            {
+                self.reassigned_scalars.insert(text.to_string());
+            }
+            // Hash variables escape only by reference-taking (`\%h`):
+            // a bare `%h` in a call or list FLATTENS TO COPIES — the
+            // callee can't add keys to the original, so it's not an
+            // escape (unlike a scalar, whose value IS the shared ref).
+            if text.starts_with('%')
+                && node.parent().is_some_and(|p| p.kind() == "refgen_expression")
+            {
+                self.escaped_scalars.insert(text.to_string());
+            }
             // Fully-qualified read (`$Foo::Bar::x`): narrow the span to the
             // bare tail (rule #7) so rename rewrites only `x` and the
             // qualifier survives, mirroring the FQ-call narrowing. The full
@@ -10209,8 +10484,15 @@ impl<'a> Builder<'a> {
         // Infer HashRef on the operand variable (e.g. $x in $x->{key})
         self.infer_deref_type(node, InferredType::HashRef);
 
-        // Record the hash variable access
-        let var_text = self.get_hash_var_from_element(node);
+        // Record the hash variable access. Container form (`$h{k}`,
+        // grammar field `hash:`) reads `%h`, not scalar `$h` — use the
+        // canonical name so the key ref, the shape witness, and the
+        // KeyWrite all key the same variable.
+        let var_text = match node.child_by_field_name("hash") {
+            Some(c) => crate::cst::canonical_container_name(c, self.source)
+                .or_else(|| self.get_hash_var_from_element(node)),
+            None => self.get_hash_var_from_element(node),
+        };
 
         // Distinguish read vs write by asking determine_access on the
         // element node itself — `$self->{k} = ...` has this element as
@@ -10351,6 +10633,66 @@ impl<'a> Builder<'a> {
             }
         }
         None
+    }
+
+    /// Record a `$var->{key} = …` write for the mutation-extension
+    /// pass. Walks subscript chains down to the scalar base: the FIRST
+    /// hop's key is the one the write autovivifies onto the variable's
+    /// own shape (`$v->{a}{b} = …` adds `a`); only a direct single-hop
+    /// write types the key's value from the RHS. Plain `%foo` elements
+    /// (`$foo{k}`, no arrow) are a different variable — skipped.
+    fn record_key_write(&mut self, left: Node<'a>, rhs: Option<Node<'a>>) {
+        let mut innermost = left;
+        loop {
+            let Some(c) = innermost.named_child(0) else { return };
+            match c.kind() {
+                "hash_element_expression" | "array_element_expression" => innermost = c,
+                "scalar" | "container_variable" => break,
+                _ => return,
+            }
+        }
+        if innermost.kind() != "hash_element_expression" {
+            return; // array first hop — Sequence mutation, not modeled
+        }
+        let Some(container) = innermost.named_child(0) else { return };
+        // Container form `$h{k}` writes `%h` (canonical name); deref
+        // form `$v->{k}` writes through scalar `$v` — arrow required
+        // (`$foo{k}` without one would be `%foo` mis-keyed to `$foo`).
+        let var_text: String = if container.kind() == "container_variable" {
+            match crate::cst::canonical_container_name(container, self.source) {
+                Some(n) => n,
+                None => return,
+            }
+        } else {
+            if !crate::cst::element_arrow_deref(innermost, self.source) {
+                return;
+            }
+            let Ok(t) = container.utf8_text(self.source) else { return };
+            if !t.starts_with('$') {
+                return;
+            }
+            t.to_string()
+        };
+        let key_node = innermost.child_by_field_name("key");
+        let key = key_node
+            .and_then(|k| self.extract_key_text(k))
+            .and_then(|(t, dynamic)| (!dynamic).then_some(t));
+        let direct = innermost == left;
+        let span = key_node
+            .map(node_to_span)
+            .unwrap_or_else(|| node_to_span(innermost));
+        self.key_writes.push(crate::file_analysis::KeyWrite {
+            var_text: var_text.to_string(),
+            key,
+            scope: self
+                .scope_stack
+                .last()
+                .copied()
+                .unwrap_or(crate::file_analysis::ScopeId(0)),
+            span,
+            rhs_span: if direct { rhs.map(node_to_span) } else { None },
+            conditional: crate::cst::is_conditionally_executed(left),
+        });
     }
 
     fn determine_access(&self, node: Node<'a>) -> AccessKind {
@@ -11508,6 +11850,24 @@ impl<'a> Builder<'a> {
             }
             self.run_chain_typing_reducer(idx, ChainPassMode::PreFold);
             self.resolve_return_types(idx, &reg, &ref_by_span, &method_sym_by_name);
+            // Mutation extension: fold key writes into variable shapes
+            // (re-emittable, clear-and-emit). After the return-type
+            // passes so call-binding-propagated shapes are visible.
+            {
+                let ctx = crate::witnesses::BagContext {
+                    scopes: &self.scopes,
+                    package_framework: &self.package_framework,
+                    module_index: None,
+                    package_parents: &self.package_parents,
+                    app_surface_consumers: &self.app_surface_consumers,
+                };
+                crate::witnesses::emit_mutation_extension_witnesses(
+                    &mut self.bag,
+                    &ctx,
+                    &self.key_writes,
+                    true,
+                );
+            }
             let cur = self.fold_state_snapshot(&reg);
             if cur == prev {
                 break;
@@ -11962,6 +12322,39 @@ impl<'a> Builder<'a> {
     /// to either emits nothing, so a should-miss stays a miss rather
     /// than a wrong-owner latch.
     ///
+    /// Post-fold owner upgrade for variable derefs: `$row->{name}` where
+    /// `$row`'s class only settled during the worklist fold (RowOf
+    /// projections, chain assignments). `resolve_hash_key_owners` ran
+    /// pre-fold and could only stamp the lexical `Variable` owner; this
+    /// re-asks the canonical bag and promotes to `Class(C)` when the
+    /// variable's type yields a class. Untyped variables keep their
+    /// lexical grouping — plain `%config` hashes are untouched.
+    fn upgrade_variable_hash_key_owners(&mut self) {
+        let mut upgrades: Vec<(usize, HashKeyOwner)> = Vec::new();
+        for (i, r) in self.refs.iter().enumerate() {
+            let RefKind::HashKeyAccess {
+                ref var_text,
+                owner: Some(HashKeyOwner::Variable { .. }),
+            } = r.kind
+            else {
+                continue;
+            };
+            if !var_text.starts_with('$') {
+                continue;
+            }
+            let Some(t) = self.bag_query_variable(var_text, r.scope, r.span.start) else {
+                continue;
+            };
+            let Some(class) = t.class_name() else { continue };
+            upgrades.push((i, HashKeyOwner::Class(class.to_string())));
+        }
+        for (i, o) in upgrades {
+            if let RefKind::HashKeyAccess { ref mut owner, .. } = self.refs[i].kind {
+                *owner = Some(o);
+            }
+        }
+    }
+
     /// Runs post-fold (after `emit_method_call_arg_keys`) so
     /// `invocant_type_at_node` answers against the canonical bag.
     fn emit_chained_hash_key_refs(&mut self, idx: &ChainTypingIndex<'a>) {
@@ -12886,7 +13279,7 @@ impl<'a> Builder<'a> {
             .filter(|b| {
                 return_types
                     .get(bare_name(&b.func_name))
-                    .map_or(false, |t| *t == InferredType::HashRef)
+                    .map_or(false, |t| t.is_hash_shaped())
             })
             .map(|b| (b.variable.as_str(), bare_name(&b.func_name).to_string()))
             .collect();

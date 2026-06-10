@@ -294,6 +294,108 @@ pub(crate) fn canonical_container_name<'a>(node: Node<'a>, src: &'a [u8]) -> Opt
     Some(format!("{}{}", target_sigil, bare))
 }
 
+/// True when `node` sits in a conditionally-executed position within
+/// its enclosing sub: under an if/unless block, a postfix modifier, a
+/// ternary arm, a loop, or a short-circuit chain (`and`/`or`; the
+/// `binary_expression` arm over-claims `&&`-and-friends' left operands
+/// too — over-marking is the safe direction, it only widens a shape to
+/// open). Climbs to the nearest sub/file boundary; scope-crossing
+/// conditionality (a write inside a block or closure relative to an
+/// outer variable's scope) is the caller's check — this answers only
+/// what the syntax between here and the boundary says.
+pub(crate) fn is_conditionally_executed(node: Node) -> bool {
+    let mut cur = node.parent();
+    while let Some(p) = cur {
+        match p.kind() {
+            "subroutine_declaration_statement"
+            | "method_declaration_statement"
+            | "anonymous_subroutine_expression"
+            | "source_file" => return false,
+            "conditional_statement"
+            | "postfix_conditional_expression"
+            | "conditional_expression"
+            | "lowprec_logical_expression"
+            | "binary_expression"
+            | "loop_statement"
+            | "for_statement"
+            | "postfix_for_expression"
+            | "postfix_loop_expression" => return true,
+            _ => {}
+        }
+        cur = p.parent();
+    }
+    false
+}
+
+/// The scalar wrapped by a container node's deref varname (`@$h{…}` —
+/// `slice_container_variable > varname > scalar`). `None` for plain
+/// (non-deref) containers, whose varname is a leaf.
+pub(crate) fn varname_inner_scalar_text<'a>(node: Node<'a>, src: &'a [u8]) -> Option<String> {
+    for i in 0..node.named_child_count() {
+        let c = node.named_child(i)?;
+        if c.kind() != "varname" {
+            continue;
+        }
+        for j in 0..c.named_child_count() {
+            let gc = c.named_child(j)?;
+            if gc.kind() == "scalar" {
+                return gc.text(src).map(|s| s.to_string());
+            }
+        }
+    }
+    None
+}
+
+/// `$v->{k}` (arrow deref of the scalar's referent) vs `$foo{k}`
+/// (element of `%foo` spelled with a `$` sigil): same node kind,
+/// different variable — only the arrow form goes through the scalar.
+/// The arrow is an anonymous token, so detect it in the source gap
+/// between the container and the subscript.
+pub(crate) fn element_arrow_deref(element: Node, src: &[u8]) -> bool {
+    let Some(container) = element.named_child(0) else { return false };
+    let Some(sub) = element
+        .child_by_field_name("key")
+        .or_else(|| element.child_by_field_name("index"))
+    else {
+        return false;
+    };
+    src.get(container.end_byte()..sub.start_byte())
+        .is_some_and(|gap| gap.windows(2).any(|w| w == b"->"))
+}
+
+/// True when this node is the *container* of an element access —
+/// `$c` in `$c->{k}` / `$c->[0]` / `$foo{k}` / `$foo[0]`. The element
+/// expressions put the key/index in a named field; the container is the
+/// other (first) named child. Element-access bases keep the reference
+/// in hand; every other read position (call argument, RHS alias, list,
+/// invocant, sigil deref) lets it escape to code that may mutate it.
+pub(crate) fn is_element_access_base(node: Node) -> bool {
+    let Some(parent) = node.parent() else { return false };
+    match parent.kind() {
+        "hash_element_expression" | "array_element_expression" => {
+            parent.named_child(0).is_some_and(|c| c == node)
+        }
+        // Postfix deref slice (`$h->@{…}` / `$h->%{…}` / `$a->@[…]`):
+        // the scalar fills the hashref/arrayref field. A slice READ
+        // copies values out — it can't mutate the referent.
+        "slice_expression" | "keyval_expression" => {
+            parent.child_by_field_name("hashref").is_some_and(|c| c == node)
+                || parent.child_by_field_name("arrayref").is_some_and(|c| c == node)
+        }
+        // Sigil-deref slice (`@$h{…}`): the scalar sits under the
+        // container's varname. Plain sigil derefs (`%$h`, `$$h`) keep
+        // their escape classification — only slice containers are
+        // value-copying reads.
+        "varname" => parent.parent().is_some_and(|gp| {
+            matches!(
+                gp.kind(),
+                "slice_container_variable" | "keyval_container_variable"
+            )
+        }),
+        _ => false,
+    }
+}
+
 /// `Class->new(...)` — a constructor call with a class-shaped invocant.
 /// Returns the invocant text (`Foo::Bar` or `__PACKAGE__`); `None` for
 /// non-constructor methods and variable/positional invocants, whose class

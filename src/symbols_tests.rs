@@ -4335,3 +4335,86 @@ class Point {
     );
     assert_eq!(loc.range.start.line, 2, "lands on the field decl line");
 }
+
+/// Closed-shape hash-key typo diagnostic: a READ of a key the closed
+/// literal doesn't define is hinted. An unconditional write EXTENDS
+/// the shape (the written key reads silently; other unknowns still
+/// hint); a conditional write opens it. Silent when the whole-story
+/// gate fails — reassignment, escape (call arg / alias / invocant /
+/// sigil deref) — and for open shapes and known keys.
+#[test]
+fn test_closed_shape_unknown_key_diagnostic() {
+    let src = "\
+my $config = { host => 'x', port => 1 };
+my $bad = $config->{typo};
+my $ok = $config->{host};
+my $mutv = { host => 'x' };
+$mutv->{added} = 1;
+my $r0 = $mutv->{added};
+my $r1 = $mutv->{other};
+my $cond = { host => 'x' };
+$cond->{maybe} = 1 if $ENV{X};
+my $rc = $cond->{anything};
+my $esc = { host => 'x' };
+process($esc);
+my $r2 = $esc->{anything};
+my $re = { host => 'x' };
+$re = fetch_config() if $ENV{X};
+my $r3 = $re->{whatever};
+my $base = { a => 1 };
+my $open = { %$base, extra => 1 };
+my $maybe = $open->{whatever};
+";
+    let analysis = parse_analysis(src);
+    let idx = crate::module_index::ModuleIndex::new_for_test();
+    let diags = collect_diagnostics(
+        &analysis,
+        &idx,
+        DiagnosticOptions { unresolved_dispatch: false },
+    );
+    let keys: Vec<&str> = diags
+        .iter()
+        .filter(|d| matches!(&d.code, Some(NumberOrString::String(c)) if c == "unknown-hash-key"))
+        .map(|d| d.message.as_str())
+        .collect();
+    assert_eq!(keys.len(), 2, "the typo and the post-extension unknown: {:?}", keys);
+    assert!(keys[0].contains("'typo'"), "{:?}", keys);
+    assert!(keys[0].contains("host"), "message names the known keys: {:?}", keys);
+    assert!(keys[1].contains("'other'"), "{:?}", keys);
+    assert!(
+        keys[1].contains("added"),
+        "extended shape names the written key: {:?}",
+        keys,
+    );
+}
+
+/// The literal-hash spelling gets the same diagnostic: container-form
+/// reads (`$h{k}`) check against `%h`'s shape. A bare `func(%h)` pass
+/// flattens to copies — the callee can't add keys — so it does NOT
+/// suppress; `\%h` ref-taking does.
+#[test]
+fn test_literal_hash_unknown_key_diagnostic() {
+    let src = "\
+my %config = (host => 'x');
+my $bad = $config{typo};
+func(%config);
+my %taken = (host => 'x');
+my $r = \\%taken;
+my $silent = $taken{anything};
+";
+    let analysis = parse_analysis(src);
+    let idx = crate::module_index::ModuleIndex::new_for_test();
+    let diags = collect_diagnostics(
+        &analysis,
+        &idx,
+        DiagnosticOptions { unresolved_dispatch: false },
+    );
+    let keys: Vec<&str> = diags
+        .iter()
+        .filter(|d| matches!(&d.code, Some(NumberOrString::String(c)) if c == "unknown-hash-key"))
+        .map(|d| d.message.as_str())
+        .collect();
+    assert_eq!(keys.len(), 1, "only the %config typo: {:?}", keys);
+    assert!(keys[0].contains("'typo'"), "{:?}", keys);
+    assert!(keys[0].contains("%config"), "names the hash variable: {:?}", keys);
+}

@@ -1010,10 +1010,9 @@ fn test_extract_hashref_literal() {
 
     let fa = build_fa("my $href = { a => 1, b => 2 };");
     let ty = fa.inferred_type_via_bag("$href", Point::new(0, 30));
-    assert_eq!(
-        ty,
-        Some(InferredType::HashRef),
-        "populated hash ref literal"
+    assert!(
+        ty.is_some_and(|t| t.is_hash_shaped()),
+        "populated hash ref literal",
     );
 }
 
@@ -1025,10 +1024,9 @@ fn test_extract_arrayref_literal() {
 
     let fa = build_fa("my $aref = [1, 2, 3];");
     let ty = fa.inferred_type_via_bag("$aref", Point::new(0, 21));
-    assert_eq!(
-        ty,
-        Some(InferredType::ArrayRef),
-        "populated array ref literal"
+    assert!(
+        ty.is_some_and(|t| t.is_array_shaped()),
+        "populated array ref literal",
     );
 }
 
@@ -1079,14 +1077,14 @@ fn test_extract_constructor_still_works() {
 fn test_arrow_hash_deref_infers_hashref() {
     let fa = build_fa("my $x;\n$x->{key};");
     let ty = fa.inferred_type_via_bag("$x", Point::new(1, 10));
-    assert_eq!(ty, Some(InferredType::HashRef));
+    assert!(ty.is_some_and(|t| t.is_hash_shaped()), "hash-shaped");
 }
 
 #[test]
 fn test_arrow_array_deref_infers_arrayref() {
     let fa = build_fa("my $x;\n$x->[0];");
     let ty = fa.inferred_type_via_bag("$x", Point::new(1, 8));
-    assert_eq!(ty, Some(InferredType::ArrayRef));
+    assert!(ty.is_some_and(|t| t.is_array_shaped()), "array-shaped");
 }
 
 #[test]
@@ -1108,9 +1106,8 @@ fn test_coderef_call_propagates_return_type() {
     // body span resolves to ArrayRef without name lookup.
     let fa = build_fa("my $cb = sub { [1,2] };\nmy $r = $cb->();\nmy $z;");
     let ty = fa.inferred_type_via_bag("$r", Point::new(2, 0));
-    assert_eq!(
-        ty,
-        Some(InferredType::ArrayRef),
+    assert!(
+        ty.as_ref().is_some_and(|t| t.is_array_shaped()),
         "coderef call must inherit the callable's return type via return_edge: got {:?}",
         ty,
     );
@@ -1120,14 +1117,14 @@ fn test_coderef_call_propagates_return_type() {
 fn test_postfix_array_deref_infers_arrayref() {
     let fa = build_fa("my $x;\nmy @a = $x->@*;\nmy $z;");
     let ty = fa.inferred_type_via_bag("$x", Point::new(2, 0));
-    assert_eq!(ty, Some(InferredType::ArrayRef));
+    assert!(ty.is_some_and(|t| t.is_array_shaped()), "array-shaped");
 }
 
 #[test]
 fn test_postfix_hash_deref_infers_hashref() {
     let fa = build_fa("my $y;\nmy %h = $y->%*;\nmy $z;");
     let ty = fa.inferred_type_via_bag("$y", Point::new(2, 0));
-    assert_eq!(ty, Some(InferredType::HashRef));
+    assert!(ty.is_some_and(|t| t.is_hash_shaped()), "hash-shaped");
 }
 
 #[test]
@@ -1228,14 +1225,14 @@ fn test_preinc_infers_numeric() {
 fn test_block_array_deref_infers_arrayref() {
     let fa = build_fa("my $x;\nmy @items = @{$x};\nmy $z;");
     let ty = fa.inferred_type_via_bag("$x", Point::new(2, 0));
-    assert_eq!(ty, Some(InferredType::ArrayRef));
+    assert!(ty.is_some_and(|t| t.is_array_shaped()), "array-shaped");
 }
 
 #[test]
 fn test_block_hash_deref_infers_hashref() {
     let fa = build_fa("my $y;\nmy %t = %{$y};\nmy $z;");
     let ty = fa.inferred_type_via_bag("$y", Point::new(2, 0));
-    assert_eq!(ty, Some(InferredType::HashRef));
+    assert!(ty.is_some_and(|t| t.is_hash_shaped()), "hash-shaped");
 }
 
 #[test]
@@ -1260,10 +1257,9 @@ fn test_builtin_push_infers_arrayref() {
     // push @{$aref} triggers array_deref_expression which already infers ArrayRef
     let fa = build_fa("my $aref;\npush @{$aref}, 1;\nmy $z;");
     let ty = fa.inferred_type_via_bag("$aref", Point::new(2, 0));
-    assert_eq!(
-        ty,
-        Some(InferredType::ArrayRef),
-        "push deref should infer ArrayRef"
+    assert!(
+        ty.is_some_and(|t| t.is_array_shaped()),
+        "push deref should infer ArrayRef",
     );
 }
 
@@ -1323,18 +1319,18 @@ fn test_builtin_length_return_type() {
 #[test]
 fn test_return_type_hashref() {
     let fa = build_fa("sub get_config {\n    return { host => \"localhost\" };\n}");
-    assert_eq!(
-        fa.sub_return_type_at_arity("get_config", None),
-        Some(InferredType::HashRef)
+    assert!(
+        fa.sub_return_type_at_arity("get_config", None).is_some_and(|t| t.is_hash_shaped()),
+        "hash-shaped",
     );
 }
 
 #[test]
 fn test_return_type_arrayref() {
     let fa = build_fa("sub get_tags {\n    return [1, 2, 3];\n}");
-    assert_eq!(
-        fa.sub_return_type_at_arity("get_tags", None),
-        Some(InferredType::ArrayRef)
+    assert!(
+        fa.sub_return_type_at_arity("get_tags", None).is_some_and(|t| t.is_array_shaped()),
+        "array-shaped",
     );
 }
 
@@ -1355,9 +1351,9 @@ fn test_return_type_coderef() {
 fn test_return_type_implicit_last_expr() {
     // No explicit return — last expression is the implicit return
     let fa = build_fa("sub get_data {\n    { key => \"val\" };\n}");
-    assert_eq!(
-        fa.sub_return_type_at_arity("get_data", None),
-        Some(InferredType::HashRef)
+    assert!(
+        fa.sub_return_type_at_arity("get_data", None).is_some_and(|t| t.is_hash_shaped()),
+        "hash-shaped",
     );
 }
 
@@ -1373,9 +1369,9 @@ fn test_return_type_consistent_returns() {
     // Multiple returns all hashref → HashRef
     let fa =
         build_fa("sub consistent {\n    if (1) { return { a => 1 } }\n    return { b => 2 };\n}");
-    assert_eq!(
-        fa.sub_return_type_at_arity("consistent", None),
-        Some(InferredType::HashRef)
+    assert!(
+        fa.sub_return_type_at_arity("consistent", None).is_some_and(|t| t.is_hash_shaped()),
+        "hash-shaped",
     );
 }
 
@@ -1383,15 +1379,14 @@ fn test_return_type_consistent_returns() {
 fn test_return_type_propagation_to_call_site() {
     let fa =
         build_fa("sub get_config {\n    return { host => 1 };\n}\nmy $cfg = get_config();\nmy $z;");
-    assert_eq!(
-        fa.sub_return_type_at_arity("get_config", None),
-        Some(InferredType::HashRef)
+    assert!(
+        fa.sub_return_type_at_arity("get_config", None).is_some_and(|t| t.is_hash_shaped()),
+        "hash-shaped",
     );
     let ty = fa.inferred_type_via_bag("$cfg", Point::new(4, 0));
-    assert_eq!(
-        ty,
-        Some(InferredType::HashRef),
-        "call site should get return type"
+    assert!(
+        ty.is_some_and(|t| t.is_hash_shaped()),
+        "call site should get return type",
     );
 }
 
@@ -1438,9 +1433,9 @@ fn test_return_type_self_variable() {
 fn test_return_type_bare_return_filtered() {
     // Bare return + typed return → bare is filtered, typed return wins
     let fa = build_fa("sub get_config {\n    return unless 1;\n    return { host => 1 };\n}");
-    assert_eq!(
-        fa.sub_return_type_at_arity("get_config", None),
-        Some(InferredType::HashRef)
+    assert!(
+        fa.sub_return_type_at_arity("get_config", None).is_some_and(|t| t.is_hash_shaped()),
+        "hash-shaped",
     );
 }
 
@@ -1455,9 +1450,9 @@ fn test_return_type_all_bare_returns() {
 fn test_return_type_undef_filtered() {
     // return undef + typed return → undef is filtered, typed return wins
     let fa = build_fa("sub maybe {\n    return undef unless 1;\n    return { a => 1 };\n}");
-    assert_eq!(
-        fa.sub_return_type_at_arity("maybe", None),
-        Some(InferredType::HashRef)
+    assert!(
+        fa.sub_return_type_at_arity("maybe", None).is_some_and(|t| t.is_hash_shaped()),
+        "hash-shaped",
     );
 }
 
@@ -1495,7 +1490,7 @@ fn test_resolve_expr_type_function_call() {
     )
     .expect("should find function_call_expression");
     let ty = crate::cursor_context::resolve_expression_type(&fa, call_node, src.as_bytes(), None);
-    assert_eq!(ty, Some(InferredType::HashRef));
+    assert!(ty.is_some_and(|t| t.is_hash_shaped()), "hash-shaped");
 }
 
 #[test]
@@ -1520,7 +1515,7 @@ fn test_resolve_expr_type_scalar_variable() {
     let scalar_node =
         find_node_at(tree.root_node(), Point::new(1, 0), "scalar").expect("should find scalar");
     let ty = crate::cursor_context::resolve_expression_type(&fa, scalar_node, src.as_bytes(), None);
-    assert_eq!(ty, Some(InferredType::HashRef));
+    assert!(ty.is_some_and(|t| t.is_hash_shaped()), "hash-shaped");
 }
 
 #[test]
@@ -1548,7 +1543,7 @@ fn test_resolve_expr_type_chained_method() {
     }
     assert_eq!(n.kind(), "method_call_expression");
     let ty = crate::cursor_context::resolve_expression_type(&fa, n, src.as_bytes(), None);
-    assert_eq!(ty, Some(InferredType::HashRef));
+    assert!(ty.is_some_and(|t| t.is_hash_shaped()), "hash-shaped");
 }
 
 #[test]
@@ -1592,10 +1587,9 @@ $calc->get_self->get_config->{host};
 
     // Verify get_config returns HashRef
     let get_config_rt = fa.sub_return_type_at_arity("get_config", None);
-    assert_eq!(
-        get_config_rt,
-        Some(InferredType::HashRef),
-        "get_config should return HashRef"
+    assert!(
+        get_config_rt.is_some_and(|t| t.is_hash_shaped()),
+        "get_config should return HashRef",
     );
 
     // The outermost expression is hash_element_expression wrapping the chain
@@ -1617,10 +1611,9 @@ $calc->get_self->get_config->{host};
     let base = n.named_child(0).expect("should have base");
     assert_eq!(base.kind(), "method_call_expression");
     let ty = crate::cursor_context::resolve_expression_type(&fa, base, src.as_bytes(), None);
-    assert_eq!(
-        ty,
-        Some(InferredType::HashRef),
-        "the chain $calc->get_self->get_config should resolve to HashRef"
+    assert!(
+        ty.is_some_and(|t| t.is_hash_shaped()),
+        "the chain $calc->get_self->get_config should resolve to HashRef",
     );
 }
 
@@ -3441,7 +3434,6 @@ fn test_cross_file_method_override() {
 
 #[test]
 fn test_cross_file_return_type_through_inheritance() {
-    use crate::file_analysis::InferredType;
     use crate::module_index::ModuleIndex;
     use std::path::PathBuf;
 
@@ -3474,7 +3466,7 @@ sub fetch {
     );
 
     let rt = fa.find_method_return_type("MyFetcher", "fetch", Some(&idx), None);
-    assert_eq!(rt, Some(InferredType::HashRef));
+    assert!(rt.is_some_and(|t| t.is_hash_shaped()), "hash-shaped");
 }
 
 #[test]
@@ -3565,7 +3557,7 @@ $cfg;
 ",
     );
     let ty = fa.inferred_type_via_bag("$cfg", Point::new(9, 0));
-    assert_eq!(ty, Some(InferredType::HashRef));
+    assert!(ty.is_some_and(|t| t.is_hash_shaped()), "hash-shaped");
 }
 
 #[test]
@@ -3588,7 +3580,7 @@ $name;
     let bar_ty = fa.inferred_type_via_bag("$bar", Point::new(10, 0));
     assert_eq!(bar_ty, Some(InferredType::ClassName("Bar".into())));
     let name_ty = fa.inferred_type_via_bag("$name", Point::new(11, 0));
-    assert_eq!(name_ty, Some(InferredType::HashRef));
+    assert!(name_ty.is_some_and(|t| t.is_hash_shaped()), "hash-shaped");
 }
 
 #[test]
@@ -3606,7 +3598,7 @@ sub run {
 ",
     );
     let ty = fa.inferred_type_via_bag("$cfg", Point::new(7, 4));
-    assert_eq!(ty, Some(InferredType::HashRef));
+    assert!(ty.is_some_and(|t| t.is_hash_shaped()), "hash-shaped");
 }
 
 // ---- Framework accessor synthesis tests ----
@@ -4420,11 +4412,10 @@ has flavor => sub { [1, 2, 3] };
         "Sweet::flavor getter returns String (from 'caramel' default), \
          not Sour's ArrayRef"
     );
-    assert_eq!(
-        fa.find_method_return_type("Sour", "flavor", None, Some(0)),
-        Some(InferredType::ArrayRef),
+    assert!(
+        fa.find_method_return_type("Sour", "flavor", None, Some(0)).is_some_and(|t| t.is_array_shaped()),
         "Sour::flavor getter returns ArrayRef (from sub-returning-array \
-         default), not Sweet's String"
+         default), not Sweet's String",
     );
     assert_eq!(
         fa.find_method_return_type("Sweet", "flavor", None, Some(1)),
@@ -4511,10 +4502,9 @@ has items => sub { [] };
 ",
     );
     let rt = fa.find_method_return_type("App", "items", None, Some(0));
-    assert_eq!(
-        rt,
-        Some(InferredType::ArrayRef),
-        "sub {{ [] }} default → ArrayRef getter"
+    assert!(
+        rt.is_some_and(|t| t.is_array_shaped()),
+        "sub {{ [] }} default → ArrayRef getter",
     );
 }
 
@@ -4528,10 +4518,9 @@ has config => sub { {} };
 ",
     );
     let rt = fa.find_method_return_type("App", "config", None, Some(0));
-    assert_eq!(
-        rt,
-        Some(InferredType::HashRef),
-        "sub {{{{ }}}} default → HashRef getter"
+    assert!(
+        rt.is_some_and(|t| t.is_hash_shaped()),
+        "sub {{{{ }}}} default → HashRef getter",
     );
 }
 
@@ -14473,4 +14462,250 @@ if ($w->has_size) { print $w->size; }
         "references include has_size call: {:?}",
         refs,
     );
+}
+
+// ---- Tier 2 nested-hashkey: structurally-typed hash literals ----
+
+/// `{ host => 'x', port => 5432 }` carries per-key types; `->{key}`
+/// narrows through assignments and direct nesting; a spread flips the
+/// shape open (unknown keys aren't claimable misses either way, but the
+/// shape records it for future diagnostics).
+#[test]
+fn hash_literal_structural_typing_and_narrowing() {
+    let src = "\
+my $config = { db => { host => 'localhost', port => 5432 }, debug => 1 };
+my $db = $config->{db};
+my $host = $db->{host};
+my $port = $config->{db}->{port};
+my $open = { %$config, extra => 'x' };
+";
+    let fa = build_fa(src);
+
+    // The literal's own structure.
+    let cfg = fa
+        .inferred_type_via_bag("$config", Point::new(1, 0))
+        .expect("$config typed");
+    let db_ty = cfg.key_value_type("db").expect("db key present").expect("db value typed");
+    assert!(
+        matches!(db_ty, InferredType::HashWithKeys { open: false, .. }),
+        "nested literal rides the value slot: {:?}",
+        db_ty,
+    );
+    assert!(cfg.key_value_type("typo").is_none(), "closed shape: unknown key is no key");
+
+    // Narrowing through an assignment hop.
+    let db = fa
+        .inferred_type_via_bag("$db", Point::new(2, 0))
+        .expect("$db typed from ->{db}");
+    assert!(matches!(db, InferredType::HashWithKeys { .. }), "got {:?}", db);
+    let host = fa
+        .inferred_type_via_bag("$host", Point::new(3, 0))
+        .expect("$host typed from ->{host}");
+    assert_eq!(host, InferredType::String);
+
+    // Direct double-drill, no intermediate variable.
+    let port = fa
+        .inferred_type_via_bag("$port", Point::new(4, 0))
+        .expect("$port typed from ->{db}->{port}");
+    assert_eq!(port, InferredType::Numeric);
+
+    // Spread → open shape.
+    let open = fa
+        .inferred_type_via_bag("$open", Point::new(4, 9))
+        .expect("$open typed");
+    assert!(
+        matches!(open, InferredType::HashWithKeys { open: true, .. }),
+        "spread flips open: {:?}",
+        open,
+    );
+}
+
+/// Mutation extension: an unconditional `$v->{k} = …` write EXTENDS a
+/// closed shape (the key joins the list, value typed from the RHS,
+/// `open` preserved); a conditional or dynamic-key write switches the
+/// shape open. Reads before the write keep the original shape.
+#[test]
+fn mutation_extension_on_closed_shapes() {
+    let src = "\
+my $ext = { host => 'x' };
+my $before = $ext->{host};
+$ext->{added} = 42;
+my $after = $ext->{added};
+my $cond = { host => 'x' };
+$cond->{maybe} = 1 if $ENV{X};
+my $dyn = { host => 'x' };
+$dyn->{$ENV{K}} = 1;
+";
+    let fa = build_fa(src);
+
+    // Before the write: the literal's own closed single-key shape.
+    let t0 = fa.inferred_type_via_bag("$ext", Point::new(1, 0)).expect("$ext typed");
+    assert!(
+        matches!(&t0, InferredType::HashWithKeys { keys, open: false } if keys.len() == 1),
+        "pre-write shape: {:?}",
+        t0,
+    );
+
+    // After: extended, still closed, value typed from the RHS.
+    let t1 = fa.inferred_type_via_bag("$ext", Point::new(3, 0)).expect("$ext typed");
+    let InferredType::HashWithKeys { keys, open: false } = &t1 else {
+        panic!("post-write shape: {:?}", t1)
+    };
+    assert_eq!(keys.len(), 2, "{:?}", keys);
+    assert_eq!(keys[1].0, "added");
+    assert_eq!(keys[1].1.as_deref(), Some(&InferredType::Numeric));
+    let after = fa.inferred_type_via_bag("$after", Point::new(4, 0)).expect("$after typed");
+    assert_eq!(after, InferredType::Numeric, "read drills the extended key");
+
+    // Conditional write → open.
+    let tc = fa.inferred_type_via_bag("$cond", Point::new(6, 0)).expect("$cond typed");
+    assert!(
+        matches!(tc, InferredType::HashWithKeys { open: true, .. }),
+        "conditional write opens: {:?}",
+        tc,
+    );
+
+    // Dynamic key → open.
+    let td = fa.inferred_type_via_bag("$dyn", Point::new(8, 0)).expect("$dyn typed");
+    assert!(
+        matches!(td, InferredType::HashWithKeys { open: true, .. }),
+        "dynamic key opens: {:?}",
+        td,
+    );
+}
+
+/// The literal-hash spelling: `my %h = (k => v)` types through the
+/// same shape builder as the hashref literal, `$h{k}` projects off
+/// `%h` (the canonical container name), mutation extension applies,
+/// and spreads — arrays included (`@_`) — flip the shape open.
+#[test]
+fn literal_hash_structural_typing() {
+    let src = "\
+my %config = (host => 'x', port => 5432);
+my $v = $config{host};
+$config{added} = 42;
+my $a = $config{added};
+my %spread = (default => 1, @_);
+";
+    let fa = build_fa(src);
+    let t = fa.inferred_type_via_bag("%config", Point::new(1, 0)).expect("%config typed");
+    assert!(
+        matches!(&t, InferredType::HashWithKeys { keys, open: false } if keys.len() == 2),
+        "literal-list shape: {:?}",
+        t,
+    );
+    let v = fa.inferred_type_via_bag("$v", Point::new(2, 0)).expect("$v typed");
+    assert_eq!(v, InferredType::String, "container-form read projects");
+    let t2 = fa.inferred_type_via_bag("%config", Point::new(3, 0)).expect("%config typed");
+    assert!(
+        matches!(&t2, InferredType::HashWithKeys { keys, open: false } if keys.len() == 3),
+        "write extends: {:?}",
+        t2,
+    );
+    let a = fa.inferred_type_via_bag("$a", Point::new(4, 0)).expect("$a typed");
+    assert_eq!(a, InferredType::Numeric, "extended key value type");
+    let sp = fa.inferred_type_via_bag("%spread", Point::new(5, 0)).expect("%spread typed");
+    assert!(
+        matches!(sp, InferredType::HashWithKeys { open: true, .. }),
+        "array spread opens: {:?}",
+        sp,
+    );
+}
+
+/// Slice writes — sigil (`@h{…}`), postfix deref (`$r->@{…}`), and
+/// sigil deref (`@$s{…}`) — land several keys at once: each records an
+/// open-switching KeyWrite, so the closed shape widens instead of
+/// claiming the written keys as misses.
+#[test]
+fn slice_writes_open_closed_shapes() {
+    let src = "\
+my %h = (a => 1);
+@h{qw(b c)} = (1, 2);
+my $r = { a => 1 };
+$r->@{qw(d e)} = (3, 4);
+my $s = { a => 1 };
+@$s{qw(f g)} = (5, 6);
+";
+    let fa = build_fa(src);
+    for (var, line) in [("%h", 2), ("$r", 4), ("$s", 6)] {
+        let t = fa
+            .inferred_type_via_bag(var, Point::new(line, 0))
+            .unwrap_or_else(|| panic!("{var} typed"));
+        assert!(
+            matches!(t, InferredType::HashWithKeys { open: true, .. }),
+            "slice write opens {var}: {:?}",
+            t,
+        );
+    }
+}
+
+/// Sub-return literals narrow at call sites: `cfg()->{host}` → String.
+#[test]
+fn hash_literal_narrows_through_sub_return() {
+    let src = "\
+sub cfg { return { host => 'x', port => 1 } }
+my $h = cfg()->{host};
+";
+    let fa = build_fa(src);
+    let h = fa
+        .inferred_type_via_bag("$h", Point::new(2, 0))
+        .expect("$h typed through cfg()->{host}");
+    assert_eq!(h, InferredType::String);
+}
+
+// ---- Tier 3 nested-hashkey: array element narrowing + mixed drill ----
+
+/// `->[N]` projects array-literal element types (tuple semantics — the
+/// heterogeneous case answers per index, better than bailing), and the
+/// mixed drill `$obj->{users}->[0]->{name}` chains hash narrowing →
+/// element projection → hash narrowing end-to-end.
+#[test]
+fn array_element_narrowing_and_mixed_drill() {
+    let src = "\
+my $x = [1, 'a'];
+my $n = $x->[0];
+my $s = $x->[1];
+my $obj = { users => [ { name => 'A', id => 1 } ] };
+my $name = $obj->{users}->[0]->{name};
+my $id = $obj->{users}->[0]->{id};
+";
+    let fa = build_fa(src);
+    assert_eq!(
+        fa.inferred_type_via_bag("$n", Point::new(2, 0)),
+        Some(InferredType::Numeric),
+        "heterogeneous tuple projects per index",
+    );
+    assert_eq!(
+        fa.inferred_type_via_bag("$s", Point::new(2, 8)),
+        Some(InferredType::String),
+    );
+    assert_eq!(
+        fa.inferred_type_via_bag("$name", Point::new(5, 0)),
+        Some(InferredType::String),
+        "mixed drill end-to-end",
+    );
+    assert_eq!(
+        fa.inferred_type_via_bag("$id", Point::new(5, 30)),
+        Some(InferredType::Numeric),
+    );
+}
+
+/// Out-of-range and unknown-element honesty: `->[7]` of a 2-tuple is
+/// None; a literal with an untypable element degrades to plain ArrayRef
+/// (no per-slot claims).
+#[test]
+fn array_element_narrowing_negative_space() {
+    let src = "\
+my $x = [1, 'a'];
+my $oob = $x->[7];
+my $mixed = [1, some_call()];
+";
+    let fa = build_fa(src);
+    assert_eq!(
+        fa.inferred_type_via_bag("$oob", Point::new(2, 0)),
+        None,
+        "out-of-range projection stays honest",
+    );
+    let m = fa.inferred_type_via_bag("$mixed", Point::new(2, 10));
+    assert_eq!(m, Some(InferredType::ArrayRef), "untypable element degrades whole literal");
 }

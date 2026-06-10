@@ -874,6 +874,19 @@ pub enum InferredType {
         controller: Option<String>,
         stash: Vec<(String, String)>,
     },
+    /// `{ host => 'x', port => 5432 }` — a hash literal with literal
+    /// keys, each carrying its value's type when inferable (`None` =
+    /// key present, value type unknown). `open` = a spread (`%$other`)
+    /// or dynamic key makes the key set open-ended, so an unknown key
+    /// is not a claimable miss. `->{key}` narrows via
+    /// [`InferredType::key_value_type`]; nesting recurses naturally
+    /// (the value's own `HashWithKeys` rides in the box). Kept at the
+    /// END for bincode variant-index stability (bump
+    /// `EXTRACT_VERSION`).
+    HashWithKeys {
+        keys: Vec<(String, Option<Box<InferredType>>)>,
+        open: bool,
+    },
 }
 
 /// Concrete parametric flavors + type-level operators. Each
@@ -1008,6 +1021,38 @@ impl InferredType {
         }
     }
 
+    /// `->{key}` narrowing on a structurally-typed hash (rule #10: ask
+    /// the value). `Some(Some(t))` = key present with a known value
+    /// type; `Some(None)` = key present, value type unknown; `None` =
+    /// not a key of this value (or not a keyed hash at all). Closed
+    /// shapes answer `None` for unknown keys; open shapes (spread)
+    /// also answer `None` — the caller can't claim a miss either way,
+    /// the distinction is for future diagnostics.
+    /// Hash-shaped rep, regardless of key knowledge — the predicate
+    /// every "is this a hashref" gate asks instead of `== HashRef`.
+    pub fn is_hash_shaped(&self) -> bool {
+        matches!(
+            self,
+            InferredType::HashRef | InferredType::HashWithKeys { .. }
+        )
+    }
+
+    /// Array-shaped rep, regardless of element knowledge — the
+    /// `is_hash_shaped` twin for `== ArrayRef` gates.
+    pub fn is_array_shaped(&self) -> bool {
+        matches!(self, InferredType::ArrayRef | InferredType::Sequence(_))
+    }
+
+    pub fn key_value_type(&self, key: &str) -> Option<Option<&InferredType>> {
+        match self {
+            InferredType::HashWithKeys { keys, .. } => keys
+                .iter()
+                .find(|(k, _)| k == key)
+                .map(|(_, t)| t.as_deref()),
+            _ => None,
+        }
+    }
+
     /// Read the inherited route default for `key` from a branded
     /// route value, where `controller` is a distinguished key and
     /// everything else lives in the stash. `None` for non-route
@@ -1136,6 +1181,17 @@ impl InferredType {
                 InferredType::BrandedRoute { controller: hc, stash: hs, .. },
                 InferredType::BrandedRoute { controller: wc, stash: ws, .. },
             ) => (wc.is_none() || hc.is_some()) && ws.len() <= hs.len(),
+            // Structure dominates rep: a keyed hash / positional tuple is
+            // strictly more informative than the bare ref a deref-
+            // narrowing observation re-derives. Structured-vs-structured
+            // only subsumes on equality (a genuine reassignment with a
+            // different shape must win as latest).
+            (InferredType::HashWithKeys { .. }, InferredType::HashRef) => true,
+            (a @ InferredType::HashWithKeys { .. }, b @ InferredType::HashWithKeys { .. }) => {
+                a == b
+            }
+            (InferredType::Sequence(_), InferredType::ArrayRef) => true,
+            (a @ InferredType::Sequence(_), b @ InferredType::Sequence(_)) => a == b,
             // Unit-shape variants subsume themselves; mismatched
             // discriminants don't subsume.
             (a, b) => std::mem::discriminant(a) == std::mem::discriminant(b),
@@ -1206,14 +1262,24 @@ pub fn resolve_return_type(return_types: &[InferredType]) -> Option<InferredType
     if return_types.iter().all(|t| t == first) {
         return Some(first.clone());
     }
-    // Object subsumes HashRef: if some returns are Object(X) and others are HashRef,
-    // the Object wins (overloaded hash access is common in Perl).
+    // All arms hash-shaped but structurally different (`{a=>1}` vs
+    // `{b=>2}`) → degrade to the coarse HashRef rather than Unknown.
+    if return_types.iter().all(|t| t.is_hash_shaped()) {
+        return Some(InferredType::HashRef);
+    }
+    // Same rule for arrays: structurally different tuples agree on the
+    // coarse ArrayRef.
+    if return_types.iter().all(|t| t.is_array_shaped()) {
+        return Some(InferredType::ArrayRef);
+    }
+    // Object subsumes HashRef: if some returns are Object(X) and others are
+    // hash-shaped, the Object wins (overloaded hash access is common in Perl).
     let mut object = None;
     for t in return_types {
         if t.is_object() {
             object = Some(t.clone());
-        } else if *t != InferredType::HashRef {
-            // Non-HashRef, non-Object disagreement → Unknown
+        } else if !t.is_hash_shaped() {
+            // Non-hash, non-Object disagreement → Unknown
             return None;
         }
     }
@@ -1609,6 +1675,30 @@ pub struct CallBinding {
     pub func_name: String,
     pub scope: ScopeId,
     pub span: Span,
+}
+
+/// One `$var->{key} = …` write observed at walk time. The mutation-
+/// extension pass (`witnesses::emit_mutation_extension_witnesses`)
+/// folds these into the variable's structural shape: an unconditional
+/// static-key write extends a closed `HashWithKeys` (the key joins the
+/// shape, its value typed from `rhs_span`); a dynamic key or a
+/// conditionally-executed write switches the shape open
+/// (docs/adr/structural-shapes.md). Persisted so cross-file
+/// enrichment can re-run the pass once imported shapes land.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KeyWrite {
+    pub var_text: String,
+    /// `None` = dynamic key (`$v->{$k}`) — unknowable membership.
+    pub key: Option<String>,
+    pub scope: ScopeId,
+    /// Key-node span — temporal anchor and per-var ordering.
+    pub span: Span,
+    /// RHS expression span — types the extended key's value.
+    pub rhs_span: Option<Span>,
+    /// Syntactically conditional within its sub (if/postfix/ternary/
+    /// loop/short-circuit). Scope-crossing writes (nested block or
+    /// closure relative to the decl scope) are detected in the pass.
+    pub conditional: bool,
 }
 
 /// A method call binding: `$var = $invocant->method()`.
@@ -2162,6 +2252,31 @@ pub struct FileAnalysis {
     #[serde(default)]
     pub attr_projections: Vec<AttrProjection>,
 
+    /// Scalars whose reference escaped the file's view (read in a
+    /// non-element-access position: call argument, alias, invocant,
+    /// sigil deref). A closed literal shape on an escaped scalar is
+    /// not the whole story — the callee may have mutated it. See
+    /// `closed_shape_is_whole_story`. `#[serde(default)]` for blob
+    /// compat; the accompanying `EXTRACT_VERSION` bump re-extracts so
+    /// no blob actually carries an empty set for analyzed code.
+    #[serde(default)]
+    pub escaped_scalars: HashSet<String>,
+
+    /// Scalars reassigned after declaration (`$v = …` with the
+    /// variable itself as assignment target — element writes are NOT
+    /// reassignment, they're modeled as shape mutations). A closed
+    /// shape on a reassigned scalar isn't trustworthy: the other
+    /// assignment may carry a different (unknown) value. The
+    /// conditional-reassignment lattice disagreement is the modeled
+    /// fix; this set is its trust-gate stand-in.
+    #[serde(default)]
+    pub reassigned_scalars: HashSet<String>,
+
+    /// Hash-key writes, in walk order. Input to the mutation-extension
+    /// pass — see [`KeyWrite`].
+    #[serde(default)]
+    pub key_writes: Vec<KeyWrite>,
+
     // Indices (built in post-pass — skipped by serde; call rebuild_all_indices() after deserialize)
     #[serde(skip, default)]
     scope_starts: Vec<(Point, ScopeId)>, // sorted by start point
@@ -2221,6 +2336,9 @@ pub struct FileAnalysisParts {
     pub provisional_dispatches: Vec<ProvisionalDispatch>,
     pub gated_param_types: Vec<ReceiverGated<TypeConstraint>>,
     pub attr_projections: Vec<AttrProjection>,
+    pub escaped_scalars: HashSet<String>,
+    pub reassigned_scalars: HashSet<String>,
+    pub key_writes: Vec<KeyWrite>,
 }
 
 /// One projection of a field/attr decl — the entity that encodes group
@@ -2343,6 +2461,9 @@ impl FileAnalysis {
             provisional_dispatches,
             gated_param_types,
             attr_projections,
+            escaped_scalars,
+            reassigned_scalars,
+            key_writes,
         } = parts;
         witnesses.rebuild_index();
         let mut fa = FileAnalysis {
@@ -2373,6 +2494,9 @@ impl FileAnalysis {
             provisional_dispatches,
             gated_param_types,
             attr_projections,
+            escaped_scalars,
+            reassigned_scalars,
+            key_writes,
             scope_starts: Vec::new(),
             symbols_by_name: HashMap::new(),
             symbols_by_scope: HashMap::new(),
@@ -3206,6 +3330,21 @@ impl FileAnalysis {
         out
     }
 
+    /// True when a closed literal shape on `var_text` is the variable's
+    /// whole story in this file: the scalar is never reassigned and its
+    /// reference never escapes into a call / alias / invocant position.
+    /// Key writes are NOT a gate clause — the mutation-extension pass
+    /// models them on the shape itself (unconditional writes extend a
+    /// closed shape; conditional/dynamic writes switch it open). The
+    /// two remaining clauses are trust-gate stand-ins for unmodeled
+    /// lattice widenings (conditional-reassignment disagreement, escape
+    /// widening — docs/adr/structural-shapes.md); the unknown-hash-key
+    /// diagnostic only fires behind them.
+    pub fn closed_shape_is_whole_story(&self, var_text: &str) -> bool {
+        !self.escaped_scalars.contains(var_text)
+            && !self.reassigned_scalars.contains(var_text)
+    }
+
     /// Get the return type of a named sub/method (local definitions
     /// only). Routes through the bag — `Symbol(sid)` writeback witness
     /// is the post-field-deletion authority. Returns owned because
@@ -3458,6 +3597,30 @@ impl FileAnalysis {
                     }
                 }
             }
+        }
+
+        // Re-run the mutation-extension pass: imported shapes (a var
+        // typed by an imported sub's `HashWithKeys` return) only land
+        // with the TCs pushed above, so build-time extension found no
+        // shape to extend for them. Append-only (`clear = false`) —
+        // post-finalize removal would shift `base_witness_count`;
+        // duplicates are idempotent and truncated by the next cycle.
+        {
+            let key_writes = std::mem::take(&mut self.key_writes);
+            let ctx = crate::witnesses::BagContext {
+                scopes: &self.scopes,
+                package_framework: &self.package_framework,
+                module_index,
+                package_parents: &self.package_parents,
+                app_surface_consumers: &self.app_surface_consumers,
+            };
+            crate::witnesses::emit_mutation_extension_witnesses(
+                &mut self.witnesses,
+                &ctx,
+                &key_writes,
+                false,
+            );
+            self.key_writes = key_writes;
         }
 
         self.resolve_method_call_types(module_index);
@@ -8170,6 +8333,9 @@ pub fn inferred_type_to_tag(ty: &InferredType) -> String {
         InferredType::ClassName(name) => format!("Object:{}", name),
         InferredType::FirstParam { package } => format!("Object:{}", package),
         InferredType::HashRef => "HashRef".to_string(),
+        // Structurally-typed hashes read as plain HashRef on the wire —
+        // the per-key detail drives narrowing, not display (yet).
+        InferredType::HashWithKeys { .. } => "HashRef".to_string(),
         InferredType::ArrayRef => "ArrayRef".to_string(),
         InferredType::CodeRef { .. } => "CodeRef".to_string(),
         InferredType::Regexp => "Regexp".to_string(),
@@ -8223,6 +8389,9 @@ pub(crate) fn format_inferred_type(ty: &InferredType) -> String {
         InferredType::ClassName(name) => name.clone(),
         InferredType::FirstParam { package } => package.clone(),
         InferredType::HashRef => "HashRef".to_string(),
+        // Structurally-typed hashes read as plain HashRef on the wire —
+        // the per-key detail drives narrowing, not display (yet).
+        InferredType::HashWithKeys { .. } => "HashRef".to_string(),
         InferredType::ArrayRef => "ArrayRef".to_string(),
         InferredType::CodeRef { .. } => "CodeRef".to_string(),
         InferredType::Regexp => "Regexp".to_string(),
@@ -8234,7 +8403,13 @@ pub(crate) fn format_inferred_type(ty: &InferredType) -> String {
             // bracketed text as link syntax and either swallow it
             // or render it as a broken link. Matches the
             // `Parametric<T1, T2>` style.
-            let parts: Vec<String> = elems.iter().map(format_inferred_type).collect();
+            // Elide long tuples — a 64-slot literal's hover shouldn't be
+            // a wall of element types.
+            let mut parts: Vec<String> =
+                elems.iter().take(4).map(format_inferred_type).collect();
+            if elems.len() > 4 {
+                parts.push("…".to_string());
+            }
             format!("Sequence<{}>", parts.join(", "))
         }
         InferredType::TypeConstraintOf(inner) => {
