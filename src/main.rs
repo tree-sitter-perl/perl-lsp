@@ -737,9 +737,11 @@ fn run_one(
                             let mask = resolve::references_mask_for(ws, Some(idx), &t);
                             resolve::refs_to(ws, Some(idx), &t, mask)
                         }
-                        resolve::ResolvedTarget::Group { local_spans, targets } => resolve::group_refs(
-                            ws, Some(idx), &origin, &local_spans, &targets, None,
-                        ),
+                        resolve::ResolvedTarget::Group { local_spans, pinned_spans, targets } => {
+                            resolve::group_refs(
+                                ws, Some(idx), &origin, &local_spans, &pinned_spans, &targets, None,
+                            )
+                        }
                         resolve::ResolvedTarget::Local => unreachable!("handled above"),
                     };
                     for loc in locs {
@@ -994,13 +996,13 @@ fn run_rename(
                 new_name.to_string(),
             )
         }
-        resolve::ResolvedTarget::Group { local_spans, targets } => {
+        resolve::ResolvedTarget::Group { local_spans, pinned_spans, targets } => {
             // Every spelling of the group; bare-name spans, bare new text.
             let origin = file_store::FileKey::Path(file_path.clone());
             let _staged = ScopedWorkspaceEntry::insert(ws, file_path, analysis);
             (
                 resolve::group_refs(
-                    ws, Some(idx), &origin, &local_spans, &targets,
+                    ws, Some(idx), &origin, &local_spans, &pinned_spans, &targets,
                     Some(resolve::RoleMask::EDITABLE),
                 ),
                 new_name.trim_start_matches(['$', '@', '%']).to_string(),

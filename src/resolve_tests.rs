@@ -2758,9 +2758,10 @@ my $val = $p->x;
     // Cursor on `$x` in the field decl (row 2, col 11 = bare name).
     let resolved = resolve_symbol(&origin_fa, tree_sitter::Point { row: 2, column: 11 }, None)
         .expect("field decl resolves");
-    let ResolvedTarget::Group { local_spans, targets } = resolved else {
+    let ResolvedTarget::Group { local_spans, pinned_spans, targets } = resolved else {
         panic!("expected Group, got {:?}", resolved);
     };
+    assert!(pinned_spans.is_empty(), "local mint has no pinned spans");
     assert!(!local_spans.is_empty(), "field var spellings present");
     assert_eq!(targets.len(), 2, "reader + ctor-key targets: {:?}", targets);
 
@@ -2769,6 +2770,7 @@ my $val = $p->x;
         None,
         &FileKey::Path(point_path.clone()),
         &local_spans,
+        &pinned_spans,
         &targets,
         None,
     );
@@ -2786,5 +2788,63 @@ my $val = $p->x;
         in_user.contains(&(2, 14)),
         "consumer reader call `->x` included; user-file hits: {:?}",
         in_user,
+    );
+}
+
+/// Consumer-side cursor, class elsewhere: from the ctor key (or accessor
+/// call) in a file that only `use`s Point, the group is minted from the
+/// CLASS's cached analysis — its field-variable/decl spans pin to the
+/// class file, so rename from the consumer rewrites the field decl and
+/// body uses over there too.
+#[test]
+fn test_consumer_cursor_mints_group_from_class_analysis() {
+    let point_src = "\
+use v5.38;
+class Point {
+    field $x :param :reader;
+    method magnitude () { return $x * $x; }
+}
+1;
+";
+    let idx = crate::module_index::ModuleIndex::new_for_test();
+    let class_path = PathBuf::from("/tmp/grp_mint_point.pm");
+    idx.insert_cache(
+        "Point",
+        Some(std::sync::Arc::new(crate::module_index::CachedModule::new(
+            class_path.clone(),
+            std::sync::Arc::new(parse(point_src)),
+        ))),
+    );
+
+    let consumer = parse("use Point;\nmy $p = Point->new(x => 3);\nmy $v = $p->x;\n");
+
+    // From the ctor key `x` (row 1, col 19).
+    let resolved = resolve_symbol(&consumer, tree_sitter::Point { row: 1, column: 19 }, Some(&idx))
+        .expect("consumer key resolves");
+    let ResolvedTarget::Group { local_spans, pinned_spans, targets } = resolved else {
+        panic!("expected Group from consumer key, got {:?}", resolved);
+    };
+    assert!(local_spans.is_empty(), "remote mint: no origin spans");
+    assert_eq!(targets.len(), 2, "reader + ctor-key targets");
+    assert!(
+        pinned_spans.iter().all(|(p, _)| p == &class_path),
+        "pinned to the class file: {:?}",
+        pinned_spans,
+    );
+    // Decl (row 2) + body use (row 3) pinned from the class analysis.
+    let pinned_rows: Vec<usize> = pinned_spans.iter().map(|(_, s)| s.start.row).collect();
+    assert!(
+        pinned_rows.contains(&2) && pinned_rows.contains(&3),
+        "field decl + body use pinned: {:?}",
+        pinned_rows,
+    );
+
+    // From the accessor call `->x` (row 2, col 12): same group shape.
+    let resolved = resolve_symbol(&consumer, tree_sitter::Point { row: 2, column: 12 }, Some(&idx))
+        .expect("consumer accessor resolves");
+    assert!(
+        matches!(resolved, ResolvedTarget::Group { ref pinned_spans, .. } if !pinned_spans.is_empty()),
+        "accessor-call cursor mints the remote group, got {:?}",
+        resolved,
     );
 }

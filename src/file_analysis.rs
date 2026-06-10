@@ -5101,6 +5101,29 @@ impl FileAnalysis {
     /// caller mints from these facts).
     pub fn field_projections_at(&self, point: Point) -> Option<FieldProjections> {
         let g = self.field_group_at(point)?;
+        Some(self.projections_of(g))
+    }
+
+    /// Mint the group by name instead of cursor — the consumer-side
+    /// entry: a deferred ctor key / accessor call in another file chases
+    /// its owner edge to this class's analysis and asks for the group
+    /// the cursor file can't see.
+    pub fn field_projections_named(&self, bare: &str, class: &str) -> Option<FieldProjections> {
+        let field_name = format!("${}", bare);
+        let g = self
+            .symbols
+            .iter()
+            .find(|s| {
+                matches!(s.kind, SymKind::Field)
+                    && s.name == field_name
+                    && s.package.as_deref() == Some(class)
+            })
+            .and_then(|sym| self.field_group_of(sym))
+            .or_else(|| self.attr_pair_group(bare, class))?;
+        Some(self.projections_of(g))
+    }
+
+    fn projections_of(&self, g: FieldGroup) -> FieldProjections {
         let mut variable_spans: Vec<Span> = g
             .field_sym
             .map(|fs| {
@@ -5116,13 +5139,13 @@ impl FileAnalysis {
         if let Some(decl) = g.decl_span {
             variable_spans.push(decl);
         }
-        Some(FieldProjections {
+        FieldProjections {
             class: g.class,
             bare: g.bare,
             has_param: g.has_param,
             has_reader: g.has_reader,
             variable_spans,
-        })
+        }
     }
 
     /// Determine what kind of rename is appropriate for the cursor position.

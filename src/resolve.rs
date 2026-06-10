@@ -132,6 +132,11 @@ pub enum ResolvedTarget {
     /// replacement text everywhere and references list them uniformly.
     Group {
         local_spans: Vec<Span>,
+        /// Spellings pinned to a specific file — the class file's
+        /// variable/decl spans when the group was minted remotely (the
+        /// cursor sat in a consumer; the source decl lives with the
+        /// class).
+        pinned_spans: Vec<(PathBuf, Span)>,
         targets: Vec<TargetRef>,
     },
     /// Inherently file-local: lexical variables, and hash keys with no
@@ -153,28 +158,61 @@ pub fn resolve_symbol(
     // the answer is the whole group (rename and references stay in
     // lockstep with the in-file `rename_at`/`find_references` union).
     if let Some(p) = analysis.field_projections_at(point) {
-        let mut targets = Vec::new();
-        if p.has_reader {
-            targets.push(TargetRef::method(
-                p.bare.clone(),
-                p.class.clone(),
-                analysis,
-                module_index,
-            ));
+        return Some(group_from_projections(p, analysis, None, module_index));
+    }
+    // Consumer-side: the class lives elsewhere. The owner edge the
+    // deferred key (or the accessor call's invocant) already carries
+    // reaches the class NAME at query time; one more hop through the
+    // index reaches the class's analysis, which holds the group facts
+    // the cursor file can't see. Its variable/decl spans pin to the
+    // class file.
+    if let (Some(idx), Some(r)) = (module_index, analysis.ref_at(point)) {
+        use crate::file_analysis::HashKeyOwner;
+        match &r.kind {
+            RefKind::HashKeyAccess { owner: None, .. } => {
+                if let Some(HashKeyOwner::Sub { package: Some(class), name }) =
+                    analysis.deferred_hash_key_owner(r, module_index)
+                {
+                    if crate::conventions::is_constructor_name(&name) {
+                        if let Some(cached) = idx.get_cached(&class) {
+                            if let Some(p) = cached
+                                .analysis
+                                .field_projections_named(&r.target_name, &class)
+                            {
+                                return Some(group_from_projections(
+                                    p,
+                                    &cached.analysis,
+                                    Some(cached.path.clone()),
+                                    module_index,
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+            RefKind::MethodCall { .. } => {
+                let bare = r.unqualified_target_name().to_string();
+                if let Some(class) = analysis.method_call_invocant_class(r, module_index) {
+                    if let Some(cached) = idx.get_cached(&class) {
+                        if let Some(p) =
+                            cached.analysis.field_projections_named(&bare, &class)
+                        {
+                            // Only an accessor-bearing group may claim a
+                            // method-call cursor.
+                            if p.has_reader {
+                                return Some(group_from_projections(
+                                    p,
+                                    &cached.analysis,
+                                    Some(cached.path.clone()),
+                                    module_index,
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+            _ => {}
         }
-        if p.has_param {
-            targets.push(TargetRef::new(
-                p.bare.clone(),
-                TargetKind::HashKeyOfSub {
-                    package: Some(p.class.clone()),
-                    name: "new".to_string(),
-                },
-            ));
-        }
-        return Some(ResolvedTarget::Group {
-            local_spans: p.variable_spans,
-            targets,
-        });
     }
     Some(match analysis.rename_kind_at(point, module_index)? {
         RenameKind::Variable => ResolvedTarget::Local,
@@ -246,6 +284,53 @@ impl RefLocation {
     }
 }
 
+/// Group construction shared by the local arm (cursor in the class
+/// file: spans are origin-local) and the consumer arm (group minted
+/// from the class's cached analysis: spans pin to the class file). The
+/// rename chain on the Method target is computed against the CLASS
+/// analysis — the only one that knows its parents.
+fn group_from_projections(
+    p: crate::file_analysis::FieldProjections,
+    class_analysis: &FileAnalysis,
+    pinned_path: Option<PathBuf>,
+    module_index: Option<&dyn CrossFileLookup>,
+) -> ResolvedTarget {
+    let mut targets = Vec::new();
+    if p.has_reader {
+        targets.push(TargetRef::method(
+            p.bare.clone(),
+            p.class.clone(),
+            class_analysis,
+            module_index,
+        ));
+    }
+    if p.has_param {
+        targets.push(TargetRef::new(
+            p.bare.clone(),
+            TargetKind::HashKeyOfSub {
+                package: Some(p.class.clone()),
+                name: "new".to_string(),
+            },
+        ));
+    }
+    match pinned_path {
+        None => ResolvedTarget::Group {
+            local_spans: p.variable_spans,
+            pinned_spans: Vec::new(),
+            targets,
+        },
+        Some(path) => ResolvedTarget::Group {
+            local_spans: Vec::new(),
+            pinned_spans: p
+                .variable_spans
+                .into_iter()
+                .map(|s| (path.clone(), s))
+                .collect(),
+            targets,
+        },
+    }
+}
+
 /// Union of `refs_to` over a projection group's targets plus the group's
 /// origin-file spans. `mask_override` = `Some(EDITABLE)` for rename;
 /// `None` lets each target pick its references mask. Output is sorted +
@@ -256,6 +341,7 @@ pub fn group_refs(
     module_index: Option<&dyn CrossFileLookup>,
     origin: &FileKey,
     local_spans: &[Span],
+    pinned_spans: &[(PathBuf, Span)],
     targets: &[TargetRef],
     mask_override: Option<RoleMask>,
 ) -> Vec<RefLocation> {
@@ -267,6 +353,11 @@ pub fn group_refs(
             access: AccessKind::Read,
         })
         .collect();
+    out.extend(pinned_spans.iter().map(|(path, span)| RefLocation {
+        key: FileKey::Path(path.clone()),
+        span: *span,
+        access: AccessKind::Read,
+    }));
     for t in targets {
         let mask = mask_override
             .unwrap_or_else(|| references_mask_for(files, module_index, t));
