@@ -7,7 +7,8 @@
 use std::collections::HashSet;
 use tree_sitter::{Node, Point, Tree};
 
-use crate::file_analysis::{extract_call_name, node_to_span, CrossFileLookup, FileAnalysis, InferredType, Span};
+use crate::cst::{extract_call_name, node_to_span};
+use crate::file_analysis::{CrossFileLookup, FileAnalysis, InferredType, Span};
 
 // ---- Types ----
 

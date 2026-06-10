@@ -502,13 +502,7 @@ fn parse_module(
     resolve_and_parse_with_memo(inc_paths, module_name, parser, memo)
 }
 
-pub fn create_parser() -> Parser {
-    let mut parser = Parser::new();
-    parser
-        .set_language(&ts_parser_perl::LANGUAGE.into())
-        .expect("failed to set Perl language");
-    parser
-}
+pub use crate::builder::create_parser;
 
 // ---- Resolution ----
 

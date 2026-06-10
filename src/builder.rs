@@ -7,7 +7,20 @@ use std::sync::Arc;
 
 use tree_sitter::{Node, Point, Tree};
 
+use crate::cst::{fq_tail_span, node_to_span};
 use crate::file_analysis::*;
+
+/// A ready-to-parse tree-sitter Parser for the Perl grammar — the one
+/// constructor every parse site (resolver, document, CLI, the s///e
+/// snippet re-parse) shares. Lives in the builder layer: the resolver
+/// calling down is fine, the builder reaching up was not.
+pub fn create_parser() -> tree_sitter::Parser {
+    let mut parser = tree_sitter::Parser::new();
+    parser
+        .set_language(&ts_parser_perl::LANGUAGE.into())
+        .expect("failed to set Perl language");
+    parser
+}
 use crate::plugin::{self, PluginRegistry};
 
 pub use crate::plugin::default_plugin_registry;
@@ -7822,7 +7835,7 @@ impl<'a> Builder<'a> {
         for _ in 0..start.column { snippet.push(' '); }
         snippet.push_str(text);
         let bytes = snippet.into_bytes();
-        let mut parser = crate::module_resolver::create_parser();
+        let mut parser = create_parser();
         let Some(tree) = parser.parse(&bytes, None) else { return };
         let scope = self.current_scope();
 
@@ -7880,7 +7893,7 @@ impl<'a> Builder<'a> {
                                         // keeps the full path in `target_name` but
                                         // narrows the renamable span to the `m` tail
                                         // (rule #7), mirroring FunctionCall.
-                                        method_name_span: crate::file_analysis::fq_tail_span(method, name),
+                                        method_name_span: crate::cst::fq_tail_span(method, name),
                                     },
                                     span: node_to_span(n),
                                     scope,
@@ -9913,7 +9926,7 @@ impl<'a> Builder<'a> {
         // `target_name` but narrows the renamable span to the `m` tail (rule
         // #7), mirroring FunctionCall — so rename rewrites only the method.
         let method_name_span = match (method_node, method_name.as_deref()) {
-            (Some(n), Some(name)) => crate::file_analysis::fq_tail_span(n, name),
+            (Some(n), Some(name)) => crate::cst::fq_tail_span(n, name),
             _ => node.span(),
         };
         let invocant_node = call.invocant();
@@ -10833,7 +10846,7 @@ impl<'a> Builder<'a> {
         // compile-time constant.
         match node.kind() {
             "function_call_expression" | "ambiguous_function_call_expression" => {
-                let name = crate::file_analysis::extract_call_name(node, self.source)?;
+                let name = crate::cst::extract_call_name(node, self.source)?;
                 if let Some(stripped) = name.strip_prefix('&') {
                     // `&$fn()` syntax — same deal.
                     if stripped.starts_with('$') {

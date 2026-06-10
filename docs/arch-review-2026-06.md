@@ -139,6 +139,23 @@ it earlier means the model crate keeps a tree-sitter dependency and the
 headline guarantee (a model that *cannot* walk trees) isn't delivered.
 Phase 5 is the next big rock.
 
+**RESOLVED (June 2026): enforcement landed as a test, not crates.** The
+full five-crate split was executed and green (PR #52, branch
+`workspace-split`) — and then deliberately not merged: publishing the
+bin from a workspace requires publishing every path dep, and four
+extra crates.io packages (each needing a manual first publish +
+trusted-publishing config, then lockstep versions forever) bought
+nothing over CI enforcement for a single-team repo. Instead
+`src/layering_tests.rs` asserts the same DAG: imports flow down only,
+the model layer is tree-sitter-`Point`-only and cst-free, and only
+build/cst name the grammar (everything else routes through
+`builder::create_parser`). The split's three genuine layering finds
+were kept: `create_parser` moved down to the builder (the s///e
+re-parse had been calling UP into the resolver), the
+`file_analysis → cst` re-export shim died, and `plugin/cli.rs` moved
+up to the lsp layer. If multi-crate ever becomes worth it (publishable
+model for external tools, say), PR #52 is the executed playbook.
+
 ## 5. What's actually fine (don't touch)
 
 - The witness bag + reducer registry. Monotone, edge-based, single query
