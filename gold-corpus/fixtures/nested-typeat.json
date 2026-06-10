@@ -43,6 +43,22 @@
         ]
       },
       "note": "$branded->{name} read after the unconditional write -- the mutation-extension pass typed the added key from its RHS."
+    },
+    {
+      "id": "nested-literal-hash-value",
+      "difficulty": "simple",
+      "semantic_area": "structural-shapes",
+      "root": "gold-corpus/nested-fixture",
+      "file": "main.pl",
+      "line": 42,
+      "col": 4,
+      "status": "gold",
+      "expect": {
+        "all": [
+          "Numeric"
+        ]
+      },
+      "note": "$plain{retries} container-form read projects off %plain's literal-list shape."
     }
   ]
 }

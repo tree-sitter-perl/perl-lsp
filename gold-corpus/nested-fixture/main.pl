@@ -38,4 +38,9 @@ $branded->{name} = 'api_root';
 my $bn = $branded->{name};
 my $bt = $branded->{nmae};
 
+# The literal-hash spelling: same shapes, same hints.
+my %plain = (retries => 3);
+my $ph = $plain{retries};
+my $pt = $plain{retrys};
+
 print "$host $port $first $uname $uid $n\n";

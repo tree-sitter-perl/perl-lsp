@@ -178,13 +178,19 @@ unknown for now, address with sum types (Part 5b) when motivated.
   emission if we parse the schema, but that's a separate plugin
   domain.
 - **Mutation-induced widening.** LANDED — see the mutation-extension
-  pass note up top. Residual flavors still open: literal `%hash`
-  variables (`my %h = (a => 1); $h{b}` — no shape TC is minted for
-  hash-sigil variables, so neither extension nor the diagnostic apply;
-  the same model, second spelling), array index writes on `Sequence`
-  tuples, and conditional-reassignment disagreement (`$spec = {…}
-  unless ref $spec` — still a trust-gate suppression via
-  `reassigned_scalars`, not a lattice fold).
+  pass note up top. Literal `%hash` variables LANDED too: `my %h =
+  (k => v)` types through the same `hash_literal_type` builder
+  (array spreads like `@_` open the shape), container-form reads
+  (`$h{k}`) project off the canonical `%h`, KeyWrites and the
+  diagnostic key the same name, and the hash gates are sharper than
+  the scalar ones (bare `func(%h)` flattens to copies — not an
+  escape; only `\%h` ref-taking is). Slice writes
+  (`@h{qw(a b)} = …`, `%h{k} = …`, `@$h{…}`) record an open-switching
+  KeyWrite — several keys at once, conservatively widened. Residual
+  flavors still open: array index writes on `Sequence` tuples, and
+  conditional-reassignment disagreement
+  (`$spec = {…} unless ref $spec` — still a trust-gate suppression
+  via `reassigned_scalars`, not a lattice fold).
 - **Recursive type constraints from Type::Tiny / Moose.** `isa =>
   HashRef[ArrayRef[Str]]` ASTs. This is a separate plugin emission
   story (`use Types::Standard` plugin extends Moo synthesis to

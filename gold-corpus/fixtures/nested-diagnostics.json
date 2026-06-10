@@ -64,6 +64,27 @@
       },
       "status": "gold",
       "note": "The unconditional write extends the closed shape: the written key reads silently, the typo beside it still hints."
+    },
+    {
+      "id": "nested-literal-hash-typo",
+      "difficulty": "simple",
+      "semantic_area": "structural-shapes",
+      "root": "gold-corpus/nested-fixture",
+      "file": "main.pl",
+      "line": 43,
+      "col": 17,
+      "query": "",
+      "newname": "",
+      "expect": {
+        "all": [
+          "key 'retrys' is not in %plain's literal shape"
+        ],
+        "none": [
+          "key 'retries' is not in"
+        ]
+      },
+      "status": "gold",
+      "note": "The literal-hash spelling of the typo hint: container-form read checked against %plain's list-literal shape."
     }
   ]
 }

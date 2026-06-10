@@ -1711,15 +1711,32 @@ impl ReducerRegistry {
                     // the value-side mirror of the build-time
                     // `invocant_type_at_node` drill, run where the index is
                     // in hand so imported structural types project too.
-                    let sub_q = ReducerQuery {
-                        attachment: base,
-                        point: q.point,
-                        framework: q.framework,
-                        arity_hint: None,
-                        receiver: q.receiver.clone(),
-                        context: q.context,
+                    // A Variable base scope-walks like the Edge arm above
+                    // (`$h{k}` projects off `%h`, whose witnesses live on
+                    // the decl scope, not the access scope).
+                    let base_t = match (base, q.context) {
+                        (WitnessAttachment::Variable { name, scope }, Some(ctx)) => {
+                            let point = scope_point(ctx.scopes, *scope);
+                            self.query_variable_with_visited(
+                                bag, ctx, name, *scope, point, state,
+                            )
+                        }
+                        _ => {
+                            let sub_q = ReducerQuery {
+                                attachment: base,
+                                point: q.point,
+                                framework: q.framework,
+                                arity_hint: None,
+                                receiver: q.receiver.clone(),
+                                context: q.context,
+                            };
+                            match &*self.query_rec(bag, &sub_q, state) {
+                                ReducedValue::Type(t) => Some(t.clone()),
+                                _ => None,
+                            }
+                        }
                     };
-                    if let ReducedValue::Type(t) = &*self.query_rec(bag, &sub_q, state) {
+                    if let Some(t) = base_t {
                         let projected = match step {
                             ProjectionStep::HashKey(k) => {
                                 t.key_value_type(k).flatten().cloned()

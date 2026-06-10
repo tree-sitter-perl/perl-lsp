@@ -2769,7 +2769,10 @@ pub fn collect_diagnostics(
     use crate::file_analysis::InferredType;
     for r in &analysis.refs {
         let RefKind::HashKeyAccess { ref var_text, .. } = r.kind else { continue };
-        if !var_text.starts_with('$') {
+        // `$config->{k}` (scalar holding a hashref) and `$config{k}`
+        // (literal `%config`, canonical var_text) — same model, both
+        // spellings.
+        if !(var_text.starts_with('$') || var_text.starts_with('%')) {
             continue;
         }
         if matches!(r.access, crate::file_analysis::AccessKind::Write) {

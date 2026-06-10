@@ -14574,6 +14574,71 @@ $dyn->{$ENV{K}} = 1;
     );
 }
 
+/// The literal-hash spelling: `my %h = (k => v)` types through the
+/// same shape builder as the hashref literal, `$h{k}` projects off
+/// `%h` (the canonical container name), mutation extension applies,
+/// and spreads — arrays included (`@_`) — flip the shape open.
+#[test]
+fn literal_hash_structural_typing() {
+    let src = "\
+my %config = (host => 'x', port => 5432);
+my $v = $config{host};
+$config{added} = 42;
+my $a = $config{added};
+my %spread = (default => 1, @_);
+";
+    let fa = build_fa(src);
+    let t = fa.inferred_type_via_bag("%config", Point::new(1, 0)).expect("%config typed");
+    assert!(
+        matches!(&t, InferredType::HashWithKeys { keys, open: false } if keys.len() == 2),
+        "literal-list shape: {:?}",
+        t,
+    );
+    let v = fa.inferred_type_via_bag("$v", Point::new(2, 0)).expect("$v typed");
+    assert_eq!(v, InferredType::String, "container-form read projects");
+    let t2 = fa.inferred_type_via_bag("%config", Point::new(3, 0)).expect("%config typed");
+    assert!(
+        matches!(&t2, InferredType::HashWithKeys { keys, open: false } if keys.len() == 3),
+        "write extends: {:?}",
+        t2,
+    );
+    let a = fa.inferred_type_via_bag("$a", Point::new(4, 0)).expect("$a typed");
+    assert_eq!(a, InferredType::Numeric, "extended key value type");
+    let sp = fa.inferred_type_via_bag("%spread", Point::new(5, 0)).expect("%spread typed");
+    assert!(
+        matches!(sp, InferredType::HashWithKeys { open: true, .. }),
+        "array spread opens: {:?}",
+        sp,
+    );
+}
+
+/// Slice writes — sigil (`@h{…}`), postfix deref (`$r->@{…}`), and
+/// sigil deref (`@$s{…}`) — land several keys at once: each records an
+/// open-switching KeyWrite, so the closed shape widens instead of
+/// claiming the written keys as misses.
+#[test]
+fn slice_writes_open_closed_shapes() {
+    let src = "\
+my %h = (a => 1);
+@h{qw(b c)} = (1, 2);
+my $r = { a => 1 };
+$r->@{qw(d e)} = (3, 4);
+my $s = { a => 1 };
+@$s{qw(f g)} = (5, 6);
+";
+    let fa = build_fa(src);
+    for (var, line) in [("%h", 2), ("$r", 4), ("$s", 6)] {
+        let t = fa
+            .inferred_type_via_bag(var, Point::new(line, 0))
+            .unwrap_or_else(|| panic!("{var} typed"));
+        assert!(
+            matches!(t, InferredType::HashWithKeys { open: true, .. }),
+            "slice write opens {var}: {:?}",
+            t,
+        );
+    }
+}
+
 /// Sub-return literals narrow at call sites: `cfg()->{host}` → String.
 #[test]
 fn hash_literal_narrows_through_sub_return() {

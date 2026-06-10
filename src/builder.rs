@@ -5892,7 +5892,19 @@ impl<'a> Builder<'a> {
                 // ternaries; Edge payloads resolve through the
                 // registry's materialization.
                 self.emit_expr_witness(right);
-                let inferred = self.bag_query_expr_span(node_to_span(right));
+                let mut inferred = self.bag_query_expr_span(node_to_span(right));
+                // `my %h = (k => v, …)` — the list IS a hash literal in
+                // this position, the hashref's second spelling. The
+                // list's own Expr witness can't carry that (its meaning
+                // depends on the LHS sigil), so type it from the LHS
+                // side through the same shape builder.
+                if inferred.is_none() && right.kind() == "list_expression" {
+                    if let Some(vt) = self.get_var_text_from_lhs(left) {
+                        if vt.starts_with('%') {
+                            inferred = Some(self.hash_literal_type(right));
+                        }
+                    }
+                }
                 if let Some(it) = inferred {
                     if let Some(vt) = self.get_var_text_from_lhs(left) {
                         self.push_type_constraint(TypeConstraint {
@@ -6005,6 +6017,52 @@ impl<'a> Builder<'a> {
                     "hash_element_expression" | "array_element_expression"
                 ) {
                     self.record_key_write(left, Some(right));
+                }
+                // Slice / keyval writes (`@h{qw(a b)} = …`, `%h{k} = …`,
+                // `@$h{…}`) land several keys at once — record an
+                // open-switching write (`key: None`) on the container so
+                // a closed shape can't claim the slice-written keys as
+                // misses.
+                if matches!(left.kind(), "slice_expression" | "keyval_expression") {
+                    {
+                        // Three container spellings: sigil (`@h{…}` →
+                        // canonical `%h`), sigil-deref (`@$h{…}` — the
+                        // varname wraps the scalar; canonical would mint
+                        // a garbage `%$h`, so the inner scalar wins),
+                        // and postfix deref (`$h->@{…}` / `$h->%{…}` —
+                        // grammar field `hashref:`, a plain scalar).
+                        let name = match left.child_by_field_name("hash") {
+                            Some(container) => {
+                                crate::cst::varname_inner_scalar_text(container, self.source)
+                                    .or_else(|| {
+                                        crate::cst::canonical_container_name(
+                                            container,
+                                            self.source,
+                                        )
+                                    })
+                            }
+                            None => left
+                                .child_by_field_name("hashref")
+                                .filter(|c| c.kind() == "scalar")
+                                .and_then(|c| c.utf8_text(self.source).ok())
+                                .map(|s| s.to_string()),
+                        };
+                        if let Some(var_text) = name {
+                            let span = node_to_span(left);
+                            self.key_writes.push(crate::file_analysis::KeyWrite {
+                                var_text,
+                                key: None,
+                                scope: self
+                                    .scope_stack
+                                    .last()
+                                    .copied()
+                                    .unwrap_or(crate::file_analysis::ScopeId(0)),
+                                span,
+                                rhs_span: None,
+                                conditional: true,
+                            });
+                        }
+                    }
                 }
             }
             // Visit LHS children (except the variable_declaration we already handled)
@@ -6187,7 +6245,15 @@ impl<'a> Builder<'a> {
         let mut i = 0;
         while i < named.len() {
             let elem = named[i];
-            if matches!(elem.kind(), "hash" | "hash_deref_expression" | "container_variable") {
+            if matches!(
+                elem.kind(),
+                "hash" | "hash_deref_expression" | "container_variable"
+                    | "array" | "array_deref_expression"
+            ) {
+                // Spread (`%other` / `%$ref` / `@_` / `@rest`) — the
+                // key set is no longer exhaustive. Arrays included:
+                // `my %h = (default => 1, @_)` is the canonical
+                // args-with-defaults idiom.
                 open = true;
                 i += 1;
                 continue;
@@ -6260,12 +6326,26 @@ impl<'a> Builder<'a> {
             // base materializes to — including an imported literal's
             // structural type the build-time chain pass can't see.
             "hash_element_expression" => {
-                let base = node.named_child(0)?;
                 let key_node = node.child_by_field_name("key")?;
                 let (key, is_dynamic) = self.extract_key_text(key_node)?;
                 if is_dynamic {
                     return None;
                 }
+                // Container form `$h{k}` (grammar field `hash:`) — the
+                // subject is `%h`, not scalar `$h`; project off the
+                // hash variable's own attachment (the registry scope-
+                // walks Variable bases the same as Edge(Variable)).
+                if let Some(container) = node.child_by_field_name("hash") {
+                    let name =
+                        crate::cst::canonical_container_name(container, self.source)?;
+                    let scope = self.scope_stack.last().copied()
+                        .unwrap_or_else(|| self.scope_at_point(node.start_position()));
+                    return Some(WitnessPayload::Projected {
+                        base: WitnessAttachment::Variable { name, scope },
+                        step: crate::witnesses::ProjectionStep::HashKey(key),
+                    });
+                }
+                let base = node.named_child(0)?;
                 self.emit_expr_witness(base);
                 Some(WitnessPayload::Projected {
                     base: WitnessAttachment::Expr(node_to_span(base)),
@@ -6859,10 +6939,19 @@ impl<'a> Builder<'a> {
             // grandparent rule) is a shape mutation instead — modeled by
             // the mutation-extension pass, not a trust break.
             if access == AccessKind::Write
-                && text.starts_with('$')
+                && (text.starts_with('$') || text.starts_with('%'))
                 && !crate::cst::is_element_access_base(node)
             {
                 self.reassigned_scalars.insert(text.to_string());
+            }
+            // Hash variables escape only by reference-taking (`\%h`):
+            // a bare `%h` in a call or list FLATTENS TO COPIES — the
+            // callee can't add keys to the original, so it's not an
+            // escape (unlike a scalar, whose value IS the shared ref).
+            if text.starts_with('%')
+                && node.parent().is_some_and(|p| p.kind() == "refgen_expression")
+            {
+                self.escaped_scalars.insert(text.to_string());
             }
             // Fully-qualified read (`$Foo::Bar::x`): narrow the span to the
             // bare tail (rule #7) so rename rewrites only `x` and the
@@ -10395,8 +10484,15 @@ impl<'a> Builder<'a> {
         // Infer HashRef on the operand variable (e.g. $x in $x->{key})
         self.infer_deref_type(node, InferredType::HashRef);
 
-        // Record the hash variable access
-        let var_text = self.get_hash_var_from_element(node);
+        // Record the hash variable access. Container form (`$h{k}`,
+        // grammar field `hash:`) reads `%h`, not scalar `$h` — use the
+        // canonical name so the key ref, the shape witness, and the
+        // KeyWrite all key the same variable.
+        let var_text = match node.child_by_field_name("hash") {
+            Some(c) => crate::cst::canonical_container_name(c, self.source)
+                .or_else(|| self.get_hash_var_from_element(node)),
+            None => self.get_hash_var_from_element(node),
+        };
 
         // Distinguish read vs write by asking determine_access on the
         // element node itself — `$self->{k} = ...` has this element as
@@ -10551,21 +10647,32 @@ impl<'a> Builder<'a> {
             let Some(c) = innermost.named_child(0) else { return };
             match c.kind() {
                 "hash_element_expression" | "array_element_expression" => innermost = c,
-                "scalar" => break,
+                "scalar" | "container_variable" => break,
                 _ => return,
             }
         }
         if innermost.kind() != "hash_element_expression" {
             return; // array first hop — Sequence mutation, not modeled
         }
-        if !crate::cst::element_arrow_deref(innermost, self.source) {
-            return;
-        }
         let Some(container) = innermost.named_child(0) else { return };
-        let Ok(var_text) = container.utf8_text(self.source) else { return };
-        if !var_text.starts_with('$') {
-            return;
-        }
+        // Container form `$h{k}` writes `%h` (canonical name); deref
+        // form `$v->{k}` writes through scalar `$v` — arrow required
+        // (`$foo{k}` without one would be `%foo` mis-keyed to `$foo`).
+        let var_text: String = if container.kind() == "container_variable" {
+            match crate::cst::canonical_container_name(container, self.source) {
+                Some(n) => n,
+                None => return,
+            }
+        } else {
+            if !crate::cst::element_arrow_deref(innermost, self.source) {
+                return;
+            }
+            let Ok(t) = container.utf8_text(self.source) else { return };
+            if !t.starts_with('$') {
+                return;
+            }
+            t.to_string()
+        };
         let key_node = innermost.child_by_field_name("key");
         let key = key_node
             .and_then(|k| self.extract_key_text(k))
