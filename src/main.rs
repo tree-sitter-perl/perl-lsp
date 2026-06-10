@@ -737,9 +737,9 @@ fn run_one(
                             let mask = resolve::references_mask_for(ws, Some(idx), &t);
                             resolve::refs_to(ws, Some(idx), &t, mask)
                         }
-                        resolve::ResolvedTarget::Group { local_spans, pinned_spans, targets } => {
+                        resolve::ResolvedTarget::Group { local_spans, pinned_spans, members } => {
                             resolve::group_refs(
-                                ws, Some(idx), &origin, &local_spans, &pinned_spans, &targets, None,
+                                ws, Some(idx), &origin, &local_spans, &pinned_spans, &members, None,
                             )
                         }
                         resolve::ResolvedTarget::Local => unreachable!("handled above"),
@@ -996,17 +996,23 @@ fn run_rename(
                 new_name.to_string(),
             )
         }
-        resolve::ResolvedTarget::Group { local_spans, pinned_spans, targets } => {
-            // Every spelling of the group; bare-name spans, bare new text.
+        resolve::ResolvedTarget::Group { local_spans, pinned_spans, members } => {
+            // Per-member replacement texts (bare vs affixed accessors).
             let origin = file_store::FileKey::Path(file_path.clone());
             let _staged = ScopedWorkspaceEntry::insert(ws, file_path, analysis);
-            (
-                resolve::group_refs(
-                    ws, Some(idx), &origin, &local_spans, &pinned_spans, &targets,
-                    Some(resolve::RoleMask::EDITABLE),
-                ),
-                new_name.trim_start_matches(['$', '@', '%']).to_string(),
-            )
+            let bare_new = new_name.trim_start_matches(['$', '@', '%']);
+            let edits = resolve::group_rename_edits(
+                ws, Some(idx), &origin, &local_spans, &pinned_spans, &members, bare_new,
+            );
+            for (loc, text) in edits {
+                let path = match &loc.key {
+                    file_store::FileKey::Path(p) => p.display().to_string(),
+                    file_store::FileKey::Url(u) => u.to_file_path()
+                        .map(|p| p.display().to_string()).unwrap_or_else(|_| u.to_string()),
+                };
+                all_edits.entry(path).or_default().push(span_to_json(loc.span, text));
+            }
+            return Ok(serde_json::to_string_pretty(&serde_json::json!(all_edits)).unwrap());
         }
         // Lexical variables, hash keys, handlers: single-file rename — the
         // same policy split the LSP rename handler reads off the target.

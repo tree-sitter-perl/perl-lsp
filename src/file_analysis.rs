@@ -2160,7 +2160,7 @@ pub struct FileAnalysis {
     #[serde(default)]
     pub gated_param_types: Vec<ReceiverGated<TypeConstraint>>,
     #[serde(default)]
-    pub attr_accessors: Vec<AttrAccessor>,
+    pub attr_projections: Vec<AttrProjection>,
 
     // Indices (built in post-pass — skipped by serde; call rebuild_all_indices() after deserialize)
     #[serde(skip, default)]
@@ -2220,19 +2220,59 @@ pub struct FileAnalysisParts {
     pub package_framework: HashMap<String, crate::witnesses::FrameworkFact>,
     pub provisional_dispatches: Vec<ProvisionalDispatch>,
     pub gated_param_types: Vec<ReceiverGated<TypeConstraint>>,
-    pub attr_accessors: Vec<AttrAccessor>,
+    pub attr_projections: Vec<AttrProjection>,
 }
 
-/// A plugin-declared, name-mapped projection-group member: `has 'size'
-/// => (predicate => 1)` synthesizes `has_size`, whose name DERIVES from
-/// the attr. Recording the relation lets the group machinery include the
-/// accessor's call sites in references, and re-derive its name on rename
-/// when the attr is embedded (`has_size` → `has_extent`).
+/// One projection of a field/attr decl — the entity that encodes group
+/// membership directly. A decl is ONE name spelled several ways; each
+/// spelling is minted AT BUILD by the synthesis that knows the
+/// semantics: Moo/Moose/Mojo::Base `has` mints `CtorKey` + `Accessor` +
+/// `InternalKey` (hash-backed repr — the repr gate IS whether
+/// `InternalKey` was minted), Corinna fields mint `CtorKey`/`Accessor`
+/// only (fields are not hash entries), plugins enroll name-mapped
+/// accessors via `EmitAction::Method.attr`. Group features (rename /
+/// references union) walk the stored projections — no scattered
+/// query-time re-derivation.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct AttrAccessor {
+pub struct AttrProjection {
     pub class: String,
     pub attr: String,
-    pub method: String,
+    pub kind: AttrProjectionKind,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum AttrProjectionKind {
+    /// `Class->new(attr => …)` constructor key.
+    CtorKey,
+    /// `$self->{attr}` internal hash slot. Minted ONLY by hash-backed
+    /// synthesis; membership matching is STRICT `HashKeyOwner::Class`
+    /// equality (never `found_by` — that broadening would leak other
+    /// subs' same-named arg keys into the group).
+    InternalKey,
+    /// An accessor method; `affix = (prefix, suffix)` when the name
+    /// embeds the attr (rename re-derives it), `None` = references-only.
+    Accessor {
+        method: String,
+        affix: Option<(String, String)>,
+    },
+}
+
+impl AttrProjection {
+    /// Derive the accessor affix by locating the attr inside the method
+    /// name (`_has_token` = `_has` + `_token`). Done once, at minting.
+    pub fn accessor(class: String, attr: String, method: String) -> Self {
+        let affix = method.find(attr.as_str()).map(|i| {
+            (
+                method[..i].to_string(),
+                method[i + attr.len()..].to_string(),
+            )
+        });
+        AttrProjection {
+            class,
+            attr,
+            kind: AttrProjectionKind::Accessor { method, affix },
+        }
+    }
 }
 
 /// Cross-file-facing facts of a field group — see
@@ -2299,7 +2339,7 @@ impl FileAnalysis {
             package_framework,
             provisional_dispatches,
             gated_param_types,
-            attr_accessors,
+            attr_projections,
         } = parts;
         witnesses.rebuild_index();
         let mut fa = FileAnalysis {
@@ -2329,7 +2369,7 @@ impl FileAnalysis {
             base_ref_count: 0,
             provisional_dispatches,
             gated_param_types,
-            attr_accessors,
+            attr_projections,
             scope_starts: Vec::new(),
             symbols_by_name: HashMap::new(),
             symbols_by_scope: HashMap::new(),
@@ -5032,17 +5072,22 @@ impl FileAnalysis {
             .map(|s| (s, bare_new.to_string()))
             .collect();
         let mut edits = bare.clone();
-        for a in self
-            .attr_accessors
+        for (method, affix) in self
+            .attr_projections
             .iter()
             .filter(|a| a.class == g.class && a.attr == g.bare)
+            .filter_map(|a| match &a.kind {
+                AttrProjectionKind::Accessor { method, affix } => {
+                    Some((method.clone(), affix.clone()))
+                }
+                _ => None,
+            })
         {
             // References-only when the name doesn't embed the attr — a
             // custom `writer => 'store_it'` can't be re-derived.
-            let Some(i) = a.method.find(g.bare.as_str()) else { continue };
-            let new_method =
-                format!("{}{}{}", &a.method[..i], bare_new, &a.method[i + g.bare.len()..]);
-            for span in self.mapped_member_spans(g, &a.method) {
+            let Some((pre, suf)) = affix else { continue };
+            let new_method = format!("{}{}{}", pre, bare_new, suf);
+            for span in self.mapped_member_spans(g, &method) {
                 // A synthesized member's decl span IS the group decl token,
                 // which the bare edit already covers — never double-edit.
                 if bare.iter().any(|(b, _)| *b == span) {
@@ -5095,11 +5140,13 @@ impl FileAnalysis {
     fn field_group_spans(&self, g: &FieldGroup) -> Vec<Span> {
         let mut spans = self.field_group_spans_bare(g);
         for a in self
-            .attr_accessors
+            .attr_projections
             .iter()
             .filter(|a| a.class == g.class && a.attr == g.bare)
         {
-            spans.extend(self.mapped_member_spans(g, &a.method));
+            if let AttrProjectionKind::Accessor { method, .. } = &a.kind {
+                spans.extend(self.mapped_member_spans(g, method));
+            }
         }
         spans.sort_by_key(|s| (s.start.row, s.start.column));
         spans.dedup();
@@ -5152,6 +5199,29 @@ impl FileAnalysis {
                         .or_else(|| self.method_call_invocant_class(r, None));
                     if cls.as_deref() == Some(g.class.as_str()) {
                         spans.push(*method_name_span);
+                    }
+                }
+            }
+        }
+        // Internal hash slots — present iff the synthesis minted the
+        // InternalKey projection (hash-backed repr; Corinna never does).
+        // STRICT Class-owner equality: `found_by` broadening would leak
+        // other subs' same-named arg keys into the group.
+        if self
+            .attr_projections
+            .iter()
+            .any(|a| {
+                a.class == g.class
+                    && a.attr == g.bare
+                    && matches!(a.kind, AttrProjectionKind::InternalKey)
+            })
+        {
+            for r in &self.refs {
+                if let RefKind::HashKeyAccess { owner: Some(HashKeyOwner::Class(c)), .. } =
+                    &r.kind
+                {
+                    if c == &g.class && r.target_name == g.bare {
+                        spans.push(r.span);
                     }
                 }
             }
@@ -5239,17 +5309,15 @@ impl FileAnalysis {
             variable_spans.push(decl);
         }
         let mapped = self
-            .attr_accessors
+            .attr_projections
             .iter()
             .filter(|a| a.class == g.class && a.attr == g.bare)
-            .map(|a| MappedMember {
-                method: a.method.clone(),
-                affix: a.method.find(g.bare.as_str()).map(|i| {
-                    (
-                        a.method[..i].to_string(),
-                        a.method[i + g.bare.len()..].to_string(),
-                    )
+            .filter_map(|a| match &a.kind {
+                AttrProjectionKind::Accessor { method, affix } => Some(MappedMember {
+                    method: method.clone(),
+                    affix: affix.clone(),
                 }),
+                _ => None,
             })
             .collect();
         FieldProjections {

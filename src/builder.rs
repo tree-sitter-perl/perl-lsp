@@ -249,7 +249,7 @@ fn build_with_plugins_inner(
         provisional_dispatches: Vec::new(),
         gated_param_types: Vec::new(),
         method_call_invocant: std::collections::HashMap::new(),
-        attr_accessors: Vec::new(),
+        attr_projections: Vec::new(),
         method_call_arity: std::collections::HashMap::new(),
         parametric_emitted_refs: std::collections::HashSet::new(),
         method_call_ref_dedup: std::collections::HashSet::new(),
@@ -491,7 +491,7 @@ fn build_with_plugins_inner(
         witnesses: b.bag,
         package_framework: b.package_framework,
         provisional_dispatches: b.provisional_dispatches,
-        attr_accessors: b.attr_accessors,
+        attr_projections: b.attr_projections,
         gated_param_types: b.gated_param_types,
     });
     // Finalize: run the legacy text-based MCB resolver as a fallback.
@@ -1441,7 +1441,7 @@ struct Builder<'a> {
     /// Plugin-declared projection-group members: accessor methods whose
     /// names derive from an attr (`predicate => has_x`). Flushed into
     /// `FileAnalysis.attr_accessors`.
-    attr_accessors: Vec<crate::file_analysis::AttrAccessor>,
+    attr_projections: Vec<crate::file_analysis::AttrProjection>,
 
     /// Per-MethodCall-ref arg count, keyed by ref index. Lets
     /// `emit_method_call_return_edges` pin the call site's arity onto its
@@ -2671,11 +2671,13 @@ impl<'a> Builder<'a> {
                 // the group machinery (references/rename union) can find
                 // name-mapped members (`has_size` for attr `size`).
                 if let (Some(attr_name), Some(cls)) = (attr.clone(), target_pkg.clone()) {
-                    self.attr_accessors.push(crate::file_analysis::AttrAccessor {
-                        class: cls,
-                        attr: attr_name,
-                        method: name.clone(),
-                    });
+                    self.attr_projections.push(
+                        crate::file_analysis::AttrProjection::accessor(
+                            cls,
+                            attr_name,
+                            name.clone(),
+                        ),
+                    );
                 }
 
                 let already_emitted = self.symbols.iter().any(|s| {
@@ -4331,6 +4333,13 @@ impl<'a> Builder<'a> {
                 // from a constructor arg key lands on `field $x :param`
                 // (rule #9).
                 if has_param {
+                    if let Some(ref pkg) = self.current_package {
+                        self.attr_projections.push(crate::file_analysis::AttrProjection {
+                            class: pkg.clone(),
+                            attr: bare_name.to_string(),
+                            kind: crate::file_analysis::AttrProjectionKind::CtorKey,
+                        });
+                    }
                     self.add_symbol(
                         bare_name.to_string(),
                         SymKind::HashKeyDef,
@@ -8776,7 +8785,23 @@ impl<'a> Builder<'a> {
         }
 
         // Synthesize HashKeyDef entries so Foo->new(name => ...) connects to the attribute.
-        if let Some(ref _pkg) = self.current_package {
+        if let Some(ref pkg) = self.current_package {
+            // The projection entity: `has` is hash-backed in every framework
+            // this visitor serves, so the InternalKey projection is minted
+            // HERE — the repr gate is encoded at the source, not re-derived
+            // by consumers (Corinna's field visitor mints no InternalKey).
+            for (name, _sel_span) in &attr_names {
+                for kind in [
+                    crate::file_analysis::AttrProjectionKind::CtorKey,
+                    crate::file_analysis::AttrProjectionKind::InternalKey,
+                ] {
+                    self.attr_projections.push(crate::file_analysis::AttrProjection {
+                        class: pkg.clone(),
+                        attr: name.clone(),
+                        kind,
+                    });
+                }
+            }
             let owner = HashKeyOwner::Sub {
                 package: self.current_package.clone(),
                 name: "new".to_string(),

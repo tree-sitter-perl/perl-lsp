@@ -137,11 +137,40 @@ pub enum ResolvedTarget {
         /// cursor sat in a consumer; the source decl lives with the
         /// class).
         pinned_spans: Vec<(PathBuf, Span)>,
-        targets: Vec<TargetRef>,
+        members: Vec<GroupMember>,
     },
     /// Inherently file-local: lexical variables, and hash keys with no
     /// resolvable owner. Callers keep their single-file path.
     Local,
+}
+
+/// One walkable member of a projection group, carrying its own rename
+/// rule: bare spellings take the plain new name; name-mapped accessors
+/// (`has_size`) re-derive theirs; members whose names don't embed the
+/// attr join references but skip rename (honest).
+#[derive(Debug, Clone)]
+pub struct GroupMember {
+    pub target: TargetRef,
+    pub rename: MemberRename,
+}
+
+#[derive(Debug, Clone)]
+pub enum MemberRename {
+    Bare,
+    Affixed { prefix: String, suffix: String },
+    Skip,
+}
+
+impl MemberRename {
+    fn text_for(&self, bare_new: &str) -> Option<String> {
+        match self {
+            MemberRename::Bare => Some(bare_new.to_string()),
+            MemberRename::Affixed { prefix, suffix } => {
+                Some(format!("{}{}{}", prefix, bare_new, suffix))
+            }
+            MemberRename::Skip => None,
+        }
+    }
 }
 
 /// Cursor → cross-file target. The single entry point for "what does this
@@ -295,29 +324,52 @@ fn group_from_projections(
     pinned_path: Option<PathBuf>,
     module_index: Option<&dyn CrossFileLookup>,
 ) -> ResolvedTarget {
-    let mut targets = Vec::new();
+    let mut members = Vec::new();
     if p.has_reader {
-        targets.push(TargetRef::method(
-            p.bare.clone(),
-            p.class.clone(),
-            class_analysis,
-            module_index,
-        ));
+        members.push(GroupMember {
+            target: TargetRef::method(
+                p.bare.clone(),
+                p.class.clone(),
+                class_analysis,
+                module_index,
+            ),
+            rename: MemberRename::Bare,
+        });
     }
     if p.has_param {
-        targets.push(TargetRef::new(
-            p.bare.clone(),
-            TargetKind::HashKeyOfSub {
-                package: Some(p.class.clone()),
-                name: "new".to_string(),
+        members.push(GroupMember {
+            target: TargetRef::new(
+                p.bare.clone(),
+                TargetKind::HashKeyOfSub {
+                    package: Some(p.class.clone()),
+                    name: "new".to_string(),
+                },
+            ),
+            rename: MemberRename::Bare,
+        });
+    }
+    for m in &p.mapped {
+        members.push(GroupMember {
+            target: TargetRef::method(
+                m.method.clone(),
+                p.class.clone(),
+                class_analysis,
+                module_index,
+            ),
+            rename: match &m.affix {
+                Some((pre, suf)) => MemberRename::Affixed {
+                    prefix: pre.clone(),
+                    suffix: suf.clone(),
+                },
+                None => MemberRename::Skip,
             },
-        ));
+        });
     }
     match pinned_path {
         None => ResolvedTarget::Group {
             local_spans: p.variable_spans,
             pinned_spans: Vec::new(),
-            targets,
+            members,
         },
         Some(path) => ResolvedTarget::Group {
             local_spans: Vec::new(),
@@ -326,7 +378,7 @@ fn group_from_projections(
                 .into_iter()
                 .map(|s| (path.clone(), s))
                 .collect(),
-            targets,
+            members,
         },
     }
 }
@@ -342,7 +394,7 @@ pub fn group_refs(
     origin: &FileKey,
     local_spans: &[Span],
     pinned_spans: &[(PathBuf, Span)],
-    targets: &[TargetRef],
+    members: &[GroupMember],
     mask_override: Option<RoleMask>,
 ) -> Vec<RefLocation> {
     let mut out: Vec<RefLocation> = local_spans
@@ -358,10 +410,10 @@ pub fn group_refs(
         span: *span,
         access: AccessKind::Read,
     }));
-    for t in targets {
+    for m in members {
         let mask = mask_override
-            .unwrap_or_else(|| references_mask_for(files, module_index, t));
-        out.extend(refs_to(files, module_index, t, mask));
+            .unwrap_or_else(|| references_mask_for(files, module_index, &m.target));
+        out.extend(refs_to(files, module_index, &m.target, mask));
     }
     out.sort_by(|a, b| {
         key_for_sort(&a.key)
@@ -372,6 +424,60 @@ pub fn group_refs(
             })
     });
     out.dedup_by(|a, b| file_key_eq(&a.key, &b.key) && a.span == b.span);
+    out
+}
+
+/// Rename edit set for a projection group: every span paired with ITS
+/// member's replacement text (bare for plain spellings, re-derived for
+/// affixed accessors). Bare-member spans win collisions — a synthesized
+/// accessor's decl token IS the group decl the bare edit covers.
+pub fn group_rename_edits(
+    files: &FileStore,
+    module_index: Option<&dyn CrossFileLookup>,
+    origin: &FileKey,
+    local_spans: &[Span],
+    pinned_spans: &[(PathBuf, Span)],
+    members: &[GroupMember],
+    bare_new: &str,
+) -> Vec<(RefLocation, String)> {
+    let mut out: Vec<(RefLocation, String)> = local_spans
+        .iter()
+        .map(|span| {
+            (
+                RefLocation { key: origin.clone(), span: *span, access: AccessKind::Read },
+                bare_new.to_string(),
+            )
+        })
+        .collect();
+    out.extend(pinned_spans.iter().map(|(path, span)| {
+        (
+            RefLocation {
+                key: FileKey::Path(path.clone()),
+                span: *span,
+                access: AccessKind::Read,
+            },
+            bare_new.to_string(),
+        )
+    }));
+    // Bare members before affixed ones, so a same-span collision keeps the
+    // bare edit (dedup below keeps the first).
+    let mut ordered: Vec<&GroupMember> = members
+        .iter()
+        .filter(|m| matches!(m.rename, MemberRename::Bare))
+        .collect();
+    ordered.extend(
+        members
+            .iter()
+            .filter(|m| !matches!(m.rename, MemberRename::Bare)),
+    );
+    for m in ordered {
+        let Some(text) = m.rename.text_for(bare_new) else { continue };
+        for loc in refs_to(files, module_index, &m.target, RoleMask::EDITABLE) {
+            out.push((loc, text.clone()));
+        }
+    }
+    let mut seen = std::collections::HashSet::new();
+    out.retain(|(loc, _)| seen.insert((key_for_sort(&loc.key), loc.span)));
     out
 }
 

@@ -2758,12 +2758,12 @@ my $val = $p->x;
     // Cursor on `$x` in the field decl (row 2, col 11 = bare name).
     let resolved = resolve_symbol(&origin_fa, tree_sitter::Point { row: 2, column: 11 }, None)
         .expect("field decl resolves");
-    let ResolvedTarget::Group { local_spans, pinned_spans, targets } = resolved else {
+    let ResolvedTarget::Group { local_spans, pinned_spans, members } = resolved else {
         panic!("expected Group, got {:?}", resolved);
     };
     assert!(pinned_spans.is_empty(), "local mint has no pinned spans");
     assert!(!local_spans.is_empty(), "field var spellings present");
-    assert_eq!(targets.len(), 2, "reader + ctor-key targets: {:?}", targets);
+    assert_eq!(members.len(), 2, "reader + ctor-key members: {:?}", members);
 
     let locs = group_refs(
         &store,
@@ -2771,7 +2771,7 @@ my $val = $p->x;
         &FileKey::Path(point_path.clone()),
         &local_spans,
         &pinned_spans,
-        &targets,
+        &members,
         None,
     );
     let in_user: Vec<_> = locs
@@ -2821,11 +2821,11 @@ class Point {
     // From the ctor key `x` (row 1, col 19).
     let resolved = resolve_symbol(&consumer, tree_sitter::Point { row: 1, column: 19 }, Some(&idx))
         .expect("consumer key resolves");
-    let ResolvedTarget::Group { local_spans, pinned_spans, targets } = resolved else {
+    let ResolvedTarget::Group { local_spans, pinned_spans, members } = resolved else {
         panic!("expected Group from consumer key, got {:?}", resolved);
     };
     assert!(local_spans.is_empty(), "remote mint: no origin spans");
-    assert_eq!(targets.len(), 2, "reader + ctor-key targets");
+    assert_eq!(members.len(), 2, "reader + ctor-key members");
     assert!(
         pinned_spans.iter().all(|(p, _)| p == &class_path),
         "pinned to the class file: {:?}",
@@ -2846,5 +2846,55 @@ class Point {
         matches!(resolved, ResolvedTarget::Group { ref pinned_spans, .. } if !pinned_spans.is_empty()),
         "accessor-call cursor mints the remote group, got {:?}",
         resolved,
+    );
+}
+
+/// Cross-file mapped rename: the consumer's `$w->has_size` predicate
+/// call re-derives to `has_extent` when the attr renames — per-member
+/// replacement texts via group_rename_edits.
+#[test]
+fn test_group_rename_rederives_mapped_members_cross_file() {
+    let store = FileStore::new();
+    let class_path = PathBuf::from("/tmp/grp_map_widget.pm");
+    let user_path = PathBuf::from("/tmp/grp_map_user.pl");
+    store.insert_workspace(
+        class_path.clone(),
+        parse("package Widget;\nuse Moo;\nhas size => (is => 'ro', predicate => 1);\n1;\n"),
+    );
+    store.insert_workspace(
+        user_path.clone(),
+        parse("use Widget;\nmy $w = Widget->new(size => 3);\nprint $w->size if $w->has_size;\n"),
+    );
+
+    let class_fa = store.workspace_raw().get(&class_path).unwrap().value().clone();
+    // Cursor on the attr decl token `size` (row 2, col 4).
+    let resolved = resolve_symbol(&class_fa, tree_sitter::Point { row: 2, column: 4 }, None)
+        .expect("attr decl resolves");
+    let ResolvedTarget::Group { local_spans, pinned_spans, members } = resolved else {
+        panic!("expected Group, got {:?}", resolved);
+    };
+    let edits = group_rename_edits(
+        &store,
+        None,
+        &FileKey::Path(class_path.clone()),
+        &local_spans,
+        &pinned_spans,
+        &members,
+        "extent",
+    );
+    let user_edits: Vec<_> = edits
+        .iter()
+        .filter(|(l, _)| matches!(&l.key, FileKey::Path(p) if p == &user_path))
+        .map(|(l, t)| (l.span.start.row, l.span.start.column, t.clone()))
+        .collect();
+    assert!(
+        user_edits.contains(&(2, 22, "has_extent".to_string())),
+        "consumer predicate call re-derived; user edits: {:?}",
+        user_edits,
+    );
+    assert!(
+        user_edits.iter().any(|(r, _, t)| *r == 1 && t == "extent"),
+        "consumer ctor key renamed bare; user edits: {:?}",
+        user_edits,
     );
 }

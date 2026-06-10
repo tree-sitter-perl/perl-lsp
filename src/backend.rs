@@ -131,6 +131,30 @@ fn rename_via_refs_to(
     locations_to_workspace_edit(locations, new_name)
 }
 
+/// `(RefLocation, text)` pairs → one `WorkspaceEdit` (per-member texts).
+fn edit_pairs_to_workspace_edit(
+    edits: Vec<(crate::resolve::RefLocation, String)>,
+) -> Option<WorkspaceEdit> {
+    if edits.is_empty() {
+        return None;
+    }
+    let mut all_changes: std::collections::HashMap<Url, Vec<TextEdit>> =
+        std::collections::HashMap::new();
+    for (loc, text) in edits {
+        if let Some(uri) = loc.to_url() {
+            all_changes.entry(uri).or_default().push(TextEdit {
+                range: symbols::span_to_range(loc.span),
+                new_text: text,
+            });
+        }
+    }
+    if all_changes.is_empty() {
+        None
+    } else {
+        Some(WorkspaceEdit { changes: Some(all_changes), ..Default::default() })
+    }
+}
+
 /// `RefLocation`s → one `WorkspaceEdit` writing `new_name` at every span.
 /// Callers guarantee every span covers exactly the renamable token
 /// (bare-name spans for groups, selection/name spans from `refs_to`).
@@ -466,7 +490,7 @@ impl LanguageServer for Backend {
         let point = symbols::position_to_point(pos);
         let target = match resolve_symbol(&doc.analysis, point, Some(&*self.module_index)) {
             Some(ResolvedTarget::Target(t)) => t,
-            Some(ResolvedTarget::Group { local_spans, pinned_spans, targets }) => {
+            Some(ResolvedTarget::Group { local_spans, pinned_spans, members }) => {
                 let origin = FileKey::Url(uri.clone());
                 drop(doc);
                 let results = group_refs(
@@ -475,7 +499,7 @@ impl LanguageServer for Backend {
                     &origin,
                     &local_spans,
                     &pinned_spans,
-                    &targets,
+                    &members,
                     None,
                 );
                 return Ok(refs_to_locations(results));
@@ -543,23 +567,23 @@ impl LanguageServer for Backend {
                 drop(doc);
                 Ok(rename_via_refs_to(&self.files, Some(&*self.module_index), &target, new_name))
             }
-            Some(ResolvedTarget::Group { local_spans, pinned_spans, targets }) => {
-                // Every spelling of the group, everywhere editable. The
-                // group's spans all cover bare names, so one replacement
-                // text serves variables, keys, and reader calls alike.
+            Some(ResolvedTarget::Group { local_spans, pinned_spans, members }) => {
+                // Every spelling of the group, everywhere editable; each
+                // member carries its own replacement (bare vs re-derived
+                // affixed accessor names).
                 let origin = FileKey::Url(uri.clone());
                 drop(doc);
                 let bare_new = new_name.trim_start_matches(['$', '@', '%']);
-                let locations = crate::resolve::group_refs(
+                let edits = crate::resolve::group_rename_edits(
                     &self.files,
                     Some(&*self.module_index),
                     &origin,
                     &local_spans,
                     &pinned_spans,
-                    &targets,
-                    Some(crate::resolve::RoleMask::EDITABLE),
+                    &members,
+                    bare_new,
                 );
-                Ok(locations_to_workspace_edit(locations, bare_new))
+                Ok(edit_pairs_to_workspace_edit(edits))
             }
             // Lexical variables, hash keys, handlers: single-file rename
             // (policy lives on `TargetRef::supports_cross_file_rename`).
