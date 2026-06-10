@@ -316,6 +316,15 @@ pub enum EmitAction {
         /// the bag's edge-chase resolver follows it at query time.
         #[serde(default)]
         return_via_edge: Option<crate::witnesses::WitnessAttachment>,
+        /// The attr this accessor PROJECTS (Moo `predicate`/`clearer`/
+        /// custom `reader`/`writer` names derived from `has 'attr'`).
+        /// Setting it enrolls the method in the attr's projection group:
+        /// references from any group spelling include this accessor's
+        /// call sites, and rename re-derives the name when the accessor
+        /// embeds the attr (`has_size` → `has_extent`). One field — the
+        /// whole group DX for plugins.
+        #[serde(default)]
+        attr: Option<String>,
     },
     /// Synthesize a `HashKeyDef` for a constructor/stash/etc. key.
     HashKeyDef {
@@ -1247,6 +1256,7 @@ mod tests {
             opaque_return: false,
             outline_label: None,
             return_via_edge: None,
+            attr: None,
         };
         let json = serde_json::to_string(&action).unwrap();
         assert!(json.contains("\"Method\""));

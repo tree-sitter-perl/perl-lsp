@@ -249,6 +249,7 @@ fn build_with_plugins_inner(
         provisional_dispatches: Vec::new(),
         gated_param_types: Vec::new(),
         method_call_invocant: std::collections::HashMap::new(),
+        attr_accessors: Vec::new(),
         method_call_arity: std::collections::HashMap::new(),
         parametric_emitted_refs: std::collections::HashSet::new(),
         method_call_ref_dedup: std::collections::HashSet::new(),
@@ -490,6 +491,7 @@ fn build_with_plugins_inner(
         witnesses: b.bag,
         package_framework: b.package_framework,
         provisional_dispatches: b.provisional_dispatches,
+        attr_accessors: b.attr_accessors,
         gated_param_types: b.gated_param_types,
     });
     // Finalize: run the legacy text-based MCB resolver as a fallback.
@@ -1436,6 +1438,10 @@ struct Builder<'a> {
     /// which queries the bag at read time and so picks up cross-file
     /// enrichment automatically.
     method_call_invocant: std::collections::HashMap<usize, String>,
+    /// Plugin-declared projection-group members: accessor methods whose
+    /// names derive from an attr (`predicate => has_x`). Flushed into
+    /// `FileAnalysis.attr_accessors`.
+    attr_accessors: Vec<crate::file_analysis::AttrAccessor>,
 
     /// Per-MethodCall-ref arg count, keyed by ref index. Lets
     /// `emit_method_call_return_edges` pin the call site's arity onto its
@@ -2646,6 +2652,7 @@ impl<'a> Builder<'a> {
                 hide_in_outline,
                 opaque_return,
                 outline_label,
+                attr,
                 return_via_edge,
             } => {
                 let return_type_for_bag = return_type.clone();
@@ -2659,6 +2666,17 @@ impl<'a> Builder<'a> {
                     is_constant: false,
                 };
                 let target_pkg = on_class.clone().or_else(|| self.current_package.clone());
+                // Projection-group enrollment: the plugin declared which
+                // attr this accessor projects. Recorded on the analysis so
+                // the group machinery (references/rename union) can find
+                // name-mapped members (`has_size` for attr `size`).
+                if let (Some(attr_name), Some(cls)) = (attr.clone(), target_pkg.clone()) {
+                    self.attr_accessors.push(crate::file_analysis::AttrAccessor {
+                        class: cls,
+                        attr: attr_name,
+                        method: name.clone(),
+                    });
+                }
 
                 let already_emitted = self.symbols.iter().any(|s| {
                     s.name == name

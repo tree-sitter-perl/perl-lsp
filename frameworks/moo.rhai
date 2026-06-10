@@ -64,7 +64,11 @@ fn derive_name(prefix, attr) {
 
 // A plain method symbol with no return type — predicate (returns bool),
 // clearer (returns undef), builder (return is whatever the user's sub yields).
-fn plain_method(name, span, params) {
+// `attr` enrolls the method in the attribute's projection group: rename
+// of the attr re-derives this method's name (when it embeds the attr) and
+// references from any group spelling include its call sites. Pass () for
+// methods whose identity is NOT the attr's (handles delegations).
+fn plain_method(name, span, params, attr) {
     #{
         Method: #{
             name: name,
@@ -80,6 +84,7 @@ fn plain_method(name, span, params) {
             opaque_return: false,
             outline_label: (),
             return_via_edge: (),
+            attr: attr,
         }
     }
 }
@@ -111,9 +116,9 @@ fn on_function_call(ctx) {
             // `lazy_build => 1` (Moose) implies a builder/clearer/predicate
             // trio at runtime; expand it to the three companion methods.
             if kw == "lazy_build" && opt.shorthand {
-                out += plain_method("_build_" + attr, span, []);
-                out += plain_method(derive_name("clear_", attr), span, []);
-                out += plain_method(derive_name("has_", attr), span, []);
+                out += plain_method("_build_" + attr, span, [], attr);
+                out += plain_method(derive_name("clear_", attr), span, [], attr);
+                out += plain_method(derive_name("has_", attr), span, [], attr);
                 continue;
             }
 
@@ -147,6 +152,7 @@ fn on_function_call(ctx) {
                             opaque_return: false,
                             outline_label: (),
                             return_via_edge: edge,
+                            attr: (),
                         }
                     };
                 }
@@ -171,7 +177,7 @@ fn on_function_call(ctx) {
             if kw == "writer" || kw == "accessor" {
                 params = [ #{ name: "$val", "default": (), is_slurpy: false, is_invocant: false } ];
             }
-            out += plain_method(name, span, params);
+            out += plain_method(name, span, params, attr);
         }
     }
 

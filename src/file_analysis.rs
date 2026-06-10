@@ -2159,6 +2159,8 @@ pub struct FileAnalysis {
     /// `docs/adr/receiver-gated-dispatch.md` (Phase 2).
     #[serde(default)]
     pub gated_param_types: Vec<ReceiverGated<TypeConstraint>>,
+    #[serde(default)]
+    pub attr_accessors: Vec<AttrAccessor>,
 
     // Indices (built in post-pass — skipped by serde; call rebuild_all_indices() after deserialize)
     #[serde(skip, default)]
@@ -2218,6 +2220,19 @@ pub struct FileAnalysisParts {
     pub package_framework: HashMap<String, crate::witnesses::FrameworkFact>,
     pub provisional_dispatches: Vec<ProvisionalDispatch>,
     pub gated_param_types: Vec<ReceiverGated<TypeConstraint>>,
+    pub attr_accessors: Vec<AttrAccessor>,
+}
+
+/// A plugin-declared, name-mapped projection-group member: `has 'size'
+/// => (predicate => 1)` synthesizes `has_size`, whose name DERIVES from
+/// the attr. Recording the relation lets the group machinery include the
+/// accessor's call sites in references, and re-derive its name on rename
+/// when the attr is embedded (`has_size` → `has_extent`).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct AttrAccessor {
+    pub class: String,
+    pub attr: String,
+    pub method: String,
 }
 
 /// Cross-file-facing facts of a field group — see
@@ -2229,6 +2244,16 @@ pub struct FieldProjections {
     pub has_reader: bool,
     /// Origin-file variable spellings (decl + body uses), bare-adjusted.
     pub variable_spans: Vec<Span>,
+    /// Plugin-declared, name-mapped members (`predicate => has_size`).
+    /// `affix` = `(prefix, suffix)` when the method name embeds the attr —
+    /// rename re-derives the name; `None` = references-only member.
+    pub mapped: Vec<MappedMember>,
+}
+
+#[derive(Debug, Clone)]
+pub struct MappedMember {
+    pub method: String,
+    pub affix: Option<(String, String)>,
 }
 
 /// One field/attr-group entity: the facts the projection union needs.
@@ -2274,6 +2299,7 @@ impl FileAnalysis {
             package_framework,
             provisional_dispatches,
             gated_param_types,
+            attr_accessors,
         } = parts;
         witnesses.rebuild_index();
         let mut fa = FileAnalysis {
@@ -2303,6 +2329,7 @@ impl FileAnalysis {
             base_ref_count: 0,
             provisional_dispatches,
             gated_param_types,
+            attr_accessors,
             scope_starts: Vec::new(),
             symbols_by_name: HashMap::new(),
             symbols_by_scope: HashMap::new(),
@@ -4999,10 +5026,65 @@ impl FileAnalysis {
     /// bare-token spans.
     fn rename_field_group(&self, g: &FieldGroup, new_name: &str) -> Vec<(Span, String)> {
         let bare_new = new_name.trim_start_matches(['$', '@', '%']);
-        self.field_group_spans(g)
+        let bare: Vec<(Span, String)> = self
+            .field_group_spans_bare(g)
             .into_iter()
             .map(|s| (s, bare_new.to_string()))
-            .collect()
+            .collect();
+        let mut edits = bare.clone();
+        for a in self
+            .attr_accessors
+            .iter()
+            .filter(|a| a.class == g.class && a.attr == g.bare)
+        {
+            // References-only when the name doesn't embed the attr — a
+            // custom `writer => 'store_it'` can't be re-derived.
+            let Some(i) = a.method.find(g.bare.as_str()) else { continue };
+            let new_method =
+                format!("{}{}{}", &a.method[..i], bare_new, &a.method[i + g.bare.len()..]);
+            for span in self.mapped_member_spans(g, &a.method) {
+                // A synthesized member's decl span IS the group decl token,
+                // which the bare edit already covers — never double-edit.
+                if bare.iter().any(|(b, _)| *b == span) {
+                    continue;
+                }
+                edits.push((span, new_method.clone()));
+            }
+        }
+        edits.sort_by_key(|(s, _)| (s.start.row, s.start.column));
+        edits.dedup_by(|a, b| a.0 == b.0);
+        edits
+    }
+
+    /// Every in-file spelling of a name-mapped member: its call sites
+    /// (class-checked) and a user-written decl (`sub _build_size`), which
+    /// unlike synthesized members does NOT sit on the group decl token.
+    fn mapped_member_spans(&self, g: &FieldGroup, method: &str) -> Vec<Span> {
+        let mut spans = Vec::new();
+        for r in &self.refs {
+            if let RefKind::MethodCall { method_name_span, .. } = &r.kind {
+                if r.unqualified_target_name() != method {
+                    continue;
+                }
+                let cls = r
+                    .resolved_method_target
+                    .as_ref()
+                    .map(|t| t.invocant_class().to_string())
+                    .or_else(|| self.method_call_invocant_class(r, None));
+                if cls.as_deref() == Some(g.class.as_str()) {
+                    spans.push(*method_name_span);
+                }
+            }
+        }
+        for s in &self.symbols {
+            if matches!(s.kind, SymKind::Sub | SymKind::Method)
+                && s.name == method
+                && s.package.as_deref() == Some(g.class.as_str())
+            {
+                spans.push(s.selection_span);
+            }
+        }
+        spans
     }
 
     /// Every in-file spelling of a field group as bare-name spans: the
@@ -5011,6 +5093,23 @@ impl FileAnalysis {
     /// reader calls. Sorted, deduped — the uniform currency for both
     /// rename (write the new bare name at each) and references.
     fn field_group_spans(&self, g: &FieldGroup) -> Vec<Span> {
+        let mut spans = self.field_group_spans_bare(g);
+        for a in self
+            .attr_accessors
+            .iter()
+            .filter(|a| a.class == g.class && a.attr == g.bare)
+        {
+            spans.extend(self.mapped_member_spans(g, &a.method));
+        }
+        spans.sort_by_key(|s| (s.start.row, s.start.column));
+        spans.dedup();
+        spans
+    }
+
+    /// The bare-name spellings only (variable, decl token, ctor keys,
+    /// reader calls) — the set a rename writes the plain new name at.
+    /// Name-mapped members re-derive their own names instead.
+    fn field_group_spans_bare(&self, g: &FieldGroup) -> Vec<Span> {
         let mut spans: Vec<Span> = Vec::new();
         // The field variable: decl + every body use. Moo attrs have no
         // variable side; their decl token contributes directly.
@@ -5139,12 +5238,27 @@ impl FileAnalysis {
         if let Some(decl) = g.decl_span {
             variable_spans.push(decl);
         }
+        let mapped = self
+            .attr_accessors
+            .iter()
+            .filter(|a| a.class == g.class && a.attr == g.bare)
+            .map(|a| MappedMember {
+                method: a.method.clone(),
+                affix: a.method.find(g.bare.as_str()).map(|i| {
+                    (
+                        a.method[..i].to_string(),
+                        a.method[i + g.bare.len()..].to_string(),
+                    )
+                }),
+            })
+            .collect();
         FieldProjections {
             class: g.class,
             bare: g.bare,
             has_param: g.has_param,
             has_reader: g.has_reader,
             variable_spans,
+            mapped,
         }
     }
 

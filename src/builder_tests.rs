@@ -14428,3 +14428,49 @@ my $s = $w->size;
     assert_eq!(find(5, 21), from_decl, "ctor-key rename == decl rename");
     assert_eq!(find(3, 47), from_decl, "accessor-call rename == decl rename");
 }
+
+/// Plugin-enrolled mapped members: `predicate => 1` synthesizes
+/// `has_size`, whose name DERIVES from the attr. Renaming the attr from
+/// any spelling re-derives the predicate (`has_size` → `has_extent`) at
+/// its call sites, and references include them. A name-mapped member
+/// never double-edits the shared decl token.
+#[test]
+fn moo_mapped_predicate_joins_group_rename() {
+    let src = "\
+package Widget;
+use Moo;
+has size => (is => 'ro', predicate => 1);
+package main;
+my $w = Widget->new(size => 3);
+if ($w->has_size) { print $w->size; }
+";
+    let fa = build_fa(src);
+    let edits = fa
+        .rename_at(Point::new(2, 5), "extent")
+        .expect("rename produces edits");
+    // The predicate call site is re-derived, not bare-replaced.
+    let predicate_edit = edits
+        .iter()
+        .find(|(s, _)| s.start.row == 5 && s.start.column == 8)
+        .expect("has_size call edited");
+    assert_eq!(predicate_edit.1, "has_extent");
+    // Everything else gets the bare name (decl, ctor key, accessor call).
+    assert!(
+        edits.iter().filter(|(_, t)| t == "extent").count() >= 3,
+        "bare spellings renamed too: {:?}",
+        edits,
+    );
+    // No span is edited twice.
+    let mut spans: Vec<_> = edits.iter().map(|(s, _)| (s.start.row, s.start.column)).collect();
+    spans.sort();
+    spans.dedup();
+    assert_eq!(spans.len(), edits.len(), "no duplicate-span edits: {:?}", edits);
+
+    // References from the attr decl include the predicate call.
+    let refs = fa.find_references(Point::new(2, 5), None);
+    assert!(
+        refs.iter().any(|s| s.start.row == 5 && s.start.column == 8),
+        "references include has_size call: {:?}",
+        refs,
+    );
+}
