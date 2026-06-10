@@ -85,6 +85,27 @@
       },
       "status": "gold",
       "note": "The literal-hash spelling of the typo hint: container-form read checked against %plain's list-literal shape."
+    },
+    {
+      "id": "nested-expression-base-typo",
+      "difficulty": "tricky",
+      "semantic_area": "structural-shapes",
+      "root": "gold-corpus/nested-fixture",
+      "file": "main.pl",
+      "line": 47,
+      "col": 22,
+      "query": "",
+      "newname": "",
+      "expect": {
+        "all": [
+          "key 'retrys' is not in this expression's literal shape"
+        ],
+        "none": [
+          "key 'retries' is not in this expression"
+        ]
+      },
+      "status": "gold",
+      "note": "Call-base drill (local_cfg()->{retrys}) hints off the producer's closed return shape via the Projected witness; no variable in hand."
     }
   ]
 }

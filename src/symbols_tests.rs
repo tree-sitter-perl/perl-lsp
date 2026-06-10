@@ -4430,3 +4430,35 @@ my $silent = $taken{anything};
     assert!(keys[0].contains("'typo'"), "{:?}", keys);
     assert!(keys[0].contains("%config"), "names the hash variable: {:?}", keys);
 }
+
+/// Expression-base spelling: `cfg()->{kye}` hints off the producer's
+/// closed return shape — no variable in hand, the drill's Projected
+/// witness carries the (base, key) pair. Known keys stay silent, and
+/// bare-variable bases stay the gated ref loop's territory.
+#[test]
+fn test_expression_base_unknown_key_diagnostic() {
+    let src = "\
+sub cfg { return { host => 'x', port => 1 } }
+my $ok = cfg()->{host};
+my $bad = cfg()->{hsot};
+";
+    let analysis = parse_analysis(src);
+    let idx = crate::module_index::ModuleIndex::new_for_test();
+    let diags = collect_diagnostics(
+        &analysis,
+        &idx,
+        DiagnosticOptions { unresolved_dispatch: false },
+    );
+    let keys: Vec<&str> = diags
+        .iter()
+        .filter(|d| matches!(&d.code, Some(NumberOrString::String(c)) if c == "unknown-hash-key"))
+        .map(|d| d.message.as_str())
+        .collect();
+    assert_eq!(keys.len(), 1, "only the call-base typo: {:?}", keys);
+    assert!(keys[0].contains("'hsot'"), "{:?}", keys);
+    assert!(
+        keys[0].contains("this expression's"),
+        "expression-base message form: {:?}",
+        keys,
+    );
+}
