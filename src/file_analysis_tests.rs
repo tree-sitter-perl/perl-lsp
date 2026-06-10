@@ -1,4 +1,5 @@
-use super::*;
+#[allow(unused_imports)]
+use crate::file_analysis::*;
 use tree_sitter::Point;
 
 /// Helper: build a minimal FileAnalysis with a single file scope and given type constraints.

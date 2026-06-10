@@ -1999,7 +1999,7 @@ pub fn query_variable_type(
 /// post-finalize the bag is append-only (removal would shift the
 /// sealed `base_witness_count`); duplicate pushes are idempotent under
 /// latest-wins and truncated away by the next enrichment cycle.
-pub(crate) fn emit_mutation_extension_witnesses(
+pub fn emit_mutation_extension_witnesses(
     bag: &mut WitnessBag,
     ctx: &BagContext,
     key_writes: &[crate::file_analysis::KeyWrite],

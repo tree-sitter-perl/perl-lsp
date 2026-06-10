@@ -1,0 +1,21 @@
+[package]
+name = "perl-lsp-build"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "perl-lsp builder: the only tree-sitter consumer — CST → FileAnalysis, plus the plugin system, POD, and cpanfile"
+
+[dependencies]
+perl-lsp-model = { path = "../model", version = "0.4.0" }
+perl-lsp-cst = { path = "../cst", version = "0.4.0" }
+tree-sitter.workspace = true
+ts-parser-perl.workspace = true
+ts-parser-pod.workspace = true
+rhai.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+log.workspace = true
+
+[dev-dependencies]
+perl-lsp-index = { path = "../index" }

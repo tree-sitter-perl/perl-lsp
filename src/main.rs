@@ -1,23 +1,28 @@
 mod backend;
-mod builder;
-mod builtins_pod;
-mod conventions;
-mod cpanfile;
-mod cst;
 mod cursor_context;
-mod document;
-mod file_analysis;
-mod file_store;
-mod module_cache;
-mod module_index;
-mod module_resolver;
-mod plugin;
-mod pod;
-mod query_cache;
-mod resolve;
+mod plugin_cli;
 mod symbols;
-mod timings;
-mod witnesses;
+
+// Lower-layer crates under their single-crate module names, so every
+// `crate::…` path in this crate reads identically to the pre-split
+// tree. The workspace DAG (model ← cst ← build ← index ← here) is
+// what now enforces CLAUDE.md rules #1/#2 at compile time.
+pub use perl_lsp_build::{builder, cpanfile, plugin, pod, query_cache};
+pub use perl_lsp_cst as cst;
+pub use perl_lsp_index::{
+    builtins_pod, document, file_store, module_cache, module_index, module_resolver,
+    resolve, timings,
+};
+pub use perl_lsp_model::{conventions, file_analysis, witnesses};
+
+// Cross-layer test suites live at the top — they drive the model and
+// builder through symbols/cursor_context, which only exist here.
+#[cfg(test)]
+#[path = "file_analysis_tests.rs"]
+mod file_analysis_tests;
+#[cfg(test)]
+#[path = "builder_tests.rs"]
+mod builder_tests;
 
 use backend::Backend;
 use tower_lsp::{LspService, Server};
@@ -102,15 +107,15 @@ async fn main() {
             return;
         }
         Some("--plugin-check") => {
-            plugin::cli::cli_plugin_check(&args[2..]);
+            plugin_cli::cli_plugin_check(&args[2..]);
             return;
         }
         Some("--plugin-run") => {
-            plugin::cli::cli_plugin_run(&args[2..]);
+            plugin_cli::cli_plugin_run(&args[2..]);
             return;
         }
         Some("--plugin-test") => {
-            plugin::cli::cli_plugin_test(&args[2..]);
+            plugin_cli::cli_plugin_test(&args[2..]);
             return;
         }
         Some("--dump-package") if args.len() >= 4 => {

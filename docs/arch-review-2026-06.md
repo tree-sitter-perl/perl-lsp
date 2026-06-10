@@ -139,6 +139,16 @@ it earlier means the model crate keeps a tree-sitter dependency and the
 headline guarantee (a model that *cannot* walk trees) isn't delivered.
 Phase 5 is the next big rock.
 
+**EXECUTED (June 2026, `workspace-split`):** five crates per the target
+DAG (`model`, `cst`, `build`, `index`, root bin). `model` keeps
+tree-sitter as a types-only dep for `Point` (the sanctioned weaker
+form); everything else about the headline guarantee holds — `model`
+has no `cst`/grammar dependency, so a tree walk there cannot compile.
+Module re-export aliases keep `crate::…` paths reading as before;
+cross-layer test suites moved to the crate that has their
+dependencies (top-most: `builder_tests`/`file_analysis_tests` in the
+bin crate). release.yml publishes members in dependency order.
+
 ## 5. What's actually fine (don't touch)
 
 - The witness bag + reducer registry. Monotone, edge-based, single query

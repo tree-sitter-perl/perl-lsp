@@ -1,4 +1,10 @@
-use super::*;
+#[allow(unused_imports)]
+use crate::builder::*;
+#[allow(unused_imports)]
+use crate::file_analysis::*;
+#[allow(unused_imports)]
+use tree_sitter::Point;
+use tree_sitter::Tree;
 
 fn parse(source: &str) -> Tree {
     let mut parser = tree_sitter::Parser::new();
@@ -10328,7 +10334,7 @@ mod synthetic_use {
         let mut parser = tree_sitter::Parser::new();
         parser.set_language(&ts_parser_perl::LANGUAGE.into()).unwrap();
         let tree = parser.parse(source, None).unwrap();
-        super::super::build_with_plugins(&tree, source.as_bytes(), plugins)
+        crate::builder::build_with_plugins(&tree, source.as_bytes(), plugins)
     }
 
     /// `use Co::Base -Class` (via the stub kit plugin) produces the same

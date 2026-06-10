@@ -320,7 +320,9 @@ fn drain_next_batch(queue: &ResolveQueue) -> Vec<String> {
 }
 
 /// Simplified resolver for tests — no Client, no progress, no cpanfile.
-#[cfg(test)]
+/// Compiled unconditionally: other crates' test targets can't see
+/// #[cfg(test)] items across crate lines.
+#[doc(hidden)]
 pub fn spawn_test_resolver(
     cache: Arc<DashMap<String, Option<Arc<CachedModule>>>>,
     reverse_index: Arc<DashMap<String, Vec<String>>>,
@@ -502,13 +504,7 @@ fn parse_module(
     resolve_and_parse_with_memo(inc_paths, module_name, parser, memo)
 }
 
-pub fn create_parser() -> Parser {
-    let mut parser = Parser::new();
-    parser
-        .set_language(&ts_parser_perl::LANGUAGE.into())
-        .expect("failed to set Perl language");
-    parser
-}
+pub use crate::builder::create_parser;
 
 // ---- Resolution ----
 

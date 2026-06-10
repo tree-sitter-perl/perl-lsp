@@ -2,7 +2,7 @@ use super::*;
 
 #[test]
 fn test_incremental_preserves_packages() {
-    let original = std::fs::read_to_string("test_files/frameworks.pl").unwrap();
+    let original = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../test_files/frameworks.pl")).unwrap();
     let mut doc = Document::new(original.clone()).unwrap();
 
     // Count packages in clean parse

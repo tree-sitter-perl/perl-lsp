@@ -10,6 +10,10 @@
 //! Part 5c for the spec.
 
 use super::*;
+#[allow(unused_imports)]
+use crate::builder::*;
+#[allow(unused_imports)]
+use crate::file_analysis::*;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tree_sitter::{Parser, Point, Tree};

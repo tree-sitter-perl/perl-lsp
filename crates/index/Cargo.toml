@@ -1,0 +1,26 @@
+[package]
+name = "perl-lsp-index"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "perl-lsp cross-file layer: workspace/module indexing, SQLite cache, the role-tagged FileStore, and refs_to resolution"
+
+[dependencies]
+perl-lsp-model = { path = "../model", version = "0.4.0" }
+perl-lsp-build = { path = "../build", version = "0.4.0" }
+perl-lsp-cst = { path = "../cst", version = "0.4.0" }
+tree-sitter.workspace = true
+ts-parser-perl.workspace = true
+dashmap.workspace = true
+rusqlite.workspace = true
+bincode.workspace = true
+zstd.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+bitflags.workspace = true
+rayon.workspace = true
+ignore.workspace = true
+log.workspace = true
+tower-lsp.workspace = true
+tokio.workspace = true

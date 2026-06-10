@@ -6,7 +6,7 @@ A Perl LSP server built on ts-parser-perl (crates.io) and tower-lsp.
 
 ```
 cargo build --release
-cargo test                              # unit tests
+cargo test --workspace                  # unit tests (root package alone misses the member crates)
 ./run_e2e.sh                            # e2e tests (needs nvim + release build)
 gold-corpus/run.pl                      # gold harness (needs release build + installed substrate)
 perl-lsp --dump-package <root> <pkg>    # debug type inference for a package
@@ -17,20 +17,31 @@ net over real CPAN modules from a snapshot-pinned substrate
 (`gold-corpus/local/`). `fixtures/*.json` is the source of truth; statuses:
 gold (must hold → FAIL on regression), xfail (known gap → XPASS when a fix
 lands, promote the row), provisional (reported, never fails). A crash is
-always a hard fail. Run it alongside `cargo test` + `./run_e2e.sh` before
+always a hard fail. Run it alongside `cargo test --workspace` + `./run_e2e.sh` before
 calling a change verified; `gold-corpus/run.pl --emit <cap> <file> <row>
 <col>` authors new rows. Known gaps live in `gold-corpus/KNOWN-GAPS.md`.
 
 ## Architecture
 
-Four layers, data flows down only:
+Four layers, data flows down only — and since the workspace split each
+layer is a crate, so the direction is compiler-enforced:
 
 ```
-LSP adapter      symbols.rs, backend.rs       → LSP protocol types
-Cross-file       module_index/_resolver/_cache → CachedModule (Arc<FileAnalysis>)
-Builder          builder.rs                   → produces FileAnalysis
-Data model       file_analysis.rs             → FileAnalysis (serde, bincode-cacheable)
+LSP adapter      perl-lsp (root bin)   symbols.rs, backend.rs        → LSP protocol types
+Cross-file       crates/index          module_index/_resolver/_cache → CachedModule (Arc<FileAnalysis>)
+Builder          crates/build          builder.rs, plugin/           → produces FileAnalysis
+Typed CST view   crates/cst            lib.rs (the old cst.rs)
+Data model       crates/model          file_analysis.rs, witnesses.rs, conventions.rs
 ```
+
+`crates/model` does not depend on `cst` or the grammar (tree-sitter is
+a types-only dep for `Point`) — a tree walk there cannot compile.
+Each crate re-exports its lower layers' modules under the
+single-crate names, so `crate::file_analysis::…` paths read the same
+everywhere; the bin crate aliases everything. Test suites that drive
+lower layers through upper ones live at the top (`src/builder_tests.rs`,
+`src/file_analysis_tests.rs`); Cargo's sanctioned dev-dependency
+cycles cover the rest.
 
 See `docs/ROADMAP.md` for the forward design corpus entry point. `docs/adr/file-store-and-resolve.md` covers the landed cross-file unification: single role-tagged FileStore + RoleMask + `refs_to`, plus `resolve_symbol` (cursor→`ResolvedTarget`) — the one entry point both LSP handlers (references/rename) and their CLI mirrors use to identify the target before calling `refs_to`. Never map `RenameKind`→`TargetRef` inline in a handler; per-feature policy on a target is a method on `TargetRef` (e.g. `supports_cross_file_rename`). Residual forward work in `docs/prompt-unification-residual.md`; the next architectural pillar (graph walking) in `docs/prompt-graph-walking.md`.
 

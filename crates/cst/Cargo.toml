@@ -1,0 +1,11 @@
+[package]
+name = "perl-lsp-cst"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "perl-lsp typed CST view: zero-copy node wrappers; every tree-sitter-perl grammar trap encoded exactly once"
+
+[dependencies]
+tree-sitter.workspace = true
+perl-lsp-model = { path = "../model", version = "0.4.0" }

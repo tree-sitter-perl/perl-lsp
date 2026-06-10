@@ -1,11 +1,39 @@
-[package]
-name = "perl-lsp"
+[workspace]
+members = ["crates/model", "crates/cst", "crates/build", "crates/index"]
+
+[workspace.package]
 version = "0.4.0"
 edition = "2021"
-authors = ["tree-sitter-perl contributors"]
 license = "Artistic-2.0"
-description = "A Perl LSP server built on tree-sitter-perl and tower-lsp"
 repository = "https://github.com/tree-sitter-perl/perl-tree-sitter-lsp"
+
+[workspace.dependencies]
+tower-lsp = "0.20"
+tokio = { version = "1", features = ["full"] }
+tree-sitter = "0.25"
+ts-parser-perl = "1.1.2"
+ts-parser-pod = "1"
+dashmap = "6"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+bincode = "1"
+zstd = "0.13"
+bitflags = "2"
+rusqlite = { version = "0.32", features = ["bundled"] }
+rayon = "1"
+ignore = "0.4"
+log = "0.4"
+env_logger = "0.11"
+rhai = { version = "1.23", features = ["sync", "serde"] }
+
+[package]
+name = "perl-lsp"
+version.workspace = true
+edition.workspace = true
+authors = ["tree-sitter-perl contributors"]
+license.workspace = true
+description = "A Perl LSP server built on tree-sitter-perl and tower-lsp"
+repository.workspace = true
 keywords = ["perl", "lsp", "tree-sitter", "language-server"]
 categories = ["development-tools", "text-editors"]
 
@@ -24,20 +52,17 @@ default = []
 perf_bench = []
 
 [dependencies]
-tower-lsp = "0.20"
-tokio = { version = "1", features = ["full"] }
-tree-sitter = "0.25"
-ts-parser-perl = "1.1.2"
-ts-parser-pod = "1"
-dashmap = "6"
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-bincode = "1"
-zstd = "0.13"
-bitflags = "2"
-rusqlite = { version = "0.32", features = ["bundled"] }
-rayon = "1"
-ignore = "0.4"
-log = "0.4"
-env_logger = "0.11"
-rhai = { version = "1.23", features = ["sync", "serde"] }
+perl-lsp-model = { path = "crates/model", version = "0.4.0" }
+perl-lsp-cst = { path = "crates/cst", version = "0.4.0" }
+perl-lsp-build = { path = "crates/build", version = "0.4.0" }
+perl-lsp-index = { path = "crates/index", version = "0.4.0" }
+tower-lsp.workspace = true
+tokio.workspace = true
+tree-sitter.workspace = true
+ts-parser-perl.workspace = true
+dashmap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+bincode.workspace = true
+log.workspace = true
+env_logger.workspace = true

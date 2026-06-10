@@ -39,6 +39,10 @@
 //! `find_definition` so it doesn't pin internal encoding.
 
 use super::*;
+#[allow(unused_imports)]
+use crate::builder::*;
+#[allow(unused_imports)]
+use crate::file_analysis::*;
 use tree_sitter::{Parser, Point};
 
 fn parse(source: &str) -> FileAnalysis {

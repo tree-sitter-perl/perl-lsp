@@ -241,13 +241,13 @@ pub trait CrossFileLookup {
 /// Fields mirror `Point` exactly — use `#[serde(with = "PointDef")]` on Point fields.
 #[derive(Serialize, Deserialize)]
 #[serde(remote = "Point")]
-pub(crate) struct PointDef {
+pub struct PointDef {
     pub row: usize,
     pub column: usize,
 }
 
 /// Helper module for `Option<Point>` serialization via the remote-derived proxy.
-pub(crate) mod point_opt_serde {
+pub mod point_opt_serde {
     use super::PointDef;
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
     use tree_sitter::Point;
@@ -275,10 +275,6 @@ pub struct Span {
     pub end: Point,
 }
 
-/// Extract the function/method name from a call expression node.
-// Node-side utilities live in `cst.rs`; re-exported here while the lazy
-// tree-resolution paths (phase 5 retires them) still call them in-module.
-pub(crate) use crate::cst::{extract_call_name, fq_tail_span, node_to_span};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FoldRange {
@@ -2302,6 +2298,7 @@ pub struct FileAnalysis {
     /// keyed on those two kinds.
     #[serde(skip, default)]
     call_ref_by_start: HashMap<Point, usize>,
+
     /// Union of `export` + `export_ok` for O(1) membership tests.
     /// Rebuilt by `build_indices` (called from `new` and `after_deserialize`),
     /// so it is valid for freshly-built and SQLite-cached modules alike.
@@ -2519,7 +2516,7 @@ impl FileAnalysis {
     /// end of the worklist (single emission point for "this sub's
     /// return type is known"). Cross-file imports do not get a local
     /// mirror; they resolve lazily through `query_sub_return_type`.
-    pub(crate) fn finalize_post_walk(&mut self) {
+    pub fn finalize_post_walk(&mut self) {
         self.resolve_method_call_types(None);
         // Fill HashKeyAccess owners that are resolvable in-file
         // via the chain-recursion dispatcher
@@ -2548,7 +2545,7 @@ impl FileAnalysis {
     ///
     /// Contract: if the invocant class does not infer, store `None` (honest
     /// miss). No name-only fallback — that re-introduces the `->new` flood.
-    pub(crate) fn stamp_method_call_targets(&mut self, module_index: Option<&dyn CrossFileLookup>) {
+    pub fn stamp_method_call_targets(&mut self, module_index: Option<&dyn CrossFileLookup>) {
         // Collect resolutions first; `method_call_invocant_class` /
         // `resolve_method_in_ancestors` borrow `&self`, so we can't hold a
         // `&mut self.refs[i]` while calling them.
@@ -2641,6 +2638,13 @@ impl FileAnalysis {
     /// Rebuild all derived indices after deserialization.
     /// Idempotent: safe to call on a freshly deserialized `FileAnalysis` whose
     /// index fields were zeroed by `#[serde(skip, default)]`.
+    /// The call-ref-by-start index, exposed for the call-ref index
+    /// test suite (a former child module with private access).
+    #[doc(hidden)]
+    pub fn call_ref_by_start_index(&self) -> &HashMap<Point, usize> {
+        &self.call_ref_by_start
+    }
+
     pub fn after_deserialize(&mut self) {
         // Clear first in case this is called on a populated FileAnalysis.
         self.scope_starts.clear();
@@ -3020,7 +3024,7 @@ impl FileAnalysis {
     /// The registry-query context over this analysis. Every bag query
     /// threads the same field set; build it here so adding a field is one
     /// edit, not one per call site.
-    pub(crate) fn bag_context<'a>(
+    pub fn bag_context<'a>(
         &'a self,
         module_index: Option<&'a dyn CrossFileLookup>,
     ) -> crate::witnesses::BagContext<'a> {
@@ -3670,7 +3674,7 @@ impl FileAnalysis {
     /// type constraint on $X" call shape rather than open-coding the
     /// witness construction. Builder has a parallel helper that does
     /// the same thing during the walk.
-    pub(crate) fn push_type_constraint(&mut self, tc: TypeConstraint) {
+    pub fn push_type_constraint(&mut self, tc: TypeConstraint) {
         use crate::witnesses::{
             TypeObservation, Witness, WitnessAttachment, WitnessPayload, WitnessSource,
         };
@@ -3906,7 +3910,7 @@ impl FileAnalysis {
     /// overrides dominate, then arity dispatch, then `SubReturnReducer`
     /// (which claims plain writeback-pushed `InferredType` witnesses).
     /// Returns `None` when nothing in the bag answers.
-    pub(crate) fn symbol_return_type_via_bag(
+    pub fn symbol_return_type_via_bag(
         &self,
         sym_id: SymbolId,
         arg_count: Option<usize>,
@@ -3921,7 +3925,7 @@ impl FileAnalysis {
     /// return type comes back `None`. Pass the index whenever the query has
     /// one (hover/completion against a cached module); the bare wrapper above
     /// keeps `None` for the many call sites that don't.
-    pub(crate) fn symbol_return_type_via_bag_ctx(
+    pub fn symbol_return_type_via_bag_ctx(
         &self,
         sym_id: SymbolId,
         arg_count: Option<usize>,
@@ -3981,7 +3985,7 @@ impl FileAnalysis {
     /// walk; no procedural overload picking — the registry's
     /// `ReturnExprReducer` claims `MethodOnClass + ReturnExpr` and
     /// the structural-walk code in `query_rec` handles MRO.
-    pub(crate) fn find_method_return_type(
+    pub fn find_method_return_type(
         &self,
         class_name: &str,
         method_name: &str,
@@ -6136,7 +6140,7 @@ impl FileAnalysis {
     }
 
     /// Walk the scope chain to find the enclosing class or package.
-    pub(crate) fn enclosing_class_for_scope(&self, scope: ScopeId) -> Option<String> {
+    pub fn enclosing_class_for_scope(&self, scope: ScopeId) -> Option<String> {
         for sid in self.scope_chain(scope).iter() {
             let s = self.scope(*sid);
             if let ScopeKind::Class { ref name } = s.kind {
@@ -6150,8 +6154,8 @@ impl FileAnalysis {
     }
 
     /// Test-only wrapper over the private `resolve_invocant_class`.
-    #[cfg(test)]
-    pub(crate) fn resolve_invocant_class_test(
+    #[doc(hidden)]
+    pub fn resolve_invocant_class_test(
         &self,
         invocant: &str,
         scope: ScopeId,
@@ -6222,13 +6226,12 @@ impl FileAnalysis {
     }
 
     /// Find a method definition within a class/package.
-    #[cfg(test)]
-    pub(crate) fn find_method_in_class(&self, class_name: &str, method_name: &str) -> Option<Span> {
+    #[doc(hidden)]
+    pub fn find_method_in_class(&self, class_name: &str, method_name: &str) -> Option<Span> {
         self.find_method_in_class_with_index(class_name, method_name, None)
     }
 
     /// Find a method definition, walking the inheritance chain if needed.
-    #[cfg(test)]
     fn find_method_in_class_with_index(
         &self,
         class_name: &str,
@@ -6729,7 +6732,7 @@ impl FileAnalysis {
     // helpers defined at module scope below
 
     /// Check if a symbol is defined within a class/package.
-    pub(crate) fn symbol_in_class(&self, sym_id: SymbolId, class_name: &str) -> bool {
+    pub fn symbol_in_class(&self, sym_id: SymbolId, class_name: &str) -> bool {
         let sym = self.symbol(sym_id);
         // Fast path: check the package captured at symbol creation time.
         // This is authoritative for multi-package files where the scope's
@@ -8196,7 +8199,7 @@ fn generate_cross_sigil_candidates(
 
 // ---- Helpers ----
 
-pub(crate) fn contains_point(span: &Span, point: Point) -> bool {
+pub fn contains_point(span: &Span, point: Point) -> bool {
     (span.start.row < point.row || (span.start.row == point.row && span.start.column <= point.column))
         && (point.row < span.end.row || (point.row == span.end.row && point.column <= span.end.column))
 }
@@ -8229,7 +8232,7 @@ fn span_size(span: &Span) -> usize {
 ///
 /// `login` → `Login`, `sales_reports` → `SalesReports`,
 /// `integrations-ads_api` → `Integrations::AdsApi`.
-fn camelize_controller(token: &str) -> String {
+pub fn camelize_controller(token: &str) -> String {
     if token.chars().next().is_some_and(|c| c.is_ascii_uppercase()) {
         return token.to_string();
     }
@@ -8262,7 +8265,7 @@ fn ucfirst_lc(piece: &str) -> String {
 /// the camelized form is the trailing namespace segment(s) of the class.
 /// `Clove::Controller::Login` matches `Login`;
 /// `App::Controller::Integrations::AdsApi` matches `Integrations::AdsApi`.
-fn module_tail_matches(module: &str, camelized: &str) -> bool {
+pub fn module_tail_matches(module: &str, camelized: &str) -> bool {
     module == camelized
         || module
             .strip_suffix(camelized)
@@ -8292,7 +8295,7 @@ fn source_line_at(source: &str, row: usize) -> &str {
 }
 
 /// Return the known return type for a Perl builtin function, if any.
-pub(crate) fn builtin_return_type(name: &str) -> Option<InferredType> {
+pub fn builtin_return_type(name: &str) -> Option<InferredType> {
     match name {
         // Numeric returns
         "time" | "length" | "index" | "rindex" | "abs" | "int" | "sqrt"
@@ -8309,7 +8312,7 @@ pub(crate) fn builtin_return_type(name: &str) -> Option<InferredType> {
 }
 
 /// Type constraint to push on the first argument of a Perl builtin.
-pub(crate) fn builtin_first_arg_type(name: &str) -> Option<InferredType> {
+pub fn builtin_first_arg_type(name: &str) -> Option<InferredType> {
     match name {
         // Numeric arg builtins
         "abs" | "int" | "sqrt" | "chr"
@@ -8383,7 +8386,7 @@ fn cross_file_resolved(sub_info: &SubInfo<'_>) -> ResolvedSub<'static> {
     }
 }
 
-pub(crate) fn format_inferred_type(ty: &InferredType) -> String {
+pub fn format_inferred_type(ty: &InferredType) -> String {
     match ty {
         InferredType::ClassName(name) => name.clone(),
         InferredType::FirstParam { package } => package.clone(),
@@ -8429,18 +8432,6 @@ fn format_parametric_type(p: &ParametricType) -> String {
     }
 }
 
-#[cfg(test)]
-#[path = "file_analysis_tests.rs"]
-mod tests;
 
-#[cfg(test)]
-#[path = "call_ref_index_tests.rs"]
-mod call_ref_index_tests;
 
-#[cfg(test)]
-#[path = "parametric_resultset_tests.rs"]
-mod parametric_resultset_tests;
 
-#[cfg(test)]
-#[path = "return_expr_tests.rs"]
-mod return_expr_tests;

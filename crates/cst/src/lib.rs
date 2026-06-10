@@ -22,13 +22,13 @@
 
 use tree_sitter::Node;
 
-use crate::file_analysis::Span;
+use perl_lsp_model::file_analysis::Span;
 
-pub(crate) use crate::conventions::is_conventional_invocant_name;
+pub use perl_lsp_model::conventions::is_conventional_invocant_name;
 
 /// Ergonomic accessors every tree consumer wants; `use crate::cst::NodeExt`
 /// instead of re-spelling `utf8_text(..).ok()` chains.
-pub(crate) trait NodeExt<'a>: Sized {
+pub trait NodeExt<'a>: Sized {
     /// The node's source text. `None` only on invalid UTF-8.
     fn text(&self, src: &'a [u8]) -> Option<&'a str>;
     /// Text of a named field's child.
@@ -54,7 +54,7 @@ impl<'a> NodeExt<'a> for Node<'a> {
     }
 }
 
-pub(crate) fn node_to_span(node: Node) -> Span {
+pub fn node_to_span(node: Node) -> Span {
     Span {
         start: node.start_position(),
         end: node.end_position(),
@@ -63,7 +63,7 @@ pub(crate) fn node_to_span(node: Node) -> Span {
 
 /// The called name of a call node: the `method` field of a method call,
 /// the `function` field of either function-call shape.
-pub(crate) fn extract_call_name(node: Node, source: &[u8]) -> Option<String> {
+pub fn extract_call_name(node: Node, source: &[u8]) -> Option<String> {
     match node.kind() {
         "method_call_expression" => node.field_text("method", source).map(str::to_string),
         "function_call_expression" | "ambiguous_function_call_expression" => {
@@ -79,7 +79,7 @@ pub(crate) fn extract_call_name(node: Node, source: &[u8]) -> Option<String> {
 /// the qualifier survives, while the ref's `target_name` keeps the full path.
 /// No `::` → the node's own span. FQ identifiers are single-line tokens, so
 /// the tail column is `start.column + byte_offset_of_tail`.
-pub(crate) fn fq_tail_span(node: Node, text: &str) -> Span {
+pub fn fq_tail_span(node: Node, text: &str) -> Span {
     match text.rfind("::") {
         Some(idx) => {
             let s = node.start_position();
@@ -92,7 +92,7 @@ pub(crate) fn fq_tail_span(node: Node, text: &str) -> Span {
     }
 }
 
-pub(crate) struct NamedChildren<'a> {
+pub struct NamedChildren<'a> {
     node: Node<'a>,
     idx: usize,
 }
@@ -118,19 +118,19 @@ macro_rules! typed_node {
     ($(#[$meta:meta])* $name:ident($kind:literal) { $($(#[$fmeta:meta])* $field:ident),* $(,)? }) => {
         $(#[$meta])*
         #[derive(Clone, Copy)]
-        pub(crate) struct $name<'a>(Node<'a>);
+        pub struct $name<'a>(Node<'a>);
 
         #[allow(dead_code)]
         impl<'a> $name<'a> {
-            pub(crate) fn cast(node: Node<'a>) -> Option<Self> {
+            pub fn cast(node: Node<'a>) -> Option<Self> {
                 (node.kind() == $kind).then_some(Self(node))
             }
-            pub(crate) fn node(&self) -> Node<'a> {
+            pub fn node(&self) -> Node<'a> {
                 self.0
             }
             $(
                 $(#[$fmeta])*
-                pub(crate) fn $field(&self) -> Option<Node<'a>> {
+                pub fn $field(&self) -> Option<Node<'a>> {
                     self.0.child_by_field_name(stringify!($field))
                 }
             )*
@@ -166,7 +166,7 @@ typed_node! {
 /// A call expression's arguments as a flat positional sequence. The
 /// `arguments` field may be a bare single node or a `list_expression` /
 /// `parenthesized_expression` wrapper — callers never see the difference.
-pub(crate) fn call_args<'a>(call_node: Node<'a>) -> Vec<Node<'a>> {
+pub fn call_args<'a>(call_node: Node<'a>) -> Vec<Node<'a>> {
     let Some(args) = call_node.child_by_field_name("arguments") else {
         return Vec::new();
     };
@@ -185,7 +185,7 @@ pub(crate) fn call_args<'a>(call_node: Node<'a>) -> Vec<Node<'a>> {
 /// *value* (`key => (a, b)`) only nests when it's the last child, so
 /// descending the trailing wrapper is safe — a non-trailing list is a
 /// genuine multi-element value and is kept whole.
-pub(crate) fn flatten_list<'a>(list: Node<'a>, out: &mut Vec<Node<'a>>) {
+pub fn flatten_list<'a>(list: Node<'a>, out: &mut Vec<Node<'a>>) {
     let count = list.child_count();
     for i in 0..count {
         let Some(child) = list.child(i) else { continue };
@@ -202,7 +202,7 @@ pub(crate) fn flatten_list<'a>(list: Node<'a>, out: &mut Vec<Node<'a>>) {
 /// position, never matched. This is THE pairing primitive — gating pair
 /// walking on the `fat_comma` node silently drops the plain-comma spelling
 /// (`{ 'GAMMA', 3 }` is identical to `{ GAMMA => 3 }`).
-pub(crate) fn pair_nodes_in<'a>(children: &[Node<'a>]) -> Vec<(Node<'a>, Node<'a>)> {
+pub fn pair_nodes_in<'a>(children: &[Node<'a>]) -> Vec<(Node<'a>, Node<'a>)> {
     let mut out = Vec::new();
     let count = children.len();
     let mut i = 0;
@@ -230,7 +230,7 @@ pub(crate) fn pair_nodes_in<'a>(children: &[Node<'a>]) -> Vec<(Node<'a>, Node<'a
 /// Pair-walk a container node: a bare `list_expression` /
 /// `parenthesized_expression`, or an `anonymous_hash_expression` (its inner
 /// list is unwrapped). Composition of [`flatten_list`] + [`pair_nodes_in`].
-pub(crate) fn pair_nodes<'a>(container: Node<'a>) -> Vec<(Node<'a>, Node<'a>)> {
+pub fn pair_nodes<'a>(container: Node<'a>) -> Vec<(Node<'a>, Node<'a>)> {
     let list = if container.kind() == "anonymous_hash_expression" {
         container
             .named()
@@ -248,7 +248,7 @@ pub(crate) fn pair_nodes<'a>(container: Node<'a>) -> Vec<(Node<'a>, Node<'a>)> {
 /// `container_variable`). For nontrivial derefs (`${$h{k}}`) the child is a
 /// `block`, not a `varname` — this returns `None` there, so a `Some` is
 /// always a simple identifier.
-pub(crate) fn varname_child<'a>(node: Node<'a>) -> Option<Node<'a>> {
+pub fn varname_child<'a>(node: Node<'a>) -> Option<Node<'a>> {
     node.named().find(|c| c.kind() == "varname")
 }
 
@@ -256,7 +256,7 @@ pub(crate) fn varname_child<'a>(node: Node<'a>) -> Option<Node<'a>> {
 /// (the grammar's `varname` child already excludes the braces). `None`
 /// for deref spellings (`${$ref}` — the varname child wraps a `block`,
 /// not a bare identifier) and non-variable nodes.
-pub(crate) fn canonical_var_name<'a>(node: Node<'a>, src: &'a [u8]) -> Option<String> {
+pub fn canonical_var_name<'a>(node: Node<'a>, src: &'a [u8]) -> Option<String> {
     let sigil = match node.kind() {
         "scalar" => '$',
         "array" => '@',
@@ -274,7 +274,7 @@ pub(crate) fn canonical_var_name<'a>(node: Node<'a>, src: &'a [u8]) -> Option<St
 /// `$foo{k}` reads `%foo`, `@foo{...}` slices `%foo`. Resolves the access
 /// node + its parent's shape to the *declared* variable's sigil + bare name.
 /// `None` = not a container-element access (caller keeps the raw text).
-pub(crate) fn canonical_container_name<'a>(node: Node<'a>, src: &'a [u8]) -> Option<String> {
+pub fn canonical_container_name<'a>(node: Node<'a>, src: &'a [u8]) -> Option<String> {
     let parent = node.parent()?;
     let bare = varname_child(node)?.text(src)?;
     let target_sigil: char = match parent.kind() {
@@ -303,7 +303,7 @@ pub(crate) fn canonical_container_name<'a>(node: Node<'a>, src: &'a [u8]) -> Opt
 /// conditionality (a write inside a block or closure relative to an
 /// outer variable's scope) is the caller's check — this answers only
 /// what the syntax between here and the boundary says.
-pub(crate) fn is_conditionally_executed(node: Node) -> bool {
+pub fn is_conditionally_executed(node: Node) -> bool {
     let mut cur = node.parent();
     while let Some(p) = cur {
         match p.kind() {
@@ -330,7 +330,7 @@ pub(crate) fn is_conditionally_executed(node: Node) -> bool {
 /// The scalar wrapped by a container node's deref varname (`@$h{…}` —
 /// `slice_container_variable > varname > scalar`). `None` for plain
 /// (non-deref) containers, whose varname is a leaf.
-pub(crate) fn varname_inner_scalar_text<'a>(node: Node<'a>, src: &'a [u8]) -> Option<String> {
+pub fn varname_inner_scalar_text<'a>(node: Node<'a>, src: &'a [u8]) -> Option<String> {
     for i in 0..node.named_child_count() {
         let c = node.named_child(i)?;
         if c.kind() != "varname" {
@@ -351,7 +351,7 @@ pub(crate) fn varname_inner_scalar_text<'a>(node: Node<'a>, src: &'a [u8]) -> Op
 /// different variable — only the arrow form goes through the scalar.
 /// The arrow is an anonymous token, so detect it in the source gap
 /// between the container and the subscript.
-pub(crate) fn element_arrow_deref(element: Node, src: &[u8]) -> bool {
+pub fn element_arrow_deref(element: Node, src: &[u8]) -> bool {
     let Some(container) = element.named_child(0) else { return false };
     let Some(sub) = element
         .child_by_field_name("key")
@@ -369,7 +369,7 @@ pub(crate) fn element_arrow_deref(element: Node, src: &[u8]) -> bool {
 /// other (first) named child. Element-access bases keep the reference
 /// in hand; every other read position (call argument, RHS alias, list,
 /// invocant, sigil deref) lets it escape to code that may mutate it.
-pub(crate) fn is_element_access_base(node: Node) -> bool {
+pub fn is_element_access_base(node: Node) -> bool {
     let Some(parent) = node.parent() else { return false };
     match parent.kind() {
         "hash_element_expression" | "array_element_expression" => {
@@ -401,13 +401,13 @@ pub(crate) fn is_element_access_base(node: Node) -> bool {
 /// non-constructor methods and variable/positional invocants, whose class
 /// comes from inference. The caller resolves `__PACKAGE__` — the enclosing
 /// package is builder state this layer doesn't hold.
-pub(crate) fn constructor_invocant<'a>(node: Node<'a>, src: &'a [u8]) -> Option<&'a str> {
-    use crate::conventions::InvocantText;
+pub fn constructor_invocant<'a>(node: Node<'a>, src: &'a [u8]) -> Option<&'a str> {
+    use perl_lsp_model::conventions::InvocantText;
     let call = MethodCall::cast(node)?;
     if !call
         .method()?
         .text(src)
-        .is_some_and(crate::conventions::is_constructor_name)
+        .is_some_and(perl_lsp_model::conventions::is_constructor_name)
     {
         return None;
     }
@@ -426,7 +426,7 @@ pub(crate) fn constructor_invocant<'a>(node: Node<'a>, src: &'a [u8]) -> Option<
 /// canonical varname child instead of raw text. The node-level half of
 /// "is this potentially the receiver" — position-based receiver detection
 /// (`$_[0]`, `shift`) stays with the builder, which knows the sub context.
-pub(crate) fn is_conventional_invocant_scalar<'a>(node: Node<'a>, src: &'a [u8]) -> bool {
+pub fn is_conventional_invocant_scalar<'a>(node: Node<'a>, src: &'a [u8]) -> bool {
     node.kind() == "scalar"
         && varname_child(node)
             .and_then(|v| v.text(src))

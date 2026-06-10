@@ -24,7 +24,7 @@ jobs:
         run: cargo build
 
       - name: Test
-        run: cargo test
+        run: cargo test --workspace
 
   e2e-tests:
     name: E2E tests (headless nvim)

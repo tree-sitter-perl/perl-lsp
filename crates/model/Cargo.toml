@@ -1,0 +1,18 @@
+[package]
+name = "perl-lsp-model"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "perl-lsp data model: FileAnalysis, the witness bag, and Perl name conventions (no tree walks — tree-sitter is a types-only dep for Point)"
+
+[dependencies]
+tree-sitter.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+bincode.workspace = true
+log.workspace = true
+
+[dev-dependencies]
+perl-lsp-build = { path = "../build" }
+perl-lsp-index = { path = "../index" }

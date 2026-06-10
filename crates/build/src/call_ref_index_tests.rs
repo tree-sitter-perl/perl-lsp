@@ -11,6 +11,10 @@
 //! a specific failure.
 
 use super::*;
+#[allow(unused_imports)]
+use crate::builder::*;
+#[allow(unused_imports)]
+use crate::file_analysis::*;
 use tree_sitter::{Parser, Point};
 
 fn parse(source: &str) -> FileAnalysis {
@@ -79,7 +83,7 @@ Foo->new->bar();
     // at the same point as the chain's leftmost token (`Foo`'s
     // start, which is also `bar.invocant_span.start`).
     let key = bar_invocant_span.start;
-    let resolved = fa.call_ref_by_start.get(&key).copied();
+    let resolved = fa.call_ref_by_start_index().get(&key).copied();
 
     assert_eq!(
         resolved,
@@ -123,7 +127,7 @@ make_b()->touch();
         panic!("touch is a MethodCall");
     };
 
-    let resolved = fa.call_ref_by_start.get(&touch_invocant_span.start).copied();
+    let resolved = fa.call_ref_by_start_index().get(&touch_invocant_span.start).copied();
     assert_eq!(
         resolved,
         Some(make_b_idx),
@@ -161,7 +165,7 @@ my $k = $x->{key};
     );
 
     // Cross-check: nothing in the index points at a non-call kind.
-    for (&_pt, &idx) in fa.call_ref_by_start.iter() {
+    for (&_pt, &idx) in fa.call_ref_by_start_index().iter() {
         let kind = &fa.refs[idx].kind;
         assert!(
             matches!(kind, RefKind::MethodCall { .. } | RefKind::FunctionCall { .. }),
@@ -178,7 +182,7 @@ my $k = $x->{key};
         panic!("m is a MethodCall");
     };
     let key_point = m_invocant_span.start;
-    let resolved = fa.call_ref_by_start.get(&key_point).copied();
+    let resolved = fa.call_ref_by_start_index().get(&key_point).copied();
 
     // The only call-shaped ref starting at `$x`'s point is the
     // outer `m` itself — the index must point there. (Recursion's
@@ -236,7 +240,7 @@ Foo->m();
     let RefKind::MethodCall { invocant_span: Some(span), .. } = &m.kind else {
         panic!("m is a MethodCall");
     };
-    let resolved = fa.call_ref_by_start.get(&span.start).copied();
+    let resolved = fa.call_ref_by_start_index().get(&span.start).copied();
     let m_idx = ref_idx(&fa, "m", is_method_call);
     assert_eq!(resolved, Some(m_idx));
 
@@ -272,7 +276,7 @@ $x->m();
     };
     // The outer `m` is the only call-shaped ref starting at `$x`'s
     // point — `$x` itself is a Variable ref, not indexed.
-    let resolved = fa.call_ref_by_start.get(&span.start).copied();
+    let resolved = fa.call_ref_by_start_index().get(&span.start).copied();
     let m_idx = ref_idx(&fa, "m", is_method_call);
     assert_eq!(
         resolved,
@@ -362,7 +366,7 @@ fn equal_span_first_write_wins() {
         ..Default::default()
     });
 
-    let resolved = fa.call_ref_by_start.get(&span.start).copied();
+    let resolved = fa.call_ref_by_start_index().get(&span.start).copied();
     assert_eq!(
         resolved,
         Some(0),
@@ -416,7 +420,7 @@ sub touch { 1 }
 "#,
     );
 
-    for (&_pt, &idx) in fa.call_ref_by_start.iter() {
+    for (&_pt, &idx) in fa.call_ref_by_start_index().iter() {
         let kind = &fa.refs[idx].kind;
         assert!(
             matches!(kind, RefKind::MethodCall { .. } | RefKind::FunctionCall { .. }),

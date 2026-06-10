@@ -13,6 +13,12 @@
 //! `apply_type_overrides` step, etc.) and re-passes once it's restored.
 
 use super::*;
+#[allow(unused_imports)]
+use crate::builder::*;
+#[allow(unused_imports)]
+use crate::file_analysis::*;
+#[allow(unused_imports)]
+use tree_sitter::Tree;
 use crate::file_analysis::{InferredType, SymKind, TypeProvenance};
 use crate::plugin::{
     CompletionQueryContext, FrameworkPlugin, OverrideTarget, PluginCompletionAnswer,
@@ -30,12 +36,12 @@ fn parse(source: &str) -> Tree {
 
 fn build_with(source: &str, plugins: Arc<PluginRegistry>) -> FileAnalysis {
     let tree = parse(source);
-    super::build_with_plugins(&tree, source.as_bytes(), plugins)
+    crate::builder::build_with_plugins(&tree, source.as_bytes(), plugins)
 }
 
 fn build_with_extra_re_fold(source: &str, plugins: Arc<PluginRegistry>) -> FileAnalysis {
     let tree = parse(source);
-    super::build_with_plugins_extra_re_fold(&tree, source.as_bytes(), plugins)
+    crate::builder::build_with_plugins_extra_re_fold(&tree, source.as_bytes(), plugins)
 }
 
 // ---- Test 1: convergence over reassignment chains --------------------------
@@ -75,7 +81,7 @@ fn convergence_chain_resolves_through_four_reassignment_hops() {
         sub c { my $x = b()->step;    return $x }
         sub d { my $x = c()->step;    return $x }
     "#;
-    let fa = build_with(source, super::default_plugin_registry());
+    let fa = build_with(source, crate::builder::default_plugin_registry());
 
     for name in ["make", "a", "b", "c", "d"] {
         assert_eq!(
@@ -221,7 +227,7 @@ fn post_walk_fold_is_observably_idempotent() {
         sub a { my $x = Bar->new->make_two(1)->step; return $x }
     "#;
 
-    let plugins = super::default_plugin_registry();
+    let plugins = crate::builder::default_plugin_registry();
     let fa_once = build_with(source, plugins.clone());
     let fa_twice = build_with_extra_re_fold(source, plugins);
 

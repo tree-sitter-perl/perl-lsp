@@ -16,7 +16,6 @@ use crate::file_analysis::{
     SymKind, SymbolDetail,
 };
 
-pub mod cli;
 pub mod rhai_host;
 
 /// Process-wide plugin registry, built once with the bundled Rhai plugins

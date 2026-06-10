@@ -70,8 +70,13 @@ jobs:
       - uses: rust-lang/crates-io-auth-action@v1
         id: auth
 
+      # Workspace members publish in dependency order; each step is
+      # idempotent so a partial earlier run resumes cleanly.
       - name: Publish to crates.io
-        run: cargo publish || echo "Already published (idempotent)"
+        run: |
+          for pkg in perl-lsp-model perl-lsp-cst perl-lsp-build perl-lsp-index perl-lsp; do
+            cargo publish -p "$pkg" || echo "$pkg already published (idempotent)"
+          done
         env:
           CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
 

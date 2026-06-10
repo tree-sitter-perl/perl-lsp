@@ -32,10 +32,10 @@ use crate::module_resolver;
 // index consumers keep one import site.
 pub use crate::file_analysis::{CachedModule, SubInfo};
 
-// ---- Internal sync primitives (pub(crate) for resolver thread) ----
+// ---- Internal sync primitives (pub for resolver thread) ----
 
 /// Thread-safe queue: Mutex<Vec> + Condvar.
-pub(crate) struct ResolveQueue {
+pub struct ResolveQueue {
     /// High priority: stale modules from open files. Drained first.
     pub priority: Mutex<Vec<String>>,
     /// Normal priority: missing modules.
@@ -44,13 +44,13 @@ pub(crate) struct ResolveQueue {
 }
 
 /// Signaled after each module is resolved.
-pub(crate) struct ResolveNotify {
+pub struct ResolveNotify {
     pub mu: Mutex<()>,
     pub cv: Condvar,
 }
 
 /// Channel for workspace root from initialize() → resolver thread.
-pub(crate) struct WorkspaceRootChannel {
+pub struct WorkspaceRootChannel {
     pub root: Mutex<Option<Option<String>>>,
     pub condvar: Condvar,
 }
@@ -405,9 +405,10 @@ impl ModuleIndex {
         }
     }
 
-    // ---- Test-only methods ----
+    // ---- Test-only methods (compiled unconditionally: other crates'
+    // test targets can't see #[cfg(test)] items across crate lines) ----
 
-    #[cfg(test)]
+    #[doc(hidden)]
     pub fn new_for_test() -> Self {
         let cache: Arc<DashMap<String, Option<Arc<CachedModule>>>> = Arc::new(DashMap::new());
         let reverse_index: Arc<DashMap<String, Vec<String>>> = Arc::new(DashMap::new());
@@ -454,7 +455,7 @@ impl ModuleIndex {
     /// Test-only: seed the builtins map directly (bypasses SQLite +
     /// the resolver thread). Used by hover tests so they don't have
     /// to spin up the perlfunc.pod parse pipeline.
-    #[cfg(test)]
+    #[doc(hidden)]
     pub fn seed_builtin_for_test(&self, name: &str, doc: &str) {
         self.builtins.insert(name.to_string(), doc.to_string());
     }

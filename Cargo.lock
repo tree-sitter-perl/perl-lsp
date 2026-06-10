@@ -793,13 +793,58 @@ name = "perl-lsp"
 version = "0.4.0"
 dependencies = [
  "bincode",
- "bitflags 2.11.1",
  "dashmap 6.1.0",
  "env_logger",
+ "log",
+ "perl-lsp-build",
+ "perl-lsp-cst",
+ "perl-lsp-index",
+ "perl-lsp-model",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tower-lsp",
+ "tree-sitter",
+ "ts-parser-perl",
+]
+
+[[package]]
+name = "perl-lsp-build"
+version = "0.4.0"
+dependencies = [
+ "log",
+ "perl-lsp-cst",
+ "perl-lsp-index",
+ "perl-lsp-model",
+ "rhai",
+ "serde",
+ "serde_json",
+ "tree-sitter",
+ "ts-parser-perl",
+ "ts-parser-pod",
+]
+
+[[package]]
+name = "perl-lsp-cst"
+version = "0.4.0"
+dependencies = [
+ "perl-lsp-model",
+ "tree-sitter",
+]
+
+[[package]]
+name = "perl-lsp-index"
+version = "0.4.0"
+dependencies = [
+ "bincode",
+ "bitflags 2.11.1",
+ "dashmap 6.1.0",
  "ignore",
  "log",
+ "perl-lsp-build",
+ "perl-lsp-cst",
+ "perl-lsp-model",
  "rayon",
- "rhai",
  "rusqlite",
  "serde",
  "serde_json",
@@ -807,8 +852,20 @@ dependencies = [
  "tower-lsp",
  "tree-sitter",
  "ts-parser-perl",
- "ts-parser-pod",
  "zstd",
+]
+
+[[package]]
+name = "perl-lsp-model"
+version = "0.4.0"
+dependencies = [
+ "bincode",
+ "log",
+ "perl-lsp-build",
+ "perl-lsp-index",
+ "serde",
+ "serde_json",
+ "tree-sitter",
 ]
 
 [[package]]

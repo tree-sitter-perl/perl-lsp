@@ -7,6 +7,18 @@ use std::sync::Arc;
 
 use tree_sitter::{Node, Point, Tree};
 
+use crate::cst::{fq_tail_span, node_to_span};
+
+/// A ready-to-parse tree-sitter Parser for the Perl grammar — the one
+/// constructor every parse site (resolver, document, CLI, the s///e
+/// snippet re-parse) shares.
+pub fn create_parser() -> tree_sitter::Parser {
+    let mut parser = tree_sitter::Parser::new();
+    parser
+        .set_language(&ts_parser_perl::LANGUAGE.into())
+        .expect("failed to set Perl language");
+    parser
+}
 use crate::file_analysis::*;
 use crate::plugin::{self, PluginRegistry};
 
@@ -175,7 +187,7 @@ pub fn build_with_plugins(
 /// The `post_walk_fold_is_observably_idempotent` invariant test
 /// asserts the answer-level guarantee directly.
 #[cfg(test)]
-pub(crate) fn build_with_plugins_extra_re_fold(
+pub fn build_with_plugins_extra_re_fold(
     tree: &Tree,
     source: &[u8],
     plugins: Arc<PluginRegistry>,
@@ -524,7 +536,7 @@ impl<'a> Builder<'a> {
     /// immediately. Mirrors `FileAnalysis::push_type_constraint`'s
     /// shape (the FA helper handles enrichment-time pushes after the
     /// builder's bag has been moved into the FA).
-    pub(crate) fn push_type_constraint(&mut self, tc: TypeConstraint) {
+    pub fn push_type_constraint(&mut self, tc: TypeConstraint) {
         self.push_type_constraint_from(tc, crate::witnesses::WitnessSource::Builder("type_constraint".into()));
     }
 
@@ -535,7 +547,7 @@ impl<'a> Builder<'a> {
     /// otherwise types `$c` as the enclosing class. `FrameworkAwareTypeFold`
     /// prefers the higher-priority class assertion (source-priority axis,
     /// CLAUDE.md "Source priority breaks ties").
-    pub(crate) fn push_plugin_type_constraint(&mut self, tc: TypeConstraint, plugin_id: String) {
+    pub fn push_plugin_type_constraint(&mut self, tc: TypeConstraint, plugin_id: String) {
         self.push_type_constraint_from(tc, crate::witnesses::WitnessSource::Plugin(plugin_id));
     }
 
@@ -1051,7 +1063,7 @@ fn code_deref_operand<'a>(code_deref: Node<'a>) -> Option<Node<'a>> {
 /// `InstanceOf` and an `anonymous_array_expression` argument containing
 /// a single string literal — we walk that shape and ignore everything
 /// else (if the tree doesn't match, this isn't an InstanceOf).
-fn parse_instance_of(isa: &str) -> Option<String> {
+pub fn parse_instance_of(isa: &str) -> Option<String> {
     let mut parser = tree_sitter::Parser::new();
     parser.set_language(&ts_parser_perl::LANGUAGE.into()).ok()?;
     let tree = parser.parse(isa, None)?;
@@ -7822,7 +7834,7 @@ impl<'a> Builder<'a> {
         for _ in 0..start.column { snippet.push(' '); }
         snippet.push_str(text);
         let bytes = snippet.into_bytes();
-        let mut parser = crate::module_resolver::create_parser();
+        let mut parser = create_parser();
         let Some(tree) = parser.parse(&bytes, None) else { return };
         let scope = self.current_scope();
 
@@ -7880,7 +7892,7 @@ impl<'a> Builder<'a> {
                                         // keeps the full path in `target_name` but
                                         // narrows the renamable span to the `m` tail
                                         // (rule #7), mirroring FunctionCall.
-                                        method_name_span: crate::file_analysis::fq_tail_span(method, name),
+                                        method_name_span: crate::cst::fq_tail_span(method, name),
                                     },
                                     span: node_to_span(n),
                                     scope,
@@ -9913,7 +9925,7 @@ impl<'a> Builder<'a> {
         // `target_name` but narrows the renamable span to the `m` tail (rule
         // #7), mirroring FunctionCall — so rename rewrites only the method.
         let method_name_span = match (method_node, method_name.as_deref()) {
-            (Some(n), Some(name)) => crate::file_analysis::fq_tail_span(n, name),
+            (Some(n), Some(name)) => crate::cst::fq_tail_span(n, name),
             _ => node.span(),
         };
         let invocant_node = call.invocant();
@@ -10833,7 +10845,7 @@ impl<'a> Builder<'a> {
         // compile-time constant.
         match node.kind() {
             "function_call_expression" | "ambiguous_function_call_expression" => {
-                let name = crate::file_analysis::extract_call_name(node, self.source)?;
+                let name = crate::cst::extract_call_name(node, self.source)?;
                 if let Some(stripped) = name.strip_prefix('&') {
                     // `&$fn()` syntax — same deal.
                     if stripped.starts_with('$') {
@@ -13557,10 +13569,4 @@ impl<'a> Builder<'a> {
 
 // ---- Tests ----
 
-#[cfg(test)]
-#[path = "builder_tests.rs"]
-mod tests;
 
-#[cfg(test)]
-#[path = "type_inference_invariants_tests.rs"]
-mod invariants_tests;
