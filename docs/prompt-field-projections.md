@@ -48,3 +48,49 @@ receiver-gated discipline applied to hash keys.
    accessors** aren't group members — their names differ from the attr;
    tying them means a name-mapping on the group (plugin-owned for Moo
    per the accessor-vocabulary split).
+
+## Internal `$self->{name}` membership — design options (pick one)
+
+Decision so far (veesh): YES for classic Perl OO where the underlying
+repr is known to be a hash. Corinna is excluded outright — fields are
+not hash entries, so `->{name}` on a Corinna class is unrelated (or a
+bug). The gating options:
+
+**A — strict-owner matching at query time (no new entity).** Internal
+keys already carry `HashKeyOwner::Class(class)`; group membership =
+HashKeyAccess refs whose owner is EXACTLY `Class(class)` (strict eq,
+never `found_by` — that broadening is what would leak other subs' arg
+keys into the group) + name == attr, included only when the class's
+repr is hash (FrameworkFact Moo/Moose/MojoBase, or a bless-hashref
+witness). Zero schema change; ships in an afternoon. Weakness: the
+repr check is a side condition, not a modeled fact, and untyped
+derefs (owner None) stay out silently.
+
+**B — a proper repr entity: `ClassRepr` on FileAnalysis.**
+`enum ClassRepr { HashRef, ArrayRef, Opaque }` derived at build (bless
+shape, framework fact), serde/cache-borne. The group asks
+`repr(class) == HashRef` before including the Class-owner arm — and
+the entity is reusable: completion on `$self->{`, a phase-6-style
+diagnostic for `->{...}` on an Opaque class, blessed-array support
+later. Costs a schema field + EXTRACT bump + derivation rules
+(multi-bless classes, mixed shapes → Opaque, honest).
+
+**C — first-class projection entity (the "proper entity instead of
+reusing HashKeyDef" instinct).** Generalize `AttrAccessor` into
+`AttrProjection { kind: CtorKey | InternalKey | Accessor { affix } }`
+emitted by the synthesis that already knows the repr; the group is
+then ONE stored constellation instead of query-time re-derivation
+across Field symbol + HashKeyDef + Method + AttrAccessor. Biggest
+lift; subsumes B (the entity still needs repr knowledge to be minted).
+
+Recommendation: **B as substrate + A's strict-eq membership rule**,
+deferring C until a second repr flavor (array-based, Object::Pad) is
+actually wanted — don't build the generalization before the second
+customer.
+
+## Remaining sliver from the mapped-member work
+
+Cross-file mapped call sites: `ResolvedTarget::Group` targets carry one
+replacement text, so a consumer file's `$w->has_size` joins references
+but not rename yet — needs per-member replacement on group targets
+(`Vec<GroupMember { target, rename: Bare | Affixed | Skip }>`).
