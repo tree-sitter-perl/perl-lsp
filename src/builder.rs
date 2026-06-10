@@ -6448,7 +6448,7 @@ impl<'a> Builder<'a> {
             "function_call_expression" | "ambiguous_function_call_expression"
                 if self.is_bless_call(node) =>
             {
-                let args = self.bless_args(node);
+                let args = self.extract_call_args(node);
                 match args.get(1) {
                     // Receiver-polymorphic: `bless X, $class` / `bless X, ref
                     // $self || $self` returns the class it was CALLED ON, so
@@ -11162,62 +11162,8 @@ impl<'a> Builder<'a> {
     /// → current package; a string/bareword literal → its text; a missing
     /// 2nd arg (`bless {}`) → current package (Perl's one-arg bless blesses
     /// into the caller's package).
-    /// `bless`'s effective arguments, recovering the class arg that
-    /// tree-sitter-perl strands in `return bless {BLOCK}, CLASS`. The brace
-    /// block greedily ends the (parenless) call, so `CLASS` lands as a sibling
-    /// of the `return_expression` in the enclosing `list_expression`. Perl
-    /// parses `bless` as a list operator (the comma binds to bless, not
-    /// return), so that stranded sibling IS the class — splice it back. Only
-    /// the parenless `ambiguous_function_call_expression` strands; an explicit
-    /// `bless({}), $x` delimits its args, so its trailing list element is a
-    /// genuine second return value, not a dropped class.
-    ///
-    /// KLUDGE (tree-sitter-perl parser bug): the correct parse is `bless` as a
-    /// list operator grabbing the whole `{BLOCK}, CLASS` list. A fix is going
-    /// upstream; once a tree-sitter-perl release parses `return bless {}, X`
-    /// with both args under the call, DELETE `bless_args` + `bless_stranded_
-    /// class` and call `extract_call_args` directly at both bless sites. See
-    /// mem `tree-sitter-perl-parse-gotcha-return`.
-    fn bless_args(&self, node: Node<'a>) -> Vec<Node<'a>> {
-        let mut args = self.extract_call_args(node);
-        if node.kind() == "ambiguous_function_call_expression"
-            && args.len() == 1
-            && args[0].kind() == "anonymous_hash_expression"
-        {
-            if let Some(class) = self.bless_stranded_class(node) {
-                args.push(class);
-            }
-        }
-        args
-    }
-
-    /// The class arg stranded after `return bless {BLOCK}` — the head's next
-    /// named sibling in the `list_expression` that captured the tail (walking
-    /// past an optional `return_expression`). See `bless_args`.
-    fn bless_stranded_class(&self, node: Node<'a>) -> Option<Node<'a>> {
-        let head = match node.parent() {
-            Some(p) if p.kind() == "return_expression" => p,
-            _ => node,
-        };
-        let list = head.parent()?;
-        if list.kind() != "list_expression" {
-            return None;
-        }
-        let mut take_next = false;
-        for i in 0..list.named_child_count() {
-            let c = list.named_child(i)?;
-            if take_next {
-                return Some(c);
-            }
-            if c.id() == head.id() {
-                take_next = true;
-            }
-        }
-        None
-    }
-
     fn visit_bless_call(&mut self, node: Node<'a>) {
-        let args = self.bless_args(node);
+        let args = self.extract_call_args(node);
         let obj = match args.first() {
             Some(n) => *n,
             None => return,
