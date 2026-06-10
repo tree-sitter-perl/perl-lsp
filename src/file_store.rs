@@ -223,10 +223,8 @@ mod tests {
 
         // Pre-populate as workspace.
         let analysis = {
-            use tree_sitter::Parser;
             let src = "package Stale; 1;\n";
-            let mut parser = Parser::new();
-            parser.set_language(&ts_parser_perl::LANGUAGE.into()).unwrap();
+            let mut parser = crate::builder::create_parser();
             let tree = parser.parse(src, None).unwrap();
             crate::builder::build(&tree, src.as_bytes())
         };
@@ -254,10 +252,8 @@ mod tests {
 
         // Try to insert workspace entry for the same path — should be ignored.
         let analysis = {
-            use tree_sitter::Parser;
             let src = "package Workspace; 1;\n";
-            let mut parser = Parser::new();
-            parser.set_language(&ts_parser_perl::LANGUAGE.into()).unwrap();
+            let mut parser = crate::builder::create_parser();
             let tree = parser.parse(src, None).unwrap();
             crate::builder::build(&tree, src.as_bytes())
         };

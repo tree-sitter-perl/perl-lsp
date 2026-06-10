@@ -175,13 +175,7 @@ fn byte_to_point(source: &[u8], byte_offset: usize) -> Point {
     Point::new(row, col)
 }
 
-fn create_parser() -> Parser {
-    let mut parser = Parser::new();
-    parser
-        .set_language(&ts_parser_perl::LANGUAGE.into())
-        .expect("Failed to load Perl grammar");
-    parser
-}
+use crate::builder::create_parser;
 
 #[cfg(test)]
 #[path = "document_tests.rs"]

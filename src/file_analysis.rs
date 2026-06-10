@@ -275,10 +275,6 @@ pub struct Span {
     pub end: Point,
 }
 
-/// Extract the function/method name from a call expression node.
-// Node-side utilities live in `cst.rs`; re-exported here while the lazy
-// tree-resolution paths (phase 5 retires them) still call them in-module.
-pub(crate) use crate::cst::{extract_call_name, fq_tail_span, node_to_span};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FoldRange {

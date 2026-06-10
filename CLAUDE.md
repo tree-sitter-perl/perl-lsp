@@ -23,7 +23,10 @@ calling a change verified; `gold-corpus/run.pl --emit <cap> <file> <row>
 
 ## Architecture
 
-Four layers, data flows down only:
+Four layers, data flows down only — enforced by `src/layering_tests.rs`
+(the import DAG, the model's Point-only tree-sitter surface, and
+single-point grammar access all fail `cargo test` on violation; new
+source files must be assigned a layer in its `layer_map`):
 
 ```
 LSP adapter      symbols.rs, backend.rs       → LSP protocol types

@@ -12,12 +12,17 @@ mod module_cache;
 mod module_index;
 mod module_resolver;
 mod plugin;
+mod plugin_cli;
 mod pod;
 mod query_cache;
 mod resolve;
 mod symbols;
 mod timings;
 mod witnesses;
+
+#[cfg(test)]
+#[path = "layering_tests.rs"]
+mod layering_tests;
 
 use backend::Backend;
 use tower_lsp::{LspService, Server};
@@ -102,15 +107,15 @@ async fn main() {
             return;
         }
         Some("--plugin-check") => {
-            plugin::cli::cli_plugin_check(&args[2..]);
+            plugin_cli::cli_plugin_check(&args[2..]);
             return;
         }
         Some("--plugin-run") => {
-            plugin::cli::cli_plugin_run(&args[2..]);
+            plugin_cli::cli_plugin_run(&args[2..]);
             return;
         }
         Some("--plugin-test") => {
-            plugin::cli::cli_plugin_test(&args[2..]);
+            plugin_cli::cli_plugin_test(&args[2..]);
             return;
         }
         Some("--dump-package") if args.len() >= 4 => {
@@ -1481,10 +1486,7 @@ fn cli_parse(path: &str) {
             }
         }
     };
-    let mut parser = tree_sitter::Parser::new();
-    parser
-        .set_language(&ts_parser_perl::LANGUAGE.into())
-        .expect("set Perl language");
+    let mut parser = builder::create_parser();
     let Some(tree) = parser.parse(&source, None) else {
         eprintln!("parse failed");
         std::process::exit(1);
