@@ -14395,3 +14395,36 @@ my $q = Q->new();
     let edits = fa2.rename_at(Point::new(2, 11), "name").expect("plain field renames");
     assert_eq!(edits.len(), 2, "decl + body use only: {:?}", edits);
 }
+
+/// Moo `has name` is the same one-entity story as a Corinna field: the
+/// decl token, accessor calls, and constructor keys rename together from
+/// whichever spelling the cursor is on.
+#[test]
+fn moo_attr_group_rename_ties_all_spellings() {
+    let src = "\
+package Widget;
+use Moo;
+has size => (is => 'ro');
+sub describe { my ($self) = @_; return $self->size; }
+package main;
+my $w = Widget->new(size => 3);
+my $s = $w->size;
+";
+    let fa = build_fa(src);
+    let find = |row: usize, col: usize| {
+        fa.rename_at(Point::new(row, col), "extent")
+            .map(|mut v| {
+                v.sort_by_key(|(s, _)| (s.start.row, s.start.column));
+                v
+            })
+            .expect("rename produces edits")
+    };
+    // Spellings of `size`: has decl (2), accessor call in describe (3),
+    // ctor key (5), accessor call (6).
+    let from_decl = find(2, 5);
+    let rows: Vec<usize> = from_decl.iter().map(|(s, _)| s.start.row).collect();
+    assert_eq!(rows, vec![2, 3, 5, 6], "decl rename covers all spellings: {:?}", from_decl);
+
+    assert_eq!(find(5, 21), from_decl, "ctor-key rename == decl rename");
+    assert_eq!(find(3, 47), from_decl, "accessor-call rename == decl rename");
+}

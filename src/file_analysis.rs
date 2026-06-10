@@ -2231,10 +2231,13 @@ pub struct FieldProjections {
     pub variable_spans: Vec<Span>,
 }
 
-/// One Corinna field-group entity: the field symbol plus the facts the
-/// projection rename needs (class, bare name, which projections exist).
+/// One field/attr-group entity: the facts the projection union needs.
+/// Corinna fields carry the field symbol (variable spellings live on it);
+/// Moo `has` attrs have no variable side — their decl token is the
+/// synthesized pair's selection span.
 struct FieldGroup {
-    field_sym: SymbolId,
+    field_sym: Option<SymbolId>,
+    decl_span: Option<Span>,
     class: String,
     bare: String,
     has_param: bool,
@@ -4842,6 +4845,20 @@ impl FileAnalysis {
     /// (`$p->x`). The field is the source; the rest are projections
     /// (rule #9), so rename rewrites them together.
     fn field_group_at(&self, point: Point) -> Option<FieldGroup> {
+        // Cursor on a `has`-decl token: any of the stacked synthesized
+        // symbols (accessor Method / ctor HashKeyDef) selects the pair.
+        if let Some(s) = self.symbol_at(point) {
+            if matches!(s.kind, SymKind::Method | SymKind::HashKeyDef) {
+                if let Some(pkg) = s.package.as_deref() {
+                    if let Some(g) = self.attr_pair_group(&s.name, pkg) {
+                        // Only when the cursor is ON the decl token itself.
+                        if contains_point(&g.decl_span.unwrap(), point) {
+                            return Some(g);
+                        }
+                    }
+                }
+            }
+        }
         // Cursor on the field decl, or on a field-variable use in a body.
         let field_sym = self
             .symbol_at(point)
@@ -4882,6 +4899,14 @@ impl FileAnalysis {
                             }
                         }
                     }
+                    // Moo accessor call → its attr pair (only when the
+                    // pair really has an accessor — a key-only pair must
+                    // not claim a method-call cursor).
+                    if let Some(g) = self.attr_pair_group(bare, &class) {
+                        if g.has_reader {
+                            return Some(g);
+                        }
+                    }
                 }
                 return None;
             }
@@ -4907,12 +4932,48 @@ impl FileAnalysis {
             return None;
         }
         let field_name = format!("${}", key);
-        let sym = self.symbols.iter().find(|s| {
+        if let Some(sym) = self.symbols.iter().find(|s| {
             matches!(s.kind, SymKind::Field)
                 && s.name == field_name
                 && s.package.as_deref() == Some(class.as_str())
+        }) {
+            return self.field_group_of(sym);
+        }
+        // Moo-style attr: the ctor key names a `has`-synthesized pair.
+        self.attr_pair_group(&key, &class)
+    }
+
+    /// A `has`-synthesized attr pair: accessor Method + constructor
+    /// HashKeyDef with the same name, package, and selection span (they
+    /// were minted from the one `has 'name'` token — span equality is
+    /// what distinguishes the pair from a real `sub name` that happens
+    /// to share a class with someone's ctor key).
+    fn attr_pair_group(&self, bare: &str, class: &str) -> Option<FieldGroup> {
+        let key_def = self.symbols.iter().find(|s| {
+            matches!(s.kind, SymKind::HashKeyDef)
+                && s.name == bare
+                && matches!(
+                    &s.detail,
+                    SymbolDetail::HashKeyDef {
+                        owner: HashKeyOwner::Sub { package: Some(p), name },
+                        ..
+                    } if p == class && crate::conventions::is_constructor_name(name)
+                )
         })?;
-        self.field_group_of(sym)
+        let accessor = self.symbols.iter().find(|s| {
+            matches!(s.kind, SymKind::Method)
+                && s.name == bare
+                && s.package.as_deref() == Some(class)
+                && s.selection_span == key_def.selection_span
+        });
+        Some(FieldGroup {
+            field_sym: None,
+            decl_span: Some(key_def.selection_span),
+            class: class.to_string(),
+            bare: bare.to_string(),
+            has_param: true,
+            has_reader: accessor.is_some(),
+        })
     }
 
     fn field_group_of(&self, sym: &Symbol) -> Option<FieldGroup> {
@@ -4923,7 +4984,8 @@ impl FileAnalysis {
             return None;
         }
         Some(FieldGroup {
-            field_sym: sym.id,
+            field_sym: Some(sym.id),
+            decl_span: None,
             class: sym.package.clone()?,
             bare: sym.name[1..].to_string(),
             has_param: attributes.iter().any(|a| a == "param"),
@@ -4950,12 +5012,18 @@ impl FileAnalysis {
     /// rename (write the new bare name at each) and references.
     fn field_group_spans(&self, g: &FieldGroup) -> Vec<Span> {
         let mut spans: Vec<Span> = Vec::new();
-        // The field variable: decl + every body use.
-        for (span, _access) in self.collect_refs_for_target(g.field_sym, true, None) {
-            spans.push(Span {
-                start: Point::new(span.start.row, span.start.column + 1),
-                end: span.end,
-            });
+        // The field variable: decl + every body use. Moo attrs have no
+        // variable side; their decl token contributes directly.
+        if let Some(field_sym) = g.field_sym {
+            for (span, _access) in self.collect_refs_for_target(field_sym, true, None) {
+                spans.push(Span {
+                    start: Point::new(span.start.row, span.start.column + 1),
+                    end: span.end,
+                });
+            }
+        }
+        if let Some(decl) = g.decl_span {
+            spans.push(decl);
         }
         // Constructor keys at call sites.
         if g.has_param {
@@ -5033,14 +5101,21 @@ impl FileAnalysis {
     /// caller mints from these facts).
     pub fn field_projections_at(&self, point: Point) -> Option<FieldProjections> {
         let g = self.field_group_at(point)?;
-        let variable_spans = self
-            .collect_refs_for_target(g.field_sym, true, None)
-            .into_iter()
-            .map(|(span, _)| Span {
-                start: Point::new(span.start.row, span.start.column + 1),
-                end: span.end,
+        let mut variable_spans: Vec<Span> = g
+            .field_sym
+            .map(|fs| {
+                self.collect_refs_for_target(fs, true, None)
+                    .into_iter()
+                    .map(|(span, _)| Span {
+                        start: Point::new(span.start.row, span.start.column + 1),
+                        end: span.end,
+                    })
+                    .collect()
             })
-            .collect();
+            .unwrap_or_default();
+        if let Some(decl) = g.decl_span {
+            variable_spans.push(decl);
+        }
         Some(FieldProjections {
             class: g.class,
             bare: g.bare,

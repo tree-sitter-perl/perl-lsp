@@ -4288,3 +4288,47 @@ fn reexport_imported_names_evaluator_unchanged() {
         "transitive surface includes the re-exported name — via the SAME evaluator",
     );
 }
+
+/// Consumer-side ctor key navigation through the deferred owner: in a
+/// file that only `use`s Point, goto-def on `x` in `Point->new(x => 1)`
+/// jumps to the `field $x :param` decl in Point.pm via the index (the
+/// build-time gate deferred because the class isn't local; query time
+/// re-derives the owner with the index in hand).
+#[test]
+fn test_goto_def_deferred_ctor_key_cross_file() {
+    let point_src = "\
+use v5.38;
+class Point {
+    field $x :param :reader;
+}
+1;
+";
+    let module_index = crate::module_index::ModuleIndex::new_for_test();
+    module_index.insert_cache(
+        "Point",
+        Some(std::sync::Arc::new(crate::module_index::CachedModule::new(
+            std::path::PathBuf::from("/tmp/sym_defer_point.pm"),
+            std::sync::Arc::new(parse_analysis(point_src)),
+        ))),
+    );
+
+    let consumer_src = "use Point;\nmy $p = Point->new(x => 1);\n";
+    let analysis = parse_analysis(consumer_src);
+    let uri = Url::parse("file:///tmp/sym_defer_consumer.pl").unwrap();
+    // Cursor on `x` (row 1, col 19).
+    let resp = find_definition(
+        &analysis,
+        Position { line: 1, character: 19 },
+        &uri,
+        &module_index,
+    );
+    let Some(GotoDefinitionResponse::Scalar(loc)) = resp else {
+        panic!("expected scalar goto-def, got {:?}", resp);
+    };
+    assert!(
+        loc.uri.path().ends_with("sym_defer_point.pm"),
+        "lands in the class file: {:?}",
+        loc.uri,
+    );
+    assert_eq!(loc.range.start.line, 2, "lands on the field decl line");
+}

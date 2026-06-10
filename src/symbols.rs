@@ -196,6 +196,37 @@ pub fn find_definition(
         }));
     }
 
+    // Deferred constructor-key (`owner: None`): the class lives in another
+    // file, so the build-time gate couldn't pin the owner. Derive it now
+    // (enclosing call's invocant class, index in hand) and jump to the def
+    // the class file carries — `field $x :param` / Moo `has x` synthesize
+    // the HashKeyDef there.
+    if let Some(r) = analysis.ref_at(point) {
+        if matches!(r.kind, RefKind::HashKeyAccess { owner: None, .. }) {
+            if let Some(owner) = analysis.deferred_hash_key_owner(r, Some(module_index)) {
+                if let crate::file_analysis::HashKeyOwner::Sub { package: Some(ref class), .. } =
+                    owner
+                {
+                    if let Some(cached) = module_index.get_cached(class) {
+                        if let Some(def) = cached
+                            .analysis
+                            .hash_key_defs_for_owner(&owner)
+                            .into_iter()
+                            .find(|d| d.name == r.target_name)
+                        {
+                            if let Ok(module_uri) = Url::from_file_path(&cached.path) {
+                                return Some(GotoDefinitionResponse::Scalar(Location {
+                                    uri: module_uri,
+                                    range: span_to_range(def.selection_span),
+                                }));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     // Check if cursor is on a function call that matches an imported symbol
     if let Some(r) = analysis.ref_at(point) {
         if matches!(r.kind, RefKind::FunctionCall { .. }) {
