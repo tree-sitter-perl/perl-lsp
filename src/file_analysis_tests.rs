@@ -5,8 +5,8 @@ use tree_sitter::Point;
 /// Constraints are pushed via `push_type_constraint` so the witness bag carries them —
 /// the bag is the sole store post-D4-followup.
 fn fa_with_constraints(constraints: Vec<TypeConstraint>) -> FileAnalysis {
-    let mut fa = FileAnalysis::new(
-        vec![Scope {
+    let mut fa = FileAnalysis::new(FileAnalysisParts {
+        scopes: vec![Scope {
             id: ScopeId(0),
             parent: None,
             kind: ScopeKind::File,
@@ -16,21 +16,8 @@ fn fa_with_constraints(constraints: Vec<TypeConstraint>) -> FileAnalysis {
             },
             package: None,
         }],
-        vec![],
-        vec![],
-        vec![],
-        vec![],
-        vec![],
-        HashMap::new(),
-        vec![],
-        HashSet::new(),
-        vec![],
-        vec![],
-        vec![],
-        HashMap::new(),
-        HashMap::new(),
-        vec![],
-    );
+        ..Default::default()
+    });
     for tc in constraints {
         fa.push_type_constraint(tc);
     }
@@ -131,8 +118,8 @@ fn test_resolve_sub_return_type() {
     // Hand-craft a FileAnalysis with a sub that has a return type.
     // Post-D3, return types live on `Symbol(_)` only — seed
     // `Symbol(0)` directly so the bag-routed query picks it up.
-    let mut fa = FileAnalysis::new(
-        vec![Scope {
+    let mut fa = FileAnalysis::new(FileAnalysisParts {
+        scopes: vec![Scope {
             id: ScopeId(0),
             parent: None,
             kind: ScopeKind::File,
@@ -142,7 +129,7 @@ fn test_resolve_sub_return_type() {
             },
             package: None,
         }],
-        vec![Symbol {
+        symbols: vec![Symbol {
             id: SymbolId(0),
             name: "get_config".to_string(),
             kind: SymKind::Sub,
@@ -168,20 +155,8 @@ fn test_resolve_sub_return_type() {
             namespace: Namespace::Language,
             outline_label: None,
         }],
-        vec![],
-        vec![],
-        vec![],
-        vec![],
-        HashMap::new(),
-        vec![],
-        HashSet::new(),
-        vec![],
-        vec![],
-        vec![],
-        HashMap::new(),
-        HashMap::new(),
-        vec![],
-    );
+        ..Default::default()
+    });
     let zero_span = Span {
         start: Point::new(0, 0),
         end: Point::new(0, 0),
@@ -311,13 +286,13 @@ fn test_qualified_call_local_goto_def_and_references() {
     // Cursor on `baz` in `Foo::baz()` (line 3 = 0-indexed; `baz` starts
     // at col 5 after `Foo::`).
     let def = fa
-        .find_definition(Point::new(3, 6), None, None, None)
+        .find_definition(Point::new(3, 6), None)
         .expect("goto-def on Foo::baz() should resolve to the local sub");
     // The def is `sub baz` on line 1.
     assert_eq!(def.start.row, 1, "should land on `sub baz`, got {:?}", def);
 
     // References anchored on the call site must include the call span.
-    let refs = fa.find_references(Point::new(3, 6), None, None, None);
+    let refs = fa.find_references(Point::new(3, 6), None);
     assert!(
         refs.iter().any(|s| s.start.row == 3),
         "references should include the Foo::baz() call site, got {:?}",
@@ -331,6 +306,116 @@ fn test_qualified_call_local_goto_def_and_references() {
     );
 }
 
+/// Fully-qualified METHOD call (`$obj->Widget::build()`): Perl dispatches
+/// `build` from the NAMED class `Widget`, ignoring the invocant's class. So
+/// goto-def / hover / rename resolve against `Widget` even when `$obj` is
+/// untyped, the rename narrows to the `build` tail, and references find the
+/// call site.
+#[test]
+fn test_fq_method_call_nav_dispatches_from_named_class() {
+    use crate::file_analysis::{RefKind, RenameKind};
+    // `$obj` is deliberately untyped — only the qualifier names the class.
+    let src = "package Widget;\nsub build { my ($class, $n) = @_; return 1 }\npackage main;\nmy $obj = get_thing();\nmy $r = $obj->Widget::build();\n";
+    let fa = build_fa_from_source(src);
+
+    // The FQ method ref keeps the full path in target_name but resolves its
+    // dispatch class to the qualifier.
+    let mref = fa
+        .refs
+        .iter()
+        .find(|r| matches!(r.kind, RefKind::MethodCall { .. }) && r.target_name == "Widget::build")
+        .expect("FQ method ref present");
+    assert_eq!(
+        fa.method_call_invocant_class(mref, None).as_deref(),
+        Some("Widget"),
+        "FQ call dispatches from the named class, not the (untyped) invocant"
+    );
+    // method_name_span is narrowed to the `build` tail (col 22), not the
+    // whole `Widget::build` token (col 14) — so rename rewrites only `build`.
+    if let RefKind::MethodCall { method_name_span, .. } = &mref.kind {
+        assert_eq!(method_name_span.start.column, 22, "rename span is the bare tail");
+    }
+
+    // goto-def on the `build` tail (line 4, col 22) lands on `sub build`.
+    let def = fa
+        .find_definition(Point::new(4, 22), None)
+        .expect("FQ method goto-def resolves to the local sub");
+    assert_eq!(def.start.row, 1, "should land on `sub build`, got {:?}", def);
+
+    // rename resolves to the bare method on the qualifier class.
+    match fa.rename_kind_at(Point::new(4, 22), None) {
+        Some(RenameKind::Method { name, class }) => {
+            assert_eq!(name, "build");
+            assert_eq!(class, "Widget");
+        }
+        other => panic!("expected Method rename, got {:?}", other),
+    }
+}
+
+/// `$self->SUPER::m` dispatches to the enclosing package's PARENT method —
+/// goto-def jumps to it and renaming the parent method rewrites the SUPER call
+/// (a dangling SUPER call would be a broken rename).
+/// SUPER walks the FULL parent MRO, not just the first parent: with
+/// `@ISA = (A, B)`, `$self->SUPER::m` finds `m` on B when only B defines it,
+/// and it skips the enclosing class itself (Perl's SUPER searches parents).
+#[test]
+fn test_super_resolves_across_all_parents() {
+    let src = "package A;\nsub a_only { 1 }\npackage B;\nsub b_only { 2 }\npackage Child;\nuse parent -norequire, 'A', 'B';\nsub go { my $self = shift; return $self->SUPER::b_only }\n";
+    let fa = build_fa_from_source(src);
+    // Method only on the SECOND parent — first-parent-only would miss it.
+    assert_eq!(
+        fa.resolve_super_method("Child", "b_only", None).map(|r| r.class().to_string()).as_deref(),
+        Some("B"),
+        "SUPER must search all parents, not just the first"
+    );
+    assert_eq!(
+        fa.resolve_super_method("Child", "a_only", None).map(|r| r.class().to_string()).as_deref(),
+        Some("A"),
+    );
+    // SUPER skips the enclosing class: Child defines `go`, but SUPER::go from
+    // Child must not resolve to Child::go.
+    assert!(
+        fa.resolve_super_method("Child", "go", None).is_none(),
+        "SUPER skips the current package"
+    );
+}
+
+#[test]
+fn test_super_method_nav_resolves_to_parent() {
+    use crate::file_analysis::{RefKind, RenameKind};
+    let src = "package Base;\nsub greet { return 1 }\npackage Child;\nuse parent -norequire, 'Base';\nsub greet { my $self = shift; return $self->SUPER::greet }\n";
+    let fa = build_fa_from_source(src);
+
+    let sref = fa
+        .refs
+        .iter()
+        .find(|r| matches!(r.kind, RefKind::MethodCall { .. }) && r.target_name == "SUPER::greet")
+        .expect("SUPER method ref present");
+    assert_eq!(
+        fa.method_call_invocant_class(sref, None).as_deref(),
+        Some("Base"),
+        "SUPER dispatches to the enclosing package's parent"
+    );
+    let span = if let RefKind::MethodCall { method_name_span, .. } = &sref.kind {
+        *method_name_span
+    } else {
+        unreachable!()
+    };
+    // goto-def on the SUPER call lands on `Base::greet` (line 1).
+    let def = fa
+        .find_definition(span.start, None)
+        .expect("SUPER goto-def resolves");
+    assert_eq!(def.start.row, 1, "SUPER::greet resolves to Base::greet, got {:?}", def);
+    // Renaming targets the parent method on `Base` (so the SUPER call tracks).
+    match fa.rename_kind_at(span.start, None) {
+        Some(RenameKind::Method { name, class }) => {
+            assert_eq!(name, "greet");
+            assert_eq!(class, "Base");
+        }
+        other => panic!("expected Method rename on Base, got {:?}", other),
+    }
+}
+
 /// A qualified call to package Foo's `baz` must not resolve to a same-named
 /// `baz` in another package — `resolved_package` isolates the qualifier.
 #[test]
@@ -340,7 +425,7 @@ fn test_qualified_call_does_not_cross_package() {
 
     // Cursor on `baz` in `Bar::baz()` (line 5, col 5).
     let def = fa
-        .find_definition(Point::new(5, 6), None, None, None)
+        .find_definition(Point::new(5, 6), None)
         .expect("Bar::baz() should resolve");
     // Bar's `sub baz` is on line 3, not Foo's on line 1.
     assert_eq!(def.start.row, 3, "should land on Bar's sub baz, got {:?}", def);
@@ -658,7 +743,7 @@ fn test_phase5_find_references_on_hash_key_def_without_tree() {
     // *usages*, not the def itself. Previously this returned 0 without a
     // tree; phase 5 returns the access sites via refs_by_target.
     let point = def_host.selection_span.start;
-    let refs = fa.find_references(point, None, None, None);
+    let refs = fa.find_references(point, None);
     assert!(
         !refs.is_empty(),
         "expected at least one access for 'host' via refs_by_target (no tree), got empty",
@@ -1051,7 +1136,7 @@ $r->get('/x')->to('Y#z');
     };
 
     let invocant = to_node.child_by_field_name("invocant").expect("invocant");
-    let ty = fa.resolve_expression_type(invocant, source_bytes, None);
+    let ty = crate::cursor_context::resolve_expression_type(&fa, invocant, source_bytes, None);
     let class = ty.as_ref().and_then(|t| t.class_name());
     assert_eq!(
         class,

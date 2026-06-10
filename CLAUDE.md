@@ -8,8 +8,18 @@ A Perl LSP server built on ts-parser-perl (crates.io) and tower-lsp.
 cargo build --release
 cargo test                              # unit tests
 ./run_e2e.sh                            # e2e tests (needs nvim + release build)
+gold-corpus/run.pl                      # gold harness (needs release build + installed substrate)
 perl-lsp --dump-package <root> <pkg>    # debug type inference for a package
 ```
+
+The gold harness (`gold-corpus/README.md`) is an exact-assertion regression
+net over real CPAN modules from a snapshot-pinned substrate
+(`gold-corpus/local/`). `fixtures/*.json` is the source of truth; statuses:
+gold (must hold → FAIL on regression), xfail (known gap → XPASS when a fix
+lands, promote the row), provisional (reported, never fails). A crash is
+always a hard fail. Run it alongside `cargo test` + `./run_e2e.sh` before
+calling a change verified; `gold-corpus/run.pl --emit <cap> <file> <row>
+<col>` authors new rows. Known gaps live in `gold-corpus/KNOWN-GAPS.md`.
 
 ## Architecture
 
@@ -22,11 +32,13 @@ Builder          builder.rs                   → produces FileAnalysis
 Data model       file_analysis.rs             → FileAnalysis (serde, bincode-cacheable)
 ```
 
-See `docs/ROADMAP.md` for the forward design corpus entry point. `docs/adr/file-store-and-resolve.md` covers the landed cross-file unification (single role-tagged FileStore + RoleMask + `refs_to`). A unified `resolve_symbol` cursor→target entry point is planned but **not landed** — handlers currently resolve the target via `FileAnalysis::rename_kind_at`, then map `RenameKind`→`TargetRef` inline (duplicated in `backend.rs` references/rename and `main.rs`) and call `refs_to`. Residual forward work in `docs/prompt-unification-residual.md`; the next architectural pillar (graph walking) in `docs/prompt-graph-walking.md`.
+See `docs/ROADMAP.md` for the forward design corpus entry point. `docs/adr/file-store-and-resolve.md` covers the landed cross-file unification: single role-tagged FileStore + RoleMask + `refs_to`, plus `resolve_symbol` (cursor→`ResolvedTarget`) — the one entry point both LSP handlers (references/rename) and their CLI mirrors use to identify the target before calling `refs_to`. Never map `RenameKind`→`TargetRef` inline in a handler; per-feature policy on a target is a method on `TargetRef` (e.g. `supports_cross_file_rename`). Residual forward work in `docs/prompt-unification-residual.md`; the next architectural pillar (graph walking) in `docs/prompt-graph-walking.md`.
 
 ### Rules (read before writing code)
 
 1. **All tree-sitter CST traversal happens inside `build()`.** No other file walks tree-sitter nodes, calls `child_by_field_name`, or uses `TreeCursor`. To add CST-derived data: extend `visit_*` in `builder.rs`. Builder plugins (separate modules taking `&mut FileAnalysis` + `&Tree` + `&[u8]`) are fine — they preserve the single entry point. Multiple post-walk passes inside `build()` are allowed and named (see "Build pipeline phases") for cases needing resolved state.
+
+   **Within sanctioned tree consumers, speak `cst.rs`, not raw nodes.** `src/cst.rs` is the typed view over the CST (rust-analyzer style: zero-copy wrappers via `typed_node!` + `cast`, `NodeExt` for field-text/span/named-children, `pair_nodes` for separator-agnostic pair walking, `call_args` for flat call arguments, `varname_child`/`canonical_container_name` for variable identity, `is_conventional_invocant_scalar` for receiver detection). Each grammar trap is encoded there exactly once. New visitor code uses the typed accessors; re-spelling `child_by_field_name(..).utf8_text(..)` chains or a fresh `kind() == "..."` probe for a shape `cst.rs` already models is a bug. Name-level Perl conventions (`is_constructor_name`, `is_conventional_invocant_name`) live in `src/conventions.rs` — pure `&str`, importable by tree-free layers like `file_analysis.rs`.
 
 2. **`file_analysis.rs` is the single source of truth.** All analysis results live in `FileAnalysis`. Query methods belong here. No `tree_sitter` imports.
 
@@ -74,6 +86,8 @@ When a comment grows past a few lines, that's a smell: either the code wants a c
 - `file_store.rs` — unified store for open + workspace FileAnalyses, role-tagged, dedup'd by path.
 - `file_analysis.rs` — data model; serde-derived.
 - `builder.rs` — CST→FileAnalysis. ONLY tree-sitter consumer.
+- `cst.rs` — typed view over the CST (typed wrappers, `NodeExt`, pair walking, call args, varname canonicalization). The vocabulary every tree consumer uses.
+- `conventions.rs` — Perl name semantics, parsed once: `MethodToken` (FQ/SUPER/main method-token qualifier), `InvocantText` (variable/bareword/`__PACKAGE__`/positional-receiver invocant shape), plus name predicates (constructor, conventional invocant, `__PACKAGE__`). Pure `&str`; no tree-sitter. Never re-derive these shapes with `rsplit_once("::")` / `starts_with('$')` string ops in a consumer.
 - `pod.rs` — POD→markdown via tree-sitter-pod.
 - `cursor_context.rs` — position-dependent context.
 - `symbols.rs` — LSP adapter.

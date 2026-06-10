@@ -506,7 +506,7 @@ $x->m();
     // Cursor on `m` in `$x->m()`.
     let row = src.lines().position(|l| l.starts_with("$x->m")).unwrap();
     let col = "$x->".len();
-    let def = fa.find_definition(Point::new(row, col), Some(&tree), Some(src.as_bytes()), None);
+    let def = fa.find_definition(Point::new(row, col), None);
     assert_eq!(
         def, None,
         "untyped `$x->m` (where $x = external()) must be an honest miss, \
@@ -536,7 +536,7 @@ $x->frob;
     let fa = crate::builder::build(&tree, src.as_bytes());
     let row = src.lines().position(|l| l.starts_with("$x->frob")).unwrap();
     let col = "$x->".len();
-    let def = fa.find_definition(Point::new(row, col), Some(&tree), Some(src.as_bytes()), None);
+    let def = fa.find_definition(Point::new(row, col), None);
     assert_eq!(
         def, None,
         "untyped `$x->frob` with two unrelated `frob` definitions must \
@@ -762,7 +762,7 @@ $b->run;
 
     // ---- (2) goto-def — $f->run must jump to Foo::run (line 2), not Bar::run (line 6).
     let gd_f = fa
-        .find_definition(f_run_call, Some(&tree), Some(src.as_bytes()), None)
+        .find_definition(f_run_call, None)
         .expect("gd on $f->run resolves");
     assert_eq!(
         gd_f.start.row, 2,
@@ -771,7 +771,7 @@ $b->run;
     );
 
     let gd_b = fa
-        .find_definition(b_run_call, Some(&tree), Some(src.as_bytes()), None)
+        .find_definition(b_run_call, None)
         .expect("gd on $b->run resolves");
     assert_eq!(
         gd_b.start.row, 6,
@@ -931,7 +931,7 @@ hi();
 
     let kind = fa.rename_kind_at(hi_call, None);
     let hover = fa.hover_info(hi_call, src, None);
-    let gd = fa.find_definition(hi_call, Some(&tree), Some(src.as_bytes()), None);
+    let gd = fa.find_definition(hi_call, None);
 
     // Rename kind — for gr/rename construction.
     let target = match kind.as_ref() {
@@ -1104,7 +1104,7 @@ $r->post('/users')->to(controller => 'Users', action => 'create');
         row: line_helper,
         column: helper_col + 2,
     };
-    let helper_highlights = fa.find_highlights(helper_pt, Some(&tree), Some(src.as_bytes()), None);
+    let helper_highlights = fa.find_highlights(helper_pt, None);
     let helper_rows: Vec<usize> = helper_highlights.iter().map(|(s, _)| s.start.row).collect();
     assert!(
         helper_rows.contains(&line_helper),
@@ -1124,7 +1124,7 @@ $r->post('/users')->to(controller => 'Users', action => 'create');
         row: line_route,
         column: route_col + 2,
     };
-    let route_highlights = fa.find_highlights(route_pt, Some(&tree), Some(src.as_bytes()), None);
+    let route_highlights = fa.find_highlights(route_pt, None);
     let route_rows: Vec<usize> = route_highlights.iter().map(|(s, _)| s.start.row).collect();
     assert!(
         route_rows.contains(&line_route),
@@ -1659,10 +1659,7 @@ $b->touch();
     // Cursor on the first $b->touch() — column 4 lands on `t` of touch.
     let highlights = consumer_fa.find_highlights(
         tree_sitter::Point { row: 3, column: 4 },
-        None,
-        None,
-        Some(&idx),
-    );
+        Some(&idx));
 
     assert_eq!(
         highlights.len(),
@@ -1970,10 +1967,7 @@ $x->makeFoo()->ping();
     // Cursor on the first `->ping()` — column 18 lands on `p` of ping.
     let highlights = consumer_fa.find_highlights(
         tree_sitter::Point { row: 3, column: 18 },
-        None,
-        None,
-        Some(&idx),
-    );
+        Some(&idx));
 
     // Both call sites of `->ping()` share the same chain receiver
     // shape; they must highlight together once chain typing
@@ -2646,5 +2640,309 @@ fn rename_from_child_call_site_includes_inherited_base_declaration() {
         hit(&script_path),
         "rename from child call site missed the $worker->process() call edit. hits: {:?}",
         locs,
+    );
+}
+
+// ---- resolve_symbol: the single cursor→target entry point ----
+
+/// Every kind that maps to a cross-file target must come back as
+/// `Target`, lexical variables as `Local`, and blank space as `None` —
+/// the same answers regardless of which handler (LSP or CLI) asks.
+#[test]
+fn test_resolve_symbol_kinds() {
+    let src = "\
+package Counter;
+sub new { my ($class) = @_; return bless { count => 0 }, $class }
+sub bump { my ($self) = @_; $self->{count}++; my $local = 1; return $local }
+1;
+";
+    let fa = parse(src);
+    let at = |row, col| resolve_symbol(&fa, tree_sitter::Point { row, column: col }, None);
+
+    // `bump` decl → callable target scoped to the package ("same callable,
+    // two shapes": decls surface as Sub even when call sites are Method).
+    match at(2, 5) {
+        Some(ResolvedTarget::Target(t)) => {
+            assert_eq!(t.name, "bump");
+            assert!(
+                matches!(&t.kind, TargetKind::Sub { package: Some(p) } if p == "Counter"),
+                "expected Sub scoped to Counter, got {:?}",
+                t.kind,
+            );
+            assert!(t.supports_cross_file_rename());
+        }
+        other => panic!("expected callable target for bump decl, got {:?}", other),
+    }
+
+    // Package name → Package target.
+    match at(0, 9) {
+        Some(ResolvedTarget::Target(t)) => {
+            assert!(matches!(t.kind, TargetKind::Package));
+            assert!(t.supports_cross_file_rename());
+        }
+        other => panic!("expected Package target, got {:?}", other),
+    }
+
+    // `$local` → lexical, single-file.
+    let local_col = src.lines().nth(2).unwrap().find("$local").unwrap() + 1;
+    assert!(
+        matches!(at(2, local_col), Some(ResolvedTarget::Local)),
+        "expected Local for lexical $local, got {:?}",
+        at(2, local_col),
+    );
+}
+
+/// An owned hash key resolves to a cross-file HashKeyOfClass target —
+/// walkable by references — but reports itself non-renameable
+/// cross-file (hash-key rename is in-file-only by design). This is the
+/// divergence the CLI used to have: its references path dropped owned
+/// hash keys to single-file because the owner mapping lived only in the
+/// LSP handler.
+#[test]
+fn test_resolve_symbol_owned_hash_key() {
+    let src = "\
+package Widget;
+use Moo;
+has size => (is => 'ro');
+sub describe { my ($self) = @_; return $self->{size} }
+1;
+";
+    let fa = parse(src);
+    // Cursor on `size` inside `$self->{size}`.
+    let col = src.lines().nth(3).unwrap().find("{size}").unwrap() + 1;
+    match resolve_symbol(&fa, tree_sitter::Point { row: 3, column: col }, None) {
+        Some(ResolvedTarget::Target(t)) => {
+            assert_eq!(t.name, "size");
+            assert!(
+                matches!(&t.kind, TargetKind::HashKeyOfClass(c) if c == "Widget"),
+                "expected HashKeyOfClass(Widget), got {:?}",
+                t.kind,
+            );
+            assert!(!t.supports_cross_file_rename());
+        }
+        other => panic!("expected owned hash-key target, got {:?}", other),
+    }
+}
+
+// ---- field projection groups: cross-file union ----
+
+/// `field $x :param :reader` in Point.pm; a consumer constructs
+/// `Point->new(x => 1)` and reads `$p->x`. References/rename from the
+/// field decl must surface the consumer's ctor key and reader call;
+/// from the consumer's key, the field must surface back.
+#[test]
+fn test_field_group_unions_across_files() {
+    let store = FileStore::new();
+    let point_path = PathBuf::from("/tmp/fieldgroup_point.pm");
+    let user_path = PathBuf::from("/tmp/fieldgroup_user.pl");
+
+    let point_src = "\
+use v5.38;
+class Point {
+    field $x :param :reader;
+    method magnitude () { return $x * $x; }
+}
+1;
+";
+    let user_src = "\
+use Point;
+my $p = Point->new(x => 3);
+my $val = $p->x;
+";
+    let point_fa = parse(point_src);
+    let user_fa = parse(user_src);
+    store.insert_workspace(point_path.clone(), point_fa);
+    store.insert_workspace(user_path.clone(), user_fa);
+
+    let origin_fa = store.workspace_raw().get(&point_path).unwrap().value().clone();
+    // Cursor on `$x` in the field decl (row 2, col 11 = bare name).
+    let resolved = resolve_symbol(&origin_fa, tree_sitter::Point { row: 2, column: 11 }, None)
+        .expect("field decl resolves");
+    let ResolvedTarget::Group { local_spans, pinned_spans, members } = resolved else {
+        panic!("expected Group, got {:?}", resolved);
+    };
+    assert!(pinned_spans.is_empty(), "local mint has no pinned spans");
+    assert!(!local_spans.is_empty(), "field var spellings present");
+    assert_eq!(members.len(), 2, "reader + ctor-key members: {:?}", members);
+
+    let locs = group_refs(
+        &store,
+        None,
+        &FileKey::Path(point_path.clone()),
+        &local_spans,
+        &pinned_spans,
+        &members,
+        None,
+    );
+    let in_user: Vec<_> = locs
+        .iter()
+        .filter(|l| matches!(&l.key, FileKey::Path(p) if p == &user_path))
+        .map(|l| (l.span.start.row, l.span.start.column))
+        .collect();
+    assert!(
+        in_user.contains(&(1, 19)),
+        "consumer ctor key `x` included; user-file hits: {:?}",
+        in_user,
+    );
+    assert!(
+        in_user.contains(&(2, 14)),
+        "consumer reader call `->x` included; user-file hits: {:?}",
+        in_user,
+    );
+}
+
+/// Consumer-side cursor, class elsewhere: from the ctor key (or accessor
+/// call) in a file that only `use`s Point, the group is minted from the
+/// CLASS's cached analysis — its field-variable/decl spans pin to the
+/// class file, so rename from the consumer rewrites the field decl and
+/// body uses over there too.
+#[test]
+fn test_consumer_cursor_mints_group_from_class_analysis() {
+    let point_src = "\
+use v5.38;
+class Point {
+    field $x :param :reader;
+    method magnitude () { return $x * $x; }
+}
+1;
+";
+    let idx = crate::module_index::ModuleIndex::new_for_test();
+    let class_path = PathBuf::from("/tmp/grp_mint_point.pm");
+    idx.insert_cache(
+        "Point",
+        Some(std::sync::Arc::new(crate::module_index::CachedModule::new(
+            class_path.clone(),
+            std::sync::Arc::new(parse(point_src)),
+        ))),
+    );
+
+    let consumer = parse("use Point;\nmy $p = Point->new(x => 3);\nmy $v = $p->x;\n");
+
+    // From the ctor key `x` (row 1, col 19).
+    let resolved = resolve_symbol(&consumer, tree_sitter::Point { row: 1, column: 19 }, Some(&idx))
+        .expect("consumer key resolves");
+    let ResolvedTarget::Group { local_spans, pinned_spans, members } = resolved else {
+        panic!("expected Group from consumer key, got {:?}", resolved);
+    };
+    assert!(local_spans.is_empty(), "remote mint: no origin spans");
+    assert_eq!(members.len(), 2, "reader + ctor-key members");
+    assert!(
+        pinned_spans.iter().all(|(p, _)| p == &class_path),
+        "pinned to the class file: {:?}",
+        pinned_spans,
+    );
+    // Decl (row 2) + body use (row 3) pinned from the class analysis.
+    let pinned_rows: Vec<usize> = pinned_spans.iter().map(|(_, s)| s.start.row).collect();
+    assert!(
+        pinned_rows.contains(&2) && pinned_rows.contains(&3),
+        "field decl + body use pinned: {:?}",
+        pinned_rows,
+    );
+
+    // From the accessor call `->x` (row 2, col 12): same group shape.
+    let resolved = resolve_symbol(&consumer, tree_sitter::Point { row: 2, column: 12 }, Some(&idx))
+        .expect("consumer accessor resolves");
+    assert!(
+        matches!(resolved, ResolvedTarget::Group { ref pinned_spans, .. } if !pinned_spans.is_empty()),
+        "accessor-call cursor mints the remote group, got {:?}",
+        resolved,
+    );
+}
+
+/// Cross-file mapped rename: the consumer's `$w->has_size` predicate
+/// call re-derives to `has_extent` when the attr renames — per-member
+/// replacement texts via group_rename_edits.
+#[test]
+fn test_group_rename_rederives_mapped_members_cross_file() {
+    let store = FileStore::new();
+    let class_path = PathBuf::from("/tmp/grp_map_widget.pm");
+    let user_path = PathBuf::from("/tmp/grp_map_user.pl");
+    store.insert_workspace(
+        class_path.clone(),
+        parse("package Widget;\nuse Moo;\nhas size => (is => 'ro', predicate => 1);\n1;\n"),
+    );
+    store.insert_workspace(
+        user_path.clone(),
+        parse("use Widget;\nmy $w = Widget->new(size => 3);\nprint $w->size if $w->has_size;\n"),
+    );
+
+    let class_fa = store.workspace_raw().get(&class_path).unwrap().value().clone();
+    // Cursor on the attr decl token `size` (row 2, col 4).
+    let resolved = resolve_symbol(&class_fa, tree_sitter::Point { row: 2, column: 4 }, None)
+        .expect("attr decl resolves");
+    let ResolvedTarget::Group { local_spans, pinned_spans, members } = resolved else {
+        panic!("expected Group, got {:?}", resolved);
+    };
+    let edits = group_rename_edits(
+        &store,
+        None,
+        &FileKey::Path(class_path.clone()),
+        &local_spans,
+        &pinned_spans,
+        &members,
+        "extent",
+    );
+    let user_edits: Vec<_> = edits
+        .iter()
+        .filter(|(l, _)| matches!(&l.key, FileKey::Path(p) if p == &user_path))
+        .map(|(l, t)| (l.span.start.row, l.span.start.column, t.clone()))
+        .collect();
+    assert!(
+        user_edits.contains(&(2, 22, "has_extent".to_string())),
+        "consumer predicate call re-derived; user edits: {:?}",
+        user_edits,
+    );
+    assert!(
+        user_edits.iter().any(|(r, _, t)| *r == 1 && t == "extent"),
+        "consumer ctor key renamed bare; user edits: {:?}",
+        user_edits,
+    );
+}
+
+/// Internal slot pokes join the group cross-file: a subclass (or any
+/// promiscuous consumer) reaching into `$self->{size}` renames with the
+/// attr — under STRICT Class-owner matching, so another sub's
+/// `(size => 1)` arg keys in unrelated classes stay out.
+#[test]
+fn test_internal_slot_pokes_join_group_cross_file() {
+    let store = FileStore::new();
+    let class_path = PathBuf::from("/tmp/grp_slot_widget.pm");
+    let sub_path = PathBuf::from("/tmp/grp_slot_subclass.pm");
+    store.insert_workspace(
+        class_path.clone(),
+        parse("package Widget;\nuse Moo;\nhas size => (is => 'rw');\n1;\n"),
+    );
+    // Subclass pokes the parent's slot directly — classic promiscuous Perl.
+    store.insert_workspace(
+        sub_path.clone(),
+        parse("package Gadget;\nuse Moo;\nextends 'Widget';\nsub poke { my ($self) = @_; return $self->{size}; }\n1;\n"),
+    );
+
+    let class_fa = store.workspace_raw().get(&class_path).unwrap().value().clone();
+    let resolved = resolve_symbol(&class_fa, tree_sitter::Point { row: 2, column: 4 }, None)
+        .expect("attr decl resolves");
+    let ResolvedTarget::Group { local_spans, pinned_spans, members } = resolved else {
+        panic!("expected Group, got {:?}", resolved);
+    };
+    assert!(
+        members.iter().any(|m| matches!(m.target.kind, TargetKind::InternalHashKey { .. })),
+        "internal-key member minted: {:?}",
+        members,
+    );
+    let edits = group_rename_edits(
+        &store,
+        None,
+        &FileKey::Path(class_path.clone()),
+        &local_spans,
+        &pinned_spans,
+        &members,
+        "extent",
+    );
+    assert!(
+        edits.iter().any(|(l, t)| {
+            matches!(&l.key, FileKey::Path(p) if p == &sub_path) && t == "extent"
+        }),
+        "subclass slot poke renamed; edits: {:?}",
+        edits,
     );
 }

@@ -4,7 +4,7 @@ use tree_sitter::{Point, Tree};
 
 use crate::cursor_context::{self, CursorContext};
 use crate::file_analysis::{
-    contains_point, format_inferred_type, CompletionCandidate, FileAnalysis, FoldKind,
+    contains_point, format_inferred_type, CompletionCandidate, CrossFileLookup, FileAnalysis, FoldKind,
     HandlerOwner, InferredType, OutlineSymbol, ParamInfo, RefKind, Span,
     SymKind as FaSymKind, SymbolDetail, PRIORITY_AUTO_ADD_QW, PRIORITY_BARE_IMPORT,
     PRIORITY_EXPLICIT_IMPORT, PRIORITY_UNIMPORTED,
@@ -172,8 +172,6 @@ pub fn find_definition(
     pos: Position,
     uri: &Url,
     module_index: &ModuleIndex,
-    tree: &Tree,
-    source: &str,
 ) -> Option<GotoDefinitionResponse> {
     let point = position_to_point(pos);
 
@@ -191,11 +189,42 @@ pub fn find_definition(
     }
 
     // Try local definition first
-    if let Some(span) = analysis.find_definition(point, Some(tree), Some(source.as_bytes()), Some(module_index)) {
+    if let Some(span) = analysis.find_definition(point, Some(module_index)) {
         return Some(GotoDefinitionResponse::Scalar(Location {
             uri: uri.clone(),
             range: span_to_range(span),
         }));
+    }
+
+    // Deferred constructor-key (`owner: None`): the class lives in another
+    // file, so the build-time gate couldn't pin the owner. Derive it now
+    // (enclosing call's invocant class, index in hand) and jump to the def
+    // the class file carries — `field $x :param` / Moo `has x` synthesize
+    // the HashKeyDef there.
+    if let Some(r) = analysis.ref_at(point) {
+        if matches!(r.kind, RefKind::HashKeyAccess { owner: None, .. }) {
+            if let Some(owner) = analysis.deferred_hash_key_owner(r, Some(module_index)) {
+                if let crate::file_analysis::HashKeyOwner::Sub { package: Some(ref class), .. } =
+                    owner
+                {
+                    if let Some(cached) = module_index.get_cached(class) {
+                        if let Some(def) = cached
+                            .analysis
+                            .hash_key_defs_for_owner(&owner)
+                            .into_iter()
+                            .find(|d| d.name == r.target_name)
+                        {
+                            if let Ok(module_uri) = Url::from_file_path(&cached.path) {
+                                return Some(GotoDefinitionResponse::Scalar(Location {
+                                    uri: module_uri,
+                                    range: span_to_range(def.selection_span),
+                                }));
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 
     // Check if cursor is on a function call that matches an imported symbol
@@ -334,15 +363,17 @@ pub fn find_definition(
         // Cross-file method goto-def: resolve inherited methods through module index
         if matches!(r.kind, RefKind::MethodCall { .. }) {
             use crate::file_analysis::MethodResolution;
+            // FQ `$o->Foo::Bar::m` dispatches the bare `m` on the named class.
+            let method = r.unqualified_target_name();
             let class_name = analysis.method_call_invocant_class(r, Some(module_index));
             if let Some(ref cn) = class_name {
-                if let Some(MethodResolution::CrossFile { ref class, ref def_module }) = analysis.resolve_method_in_ancestors(cn, &r.target_name, Some(module_index)) {
+                if let Some(MethodResolution::CrossFile { ref class, ref def_module }) = analysis.resolve_method_in_ancestors(cn, method, Some(module_index)) {
                     // One path for both: a real inherited method lives in
                     // `class`'s own module; a plugin-bridged helper lives in
                     // `def_module` (the bridging file). Same lookup either way.
                     let module = def_module.as_deref().unwrap_or(class);
                     if let Some(cached) = module_index.get_cached(module) {
-                        if let Some(sub_info) = cached.sub_info(&r.target_name) {
+                        if let Some(sub_info) = cached.sub_info(method) {
                             if let Ok(module_uri) = Url::from_file_path(&cached.path) {
                                 let line = sub_info.def_line();
                                 let def_range = Range {
@@ -402,8 +433,8 @@ fn dispatch_handler_locations(
     })
 }
 
-pub fn find_references(analysis: &FileAnalysis, pos: Position, uri: &Url, tree: &Tree, source: &str, module_index: Option<&ModuleIndex>) -> Vec<Location> {
-    analysis.find_references(position_to_point(pos), Some(tree), Some(source.as_bytes()), module_index)
+pub fn find_references(analysis: &FileAnalysis, pos: Position, uri: &Url, module_index: Option<&dyn CrossFileLookup>) -> Vec<Location> {
+    analysis.find_references(position_to_point(pos), module_index)
         .into_iter()
         .map(|span| Location {
             uri: uri.clone(),
@@ -417,12 +448,8 @@ pub fn rename(
     pos: Position,
     uri: &Url,
     new_name: &str,
-    tree: Option<&tree_sitter::Tree>,
-    source: Option<&str>,
 ) -> Option<WorkspaceEdit> {
-    let edits = analysis.rename_at(
-        position_to_point(pos), new_name, tree, source.map(|s| s.as_bytes()),
-    )?;
+    let edits = analysis.rename_at(position_to_point(pos), new_name)?;
 
     let text_edits: Vec<TextEdit> = edits
         .into_iter()
@@ -524,7 +551,7 @@ pub fn completion_items(
     // (e.g. Minion's arg-0 task-name completion: pure tasks, no
     // Minion instance-method firehose).
     if let Some(qctx) = cursor_context::build_plugin_query_context(analysis, tree, source.as_bytes(), point) {
-        let registry = crate::builder::default_plugin_registry();
+        let registry = crate::plugin::default_plugin_registry();
         let (uses, parents) = analysis.trigger_view_at(point);
         let query = crate::plugin::TriggerQuery {
             package_uses: &uses,
@@ -1085,9 +1112,9 @@ pub fn hover_info(
     None
 }
 
-pub fn document_highlights(analysis: &FileAnalysis, pos: Position, tree: &tree_sitter::Tree, source: &str, module_index: Option<&ModuleIndex>) -> Vec<DocumentHighlight> {
+pub fn document_highlights(analysis: &FileAnalysis, pos: Position, module_index: Option<&dyn CrossFileLookup>) -> Vec<DocumentHighlight> {
     use crate::file_analysis::AccessKind;
-    analysis.find_highlights(position_to_point(pos), Some(tree), Some(source.as_bytes()), module_index)
+    analysis.find_highlights(position_to_point(pos), module_index)
         .into_iter()
         .map(|(span, access)| DocumentHighlight {
             range: span_to_range(span),
@@ -1107,9 +1134,9 @@ pub fn document_highlights(analysis: &FileAnalysis, pos: Position, tree: &tree_s
 pub fn linked_editing_ranges(
     analysis: &FileAnalysis,
     pos: Position,
-    module_index: Option<&ModuleIndex>,
+    module_index: Option<&dyn CrossFileLookup>,
 ) -> Option<Vec<Range>> {
-    let refs = analysis.find_references(position_to_point(pos), None, None, module_index);
+    let refs = analysis.find_references(position_to_point(pos), module_index);
     if refs.len() < 2 {
         return None;
     }
@@ -1591,7 +1618,7 @@ fn span_contains_span(outer: &crate::file_analysis::Span, inner: &crate::file_an
 /// agree — same abstraction, same reach).
 fn string_dispatch_signature_for(
     analysis: &FileAnalysis,
-    module_index: Option<&ModuleIndex>,
+    module_index: Option<&dyn CrossFileLookup>,
     class: &str,
     dispatcher: &str,
     handler_name: &str,
@@ -1678,7 +1705,7 @@ fn string_dispatch_signature_for(
 /// no DispatchCall ref exists yet.
 fn string_dispatch_signature(
     analysis: &FileAnalysis,
-    module_index: Option<&ModuleIndex>,
+    module_index: Option<&dyn CrossFileLookup>,
     invocant: Option<&str>,
     dispatcher: &str,
     handler_name: &str,
@@ -1704,7 +1731,7 @@ pub fn signature_help(
     // hash of a dispatcher — native would mis-show the task sig).
     let mut skip_string_dispatch = false;
     if let Some(qctx) = cursor_context::build_plugin_query_context(analysis, tree, text.as_bytes(), point) {
-        let registry = crate::builder::default_plugin_registry();
+        let registry = crate::plugin::default_plugin_registry();
         let (uses, parents) = analysis.trigger_view_at(point);
         let query = crate::plugin::TriggerQuery {
             package_uses: &uses,
@@ -1827,8 +1854,12 @@ pub fn signature_help(
                 } else {
                     p.name.clone()
                 };
-                // Skip $self/$class — type is obvious
-                if p.name == "$self" || p.name == "$class" {
+                // Skip the invocant — its type is obvious. Flag first (covers
+                // plugin-marked invocants like a helper's `$c`); name
+                // convention as backstop for pre-flag cache blobs.
+                if p.is_invocant
+                    || crate::conventions::is_conventional_invocant_name(&p.name)
+                {
                     return base;
                 }
                 // Cross-file: use pre-resolved param types
@@ -1925,8 +1956,8 @@ pub fn inlay_hints(analysis: &FileAnalysis, range: Range) -> Vec<InlayHint> {
 
         match sym.kind {
             FaSymKind::Variable => {
-                // Skip $self — always the enclosing class, too noisy
-                if sym.name == "$self" {
+                // Skip conventional invocants — always the enclosing class.
+                if crate::conventions::is_conventional_invocant_name(&sym.name) {
                     continue;
                 }
                 if let Some(ty) = analysis.inferred_type_via_bag(&sym.name, sym.span.start) {
@@ -2492,7 +2523,7 @@ pub fn collect_diagnostics(
         let name = &r.target_name;
 
         // Skip package-qualified calls like Foo::bar()
-        if name.contains("::") {
+        if crate::file_analysis::split_qualified(name).0.is_some() {
             continue;
         }
 
@@ -2580,9 +2611,14 @@ pub fn collect_diagnostics(
                         ..Default::default()
                     });
                 } else {
+                    // HINT (not INFORMATION): an unresolved bareword call is
+                    // often a genuinely-dynamic sub (AUTOLOAD, runtime glob
+                    // install, a not-installed dep) the static walker can't see.
+                    // Keep it the quietest visible severity so a Moose/AUTOLOAD-
+                    // heavy codebase doesn't light up the Problems panel.
                     diagnostics.push(Diagnostic {
                         range,
-                        severity: Some(DiagnosticSeverity::INFORMATION),
+                        severity: Some(DiagnosticSeverity::HINT),
                         code: Some(NumberOrString::String("unresolved-function".into())),
                         source: Some("perl-lsp".into()),
                         message: format!("'{}' is not defined in this file", name),
@@ -2593,7 +2629,11 @@ pub fn collect_diagnostics(
         }
     }
 
-    // 5e: Unresolved method diagnostics for locally-defined classes
+    // 5e: Unresolved method diagnostics for locally-defined classes.
+    // Rule-#10 debt: the framework entries below (DBIC/Moose) belong to the
+    // frameworks, not core diagnostics — they move out when plugins can
+    // register meta-methods (docs/prompt-dbic-as-plugin.md) or the Openness
+    // rule lands (docs/prompt-unification-residual.md phase 6).
     let universal_methods = [
         "new", "AUTOLOAD", "DESTROY", "can", "isa", "DOES",
         // Moose adds lowercase `does` alongside UNIVERSAL's uppercase DOES.
@@ -2623,19 +2663,19 @@ pub fn collect_diagnostics(
         // to find a method literally named "SUPER::foo" in the MRO always
         // fails. Caller-side package dispatch (`Class::method`) is intentional
         // and not our job to validate here.
-        if method_name.contains("::") {
+        use crate::conventions::{InvocantText, MethodToken};
+        if !matches!(MethodToken::parse(method_name), MethodToken::Bare(_)) {
             continue;
         }
 
-        // Resolve invocant to class name
-        let class_name = if !invocant.starts_with('$')
-            && !invocant.starts_with('@')
-            && !invocant.starts_with('%')
-        {
-            Some(invocant.clone())
-        } else {
-            analysis.inferred_type_via_bag(invocant, r.span.start)
-                .and_then(|ty| ty.class_name().map(|s| s.to_string()))
+        // Resolve invocant to class name. Diagnostics stays bag-only for
+        // scalars — no enclosing-class fallback, which would manufacture
+        // warnings on untyped invocants — and skips everything else.
+        let class_name = match invocant.classify() {
+            InvocantText::Bareword(b) => Some(b.to_string()),
+            InvocantText::Scalar(_) => analysis.inferred_type_via_bag(invocant, r.span.start)
+                .and_then(|ty| ty.class_name().map(|s| s.to_string())),
+            _ => None,
         };
         let class_name = match class_name {
             Some(cn) => cn,

@@ -9,7 +9,231 @@ use std::collections::{HashMap, HashSet};
 use serde::{Deserialize, Serialize};
 use tree_sitter::Point;
 
-use crate::module_index::ModuleIndex;
+// ---- Cross-file lookup capability ----
+
+/// A module in the cache — its filesystem path plus the full FileAnalysis of
+/// its source. Shared by reference-count so async handlers don't deep-copy.
+#[derive(Debug)]
+pub struct CachedModule {
+    pub path: std::path::PathBuf,
+    pub analysis: std::sync::Arc<FileAnalysis>,
+}
+
+impl CachedModule {
+    pub fn new(path: std::path::PathBuf, analysis: std::sync::Arc<FileAnalysis>) -> Self {
+        CachedModule { path, analysis }
+    }
+
+    /// Look up metadata for a sub/method in this module.
+    ///
+    /// Returns a lightweight view into the full `FileAnalysis`. Works for
+    /// any declared sub — exported or not.
+    pub fn sub_info(&self, name: &str) -> Option<SubInfo<'_>> {
+        // Prefer the first matching Sub/Method symbol. Builder may emit several
+        // when rw accessors exist (getter + setter); overloads are collected as
+        // additional symbols with the same name.
+        let mut syms = self.analysis.symbols.iter().filter(|s| {
+            s.name == name && matches!(s.kind, SymKind::Sub | SymKind::Method)
+        });
+        let primary = syms.next()?;
+        let overloads: Vec<&Symbol> = syms.collect();
+
+        // Keys are owned by `Sub { package: primary.package, name }` — the
+        // sub's hash keys live under the same package as the sub itself.
+        let hash_keys: Vec<String> = self
+            .analysis
+            .hash_key_defs_for_owner(&HashKeyOwner::Sub {
+                package: primary.package.clone(),
+                name: name.to_string(),
+            })
+            .iter()
+            .map(|s| s.name.clone())
+            .collect();
+
+        Some(SubInfo {
+            analysis: &self.analysis,
+            primary,
+            overloads,
+            hash_keys,
+        })
+    }
+
+    /// Locate a package-global variable declaration (`our $x` / `our @arr`
+    /// / `our %h`) by its sigil-bearing name within `package`. Powers
+    /// cross-file goto-def for a fully-qualified read (`$Foo::Bar::x`).
+    /// `name` includes the sigil (`$x`, `@arr`, `%h`) to match how variable
+    /// symbols are keyed.
+    pub fn package_var_def_line(&self, name: &str, package: &str) -> Option<u32> {
+        self.analysis
+            .symbols
+            .iter()
+            .find(|s| {
+                matches!(s.kind, SymKind::Variable | SymKind::Field)
+                    && s.name == name
+                    && s.package.as_deref() == Some(package)
+            })
+            .map(|s| s.span.start.row as u32)
+    }
+
+    /// True if any sub/method with this name is declared in this module.
+    pub fn has_sub(&self, name: &str) -> bool {
+        self.analysis.symbols.iter().any(|s| {
+            s.name == name && matches!(s.kind, SymKind::Sub | SymKind::Method)
+        })
+    }
+
+    /// True if a sub/method with this name is declared in this module
+    /// *attributed to `package`* — distinct from `has_sub`, which keys
+    /// on declaration only. Cross-package typeglob installs
+    /// (`*{'DateTime::'.$sub} = …` inside `package DateTime::PP`)
+    /// synthesize a symbol whose `package` (DateTime) differs from the
+    /// file's own module name (DateTime::PP), so a class-keyed method
+    /// lookup must ask by package, not by module-name match.
+    pub fn has_sub_in_package(&self, name: &str, package: &str) -> bool {
+        self.analysis.symbols.iter().any(|s| {
+            s.name == name
+                && matches!(s.kind, SymKind::Sub | SymKind::Method)
+                && s.package.as_deref() == Some(package)
+        })
+    }
+}
+
+/// A view into a module's metadata for a named sub/method.
+///
+/// Composed of a primary symbol plus any additional symbols with the same
+/// name (for rw accessor setter overloads).
+pub struct SubInfo<'a> {
+    analysis: &'a FileAnalysis,
+    primary: &'a Symbol,
+    #[allow(dead_code)] // retained for the `param_counts` / `return_type_for_arity` API surface
+    overloads: Vec<&'a Symbol>,
+    hash_keys: Vec<String>,
+}
+
+impl<'a> SubInfo<'a> {
+    pub fn def_line(&self) -> u32 {
+        self.primary.span.start.row as u32
+    }
+
+    pub fn params(&self) -> &'a [ParamInfo] {
+        match &self.primary.detail {
+            SymbolDetail::Sub { params, .. } => params,
+            _ => &[],
+        }
+    }
+
+    pub fn is_method(&self) -> bool {
+        if self.primary.kind == SymKind::Method {
+            return true;
+        }
+        matches!(
+            self.primary.detail,
+            SymbolDetail::Sub { is_method: true, .. }
+        )
+    }
+
+    /// Pass `module_index` so a return type produced by a cross-file method
+    /// chain in the sub body resolves; `None` keeps it single-file.
+    pub fn return_type(&self, module_index: Option<&dyn CrossFileLookup>) -> Option<InferredType> {
+        match &self.primary.detail {
+            SymbolDetail::Sub { .. } => {
+                self.analysis.symbol_return_type_via_bag_ctx(self.primary.id, None, module_index)
+            }
+            _ => None,
+        }
+    }
+
+    pub fn doc(&self) -> Option<&'a str> {
+        match &self.primary.detail {
+            SymbolDetail::Sub { doc, .. } => doc.as_deref(),
+            _ => None,
+        }
+    }
+
+    pub fn hash_keys(&self) -> &[String] {
+        &self.hash_keys
+    }
+
+    /// Arity list covering the primary and overloads, in declaration order.
+    #[allow(dead_code)] // public SubInfo accessor; consumed by tooling/future cross-file callers
+    pub fn param_counts(&self) -> Vec<usize> {
+        std::iter::once(self.primary)
+            .chain(self.overloads.iter().copied())
+            .map(|s| match &s.detail {
+                SymbolDetail::Sub { params, .. } => params.len(),
+                _ => 0,
+            })
+            .collect()
+    }
+
+    /// Return type for an overload with the given arity, if any matches.
+    #[allow(dead_code)] // public SubInfo accessor; consumed by tooling/future cross-file callers
+    pub fn return_type_for_arity(&self, arity: usize, module_index: Option<&dyn CrossFileLookup>) -> Option<InferredType> {
+        for sym in std::iter::once(self.primary).chain(self.overloads.iter().copied()) {
+            if let SymbolDetail::Sub { params, .. } = &sym.detail {
+                if params.len() == arity {
+                    return self.analysis.symbol_return_type_via_bag_ctx(sym.id, Some(arity), module_index);
+                }
+            }
+        }
+        None
+    }
+
+    /// SymbolId of the primary (first matching) sym.
+    #[allow(dead_code)] // public SubInfo accessor; consumed by tooling/future cross-file callers
+    pub fn primary_id(&self) -> SymbolId {
+        self.primary.id
+    }
+
+    /// SymbolId of the overload whose param count matches `arity`,
+    /// if any.
+    #[allow(dead_code)] // public SubInfo accessor; consumed by tooling/future cross-file callers
+    pub fn id_for_arity(&self, arity: usize) -> Option<SymbolId> {
+        for sym in std::iter::once(self.primary).chain(self.overloads.iter().copied()) {
+            if let SymbolDetail::Sub { params, .. } = &sym.detail {
+                if params.len() == arity {
+                    return Some(sym.id);
+                }
+            }
+        }
+        None
+    }
+
+    /// Inferred type for a param by name (if the analysis resolved one).
+    /// Goes through the canonical bag-aware query so framework rules
+    /// (Mojo `$self` etc.) apply consistently across every consumer.
+    pub fn param_inferred_type(&self, param_name: &str) -> Option<InferredType> {
+        self.analysis
+            .inferred_type_via_bag(param_name, self.primary.span.end)
+    }
+}
+
+/// What query-time cross-file resolution needs from the dependency
+/// index. `ModuleIndex` implements this; `file_analysis`/`witnesses`
+/// depend on the capability, not the index — the inversion that breaks
+/// the FA ↔ index cycle (docs/arch-review-2026-06.md §4).
+///
+/// Object-safe by design: a `&dyn CrossFileLookup` rides
+/// `witnesses::BagContext`, hence the `&mut dyn FnMut` callback params.
+pub trait CrossFileLookup {
+    fn get_cached(&self, module_name: &str) -> Option<std::sync::Arc<CachedModule>>;
+    fn parents_cached(&self, module_name: &str) -> Vec<String>;
+    fn modules_with_symbol(&self, name: &str) -> Vec<String>;
+    fn find_exporters(&self, func_name: &str) -> Vec<String>;
+    fn defining_module_cached(&self, entry: &str, name: &str) -> Option<std::sync::Arc<CachedModule>>;
+    fn module_declaring_method_in_package(&self, name: &str, class: &str) -> Option<String>;
+    fn for_each_cached(&self, f: &mut dyn FnMut(&str, &std::sync::Arc<CachedModule>));
+    fn for_each_reexport_module(
+        &self,
+        start: Vec<String>,
+        visit: &mut dyn FnMut(&std::sync::Arc<CachedModule>) -> std::ops::ControlFlow<()>,
+    );
+    fn for_each_entity_bridged_to(
+        &self,
+        class_name: &str,
+        f: &mut dyn FnMut(&str, &std::sync::Arc<CachedModule>, &Symbol),
+    );
+}
 
 // ---- Serde proxy for tree_sitter::Point ----
 
@@ -52,46 +276,9 @@ pub struct Span {
 }
 
 /// Extract the function/method name from a call expression node.
-pub(crate) fn extract_call_name(node: tree_sitter::Node, source: &[u8]) -> Option<String> {
-    match node.kind() {
-        "method_call_expression" => node
-            .child_by_field_name("method")
-            .and_then(|n| n.utf8_text(source).ok())
-            .map(|s| s.to_string()),
-        "function_call_expression" | "ambiguous_function_call_expression" => node
-            .child_by_field_name("function")
-            .and_then(|n| n.utf8_text(source).ok())
-            .map(|s| s.to_string()),
-        _ => None,
-    }
-}
-
-pub(crate) fn node_to_span(node: tree_sitter::Node) -> Span {
-    Span {
-        start: node.start_position(),
-        end: node.end_position(),
-    }
-}
-
-/// Narrow `node`'s span to the bare tail after the last `::` in `text` (rule
-/// #7): for a qualified name (`Foo::Bar::baz`) the renamable / highlightable
-/// token is `baz`, not the whole path — so rename rewrites only the tail and
-/// the qualifier survives, while the ref's `target_name` keeps the full path. No
-/// `::` → the node's own span. FQ identifiers are single-line tokens, so the
-/// tail column is `start.column + byte_offset_of_tail`.
-pub(crate) fn fq_tail_span(node: tree_sitter::Node, text: &str) -> Span {
-    match text.rfind("::") {
-        Some(idx) => {
-            let s = node.start_position();
-            Span {
-                start: Point { row: s.row, column: s.column + idx + 2 },
-                end: node.end_position(),
-            }
-        }
-        None => node_to_span(node),
-    }
-}
-
+// Node-side utilities live in `cst.rs`; re-exported here while the lazy
+// tree-resolution paths (phase 5 retires them) still call them in-module.
+pub(crate) use crate::cst::{extract_call_name, fq_tail_span, node_to_span};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FoldRange {
@@ -550,7 +737,7 @@ pub enum RefKind {
     /// publishes Variable witnesses + chain-receiver `Expression`
     /// edge witnesses; the helper reads those at query time.
     MethodCall {
-        invocant: String,
+        invocant: crate::conventions::InvocantName,
         /// Span of the invocant node. Used by
         /// `method_call_invocant_class` to find an inner-receiver
         /// ref via `call_ref_by_start` (chain dispatch).
@@ -829,8 +1016,8 @@ impl InferredType {
     /// receiver value what controller is in force; it never inspects
     /// the chain shape. The build-time consumer reads the flattened
     /// `CallContext.receiver_route_defaults`; this is the query-time
-    /// surface for cursor-time stash lookups (hover/completion) — not
-    /// yet wired, hence `allow(dead_code)` for the spike.
+    /// surface for cursor-time stash lookups (hover/completion), which
+    /// aren't wired yet — hence `allow(dead_code)`.
     #[allow(dead_code)]
     pub fn route_default(&self, key: &str) -> Option<&str> {
         let InferredType::BrandedRoute { controller, stash, .. } = self else {
@@ -1188,7 +1375,7 @@ pub const APP_SURFACE_CLASS: &str = "Mojolicious::_AppSurface";
 pub fn parents_of(
     class: &str,
     package_parents: &HashMap<String, Vec<String>>,
-    module_index: Option<&ModuleIndex>,
+    module_index: Option<&dyn CrossFileLookup>,
     consumers: &[String],
 ) -> Vec<String> {
     let mut parents: Vec<String> = package_parents.get(class).cloned().unwrap_or_default();
@@ -1221,7 +1408,7 @@ pub fn class_isa(
     class: &str,
     target: &str,
     package_parents: &HashMap<String, Vec<String>>,
-    module_index: Option<&ModuleIndex>,
+    module_index: Option<&dyn CrossFileLookup>,
 ) -> bool {
     if class == target {
         return true;
@@ -1262,7 +1449,7 @@ pub fn class_isa(
 pub fn any_ancestor<F>(
     class: &str,
     package_parents: &HashMap<String, Vec<String>>,
-    module_index: Option<&ModuleIndex>,
+    module_index: Option<&dyn CrossFileLookup>,
     mut pred: F,
 ) -> bool
 where
@@ -1360,7 +1547,7 @@ impl<T> ReceiverGated<T> {
         &self,
         receiver_class: Option<&str>,
         package_parents: &HashMap<String, Vec<String>>,
-        module_index: Option<&ModuleIndex>,
+        module_index: Option<&dyn CrossFileLookup>,
     ) -> GateResult<&T> {
         match receiver_class {
             None => GateResult::ReceiverUntyped,
@@ -1972,6 +2159,8 @@ pub struct FileAnalysis {
     /// `docs/adr/receiver-gated-dispatch.md` (Phase 2).
     #[serde(default)]
     pub gated_param_types: Vec<ReceiverGated<TypeConstraint>>,
+    #[serde(default)]
+    pub attr_projections: Vec<AttrProjection>,
 
     // Indices (built in post-pass — skipped by serde; call rebuild_all_indices() after deserialize)
     #[serde(skip, default)]
@@ -2002,25 +2191,160 @@ pub struct FileAnalysis {
     export_lookup: HashSet<String>,
 }
 
+/// Everything the builder hands over to construct a `FileAnalysis`.
+/// Field-named so a swapped pair of same-typed tables can't compile
+/// silently the way positional args could, and hand-crafted test FAs
+/// spell only the tables they use (`..Default::default()`).
+#[derive(Default)]
+pub struct FileAnalysisParts {
+    pub scopes: Vec<Scope>,
+    pub symbols: Vec<Symbol>,
+    pub refs: Vec<Ref>,
+    pub fold_ranges: Vec<FoldRange>,
+    pub imports: Vec<Import>,
+    pub call_bindings: Vec<CallBinding>,
+    pub package_parents: HashMap<String, Vec<String>>,
+    pub method_call_bindings: Vec<MethodCallBinding>,
+    pub framework_imports: HashSet<String>,
+    pub export: Vec<String>,
+    pub export_ok: Vec<String>,
+    pub export_tags: HashMap<String, Vec<String>>,
+    pub reexport_modules: Vec<String>,
+    pub plugin_namespaces: Vec<PluginNamespace>,
+    pub package_uses: HashMap<String, Vec<String>>,
+    pub type_provenance: HashMap<SymbolId, TypeProvenance>,
+    pub package_ranges: Vec<PackageRange>,
+    pub regex_spans: Vec<Span>,
+    pub app_surface_consumers: Vec<String>,
+    pub witnesses: crate::witnesses::WitnessBag,
+    pub package_framework: HashMap<String, crate::witnesses::FrameworkFact>,
+    pub provisional_dispatches: Vec<ProvisionalDispatch>,
+    pub gated_param_types: Vec<ReceiverGated<TypeConstraint>>,
+    pub attr_projections: Vec<AttrProjection>,
+}
+
+/// One projection of a field/attr decl — the entity that encodes group
+/// membership directly. A decl is ONE name spelled several ways; each
+/// spelling is minted AT BUILD by the synthesis that knows the
+/// semantics: Moo/Moose/Mojo::Base `has` mints `CtorKey` + `Accessor` +
+/// `InternalKey` (hash-backed repr — the repr gate IS whether
+/// `InternalKey` was minted), Corinna fields mint `CtorKey`/`Accessor`
+/// only (fields are not hash entries), plugins enroll name-mapped
+/// accessors via `EmitAction::Method.attr`. Group features (rename /
+/// references union) walk the stored projections — no scattered
+/// query-time re-derivation.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct AttrProjection {
+    pub class: String,
+    pub attr: String,
+    pub kind: AttrProjectionKind,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum AttrProjectionKind {
+    /// `Class->new(attr => …)` constructor key.
+    CtorKey,
+    /// `$self->{attr}` internal hash slot. Minted ONLY by hash-backed
+    /// synthesis; membership matching is STRICT `HashKeyOwner::Class`
+    /// equality (never `found_by` — that broadening would leak other
+    /// subs' same-named arg keys into the group).
+    InternalKey,
+    /// An accessor method; `affix = (prefix, suffix)` when the name
+    /// embeds the attr (rename re-derives it), `None` = references-only.
+    Accessor {
+        method: String,
+        affix: Option<(String, String)>,
+    },
+}
+
+impl AttrProjection {
+    /// Derive the accessor affix by locating the attr inside the method
+    /// name (`_has_token` = `_has` + `_token`). Done once, at minting.
+    pub fn accessor(class: String, attr: String, method: String) -> Self {
+        let affix = method.find(attr.as_str()).map(|i| {
+            (
+                method[..i].to_string(),
+                method[i + attr.len()..].to_string(),
+            )
+        });
+        AttrProjection {
+            class,
+            attr,
+            kind: AttrProjectionKind::Accessor { method, affix },
+        }
+    }
+}
+
+/// Cross-file-facing facts of a field group — see
+/// `FileAnalysis::field_projections_at`.
+pub struct FieldProjections {
+    pub class: String,
+    pub bare: String,
+    pub has_param: bool,
+    pub has_reader: bool,
+    /// An `InternalKey` projection was minted (hash-backed repr) —
+    /// `$obj->{attr}` slot pokes join the group, cross-file included.
+    pub has_internal: bool,
+    /// Origin-file variable spellings (decl + body uses), bare-adjusted.
+    pub variable_spans: Vec<Span>,
+    /// Plugin-declared, name-mapped members (`predicate => has_size`).
+    /// `affix` = `(prefix, suffix)` when the method name embeds the attr —
+    /// rename re-derives the name; `None` = references-only member.
+    pub mapped: Vec<MappedMember>,
+}
+
+#[derive(Debug, Clone)]
+pub struct MappedMember {
+    pub method: String,
+    pub affix: Option<(String, String)>,
+}
+
+/// One field/attr-group entity: the facts the projection union needs.
+/// Corinna fields carry the field symbol (variable spellings live on it);
+/// Moo `has` attrs have no variable side — their decl token is the
+/// synthesized pair's selection span.
+struct FieldGroup {
+    field_sym: Option<SymbolId>,
+    decl_span: Option<Span>,
+    class: String,
+    bare: String,
+    has_param: bool,
+    has_reader: bool,
+}
+
 impl FileAnalysis {
     /// Create a new FileAnalysis with indices built from the raw tables.
-    pub fn new(
-        scopes: Vec<Scope>,
-        symbols: Vec<Symbol>,
-        refs: Vec<Ref>,
-        fold_ranges: Vec<FoldRange>,
-        imports: Vec<Import>,
-        call_bindings: Vec<CallBinding>,
-        package_parents: HashMap<String, Vec<String>>,
-        method_call_bindings: Vec<MethodCallBinding>,
-        framework_imports: HashSet<String>,
-        export: Vec<String>,
-        export_ok: Vec<String>,
-        plugin_namespaces: Vec<PluginNamespace>,
-        package_uses: HashMap<String, Vec<String>>,
-        type_provenance: HashMap<SymbolId, TypeProvenance>,
-        package_ranges: Vec<PackageRange>,
-    ) -> Self {
+    /// `finalize_post_walk` runs on the builder path to seal baseline
+    /// counts and resolve text-based MCB; hand-crafted test FAs skip it
+    /// and push witnesses directly.
+    pub fn new(parts: FileAnalysisParts) -> Self {
+        let FileAnalysisParts {
+            scopes,
+            symbols,
+            refs,
+            fold_ranges,
+            imports,
+            call_bindings,
+            package_parents,
+            method_call_bindings,
+            framework_imports,
+            export,
+            export_ok,
+            export_tags,
+            reexport_modules,
+            plugin_namespaces,
+            package_uses,
+            type_provenance,
+            package_ranges,
+            regex_spans,
+            app_surface_consumers,
+            mut witnesses,
+            package_framework,
+            provisional_dispatches,
+            gated_param_types,
+            attr_projections,
+        } = parts;
+        witnesses.rebuild_index();
         let mut fa = FileAnalysis {
             scopes,
             symbols,
@@ -2030,24 +2354,25 @@ impl FileAnalysis {
             call_bindings,
             method_call_bindings,
             package_ranges,
-            regex_spans: Vec::new(),
+            regex_spans,
             package_parents,
-            app_surface_consumers: Vec::new(),
+            app_surface_consumers,
             package_uses,
             framework_imports,
             export,
             export_ok,
-            export_tags: HashMap::new(),
-            reexport_modules: Vec::new(),
+            export_tags,
+            reexport_modules,
             plugin_namespaces,
             type_provenance,
-            witnesses: crate::witnesses::WitnessBag::new(),
-            package_framework: HashMap::new(),
+            witnesses,
+            package_framework,
             base_symbol_count: 0,
             base_witness_count: 0,
             base_ref_count: 0,
-            provisional_dispatches: Vec::new(),
-            gated_param_types: Vec::new(),
+            provisional_dispatches,
+            gated_param_types,
+            attr_projections,
             scope_starts: Vec::new(),
             symbols_by_name: HashMap::new(),
             symbols_by_scope: HashMap::new(),
@@ -2057,11 +2382,6 @@ impl FileAnalysis {
             export_lookup: HashSet::new(),
         };
         fa.build_indices();
-        // The builder path overwrites `witnesses` with its already-populated
-        // bag after construction. Hand-crafted FAs (tests) push witnesses
-        // directly via `fa.witnesses.push(...)` or `push_type_constraint`.
-        // `finalize_post_walk` runs on the builder path to seal baseline
-        // counts and resolve text-based MCB; tests skip it.
         fa
     }
 
@@ -2104,7 +2424,7 @@ impl FileAnalysis {
     ///
     /// Contract: if the invocant class does not infer, store `None` (honest
     /// miss). No name-only fallback — that re-introduces the `->new` flood.
-    pub(crate) fn stamp_method_call_targets(&mut self, module_index: Option<&ModuleIndex>) {
+    pub(crate) fn stamp_method_call_targets(&mut self, module_index: Option<&dyn CrossFileLookup>) {
         // Collect resolutions first; `method_call_invocant_class` /
         // `resolve_method_in_ancestors` borrow `&self`, so we can't hold a
         // `&mut self.refs[i]` while calling them.
@@ -2116,7 +2436,7 @@ impl FileAnalysis {
             let target = self
                 .method_call_invocant_class(r, module_index)
                 .map(|cn| {
-                    match self.resolve_method_in_ancestors(&cn, &r.target_name, module_index) {
+                    match self.resolve_method_in_ancestors(&cn, r.unqualified_target_name(), module_index) {
                         Some(MethodResolution::Local { sym_id, .. }) => MethodTarget::Local {
                             sym_id,
                             invocant_class: cn,
@@ -2152,7 +2472,7 @@ impl FileAnalysis {
     /// same routine runs from enrichment with `module_index =
     /// Some(_)` to fill cross-file gaps. Idempotent — only None-
     /// owner refs are touched, so a second run leaves them alone.
-    fn fix_chain_receiver_hash_key_owners(&mut self, module_index: Option<&ModuleIndex>) {
+    fn fix_chain_receiver_hash_key_owners(&mut self, module_index: Option<&dyn CrossFileLookup>) {
         let mut owner_fixes: Vec<(usize, HashKeyOwner)> = Vec::new();
         for (i, r) in self.refs.iter().enumerate() {
             if !matches!(r.kind, RefKind::HashKeyAccess { owner: None, .. }) {
@@ -2385,7 +2705,7 @@ impl FileAnalysis {
     /// (`imported_names`) is untouched; it binds whatever the surface reports.
     pub fn export_surface_with_index(
         &self,
-        module_index: &ModuleIndex,
+        module_index: &dyn CrossFileLookup,
     ) -> ExportSurface<'_> {
         if self.reexport_modules.is_empty() {
             return self.export_surface();
@@ -2399,8 +2719,8 @@ impl FileAnalysis {
         // one shared traversal (cycle-bounded + fan-out-capped). Own surface is
         // already seeded above, so we seed the queue with `reexport_modules`.
         module_index.for_each_reexport_module(
-            self.reexport_modules.iter().cloned(),
-            |cached| {
+            self.reexport_modules.to_vec(),
+            &mut |cached| {
                 let a = &cached.analysis;
                 for n in &a.export {
                     if !default_set.contains(n) {
@@ -2572,22 +2892,33 @@ impl FileAnalysis {
     /// value is a cross-file method chain (`my $x = Foo->new->bar`) resolves —
     /// the chase keeps the index when it crosses the `Variable` edge instead of
     /// dead-ending. Pass the index from query-time callers (hover/completion);
-    /// the bare wrapper keeps `None` for build-time / single-file callers. Both
-    /// now carry `package_parents` (previously dropped to empty).
+    /// the bare wrapper keeps `None` for build-time / single-file callers.
+    /// The registry-query context over this analysis. Every bag query
+    /// threads the same field set; build it here so adding a field is one
+    /// edit, not one per call site.
+    pub(crate) fn bag_context<'a>(
+        &'a self,
+        module_index: Option<&'a dyn CrossFileLookup>,
+    ) -> crate::witnesses::BagContext<'a> {
+        crate::witnesses::BagContext {
+            scopes: &self.scopes,
+            package_framework: &self.package_framework,
+            module_index,
+            package_parents: &self.package_parents,
+            app_surface_consumers: &self.app_surface_consumers,
+        }
+    }
+
     pub fn inferred_type_via_bag_ctx(
         &self,
         var_name: &str,
         point: Point,
-        module_index: Option<&ModuleIndex>,
+        module_index: Option<&dyn CrossFileLookup>,
     ) -> Option<InferredType> {
         let scope = self.scope_at(point)?;
         if let Some(t) = crate::witnesses::query_variable_type(
             &self.witnesses,
-            &self.scopes,
-            &self.package_framework,
-            &self.package_parents,
-            &self.app_surface_consumers,
-            module_index,
+            &self.bag_context(module_index),
             var_name,
             scope,
             point,
@@ -2603,16 +2934,15 @@ impl FileAnalysis {
     /// Resolve a `param_types()` role-contract TC for `var` at `point`: find a
     /// gated TC whose scope is on the chain and whose variable matches, then
     /// read its inner type ONLY if the enclosing package `isa` the rule's
-    /// gate (`in_role`), resolved cross-file via `resolve_for`. The gate makes
-    /// a controller whose `Catalyst::Controller` ancestry is established
-    /// through a cross-file base type its `$c` — the build-time local-only
-    /// ancestry check this replaces would have dropped it.
+    /// gate (`in_role`), resolved cross-file via `resolve_for` — so a
+    /// controller whose `Catalyst::Controller` ancestry runs through a
+    /// cross-file base still types its `$c`.
     fn gated_param_type_for(
         &self,
         var: &str,
         scope: ScopeId,
         point: Point,
-        module_index: Option<&ModuleIndex>,
+        module_index: Option<&dyn CrossFileLookup>,
     ) -> Option<InferredType> {
         if self.gated_param_types.is_empty() {
             return None;
@@ -2643,22 +2973,16 @@ impl FileAnalysis {
     pub fn method_call_return_type_via_bag(
         &self,
         ref_idx: usize,
-        module_index: Option<&ModuleIndex>,
+        module_index: Option<&dyn CrossFileLookup>,
     ) -> Option<InferredType> {
         use crate::witnesses::{
-            BagContext, FrameworkFact, ReducedValue, ReducerQuery, ReducerRegistry,
+            FrameworkFact, ReducedValue, ReducerQuery, ReducerRegistry,
             WitnessAttachment,
         };
 
         let att = WitnessAttachment::Expression(crate::witnesses::RefIdx(ref_idx as u32));
         let reg = ReducerRegistry::with_defaults();
-        let ctx = BagContext {
-            scopes: &self.scopes,
-            package_framework: &self.package_framework,
-            module_index,
-            package_parents: &self.package_parents,
-            app_surface_consumers: &self.app_surface_consumers,
-            };
+        let ctx = self.bag_context(module_index);
         // Thread the receiver's resolved type so a receiver-relative
         // return (`Operator(RowOf(Receiver))` — DBIC `find`/`search`)
         // projects at query time, exactly as the build-time chain typer
@@ -2722,21 +3046,15 @@ impl FileAnalysis {
     fn bag_query_expr_span(
         &self,
         span: Span,
-        module_index: Option<&ModuleIndex>,
+        module_index: Option<&dyn CrossFileLookup>,
     ) -> Option<InferredType> {
         use crate::witnesses::{
-            BagContext, FrameworkFact, ReducedValue, ReducerQuery, ReducerRegistry,
+            FrameworkFact, ReducedValue, ReducerQuery, ReducerRegistry,
             WitnessAttachment,
         };
         let att = WitnessAttachment::Expr(span);
         let reg = ReducerRegistry::with_defaults();
-        let ctx = BagContext {
-            scopes: &self.scopes,
-            package_framework: &self.package_framework,
-            module_index,
-            package_parents: &self.package_parents,
-            app_surface_consumers: &self.app_surface_consumers,
-        };
+        let ctx = self.bag_context(module_index);
         let q = ReducerQuery {
             attachment: &att,
             point: None,
@@ -2770,7 +3088,7 @@ impl FileAnalysis {
     pub fn expr_type_at_span(
         &self,
         span: Span,
-        module_index: Option<&ModuleIndex>,
+        module_index: Option<&dyn CrossFileLookup>,
     ) -> Option<InferredType> {
         // Depth backstop for the `expr_type_at_span` ⇄
         // `method_call_return_type_via_bag` mutual recursion (the latter
@@ -2847,13 +3165,7 @@ impl FileAnalysis {
         sub_name: &str,
         arity: Option<u32>,
     ) -> Option<InferredType> {
-        let ctx = crate::witnesses::BagContext {
-            scopes: &self.scopes,
-            package_framework: &self.package_framework,
-            module_index: None,
-            package_parents: &self.package_parents,
-            app_surface_consumers: &self.app_surface_consumers,
-            };
+        let ctx = self.bag_context(None);
         crate::witnesses::query_sub_return_type(
             &self.witnesses,
             &self.symbols,
@@ -2939,7 +3251,7 @@ impl FileAnalysis {
     /// module index is available.
     pub fn enrich_imported_types_with_keys(
         &mut self,
-        module_index: Option<&ModuleIndex>,
+        module_index: Option<&dyn CrossFileLookup>,
     ) {
         // Truncate back to baseline so repeated enrichment doesn't
         // accumulate duplicates. Enrichment pushes Variable witnesses
@@ -3050,7 +3362,7 @@ impl FileAnalysis {
             .collect();
         let binding_by_var: std::collections::HashMap<String, String> = self.call_bindings.iter()
             .filter_map(|b| {
-                let bare = b.func_name.rsplit("::").next().unwrap_or(&b.func_name).to_string();
+                let bare = split_qualified(&b.func_name).1.to_string();
                 if imported_keyed_subs.contains(&bare) {
                     Some((b.variable.clone(), bare))
                 } else {
@@ -3161,7 +3473,7 @@ impl FileAnalysis {
 
     /// Resolve method call bindings to type constraints.
     /// Called in local post-pass (None) and cross-file enrichment (Some(module_index)).
-    fn resolve_method_call_types(&mut self, module_index: Option<&ModuleIndex>) {
+    fn resolve_method_call_types(&mut self, module_index: Option<&dyn CrossFileLookup>) {
         let bindings = self.method_call_bindings.clone();
         for binding in &bindings {
             // Skip if this variable already has a type at this point
@@ -3242,7 +3554,7 @@ impl FileAnalysis {
     fn resolve_dispatch_candidate<'a>(
         &'a self,
         gated: &'a ProvisionalDispatch,
-        module_index: Option<&ModuleIndex>,
+        module_index: Option<&dyn CrossFileLookup>,
     ) -> GateResult<&'a DispatchCandidate> {
         let recv = self.dispatch_receiver_class(gated, module_index);
         gated.resolve_for(recv.as_deref(), &self.package_parents, module_index)
@@ -3255,7 +3567,7 @@ impl FileAnalysis {
     fn dispatch_receiver_class(
         &self,
         gated: &ProvisionalDispatch,
-        module_index: Option<&ModuleIndex>,
+        module_index: Option<&dyn CrossFileLookup>,
     ) -> Option<String> {
         gated.receiver_hint().cloned().or_else(|| {
             let call_span = gated.call_span();
@@ -3273,14 +3585,14 @@ impl FileAnalysis {
 
     /// Query-time handler call-sites in THIS file: every gated dispatch
     /// candidate whose receiver isa-resolves the gate, projected to the data
-    /// `refs_to` and goto-def need. This is the single seam that replaces
-    /// enrichment-eager promotion — both `resolve.rs` (handler references)
-    /// and dispatch goto-def call it, so they can't drift. Candidates ride
-    /// the cache; resolution is lazy, so non-open workspace/dependency files
-    /// surface exactly like open ones (`docs/adr/receiver-gated-dispatch.md`).
+    /// `refs_to` and goto-def need. The single seam for both — `resolve.rs`
+    /// (handler references) and dispatch goto-def call it, so they can't
+    /// drift. Candidates ride the cache; resolution is lazy, so non-open
+    /// workspace/dependency files surface exactly like open ones
+    /// (`docs/adr/receiver-gated-dispatch.md`).
     pub fn applicable_dispatches(
         &self,
-        module_index: Option<&ModuleIndex>,
+        module_index: Option<&dyn CrossFileLookup>,
     ) -> Vec<AppliedDispatch> {
         // Avoid double-counting a site the emit-hook path already materialized
         // as a real `DispatchCall` ref (files whose triggers fired).
@@ -3320,7 +3632,7 @@ impl FileAnalysis {
     pub fn dispatch_at(
         &self,
         point: Point,
-        module_index: Option<&ModuleIndex>,
+        module_index: Option<&dyn CrossFileLookup>,
     ) -> Option<AppliedDispatch> {
         for gated in &self.provisional_dispatches {
             // `call_span` (a gate-input accessor) spans the whole `verb('name')`
@@ -3346,7 +3658,7 @@ impl FileAnalysis {
     /// negative and never appears here.
     pub fn untyped_dispatches(
         &self,
-        module_index: Option<&ModuleIndex>,
+        module_index: Option<&dyn CrossFileLookup>,
     ) -> Vec<UntypedDispatch> {
         let mut out = Vec::new();
         for gated in &self.provisional_dispatches {
@@ -3426,194 +3738,6 @@ impl FileAnalysis {
         }
     }
 
-    /// Resolve the type of an arbitrary CST expression node.
-    ///
-    /// Recursive tree walk that composes existing atoms:
-    /// - `scalar` → `inferred_type(var_text, point)`
-    /// - bareword (class name) → `Object(ClassName)`
-    /// - `method_call_expression` → resolve invocant → find method → return type
-    /// - `function_call_expression` → `sub_return_type(name)`
-    /// - `hash_element_expression` → resolve base (for chaining)
-    ///
-    /// Used at query time (completion, goto-def, hover) — not during the build walk.
-    pub fn resolve_expression_type(
-        &self,
-        node: tree_sitter::Node,
-        source: &[u8],
-        module_index: Option<&ModuleIndex>,
-    ) -> Option<InferredType> {
-        // Tree-free first: the builder recorded the type of every
-        // meaningful expression at its span (`Expr(span)` + the
-        // `Expression(refidx)` call axis). Read it back by span — the
-        // same chase `method_call_invocant_class` uses. The node-kind
-        // walk below is the degradation path for the raw-cursor /
-        // incomplete-ERROR case completion hits where no witness was
-        // recorded (a node that never existed at build time).
-        let span = Span {
-            start: node.start_position(),
-            end: node.end_position(),
-        };
-        if let Some(t) = self.expr_type_at_span(span, module_index) {
-            return Some(t);
-        }
-        let point = node.start_position();
-        match node.kind() {
-            "scalar" => {
-                let text = node.utf8_text(source).ok()?;
-                // Route scalar-type resolution through the witness bag so
-                // framework / branch / arity rules refine the answer. Keep the
-                // index so a role-contract param (`$c`) resolves through
-                // cross-file ancestry, not just the local `package_parents`.
-                self.inferred_type_via_bag_ctx(text, point, module_index)
-            }
-            "package" | "bareword" => {
-                // Bareword = class name
-                let text = node.utf8_text(source).ok()?;
-                Some(InferredType::ClassName(text.to_string()))
-            }
-            "array_element_expression" => {
-                // `$arr[N]` — look up `@arr`'s Sequence shape via the
-                // bag, project the index. The bag answer is whatever
-                // the walker's last `push` / `my @arr = (...)`
-                // contribution left on `Variable{"@arr", scope}`.
-                let arr = node.child_by_field_name("array")?;
-                let name = arr
-                    .named_child(0)
-                    .and_then(|n| n.utf8_text(source).ok())?;
-                let idx_node = node.child_by_field_name("index")?;
-                let idx: i32 = idx_node.utf8_text(source).ok()?.parse().ok()?;
-                let arr_var = format!("@{}", name);
-                self.inferred_type_via_bag(&arr_var, point)
-                    .and_then(|t| t.element_at(idx).cloned())
-            }
-            "method_call_expression" => {
-                let invocant_node = node.child_by_field_name("invocant")?;
-                let invocant_type = self.resolve_expression_type(invocant_node, source, module_index)?;
-                let class_name = invocant_type.class_name()?;
-                let method_name = node.child_by_field_name("method")?;
-                let method_text = method_name.utf8_text(source).ok()?;
-                // Constructor call returns Object(ClassName)
-                if method_text == "new" {
-                    return Some(InferredType::ClassName(class_name.to_string()));
-                }
-                let arg_count = self.count_call_args(node);
-                self.find_method_return_type(class_name, method_text, module_index, Some(arg_count))
-            }
-            "function_call_expression" | "ambiguous_function_call_expression" => {
-                let func_node = node.child_by_field_name("function")?;
-                let name = func_node.utf8_text(source).ok()?;
-                // Route through the arity-aware helper so fluent
-                // arity dispatch (`return X unless @_`) can pick the
-                // right branch when the caller's arg count is known.
-                let arg_count = self.count_call_args(node) as u32;
-                self.sub_return_type_at_arity(name, Some(arg_count))
-                    .or_else(|| builtin_return_type(name))
-            }
-            "func1op_call_expression" | "func0op_call_expression" => {
-                let name = node.child(0)?.utf8_text(source).ok()?;
-                builtin_return_type(name)
-            }
-            "hash_element_expression" => {
-                // For chaining: resolve the base expression
-                let base = node.named_child(0)?;
-                self.resolve_expression_type(base, source, module_index)
-            }
-            _ => None,
-        }
-    }
-
-    /// Resolve the hash key owner from a tree node at a given point.
-    ///
-    /// Finds the enclosing `hash_element_expression`, resolves its base expression
-    /// type, and returns the appropriate `HashKeyOwner`. Used by goto-def,
-    /// references, completion, and highlights for chained hash access like
-    /// `$calc->get_self->get_config->{host}`.
-    pub fn resolve_hash_owner_from_tree(
-        &self,
-        tree: &tree_sitter::Tree,
-        source: &[u8],
-        point: Point,
-        module_index: Option<&ModuleIndex>,
-    ) -> Option<HashKeyOwner> {
-        let hash_elem = tree.root_node()
-            .descendant_for_point_range(point, point)
-            .and_then(|n| find_ancestor(n, "hash_element_expression"))?;
-        let base = hash_elem.named_child(0)?;
-        let ty = self.resolve_expression_type(base, source, module_index)?;
-
-        // Extract the function/method name for Sub owner
-        let sub_name = match base.kind() {
-            "method_call_expression" => base.child_by_field_name("method")
-                .and_then(|n| n.utf8_text(source).ok())
-                .map(|s| s.to_string()),
-            "function_call_expression" | "ambiguous_function_call_expression" =>
-                base.child_by_field_name("function")
-                    .and_then(|n| n.utf8_text(source).ok())
-                    .map(|s| s.to_string()),
-            _ => None,
-        };
-
-        if let Some(name) = sub_name {
-            // Try each package the sub might belong to. In practice, the sub
-            // is either defined locally (package comes from its Symbol) or
-            // imported (package = None, matching the enrichment synthetic def).
-            let mut candidate_owners: Vec<HashKeyOwner> = Vec::new();
-            for sym in &self.symbols {
-                if (sym.kind == SymKind::Sub || sym.kind == SymKind::Method) && sym.name == name {
-                    candidate_owners.push(HashKeyOwner::Sub {
-                        package: sym.package.clone(),
-                        name: name.clone(),
-                    });
-                }
-            }
-            // Fallback: None-package owner (matches imported synthetic defs).
-            candidate_owners.push(HashKeyOwner::Sub { package: None, name: name.clone() });
-            for sub_owner in candidate_owners {
-                if !self.hash_key_defs_for_owner(&sub_owner).is_empty() {
-                    return Some(sub_owner);
-                }
-            }
-        }
-
-        // Hash-key context: read `hash_key_class()` (= row-class
-        // for Parametric, dispatch class else) instead of bare
-        // `class_name()`. CLAUDE.md invariant #10 — never special-
-        // case for a particular shape; the type already carries
-        // the per-axis answer. For non-Parametric this is
-        // equivalent to `class_name()`; for Parametric it's the
-        // crucial narrowing to the type's row-class arg.
-        if let Some(cn) = ty.hash_key_class() {
-            return Some(HashKeyOwner::Class(cn.to_string()));
-        }
-
-        None
-    }
-
-    /// Check if cursor is on a bareword or string inside call arguments.
-    /// Returns the text if so (could be a named arg key).
-    fn call_arg_key_at(&self, tree: &tree_sitter::Tree, source: &[u8], point: Point) -> Option<String> {
-        let node = tree.root_node().descendant_for_point_range(point, point)?;
-        let key_node = match node.kind() {
-            "autoquoted_bareword" => node,
-            "string_literal" | "interpolated_string_literal" => node,
-            _ => {
-                let parent = node.parent()?;
-                if matches!(parent.kind(), "string_literal" | "interpolated_string_literal") {
-                    parent
-                } else {
-                    return None;
-                }
-            }
-        };
-        let text = key_node.utf8_text(source).ok()?;
-        if (text.starts_with('\'') || text.starts_with('"')) && text.len() >= 2 {
-            Some(text[1..text.len()-1].to_string())
-        } else if text.starts_with('\'') || text.starts_with('"') {
-            None
-        } else {
-            Some(text.to_string())
-        }
-    }
 
     /// Bag-routed query: "what does `Symbol(sym_id)` return at this
     /// arity?" Runs through the full reducer registry — Plugin
@@ -3639,21 +3763,15 @@ impl FileAnalysis {
         &self,
         sym_id: SymbolId,
         arg_count: Option<usize>,
-        module_index: Option<&ModuleIndex>,
+        module_index: Option<&dyn CrossFileLookup>,
     ) -> Option<InferredType> {
         use crate::witnesses::{
-            BagContext, FrameworkFact, ReducedValue, ReducerQuery, ReducerRegistry,
+            FrameworkFact, ReducedValue, ReducerQuery, ReducerRegistry,
             WitnessAttachment,
         };
         let att = WitnessAttachment::Symbol(sym_id);
         let reg = ReducerRegistry::with_defaults();
-        let ctx = BagContext {
-            scopes: &self.scopes,
-            package_framework: &self.package_framework,
-            module_index,
-            package_parents: &self.package_parents,
-            app_surface_consumers: &self.app_surface_consumers,
-            };
+        let ctx = self.bag_context(module_index);
         // Default the arity hint from the sym's own param count when
         // the caller didn't supply one — the sym's params count IS its
         // native arity. Mojo writer (params=1) answers its
@@ -3705,11 +3823,11 @@ impl FileAnalysis {
         &self,
         class_name: &str,
         method_name: &str,
-        module_index: Option<&ModuleIndex>,
+        module_index: Option<&dyn CrossFileLookup>,
         arg_count: Option<usize>,
     ) -> Option<InferredType> {
         use crate::witnesses::{
-            BagContext, FrameworkFact, ReducedValue, ReducerQuery, ReducerRegistry,
+            FrameworkFact, ReducedValue, ReducerQuery, ReducerRegistry,
             WitnessAttachment,
         };
         let framework = self
@@ -3721,13 +3839,7 @@ impl FileAnalysis {
             class: class_name.to_string(),
             name: method_name.to_string(),
         };
-        let ctx = BagContext {
-            scopes: &self.scopes,
-            package_framework: &self.package_framework,
-            module_index,
-            package_parents: &self.package_parents,
-            app_surface_consumers: &self.app_surface_consumers,
-        };
+        let ctx = self.bag_context(module_index);
         // Default receiver = `ClassName(class_name)` so that
         // `ReturnExpr::Receiver` evaluates correctly for class-keyed
         // method-return queries that don't have a specific
@@ -3751,43 +3863,13 @@ impl FileAnalysis {
         None
     }
 
-    /// Count arguments in a method/function call expression (excluding invocant).
-    pub(crate) fn count_call_args(&self, node: tree_sitter::Node) -> usize {
-        let args = match node.child_by_field_name("arguments") {
-            Some(a) => a,
-            None => return 0,
-        };
-        match args.kind() {
-            "parenthesized_expression" | "list_expression" => args.named_child_count(),
-            _ => 1, // single argument
-        }
-    }
-
-    /// Find a `:param` field in a class by its bare name (without sigil).
-    fn find_param_field(&self, class_name: &str, key: &str) -> Option<Span> {
-        for sym in &self.symbols {
-            if matches!(sym.kind, SymKind::Field) {
-                if let SymbolDetail::Field { ref attributes, .. } = sym.detail {
-                    if attributes.contains(&"param".to_string())
-                        && self.symbol_in_class(sym.id, class_name)
-                    {
-                        if sym.bare_name() == key {
-                            return Some(sym.selection_span);
-                        }
-                    }
-                }
-            }
-        }
-        None
-    }
-
     /// Format a method completion detail string, appending return type if known.
     fn method_detail(
         &self,
         class_name: &str,
         method_name: &str,
         defining_class: Option<&str>,
-        module_index: Option<&ModuleIndex>,
+        module_index: Option<&dyn CrossFileLookup>,
     ) -> String {
         let base = if let Some(dc) = defining_class {
             if dc != class_name {
@@ -3850,14 +3932,14 @@ impl FileAnalysis {
         &self,
         class_name: &str,
         method_name: &str,
-        module_index: Option<&ModuleIndex>,
+        module_index: Option<&dyn CrossFileLookup>,
     ) -> bool {
         if self.method_opaque_return(class_name, method_name) {
             return true;
         }
         let Some(idx) = module_index else { return false };
         let mut found = false;
-        idx.for_each_entity_bridged_to(class_name, |_mod, _cached, sym| {
+        idx.for_each_entity_bridged_to(class_name, &mut |_mod, _cached, sym| {
             if found { return; }
             if sym.name != method_name { return; }
             if !matches!(sym.kind, SymKind::Sub | SymKind::Method) { return; }
@@ -3872,7 +3954,7 @@ impl FileAnalysis {
     pub fn complete_methods_for_class(
         &self,
         class_name: &str,
-        module_index: Option<&ModuleIndex>,
+        module_index: Option<&dyn CrossFileLookup>,
     ) -> Vec<CompletionCandidate> {
         let mut candidates = Vec::new();
         let mut seen_names: HashSet<String> = HashSet::new();
@@ -3905,7 +3987,7 @@ impl FileAnalysis {
         &self,
         original_class: &str,
         class_name: &str,
-        module_index: Option<&ModuleIndex>,
+        module_index: Option<&dyn CrossFileLookup>,
         candidates: &mut Vec<CompletionCandidate>,
         seen_names: &mut HashSet<String>,
         depth: usize,
@@ -3980,7 +4062,7 @@ impl FileAnalysis {
             // Collect into a temporary list to avoid borrow-checker
             // issues with the closure capturing &mut seen_names/candidates.
             let mut bridged: Vec<(String, SymKind, Option<SymbolDetail>, Option<InferredType>)> = Vec::new();
-            idx.for_each_entity_bridged_to(class_name, |_mod, _cached, sym| {
+            idx.for_each_entity_bridged_to(class_name, &mut |_mod, _cached, sym| {
                 if !matches!(sym.kind, SymKind::Sub | SymKind::Method) { return; }
                 bridged.push((
                     sym.name.clone(),
@@ -4155,11 +4237,15 @@ impl FileAnalysis {
     /// layer (rule #3). Callers in `symbols.rs` / `cursor_context.rs`
     /// compose this; they don't repeat the rules.
     pub fn invocant_text_to_class(&self, invocant: Option<&str>, point: Point) -> Option<String> {
+        use crate::conventions::InvocantText;
         let text = invocant?;
-        if text == "$self" || text == "__PACKAGE__" {
+        if crate::conventions::is_conventional_invocant_name(text) {
             return self.package_at(point).map(|s| s.to_string());
         }
-        if text.starts_with('$') {
+        match InvocantText::parse(text) {
+            InvocantText::CurrentPackage | InvocantText::PositionalReceiver => {
+                self.package_at(point).map(|s| s.to_string())
+            }
             // Use `InferredType::class_name()` so BOTH `ClassName` and
             // `FirstParam` resolve to their class — without this, a
             // `my ($c) = @_` invocant in a controller method (typed
@@ -4168,13 +4254,12 @@ impl FileAnalysis {
             // Method completion on the same `$c` already uses this
             // accessor; routing through it here keeps the two paths in
             // sync. Rule #3.
-            return self.inferred_type_via_bag(text, point)
-                .and_then(|t| t.class_name().map(str::to_string));
+            InvocantText::Scalar(_) => self
+                .inferred_type_via_bag(text, point)
+                .and_then(|t| t.class_name().map(str::to_string)),
+            InvocantText::NonScalar(_) => None,
+            InvocantText::Bareword(b) => Some(b.to_string()),
         }
-        if text.starts_with('@') || text.starts_with('%') {
-            return None;
-        }
-        Some(text.to_string())
     }
 
     /// Find all symbols with a given name.
@@ -4245,10 +4330,26 @@ impl FileAnalysis {
         self.symbols.iter().find(|s| contains_point(&s.selection_span, point))
     }
 
+    /// The build-time-resolved owner of the hash key under the cursor —
+    /// from the access ref (`$cfg->{key}`) or the key's def symbol (Moo
+    /// `has`, return-shape keys). `None` = the key is lexical/unowned and
+    /// cross-file queries have nothing to pin on.
+    pub fn hash_key_owner_at(&self, point: Point) -> Option<HashKeyOwner> {
+        if let Some(RefKind::HashKeyAccess { owner: Some(o), .. }) =
+            self.ref_at(point).map(|r| &r.kind)
+        {
+            return Some(o.clone());
+        }
+        match self.symbol_at(point).map(|s| &s.detail) {
+            Some(SymbolDetail::HashKeyDef { owner, .. }) => Some(owner.clone()),
+            _ => None,
+        }
+    }
+
     // ---- High-level queries ----
 
     /// Go-to-definition: resolve the symbol at cursor to its definition span.
-    pub fn find_definition(&self, point: Point, tree: Option<&tree_sitter::Tree>, source_bytes: Option<&[u8]>, module_index: Option<&ModuleIndex>) -> Option<Span> {
+    pub fn find_definition(&self, point: Point, _module_index: Option<&dyn CrossFileLookup>) -> Option<Span> {
         // 1. Check if cursor is on a ref
         if let Some(r) = self.ref_at(point) {
             match &r.kind {
@@ -4279,53 +4380,6 @@ impl FileAnalysis {
                     // the LSP adapter (symbols::find_definition).
                 }
                 RefKind::MethodCall { .. } => {
-                    // Single-source the invocant class off the build-time
-                    // frozen dispatch edge (NAV unification) — the same edge
-                    // refs_to / hover read, so all three agree. `None` edge
-                    // means the invocant didn't infer: honest miss.
-                    let class_name = r
-                        .resolved_method_target
-                        .as_ref()
-                        .map(|t| t.invocant_class().to_string());
-
-                    // Cursor on a named arg key (not the method name):
-                    // resolve to its hash-key def or :param field.
-                    //
-                    // The hash-key-arg owner is per-flavor + method-aware:
-                    // `ParametricType::method_arg_owner(method)` —
-                    // `Some(owner)` means the flavor claims these args
-                    // (DBIC ResultSet → row class for search/find/create;
-                    // None for count/exists). When unclaimed, fall back to
-                    // the receiver's class (constructor keys on
-                    // `bless {} 'Foo'`). Method dispatch still uses
-                    // `class_name()`, so `$rs->search` resolves against the
-                    // ResultSet base.
-                    if let (Some(t), Some(s)) = (tree, source_bytes) {
-                        if let Some(key_name) = self.call_arg_key_at(t, s, point) {
-                            let owner = self
-                                .method_call_invocant_type(r, module_index)
-                                .as_ref()
-                                .and_then(|ty| ty.as_parametric())
-                                .and_then(|p| p.method_arg_owner(&r.target_name))
-                                .or_else(|| {
-                                    class_name
-                                        .as_ref()
-                                        .map(|c| HashKeyOwner::Class(c.clone()))
-                                });
-                            if let Some(owner) = owner {
-                                for def in self.hash_key_defs_for_owner(&owner) {
-                                    if def.name == key_name {
-                                        return Some(def.selection_span);
-                                    }
-                                }
-                                if let HashKeyOwner::Class(cn) = &owner {
-                                    if let Some(span) = self.find_param_field(cn, &key_name) {
-                                        return Some(span);
-                                    }
-                                }
-                            }
-                        }
-                    }
 
                     // Method dispatch is the frozen edge, full stop.
                     // `Local` lands on the local symbol; `CrossFile`
@@ -4354,12 +4408,7 @@ impl FileAnalysis {
                 }
                 RefKind::HashKeyAccess { ref owner, .. } => {
                     // Try the pre-resolved owner first
-                    let resolved_owner = owner.clone().or_else(|| {
-                        let tree = tree?;
-                        let source = source_bytes?;
-                        self.resolve_hash_owner_from_tree(tree, source, r.span.start, module_index)
-                    });
-                    if let Some(ref owner) = resolved_owner {
+                    if let Some(ref owner) = owner {
                         for def in self.hash_key_defs_for_owner(owner) {
                             if def.name == r.target_name {
                                 return Some(def.selection_span);
@@ -4409,12 +4458,15 @@ impl FileAnalysis {
     pub fn find_references(
         &self,
         point: Point,
-        tree: Option<&tree_sitter::Tree>,
-        source_bytes: Option<&[u8]>,
-        module_index: Option<&ModuleIndex>,
+        module_index: Option<&dyn CrossFileLookup>,
     ) -> Vec<Span> {
-        if let Some((target_id, include_decl)) = self.resolve_target_at(point, tree, source_bytes, module_index) {
-            let mut results = self.collect_refs_for_target(target_id, include_decl, tree, source_bytes, module_index);
+        // A field group's spellings reference each other — from any of
+        // them, surface all of them (the same union rename rewrites).
+        if let Some(g) = self.field_group_at(point) {
+            return self.field_group_spans(&g);
+        }
+        if let Some((target_id, include_decl)) = self.resolve_target_at(point, module_index) {
+            let mut results = self.collect_refs_for_target(target_id, include_decl, module_index);
             results.sort_by_key(|(s, _)| (s.start.row, s.start.column));
             results.dedup_by(|a, b| a.0.start == b.0.start && a.0.end == b.0.end);
             results.into_iter().map(|(span, _)| span).collect()
@@ -4427,12 +4479,10 @@ impl FileAnalysis {
     pub fn find_highlights(
         &self,
         point: Point,
-        tree: Option<&tree_sitter::Tree>,
-        source_bytes: Option<&[u8]>,
-        module_index: Option<&ModuleIndex>,
+        module_index: Option<&dyn CrossFileLookup>,
     ) -> Vec<(Span, AccessKind)> {
-        if let Some((target_id, _)) = self.resolve_target_at(point, tree, source_bytes, module_index) {
-            let mut results = self.collect_refs_for_target(target_id, true, tree, source_bytes, module_index);
+        if let Some((target_id, _)) = self.resolve_target_at(point, module_index) {
+            let mut results = self.collect_refs_for_target(target_id, true, module_index);
             results.sort_by_key(|(s, _)| (s.start.row, s.start.column));
             results.dedup_by(|a, b| a.0.start == b.0.start && a.0.end == b.0.end);
             return results;
@@ -4455,7 +4505,10 @@ impl FileAnalysis {
                     results.push((*method_name_span, r.access));
                     for other in &self.refs {
                         if std::ptr::eq(other, r) { continue; }
-                        if other.target_name != r.target_name { continue; }
+                        // Match on the bare method tail so a plain `$x->m()` and
+                        // a fully-qualified `$y->Foo::Bar::m()` group together
+                        // (the class check below still pins same-class dispatch).
+                        if other.unqualified_target_name() != r.unqualified_target_name() { continue; }
                         if !matches!(other.kind, RefKind::MethodCall { .. }) { continue; }
                         let Some(ocn) = self.method_call_invocant_class(other, module_index) else { continue };
                         if ocn != wanted_class { continue; }
@@ -4491,9 +4544,7 @@ impl FileAnalysis {
         &self,
         target_id: SymbolId,
         include_decl: bool,
-        tree: Option<&tree_sitter::Tree>,
-        source_bytes: Option<&[u8]>,
-        module_index: Option<&ModuleIndex>,
+        module_index: Option<&dyn CrossFileLookup>,
     ) -> Vec<(Span, AccessKind)> {
         let sym = self.symbol(target_id);
         let mut results: Vec<(Span, AccessKind)> = Vec::new();
@@ -4536,7 +4587,7 @@ impl FileAnalysis {
                             }
                         }
                         (RefKind::MethodCall { method_name_span, .. },
-                         SymKind::Sub | SymKind::Method) if r.target_name == sym.name => {
+                         SymKind::Sub | SymKind::Method) if r.unqualified_target_name() == sym.name => {
                             // Same-class match only; unresolved or
                             // different-class invocants are excluded.
                             // Method-call ref.span covers the whole
@@ -4567,15 +4618,8 @@ impl FileAnalysis {
                     }
                     let matches = match ro {
                         Some(ref ro) => owner.found_by(ro),
-                        None => {
-                            if let (Some(t), Some(s)) = (tree, source_bytes) {
-                                self.resolve_hash_owner_from_tree(t, s, r.span.start, None)
-                                    .as_ref()
-                                    .map_or(false, |resolved| owner.found_by(resolved))
-                            } else {
-                                false
-                            }
-                        }
+                        None => false,
+
                     };
                     if matches {
                         results.push((r.span, r.access));
@@ -4588,7 +4632,7 @@ impl FileAnalysis {
     }
 
     /// Hover info: return display text for the symbol at cursor.
-    pub fn hover_info(&self, point: Point, source: &str, module_index: Option<&ModuleIndex>) -> Option<String> {
+    pub fn hover_info(&self, point: Point, source: &str, module_index: Option<&dyn CrossFileLookup>) -> Option<String> {
         // Check refs first
         if let Some(r) = self.ref_at(point) {
             match &r.kind {
@@ -4602,8 +4646,9 @@ impl FileAnalysis {
                     if let Some(mr) = method_hover {
                         if matches!(mr.kind, RefKind::MethodCall { .. }) {
                             let class_name = self.method_call_invocant_class(mr, module_index);
+                            let mname = mr.unqualified_target_name();
                             if let Some(ref cn) = class_name {
-                                match self.resolve_method_in_ancestors(cn, &mr.target_name, module_index) {
+                                match self.resolve_method_in_ancestors(cn, mname, module_index) {
                                     Some(MethodResolution::Local { sym_id, class: ref defining_class, .. }) => {
                                         let sym = self.symbol(sym_id);
                                         let line = source_line_at(source, sym.selection_span.start.row);
@@ -4613,7 +4658,7 @@ impl FileAnalysis {
                                             cn.to_string()
                                         };
                                         let mut text = format!("```perl\n{}\n```\n\n*class {} — resolved from `{}`*", line.trim(), class_label, r.target_name);
-                                        if let Some(ref rt) = self.find_method_return_type(cn, &mr.target_name, module_index, None) {
+                                        if let Some(ref rt) = self.find_method_return_type(cn, mname, module_index, None) {
                                             text.push_str(&format!("\n\n*returns: {}*", format_inferred_type(&rt)));
                                         }
                                         if let SymbolDetail::Sub { ref doc, .. } = sym.detail {
@@ -4629,8 +4674,8 @@ impl FileAnalysis {
                                             // inherited method in `class`'s own module.
                                             let module = def_module.as_deref().unwrap_or(class.as_str());
                                             if let Some(cached) = idx.get_cached(module) {
-                                                if let Some(sub_info) = cached.sub_info(&mr.target_name) {
-                                                    let sig = format_cross_file_signature(&mr.target_name, &sub_info);
+                                                if let Some(sub_info) = cached.sub_info(mname) {
+                                                    let sig = format_cross_file_signature(mname, &sub_info);
                                                     let mut text = format!("```perl\n{}\n```\n\n*class {} — resolved from `{}`*", sig, class, r.target_name);
                                                     if let Some(rt) = sub_info.return_type(Some(idx)) {
                                                         text.push_str(&format!("\n\n*returns: {}*", format_inferred_type(&rt)));
@@ -4718,8 +4763,10 @@ impl FileAnalysis {
                         .resolved_method_target
                         .as_ref()
                         .map(|t| t.invocant_class().to_string());
+                    // The bare method name (FQ `$o->Foo::Bar::m` resolves `m`).
+                    let method = r.unqualified_target_name();
                     if let Some(ref cn) = class_name {
-                        match self.resolve_method_in_ancestors(cn, &r.target_name, module_index) {
+                        match self.resolve_method_in_ancestors(cn, method, module_index) {
                             Some(MethodResolution::Local { sym_id, class: ref defining_class, .. }) => {
                                 let sym = self.symbol(sym_id);
                                 let line = source_line_at(source, sym.selection_span.start.row);
@@ -4729,7 +4776,7 @@ impl FileAnalysis {
                                     cn.to_string()
                                 };
                                 let mut text = format!("```perl\n{}\n```\n\n*class {}*", line.trim(), class_label);
-                                if let Some(ref rt) = self.find_method_return_type(cn, &r.target_name, module_index, None) {
+                                if let Some(ref rt) = self.find_method_return_type(cn, method, module_index, None) {
                                     text.push_str(&format!("\n\n*returns: {}*", format_inferred_type(&rt)));
                                 }
                                 return Some(text);
@@ -4740,13 +4787,13 @@ impl FileAnalysis {
                                     // inherited method in `class`'s own module.
                                     let module = def_module.as_deref().unwrap_or(class.as_str());
                                     if let Some(cached) = idx.get_cached(module) {
-                                        if let Some(sub_info) = cached.sub_info(&r.target_name) {
+                                        if let Some(sub_info) = cached.sub_info(method) {
                                             let class_label = if class != cn {
                                                 format!("{} (from {})", cn, class)
                                             } else {
                                                 cn.to_string()
                                             };
-                                            let sig = format_cross_file_signature(&r.target_name, &sub_info);
+                                            let sig = format_cross_file_signature(method, &sub_info);
                                             let mut text = format!("```perl\n{}\n```\n\n*class {}*", sig, class_label);
                                             if let Some(rt) = sub_info.return_type(Some(idx)) {
                                                 text.push_str(&format!("\n\n*returns: {}*", format_inferred_type(&rt)));
@@ -4763,7 +4810,7 @@ impl FileAnalysis {
                         }
                     }
                     // Fallback
-                    for &sid in self.symbols_named(&r.target_name) {
+                    for &sid in self.symbols_named(method) {
                         let sym = self.symbol(sid);
                         if matches!(sym.kind, SymKind::Sub | SymKind::Method) {
                             return Some(self.format_symbol_hover(sym, source, module_index));
@@ -4822,8 +4869,14 @@ impl FileAnalysis {
     }
 
     /// Rename: return all spans + new text for renaming the symbol at cursor.
-    pub fn rename_at(&self, point: Point, new_name: &str, tree: Option<&tree_sitter::Tree>, source_bytes: Option<&[u8]>) -> Option<Vec<(Span, String)>> {
-        let refs = self.find_references(point, tree, source_bytes, None);
+    pub fn rename_at(&self, point: Point, new_name: &str) -> Option<Vec<(Span, String)>> {
+        // A Corinna field and its projections (`:param` constructor key,
+        // `:reader` calls) are ONE renameable entity — rename from any
+        // spelling rewrites all of them.
+        if let Some(group) = self.field_group_at(point) {
+            return Some(self.rename_field_group(&group, new_name));
+        }
+        let refs = self.find_references(point, None);
         if refs.is_empty() {
             return None;
         }
@@ -4856,6 +4909,436 @@ impl FileAnalysis {
         Some(edits)
     }
 
+    /// The renameable entity behind a Corinna field: `field $x :param
+    /// :reader` is ONE name spelled three ways — the field variable, the
+    /// constructor key (`Point->new(x => …)`), and the reader method
+    /// (`$p->x`). The field is the source; the rest are projections
+    /// (rule #9), so rename rewrites them together.
+    fn field_group_at(&self, point: Point) -> Option<FieldGroup> {
+        // Cursor on a `has`-decl token: any of the stacked synthesized
+        // symbols (accessor Method / ctor HashKeyDef) selects the pair.
+        if let Some(s) = self.symbol_at(point) {
+            if matches!(s.kind, SymKind::Method | SymKind::HashKeyDef) {
+                if let Some(pkg) = s.package.as_deref() {
+                    if let Some(g) = self.attr_pair_group(&s.name, pkg) {
+                        // Only when the cursor is ON the decl token itself.
+                        if contains_point(&g.decl_span.unwrap(), point) {
+                            return Some(g);
+                        }
+                    }
+                }
+            }
+        }
+        // Cursor on the field decl, or on a field-variable use in a body.
+        let field_sym = self
+            .symbol_at(point)
+            .filter(|s| matches!(s.kind, SymKind::Field))
+            .or_else(|| {
+                self.ref_at(point).and_then(|r| {
+                    if !matches!(r.kind, RefKind::Variable) {
+                        return None;
+                    }
+                    r.resolves_to
+                        .map(|id| self.symbol(id))
+                        .filter(|s| matches!(s.kind, SymKind::Field))
+                })
+            });
+        if let Some(sym) = field_sym {
+            return self.field_group_of(sym);
+        }
+        // Cursor on a reader call: `$p->x` where the dispatch class has
+        // `field $x :reader` in THIS file.
+        if let Some(r) = self.ref_at(point) {
+            if matches!(r.kind, RefKind::MethodCall { .. }) {
+                let bare = r.unqualified_target_name();
+                let cls = r
+                    .resolved_method_target
+                    .as_ref()
+                    .map(|t| t.invocant_class().to_string())
+                    .or_else(|| self.method_call_invocant_class(r, None));
+                if let Some(class) = cls {
+                    let field_name = format!("${}", bare);
+                    if let Some(sym) = self.symbols.iter().find(|s| {
+                        matches!(s.kind, SymKind::Field)
+                            && s.name == field_name
+                            && s.package.as_deref() == Some(class.as_str())
+                    }) {
+                        if let Some(g) = self.field_group_of(sym) {
+                            if g.has_reader {
+                                return Some(g);
+                            }
+                        }
+                    }
+                    // Moo accessor call → its attr pair (only when the
+                    // pair really has an accessor — a key-only pair must
+                    // not claim a method-call cursor).
+                    if let Some(g) = self.attr_pair_group(bare, &class) {
+                        if g.has_reader {
+                            return Some(g);
+                        }
+                    }
+                }
+                return None;
+            }
+        }
+        // Cursor on a constructor key (access at a call site, or the
+        // synthesized def) owned by `Sub { class, new }`.
+        let (key, owner) = match self.ref_at(point).map(|r| (r, &r.kind)) {
+            Some((r, RefKind::HashKeyAccess { owner: Some(o), .. })) => {
+                (r.target_name.clone(), o.clone())
+            }
+            _ => match self.symbol_at(point) {
+                Some(s) if matches!(s.kind, SymKind::HashKeyDef) => match &s.detail {
+                    SymbolDetail::HashKeyDef { owner, .. } => (s.name.clone(), owner.clone()),
+                    _ => return None,
+                },
+                _ => return None,
+            },
+        };
+        let HashKeyOwner::Sub { package: Some(class), name } = owner else {
+            return None;
+        };
+        if !crate::conventions::is_constructor_name(&name) {
+            return None;
+        }
+        let field_name = format!("${}", key);
+        if let Some(sym) = self.symbols.iter().find(|s| {
+            matches!(s.kind, SymKind::Field)
+                && s.name == field_name
+                && s.package.as_deref() == Some(class.as_str())
+        }) {
+            return self.field_group_of(sym);
+        }
+        // Moo-style attr: the ctor key names a `has`-synthesized pair.
+        self.attr_pair_group(&key, &class)
+    }
+
+    /// A `has`-synthesized attr pair: accessor Method + constructor
+    /// HashKeyDef with the same name, package, and selection span (they
+    /// were minted from the one `has 'name'` token — span equality is
+    /// what distinguishes the pair from a real `sub name` that happens
+    /// to share a class with someone's ctor key).
+    fn attr_pair_group(&self, bare: &str, class: &str) -> Option<FieldGroup> {
+        let key_def = self.symbols.iter().find(|s| {
+            matches!(s.kind, SymKind::HashKeyDef)
+                && s.name == bare
+                && matches!(
+                    &s.detail,
+                    SymbolDetail::HashKeyDef {
+                        owner: HashKeyOwner::Sub { package: Some(p), name },
+                        ..
+                    } if p == class && crate::conventions::is_constructor_name(name)
+                )
+        })?;
+        let accessor = self.symbols.iter().find(|s| {
+            matches!(s.kind, SymKind::Method)
+                && s.name == bare
+                && s.package.as_deref() == Some(class)
+                && s.selection_span == key_def.selection_span
+        });
+        Some(FieldGroup {
+            field_sym: None,
+            decl_span: Some(key_def.selection_span),
+            class: class.to_string(),
+            bare: bare.to_string(),
+            has_param: true,
+            has_reader: accessor.is_some(),
+        })
+    }
+
+    fn field_group_of(&self, sym: &Symbol) -> Option<FieldGroup> {
+        let SymbolDetail::Field { ref attributes, .. } = sym.detail else {
+            return None;
+        };
+        if !sym.name.starts_with('$') {
+            return None;
+        }
+        Some(FieldGroup {
+            field_sym: Some(sym.id),
+            decl_span: None,
+            class: sym.package.clone()?,
+            bare: sym.name[1..].to_string(),
+            has_param: attributes.iter().any(|a| a == "param"),
+            has_reader: attributes.iter().any(|a| a == "reader"),
+        })
+    }
+
+    /// Union of edits for every spelling in a field group, all written as
+    /// the bare name: variable occurrences contribute sigil-skipped spans
+    /// (the `$` survives), constructor keys and reader calls their own
+    /// bare-token spans.
+    fn rename_field_group(&self, g: &FieldGroup, new_name: &str) -> Vec<(Span, String)> {
+        let bare_new = new_name.trim_start_matches(['$', '@', '%']);
+        let bare: Vec<(Span, String)> = self
+            .field_group_spans_bare(g)
+            .into_iter()
+            .map(|s| (s, bare_new.to_string()))
+            .collect();
+        let mut edits = bare.clone();
+        for (method, affix) in self
+            .attr_projections
+            .iter()
+            .filter(|a| a.class == g.class && a.attr == g.bare)
+            .filter_map(|a| match &a.kind {
+                AttrProjectionKind::Accessor { method, affix } => {
+                    Some((method.clone(), affix.clone()))
+                }
+                _ => None,
+            })
+        {
+            // References-only when the name doesn't embed the attr — a
+            // custom `writer => 'store_it'` can't be re-derived.
+            let Some((pre, suf)) = affix else { continue };
+            let new_method = format!("{}{}{}", pre, bare_new, suf);
+            for span in self.mapped_member_spans(g, &method) {
+                // A synthesized member's decl span IS the group decl token,
+                // which the bare edit already covers — never double-edit.
+                if bare.iter().any(|(b, _)| *b == span) {
+                    continue;
+                }
+                edits.push((span, new_method.clone()));
+            }
+        }
+        edits.sort_by_key(|(s, _)| (s.start.row, s.start.column));
+        edits.dedup_by(|a, b| a.0 == b.0);
+        edits
+    }
+
+    /// Every in-file spelling of a name-mapped member: its call sites
+    /// (class-checked) and a user-written decl (`sub _build_size`), which
+    /// unlike synthesized members does NOT sit on the group decl token.
+    fn mapped_member_spans(&self, g: &FieldGroup, method: &str) -> Vec<Span> {
+        let mut spans = Vec::new();
+        for r in &self.refs {
+            if let RefKind::MethodCall { method_name_span, .. } = &r.kind {
+                if r.unqualified_target_name() != method {
+                    continue;
+                }
+                let cls = r
+                    .resolved_method_target
+                    .as_ref()
+                    .map(|t| t.invocant_class().to_string())
+                    .or_else(|| self.method_call_invocant_class(r, None));
+                if cls.as_deref() == Some(g.class.as_str()) {
+                    spans.push(*method_name_span);
+                }
+            }
+        }
+        for s in &self.symbols {
+            if matches!(s.kind, SymKind::Sub | SymKind::Method)
+                && s.name == method
+                && s.package.as_deref() == Some(g.class.as_str())
+            {
+                spans.push(s.selection_span);
+            }
+        }
+        spans
+    }
+
+    /// Every in-file spelling of a field group as bare-name spans: the
+    /// field variable (decl + body uses, sigil skipped so the `$`
+    /// survives a bare-text rewrite), constructor keys at call sites,
+    /// reader calls. Sorted, deduped — the uniform currency for both
+    /// rename (write the new bare name at each) and references.
+    fn field_group_spans(&self, g: &FieldGroup) -> Vec<Span> {
+        let mut spans = self.field_group_spans_bare(g);
+        for a in self
+            .attr_projections
+            .iter()
+            .filter(|a| a.class == g.class && a.attr == g.bare)
+        {
+            if let AttrProjectionKind::Accessor { method, .. } = &a.kind {
+                spans.extend(self.mapped_member_spans(g, method));
+            }
+        }
+        spans.sort_by_key(|s| (s.start.row, s.start.column));
+        spans.dedup();
+        spans
+    }
+
+    /// The bare-name spellings only (variable, decl token, ctor keys,
+    /// reader calls) — the set a rename writes the plain new name at.
+    /// Name-mapped members re-derive their own names instead.
+    fn field_group_spans_bare(&self, g: &FieldGroup) -> Vec<Span> {
+        let mut spans: Vec<Span> = Vec::new();
+        // The field variable: decl + every body use. Moo attrs have no
+        // variable side; their decl token contributes directly.
+        if let Some(field_sym) = g.field_sym {
+            for (span, _access) in self.collect_refs_for_target(field_sym, true, None) {
+                spans.push(Span {
+                    start: Point::new(span.start.row, span.start.column + 1),
+                    end: span.end,
+                });
+            }
+        }
+        if let Some(decl) = g.decl_span {
+            spans.push(decl);
+        }
+        // Constructor keys at call sites.
+        if g.has_param {
+            let owner = HashKeyOwner::Sub {
+                package: Some(g.class.clone()),
+                name: "new".to_string(),
+            };
+            for r in &self.refs {
+                if let RefKind::HashKeyAccess { owner: Some(o), .. } = &r.kind {
+                    if r.target_name == g.bare && o.found_by(&owner) {
+                        spans.push(r.span);
+                    }
+                }
+            }
+        }
+        // Reader calls (`$p->x`) dispatching to this class.
+        if g.has_reader {
+            for r in &self.refs {
+                if let RefKind::MethodCall { method_name_span, .. } = &r.kind {
+                    if r.unqualified_target_name() != g.bare {
+                        continue;
+                    }
+                    let cls = r
+                        .resolved_method_target
+                        .as_ref()
+                        .map(|t| t.invocant_class().to_string())
+                        .or_else(|| self.method_call_invocant_class(r, None));
+                    if cls.as_deref() == Some(g.class.as_str()) {
+                        spans.push(*method_name_span);
+                    }
+                }
+            }
+        }
+        // Internal hash slots — present iff the synthesis minted the
+        // InternalKey projection (hash-backed repr; Corinna never does).
+        // STRICT Class-owner equality: `found_by` broadening would leak
+        // other subs' same-named arg keys into the group.
+        if self
+            .attr_projections
+            .iter()
+            .any(|a| {
+                a.class == g.class
+                    && a.attr == g.bare
+                    && matches!(a.kind, AttrProjectionKind::InternalKey)
+            })
+        {
+            for r in &self.refs {
+                if let RefKind::HashKeyAccess { owner: Some(HashKeyOwner::Class(c)), .. } =
+                    &r.kind
+                {
+                    if c == &g.class && r.target_name == g.bare {
+                        spans.push(r.span);
+                    }
+                }
+            }
+        }
+        spans.sort_by_key(|s| (s.start.row, s.start.column));
+        spans.dedup();
+        spans
+    }
+
+    /// Query-time owner for a deferred (`owner: None`) hash-key access:
+    /// find the enclosing call ref and derive `Sub { invocant class,
+    /// method }` with the index in hand. The build-time gate deferred
+    /// exactly because the class wasn't visible locally — this is the
+    /// other half of that bargain (the receiver-gated discipline: the
+    /// type is the gate, resolved at query time).
+    pub fn deferred_hash_key_owner(
+        &self,
+        key_ref: &Ref,
+        module_index: Option<&dyn CrossFileLookup>,
+    ) -> Option<HashKeyOwner> {
+        let enclosing = self
+            .refs
+            .iter()
+            .filter(|c| {
+                matches!(c.kind, RefKind::MethodCall { .. })
+                    && contains_point(&c.span, key_ref.span.start)
+                    && contains_point(&c.span, key_ref.span.end)
+            })
+            .min_by_key(|c| span_size(&c.span))?;
+        let class = enclosing
+            .resolved_method_target
+            .as_ref()
+            .map(|t| t.invocant_class().to_string())
+            .or_else(|| self.method_call_invocant_class(enclosing, module_index))?;
+        Some(HashKeyOwner::Sub {
+            package: Some(class),
+            name: enclosing.unqualified_target_name().to_string(),
+        })
+    }
+
+    /// The cross-file-facing view of the field group at `point`: the
+    /// class + bare name + which projections exist, plus the origin-file
+    /// variable spellings (fields are lexical to the class block, so the
+    /// variable side can ONLY live here — keys and reader calls in other
+    /// files are walked by `refs_to` against the projection targets the
+    /// caller mints from these facts).
+    pub fn field_projections_at(&self, point: Point) -> Option<FieldProjections> {
+        let g = self.field_group_at(point)?;
+        Some(self.projections_of(g))
+    }
+
+    /// Mint the group by name instead of cursor — the consumer-side
+    /// entry: a deferred ctor key / accessor call in another file chases
+    /// its owner edge to this class's analysis and asks for the group
+    /// the cursor file can't see.
+    pub fn field_projections_named(&self, bare: &str, class: &str) -> Option<FieldProjections> {
+        let field_name = format!("${}", bare);
+        let g = self
+            .symbols
+            .iter()
+            .find(|s| {
+                matches!(s.kind, SymKind::Field)
+                    && s.name == field_name
+                    && s.package.as_deref() == Some(class)
+            })
+            .and_then(|sym| self.field_group_of(sym))
+            .or_else(|| self.attr_pair_group(bare, class))?;
+        Some(self.projections_of(g))
+    }
+
+    fn projections_of(&self, g: FieldGroup) -> FieldProjections {
+        let mut variable_spans: Vec<Span> = g
+            .field_sym
+            .map(|fs| {
+                self.collect_refs_for_target(fs, true, None)
+                    .into_iter()
+                    .map(|(span, _)| Span {
+                        start: Point::new(span.start.row, span.start.column + 1),
+                        end: span.end,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        if let Some(decl) = g.decl_span {
+            variable_spans.push(decl);
+        }
+        let mapped = self
+            .attr_projections
+            .iter()
+            .filter(|a| a.class == g.class && a.attr == g.bare)
+            .filter_map(|a| match &a.kind {
+                AttrProjectionKind::Accessor { method, affix } => Some(MappedMember {
+                    method: method.clone(),
+                    affix: affix.clone(),
+                }),
+                _ => None,
+            })
+            .collect();
+        let has_internal = self.attr_projections.iter().any(|a| {
+            a.class == g.class
+                && a.attr == g.bare
+                && matches!(a.kind, AttrProjectionKind::InternalKey)
+        });
+        FieldProjections {
+            class: g.class,
+            bare: g.bare,
+            has_param: g.has_param,
+            has_reader: g.has_reader,
+            has_internal,
+            variable_spans,
+            mapped,
+        }
+    }
+
     /// Determine what kind of rename is appropriate for the cursor position.
     ///
     /// For `RenameKind::Method`, the class is mandatory (so cross-file
@@ -4864,7 +5347,7 @@ impl FileAnalysis {
     /// falls through to symbol-at resolution; if that also has no
     /// class context (orphan Sub), returns `None` — the cursor isn't
     /// on something we can safely rename.
-    pub fn rename_kind_at(&self, point: Point, module_index: Option<&ModuleIndex>) -> Option<RenameKind> {
+    pub fn rename_kind_at(&self, point: Point, module_index: Option<&dyn CrossFileLookup>) -> Option<RenameKind> {
         if let Some(r) = self.ref_at(point) {
             match &r.kind {
                 RefKind::Variable | RefKind::ContainerAccess => return Some(RenameKind::Variable),
@@ -4879,8 +5362,10 @@ impl FileAnalysis {
                 }
                 RefKind::MethodCall { .. } => {
                     if let Some(class) = self.method_call_invocant_class(r, module_index) {
+                        // FQ `$o->Foo::Bar::m` renames the bare `m` tail; the
+                        // qualifier scopes the class (same as Function above).
                         return Some(RenameKind::Method {
-                            name: r.target_name.clone(),
+                            name: r.unqualified_target_name().to_string(),
                             class,
                         });
                     }
@@ -4953,7 +5438,7 @@ impl FileAnalysis {
         old_name: &str,
         scope: &Option<String>,
         new_name: &str,
-        module_index: Option<&ModuleIndex>,
+        module_index: Option<&dyn CrossFileLookup>,
     ) -> Vec<(Span, String)> {
         let mut edits = Vec::new();
         for sym in &self.symbols {
@@ -4996,7 +5481,7 @@ impl FileAnalysis {
         old_name: &str,
         package: &Option<String>,
         new_name: &str,
-        module_index: Option<&ModuleIndex>,
+        module_index: Option<&dyn CrossFileLookup>,
     ) -> Vec<(Span, String)> {
         self.rename_callable_in_scope(old_name, package, new_name, module_index)
     }
@@ -5010,7 +5495,7 @@ impl FileAnalysis {
         old_name: &str,
         class: &str,
         new_name: &str,
-        module_index: Option<&ModuleIndex>,
+        module_index: Option<&dyn CrossFileLookup>,
     ) -> Vec<(Span, String)> {
         self.rename_callable_in_scope(old_name, &Some(class.to_string()), new_name, module_index)
     }
@@ -5035,7 +5520,7 @@ impl FileAnalysis {
     // ---- Internal resolution helpers ----
 
     /// Find the target symbol for the thing at cursor. Returns (SymbolId, include_decl_in_refs).
-    fn resolve_target_at(&self, point: Point, tree: Option<&tree_sitter::Tree>, source_bytes: Option<&[u8]>, module_index: Option<&ModuleIndex>) -> Option<(SymbolId, bool)> {
+    fn resolve_target_at(&self, point: Point, module_index: Option<&dyn CrossFileLookup>) -> Option<(SymbolId, bool)> {
         // Check refs first
         if let Some(r) = self.ref_at(point) {
             match &r.kind {
@@ -5061,9 +5546,11 @@ impl FileAnalysis {
                 }
                 RefKind::MethodCall { .. } => {
                     let class_name = self.method_call_invocant_class(r, module_index);
+                    // Bare method name (FQ `$o->Foo::Bar::m` resolves `m`).
+                    let method = r.unqualified_target_name();
                     // Try inheritance-aware resolution first
                     if let Some(ref cn) = class_name {
-                        match self.resolve_method_in_ancestors(cn, &r.target_name, module_index) {
+                        match self.resolve_method_in_ancestors(cn, method, module_index) {
                             Some(MethodResolution::Local { sym_id, .. }) => {
                                 return Some((sym_id, true));
                             }
@@ -5072,7 +5559,7 @@ impl FileAnalysis {
                                 // a local symbol only when its package
                                 // equals the resolved class — no
                                 // same-name cross-class latching.
-                                for &sid in self.symbols_named(&r.target_name) {
+                                for &sid in self.symbols_named(method) {
                                     let sym = self.symbol(sid);
                                     if !matches!(sym.kind, SymKind::Sub | SymKind::Method) { continue; }
                                     if sym.package.as_deref() == Some(cn.as_str()) {
@@ -5090,7 +5577,7 @@ impl FileAnalysis {
                         // the class locally, produce no target —
                         // better than cross-linking a same-named
                         // method on a different class.
-                        for &sid in self.symbols_named(&r.target_name) {
+                        for &sid in self.symbols_named(method) {
                             let sym = self.symbol(sid);
                             if !matches!(sym.kind, SymKind::Sub | SymKind::Method) { continue; }
                             if sym.package.as_deref() == Some(cn.as_str()) {
@@ -5108,7 +5595,7 @@ impl FileAnalysis {
                     // last-resort name match. Only reaches here for
                     // refs the builder AND the runtime resolver both
                     // failed on (rare: ERROR-recovered invocants).
-                    for &sid in self.symbols_named(&r.target_name) {
+                    for &sid in self.symbols_named(method) {
                         if matches!(self.symbol(sid).kind, SymKind::Sub | SymKind::Method) {
                             return Some((sid, true));
                         }
@@ -5122,12 +5609,7 @@ impl FileAnalysis {
                     }
                 }
                 RefKind::HashKeyAccess { ref owner, .. } => {
-                    let resolved_owner = owner.clone().or_else(|| {
-                        let tree = tree?;
-                        let source = source_bytes?;
-                        self.resolve_hash_owner_from_tree(tree, source, r.span.start, module_index)
-                    });
-                    if let Some(ref owner) = resolved_owner {
+                    if let Some(ref owner) = owner {
                         for def in self.hash_key_defs_for_owner(owner) {
                             if def.name == r.target_name {
                                 return Some((def.id, true));
@@ -5184,25 +5666,48 @@ impl FileAnalysis {
     pub fn method_call_invocant_class(
         &self,
         r: &Ref,
-        module_index: Option<&ModuleIndex>,
+        module_index: Option<&dyn CrossFileLookup>,
     ) -> Option<String> {
         let RefKind::MethodCall { invocant, invocant_span, .. } = &r.kind else {
             return None;
         };
+        // A qualified method token names its dispatch class explicitly —
+        // Perl ignores the invocant's class for the lookup, so the token
+        // wins ahead of invocant resolution.
+        use crate::conventions::MethodToken;
+        match MethodToken::parse(&r.target_name) {
+            MethodToken::Super(name) => {
+                // SUPER searches the enclosing package's parents' MRO; the
+                // dispatch class is whichever ancestor actually defines it
+                // (multi-parent safe). `None` when the index isn't available
+                // yet (build-time stamp of a dependency file, cross-file
+                // parent) — every query-time consumer re-resolves with the
+                // index: open docs via the enrichment re-stamp, goto-def via
+                // the cross-file path, references/rename via `refs_to`'s
+                // SUPER arm.
+                let encl = self.enclosing_class_for_scope(r.scope)?;
+                return self
+                    .resolve_super_method(&encl, name, module_index)
+                    .map(|res| res.class().to_string());
+            }
+            token => {
+                if let Some(pkg) = token.literal_package() {
+                    return Some(pkg.to_string());
+                }
+            }
+        }
         if invocant.is_empty() {
             return None;
         }
 
-        // Pseudo-invocants for "$self at the method's first arg":
-        // `shift` (no args; `sub m { my $self = shift; ... }`),
-        // `$_[0]` / `@_[0]` (positional), and raw `__PACKAGE__` on
-        // synthesized refs. None are real variables, so the bag has no
-        // witness for them — resolve to enclosing-class identity here.
-        if invocant == "shift"
-            || invocant == "$_[0]"
-            || invocant == "@_[0]"
-            || invocant == "__PACKAGE__"
-        {
+        // Positional receiver spellings and `__PACKAGE__` aren't real
+        // variables (the bag has no witness for them) — both resolve to
+        // enclosing-class identity here.
+        use crate::conventions::InvocantText;
+        if matches!(
+            invocant.classify(),
+            InvocantText::PositionalReceiver | InvocantText::CurrentPackage
+        ) {
             return self.enclosing_class_for_scope(r.scope);
         }
 
@@ -5241,13 +5746,14 @@ impl FileAnalysis {
                         if let Some(recv_class) =
                             self.method_call_invocant_class(recv, module_index)
                         {
-                            if recv.target_name == "new" {
+                            let recv_method = recv.unqualified_target_name();
+                            if crate::conventions::is_constructor_name(recv_method) {
                                 return Some(recv_class);
                             }
                             if let Some(cn) = self
                                 .find_method_return_type(
                                     &recv_class,
-                                    &recv.target_name,
+                                    recv_method,
                                     module_index,
                                     None,
                                 )
@@ -5280,10 +5786,10 @@ impl FileAnalysis {
             {
                 return Some(cn);
             }
-            // `$self` enclosing-class fallback for an untyped variable
-            // invocant. Other untyped variable invocants stay None —
+            // Conventional-invocant enclosing-class fallback for an untyped
+            // variable invocant. Other untyped variable invocants stay None —
             // better than poisoning them with the surrounding package.
-            if invocant == "$self" {
+            if crate::conventions::is_conventional_invocant_name(invocant) {
                 return self.enclosing_class_for_scope(r.scope);
             }
             return None;
@@ -5292,7 +5798,7 @@ impl FileAnalysis {
         // Bareword invocant. Could be a zero-arg sub returning ClassName
         // (`app->routes` where `app` is plugin-emitted); promote that.
         // Otherwise the bareword text *is* the class (`Foo->method`).
-        let bare = invocant.rsplit("::").next().unwrap_or(invocant);
+        let bare = split_qualified(invocant).1;
         if let Some(InferredType::ClassName(c)) = self.sub_return_type_at_arity(bare, Some(0)) {
             return Some(c);
         }
@@ -5338,7 +5844,7 @@ impl FileAnalysis {
         &self,
         token: &str,
         action: &str,
-        module_index: Option<&ModuleIndex>,
+        module_index: Option<&dyn CrossFileLookup>,
     ) -> Option<String> {
         let camelized = camelize_controller(token);
         if camelized.is_empty() {
@@ -5357,7 +5863,7 @@ impl FileAnalysis {
             .filter(|m| module_tail_matches(m, &camelized))
             .collect();
         if candidates.is_empty() {
-            idx.for_each_cached(|name, _| {
+            idx.for_each_cached(&mut |name, _| {
                 if module_tail_matches(name, &camelized) {
                     candidates.push(name.to_string());
                 }
@@ -5393,7 +5899,7 @@ impl FileAnalysis {
     pub fn method_call_invocant_type(
         &self,
         r: &Ref,
-        module_index: Option<&ModuleIndex>,
+        module_index: Option<&dyn CrossFileLookup>,
     ) -> Option<InferredType> {
         let RefKind::MethodCall { invocant, invocant_span, .. } = &r.kind else {
             return None;
@@ -5403,8 +5909,12 @@ impl FileAnalysis {
         }
         let point = invocant_span.map(|s| s.start).unwrap_or(r.span.start);
 
-        // Pseudo-invocants (`shift`, `$_[0]`, `__PACKAGE__`) → enclosing class.
-        if invocant == "shift" || invocant == "$_[0]" || invocant == "@_[0]" || invocant == "__PACKAGE__" {
+        // Positional receiver spellings and `__PACKAGE__` → enclosing class.
+        if matches!(
+            invocant.classify(),
+            crate::conventions::InvocantText::PositionalReceiver
+                | crate::conventions::InvocantText::CurrentPackage
+        ) {
             return self.enclosing_class_for_scope(r.scope).map(InferredType::ClassName);
         }
 
@@ -5447,7 +5957,7 @@ impl FileAnalysis {
             if let Some(t) = self.inferred_type_via_bag_ctx(invocant, point, module_index) {
                 return Some(t);
             }
-            if invocant == "$self" {
+            if crate::conventions::is_conventional_invocant_name(invocant) {
                 return self.enclosing_class_for_scope(r.scope).map(InferredType::ClassName);
             }
             return None;
@@ -5456,15 +5966,15 @@ impl FileAnalysis {
         // Bareword: the bareword *is* the class (or a zero-arg
         // ClassName-returning sub — same rule as
         // `method_call_invocant_class`'s bareword branch).
-        let bare = invocant.rsplit("::").next().unwrap_or(invocant);
+        let bare = split_qualified(invocant).1;
         if let Some(InferredType::ClassName(c)) = self.sub_return_type_at_arity(bare, Some(0)) {
             return Some(InferredType::ClassName(c));
         }
-        Some(InferredType::ClassName(invocant.clone()))
+        Some(InferredType::ClassName(invocant.to_string()))
     }
 
     /// Walk the scope chain to find the enclosing class or package.
-    fn enclosing_class_for_scope(&self, scope: ScopeId) -> Option<String> {
+    pub(crate) fn enclosing_class_for_scope(&self, scope: ScopeId) -> Option<String> {
         for sid in self.scope_chain(scope).iter() {
             let s = self.scope(*sid);
             if let ScopeKind::Class { ref name } = s.kind {
@@ -5494,52 +6004,58 @@ impl FileAnalysis {
     /// `method_call_invocant_class` is preferred everywhere a
     /// `&Ref` is available.
     fn resolve_invocant_class(&self, invocant: &str, scope: ScopeId, point: Point) -> Option<String> {
-        if invocant.starts_with('$') || invocant.starts_with('@') || invocant.starts_with('%') {
-            // Variable invocant → infer type via the witness bag so
-            // framework/branch/arity rules refine the answer (falls
-            // back to legacy `inferred_type` internally).
-            self.inferred_type_via_bag(invocant, point)
-                .and_then(|t| t.class_name().map(|s| s.to_string()))
-                .or_else(|| {
-                    // Enclosing-class fallback only applies to
-                    // `$self` — other variable invocants whose type
-                    // we don't know stay None, not poisoned with the
-                    // surrounding package. Otherwise `$r->to(...)`
-                    // with `$r` un-typed would pretend `to` is a
-                    // method on the enclosing package (MyApp), and
-                    // goto-def on the method name lands on
-                    // `package MyApp;`. The comment here described
-                    // this guard but the code didn't actually check.
-                    if invocant != "$self" {
-                        return None;
-                    }
-                    let chain = self.scope_chain(scope);
-                    for scope_id in &chain {
-                        let s = self.scope(*scope_id);
-                        if let ScopeKind::Class { ref name } = s.kind {
-                            return Some(name.clone());
-                        }
-                        if let Some(ref pkg) = s.package {
-                            return Some(pkg.clone());
-                        }
-                    }
-                    None
-                })
-        } else {
-            // Bareword invocant: ambiguous between class-name and
-            // zero-arg function call. If a sub by this name resolves
-            // (locally or via a cross-file import) to a ClassName
-            // return type when called with zero args, treat the
-            // bareword as the call and use that class. Mirrors the
-            // same rule in `receiver_type_for` and
-            // `resolve_invocant_class_tree`.
-            let bare = invocant.rsplit("::").next().unwrap_or(invocant);
-            if let Some(InferredType::ClassName(c)) =
-                self.sub_return_type_at_arity(bare, Some(0))
-            {
-                return Some(c);
+        use crate::conventions::InvocantText;
+        let enclosing = || {
+            for scope_id in &self.scope_chain(scope) {
+                let s = self.scope(*scope_id);
+                if let ScopeKind::Class { ref name } = s.kind {
+                    return Some(name.clone());
+                }
+                if let Some(ref pkg) = s.package {
+                    return Some(pkg.clone());
+                }
             }
-            Some(invocant.to_string())
+            None
+        };
+        match InvocantText::parse(invocant) {
+            InvocantText::CurrentPackage | InvocantText::PositionalReceiver => enclosing(),
+            InvocantText::NonScalar(_) => None,
+            InvocantText::Scalar(_) => {
+                // Scalar invocant → infer type via the witness bag so
+                // framework/branch/arity rules refine the answer.
+                self.inferred_type_via_bag(invocant, point)
+                    .and_then(|t| t.class_name().map(|s| s.to_string()))
+                    .or_else(|| {
+                        // Enclosing-class fallback only applies to
+                        // conventional invocants — other variable invocants
+                        // whose type we don't know stay None, not poisoned
+                        // with the surrounding package. Otherwise `$r->to(...)`
+                        // with `$r` un-typed would pretend `to` is a method on
+                        // the enclosing package (MyApp), and goto-def on the
+                        // method name lands on `package MyApp;`.
+                        if crate::conventions::is_conventional_invocant_name(invocant) {
+                            enclosing()
+                        } else {
+                            None
+                        }
+                    })
+            }
+            InvocantText::Bareword(_) => {
+                // Bareword invocant: ambiguous between class-name and
+                // zero-arg function call. If a sub by this name resolves
+                // (locally or via a cross-file import) to a ClassName
+                // return type when called with zero args, treat the
+                // bareword as the call and use that class. Mirrors the
+                // same rule in `receiver_type_for` and
+                // `resolve_invocant_class_tree`.
+                let bare = split_qualified(invocant).1;
+                if let Some(InferredType::ClassName(c)) =
+                    self.sub_return_type_at_arity(bare, Some(0))
+                {
+                    return Some(c);
+                }
+                Some(invocant.to_string())
+            }
         }
     }
 
@@ -5555,7 +6071,7 @@ impl FileAnalysis {
         &self,
         class_name: &str,
         method_name: &str,
-        module_index: Option<&ModuleIndex>,
+        module_index: Option<&dyn CrossFileLookup>,
     ) -> Option<Span> {
         match self.resolve_method_in_ancestors(class_name, method_name, module_index) {
             Some(MethodResolution::Local { sym_id, .. }) => {
@@ -5584,7 +6100,42 @@ impl FileAnalysis {
     fn for_each_ancestor_class(
         &self,
         class_name: &str,
-        module_index: Option<&ModuleIndex>,
+        module_index: Option<&dyn CrossFileLookup>,
+        visit: impl FnMut(&str) -> std::ops::ControlFlow<()>,
+    ) {
+        self.for_each_ancestor_class_opt(class_name, module_index, false, visit)
+    }
+
+    /// `child isa ancestor`? — the MRO walk (local ∪ cross-file parents)
+    /// as a predicate. `true` when `child == ancestor` too.
+    pub fn class_isa(
+        &self,
+        child: &str,
+        ancestor: &str,
+        module_index: Option<&dyn CrossFileLookup>,
+    ) -> bool {
+        let mut found = false;
+        self.for_each_ancestor_class(child, module_index, |c| {
+            if c == ancestor {
+                found = true;
+                std::ops::ControlFlow::Break(())
+            } else {
+                std::ops::ControlFlow::Continue(())
+            }
+        });
+        found
+    }
+
+    /// MRO walk shared by every inheritance consumer. `skip_self`: when true,
+    /// the starting class is NOT visited but its parents' MRO still is — this
+    /// is exactly `SUPER::` semantics (search the enclosing package's parents,
+    /// skipping the package itself). The seen-set still records the start so a
+    /// diamond that loops back to it is skipped.
+    fn for_each_ancestor_class_opt(
+        &self,
+        class_name: &str,
+        module_index: Option<&dyn CrossFileLookup>,
+        skip_self: bool,
         mut visit: impl FnMut(&str) -> std::ops::ControlFlow<()>,
     ) {
         // Perl's default MRO is left-to-right depth-first: for
@@ -5599,11 +6150,15 @@ impl FileAnalysis {
         // `@ISA` order before the reverse-push.
         let mut seen: HashSet<String> = HashSet::new();
         let mut stack: Vec<String> = vec![class_name.to_string()];
+        let mut first = true;
         while let Some(cur) = stack.pop() {
             if !seen.insert(cur.clone()) { continue; }
             if seen.len() > 21 { break; } // matches the legacy depth guard
-            if let std::ops::ControlFlow::Break(()) = visit(&cur) {
-                return;
+            let is_root = std::mem::replace(&mut first, false);
+            if !(skip_self && is_root) {
+                if let std::ops::ControlFlow::Break(()) = visit(&cur) {
+                    return;
+                }
             }
             let parents = parents_of(
                 &cur,
@@ -5635,7 +6190,7 @@ impl FileAnalysis {
         &self,
         class_name: &str,
         method_name: &str,
-        module_index: Option<&ModuleIndex>,
+        module_index: Option<&dyn CrossFileLookup>,
     ) -> Vec<String> {
         let defining = match self.resolve_method_in_ancestors(class_name, method_name, module_index) {
             Some(MethodResolution::Local { class, .. })
@@ -5655,89 +6210,106 @@ impl FileAnalysis {
         chain
     }
 
+    /// Does `cls` ITSELF define/bridge `method_name`? The per-class check —
+    /// no ancestor walk — factored out of the MRO loop so normal dispatch and
+    /// `SUPER::` share one definition of "this class has the method". (a) local
+    /// symbols packaged under `cls`, (b) local plugin-namespace entities
+    /// bridged to `cls`, (c) cross-file: `cls`'s own module, cross-package
+    /// typeglob installs, and plugin bridges from other files.
+    fn method_resolution_on_class(
+        &self,
+        cls: &str,
+        method_name: &str,
+        module_index: Option<&dyn CrossFileLookup>,
+    ) -> Option<MethodResolution> {
+        // (a) Local symbols in this file packaged under `cls`.
+        for &sid in self.symbols_named(method_name) {
+            let sym = self.symbol(sid);
+            if matches!(sym.kind, SymKind::Sub | SymKind::Method)
+                && self.symbol_in_class(sid, cls)
+            {
+                return Some(MethodResolution::Local { class: cls.to_string(), sym_id: sid });
+            }
+        }
+        // (b) Local plugin-namespace entities bridged to `cls`.
+        for ns in &self.plugin_namespaces {
+            if !ns.bridges.iter().any(|b| matches!(b, Bridge::Class(c) if c == cls)) { continue; }
+            for sym_id in &ns.entities {
+                let Some(sym) = self.symbols.get(sym_id.0 as usize) else { continue };
+                if !matches!(sym.kind, SymKind::Sub | SymKind::Method) { continue; }
+                if sym.name == method_name {
+                    return Some(MethodResolution::Local { class: cls.to_string(), sym_id: *sym_id });
+                }
+            }
+        }
+        // (c) Cross-file: the cached module for `cls` itself (real
+        // CPAN/user-defined methods) plus plugin-emitted methods registered via
+        // bridges from other workspace files (rule #8 — `for_each_entity_
+        // bridged_to`).
+        if let Some(idx) = module_index {
+            if let Some(cached) = idx.get_cached(cls) {
+                if cached.has_sub(method_name) {
+                    return Some(MethodResolution::CrossFile { class: cls.to_string(), def_module: None });
+                }
+            }
+            // Cross-package typeglob install: the method is attributed to `cls`
+            // but lives in a differently-named module file (`*{'DateTime::'.
+            // $sub} = …` inside `package DateTime::PP`). Record the home module.
+            if let Some(home) = idx.module_declaring_method_in_package(method_name, cls) {
+                return Some(MethodResolution::CrossFile { class: cls.to_string(), def_module: Some(home) });
+            }
+            // Plugin-bridged method (a Mojo helper synthesized in another file,
+            // bridged to `cls`). Record the registration module so the def
+            // lookup hits the right file, not `cls`'s own module.
+            let mut bridged_module: Option<String> = None;
+            idx.for_each_entity_bridged_to(cls, &mut |mod_name, _cached, sym| {
+                if bridged_module.is_some() { return; }
+                if !matches!(sym.kind, SymKind::Sub | SymKind::Method) { return; }
+                if sym.name == method_name {
+                    bridged_module = Some(mod_name.to_string());
+                }
+            });
+            if bridged_module.is_some() {
+                return Some(MethodResolution::CrossFile { class: cls.to_string(), def_module: bridged_module });
+            }
+        }
+        None
+    }
+
     /// Walk the inheritance chain to find a method (DFS, matches Perl's default MRO).
     pub fn resolve_method_in_ancestors(
         &self,
         class_name: &str,
         method_name: &str,
-        module_index: Option<&ModuleIndex>,
+        module_index: Option<&dyn CrossFileLookup>,
     ) -> Option<MethodResolution> {
         let mut result: Option<MethodResolution> = None;
         self.for_each_ancestor_class(class_name, module_index, |cls| {
-            // (a) Local symbols in this file packaged under `cls`.
-            for &sid in self.symbols_named(method_name) {
-                let sym = self.symbol(sid);
-                if matches!(sym.kind, SymKind::Sub | SymKind::Method)
-                    && self.symbol_in_class(sid, cls)
-                {
-                    result = Some(MethodResolution::Local {
-                        class: cls.to_string(),
-                        sym_id: sid,
-                    });
-                    return std::ops::ControlFlow::Break(());
-                }
+            match self.method_resolution_on_class(cls, method_name, module_index) {
+                Some(r) => { result = Some(r); std::ops::ControlFlow::Break(()) }
+                None => std::ops::ControlFlow::Continue(()),
             }
-            // (b) Local plugin-namespace entities bridged to `cls`.
-            for ns in &self.plugin_namespaces {
-                if !ns.bridges.iter().any(|b| matches!(b, Bridge::Class(c) if c == cls)) { continue; }
-                for sym_id in &ns.entities {
-                    let Some(sym) = self.symbols.get(sym_id.0 as usize) else { continue };
-                    if !matches!(sym.kind, SymKind::Sub | SymKind::Method) { continue; }
-                    if sym.name == method_name {
-                        result = Some(MethodResolution::Local {
-                            class: cls.to_string(),
-                            sym_id: *sym_id,
-                        });
-                        return std::ops::ControlFlow::Break(());
-                    }
-                }
+        });
+        result
+    }
+
+    /// `$self->SUPER::m` dispatch: resolve `method_name` over `enclosing`'s
+    /// parents' MRO, skipping `enclosing` itself (Perl's SUPER searches the
+    /// current package's parents). Walks the FULL DFS MRO — every parent in
+    /// `@ISA`, not just the first — so a method defined on a later parent (or a
+    /// grandparent reached only through it) resolves exactly as Perl would.
+    pub fn resolve_super_method(
+        &self,
+        enclosing: &str,
+        method_name: &str,
+        module_index: Option<&dyn CrossFileLookup>,
+    ) -> Option<MethodResolution> {
+        let mut result: Option<MethodResolution> = None;
+        self.for_each_ancestor_class_opt(enclosing, module_index, true, |cls| {
+            match self.method_resolution_on_class(cls, method_name, module_index) {
+                Some(r) => { result = Some(r); std::ops::ControlFlow::Break(()) }
+                None => std::ops::ControlFlow::Continue(()),
             }
-            // (c) Cross-file: the cached module for `cls` itself
-            // (real CPAN/user-defined methods on the class) plus
-            // plugin-emitted methods registered via bridges from
-            // other workspace files. Per rule #8 the bridge index
-            // is the lookup — see `for_each_entity_bridged_to`.
-            if let Some(idx) = module_index {
-                if let Some(cached) = idx.get_cached(cls) {
-                    if cached.has_sub(method_name) {
-                        // Real method in `cls`'s own module.
-                        result = Some(MethodResolution::CrossFile { class: cls.to_string(), def_module: None });
-                        return std::ops::ControlFlow::Break(());
-                    }
-                }
-                // Cross-package typeglob install: the method is attributed
-                // to `cls` but lives in a differently-named module file
-                // (`*{'DateTime::'.$sub} = …` inside `package DateTime::PP`).
-                // The class's own module doesn't declare it; the symbol's
-                // package does. Record the actual home module so the def
-                // lookup hits the right file.
-                if let Some(home) = idx.module_declaring_method_in_package(method_name, cls) {
-                    result = Some(MethodResolution::CrossFile {
-                        class: cls.to_string(),
-                        def_module: Some(home),
-                    });
-                    return std::ops::ControlFlow::Break(());
-                }
-                // Plugin-bridged method (e.g. a Mojo helper synthesized in
-                // another file, bridged to `cls`). The SAME bridge walk
-                // completion uses — record which module the symbol actually
-                // lives in (its registration key, not a re-derived package
-                // name) so consumers don't re-look-it-up in `cls`'s module,
-                // where a bridged helper doesn't exist.
-                let mut bridged_module: Option<String> = None;
-                idx.for_each_entity_bridged_to(cls, |mod_name, _cached, sym| {
-                    if bridged_module.is_some() { return; }
-                    if !matches!(sym.kind, SymKind::Sub | SymKind::Method) { return; }
-                    if sym.name == method_name {
-                        bridged_module = Some(mod_name.to_string());
-                    }
-                });
-                if bridged_module.is_some() {
-                    result = Some(MethodResolution::CrossFile { class: cls.to_string(), def_module: bridged_module });
-                    return std::ops::ControlFlow::Break(());
-                }
-            }
-            std::ops::ControlFlow::Continue(())
         });
         result
     }
@@ -5758,7 +6330,7 @@ impl FileAnalysis {
     pub fn class_has_unresolved_ancestor(
         &self,
         class_name: &str,
-        module_index: Option<&ModuleIndex>,
+        module_index: Option<&dyn CrossFileLookup>,
     ) -> bool {
         let class_is_known = |name: &str| -> bool {
             if name == APP_SURFACE_CLASS {
@@ -5814,7 +6386,7 @@ impl FileAnalysis {
         &self,
         class_name: &str,
         dispatcher: &str,
-        module_index: Option<&ModuleIndex>,
+        module_index: Option<&dyn CrossFileLookup>,
         mut visit: impl FnMut(&Symbol, &str),
     ) {
         let disp_matches = |dd: &[String]| dd.iter().any(|d| d == dispatcher);
@@ -5842,7 +6414,7 @@ impl FileAnalysis {
             }
             // (3) Cross-file plugin-namespace bridge.
             if let Some(idx) = module_index {
-                idx.for_each_entity_bridged_to(cls, |_mod, cached, sym| {
+                idx.for_each_entity_bridged_to(cls, &mut |_mod, cached, sym| {
                     if let SymbolDetail::Handler { dispatchers, .. } = &sym.detail {
                         if disp_matches(dispatchers) {
                             let prov = cached.path.file_name()
@@ -5868,7 +6440,7 @@ impl FileAnalysis {
         name: &str,
         owner: &HandlerOwner,
         active_dispatcher: Option<&str>,
-        module_index: Option<&ModuleIndex>,
+        module_index: Option<&dyn CrossFileLookup>,
     ) -> String {
         let class = match owner {
             HandlerOwner::Class(n) => n.as_str(),
@@ -6033,7 +6605,7 @@ impl FileAnalysis {
         &self,
         sym: &Symbol,
         source: &str,
-        module_index: Option<&ModuleIndex>,
+        module_index: Option<&dyn CrossFileLookup>,
     ) -> String {
         self.format_symbol_hover_at(sym, source, sym.selection_span.end, module_index)
     }
@@ -6043,7 +6615,7 @@ impl FileAnalysis {
         sym: &Symbol,
         source: &str,
         at: Point,
-        module_index: Option<&ModuleIndex>,
+        module_index: Option<&dyn CrossFileLookup>,
     ) -> String {
         let line = source_line_at(source, sym.span.start.row);
         let mut text = format!("```perl\n{}\n```", line.trim());
@@ -6318,7 +6890,7 @@ impl FileAnalysis {
         for sym in &self.symbols {
             match sym.kind {
                 SymKind::Variable | SymKind::Field => {
-                    let is_self = sym.name == "$self" || sym.name == "$class";
+                    let is_self = crate::conventions::is_conventional_invocant_name(&sym.name);
                     let (sigil, is_readonly, is_param) = match &sym.detail {
                         SymbolDetail::Variable { sigil, decl_kind } => {
                             let readonly = matches!(decl_kind, DeclKind::Field);
@@ -6397,7 +6969,8 @@ impl FileAnalysis {
             match &r.kind {
                 RefKind::Variable | RefKind::ContainerAccess => {
                     let sigil = r.target_name.chars().next().unwrap_or('$');
-                    let is_self = r.target_name == "$self" || r.target_name == "$class";
+                    let is_self =
+                        crate::conventions::is_conventional_invocant_name(&r.target_name);
                     let token_type = if is_self { TOK_KEYWORD } else { TOK_VARIABLE };
                     // Don't add sigil modifier for $self/$class — it would override the keyword color
                     let mut mods = if is_self { 0 } else { sigil_modifier(sigil) };
@@ -6502,6 +7075,15 @@ pub enum MethodResolution {
     /// `get_cached(def_module.unwrap_or(class)).sub_info(method)` — so bridged
     /// helpers and real inherited methods share one code path.
     CrossFile { class: String, def_module: Option<String> },
+}
+
+impl MethodResolution {
+    /// The class the method resolved on (both variants carry it).
+    pub fn class(&self) -> &str {
+        match self {
+            MethodResolution::Local { class, .. } | MethodResolution::CrossFile { class, .. } => class,
+        }
+    }
 }
 
 /// Result of resolving a sub/method call — local symbol or cross-file metadata.
@@ -6629,20 +7211,13 @@ impl FileAnalysis {
         &self,
         invocant: &str,
         point: Point,
-        module_index: Option<&ModuleIndex>,
+        module_index: Option<&dyn CrossFileLookup>,
     ) -> Vec<CompletionCandidate> {
-        let class_name = if !invocant.starts_with('$')
-            && !invocant.starts_with('@')
-            && !invocant.starts_with('%')
-        {
-            Some(invocant.to_string())
-        } else {
-            self.resolve_invocant_class(
-                invocant,
-                self.scope_at(point).unwrap_or(ScopeId(0)),
-                point,
-            )
-        };
+        let class_name = self.resolve_invocant_class(
+            invocant,
+            self.scope_at(point).unwrap_or(ScopeId(0)),
+            point,
+        );
 
         if let Some(ref cn) = class_name {
             // Pass `module_index` so the ancestor walk reaches CROSS-FILE
@@ -6897,20 +7472,16 @@ impl FileAnalysis {
         invocant: Option<&str>,
         point: Point,
         used_keys: &HashSet<String>,
-        module_index: Option<&ModuleIndex>,
+        module_index: Option<&dyn CrossFileLookup>,
     ) -> Vec<CompletionCandidate> {
-        // For `new` calls on a class, check for :param fields
-        if call_name == "new" {
+        // For constructor calls on a class, check for :param fields
+        if crate::conventions::is_constructor_name(call_name) {
             if let Some(inv) = invocant {
-                let class_name = if !inv.starts_with('$') {
-                    Some(inv.to_string())
-                } else {
-                    self.resolve_invocant_class(
-                        inv,
-                        self.scope_at(point).unwrap_or(ScopeId(0)),
-                        point,
-                    )
-                };
+                let class_name = self.resolve_invocant_class(
+                    inv,
+                    self.scope_at(point).unwrap_or(ScopeId(0)),
+                    point,
+                );
                 if let Some(ref cn) = class_name {
                     let param_candidates = self.class_param_completions(cn, used_keys);
                     if !param_candidates.is_empty() {
@@ -7011,7 +7582,7 @@ impl FileAnalysis {
         is_method: bool,
         invocant: Option<&str>,
         point: Point,
-        module_index: Option<&ModuleIndex>,
+        module_index: Option<&dyn CrossFileLookup>,
     ) -> Option<SignatureInfo> {
         let resolved = self.find_sub_for_call(name, is_method, invocant, point, module_index)?;
 
@@ -7025,9 +7596,9 @@ impl FileAnalysis {
                 let mut params = params;
                 let is_method = is_method
                     || sym_is_method
-                    || params
-                        .first()
-                        .map_or(false, |p| p.name == "$self" || p.name == "$class");
+                    || params.first().map_or(false, |p| {
+                        crate::conventions::is_conventional_invocant_name(&p.name)
+                    });
 
                 // Strip the implicit invocant from the display list.
                 // `is_invocant` covers both Perl-native `$self`/`$class`
@@ -7057,8 +7628,11 @@ impl FileAnalysis {
                     .map(|t| t.as_ref().map(inferred_type_to_tag))
                     .collect();
 
-                let is_method = is_method || cf_is_method
-                    || params.first().map_or(false, |p| p.name == "$self" || p.name == "$class");
+                let is_method = is_method
+                    || cf_is_method
+                    || params.first().map_or(false, |p| {
+                        crate::conventions::is_conventional_invocant_name(&p.name)
+                    });
 
                 // Same invocant-strip as the local branch — by flag,
                 // not by name. Cross-file ParamInfo carries the flag
@@ -7094,21 +7668,28 @@ impl FileAnalysis {
         is_method: bool,
         invocant: Option<&str>,
         point: Point,
-        module_index: Option<&ModuleIndex>,
+        module_index: Option<&dyn CrossFileLookup>,
     ) -> Option<ResolvedSub<'s>> {
+        let scope = self.scope_at(point).unwrap_or(ScopeId(0));
+        // A fully-qualified / SUPER call token (`$o->Foo::Bar::m`, `SUPER::m`)
+        // names its dispatch class explicitly — split it so lookups use the
+        // bare tail scoped to the qualifier, overriding the invocant-derived
+        // class (Perl ignores the invocant's class for the lookup). SUPER
+        // resolves over the enclosing package's parent MRO.
+        let token = crate::conventions::MethodToken::parse(name);
+        let name = token.name();
+        let fq_class = match token {
+            crate::conventions::MethodToken::Super(tail) => self
+                .enclosing_class_for_scope(scope)
+                .and_then(|e| self.resolve_super_method(&e, tail, module_index))
+                .map(|r| r.class().to_string()),
+            t => t.literal_package().map(str::to_string),
+        };
         // Resolve class name for scoped lookup
-        let class_name = if is_method {
-            invocant.and_then(|inv| {
-                if !inv.starts_with('$') && !inv.starts_with('@') && !inv.starts_with('%') {
-                    Some(inv.to_string())
-                } else {
-                    self.resolve_invocant_class(
-                        inv,
-                        self.scope_at(point).unwrap_or(ScopeId(0)),
-                        point,
-                    )
-                }
-            })
+        let class_name = if fq_class.is_some() {
+            fq_class
+        } else if is_method {
+            invocant.and_then(|inv| self.resolve_invocant_class(inv, scope, point))
         } else {
             None
         };
@@ -7458,18 +8039,6 @@ pub(crate) fn contains_point(span: &Span, point: Point) -> bool {
         && (point.row < span.end.row || (point.row == span.end.row && point.column <= span.end.column))
 }
 
-/// Walk up from a node to find an ancestor of the given kind.
-fn find_ancestor<'a>(node: tree_sitter::Node<'a>, kind: &str) -> Option<tree_sitter::Node<'a>> {
-    let mut current = node;
-    for _ in 0..20 {
-        if current.kind() == kind {
-            return Some(current);
-        }
-        current = current.parent()?;
-    }
-    None
-}
-
 fn span_size(span: &Span) -> usize {
     // Use row difference as primary size metric; column as tiebreaker
     let rows = span.end.row.saturating_sub(span.start.row);
@@ -7624,7 +8193,7 @@ pub fn inferred_type_to_tag(ty: &InferredType) -> String {
 }
 
 /// Format a cross-file method signature from a SubInfo view.
-fn format_cross_file_signature(method_name: &str, sub_info: &crate::module_index::SubInfo<'_>) -> String {
+fn format_cross_file_signature(method_name: &str, sub_info: &SubInfo<'_>) -> String {
     let params = sub_info.params();
     if params.is_empty() {
         format!("sub {}()", method_name)
@@ -7635,7 +8204,7 @@ fn format_cross_file_signature(method_name: &str, sub_info: &crate::module_index
 }
 
 /// Build a `ResolvedSub::CrossFile` from a SubInfo view, snapshotting owned data.
-fn cross_file_resolved(sub_info: &crate::module_index::SubInfo<'_>) -> ResolvedSub<'static> {
+fn cross_file_resolved(sub_info: &SubInfo<'_>) -> ResolvedSub<'static> {
     let params: Vec<ParamInfo> = sub_info.params().to_vec();
     let param_types: Vec<Option<InferredType>> = params
         .iter()

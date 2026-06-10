@@ -97,7 +97,8 @@
       "line": 90,
       "col": 4,
       "newname": "RENAMED",
-      "expect": {"all":["urn.pm","\"line\":\"90\""],"none":["isbn.pm","_generic.pm"]},
+      "comment": "Renames URI::urn::canonical: the def (urn.pm:90) AND the subclass SUPER call that targets it (isbn.pm:97, $self->SUPER::canonical). NOT isbn's own canonical override (isbn.pm:94) nor _generic.pm's $rel->canonical (dispatches to a different class).",
+      "expect": {"all":["urn.pm","\"line\":\"90\"","isbn.pm","\"line\":\"97\""],"none":["_generic.pm","\"line\":\"94\""]},
       "status": "gold"
     }
   ]

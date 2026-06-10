@@ -3,33 +3,14 @@
 //! One depth-first walk populates scopes, symbols, refs, type constraints,
 //! and fold ranges. Post-passes resolve hash key owners and variable refs.
 
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 
 use tree_sitter::{Node, Point, Tree};
 
 use crate::file_analysis::*;
 use crate::plugin::{self, PluginRegistry};
 
-/// Process-wide plugin registry, built once with the bundled Rhai plugins
-/// plus anything in `plugin_search_dirs()` (`$PERL_LSP_PLUGIN_DIR` and the
-/// nearest repo-local `.perl-lsp/`). All `build()` calls share it; tests
-/// that need isolation use `build_with_plugins()`.
-pub fn default_plugin_registry() -> Arc<PluginRegistry> {
-    static REG: OnceLock<Arc<PluginRegistry>> = OnceLock::new();
-    REG.get_or_init(|| {
-        let engine = Arc::new(plugin::rhai_host::make_engine());
-        let mut reg = PluginRegistry::new();
-        for p in plugin::rhai_host::load_bundled(engine.clone()) {
-            reg.register(p);
-        }
-        for dir in plugin::rhai_host::plugin_search_dirs() {
-            for p in plugin::rhai_host::load_plugin_dir(&dir, engine.clone()) {
-                reg.register(p);
-            }
-        }
-        Arc::new(reg)
-    }).clone()
-}
+pub use crate::plugin::default_plugin_registry;
 
 /// Single CST walk that powers the post-walk `ChainTypingReducer`.
 /// Indexes the node sets the reducer needs:
@@ -268,6 +249,7 @@ fn build_with_plugins_inner(
         provisional_dispatches: Vec::new(),
         gated_param_types: Vec::new(),
         method_call_invocant: std::collections::HashMap::new(),
+        attr_projections: Vec::new(),
         method_call_arity: std::collections::HashMap::new(),
         parametric_emitted_refs: std::collections::HashSet::new(),
         method_call_ref_dedup: std::collections::HashSet::new(),
@@ -486,35 +468,32 @@ fn build_with_plugins_inner(
     // Post-pass 5: fill in tail POD docs for subs that didn't get preceding doc
     b.resolve_tail_pod_docs();
 
-    let bag = std::mem::take(&mut b.bag);
-    let package_framework = std::mem::take(&mut b.package_framework);
-
-    let mut fa = FileAnalysis::new(
-        b.scopes,
-        b.symbols,
-        b.refs,
-        b.fold_ranges,
-        b.imports,
-        b.call_bindings,
-        b.package_parents,
-        b.method_call_bindings,
-        b.framework_imports,
-        b.export,
-        b.export_ok,
-        b.plugin_namespaces,
-        b.package_uses,
-        b.type_provenance,
-        b.package_ranges,
-    );
-    fa.package_framework = package_framework;
-    fa.export_tags = std::mem::take(&mut b.export_tags);
-    fa.reexport_modules = std::mem::take(&mut b.reexport_modules);
-    fa.app_surface_consumers = b.app_surface_consumers.clone();
-    fa.regex_spans = b.regex_spans;
-    fa.witnesses = bag;
-    fa.witnesses.rebuild_index();
-    fa.provisional_dispatches = std::mem::take(&mut b.provisional_dispatches);
-    fa.gated_param_types = std::mem::take(&mut b.gated_param_types);
+    let mut fa = FileAnalysis::new(crate::file_analysis::FileAnalysisParts {
+        scopes: b.scopes,
+        symbols: b.symbols,
+        refs: b.refs,
+        fold_ranges: b.fold_ranges,
+        imports: b.imports,
+        call_bindings: b.call_bindings,
+        package_parents: b.package_parents,
+        method_call_bindings: b.method_call_bindings,
+        framework_imports: b.framework_imports,
+        export: b.export,
+        export_ok: b.export_ok,
+        export_tags: b.export_tags,
+        reexport_modules: b.reexport_modules,
+        plugin_namespaces: b.plugin_namespaces,
+        package_uses: b.package_uses,
+        type_provenance: b.type_provenance,
+        package_ranges: b.package_ranges,
+        regex_spans: b.regex_spans,
+        app_surface_consumers: b.app_surface_consumers,
+        witnesses: b.bag,
+        package_framework: b.package_framework,
+        provisional_dispatches: b.provisional_dispatches,
+        attr_projections: b.attr_projections,
+        gated_param_types: b.gated_param_types,
+    });
     // Finalize: run the legacy text-based MCB resolver as a fallback.
     // For every assignment the unified typer (run before
     // `resolve_return_types` above) couldn't handle, MCB fills in.
@@ -984,7 +963,7 @@ struct ReturnInfo {
 /// trailing component. `"Foo::Bar::baz"` → `"baz"`; `"baz"` → `"baz"`. Pure
 /// string op — does not consult the symbol table or package state.
 fn bare_name(s: &str) -> &str {
-    s.rsplit("::").next().unwrap_or(s)
+    crate::file_analysis::split_qualified(s).1
 }
 
 /// If `return_node` is `return CALL`, where CALL is a simple named function
@@ -1018,14 +997,7 @@ fn extract_delegated_call_name<'a>(return_node: Node<'a>, source: &'a [u8]) -> O
 /// returned node's kind (`varname` text is only meaningful for the
 /// identifier form).
 fn find_varname_child<'a>(node: Node<'a>) -> Option<Node<'a>> {
-    for i in 0..node.named_child_count() {
-        if let Some(child) = node.named_child(i) {
-            if child.kind() == "varname" {
-                return Some(child);
-            }
-        }
-    }
-    None
+    crate::cst::varname_child(node)
 }
 
 /// Find a directly-contained `code_deref_expression` in `node` (the grammar
@@ -1466,6 +1438,10 @@ struct Builder<'a> {
     /// which queries the bag at read time and so picks up cross-file
     /// enrichment automatically.
     method_call_invocant: std::collections::HashMap<usize, String>,
+    /// Plugin-declared projection-group members: accessor methods whose
+    /// names derive from an attr (`predicate => has_x`). Flushed into
+    /// `FileAnalysis.attr_accessors`.
+    attr_projections: Vec<crate::file_analysis::AttrProjection>,
 
     /// Per-MethodCall-ref arg count, keyed by ref index. Lets
     /// `emit_method_call_return_edges` pin the call site's arity onto its
@@ -1537,6 +1513,13 @@ struct Builder<'a> {
 ///     cross-file once `module_index` is available).
 enum Gate {
     Strict(HashKeyOwner),
+    /// Strict, but the owner's class is not defined in this file, so a
+    /// local def miss is NOT authoritative (the def may live with the
+    /// class, cross-file). Emits `owner: None` on miss; the query-time
+    /// class check in `refs_to`'s key arm decides — same discipline as
+    /// receiver-gated dispatch (the type is the gate, resolved with the
+    /// index in hand).
+    StrictOrDefer(HashKeyOwner),
     Open(HashKeyOwner),
     Deferred,
 }
@@ -1792,17 +1775,7 @@ impl<'a> Builder<'a> {
     /// nodes. Tree-sitter-perl wraps multi-arg lists in `list_expression`;
     /// single-arg calls present the arg directly.
     fn extract_call_args(&self, call_node: Node<'a>) -> Vec<Node<'a>> {
-        let args = match call_node.child_by_field_name("arguments") {
-            Some(a) => a,
-            None => return Vec::new(),
-        };
-        if args.kind() == "list_expression" || args.kind() == "parenthesized_expression" {
-            (0..args.named_child_count())
-                .filter_map(|i| args.named_child(i))
-                .collect()
-        } else {
-            vec![args]
-        }
+        crate::cst::call_args(call_node)
     }
 
     /// Build an `ArgInfo` for a plugin. Constant-folds literals, barewords,
@@ -1975,9 +1948,9 @@ impl<'a> Builder<'a> {
             "refgen_expression" => {
                 let names = self.extract_names_from_refgen(node);
                 let raw = names.into_iter().next()?;
-                let (class, name) = match raw.rsplit_once("::") {
-                    Some((c, n)) => (c.to_string(), n.to_string()),
-                    None => (self.current_package.clone()?, raw),
+                let (class, name) = match crate::file_analysis::split_qualified(&raw) {
+                    (Some(c), n) => (c.to_string(), n.to_string()),
+                    (None, _) => (self.current_package.clone()?, raw),
                 };
                 Some(crate::witnesses::WitnessAttachment::MethodOnClass { class, name })
             }
@@ -2206,6 +2179,18 @@ impl<'a> Builder<'a> {
                 if text == "$self" {
                     return self.package_for_node(node).map(InferredType::ClassName);
                 }
+                // Const-folded class string: `my $c = 'Counter'; $c->bump`.
+                // In invocant position a known constant string IS the
+                // dispatch class — the same fold dynamic method names use
+                // on the other slot of the arrow. Single candidate only (a
+                // multi-valued fold can't pin one class); checked before
+                // the bag, whose honest answer for `$c` is the degenerate
+                // `String`.
+                let canonical = crate::cst::canonical_var_name(node, self.source);
+                let fold_key = canonical.as_deref().unwrap_or(text);
+                if let Some([class]) = self.resolve_constant_strings(fold_key, 0).as_deref() {
+                    return Some(InferredType::ClassName(class.clone()));
+                }
                 // The bag is canonical at every phase, walk-time
                 // included: `push_type_constraint` mirrors every TC
                 // into a Variable witness live during the walk, so
@@ -2217,7 +2202,7 @@ impl<'a> Builder<'a> {
             }
             "bareword" | "package" => {
                 let text = node.utf8_text(self.source).ok()?;
-                if text == "__PACKAGE__" {
+                if crate::conventions::is_current_package_token(text) {
                     return self.package_for_node(node).map(InferredType::ClassName);
                 }
                 let bare = bare_name(text);
@@ -2667,6 +2652,7 @@ impl<'a> Builder<'a> {
                 hide_in_outline,
                 opaque_return,
                 outline_label,
+                attr,
                 return_via_edge,
             } => {
                 let return_type_for_bag = return_type.clone();
@@ -2680,6 +2666,19 @@ impl<'a> Builder<'a> {
                     is_constant: false,
                 };
                 let target_pkg = on_class.clone().or_else(|| self.current_package.clone());
+                // Projection-group enrollment: the plugin declared which
+                // attr this accessor projects. Recorded on the analysis so
+                // the group machinery (references/rename union) can find
+                // name-mapped members (`has_size` for attr `size`).
+                if let (Some(attr_name), Some(cls)) = (attr.clone(), target_pkg.clone()) {
+                    self.attr_projections.push(
+                        crate::file_analysis::AttrProjection::accessor(
+                            cls,
+                            attr_name,
+                            name.clone(),
+                        ),
+                    );
+                }
 
                 let already_emitted = self.symbols.iter().any(|s| {
                     s.name == name
@@ -2826,7 +2825,9 @@ impl<'a> Builder<'a> {
                 let ref_idx = self.refs.len();
                 self.refs.push(Ref {
                     kind: RefKind::MethodCall {
-                        invocant,
+                        // The plugin asserts its receiver text (a literal
+                        // class like "Users", or a canonical `$self`).
+                        invocant: crate::conventions::InvocantName::assume_canonical(invocant),
                         invocant_span,
                         method_name_span: span,
                     },
@@ -2926,9 +2927,9 @@ impl<'a> Builder<'a> {
                 // name defaults to the package the registration sits in (the
                 // sub is local to it). Resolution is deferred so a forward-
                 // declared sub still resolves.
-                let (package, sub_name) = match sub_name.rsplit_once("::") {
-                    Some((pkg, n)) => (Some(pkg.to_string()), n.to_string()),
-                    None => (self.current_package.clone(), sub_name),
+                let (package, sub_name) = match crate::file_analysis::split_qualified(&sub_name) {
+                    (Some(pkg), n) => (Some(pkg.to_string()), n.to_string()),
+                    (None, _) => (self.current_package.clone(), sub_name),
                 };
                 self.deferred_named_sub_param_types.push(DeferredNamedSubParamType {
                     sub_name,
@@ -3713,10 +3714,8 @@ impl<'a> Builder<'a> {
         // Framework-specific invocant markers (`as_invocant_params` from
         // a plugin) stack on top via EmittedParam → ParamInfo.
         if let Some(first) = params.first_mut() {
-            let name_says_invocant = matches!(
-                first.name.as_str(),
-                "$self" | "$class" | "$this" | "$proto"
-            );
+            let name_says_invocant =
+                crate::conventions::is_conventional_invocant_name(&first.name);
             let pkg_is_subclass = self.current_package
                 .as_ref()
                 .map_or(false, |p| self.package_parents.contains_key(p));
@@ -4077,9 +4076,8 @@ impl<'a> Builder<'a> {
                     == Some("shift")
             }
             "ambiguous_function_call_expression" | "function_call_expression" => {
-                node.child_by_field_name("function")
-                    .and_then(|f| f.utf8_text(self.source).ok())
-                    == Some("shift")
+                use crate::cst::NodeExt;
+                node.field_text("function", self.source) == Some("shift")
             }
             _ => false,
         }
@@ -4302,24 +4300,66 @@ impl<'a> Builder<'a> {
                 // Re-read attrs from the symbol we just stored (avoid re-collecting)
                 let has_reader;
                 let has_writer;
+                let has_param;
                 if let Some(last_sym) = self.symbols.last() {
                     if let SymbolDetail::Field { ref attributes, .. } = last_sym.detail {
                         has_reader = attributes.iter().any(|a| a == "reader");
                         has_writer = attributes.iter().any(|a| a == "writer");
+                        has_param = attributes.iter().any(|a| a == "param");
                     } else {
                         has_reader = false;
                         has_writer = false;
+                        has_param = false;
                     }
                 } else {
                     has_reader = false;
                     has_writer = false;
+                    has_param = false;
+                }
+                // Bare-name sub-span of the `$x` token: synthesized
+                // projections (ctor key, reader) select THIS, not the
+                // sigiled var span — a rename writing a bare replacement
+                // over a sigiled span would eat the `$`.
+                let bare_span = Span {
+                    start: Point {
+                        row: var_span.start.row,
+                        column: var_span.start.column + 1,
+                    },
+                    end: var_span.end,
+                };
+                // `:param` → constructor key: `Point->new(x => …)` connects
+                // to the field, mirroring Moo `has` / Class::Tiny synthesis.
+                // Selection span = the field decl's bare name, so goto-def
+                // from a constructor arg key lands on `field $x :param`
+                // (rule #9).
+                if has_param {
+                    if let Some(ref pkg) = self.current_package {
+                        self.attr_projections.push(crate::file_analysis::AttrProjection {
+                            class: pkg.clone(),
+                            attr: bare_name.to_string(),
+                            kind: crate::file_analysis::AttrProjectionKind::CtorKey,
+                        });
+                    }
+                    self.add_symbol(
+                        bare_name.to_string(),
+                        SymKind::HashKeyDef,
+                        node_to_span(node),
+                        bare_span,
+                        SymbolDetail::HashKeyDef {
+                            owner: HashKeyOwner::Sub {
+                                package: self.current_package.clone(),
+                                name: "new".to_string(),
+                            },
+                            is_dynamic: false,
+                        },
+                    );
                 }
                 if has_reader {
                     self.add_symbol(
                         bare_name.to_string(),
                         SymKind::Method,
                         node_to_span(node),
-                        *var_span,
+                        bare_span,
                         SymbolDetail::Sub { params: vec![], is_method: true, doc: None, display: None, hide_in_outline: false, opaque_return: false, is_constant: false },
                     );
                 }
@@ -4329,7 +4369,7 @@ impl<'a> Builder<'a> {
                         writer_name,
                         SymKind::Method,
                         node_to_span(node),
-                        *var_span,
+                        bare_span,
                         SymbolDetail::Sub {
                             params: vec![ParamInfo {
                                 name: format!("${}", bare_name),
@@ -5026,19 +5066,12 @@ impl<'a> Builder<'a> {
     /// node, not its role), so names come from `extract_node_string` (bareword
     /// *or* quoted string), never from a `=>`-presence gate.
     fn accumulate_constant_block(&mut self, hash: Node<'a>) {
-        let list = (0..hash.named_child_count())
-            .filter_map(|i| hash.named_child(i))
-            .find(|c| c.kind() == "list_expression")
-            .unwrap_or(hash);
-        let mut flat: Vec<Node<'a>> = Vec::new();
-        Self::flatten_pair_list_children(list, &mut flat);
         let mut decls: Vec<(String, Node<'a>, Vec<String>)> = Vec::new();
-        self.for_each_pair_node_in_children(&flat, |name_node, val_node| {
+        for (name_node, val_node) in crate::cst::pair_nodes(hash) {
             if let Some(n) = self.extract_node_string(name_node) {
                 decls.push((n, name_node, self.extract_string_names(val_node)));
             }
-            true
-        });
+        }
         for (name, name_node, values) in decls {
             self.register_constant_symbol(&name, name_node);
             if !values.is_empty() {
@@ -5871,7 +5904,7 @@ impl<'a> Builder<'a> {
                                 invocant_node.utf8_text(self.source),
                             ) {
                                 // Skip constructors — already handled by extract_constructor_class
-                                if method != "new" {
+                                if !crate::conventions::is_constructor_name(method) {
                                     if let Some(vt) = self.get_var_text_from_lhs(left) {
                                         // Resolve dynamic method names via constant folding
                                         let method_names = if method.starts_with('$') {
@@ -6173,7 +6206,7 @@ impl<'a> Builder<'a> {
             "function_call_expression" | "ambiguous_function_call_expression"
                 if self.is_bless_call(node) =>
             {
-                let args = self.extract_call_args(node);
+                let args = self.bless_args(node);
                 match args.get(1) {
                     // Receiver-polymorphic: `bless X, $class` / `bless X, ref
                     // $self || $self` returns the class it was CALLED ON, so
@@ -6908,11 +6941,10 @@ impl<'a> Builder<'a> {
                 // `Sub::Exporter::setup_exporter({ exports => [...] })`.
                 // Match on the unqualified tail so the package prefix
                 // (which the caller may have aliased) isn't load-bearing.
-                if let Some(tail) = name.rsplit("::").next() {
-                    if tail == "setup_exporter" {
-                        if let Some(args) = node.child_by_field_name("arguments") {
-                            self.detect_exporter_setup_call(tail, args);
-                        }
+                let tail = crate::file_analysis::split_qualified(name).1;
+                if tail == "setup_exporter" {
+                    if let Some(args) = node.child_by_field_name("arguments") {
+                        self.detect_exporter_setup_call(tail, args);
                     }
                 }
 
@@ -7451,7 +7483,7 @@ impl<'a> Builder<'a> {
         let mut pins: Vec<(usize, String)> = Vec::new();
         for (i, r) in self.refs.iter().enumerate() {
             let RefKind::FunctionCall { resolved_package: None } = &r.kind else { continue };
-            if r.target_name.contains("::") {
+            if crate::file_analysis::split_qualified(&r.target_name).0.is_some() {
                 continue; // qualified calls already pin at walk time (step 1)
             }
             let Some(pkgs) = sub_pkgs.get(r.target_name.as_str()) else { continue };
@@ -7556,12 +7588,20 @@ impl<'a> Builder<'a> {
                             if name.chars().next().map_or(false, |c| c == '_' || c.is_alphabetic()) {
                                 self.refs.push(Ref {
                                     kind: RefKind::MethodCall {
-                                        invocant: invocant
-                                            .and_then(|i| i.utf8_text(&bytes).ok())
-                                            .unwrap_or("")
-                                            .to_string(),
+                                        invocant: crate::conventions::InvocantName::assume_canonical(
+                                            invocant
+                                                .and_then(|i| {
+                                                    crate::cst::canonical_var_name(i, &bytes)
+                                                        .or_else(|| i.utf8_text(&bytes).ok().map(String::from))
+                                                })
+                                                .unwrap_or_default(),
+                                        ),
                                         invocant_span: invocant.map(node_to_span),
-                                        method_name_span: node_to_span(method),
+                                        // A fully-qualified call (`$o->Foo::Bar::m`)
+                                        // keeps the full path in `target_name` but
+                                        // narrows the renamable span to the `m` tail
+                                        // (rule #7), mirroring FunctionCall.
+                                        method_name_span: crate::file_analysis::fq_tail_span(method, name),
                                     },
                                     span: node_to_span(n),
                                     scope,
@@ -7911,8 +7951,8 @@ impl<'a> Builder<'a> {
             // the tail under `DateTime`, not the file's own `current_package`
             // (`DateTime::PP`), so `MethodOnClass{DateTime, _ymd2rd}` resolves.
             // Unqualified names stay under the current package.
-            let (target_pkg, local) = match name.rsplit_once("::") {
-                Some((prefix, tail)) if !prefix.is_empty() => {
+            let (target_pkg, local) = match crate::file_analysis::split_qualified(&name) {
+                (Some(prefix), tail) if !prefix.is_empty() => {
                     (Some(prefix.to_string()), tail.to_string())
                 }
                 _ => (self.current_package.clone(), name.clone()),
@@ -8745,7 +8785,23 @@ impl<'a> Builder<'a> {
         }
 
         // Synthesize HashKeyDef entries so Foo->new(name => ...) connects to the attribute.
-        if let Some(ref _pkg) = self.current_package {
+        if let Some(ref pkg) = self.current_package {
+            // The projection entity: `has` is hash-backed in every framework
+            // this visitor serves, so the InternalKey projection is minted
+            // HERE — the repr gate is encoded at the source, not re-derived
+            // by consumers (Corinna's field visitor mints no InternalKey).
+            for (name, _sel_span) in &attr_names {
+                for kind in [
+                    crate::file_analysis::AttrProjectionKind::CtorKey,
+                    crate::file_analysis::AttrProjectionKind::InternalKey,
+                ] {
+                    self.attr_projections.push(crate::file_analysis::AttrProjection {
+                        class: pkg.clone(),
+                        attr: name.clone(),
+                        kind,
+                    });
+                }
+            }
             let owner = HashKeyOwner::Sub {
                 package: self.current_package.clone(),
                 name: "new".to_string(),
@@ -9163,43 +9219,15 @@ impl<'a> Builder<'a> {
     /// barewords, autoquoted barewords (`-setup`), or strings; the inter-token
     /// commas / `=>` are skipped positionally. Stops early when `f` returns
     /// `false`.
-    fn for_each_pair_in_list<F>(&self, container: Node<'a>, f: F)
+    fn for_each_pair_in_list<F>(&self, container: Node<'a>, mut f: F)
     where
         F: FnMut(&str, Node<'a>) -> bool,
     {
-        let list = if container.kind() == "anonymous_hash_expression" {
-            (0..container.named_child_count())
-                .filter_map(|i| container.named_child(i))
-                .find(|c| c.kind() == "list_expression")
-                .unwrap_or(container)
-        } else {
-            container
-        };
-        let mut children: Vec<Node<'a>> = Vec::new();
-        Self::flatten_pair_list_children(list, &mut children);
-        self.for_each_pair_in_children(&children, f);
-    }
-
-    /// Flatten a pair-list container's children into one token stream,
-    /// descending tree-sitter-perl's right-associative nesting: `a => 1, b =>
-    /// 2` parses as `a, =>, 1, (b, =>, 2)` — the tail pairs hide inside a
-    /// nested `list_expression`. We splice that nested list's children inline
-    /// (in place of the wrapper node) so a single linear scan sees every pair.
-    /// A `list_expression` that is itself a *value* (e.g. `key => (a, b)`) only
-    /// nests when it's the last child, so descending the trailing wrapper is
-    /// safe — a non-trailing list is a genuine multi-element value and is kept
-    /// whole.
-    fn flatten_pair_list_children(list: Node<'a>, out: &mut Vec<Node<'a>>) {
-        let count = list.child_count();
-        for i in 0..count {
-            let Some(child) = list.child(i) else { continue };
-            // The trailing `list_expression` is the right-assoc continuation of
-            // the pair stream; everything else (including a non-trailing list
-            // that is a real value) stays as-is.
-            if child.kind() == "list_expression" && i + 1 == count {
-                Self::flatten_pair_list_children(child, out);
-            } else {
-                out.push(child);
+        for (k_node, val) in crate::cst::pair_nodes(container) {
+            if let Some(key) = self.extract_node_string(k_node) {
+                if !f(&key, val) {
+                    return;
+                }
             }
         }
     }
@@ -9223,33 +9251,17 @@ impl<'a> Builder<'a> {
         });
     }
 
-    /// Node-level pair walker: walk a flat sibling sequence as positional
-    /// `(key_node, value_node)` pairs, separator-agnostic (the `,` / `=>`
-    /// between tokens is skipped by position, never matched). The canonical
-    /// pairing primitive — `for_each_pair_in_children` is its string-key
-    /// projection, and span-needing callers (constant block, hash-key defs)
-    /// read the key node directly. Stops early when `f` returns `false`.
+    /// Node-level pair walker over a flat sibling sequence — see
+    /// `cst::pair_nodes_in` for the pairing rule. Stops early when `f`
+    /// returns `false`.
     fn for_each_pair_node_in_children<F>(&self, children: &[Node<'a>], mut f: F)
     where
         F: FnMut(Node<'a>, Node<'a>) -> bool,
     {
-        let count = children.len();
-        let mut i = 0;
-        while i < count {
-            let k_node = children[i];
-            i += 1;
-            if !k_node.is_named() { continue; }
-            // Skip the comma / fat comma to the next named node (the value).
-            let val = loop {
-                match children.get(i) {
-                    Some(c) if c.is_named() => break Some(*c),
-                    Some(_) => i += 1,
-                    None => break None,
-                }
-            };
-            let Some(val) = val else { break; };
-            i += 1; // step past the value so the next key isn't read off it
-            if !f(k_node, val) { return; }
+        for (k_node, val) in crate::cst::pair_nodes_in(children) {
+            if !f(k_node, val) {
+                return;
+            }
         }
     }
 
@@ -9611,52 +9623,54 @@ impl<'a> Builder<'a> {
     }
 
     fn visit_method_call(&mut self, node: Node<'a>) {
-        let method_node = node.child_by_field_name("method");
+        use crate::cst::NodeExt;
+        let call = crate::cst::MethodCall::cast(node)
+            .expect("visit_node dispatches method_call_expression here");
+        let method_node = call.method();
         let method_name = method_node
-            .and_then(|n| n.utf8_text(self.source).ok())
+            .and_then(|n| n.text(self.source))
             .map(|s| s.to_string());
-        let method_name_span = method_node.map(|n| node_to_span(n))
-            .unwrap_or_else(|| node_to_span(node));
-        let invocant_node = node.child_by_field_name("invocant");
-        let invocant_text = invocant_node
-            .and_then(|n| n.utf8_text(self.source).ok())
-            .map(|s| s.to_string());
+        // A fully-qualified call (`$o->Foo::Bar::m`) keeps the full path in
+        // `target_name` but narrows the renamable span to the `m` tail (rule
+        // #7), mirroring FunctionCall — so rename rewrites only the method.
+        let method_name_span = match (method_node, method_name.as_deref()) {
+            (Some(n), Some(name)) => crate::file_analysis::fq_tail_span(n, name),
+            _ => node.span(),
+        };
+        let invocant_node = call.invocant();
+        // Canonical sigiled name for variable invocants (`${sner}` records
+        // as `$sner`) so downstream bag lookups hit the variable's key; raw
+        // text for everything else.
+        let invocant_text = invocant_node.and_then(|n| {
+            crate::cst::canonical_var_name(n, self.source)
+                .or_else(|| n.text(self.source).map(|s| s.to_string()))
+        });
         let invocant = invocant_text.as_ref().map(|s| {
-            // Resolve __PACKAGE__ to enclosing package name
-            if s == "__PACKAGE__" {
-                self.current_package.clone().unwrap_or_else(|| s.to_string())
+            // Resolve __PACKAGE__ to enclosing package name. This is THE
+            // canonical producer for ref invocants — varname spelling
+            // normalized above, package token resolved here.
+            if crate::conventions::is_current_package_token(s) {
+                crate::conventions::InvocantName::assume_canonical(
+                    self.current_package.clone().unwrap_or_else(|| s.to_string()),
+                )
             } else {
-                s.to_string()
+                crate::conventions::InvocantName::assume_canonical(s)
             }
         });
-        // Always store the invocant span so post-walk refinement
-        // (`apply_chain_typing_invocants`) can find the node and
-        // fill `invocant_class` for refs that walk-time couldn't
-        // resolve (variable invocants whose TC isn't yet seeded,
-        // call-chain invocants whose inner sub return type isn't
-        // resolved). Without this, a `$obj->method` ref whose
-        // walk-time invocant_class was None would stay None
-        // forever and class-scoped `refs_to` would silently match
+        // Stored even when walk-time can't resolve the class — PostFold's
+        // `apply_chain_typing_invocants` needs the span to find the node
+        // and fill `invocant_class`, else class-scoped `refs_to` matches
         // too broadly.
-        let invocant_span = invocant_node.map(node_to_span);
+        let invocant_span = invocant_node.map(|n| n.span());
 
-        // Walk-time invocant_class — closed-under-syntax cases only:
-        //   - constructor pattern (`Sner->new->hi`)
-        //   - `__PACKAGE__->method(...)`
-        //
-        // Both are determined by syntax alone — no inference, no
-        // bag lookup. Everything else (variable invocants, bareword
-        // invocants whose canonical class only the bag knows like
-        // `app`, call-chain invocants whose return type is
-        // mid-fold) stays None and gets filled by PostFold's
-        // `apply_chain_typing_invocants` against the canonical bag.
-        // Now that `emit_method_call_arg_keys` runs post-walk, no
-        // walk-time consumer reads `invocant_class` — leaving it
-        // None at walk-time costs nothing.
+        // Walk-time invocant_class: closed-under-syntax cases only
+        // (constructor chain `Sner->new->hi`, `__PACKAGE__->m`, a scalar
+        // holding a const-folded class string). Everything
+        // inference-dependent stays None for PostFold to fill from the bag.
         let invocant_class = invocant_node.and_then(|n| match n.kind() {
             "method_call_expression" => self.extract_constructor_class(n),
             "bareword" | "package"
-                if n.utf8_text(self.source).ok() == Some("__PACKAGE__") =>
+                if n.utf8_text(self.source).ok().is_some_and(crate::conventions::is_current_package_token) =>
             {
                 self.current_package.clone()
             }
@@ -9721,19 +9735,11 @@ impl<'a> Builder<'a> {
                     }
                 }
 
-                // Part 5c — `recv->resultset('Foo')` is closed
-                // under syntax. Push the `Parametric` InferredType
-                // at the call's `Expression(refidx)` so chain
-                // receivers reading via
-                // `method_call_return_type_via_bag` see it, and
-                // mark the ref so `emit_method_call_return_edges`
-                // skips its standard `Edge(MethodOnClass)` (which
-                // would resolve to the receiver class's `resultset`
-                // plain return type and mask the row-class arg via
-                // `FrameworkAwareTypeFold`'s class-axis short-
-                // circuit). Variable-binding chain typing
-                // (`my $rs = $schema->resultset(…)`) reads the same
-                // attachment via the bag and seeds a TC for `$rs`.
+                // `recv->resultset('Foo')` is closed under syntax: push the
+                // `Parametric` type at the call's `Expression(refidx)`, and
+                // mark the ref so `emit_method_call_return_edges` skips its
+                // standard `Edge(MethodOnClass)` — that edge would resolve to
+                // plain `resultset` and mask the row-class arg.
                 if let Some(ty) = self.extract_resultset_parametric(node) {
                     self.parametric_emitted_refs.insert(idx);
                     let r_span = self.refs[idx].span;
@@ -9791,7 +9797,7 @@ impl<'a> Builder<'a> {
                             bw_text.to_string(),
                             AccessKind::Read,
                         );
-                    } else if bw_text != "__PACKAGE__" {
+                    } else if !crate::conventions::is_current_package_token(bw_text) {
                         // Class-name invocant (`Foo->bar`): the bareword is a
                         // package, not a local sub. Emit a narrower PackageRef
                         // at the invocant span so cursor-on-`Foo` resolves to
@@ -9813,7 +9819,7 @@ impl<'a> Builder<'a> {
         }
 
         // DBIC accessor synthesis: __PACKAGE__->add_columns(...), ->has_many(...), etc.
-        let is_pkg_call = invocant_text.as_deref() == Some("__PACKAGE__")
+        let is_pkg_call = invocant_text.as_deref().is_some_and(crate::conventions::is_current_package_token)
             || (invocant_node.map(|n| n.kind()) == Some("package")
                 && invocant_text.as_ref() == self.current_package.as_ref());
         if is_pkg_call {
@@ -10035,14 +10041,9 @@ impl<'a> Builder<'a> {
             );
         }
 
-        // Also synthesize HashKeyDef symbols owned by the row class
-        // so `$rs->search({ name => … })` and `$row->{name}` find
-        // their column def. Mirrors what Mojo `has` does for
-        // constructor args. The HashKeyAccess consumer at
-        // `find_definition`'s method-call-arg arm looks up
-        // `HashKeyOwner::Class(<class>)` — when threaded through
-        // Parametric ResultSet typing (Part 5c), `<class>` is the
-        // row class.
+        // Also synthesize HashKeyDef symbols owned by the row class so
+        // `$rs->search({ name => … })` and `$row->{name}` find their column
+        // def (same shape Mojo `has` emits for constructor args).
         if let Some(ref pkg) = self.current_package {
             let owner = HashKeyOwner::Class(pkg.clone());
             for (name, sel_span) in &col_names {
@@ -10401,28 +10402,8 @@ impl<'a> Builder<'a> {
     /// name comes from the `varname` child so forms like `@{$ref}[0]`
     /// (ERROR/block-varname) don't produce garbage.
     fn canonicalize_container(&self, node: Node<'a>, text: &str) -> String {
-        let fallback = || text.to_string();
-        let parent = match node.parent() { Some(p) => p, None => return fallback() };
-        let bare = match find_varname_child(node).and_then(|v| v.utf8_text(self.source).ok()) {
-            Some(b) => b,
-            None => return fallback(),
-        };
-
-        let target_sigil: char = match parent.kind() {
-            "array_element_expression" => '@',
-            "hash_element_expression" => '%',
-            "slice_expression" | "keyval_expression" => {
-                if parent.child_by_field_name("array").map_or(false, |c| c == node) {
-                    '@'
-                } else if parent.child_by_field_name("hash").map_or(false, |c| c == node) {
-                    '%'
-                } else {
-                    return fallback();
-                }
-            }
-            _ => return fallback(),
-        };
-        format!("{}{}", target_sigil, bare)
+        crate::cst::canonical_container_name(node, self.source)
+            .unwrap_or_else(|| text.to_string())
     }
 
     /// Extract the function name from a call expression (function_call or ambiguous_function_call).
@@ -10430,11 +10411,9 @@ impl<'a> Builder<'a> {
         // Only match actual function calls, not method calls
         // (method calls are handled by MethodCallBinding).
         //
-        // We used to reject names containing `:` (qualified calls like
-        // `Pkg::Sub::foo()`), which silently dropped those from
-        // `call_bindings`. The fixup downstream strips the package prefix
-        // before looking the sub up in `return_types`, so qualifiers are
-        // fine to pass through here.
+        // Qualified names (`Pkg::Sub::foo()`) pass through whole — the
+        // downstream fixup strips the package prefix before the
+        // `return_types` lookup, so rejecting them here only loses bindings.
         //
         // Dynamic calls like `my $fn = 'get_config'; $fn->()` — the parser
         // yields a function_call_expression with function="$fn". Mirror the
@@ -10463,22 +10442,11 @@ impl<'a> Builder<'a> {
     }
 
     fn extract_constructor_class(&self, node: Node<'a>) -> Option<String> {
-        if node.kind() == "method_call_expression" {
-            let method = node.child_by_field_name("method")?;
-            if method.utf8_text(self.source).ok() == Some("new") {
-                let invocant = node.child_by_field_name("invocant")?;
-                let inv_text = invocant.utf8_text(self.source).ok()?;
-                // Invocant must be a package name (not a variable)
-                if !inv_text.starts_with('$') && !inv_text.starts_with('@') && !inv_text.starts_with('%') {
-                    // Resolve __PACKAGE__ to enclosing package name
-                    if inv_text == "__PACKAGE__" {
-                        return self.current_package.clone();
-                    }
-                    return Some(inv_text.to_string());
-                }
-            }
+        let inv = crate::cst::constructor_invocant(node, self.source)?;
+        if crate::conventions::is_current_package_token(inv) {
+            return self.current_package.clone();
         }
-        None
+        Some(inv.to_string())
     }
 
     /// `recv->resultset('Foo')` → `Parametric(ResultSet { base,
@@ -10783,8 +10751,62 @@ impl<'a> Builder<'a> {
     /// → current package; a string/bareword literal → its text; a missing
     /// 2nd arg (`bless {}`) → current package (Perl's one-arg bless blesses
     /// into the caller's package).
+    /// `bless`'s effective arguments, recovering the class arg that
+    /// tree-sitter-perl strands in `return bless {BLOCK}, CLASS`. The brace
+    /// block greedily ends the (parenless) call, so `CLASS` lands as a sibling
+    /// of the `return_expression` in the enclosing `list_expression`. Perl
+    /// parses `bless` as a list operator (the comma binds to bless, not
+    /// return), so that stranded sibling IS the class — splice it back. Only
+    /// the parenless `ambiguous_function_call_expression` strands; an explicit
+    /// `bless({}), $x` delimits its args, so its trailing list element is a
+    /// genuine second return value, not a dropped class.
+    ///
+    /// KLUDGE (tree-sitter-perl parser bug): the correct parse is `bless` as a
+    /// list operator grabbing the whole `{BLOCK}, CLASS` list. A fix is going
+    /// upstream; once a tree-sitter-perl release parses `return bless {}, X`
+    /// with both args under the call, DELETE `bless_args` + `bless_stranded_
+    /// class` and call `extract_call_args` directly at both bless sites. See
+    /// mem `tree-sitter-perl-parse-gotcha-return`.
+    fn bless_args(&self, node: Node<'a>) -> Vec<Node<'a>> {
+        let mut args = self.extract_call_args(node);
+        if node.kind() == "ambiguous_function_call_expression"
+            && args.len() == 1
+            && args[0].kind() == "anonymous_hash_expression"
+        {
+            if let Some(class) = self.bless_stranded_class(node) {
+                args.push(class);
+            }
+        }
+        args
+    }
+
+    /// The class arg stranded after `return bless {BLOCK}` — the head's next
+    /// named sibling in the `list_expression` that captured the tail (walking
+    /// past an optional `return_expression`). See `bless_args`.
+    fn bless_stranded_class(&self, node: Node<'a>) -> Option<Node<'a>> {
+        let head = match node.parent() {
+            Some(p) if p.kind() == "return_expression" => p,
+            _ => node,
+        };
+        let list = head.parent()?;
+        if list.kind() != "list_expression" {
+            return None;
+        }
+        let mut take_next = false;
+        for i in 0..list.named_child_count() {
+            let c = list.named_child(i)?;
+            if take_next {
+                return Some(c);
+            }
+            if c.id() == head.id() {
+                take_next = true;
+            }
+        }
+        None
+    }
+
     fn visit_bless_call(&mut self, node: Node<'a>) {
-        let args = self.extract_call_args(node);
+        let args = self.bless_args(node);
         let obj = match args.first() {
             Some(n) => *n,
             None => return,
@@ -10820,12 +10842,7 @@ impl<'a> Builder<'a> {
             return true;
         }
         match node.kind() {
-            // Compare the canonical varname (bare identifier), not the raw node
-            // text — so the braced spellings `${self}` / `${ class }` match too,
-            // and a deref (`${$ref}`, whose varname child is a `block`) does not.
-            "scalar" => find_varname_child(node)
-                .and_then(|v| v.utf8_text(self.source).ok())
-                .is_some_and(|n| matches!(n, "self" | "class" | "this" | "proto")),
+            "scalar" => crate::cst::is_conventional_invocant_scalar(node, self.source),
             "array_element_expression" => self.is_positional_receiver(node),
             // `ref <invocant>`
             "func1op_call_expression" => {
@@ -10849,7 +10866,7 @@ impl<'a> Builder<'a> {
         // `__PACKAGE__` parses as a func0op call here (not a bareword), so
         // `invocant_type_at_node`'s bareword arm doesn't catch it — resolve
         // it to the enclosing package directly.
-        if class_node.utf8_text(self.source).ok() == Some("__PACKAGE__") {
+        if class_node.utf8_text(self.source).ok().is_some_and(crate::conventions::is_current_package_token) {
             return self.package_for_node(class_node);
         }
         // `bless $r, ref $x` (the clone idiom) blesses into `$x`'s class: the
@@ -10942,6 +10959,13 @@ impl<'a> Builder<'a> {
                     if !self.has_hash_key_def(&key, owner) { continue; }
                     Some(owner.clone())
                 }
+                Gate::StrictOrDefer(owner) => {
+                    if self.has_hash_key_def(&key, owner) {
+                        Some(owner.clone())
+                    } else {
+                        None
+                    }
+                }
                 Gate::Open(owner) => Some(owner.clone()),
                 Gate::Deferred => None,
             };
@@ -10987,22 +11011,8 @@ impl<'a> Builder<'a> {
     /// so the separator (`,` vs `=>`) is irrelevant; we pair positionally via
     /// the shared node-level walker and take each key node.
     fn collect_pair_keys(&mut self, node: Node<'a>, owner: &HashKeyOwner) {
-        // Unwrap the hash wrapper to its inner list, then flatten the
-        // right-associative pair nesting into one stream so positional pairing
-        // sees every key/value across the `(b, =>, 2)` continuation boundary —
-        // the value side is a real value, never re-scanned as a key.
-        let list = if node.kind() == "anonymous_hash_expression" {
-            (0..node.named_child_count())
-                .filter_map(|i| node.named_child(i))
-                .find(|c| c.kind() == "list_expression")
-                .unwrap_or(node)
-        } else {
-            node
-        };
-        let mut flat: Vec<Node<'a>> = Vec::new();
-        Self::flatten_pair_list_children(list, &mut flat);
         let mut defs: Vec<(String, Span)> = Vec::new();
-        self.for_each_pair_node_in_children(&flat, |k_node, _val| {
+        for (k_node, _val) in crate::cst::pair_nodes(node) {
             if matches!(
                 k_node.kind(),
                 "autoquoted_bareword" | "string_literal" | "interpolated_string_literal"
@@ -11013,8 +11023,7 @@ impl<'a> Builder<'a> {
                     }
                 }
             }
-            true
-        });
+        }
         for (key, span) in defs {
             self.add_symbol(
                 key,
@@ -11524,15 +11533,9 @@ impl<'a> Builder<'a> {
         reg: &crate::witnesses::ReducerRegistry,
     ) -> (Vec<(SymbolId, Option<InferredType>)>, usize, usize) {
         use crate::witnesses::{
-            BagContext, FrameworkFact, ReducedValue, ReducerQuery, WitnessAttachment,
+            FrameworkFact, ReducedValue, ReducerQuery, WitnessAttachment,
         };
-        let ctx = BagContext {
-            scopes: &self.scopes,
-            package_framework: &self.package_framework,
-            module_index: None,
-            package_parents: &self.package_parents,
-            app_surface_consumers: &self.app_surface_consumers,
-        };
+        let ctx = self.bag_context();
         let mut answers: Vec<(SymbolId, Option<InferredType>)> = self
             .symbols
             .iter()
@@ -11863,6 +11866,7 @@ impl<'a> Builder<'a> {
         enum Path<'a> {
             Claimed(HashKeyOwner, Node<'a>),
             Strict(HashKeyOwner, Node<'a>),
+            StrictOrDefer(HashKeyOwner, Node<'a>),
             Deferred(Node<'a>),
         }
         let mut pending: Vec<Path<'a>> = Vec::new();
@@ -11894,13 +11898,22 @@ impl<'a> Builder<'a> {
                 continue;
             }
             if let Some(cls) = self.method_call_invocant.get(&i) {
-                pending.push(Path::Strict(
-                    HashKeyOwner::Sub {
-                        package: Some(cls.clone()),
-                        name: r.target_name.clone(),
-                    },
-                    args,
-                ));
+                // Definitions only — a `use Point` import symbol
+                // (SymKind::Module) does not make the class local.
+                let local_class = self.symbols.iter().any(|s| {
+                    matches!(s.kind, SymKind::Package | SymKind::Class) && s.name == *cls
+                });
+                let owner = HashKeyOwner::Sub {
+                    package: Some(cls.clone()),
+                    name: r.target_name.clone(),
+                };
+                pending.push(if local_class {
+                    Path::Strict(owner, args)
+                } else {
+                    // The class lives elsewhere — a local def miss can't
+                    // veto; defer the gate to query time.
+                    Path::StrictOrDefer(owner, args)
+                });
                 continue;
             }
             // Receiver type unresolvable at build. Only defer for
@@ -11923,6 +11936,9 @@ impl<'a> Builder<'a> {
                 }
                 Path::Strict(owner, args) => {
                     self.emit_call_arg_key_accesses(args, Gate::Strict(owner));
+                }
+                Path::StrictOrDefer(owner, args) => {
+                    self.emit_call_arg_key_accesses(args, Gate::StrictOrDefer(owner));
                 }
                 Path::Deferred(args) => {
                     self.emit_call_arg_key_accesses(args, Gate::Deferred);
@@ -12112,6 +12128,23 @@ impl<'a> Builder<'a> {
     /// attachment. Refs without a filled class skip emission —
     /// without a known class there's no class-keyed slot to target.
     ///
+    /// Resolve a qualified method token to the class(es) the lookup starts
+    /// at. Qualifier semantics live on `MethodToken`; the SUPER arm is the
+    /// only one needing builder state (the enclosing package's parents —
+    /// possibly several). `Bare` has no qualifier → empty.
+    fn qualified_dispatch_classes(
+        &self,
+        token: crate::conventions::MethodToken<'_>,
+        enclosing: &str,
+    ) -> Vec<String> {
+        match token {
+            crate::conventions::MethodToken::Super(_) => {
+                self.package_parents.get(enclosing).cloned().unwrap_or_default()
+            }
+            t => t.literal_package().map(|p| vec![p.to_string()]).unwrap_or_default(),
+        }
+    }
+
     /// Clear-and-emit on tag `method_call_return` so repeat calls
     /// inside the worklist driver stay idempotent.
     fn emit_method_call_return_edges(&mut self) {
@@ -12138,6 +12171,41 @@ impl<'a> Builder<'a> {
             // the method-on-class edge would fold to a brandless
             // `ClassName(Route)` and mask it.
             if self.route_branded_refs.contains(&i) {
+                continue;
+            }
+            // A qualified method token names an EXPLICIT dispatch class —
+            // Perl looks the method up on the named class, not the
+            // invocant's. Either way the call still blesses into the
+            // INVOCANT's class, so the result is typed relative to the
+            // invocant (falling back to the enclosing package).
+            let token = crate::conventions::MethodToken::parse(&r.target_name);
+            if !matches!(token, crate::conventions::MethodToken::Bare(_)) {
+                let method = token.name();
+                let Some(encl) = self.package_at_pos(r.span.start) else { continue };
+                let receiver_class = self
+                    .method_call_invocant
+                    .get(&i)
+                    .cloned()
+                    .unwrap_or_else(|| encl.to_string());
+                let arity = self.method_call_arity.get(&i).copied().unwrap_or(0);
+                let lookup_classes = self.qualified_dispatch_classes(token, encl);
+                for class in lookup_classes {
+                    edges.push(Witness {
+                        attachment: WitnessAttachment::Expression(crate::witnesses::RefIdx(
+                            i as u32,
+                        )),
+                        source: WitnessSource::Builder("method_call_return".into()),
+                        payload: WitnessPayload::QualifiedCallReturn {
+                            method_lookup: WitnessAttachment::MethodOnClass {
+                                class,
+                                name: method.to_string(),
+                            },
+                            receiver_class: receiver_class.clone(),
+                            arity,
+                        },
+                        span: r.span,
+                    });
+                }
                 continue;
             }
             let Some(class) = self.method_call_invocant.get(&i) else {
@@ -12205,16 +12273,10 @@ impl<'a> Builder<'a> {
         receiver: Option<InferredType>,
     ) -> Option<InferredType> {
         use crate::witnesses::{
-            BagContext, FrameworkFact, ReducedValue, ReducerQuery, ReducerRegistry,
+            FrameworkFact, ReducedValue, ReducerQuery, ReducerRegistry,
         };
         let reg = ReducerRegistry::with_defaults();
-        let ctx = BagContext {
-            scopes: &self.scopes,
-            package_framework: &self.package_framework,
-            module_index: None,
-            package_parents: &self.package_parents,
-            app_surface_consumers: &self.app_surface_consumers,
-        };
+        let ctx = self.bag_context();
         let q = ReducerQuery {
             attachment: att,
             point: None,
@@ -12233,23 +12295,25 @@ impl<'a> Builder<'a> {
     /// scope chain via `query_variable_type` (FrameworkAwareTypeFold,
     /// branch-arm fold, etc. all apply). Used by the post-walk chain
     /// typer once the bag is fully populated by `populate_witness_bag`.
+    /// The registry-query context at build time: same field set every bag
+    /// query threads, always index-free (single-file until enrichment).
+    fn bag_context(&self) -> crate::witnesses::BagContext<'_> {
+        crate::witnesses::BagContext {
+            scopes: &self.scopes,
+            package_framework: &self.package_framework,
+            module_index: None,
+            package_parents: &self.package_parents,
+            app_surface_consumers: &self.app_surface_consumers,
+        }
+    }
+
     fn bag_query_variable(
         &self,
         name: &str,
         scope: ScopeId,
         point: Point,
     ) -> Option<InferredType> {
-        crate::witnesses::query_variable_type(
-            &self.bag,
-            &self.scopes,
-            &self.package_framework,
-            &self.package_parents,
-            &self.app_surface_consumers,
-            None, // build time: no module index (single-file)
-            name,
-            scope,
-            point,
-        )
+        crate::witnesses::query_variable_type(&self.bag, &self.bag_context(), name, scope, point)
     }
 
     /// Bag-routed lookup for a sub's return type by name. Goes through
@@ -12264,13 +12328,7 @@ impl<'a> Builder<'a> {
     /// zero-arg form (a chain like `app->routes` calls `app()` then
     /// `routes()` on its return).
     fn bag_query_named_sub(&self, name: &str, arity_hint: Option<u32>) -> Option<InferredType> {
-        let ctx = crate::witnesses::BagContext {
-            scopes: &self.scopes,
-            package_framework: &self.package_framework,
-            module_index: None,
-            package_parents: &self.package_parents,
-            app_surface_consumers: &self.app_surface_consumers,
-            };
+        let ctx = self.bag_context();
         crate::witnesses::query_sub_return_type(
             &self.bag,
             &self.symbols,
@@ -12299,18 +12357,12 @@ impl<'a> Builder<'a> {
         receiver: Option<InferredType>,
     ) -> Option<InferredType> {
         use crate::witnesses::{
-            BagContext, FrameworkFact, ReducedValue, ReducerQuery, ReducerRegistry,
+            FrameworkFact, ReducedValue, ReducerQuery, ReducerRegistry,
             WitnessAttachment,
         };
         let att = WitnessAttachment::Expression(ref_idx);
         let reg = ReducerRegistry::with_defaults();
-        let ctx = BagContext {
-            scopes: &self.scopes,
-            package_framework: &self.package_framework,
-            module_index: None,
-            package_parents: &self.package_parents,
-            app_surface_consumers: &self.app_surface_consumers,
-            };
+        let ctx = self.bag_context();
         let q = ReducerQuery {
             attachment: &att,
             point: None,
@@ -12475,7 +12527,7 @@ impl<'a> Builder<'a> {
         std::collections::HashMap<String, crate::file_analysis::TypeProvenance>,
     ) {
         use crate::witnesses::{
-            BagContext, FrameworkFact, ReducedValue, ReducerQuery, WitnessAttachment,
+            FrameworkFact, ReducedValue, ReducerQuery, WitnessAttachment,
         };
         let mut return_types: std::collections::HashMap<String, InferredType> =
             std::collections::HashMap::new();
@@ -12484,13 +12536,7 @@ impl<'a> Builder<'a> {
             crate::file_analysis::TypeProvenance,
         > = std::collections::HashMap::new();
 
-        let ctx = BagContext {
-            scopes: &self.scopes,
-            package_framework: &self.package_framework,
-            module_index: None,
-            package_parents: &self.package_parents,
-            app_surface_consumers: &self.app_surface_consumers,
-        };
+        let ctx = self.bag_context();
 
         let mut updates: Vec<(SymbolId, String, InferredType)> = Vec::new();
 

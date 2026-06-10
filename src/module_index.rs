@@ -20,207 +20,17 @@ use std::sync::{Arc, Condvar, Mutex};
 use dashmap::DashMap;
 use tower_lsp::Client;
 
-use crate::file_analysis::{FileAnalysis, HashKeyOwner, InferredType, ParamInfo, SymKind, Symbol, SymbolDetail, SymbolId};
+use crate::file_analysis::{CrossFileLookup, FileAnalysis, SymKind};
+#[cfg(test)]
+use crate::file_analysis::InferredType;
 use crate::module_resolver;
 
 // ---- Public types ----
 
-/// A module in the cache — its filesystem path plus the full FileAnalysis of
-/// its source. Shared by reference-count so async handlers don't deep-copy.
-#[derive(Debug)]
-pub struct CachedModule {
-    pub path: PathBuf,
-    pub analysis: Arc<FileAnalysis>,
-}
-
-impl CachedModule {
-    pub fn new(path: PathBuf, analysis: Arc<FileAnalysis>) -> Self {
-        CachedModule { path, analysis }
-    }
-
-    /// Look up metadata for a sub/method in this module.
-    ///
-    /// Returns a lightweight view into the full `FileAnalysis`. Works for
-    /// any declared sub — exported or not.
-    pub fn sub_info(&self, name: &str) -> Option<SubInfo<'_>> {
-        // Prefer the first matching Sub/Method symbol. Builder may emit several
-        // when rw accessors exist (getter + setter); overloads are collected as
-        // additional symbols with the same name.
-        let mut syms = self.analysis.symbols.iter().filter(|s| {
-            s.name == name && matches!(s.kind, SymKind::Sub | SymKind::Method)
-        });
-        let primary = syms.next()?;
-        let overloads: Vec<&Symbol> = syms.collect();
-
-        // Keys are owned by `Sub { package: primary.package, name }` — the
-        // sub's hash keys live under the same package as the sub itself.
-        let hash_keys: Vec<String> = self
-            .analysis
-            .hash_key_defs_for_owner(&HashKeyOwner::Sub {
-                package: primary.package.clone(),
-                name: name.to_string(),
-            })
-            .iter()
-            .map(|s| s.name.clone())
-            .collect();
-
-        Some(SubInfo {
-            analysis: &self.analysis,
-            primary,
-            overloads,
-            hash_keys,
-        })
-    }
-
-    /// Locate a package-global variable declaration (`our $x` / `our @arr`
-    /// / `our %h`) by its sigil-bearing name within `package`. Powers
-    /// cross-file goto-def for a fully-qualified read (`$Foo::Bar::x`).
-    /// `name` includes the sigil (`$x`, `@arr`, `%h`) to match how variable
-    /// symbols are keyed.
-    pub fn package_var_def_line(&self, name: &str, package: &str) -> Option<u32> {
-        self.analysis
-            .symbols
-            .iter()
-            .find(|s| {
-                matches!(s.kind, SymKind::Variable | SymKind::Field)
-                    && s.name == name
-                    && s.package.as_deref() == Some(package)
-            })
-            .map(|s| s.span.start.row as u32)
-    }
-
-    /// True if any sub/method with this name is declared in this module.
-    pub fn has_sub(&self, name: &str) -> bool {
-        self.analysis.symbols.iter().any(|s| {
-            s.name == name && matches!(s.kind, SymKind::Sub | SymKind::Method)
-        })
-    }
-
-    /// True if a sub/method with this name is declared in this module
-    /// *attributed to `package`* — distinct from `has_sub`, which keys
-    /// on declaration only. Cross-package typeglob installs
-    /// (`*{'DateTime::'.$sub} = …` inside `package DateTime::PP`)
-    /// synthesize a symbol whose `package` (DateTime) differs from the
-    /// file's own module name (DateTime::PP), so a class-keyed method
-    /// lookup must ask by package, not by module-name match.
-    pub fn has_sub_in_package(&self, name: &str, package: &str) -> bool {
-        self.analysis.symbols.iter().any(|s| {
-            s.name == name
-                && matches!(s.kind, SymKind::Sub | SymKind::Method)
-                && s.package.as_deref() == Some(package)
-        })
-    }
-}
-
-/// A view into a module's metadata for a named sub/method.
-///
-/// Composed of a primary symbol plus any additional symbols with the same
-/// name (for rw accessor setter overloads).
-pub struct SubInfo<'a> {
-    analysis: &'a FileAnalysis,
-    primary: &'a Symbol,
-    #[allow(dead_code)] // retained for the `param_counts` / `return_type_for_arity` API surface
-    overloads: Vec<&'a Symbol>,
-    hash_keys: Vec<String>,
-}
-
-impl<'a> SubInfo<'a> {
-    pub fn def_line(&self) -> u32 {
-        self.primary.span.start.row as u32
-    }
-
-    pub fn params(&self) -> &'a [ParamInfo] {
-        match &self.primary.detail {
-            SymbolDetail::Sub { params, .. } => params,
-            _ => &[],
-        }
-    }
-
-    pub fn is_method(&self) -> bool {
-        if self.primary.kind == SymKind::Method {
-            return true;
-        }
-        matches!(
-            self.primary.detail,
-            SymbolDetail::Sub { is_method: true, .. }
-        )
-    }
-
-    /// Pass `module_index` so a return type produced by a cross-file method
-    /// chain in the sub body resolves; `None` keeps it single-file.
-    pub fn return_type(&self, module_index: Option<&ModuleIndex>) -> Option<InferredType> {
-        match &self.primary.detail {
-            SymbolDetail::Sub { .. } => {
-                self.analysis.symbol_return_type_via_bag_ctx(self.primary.id, None, module_index)
-            }
-            _ => None,
-        }
-    }
-
-    pub fn doc(&self) -> Option<&'a str> {
-        match &self.primary.detail {
-            SymbolDetail::Sub { doc, .. } => doc.as_deref(),
-            _ => None,
-        }
-    }
-
-    pub fn hash_keys(&self) -> &[String] {
-        &self.hash_keys
-    }
-
-    /// Arity list covering the primary and overloads, in declaration order.
-    #[allow(dead_code)] // public SubInfo accessor; consumed by tooling/future cross-file callers
-    pub fn param_counts(&self) -> Vec<usize> {
-        std::iter::once(self.primary)
-            .chain(self.overloads.iter().copied())
-            .map(|s| match &s.detail {
-                SymbolDetail::Sub { params, .. } => params.len(),
-                _ => 0,
-            })
-            .collect()
-    }
-
-    /// Return type for an overload with the given arity, if any matches.
-    #[allow(dead_code)] // public SubInfo accessor; consumed by tooling/future cross-file callers
-    pub fn return_type_for_arity(&self, arity: usize, module_index: Option<&ModuleIndex>) -> Option<InferredType> {
-        for sym in std::iter::once(self.primary).chain(self.overloads.iter().copied()) {
-            if let SymbolDetail::Sub { params, .. } = &sym.detail {
-                if params.len() == arity {
-                    return self.analysis.symbol_return_type_via_bag_ctx(sym.id, Some(arity), module_index);
-                }
-            }
-        }
-        None
-    }
-
-    /// SymbolId of the primary (first matching) sym.
-    #[allow(dead_code)] // public SubInfo accessor; consumed by tooling/future cross-file callers
-    pub fn primary_id(&self) -> SymbolId {
-        self.primary.id
-    }
-
-    /// SymbolId of the overload whose param count matches `arity`,
-    /// if any.
-    #[allow(dead_code)] // public SubInfo accessor; consumed by tooling/future cross-file callers
-    pub fn id_for_arity(&self, arity: usize) -> Option<SymbolId> {
-        for sym in std::iter::once(self.primary).chain(self.overloads.iter().copied()) {
-            if let SymbolDetail::Sub { params, .. } = &sym.detail {
-                if params.len() == arity {
-                    return Some(sym.id);
-                }
-            }
-        }
-        None
-    }
-
-    /// Inferred type for a param by name (if the analysis resolved one).
-    /// Goes through the canonical bag-aware query so framework rules
-    /// (Mojo `$self` etc.) apply consistently across every consumer.
-    pub fn param_inferred_type(&self, param_name: &str) -> Option<InferredType> {
-        self.analysis
-            .inferred_type_via_bag(param_name, self.primary.span.end)
-    }
-}
+// `CachedModule` / `SubInfo` are pure views over `FileAnalysis` and live
+// there (the index depends on the model, not vice versa); re-exported so
+// index consumers keep one import site.
+pub use crate::file_analysis::{CachedModule, SubInfo};
 
 // ---- Internal sync primitives (pub(crate) for resolver thread) ----
 
@@ -862,6 +672,56 @@ impl ModuleIndex {
     pub fn resolve_module(&self, module_name: &str) -> Option<PathBuf> {
         let inc_paths = module_resolver::discover_inc_paths();
         module_resolver::resolve_module_path(&inc_paths, module_name)
+    }
+}
+
+/// The capability `file_analysis`/`witnesses` query against. Delegates to
+/// the inherent methods (inherent wins name resolution on `self`, so no
+/// recursion); the generic inherent iterators accept the `&mut dyn FnMut`
+/// trampolines directly.
+impl CrossFileLookup for ModuleIndex {
+    fn get_cached(&self, module_name: &str) -> Option<Arc<CachedModule>> {
+        self.get_cached(module_name)
+    }
+
+    fn parents_cached(&self, module_name: &str) -> Vec<String> {
+        self.parents_cached(module_name)
+    }
+
+    fn modules_with_symbol(&self, name: &str) -> Vec<String> {
+        self.modules_with_symbol(name)
+    }
+
+    fn find_exporters(&self, func_name: &str) -> Vec<String> {
+        self.find_exporters(func_name)
+    }
+
+    fn defining_module_cached(&self, entry: &str, name: &str) -> Option<Arc<CachedModule>> {
+        self.defining_module_cached(entry, name)
+    }
+
+    fn module_declaring_method_in_package(&self, name: &str, class: &str) -> Option<String> {
+        self.module_declaring_method_in_package(name, class)
+    }
+
+    fn for_each_cached(&self, f: &mut dyn FnMut(&str, &Arc<CachedModule>)) {
+        self.for_each_cached(f)
+    }
+
+    fn for_each_reexport_module(
+        &self,
+        start: Vec<String>,
+        visit: &mut dyn FnMut(&Arc<CachedModule>) -> std::ops::ControlFlow<()>,
+    ) {
+        self.for_each_reexport_module(start, visit)
+    }
+
+    fn for_each_entity_bridged_to(
+        &self,
+        class_name: &str,
+        f: &mut dyn FnMut(&str, &Arc<CachedModule>, &crate::file_analysis::Symbol),
+    ) {
+        self.for_each_entity_bridged_to(class_name, f)
     }
 }
 

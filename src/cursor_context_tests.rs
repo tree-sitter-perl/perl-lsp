@@ -218,6 +218,34 @@ fn test_tree_context_method_on_function_call() {
 }
 
 #[test]
+fn test_tree_context_fq_method_is_qualified_path() {
+    // `$obj->Foo::Bar::` while typing a fully-qualified method: the qualifier
+    // names the dispatch PACKAGE, so completion targets that package's subs,
+    // not the (untyped) invocant's methods.
+    let source = "my $obj = X->new;\nmy $r = $obj->Foo::Bar::";
+    let (tree, fa) = build_fa(source);
+    let col = source.lines().nth(1).unwrap().len();
+    let ctx = detect_cursor_context_tree(&tree, source.as_bytes(), Point::new(1, col), &fa);
+    assert!(
+        matches!(ctx, Some(CursorContext::QualifiedPath { ref package }) if package == "Foo::Bar"),
+        "expected QualifiedPath(Foo::Bar), got {:?}",
+        ctx,
+    );
+
+    // SUPER is not a package — it must fall through to ordinary method
+    // completion (so inherited methods still show), not QualifiedPath(SUPER).
+    let s2 = "package C;\nsub m { my $self = shift; $self->SUPER::";
+    let (t2, fa2) = build_fa(s2);
+    let c2 = s2.lines().nth(1).unwrap().len();
+    let ctx2 = detect_cursor_context_tree(&t2, s2.as_bytes(), Point::new(1, c2), &fa2);
+    assert!(
+        !matches!(ctx2, Some(CursorContext::QualifiedPath { .. })),
+        "SUPER:: must not be treated as a package path, got {:?}",
+        ctx2,
+    );
+}
+
+#[test]
 fn test_tree_context_method_on_chained_call() {
     // $f->get_bar()-> where get_bar returns Object(Bar)
     let source = "package Foo;\nsub new { bless {}, shift }\nsub get_bar {\n    return Bar->new();\n}\npackage Bar;\nsub new { bless {}, shift }\npackage main;\nmy $f = Foo->new();\n$f->get_bar()->";
@@ -416,9 +444,7 @@ fn test_detect_qualified_path_with_unicode_segment() {
 /// the module index to resolve, confirming the invocant_type is now non-None.
 #[test]
 fn test_resolve_node_type_scalar_threads_module_index() {
-    use crate::file_analysis::InferredType;
     use crate::module_index::ModuleIndex;
-    use std::path::PathBuf;
     // Build a controller that has $c typed via a cross-file ReceiverGated TC.
     // We use the real builder (not a plugin) — instead, give $c an explicit
     // TypeConstraint via a known-type assignment so the test doesn't need a

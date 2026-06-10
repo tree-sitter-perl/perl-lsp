@@ -80,10 +80,9 @@ pub enum WitnessAttachment {
     /// `Edge(Expr(arm_span))` here; the ternary's own `Expr(span)`
     /// carries a single `Edge(BranchArm(span))` so consumers querying
     /// the expression materialize the agreed arm type. Distinct shape
-    /// (like `SymbolReturnArm`) so `BranchArmFold` claims by attachment,
-    /// which is why `ExprReturn` / `FrameworkAwareTypeFold` no longer
-    /// have to exclude branch-arm witnesses from the shared `Expr` /
-    /// `Variable` attachments.
+    /// (like `SymbolReturnArm`) so `BranchArmFold` claims by attachment
+    /// and the shared `Expr` / `Variable` reducers never see arm
+    /// witnesses.
     BranchArm(Span),
     /// Typed-slot collector: "what type does instance slot `key` hold on
     /// class `class`?" Seeded from typed hash-key WRITEs
@@ -151,6 +150,26 @@ pub enum WitnessPayload {
     /// `MethodOnClass{class, method}` at the call's `count_call_args`);
     /// chased like `Edge` but overrides `q.arity_hint` with `arity`.
     CallReturn { target: WitnessAttachment, arity: u32 },
+    /// **Explicitly-qualified method dispatch** — the method token carried a
+    /// `::` so Perl dispatches from a *named* class, not the invocant's: look
+    /// the method up on `method_lookup` but type the result relative to
+    /// `receiver_class` (the invocant / enclosing class). Two spellings, one
+    /// rule (see `emit_method_call_return_edges`):
+    ///   - `$obj->SUPER::m` → `method_lookup` is `MethodOnClass{<enclosing
+    ///     package's parent>, m}` (SUPER searches the *writing* package's
+    ///     `@ISA`, skipping it);
+    ///   - `$obj->Foo::Bar::m` → `method_lookup` is `MethodOnClass{Foo::Bar,
+    ///     m}` (fully-qualified: search starts at the named class).
+    /// In both, the call still blesses into the CALLER's class, so a ctor
+    /// returning `ReturnExpr::ReceiverOr` must substitute the invocant — the
+    /// dynamic outer receiver wins when it is a subclass of `receiver_class`.
+    /// (A plain `CallReturn` can't express this: its receiver defaults to the
+    /// dispatch class, which here is the parent / named class — wrong.)
+    QualifiedCallReturn {
+        method_lookup: WitnessAttachment,
+        receiver_class: String,
+        arity: u32,
+    },
     /// **Symbol-declarative return type.** A receiver-relative /
     /// arity-relative expression that `ReturnExprReducer` substitutes at
     /// query time using `q.receiver` and `q.arity_hint`. Subsumes both
@@ -486,7 +505,7 @@ pub struct ReducerQuery<'a> {
 pub struct BagContext<'a> {
     pub scopes: &'a [Scope],
     pub package_framework: &'a HashMap<String, FrameworkFact>,
-    pub module_index: Option<&'a crate::module_index::ModuleIndex>,
+    pub module_index: Option<&'a dyn crate::file_analysis::CrossFileLookup>,
     pub package_parents: &'a HashMap<String, Vec<String>>,
     /// Manifest-declared app-surface consumer classes — threaded so the
     /// `MethodOnClass` inheritance walk injects the synthetic surface
@@ -1228,13 +1247,49 @@ fn receiver_key(r: &Option<InferredType>) -> Option<String> {
 fn fresh_dispatch_receiver(
     incoming: &Option<InferredType>,
     class: &str,
+    ctx: Option<&BagContext>,
 ) -> Option<InferredType> {
     if let Some(t) = incoming {
-        if t.class_name() == Some(class) {
-            return Some(t.clone());
+        if let Some(cn) = t.class_name() {
+            // Preserve a receiver that IS the dispatch class — or a SUBCLASS of
+            // it (SUPER:: dispatch, inherited methods): more specific, still valid.
+            if cn == class || ctx.is_some_and(|c| is_subclass_of(cn, class, c)) {
+                return Some(t.clone());
+            }
         }
     }
     Some(InferredType::ClassName(class.to_string()))
+}
+
+/// Is `child` a (transitive) subclass of `ancestor`? Bounded BFS over `parents_of`.
+fn is_subclass_of(child: &str, ancestor: &str, ctx: &BagContext) -> bool {
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut queue: std::collections::VecDeque<String> =
+        std::collections::VecDeque::from([child.to_string()]);
+    let mut steps = 0;
+    while let Some(c) = queue.pop_front() {
+        steps += 1;
+        if steps > 64 {
+            break;
+        }
+        if !seen.insert(c.clone()) {
+            continue;
+        }
+        for p in crate::file_analysis::parents_of(
+            &c,
+            ctx.package_parents,
+            ctx.module_index,
+            ctx.app_surface_consumers,
+        ) {
+            if p == ancestor {
+                return true;
+            }
+            if !seen.contains(&p) {
+                queue.push_back(p);
+            }
+        }
+    }
+    false
 }
 
 /// Depth backstop for `query_rec`. The `(bag, attachment)` visited set is
@@ -1278,9 +1333,9 @@ impl ReducerRegistry {
         // so placement here is non-load-bearing — grouped with the other
         // arm-agreement folds for legibility.
         r.register(Box::new(SlotTypeFold));
-        // BranchArmFold claims the dedicated `BranchArm(_)` shape, so its
-        // order relative to the Variable/Expr folds below is no longer
-        // load-bearing — they no longer overlap.
+        // BranchArmFold claims the dedicated `BranchArm(_)` shape — no
+        // overlap with the Variable/Expr folds below, so order here is
+        // not load-bearing.
         r.register(Box::new(BranchArmFold));
         r.register(Box::new(FrameworkAwareTypeFold));
         r.register(Box::new(ExprReturn));
@@ -1483,7 +1538,7 @@ impl ReducerRegistry {
                 // bridged Methods aren't arity-discriminated.
                 if let Some(idx) = ctx.module_index {
                     let mut found: Option<InferredType> = None;
-                    idx.for_each_entity_bridged_to(class, |_mod, cached, sym| {
+                    idx.for_each_entity_bridged_to(class, &mut |_mod, cached, sym| {
                         if found.is_some() {
                             return;
                         }
@@ -1542,16 +1597,7 @@ impl ReducerRegistry {
                         ) => {
                             let point = scope_point(ctx.scopes, *scope);
                             self.query_variable_with_visited(
-                                bag,
-                                ctx.scopes,
-                                ctx.package_framework,
-                                ctx.package_parents,
-                                ctx.app_surface_consumers,
-                                ctx.module_index,
-                                name,
-                                *scope,
-                                point,
-                                state,
+                                bag, ctx, name, *scope, point, state,
                             )
                         }
                         _ => {
@@ -1572,7 +1618,7 @@ impl ReducerRegistry {
                                         WitnessAttachment::MethodOnClass { .. }
                                     ) =>
                                 {
-                                    fresh_dispatch_receiver(&q.receiver, class)
+                                    fresh_dispatch_receiver(&q.receiver, class, q.context)
                                 }
                                 _ => q.receiver.clone(),
                             };
@@ -1610,12 +1656,36 @@ impl ReducerRegistry {
                     // query's — that's the whole point of this variant.
                     let receiver = match target {
                         WitnessAttachment::MethodOnClass { class, .. } => {
-                            fresh_dispatch_receiver(&q.receiver, class)
+                            fresh_dispatch_receiver(&q.receiver, class, q.context)
                         }
                         _ => q.receiver.clone(),
                     };
                     let sub_q = ReducerQuery {
                         attachment: target,
+                        point: q.point,
+                        framework: q.framework,
+                        arity_hint: Some(*arity),
+                        receiver,
+                        context: q.context,
+                    };
+                    if let ReducedValue::Type(t) = &*self.query_rec(bag, &sub_q, state) {
+                        out.push(Witness {
+                            attachment: w.attachment.clone(),
+                            source: w.source.clone(),
+                            payload: WitnessPayload::InferredType(t.clone()),
+                            span: w.span,
+                        });
+                    }
+                }
+                WitnessPayload::QualifiedCallReturn { method_lookup, receiver_class, arity } => {
+                    // Look the method up on the named/parent class, but the
+                    // receiver is the INVOCANT (enclosing) class — prefer a
+                    // dynamic outer receiver only when it's a subclass of it
+                    // (same rule as a fresh dispatch onto `receiver_class`).
+                    let receiver =
+                        fresh_dispatch_receiver(&q.receiver, receiver_class, q.context);
+                    let sub_q = ReducerQuery {
+                        attachment: method_lookup,
                         point: q.point,
                         framework: q.framework,
                         arity_hint: Some(*arity),
@@ -1645,11 +1715,7 @@ impl ReducerRegistry {
     fn query_variable_with_visited(
         &self,
         bag: &WitnessBag,
-        scopes: &[Scope],
-        package_framework: &HashMap<String, FrameworkFact>,
-        package_parents: &HashMap<String, Vec<String>>,
-        app_surface_consumers: &[String],
-        module_index: Option<&crate::module_index::ModuleIndex>,
+        ctx: &BagContext,
         var: &str,
         scope: ScopeId,
         point: Point,
@@ -1659,24 +1725,13 @@ impl ReducerRegistry {
         let mut cur = Some(scope);
         while let Some(sid) = cur {
             chain.push(sid);
-            cur = scopes[sid.0 as usize].parent;
+            cur = ctx.scopes[sid.0 as usize].parent;
         }
         let framework = chain
             .iter()
-            .find_map(|sid| scopes[sid.0 as usize].package.as_ref())
-            .and_then(|pkg| package_framework.get(pkg).copied())
+            .find_map(|sid| ctx.scopes[sid.0 as usize].package.as_ref())
+            .and_then(|pkg| ctx.package_framework.get(pkg).copied())
             .unwrap_or(FrameworkFact::Plain);
-        // Preserve the caller's index + parents. Resolving a variable whose
-        // value is a cross-file method chain needs both; rebuilding them empty
-        // here is what dropped the index mid-chase and made `Variable` the lone
-        // attachment that couldn't resolve across files.
-        let ctx = BagContext {
-            scopes,
-            package_framework,
-            module_index,
-            package_parents,
-            app_surface_consumers,
-        };
         for sid in chain {
             let att = WitnessAttachment::Variable {
                 name: var.to_string(),
@@ -1688,7 +1743,7 @@ impl ReducerRegistry {
                 framework,
                 arity_hint: None,
                 receiver: None,
-                context: Some(&ctx),
+                context: Some(ctx),
             };
             if let ReducedValue::Type(t) = &*self.query_rec(bag, &q, state) {
                 return Some(t.clone());
@@ -1834,29 +1889,14 @@ pub fn query_sub_return_type(
 /// loops.
 pub fn query_variable_type(
     bag: &WitnessBag,
-    scopes: &[Scope],
-    package_framework: &HashMap<String, FrameworkFact>,
-    package_parents: &HashMap<String, Vec<String>>,
-    app_surface_consumers: &[String],
-    module_index: Option<&crate::module_index::ModuleIndex>,
+    ctx: &BagContext,
     var: &str,
     scope: ScopeId,
     point: Point,
 ) -> Option<InferredType> {
     let reg = ReducerRegistry::with_defaults();
     let mut state = QueryState::new();
-    reg.query_variable_with_visited(
-        bag,
-        scopes,
-        package_framework,
-        package_parents,
-        app_surface_consumers,
-        module_index,
-        var,
-        scope,
-        point,
-        &mut state,
-    )
+    reg.query_variable_with_visited(bag, ctx, var, scope, point, &mut state)
 }
 
 // ---------------------------------------------------------------

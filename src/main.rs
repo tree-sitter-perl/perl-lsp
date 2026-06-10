@@ -1,7 +1,9 @@
 mod backend;
 mod builder;
 mod builtins_pod;
+mod conventions;
 mod cpanfile;
+mod cst;
 mod cursor_context;
 mod document;
 mod file_analysis;
@@ -687,12 +689,12 @@ fn run_one(
 
     match req.q.as_str() {
         "definition" => {
-            let (source, tree, mut analysis) = parse_file(file);
+            let (_source, _tree, mut analysis) = parse_file(file);
             analysis.enrich_imported_types_with_keys(Some(idx));
             let abs = std::fs::canonicalize(file).unwrap_or_else(|_| std::path::PathBuf::from(file));
             let uri = tower_lsp::lsp_types::Url::from_file_path(&abs)
                 .unwrap_or_else(|_| tower_lsp::lsp_types::Url::parse("file:///unknown").unwrap());
-            if let Some(resp) = symbols::find_definition(&analysis, pos, &uri, idx, &tree, &source) {
+            if let Some(resp) = symbols::find_definition(&analysis, pos, &uri, idx) {
                 use tower_lsp::lsp_types::GotoDefinitionResponse;
                 let first = match resp {
                     GotoDefinitionResponse::Scalar(loc) => Some(loc),
@@ -716,22 +718,33 @@ fn run_one(
             analysis.enrich_imported_types_with_keys(Some(idx));
             let file_path = std::path::Path::new(file).canonicalize()
                 .unwrap_or_else(|_| std::path::PathBuf::from(file));
-            let target = analysis.rename_kind_at(point, Some(idx))
-                .and_then(|k| resolve::TargetRef::from_rename_kind(k, &analysis, Some(idx)));
+            let resolved = resolve::resolve_symbol(&analysis, point, Some(idx));
             let mut sources = SourceCache::new();
             let mut results = Vec::new();
-            match target {
-                None => {
+            match resolved {
+                Some(resolve::ResolvedTarget::Local) | None => {
                     let path_str = file_path.display().to_string();
-                    for span in &analysis.find_references(point, None, None, Some(idx)) {
+                    for span in &analysis.find_references(point, Some(idx)) {
                         let (line, col) = sources.display(&path_str, span.start.row, span.start.column);
                         results.push(serde_json::json!({"file": path_str, "line": line, "col": col}));
                     }
                 }
-                Some(target) => {
+                Some(resolved) => {
+                    let origin = file_store::FileKey::Path(file_path.clone());
                     let _staged = ScopedWorkspaceEntry::insert(ws, file_path.clone(), analysis);
-                    let mask = resolve::references_mask_for(ws, Some(idx), &target);
-                    for loc in resolve::refs_to(ws, Some(idx), &target, mask) {
+                    let locs = match resolved {
+                        resolve::ResolvedTarget::Target(t) => {
+                            let mask = resolve::references_mask_for(ws, Some(idx), &t);
+                            resolve::refs_to(ws, Some(idx), &t, mask)
+                        }
+                        resolve::ResolvedTarget::Group { local_spans, pinned_spans, members } => {
+                            resolve::group_refs(
+                                ws, Some(idx), &origin, &local_spans, &pinned_spans, &members, None,
+                            )
+                        }
+                        resolve::ResolvedTarget::Local => unreachable!("handled above"),
+                    };
+                    for loc in locs {
                         let path = match &loc.key {
                             file_store::FileKey::Path(p) => p.display().to_string(),
                             file_store::FileKey::Url(u) => u.to_file_path()
@@ -808,7 +821,7 @@ fn run_one(
         }
         "document-highlight" => {
             let doc = cli_open_document(file, idx);
-            let highlights = symbols::document_highlights(&doc.analysis, pos, &doc.tree, &doc.text, Some(idx));
+            let highlights = symbols::document_highlights(&doc.analysis, pos, Some(idx));
             let mut sources = SourceCache::new();
             let path = std::fs::canonicalize(file).map(|p| p.display().to_string())
                 .unwrap_or_else(|_| file.to_string());
@@ -972,35 +985,53 @@ fn run_rename(
         .unwrap_or_else(|_| std::path::PathBuf::from(file));
     let (_s, _t, mut analysis) = parse_file(file);
     analysis.enrich_imported_types_with_keys(Some(idx));
-    let rename_kind = analysis.rename_kind_at(point, Some(idx))
+    let resolved = resolve::resolve_symbol(&analysis, point, Some(idx))
         .ok_or_else(|| format!("Nothing renameable at {}:{}", point.row, point.column))?;
     let mut all_edits: HashMap<String, Vec<serde_json::Value>> = HashMap::new();
-    match &rename_kind {
-        file_analysis::RenameKind::Variable
-        | file_analysis::RenameKind::HashKey(_)
-        | file_analysis::RenameKind::Handler { .. } => {
-            let source = std::fs::read_to_string(&file_path).map_err(|e| e.to_string())?;
-            let mut parser = module_resolver::create_parser();
-            let tree = parser.parse(&source, None).ok_or("parse failed")?;
-            if let Some(edits) = analysis.rename_at(point, new_name, Some(&tree), Some(source.as_bytes())) {
+    let (locations, replacement) = match resolved {
+        resolve::ResolvedTarget::Target(t) if t.supports_cross_file_rename() => {
+            let _staged = ScopedWorkspaceEntry::insert(ws, file_path, analysis);
+            (
+                resolve::refs_to(ws, Some(idx), &t, resolve::RoleMask::EDITABLE),
+                new_name.to_string(),
+            )
+        }
+        resolve::ResolvedTarget::Group { local_spans, pinned_spans, members } => {
+            // Per-member replacement texts (bare vs affixed accessors).
+            let origin = file_store::FileKey::Path(file_path.clone());
+            let _staged = ScopedWorkspaceEntry::insert(ws, file_path, analysis);
+            let bare_new = new_name.trim_start_matches(['$', '@', '%']);
+            let edits = resolve::group_rename_edits(
+                ws, Some(idx), &origin, &local_spans, &pinned_spans, &members, bare_new,
+            );
+            for (loc, text) in edits {
+                let path = match &loc.key {
+                    file_store::FileKey::Path(p) => p.display().to_string(),
+                    file_store::FileKey::Url(u) => u.to_file_path()
+                        .map(|p| p.display().to_string()).unwrap_or_else(|_| u.to_string()),
+                };
+                all_edits.entry(path).or_default().push(span_to_json(loc.span, text));
+            }
+            return Ok(serde_json::to_string_pretty(&serde_json::json!(all_edits)).unwrap());
+        }
+        // Lexical variables, hash keys, handlers: single-file rename — the
+        // same policy split the LSP rename handler reads off the target.
+        _ => {
+            if let Some(edits) = analysis.rename_at(point, new_name) {
                 let json_edits: Vec<_> = edits.into_iter()
                     .map(|(span, text)| span_to_json(span, text)).collect();
                 all_edits.insert(file_path.display().to_string(), json_edits);
             }
             return Ok(serde_json::to_string_pretty(&serde_json::json!(all_edits)).unwrap());
         }
-        _ => {}
-    }
-    let target = resolve::TargetRef::from_rename_kind(rename_kind, &analysis, Some(idx))
-        .ok_or("Function/Method/Package map to a target")?;
-    let _staged = ScopedWorkspaceEntry::insert(ws, file_path, analysis);
-    for loc in resolve::refs_to(ws, Some(idx), &target, resolve::RoleMask::EDITABLE) {
+    };
+    for loc in locations {
         let path = match &loc.key {
             file_store::FileKey::Path(p) => p.display().to_string(),
             file_store::FileKey::Url(u) => u.to_file_path()
                 .map(|p| p.display().to_string()).unwrap_or_else(|_| u.to_string()),
         };
-        all_edits.entry(path).or_default().push(span_to_json(loc.span, new_name.to_string()));
+        all_edits.entry(path).or_default().push(span_to_json(loc.span, replacement.clone()));
     }
     Ok(serde_json::to_string_pretty(&serde_json::json!(all_edits)).unwrap())
 }
