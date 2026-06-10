@@ -22,10 +22,6 @@ side. This file keeps only what's still open.
   two assignment witnesses disagree-to-widen (BranchArmFold's shape,
   applied to conditional reassignment). When it lands, the
   reassignment clause comes out of the gate the way key writes did.
-- **Escape widening.** A var passed as a call argument could keep a
-  WIDENED shape (open) instead of losing diagnostics entirely.
-  Today: gate suppression via `escaped_scalars`. Worth modeling only
-  with interprocedural appetite — the gate is cheap and sound.
 - **Array index writes on `Sequence` tuples.** `$items->[3] = …` on a
   closed tuple neither extends nor opens it today (`record_key_write`
   skips array first hops). The hash-side machinery (KeyWrite +

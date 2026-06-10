@@ -250,7 +250,7 @@ fn build_with_plugins_inner(
         gated_param_types: Vec::new(),
         method_call_invocant: std::collections::HashMap::new(),
         attr_projections: Vec::new(),
-        escaped_scalars: std::collections::HashSet::new(),
+        escape_recorded: std::collections::HashSet::new(),
         reassigned_scalars: std::collections::HashSet::new(),
         key_writes: Vec::new(),
         method_call_arity: std::collections::HashMap::new(),
@@ -504,7 +504,6 @@ fn build_with_plugins_inner(
         provisional_dispatches: b.provisional_dispatches,
         attr_projections: b.attr_projections,
         gated_param_types: b.gated_param_types,
-        escaped_scalars: b.escaped_scalars,
         reassigned_scalars: b.reassigned_scalars,
         key_writes: b.key_writes,
     });
@@ -1457,13 +1456,11 @@ struct Builder<'a> {
     /// `FileAnalysis.attr_accessors`.
     attr_projections: Vec<crate::file_analysis::AttrProjection>,
 
-    /// Scalars read in any position other than an element-access base
-    /// (`func($c)`, `my $z = $c`, `$c->method`, `%$c`) — the reference
-    /// escaped to code that may mutate the referent, so a closed literal
-    /// shape is no longer the variable's whole story. Flushed into
-    /// `FileAnalysis.escaped_scalars`; consumed by
-    /// `closed_shape_is_whole_story`.
-    escaped_scalars: std::collections::HashSet<String>,
+    /// Vars whose first escape site is already recorded as an
+    /// open-switching `KeyWrite` (walk-local dedup — one escape write
+    /// per var is enough: it widens the shape from that point on, and
+    /// the mutation-extension pass charges one bag query per record).
+    escape_recorded: std::collections::HashSet<String>,
 
     /// Scalars reassigned after declaration (`$v = …` targeting the
     /// variable itself; element writes go to `key_writes` instead).
@@ -6925,13 +6922,18 @@ impl<'a> Builder<'a> {
             let access = self.determine_access(node);
             // A scalar READ anywhere but an element-access base hands the
             // reference to code that may mutate the referent (call arg,
-            // alias, invocant, deref) — record the escape so closed-shape
-            // consumers know the literal isn't the whole story.
+            // alias, invocant, deref). An escape IS an unknown-key write:
+            // record it as an open-switching KeyWrite at the escape span,
+            // and the mutation-extension pass widens the shape from that
+            // point on — temporal, so reads BEFORE the first escape keep
+            // their closed shape. One site per var suffices.
             if access == AccessKind::Read
                 && text.starts_with('$')
                 && !crate::cst::is_element_access_base(node)
+                && !self.escape_recorded.contains(text)
             {
-                self.escaped_scalars.insert(text.to_string());
+                self.escape_recorded.insert(text.to_string());
+                self.record_escape_write(text.to_string(), node);
             }
             // Write with the variable itself as assignment target =
             // reassignment. An element write (`$v->{k} = …`, where this
@@ -6950,8 +6952,10 @@ impl<'a> Builder<'a> {
             // escape (unlike a scalar, whose value IS the shared ref).
             if text.starts_with('%')
                 && node.parent().is_some_and(|p| p.kind() == "refgen_expression")
+                && !self.escape_recorded.contains(text)
             {
-                self.escaped_scalars.insert(text.to_string());
+                self.escape_recorded.insert(text.to_string());
+                self.record_escape_write(text.to_string(), node);
             }
             // Fully-qualified read (`$Foo::Bar::x`): narrow the span to the
             // bare tail (rule #7) so rename rewrites only `x` and the
@@ -10641,6 +10645,26 @@ impl<'a> Builder<'a> {
     /// own shape (`$v->{a}{b} = …` adds `a`); only a direct single-hop
     /// write types the key's value from the RHS. Plain `%foo` elements
     /// (`$foo{k}`, no arrow) are a different variable — skipped.
+    /// Record an escape as an open-switching `KeyWrite` (`key: None`)
+    /// at the escape span — the modeled form of escape widening: once
+    /// the reference is out of our sight, any key may have been
+    /// written, which is exactly what a dynamic-key write claims.
+    fn record_escape_write(&mut self, var_text: String, node: Node<'a>) {
+        let span = node_to_span(node);
+        self.key_writes.push(crate::file_analysis::KeyWrite {
+            var_text,
+            key: None,
+            scope: self
+                .scope_stack
+                .last()
+                .copied()
+                .unwrap_or(crate::file_analysis::ScopeId(0)),
+            span,
+            rhs_span: None,
+            conditional: true,
+        });
+    }
+
     fn record_key_write(&mut self, left: Node<'a>, rhs: Option<Node<'a>>) {
         let mut innermost = left;
         loop {
