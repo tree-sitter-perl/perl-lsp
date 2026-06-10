@@ -189,6 +189,24 @@ pub enum WitnessPayload {
     Derivation,
     /// Escape hatch for plugin-defined payloads that don't fit above.
     Custom { family: String, json: String },
+    /// Edge fact with a projection: "the value at my attachment is the
+    /// `step`-projection of whatever resolves at `base`." Emitted for
+    /// `expr->{key}` / `expr->[N]` expressions so the drill participates
+    /// in the edge graph — the chase materializes `base` at QUERY time
+    /// (when cross-file knowledge like an imported literal's
+    /// `HashWithKeys` is in hand) and narrows through the step. Kept at
+    /// the END for bincode variant-index stability (bump
+    /// `EXTRACT_VERSION`).
+    Projected {
+        base: WitnessAttachment,
+        step: ProjectionStep,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum ProjectionStep {
+    HashKey(String),
+    ArrayIndex(i32),
 }
 
 /// A sub's return type as a **deferred computation**, not a value:
@@ -1686,6 +1704,36 @@ impl ReducerRegistry {
                             payload: WitnessPayload::InferredType(t.clone()),
                             span: w.span,
                         });
+                    }
+                }
+                WitnessPayload::Projected { base, step } => {
+                    // Materialize the base, then narrow through the step —
+                    // the value-side mirror of the build-time
+                    // `invocant_type_at_node` drill, run where the index is
+                    // in hand so imported structural types project too.
+                    let sub_q = ReducerQuery {
+                        attachment: base,
+                        point: q.point,
+                        framework: q.framework,
+                        arity_hint: None,
+                        receiver: q.receiver.clone(),
+                        context: q.context,
+                    };
+                    if let ReducedValue::Type(t) = &*self.query_rec(bag, &sub_q, state) {
+                        let projected = match step {
+                            ProjectionStep::HashKey(k) => {
+                                t.key_value_type(k).flatten().cloned()
+                            }
+                            ProjectionStep::ArrayIndex(i) => t.element_at(*i).cloned(),
+                        };
+                        if let Some(t) = projected {
+                            out.push(Witness {
+                                attachment: w.attachment.clone(),
+                                source: w.source.clone(),
+                                payload: WitnessPayload::InferredType(t),
+                                span: w.span,
+                            });
+                        }
                     }
                 }
                 WitnessPayload::QualifiedCallReturn { method_lookup, receiver_class, arity } => {

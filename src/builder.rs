@@ -6225,6 +6225,35 @@ impl<'a> Builder<'a> {
             "anonymous_hash_expression" => {
                 Some(WitnessPayload::InferredType(self.hash_literal_type(node)))
             }
+            // Drill expressions edge to their base with a projection step,
+            // so `$config->{db}` resolves at QUERY time through whatever the
+            // base materializes to — including an imported literal's
+            // structural type the build-time chain pass can't see.
+            "hash_element_expression" => {
+                let base = node.named_child(0)?;
+                let key_node = node.child_by_field_name("key")?;
+                let (key, is_dynamic) = self.extract_key_text(key_node)?;
+                if is_dynamic {
+                    return None;
+                }
+                self.emit_expr_witness(base);
+                Some(WitnessPayload::Projected {
+                    base: WitnessAttachment::Expr(node_to_span(base)),
+                    step: crate::witnesses::ProjectionStep::HashKey(key),
+                })
+            }
+            // Arrow-deref element only (`$x->[0]`); the container form
+            // `$arr[N]` keeps its variable-keyed handling.
+            "array_element_expression" if node.child_by_field_name("array").is_none() => {
+                let base = node.named_child(0)?;
+                let idx_node = node.child_by_field_name("index")?;
+                let idx: i32 = idx_node.utf8_text(self.source).ok()?.parse().ok()?;
+                self.emit_expr_witness(base);
+                Some(WitnessPayload::Projected {
+                    base: WitnessAttachment::Expr(node_to_span(base)),
+                    step: crate::witnesses::ProjectionStep::ArrayIndex(idx),
+                })
+            }
             "anonymous_array_expression" => {
                 Some(WitnessPayload::InferredType(self.array_literal_type(node)))
             }

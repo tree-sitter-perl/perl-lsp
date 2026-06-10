@@ -1,6 +1,6 @@
 {
   "capability": "hover",
-  "comment": "Tier 3 array tuples travel cross-file ($items from an imported literal). The drill HOPS ($db = $config->{db} where cfg() is imported) do not type yet: assignment chain typing runs at build, index-less — xfail until enrichment re-runs the chain pass.",
+  "comment": "Tier 3 array tuples travel cross-file ($items from an imported literal). Drill hops ($db = $config->{db} where cfg() is imported) resolve at query time through the Projected edge payload.",
   "rows": [
     {
       "id": "nested-imported-sequence",
@@ -17,7 +17,7 @@
       "file": "main.pl",
       "line": 9,
       "col": 4,
-      "status": "xfail",
+      "status": "gold",
       "expect": { "all": ["String"] }
     },
     {
@@ -26,7 +26,7 @@
       "file": "main.pl",
       "line": 10,
       "col": 4,
-      "status": "xfail",
+      "status": "gold",
       "expect": { "all": ["Numeric"] }
     }
   ]
