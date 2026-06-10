@@ -29,12 +29,6 @@ side. This file keeps only what's still open.
   while no array-index diagnostic exists (`element_at`'s None is an
   honest miss); adding `open` to `Sequence` is the fix if one ever
   lands.
-- **Batch diagnostics enrichment parity.** Cross-file-typed shapes
-  can't hint under `--batch`/`--check` — `batch_diagnostics` walks
-  raw workspace entries while `publish_diagnostics` enriches open
-  docs first. Tracked as the `nested-closed-shape-typo-crossfile`
-  xfail row + `gold-corpus/KNOWN-GAPS.md`; closing it re-baselines
-  the diagnostics suite.
 - **Inferring hash structure from `bless` targets.** `bless { a => 1
   }, 'Foo'` already records HashKeyDef synthesis on `Foo`; letting
   the type system see the per-key types too is unbundled future work.
