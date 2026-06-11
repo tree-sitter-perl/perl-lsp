@@ -10,6 +10,8 @@ name: Publish identity bootstrap
 
 on:
   workflow_dispatch:
+  push: # iteration convenience; drop before merge
+    branches: [vscode-publishing]
 
 jobs:
   identity-guid:
