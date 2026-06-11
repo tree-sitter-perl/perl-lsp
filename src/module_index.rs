@@ -685,8 +685,21 @@ impl ModuleIndex {
     /// Is `module` imported by any workspace file (entrypoint scripts
     /// included)? `false` is honest only after the workspace scan has
     /// run — callers on the diagnostics path are post-startup.
+    ///
+    /// Matching is exact OR last-segment tail: a `plugin 'DataLog'`
+    /// load records the default-namespace guess
+    /// (`Mojolicious::Plugin::DataLog`) while the resolved provider
+    /// may live in an app-custom tree (`Clove::App::Plugin::DataLog`).
+    /// The looseness only SUPPRESSES the lint — the honest-quiet
+    /// direction.
     pub fn is_module_loaded(&self, module: &str) -> bool {
-        self.loaded_modules.contains_key(module)
+        if self.loaded_modules.contains_key(module) {
+            return true;
+        }
+        let tail = module.rsplit("::").next().unwrap_or(module);
+        self.loaded_modules
+            .iter()
+            .any(|e| e.key().rsplit("::").next() == Some(tail))
     }
 
     /// Was `module` registered from the workspace tree (vs @INC)?

@@ -1934,3 +1934,60 @@ fn name_in_no_export_or_tag_is_not_exported() {
     assert!(fa.exports_name("foo"));
     assert!(!fa.exports_name("private_helper"), "non-exported sub must stay unexported");
 }
+
+#[test]
+fn cross_file_slot_write_types_the_read() {
+    // A4 v2: the typed slot write lives in the PARENT class's file;
+    // the read in the child file narrows through the registry's
+    // SlotType cross-file + ancestor arm at query time.
+    use std::sync::Arc;
+    let idx = crate::module_index::ModuleIndex::new_for_test();
+    let parent_src = "package Parent;\nsub init {\n    my ($self) = @_;\n    $self->{conn} = My::Conn->new;\n}\n1;\n";
+    {
+        let mut parser = crate::builder::create_parser();
+        let tree = parser.parse(parent_src, None).unwrap();
+        let fa = crate::builder::build(&tree, parent_src.as_bytes());
+        idx.insert_cache(
+            "Parent",
+            Some(Arc::new(crate::file_analysis::CachedModule::new(
+                std::path::PathBuf::from("/fake/Parent.pm"),
+                Arc::new(fa),
+            ))),
+        );
+    }
+    let child_src = "package Child;\nuse Moo;\nextends 'Parent';\nsub go {\n    my ($self) = @_;\n    my $x = $self->{conn};\n}\n1;\n";
+    let mut parser = crate::builder::create_parser();
+    let tree = parser.parse(child_src, None).unwrap();
+    let fa = crate::builder::build(&tree, child_src.as_bytes());
+
+    // the read expression `$self->{conn}` on line 5 (0-based)
+    let read_span = fa
+        .refs
+        .iter()
+        .find(|r| {
+            matches!(r.kind, RefKind::HashKeyAccess { .. })
+                && r.target_name == "conn"
+                && r.span.start.row == 5
+        })
+        .map(|r| r.span)
+        .expect("read-site hash key ref");
+    // the Expr witness covers the whole `$self->{conn}` element; ask at
+    // the element span — expr_type_at_span finds the narrowest cover.
+    let t = fa.expr_type_at_span(
+        Span { start: Point { row: 5, column: 12 }, end: Point { row: 5, column: 25 } },
+        Some(&idx),
+    );
+    assert_eq!(
+        t,
+        Some(InferredType::ClassName("My::Conn".into())),
+        "read at {read_span:?} should narrow via the parent file's slot write",
+    );
+    // and the variable that received it — `$x` rides Edge(Expr(read))
+    let t2 = fa.inferred_type_via_bag_ctx(
+        "$x",
+        Point { row: 6, column: 0 },
+        Some(&idx),
+    );
+    assert_eq!(t2, Some(InferredType::ClassName("My::Conn".into())));
+}
+

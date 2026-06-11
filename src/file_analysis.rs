@@ -6591,6 +6591,39 @@ impl FileAnalysis {
         incomplete
     }
 
+    /// The plugin module whose BRIDGE is what resolves `class`->`name`
+    /// — the helper's provider. `None` when a real def resolves first
+    /// (local sub, inherited method, typeglob install) or when nothing
+    /// resolves at all. The entrypoint-scan lint asks this to find
+    /// helpers whose providing plugin no entrypoint loads.
+    pub fn bridged_helper_provider(
+        &self,
+        class: &str,
+        name: &str,
+        module_index: Option<&dyn CrossFileLookup>,
+    ) -> Option<String> {
+        let res = self.resolve_method_in_ancestors(class, name, module_index)?;
+        let MethodResolution::CrossFile { class: on_class, def_module: Some(module) } = res
+        else {
+            return None;
+        };
+        // CrossFile{def_module: Some} covers typeglob installs too —
+        // bridge-classify by the providing module's own declaration.
+        let idx = module_index?;
+        let cached = idx.get_cached(&module)?;
+        let is_bridge = cached.analysis.plugin_namespaces.iter().any(|ns| {
+            ns.bridges
+                .iter()
+                .any(|b| matches!(b, Bridge::Class(c) if c == &on_class))
+                && ns.entities.iter().any(|sid| {
+                    cached.analysis.symbols.get(sid.0 as usize).is_some_and(|s| {
+                        matches!(s.kind, SymKind::Sub | SymKind::Method) && s.name == name
+                    })
+                })
+        });
+        is_bridge.then_some(module)
+    }
+
     /// Is `pkg` a role? Single source of the property — consumers ask
     /// here, never re-derive from use lists. The verdict is baked at
     /// build time from an OPEN maker set (builder `ROLE_MAKERS` base

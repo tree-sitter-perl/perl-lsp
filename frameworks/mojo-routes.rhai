@@ -323,6 +323,17 @@ fn on_method_call(ctx) {
                         invocant_span: (),
                     }
                 };
+                // "You loaded it" — same as the lite arm: record the
+                // load so the resolver pulls the plugin AND the
+                // entrypoint-scan lint sees the load fact. Default
+                // namespace guess for short names; the lint
+                // tail-matches, so app-custom namespaces
+                // (Clove::App::Plugin::*) count as loaded too.
+                if !name.contains("::") {
+                    out += #{ "SyntheticUse": #{ "module": "Mojolicious::Plugin::" + name, "args": [], "imports": [], "span": span }};
+                } else {
+                    out += #{ "SyntheticUse": #{ "module": name, "args": [], "imports": [], "span": span }};
+                }
             }
         }
         return out;
