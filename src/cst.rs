@@ -365,6 +365,46 @@ pub(crate) fn string_content_span(node: Node) -> Span {
 /// the qw/string node). Non-literal elements (bareword constants,
 /// `@list` variables) go through `fold`: syntax lives here, constant
 /// resolution stays with the caller that has the state for it.
+/// `map "PREFIX$_", LIST` — the string-template map over a literal
+/// list is statically foldable: each produced string is the template
+/// with `$_` replaced by the list element, and its span is the
+/// ELEMENT's own span, so per-name refs (role parents, package lists)
+/// land on the word that produced them. Exactly one `$_` in the
+/// template and `map` only (`grep` filters, it doesn't transform);
+/// anything fancier is an honest miss. The crm idiom that motivated
+/// it: `with map "Clove::Sheets::Roles::$_", qw/CSV DB/;`.
+fn map_built_strings(
+    node: Node,
+    src: &[u8],
+    fold: &mut dyn FnMut(Node) -> Vec<(String, Span)>,
+) -> Vec<(String, Span)> {
+    let Some(kw) = node.child(0) else { return vec![] };
+    if kw.utf8_text(src).ok() != Some("map") {
+        return vec![];
+    }
+    let Some(cb) = node.child_by_field_name("callback") else { return vec![] };
+    if cb.kind() != "interpolated_string_literal" {
+        return vec![];
+    }
+    let Some(content) = cb.named().find(|c| c.kind() == "string_content") else {
+        return vec![];
+    };
+    let Ok(ctext) = content.utf8_text(src) else { return vec![] };
+    let subs: Vec<Node> = content.named().filter(|c| c.kind() == "scalar").collect();
+    let [topic] = subs.as_slice() else { return vec![] };
+    if topic.utf8_text(src).ok() != Some("$_") {
+        return vec![];
+    }
+    let pre_end = topic.start_byte() - content.start_byte();
+    let post_start = topic.end_byte() - content.start_byte();
+    let (pre, post) = (&ctext[..pre_end], &ctext[post_start..]);
+    let Some(list) = node.child_by_field_name("list") else { return vec![] };
+    string_list(list, src, fold)
+        .into_iter()
+        .map(|(t, sp)| (format!("{pre}{t}{post}"), sp))
+        .collect()
+}
+
 pub(crate) fn string_list(
     node: Node,
     src: &[u8],
@@ -383,6 +423,7 @@ pub(crate) fn string_list(
             return vec![];
         }
         "bareword" | "autoquoted_bareword" | "array" => return fold(node),
+        "map_grep_expression" => return map_built_strings(node, src, fold),
         _ => {}
     }
     let mut results = Vec::new();
@@ -399,6 +440,7 @@ pub(crate) fn string_list(
                 results.extend(string_list(child, src, fold));
             }
             "bareword" | "autoquoted_bareword" | "array" => results.extend(fold(child)),
+            "map_grep_expression" => results.extend(map_built_strings(child, src, fold)),
             _ => {}
         }
     }

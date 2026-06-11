@@ -14741,3 +14741,22 @@ my $mixed = [1, some_call()];
     let m = fa.inferred_type_via_bag("$mixed", Point::new(2, 10));
     assert_eq!(m, Some(InferredType::ArrayRef), "untypable element degrades whole literal");
 }
+
+/// `with map "Prefix::$_", qw/A B/` — the string-template map over a
+/// literal list folds statically: role parents land (resolution walks
+/// them) with per-word spans (goto-def on each qw word). The crm
+/// role-graph idiom.
+#[test]
+fn map_built_role_parents() {
+    let src = "\
+package My::Class;
+use Moo;
+with map \"My::Roles::$_\", qw/Alpha Beta/;
+";
+    let fa = build_fa(src);
+    let parents = fa.package_parents.get("My::Class").expect("parents recorded");
+    assert_eq!(
+        parents.as_slice(),
+        &["My::Roles::Alpha".to_string(), "My::Roles::Beta".to_string()],
+    );
+}
