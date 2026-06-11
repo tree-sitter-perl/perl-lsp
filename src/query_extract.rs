@@ -149,6 +149,12 @@ pub struct LangPack {
     /// per-language cross-file resolution strategy ("the one executable
     /// line"). Python: `pkg.mod` → pkg/mod.py | pkg/mod/__init__.py.
     pub module_paths: fn(module: &str) -> Vec<String>,
+    /// Does a call to `callee` construct a KEYED value whose named
+    /// arguments are `$`-style accessible keys? (R: list / data.frame.)
+    pub shape_ctor: fn(callee: &str) -> bool,
+    /// Languages where imports are CALLS, not statements (R's
+    /// library()/source()): map (callee, argument) → imported module.
+    pub import_call: fn(callee: &str, arg: &str) -> Option<String>,
 }
 
 pub fn perl_pack() -> LangPack {
@@ -168,6 +174,8 @@ pub fn perl_pack() -> LangPack {
         annot_type: |_| None,
         ctor_class: |_| None,
         module_paths: |m| vec![format!("{}.pm", m.replace("::", "/"))],
+        shape_ctor: |_| false,
+        import_call: |_, _| None,
     }
 }
 
@@ -196,6 +204,29 @@ pub fn python_pack() -> LangPack {
         module_paths: |m| {
             let base = m.replace('.', "/");
             vec![format!("{base}.py"), format!("{base}/__init__.py")]
+        },
+        shape_ctor: |_| false,
+        import_call: |_, _| None,
+    }
+}
+
+pub fn r_pack() -> LangPack {
+    LangPack {
+        query_source: include_str!("../queries/r/skeleton.scm"),
+        shape_name: |_, raw| raw.to_string(),
+        default_name: |_| None,
+        annot_type: |_| None,
+        // No reliable lexical ctor convention in R (S4/R5 exist but
+        // rare); class typing arrives via shapes and S3 later.
+        ctor_class: |_| None,
+        // source("util.R") hands us the path verbatim; library(pkg)
+        // resolves into the installed-library tree (a real install
+        // would consult .libPaths() — out of spike scope).
+        module_paths: |m| vec![m.to_string()],
+        shape_ctor: |callee| matches!(callee, "list" | "data.frame" | "tibble"),
+        import_call: |callee, arg| match callee {
+            "library" | "require" | "source" => Some(arg.to_string()),
+            _ => None,
         },
     }
 }
@@ -300,6 +331,14 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     let mut flow_targets: HashMap<usize, (String, ScopeId, Point)> = HashMap::new();
     let mut flow_sources: HashMap<usize, Span> = HashMap::new();
     let mut annots: HashMap<usize, String> = HashMap::new();
+    // keyed-shape collection: ctor + keys grouped per @expr.shape span
+    let mut shape_spans: Vec<(usize, usize, Span)> = Vec::new();
+    let mut shape_ctors: HashMap<(usize, usize), String> = HashMap::new();
+    let mut shape_keys: Vec<(usize, usize, String)> = Vec::new();
+    // import-call halves, joined per match (BTreeMap: match ids are
+    // source-ordered, so imports come out deterministic)
+    let mut import_fns: std::collections::BTreeMap<usize, String> = Default::default();
+    let mut import_args: std::collections::BTreeMap<usize, String> = Default::default();
     // expr-literal spans, for narrowing an Edge target onto the actual
     // literal when the rhs node wraps it.
     let mut lit_spans: Vec<(usize, usize, Span)> = Vec::new();
@@ -424,6 +463,27 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
             "type.annot" => {
                 annots.insert(e.match_id, e.text.clone());
             }
+            "expr.shape" => {
+                shape_spans.push((e.start_byte, e.end_byte, Span { start: e.start, end: e.end }));
+            }
+            "shape.ctor" => {
+                // belongs to the smallest enclosing expr.shape; matches
+                // share the call node so byte keys line up
+                shape_ctors
+                    .entry(byte_range_of(&events, e.match_id, "expr.shape").unwrap_or((0, 0)))
+                    .or_insert_with(|| e.text.clone());
+            }
+            "shape.key" => {
+                if let Some(range) = byte_range_of(&events, e.match_id, "expr.shape") {
+                    shape_keys.push((range.0, range.1, e.text.clone()));
+                }
+            }
+            "import.fn" => {
+                import_fns.insert(e.match_id, e.text.clone());
+            }
+            "import.arg" => {
+                import_args.insert(e.match_id, e.text.clone());
+            }
             cap if cap.starts_with("obs.") => {
                 // Usage-site evidence: a mono-typed operator observes
                 // its operand. Same Observation payloads the Perl
@@ -471,6 +531,74 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
             }
             _ => {}
         }
+    }
+
+    // ---- keyed shapes → HashWithKeys witnesses ----
+    {
+        let mut seen_spans: std::collections::HashSet<(usize, usize)> =
+            std::collections::HashSet::new();
+        for &(sb, eb, span) in &shape_spans {
+            if !seen_spans.insert((sb, eb)) {
+                continue;
+            }
+            let Some(ctor) = shape_ctors.get(&(sb, eb)) else { continue };
+            if !(pack.shape_ctor)(ctor) {
+                continue;
+            }
+            let mut keys: Vec<(String, Option<Box<InferredType>>)> = shape_keys
+                .iter()
+                .filter(|&&(s2, e2, _)| s2 == sb && e2 == eb)
+                .map(|(_, _, k)| (k.clone(), None))
+                .collect();
+            keys.dedup_by(|a, b| a.0 == b.0);
+            lit_spans.push((sb, eb, span));
+            out.witnesses.push(crate::witnesses::Witness {
+                attachment: crate::witnesses::WitnessAttachment::Expr(span),
+                source: crate::witnesses::WitnessSource::Builder("skeleton-shape".into()),
+                payload: crate::witnesses::WitnessPayload::InferredType(
+                    InferredType::HashWithKeys { keys, open: false },
+                ),
+                span,
+            });
+        }
+    }
+
+    // ---- import CALLS (library/source) → imports ----
+    for (mid, f) in &import_fns {
+        if let Some(arg) = import_args.get(mid) {
+            if let Some(module) = (pack.import_call)(f, arg) {
+                if !out.imports.contains(&module) {
+                    out.imports.push(module);
+                }
+            }
+        }
+    }
+
+    // ---- def dedup: `f <- function` matches both the sub and the
+    // generic var pattern; keep the more specific kind per name site ----
+    {
+        let mut best: HashMap<(usize, usize), usize> = HashMap::new();
+        let mut keep = vec![true; out.symbols.len()];
+        for (i, sym) in out.symbols.iter().enumerate() {
+            let key = (sym.name_start.row, sym.name_start.column);
+            match best.get(&key) {
+                None => {
+                    best.insert(key, i);
+                }
+                Some(&j) => {
+                    let (gen_i, gen_j) =
+                        (out.symbols[i].kind == "var", out.symbols[j].kind == "var");
+                    if gen_j && !gen_i {
+                        keep[j] = false;
+                        best.insert(key, i);
+                    } else {
+                        keep[i] = false;
+                    }
+                }
+            }
+        }
+        let mut it = keep.iter();
+        out.symbols.retain(|_| *it.next().unwrap());
     }
 
     // ---- join flow captures into Variable witnesses ----

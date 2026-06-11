@@ -562,3 +562,127 @@ fn python_workspace_rename_for_free() {
     assert_eq!(texts[&pb], "from a import fetch_all\n\nz = fetch_all(1)\n");
 }
 
+
+#[test]
+fn dbg_r_cst() {
+    let mut p = tree_sitter::Parser::new();
+    p.set_language(&tree_sitter_r::LANGUAGE.into()).unwrap();
+    let src = "library(dplyr)\nsource(\"util.R\")\nf <- function(x) {\n  y <- x + 1\n  y\n}\ndf <- data.frame(age = c(30), name = c(\"ada\"))\nm <- df$age\nprint.myclass <- function(obj) obj\n";
+    let tree = p.parse(src, None).unwrap();
+    println!("{}", tree.root_node().to_sexp());
+}
+
+// ---- spike 4: the R pack ----
+
+fn r_parser() -> tree_sitter::Parser {
+    let mut p = tree_sitter::Parser::new();
+    p.set_language(&tree_sitter_r::LANGUAGE.into()).unwrap();
+    p
+}
+
+fn r_fa(src: &str) -> (crate::file_analysis::FileAnalysis, Vec<String>, SkeletonAnalysis) {
+    let mut parser = r_parser();
+    let tree = parser.parse(src, None).unwrap();
+    let skel = extract(&tree, src.as_bytes(), &r_pack()).unwrap();
+    let imports = skel.imports.clone();
+    let symbols = SkeletonAnalysis {
+        symbols: skel.symbols.clone(),
+        ..Default::default()
+    };
+    (skel.into_file_analysis(), imports, symbols)
+}
+
+#[test]
+fn r_outline_imports_and_s3_names() {
+    let src = "library(dplyr)\nsource(\"util.R\")\n\nadd_one <- function(x) {\n  y <- x + 1\n  y\n}\n\nprint.myclass <- function(obj) obj\n";
+    let (_fa, imports, skel) = r_fa(src);
+    assert_eq!(imports, vec!["dplyr", "util.R"]);
+    let subs: Vec<&str> = skel
+        .symbols
+        .iter()
+        .filter(|s| s.kind == "sub")
+        .map(|s| s.name.as_str())
+        .collect();
+    // S3 method names fall out of the def pattern verbatim — the
+    // convention layer (print.myclass IS print on myclass) is a later
+    // pack predicate, but the outline is already right.
+    assert_eq!(subs, vec!["add_one", "print.myclass"]);
+    // params + locals are vars, the function names are NOT doubled
+    let vars: Vec<&str> = skel
+        .symbols
+        .iter()
+        .filter(|s| s.kind == "var")
+        .map(|s| s.name.as_str())
+        .collect();
+    assert_eq!(vars, vec!["x", "y", "obj"]);
+}
+
+#[test]
+fn r_data_frame_columns_are_static_keys() {
+    // THE feature no R tooling has statically: df's columns as part of
+    // its TYPE, from the data.frame literal, through the production
+    // witness engine.
+    let src = "df <- data.frame(age = c(30, 41), name = c(\"ada\", \"grace\"))\nlater <- 1\n";
+    let (fa, _, _) = r_fa(src);
+    let end = tree_sitter::Point { row: 1, column: 0 };
+    use crate::file_analysis::InferredType;
+    match fa.inferred_type_via_bag("df", end) {
+        Some(InferredType::HashWithKeys { keys, open }) => {
+            let names: Vec<&str> = keys.iter().map(|(k, _)| k.as_str()).collect();
+            assert_eq!(names, vec!["age", "name"]);
+            assert!(!open);
+        }
+        other => panic!("expected the column shape, got {other:?}"),
+    }
+}
+
+#[test]
+fn r_cross_file_refs_and_workspace_rename() {
+    // util.R defines fetch_data; analysis.R sources it and calls it.
+    // refs_to + rename across files, R-flavored resolution = the
+    // source() path string, verbatim.
+    let dir = std::env::temp_dir().join(format!("qx-r-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let src_util = "fetch_data <- function(path) {\n  path\n}\n";
+    std::fs::write(dir.join("util.R"), src_util).unwrap();
+    let src_main = "source(\"util.R\")\n\nresult <- fetch_data(\"db.csv\")\n";
+
+    let (fa_main, imports, _) = r_fa(src_main);
+    let (fa_util, _, _) = r_fa(src_util);
+
+    // cross-file registration through the pack resolver
+    let idx = crate::module_index::ModuleIndex::new_for_test();
+    resolve_imports_with_pack(&imports, &dir, &r_pack(), &mut r_parser, &idx).unwrap();
+    assert!(
+        idx.get_cached("util.R").is_some(),
+        "source() path registered as a module",
+    );
+
+    // rename across the two files via the production path
+    let store = crate::file_store::FileStore::new();
+    let pm = std::path::PathBuf::from("/fake/r/analysis.R");
+    let pu = std::path::PathBuf::from("/fake/r/util.R");
+    store.insert_workspace(pm.clone(), fa_main);
+    store.insert_workspace(pu.clone(), fa_util);
+
+    let point = tree_sitter::Point { row: 2, column: 12 }; // on fetch_data call
+    let fa_view = store.workspace_raw().get(&pm).unwrap().clone();
+    let target = match crate::resolve::resolve_symbol(&fa_view, point, None) {
+        Some(crate::resolve::ResolvedTarget::Target(t)) => t,
+        other => panic!("expected target, got {other:?}"),
+    };
+    assert_eq!(target.name, "fetch_data");
+    let locs = crate::resolve::refs_to(&store, None, &target, crate::resolve::RoleMask::EDITABLE);
+    let files: Vec<String> = locs
+        .iter()
+        .map(|l| match &l.key {
+            crate::file_store::FileKey::Path(p) => {
+                p.file_name().unwrap().to_string_lossy().to_string()
+            }
+            _ => unreachable!(),
+        })
+        .collect();
+    assert!(files.contains(&"util.R".to_string()), "decl found: {files:?}");
+    assert!(files.contains(&"analysis.R".to_string()), "call found: {files:?}");
+    std::fs::remove_dir_all(&dir).ok();
+}
