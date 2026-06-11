@@ -4515,3 +4515,32 @@ sub run {
         "the contract record carries all three names",
     );
 }
+
+/// Anonymous subs are resolvable, not browsable: the synthesized
+/// `(anon)` symbol carries hide_in_outline, and the workspace-symbol
+/// converter honors it (an empty/broad query must not surface them).
+#[test]
+fn test_anon_subs_hidden_from_workspace_symbols() {
+    let src = "\
+my $cb = sub { return 42 };
+sub real_sub { 1 }
+";
+    let analysis = parse_analysis(src);
+    let uri = tower_lsp::lsp_types::Url::parse("file:///t.pl").unwrap();
+    let names: Vec<String> = analysis
+        .symbols
+        .iter()
+        .filter_map(|s| symbol_to_workspace_info(s, uri.clone()))
+        .map(|i| i.name)
+        .collect();
+    assert!(
+        names.iter().any(|n| n == "real_sub"),
+        "real subs surface: {:?}",
+        names,
+    );
+    assert!(
+        !names.iter().any(|n| n.contains("anon")),
+        "anon subs stay out: {:?}",
+        names,
+    );
+}

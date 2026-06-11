@@ -154,6 +154,11 @@ pub fn symbol_to_workspace_info(sym: &crate::file_analysis::Symbol, uri: Url) ->
         FaSymKind::Sub | FaSymKind::Method | FaSymKind::Package | FaSymKind::Class => {}
         _ => return None,
     }
+    // The detail's hide_in_outline covers the workspace list too —
+    // anon subs and plugin DSL imports are resolvable, not browsable.
+    if let crate::file_analysis::SymbolDetail::Sub { hide_in_outline: true, .. } = &sym.detail {
+        return None;
+    }
     Some(SymbolInformation {
         name: sym.name.clone(),
         kind: fa_sym_kind_to_lsp(&sym.kind),
