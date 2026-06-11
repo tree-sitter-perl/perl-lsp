@@ -5159,12 +5159,27 @@ impl<'a> Builder<'a> {
         };
         // A `MAX_RETRIES()` call already gets its FunctionCall ref from
         // `visit_function_call` (the `function` field). Don't double-emit.
+        // Declaration/name slots aren't value-position barewords either:
+        // a sub's own `name`, a package/class/use statement's module —
+        // their refs belong to their visitors.
         if let Some(parent) = node.parent() {
             if matches!(
                 parent.kind(),
                 "function_call_expression" | "ambiguous_function_call_expression"
             ) && parent.child_by_field_name("function").map(|f| f.id()) == Some(node.id())
             {
+                return;
+            }
+            if matches!(
+                parent.kind(),
+                "subroutine_declaration_statement"
+                    | "method_declaration_statement"
+                    | "package_statement"
+                    | "class_statement"
+                    | "use_statement"
+                    | "require_statement"
+                    | "no_statement"
+            ) {
                 return;
             }
         }
@@ -5205,15 +5220,32 @@ impl<'a> Builder<'a> {
             .declared_constants
             .get(&pkg)
             .is_some_and(|set| set.contains(name));
-        if !is_declared {
+        if is_declared {
+            self.add_ref(
+                RefKind::FunctionCall { resolved_package: Some(pkg) },
+                node_to_span(node),
+                name.to_string(),
+                AccessKind::Read,
+            );
             return;
         }
-        self.add_ref(
-            RefKind::FunctionCall { resolved_package: Some(pkg) },
-            node_to_span(node),
-            name.to_string(),
-            AccessKind::Read,
-        );
+        // A bareword naming an in-scope sub IS a call — Perl prefers
+        // the defined sub over the class-name reading (`get_config->`
+        // calls get_config()), so `my $x = get_config;` and the deref
+        // base in `get_config->{host}` deserve the full function
+        // treatment: hover, goto-def, references, rename, semantic
+        // tokens. `resolve_call_package` is the one seam for "whose
+        // sub is this" (enclosing package, then imports) — no pin, no
+        // ref, so unresolvable barewords (filehandles, prototypes'
+        // leftovers) stay untouched.
+        if let Some(owner) = self.resolve_call_package(name) {
+            self.add_ref(
+                RefKind::FunctionCall { resolved_package: Some(owner) },
+                node_to_span(node),
+                name.to_string(),
+                AccessKind::Read,
+            );
+        }
     }
 
     /// Register a single `use constant` name as a parameterless Sub symbol.

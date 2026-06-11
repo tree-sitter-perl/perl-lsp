@@ -14760,3 +14760,36 @@ with map \"My::Roles::$_\", qw/Alpha Beta/;
         &["My::Roles::Alpha".to_string(), "My::Roles::Beta".to_string()],
     );
 }
+
+/// A bareword naming an in-scope sub IS a call (Perl prefers the
+/// defined sub over the class-name reading), so value-position
+/// barewords get the full function treatment: a FunctionCall ref per
+/// site — hover/goto-def/references/rename ride it. The declaration
+/// name slot and unresolvable barewords stay untouched.
+#[test]
+fn bareword_promotes_to_function_ref() {
+    let src = "\
+sub get_config { return { host => 1 } }
+my $a = get_config;
+my $b = get_config->{host};
+my @l = (get_config, 1);
+my $f = UNRESOLVED_BAREWORD_FH;
+";
+    let fa = build_fa(src);
+    let call_refs: Vec<_> = fa
+        .refs
+        .iter()
+        .filter(|r| {
+            r.target_name == "get_config" && matches!(r.kind, RefKind::FunctionCall { .. })
+        })
+        .collect();
+    assert_eq!(
+        call_refs.len(),
+        3,
+        "three value-position barewords promote; the decl name does not",
+    );
+    assert!(
+        !fa.refs.iter().any(|r| r.target_name == "UNRESOLVED_BAREWORD_FH"),
+        "unresolvable barewords stay untouched",
+    );
+}
