@@ -264,6 +264,7 @@ fn build_with_plugins_inner(
         method_call_invocant: std::collections::HashMap::new(),
         attr_projections: Vec::new(),
         escape_recorded: std::collections::HashSet::new(),
+        role_requires: std::collections::HashMap::new(),
         reassigned_scalars: std::collections::HashSet::new(),
         key_writes: Vec::new(),
         method_call_arity: std::collections::HashMap::new(),
@@ -519,6 +520,7 @@ fn build_with_plugins_inner(
         gated_param_types: b.gated_param_types,
         reassigned_scalars: b.reassigned_scalars,
         key_writes: b.key_writes,
+        role_requires: b.role_requires,
     });
     // Finalize: run the legacy text-based MCB resolver as a fallback.
     // For every assignment the unified typer (run before
@@ -1484,6 +1486,10 @@ struct Builder<'a> {
     /// mutation-extension pass (shape extension / open-widening).
     /// Flushed into `FileAnalysis.key_writes`.
     key_writes: Vec<crate::file_analysis::KeyWrite>,
+
+    /// Per-role `requires` lists. Flushed into
+    /// `FileAnalysis.role_requires`.
+    role_requires: std::collections::HashMap<String, Vec<String>>,
 
     /// Per-MethodCall-ref arg count, keyed by ref index. Lets
     /// `emit_method_call_return_edges` pin the call site's arity onto its
@@ -5233,86 +5239,17 @@ impl<'a> Builder<'a> {
         );
     }
 
-    /// Extract strings from a node's children: qw(), paren lists, bare strings.
-    /// Returns (text, span) pairs where span covers each individual word.
-    /// Also handles the case where the node itself is a string/qw (not just its children).
+    /// Strings of a list-ish node, per-word spans included. Syntax
+    /// (qw / string literals / list recursion) lives in
+    /// `cst::string_list`; this wrapper supplies the constant-folding
+    /// hook for bareword / `@list` elements, which needs builder state.
     fn extract_string_list(&self, node: Node<'a>) -> Vec<(String, Span)> {
-        // Handle the node itself being a leaf string type
-        match node.kind() {
-            "quoted_word_list" => {
-                let mut results = Vec::new();
-                self.extract_qw_word_spans(node, &mut results);
-                return results;
-            }
-            "string_literal" | "interpolated_string_literal" => {
-                if let Some(text) = self.extract_string_content(node) {
-                    return vec![(text, self.string_content_span(node))];
-                }
-                return vec![];
-            }
-            "bareword" | "autoquoted_bareword" => {
-                if let Ok(text) = node.utf8_text(self.source) {
-                    if let Some(values) = self.resolve_constant_strings(text, 0) {
-                        let span = node_to_span(node);
-                        return values.into_iter().map(|v| (v, span)).collect();
-                    }
-                }
-                return vec![];
-            }
-            "array" => {
-                if let Ok(text) = node.utf8_text(self.source) {
-                    if let Some(values) = self.resolve_constant_strings(text, 0) {
-                        let span = node_to_span(node);
-                        return values.into_iter().map(|v| (v, span)).collect();
-                    }
-                }
-                return vec![];
-            }
-            _ => {}
-        }
-        // Walk children
-        let mut results = Vec::new();
-        for i in 0..node.child_count() {
-            if let Some(child) = node.child(i) {
-                match child.kind() {
-                    "quoted_word_list" => {
-                        self.extract_qw_word_spans(child, &mut results);
-                    }
-                    "string_literal" | "interpolated_string_literal" => {
-                        if let Some(text) = self.extract_string_content(child) {
-                            results.push((text, self.string_content_span(child)));
-                        }
-                    }
-                    "parenthesized_expression" | "list_expression"
-                    | "anonymous_array_expression" => {
-                        results.extend(self.extract_string_list(child));
-                    }
-                    // Constant/variable resolution: barewords and array variables
-                    "bareword" | "autoquoted_bareword" => {
-                        if let Ok(text) = child.utf8_text(self.source) {
-                            if let Some(values) = self.resolve_constant_strings(text, 0) {
-                                let span = node_to_span(child);
-                                for val in values {
-                                    results.push((val, span));
-                                }
-                            }
-                        }
-                    }
-                    "array" => {
-                        if let Ok(text) = child.utf8_text(self.source) {
-                            if let Some(values) = self.resolve_constant_strings(text, 0) {
-                                let span = node_to_span(child);
-                                for val in values {
-                                    results.push((val, span));
-                                }
-                            }
-                        }
-                    }
-                    _ => {}
-                }
-            }
-        }
-        results
+        crate::cst::string_list(node, self.source, &mut |n| {
+            let Ok(text) = n.utf8_text(self.source) else { return vec![] };
+            let Some(values) = self.resolve_constant_strings(text, 0) else { return vec![] };
+            let span = node_to_span(n);
+            values.into_iter().map(|v| (v, span)).collect()
+        })
     }
 
     /// Extract strings without spans. Convenience for callers that don't need positions.
@@ -5335,52 +5272,10 @@ impl<'a> Builder<'a> {
         }
     }
 
-    /// Extract per-word (text, span) pairs from a quoted_word_list node.
-    /// Handles multi-line qw by tracking row/col through whitespace.
     fn extract_qw_word_spans(&self, qw_node: Node<'a>, results: &mut Vec<(String, Span)>) {
-        for j in 0..qw_node.named_child_count() {
-            if let Some(sc) = qw_node.named_child(j) {
-                if sc.kind() == "string_content" {
-                    if let Ok(text) = sc.utf8_text(self.source) {
-                        let sc_start = sc.start_position();
-                        let bytes = text.as_bytes();
-                        let mut row = sc_start.row;
-                        let mut col = sc_start.column;
-                        let mut i = 0;
-                        while i < bytes.len() {
-                            // Skip whitespace, tracking newlines
-                            while i < bytes.len() && bytes[i].is_ascii_whitespace() {
-                                if bytes[i] == b'\n' {
-                                    row += 1;
-                                    col = 0;
-                                } else {
-                                    col += 1;
-                                }
-                                i += 1;
-                            }
-                            // Collect word
-                            let word_start = (row, col);
-                            let word_begin = i;
-                            while i < bytes.len() && !bytes[i].is_ascii_whitespace() {
-                                col += 1;
-                                i += 1;
-                            }
-                            if word_begin < i {
-                                let word = &text[word_begin..i];
-                                let span = Span {
-                                    start: Point::new(word_start.0, word_start.1),
-                                    end: Point::new(row, col),
-                                };
-                                results.push((word.to_string(), span));
-                            }
-                        }
-                    }
-                }
-            }
-        }
+        crate::cst::qw_word_spans(qw_node, self.source, results)
     }
 
-    /// Find the qw close paren position in a use statement (only needed for completion positioning).
     fn find_qw_close_position(&self, node: Node<'a>) -> Option<Point> {
         for i in 0..node.child_count() {
             if let Some(child) = node.child(i) {
@@ -7200,6 +7095,18 @@ impl<'a> Builder<'a> {
                         }
                     }
                 }
+                // Moo/Moose role `requires NAMES` — declared method
+                // contracts the composer must fulfill. Gated on the
+                // role sugar actually being in scope (a plain class
+                // never imports `requires`) so a user-defined sub of
+                // the same name doesn't synthesize bogus methods.
+                if name == "requires" && self.framework_imports.contains("requires") {
+                    if let Some(pkg) = self.current_package.clone() {
+                        if self.framework_modes.contains_key(&pkg) {
+                            self.visit_requires_call(node, &pkg);
+                        }
+                    }
+                }
                 // Moose/Moo `with 'Role'` — register roles as parents for method resolution
                 if name == "with" {
                     if let Some(pkg) = self.current_package.clone() {
@@ -8550,6 +8457,41 @@ impl<'a> Builder<'a> {
 
     /// Synthesize accessor methods from `has` calls in Moo/Moose/Mojo::Base classes.
     /// Handle Moose/Moo `extends 'Parent::Class', ...` — register parent classes.
+    /// `requires LIST` in a role — each name is a method CONTRACT the
+    /// composing class must fulfill. Synthesize a Method symbol per
+    /// name (span = the name's own atom, rule #7) so `$self->name`
+    /// resolves inside the role: the unresolved-method hint stays
+    /// quiet, goto-def lands on the contract, completion offers it.
+    /// Names also land in `role_requires` — the input for the future
+    /// composer-mismatch diagnostic.
+    fn visit_requires_call(&mut self, node: Node<'a>, pkg: &str) {
+        let Some(args) = node.child_by_field_name("arguments") else { return };
+        let names = self.extract_string_list(args);
+        for (name, span) in &names {
+            self.add_symbol(
+                name.clone(),
+                SymKind::Method,
+                *span,
+                *span,
+                SymbolDetail::Sub {
+                    params: vec![],
+                    is_method: true,
+                    doc: Some(format!(
+                        "**Required** by role `{pkg}` — the composing class must provide it.",
+                    )),
+                    display: None,
+                    hide_in_outline: false,
+                    opaque_return: false,
+                    is_constant: false,
+                },
+            );
+        }
+        self.role_requires
+            .entry(pkg.to_string())
+            .or_default()
+            .extend(names.into_iter().map(|(n, _)| n));
+    }
+
     fn visit_extends_call(&mut self, node: Node<'a>, pkg: &str) {
         let args = match node.child_by_field_name("arguments") {
             Some(a) => a,
@@ -9414,29 +9356,13 @@ impl<'a> Builder<'a> {
 
     /// Extract string content from a string_literal node (strips quotes).
     fn extract_string_content(&self, node: Node<'a>) -> Option<String> {
-        for i in 0..node.named_child_count() {
-            if let Some(content) = node.named_child(i) {
-                if content.kind() == "string_content" {
-                    return content.utf8_text(self.source).ok().map(|s| s.to_string());
-                }
-            }
-        }
-        None
+        crate::cst::string_content_text(node, self.source)
     }
 
-    /// Get the span of the string_content inside a string_literal (for selection_span).
     fn string_content_span(&self, node: Node<'a>) -> Span {
-        for i in 0..node.named_child_count() {
-            if let Some(content) = node.named_child(i) {
-                if content.kind() == "string_content" {
-                    return node_to_span(content);
-                }
-            }
-        }
-        node_to_span(node)
+        crate::cst::string_content_span(node)
     }
 
-    /// Extract attribute names from an array ref expression: [qw(foo bar)] or ['foo', 'bar']
     fn extract_array_attr_names(&self, node: Node<'a>, names: &mut Vec<(String, Span)>) {
         // Handle bare qw() node directly (e.g. as method arg)
         if node.kind() == "quoted_word_list" {

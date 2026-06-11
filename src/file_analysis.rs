@@ -2276,6 +2276,13 @@ pub struct FileAnalysis {
     #[serde(default)]
     pub key_writes: Vec<KeyWrite>,
 
+    /// Per-role `requires` lists: the method contracts a composing
+    /// class must fulfill. The synthesized Method symbols carry the
+    /// in-role resolution; this record is the input for the future
+    /// composer-mismatch diagnostic (docs/prompt-role-requires.md).
+    #[serde(default)]
+    pub role_requires: HashMap<String, Vec<String>>,
+
     // Indices (built in post-pass — skipped by serde; call rebuild_all_indices() after deserialize)
     #[serde(skip, default)]
     scope_starts: Vec<(Point, ScopeId)>, // sorted by start point
@@ -2337,6 +2344,7 @@ pub struct FileAnalysisParts {
     pub attr_projections: Vec<AttrProjection>,
     pub reassigned_scalars: HashSet<String>,
     pub key_writes: Vec<KeyWrite>,
+    pub role_requires: HashMap<String, Vec<String>>,
 }
 
 /// One projection of a field/attr decl — the entity that encodes group
@@ -2461,6 +2469,7 @@ impl FileAnalysis {
             attr_projections,
             reassigned_scalars,
             key_writes,
+            role_requires,
         } = parts;
         witnesses.rebuild_index();
         let mut fa = FileAnalysis {
@@ -2493,6 +2502,7 @@ impl FileAnalysis {
             attr_projections,
             reassigned_scalars,
             key_writes,
+            role_requires,
             scope_starts: Vec::new(),
             symbols_by_name: HashMap::new(),
             symbols_by_scope: HashMap::new(),
