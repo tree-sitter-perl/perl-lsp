@@ -154,6 +154,16 @@ pub fn symbol_to_workspace_info(sym: &crate::file_analysis::Symbol, uri: Url) ->
         FaSymKind::Sub | FaSymKind::Method | FaSymKind::Package | FaSymKind::Class => {}
         _ => return None,
     }
+    // The detail's hide_in_outline covers the workspace list too —
+    // anon subs and plugin DSL imports are resolvable, not browsable.
+    // Lexical subs likewise: document symbols show them (in-file
+    // structure), workspace search does not (not addressable outside
+    // their block).
+    match &sym.detail {
+        crate::file_analysis::SymbolDetail::Sub { hide_in_outline: true, .. }
+        | crate::file_analysis::SymbolDetail::Sub { lexical: true, .. } => return None,
+        _ => {}
+    }
     Some(SymbolInformation {
         name: sym.name.clone(),
         kind: fa_sym_kind_to_lsp(&sym.kind),

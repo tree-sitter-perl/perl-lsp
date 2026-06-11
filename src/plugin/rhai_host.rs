@@ -137,6 +137,7 @@ pub struct RhaiPlugin {
     param_types: Vec<ParamType>,
     type_constraint_names: Vec<String>,
     app_surface_consumers: Vec<String>,
+    topic_route_dsl: Option<crate::plugin::TopicRouteDsl>,
     engine: Arc<Engine>,
     ast: Arc<AST>,
     has_on_function_call: bool,
@@ -282,6 +283,19 @@ impl RhaiPlugin {
             }
         }
 
+        // `topic_route_dsl()` — optional manifest map; bad shapes log
+        // and disable rather than fail the plugin.
+        let mut topic_route_dsl: Option<crate::plugin::TopicRouteDsl> = None;
+        if signatures.iter().any(|n| n == "topic_route_dsl") {
+            match engine.call_fn::<Dynamic>(&mut rhai::Scope::new(), &ast, "topic_route_dsl", ()) {
+                Ok(d) => match from_dynamic::<crate::plugin::TopicRouteDsl>(&d) {
+                    Ok(t) => topic_route_dsl = Some(t),
+                    Err(e) => log::error!("plugin `{}` topic_route_dsl() bad shape: {}", id, e),
+                },
+                Err(e) => log::error!("plugin `{}` topic_route_dsl() failed: {}", id, e),
+            }
+        }
+
         Ok(Self {
             has_on_function_call: signatures.iter().any(|n| n == "on_function_call"),
             has_type_constraint_inner: signatures.iter().any(|n| n == "type_constraint_inner"),
@@ -296,6 +310,7 @@ impl RhaiPlugin {
             param_types,
             type_constraint_names,
             app_surface_consumers,
+            topic_route_dsl,
             engine,
             ast: Arc::new(ast),
         })
@@ -384,6 +399,10 @@ impl FrameworkPlugin for RhaiPlugin {
 
     fn app_surface_consumers(&self) -> &[String] {
         &self.app_surface_consumers
+    }
+
+    fn topic_route_dsl(&self) -> Option<crate::plugin::TopicRouteDsl> {
+        self.topic_route_dsl.clone()
     }
 
     fn type_constraint_inner(
@@ -695,6 +714,7 @@ mod tests {
             function_name: Some("greet".into()),
             method_name: None,
             receiver_text: None,
+            receiver_call_name: None,
             receiver_type: None,
             receiver_route_defaults: Vec::new(),
             args: vec![],
@@ -805,12 +825,14 @@ mod tests {
             function_name: None,
             method_name: Some("on".into()),
             receiver_text: Some("$self".into()),
+            receiver_call_name: None,
             receiver_type: Some(InferredType::ClassName("My::Emitter".into())),
             receiver_route_defaults: Vec::new(),
             args: vec![
                 ArgInfo {
                     text: "'connect'".into(),
                     string_value: Some("connect".into()),
+                    string_values: Vec::new(),
                     span: evt_span,
                     content_span: None,
                     inferred_type: Some(InferredType::String), sub_params: vec![], callable_return_edge: None, ref_sub_name: None,
@@ -818,6 +840,7 @@ mod tests {
                 ArgInfo {
                     text: "sub { ... }".into(),
                     string_value: None,
+                    string_values: Vec::new(),
                     span: cb_span,
                     content_span: None,
                     inferred_type: Some(InferredType::CodeRef { return_edge: None }), sub_params: vec![], callable_return_edge: None, ref_sub_name: None,
@@ -878,11 +901,13 @@ mod tests {
                 function_name: Some(func.into()),
                 method_name: None,
                 receiver_text: None,
+                receiver_call_name: None,
                 receiver_type: None,
                 receiver_route_defaults: Vec::new(),
                 args: vec![ArgInfo {
                     text: accessor.into(),
                     string_value: Some(accessor.into()),
+                    string_values: Vec::new(),
                     span: name_span,
                     content_span: None,
                     inferred_type: Some(InferredType::String),
@@ -921,11 +946,13 @@ mod tests {
             function_name: Some(func.into()),
             method_name: None,
             receiver_text: None,
+            receiver_call_name: None,
             receiver_type: None,
             receiver_route_defaults: Vec::new(),
             args: vec![ArgInfo {
                 text: "x".into(),
                 string_value,
+                string_values: Vec::new(),
                 span: sp(1, 4, 1, 8),
                 content_span: None,
                 inferred_type: None,
@@ -965,6 +992,7 @@ mod tests {
             function_name: None,
             method_name: Some("on".into()),
             receiver_text: Some("$self".into()),
+            receiver_call_name: None,
             receiver_type: Some(InferredType::ClassName("Foo".into())),
             receiver_route_defaults: Vec::new(),
             args: vec![
@@ -972,6 +1000,7 @@ mod tests {
                 ArgInfo {
                     text: "$name".into(),
                     string_value: None,
+                    string_values: Vec::new(),
                     span: sp(0, 0, 0, 5),
                     content_span: None,
                     inferred_type: None, sub_params: vec![], callable_return_edge: None, ref_sub_name: None,
@@ -979,6 +1008,7 @@ mod tests {
                 ArgInfo {
                     text: "sub {}".into(),
                     string_value: None,
+                    string_values: Vec::new(),
                     span: sp(0, 6, 0, 12),
                     content_span: None,
                     inferred_type: Some(InferredType::CodeRef { return_edge: None }), sub_params: vec![], callable_return_edge: None, ref_sub_name: None,
@@ -1108,12 +1138,14 @@ mod tests {
             function_name: None,
             method_name: Some("model".into()),
             receiver_text: Some("$c".into()),
+            receiver_call_name: None,
             receiver_type: Some(InferredType::ClassName("Catalyst".into())),
             receiver_route_defaults: vec![],
             args: vec![
                 ArgInfo {
                     text: "'Foo'".into(),
                     string_value: Some("Foo".into()),
+                    string_values: Vec::new(),
                     span: name_span,
                     content_span: Some(name_span),
                     inferred_type: Some(InferredType::String),
@@ -1157,12 +1189,14 @@ mod tests {
             function_name: None,
             method_name: Some("forward".into()),
             receiver_text: Some("$c".into()),
+            receiver_call_name: None,
             receiver_type: Some(InferredType::ClassName("Catalyst".into())),
             receiver_route_defaults: vec![],
             args: vec![
                 ArgInfo {
                     text: "'/Root/index'".into(),
                     string_value: Some("/Root/index".into()),
+                    string_values: Vec::new(),
                     span: path_span,
                     content_span: Some(path_span),
                     inferred_type: Some(InferredType::String),
@@ -1206,12 +1240,14 @@ mod tests {
             function_name: None,
             method_name: Some("model".into()),
             receiver_text: Some("$schema".into()),
+            receiver_call_name: None,
             receiver_type: Some(InferredType::ClassName("DBIx::Class::Schema".into())),
             receiver_route_defaults: vec![],
             args: vec![
                 ArgInfo {
                     text: "'Foo'".into(),
                     string_value: Some("Foo".into()),
+                    string_values: Vec::new(),
                     span: sp(0, 0, 0, 5),
                     content_span: None,
                     inferred_type: Some(InferredType::String),
@@ -1251,6 +1287,7 @@ mod tests {
             function_name: Some("unrelated".into()),
             method_name: None,
             receiver_text: None,
+            receiver_call_name: None,
             receiver_type: None,
             receiver_route_defaults: Vec::new(),
             args: vec![],

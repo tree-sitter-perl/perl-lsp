@@ -4473,3 +4473,99 @@ cfg()->{hsot2};
         keys,
     );
 }
+
+/// Role `requires NAMES` declares method contracts: `$self->name`
+/// inside the role resolves to the synthesized marker (no
+/// unresolved-method hint, goto-def lands on the contract atom); a
+/// genuinely unknown method still hints. Both the qw and
+/// single-string spellings.
+#[test]
+fn test_role_requires_suppresses_unresolved_method() {
+    let src = "\
+package My::Role;
+use Moo::Role;
+requires qw/fetch source/;
+requires 'extra';
+sub run {
+  my ($self) = @_;
+  $self->fetch;
+  $self->source;
+  $self->extra;
+  $self->typo_method;
+}
+1;
+";
+    let analysis = parse_analysis(src);
+    let idx = crate::module_index::ModuleIndex::new_for_test();
+    let diags = collect_diagnostics(
+        &analysis,
+        &idx,
+        DiagnosticOptions { unresolved_dispatch: false },
+    );
+    let unresolved: Vec<&str> = diags
+        .iter()
+        .filter(|d| matches!(&d.code, Some(NumberOrString::String(c)) if c == "unresolved-method"))
+        .map(|d| d.message.as_str())
+        .collect();
+    assert_eq!(unresolved.len(), 1, "only the typo: {:?}", unresolved);
+    assert!(unresolved[0].contains("typo_method"), "{:?}", unresolved);
+    assert_eq!(
+        analysis.role_requires.get("My::Role").map(|v| v.len()),
+        Some(3),
+        "the contract record carries all three names",
+    );
+}
+
+/// Anonymous subs are resolvable, not browsable: the synthesized
+/// `(anon)` symbol carries hide_in_outline, and the workspace-symbol
+/// converter honors it (an empty/broad query must not surface them).
+#[test]
+fn test_anon_subs_hidden_from_workspace_symbols() {
+    let src = "\
+my $cb = sub { return 42 };
+sub real_sub { 1 }
+";
+    let analysis = parse_analysis(src);
+    let uri = tower_lsp::lsp_types::Url::parse("file:///t.pl").unwrap();
+    let names: Vec<String> = analysis
+        .symbols
+        .iter()
+        .filter_map(|s| symbol_to_workspace_info(s, uri.clone()))
+        .map(|i| i.name)
+        .collect();
+    assert!(
+        names.iter().any(|n| n == "real_sub"),
+        "real subs surface: {:?}",
+        names,
+    );
+    assert!(
+        !names.iter().any(|n| n.contains("anon")),
+        "anon subs stay out: {:?}",
+        names,
+    );
+}
+
+/// `my sub helper { … }` — document symbols keep it (real in-file
+/// structure); workspace-symbol search drops it (not addressable
+/// outside its block). Plain subs surface in both.
+#[test]
+fn test_lexical_subs_outline_only() {
+    let src = "\
+my sub helper_fn { 42 }
+sub public_fn { helper_fn() }
+";
+    let analysis = parse_analysis(src);
+    let uri = tower_lsp::lsp_types::Url::parse("file:///t.pl").unwrap();
+    let ws: Vec<String> = analysis
+        .symbols
+        .iter()
+        .filter_map(|s| symbol_to_workspace_info(s, uri.clone()))
+        .map(|i| i.name)
+        .collect();
+    assert!(ws.iter().any(|n| n == "public_fn"), "{:?}", ws);
+    assert!(!ws.iter().any(|n| n == "helper_fn"), "lexical stays out of workspace: {:?}", ws);
+    let outline = analysis.document_symbols();
+    let names: Vec<&str> = outline.iter().map(|d| d.name.as_str()).collect();
+    assert!(names.contains(&"helper_fn"), "outline keeps the lexical sub: {:?}", names);
+    assert!(names.contains(&"public_fn"), "{:?}", names);
+}

@@ -14741,3 +14741,194 @@ my $mixed = [1, some_call()];
     let m = fa.inferred_type_via_bag("$mixed", Point::new(2, 10));
     assert_eq!(m, Some(InferredType::ArrayRef), "untypable element degrades whole literal");
 }
+
+/// `with map "Prefix::$_", qw/A B/` — the string-template map over a
+/// literal list folds statically: role parents land (resolution walks
+/// them) with per-word spans (goto-def on each qw word). The crm
+/// role-graph idiom.
+#[test]
+fn map_built_role_parents() {
+    let src = "\
+package My::Class;
+use Moo;
+with map \"My::Roles::$_\", qw/Alpha Beta/;
+";
+    let fa = build_fa(src);
+    let parents = fa.package_parents.get("My::Class").expect("parents recorded");
+    assert_eq!(
+        parents.as_slice(),
+        &["My::Roles::Alpha".to_string(), "My::Roles::Beta".to_string()],
+    );
+}
+
+/// A bareword naming an in-scope sub IS a call (Perl prefers the
+/// defined sub over the class-name reading), so value-position
+/// barewords get the full function treatment: a FunctionCall ref per
+/// site — hover/goto-def/references/rename ride it. The declaration
+/// name slot and unresolvable barewords stay untouched.
+#[test]
+fn bareword_promotes_to_function_ref() {
+    let src = "\
+sub get_config { return { host => 1 } }
+my $a = get_config;
+my $b = get_config->{host};
+my @l = (get_config, 1);
+my $f = UNRESOLVED_BAREWORD_FH;
+";
+    let fa = build_fa(src);
+    let call_refs: Vec<_> = fa
+        .refs
+        .iter()
+        .filter(|r| {
+            r.target_name == "get_config" && matches!(r.kind, RefKind::FunctionCall { .. })
+        })
+        .collect();
+    assert_eq!(
+        call_refs.len(),
+        3,
+        "three value-position barewords promote; the decl name does not",
+    );
+    assert!(
+        !fa.refs.iter().any(|r| r.target_name == "UNRESOLVED_BAREWORD_FH"),
+        "unresolvable barewords stay untouched",
+    );
+}
+
+/// Mojolicious::Lite topic routes: `under(...)->to('ctrl#…')` sets the
+/// implicit base, `group { }` scopes it (an inner `under` applies only
+/// within, the outer base restores after), and `->to('#action')`
+/// partials on lite verb calls inherit the controller. Every name in
+/// the mechanism comes from the mojo-lite plugin's topic_route_dsl
+/// manifest; the base write is the plugin's SetRouteBase emission.
+#[test]
+fn lite_group_under_route_inheritance() {
+    let src = "\
+use Mojolicious::Lite;
+under('/auth')->to('login#check');
+group {
+  under('/n')->to('notifications#under');
+  get('/x')->to('#missing_fnsku');
+};
+get('/y')->to('#after_group');
+";
+    let fa = {
+        let mut parser = super::create_parser();
+        let tree = parser.parse(src, None).unwrap();
+        super::build_with_plugins(&tree, src.as_bytes(), super::default_plugin_registry())
+    };
+    let invocant_of = |action: &str| -> String {
+        fa.refs
+            .iter()
+            .find_map(|r| {
+                if r.target_name != action {
+                    return None;
+                }
+                let RefKind::MethodCall { ref invocant, .. } = r.kind else { return None };
+                Some(format!("{:?}", invocant))
+            })
+            .unwrap_or_else(|| panic!("no MethodCall ref for {action}"))
+    };
+    assert!(
+        invocant_of("missing_fnsku").contains("notifications"),
+        "in-group partial inherits the group's under",
+    );
+    assert!(
+        invocant_of("after_group").contains("login"),
+        "post-group partial inherits the OUTER under — the group frame popped",
+    );
+}
+
+/// `plugin 'Thing'` emits a register-anchored MethodCall ref with the
+/// DECAMELIZED token ("WasLoaded" → "was_loaded"), so goto-def rides
+/// the same camelize+tail+ownership search as go-to-controller —
+/// namespace-agnostic (Mojolicious::Plugin::* and app-specific
+/// namespaces both land).
+#[test]
+fn lite_plugin_name_emits_register_ref() {
+    let src = "\
+use Mojolicious::Lite;
+plugin 'WasLoaded';
+plugin 'Foo::BarBaz';
+";
+    let fa = {
+        let mut parser = super::create_parser();
+        let tree = parser.parse(src, None).unwrap();
+        super::build_with_plugins(&tree, src.as_bytes(), super::default_plugin_registry())
+    };
+    let invocants: Vec<String> = fa
+        .refs
+        .iter()
+        .filter(|r| r.target_name == "register")
+        .filter_map(|r| {
+            let RefKind::MethodCall { ref invocant, .. } = r.kind else { return None };
+            Some(format!("{:?}", invocant))
+        })
+        .collect();
+    assert_eq!(invocants.len(), 2, "{:?}", invocants);
+    assert!(invocants[0].contains("was_loaded"), "{:?}", invocants);
+    assert!(invocants[1].contains("foo-bar_baz"), "{:?}", invocants);
+}
+
+/// Framework-assigned Mojo attrs (`has [qw(app tx)]` with no default —
+/// the framework sets them at dispatch) type via plugin overrides, and
+/// a plugin's `register($self, $app, $conf)` gets `$app: Mojolicious`
+/// via the param_types manifest — with or without an indexed Mojo
+/// source tree.
+#[test]
+fn mojo_framework_assigned_attrs_type() {
+    let src = "\
+package My::App::Plugin::Demo;
+use Mojo::Base 'Mojolicious::Plugin';
+sub register {
+  my ($self, $app, $conf) = @_;
+  return $app;
+}
+1;
+";
+    let fa = {
+        let mut parser = super::create_parser();
+        let tree = parser.parse(src, None).unwrap();
+        super::build_with_plugins(&tree, src.as_bytes(), super::default_plugin_registry())
+    };
+    let idx = crate::module_index::ModuleIndex::new_for_test();
+    let t = fa.inferred_type_via_bag_ctx("$app", Point::new(4, 10), Some(&idx));
+    assert_eq!(
+        t,
+        Some(InferredType::ClassName("Mojolicious".into())),
+        "register's $app is the application",
+    );
+}
+
+/// Interpolation deref `${ EXPR }` — `scalar > block` with no varname
+/// wrapper — carries real code in strings AND regex patterns:
+/// `s/_to_${\ $self->filetype }$//` holds a method call that must get
+/// refs (the crm Clove::Converter idiom). The outer scalar emits
+/// nothing (its text is not a variable name).
+#[test]
+fn interpolation_deref_code_gets_refs() {
+    let src = "\
+package T;
+sub filetype { 'csv' }
+sub run {
+  my $self = shift;
+  my @m;
+  grep {s/_to_${\\$self->filetype}$//} @m;
+  my $y = \"x_${\\$self->filetype}_z\";
+  return $y;
+}
+1;
+";
+    let fa = build_fa(src);
+    let calls = fa
+        .refs
+        .iter()
+        .filter(|r| {
+            r.target_name == "filetype" && matches!(r.kind, RefKind::MethodCall { .. })
+        })
+        .count();
+    assert_eq!(calls, 2, "regex-pattern and string interpolations both ref");
+    assert!(
+        !fa.refs.iter().any(|r| r.target_name.contains("${")),
+        "no junk ref for the outer interpolation scalar",
+    );
+}

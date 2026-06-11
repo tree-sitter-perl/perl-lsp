@@ -86,7 +86,48 @@ fn overrides() {
         "Mojolicious app `routes` accessor returns the top-level router");
     out += route_method_override("Mojolicious::Controller", "routes", "Mojolicious::Routes",
         "Mojolicious controller `routes` accessor returns the top-level router");
+    // Framework-assigned attrs: `has [qw(app tx)]` and friends are
+    // declared with NO default/isa (the framework assigns them at
+    // dispatch), so the synthesized accessors carry no return type and
+    // chains die at the first hop. Declared here as overrides — the
+    // same trick as the route verbs above — so `$c->app->…`,
+    // `$c->tx->…`, `$plugin_app->…` type with or without an indexed
+    // Mojo source tree.
+    let assigned = [
+        ["Mojolicious::Controller", "app", "Mojolicious"],
+        ["Mojolicious::Controller", "tx", "Mojo::Transaction::HTTP"],
+        ["Mojolicious::Plugin", "app", "Mojolicious"],
+        ["Mojo::Server", "app", "Mojolicious"],
+        ["Mojolicious", "ua", "Mojo::UserAgent"],
+        ["Mojolicious::Controller", "ua", "Mojo::UserAgent"],
+        ["Mojo::UserAgent", "transactor", "Mojo::UserAgent::Transactor"],
+        // req/res delegate through $tx in real source (`sub req {
+        // shift->tx->req }`); declared on BOTH the controller and the
+        // transaction (route-verbs pattern) so the chain types without
+        // an indexed Mojo tree, and `$tx->req->…` works wherever a
+        // transaction shows up (ua callbacks, hooks, proxies).
+        ["Mojolicious::Controller", "req", "Mojo::Message::Request"],
+        ["Mojolicious::Controller", "res", "Mojo::Message::Response"],
+        ["Mojo::Transaction", "req", "Mojo::Message::Request"],
+        ["Mojo::Transaction", "res", "Mojo::Message::Response"],
+        ["Mojo::Transaction::HTTP", "req", "Mojo::Message::Request"],
+        ["Mojo::Transaction::HTTP", "res", "Mojo::Message::Response"],
+    ];
+    for a in assigned {
+        out += route_method_override(a[0], a[1], a[2],
+            "framework-assigned attr (has with no default; set at dispatch)");
+    }
     out
+}
+
+// `register($self, $app, $conf)` — the contract method every
+// Mojolicious plugin implements; the framework passes the app. $conf's
+// call-site shape is future work (long-distance param typing).
+fn param_types() {
+    [
+        #{ method: "register", in_role: "Mojolicious::Plugin", param: 1,
+           type_class: "Mojolicious" },
+    ]
 }
 
 // A route is a first-class thing — it has identity (the `Controller#action`
@@ -235,8 +276,57 @@ fn inherited_controller(ctx) {
     ()
 }
 
+
+// Mojo::Util decamelize: "FooBar" -> "foo_bar", "Foo::Bar" -> "foo-bar".
+// Plugin names arrive camelized; the core's controller-token search is
+// gated on lowercase-leading tokens (mirroring camelize's /^[A-Z]/
+// early-return), so emitting the decamelized form round-trips through
+// the exact same machinery Mojo's loader uses.
+fn decamelize(name) {
+    let out = "";
+    let parts = name.split("::");
+    let first_part = true;
+    for part in parts {
+        if !first_part { out += "-"; }
+        first_part = false;
+        let first = true;
+        for ch in part {
+            if ch >= 'A' && ch <= 'Z' {
+                if !first { out += "_"; }
+                out += ch.to_lower();
+            } else {
+                out += ch;
+            }
+            first = false;
+        }
+    }
+    out
+}
+
 fn on_method_call(ctx) {
     let out = [];
+
+    // `$app->plugin('Thing')` — the OO spelling of the lite `plugin`
+    // verb; same register-anchored resolution (see mojo-lite).
+    if ctx.method_name == "plugin" {
+        let args = ctx.args;
+        if args.len() >= 1 {
+            let name = args[0].string_value;
+            if name != () && name != "" {
+                let span = args[0].content_span;
+                if span == () { span = args[0].span; }
+                out += #{
+                    MethodCallRef: #{
+                        method_name: "register",
+                        invocant: decamelize(name),
+                        span: span,
+                        invocant_span: (),
+                    }
+                };
+            }
+        }
+        return out;
+    }
 
     if ctx.method_name == "name" {
         let args = ctx.args;
@@ -295,7 +385,14 @@ fn on_method_call(ctx) {
                 let action_start = lit_controller_len + 1;
                 let action_end   = action_start + action.len();
                 let action_span = subspan_cols(base, action_start, action_end);
-                return route_emissions(controller, action, action_span, ctx.current_package);
+                let ems = route_emissions(controller, action, action_span, ctx.current_package);
+                // Lite `under(...)->to('ctrl#…')` also WRITES the topic
+                // base following sibling routes inherit. The receiver's
+                // call name is a generic core fact; "under" is ours.
+                if ctx.receiver_call_name == "under" && controller != "" {
+                    ems += #{ "SetRouteBase": #{ "controller": controller } };
+                }
+                return ems;
             }
         }
     }

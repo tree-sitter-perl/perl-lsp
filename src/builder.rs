@@ -202,6 +202,8 @@ fn build_with_plugins_inner(
     plugins: Arc<PluginRegistry>,
     extra_re_fold: bool,
 ) -> FileAnalysis {
+    let topic_dsls: Vec<plugin::TopicRouteDsl> =
+        plugins.all().filter_map(|pl| pl.topic_route_dsl()).collect();
     let mut b = Builder {
         source,
         scopes: Vec::new(),
@@ -264,6 +266,9 @@ fn build_with_plugins_inner(
         method_call_invocant: std::collections::HashMap::new(),
         attr_projections: Vec::new(),
         escape_recorded: std::collections::HashSet::new(),
+        role_requires: std::collections::HashMap::new(),
+        lite_brand: vec![None],
+        topic_dsls,
         reassigned_scalars: std::collections::HashSet::new(),
         key_writes: Vec::new(),
         method_call_arity: std::collections::HashMap::new(),
@@ -519,6 +524,7 @@ fn build_with_plugins_inner(
         gated_param_types: b.gated_param_types,
         reassigned_scalars: b.reassigned_scalars,
         key_writes: b.key_writes,
+        role_requires: b.role_requires,
     });
     // Finalize: run the legacy text-based MCB resolver as a fallback.
     // For every assignment the unified typer (run before
@@ -1485,6 +1491,21 @@ struct Builder<'a> {
     /// Flushed into `FileAnalysis.key_writes`.
     key_writes: Vec<crate::file_analysis::KeyWrite>,
 
+    /// Per-role `requires` lists. Flushed into
+    /// `FileAnalysis.role_requires`.
+    role_requires: std::collections::HashMap<String, Vec<String>>,
+
+    /// Topic-route implicit base — the controller default the current
+    /// base-setter established, scoped by the DSL's group function
+    /// (push on entry, pop on exit). Topic-DSL routes have no variable
+    /// for the brand to ride; this stack IS the receiver for
+    /// `->to('#action')` partials on declared verb calls.
+    lite_brand: Vec<Option<String>>,
+
+    /// Topic-route DSL manifests collected from the plugin registry —
+    /// see `plugin::TopicRouteDsl`.
+    topic_dsls: Vec<plugin::TopicRouteDsl>,
+
     /// Per-MethodCall-ref arg count, keyed by ref index. Lets
     /// `emit_method_call_return_edges` pin the call site's arity onto its
     /// `Expression(refidx)` return edge (`CallReturn`), so a fluent
@@ -1834,6 +1855,7 @@ impl<'a> Builder<'a> {
     fn arg_info_for(&mut self, arg: Node<'a>) -> plugin::ArgInfo {
         let text = arg.utf8_text(self.source).unwrap_or("").to_string();
         let mut content_span: Option<Span> = None;
+        let mut string_values: Vec<String> = Vec::new();
         let string_value = match arg.kind() {
             "string_literal" | "interpolated_string_literal" => {
                 // Read the string_content child — quote-flavor-agnostic
@@ -1858,11 +1880,15 @@ impl<'a> Builder<'a> {
             // positional args) where the token text IS the string value.
             "autoquoted_bareword" | "bareword" => Some(text.clone()),
             "scalar" | "array" | "hash" => {
-                self.resolve_constant_strings(&text, 0)
-                    .and_then(|v| v.into_iter().next())
+                let folded = self.resolve_constant_strings(&text, 0).unwrap_or_default();
+                string_values = folded.clone();
+                folded.into_iter().next()
             }
             _ => None,
         };
+        if string_values.is_empty() {
+            string_values.extend(string_value.clone());
+        }
         self.emit_expr_witness(arg);
         let inferred_type = self.bag_query_expr_span(node_to_span(arg));
         let sub_params = if arg.kind() == "anonymous_subroutine_expression" {
@@ -1907,6 +1933,7 @@ impl<'a> Builder<'a> {
         plugin::ArgInfo {
             text,
             string_value,
+            string_values,
             span: node_to_span(arg),
             content_span,
             inferred_type,
@@ -2518,6 +2545,32 @@ impl<'a> Builder<'a> {
     /// bareword arms query the local Symbol's return, method-call arms
     /// query Expression(refidx), shift / `$_[0]` / `__PACKAGE__` use
     /// current_package. One function, one dispatch.
+    /// The active topic-route DSL, when a plugin declared one whose
+    /// gating module is in scope. Core knows no names — the plugin
+    /// manifest carries the module, the verbs, and the scope function.
+    fn active_topic_dsl(&self) -> Option<&plugin::TopicRouteDsl> {
+        self.topic_dsls.iter().find(|d| {
+            self.package_uses
+                .values()
+                .any(|ms| ms.iter().any(|m| *m == d.module))
+        })
+    }
+
+    /// The called function's name when `inv` is a call — the generic
+    /// syntax fact `CallContext.receiver_call_name` carries to plugins.
+    fn invocant_call_name(&self, inv: Node<'a>) -> Option<String> {
+        if !matches!(
+            inv.kind(),
+            "function_call_expression" | "ambiguous_function_call_expression"
+        ) {
+            return None;
+        }
+        inv.child_by_field_name("function")?
+            .utf8_text(self.source)
+            .ok()
+            .map(str::to_string)
+    }
+
     fn receiver_type_for(&self, invocant_node: Option<Node<'a>>) -> Option<InferredType> {
         self.invocant_type_at_node(invocant_node?)
     }
@@ -2567,6 +2620,7 @@ impl<'a> Builder<'a> {
             function_name: None,
             method_name: None,
             receiver_text: None,
+            receiver_call_name: None,
             receiver_type: None,
             receiver_route_defaults: Vec::new(),
             args,
@@ -2698,6 +2752,14 @@ impl<'a> Builder<'a> {
     fn apply_emit_action(&mut self, plugin_id: String, action: plugin::EmitAction) {
         let ns = Namespace::framework(plugin_id.clone());
         match action {
+            // Topic-route base write: the plugin parsed its own
+            // `->to('ctrl#…')` on its declared base-setter verb; core
+            // just stores the result on the innermost open frame.
+            plugin::EmitAction::SetRouteBase { controller } => {
+                if let Some(frame) = self.lite_brand.last_mut() {
+                    *frame = Some(controller);
+                }
+            }
             plugin::EmitAction::Method {
                 name,
                 span,
@@ -2723,6 +2785,7 @@ impl<'a> Builder<'a> {
                     hide_in_outline,
                     opaque_return,
                     is_constant: false,
+                    lexical: false,
                 };
                 let target_pkg = on_class.clone().or_else(|| self.current_package.clone());
                 // Projection-group enrollment: the plugin declared which
@@ -3494,6 +3557,7 @@ impl<'a> Builder<'a> {
                     hide_in_outline: false,
                     opaque_return: false,
                     is_constant: false,
+                    lexical: false,
                 },
             );
         }
@@ -3786,12 +3850,17 @@ impl<'a> Builder<'a> {
         // Extract preceding POD/comment documentation
         let doc = self.extract_preceding_doc(node, &name);
 
+        // `my sub helper { … }` — the grammar's `lexical` field marks a
+        // block-scoped sub: real in-file structure (document symbols
+        // keep it) but not a workspace-addressable entity (workspace
+        // search drops it).
+        let lexical = node.child_by_field_name("lexical").is_some();
         self.add_symbol(
             name.clone(),
             if is_method { SymKind::Method } else { SymKind::Sub },
             node_to_span(node),
             node_to_span(name_node),
-            SymbolDetail::Sub { params: params.clone(), is_method, doc, display: None, hide_in_outline: false, opaque_return: false, is_constant: false },
+            SymbolDetail::Sub { params: params.clone(), is_method, doc, display: None, hide_in_outline: false, opaque_return: false, is_constant: false, lexical },
         );
 
         // Exporter::Extensible method-attribute export form: `sub foo :Export`.
@@ -3934,6 +4003,7 @@ impl<'a> Builder<'a> {
                 hide_in_outline: true,
                 opaque_return: false,
                 is_constant: false,
+                lexical: false,
             },
         );
         self.anon_sub_symbol_by_span.insert(span, sym_id);
@@ -4419,7 +4489,7 @@ impl<'a> Builder<'a> {
                         SymKind::Method,
                         node_to_span(node),
                         bare_span,
-                        SymbolDetail::Sub { params: vec![], is_method: true, doc: None, display: None, hide_in_outline: false, opaque_return: false, is_constant: false },
+                        SymbolDetail::Sub { params: vec![], is_method: true, doc: None, display: None, hide_in_outline: false, opaque_return: false, is_constant: false, lexical: false },
                     );
                 }
                 if has_writer {
@@ -4442,6 +4512,7 @@ impl<'a> Builder<'a> {
                     hide_in_outline: false,
                     opaque_return: false,
                     is_constant: false,
+                    lexical: false,
                         },
                     );
                 }
@@ -4572,13 +4643,32 @@ impl<'a> Builder<'a> {
         // `... for (LIST)` form (the child_by_field_name paren gotcha), so the
         // list payload is read off the second named child instead — `[call,
         // list]`. `extract_string_list` folds qw / paren-list / constants.
+        let mut topic_values: Vec<String> = Vec::new();
         if let (Some(call), Some(list_node)) = (node.named_child(0), node.named_child(1)) {
             let names = self.extract_string_list(list_node);
             if !names.is_empty() && self.is_class_accessor_loop_body(call) {
                 self.emit_class_accessor_symbols(call, &names);
             }
+            topic_values = names.into_iter().map(|(n, _)| n).collect();
+        }
+        // The statement-modifier topic: `EXPR for qw(...)` runs EXPR once
+        // per element with `$_` bound — fold `$_` over the literal list
+        // for the body visit so registration loops expand
+        // (`$app->helper($_ => …) for qw(a b c)` is N registrations).
+        // Scoped: saved and restored around the children walk.
+        let saved = self.constant_strings.get("$_").cloned();
+        if !topic_values.is_empty() {
+            self.constant_strings.insert("$_".to_string(), topic_values);
         }
         self.visit_children(node);
+        match saved {
+            Some(v) => {
+                self.constant_strings.insert("$_".to_string(), v);
+            }
+            None => {
+                self.constant_strings.remove("$_");
+            }
+        }
     }
 
     /// Is `node` a `mk_classdata`/`mk_classaccessor` call whose single arg is the
@@ -4709,6 +4799,7 @@ impl<'a> Builder<'a> {
                     hide_in_outline: false,
                     opaque_return: false,
                     is_constant: false,
+                    lexical: false,
                 },
             );
             self.record_framework_accessor_witness(
@@ -5153,12 +5244,27 @@ impl<'a> Builder<'a> {
         };
         // A `MAX_RETRIES()` call already gets its FunctionCall ref from
         // `visit_function_call` (the `function` field). Don't double-emit.
+        // Declaration/name slots aren't value-position barewords either:
+        // a sub's own `name`, a package/class/use statement's module —
+        // their refs belong to their visitors.
         if let Some(parent) = node.parent() {
             if matches!(
                 parent.kind(),
                 "function_call_expression" | "ambiguous_function_call_expression"
             ) && parent.child_by_field_name("function").map(|f| f.id()) == Some(node.id())
             {
+                return;
+            }
+            if matches!(
+                parent.kind(),
+                "subroutine_declaration_statement"
+                    | "method_declaration_statement"
+                    | "package_statement"
+                    | "class_statement"
+                    | "use_statement"
+                    | "require_statement"
+                    | "no_statement"
+            ) {
                 return;
             }
         }
@@ -5199,15 +5305,32 @@ impl<'a> Builder<'a> {
             .declared_constants
             .get(&pkg)
             .is_some_and(|set| set.contains(name));
-        if !is_declared {
+        if is_declared {
+            self.add_ref(
+                RefKind::FunctionCall { resolved_package: Some(pkg) },
+                node_to_span(node),
+                name.to_string(),
+                AccessKind::Read,
+            );
             return;
         }
-        self.add_ref(
-            RefKind::FunctionCall { resolved_package: Some(pkg) },
-            node_to_span(node),
-            name.to_string(),
-            AccessKind::Read,
-        );
+        // A bareword naming an in-scope sub IS a call — Perl prefers
+        // the defined sub over the class-name reading (`get_config->`
+        // calls get_config()), so `my $x = get_config;` and the deref
+        // base in `get_config->{host}` deserve the full function
+        // treatment: hover, goto-def, references, rename, semantic
+        // tokens. `resolve_call_package` is the one seam for "whose
+        // sub is this" (enclosing package, then imports) — no pin, no
+        // ref, so unresolvable barewords (filehandles, prototypes'
+        // leftovers) stay untouched.
+        if let Some(owner) = self.resolve_call_package(name) {
+            self.add_ref(
+                RefKind::FunctionCall { resolved_package: Some(owner) },
+                node_to_span(node),
+                name.to_string(),
+                AccessKind::Read,
+            );
+        }
     }
 
     /// Register a single `use constant` name as a parameterless Sub symbol.
@@ -5229,90 +5352,22 @@ impl<'a> Builder<'a> {
                 hide_in_outline: false,
                 opaque_return: false,
                 is_constant: true,
+                lexical: false,
             },
         );
     }
 
-    /// Extract strings from a node's children: qw(), paren lists, bare strings.
-    /// Returns (text, span) pairs where span covers each individual word.
-    /// Also handles the case where the node itself is a string/qw (not just its children).
+    /// Strings of a list-ish node, per-word spans included. Syntax
+    /// (qw / string literals / list recursion) lives in
+    /// `cst::string_list`; this wrapper supplies the constant-folding
+    /// hook for bareword / `@list` elements, which needs builder state.
     fn extract_string_list(&self, node: Node<'a>) -> Vec<(String, Span)> {
-        // Handle the node itself being a leaf string type
-        match node.kind() {
-            "quoted_word_list" => {
-                let mut results = Vec::new();
-                self.extract_qw_word_spans(node, &mut results);
-                return results;
-            }
-            "string_literal" | "interpolated_string_literal" => {
-                if let Some(text) = self.extract_string_content(node) {
-                    return vec![(text, self.string_content_span(node))];
-                }
-                return vec![];
-            }
-            "bareword" | "autoquoted_bareword" => {
-                if let Ok(text) = node.utf8_text(self.source) {
-                    if let Some(values) = self.resolve_constant_strings(text, 0) {
-                        let span = node_to_span(node);
-                        return values.into_iter().map(|v| (v, span)).collect();
-                    }
-                }
-                return vec![];
-            }
-            "array" => {
-                if let Ok(text) = node.utf8_text(self.source) {
-                    if let Some(values) = self.resolve_constant_strings(text, 0) {
-                        let span = node_to_span(node);
-                        return values.into_iter().map(|v| (v, span)).collect();
-                    }
-                }
-                return vec![];
-            }
-            _ => {}
-        }
-        // Walk children
-        let mut results = Vec::new();
-        for i in 0..node.child_count() {
-            if let Some(child) = node.child(i) {
-                match child.kind() {
-                    "quoted_word_list" => {
-                        self.extract_qw_word_spans(child, &mut results);
-                    }
-                    "string_literal" | "interpolated_string_literal" => {
-                        if let Some(text) = self.extract_string_content(child) {
-                            results.push((text, self.string_content_span(child)));
-                        }
-                    }
-                    "parenthesized_expression" | "list_expression"
-                    | "anonymous_array_expression" => {
-                        results.extend(self.extract_string_list(child));
-                    }
-                    // Constant/variable resolution: barewords and array variables
-                    "bareword" | "autoquoted_bareword" => {
-                        if let Ok(text) = child.utf8_text(self.source) {
-                            if let Some(values) = self.resolve_constant_strings(text, 0) {
-                                let span = node_to_span(child);
-                                for val in values {
-                                    results.push((val, span));
-                                }
-                            }
-                        }
-                    }
-                    "array" => {
-                        if let Ok(text) = child.utf8_text(self.source) {
-                            if let Some(values) = self.resolve_constant_strings(text, 0) {
-                                let span = node_to_span(child);
-                                for val in values {
-                                    results.push((val, span));
-                                }
-                            }
-                        }
-                    }
-                    _ => {}
-                }
-            }
-        }
-        results
+        crate::cst::string_list(node, self.source, &mut |n| {
+            let Ok(text) = n.utf8_text(self.source) else { return vec![] };
+            let Some(values) = self.resolve_constant_strings(text, 0) else { return vec![] };
+            let span = node_to_span(n);
+            values.into_iter().map(|v| (v, span)).collect()
+        })
     }
 
     /// Extract strings without spans. Convenience for callers that don't need positions.
@@ -5335,52 +5390,10 @@ impl<'a> Builder<'a> {
         }
     }
 
-    /// Extract per-word (text, span) pairs from a quoted_word_list node.
-    /// Handles multi-line qw by tracking row/col through whitespace.
     fn extract_qw_word_spans(&self, qw_node: Node<'a>, results: &mut Vec<(String, Span)>) {
-        for j in 0..qw_node.named_child_count() {
-            if let Some(sc) = qw_node.named_child(j) {
-                if sc.kind() == "string_content" {
-                    if let Ok(text) = sc.utf8_text(self.source) {
-                        let sc_start = sc.start_position();
-                        let bytes = text.as_bytes();
-                        let mut row = sc_start.row;
-                        let mut col = sc_start.column;
-                        let mut i = 0;
-                        while i < bytes.len() {
-                            // Skip whitespace, tracking newlines
-                            while i < bytes.len() && bytes[i].is_ascii_whitespace() {
-                                if bytes[i] == b'\n' {
-                                    row += 1;
-                                    col = 0;
-                                } else {
-                                    col += 1;
-                                }
-                                i += 1;
-                            }
-                            // Collect word
-                            let word_start = (row, col);
-                            let word_begin = i;
-                            while i < bytes.len() && !bytes[i].is_ascii_whitespace() {
-                                col += 1;
-                                i += 1;
-                            }
-                            if word_begin < i {
-                                let word = &text[word_begin..i];
-                                let span = Span {
-                                    start: Point::new(word_start.0, word_start.1),
-                                    end: Point::new(row, col),
-                                };
-                                results.push((word.to_string(), span));
-                            }
-                        }
-                    }
-                }
-            }
-        }
+        crate::cst::qw_word_spans(qw_node, self.source, results)
     }
 
-    /// Find the qw close paren position in a use statement (only needed for completion positioning).
     fn find_qw_close_position(&self, node: Node<'a>) -> Option<Point> {
         for i in 0..node.child_count() {
             if let Some(child) = node.child(i) {
@@ -6924,6 +6937,21 @@ impl<'a> Builder<'a> {
             return;
         }
 
+        // Interpolation deref: `${ EXPR }` inside a string or regex
+        // parses as `scalar > block` directly — no varname wrapper, so
+        // `is_block_deref` doesn't claim it. The block holds real code
+        // (`"_${\ $self->filetype }_"` carries a method call); visit it
+        // so its refs land, and emit nothing for the outer node — its
+        // text isn't a variable name.
+        for i in 0..node.child_count() {
+            if let Some(child) = node.child(i) {
+                if child.kind() == "block" {
+                    self.visit_children(child);
+                    return;
+                }
+            }
+        }
+
         // Sigil-deref of a scalar: `%$x` / `@$x` / `$$x` parses as the outer
         // sigil node (hash/array/scalar) whose varname child wraps an inner
         // `scalar` node naming the dereferenced variable. The inner scalar is
@@ -7200,6 +7228,18 @@ impl<'a> Builder<'a> {
                         }
                     }
                 }
+                // Moo/Moose role `requires NAMES` — declared method
+                // contracts the composer must fulfill. Gated on the
+                // role sugar actually being in scope (a plain class
+                // never imports `requires`) so a user-defined sub of
+                // the same name doesn't synthesize bogus methods.
+                if name == "requires" && self.framework_imports.contains("requires") {
+                    if let Some(pkg) = self.current_package.clone() {
+                        if self.framework_modes.contains_key(&pkg) {
+                            self.visit_requires_call(node, &pkg);
+                        }
+                    }
+                }
                 // Moose/Moo `with 'Role'` — register roles as parents for method resolution
                 if name == "with" {
                     if let Some(pkg) = self.current_package.clone() {
@@ -7313,7 +7353,26 @@ impl<'a> Builder<'a> {
                 }
             }
         }
+        // A topic-route DSL's scope function (`group { … }` in lite)
+        // brackets the implicit base: push a copy of the current frame,
+        // restore after the block — a base set inside applies only
+        // within. The function's NAME comes from the plugin manifest.
+        let lite_group = self
+            .active_topic_dsl()
+            .map(|d| d.group_fn.clone())
+            .is_some_and(|g| {
+                node.child_by_field_name("function")
+                    .and_then(|f| f.utf8_text(self.source).ok())
+                    == Some(g.as_str())
+            });
+        if lite_group {
+            let cur = self.lite_brand.last().cloned().flatten();
+            self.lite_brand.push(cur);
+        }
         self.visit_children(node);
+        if lite_group {
+            self.lite_brand.pop();
+        }
         // If `modifier_invocant_pos` wasn't consumed by a nested `visit_anonymous_sub`
         // (malformed or modifier-without-sub-body code), clear it so it doesn't leak
         // to the next anonymous sub in the file.
@@ -8277,6 +8336,7 @@ impl<'a> Builder<'a> {
                     hide_in_outline: false,
                     opaque_return: false,
                     is_constant: false,
+                    lexical: false,
                 },
                 Namespace::Language,
                 target_pkg,
@@ -8550,6 +8610,42 @@ impl<'a> Builder<'a> {
 
     /// Synthesize accessor methods from `has` calls in Moo/Moose/Mojo::Base classes.
     /// Handle Moose/Moo `extends 'Parent::Class', ...` — register parent classes.
+    /// `requires LIST` in a role — each name is a method CONTRACT the
+    /// composing class must fulfill. Synthesize a Method symbol per
+    /// name (span = the name's own atom, rule #7) so `$self->name`
+    /// resolves inside the role: the unresolved-method hint stays
+    /// quiet, goto-def lands on the contract, completion offers it.
+    /// Names also land in `role_requires` — the input for the future
+    /// composer-mismatch diagnostic.
+    fn visit_requires_call(&mut self, node: Node<'a>, pkg: &str) {
+        let Some(args) = node.child_by_field_name("arguments") else { return };
+        let names = self.extract_string_list(args);
+        for (name, span) in &names {
+            self.add_symbol(
+                name.clone(),
+                SymKind::Method,
+                *span,
+                *span,
+                SymbolDetail::Sub {
+                    params: vec![],
+                    is_method: true,
+                    doc: Some(format!(
+                        "**Required** by role `{pkg}` — the composing class must provide it.",
+                    )),
+                    display: None,
+                    hide_in_outline: false,
+                    opaque_return: false,
+                    is_constant: false,
+                    lexical: false,
+                },
+            );
+        }
+        self.role_requires
+            .entry(pkg.to_string())
+            .or_default()
+            .extend(names.into_iter().map(|(n, _)| n));
+    }
+
     fn visit_extends_call(&mut self, node: Node<'a>, pkg: &str) {
         let args = match node.child_by_field_name("arguments") {
             Some(a) => a,
@@ -8851,6 +8947,7 @@ impl<'a> Builder<'a> {
                     hide_in_outline: false,
                     opaque_return: false,
                     is_constant: false,
+                    lexical: false,
                         },
                     );
                     // Moo/Moose getter: arity 0 → isa-derived type
@@ -8894,6 +8991,7 @@ impl<'a> Builder<'a> {
                     hide_in_outline: true,
                     opaque_return: false,
                     is_constant: false,
+                    lexical: false,
                             },
                         );
                         let writer_arm = return_type.clone().map(|t| {
@@ -8932,6 +9030,7 @@ impl<'a> Builder<'a> {
                     hide_in_outline: false,
                     opaque_return: false,
                     is_constant: false,
+                    lexical: false,
                             },
                         );
                         let writer_arm = return_type.clone().map(|t| {
@@ -9006,6 +9105,7 @@ impl<'a> Builder<'a> {
                     hide_in_outline: false,
                     opaque_return: false,
                     is_constant: false,
+                    lexical: false,
                         },
                     );
                     let getter_arm = getter_type.clone().map(|t| {
@@ -9042,6 +9142,7 @@ impl<'a> Builder<'a> {
                     hide_in_outline: true,
                     opaque_return: false,
                     is_constant: false,
+                    lexical: false,
                         },
                     );
                     // Mojo writer: arity ≥ 1 → fluent return
@@ -9414,29 +9515,13 @@ impl<'a> Builder<'a> {
 
     /// Extract string content from a string_literal node (strips quotes).
     fn extract_string_content(&self, node: Node<'a>) -> Option<String> {
-        for i in 0..node.named_child_count() {
-            if let Some(content) = node.named_child(i) {
-                if content.kind() == "string_content" {
-                    return content.utf8_text(self.source).ok().map(|s| s.to_string());
-                }
-            }
-        }
-        None
+        crate::cst::string_content_text(node, self.source)
     }
 
-    /// Get the span of the string_content inside a string_literal (for selection_span).
     fn string_content_span(&self, node: Node<'a>) -> Span {
-        for i in 0..node.named_child_count() {
-            if let Some(content) = node.named_child(i) {
-                if content.kind() == "string_content" {
-                    return node_to_span(content);
-                }
-            }
-        }
-        node_to_span(node)
+        crate::cst::string_content_span(node)
     }
 
-    /// Extract attribute names from an array ref expression: [qw(foo bar)] or ['foo', 'bar']
     fn extract_array_attr_names(&self, node: Node<'a>, names: &mut Vec<(String, Span)>) {
         // Handle bare qw() node directly (e.g. as method arg)
         if node.kind() == "quoted_word_list" {
@@ -10172,6 +10257,13 @@ impl<'a> Builder<'a> {
                 ctx.method_name = Some(name.clone());
                 ctx.receiver_text = invocant_text.clone();
                 ctx.receiver_type = self.receiver_type_for(invocant_node);
+                // The receiver's call name is a generic syntax fact —
+                // set unconditionally so plugins can match their own
+                // DSL verbs (mojo-routes' base-setter) whatever the
+                // receiver's type resolved to.
+                if let Some(inv) = invocant_node {
+                    ctx.receiver_call_name = self.invocant_call_name(inv);
+                }
                 if let Some(InferredType::BrandedRoute { controller, stash, .. }) =
                     &ctx.receiver_type
                 {
@@ -10180,6 +10272,27 @@ impl<'a> Builder<'a> {
                         defaults.push(("controller".to_string(), c.clone()));
                     }
                     ctx.receiver_route_defaults = defaults;
+                }
+                // Topic-route spelling: the receiver is a DSL verb CALL
+                // (`get('/x')->to('#action')`) — no variable, so the
+                // implicit base lives on the walk's stack. Fills the
+                // controller default only when the brand didn't carry
+                // one; which names count is the plugin manifest's call.
+                if ctx
+                    .receiver_route_defaults
+                    .iter()
+                    .all(|(k, _)| k != "controller")
+                {
+                    if let (Some(dsl), Some(callee)) =
+                        (self.active_topic_dsl(), ctx.receiver_call_name.as_deref())
+                    {
+                        if dsl.verbs.iter().any(|v| v == callee) {
+                            if let Some(c) = self.lite_brand.last().cloned().flatten() {
+                                ctx.receiver_route_defaults
+                                    .push(("controller".to_string(), c));
+                            }
+                        }
+                    }
                 }
                 self.record_provisional_dispatch(name, &ctx);
                 self.dispatch_method_call_plugins(ctx);
@@ -10295,6 +10408,7 @@ impl<'a> Builder<'a> {
                     hide_in_outline: false,
                     opaque_return: false,
                     is_constant: false,
+                    lexical: false,
                 },
             );
         }
@@ -10341,6 +10455,7 @@ impl<'a> Builder<'a> {
                     hide_in_outline: false,
                     opaque_return: false,
                     is_constant: false,
+                    lexical: false,
                 },
             );
         }
@@ -10448,6 +10563,7 @@ impl<'a> Builder<'a> {
                     hide_in_outline: false,
                     opaque_return: false,
                     is_constant: false,
+                    lexical: false,
                 },
             );
             // DBIC relationship accessor — arity 0 (no arg form is
@@ -11515,6 +11631,7 @@ impl<'a> Builder<'a> {
                     hide_in_outline: false,
                     opaque_return: false,
                     is_constant: false,
+                    lexical: false,
                 },
             );
             synth_names.insert(name.to_string());

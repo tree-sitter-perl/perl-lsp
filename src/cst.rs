@@ -294,6 +294,159 @@ pub(crate) fn canonical_container_name<'a>(node: Node<'a>, src: &'a [u8]) -> Opt
     Some(format!("{}{}", target_sigil, bare))
 }
 
+/// Per-word `(text, span)` pairs of a `quoted_word_list`, multi-line
+/// aware (rows/cols tracked through internal whitespace).
+pub(crate) fn qw_word_spans(qw_node: Node, src: &[u8], results: &mut Vec<(String, Span)>) {
+    for j in 0..qw_node.named_child_count() {
+        let Some(sc) = qw_node.named_child(j) else { continue };
+        if sc.kind() != "string_content" {
+            continue;
+        }
+        let Ok(text) = sc.utf8_text(src) else { continue };
+        let sc_start = sc.start_position();
+        let bytes = text.as_bytes();
+        let mut row = sc_start.row;
+        let mut col = sc_start.column;
+        let mut i = 0;
+        while i < bytes.len() {
+            while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+                if bytes[i] == b'\n' {
+                    row += 1;
+                    col = 0;
+                } else {
+                    col += 1;
+                }
+                i += 1;
+            }
+            let word_start = tree_sitter::Point { row, column: col };
+            let word_begin = i;
+            while i < bytes.len() && !bytes[i].is_ascii_whitespace() {
+                col += 1;
+                i += 1;
+            }
+            if i > word_begin {
+                results.push((
+                    text[word_begin..i].to_string(),
+                    Span { start: word_start, end: tree_sitter::Point { row, column: col } },
+                ));
+            }
+        }
+    }
+}
+
+/// The `string_content` text of a quoted node — quote-flavor-agnostic.
+pub(crate) fn string_content_text(node: Node, src: &[u8]) -> Option<String> {
+    for i in 0..node.named_child_count() {
+        if let Some(content) = node.named_child(i) {
+            if content.kind() == "string_content" {
+                return content.utf8_text(src).ok().map(|s| s.to_string());
+            }
+        }
+    }
+    None
+}
+
+/// Span of the `string_content` inside a quoted node (selection span);
+/// the whole node when there is none (empty string).
+pub(crate) fn string_content_span(node: Node) -> Span {
+    for i in 0..node.named_child_count() {
+        if let Some(content) = node.named_child(i) {
+            if content.kind() == "string_content" {
+                return node_to_span(content);
+            }
+        }
+    }
+    node_to_span(node)
+}
+
+/// Strings of a list-ish node — qw(), paren/comma lists, arrayrefs,
+/// bare string literals — with per-word spans, INCLUDING the case
+/// where `node` itself is the leaf (a parenless call's `arguments` IS
+/// the qw/string node). Non-literal elements (bareword constants,
+/// `@list` variables) go through `fold`: syntax lives here, constant
+/// resolution stays with the caller that has the state for it.
+/// `map "PREFIX$_", LIST` — the string-template map over a literal
+/// list is statically foldable: each produced string is the template
+/// with `$_` replaced by the list element, and its span is the
+/// ELEMENT's own span, so per-name refs (role parents, package lists)
+/// land on the word that produced them. Exactly one `$_` in the
+/// template and `map` only (`grep` filters, it doesn't transform);
+/// anything fancier is an honest miss. The crm idiom that motivated
+/// it: `with map "Clove::Sheets::Roles::$_", qw/CSV DB/;`.
+fn map_built_strings(
+    node: Node,
+    src: &[u8],
+    fold: &mut dyn FnMut(Node) -> Vec<(String, Span)>,
+) -> Vec<(String, Span)> {
+    let Some(kw) = node.child(0) else { return vec![] };
+    if kw.utf8_text(src).ok() != Some("map") {
+        return vec![];
+    }
+    let Some(cb) = node.child_by_field_name("callback") else { return vec![] };
+    if cb.kind() != "interpolated_string_literal" {
+        return vec![];
+    }
+    let Some(content) = cb.named().find(|c| c.kind() == "string_content") else {
+        return vec![];
+    };
+    let Ok(ctext) = content.utf8_text(src) else { return vec![] };
+    let subs: Vec<Node> = content.named().filter(|c| c.kind() == "scalar").collect();
+    let [topic] = subs.as_slice() else { return vec![] };
+    if topic.utf8_text(src).ok() != Some("$_") {
+        return vec![];
+    }
+    let pre_end = topic.start_byte() - content.start_byte();
+    let post_start = topic.end_byte() - content.start_byte();
+    let (pre, post) = (&ctext[..pre_end], &ctext[post_start..]);
+    let Some(list) = node.child_by_field_name("list") else { return vec![] };
+    string_list(list, src, fold)
+        .into_iter()
+        .map(|(t, sp)| (format!("{pre}{t}{post}"), sp))
+        .collect()
+}
+
+pub(crate) fn string_list(
+    node: Node,
+    src: &[u8],
+    fold: &mut dyn FnMut(Node) -> Vec<(String, Span)>,
+) -> Vec<(String, Span)> {
+    match node.kind() {
+        "quoted_word_list" => {
+            let mut results = Vec::new();
+            qw_word_spans(node, src, &mut results);
+            return results;
+        }
+        "string_literal" | "interpolated_string_literal" => {
+            if let Some(text) = string_content_text(node, src) {
+                return vec![(text, string_content_span(node))];
+            }
+            return vec![];
+        }
+        "bareword" | "autoquoted_bareword" | "array" => return fold(node),
+        "map_grep_expression" => return map_built_strings(node, src, fold),
+        _ => {}
+    }
+    let mut results = Vec::new();
+    for i in 0..node.child_count() {
+        let Some(child) = node.child(i) else { continue };
+        match child.kind() {
+            "quoted_word_list" => qw_word_spans(child, src, &mut results),
+            "string_literal" | "interpolated_string_literal" => {
+                if let Some(text) = string_content_text(child, src) {
+                    results.push((text, string_content_span(child)));
+                }
+            }
+            "parenthesized_expression" | "list_expression" | "anonymous_array_expression" => {
+                results.extend(string_list(child, src, fold));
+            }
+            "bareword" | "autoquoted_bareword" | "array" => results.extend(fold(child)),
+            "map_grep_expression" => results.extend(map_built_strings(child, src, fold)),
+            _ => {}
+        }
+    }
+    results
+}
+
 /// True when `node` sits in a conditionally-executed position within
 /// its enclosing sub: under an if/unless block, a postfix modifier, a
 /// ternary arm, a loop, or a short-circuit chain (`and`/`or`; the

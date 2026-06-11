@@ -216,12 +216,15 @@
       "line": 81,
       "col": 4,
       "expect": {
-        "all": [],
-        "none": [
-          "DateTime.pm:"
-        ]
+        "all": [
+          "DateTime.pm:84:26",
+          "DateTime.pm:1823:26",
+          "DateTime.pm:1981:33"
+        ],
+        "none": []
       },
-      "status": "provisional"
+      "status": "gold",
+      "note": "sub INFINITY () constant: bareword usages promote to FunctionCall refs, so linked-editing syncs def + all three usage sites (previously engaged nothing \u2014 the provisional pinned that gap)."
     },
     {
       "id": "le-ppi-logical-file",

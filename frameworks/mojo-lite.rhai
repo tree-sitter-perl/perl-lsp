@@ -49,9 +49,58 @@ fn triggers() {
 //     diagnostic skips them regardless of whether the real source module
 //     is resolved cross-file yet.
 
+// The lite topic-route DSL: file-level verbs whose `->to('#action')`
+// partials inherit the controller the nearest `under(...)->to('ctrl#…')`
+// set, scoped by `group { }`. Core keeps the generic frame stack; every
+// NAME in the mechanism is declared right here. The SetRouteBase write
+// itself is emitted by mojo-routes (the plugin that parses to-specs).
+fn topic_route_dsl() {
+    #{
+        "module": "Mojolicious::Lite",
+        "verbs": ["get", "post", "put", "delete", "del", "patch", "options",
+                  "any", "websocket", "under"],
+        "group_fn": "group",
+    }
+}
+
+
+// Mojo::Util decamelize: "FooBar" -> "foo_bar", "Foo::Bar" -> "foo-bar".
+// Plugin names arrive camelized; the core's controller-token search is
+// gated on lowercase-leading tokens (mirroring camelize's /^[A-Z]/
+// early-return), so emitting the decamelized form round-trips through
+// the exact same machinery Mojo's loader uses.
+fn decamelize(name) {
+    let out = "";
+    let parts = name.split("::");
+    let first_part = true;
+    for part in parts {
+        if !first_part { out += "-"; }
+        first_part = false;
+        let first = true;
+        for ch in part {
+            if ch >= 'A' && ch <= 'Z' {
+                if !first { out += "_"; }
+                out += ch.to_lower();
+            } else {
+                out += ch;
+            }
+            first = false;
+        }
+    }
+    out
+}
+
 fn on_use(ctx) {
     if ctx.module_name != "Mojolicious::Lite" { return []; }
     let out = [];
+    // The framework loads these unconditionally at startup — no `use`
+    // ever names them, so the import-driven resolver would never pull
+    // them in and their helper registrations would stay invisible.
+    // Declaring the implication here (rule #8: the plugin owns
+    // framework behavior) routes them through the normal import →
+    // resolve → bridge pipeline.
+    out += #{ "SyntheticUse": #{ "module": "Mojolicious::Plugin::DefaultHelpers", "args": [], "imports": [], "span": ctx.span }};
+    out += #{ "SyntheticUse": #{ "module": "Mojolicious::Plugin::TagHelpers", "args": [], "imports": [], "span": ctx.span }};
 
     // `app` — no real sub to link to; monkey-patched `sub { $app }`.
     // Typed Sub is the one acknowledged stub; downstream chain flow
@@ -140,6 +189,40 @@ fn on_use(ctx) {
 
 fn on_function_call(ctx) {
     let out = [];
+
+    // `plugin 'Thing'` — goto-def on the name lands on the plugin
+    // class's `register`. Same machinery as go-to-controller: the
+    // MethodCallRef's invocant token camelizes and tail-matches
+    // workspace modules, with ownership of the action (`register` —
+    // every Mojolicious plugin has one) as the disambiguator.
+    // Namespace-agnostic, so app-specific plugin namespaces
+    // (Clove::App::Plugin::*) resolve the same as Mojolicious::Plugin::*.
+    if ctx.function_name == "plugin" {
+        let args = ctx.args;
+        if args.len() >= 1 {
+            let name = args[0].string_value;
+            if name != () && name != "" {
+                let span = args[0].content_span;
+                if span == () { span = args[0].span; }
+                out += #{
+                    MethodCallRef: #{
+                        method_name: "register",
+                        invocant: decamelize(name),
+                        span: span,
+                        invocant_span: (),
+                    }
+                };
+                // "You loaded it" — make the resolver pull the plugin in
+                // so its helpers register. Default namespace guess only;
+                // app-custom namespaces (Clove::App::Plugin::*) are
+                // workspace modules and already indexed.
+                if !name.contains("::") {
+                    out += #{ "SyntheticUse": #{ "module": "Mojolicious::Plugin::" + name, "args": [], "imports": [], "span": span }};
+                }
+            }
+        }
+        return out;
+    }
 
     // Route-declaration verbs. `under` is a middleware-ish route
     // wrapper; `websocket` registers a WS handler. Both behave like
