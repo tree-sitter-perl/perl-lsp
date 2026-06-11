@@ -73,4 +73,27 @@ t.test("implementation: $self->fetch in the role body fans out the same way", fu
   end
 end)
 
+-- ── composer-mismatch diagnostic ─────────────────────────────────────
+
+t.test("diagnostic: broken composer warns role-requires-unfulfilled", function()
+  local name = "diagnostic: broken composer warns role-requires-unfulfilled"
+  local bbuf = lsp.open_and_attach("test_files/lib/Contract/Broken.pm")
+  -- Diagnostics publish after cross-file resolution; poll for the warning.
+  local found = nil
+  for _ = 1, 40 do
+    for _, d in ipairs(lsp.diagnostics(bbuf)) do
+      if d.message:find("does not provide it", 1, true) then found = d; break end
+    end
+    if found then break end
+    vim.wait(250)
+  end
+  if not t.ok(name, found, "no role-requires-unfulfilled diagnostic arrived") then return end
+  if not t.ok(name, found.severity == vim.diagnostic.severity.WARN,
+    "expected WARNING severity, got " .. tostring(found.severity)) then return end
+  if t.ok(name, found.message:find("role Contract::Role requires 'fetch'", 1, true),
+    "unexpected message: " .. found.message) then
+    t.pass(name)
+  end
+end)
+
 t.finish()

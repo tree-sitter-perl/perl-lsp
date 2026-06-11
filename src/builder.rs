@@ -267,6 +267,8 @@ fn build_with_plugins_inner(
         attr_projections: Vec::new(),
         escape_recorded: std::collections::HashSet::new(),
         role_requires: std::collections::HashMap::new(),
+        contract_symbols: std::collections::HashSet::new(),
+        dynamic_parent_packages: std::collections::HashSet::new(),
         lite_brand: vec![None],
         topic_dsls,
         reassigned_scalars: std::collections::HashSet::new(),
@@ -525,6 +527,8 @@ fn build_with_plugins_inner(
         reassigned_scalars: b.reassigned_scalars,
         key_writes: b.key_writes,
         role_requires: b.role_requires,
+        contract_symbols: b.contract_symbols,
+        dynamic_parent_packages: b.dynamic_parent_packages,
     });
     // Finalize: run the legacy text-based MCB resolver as a fallback.
     // For every assignment the unified typer (run before
@@ -1494,6 +1498,15 @@ struct Builder<'a> {
     /// Per-role `requires` lists. Flushed into
     /// `FileAnalysis.role_requires`.
     role_requires: std::collections::HashMap<String, Vec<String>>,
+
+    /// SymbolIds of `requires`-synthesized contract markers. Flushed
+    /// into `FileAnalysis.contract_symbols`.
+    contract_symbols: std::collections::HashSet<crate::file_analysis::SymbolId>,
+
+    /// Packages with at least one parent edge we could not fold to a
+    /// literal name (runtime-generated roles). Flushed into
+    /// `FileAnalysis.dynamic_parent_packages`.
+    dynamic_parent_packages: std::collections::HashSet<String>,
 
     /// Topic-route implicit base — the controller default the current
     /// base-setter established, scoped by the DSL's group function
@@ -8621,7 +8634,7 @@ impl<'a> Builder<'a> {
         let Some(args) = node.child_by_field_name("arguments") else { return };
         let names = self.extract_string_list(args);
         for (name, span) in &names {
-            self.add_symbol(
+            let sid = self.add_symbol(
                 name.clone(),
                 SymKind::Method,
                 *span,
@@ -8639,6 +8652,7 @@ impl<'a> Builder<'a> {
                     lexical: false,
                 },
             );
+            self.contract_symbols.insert(sid);
         }
         self.role_requires
             .entry(pkg.to_string())
@@ -8651,7 +8665,20 @@ impl<'a> Builder<'a> {
             Some(a) => a,
             None => return,
         };
-        let parents = self.extract_string_names(args);
+        let (named, residue) = crate::cst::string_list_with_residue(args, self.source, &mut |n| {
+            let Ok(text) = n.utf8_text(self.source) else { return vec![] };
+            let Some(values) = self.resolve_constant_strings(text, 0) else { return vec![] };
+            let span = node_to_span(n);
+            values.into_iter().map(|v| (v, span)).collect()
+        });
+        // A parent we couldn't fold (`with ReportProxy(type => ...)` —
+        // a runtime-generated role) makes this package's ancestry
+        // incomplete: record the fact so `class_has_unresolved_ancestor`
+        // keeps inheritance-dependent consumers honest-silent.
+        if residue {
+            self.dynamic_parent_packages.insert(pkg.to_string());
+        }
+        let parents: Vec<String> = named.into_iter().map(|(s, _)| s).collect();
         if !parents.is_empty() {
             let parent_set: std::collections::HashSet<&str> = parents.iter().map(|s| s.as_str()).collect();
             self.emit_refs_for_strings(node, &parent_set, RefKind::PackageRef);
