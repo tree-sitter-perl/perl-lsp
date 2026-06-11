@@ -194,6 +194,17 @@ pub struct ModuleIndex {
     cache: Arc<DashMap<String, Option<Arc<CachedModule>>>>,
     /// See `ModuleEdgeIndexes` — names + bridges + children reverse maps.
     edges: Arc<ModuleEdgeIndexes>,
+    /// Modules imported (literally or via SyntheticUse) by ANY
+    /// workspace file, entrypoint scripts included. Powers the
+    /// entrypoint-scan helper lint's "does anything load M" question.
+    /// Fed by `register_workspace_module` only — the workspace scan
+    /// re-runs every startup, so no warm-rebuild feed is needed.
+    loaded_modules: Arc<DashMap<String, ()>>,
+    /// Primary package names of workspace-registered files. The lint
+    /// fires only for WORKSPACE plugin modules (in-project plugins you
+    /// forgot to load); installed CPAN plugins keep the generous
+    /// "downloaded = intended" resolution.
+    workspace_modules: Arc<DashMap<String, ()>>,
     /// Modules loaded from cache with an old extract_version.
     /// Eligible for priority re-resolution when requested.
     stale_modules: Arc<DashMap<String, ()>>,
@@ -251,6 +262,8 @@ impl ModuleIndex {
         ModuleIndex {
             cache,
             edges,
+            loaded_modules: Arc::new(DashMap::new()),
+            workspace_modules: Arc::new(DashMap::new()),
             stale_modules,
             available_modules,
             builtins,
@@ -530,6 +543,8 @@ impl ModuleIndex {
         ModuleIndex {
             cache,
             edges,
+            loaded_modules: Arc::new(DashMap::new()),
+            workspace_modules: Arc::new(DashMap::new()),
             stale_modules,
             available_modules,
             builtins,
@@ -576,6 +591,8 @@ impl ModuleIndex {
         ModuleIndex {
             cache,
             edges,
+            loaded_modules: Arc::new(DashMap::new()),
+            workspace_modules: Arc::new(DashMap::new()),
             stale_modules,
             available_modules,
             builtins,
@@ -616,7 +633,17 @@ impl ModuleIndex {
     ///
     /// No-op for files without a `package` declaration (top-level scripts).
     pub fn register_workspace_module(&self, path: std::path::PathBuf, analysis: Arc<FileAnalysis>) {
+        // Loaded-module tracking feeds the entrypoint-scan lint and must
+        // run BEFORE the packageless early-return: Mojolicious::Lite
+        // scripts (no `package` decl) are exactly the entrypoints whose
+        // `plugin 'X'` loads (via SyntheticUse imports) the lint needs
+        // to see. Workspace scan re-runs every startup, so this set
+        // needs no warm-rebuild feed.
+        for imp in &analysis.imports {
+            self.loaded_modules.insert(imp.module_name.clone(), ());
+        }
         let Some(module_name) = first_package_name(&analysis) else { return };
+        self.workspace_modules.insert(module_name.clone(), ());
         // Canonicalize the path — `Url::from_file_path` in symbols.rs
         // requires absolute paths, so relative workspace paths (e.g.
         // "./test_files/lib/Users.pm" from CLI `.` root) would silently
@@ -655,6 +682,18 @@ impl ModuleIndex {
     /// Callers then pull the namespace's entities from the module's
     /// `FileAnalysis` and iterate. Explicit bridges rather than
     /// symbol-package inference.
+    /// Is `module` imported by any workspace file (entrypoint scripts
+    /// included)? `false` is honest only after the workspace scan has
+    /// run — callers on the diagnostics path are post-startup.
+    pub fn is_module_loaded(&self, module: &str) -> bool {
+        self.loaded_modules.contains_key(module)
+    }
+
+    /// Was `module` registered from the workspace tree (vs @INC)?
+    pub fn is_workspace_module(&self, module: &str) -> bool {
+        self.workspace_modules.contains_key(module)
+    }
+
     pub fn modules_bridging_to(&self, class_name: &str) -> Vec<String> {
         match self.edges.bridges.get(class_name) {
             Some(mods) => {
