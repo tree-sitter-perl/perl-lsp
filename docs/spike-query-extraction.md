@@ -108,9 +108,55 @@ query medium absorbs it; TSG proved what happens when one tries.
   bet — and unlike TSG, the typed escape hatch (host predicates, real
   plugins) is load-bearing from day one rather than bolted on.
 
-## Recommendation
+## Spike 2: the witness bag fed from captures alone
 
-Keep the branch as evidence; don't merge. If/when a second language is
-wanted, start from the skeleton tier (this driver, nearly as-is) and
-spend the design round on witness-emission keying — not on making
-queries do more than ring 1.
+Round 2 pushed past extraction into the engine seam. New vocabulary:
+`@expr.lit.<t>` (literal → `InferredType` witness on `Expr(span)`),
+`@expr.read.var` (variable read → `Edge(Variable)` witness),
+`@flow.target`/`@flow.source` (assignment → `Variable →
+Edge(Expr(rhs))`), `@type.annot` (annotation → direct type witness via
+a pack predicate). The driver assembles REAL `Scope` rows, REAL
+`Symbol` rows, and a REAL `WitnessBag` into a REAL `FileAnalysis` via
+`FileAnalysisParts` — no builder anywhere.
+
+**Result 1 — the production engine answers on a walker-free
+FileAnalysis.** `inferred_type_via_bag` resolves literals, and the
+three-hop edge chase `my $y = $x` → `Variable($x)` → `Expr(literal)`
+runs through the production reducer registry untouched
+(`walker_free_file_analysis_answers_type_queries`).
+
+**Result 2 — a second language, for real.** tree-sitter-python +
+`queries/python/skeleton.scm` (~45 lines) + a pack with ONE host
+predicate (`annot_type`). Same driver, same engine: Python outline
+(class/def/vars), imports, literal typing, **annotation-driven
+typing** (`n: int = compute()` — ring 3 partly in the tree, exactly as
+predicted), the cross-variable edge chase, and correctly-scoped
+locals inside a method body (`python_pack_same_driver_same_engine`).
+
+**Result 3 — the engine-touch list, the number that answers "how far":
+ZERO.** No edit to `file_analysis.rs`, `witnesses.rs`, `resolve.rs`,
+or `module_index.rs`. Everything lived in the driver, two .scm files,
+and pack predicates. The bag discipline (edges-not-values, monotone,
+temporal spans) transferred to a second language verbatim — the
+witness bag is the language-agnostic core, today, by construction.
+
+What spike 2 did NOT prove, in fairness: cross-file resolution for a
+second language (module-name → file strategy is per-language and
+unbuilt), method dispatch (`MethodOnClass` needs class-shape emission
+the Python pack doesn't do yet), and any of ring 2 at production
+fidelity. The gradient from here is real work, but it is *additive*
+pack work against a fixed engine — not engine surgery.
+
+## Recommendation (revised after spike 2)
+
+Keep the branch as evidence; don't merge. The Perl path stays
+walker-built — its ring 2/3 fidelity is years ahead of what packs
+reach. But the multi-language thesis is now demonstrated, not
+speculated: the engine answers type queries for a language it has
+never heard of, through a 45-line query pack and one predicate. If a
+second language ever matters, the path is: skeleton tier (outline /
+workspace symbols — driver as-is) → lexical typing (this spike's
+vocabulary) → per-language module resolution → dispatch emission.
+Each step is pack work. The design round worth pre-investing is none;
+the next round worth having is module resolution strategy, and only
+when a concrete second language shows up.
