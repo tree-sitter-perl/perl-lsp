@@ -269,6 +269,8 @@ fn build_with_plugins_inner(
         role_requires: std::collections::HashMap::new(),
         contract_symbols: std::collections::HashSet::new(),
         dynamic_parent_packages: std::collections::HashSet::new(),
+        role_maker_modules: std::collections::HashSet::new(),
+        role_packages: std::collections::HashSet::new(),
         lite_brand: vec![None],
         topic_dsls,
         reassigned_scalars: std::collections::HashSet::new(),
@@ -295,6 +297,8 @@ fn build_with_plugins_inner(
         .app_surface_consumers()
         .map(|s| s.to_string())
         .collect();
+    b.role_maker_modules
+        .extend(b.plugins.role_makers().map(|s| s.to_string()));
     for pt in b.plugins.param_types() {
         match &pt.method {
             Some(name) => {
@@ -529,6 +533,7 @@ fn build_with_plugins_inner(
         role_requires: b.role_requires,
         contract_symbols: b.contract_symbols,
         dynamic_parent_packages: b.dynamic_parent_packages,
+        role_packages: b.role_packages,
     });
     // Finalize: run the legacy text-based MCB resolver as a fallback.
     // For every assignment the unified typer (run before
@@ -1507,6 +1512,17 @@ struct Builder<'a> {
     /// literal name (runtime-generated roles). Flushed into
     /// `FileAnalysis.dynamic_parent_packages`.
     dynamic_parent_packages: std::collections::HashSet<String>,
+
+    /// Modules whose `use` makes the consuming package a role — the
+    /// union of every plugin's `role_makers()` manifest (the base
+    /// engines live in `frameworks/moo.rhai`). Core holds no list;
+    /// the set is open by construction.
+    role_maker_modules: std::collections::HashSet<String>,
+
+    /// Per-file verdict: packages that ARE roles. Flushed into
+    /// `FileAnalysis.role_packages`; `is_role_package` reads the baked
+    /// set, never re-derives from use lists.
+    role_packages: std::collections::HashSet<String>,
 
     /// Topic-route implicit base — the controller default the current
     /// base-setter established, scoped by the DSL's group function
@@ -4966,9 +4982,15 @@ impl<'a> Builder<'a> {
         // Populated before any plugin-dispatch site reads it.
         if let Some(pkg) = self.current_package.as_ref().cloned() {
             self.package_uses
-                .entry(pkg)
+                .entry(pkg.clone())
                 .or_default()
                 .push(module_name.clone());
+            // Role verdict: base engines ∪ plugin-declared makers.
+            // Shared with SyntheticUse, so kit chains (`use Clove::Role`
+            // → SyntheticUse "Moo::Role") mark through either hop.
+            if self.role_maker_modules.contains(&module_name) {
+                self.role_packages.insert(pkg);
+            }
         }
 
         // Detect framework mode from use statements

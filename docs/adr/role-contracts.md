@@ -59,15 +59,23 @@ sibling role's def, a cross-package typeglob install, or a
 plugin-bridged entity. Modifiers (`around`/`before`/`after`) never
 synthesize symbols, so they correctly don't provide.
 
-Role-ness itself is `FileAnalysis::is_role_package` — derived from
-`package_uses` (Moo::Role / Moose::Role / Mouse::Role / Role::Tiny;
-`Role::Tiny::With` deliberately absent, it grants `with` to plain
-classes). One predicate; consumers never re-derive from use lists.
-The four names are only the BASE engines: house role kits join by
-emitting `SyntheticUse "Moo::Role"` from their plugin — `process_use`
-feeds `package_uses` identically for real and synthetic uses, so the
-predicate sees kit-declared roles with no core change (crm's
-`clove-role.rhai` is the live example, exercised by calibration).
+Role-ness itself is `FileAnalysis::is_role_package`, reading the
+baked `role_packages` verdict. One predicate; consumers never
+re-derive from use lists. The maker set behind the verdict is OPEN —
+core holds no list at all:
+
+- every plugin's `role_makers()` manifest contributes engine modules;
+  the four base engines (Moo::Role / Moose::Role / Mouse::Role /
+  Role::Tiny — `Role::Tiny::With` deliberately absent, it grants
+  `with` to plain classes) live in `frameworks/moo.rhai`'s manifest,
+  not in core;
+- Moo-shaped house kits can instead emit `SyntheticUse "Moo::Role"` —
+  `process_use` feeds the verdict identically for real and synthetic
+  uses, so kit chains mark through either hop (crm's
+  `clove-role.rhai` is the live example, exercised by calibration).
+
+A role engine that is neither declared nor Moo-shaped is one
+`role_makers()` line in a plugin away.
 
 ## Honest silence rides the one incompleteness seam
 

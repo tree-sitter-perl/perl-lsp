@@ -2313,6 +2313,11 @@ pub struct FileAnalysis {
     #[serde(default)]
     pub dynamic_parent_packages: HashSet<String>,
 
+    /// Packages that ARE roles — the baked verdict behind
+    /// `is_role_package`. Fed by the builder's open role-maker set.
+    #[serde(default)]
+    pub role_packages: HashSet<String>,
+
     // Indices (built in post-pass — skipped by serde; call rebuild_all_indices() after deserialize)
     #[serde(skip, default)]
     scope_starts: Vec<(Point, ScopeId)>, // sorted by start point
@@ -2377,6 +2382,7 @@ pub struct FileAnalysisParts {
     pub role_requires: HashMap<String, Vec<String>>,
     pub contract_symbols: HashSet<SymbolId>,
     pub dynamic_parent_packages: HashSet<String>,
+    pub role_packages: HashSet<String>,
 }
 
 /// One projection of a field/attr decl — the entity that encodes group
@@ -2504,6 +2510,7 @@ impl FileAnalysis {
             role_requires,
             contract_symbols,
             dynamic_parent_packages,
+            role_packages,
         } = parts;
         witnesses.rebuild_index();
         let mut fa = FileAnalysis {
@@ -2539,6 +2546,7 @@ impl FileAnalysis {
             role_requires,
             contract_symbols,
             dynamic_parent_packages,
+            role_packages,
             scope_starts: Vec::new(),
             symbols_by_name: HashMap::new(),
             symbols_by_scope: HashMap::new(),
@@ -6584,15 +6592,12 @@ impl FileAnalysis {
     }
 
     /// Is `pkg` a role? Single source of the property — consumers ask
-    /// here, never re-derive from use lists. A package is a role when
-    /// it `use`s a role-maker (`Role::Tiny::With` is absent
-    /// deliberately: it grants `with` to plain classes).
+    /// here, never re-derive from use lists. The verdict is baked at
+    /// build time from an OPEN maker set (builder `ROLE_MAKERS` base
+    /// engines ∪ plugin `role_makers()` manifests), so house role
+    /// engines join via plugin declaration with no core change.
     pub fn is_role_package(&self, pkg: &str) -> bool {
-        const ROLE_MAKERS: [&str; 4] =
-            ["Moo::Role", "Moose::Role", "Mouse::Role", "Role::Tiny"];
-        self.package_uses
-            .get(pkg)
-            .is_some_and(|uses| uses.iter().any(|u| ROLE_MAKERS.contains(&u.as_str())))
+        self.role_packages.contains(pkg)
     }
 
     /// The composer-mismatch check (docs/adr/role-contracts.md): for
