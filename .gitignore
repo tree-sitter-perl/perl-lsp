@@ -2,9 +2,11 @@
 /.nvim-test
 editors/vscode/node_modules/
 editors/vscode/out/
+.node-version
 
 .claude/
 qa-workspace/
 gold-corpus/local/
 gold-corpus/.carton/
 gold-corpus/local
+*.vsix

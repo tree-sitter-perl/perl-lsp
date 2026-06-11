@@ -1,0 +1,42 @@
+# One-shot bootstrap for marketplace publishing via Entra workload identity.
+#
+# The VS Marketplace "Add member" box wants the identity's Team Foundation
+# Identity GUID, which can only be learned by asking the Profile API *as* that
+# identity — and a federated managed identity only exists inside an
+# authenticated run. So: run this once, copy the GUID it prints, paste it into
+# marketplace.visualstudio.com/manage → publisher → Members (role: Contributor).
+# Keep the workflow around for identity rotations.
+name: Publish identity bootstrap
+
+on:
+  workflow_dispatch:
+
+jobs:
+  identity-guid:
+    runs-on: ubuntu-latest
+    environment: release # must match the federated credential's subject
+    permissions:
+      id-token: write
+    steps:
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+          allow-no-subscriptions: true
+
+      - name: Team Foundation Identity GUID
+        run: |
+          # 499b84ac-… is the fixed resource ID of Azure DevOps itself.
+          GUID=$(az rest -u https://app.vssps.visualstudio.com/_apis/profile/profiles/me \
+            --resource 499b84ac-1321-427f-aa17-267ca6975798 --query id -o tsv)
+          echo "Team Foundation Identity GUID: $GUID"
+          {
+            echo "## Publish identity"
+            echo
+            echo "Add this GUID as a **Contributor** member of the marketplace publisher:"
+            echo
+            echo '```'
+            echo "$GUID"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
