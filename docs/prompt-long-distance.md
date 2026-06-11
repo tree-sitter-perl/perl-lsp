@@ -65,7 +65,7 @@ severity (Perl dies at compose time). Needs substrate calibration
 HashWithKeys{minion, redis, schema}` inside register. Generalizes to
 any sub with enumerable callers: gather call-site arg shapes, fold
 with the existing agreement rules (all agree → the type; disagree →
-widen; any unknown caller → open/decline). The fold半 exists
+widen; any unknown caller → open/decline). Half the machinery exists
 (BranchArmFold's shape); the gather is the new arg-shape collector.
 Highest ceiling, highest cost — and the one that must NOT lie:
 a single un-enumerable caller (dynamic dispatch, exported surface)
