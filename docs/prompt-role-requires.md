@@ -1,12 +1,31 @@
-# Role `requires` — the composer-mismatch diagnostic (design)
+# Role `requires` — the composer-mismatch diagnostic
 
-**Status: recorded, not built.** The in-role half LANDED: `requires
-NAMES` synthesizes Method symbols (span = each name's atom) so
-`$self->name` resolves inside the role — no unresolved-method hint,
-goto-def lands on the contract, completion offers it — and the names
-land in `FileAnalysis.role_requires` (per-package `requires` lists,
-serde-default). This doc is the deferred half: telling a COMPOSER it
-doesn't fulfill a contract.
+**Status: LANDED (both halves).** The in-role half: `requires NAMES`
+synthesizes Method symbols (span = each name's atom) so `$self->name`
+resolves inside the role — no unresolved-method hint, goto-def lands
+on the contract, completion offers it — and the names land in
+`FileAnalysis.role_requires`. The composer half below shipped as
+`role-requires-unfulfilled` (`FileAnalysis::unfulfilled_role_requires`,
+emitted in `collect_diagnostics`). Load-bearing decisions from the
+build, found by calibration:
+
+- **Markers are identified by SymbolId** (`FileAnalysis.
+  contract_symbols`), never by name. A role that both requires AND
+  defines a name (`Clove::Sheets`'s default-implementation pattern)
+  provides it — the name-keyed check ate the real def beside the
+  marker, and the typeglob-install provision arm conversely saw the
+  marker itself through the names index ("every requires satisfies
+  itself"). Both directions only stay correct symbol-keyed.
+- **Unfoldable parent edges are recorded** (`dynamic_parent_packages`
+  via `cst::string_list_with_residue`): `with ReportProxy(type =>
+  ...)` generates a role at runtime, so the recorded parent list is
+  not the whole ancestry. The fact feeds
+  `class_has_unresolved_ancestor` — the single incompleteness seam —
+  which keeps this diagnostic AND the unresolved-method hint
+  honest-silent on such classes.
+- **`is_role_package` derives from `package_uses`** (Moo::Role /
+  Moose::Role / Mouse::Role / Role::Tiny; `Role::Tiny::With` is
+  deliberately absent — it grants `with` to plain classes).
 
 ## The diagnostic
 
@@ -43,15 +62,14 @@ parity as the rest: batch/--check get it via the enriched-copy pass).
 The check is ancestry-shaped, so it composes with the `ReceiverGated`
 applicability machinery if gating is ever needed; start without it.
 
-## Calibration
+## Calibration (done)
 
-Substrate sweep mandatory before shipping. Known noise sources to
-calibrate against: dynamically-installed methods (`*name = sub` in
-the composer — the codegen recognizers should already cover most),
-`can()`-probed optional contracts (Clove::Sheets probes
-`$self->can('process_row')` — NOT a requires, correctly out of
-scope), and AUTOLOAD composers (suppress when the composer defines
-AUTOLOAD, same rule the unresolved-method hint uses).
+Substrate: 0 hits across 2,293 modules. crm: 0 false positives after
+the two fixes above (the raw first sweep produced 84, all from the
+default-implementation and runtime-generated-parent patterns), plus
+41 pre-existing false unresolved-method hints retired by the
+dynamic-parents seam. `can()`-probed optional contracts
+(`$self->can('process_row')`) are NOT requires and stay out of scope.
 
 ## crm finding that motivated this
 
