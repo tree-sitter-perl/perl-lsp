@@ -63,6 +63,11 @@ Role-ness itself is `FileAnalysis::is_role_package` — derived from
 `package_uses` (Moo::Role / Moose::Role / Mouse::Role / Role::Tiny;
 `Role::Tiny::With` deliberately absent, it grants `with` to plain
 classes). One predicate; consumers never re-derive from use lists.
+The four names are only the BASE engines: house role kits join by
+emitting `SyntheticUse "Moo::Role"` from their plugin — `process_use`
+feeds `package_uses` identically for real and synthetic uses, so the
+predicate sees kit-declared roles with no core change (crm's
+`clove-role.rhai` is the live example, exercised by calibration).
 
 ## Honest silence rides the one incompleteness seam
 
