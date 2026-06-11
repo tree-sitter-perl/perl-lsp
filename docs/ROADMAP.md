@@ -69,6 +69,15 @@ runtime export generators) live in `docs/open-problems.md`.
 - **Residual Parts 1-5** — invocant mutations, hash-key unions, method
   loops, functional operators, value-indexed returns. Independent
   reducer+emitter pairs. Order by value.
+- **Flow-sensitive narrowing** — narrow a variable's type inside
+  guarded blocks: `if ($x->isa('Foo'))`, `ref($x) eq 'HASH'`,
+  `blessed($x)`, Type::Tiny predicates (`is_HashRef` / `assert_Str`).
+  Not yet designed; wants its own prompt doc before work starts. The
+  temporal machinery is the substrate — witnesses are point-stamped
+  and `FrameworkAwareTypeFold` already skips past-the-query-point
+  witnesses — so a guard becomes a scoped Variable witness valid
+  within the guarded block. The open design question is the un-narrow
+  at block exit (witnesses are monotone; narrowing must not leak).
 - **Type-system encoding for axis dispatch** — defer until the full axis
   set is known (Element, Wrapped, Effect on top of Dispatch + HashKey).
 - **Type-is-the-gate** — defer the general refactor until a second
