@@ -214,6 +214,42 @@ exactly one .scm pattern (imported names are refs). Two fixes were
 needed, both in the driver/pack, neither in the engine: name-token
 selection spans (were zero-width) and the import-name capture.
 
+## Spike 4: the R pack — a best-in-class probe
+
+Target selection: R is medium-popular (data science), its incumbent
+(`REditorSupport/languageserver`) is R-implemented, slow, and thin on
+cross-file — and R's bones fit this engine eerily well. `tree-sitter-r`
+1.2 (r-lib, maintained). The pack: ~60 lines of .scm + ~25 lines of
+predicates. Two new GENERIC vocabulary families paid for by R and
+available to every pack:
+
+- `@expr.shape` / `@shape.ctor` / `@shape.key` — keyed-shape literals.
+  The driver groups keys per shape span; the pack's `shape_ctor`
+  predicate says which callees construct `$`-accessible values
+  (list / data.frame / tibble).
+- `@import.fn` / `@import.arg` + `import_call` predicate — languages
+  whose imports are CALLS (`library(dplyr)`, `source("util.R")`), not
+  statements.
+
+What works, all through the production engine, zero engine edits:
+
+- **Outline + imports + S3 names** (`print.myclass` falls out of the
+  def pattern verbatim; the S3 convention layer — that it IS `print`
+  on `myclass` — is a later pack predicate, mirroring conventions.rs).
+- **`data.frame` columns as static type content** — `df <-
+  data.frame(age = ..., name = ...)` types as
+  `HashWithKeys{age, name}` through the bag. Static column knowledge
+  for `df$` does not exist in R tooling today; here it's the
+  structural-shapes machinery doing what it already did for Perl.
+- **Cross-file refs + workspace rename across `source()`** — R hands
+  the resolver a literal path, so `module_paths` is the identity
+  function. The production refs_to/rename path needed nothing new.
+
+One driver bug found (HashMap iteration order leaking into import
+order — BTreeMap fix); one R-shaped trap recorded for the future
+trap library: `f <- function` matches both the sub and the generic
+var pattern, handled by a generic specific-kind-wins def dedup.
+
 ## Recommendation (revised after spike 2)
 
 Keep the branch as evidence; don't merge. The Perl path stays
