@@ -84,3 +84,23 @@
 ; verified, never assumed from the printed CST.
 (for_statement
   variable: (scalar) @def.var.name) @def.var
+
+; ---- spike 2: typed-value events feeding the witness bag ----
+; The driver maps `expr.lit.<t>` suffixes to InferredType generically;
+; assignment events become Variable → Edge(Expr(rhs)) witnesses the
+; PRODUCTION reducer registry chases. Same bag discipline as the
+; builder: literals are source values, everything else is an edge.
+(string_literal) @expr.lit.string
+(interpolated_string_literal) @expr.lit.string
+(number) @expr.lit.number
+(anonymous_array_expression) @expr.lit.arrayref
+(anonymous_hash_expression) @expr.lit.hashref
+(scalar) @expr.read.var
+
+(assignment_expression
+  left: (variable_declaration [(scalar) (array) (hash)] @flow.target)
+  right: (_) @flow.source) @flow.assign
+
+(assignment_expression
+  left: (scalar) @flow.target
+  right: (_) @flow.source) @flow.assign

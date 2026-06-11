@@ -266,3 +266,73 @@ fn field_queryability_must_be_probed_per_node() {
         }
     }
 }
+
+// ---- spike 2: the witness bag fed from captures alone ----
+
+#[test]
+fn walker_free_file_analysis_answers_type_queries() {
+    // No builder anywhere in this test: captures → witnesses → a real
+    // FileAnalysis → the production reducer registry answers.
+    let src = "my $x = \"hello\";\nmy $n = 42;\nmy $h = {};\nmy $y = $x;\n";
+    let mut parser = crate::builder::create_parser();
+    let tree = parser.parse(src, None).unwrap();
+    let skel = extract(&tree, src.as_bytes(), &perl_pack()).unwrap();
+    let fa = skel.into_file_analysis();
+
+    let end = tree_sitter::Point { row: 4, column: 0 };
+    use crate::file_analysis::InferredType;
+    assert_eq!(fa.inferred_type_via_bag("$x", end), Some(InferredType::String));
+    assert_eq!(fa.inferred_type_via_bag("$n", end), Some(InferredType::Numeric));
+    assert_eq!(fa.inferred_type_via_bag("$h", end), Some(InferredType::HashRef));
+    // THE edge chase: $y → Variable($x) → Expr(literal) — three hops
+    // through the production registry, zero walker code.
+    assert_eq!(fa.inferred_type_via_bag("$y", end), Some(InferredType::String));
+}
+
+#[test]
+fn python_pack_same_driver_same_engine() {
+    // The cross-language existence proof: a different grammar, a
+    // ~40-line query pack, the SAME driver and the SAME engine.
+    let src = "\
+import os
+
+class Greeter:
+    def greet(self, name):
+        msg = \"hi\"
+        return msg
+
+x = \"hello\"
+n: int = compute()
+y = x
+";
+    let mut parser = tree_sitter::Parser::new();
+    parser
+        .set_language(&tree_sitter_python::LANGUAGE.into())
+        .unwrap();
+    let tree = parser.parse(src, None).unwrap();
+    let skel = extract(&tree, src.as_bytes(), &python_pack()).unwrap();
+
+    // outline: class + method + module-level vars
+    let names: Vec<(String, String)> = skel
+        .symbols
+        .iter()
+        .map(|s| (s.kind.clone(), s.name.clone()))
+        .collect();
+    assert!(names.contains(&("class".into(), "Greeter".into())), "{names:?}");
+    assert!(names.contains(&("sub".into(), "greet".into())), "{names:?}");
+    assert!(names.contains(&("var".into(), "x".into())), "{names:?}");
+    assert_eq!(skel.imports, vec!["os"]);
+
+    let fa = skel.into_file_analysis();
+    let end = tree_sitter::Point { row: 10, column: 0 };
+    use crate::file_analysis::InferredType;
+    // literal
+    assert_eq!(fa.inferred_type_via_bag("x", end), Some(InferredType::String));
+    // annotation — ring 3 in the tree, emitted by the pack predicate
+    assert_eq!(fa.inferred_type_via_bag("n", end), Some(InferredType::Numeric));
+    // edge chase across variables
+    assert_eq!(fa.inferred_type_via_bag("y", end), Some(InferredType::String));
+    // scoped local inside the method body
+    let inside = tree_sitter::Point { row: 5, column: 8 };
+    assert_eq!(fa.inferred_type_via_bag("msg", inside), Some(InferredType::String));
+}
