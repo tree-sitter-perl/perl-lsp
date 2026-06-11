@@ -285,7 +285,7 @@ multi-language path (`prompt-multi-language.md`).
 ## Recommendation (revised after spike 2)
 
 Keep the branch as evidence; don't merge. The Perl path stays
-walker-built — its ring 2/3 fidelity is years ahead of what packs
+walker-built — its ring 2/3 fidelity is far ahead of what packs
 reach. But the multi-language thesis is now demonstrated, not
 speculated: the engine answers type queries for a language it has
 never heard of, through a 45-line query pack and one predicate. If a
