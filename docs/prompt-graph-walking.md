@@ -400,3 +400,82 @@ framework) vs `Custom { kind, name }` (open, loses exhaustiveness) vs
 hybrid. The plugin-system's trajectory (manifests over enums —
 `role_makers`, `app_surface_consumers`) argues hybrid with the open
 arm as the default for plugin-declared scopes.
+
+## The ancestry-axis strangle — design space (the #3 decision)
+
+The strangle table above listed "bridges" and "ancestry" as separate
+steps. Porting the real consumers proved that wrong: **they're one
+strangle.** `resolve_method_in_ancestors`, `for_each_dispatch_handler_
+on_class`, `class_isa`, `class_has_unresolved_ancestor`,
+`resolve_super_method`, `method_rename_chain`, `collect_ancestor_
+methods`, `complete_methods_for_class` — all ~8 — funnel through ONE
+function, `for_each_ancestor_class`, and each pulls local symbols +
+bridged entities (the BRIDGES axis) at every class the INHERITS walk
+visits. `for_each_entity_bridged_to` is the bridge *primitive* (the
+graph's BRIDGES edge derivation already calls it), not a consumer to
+strangle. So:
+
+> The ancestry funnel IS the strangle. Port `for_each_ancestor_class`
+> to delegate to `walk(class, INHERITS)` and all 8 consumers come
+> along; their bridge/local pulls stay in their visit closures,
+> untouched.
+
+### The enabler decision (resolved)
+
+Both this and every model-internal walk were gated on a layering
+wall: the consumers live in `file_analysis.rs` (Model); `walk` lived
+in `graph.rs` (Index); Model can't import up. Two ways out:
+
+- **(A) Move the graph DOWN to Model.** `graph.rs` imports only
+  `file_analysis` (the `CrossFileLookup` trait + `parents_of`) — zero
+  Index deps. It was *misfiled* at Index in phase 1. Reassigning it to
+  Model (one line in `layer_map`) lets every model walker call `walk`
+  directly; graph and `file_analysis` mutually reference at the same
+  layer, which the DAG test permits (only `target_layer > my_layer` is
+  a violation). Tiny, no function relocation.
+- **(B) Move the ancestry QUERY functions UP** out of `file_analysis`
+  into a query/Index layer. Aligns with the arch-review note that
+  these `&dyn CrossFileLookup`-taking functions were misfiled in the
+  model — but it's a wide mechanical relocation of ~8 functions + all
+  callers, large risk surface.
+
+**Chosen: (A).** Landed. `class_isa` is the first consumer ported as
+proof (`class_isa_matches_legacy_ancestor_walk` pins parity). (B) stays
+available as an independent later cleanup if the model gets fat.
+
+### What the funnel port still needs
+
+1. **`skip_self` on `walk`.** `for_each_ancestor_class_opt(skip_self:
+   true)` is `SUPER::` semantics (search parents, not self, but seed
+   the seen-set with self for diamonds). `walk` already excludes the
+   origin from `visit`, but it also *seeds edges from* the origin —
+   which is the skip_self=true behavior. The skip_self=false case
+   (visit self too) is what `class_isa` handled with an explicit
+   reflexive check. So: a `walk` variant that ALSO visits the origin
+   (or callers add the reflexive check, as `class_isa` did). Decide
+   one convention before porting the funnel.
+2. **Visit signature.** `for_each_ancestor_class` yields `&str` class
+   names. `walk` yields `&Node`. The funnel port maps `Node::Class(c)
+   → c`; Module nodes (from a combined BRIDGES mask) are filtered or
+   handled per consumer. Keep the funnel INHERITS-only; the bridge
+   pull stays in each consumer's closure (no behavior change).
+3. **Parity proof = the existing net.** The 8 consumers drive
+   inheritance/dispatch/SUPER/role e2e + gold rows. Port the funnel,
+   run them; a parity unit test per consumer is cheap insurance for
+   the hot ones (`resolve_method_in_ancestors`).
+
+### Remaining strangles after the funnel
+
+- **file-role tier** (`refs_to`/`resolve_symbol` open/workspace/dep
+  walk) — needs a `file_role` edge kind + File nodes. New taxonomy,
+  not a model gate.
+- **lexical scope chains** (`cursor_context`) — needs Scope nodes +
+  `PARENT`/`BINDS_*` edges. New taxonomy.
+- **branded bridges** (`$minion`/`$app` instance identity) — branded
+  edges, the design-heavy finale.
+
+Each grows the node/edge set additively. The migration ends when
+`package_parents`, `RoleMask`-as-a-concept, and `PluginNamespace.
+bridges` have no direct consumers — every visibility question is a
+`walk` with a mask. Openness diagnostic + multi-app Mojo fall out
+then.

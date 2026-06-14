@@ -9,8 +9,14 @@
 //! (strangler fig).
 //!
 //! The builder does NOT build this. It consumes `&FileAnalysis` +
-//! `CrossFileLookup` and answers queries; `FileAnalysis` stays the
-//! canonical model (rule #2).
+//! the `CrossFileLookup` trait and answers queries; `FileAnalysis`
+//! stays the canonical model (rule #2).
+//!
+//! MODEL layer: this is a derived view over `&FileAnalysis` and the
+//! model-defined `CrossFileLookup` trait — zero Index-layer deps — so
+//! model-internal walkers (`for_each_ancestor_class` and the dispatch/
+//! method/bridge resolution that funnels through it) can route through
+//! `walk` without an up-layer import. Phase 1 misfiled it at Index.
 
 use crate::file_analysis::{CrossFileLookup, FileAnalysis};
 

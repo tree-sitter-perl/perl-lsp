@@ -6461,6 +6461,18 @@ impl FileAnalysis {
         self.for_each_ancestor_class_opt(class_name, module_index, false, visit)
     }
 
+    /// Test-only access to the legacy ancestor walk, for graph-walk
+    /// parity assertions during the strangler migration.
+    #[cfg(test)]
+    pub fn for_each_ancestor_class_test(
+        &self,
+        class_name: &str,
+        module_index: Option<&dyn CrossFileLookup>,
+        visit: impl FnMut(&str) -> std::ops::ControlFlow<()>,
+    ) {
+        self.for_each_ancestor_class(class_name, module_index, visit)
+    }
+
     /// `child isa ancestor`? — the MRO walk (local ∪ cross-file parents)
     /// as a predicate. `true` when `child == ancestor` too.
     pub fn class_isa(
@@ -6469,15 +6481,29 @@ impl FileAnalysis {
         ancestor: &str,
         module_index: Option<&dyn CrossFileLookup>,
     ) -> bool {
+        // First ancestry consumer ported onto the one walker
+        // (`docs/prompt-graph-walking.md`). `walk` excludes the origin,
+        // so the reflexive `X isa X` is a direct check; the rest is an
+        // INHERITS traversal — same `parents_of` seam, same seen-set
+        // and depth cap as the legacy `for_each_ancestor_class`, so the
+        // two cannot disagree during the migration.
+        if child == ancestor {
+            return true;
+        }
+        let graph = crate::graph::GraphView::new(self, module_index);
         let mut found = false;
-        self.for_each_ancestor_class(child, module_index, |c| {
-            if c == ancestor {
-                found = true;
-                std::ops::ControlFlow::Break(())
-            } else {
-                std::ops::ControlFlow::Continue(())
-            }
-        });
+        graph.walk(
+            crate::graph::Node::Class(child.to_string()),
+            crate::graph::EdgeKindMask::INHERITS,
+            &mut |n| {
+                if matches!(n, crate::graph::Node::Class(c) if c == ancestor) {
+                    found = true;
+                    std::ops::ControlFlow::Break(())
+                } else {
+                    std::ops::ControlFlow::Continue(())
+                }
+            },
+        );
         found
     }
 

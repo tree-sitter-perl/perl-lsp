@@ -97,3 +97,41 @@ fn walk_bridges_reaches_plugin_modules_terminally() {
     assert_eq!(mods, vec!["My::Plugin::W"]);
 }
 
+
+#[test]
+fn class_isa_matches_legacy_ancestor_walk() {
+    // Parity pin: the ported class_isa (walk INHERITS) must agree with
+    // the legacy for_each_ancestor_class on every shape — reflexive,
+    // direct, transitive, role, diamond, and negative.
+    let fa = parse(
+        "package Base;\n1;\n\
+         package Mid;\nuse parent -norequire, 'Base';\n1;\n\
+         package Leaf;\nuse parent -norequire, 'Mid';\n1;\n\
+         package R;\nuse Moo::Role;\n1;\n\
+         package Composer;\nuse Moo;\nwith 'R';\nextends 'Leaf';\n1;\n\
+         package Unrelated;\n1;\n",
+    );
+    let cases = [
+        ("Leaf", "Leaf", true),     // reflexive
+        ("Leaf", "Mid", true),      // direct
+        ("Leaf", "Base", true),     // transitive
+        ("Composer", "Base", true), // through extends → Leaf → Mid → Base
+        ("Composer", "R", true),    // role composition
+        ("Leaf", "Unrelated", false),
+        ("Base", "Leaf", false),    // wrong direction
+    ];
+    for (child, ancestor, want) in cases {
+        // ported (walk) answer
+        let got = fa.class_isa(child, ancestor, None);
+        // independent legacy walk over the same data
+        let mut legacy = child == ancestor;
+        fa.for_each_ancestor_class_test(child, None, |c| {
+            if c == ancestor {
+                legacy = true;
+            }
+            std::ops::ControlFlow::Continue(())
+        });
+        assert_eq!(got, want, "class_isa({child}, {ancestor})");
+        assert_eq!(got, legacy, "walk vs legacy disagree on ({child}, {ancestor})");
+    }
+}
