@@ -713,6 +713,24 @@ pub struct DispatchVerb {
     pub name_arg_index: usize,
 }
 
+/// A method that LOADS a module, naming it in a positional string
+/// argument — `$app->plugin('X')`, `$app->plugin($_) for qw/A B/`.
+/// Recognized TRIGGER-INDEPENDENTLY (like `DispatchVerb`): the load
+/// happens on the receiver app regardless of the enclosing file's
+/// class — a `Mojolicious::Plugin` subclass, never an app, for the
+/// whole nested-plugin cascade. `receiver_class` is the honest intent
+/// (the app type); the load FACT is a suppression signal for the
+/// entrypoint lint, so recording errs toward silence rather than
+/// gating on a receiver type that only resolves at query time (see
+/// `record_plugin_loads`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LoadVerb {
+    pub verb: String,
+    pub receiver_class: String,
+    #[serde(default)]
+    pub name_arg_index: usize,
+}
+
 /// One extracted parameter of a parametric type-constraint constructor
 /// (`InstanceOf['Foo']` → one param with `string: "Foo"`). The builder
 /// fills exactly one of the two fields per param (rule #1 — it walked the
@@ -805,6 +823,11 @@ pub trait FrameworkPlugin: Send + Sync {
     /// in the enrichment pass (cross-file receiver isa resolution) — see
     /// `DispatchVerb`. Default empty; only dispatch-style plugins declare.
     fn dispatch_verbs(&self) -> &[DispatchVerb] {
+        &[]
+    }
+
+    /// Module-loading verbs — see `LoadVerb`. Default empty.
+    fn load_verbs(&self) -> &[LoadVerb] {
         &[]
     }
 
@@ -1133,6 +1156,10 @@ impl PluginRegistry {
     /// Trigger-independent, same rationale as `overrides`.
     pub fn dispatch_verbs<'a>(&'a self) -> impl Iterator<Item = &'a DispatchVerb> + 'a {
         self.plugins.iter().flat_map(|p| p.dispatch_verbs().iter())
+    }
+
+    pub fn load_verbs<'a>(&'a self) -> impl Iterator<Item = &'a LoadVerb> + 'a {
+        self.plugins.iter().flat_map(|p| p.load_verbs().iter())
     }
 
     /// Yield every role-contract parameter-type rule across the registry.

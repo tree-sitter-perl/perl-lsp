@@ -123,6 +123,14 @@ fn overrides() {
 // `register($self, $app, $conf)` — the contract method every
 // Mojolicious plugin implements; the framework passes the app. $conf's
 // call-site shape is future work (long-distance param typing).
+// `$app->plugin('X')` LOADS X — recognized core-side, trigger-
+// independently (the cascade is in Mojolicious::Plugin files no Mojo
+// trigger matches). receiver_class is the honest app type; the load
+// fact is a lint-suppression signal, recorded liberally.
+fn load_verbs() {
+    [ #{ verb: "plugin", receiver_class: "Mojolicious", name_arg_index: 0 } ]
+}
+
 fn param_types() {
     [
         #{ method: "register", in_role: "Mojolicious::Plugin", param: 1,
@@ -340,11 +348,10 @@ fn on_method_call(ctx) {
                 } else {
                     out += #{ "SyntheticUse": #{ "module": name, "args": [], "imports": [], "span": span }};
                 }
-                // the loader fact: which module, and where its config
-                // value sits — the caller half of $conf typing
-                let cfg = ();
-                if args.len() >= 2 { cfg = args[1].span; }
-                out += #{ "PluginLoad": #{ "name": name, "config_span": cfg }};
+                // The load FACT (PluginLoad) is recorded core-side,
+                // trigger-independently: the nested-plugin cascade runs
+                // in Mojolicious::Plugin files this hook never sees. See
+                // `load_verbs()` + `Builder::record_plugin_loads`.
             }
         }
         return out;

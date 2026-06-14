@@ -4765,3 +4765,4 @@ fn test_helper_not_loaded_exempts_installed_plugins() {
         sub act {\n    my $self = shift;\n    $self->was_loaded;\n}\n1;\n";
     assert!(lint_messages(&idx, consumer).is_empty());
 }
+

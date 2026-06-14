@@ -679,6 +679,14 @@ impl ModuleIndex {
         for imp in &analysis.imports {
             self.loaded_modules.insert(imp.module_name.clone(), ());
         }
+        // Method-form loads (`$app->plugin('X')`, the nested cascade)
+        // are recorded as `plugin_loads` by the trigger-independent
+        // builder recognizer — feed them too. Names are short
+        // (`FeatureFlags`); `is_module_loaded` tail-matches them to FQ
+        // providers (`Clove::App::Plugin::FeatureFlags`).
+        for f in &analysis.plugin_loads {
+            self.loaded_modules.insert(f.name.clone(), ());
+        }
         self.record_loader_shapes(&path.display().to_string(), &analysis);
         let Some(module_name) = first_package_name(&analysis) else { return };
         self.workspace_modules.insert(module_name.clone(), ());

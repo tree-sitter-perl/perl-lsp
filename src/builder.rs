@@ -256,6 +256,7 @@ fn build_with_plugins_inner(
         open_statement_package: None,
         plugins,
         dispatch_manifest: std::collections::HashMap::new(),
+        load_manifest: std::collections::HashMap::new(),
         type_constraint_names: std::collections::HashSet::new(),
         app_surface_consumers: Vec::new(),
         param_type_manifest: std::collections::HashMap::new(),
@@ -287,6 +288,11 @@ fn build_with_plugins_inner(
     b.dispatch_manifest = b
         .plugins
         .dispatch_verbs()
+        .map(|d| (d.verb.clone(), d.clone()))
+        .collect();
+    b.load_manifest = b
+        .plugins
+        .load_verbs()
         .map(|d| (d.verb.clone(), d.clone()))
         .collect();
     b.type_constraint_names = b
@@ -1440,6 +1446,7 @@ struct Builder<'a> {
     /// construction (trigger-independent, like overrides). Drives provisional
     /// dispatch collection in the method-call walk.
     dispatch_manifest: std::collections::HashMap<String, plugin::DispatchVerb>,
+    load_manifest: std::collections::HashMap<String, plugin::LoadVerb>,
     /// Constraint-constructor name gate from plugin `type_constraint_names()`
     /// (`InstanceOf`, …), flattened once. A call to one of these is typed as
     /// `TypeConstraintOf` via the plugin's fold rather than its callee return.
@@ -1915,11 +1922,22 @@ impl<'a> Builder<'a> {
                 }
                 Some(self.extract_string_content(arg).unwrap_or_default())
             }
-            // `autoquoted_bareword` is what the LHS of fat-comma parses
-            // as (`key => value`) — `bareword` never appears there. The
-            // `bareword` branch catches the other contexts (e.g. unquoted
-            // positional args) where the token text IS the string value.
-            "autoquoted_bareword" | "bareword" => Some(text.clone()),
+            // `autoquoted_bareword` is a fat-comma key (`key => value`)
+            // — its text IS the value, never const-folded (a key that
+            // happens to match a constant name is still that key).
+            "autoquoted_bareword" => Some(text.clone()),
+            // A positional `bareword` arg may be a constant — fold it
+            // through the constant table (`$app->plugin(EXTRA)` where
+            // `use constant EXTRA => 'Gizmos'`). Falls back to the raw
+            // token when it names no constant.
+            "bareword" => {
+                if let Some(folded) = self.resolve_constant_strings(&text, 0) {
+                    string_values = folded.clone();
+                    folded.into_iter().next()
+                } else {
+                    Some(text.clone())
+                }
+            }
             "scalar" | "array" | "hash" => {
                 let folded = self.resolve_constant_strings(&text, 0).unwrap_or_default();
                 string_values = folded.clone();
@@ -2785,6 +2803,81 @@ impl<'a> Builder<'a> {
                 call_span: ctx.call_span,
             },
         ));
+    }
+
+    /// Record `PluginLoadFact`s for a method-form load verb
+    /// (`$app->plugin(...)`), TRIGGER-INDEPENDENTLY — the nested-plugin
+    /// cascade runs inside `Mojolicious::Plugin` files that no Mojo
+    /// trigger matches, so gating on the file class loses every load
+    /// past the entrypoint (the receiver-gated dispatch lesson,
+    /// `docs/adr/receiver-gated-dispatch.md`).
+    ///
+    /// Multi-value by construction: `ctx.args[i].string_values` carries
+    /// the full constant-fold — a `qw(...)` loop topic, a `$_` postfix
+    /// fold, OR a folded scalar constant — so `$app->plugin($_) for
+    /// qw/A B C/` records A, B, AND C, and `$app->plugin(SOME_CONST)`
+    /// records the folded name. The load fact is a SUPPRESSION signal
+    /// for the entrypoint lint, so an untyped receiver records (honest-
+    /// silent); the verb-name specificity + workspace-only + tail-match
+    /// bound any false suppression. config_span (arg i+1) rides through
+    /// for loader-config `$conf` typing.
+    fn record_plugin_loads(&mut self, method: &str, ctx: &plugin::CallContext) {
+        let Some(spec) = self.load_manifest.get(method) else { return };
+        let Some(arg) = ctx.args.get(spec.name_arg_index) else { return };
+        let names = arg.string_values.clone();
+        if names.is_empty() {
+            return;
+        }
+        // Skip a load on a receiver KNOWN to be a different concrete
+        // class — the only confident negative we have at walk time
+        // (the app receiver is param-typed, hence None here).
+        if let Some(InferredType::ClassName(c)) = &ctx.receiver_type {
+            if c != &spec.receiver_class
+                && !self.package_isa_local(c, &spec.receiver_class)
+            {
+                // an untyped/None receiver still records; a confirmed
+                // foreign class does not. cross-file isa isn't available
+                // at build, so this only fires on a locally-known class.
+                if self.package_parents.contains_key(c) {
+                    return;
+                }
+            }
+        }
+        let config_span = ctx.args.get(spec.name_arg_index + 1).map(|a| a.span);
+        for n in names {
+            if n.is_empty() {
+                continue;
+            }
+            self.plugin_loads.push(crate::file_analysis::PluginLoadFact {
+                name: n,
+                config_span,
+            });
+        }
+    }
+
+    /// Local-only isa: does `child` reach `ancestor` through this
+    /// file's `package_parents`? (No index at build — `parents_of`'s
+    /// cross-file arm needs one.)
+    fn package_isa_local(&self, child: &str, ancestor: &str) -> bool {
+        if child == ancestor {
+            return true;
+        }
+        let mut stack = vec![child.to_string()];
+        let mut seen = std::collections::HashSet::new();
+        while let Some(c) = stack.pop() {
+            if !seen.insert(c.clone()) {
+                continue;
+            }
+            if let Some(ps) = self.package_parents.get(&c) {
+                for p in ps {
+                    if p == ancestor {
+                        return true;
+                    }
+                    stack.push(p.clone());
+                }
+            }
+        }
+        false
     }
 
     /// Convert a plugin-produced `EmitAction` into real builder state. All
@@ -10380,6 +10473,7 @@ impl<'a> Builder<'a> {
                     }
                 }
                 self.record_provisional_dispatch(name, &ctx);
+                self.record_plugin_loads(name, &ctx);
                 self.dispatch_method_call_plugins(ctx);
             }
         }

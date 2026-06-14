@@ -14985,3 +14985,32 @@ fn test_bundled_moo_manifest_carries_base_role_engines() {
         assert!(!fa.is_role_package(class), "{class} should NOT be a role");
     }
 }
+
+#[test]
+fn plugin_loads_recorded_trigger_independent_and_multivalue() {
+    use crate::file_analysis::SymKind;
+    // A Mojolicious::Plugin file (NO Mojo app trigger) loading other
+    // plugins three ways: literal, qw-loop topic, folded constant.
+    let src = "package My::Plugin::All;\n\
+        use Mojo::Base 'Mojolicious::Plugin';\n\
+        use constant EXTRA => 'Gizmos';\n\
+        sub register {\n\
+          my ($self, $app, $conf) = @_;\n\
+          $app->plugin('FeatureFlags');\n\
+          $app->plugin($_) for qw/SheetReaders ImportTasks ExportTasks/;\n\
+          $app->plugin(EXTRA);\n\
+        }\n\
+        1;\n";
+    let mut parser = create_parser();
+    let tree = parser.parse(src, None).unwrap();
+    let fa = build(&tree, src.as_bytes());
+    let mut loads: Vec<String> = fa.plugin_loads.iter().map(|f| f.name.clone()).collect();
+    loads.sort();
+    assert_eq!(
+        loads,
+        vec!["ExportTasks", "FeatureFlags", "Gizmos", "ImportTasks", "SheetReaders"],
+        "all three forms (literal, qw-loop, folded constant) recorded; got {:?}",
+        fa.plugin_loads,
+    );
+    let _ = SymKind::Sub;
+}
