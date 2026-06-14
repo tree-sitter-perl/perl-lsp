@@ -892,6 +892,7 @@ fn query_memo_keeps_inherited_receiver_per_child_in_one_query() {
         module_index: None,
         package_parents: &package_parents,
         app_surface_consumers: &consumers,
+        home_brand: None,
     };
 
     let reg = ReducerRegistry::with_defaults();

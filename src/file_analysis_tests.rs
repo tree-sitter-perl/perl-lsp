@@ -2050,3 +2050,98 @@ fn loader_config_types_register_conf_cross_file() {
     }
 }
 
+/// Branded edges, end to end: two self-contained Mojo::Lite apps in one
+/// workspace register different helpers. Both helpers bridge to the same
+/// app-surface class, so before brands they MERGED — app-two saw
+/// app-one's helper. After per-file branding, each app sees only its own.
+/// See `docs/adr/branded-edges.md`.
+#[test]
+fn multi_app_lite_helpers_do_not_leak_across_apps() {
+    use crate::file_analysis::APP_SURFACE_CLASS;
+    use std::sync::Arc;
+
+    fn lite_app(idx: &crate::module_index::ModuleIndex, module: &str, file_id: &str, helper: &str) -> FileAnalysis {
+        let src = format!(
+            "use Mojolicious::Lite;\napp->helper({helper} => sub {{ my $c = shift; 1 }});\napp->start;\n"
+        );
+        let mut parser = crate::builder::create_parser();
+        let tree = parser.parse(&src, None).unwrap();
+        let mut fa = crate::builder::build(&tree, src.as_bytes());
+        fa.apply_home_brand(file_id);
+        // register a clone into the index so the OTHER app sees it cross-file
+        idx.insert_cache(
+            module,
+            Some(Arc::new(crate::file_analysis::CachedModule::new(
+                std::path::PathBuf::from(file_id),
+                Arc::new({
+                    let mut c = crate::builder::build(&tree, src.as_bytes());
+                    c.apply_home_brand(file_id);
+                    c
+                }),
+            ))),
+        );
+        fa
+    }
+
+    let idx = crate::module_index::ModuleIndex::new_for_test();
+    let app_one = lite_app(&idx, "App::One", "/ws/one.pl", "alpha_helper");
+    let _app_two = lite_app(&idx, "App::Two", "/ws/two.pl", "beta_helper");
+
+    // sanity: branding actually happened (Lite app → home_brand set)
+    assert_eq!(app_one.home_brand.as_deref(), Some("/ws/one.pl"));
+
+    let labels: Vec<String> = app_one
+        .complete_methods_for_class(APP_SURFACE_CLASS, Some(&idx))
+        .into_iter()
+        .map(|c| c.label)
+        .collect();
+    assert!(
+        labels.iter().any(|l| l == "alpha_helper"),
+        "app-one must still see its OWN helper; got {labels:?}",
+    );
+    assert!(
+        !labels.iter().any(|l| l == "beta_helper"),
+        "app-one must NOT see app-two's helper (the leak); got {labels:?}",
+    );
+}
+
+/// The same two apps, but app-one is left UNBRANDED (home_brand None) —
+/// the pre-feature state. It is brand-agnostic, so it sees everything,
+/// proving the consumer brand is what filters (and that branding is
+/// additive, never a regression for unbranded callers).
+#[test]
+fn unbranded_app_still_sees_everything_no_regression() {
+    use crate::file_analysis::APP_SURFACE_CLASS;
+    use std::sync::Arc;
+
+    let idx = crate::module_index::ModuleIndex::new_for_test();
+    let two_src = "use Mojolicious::Lite;\napp->helper(beta_helper => sub { my $c = shift; 1 });\napp->start;\n";
+    let mut parser = crate::builder::create_parser();
+    let tree = parser.parse(two_src, None).unwrap();
+    let mut two = crate::builder::build(&tree, two_src.as_bytes());
+    two.apply_home_brand("/ws/two.pl");
+    idx.insert_cache(
+        "App::Two",
+        Some(Arc::new(crate::file_analysis::CachedModule::new(
+            std::path::PathBuf::from("/ws/two.pl"),
+            Arc::new(two),
+        ))),
+    );
+
+    let one_src = "use Mojolicious::Lite;\napp->helper(alpha_helper => sub { my $c = shift; 1 });\napp->start;\n";
+    let tree1 = parser.parse(one_src, None).unwrap();
+    let app_one = crate::builder::build(&tree1, one_src.as_bytes()); // NOT branded
+    assert!(app_one.home_brand.is_none());
+
+    let labels: Vec<String> = app_one
+        .complete_methods_for_class(APP_SURFACE_CLASS, Some(&idx))
+        .into_iter()
+        .map(|c| c.label)
+        .collect();
+    // agnostic query sees the cross-file helper — exactly the pre-brand behavior.
+    assert!(
+        labels.iter().any(|l| l == "beta_helper"),
+        "an unbranded (agnostic) app must see every helper, no regression; got {labels:?}",
+    );
+}
+

@@ -100,6 +100,13 @@ impl<'a> GraphView<'a> {
     /// A brand-scoped view: branded BRIDGES edges fire only for the
     /// matching `brand` (and global ones always). INHERITS / INHERITS_INV
     /// are brand-agnostic and behave identically to [`Self::new`].
+    ///
+    /// The branded seam for `walk(.., BRIDGES, ..)`. Production bridge
+    /// resolution currently goes through the direct primitive
+    /// (`for_each_entity_bridged_to_branded`), which carries the same one
+    /// filter; this ctor is exercised by the graph tests that pin the two
+    /// paths agree (R3). Reserved for a future BRIDGES-walking consumer.
+    #[allow(dead_code)]
     pub fn new_branded(
         fa: &'a FileAnalysis,
         idx: Option<&'a dyn CrossFileLookup>,

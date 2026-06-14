@@ -530,6 +530,11 @@ pub struct BagContext<'a> {
     /// parent via `parents_of`, matching the FA-side ancestor walks.
     /// Empty for in-file callers that don't carry consumer state.
     pub app_surface_consumers: &'a [String],
+    /// The querying file's brand (`FileAnalysis::home_brand`) — scopes
+    /// the `MethodOnClass` cross-file bridge walk so a branded helper
+    /// from another instance/app isn't resolved here. `None` = agnostic,
+    /// matching the FA-side visibility sites. See `docs/adr/branded-edges.md`.
+    pub home_brand: Option<&'a str>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1510,6 +1515,9 @@ impl ReducerRegistry {
                                 module_index: Some(idx),
                                 package_parents: &cached.analysis.package_parents,
                                 app_surface_consumers: &cached.analysis.app_surface_consumers,
+                                // brand follows the QUERY ORIGIN through
+                                // cross-file recursion, not the cached file.
+                                home_brand: ctx.home_brand,
                             };
                             let sub_q = ReducerQuery {
                                 attachment: q.attachment,
@@ -1567,7 +1575,7 @@ impl ReducerRegistry {
                 // bridged Methods aren't arity-discriminated.
                 if let Some(idx) = ctx.module_index {
                     let mut found: Option<InferredType> = None;
-                    idx.for_each_entity_bridged_to(class, &mut |_mod, cached, sym| {
+                    idx.for_each_entity_bridged_to_branded(class, ctx.home_brand, &mut |_mod, cached, sym| {
                         if found.is_some() {
                             return;
                         }
@@ -1612,6 +1620,9 @@ impl ReducerRegistry {
                                 module_index: Some(idx),
                                 package_parents: &cached.analysis.package_parents,
                                 app_surface_consumers: &cached.analysis.app_surface_consumers,
+                                // brand follows the QUERY ORIGIN through
+                                // cross-file recursion, not the cached file.
+                                home_brand: ctx.home_brand,
                             };
                             let sub_q = ReducerQuery {
                                 attachment: q.attachment,
@@ -2017,6 +2028,7 @@ pub fn query_sub_return_type(
                     module_index: Some(idx),
                     package_parents: &cached.analysis.package_parents,
                     app_surface_consumers: &cached.analysis.app_surface_consumers,
+                    home_brand: ctx.home_brand,
                 };
                 let att = WitnessAttachment::Symbol(sym.id);
                 let q = ReducerQuery {

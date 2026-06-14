@@ -14098,6 +14098,7 @@ fn slot_type(fa: &FileAnalysis, class: &str, key: &str) -> Option<InferredType> 
         module_index: None,
         package_parents: &fa.package_parents,
         app_surface_consumers: &fa.app_surface_consumers,
+        home_brand: None,
     };
     let q = ReducerQuery {
         attachment: &att,

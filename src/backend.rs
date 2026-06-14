@@ -69,6 +69,9 @@ impl Backend {
                         .load(std::sync::atomic::Ordering::Relaxed),
                 };
                 files.for_each_open_mut(|uri, doc| {
+                    if let Some(id) = brand_id_for_uri(uri) {
+                        doc.analysis.apply_home_brand(&id);
+                    }
                     doc.analysis.enrich_imported_types_with_keys(Some(module_index.as_ref()));
                     let diagnostics = symbols::collect_diagnostics(&doc.analysis, module_index, options);
                     pending.push((uri.clone(), diagnostics));
@@ -92,6 +95,11 @@ impl Backend {
 
     fn enrich_analysis(&self, uri: &Url) {
         if let Some(mut doc) = self.files.get_open_mut(uri) {
+            // `doc.update` rebuilds the FileAnalysis from scratch and so
+            // drops the brand; re-apply (idempotent) before every enrich.
+            if let Some(id) = brand_id_for_uri(uri) {
+                doc.analysis.apply_home_brand(&id);
+            }
             doc.analysis.enrich_imported_types_with_keys(Some(&*self.module_index));
         }
     }
@@ -114,6 +122,17 @@ impl Backend {
 ///
 /// Rename shares the same resolution path as references — both go through
 /// `refs_to(EDITABLE)`. This is the single place that decides which spans get
+/// The brand for an open file = its canonical filesystem path. Stable
+/// per file and unique across co-resident apps, so two Mojo::Lite apps
+/// in one workspace get distinct brands. `None` for non-`file:` URIs
+/// (apply_home_brand then leaves the analysis agnostic). See
+/// `docs/adr/branded-edges.md`.
+fn brand_id_for_uri(uri: &Url) -> Option<String> {
+    uri.to_file_path()
+        .ok()
+        .map(|p| p.to_string_lossy().into_owned())
+}
+
 /// edited, so rename and references can't diverge on which call sites qualify.
 /// `refs_to` handles inheritance fan-out for Method targets (via
 /// `method_rename_chain`) so callers on child classes of a base method are

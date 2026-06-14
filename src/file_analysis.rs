@@ -2284,6 +2284,18 @@ pub struct FileAnalysis {
     #[serde(default)]
     pub plugin_namespaces: Vec<PluginNamespace>,
 
+    /// This file's own brand — the instance identity that scopes which
+    /// branded plugin content its queries can see. Set at registration
+    /// (not build: file identity isn't known to the builder) by
+    /// [`Self::apply_home_brand`], and only for a self-contained
+    /// instance-host (today: a Mojo::Lite app, whose app, helpers, and
+    /// `$self->helper` uses all live in one file). `None` = brand-
+    /// agnostic: queries see every namespace, the pre-brand behavior.
+    /// Read at each visibility site as the query's brand context. See
+    /// `docs/adr/branded-edges.md`.
+    #[serde(default)]
+    pub home_brand: Option<String>,
+
     /// Per-symbol provenance for return types. Populated for plugin
     /// `overrides()` and for reducer-driven folds over the witness bag.
     /// Missing entry == `TypeProvenance::Inferred`.
@@ -2637,6 +2649,8 @@ impl FileAnalysis {
             export_tags,
             reexport_modules,
             plugin_namespaces,
+            // Set at registration (`apply_home_brand`), not build.
+            home_brand: None,
             type_provenance,
             witnesses,
             package_framework,
@@ -3181,6 +3195,7 @@ impl FileAnalysis {
             module_index,
             package_parents: &self.package_parents,
             app_surface_consumers: &self.app_surface_consumers,
+            home_brand: self.query_brand(),
         }
     }
 
@@ -3863,6 +3878,7 @@ impl FileAnalysis {
                 module_index,
                 package_parents: &self.package_parents,
                 app_surface_consumers: &self.app_surface_consumers,
+                home_brand: self.home_brand.as_deref(),
             };
             crate::witnesses::emit_mutation_extension_witnesses(
                 &mut self.witnesses,
@@ -4352,7 +4368,7 @@ impl FileAnalysis {
         }
         let Some(idx) = module_index else { return false };
         let mut found = false;
-        idx.for_each_entity_bridged_to(class_name, &mut |_mod, _cached, sym| {
+        idx.for_each_entity_bridged_to_branded(class_name, self.query_brand(), &mut |_mod, _cached, sym| {
             if found { return; }
             if sym.name != method_name { return; }
             if !matches!(sym.kind, SymKind::Sub | SymKind::Method) { return; }
@@ -4438,8 +4454,9 @@ impl FileAnalysis {
         // package is `Mojolicious::Controller` surfacing from a
         // `Mojolicious` query when the namespace bridges both).
         for ns in &self.plugin_namespaces {
-            let bridges_class = ns.bridges.iter().any(|b|
-                matches!(b, Bridge::Class(c) if c == class_name));
+            let bridges_class = ns.visible_under(self.query_brand())
+                && ns.bridges.iter().any(|b|
+                    matches!(b, Bridge::Class(c) if c == class_name));
             if !bridges_class { continue; }
             for sym_id in &ns.entities {
                 let Some(sym) = self.symbols.get(sym_id.0 as usize) else { continue };
@@ -4475,7 +4492,7 @@ impl FileAnalysis {
             // Collect into a temporary list to avoid borrow-checker
             // issues with the closure capturing &mut seen_names/candidates.
             let mut bridged: Vec<(String, SymKind, Option<SymbolDetail>, Option<InferredType>)> = Vec::new();
-            idx.for_each_entity_bridged_to(class_name, &mut |_mod, _cached, sym| {
+            idx.for_each_entity_bridged_to_branded(class_name, self.query_brand(), &mut |_mod, _cached, sym| {
                 if !matches!(sym.kind, SymKind::Sub | SymKind::Method) { return; }
                 bridged.push((
                     sym.name.clone(),
@@ -6472,6 +6489,54 @@ impl FileAnalysis {
         }
     }
 
+    /// Assign this file's instance brand once its identity (`file_id`,
+    /// the canonical path) is known — a registration-time step, because
+    /// the builder never sees the path. Brands the file IFF it is a
+    /// self-contained Mojo::Lite app: the one shape where the brand's
+    /// CONSUMER (`$self->helper` queries) and PRODUCER (the app's helper
+    /// namespaces) are the same file, so a per-file brand is both
+    /// derivable and regression-free. For everything else this is a
+    /// no-op — `home_brand` stays `None` (agnostic), so full-Mojo apps,
+    /// cross-file controllers, and non-Mojo files see every helper
+    /// exactly as before.
+    ///
+    /// Stamps the SAME `file_id` onto every still-unbranded namespace the
+    /// file owns, so the file's own queries (`home_brand == file_id`) see
+    /// its content while a co-resident app's queries (a different
+    /// `home_brand`) filter it out. Idempotent: a second call is a no-op.
+    pub fn apply_home_brand(&mut self, file_id: &str) {
+        if self.home_brand.is_some() {
+            return;
+        }
+        if !self.is_self_contained_lite_app() {
+            return;
+        }
+        self.home_brand = Some(file_id.to_string());
+        for ns in &mut self.plugin_namespaces {
+            if ns.brand.is_none() {
+                ns.brand = Some(file_id.to_string());
+            }
+        }
+    }
+
+    /// A Mojo::Lite app keeps its app instance, helper registrations, and
+    /// `$self->helper` uses in one file (it runs in `main`), so its brand
+    /// is per-file and its consumer is itself. `use Mojolicious::Lite` is
+    /// the witness — the same trigger the `mojo-lite` plugin keys on.
+    fn is_self_contained_lite_app(&self) -> bool {
+        self.package_uses
+            .values()
+            .any(|uses| uses.iter().any(|u| u == "Mojolicious::Lite"))
+    }
+
+    /// This file's brand as a query context (`home_brand` borrowed). The
+    /// one accessor visibility sites read to scope branded-namespace
+    /// lookups; `None` = agnostic (sees every namespace). See
+    /// `docs/adr/branded-edges.md`.
+    pub(crate) fn query_brand(&self) -> Option<&str> {
+        self.home_brand.as_deref()
+    }
+
     /// Find a method definition within a class/package.
     #[cfg(test)]
     pub(crate) fn find_method_in_class(&self, class_name: &str, method_name: &str) -> Option<Span> {
@@ -6640,6 +6705,7 @@ impl FileAnalysis {
         }
         // (b) Local plugin-namespace entities bridged to `cls`.
         for ns in &self.plugin_namespaces {
+            if !ns.visible_under(self.query_brand()) { continue; }
             if !ns.bridges.iter().any(|b| matches!(b, Bridge::Class(c) if c == cls)) { continue; }
             for sym_id in &ns.entities {
                 let Some(sym) = self.symbols.get(sym_id.0 as usize) else { continue };
@@ -6669,7 +6735,7 @@ impl FileAnalysis {
             // bridged to `cls`). Record the registration module so the def
             // lookup hits the right file, not `cls`'s own module.
             let mut bridged_module: Option<String> = None;
-            idx.for_each_entity_bridged_to(cls, &mut |mod_name, _cached, sym| {
+            idx.for_each_entity_bridged_to_branded(cls, self.query_brand(), &mut |mod_name, _cached, sym| {
                 if bridged_module.is_some() { return; }
                 if !matches!(sym.kind, SymKind::Sub | SymKind::Method) { return; }
                 if sym.name == method_name {
@@ -6817,9 +6883,10 @@ impl FileAnalysis {
         let idx = module_index?;
         let cached = idx.get_cached(&module)?;
         let is_bridge = cached.analysis.plugin_namespaces.iter().any(|ns| {
-            ns.bridges
-                .iter()
-                .any(|b| matches!(b, Bridge::Class(c) if c == &on_class))
+            ns.visible_under(self.query_brand())
+                && ns.bridges
+                    .iter()
+                    .any(|b| matches!(b, Bridge::Class(c) if c == &on_class))
                 && ns.entities.iter().any(|sid| {
                     cached.analysis.symbols.get(sid.0 as usize).is_some_and(|s| {
                         matches!(s.kind, SymKind::Sub | SymKind::Method) && s.name == name
@@ -6943,7 +7010,7 @@ impl FileAnalysis {
                                     c.analysis.provides_method_in_package(&name, a)
                                 }) || {
                                 let mut hit = false;
-                                idx.for_each_entity_bridged_to(a, &mut |_m, _c, sym| {
+                                idx.for_each_entity_bridged_to_branded(a, self.query_brand(), &mut |_m, _c, sym| {
                                     if !hit
                                         && matches!(sym.kind, SymKind::Sub | SymKind::Method)
                                         && sym.name == name
@@ -6991,7 +7058,8 @@ impl FileAnalysis {
             }
         }
         self.plugin_namespaces.iter().any(|ns| {
-            ns.bridges.iter().any(|b| matches!(b, Bridge::Class(c) if c == cls))
+            ns.visible_under(self.query_brand())
+                && ns.bridges.iter().any(|b| matches!(b, Bridge::Class(c) if c == cls))
                 && ns.entities.iter().any(|sid| {
                     self.symbols.get(sid.0 as usize).is_some_and(|s| {
                         matches!(s.kind, SymKind::Sub | SymKind::Method) && s.name == name
@@ -7062,6 +7130,7 @@ impl FileAnalysis {
             }
             // (2) Local plugin-namespace bridge to `cls`.
             for ns in &self.plugin_namespaces {
+                if !ns.visible_under(self.query_brand()) { continue; }
                 if !ns.bridges.iter().any(|b| matches!(b, Bridge::Class(c) if c == cls)) { continue; }
                 for sym_id in &ns.entities {
                     let Some(sym) = self.symbols.get(sym_id.0 as usize) else { continue };
@@ -7074,7 +7143,7 @@ impl FileAnalysis {
             }
             // (3) Cross-file plugin-namespace bridge.
             if let Some(idx) = module_index {
-                idx.for_each_entity_bridged_to(cls, &mut |_mod, cached, sym| {
+                idx.for_each_entity_bridged_to_branded(cls, self.query_brand(), &mut |_mod, cached, sym| {
                     if let SymbolDetail::Handler { dispatchers, .. } = &sym.detail {
                         if disp_matches(dispatchers) {
                             let prov = cached.path.file_name()
