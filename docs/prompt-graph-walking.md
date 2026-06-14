@@ -468,15 +468,23 @@ available as an independent later cleanup if the model gets fat.
 
 ### What the funnel port still needs
 
-1. **`skip_self` on `walk`.** `for_each_ancestor_class_opt(skip_self:
-   true)` is `SUPER::` semantics (search parents, not self, but seed
-   the seen-set with self for diamonds). `walk` already excludes the
-   origin from `visit`, but it also *seeds edges from* the origin —
-   which is the skip_self=true behavior. The skip_self=false case
-   (visit self too) is what `class_isa` handled with an explicit
-   reflexive check. So: a `walk` variant that ALSO visits the origin
-   (or callers add the reflexive check, as `class_isa` did). Decide
-   one convention before porting the funnel.
+1. **`skip_self` — DECIDED: no such parameter. `walk` is edge-only;
+   callers add the reflexive check.** A walk discovers what you
+   *reach* by following edges; the origin is the thing you already
+   *have*, so yielding it conflates the two. Decisive reason it can't
+   be a `walk` option anyway: the self-handling is CONSUMER-SPECIFIC —
+   `class_isa` checks `self == ancestor`, `resolve_method_in_ancestors`
+   checks `method_resolution_on_class(self)`, `collect_ancestor_
+   methods` gathers self's methods, `class_has_unresolved_ancestor`
+   checks self's parents. `walk` couldn't handle self without calling
+   back into per-consumer logic, which is just the consumer doing it.
+   So: include-self consumers prepend their own one-line check (as
+   `class_isa` did); the old `skip_self=true` variant
+   (`resolve_super_method` — SUPER searches parents only) becomes the
+   BARE `walk(enclosing, INHERITS)`, no flag. The seen-set already
+   seeds the origin (cycle-safe for both shapes), so nothing else
+   changes. `for_each_ancestor_class_opt`'s bool is deleted, not
+   ported.
 2. **Visit signature.** `for_each_ancestor_class` yields `&str` class
    names. `walk` yields `&Node`. The funnel port maps `Node::Class(c)
    → c`; Module nodes (from a combined BRIDGES mask) are filtered or
