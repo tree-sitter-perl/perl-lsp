@@ -7,51 +7,56 @@ through it; `children_index`'s descendant fan-out and plugin bridges
 too. Landed design + rationale: `docs/adr/graph-walking.md`. This doc
 is what's left.
 
-## Next: branded edges
+## Branded edges — LANDED (mechanism + per-file), forward work below
 
-A branded edge fires only when the walker's *context* matches a brand —
-the instance-identity cases the plain class/bridge edges can't express.
+The mechanism shipped: `PluginNamespace.brand` + `visible_under` (the
+one additive rule), `GraphView` brand context (`new_branded`) into the
+single BRIDGES edge, the cross-file `for_each_entity_bridged_to_branded`
+primitive, and the same-file visibility sites gated on
+`self.query_brand()`. The PER-FILE consumer is wired:
+`FileAnalysis::home_brand` (= canonical path), assigned at registration
+by `apply_home_brand` for self-contained Mojo::Lite apps, so two NAMED
+lite-app packages in one workspace no longer merge helpers. Landed
+design: `docs/adr/branded-edges.md`. A three-way bake-off (brand on the
+bridge / on `InferredType` / on the namespace) picked the namespace
+placement; the judges' grafts (visible_under-as-a-method, the Brand
+context, the value-sourced consumer brand) are folded in.
 
-```rust
-enum Brand {
-    Variable { file: FileId, scope: ScopeId, name: String },
-    File(FileId),
-    Custom { kind: String, payload: serde_json::Value },  // plugins
-}
-```
+What remains — both reuse the SAME mechanism, only the brand SOURCE
+changes:
 
-Concrete cases:
+### Per-variable instances
 
-- **`my $minion = Minion->new(...)`** — entities of `$minion`'s plugin
-  namespace bridge to `Brand::Variable { … "$minion" }`. A second
-  Minion instance in the same workspace doesn't collide.
-- **`my $app = Mojolicious::Lite->new`** — the app's namespace bridges
-  to `Brand::File(file_id)` (the multi-app Mojo case).
+`my $a = Minion->new; my $b = Minion->new` share a file, so the per-file
+brand can't separate them. The same-file sites already gate on
+`visible_under`, so the model is ready; what's missing is (a) EMISSION —
+the plugin mints one branded namespace per construction site, brand =
+the decl-site instance id (the `PluginNamespace.id`
+`"minion:$minion@MyApp.pm:5"` scheme); and (b) QUERY — a per-variable
+instance-brand resolver out of `method_call_invocant_class`, surfacing
+the receiver's brand ON the resolved value (NOT a consumer-minted
+string, NOT a new `InferredType` variant — carry it as a sibling datum,
+per the lossy-`Option<String>` rule).
 
-The goal is for brands to fit `walk` cleanly — a brand is walk
-*context* that gates branded edges, not a bolt-on. `walk` already
-carries the origin; brand context rides alongside, and `edges_from`
-consults it for branded edge kinds.
+### Accessor chains — timing decided
 
-**The one real decision is brand-resolution timing.** The hard case
-isn't `my $minion = Minion->new` (static, visible at the decl) — it's
-`$app->minion` vs `$app->other_minion`, where the brand depends on what
-the accessor returns (type inference, possibly cross-file). Three
-options:
+`$app->minion` brand depends on what the accessor returns (cross-file
+return type). Decision (bake-off + review consensus): **lazy at query
+time**, derived from the resolved invocant — NOT a cross-file enrichment
+post-pass. Enrichment runs OPEN-DOCUMENTS-ONLY and bakes one brand per
+accessor, but the brand is query-receiver-dependent, so it would
+re-merge on workspace/dependency files (recreating the bug). The
+invocant resolution already runs lazily + cross-file at query time; the
+brand rides out of it into `GraphView::new_branded` / the branded
+primitive — the seam is already in place.
 
-1. **Static at emission** — covers `my $x = Class->new` and per-file
-   singletons; misses accessor-returned brands.
-2. **Cross-file enrichment post-pass** — after inference settles, walk
-   method-call refs whose receiver resolves to a branded namespace and
-   materialise the branded edges. Same machinery as
-   `enrich_imported_types_with_keys`.
-3. **Lazy at query time** — branded edges carry a compute-brand
-   closure. Reintroduces the query-time logic the unification is
-   trying to remove; avoid.
+### Full-Mojo multi-app (out of scope, documented degradation)
 
-Plan: **(1) for the cheap cases, (2) for accessor chains.** Land (1)
-first; the accessor-chain case shouldn't block it. Decide the timing
-deliberately when this is picked up — don't defer it into the code.
+Helpers on a `Mojolicious` app class consumed by SEPARATE controller
+files stay merged: the controller file can't carry the app's brand
+(`home_brand` is per-file and the controller is a different file). Not a
+regression (today's behavior); a real fix needs controller→app
+association, which doesn't exist statically.
 
 ## Deferred: Scope nodes (the future taxonomy)
 

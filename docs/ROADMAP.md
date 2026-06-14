@@ -6,10 +6,14 @@ This file is only what's NEXT, in order.
 ## Now (in order)
 
 1. **Graph walking** — the walker + the whole inheritance axis landed
-   (`adr/graph-walking.md`). Next: **branded edges** (`$minion`/`$app`
-   instance identity → multi-app Mojo), then the deferred Scope-node
-   taxonomy (Openness diagnostic, `home_namespace`) when those are
-   built. Forward work: `prompt-graph-walking.md`.
+   (`adr/graph-walking.md`). **Branded edges** landed the mechanism +
+   the per-file consumer (`adr/branded-edges.md`): two named Mojo::Lite
+   apps no longer merge helpers. Next on this axis: **per-variable
+   instance brands** (`$minion` vs `$other`) — emission + an
+   instance-brand resolver out of `method_call_invocant_class`; then the
+   **accessor-chain** brand (`$app->minion`, lazy-at-query-time, seam in
+   place). Then the deferred Scope-node taxonomy (Openness diagnostic,
+   `home_namespace`). Forward work: `prompt-graph-walking.md`.
 2. **DBIC out of core** — ungated; phase ladder in
    `prompt-dbic-as-plugin.md`. Ends with core plugin-free except
    generic dispatch.
