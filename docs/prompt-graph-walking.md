@@ -165,9 +165,20 @@ multi-instance Minion / multi-app cases come up.
 ## Architecture: graph lives in isolation
 
 **The builder does not build the graph.** The builder stays focused on
-CST → `FileAnalysis`. A new module (call it `src/graph.rs` or
-`src/scope_graph.rs`) consumes `&FileAnalysis` and produces the graph as
-a derived structure.
+CST → `FileAnalysis`. `src/graph.rs` consumes `&FileAnalysis` (+ the
+`CrossFileLookup` trait) and answers `walk` queries.
+
+**As built, the graph is NOT materialized — it is a lazy derived
+view.** `GraphView` holds two borrows (`&FileAnalysis`, `Option<&dyn
+CrossFileLookup>`) and nothing else: no node list, no adjacency map, no
+build step. `walk` DFS-chases edges on demand — `edges_from` derives a
+node's neighbors at the moment the walker asks, by calling the stores
+that already exist (`parents_of`, `direct_children_of`,
+`for_each_entity_bridged_to`). A walk materializes only its transient
+traversal state (seen-set + per-node neighbor vec), discarded on
+return. "Chasing an edge" *is* a map lookup against `package_parents`
+— the same primitive the legacy walkers call, which is why a ported
+consumer is provably parity (same lookups, one walker).
 
 ```
                   ┌─────────────────────┐
@@ -176,15 +187,27 @@ a derived structure.
                   │   refs, owners,     │
                   │   plugin namespaces │
                   └──────────┬──────────┘
-                             │
+                             │  (borrowed; nothing built)
                   ┌──────────▼──────────┐
-                  │   Graph (derived)   │  (typed-edge graph)
-                  │   nodes, edges,     │
-                  │   brand index       │
+                  │  GraphView (lazy)   │  walk(origin, mask) →
+                  │  edges chased       │  edges_from derives
+                  │  on demand          │  neighbors per call
                   └──────────┬──────────┘
                              │
                        (queries via `walk`)
 ```
+
+**`walk` is the caching seam.** Because every consumer goes through
+`walk(origin, mask)` and never sees how edges are produced, caching
+slots in behind `edges_from` with ZERO consumer changes — memoize
+`(node, kind) → neighbors` on the view, or hang a longer-lived edge
+cache off the index. Lazy is the default precisely so you don't pay
+for that machinery until a profiler flags an edge kind. And it's
+per-edge-kind, not all-or-nothing: `children_index` is already the
+materialized form of the INHERITS_INV edge (the reverse walk was
+expensive, so it's precomputed once), while INHERITS stays a cheap
+lazy lookup — each edge kind picks lazy-vs-materialized on its own
+cost, behind the same seam.
 
 Consequences:
 
