@@ -98,14 +98,28 @@ mandatory. This is a single path; no second mechanism for `our`.
 - **`bridges_file`** — plugin_namespace → file. Used for per-file
   singletons (the Mojolicious::Lite app case).
 
-#### File attribution (replaces `RoleMask` as an edge concept)
-- **`file_role`** — file edges tagged: `open` | `workspace` |
-  `dependency` | `builtin`.
+#### File attribution — `RoleMask` STAYS (the unification thesis's boundary)
+**Correction (graph-walking-1, after porting the inheritance axis):**
+this was an overreach. `refs_to`/`references_mask_for`/`group_refs`
+ENUMERATE file tiers (open → workspace → dependency), collecting
+matching refs from *every* file — a brute-force scan partitioned by
+role. There is no origin and no edge to follow, so it is not a
+`walk(origin, mask)`: forcing it needs a synthetic "root" node with a
+`file_role` edge to every file, which still enumerates everything,
+dressed as a graph. Zero benefit.
 
-The "files are special" abstraction goes away. `RoleMask::EDITABLE`
-becomes "edge-kind mask: don't traverse `dependency`-tagged file edges."
-Same walker, kind-mask varies. The `RoleMask` type can survive as a
-convenience constructor.
+The only real graph version is an import-reachability OPTIMIZATION
+(scan only files that transitively import the target via reverse
+`uses_module` edges) — but that trades the completeness `refs_to`
+exists for (re-exports, framework DSL, dynamic dispatch produce refs
+with no clean import edge) for speed. Not a parity strangle.
+
+So `RoleMask` is a PARTITION, not a traversal model, and stays as the
+right abstraction. `walk` unifies the three edge-following models
+(`package_parents`→INHERITS, `bridges`→BRIDGES, the lexical scope
+tree→PARENT); file-role is orthogonal and out of scope. If the three
+tier-iteration sites ever want DRYing, that's a shared
+`for_each_file_in_mask` helper in resolve/file_store — not the graph.
 
 ### Branded edges (first-class)
 
@@ -165,9 +179,20 @@ multi-instance Minion / multi-app cases come up.
 ## Architecture: graph lives in isolation
 
 **The builder does not build the graph.** The builder stays focused on
-CST → `FileAnalysis`. A new module (call it `src/graph.rs` or
-`src/scope_graph.rs`) consumes `&FileAnalysis` and produces the graph as
-a derived structure.
+CST → `FileAnalysis`. `src/graph.rs` consumes `&FileAnalysis` (+ the
+`CrossFileLookup` trait) and answers `walk` queries.
+
+**As built, the graph is NOT materialized — it is a lazy derived
+view.** `GraphView` holds two borrows (`&FileAnalysis`, `Option<&dyn
+CrossFileLookup>`) and nothing else: no node list, no adjacency map, no
+build step. `walk` DFS-chases edges on demand — `edges_from` derives a
+node's neighbors at the moment the walker asks, by calling the stores
+that already exist (`parents_of`, `direct_children_of`,
+`for_each_entity_bridged_to`). A walk materializes only its transient
+traversal state (seen-set + per-node neighbor vec), discarded on
+return. "Chasing an edge" *is* a map lookup against `package_parents`
+— the same primitive the legacy walkers call, which is why a ported
+consumer is provably parity (same lookups, one walker).
 
 ```
                   ┌─────────────────────┐
@@ -176,15 +201,27 @@ a derived structure.
                   │   refs, owners,     │
                   │   plugin namespaces │
                   └──────────┬──────────┘
-                             │
+                             │  (borrowed; nothing built)
                   ┌──────────▼──────────┐
-                  │   Graph (derived)   │  (typed-edge graph)
-                  │   nodes, edges,     │
-                  │   brand index       │
+                  │  GraphView (lazy)   │  walk(origin, mask) →
+                  │  edges chased       │  edges_from derives
+                  │  on demand          │  neighbors per call
                   └──────────┬──────────┘
                              │
                        (queries via `walk`)
 ```
+
+**`walk` is the caching seam.** Because every consumer goes through
+`walk(origin, mask)` and never sees how edges are produced, caching
+slots in behind `edges_from` with ZERO consumer changes — memoize
+`(node, kind) → neighbors` on the view, or hang a longer-lived edge
+cache off the index. Lazy is the default precisely so you don't pay
+for that machinery until a profiler flags an edge kind. And it's
+per-edge-kind, not all-or-nothing: `children_index` is already the
+materialized form of the INHERITS_INV edge (the reverse walk was
+expensive, so it's precomputed once), while INHERITS stays a cheap
+lazy lookup — each edge kind picks lazy-vs-materialized on its own
+cost, behind the same seam.
 
 Consequences:
 
@@ -241,8 +278,20 @@ different masks:
 
 Strangler fig, lasts a while. Phases:
 
-1. **Stand up `Graph` as a parallel structure.** Populated alongside
-   today's data; not yet queried.
+1. **Stand up `Graph` as a parallel structure.** ~~Populated alongside
+   today's data; not yet queried.~~ **LANDED (graph-walking-1)** as a
+   DERIVED view, not parallel storage: `src/graph.rs` `GraphView` +
+   `walk(origin, EdgeKindMask, visit)` — visit-at-pop DFS preserving
+   @ISA order, seen-set, the legacy depth cap. Edge derivation is one
+   function (`edges_from`): INHERITS via `parents_of` (the shared
+   injection site, so graph and legacy walkers cannot disagree),
+   INHERITS_INV via the children index (`direct_children_of`, depth 1
+   — the walker supplies transitivity), BRIDGES via
+   `for_each_entity_bridged_to` (terminal Module nodes; composes with
+   INHERITS through the synthetic app-surface edge, replacing the
+   ancestor+bridge two-step). First ported consumer:
+   `resolve.rs::implementations_of` (the requires→composers fan-out)
+   — its gold rows are the parity net.
 2. **Port one query at a time**, retiring old data structures as their
    last consumer moves over:
    - `resolve_method_in_ancestors` first (simplest, smallest blast
@@ -388,3 +437,91 @@ framework) vs `Custom { kind, name }` (open, loses exhaustiveness) vs
 hybrid. The plugin-system's trajectory (manifests over enums —
 `role_makers`, `app_surface_consumers`) argues hybrid with the open
 arm as the default for plugin-declared scopes.
+
+## The ancestry-axis strangle — design space (the #3 decision)
+
+The strangle table above listed "bridges" and "ancestry" as separate
+steps. Porting the real consumers proved that wrong: **they're one
+strangle.** `resolve_method_in_ancestors`, `for_each_dispatch_handler_
+on_class`, `class_isa`, `class_has_unresolved_ancestor`,
+`resolve_super_method`, `method_rename_chain`, `collect_ancestor_
+methods`, `complete_methods_for_class` — all ~8 — funnel through ONE
+function, `for_each_ancestor_class`, and each pulls local symbols +
+bridged entities (the BRIDGES axis) at every class the INHERITS walk
+visits. `for_each_entity_bridged_to` is the bridge *primitive* (the
+graph's BRIDGES edge derivation already calls it), not a consumer to
+strangle. So:
+
+> The ancestry funnel IS the strangle. Port `for_each_ancestor_class`
+> to delegate to `walk(class, INHERITS)` and all 8 consumers come
+> along; their bridge/local pulls stay in their visit closures,
+> untouched.
+
+### The enabler decision (resolved)
+
+Both this and every model-internal walk were gated on a layering
+wall: the consumers live in `file_analysis.rs` (Model); `walk` lived
+in `graph.rs` (Index); Model can't import up. Two ways out:
+
+- **(A) Move the graph DOWN to Model.** `graph.rs` imports only
+  `file_analysis` (the `CrossFileLookup` trait + `parents_of`) — zero
+  Index deps. It was *misfiled* at Index in phase 1. Reassigning it to
+  Model (one line in `layer_map`) lets every model walker call `walk`
+  directly; graph and `file_analysis` mutually reference at the same
+  layer, which the DAG test permits (only `target_layer > my_layer` is
+  a violation). Tiny, no function relocation.
+- **(B) Move the ancestry QUERY functions UP** out of `file_analysis`
+  into a query/Index layer. Aligns with the arch-review note that
+  these `&dyn CrossFileLookup`-taking functions were misfiled in the
+  model — but it's a wide mechanical relocation of ~8 functions + all
+  callers, large risk surface.
+
+**Chosen: (A).** Landed. `class_isa` is the first consumer ported as
+proof (`class_isa_matches_legacy_ancestor_walk` pins parity). (B) stays
+available as an independent later cleanup if the model gets fat.
+
+### What the funnel port still needs
+
+1. **`skip_self` — DECIDED: no such parameter. `walk` is edge-only;
+   callers add the reflexive check.** A walk discovers what you
+   *reach* by following edges; the origin is the thing you already
+   *have*, so yielding it conflates the two. Decisive reason it can't
+   be a `walk` option anyway: the self-handling is CONSUMER-SPECIFIC —
+   `class_isa` checks `self == ancestor`, `resolve_method_in_ancestors`
+   checks `method_resolution_on_class(self)`, `collect_ancestor_
+   methods` gathers self's methods, `class_has_unresolved_ancestor`
+   checks self's parents. `walk` couldn't handle self without calling
+   back into per-consumer logic, which is just the consumer doing it.
+   So: include-self consumers prepend their own one-line check (as
+   `class_isa` did); the old `skip_self=true` variant
+   (`resolve_super_method` — SUPER searches parents only) becomes the
+   BARE `walk(enclosing, INHERITS)`, no flag. The seen-set already
+   seeds the origin (cycle-safe for both shapes), so nothing else
+   changes. `for_each_ancestor_class_opt`'s bool is deleted, not
+   ported.
+2. **Visit signature.** `for_each_ancestor_class` yields `&str` class
+   names. `walk` yields `&Node`. The funnel port maps `Node::Class(c)
+   → c`; Module nodes (from a combined BRIDGES mask) are filtered or
+   handled per consumer. Keep the funnel INHERITS-only; the bridge
+   pull stays in each consumer's closure (no behavior change).
+3. **Parity proof = the existing net.** The 8 consumers drive
+   inheritance/dispatch/SUPER/role e2e + gold rows. Port the funnel,
+   run them; a parity unit test per consumer is cheap insurance for
+   the hot ones (`resolve_method_in_ancestors`).
+
+### Remaining strangles after the funnel
+
+- **lexical scope chains** (`cursor_context`) — needs Scope nodes +
+  `PARENT`/`BINDS_*` edges. New taxonomy. This IS a genuine
+  walk-from-origin (cursor scope → enclosing scopes until a binding),
+  so it fits `walk`; the cost is adding the node/edge kinds.
+- **branded bridges** (`$minion`/`$app` instance identity) — branded
+  edges, the design-heavy finale.
+- ~~file-role tier~~ — REMOVED: enumeration, not a walk (see "File
+  attribution" above). `RoleMask` stays.
+
+Each grows the node/edge set additively. The migration ends when
+`package_parents` and `PluginNamespace.bridges` have no direct
+consumers — every *reachability* question is a `walk` with a mask.
+(`RoleMask` is not in that set; it partitions files, it doesn't
+traverse.) Openness diagnostic + multi-app Mojo fall out then.

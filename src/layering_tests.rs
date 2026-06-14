@@ -28,6 +28,7 @@ fn layer_map() -> HashMap<&'static str, Layer> {
         ("file_analysis", Model),
         ("witnesses", Model),
         ("conventions", Model),
+        ("graph", Model),
         ("cst", Cst),
         ("builder", Build),
         ("plugin", Build),

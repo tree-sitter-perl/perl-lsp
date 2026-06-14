@@ -240,6 +240,10 @@ pub trait CrossFileLookup {
         class: &str,
         visit: &mut dyn FnMut(&str, &std::sync::Arc<CachedModule>) -> std::ops::ControlFlow<()>,
     );
+    /// Direct children/composers of `class` as (package, module) pairs
+    /// — the `children_index` inverse, depth 1 (the graph walker
+    /// supplies transitivity).
+    fn direct_children_of(&self, class: &str) -> Vec<(String, String)>;
     /// Registration-time loader-config shapes: every (load_name, shape)
     /// projected from `PluginLoad` facts across the workspace —
     /// INCLUDING packageless entrypoint scripts, which never enter the
@@ -1452,6 +1456,26 @@ pub const APP_SURFACE_CLASS: &str = "Mojolicious::_AppSurface";
 /// appended last so same-name overrides on a real parent win. The
 /// surface has no parents of its own, so the walk's seen-set + depth cap
 /// bound it like any edge.
+/// The lexical scope chain `[start, parent, …, file]` over a bare
+/// `&[Scope]` slice — the single source of the parent-climb. A free
+/// function (not a `FileAnalysis` method) so the witness-bag query path,
+/// which holds `BagContext.scopes: &[Scope]` and never a `&FileAnalysis`,
+/// shares it instead of re-rolling the `while let Some(p) = …parent`
+/// loop (it had two copies). `FileAnalysis::scope_chain` is the thin
+/// wrapper. The tree has one parent per node and no cycles, so this is a
+/// linked-list climb, not a graph walk — `GraphView` (which needs a
+/// `&FileAnalysis`) deliberately does NOT own it; see
+/// `docs/prompt-graph-walking.md` on why lexical isn't a strangle.
+pub fn scope_chain_of(scopes: &[Scope], start: ScopeId) -> Vec<ScopeId> {
+    let mut chain = Vec::new();
+    let mut current = Some(start);
+    while let Some(id) = current {
+        chain.push(id);
+        current = scopes[id.0 as usize].parent;
+    }
+    chain
+}
+
 pub fn parents_of(
     class: &str,
     package_parents: &HashMap<String, Vec<String>>,
@@ -2991,13 +3015,7 @@ impl FileAnalysis {
 
     /// Walk the scope chain from a scope upward to file root.
     pub fn scope_chain(&self, start: ScopeId) -> Vec<ScopeId> {
-        let mut chain = Vec::new();
-        let mut current = Some(start);
-        while let Some(id) = current {
-            chain.push(id);
-            current = self.scopes[id.0 as usize].parent;
-        }
-        chain
+        scope_chain_of(&self.scopes, start)
     }
 
     /// Get the scope struct by ID.
@@ -6448,13 +6466,45 @@ impl FileAnalysis {
     /// through here so the two code paths can never drift on MRO
     /// rules. New ancestor-aware queries should reuse it too rather
     /// than reroll the walk.
+    /// The include-self MRO walk: visit `class_name` itself, then every
+    /// proper ancestor in Perl's left-to-right DFS order. The ONE place
+    /// self-handling lives for the ~7 "method on this class or up the
+    /// chain" consumers — running their own closure on self (consumer-
+    /// specific, so it can't move into `walk`, which has no closure for
+    /// the origin). Proper-ancestor traversal IS `walk(class, INHERITS)`
+    /// — same `parents_of` seam, so it cannot diverge from the legacy
+    /// hand-rolled DFS this replaced. The `skip_self=true` variant is
+    /// gone: `SUPER::` is the bare `walk` (see `resolve_super_method`).
     fn for_each_ancestor_class(
+        &self,
+        class_name: &str,
+        module_index: Option<&dyn CrossFileLookup>,
+        mut visit: impl FnMut(&str) -> std::ops::ControlFlow<()>,
+    ) {
+        if visit(class_name).is_break() {
+            return;
+        }
+        let graph = crate::graph::GraphView::new(self, module_index);
+        graph.walk(
+            crate::graph::Node::Class(class_name.to_string()),
+            crate::graph::EdgeKindMask::INHERITS,
+            &mut |n| match n {
+                crate::graph::Node::Class(c) => visit(c),
+                _ => std::ops::ControlFlow::Continue(()),
+            },
+        );
+    }
+
+    /// Test-only access to the legacy ancestor walk, for graph-walk
+    /// parity assertions during the strangler migration.
+    #[cfg(test)]
+    pub fn for_each_ancestor_class_test(
         &self,
         class_name: &str,
         module_index: Option<&dyn CrossFileLookup>,
         visit: impl FnMut(&str) -> std::ops::ControlFlow<()>,
     ) {
-        self.for_each_ancestor_class_opt(class_name, module_index, false, visit)
+        self.for_each_ancestor_class(class_name, module_index, visit)
     }
 
     /// `child isa ancestor`? — the MRO walk (local ∪ cross-file parents)
@@ -6465,62 +6515,30 @@ impl FileAnalysis {
         ancestor: &str,
         module_index: Option<&dyn CrossFileLookup>,
     ) -> bool {
-        let mut found = false;
-        self.for_each_ancestor_class(child, module_index, |c| {
-            if c == ancestor {
-                found = true;
-                std::ops::ControlFlow::Break(())
-            } else {
-                std::ops::ControlFlow::Continue(())
-            }
-        });
-        found
-    }
-
-    /// MRO walk shared by every inheritance consumer. `skip_self`: when true,
-    /// the starting class is NOT visited but its parents' MRO still is — this
-    /// is exactly `SUPER::` semantics (search the enclosing package's parents,
-    /// skipping the package itself). The seen-set still records the start so a
-    /// diamond that loops back to it is skipped.
-    fn for_each_ancestor_class_opt(
-        &self,
-        class_name: &str,
-        module_index: Option<&dyn CrossFileLookup>,
-        skip_self: bool,
-        mut visit: impl FnMut(&str) -> std::ops::ControlFlow<()>,
-    ) {
-        // Perl's default MRO is left-to-right depth-first: for
-        // `@ISA = (A, B)`, walk A and all A's ancestors before
-        // visiting B. A stack-based DFS achieves this by pushing
-        // parents in REVERSE order so LIFO pops them in `@ISA`
-        // order. The previous implementation pushed left-to-right
-        // and visited parents in reverse `@ISA` — wrong for
-        // method-resolution semantics, surfaced as same-name
-        // overrides on a later parent silently winning over an
-        // earlier one. Local + cross-file parents concatenate in
-        // `@ISA` order before the reverse-push.
-        let mut seen: HashSet<String> = HashSet::new();
-        let mut stack: Vec<String> = vec![class_name.to_string()];
-        let mut first = true;
-        while let Some(cur) = stack.pop() {
-            if !seen.insert(cur.clone()) { continue; }
-            if seen.len() > 21 { break; } // matches the legacy depth guard
-            let is_root = std::mem::replace(&mut first, false);
-            if !(skip_self && is_root) {
-                if let std::ops::ControlFlow::Break(()) = visit(&cur) {
-                    return;
-                }
-            }
-            let parents = parents_of(
-                &cur,
-                &self.package_parents,
-                module_index,
-                &self.app_surface_consumers,
-            );
-            for p in parents.into_iter().rev() {
-                stack.push(p);
-            }
+        // First ancestry consumer ported onto the one walker
+        // (`docs/prompt-graph-walking.md`). `walk` excludes the origin,
+        // so the reflexive `X isa X` is a direct check; the rest is an
+        // INHERITS traversal — same `parents_of` seam, same seen-set
+        // and depth cap as the legacy `for_each_ancestor_class`, so the
+        // two cannot disagree during the migration.
+        if child == ancestor {
+            return true;
         }
+        let graph = crate::graph::GraphView::new(self, module_index);
+        let mut found = false;
+        graph.walk(
+            crate::graph::Node::Class(child.to_string()),
+            crate::graph::EdgeKindMask::INHERITS,
+            &mut |n| {
+                if matches!(n, crate::graph::Node::Class(c) if c == ancestor) {
+                    found = true;
+                    std::ops::ControlFlow::Break(())
+                } else {
+                    std::ops::ControlFlow::Continue(())
+                }
+            },
+        );
+        found
     }
 
     /// Inheritance chain for a method rename: `[class, ..., defining_class]`.
@@ -6655,13 +6673,24 @@ impl FileAnalysis {
         method_name: &str,
         module_index: Option<&dyn CrossFileLookup>,
     ) -> Option<MethodResolution> {
+        // SUPER:: searches the PARENTS, never the enclosing class — so
+        // it is the bare `walk` (origin-excluded by construction). The
+        // old `skip_self=true` variant is exactly this; no flag needed.
         let mut result: Option<MethodResolution> = None;
-        self.for_each_ancestor_class_opt(enclosing, module_index, true, |cls| {
-            match self.method_resolution_on_class(cls, method_name, module_index) {
-                Some(r) => { result = Some(r); std::ops::ControlFlow::Break(()) }
-                None => std::ops::ControlFlow::Continue(()),
-            }
-        });
+        let graph = crate::graph::GraphView::new(self, module_index);
+        graph.walk(
+            crate::graph::Node::Class(enclosing.to_string()),
+            crate::graph::EdgeKindMask::INHERITS,
+            &mut |n| {
+                let crate::graph::Node::Class(cls) = n else {
+                    return std::ops::ControlFlow::Continue(());
+                };
+                match self.method_resolution_on_class(cls, method_name, module_index) {
+                    Some(r) => { result = Some(r); std::ops::ControlFlow::Break(()) }
+                    None => std::ops::ControlFlow::Continue(()),
+                }
+            },
+        );
         result
     }
 
@@ -7274,13 +7303,14 @@ impl FileAnalysis {
     /// "structural"; a `Sub`/`Method` reached first means "working state".
     /// Both the outline tree builder and the `--outline` CLI ask this.
     pub fn scope_within_sub_body(&self, scope: ScopeId) -> bool {
-        let mut cur = Some(scope);
-        while let Some(id) = cur {
-            let Some(s) = self.scopes.iter().find(|s| s.id == id) else { return false };
-            match s.kind {
+        // Climb the shared chain (indexed lookup, not the old O(n)
+        // `.find(|s| s.id == id)` per level); a Sub/Method boundary
+        // before any Class/File answers true.
+        for id in self.scope_chain(scope) {
+            match self.scopes[id.0 as usize].kind {
                 ScopeKind::Sub { .. } | ScopeKind::Method { .. } => return true,
                 ScopeKind::Class { .. } | ScopeKind::File => return false,
-                ScopeKind::Block | ScopeKind::ForLoop { .. } => cur = s.parent,
+                ScopeKind::Block | ScopeKind::ForLoop { .. } => {}
             }
         }
         false
