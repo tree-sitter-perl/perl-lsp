@@ -135,3 +135,26 @@ fn class_isa_matches_legacy_ancestor_walk() {
         assert_eq!(got, legacy, "walk vs legacy disagree on ({child}, {ancestor})");
     }
 }
+
+#[test]
+fn edge_kind_all_covers_every_mask_bit() {
+    // Lockstep guard: `flag()` is an exhaustive match (a variant
+    // without a flag arm won't compile), and `edges_from` matches
+    // exhaustively too — but `EdgeKind::ALL` is a fixed-length array,
+    // so a variant added everywhere EXCEPT `ALL` would compile and
+    // silently never be walked. This pins that the ALL-driven union
+    // equals the full mask, catching that one hole.
+    let union = EdgeKind::ALL
+        .iter()
+        .fold(EdgeKindMask::empty(), |acc, k| acc | k.flag());
+    assert_eq!(
+        union.bits(),
+        EdgeKindMask::all().bits(),
+        "an EdgeKind is missing from EdgeKind::ALL",
+    );
+    // and every flag is distinct (no two variants share a bit)
+    assert_eq!(
+        EdgeKind::ALL.len(),
+        EdgeKind::ALL.iter().map(|k| k.flag().bits()).collect::<std::collections::HashSet<_>>().len(),
+    );
+}

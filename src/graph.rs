@@ -20,22 +20,50 @@
 
 use crate::file_analysis::{CrossFileLookup, FileAnalysis};
 
+/// One typed edge family. The CLOSED set of edge kinds — `edges_from`
+/// matches on this exhaustively, so adding a kind is a compile error
+/// until its derivation is written (the design doc's "one match site,
+/// never a parallel walker" invariant, with compiler teeth). The
+/// bitflag MASK below is set membership over this enum, not a separate
+/// source of truth: `EdgeKind::ALL` + `flag()` keep them in lockstep.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EdgeKind {
+    /// class → parent class/role (`use parent`/`@ISA`/`with`/…, plus
+    /// the synthetic app-surface edge — `parents_of` is the single
+    /// injection site, shared with the legacy walkers so the two
+    /// cannot disagree during the migration).
+    Inherits,
+    /// parent → direct child/composer (the `children_index` inverse;
+    /// `walk` supplies the transitivity).
+    InheritsInv,
+    /// class → modules whose plugin namespaces bridge to it. Module
+    /// nodes are terminal — bridge edges don't compose.
+    Bridges,
+}
+
+impl EdgeKind {
+    /// Every variant. New kinds MUST be added here — the `edges_from`
+    /// loop iterates it, so a forgotten kind is never traversed (and
+    /// its `flag()` arm + match arm are compile errors meanwhile).
+    pub const ALL: [EdgeKind; 3] = [Self::Inherits, Self::InheritsInv, Self::Bridges];
+
+    fn flag(self) -> EdgeKindMask {
+        match self {
+            EdgeKind::Inherits => EdgeKindMask::INHERITS,
+            EdgeKind::InheritsInv => EdgeKindMask::INHERITS_INV,
+            EdgeKind::Bridges => EdgeKindMask::BRIDGES,
+        }
+    }
+}
+
 bitflags::bitflags! {
-    /// Which edges a walk may traverse. Today's bespoke walkers are
-    /// masks: ancestry = INHERITS, the descendant/composer fan-out =
-    /// INHERITS_INV, plugin-entity reachability = BRIDGES.
+    /// A SET of [`EdgeKind`]s a walk may traverse (`INHERITS | BRIDGES`).
+    /// Storage + ergonomic `|` only — `EdgeKind` is the source of truth;
+    /// the consts here mirror its variants via `EdgeKind::flag()`.
     #[derive(Clone, Copy, PartialEq, Eq)]
     pub struct EdgeKindMask: u8 {
-        /// class → parent class/role (`use parent`/`@ISA`/`with`/…,
-        /// plus the synthetic app-surface edge — `parents_of` is the
-        /// single injection site, shared with the legacy walkers so
-        /// the two cannot disagree during the migration).
         const INHERITS     = 1 << 0;
-        /// parent → direct child/composer (the `children_index`
-        /// inverse; `walk` supplies the transitivity).
         const INHERITS_INV = 1 << 1;
-        /// class → modules whose plugin namespaces bridge to it.
-        /// Module nodes are terminal — bridge edges don't compose.
         const BRIDGES      = 1 << 2;
     }
 }
@@ -98,35 +126,44 @@ impl<'a> GraphView<'a> {
         }
     }
 
-    /// Edge derivation — the ONE place graph structure comes from. New
-    /// edge kinds add an arm here, never a parallel walker.
+    /// Edge derivation — the ONE place graph structure comes from. The
+    /// `match` is EXHAUSTIVE over `EdgeKind`, so a new kind can't be
+    /// added without writing its derivation here (never a parallel
+    /// walker).
     fn edges_from(&self, node: &Node, mask: EdgeKindMask, out: &mut Vec<Node>) {
         let Node::Class(class) = node else { return };
-        if mask.contains(EdgeKindMask::INHERITS) {
-            for p in crate::file_analysis::parents_of(
-                class,
-                &self.fa.package_parents,
-                self.idx,
-                &self.fa.app_surface_consumers,
-            ) {
-                out.push(Node::Class(p));
+        for kind in EdgeKind::ALL {
+            if !mask.contains(kind.flag()) {
+                continue;
             }
-        }
-        if mask.contains(EdgeKindMask::INHERITS_INV) {
-            if let Some(idx) = self.idx {
-                for (pkg, _module) in idx.direct_children_of(class) {
-                    out.push(Node::Class(pkg));
-                }
-            }
-        }
-        if mask.contains(EdgeKindMask::BRIDGES) {
-            if let Some(idx) = self.idx {
-                let mut seen_mods: std::collections::HashSet<String> = Default::default();
-                idx.for_each_entity_bridged_to(class, &mut |module, _cached, _sym| {
-                    if seen_mods.insert(module.to_string()) {
-                        out.push(Node::Module(module.to_string()));
+            match kind {
+                EdgeKind::Inherits => {
+                    for p in crate::file_analysis::parents_of(
+                        class,
+                        &self.fa.package_parents,
+                        self.idx,
+                        &self.fa.app_surface_consumers,
+                    ) {
+                        out.push(Node::Class(p));
                     }
-                });
+                }
+                EdgeKind::InheritsInv => {
+                    if let Some(idx) = self.idx {
+                        for (pkg, _module) in idx.direct_children_of(class) {
+                            out.push(Node::Class(pkg));
+                        }
+                    }
+                }
+                EdgeKind::Bridges => {
+                    if let Some(idx) = self.idx {
+                        let mut seen_mods: std::collections::HashSet<String> = Default::default();
+                        idx.for_each_entity_bridged_to(class, &mut |module, _cached, _sym| {
+                            if seen_mods.insert(module.to_string()) {
+                                out.push(Node::Module(module.to_string()));
+                            }
+                        });
+                    }
+                }
             }
         }
     }
