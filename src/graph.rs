@@ -81,11 +81,31 @@ pub enum Node {
 pub struct GraphView<'a> {
     fa: &'a FileAnalysis,
     idx: Option<&'a dyn CrossFileLookup>,
+    /// Brand context for branded BRIDGES edges. `None` = brand-agnostic:
+    /// every namespace is reached, the behavior before brands existed.
+    /// `Some(b)` = scoped: only global (unbranded) namespaces plus those
+    /// branded `b` are reached. The filter itself lives once in
+    /// `PluginNamespace::visible_under`; the view only carries the
+    /// context and threads it into the bridge primitive. Brand is walk
+    /// CONTEXT, not a new `EdgeKind` — the closed edge set is untouched.
+    /// See `docs/adr/branded-edges.md`.
+    brand: Option<&'a str>,
 }
 
 impl<'a> GraphView<'a> {
     pub fn new(fa: &'a FileAnalysis, idx: Option<&'a dyn CrossFileLookup>) -> Self {
-        GraphView { fa, idx }
+        GraphView { fa, idx, brand: None }
+    }
+
+    /// A brand-scoped view: branded BRIDGES edges fire only for the
+    /// matching `brand` (and global ones always). INHERITS / INHERITS_INV
+    /// are brand-agnostic and behave identically to [`Self::new`].
+    pub fn new_branded(
+        fa: &'a FileAnalysis,
+        idx: Option<&'a dyn CrossFileLookup>,
+        brand: Option<&'a str>,
+    ) -> Self {
+        GraphView { fa, idx, brand }
     }
 
     /// THE walker. DFS from `origin` over edges in `mask`, depth-capped
@@ -155,11 +175,15 @@ impl<'a> GraphView<'a> {
                 EdgeKind::Bridges => {
                     if let Some(idx) = self.idx {
                         let mut seen_mods: std::collections::HashSet<String> = Default::default();
-                        idx.for_each_entity_bridged_to(class, &mut |module, _cached, _sym| {
-                            if seen_mods.insert(module.to_string()) {
-                                out.push(Node::Module(module.to_string()));
-                            }
-                        });
+                        idx.for_each_entity_bridged_to_branded(
+                            class,
+                            self.brand,
+                            &mut |module, _cached, _sym| {
+                                if seen_mods.insert(module.to_string()) {
+                                    out.push(Node::Module(module.to_string()));
+                                }
+                            },
+                        );
                     }
                 }
             }

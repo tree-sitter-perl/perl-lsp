@@ -183,3 +183,142 @@ fn ancestor_funnel_includes_self_then_mro_order() {
     // DFS, not BFS — and Base seen-once despite the diamond.
     assert_eq!(order, vec!["A", "Left", "Base", "Right"]);
 }
+
+// ── branded edges ───────────────────────────────────────────────────
+// Two same-class receivers (here: two modules whose plugin namespaces
+// all bridge to ONE surface class S) carry distinct plugin content
+// without merging, because each namespace is branded by instance/file
+// identity and the query is brand-scoped. See `docs/adr/branded-edges.md`.
+
+/// Register a module whose single plugin namespace bridges to `surface`
+/// under `brand`, owning one entity sub named `helper`.
+fn branded_bridge_module(
+    idx: &crate::module_index::ModuleIndex,
+    mod_name: &str,
+    surface: &str,
+    brand: Option<&str>,
+    helper: &str,
+) {
+    let mut fa = parse(&format!("package {mod_name};\nsub {helper} {{ 1 }}\n1;\n"));
+    let sid = fa.symbols.iter().find(|s| s.name == helper).unwrap().id;
+    let zero = crate::file_analysis::Span {
+        start: tree_sitter::Point { row: 0, column: 0 },
+        end: tree_sitter::Point { row: 0, column: 0 },
+    };
+    fa.plugin_namespaces.push(crate::file_analysis::PluginNamespace {
+        id: format!("ns:{mod_name}"),
+        plugin_id: "test".into(),
+        kind: "app".into(),
+        entities: vec![sid],
+        bridges: vec![crate::file_analysis::Bridge::Class(surface.into())],
+        brand: brand.map(|s| s.to_string()),
+        decl_span: zero,
+    });
+    idx.insert_cache(
+        mod_name,
+        Some(Arc::new(crate::file_analysis::CachedModule::new(
+            std::path::PathBuf::from(format!("/fake/g/{mod_name}.pm")),
+            Arc::new(fa),
+        ))),
+    );
+}
+
+/// Names of entities reached from `surface` through the BRIDGES walk
+/// under `brand`, read RAW off each reached module (the walk is the only
+/// brand filter — the no-double-filter invariant).
+fn helpers_visible(
+    idx: &crate::module_index::ModuleIndex,
+    surface: &str,
+    brand: Option<&str>,
+) -> Vec<String> {
+    let probe = parse("package Probe;\n1;\n");
+    let g = GraphView::new_branded(&probe, Some(idx), brand);
+    let mut names: Vec<String> = Vec::new();
+    g.walk(Node::Class(surface.into()), EdgeKindMask::BRIDGES, &mut |n| {
+        if let Node::Module(m) = n {
+            if let Some(cached) = idx.get_cached(m) {
+                for ns in &cached.analysis.plugin_namespaces {
+                    for sid in &ns.entities {
+                        if let Some(sym) = cached.analysis.symbols.get(sid.0 as usize) {
+                            names.push(sym.name.clone());
+                        }
+                    }
+                }
+            }
+        }
+        std::ops::ControlFlow::Continue(())
+    });
+    names.sort();
+    names
+}
+
+#[test]
+fn branded_bridges_separate_same_class_receivers() {
+    // R1: two apps' helpers bridge to the SAME surface S under distinct
+    // brands; a brand-"one" query sees only app-one's helper.
+    let idx = crate::module_index::ModuleIndex::new_for_test();
+    let s = "App::Surface";
+    branded_bridge_module(&idx, "App::One", s, Some("one"), "helper_one");
+    branded_bridge_module(&idx, "App::Two", s, Some("two"), "helper_two");
+
+    assert_eq!(helpers_visible(&idx, s, Some("one")), vec!["helper_one"]);
+    assert_eq!(helpers_visible(&idx, s, Some("two")), vec!["helper_two"]);
+}
+
+#[test]
+fn unbranded_bridge_is_global_under_every_brand() {
+    // R2: an unbranded (global) namespace is visible under any brand
+    // context AND under the agnostic (None) context; a branded one is
+    // not — brands are additive, not a partition of the global set.
+    let idx = crate::module_index::ModuleIndex::new_for_test();
+    let s = "App::Surface";
+    branded_bridge_module(&idx, "App::One", s, Some("one"), "helper_one");
+    branded_bridge_module(&idx, "Shared::Plug", s, None, "global_helper");
+
+    // brand "one": own + global, never app-two's (absent here) — global rides along.
+    assert_eq!(
+        helpers_visible(&idx, s, Some("one")),
+        vec!["global_helper", "helper_one"],
+    );
+    // a different brand sees the global but NOT app-one's branded helper.
+    assert_eq!(helpers_visible(&idx, s, Some("other")), vec!["global_helper"]);
+    // agnostic (None) sees everything — the pre-brand behavior, no regression.
+    assert_eq!(
+        helpers_visible(&idx, s, None),
+        vec!["global_helper", "helper_one"],
+    );
+}
+
+#[test]
+fn branded_filter_routes_through_the_one_bridge_primitive() {
+    // R3: the brand filter lives behind the single bridge primitive, so
+    // the graph walk and a direct `for_each_entity_bridged_to_branded`
+    // call cannot disagree (no parallel walker). Also pins that the
+    // unbranded `for_each_entity_bridged_to` == the None-brand case.
+    let idx = crate::module_index::ModuleIndex::new_for_test();
+    let s = "App::Surface";
+    branded_bridge_module(&idx, "App::One", s, Some("one"), "helper_one");
+    branded_bridge_module(&idx, "App::Two", s, Some("two"), "helper_two");
+
+    let mut direct: Vec<String> = Vec::new();
+    idx.for_each_entity_bridged_to_branded(
+        s,
+        Some("one"),
+        |_m: &str, _c: &Arc<crate::file_analysis::CachedModule>, sym: &crate::file_analysis::Symbol| {
+            direct.push(sym.name.clone());
+        },
+    );
+    direct.sort();
+    assert_eq!(direct, helpers_visible(&idx, s, Some("one")));
+
+    // unbranded entry point == agnostic (None) == sees both
+    let mut all: Vec<String> = Vec::new();
+    idx.for_each_entity_bridged_to(
+        s,
+        |_m: &str, _c: &Arc<crate::file_analysis::CachedModule>, sym: &crate::file_analysis::Symbol| {
+            all.push(sym.name.clone())
+        },
+    );
+    all.sort();
+    assert_eq!(all, vec!["helper_one", "helper_two"]);
+}

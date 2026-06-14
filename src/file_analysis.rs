@@ -233,6 +233,21 @@ pub trait CrossFileLookup {
         class_name: &str,
         f: &mut dyn FnMut(&str, &std::sync::Arc<CachedModule>, &Symbol),
     );
+    /// Brand-scoped sibling of [`Self::for_each_entity_bridged_to`]. Only
+    /// visits entities of namespaces whose `visible_under(query_brand)`
+    /// holds, so a query from one branded instance never sees another's
+    /// content. `query_brand == None` is brand-agnostic (sees every
+    /// namespace — identical to the unbranded method). The default
+    /// delegates to the unbranded form so non-Index `CrossFileLookup`
+    /// impls keep working until they opt in. See `docs/adr/branded-edges.md`.
+    fn for_each_entity_bridged_to_branded(
+        &self,
+        class_name: &str,
+        _query_brand: Option<&str>,
+        f: &mut dyn FnMut(&str, &std::sync::Arc<CachedModule>, &Symbol),
+    ) {
+        self.for_each_entity_bridged_to(class_name, f)
+    }
     /// Direct children/composers of `class` as (package, module) pairs
     /// — the `children_index` inverse, depth 1 (the graph walker
     /// supplies transitivity).
@@ -1405,9 +1420,47 @@ pub struct PluginNamespace {
     pub entities: Vec<SymbolId>,
     /// How Perl-space expressions reach this namespace's entities.
     pub bridges: Vec<Bridge>,
+    /// Instance/file identity that scopes this namespace's visibility.
+    /// `None` (the default) = GLOBAL: visible to every query, the
+    /// behavior before brands existed. `Some(b)` = scoped: visible only
+    /// to a query whose brand context matches `b` (or is brand-agnostic).
+    /// Lets two same-class receivers — two self-contained Mojo::Lite apps
+    /// branded by file, two `Minion` instances branded by decl site —
+    /// carry distinct plugin content without merging at the shared
+    /// bridge class. The additive rule lives once in [`Self::visible_under`];
+    /// consumers ask the namespace, never re-derive it. See
+    /// `docs/adr/branded-edges.md`.
+    #[serde(default)]
+    pub brand: Option<String>,
     /// Span where the plugin declared the namespace (typically the
     /// registration call — `$app->plugin('Minion', ...)` etc.).
     pub decl_span: Span,
+}
+
+impl PluginNamespace {
+    /// Whether this namespace is visible to a query carrying
+    /// `query_brand`. The ONE home of the additive-brand rule:
+    ///
+    /// - An UNBRANDED namespace (`brand == None`) is global — visible
+    ///   under every context, including the brand-agnostic `None`. This
+    ///   is what keeps every pre-brand namespace (and every plugin that
+    ///   never opts in) behaving exactly as before.
+    /// - A BRANDED namespace (`brand == Some(b)`) is visible only when
+    ///   the query is brand-agnostic (`None` — a caller that wants the
+    ///   pre-brand "see everything" behavior, no regression) or carries
+    ///   the matching tag (`Some(b)`).
+    ///
+    /// The walk/primitive is the ONLY brand filter; consumers read the
+    /// reached entities raw and never re-apply this (the no-double-filter
+    /// invariant — a second decision with the wrong context silently
+    /// drops branded content). See `docs/adr/branded-edges.md`.
+    pub fn visible_under(&self, query_brand: Option<&str>) -> bool {
+        match (self.brand.as_deref(), query_brand) {
+            (None, _) => true,           // global namespace: always visible
+            (Some(_), None) => true,     // agnostic query: sees everything
+            (Some(b), Some(q)) => b == q, // scoped query: exact match
+        }
+    }
 }
 
 /// A connection from a Perl-space type/shape into a plugin namespace.

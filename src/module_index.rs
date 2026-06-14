@@ -844,6 +844,22 @@ impl ModuleIndex {
     pub fn for_each_entity_bridged_to(
         &self,
         class_name: &str,
+        visit: impl FnMut(&str, &Arc<CachedModule>, &crate::file_analysis::Symbol),
+    ) {
+        // Brand-agnostic: `None` sees every namespace (no filtering).
+        self.for_each_entity_bridged_to_branded(class_name, None, visit)
+    }
+
+    /// Brand-scoped entity walk — the cross-file half of branded edges.
+    /// Skips namespaces whose `visible_under(query_brand)` is false, so a
+    /// query from one branded instance (a Mojo::Lite app, a `Minion`
+    /// receiver) never sees another instance's plugin content even when
+    /// both bridge to the same class. `query_brand == None` reproduces
+    /// the unbranded walk exactly. See `docs/adr/branded-edges.md`.
+    pub fn for_each_entity_bridged_to_branded(
+        &self,
+        class_name: &str,
+        query_brand: Option<&str>,
         // `mod_name` is the cache key the bridging module is registered under
         // — the authoritative handle for a follow-up `get_cached(mod_name)`.
         // Don't re-derive it from the analysis: the registration name and the
@@ -853,6 +869,10 @@ impl ModuleIndex {
         for mod_name in self.modules_bridging_to(class_name) {
             let Some(cached) = self.get_cached(&mod_name) else { continue };
             for ns in &cached.analysis.plugin_namespaces {
+                // The walk is the ONLY brand filter (no-double-filter
+                // invariant): once a namespace is brand-visible here, its
+                // entities are yielded raw.
+                if !ns.visible_under(query_brand) { continue; }
                 let bridges_class = ns.bridges.iter().any(|b|
                     matches!(b, crate::file_analysis::Bridge::Class(c) if c == class_name));
                 if !bridges_class { continue; }
@@ -966,6 +986,15 @@ impl CrossFileLookup for ModuleIndex {
         f: &mut dyn FnMut(&str, &Arc<CachedModule>, &crate::file_analysis::Symbol),
     ) {
         self.for_each_entity_bridged_to(class_name, f)
+    }
+
+    fn for_each_entity_bridged_to_branded(
+        &self,
+        class_name: &str,
+        query_brand: Option<&str>,
+        f: &mut dyn FnMut(&str, &Arc<CachedModule>, &crate::file_analysis::Symbol),
+    ) {
+        self.for_each_entity_bridged_to_branded(class_name, query_brand, f)
     }
 
     fn direct_children_of(&self, class: &str) -> Vec<(String, String)> {

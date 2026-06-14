@@ -3272,6 +3272,10 @@ impl<'a> Builder<'a> {
                         kind,
                         entities,
                         bridges,
+                        // Emitted unbranded; per-instance brands are
+                        // assigned at registration when file identity is
+                        // known (`FileAnalysis::apply_home_brand`).
+                        brand: None,
                         decl_span,
                     });
                 }
