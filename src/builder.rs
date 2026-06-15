@@ -12057,10 +12057,14 @@ impl<'a> Builder<'a> {
             let mut current = Some(handler.scope);
             while let Some(scope_id) = current {
                 if let Some(vars) = scope_vars.get(&scope_id) {
+                    // LATEST decl before the handler (Perl shadowing) —
+                    // the identical max-by-position selection the
+                    // query side (`FileAnalysis::latest_lexical_decl`)
+                    // makes, so brands never disagree.
                     if let Some((_, decl_point)) = vars
                         .iter()
                         .filter(|(n, p)| n == receiver && le_point(*p, before))
-                        .last()
+                        .max_by_key(|(_, p)| (p.row, p.column))
                     {
                         assignments.push((
                             *hsid,

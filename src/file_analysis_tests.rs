@@ -2153,6 +2153,63 @@ fn minion_tasks_are_scoped_per_instance() {
         "$a->enqueue('task_b') must NOT reach $b's task (the leak)");
 }
 
+/// F1 regression: a re-`my` of the receiver (Perl shadowing) must brand
+/// build-side and resolve query-side on the SAME (latest) declaration —
+/// otherwise the brands disagree and the own task silently fails to
+/// resolve. `enqueue('task_b')` (the second `$m`'s task) resolves;
+/// `enqueue('task_a')` (the shadowed-away first `$m`'s) does not.
+#[test]
+fn minion_tasks_shadowed_receiver_resolve_consistently() {
+    let src = "use Minion;\n\
+        my $m = Minion->new;\n\
+        $m->add_task(task_a => sub { 1 });\n\
+        my $m = Minion->new;\n\
+        $m->add_task(task_b => sub { 2 });\n\
+        $m->enqueue('task_b');\n\
+        $m->enqueue('task_a');\n";
+    let mut parser = crate::builder::create_parser();
+    let tree = parser.parse(src, None).unwrap();
+    let fa = crate::builder::build(&tree, src.as_bytes());
+    let resolved = |task: &str| -> bool {
+        fa.refs.iter().any(|r| {
+            matches!(&r.kind, crate::file_analysis::RefKind::DispatchCall { dispatcher, .. } if dispatcher == "enqueue")
+                && r.target_name == task
+                && r.resolves_to.is_some()
+        })
+    };
+    assert!(resolved("task_b"), "the current $m's own task must resolve");
+    assert!(!resolved("task_a"), "a task on the shadowed-away $m must NOT resolve");
+}
+
+/// F2 regression: stacked handlers with the same (name, owner) — the
+/// dispatch ref must resolve to the LAST-defined one (the pre-brand
+/// `(name,owner)` HashMap was last-write-wins). Two `dup` tasks on the
+/// same `$m`; `enqueue('dup')` resolves to the second registration.
+#[test]
+fn stacked_tasks_resolve_to_last_defined() {
+    let src = "use Minion;\n\
+        my $m = Minion->new;\n\
+        $m->add_task(dup => sub { 1 });\n\
+        $m->add_task(dup => sub { 2 });\n\
+        $m->enqueue('dup');\n";
+    let mut parser = crate::builder::create_parser();
+    let tree = parser.parse(src, None).unwrap();
+    let fa = crate::builder::build(&tree, src.as_bytes());
+    // the two handler defs, by declaration order (span).
+    let mut defs: Vec<(crate::file_analysis::SymbolId, u32)> = fa.symbols.iter()
+        .filter(|s| s.name == "dup" && matches!(s.detail, crate::file_analysis::SymbolDetail::Handler { .. }))
+        .map(|s| (s.id, s.span.start.row as u32))
+        .collect();
+    defs.sort_by_key(|(_, row)| *row);
+    assert_eq!(defs.len(), 2, "expected two stacked dup handlers");
+    let last = defs.last().unwrap().0;
+    let target = fa.refs.iter().find(|r| {
+        matches!(&r.kind, crate::file_analysis::RefKind::DispatchCall { dispatcher, .. } if dispatcher == "enqueue")
+            && r.target_name == "dup"
+    }).and_then(|r| r.resolves_to);
+    assert_eq!(target, Some(last), "enqueue('dup') must resolve to the LAST-defined handler");
+}
+
 /// The same two apps, but app-one is left UNBRANDED (home_brand None) —
 /// the pre-feature state. It is brand-agnostic, so it sees everything,
 /// proving the consumer brand is what filters (and that branding is

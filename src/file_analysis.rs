@@ -1546,6 +1546,11 @@ pub fn scope_chain_of(scopes: &[Scope], start: ScopeId) -> Vec<ScopeId> {
     chain
 }
 
+/// Lexical `<=` on positions ((row, column) order).
+pub(crate) fn le_point(a: Point, b: Point) -> bool {
+    (a.row, a.column) <= (b.row, b.column)
+}
+
 /// Canonical brand id for a file path — the value handed to
 /// [`FileAnalysis::apply_home_brand`] and matched by
 /// [`PluginNamespace::visible_under`]. Canonicalizes so the
@@ -2947,16 +2952,31 @@ impl FileAnalysis {
                     .push((sym.id, instance_brand.as_deref()));
             }
         }
+        // MethodCall refs bucketed by verb — the dispatch-receiver brand
+        // resolver looks the enclosing call up here instead of scanning
+        // every ref per DispatchCall (the pairing would otherwise be
+        // O(dispatch_refs × refs)).
+        let mut calls_by_verb: HashMap<&str, Vec<usize>> = HashMap::new();
+        for (i, r) in self.refs.iter().enumerate() {
+            if matches!(r.kind, RefKind::MethodCall { .. }) {
+                calls_by_verb.entry(r.target_name.as_str()).or_default().push(i);
+            }
+        }
         let mut handler_resolutions: Vec<(usize, SymbolId)> = Vec::new();
         for (i, r) in self.refs.iter().enumerate() {
             if r.resolves_to.is_some() { continue; }
             if let RefKind::DispatchCall { owner: Some(owner), .. } = &r.kind {
                 if let Some(cands) = handler_defs.get(&(r.target_name.as_str(), owner)) {
-                    let recv = self.dispatch_ref_receiver_brand(r);
+                    let recv = self.dispatch_ref_receiver_brand(r, &calls_by_verb);
+                    // `.rev()` so that among equal-preference candidates
+                    // the LAST-defined wins — preserving the pre-brand
+                    // stacked-handler behavior (the old `(name,owner)`
+                    // HashMap was last-write-wins). Exact instance match
+                    // (key 0) still beats a global (key 1).
                     let pick = cands
                         .iter()
+                        .rev()
                         .filter(|(_, b)| brand_visible(*b, recv.as_deref()))
-                        // exact instance match (key 0) beats a global (key 1)
                         .min_by_key(|(_, b)| usize::from(*b != recv.as_deref()))
                         .map(|(sid, _)| *sid);
                     if let Some(sid) = pick {
@@ -6623,11 +6643,40 @@ impl FileAnalysis {
         if crate::conventions::is_conventional_invocant_name(receiver) {
             return None; // $self / $class — the package, not an instance
         }
-        let decl = self.resolve_variable(receiver, point)?;
-        Some(format!(
-            "inst:{}@{}:{}",
-            receiver, decl.span.start.row, decl.span.start.column
-        ))
+        // Key on the LATEST decl before `point` (Perl shadowing), the
+        // identical selection `Builder::assign_task_instance_brands` makes
+        // at build time — `resolve_variable` returns the FIRST in-scope
+        // match and would disagree under shadowing, splitting one
+        // instance's identity. See `docs/adr/branded-edges.md`.
+        let decl = self.latest_lexical_decl(receiver, point)?;
+        Some(format!("inst:{}@{}:{}", receiver, decl.row, decl.column))
+    }
+
+    /// Location of the LATEST declaration of scalar/field `name` before
+    /// `point`: scope chain innermost-first, first scope with a match
+    /// wins (its latest decl). The shared decl-selection rule for
+    /// instance brands — build time runs the same selection.
+    fn latest_lexical_decl(&self, name: &str, point: Point) -> Option<Point> {
+        let scope = self.scope_at(point)?;
+        for scope_id in self.scope_chain(scope) {
+            let latest = self
+                .symbols_by_scope
+                .get(&scope_id)
+                .into_iter()
+                .flatten()
+                .map(|id| &self.symbols[id.0 as usize])
+                .filter(|s| {
+                    s.name == name
+                        && matches!(s.kind, SymKind::Variable | SymKind::Field)
+                        && le_point(s.span.start, point)
+                })
+                .map(|s| s.span.start)
+                .max_by_key(|p| (p.row, p.column));
+            if latest.is_some() {
+                return latest;
+            }
+        }
+        None
     }
 
     /// The instance brand of the receiver of the method call enclosing
@@ -6636,14 +6685,14 @@ impl FileAnalysis {
     /// call's invocant via `instance_brand_at`. `None` for non-instance
     /// receivers. See `docs/adr/branded-edges.md`.
     pub(crate) fn receiver_brand_at(&self, point: Point) -> Option<String> {
-        let le = |a: Point, b: Point| (a.row, a.column) <= (b.row, b.column);
+        // Once per completion (not in a loop) — a linear scan is fine.
         let mc = self
             .refs
             .iter()
             .filter(|r| {
                 matches!(r.kind, RefKind::MethodCall { .. })
-                    && le(r.span.start, point)
-                    && le(point, r.span.end)
+                    && le_point(r.span.start, point)
+                    && le_point(point, r.span.end)
             })
             .max_by_key(|r| (r.span.start.row, r.span.start.column))?;
         let RefKind::MethodCall { invocant, invocant_span, .. } = &mc.kind else {
@@ -6656,26 +6705,27 @@ impl FileAnalysis {
     /// The instance brand of a `DispatchCall` ref's receiver — the
     /// query-side counterpart of the handler's `instance_brand`. Finds
     /// the enclosing method call (same dispatcher verb, whose span
-    /// contains the name-arg ref), then resolves its invocant variable
-    /// via `instance_brand_at`. `None` for class / `$self` / chain /
-    /// untyped receivers — they dispatch agnostically (pre-brand
-    /// behavior). See `docs/adr/branded-edges.md`.
-    fn dispatch_ref_receiver_brand(&self, dref: &Ref) -> Option<String> {
+    /// contains the name-arg ref) via the `calls_by_verb` index, then
+    /// resolves its invocant variable via `instance_brand_at`. `None` for
+    /// class / `$self` / chain / untyped receivers — they dispatch
+    /// agnostically (pre-brand behavior). See `docs/adr/branded-edges.md`.
+    fn dispatch_ref_receiver_brand(
+        &self,
+        dref: &Ref,
+        calls_by_verb: &HashMap<&str, Vec<usize>>,
+    ) -> Option<String> {
         let RefKind::DispatchCall { dispatcher, .. } = &dref.kind else {
             return None;
         };
-        let le = |a: Point, b: Point| (a.row, a.column) <= (b.row, b.column);
         // Tightest enclosing call: the one whose span contains the ref
         // and starts latest (innermost) — guards against a nested call
         // reusing the same verb.
-        let mc = self
-            .refs
+        let mc = calls_by_verb
+            .get(dispatcher.as_str())?
             .iter()
+            .map(|&i| &self.refs[i])
             .filter(|r| {
-                matches!(r.kind, RefKind::MethodCall { .. })
-                    && r.target_name == *dispatcher
-                    && le(r.span.start, dref.span.start)
-                    && le(dref.span.end, r.span.end)
+                le_point(r.span.start, dref.span.start) && le_point(dref.span.end, r.span.end)
             })
             .max_by_key(|r| (r.span.start.row, r.span.start.column))?;
         let RefKind::MethodCall { invocant, invocant_span, .. } = &mc.kind else {
