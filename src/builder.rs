@@ -4603,11 +4603,9 @@ impl<'a> Builder<'a> {
         }
         let method = rhs.child_by_field_name("method")?;
         let name = method.utf8_text(self.source).ok()?;
-        if crate::conventions::is_constructor_name(name) {
-            return None; // `->new` is a fresh instance, not an alias
-        }
-        (!name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'))
-            .then(|| format!("acc:{name}"))
+        // Same leaf rule as the receiver-side `accessor_chain_brand`
+        // (excludes `->new`, the constructor) — one helper, no drift.
+        crate::conventions::accessor_brand_for_leaf(name)
     }
 
     fn visit_variable_decl(&mut self, node: Node<'a>) {

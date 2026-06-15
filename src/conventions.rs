@@ -46,16 +46,27 @@ pub fn is_constructor_name(name: &str) -> bool {
 /// with args or a sigil — `$app->minion('x')` / deref shapes stay global
 /// (`None`), the conservative default.
 pub fn accessor_chain_brand(receiver: &str) -> Option<String> {
-    let leaf = receiver.rsplit("->").next()?.trim();
+    let leaf = receiver.rsplit("->").next()?;
     // a chain at all? (`rsplit` always yields the whole string when there
     // is no `->`, so require the separator was actually present)
     if leaf == receiver {
         return None;
     }
+    accessor_brand_for_leaf(leaf)
+}
+
+/// The brand for an accessor whose leaf method is `leaf`, or `None` if
+/// `leaf` isn't a singleton-accessor identity. The ONE leaf rule, shared
+/// by `accessor_chain_brand` (receiver text) and the builder's
+/// `decl_accessor_alias_brand` (assignment RHS) so they can't drift: a
+/// bare Perl identifier that ISN'T a constructor (`->new` returns a fresh
+/// instance, not a singleton). See `docs/adr/branded-edges.md`.
+pub fn accessor_brand_for_leaf(leaf: &str) -> Option<String> {
+    let leaf = leaf.trim();
     let is_ident = !leaf.is_empty()
         && leaf.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
         && !leaf.chars().next().unwrap().is_ascii_digit();
-    is_ident.then(|| format!("acc:{leaf}"))
+    (is_ident && !is_constructor_name(leaf)).then(|| format!("acc:{leaf}"))
 }
 
 /// `__PACKAGE__` — the compile-time token for the enclosing package.
@@ -229,6 +240,9 @@ mod tests {
         assert_eq!(accessor_chain_brand("$minion"), None);
         assert_eq!(accessor_chain_brand("$app->minion('x')"), None);
         assert_eq!(accessor_chain_brand("$Foo::bar"), None);
+        // a constructor leaf is a FRESH instance, not a singleton accessor.
+        assert_eq!(accessor_chain_brand("$app->new"), None);
+        assert_eq!(accessor_chain_brand("Minion->new"), None);
     }
 
     #[test]
