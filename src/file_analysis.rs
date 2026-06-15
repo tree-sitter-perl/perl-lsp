@@ -2345,6 +2345,14 @@ pub struct FileAnalysis {
     #[serde(default)]
     pub home_brand: Option<String>,
 
+    /// Variable decl symbol → the accessor brand it aliases
+    /// (`my $m = $app->minion` → `acc:minion`). So a variable holding an
+    /// accessor's result dispatches to the SAME instance as the accessor
+    /// chain itself; `instance_brand_at` reads it before the per-variable
+    /// brand. See `docs/adr/branded-edges.md`.
+    #[serde(default)]
+    pub var_accessor_brands: HashMap<SymbolId, String>,
+
     /// Per-symbol provenance for return types. Populated for plugin
     /// `overrides()` and for reducer-driven folds over the witness bag.
     /// Missing entry == `TypeProvenance::Inferred`.
@@ -2529,6 +2537,7 @@ pub struct FileAnalysisParts {
     pub role_packages: HashSet<String>,
     pub plugin_loads: Vec<PluginLoadFact>,
     pub loader_config_params: Vec<LoaderConfigParam>,
+    pub var_accessor_brands: HashMap<SymbolId, String>,
 }
 
 /// "This file loads plugin `name`, passing the config value at
@@ -2677,6 +2686,7 @@ impl FileAnalysis {
             role_packages,
             plugin_loads,
             loader_config_params,
+            var_accessor_brands,
         } = parts;
         witnesses.rebuild_index();
         let mut fa = FileAnalysis {
@@ -2700,6 +2710,7 @@ impl FileAnalysis {
             plugin_namespaces,
             // Set at registration (`apply_home_brand`), not build.
             home_brand: None,
+            var_accessor_brands,
             type_provenance,
             witnesses,
             package_framework,
@@ -6658,15 +6669,23 @@ impl FileAnalysis {
         // at build time — `resolve_variable` returns the FIRST in-scope
         // match and would disagree under shadowing, splitting one
         // instance's identity. See `docs/adr/branded-edges.md`.
-        let decl = self.latest_lexical_decl(receiver, point)?;
-        Some(format!("inst:{}@{}:{}", receiver, decl.row, decl.column))
+        let decl_id = self.latest_lexical_decl(receiver, point)?;
+        // A variable that aliases an accessor (`my $m = $app->minion`)
+        // shares the ACCESSOR's brand, so `$m->enqueue` reaches the same
+        // tasks as `$app->minion->enqueue`. Checked before the per-variable
+        // brand. Build side does the identical lookup.
+        if let Some(brand) = self.var_accessor_brands.get(&decl_id) {
+            return Some(brand.clone());
+        }
+        let p = self.symbols[decl_id.0 as usize].span.start;
+        Some(format!("inst:{}@{}:{}", receiver, p.row, p.column))
     }
 
-    /// Location of the LATEST declaration of scalar/field `name` before
-    /// `point`: scope chain innermost-first, first scope with a match
-    /// wins (its latest decl). The shared decl-selection rule for
-    /// instance brands — build time runs the same selection.
-    fn latest_lexical_decl(&self, name: &str, point: Point) -> Option<Point> {
+    /// The LATEST declaration of scalar/field `name` before `point`: scope
+    /// chain innermost-first, first scope with a match wins (its latest
+    /// decl). The shared decl-selection rule for instance brands — build
+    /// time runs the same selection.
+    fn latest_lexical_decl(&self, name: &str, point: Point) -> Option<SymbolId> {
         let scope = self.scope_at(point)?;
         for scope_id in self.scope_chain(scope) {
             let latest = self
@@ -6680,8 +6699,8 @@ impl FileAnalysis {
                         && matches!(s.kind, SymKind::Variable | SymKind::Field)
                         && le_point(s.span.start, point)
                 })
-                .map(|s| s.span.start)
-                .max_by_key(|p| (p.row, p.column));
+                .max_by_key(|s| (s.span.start.row, s.span.start.column))
+                .map(|s| s.id);
             if latest.is_some() {
                 return latest;
             }

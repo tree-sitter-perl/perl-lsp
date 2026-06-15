@@ -241,6 +241,7 @@ fn build_with_plugins_inner(
         reexport_modules: Vec::new(),
         plugin_namespaces: Vec::new(),
         task_handler_receivers: Vec::new(),
+        var_accessor_brands: std::collections::HashMap::new(),
         type_provenance: std::collections::HashMap::new(),
         bag: crate::witnesses::WitnessBag::new(),
         unresolved_expr_nodes: Vec::new(),
@@ -556,6 +557,7 @@ fn build_with_plugins_inner(
         role_packages: b.role_packages,
         plugin_loads: b.plugin_loads,
         loader_config_params: b.loader_config_params,
+        var_accessor_brands: b.var_accessor_brands,
     });
     // Finalize: run the legacy text-based MCB resolver as a fallback.
     // For every assignment the unified typer (run before
@@ -1392,6 +1394,12 @@ struct Builder<'a> {
     /// Resolved to per-instance brands post-construction once the
     /// scope/symbol tables settle (`FileAnalysis::assign_instance_brands`).
     task_handler_receivers: Vec<(crate::file_analysis::SymbolId, String)>,
+    /// Variable decl symbol → the accessor brand it aliases
+    /// (`my $m = $app->minion` → `$m` is `acc:minion`). So a variable that
+    /// aliases an accessor dispatches to the SAME instance as the accessor
+    /// chain — `$m->enqueue` reaches `$app->minion`'s tasks. See
+    /// `docs/adr/branded-edges.md`.
+    var_accessor_brands: std::collections::HashMap<crate::file_analysis::SymbolId, String>,
     /// Per-symbol provenance for return types. Populated by plugin
     /// `overrides()` (PluginOverride) and by reducer-driven folds
     /// (ReducerFold). Empty entry == `TypeProvenance::Inferred`.
@@ -4575,6 +4583,33 @@ impl<'a> Builder<'a> {
         }
     }
 
+    /// The accessor brand a `my $x = <rhs>` decl aliases, if its RHS is a
+    /// method-call chain naming an accessor (`$app->minion` → `acc:minion`).
+    /// `None` for a constructor (`Class->new` — a FRESH instance, keyed
+    /// per-variable), a non-method RHS, or no initializer. Matches
+    /// `conventions::accessor_chain_brand`'s leaf rule so the aliased
+    /// variable and the accessor chain agree. See `docs/adr/branded-edges.md`.
+    fn decl_accessor_alias_brand(&self, decl: Node<'a>) -> Option<String> {
+        let parent = decl.parent()?;
+        if parent.kind() != "assignment_expression" {
+            return None;
+        }
+        if parent.child_by_field_name("left").map(|n| n.id()) != Some(decl.id()) {
+            return None;
+        }
+        let rhs = parent.child_by_field_name("right")?;
+        if rhs.kind() != "method_call_expression" {
+            return None;
+        }
+        let method = rhs.child_by_field_name("method")?;
+        let name = method.utf8_text(self.source).ok()?;
+        if crate::conventions::is_constructor_name(name) {
+            return None; // `->new` is a fresh instance, not an alias
+        }
+        (!name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'))
+            .then(|| format!("acc:{name}"))
+    }
+
     fn visit_variable_decl(&mut self, node: Node<'a>) {
         let keyword = self.get_decl_keyword(node, );
         let decl_kind = match keyword.as_deref() {
@@ -4587,6 +4622,12 @@ impl<'a> Builder<'a> {
 
         // Collect all declared variables
         let vars = self.collect_vars_from_decl(node);
+        // `my $m = $app->minion` — record `$m` as an alias of the accessor
+        // instance so it shares the accessor's brand. Only a single scalar
+        // decl initialized by a (non-constructor) method-call chain.
+        let alias_brand = (vars.len() == 1 && vars[0].0.starts_with('$'))
+            .then(|| self.decl_accessor_alias_brand(node))
+            .flatten();
         for (name, var_span) in &vars {
             let sigil = name.chars().next().unwrap_or('$');
             let sym_kind = if decl_kind == DeclKind::Field { SymKind::Field } else { SymKind::Variable };
@@ -4596,13 +4637,16 @@ impl<'a> Builder<'a> {
             } else {
                 SymbolDetail::Variable { sigil, decl_kind }
             };
-            self.add_symbol(
+            let sid = self.add_symbol(
                 name.clone(),
                 sym_kind,
                 node_to_span(node),
                 *var_span,
                 detail,
             );
+            if let Some(brand) = &alias_brand {
+                self.var_accessor_brands.insert(sid, brand.clone());
+            }
             self.add_ref(
                 RefKind::Variable,
                 *var_span,
@@ -12030,16 +12074,18 @@ impl<'a> Builder<'a> {
         if self.task_handler_receivers.is_empty() {
             return;
         }
-        // scope -> declared scalars/fields (name, decl point), the same
-        // shape `resolve_variable_refs` walks.
-        let mut scope_vars: std::collections::HashMap<ScopeId, Vec<(String, Point)>> =
-            std::collections::HashMap::new();
+        // scope -> declared scalars/fields (name, decl point, sym id), the
+        // same shape `resolve_variable_refs` walks.
+        let mut scope_vars: std::collections::HashMap<
+            ScopeId,
+            Vec<(String, Point, crate::file_analysis::SymbolId)>,
+        > = std::collections::HashMap::new();
         for sym in &self.symbols {
             if matches!(sym.kind, SymKind::Variable | SymKind::Field) {
                 scope_vars
                     .entry(sym.scope)
                     .or_default()
-                    .push((sym.name.clone(), sym.span.start));
+                    .push((sym.name.clone(), sym.span.start, sym.id));
             }
         }
         let receivers = std::mem::take(&mut self.task_handler_receivers);
@@ -12068,15 +12114,22 @@ impl<'a> Builder<'a> {
                     // the identical max-by-position selection the
                     // query side (`FileAnalysis::latest_lexical_decl`)
                     // makes, so brands never disagree.
-                    if let Some((_, decl_point)) = vars
+                    if let Some((_, decl_point, decl_id)) = vars
                         .iter()
-                        .filter(|(n, p)| n == receiver && le_point(*p, before))
-                        .max_by_key(|(_, p)| (p.row, p.column))
+                        .filter(|(n, p, _)| n == receiver && le_point(*p, before))
+                        .max_by_key(|(_, p, _)| (p.row, p.column))
                     {
-                        assignments.push((
-                            *hsid,
-                            format!("inst:{}@{}:{}", receiver, decl_point.row, decl_point.column),
-                        ));
+                        // A variable aliasing an accessor inherits the
+                        // accessor brand (identical lookup to the query
+                        // side's `var_accessor_brands`).
+                        let brand = self
+                            .var_accessor_brands
+                            .get(decl_id)
+                            .cloned()
+                            .unwrap_or_else(|| {
+                                format!("inst:{}@{}:{}", receiver, decl_point.row, decl_point.column)
+                            });
+                        assignments.push((*hsid, brand));
                         break;
                     }
                 }

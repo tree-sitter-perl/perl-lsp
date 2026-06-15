@@ -2187,6 +2187,43 @@ fn accessor_chain_tasks_scoped_by_accessor() {
     assert!(resolved_at(5, "only_minion"), "same accessor on a different base must still resolve");
 }
 
+/// A variable initialized from an accessor chain (`my $m = $app->minion`)
+/// ALIASES that accessor's instance — so it dispatches to the SAME tasks,
+/// whichever form (accessor or alias) registers vs enqueues. A
+/// constructor (`Class->new`) stays a fresh per-variable instance. Closes
+/// the mixed-form regression the accessor-chain tier introduced. See
+/// `docs/adr/branded-edges.md`.
+#[test]
+fn accessor_alias_variable_shares_the_accessor_instance() {
+    use crate::file_analysis::RefKind;
+    let enqueue_resolves = |src: &str, task: &str| -> bool {
+        let mut parser = crate::builder::create_parser();
+        let tree = parser.parse(src, None).unwrap();
+        let fa = crate::builder::build(&tree, src.as_bytes());
+        fa.refs.iter().any(|r| {
+            matches!(&r.kind, RefKind::DispatchCall { dispatcher, .. } if dispatcher == "enqueue")
+                && r.target_name == task
+                && r.resolves_to.is_some()
+        })
+    };
+    // accessor registers, alias enqueues — same instance, resolves.
+    assert!(enqueue_resolves(
+        "use Minion;\n$app->minion->add_task(t => sub {1});\nmy $m = $app->minion;\n$m->enqueue('t');\n", "t"),
+        "alias of $app->minion must reach $app->minion's task");
+    // alias registers, accessor enqueues — same instance, resolves.
+    assert!(enqueue_resolves(
+        "use Minion;\nmy $m = $app->minion;\n$m->add_task(t => sub {1});\n$app->minion->enqueue('t');\n", "t"),
+        "$app->minion must reach its alias's task");
+    // a DIFFERENT accessor aliased — distinct instance, must NOT resolve.
+    assert!(!enqueue_resolves(
+        "use Minion;\n$app->other->add_task(t => sub {1});\nmy $m = $app->minion;\n$m->enqueue('t');\n", "t"),
+        "alias of ->minion must NOT reach ->other's task");
+    // constructor stays per-variable: $a can't reach $b's task.
+    assert!(!enqueue_resolves(
+        "use Minion;\nmy $a = Minion->new;\nmy $b = Minion->new;\n$b->add_task(t => sub {1});\n$a->enqueue('t');\n", "t"),
+        "Minion->new is a fresh instance, not an accessor alias");
+}
+
 /// F1 regression: a re-`my` of the receiver (Perl shadowing) must brand
 /// build-side and resolve query-side on the SAME (latest) declaration —
 /// otherwise the brands disagree and the own task silently fails to

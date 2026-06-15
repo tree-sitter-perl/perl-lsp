@@ -1503,19 +1503,23 @@ fn dispatch_target_items_for(
     module_index: &ModuleIndex,
     owner_class: &str,
     dispatcher_names: &[String],
-    // The receiver's per-instance brand at the cursor — local handlers
-    // are filtered to those visible to this instance, so completing
-    // `$a->enqueue('|')` offers only `$a`'s tasks, not `$b`'s. `None`
-    // (non-instance receiver) keeps the pre-brand behavior. Cross-file
-    // handlers stay unfiltered: instance brands key on a same-file
-    // declaration, so they don't carry across the file boundary.
+    // The receiver's per-instance brand at the cursor. Handlers are
+    // filtered to those visible to this instance — completing
+    // `$a->enqueue('|')` offers only `$a`'s tasks. Applied to LOCAL AND
+    // CROSS-FILE handlers: an accessor brand (`acc:minion`) is a singleton
+    // that carries across files, so a cross-file `acc:other` task must be
+    // filtered out too; a per-variable brand (`inst:…`) keys on a same-file
+    // decl, so a cross-file `inst:…` never matches this receiver and is
+    // (correctly) filtered. `None` (non-instance receiver) keeps the
+    // pre-brand "see everything" behavior via `brand_visible`.
     receiver_brand: Option<&str>,
 ) -> Vec<CompletionItem> {
     use crate::file_analysis::{brand_visible, SymbolDetail};
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut out: Vec<CompletionItem> = Vec::new();
     let mut emit = |sym: &crate::file_analysis::Symbol| {
-        let SymbolDetail::Handler { display, .. } = &sym.detail else { return };
+        let SymbolDetail::Handler { display, instance_brand, .. } = &sym.detail else { return };
+        if !brand_visible(instance_brand.as_deref(), receiver_brand) { return; }
         if !seen.insert(sym.name.clone()) { return; }
         let detail = display.outline_word().map(|s| s.to_string());
         out.push(CompletionItem {
@@ -1529,11 +1533,6 @@ fn dispatch_target_items_for(
         });
     };
     for sym in analysis.handlers_for_owner(owner_class, dispatcher_names) {
-        if let SymbolDetail::Handler { instance_brand, .. } = &sym.detail {
-            if !brand_visible(instance_brand.as_deref(), receiver_brand) {
-                continue;
-            }
-        }
         emit(sym);
     }
     module_index.for_each_cached(|_, cached| {

@@ -122,6 +122,24 @@ stay global. Known coarseness: two *different* apps' `->minion` in one
 workspace share `acc:minion` (a home-brand prefix would separate them — a
 further tier).
 
+**Variable aliases inherit the accessor brand.** `my $m = $app->minion`
+makes `$m` the SAME instance as the accessor, so `$m->enqueue` reaches
+`$app->minion`'s tasks regardless of which form registered vs enqueued —
+the common register-in-plugin (`$app->minion->add_task`) /
+enqueue-via-local (`my $m = $app->minion; $m->enqueue`) split. The builder
+records `var_accessor_brands` (decl symbol → `acc:leaf`) for a single
+scalar initialized by a non-constructor method-call chain;
+`instance_brand_at` reads it before the per-variable brand, the build side
+does the identical lookup. `Class->new` is excluded — a fresh instance
+keyed per-variable, not an alias. Without this, the accessor tier would
+*regress* the mixed-form pattern (the chains were global before).
+
+Because an accessor brand is a singleton that DOES cross files, completion
+filters cross-file handlers by the receiver brand too (a cross-file
+`acc:other` task is hidden on `$app->minion`); a per-variable `inst:…` is
+same-file and never matches a foreign receiver, so it's filtered there by
+the same rule.
+
 ## Boundaries — what this does NOT do yet
 
 - **Full Mojo multi-app** (helpers on an app class, consumed by separate
