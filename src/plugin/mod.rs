@@ -179,6 +179,16 @@ pub struct CallContext {
     /// from here. Empty otherwise.
     #[serde(default)]
     pub arg_pairs: Vec<ArgPair>,
+    /// True when this is a method call whose receiver is the current
+    /// package itself — `__PACKAGE__->m(...)` or `CurrentClass->m(...)`,
+    /// i.e. a class-level call, not an instance one. The distinguishing
+    /// fact for framework DSLs that declare on the class (`add_columns`,
+    /// `load_components`, `mk_*_accessors`): a class-level call mutates the
+    /// class, an instance call (`$rs->add_columns(...)`) is a runtime
+    /// query/op and must NOT be read as a declaration. Always false for
+    /// function calls. See `frameworks/dbic.rhai`.
+    #[serde(default)]
+    pub receiver_is_package: bool,
 }
 
 /// Decision-ready snapshot of a Moo/Moose `has` declaration's

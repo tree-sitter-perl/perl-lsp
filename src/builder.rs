@@ -2686,6 +2686,7 @@ impl<'a> Builder<'a> {
             has_options: None,
             arg_names: Vec::new(),
             arg_pairs: Vec::new(),
+            receiver_is_package: false,
         }
     }
 
@@ -10412,6 +10413,11 @@ impl<'a> Builder<'a> {
                 );
                 ctx.call_kind = plugin::CallKind::Method;
                 ctx.method_name = Some(name.clone());
+                // `__PACKAGE__->m(...)` / `CurrentClass->m(...)` — a
+                // class-level call. Class-declaration DSLs (DBIC columns,
+                // load_components) gate on this so a runtime instance call
+                // (`$rs->add_columns(...)`) isn't read as a declaration.
+                ctx.receiver_is_package = is_pkg_call;
                 ctx.receiver_text = invocant_text.clone();
                 ctx.receiver_type = self.receiver_type_for(invocant_node);
                 // The receiver's call name is a generic syntax fact —

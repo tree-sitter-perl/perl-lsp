@@ -4182,6 +4182,41 @@ __PACKAGE__->belongs_to(author => 'Schema::Result::User', 'author_id');
 }
 
 #[test]
+fn test_dbic_instance_add_columns_does_not_synthesize() {
+    // A runtime `$rs->add_columns('x','y')` (dynamic query building, e.g. crm's
+    // ResultSet joins) is NOT a class declaration — the dbic plugin gates on
+    // `receiver_is_package`, so no column accessors are minted from it. Only
+    // `__PACKAGE__->add_columns` (class-level) declares columns.
+    let fa = build_fa(
+        "
+package My::RS;
+use base 'DBIx::Class::ResultSet';
+__PACKAGE__->add_columns('decl_col');
+sub widen {
+    my $self = shift;
+    $self->add_columns('runtime_col');
+}
+",
+    );
+    let decl: Vec<_> = fa
+        .symbols
+        .iter()
+        .filter(|s| s.name == "decl_col" && s.kind == SymKind::Method)
+        .collect();
+    let runtime: Vec<_> = fa
+        .symbols
+        .iter()
+        .filter(|s| s.name == "runtime_col" && s.kind == SymKind::Method)
+        .collect();
+    assert_eq!(decl.len(), 1, "class-level __PACKAGE__->add_columns declares");
+    assert_eq!(
+        runtime.len(),
+        0,
+        "instance $rs->add_columns is a runtime op, not a declaration"
+    );
+}
+
+#[test]
 fn test_accessor_return_type_propagation() {
     let src = r#"
 package Moo::Config;

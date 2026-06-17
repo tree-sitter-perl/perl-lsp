@@ -103,6 +103,10 @@ fn on_method_call(ctx) {
     let verb = ctx.method_name;
     if verb == () { return out; }
 
+    // Class-level declaration only: `__PACKAGE__->add_columns(...)`, never a
+    // runtime `$rs->add_columns({...})` (a query op, not a column decl).
+    if !ctx.receiver_is_package { return out; }
+
     let names = ctx.arg_names;
     if names == () || names.len() < 1 { return out; }
 

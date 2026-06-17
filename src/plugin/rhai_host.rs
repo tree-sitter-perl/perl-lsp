@@ -807,6 +807,7 @@ mod tests {
             has_options: None,
             arg_names: Vec::new(),
             arg_pairs: Vec::new(),
+            receiver_is_package: false,
         };
 
         let emissions = plugin.on_function_call(&ctx);
@@ -938,6 +939,7 @@ mod tests {
             has_options: None,
             arg_names: Vec::new(),
             arg_pairs: Vec::new(),
+            receiver_is_package: false,
         };
 
         let emissions = plugin.on_method_call(&ctx);
@@ -1009,6 +1011,7 @@ mod tests {
                 has_options: None,
                 arg_names: Vec::new(),
                 arg_pairs: Vec::new(),
+                receiver_is_package: false,
             };
 
             let emissions = plugin.on_function_call(&ctx);
@@ -1056,6 +1059,7 @@ mod tests {
             has_options: None,
             arg_names: Vec::new(),
             arg_pairs: Vec::new(),
+            receiver_is_package: false,
         };
 
         // Dynamic column name (`col $field => ...`) — nothing to synthesize.
@@ -1112,6 +1116,7 @@ mod tests {
             has_options: None,
             arg_names: Vec::new(),
             arg_pairs: Vec::new(),
+            receiver_is_package: false,
         };
 
         let emissions = plugin.on_method_call(&ctx);
@@ -1254,6 +1259,7 @@ mod tests {
             has_options: None,
             arg_names: Vec::new(),
             arg_pairs: Vec::new(),
+            receiver_is_package: false,
         };
 
         let emissions = plugin.on_method_call(&ctx);
@@ -1307,6 +1313,7 @@ mod tests {
             has_options: None,
             arg_names: Vec::new(),
             arg_pairs: Vec::new(),
+            receiver_is_package: false,
         };
 
         let emissions = plugin.on_method_call(&ctx);
@@ -1360,6 +1367,7 @@ mod tests {
             has_options: None,
             arg_names: Vec::new(),
             arg_pairs: Vec::new(),
+            receiver_is_package: false,
         };
 
         let emissions = plugin.on_method_call(&ctx);
@@ -1397,6 +1405,7 @@ mod tests {
             has_options: None,
             arg_names: Vec::new(),
             arg_pairs: Vec::new(),
+            receiver_is_package: false,
         };
         assert!(plugin.on_function_call(&ctx).is_empty());
     }
