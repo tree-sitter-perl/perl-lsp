@@ -32,6 +32,13 @@ Type intelligence:
 - A4 v2: cross-FILE slot writes (`$self->{k} = Obj->new` in another
   file) — the `MethodOnClass` bridge pattern.
 
+Plugin genericity:
+- `has_options` final dissolution: move the `isa`-string→`InferredType`
+  mapping out of core (it's the last Moo-semantic field there) onto the
+  `type_constraint_names()` / `type_constraint_inner()` plugin seam.
+  Once it lands, `HasOptions` collapses into `arg_names` + `arg_pairs`
+  (the generic keyval primitive that already carries the options).
+
 Hardening:
 - Fold safety net: `eprintln!` → `tracing::error!` (builder.rs
   ~12061) + a synthetic-oscillator test so the release-mode

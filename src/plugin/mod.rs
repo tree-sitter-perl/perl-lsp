@@ -173,10 +173,25 @@ pub struct CallContext {
     /// `frameworks/dbic.rhai`.
     #[serde(default)]
     pub arg_names: Vec<(String, Span)>,
+    /// The call's fat-comma pairs, value-shape classified — the generic
+    /// keyval primitive (see [`ArgPair`]). Populated alongside `arg_names`
+    /// for registered verbs; the moo plugin reads its accessor options
+    /// from here. Empty otherwise.
+    #[serde(default)]
+    pub arg_pairs: Vec<ArgPair>,
 }
 
-/// Decision-ready snapshot of a Moo/Moose `has` declaration's accessor
-/// options. The builder fills it from the CST; the plugin reads it.
+/// Decision-ready snapshot of a Moo/Moose `has` declaration's
+/// non-pair head: the attribute name(s) and the resolved `isa` type.
+/// The accessor *options* are carried generically in
+/// [`CallContext::arg_pairs`]. The builder fills this from the CST; the
+/// plugin reads it.
+///
+/// `isa_type` is the one remaining Moo-semantic field core resolves
+/// (`'Str'` → `String`, `"InstanceOf['X']"` → `InstanceOf`, …). Moving
+/// that mapping out to a plugin — leaning on the `type_constraint_*`
+/// seam — is roadmapped; once it lands, this whole struct dissolves into
+/// `arg_names` + `arg_pairs`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HasOptions {
     /// `(attribute_name, name_token_span)` — one per attr (`has [qw/a b/]`
@@ -188,29 +203,41 @@ pub struct HasOptions {
     /// return to the remote method on that class.
     #[serde(default)]
     pub isa_type: Option<InferredType>,
-    pub options: Vec<HasOption>,
 }
 
-/// One Moo/Moose `has` accessor option (`predicate`, `clearer`, `writer`,
-/// `reader`, `builder`, `handles`). The builder classifies the value
-/// shape; the plugin maps the keyword to a method-name pattern.
+/// One fat-comma pair of a call's argument list, value-shape classified —
+/// the generic keyval primitive. `key` is the autoquoted/string LHS; the
+/// builder walks the value node (rule #1) into a [`ValueShape`] so the
+/// plugin reads its meaning without touching the tree. Separator-agnostic
+/// (the LHS is a key whether written `k => v` or `'k', v`). Populated for
+/// the verbs a plugin registers (`arg_name_verbs`); see `frameworks/moo.rhai`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct HasOption {
-    /// `"predicate"`, `"clearer"`, `"writer"`, `"reader"`, `"builder"`,
-    /// `"handles"`.
-    pub keyword: String,
-    /// The value was `=> 1` — the plugin derives the method name from the
-    /// attribute (`has_<attr>`, `clear_<attr>`, `_build_<attr>`, …).
-    #[serde(default)]
-    pub shorthand: bool,
-    /// The value was an explicit string — use it verbatim as the method name.
-    #[serde(default)]
-    pub explicit_name: Option<String>,
-    /// For `handles => {local => remote}` / `[qw/m.../]`: the
-    /// `(local_name, remote_name)` delegation pairs (local == remote for
-    /// the arrayref form). Empty for the non-`handles` keywords.
-    #[serde(default)]
-    pub handles: Vec<(String, String)>,
+pub struct ArgPair {
+    pub key: String,
+    pub key_span: Span,
+    pub value: ValueShape,
+}
+
+/// The classified shape of a fat-comma pair's value. Generic — no DSL
+/// vocabulary. The plugin maps `(keyword, shape)` to behavior: a Moo
+/// `predicate => 1` is `Num("1")`, `predicate => 'has_x'` is `Str`,
+/// `handles => { l => r }` is `HashPairs`, `handles => [qw/m/]` is
+/// `ArrayItems`. Every variant carries data so it serializes to a
+/// single-key map (Rhai reads `value.Str` / `value.HashPairs` / … as
+/// `()` when absent).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum ValueShape {
+    /// A string literal's content or a bareword's text.
+    Str(String),
+    /// A numeric literal's text (`1` is the Moo `=> 1` shorthand).
+    Num(String),
+    /// `{ k => v, ... }` flattened to `(key, value)` string pairs.
+    HashPairs(Vec<(String, String)>),
+    /// `[ a, b ]` / `[qw/a b/]` flattened to its string items.
+    ArrayItems(Vec<String>),
+    /// A value we don't classify (coderef, scalar var, nested expr);
+    /// carries the node kind for debugging.
+    Other(String),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

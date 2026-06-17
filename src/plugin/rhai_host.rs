@@ -806,6 +806,7 @@ mod tests {
             current_package_uses: vec!["Demo".into()],
             has_options: None,
             arg_names: Vec::new(),
+            arg_pairs: Vec::new(),
         };
 
         let emissions = plugin.on_function_call(&ctx);
@@ -936,6 +937,7 @@ mod tests {
             current_package_uses: vec![],
             has_options: None,
             arg_names: Vec::new(),
+            arg_pairs: Vec::new(),
         };
 
         let emissions = plugin.on_method_call(&ctx);
@@ -1006,6 +1008,7 @@ mod tests {
                 current_package_uses: vec!["DBIx::Class::ResultDDL".into()],
                 has_options: None,
                 arg_names: Vec::new(),
+                arg_pairs: Vec::new(),
             };
 
             let emissions = plugin.on_function_call(&ctx);
@@ -1052,6 +1055,7 @@ mod tests {
             current_package_uses: vec!["DBIx::Class::ResultDDL".into()],
             has_options: None,
             arg_names: Vec::new(),
+            arg_pairs: Vec::new(),
         };
 
         // Dynamic column name (`col $field => ...`) — nothing to synthesize.
@@ -1107,6 +1111,7 @@ mod tests {
             current_package_uses: vec![],
             has_options: None,
             arg_names: Vec::new(),
+            arg_pairs: Vec::new(),
         };
 
         let emissions = plugin.on_method_call(&ctx);
@@ -1248,6 +1253,7 @@ mod tests {
             current_package_uses: vec![],
             has_options: None,
             arg_names: Vec::new(),
+            arg_pairs: Vec::new(),
         };
 
         let emissions = plugin.on_method_call(&ctx);
@@ -1300,6 +1306,7 @@ mod tests {
             current_package_uses: vec![],
             has_options: None,
             arg_names: Vec::new(),
+            arg_pairs: Vec::new(),
         };
 
         let emissions = plugin.on_method_call(&ctx);
@@ -1352,6 +1359,7 @@ mod tests {
             current_package_uses: vec![],
             has_options: None,
             arg_names: Vec::new(),
+            arg_pairs: Vec::new(),
         };
 
         let emissions = plugin.on_method_call(&ctx);
@@ -1388,6 +1396,7 @@ mod tests {
             current_package_uses: vec![],
             has_options: None,
             arg_names: Vec::new(),
+            arg_pairs: Vec::new(),
         };
         assert!(plugin.on_function_call(&ctx).is_empty());
     }

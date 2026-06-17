@@ -2690,6 +2690,7 @@ impl<'a> Builder<'a> {
             current_package_uses: uses,
             has_options: None,
             arg_names: Vec::new(),
+            arg_pairs: Vec::new(),
         }
     }
 
@@ -5539,10 +5540,16 @@ impl<'a> Builder<'a> {
     /// `CallContext::arg_names`. Shares `cst::string_list` (qw / string /
     /// nested-list / fat-comma handling) but with a DSL-arg fold: a
     /// bareword is its own LITERAL text. Fat-comma autoquoting means a
-    /// key/name bareword is that name, never a constant lookup — and the
-    /// parser labels fat-comma keys as `bareword` OR `autoquoted_bareword`
-    /// interchangeably, so both resolve to text here. `@array` elements
-    /// still fold through the constant table.
+    /// key/name bareword is that name, never a constant lookup. `@array`
+    /// elements still fold through the constant table.
+    ///
+    /// KLUDGE (tree-sitter-perl grammar): a fat-comma key is *normally*
+    /// lexed as `autoquoted_bareword` (a grammar-certified literal), but on
+    /// continuation lines of a multi-line list certain words (`name`,
+    /// `status`) come through as plain `bareword`. Treating every bareword
+    /// as literal text here papers over that until the grammar is fixed
+    /// upstream; once it is, this can defer to the autoquoted classification
+    /// (and constant barewords could route back through the fold).
     fn extract_arg_name_list(&self, node: Node<'a>) -> Vec<(String, Span)> {
         crate::cst::string_list(node, self.source, &mut |n| {
             if n.kind() == "array" {
@@ -7540,15 +7547,18 @@ impl<'a> Builder<'a> {
                         ctx.arg_names = self.extract_arg_name_list(node
                             .child_by_field_name("arguments")
                             .unwrap_or(node));
-                        // Moo/Moose `has`/`option` additionally needs the
-                        // classified option shape (shorthand `=> 1`, `handles`
-                        // hashref) a flat name list can't carry — the moo
-                        // plugin reads it from `has_options`. Built behind the
-                        // same registration gate, scoped by framework mode.
+                        // Moo/Moose `has`/`option`: the accessor options are
+                        // the generic value-shape pairs (`arg_pairs`); the
+                        // non-pair head (attr name(s) + resolved isa) rides
+                        // `has_options`. Built behind the same registration
+                        // gate, scoped by framework mode.
                         if let Some(mode) = self.current_package.as_ref()
                             .and_then(|pkg| self.framework_modes.get(pkg).copied())
                         {
-                            ctx.has_options = self.extract_has_options(node, mode);
+                            if let Some((opts, pairs)) = self.extract_has_options(node, mode) {
+                                ctx.has_options = Some(opts);
+                                ctx.arg_pairs = pairs;
+                            }
                         }
                     }
                     self.dispatch_function_call_plugins(ctx);
@@ -9078,21 +9088,21 @@ impl<'a> Builder<'a> {
 
         // After first arg: options (Moo/Moose) or default value (Mojo::Base).
         // Both the nested `=> (is => ...)` and the flat `, is => ...` forms
-        // route through `for_each_has_option_pair`.
+        // route through `has_option_pair_nodes`.
         let rest: Vec<Node> = first_named_idx
             .map(|first| args_children[first + 1..].to_vec())
             .unwrap_or_default();
         if mode == FrameworkMode::MojoBase {
             mojo_default_node = rest.iter().copied().find(|c| c.is_named());
         } else {
-            self.for_each_has_option_pair(&rest, |key, val_node| {
-                match key {
-                    "is" => {
+            for (k_node, val_node) in self.has_option_pair_nodes(&rest) {
+                match self.extract_node_string(k_node).as_deref() {
+                    Some("is") => {
                         if is_value.is_none() {
                             is_value = self.extract_node_string(val_node);
                         }
                     }
-                    "isa" => {
+                    Some("isa") => {
                         if isa_value.is_none() {
                             isa_value = self.extract_node_string(val_node);
                         }
@@ -9102,8 +9112,7 @@ impl<'a> Builder<'a> {
                     }
                     _ => {}
                 }
-                true
-            });
+            }
         }
 
         // Map isa value to InferredType
@@ -9452,7 +9461,16 @@ impl<'a> Builder<'a> {
     /// constructor-key synthesis stays native in `visit_has_call`. New Moo
     /// behavior wants the plugin; this seam is where structured option data
     /// crosses over.
-    fn extract_has_options(&mut self, node: Node<'a>, mode: FrameworkMode) -> Option<plugin::HasOptions> {
+    /// `has` decomposes into a non-pair head (attr name(s) + the resolved
+    /// `isa` type) and a tail of accessor options. The head is returned in
+    /// `HasOptions`; the options are the generic value-shape-classified
+    /// `arg_pairs` the caller sets on the context. `isa` is the one
+    /// type-semantic field core still resolves (roadmapped to move out).
+    fn extract_has_options(
+        &mut self,
+        node: Node<'a>,
+        mode: FrameworkMode,
+    ) -> Option<(plugin::HasOptions, Vec<plugin::ArgPair>)> {
         // Mojo::Base has no accessor-option vocabulary — its `has` is just
         // getter/setter + default value, all native.
         if mode == FrameworkMode::MojoBase {
@@ -9466,10 +9484,6 @@ impl<'a> Builder<'a> {
         };
 
         let mut attr_names: Vec<(String, Span)> = Vec::new();
-        let mut isa_value: Option<String> = None;
-        let mut isa_value_node: Option<Node<'a>> = None;
-        let mut option_nodes: Vec<(String, Node<'a>)> = Vec::new();
-
         let mut first_named_idx: Option<usize> = None;
         for (idx, child) in args_children.iter().enumerate() {
             if !child.is_named() { continue; }
@@ -9497,12 +9511,26 @@ impl<'a> Builder<'a> {
 
         if attr_names.is_empty() { return None; }
 
+        // Option tail → generic classified pairs. `isa` rides the pairs like
+        // any other keyword (the plugin ignores keywords it doesn't act on)
+        // AND is captured here for the type resolution core still owns.
+        let mut arg_pairs: Vec<plugin::ArgPair> = Vec::new();
+        let mut isa_value: Option<String> = None;
+        let mut isa_value_node: Option<Node<'a>> = None;
         if let Some(first) = first_named_idx {
             let rest = &args_children[first + 1..];
-            self.collect_has_option_value_nodes(
-                rest, &mut isa_value, &mut isa_value_node, &mut option_nodes,
-            );
+            for (k_node, v_node) in self.has_option_pair_nodes(rest) {
+                let Some(key) = self.extract_node_string(k_node) else { continue };
+                if key == "isa" {
+                    if isa_value.is_none() { isa_value = self.extract_node_string(v_node); }
+                    if isa_value_node.is_none() { isa_value_node = Some(v_node); }
+                }
+                let value = self.classify_value_shape(v_node);
+                arg_pairs.push(plugin::ArgPair { key, key_span: node_to_span(k_node), value });
+            }
         }
+
+        if arg_pairs.is_empty() { return None; }
 
         let isa_type = isa_value
             .as_deref()
@@ -9513,90 +9541,55 @@ impl<'a> Builder<'a> {
                 self.bag_query_expr_span(node_to_span(n))?.constrained_inner().cloned()
             });
 
-        // Classify each option by VALUE shape, not by keyword — the keyword
-        // vocabulary is the plugin's (rule #10). `shorthand` (`=> 1`),
-        // `explicit_name` (`=> 'name'`), and `handles` (`=> {..}` / `[..]`)
-        // are mutually exclusive value shapes; an option whose value matches
-        // none still passes through with all fields empty (the plugin's arms
-        // ignore keywords / shapes it doesn't act on).
-        let mut options: Vec<plugin::HasOption> = Vec::new();
-        for (keyword, val_node) in option_nodes {
-            let shorthand = self.node_is_numeric_one(val_node);
-            let explicit_name = if shorthand {
-                None
-            } else {
-                self.extract_node_string(val_node)
-            };
-            let handles = if shorthand || explicit_name.is_some() {
-                Vec::new()
-            } else {
-                self.extract_handles_delegation(val_node)
-            };
-            options.push(plugin::HasOption {
-                keyword,
-                shorthand,
-                explicit_name,
-                handles,
-            });
-        }
-
-        if options.is_empty() { return None; }
-        Some(plugin::HasOptions { attr_names, isa_type, options })
+        Some((plugin::HasOptions { attr_names, isa_type }, arg_pairs))
     }
 
-    /// Walk a `has` options fat-comma list, capturing the `isa` value (its
-    /// string and node) and the value node for *every other* option keyword —
-    /// no allowlist. The accessor-keyword vocabulary lives in `moo.rhai`
-    /// (rule #10); core only does the CST walk (rule #1) and hands the full
-    /// option list to the plugin, which decides which keywords matter. Keeps
-    /// the raw value nodes so the classifier can read the value shape.
-    /// Drive `f(key, value_node)` over a `has` call's option tail, regardless
-    /// of which surface form was written:
-    ///   `has 'name' => (is => 'ro')`  — options live in one nested list node
-    ///   `has 'name', is => 'ro'`      — options are flat siblings of the name
-    /// `rest` is the slice of `arguments` children *after* the first (name)
-    /// arg. A single nested list/paren delegates to the container walker; any
-    /// other shape is read as a flat fat-comma run.
-    fn for_each_has_option_pair<F>(&self, rest: &[Node<'a>], f: F)
-    where
-        F: FnMut(&str, Node<'a>) -> bool,
-    {
+    /// Collect a call's option-tail fat-comma pairs as `(key_node, value_node)`,
+    /// regardless of surface form — `has 'n' => (k => v)` (one nested list) or
+    /// `has 'n', k => v` (flat siblings). Owned Vec so the caller can run
+    /// `&self` classifiers over each pair without a borrow tangle.
+    fn has_option_pair_nodes(&self, rest: &[Node<'a>]) -> Vec<(Node<'a>, Node<'a>)> {
         let named: Vec<Node<'a>> = rest.iter().copied().filter(|n| n.is_named()).collect();
         if let [only] = named.as_slice() {
             if matches!(only.kind(), "list_expression" | "parenthesized_expression") {
-                self.for_each_pair_in_list(*only, f);
-                return;
+                return crate::cst::pair_nodes(*only);
             }
         }
-        self.for_each_pair_in_children(rest, f);
+        crate::cst::pair_nodes_in(rest)
     }
 
-    fn collect_has_option_value_nodes(
-        &self,
-        rest: &[Node<'a>],
-        isa_value: &mut Option<String>,
-        isa_value_node: &mut Option<Node<'a>>,
-        option_nodes: &mut Vec<(String, Node<'a>)>,
-    ) {
-        self.for_each_has_option_pair(rest, |key, val_node| {
-            // `isa` feeds the resolved attribute type, not an accessor option.
-            if key == "isa" {
-                if isa_value.is_none() {
-                    *isa_value = self.extract_node_string(val_node);
-                }
-                if isa_value_node.is_none() {
-                    *isa_value_node = Some(val_node);
-                }
-            } else {
-                option_nodes.push((key.to_string(), val_node));
+    /// Classify a fat-comma value node into the generic [`plugin::ValueShape`]
+    /// — no DSL vocabulary, just the syntactic shape. The plugin maps
+    /// `(keyword, shape)` to behavior.
+    fn classify_value_shape(&self, node: Node<'a>) -> plugin::ValueShape {
+        match node.kind() {
+            "number" => plugin::ValueShape::Num(
+                node.utf8_text(self.source).unwrap_or("").to_string(),
+            ),
+            "string_literal" | "interpolated_string_literal" => {
+                plugin::ValueShape::Str(self.extract_string_content(node).unwrap_or_default())
             }
-            true
-        });
-    }
-
-    /// `true` when the node is the integer literal `1` (the `=> 1` shorthand).
-    fn node_is_numeric_one(&self, node: Node<'_>) -> bool {
-        node.kind() == "number" && matches!(node.utf8_text(self.source), Ok("1"))
+            "bareword" | "autoquoted_bareword" => {
+                plugin::ValueShape::Str(node.utf8_text(self.source).unwrap_or("").to_string())
+            }
+            "anonymous_hash_expression" => {
+                let mut tokens: Vec<String> = Vec::new();
+                self.collect_hash_tokens(node, &mut tokens);
+                let mut pairs = Vec::new();
+                let mut i = 0;
+                while i + 1 < tokens.len() {
+                    pairs.push((tokens[i].clone(), tokens[i + 1].clone()));
+                    i += 2;
+                }
+                plugin::ValueShape::HashPairs(pairs)
+            }
+            "array_ref_expression" | "anonymous_array_expression" => {
+                plugin::ValueShape::ArrayItems(
+                    self.extract_string_list(node).into_iter().map(|(s, _)| s).collect(),
+                )
+            }
+            other => plugin::ValueShape::Other(other.to_string()),
+        }
     }
 
     /// Extract a string from a bareword or string-literal node.
@@ -9606,40 +9599,6 @@ impl<'a> Builder<'a> {
             "string_literal" | "interpolated_string_literal" => self.extract_string_content(node),
             _ => None,
         }
-    }
-
-    /// Parse a `handles` value into `(local, remote)` delegation pairs.
-    /// Hashref `{ local => 'remote' }` maps local→remote; arrayref / qw list
-    /// uses the same name for both. tree-sitter-perl nests fat-comma pairs
-    /// right-associatively inside a `list_expression`, so the hashref form
-    /// flattens the token stream and re-pairs.
-    fn extract_handles_delegation(&self, node: Node<'_>) -> Vec<(String, String)> {
-        let mut pairs = Vec::new();
-        match node.kind() {
-            "anonymous_hash_expression" => {
-                let mut tokens: Vec<String> = Vec::new();
-                self.collect_hash_tokens(node, &mut tokens);
-                let mut i = 0;
-                while i + 1 < tokens.len() {
-                    pairs.push((tokens[i].clone(), tokens[i + 1].clone()));
-                    i += 2;
-                }
-            }
-            "array_ref_expression" | "anonymous_array_expression" => {
-                for (name, _span) in self.extract_string_list(node) {
-                    pairs.push((name.clone(), name));
-                }
-            }
-            "quoted_word_list" => {
-                let mut names = Vec::new();
-                self.extract_qw_word_spans(node, &mut names);
-                for (name, _span) in names {
-                    pairs.push((name.clone(), name));
-                }
-            }
-            _ => {}
-        }
-        pairs
     }
 
     /// Flatten a fat-comma hash node into alternating key/value strings,
@@ -9835,25 +9794,6 @@ impl<'a> Builder<'a> {
                 }
             }
         }
-    }
-
-    /// Slice variant of `for_each_pair_in_list`: walk a flat sequence of
-    /// sibling nodes (including the inter-token commas / `=>`) as positional
-    /// pairs. Lets callers feed a *sub-range* of a container's children —
-    /// e.g. the option tail of `has 'name', is => 'ro', ...`, where the name
-    /// and the options share one `list_expression` parent and there's no
-    /// nested options node to hand to the container variant. String-key
-    /// projection over `for_each_pair_node_in_children`.
-    fn for_each_pair_in_children<F>(&self, children: &[Node<'a>], mut f: F)
-    where
-        F: FnMut(&str, Node<'a>) -> bool,
-    {
-        self.for_each_pair_node_in_children(children, |k_node, val| {
-            match self.extract_node_string(k_node) {
-                Some(key) => f(&key, val),
-                None => true,
-            }
-        });
     }
 
     /// Node-level pair walker over a flat sibling sequence — see
