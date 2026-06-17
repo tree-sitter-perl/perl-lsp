@@ -12,15 +12,13 @@
 //                       a class, the delegated method's return edges to the
 //                       remote method on that class
 //
-// The core walks the `has` CST and hands this plugin EVERY fat-comma option
-// key→value as a value-shape-classified `ctx.has_options` entry (rule #1 —
-// only the builder touches tree-sitter; no keyword allowlist in core, so a
-// new keyword needs no core edit). What lives HERE is the vocabulary: which
-// keyword maps to which name pattern and return behavior; arms below ignore
-// keywords/shapes they don't act on. New Moo accessor behavior is a new arm
-// in this file, not a branch in the builder. The default accessor / isa /
-// constructor-key synthesis is still native in `visit_has_call` (a larger
-// move left as future work); this plugin is the seam for everything beyond it.
+// The core walks the `has` CST and hands this plugin every fat-comma option
+// as a value-shape-classified `ctx.arg_pairs` entry (rule #1 — only the
+// builder touches tree-sitter; no keyword allowlist in core, so a new keyword
+// needs no core edit). What lives HERE is the vocabulary: which keyword maps
+// to which name pattern and return behavior; arms below ignore keywords/shapes
+// they don't act on. The default accessor / isa / constructor-key synthesis is
+// still native in `visit_has_call`; this plugin is the seam beyond it.
 
 fn id() { "moo" }
 
@@ -34,6 +32,14 @@ fn id() { "moo" }
 // grants `with` to plain classes.
 fn role_makers() {
     ["Moo::Role", "Moose::Role", "Mouse::Role", "Role::Tiny"]
+}
+
+// The verbs whose args core flattens into `ctx.arg_pairs` (the accessor
+// options) and `has_options` (the attr-name + isa head). Declaring them
+// here keeps core from hardcoding `has`/`option` — the vocabulary lives
+// with the plugin.
+fn arg_name_verbs() {
+    ["has", "option"]
 }
 
 fn triggers() {
@@ -109,6 +115,23 @@ fn isa_class(isa_type) {
     ()
 }
 
+// The `=> 1` shorthand: the generic value-shape is `Num("1")`.
+fn is_shorthand(val) {
+    val.Num == "1"
+}
+
+// `handles => {l => r}` / `[qw/m/]` as `[local, remote]` pairs. The
+// "arrayref entry is its own remote" rule is Moo's, so it lives here:
+// the generic primitive just hands us `HashPairs` / `ArrayItems`.
+fn handles_pairs(val) {
+    if val.HashPairs != () { return val.HashPairs; }
+    let out = [];
+    if val.ArrayItems != () {
+        for n in val.ArrayItems { out.push([n, n]); }
+    }
+    out
+}
+
 fn on_function_call(ctx) {
     let out = [];
     // `option` (MooX::Options) shares `has`'s accessor-option vocabulary.
@@ -117,17 +140,20 @@ fn on_function_call(ctx) {
     if opts == () { return out; }
 
     let cls = isa_class(opts.isa_type);
+    // The accessor options are the generic value-shape-classified pairs.
+    let pairs = ctx.arg_pairs;
 
     for attr_pair in opts.attr_names {
         let attr = attr_pair[0];
         let span = attr_pair[1];
 
-        for opt in opts.options {
-            let kw = opt.keyword;
+        for opt in pairs {
+            let kw = opt.key;
+            let val = opt.value;
 
             // `lazy_build => 1` (Moose) implies a builder/clearer/predicate
             // trio at runtime; expand it to the three companion methods.
-            if kw == "lazy_build" && opt.shorthand {
+            if kw == "lazy_build" && is_shorthand(val) {
                 out += plain_method("_build_" + attr, span, [], attr);
                 out += plain_method(derive_name("clear_", attr), span, [], attr);
                 out += plain_method(derive_name("has_", attr), span, [], attr);
@@ -142,7 +168,7 @@ fn on_function_call(ctx) {
                 // One method per delegated name. With a class-typed isa, edge
                 // the method's return through MethodOnClass{class, remote} so
                 // `$self->log(...)` chains to the remote method's return.
-                for pair in opt.handles {
+                for pair in handles_pairs(val) {
                     let local = pair[0];
                     let remote = pair[1];
                     let edge = ();
@@ -174,13 +200,13 @@ fn on_function_call(ctx) {
             // Resolve the method name: shorthand derives from the attr, an
             // explicit string is used verbatim.
             let name = ();
-            if opt.shorthand {
+            if is_shorthand(val) {
                 if kw == "predicate" { name = derive_name("has_", attr); }
                 else if kw == "clearer" { name = derive_name("clear_", attr); }
                 else if kw == "builder" { name = "_build_" + attr; }
                 // writer/reader have no `=> 1` shorthand in Moo.
-            } else if opt.explicit_name != () {
-                name = opt.explicit_name;
+            } else if val.Str != () {
+                name = val.Str;
             }
             if name == () { continue; }
 

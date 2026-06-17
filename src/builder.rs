@@ -2684,6 +2684,9 @@ impl<'a> Builder<'a> {
             current_package_parents: parents,
             current_package_uses: uses,
             has_options: None,
+            arg_names: Vec::new(),
+            arg_pairs: Vec::new(),
+            receiver_is_package: false,
         }
     }
 
@@ -5536,6 +5539,28 @@ impl<'a> Builder<'a> {
         })
     }
 
+    /// Flatten a DSL call's args to `(name, span)` for `CallContext::arg_names`.
+    /// Like `cst::string_list` but with a DSL-arg fold: an `autoquoted_bareword`
+    /// is a grammar-certified fat-comma key (its value IS its text, never a
+    /// constant lookup); a plain `bareword` / `@array` is a genuine value and
+    /// folds through the constant table. The autoquoted rule isn't pushed into
+    /// `string_list` itself — that unmasks a use-import bug; see ROADMAP.
+    fn extract_arg_name_list(&self, node: Node<'a>) -> Vec<(String, Span)> {
+        crate::cst::string_list(node, self.source, &mut |n| {
+            if n.kind() == "autoquoted_bareword" {
+                return match n.utf8_text(self.source) {
+                    Ok(text) => vec![(text.to_string(), node_to_span(n))],
+                    Err(_) => vec![],
+                };
+            }
+            // plain bareword / @array: a genuine value — fold via constants.
+            let Ok(text) = n.utf8_text(self.source) else { return vec![] };
+            let Some(values) = self.resolve_constant_strings(text, 0) else { return vec![] };
+            let span = node_to_span(n);
+            values.into_iter().map(|v| (v, span)).collect()
+        })
+    }
+
     /// Extract strings without spans. Convenience for callers that don't need positions.
     fn extract_string_names(&self, node: Node<'a>) -> Vec<String> {
         self.extract_string_list(node).into_iter().map(|(s, _)| s).collect()
@@ -7504,15 +7529,30 @@ impl<'a> Builder<'a> {
                     );
                     ctx.call_kind = plugin::CallKind::Function;
                     ctx.function_name = Some(name.to_string());
-                    // The accessor-option vocabulary (predicate/clearer/writer/
-                    // reader/builder/handles) lives in the moo plugin. Core does
-                    // the node walk (rule #1) and hands over the decision-ready
-                    // option shape; the plugin maps keywords to method names.
-                    if name == "has" || name == "option" {
+                    // The verb vocabulary is the plugin's (`arg_name_verbs`),
+                    // not core's: when an applicable plugin registered this
+                    // name, hand over the flat `cst::string_list` of args.
+                    let wants_names = {
+                        let query = plugin::TriggerQuery {
+                            package_uses: &ctx.current_package_uses,
+                            package_parents: &ctx.current_package_parents,
+                        };
+                        self.plugins.wants_arg_names(&query, name)
+                    };
+                    if wants_names {
+                        ctx.arg_names = self.extract_arg_name_list(node
+                            .child_by_field_name("arguments")
+                            .unwrap_or(node));
+                        // Moo/Moose `has`/`option`: options ride `arg_pairs`;
+                        // `has_options` carries only the non-pair head (attr
+                        // names + isa). Scoped by framework mode.
                         if let Some(mode) = self.current_package.as_ref()
                             .and_then(|pkg| self.framework_modes.get(pkg).copied())
                         {
-                            ctx.has_options = self.extract_has_options(node, mode);
+                            if let Some((opts, pairs)) = self.extract_has_options(node, mode) {
+                                ctx.has_options = Some(opts);
+                                ctx.arg_pairs = pairs;
+                            }
                         }
                     }
                     self.dispatch_function_call_plugins(ctx);
@@ -9042,21 +9082,21 @@ impl<'a> Builder<'a> {
 
         // After first arg: options (Moo/Moose) or default value (Mojo::Base).
         // Both the nested `=> (is => ...)` and the flat `, is => ...` forms
-        // route through `for_each_has_option_pair`.
+        // route through `has_option_pair_nodes`.
         let rest: Vec<Node> = first_named_idx
             .map(|first| args_children[first + 1..].to_vec())
             .unwrap_or_default();
         if mode == FrameworkMode::MojoBase {
             mojo_default_node = rest.iter().copied().find(|c| c.is_named());
         } else {
-            self.for_each_has_option_pair(&rest, |key, val_node| {
-                match key {
-                    "is" => {
+            for (k_node, val_node) in self.has_option_pair_nodes(&rest) {
+                match self.extract_node_string(k_node).as_deref() {
+                    Some("is") => {
                         if is_value.is_none() {
                             is_value = self.extract_node_string(val_node);
                         }
                     }
-                    "isa" => {
+                    Some("isa") => {
                         if isa_value.is_none() {
                             isa_value = self.extract_node_string(val_node);
                         }
@@ -9066,8 +9106,7 @@ impl<'a> Builder<'a> {
                     }
                     _ => {}
                 }
-                true
-            });
+            }
         }
 
         // Map isa value to InferredType
@@ -9407,16 +9446,18 @@ impl<'a> Builder<'a> {
         }
     }
 
-    /// Walk a `has` call's CST into the decision-ready `HasOptions` the moo
-    /// plugin reads. The split is deliberate: core owns the node walk
-    /// (rule #1) and value *classification* (shorthand `=> 1` vs explicit
-    /// string vs `handles` delegation pairs); the plugin owns the accessor
-    /// *vocabulary* (which keyword → which method-name pattern). Only the
-    /// non-default options live here — the default accessor / isa /
-    /// constructor-key synthesis stays native in `visit_has_call`. New Moo
-    /// behavior wants the plugin; this seam is where structured option data
-    /// crosses over.
-    fn extract_has_options(&mut self, node: Node<'a>, mode: FrameworkMode) -> Option<plugin::HasOptions> {
+    /// Walk a `has` call into its non-pair head — the `HasOptions` the moo
+    /// plugin reads (attr name(s) + resolved `isa` type). The accessor
+    /// options are the generic `arg_pairs` the caller sets alongside. Core
+    /// owns the node walk (rule #1); the plugin owns the keyword vocabulary.
+    /// `isa` is the one type-semantic field core still resolves (roadmapped
+    /// to move out); the default accessor / isa / constructor-key synthesis
+    /// stays native in `visit_has_call`.
+    fn extract_has_options(
+        &mut self,
+        node: Node<'a>,
+        mode: FrameworkMode,
+    ) -> Option<(plugin::HasOptions, Vec<plugin::ArgPair>)> {
         // Mojo::Base has no accessor-option vocabulary — its `has` is just
         // getter/setter + default value, all native.
         if mode == FrameworkMode::MojoBase {
@@ -9430,10 +9471,6 @@ impl<'a> Builder<'a> {
         };
 
         let mut attr_names: Vec<(String, Span)> = Vec::new();
-        let mut isa_value: Option<String> = None;
-        let mut isa_value_node: Option<Node<'a>> = None;
-        let mut option_nodes: Vec<(String, Node<'a>)> = Vec::new();
-
         let mut first_named_idx: Option<usize> = None;
         for (idx, child) in args_children.iter().enumerate() {
             if !child.is_named() { continue; }
@@ -9461,12 +9498,26 @@ impl<'a> Builder<'a> {
 
         if attr_names.is_empty() { return None; }
 
+        // Option tail → generic classified pairs. `isa` rides the pairs like
+        // any other keyword (the plugin ignores keywords it doesn't act on)
+        // AND is captured here for the type resolution core still owns.
+        let mut arg_pairs: Vec<plugin::ArgPair> = Vec::new();
+        let mut isa_value: Option<String> = None;
+        let mut isa_value_node: Option<Node<'a>> = None;
         if let Some(first) = first_named_idx {
             let rest = &args_children[first + 1..];
-            self.collect_has_option_value_nodes(
-                rest, &mut isa_value, &mut isa_value_node, &mut option_nodes,
-            );
+            for (k_node, v_node) in self.has_option_pair_nodes(rest) {
+                let Some(key) = self.extract_node_string(k_node) else { continue };
+                if key == "isa" {
+                    if isa_value.is_none() { isa_value = self.extract_node_string(v_node); }
+                    if isa_value_node.is_none() { isa_value_node = Some(v_node); }
+                }
+                let value = self.classify_value_shape(v_node);
+                arg_pairs.push(plugin::ArgPair { key, key_span: node_to_span(k_node), value });
+            }
         }
+
+        if arg_pairs.is_empty() { return None; }
 
         let isa_type = isa_value
             .as_deref()
@@ -9477,90 +9528,55 @@ impl<'a> Builder<'a> {
                 self.bag_query_expr_span(node_to_span(n))?.constrained_inner().cloned()
             });
 
-        // Classify each option by VALUE shape, not by keyword — the keyword
-        // vocabulary is the plugin's (rule #10). `shorthand` (`=> 1`),
-        // `explicit_name` (`=> 'name'`), and `handles` (`=> {..}` / `[..]`)
-        // are mutually exclusive value shapes; an option whose value matches
-        // none still passes through with all fields empty (the plugin's arms
-        // ignore keywords / shapes it doesn't act on).
-        let mut options: Vec<plugin::HasOption> = Vec::new();
-        for (keyword, val_node) in option_nodes {
-            let shorthand = self.node_is_numeric_one(val_node);
-            let explicit_name = if shorthand {
-                None
-            } else {
-                self.extract_node_string(val_node)
-            };
-            let handles = if shorthand || explicit_name.is_some() {
-                Vec::new()
-            } else {
-                self.extract_handles_delegation(val_node)
-            };
-            options.push(plugin::HasOption {
-                keyword,
-                shorthand,
-                explicit_name,
-                handles,
-            });
-        }
-
-        if options.is_empty() { return None; }
-        Some(plugin::HasOptions { attr_names, isa_type, options })
+        Some((plugin::HasOptions { attr_names, isa_type }, arg_pairs))
     }
 
-    /// Walk a `has` options fat-comma list, capturing the `isa` value (its
-    /// string and node) and the value node for *every other* option keyword —
-    /// no allowlist. The accessor-keyword vocabulary lives in `moo.rhai`
-    /// (rule #10); core only does the CST walk (rule #1) and hands the full
-    /// option list to the plugin, which decides which keywords matter. Keeps
-    /// the raw value nodes so the classifier can read the value shape.
-    /// Drive `f(key, value_node)` over a `has` call's option tail, regardless
-    /// of which surface form was written:
-    ///   `has 'name' => (is => 'ro')`  — options live in one nested list node
-    ///   `has 'name', is => 'ro'`      — options are flat siblings of the name
-    /// `rest` is the slice of `arguments` children *after* the first (name)
-    /// arg. A single nested list/paren delegates to the container walker; any
-    /// other shape is read as a flat fat-comma run.
-    fn for_each_has_option_pair<F>(&self, rest: &[Node<'a>], f: F)
-    where
-        F: FnMut(&str, Node<'a>) -> bool,
-    {
+    /// Collect a call's option-tail fat-comma pairs as `(key_node, value_node)`,
+    /// regardless of surface form — `has 'n' => (k => v)` (one nested list) or
+    /// `has 'n', k => v` (flat siblings). Owned Vec so the caller can run
+    /// `&self` classifiers over each pair without a borrow tangle.
+    fn has_option_pair_nodes(&self, rest: &[Node<'a>]) -> Vec<(Node<'a>, Node<'a>)> {
         let named: Vec<Node<'a>> = rest.iter().copied().filter(|n| n.is_named()).collect();
         if let [only] = named.as_slice() {
             if matches!(only.kind(), "list_expression" | "parenthesized_expression") {
-                self.for_each_pair_in_list(*only, f);
-                return;
+                return crate::cst::pair_nodes(*only);
             }
         }
-        self.for_each_pair_in_children(rest, f);
+        crate::cst::pair_nodes_in(rest)
     }
 
-    fn collect_has_option_value_nodes(
-        &self,
-        rest: &[Node<'a>],
-        isa_value: &mut Option<String>,
-        isa_value_node: &mut Option<Node<'a>>,
-        option_nodes: &mut Vec<(String, Node<'a>)>,
-    ) {
-        self.for_each_has_option_pair(rest, |key, val_node| {
-            // `isa` feeds the resolved attribute type, not an accessor option.
-            if key == "isa" {
-                if isa_value.is_none() {
-                    *isa_value = self.extract_node_string(val_node);
-                }
-                if isa_value_node.is_none() {
-                    *isa_value_node = Some(val_node);
-                }
-            } else {
-                option_nodes.push((key.to_string(), val_node));
+    /// Classify a fat-comma value node into the generic [`plugin::ValueShape`]
+    /// — no DSL vocabulary, just the syntactic shape. The plugin maps
+    /// `(keyword, shape)` to behavior.
+    fn classify_value_shape(&self, node: Node<'a>) -> plugin::ValueShape {
+        match node.kind() {
+            "number" => plugin::ValueShape::Num(
+                node.utf8_text(self.source).unwrap_or("").to_string(),
+            ),
+            "string_literal" | "interpolated_string_literal" => {
+                plugin::ValueShape::Str(self.extract_string_content(node).unwrap_or_default())
             }
-            true
-        });
-    }
-
-    /// `true` when the node is the integer literal `1` (the `=> 1` shorthand).
-    fn node_is_numeric_one(&self, node: Node<'_>) -> bool {
-        node.kind() == "number" && matches!(node.utf8_text(self.source), Ok("1"))
+            "bareword" | "autoquoted_bareword" => {
+                plugin::ValueShape::Str(node.utf8_text(self.source).unwrap_or("").to_string())
+            }
+            "anonymous_hash_expression" => {
+                let mut tokens: Vec<String> = Vec::new();
+                self.collect_hash_tokens(node, &mut tokens);
+                let mut pairs = Vec::new();
+                let mut i = 0;
+                while i + 1 < tokens.len() {
+                    pairs.push((tokens[i].clone(), tokens[i + 1].clone()));
+                    i += 2;
+                }
+                plugin::ValueShape::HashPairs(pairs)
+            }
+            "array_ref_expression" | "anonymous_array_expression" => {
+                plugin::ValueShape::ArrayItems(
+                    self.extract_string_list(node).into_iter().map(|(s, _)| s).collect(),
+                )
+            }
+            other => plugin::ValueShape::Other(other.to_string()),
+        }
     }
 
     /// Extract a string from a bareword or string-literal node.
@@ -9570,40 +9586,6 @@ impl<'a> Builder<'a> {
             "string_literal" | "interpolated_string_literal" => self.extract_string_content(node),
             _ => None,
         }
-    }
-
-    /// Parse a `handles` value into `(local, remote)` delegation pairs.
-    /// Hashref `{ local => 'remote' }` maps local→remote; arrayref / qw list
-    /// uses the same name for both. tree-sitter-perl nests fat-comma pairs
-    /// right-associatively inside a `list_expression`, so the hashref form
-    /// flattens the token stream and re-pairs.
-    fn extract_handles_delegation(&self, node: Node<'_>) -> Vec<(String, String)> {
-        let mut pairs = Vec::new();
-        match node.kind() {
-            "anonymous_hash_expression" => {
-                let mut tokens: Vec<String> = Vec::new();
-                self.collect_hash_tokens(node, &mut tokens);
-                let mut i = 0;
-                while i + 1 < tokens.len() {
-                    pairs.push((tokens[i].clone(), tokens[i + 1].clone()));
-                    i += 2;
-                }
-            }
-            "array_ref_expression" | "anonymous_array_expression" => {
-                for (name, _span) in self.extract_string_list(node) {
-                    pairs.push((name.clone(), name));
-                }
-            }
-            "quoted_word_list" => {
-                let mut names = Vec::new();
-                self.extract_qw_word_spans(node, &mut names);
-                for (name, _span) in names {
-                    pairs.push((name.clone(), name));
-                }
-            }
-            _ => {}
-        }
-        pairs
     }
 
     /// Flatten a fat-comma hash node into alternating key/value strings,
@@ -9799,25 +9781,6 @@ impl<'a> Builder<'a> {
                 }
             }
         }
-    }
-
-    /// Slice variant of `for_each_pair_in_list`: walk a flat sequence of
-    /// sibling nodes (including the inter-token commas / `=>`) as positional
-    /// pairs. Lets callers feed a *sub-range* of a container's children —
-    /// e.g. the option tail of `has 'name', is => 'ro', ...`, where the name
-    /// and the options share one `list_expression` parent and there's no
-    /// nested options node to hand to the container variant. String-key
-    /// projection over `for_each_pair_node_in_children`.
-    fn for_each_pair_in_children<F>(&self, children: &[Node<'a>], mut f: F)
-    where
-        F: FnMut(&str, Node<'a>) -> bool,
-    {
-        self.for_each_pair_node_in_children(children, |k_node, val| {
-            match self.extract_node_string(k_node) {
-                Some(key) => f(&key, val),
-                None => true,
-            }
-        });
     }
 
     /// Node-level pair walker over a flat sibling sequence — see
@@ -10398,10 +10361,8 @@ impl<'a> Builder<'a> {
                 if name == "load_components" {
                     self.visit_load_components(node);
                 }
-                // DBIC accessor synthesis
-                if self.is_dbic_class() {
-                    self.visit_dbic_class_method(node, name);
-                }
+                // DBIC column/relationship synthesis lives in the `dbic`
+                // plugin (`ClassIsa("DBIx::Class")`), fed `ctx.arg_names`.
                 // Class::Accessor::Grouped accessor synthesis. Not DBIC-gated:
                 // any package can `use parent 'Class::Accessor::Grouped'`. The
                 // call shape is the signal — `mk_*_accessors('group', @names)`
@@ -10435,6 +10396,8 @@ impl<'a> Builder<'a> {
                 );
                 ctx.call_kind = plugin::CallKind::Method;
                 ctx.method_name = Some(name.clone());
+                // The class-level-call fact declaration DSLs gate on.
+                ctx.receiver_is_package = is_pkg_call;
                 ctx.receiver_text = invocant_text.clone();
                 ctx.receiver_type = self.receiver_type_for(invocant_node);
                 // The receiver's call name is a generic syntax fact —
@@ -10474,6 +10437,20 @@ impl<'a> Builder<'a> {
                         }
                     }
                 }
+                // Flat arg-names for registered verbs (the DBIC plugin
+                // reads columns/relationship names off `ctx.arg_names`).
+                let wants_names = {
+                    let query = plugin::TriggerQuery {
+                        package_uses: &ctx.current_package_uses,
+                        package_parents: &ctx.current_package_parents,
+                    };
+                    self.plugins.wants_arg_names(&query, name)
+                };
+                if wants_names {
+                    if let Some(args_node) = node.child_by_field_name("arguments") {
+                        ctx.arg_names = self.extract_arg_name_list(args_node);
+                    }
+                }
                 self.record_provisional_dispatch(name, &ctx);
                 self.record_plugin_loads(name, &ctx);
                 self.dispatch_method_call_plugins(ctx);
@@ -10481,39 +10458,6 @@ impl<'a> Builder<'a> {
         }
 
         self.visit_children(node);
-    }
-
-    /// Check if the current package inherits from a DBIx::Class package,
-    /// at any depth. Walks the full local ancestry (`package_parents`),
-    /// so multi-level chains (`Result → BaseResult → DBIx::Class::Core`)
-    /// still get column/relationship synthesis — not just direct parents.
-    /// The builder has no `module_index` during the live walk, but the
-    /// resolver re-runs the full builder per file, so each file's own
-    /// `package_parents` carries the edges it declares.
-    fn is_dbic_class(&self) -> bool {
-        let Some(ref pkg) = self.current_package else { return false };
-        crate::file_analysis::any_ancestor(
-            pkg,
-            &self.package_parents,
-            None,
-            |c| c.starts_with("DBIx::Class"),
-        )
-    }
-
-    /// Synthesize accessor methods from DBIC class method calls.
-    fn visit_dbic_class_method(&mut self, node: Node<'a>, method_name: &str) {
-        match method_name {
-            "add_columns" | "add_column" => {
-                self.visit_dbic_add_columns(node);
-            }
-            "has_many" | "many_to_many" => {
-                self.visit_dbic_relationship(node, true);
-            }
-            "belongs_to" | "has_one" | "might_have" => {
-                self.visit_dbic_relationship(node, false);
-            }
-            _ => {}
-        }
     }
 
     /// Class::Accessor::Grouped accessor synthesis. The `mk_group_*_accessors`
@@ -10592,217 +10536,6 @@ impl<'a> Builder<'a> {
                     lexical: false,
                 },
             );
-        }
-    }
-
-    /// Synthesize column accessor methods from __PACKAGE__->add_columns(...).
-    fn visit_dbic_add_columns(&mut self, node: Node<'a>) {
-        // Arguments from method_call_expression:
-        //   qw(id name email)
-        //   id => { data_type => 'integer' }, name => { data_type => 'varchar' }
-        let args = match node.child_by_field_name("arguments") {
-            Some(a) => a,
-            None => return,
-        };
-
-        let mut col_names: Vec<(String, Span)> = Vec::new();
-
-        match args.kind() {
-            "quoted_word_list" => {
-                self.extract_array_attr_names(args, &mut col_names);
-            }
-            "parenthesized_expression" | "list_expression" => {
-                self.extract_dbic_column_names(args, &mut col_names);
-            }
-            _ => {}
-        }
-
-        for (name, sel_span) in &col_names {
-            self.add_symbol(
-                name.clone(),
-                SymKind::Method,
-                node_to_span(node),
-                *sel_span,
-                SymbolDetail::Sub {
-                    params: vec![ParamInfo {
-                        name: "$val".into(),
-                        default: None,
-                        is_slurpy: false,
-                    is_invocant: false,
-                    }],
-                    is_method: true,
-                    doc: None,
-                    display: None,
-                    hide_in_outline: false,
-                    opaque_return: false,
-                    is_constant: false,
-                    lexical: false,
-                },
-            );
-        }
-
-        // Also synthesize HashKeyDef symbols owned by the row class so
-        // `$rs->search({ name => … })` and `$row->{name}` find their column
-        // def (same shape Mojo `has` emits for constructor args).
-        if let Some(ref pkg) = self.current_package {
-            let owner = HashKeyOwner::Class(pkg.clone());
-            for (name, sel_span) in &col_names {
-                self.add_symbol(
-                    name.clone(),
-                    SymKind::HashKeyDef,
-                    node_to_span(node),
-                    *sel_span,
-                    SymbolDetail::HashKeyDef {
-                        owner: owner.clone(),
-                        is_dynamic: false,
-                    },
-                );
-            }
-        }
-    }
-
-    /// Extract column names from DBIC add_columns argument list.
-    /// In `id => { ... }, name => { ... }`, the column names are the fat-comma keys.
-    fn extract_dbic_column_names(&self, node: Node<'a>, names: &mut Vec<(String, Span)>) {
-        let mut expect_key = true;
-        for i in 0..node.child_count() {
-            let child = match node.child(i) {
-                Some(c) => c,
-                None => continue,
-            };
-
-            if !child.is_named() {
-                if child.kind() == "=>" {
-                    expect_key = false; // next named node is a value
-                }
-                continue;
-            }
-
-            if expect_key {
-                match child.kind() {
-                    "bareword" | "autoquoted_bareword" => {
-                        if let Ok(text) = child.utf8_text(self.source) {
-                            names.push((text.to_string(), node_to_span(child)));
-                        }
-                        expect_key = true; // will flip on =>
-                    }
-                    "string_literal" | "interpolated_string_literal" => {
-                        if let Some(text) = self.extract_string_content(child) {
-                            names.push((text, self.string_content_span(child)));
-                        }
-                        expect_key = true;
-                    }
-                    "quoted_word_list" => {
-                        // qw(id name email) — simple form
-                        self.extract_array_attr_names(child, names);
-                        return;
-                    }
-                    _ => {}
-                }
-            } else {
-                // Skip the value (hash_ref, string, etc.)
-                expect_key = true;
-            }
-        }
-    }
-
-    /// Synthesize relationship accessor from __PACKAGE__->has_many/belongs_to/etc.
-    fn visit_dbic_relationship(&mut self, node: Node<'a>, is_resultset: bool) {
-        // First arg: accessor name, second arg: related class
-        let mut accessor_name: Option<(String, Span)> = None;
-        let mut related_class: Option<String> = None;
-
-        let args = match node.child_by_field_name("arguments") {
-            Some(a) => a,
-            None => return,
-        };
-
-        match args.kind() {
-            "parenthesized_expression" | "list_expression" => {
-                self.extract_relationship_args(args, &mut accessor_name, &mut related_class);
-            }
-            _ => {}
-        }
-
-        if let Some((name, sel_span)) = accessor_name {
-            let return_type = if is_resultset {
-                Some(InferredType::ClassName("DBIx::Class::ResultSet".to_string()))
-            } else {
-                related_class.map(|c| InferredType::ClassName(c))
-            };
-
-            let sym_id = self.add_symbol(
-                name.clone(),
-                SymKind::Method,
-                node_to_span(node),
-                sel_span,
-                SymbolDetail::Sub {
-                    params: vec![],
-                    is_method: true,
-                    doc: None,
-                    display: None,
-                    hide_in_outline: false,
-                    opaque_return: false,
-                    is_constant: false,
-                    lexical: false,
-                },
-            );
-            // DBIC relationship accessor — arity 0 (no arg form is
-            // the standard call shape; with-arg variants exist but
-            // surface via different code paths). Encode as Empty +
-            // Concrete; multi-row vs single-row representation is
-            // already in `return_type` (a `Parametric(ResultSet)`
-            // for has_many, a `ClassName(row)` for belongs_to /
-            // has_one / might_have).
-            let arm = return_type.map(|t| {
-                (
-                    crate::witnesses::ArgGuard::Empty,
-                    crate::witnesses::ReturnExpr::Concrete(t),
-                )
-            });
-            self.record_framework_accessor_witness(
-                sym_id,
-                &name,
-                arm,
-                "DBIx::Class",
-                if is_resultset {
-                    format!("DBIx::Class resultset relationship `{}`", name)
-                } else {
-                    format!("DBIx::Class row relationship `{}`", name)
-                },
-            );
-        }
-    }
-
-    /// Extract accessor name and related class from relationship call arguments.
-    fn extract_relationship_args(&self, node: Node<'a>, accessor: &mut Option<(String, Span)>, related: &mut Option<String>) {
-        let mut arg_idx = 0;
-        for i in 0..node.child_count() {
-            let child = match node.child(i) {
-                Some(c) if c.is_named() => c,
-                _ => continue,
-            };
-            match child.kind() {
-                "string_literal" | "interpolated_string_literal" => {
-                    if let Some(text) = self.extract_string_content(child) {
-                        if arg_idx == 0 {
-                            *accessor = Some((text, self.string_content_span(child)));
-                        } else if arg_idx == 1 {
-                            *related = Some(text);
-                        }
-                        arg_idx += 1;
-                    }
-                }
-                "bareword" | "autoquoted_bareword" => {
-                    if let Ok(text) = child.utf8_text(self.source) {
-                        if arg_idx == 0 {
-                            *accessor = Some((text.to_string(), node_to_span(child)));
-                        }
-                        arg_idx += 1;
-                    }
-                }
-                _ => { arg_idx += 1; }
-            }
         }
     }
 

@@ -139,6 +139,7 @@ pub struct RhaiPlugin {
     type_constraint_names: Vec<String>,
     app_surface_consumers: Vec<String>,
     role_makers: Vec<String>,
+    arg_name_verbs: Vec<String>,
     topic_route_dsl: Option<crate::plugin::TopicRouteDsl>,
     engine: Arc<Engine>,
     ast: Arc<AST>,
@@ -326,6 +327,27 @@ impl RhaiPlugin {
             }
         }
 
+        // `arg_name_verbs()` — call verbs wanting flat-arg-name
+        // extraction; same optional, fail-safe array-of-strings shape.
+        let mut arg_name_verbs: Vec<String> = Vec::new();
+        if signatures.iter().any(|n| n == "arg_name_verbs") {
+            match engine.call_fn::<Array>(&mut rhai::Scope::new(), &ast, "arg_name_verbs", ()) {
+                Ok(arr) => {
+                    for d in arr {
+                        match from_dynamic::<String>(&d) {
+                            Ok(s) => arg_name_verbs.push(s),
+                            Err(e) => log::error!(
+                                "plugin `{}` arg_name_verbs() bad entry: {}",
+                                id,
+                                e
+                            ),
+                        }
+                    }
+                }
+                Err(e) => log::error!("plugin `{}` arg_name_verbs() failed: {}", id, e),
+            }
+        }
+
         // `topic_route_dsl()` — optional manifest map; bad shapes log
         // and disable rather than fail the plugin.
         let mut topic_route_dsl: Option<crate::plugin::TopicRouteDsl> = None;
@@ -355,6 +377,7 @@ impl RhaiPlugin {
             type_constraint_names,
             app_surface_consumers,
             role_makers,
+            arg_name_verbs,
             topic_route_dsl,
             engine,
             ast: Arc::new(ast),
@@ -452,6 +475,10 @@ impl FrameworkPlugin for RhaiPlugin {
 
     fn role_makers(&self) -> &[String] {
         &self.role_makers
+    }
+
+    fn arg_name_verbs(&self) -> &[String] {
+        &self.arg_name_verbs
     }
 
     fn topic_route_dsl(&self) -> Option<crate::plugin::TopicRouteDsl> {
@@ -560,6 +587,7 @@ const BUNDLED: &[(&str, &str)] = &[
     ("minion", include_str!("../../frameworks/minion.rhai")),
     ("data-printer", include_str!("../../frameworks/data-printer.rhai")),
     ("dbic-resultddl", include_str!("../../frameworks/dbic-resultddl.rhai")),
+    ("dbic", include_str!("../../frameworks/dbic.rhai")),
     ("type-tiny", include_str!("../../frameworks/type-tiny.rhai")),
     ("dancer", include_str!("../../frameworks/dancer.rhai")),
     ("moo", include_str!("../../frameworks/moo.rhai")),
@@ -777,6 +805,9 @@ mod tests {
             current_package_parents: vec![],
             current_package_uses: vec!["Demo".into()],
             has_options: None,
+            arg_names: Vec::new(),
+            arg_pairs: Vec::new(),
+            receiver_is_package: false,
         };
 
         let emissions = plugin.on_function_call(&ctx);
@@ -850,6 +881,7 @@ mod tests {
             ("minion", include_str!("../../frameworks/minion.rhai")),
             ("data-printer", include_str!("../../frameworks/data-printer.rhai")),
             ("dbic-resultddl", include_str!("../../frameworks/dbic-resultddl.rhai")),
+            ("dbic", include_str!("../../frameworks/dbic.rhai")),
             ("type-tiny", include_str!("../../frameworks/type-tiny.rhai")),
             ("dancer", include_str!("../../frameworks/dancer.rhai")),
             ("moo", include_str!("../../frameworks/moo.rhai")),
@@ -905,6 +937,9 @@ mod tests {
             current_package_parents: vec!["Mojo::EventEmitter".into()],
             current_package_uses: vec![],
             has_options: None,
+            arg_names: Vec::new(),
+            arg_pairs: Vec::new(),
+            receiver_is_package: false,
         };
 
         let emissions = plugin.on_method_call(&ctx);
@@ -974,6 +1009,9 @@ mod tests {
                 current_package_parents: vec![],
                 current_package_uses: vec!["DBIx::Class::ResultDDL".into()],
                 has_options: None,
+                arg_names: Vec::new(),
+                arg_pairs: Vec::new(),
+                receiver_is_package: false,
             };
 
             let emissions = plugin.on_function_call(&ctx);
@@ -1019,6 +1057,9 @@ mod tests {
             current_package_parents: vec![],
             current_package_uses: vec!["DBIx::Class::ResultDDL".into()],
             has_options: None,
+            arg_names: Vec::new(),
+            arg_pairs: Vec::new(),
+            receiver_is_package: false,
         };
 
         // Dynamic column name (`col $field => ...`) — nothing to synthesize.
@@ -1073,6 +1114,9 @@ mod tests {
             current_package_parents: vec!["Mojo::EventEmitter".into()],
             current_package_uses: vec![],
             has_options: None,
+            arg_names: Vec::new(),
+            arg_pairs: Vec::new(),
+            receiver_is_package: false,
         };
 
         let emissions = plugin.on_method_call(&ctx);
@@ -1213,6 +1257,9 @@ mod tests {
             current_package_parents: vec!["Catalyst::Controller".into()],
             current_package_uses: vec![],
             has_options: None,
+            arg_names: Vec::new(),
+            arg_pairs: Vec::new(),
+            receiver_is_package: false,
         };
 
         let emissions = plugin.on_method_call(&ctx);
@@ -1264,6 +1311,9 @@ mod tests {
             current_package_parents: vec!["Catalyst::Controller".into()],
             current_package_uses: vec![],
             has_options: None,
+            arg_names: Vec::new(),
+            arg_pairs: Vec::new(),
+            receiver_is_package: false,
         };
 
         let emissions = plugin.on_method_call(&ctx);
@@ -1315,6 +1365,9 @@ mod tests {
             current_package_parents: vec!["Catalyst::Controller".into()],
             current_package_uses: vec![],
             has_options: None,
+            arg_names: Vec::new(),
+            arg_pairs: Vec::new(),
+            receiver_is_package: false,
         };
 
         let emissions = plugin.on_method_call(&ctx);
@@ -1350,6 +1403,9 @@ mod tests {
             current_package_parents: vec![],
             current_package_uses: vec![],
             has_options: None,
+            arg_names: Vec::new(),
+            arg_pairs: Vec::new(),
+            receiver_is_package: false,
         };
         assert!(plugin.on_function_call(&ctx).is_empty());
     }
