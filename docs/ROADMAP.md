@@ -32,6 +32,13 @@ Type intelligence:
 - A4 v2: cross-FILE slot writes (`$self->{k} = Obj->new` in another
   file) — the `MethodOnClass` bridge pattern.
 
+Plugin genericity:
+- `has_options` final dissolution: move the `isa`-string→`InferredType`
+  mapping out of core (it's the last Moo-semantic field there) onto the
+  `type_constraint_names()` / `type_constraint_inner()` plugin seam.
+  Once it lands, `HasOptions` collapses into `arg_names` + `arg_pairs`
+  (the generic keyval primitive that already carries the options).
+
 Hardening:
 - Fold safety net: `eprintln!` → `tracing::error!` (builder.rs
   ~12061) + a synthetic-oscillator test so the release-mode
@@ -46,6 +53,23 @@ Hardening:
 - `return_via_edge` chases lack `TypeProvenance` (stamp
   `Delegation{kind: "callable_return_edge"}` on the chase).
 - cst/conventions migration backlog — `prompt-cst-migration.md`.
+- Unify autoquoted-key-as-literal into `cst::string_list`. Today
+  `string_list` routes `autoquoted_bareword` through the caller's
+  `fold` (const resolution), so the DSL-arg callers (`extract_arg_name_list`)
+  carry a per-caller fold that special-cases autoquoted→literal. An
+  autoquoted bareword is a grammar-certified literal for *every* caller,
+  so the right home for the rule is `string_list` itself — then
+  `extract_arg_name_list` deletes and the DBIC/keyval paths just use
+  `extract_string_list`. **Blocked on** a latent use-import bug it
+  unmasks: `use constant NAME => v`'s autoquoted key gets emitted as a
+  spurious `FunctionCall` import ref (resolved_package `"constant"`) by
+  the use-list walker — the old fold hid it by dropping non-constant
+  barewords. Regression-guarded by `const_call_form_not_double_reffed`.
+  Fix the use-`constant` path to not feed its declared names to the
+  generic import-ref emitter (it already routes them to
+  `accumulate_use_constant`), THEN move the autoquoted arm into
+  `string_list` and drop the per-caller fold. Proper unification; not
+  urgent (the per-caller fold is correct, just not DRY).
 
 QA tail:
 - MAIN-1 (`main::` across `require`) and H1 (duplicate packages) —
