@@ -1984,6 +1984,7 @@ impl<'a> Builder<'a> {
         } else {
             None
         };
+        let value_shape = self.classify_value_shape(arg);
         plugin::ArgInfo {
             text,
             string_value,
@@ -1991,6 +1992,7 @@ impl<'a> Builder<'a> {
             span: node_to_span(arg),
             content_span,
             inferred_type,
+            value_shape,
             sub_params,
             callable_return_edge,
             ref_sub_name,

@@ -76,6 +76,17 @@ pub struct ArgInfo {
     #[serde(default)]
     pub content_span: Option<Span>,
     pub inferred_type: Option<InferredType>,
+    /// The arg's syntactic value shape, classified one level deep —
+    /// `Str` / `Num` / `HashPairs` (`{ k => v }`) / `ArrayItems`
+    /// (`[ a, b ]` / `[qw/…/]`) / `Other`. This is the generic primitive
+    /// for argument-shape-polymorphic verbs: a plugin reads
+    /// `args[i].value_shape` and branches on the shape its own vocabulary
+    /// cares about (Mojo's `query`/`stash`/`to` each accept a hashref,
+    /// arrayref, pair list, or string for the same slot). Core owns the
+    /// tree walk (rule #1); the plugin owns "what this shape means here"
+    /// (rule #8/#10). Populated for every arg.
+    #[serde(default)]
+    pub value_shape: ValueShape,
     /// If this arg is an anonymous sub (`sub ($a, $b) { ... }` or a block
     /// that begins with `my ($a, $b) = @_`), its extracted param list.
     /// Used by handler-registration plugins (Mojo events, Dancer routes,
@@ -234,6 +245,14 @@ pub enum ValueShape {
     /// A value we don't classify (coderef, scalar var, nested expr);
     /// carries the node kind for debugging.
     Other(String),
+}
+
+impl Default for ValueShape {
+    /// Unclassified — the back-compat default when a serialized
+    /// `ArgInfo` omits `value_shape`.
+    fn default() -> Self {
+        ValueShape::Other(String::new())
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -1147,6 +1147,7 @@ pub fn build_plugin_query_context(
                 },
                 content_span: None,
                 inferred_type: Some(InferredType::String),
+                value_shape: crate::plugin::ValueShape::Str(s.clone()),
                 sub_params: Vec::new(),
                 callable_return_edge: None,
                 ref_sub_name: None,
