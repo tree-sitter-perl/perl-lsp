@@ -317,6 +317,34 @@ fn decamelize(name) {
     out
 }
 
+// Pull `controller`/`action` (+ the action's goto-def span) from a route
+// keyval tail. `start` is 1 to skip a leading `'ctrl#act'` target string,
+// 0 for the pure long form — Mojo lets stash pairs follow the target
+// (`->to('a#', action => 'b', section => 'x')`), so the walk MUST begin
+// after the head, not swallow it. Stash keys we don't model are ignored;
+// `()` for a field that didn't appear so the caller keeps whatever the
+// target string already gave it.
+fn route_keyvals(args, start) {
+    let controller = ();
+    let action = ();
+    let action_span = ();
+    for p in classified_pairs(args, start) {
+        if p.key == "controller" {
+            if p.value.Str != () { controller = p.value.Str; }
+        } else if p.key == "action" {
+            if p.value.Str != () {
+                action = p.value.Str;
+                action_span = if p.value_content_span != () {
+                    p.value_content_span
+                } else {
+                    p.value_span
+                };
+            }
+        }
+    }
+    #{ controller: controller, action: action, action_span: action_span }
+}
+
 fn on_method_call(ctx) {
     let out = [];
 
@@ -386,7 +414,7 @@ fn on_method_call(ctx) {
     // delimiters), not the outer arg span. Offsets are into the
     // string's content, not the raw literal — so a `q{Users#list}`
     // or heredoc-bodied arg works the same as `'Users#list'`.
-    let first = args[0].string_value;
+    let first = args[0].value_shape.Str;
     if first != () && first.contains("#") {
         let parts = first.split("#");
         if parts.len() == 2 {
@@ -414,6 +442,19 @@ fn on_method_call(ctx) {
                 let action_start = lit_controller_len + 1;
                 let action_end   = action_start + action.len();
                 let action_span = subspan_cols(base, action_start, action_end);
+                // `->to('ctrl#', action => 'name', …)`: the target string
+                // sets the controller but defers the action to a trailing
+                // keyval. Pull it (and a controller override) from the
+                // pairs that follow the first arg. The string-derived
+                // action wins when present; this only fills the gaps.
+                if action == "" {
+                    let kv = route_keyvals(args, 1);
+                    if kv.action != () {
+                        action = kv.action;
+                        action_span = kv.action_span;
+                    }
+                    if kv.controller != () { controller = kv.controller; }
+                }
                 let ems = route_emissions(controller, action, action_span, ctx.current_package);
                 // Lite `under(...)->to('ctrl#…')` also WRITES the topic
                 // base following sibling routes inherit. The receiver's
@@ -429,34 +470,16 @@ fn on_method_call(ctx) {
     // Long form: `->to(controller => 'Users', action => 'list')`.
     // `content_span` gives us the action string's contents directly —
     // no quote math needed.
-    let controller = "";
-    let action = "";
-    let action_span = ();
-    let i = 0;
-    while i < args.len() - 1 {
-        let key = args[i].string_value;
-        if key == "controller" {
-            let v = args[i + 1].string_value;
-            if v != () { controller = v; }
-        } else if key == "action" {
-            let v = args[i + 1].string_value;
-            if v != () {
-                action = v;
-                action_span = args[i + 1].content_span;
-                if action_span == () { action_span = args[i + 1].span; }
-            }
-        }
-        i += 2;
-    }
-
-    if action_span != () {
+    let kv = route_keyvals(args, 0);
+    if kv.action_span != () {
+        let controller = if kv.controller == () { "" } else { kv.controller };
         // Same inheritance as the short form: a long-form target with
         // an `action` but no `controller` reads the inherited one.
         if controller == "" {
             let inh = inherited_controller(ctx);
             if inh != () { controller = inh; }
         }
-        return route_emissions(controller, action, action_span, ctx.current_package);
+        return route_emissions(controller, kv.action, kv.action_span, ctx.current_package);
     }
 
     out
