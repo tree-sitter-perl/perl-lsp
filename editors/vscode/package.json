@@ -1,7 +1,7 @@
 {
   "name": "vscode-perl-lsp",
   "displayName": "Perl (perl-lsp)",
-  "description": "Perl language support powered by tree-sitter-perl — type inference, cross-file navigation, framework intelligence",
+  "description": "Perl IntelliSense — autocomplete, go-to-definition, hover, and project-wide cross-file rename. Type inference and framework intelligence (Moo/Moose, Mojolicious, DBIx::Class), powered by tree-sitter-perl.",
   "version": "0.4.2",
   "publisher": "tree-sitter-perl",
   "license": "Artistic-2.0",
@@ -20,12 +20,17 @@
   ],
   "keywords": [
     "perl",
+    "perl language server",
+    "intellisense",
+    "autocomplete",
+    "rename",
     "lsp",
-    "tree-sitter",
-    "moo",
+    "perltidy",
+    "go to definition",
     "moose",
     "mojolicious",
-    "dbic"
+    "dbic",
+    "tree-sitter"
   ],
   "activationEvents": [
     "onLanguage:perl"

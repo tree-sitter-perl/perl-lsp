@@ -1,6 +1,6 @@
 # Perl (perl-lsp)
 
-Perl language support powered by [tree-sitter-perl](https://github.com/tree-sitter-perl/tree-sitter-perl) — type inference without annotations, cross-file navigation, and framework intelligence for Moo/Moose, Mojolicious, and DBIx::Class.
+Perl IntelliSense for VS Code — autocomplete, go-to-definition, hover, find references, and project-wide rename — powered by [tree-sitter-perl](https://github.com/tree-sitter-perl/tree-sitter-perl). Type inference without annotations, cross-file navigation, and framework intelligence for Moo/Moose, Mojolicious, and DBIx::Class.
 
 The extension manages the [perl-lsp](https://github.com/tree-sitter-perl/perl-tree-sitter-lsp) language server for you: it downloads the matching binary on first activation, so installing the extension is the only setup step.
 
@@ -45,17 +45,20 @@ $self->$method();          # go-to-definition works — resolves through the con
 
 perl-lsp folds `use constant`, package-scope variables, string interpolation, and loop/map variables to resolve dynamic method calls.
 
+### Project-wide rename
+
+Rename a sub, method, package, or variable and perl-lsp rewrites every reference across your whole project — the declaration, all call sites, inherited overrides, and imports in other files.
+
 ### Cross-file intelligence
 
 - Module resolution from `@INC`, `PERL5LIB`, and cpanfile dependencies
 - Auto-discovers `lib/` and `local/lib/perl5/` — no configuration for standard layouts (cpm, carton, plain `lib/`)
 - Inheritance chain walking: parents, roles, mixins, `load_components`
-- Cross-file rename — e.g. 289 edits across 56 files in Mojolicious in under a second
 - SQLite cache per project for instant warm starts
 
 ## What you get
 
-completion (variables, methods, hash keys, auto-import, module names) · go-to-definition · find references · rename · hover with rendered POD · signature help · semantic tokens · inlay hints · diagnostics · code actions · workspace symbols · document outline · formatting (perltidy) · document highlights · selection range · folding · linked editing
+completion (variables, methods, hash keys, auto-import, module names) · go-to-definition · find references · **project-wide rename** · hover with rendered POD · signature help · semantic tokens · inlay hints · diagnostics · code actions · workspace symbols · document outline · formatting (perltidy) · document highlights · selection range · folding · linked editing
 
 ## Requirements
 
