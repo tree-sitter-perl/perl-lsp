@@ -87,17 +87,11 @@ jobs:
       - uses: actions/checkout@v6
 
       - name: Extract CHANGELOG section for this tag
-        run: |
-          # Pull the block under `## <tag>` (e.g. `## v0.4.0`) up to the next `## `.
-          awk -v hdr="## ${GITHUB_REF_NAME}" '
-            $0 == hdr {f=1; next}
-            /^## / && f {exit}
-            f
-          ' CHANGELOG.md > RELEASE_NOTES.md
-          if [ ! -s RELEASE_NOTES.md ]; then
-            echo "Release ${GITHUB_REF_NAME}." > RELEASE_NOTES.md
-            echo "::warning::No CHANGELOG.md section for ${GITHUB_REF_NAME}; using a stub body."
-          fi
+        # Shared with the local preview (`scripts/release-notes.sh v0.5.0`) so
+        # what you see locally is exactly what the release publishes. The
+        # script prefix-matches the dated `## <tag> — <date>` header and falls
+        # back to a stub body when no section exists.
+        run: scripts/release-notes.sh "${GITHUB_REF_NAME}" > RELEASE_NOTES.md
 
       - name: Create release
         uses: softprops/action-gh-release@v3
