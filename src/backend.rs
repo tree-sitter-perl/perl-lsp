@@ -749,47 +749,22 @@ impl LanguageServer for Backend {
         params: DocumentFormattingParams,
     ) -> Result<Option<Vec<TextEdit>>> {
         let uri = &params.text_document.uri;
-        let doc = match self.files.get_open(uri) {
-            Some(doc) => doc,
+        // Copy the source out and release the DashMap guard before awaiting
+        // perltidy: holding a shard read lock across the await deadlocks any
+        // concurrent didChange (which needs the write lock) on the same file.
+        let source = match self.files.get_open(uri) {
+            Some(doc) => doc.text.clone(),
             None => return Ok(None),
         };
 
         // Shell out to perltidy
-        let result = tokio::process::Command::new("perltidy")
-            .arg("--standard-output")
-            .arg("--standard-error-output")
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .spawn();
-
-        let mut child = match result {
-            Ok(c) => c,
-            Err(e) => {
-                self.client
-                    .log_message(
-                        MessageType::ERROR,
-                        format!("Failed to run perltidy: {}", e),
-                    )
-                    .await;
-                return Ok(None);
-            }
-        };
-
-        // Write source to stdin
-        if let Some(mut stdin) = child.stdin.take() {
-            use tokio::io::AsyncWriteExt;
-            let _ = stdin.write_all(doc.text.as_bytes()).await;
-            drop(stdin);
-        }
-
-        let output = match child.wait_with_output().await {
+        let output = match run_perltidy(source.clone()).await {
             Ok(o) => o,
             Err(e) => {
                 self.client
                     .log_message(
                         MessageType::ERROR,
-                        format!("perltidy failed: {}", e),
+                        format!("Failed to run perltidy: {}", e),
                     )
                     .await;
                 return Ok(None);
@@ -808,12 +783,12 @@ impl LanguageServer for Backend {
         }
 
         let formatted = String::from_utf8_lossy(&output.stdout).to_string();
-        if formatted == doc.text {
+        if formatted == source {
             return Ok(None);
         }
 
         // Replace entire document
-        let line_count = doc.text.lines().count();
+        let line_count = source.lines().count();
         Ok(Some(vec![TextEdit {
             range: Range {
                 start: Position {
@@ -944,40 +919,24 @@ impl LanguageServer for Backend {
         params: DocumentRangeFormattingParams,
     ) -> Result<Option<Vec<TextEdit>>> {
         let uri = &params.text_document.uri;
-        let doc = match self.files.get_open(uri) {
-            Some(doc) => doc,
+        // Copy the source out and release the DashMap guard before awaiting
+        // perltidy — see `formatting` for why holding it across the await
+        // deadlocks concurrent didChange on the same file.
+        let source = match self.files.get_open(uri) {
+            Some(doc) => doc.text.clone(),
             None => return Ok(None),
         };
 
         // Extract lines for the range
         let start_line = params.range.start.line as usize;
         let end_line = params.range.end.line as usize;
-        let lines: Vec<&str> = doc.text.lines().collect();
+        let lines: Vec<&str> = source.lines().collect();
         if start_line >= lines.len() { return Ok(None); }
         let end = (end_line + 1).min(lines.len());
         let range_text: String = lines[start_line..end].join("\n") + "\n";
 
         // Shell out to perltidy on the range
-        let result = tokio::process::Command::new("perltidy")
-            .arg("--standard-output")
-            .arg("--standard-error-output")
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .spawn();
-
-        let mut child = match result {
-            Ok(c) => c,
-            Err(_) => return Ok(None),
-        };
-
-        if let Some(mut stdin) = child.stdin.take() {
-            use tokio::io::AsyncWriteExt;
-            let _ = stdin.write_all(range_text.as_bytes()).await;
-            drop(stdin);
-        }
-
-        let output = match child.wait_with_output().await {
+        let output = match run_perltidy(range_text.clone()).await {
             Ok(o) if o.status.success() => o,
             _ => return Ok(None),
         };
@@ -1015,4 +974,36 @@ impl LanguageServer for Backend {
             None => Ok(None),
         }
     }
+}
+
+/// Run perltidy over `input`, returning its captured output.
+///
+/// `kill_on_drop` so a cancelled formatting request (the editor sends
+/// `$/cancelRequest`, tower-lsp aborts the handler future) reaps perltidy
+/// instead of leaving a `<defunct>` zombie (#80). The stdin write runs in its
+/// own task concurrently with `wait_with_output`'s stdout drain so we never
+/// block writing stdin while perltidy is blocked writing stdout.
+async fn run_perltidy(input: String) -> std::io::Result<std::process::Output> {
+    use tokio::io::AsyncWriteExt;
+
+    let mut child = tokio::process::Command::new("perltidy")
+        .arg("--standard-output")
+        .arg("--standard-error-output")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()?;
+
+    let stdin = child.stdin.take();
+    let writer = tokio::spawn(async move {
+        if let Some(mut stdin) = stdin {
+            let _ = stdin.write_all(input.as_bytes()).await;
+            // drop closes stdin, signalling EOF to perltidy
+        }
+    });
+
+    let output = child.wait_with_output().await;
+    let _ = writer.await;
+    output
 }
