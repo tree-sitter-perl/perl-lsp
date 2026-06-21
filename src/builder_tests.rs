@@ -15246,6 +15246,39 @@ fn optional_without_defined_does_not_dispatch() {
     );
 }
 
+#[test]
+fn optional_ternary_production() {
+    let fa = build_fa(
+        "package P;\nsub f {\n    my ($c) = @_;\n    my $x = $c ? Foo->new : undef;\n    $x;\n}",
+    );
+    assert_eq!(
+        fa.inferred_type_via_bag("$x", Point::new(4, 4)),
+        Some(InferredType::Optional(Box::new(InferredType::ClassName("Foo".into())))),
+        "$c ? Foo->new : undef produces Optional<Foo>",
+    );
+}
+
+#[test]
+fn optional_ternary_then_defined_narrows() {
+    let fa = build_fa(
+        "package P;\nsub f {\n    my ($c) = @_;\n    my $x = $c ? Foo->new : undef;\n    return unless defined $x;\n    $x->go;\n}",
+    );
+    assert_eq!(invocant_class_of(&fa, "go").as_deref(), Some("Foo"));
+}
+
+#[test]
+fn optional_ternary_conflict_stays_none() {
+    // Two distinct concrete arms (no undef) still disagree → None.
+    let fa = build_fa(
+        "package P;\nsub f {\n    my ($c) = @_;\n    my $x = $c ? Foo->new : Bar->new;\n    $x;\n}",
+    );
+    assert_eq!(
+        fa.inferred_type_via_bag("$x", Point::new(4, 4)),
+        None,
+        "Foo vs Bar is genuine disagreement, not Optional",
+    );
+}
+
 // ── Negative lattice (phase 3): Undef on the `defined` family ──
 
 #[test]

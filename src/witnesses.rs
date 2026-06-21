@@ -804,26 +804,46 @@ impl WitnessReducer for BranchArmFold {
     }
 
     fn claims(&self, w: &Witness) -> bool {
-        matches!(w.attachment, WitnessAttachment::BranchArm(_))
-            && matches!(w.payload, WitnessPayload::InferredType(_))
+        if !matches!(w.attachment, WitnessAttachment::BranchArm(_)) {
+            return false;
+        }
+        match &w.payload {
+            WitnessPayload::InferredType(_) => true,
+            WitnessPayload::Fact { family, .. } => family == "undef_arm",
+            _ => false,
+        }
     }
 
     fn reduce(&self, ws: &[&Witness], _q: &ReducerQuery) -> ReducedValue {
-        let arms: Vec<&InferredType> = ws
-            .iter()
-            .filter_map(|w| match &w.payload {
-                WitnessPayload::InferredType(t) => Some(t),
-                _ => None,
-            })
-            .collect();
-        if arms.len() < 2 {
+        let mut typed: Vec<InferredType> = Vec::new();
+        let mut undef_arms = 0usize;
+        for w in ws {
+            match &w.payload {
+                WitnessPayload::InferredType(t) => typed.push(t.clone()),
+                WitnessPayload::Fact { family, .. } if family == "undef_arm" => undef_arms += 1,
+                _ => {}
+            }
+        }
+        // Both arms must have contributed — the ≥2 rule guards a single
+        // materialized arm from masquerading as agreement.
+        if typed.len() + undef_arms < 2 {
             return ReducedValue::None;
         }
-        let first = arms[0];
-        if arms.iter().all(|t| *t == first) {
-            return ReducedValue::Type(first.clone());
+        // Strict agreement among the typed arms (a ternary wants exact
+        // agreement, NOT the loose hash/object subsumption the return-arm
+        // join uses). An `undef` arm then lifts the agreed `T` to
+        // `Optional<T>`.
+        let agreed = match typed.split_first() {
+            Some((first, rest)) if rest.iter().all(|t| t == first) => Some(first.clone()),
+            _ => None,
+        };
+        match agreed {
+            Some(t) if undef_arms > 0 && !matches!(t, InferredType::Optional(_)) => {
+                ReducedValue::Type(InferredType::Optional(Box::new(t)))
+            }
+            Some(t) => ReducedValue::Type(t),
+            None => ReducedValue::None,
         }
-        ReducedValue::None
     }
 }
 

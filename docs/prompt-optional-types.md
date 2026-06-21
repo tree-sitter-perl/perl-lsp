@@ -124,12 +124,20 @@ green.
   consumer (goto/completion/hover/dispatch) benefits. Unblock: a real
   union lattice + a consumer of negative facts.
 
-**Phase 4 — provenance + Type::Tiny + Optional production:**
-- Route `BranchArmFold` (ternary) + `SlotTypeFold` through the join so a
-  `{T, undef}` pair *produces* `Optional<T>`.
-- `TypeProvenance::ReducerFold { reducer: "optional_join" }` for
-  `--dump-package`.
-- Map Type::Tiny `Maybe[T]` / `Optional[T]` onto `Optional(Box<T>)`.
+**Phase 4 — Optional production + Type::Tiny:**
+- **Ternary (LANDED):** `$c ? Foo->new : undef` ⇒ `Optional<Foo>`. The
+  `undef` arm is marked like a `return undef` arm (`Builder("undef_arm")`
+  Fact on `BranchArm(span)`); `BranchArmFold` keeps its **strict** arm
+  agreement (a ternary wants exact agreement, not the return-arm join's
+  loose hash/object subsumption — `$c ? Foo : Bar` stays `None`) and
+  lifts the agreed `T` to `Optional<T>` when an undef arm is present.
+  Composes with `defined`: `my $x = $c ? Foo->new : undef; return unless
+  defined $x; $x->go` dispatches on `Foo`.
+- Still deferred: `SlotTypeFold` ({T, undef} slot writes → Optional);
+  bare `return;` as an undef arm (wider gold blast radius);
+  `TypeProvenance::ReducerFold { reducer: "optional_join" }` for
+  `--dump-package`; Type::Tiny `Maybe[T]` / `Optional[T]` →
+  `Optional(Box<T>)`.
 
 ## Sequencing wrinkle (Phase 2+)
 
