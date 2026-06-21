@@ -15487,6 +15487,20 @@ fn narrow_place_ref_eq() {
 }
 
 #[test]
+fn optional_return_provenance() {
+    // --dump-package should explain an Optional return via the join.
+    let fa = build_fa("package P;\nsub maybe { return undef unless 1; return Foo->new; }\n");
+    let sid = fa.symbols.iter().find(|s| s.name == "maybe").unwrap().id;
+    match fa.type_provenance.get(&sid) {
+        Some(TypeProvenance::ReducerFold { evidence, .. }) => assert!(
+            evidence.iter().any(|e| e == "optional_join"),
+            "evidence should record the optional join, got {evidence:?}",
+        ),
+        other => panic!("expected ReducerFold provenance, got {other:?}"),
+    }
+}
+
+#[test]
 fn optional_maybe_isa_scalar() {
     let fa = build_fa("package P;\nuse Moo;\nhas x => (is => 'ro', isa => 'Maybe[Int]');\n");
     assert_eq!(
