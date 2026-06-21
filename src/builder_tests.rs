@@ -1430,12 +1430,14 @@ fn test_return_type_self_variable() {
 }
 
 #[test]
-fn test_return_type_bare_return_filtered() {
-    // Bare return + typed return → bare is filtered, typed return wins
+fn test_return_type_bare_return_optional() {
+    // Bare `return;` + typed return → Optional<typed>: `return unless …`
+    // means the sub can yield undef (docs/prompt-optional-types.md).
     let fa = build_fa("sub get_config {\n    return unless 1;\n    return { host => 1 };\n}");
+    let t = fa.sub_return_type_at_arity("get_config", None);
     assert!(
-        fa.sub_return_type_at_arity("get_config", None).is_some_and(|t| t.is_hash_shaped()),
-        "hash-shaped",
+        matches!(&t, Some(InferredType::Optional(inner)) if inner.is_hash_shaped()),
+        "Optional<hash-shaped>, got {t:?}",
     );
 }
 
@@ -15484,6 +15486,16 @@ fn narrow_place_ref_eq() {
         Some(InferredType::HashRef),
         "ref(place) eq 'HASH' narrows the slot",
     );
+}
+
+#[test]
+fn optional_bare_return_then_defined() {
+    // The dominant idiom: `return unless …; return Obj->new` is Optional,
+    // and a `defined` guard at the call site recovers the class.
+    let fa = build_fa(
+        "package P;\nsub maybe { return unless 1; return Foo->new; }\nsub use_it {\n    my $r = maybe();\n    return unless defined $r;\n    $r->go;\n}",
+    );
+    assert_eq!(invocant_class_of(&fa, "go").as_deref(), Some("Foo"));
 }
 
 #[test]

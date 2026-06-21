@@ -140,10 +140,14 @@ green.
   InstanceOf/Moose-class fallbacks. Covers the quoted-string isa form;
   the bareword Type::Tiny constructor form (its own
   `TypeConstraintOf` path) is a follow-up.
+- **Bare `return;` as an undef arm (LANDED):** `return unless …; return
+  Obj->new` — the dominant Perl idiom — now yields `Optional<Obj>` (was
+  filtered). `publish_return_arm_witnesses` marks the bodyless `return`
+  like a `return undef`. The `defined` guard recovers the class at the
+  call site. Gold expectations updated to match (a `return unless` sub
+  *can* return undef — the Optional is the honest answer).
 - Still deferred: `SlotTypeFold` ({T, undef} slot writes → Optional);
-  bare `return;` as an undef arm (wider gold blast radius);
-  `TypeProvenance::ReducerFold { reducer: "optional_join" }` for
-  `--dump-package`; the bareword Type::Tiny `Maybe[…]` form.
+  the bareword Type::Tiny `Maybe[…]` constructor form.
 
 ## Sequencing wrinkle (Phase 2+)
 
