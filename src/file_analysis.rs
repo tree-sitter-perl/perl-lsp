@@ -6019,6 +6019,23 @@ impl FileAnalysis {
             return self.enclosing_class_for_scope(r.scope);
         }
 
+        // Flow-narrowing: a place invocant (`$self->{x}`) refined by a guard
+        // resolves at the use-site point, ahead of the functional deref
+        // chase — narrowing is strictly more precise where it applies
+        // (docs/prompt-flow-narrowing.md, v1b). Keyed on the invocant's own
+        // spelling, the place narrowing witness rides the `Variable` query
+        // path like any scalar.
+        if let Some(span) = invocant_span {
+            if invocant.contains("->") {
+                if let Some(cn) = self
+                    .inferred_type_via_bag_ctx(invocant, span.start, module_index)
+                    .and_then(|t| t.class_name().map(|s| s.to_string()))
+                {
+                    return Some(cn);
+                }
+            }
+        }
+
         // The invocant's type, resolved tree-free from the bag at its
         // span. Covers every recorded shape: scalar/array/hash reads,
         // chain receivers (the `Expression(refidx)` axis), function-call
