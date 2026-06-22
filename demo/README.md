@@ -36,9 +36,30 @@ ffmpeg -i demo/perl-lsp.gif -c:v libvpx-vp9 -b:v 0 -crf 34 demo/perl-lsp.webm
 
 ## The scene
 
-`app.pl` uses `Account` (`lib/Account.pm`, a Moo class). The demo shows hover
-(inferred cross-file type), completion (the real method list), and a rename of a
-`has` accessor in `Account.pm` cascading back into `app.pl`.
+Three files: `app.pl` builds an account with `make_account(...)`, a helper
+**default-exported** from `lib/Bank.pm`, which returns an `Account`
+(`lib/Account.pm`, a Moo class). Five beats:
+
+1. **Hover** `$acct` → `Account`, inferred *through* `make_account`'s return type
+2. **Goto-def** `make_account` → `Bank.pm` (default-export resolution)
+3. **Completion** `$acct->` → Account's methods (known via the function return)
+4. **Rename** the `has balance` accessor in `Account.pm`
+5. …which **cascades cross-file** into `Bank.pm`'s factory (`balance => …`)
+
+## Recording must use a current binary + the demo root
+
+Cross-file resolution depends on two things that have bitten this demo:
+
+- **Build first** (`cargo build --release`). A stale binary silently lacks
+  newer inference (e.g. a function's return type) and the cross-file beats fail.
+- The driver runs nvim **from inside `demo/`** and `demo_init.lua` **pins the
+  LSP root to `demo/`** — otherwise the root resolves to the outer repo (its
+  `.git`), `use lib 'lib'` points at the wrong dir, and imports don't resolve.
+
+The first take after a cold cache can miss the cross-file beats (the module
+index lags attach); re-run — once warm it's stable. Sanity-check perl-lsp itself
+synchronously with `perl-lsp --dump-package demo Bank` (look for
+`bag_return_type: "Account"` on `make_account`).
 
 ## Determinism notes (why the config looks the way it does)
 

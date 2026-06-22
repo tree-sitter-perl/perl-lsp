@@ -1,9 +1,9 @@
 use strict;
 use warnings;
 use lib 'lib';
-use Account;
+use Bank;
 
-my $acct = Account->new( owner => 'Ada', balance => 100 );
+my $acct = make_account( 'Ada', 100 );
 
 $acct->deposit(50);
 

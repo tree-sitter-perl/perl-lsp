@@ -3,8 +3,14 @@
 -- few helpers that make the recording DETERMINISTIC (the live LSP/completion paths
 -- are racy under scripted PTY input).
 --
--- Launched from repo root (the driver cd's there), so the relative dofile resolves.
-dofile("test_nvim_init.lua")
+-- Resolve paths relative to THIS file, so we don't depend on the launch CWD.
+local HERE = debug.getinfo(1, "S").source:sub(2):match("(.*/)") -- .../demo/
+dofile(HERE .. "../test_nvim_init.lua")
+
+-- Pin the LSP root to demo/ (not the outer repo via its .git) so `use lib 'lib'`
+-- and the workspace index resolve Bank.pm/Account.pm. The driver also cd's into
+-- demo/, but pinning makes it robust regardless of root-marker precedence.
+vim.lsp.config["perl-lsp"].root_dir = HERE:gsub("/$", "")
 
 -- NOTE: do NOT set `vim.opt.swapfile = false` here — it silently suppresses
 -- vim.lsp.completion's popup menu. The driver cleans stale swaps before each run
@@ -67,10 +73,11 @@ vim.cmd([[inoremap <silent> <C-l> <C-r>=v:lua.DemoComplete()<CR>]])
 -- command (which lingers in the cmdline and defaces the frame). The driver
 -- presses `;c` once before each beat, in order.
 local DEMO_CAPTIONS = {
-  "Hover  ·  the type of $acct is inferred across files",
-  "Completion  ·  real methods on $acct — because its class is known",
-  "Rename  ·  the has-accessor in Account.pm, everywhere it's used",
-  "…and across files: app.pl is updated automatically",
+  "Hover  ·  $acct is an Account — inferred through make_account()",
+  "Go to definition  ·  jumps to make_account in Bank.pm",
+  "Completion  ·  Account's methods on $acct, across files",
+  "Rename  ·  the has-accessor balance in Account.pm",
+  "…cascades cross-file into Bank.pm's factory",
 }
 local demo_cap_i = 0
 vim.keymap.set("n", ";c", function()
