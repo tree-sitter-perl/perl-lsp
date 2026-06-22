@@ -5,7 +5,7 @@ edition = "2021"
 authors = ["tree-sitter-perl contributors"]
 license = "Artistic-2.0"
 description = "A Perl LSP server built on tree-sitter-perl and tower-lsp"
-repository = "https://github.com/tree-sitter-perl/perl-tree-sitter-lsp"
+repository = "https://github.com/tree-sitter-perl/perl-lsp"
 keywords = ["perl", "lsp", "tree-sitter", "language-server"]
 categories = ["development-tools", "text-editors"]
 

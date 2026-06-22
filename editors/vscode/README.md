@@ -2,7 +2,7 @@
 
 Perl IntelliSense for VS Code — autocomplete, go-to-definition, hover, find references, and project-wide rename — powered by [tree-sitter-perl](https://github.com/tree-sitter-perl/tree-sitter-perl). Type inference without annotations, cross-file navigation, and framework intelligence for Moo/Moose, Mojolicious, and DBIx::Class.
 
-The extension manages the [perl-lsp](https://github.com/tree-sitter-perl/perl-tree-sitter-lsp) language server for you: it downloads the matching binary on first activation, so installing the extension is the only setup step.
+The extension manages the [perl-lsp](https://github.com/tree-sitter-perl/perl-lsp) language server for you: it downloads the matching binary on first activation, so installing the extension is the only setup step.
 
 ## Highlights
 
@@ -86,14 +86,14 @@ PERL5LIB=./my-libs/perl5 code .
 
 ## Extending: plugins for your in-house frameworks
 
-Framework smarts ship as [Rhai](https://rhai.rs) plugins, and you can add your own — drop a `.rhai` file into the directory named by `$PERL_LSP_PLUGIN_DIR`. If your codebase uses an `Import::Base`-style kit, the bundled generator can emit a plugin for it automatically. See the [plugin docs](https://github.com/tree-sitter-perl/perl-tree-sitter-lsp#plugins).
+Framework smarts ship as [Rhai](https://rhai.rs) plugins, and you can add your own — drop a `.rhai` file into the directory named by `$PERL_LSP_PLUGIN_DIR`. If your codebase uses an `Import::Base`-style kit, the bundled generator can emit a plugin for it automatically. See the [plugin docs](https://github.com/tree-sitter-perl/perl-lsp#plugins).
 
 ## Troubleshooting
 
 - Server logs are in the **Output** panel → **perl-lsp** channel.
 - The first open of a large workspace indexes it in the background; cross-file results sharpen as indexing completes and are cached for next time.
-- File an issue: [tree-sitter-perl/perl-tree-sitter-lsp](https://github.com/tree-sitter-perl/perl-tree-sitter-lsp/issues)
+- File an issue: [tree-sitter-perl/perl-lsp](https://github.com/tree-sitter-perl/perl-lsp/issues)
 
 ## License
 
-[Artistic License 2.0](https://github.com/tree-sitter-perl/perl-tree-sitter-lsp/blob/main/LICENSE) — same as Perl itself.
+[Artistic License 2.0](https://github.com/tree-sitter-perl/perl-lsp/blob/main/LICENSE) — same as Perl itself.

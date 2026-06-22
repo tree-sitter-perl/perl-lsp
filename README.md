@@ -233,8 +233,8 @@ See `perl-gen/README.md` for full usage and
 ## Building from Source
 
 ```bash
-git clone https://github.com/tree-sitter-perl/perl-tree-sitter-lsp
-cd perl-tree-sitter-lsp
+git clone https://github.com/tree-sitter-perl/perl-lsp
+cd perl-lsp
 cargo build --release
 ```
 
