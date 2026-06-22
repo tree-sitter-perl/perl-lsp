@@ -25,6 +25,11 @@ use crate::plugin::{self, PluginRegistry};
 
 pub use crate::plugin::default_plugin_registry;
 
+/// Flow-sensitive narrowing: guard recognition + span-scoped emission.
+/// A child module so its `impl Builder` methods keep private-field access
+/// while the code lives in its own file (rule #1: still driven by `build()`).
+mod narrowing;
+
 /// Single CST walk that powers the post-walk `ChainTypingReducer`.
 /// Indexes the node sets the reducer needs:
 ///
@@ -613,6 +618,7 @@ impl<'a> Builder<'a> {
         }
     }
 
+
     /// Post-walk pass: ref-derived facts that don't need walk-time
     /// visibility — `HashRefAccess` observations from `$v->{k}` refs
     /// and invocant-mutation facts on hash-key writes. Variable
@@ -928,6 +934,7 @@ fn extract_numeric(node: tree_sitter::Node, source: &[u8]) -> Option<u32> {
     node.utf8_text(source).ok()?.trim().parse::<u32>().ok()
 }
 
+
 /// Read the raw bytes between two sibling nodes to recover the
 /// postfix keyword (`if` / `unless` / `while` / …). Used because
 /// tree-sitter-perl shares one node kind for both `if` and `unless`.
@@ -942,12 +949,10 @@ fn connector_keyword_between(
         return None;
     }
     let between = std::str::from_utf8(&source[start..end]).ok()?.trim();
-    // Expect exactly one keyword in between.
     for kw in ["unless", "if", "while", "until"] {
         if between == kw || between.starts_with(kw) && between.trim() == kw {
             return Some(kw.to_string());
         }
-        // tolerate extra whitespace (e.g. newlines)
         if between.split_whitespace().next() == Some(kw) {
             return Some(kw.to_string());
         }
@@ -983,6 +988,11 @@ fn raw_mid_op(node: tree_sitter::Node, source: &[u8]) -> String {
         .trim()
         .to_string()
 }
+
+fn point_lt(a: tree_sitter::Point, b: tree_sitter::Point) -> bool {
+    (a.row, a.column) < (b.row, b.column)
+}
+
 
 /// Structural index of one return-expression in a sub body. Type
 /// information lives in the bag: the body expression carries its own
@@ -3365,6 +3375,21 @@ impl<'a> Builder<'a> {
             // Foldable statements
             "if_statement" | "unless_statement" | "while_statement" | "until_statement" => {
                 self.add_fold_range(node);
+                self.visit_children(node);
+            }
+
+            // Flow-sensitive narrowing: a block guard refines the then-block;
+            // a statement-level exit guard refines the rest of the block.
+            "conditional_statement" => {
+                self.narrow_block_guard(node);
+                self.visit_children(node);
+            }
+            "postfix_conditional_expression" => {
+                self.narrow_postfix_exit(node);
+                self.visit_children(node);
+            }
+            "lowprec_logical_expression" => {
+                self.narrow_logical_exit(node);
                 self.visit_children(node);
             }
 
