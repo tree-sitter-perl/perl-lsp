@@ -5,35 +5,19 @@ This file is only what's NEXT, in order.
 
 ## Now (in order)
 
-1. **Narrowing / Optional diagnostics** — turn the type lattice into bug
-   detection. The flow-narrowing + `Optional<T>` + `Undef` lattice has
-   landed (decision records: `adr/flow-narrowing.md`,
-   `adr/optional-types.md`; remaining production/coverage gaps:
-   `prompt-flow-narrowing.md`, `prompt-optional-types.md`), so a value's
-   type now answers "are you `undef` here?", "might you be?", "are you the
-   class this guard tested?". A diagnostic is just a consumer that asks
-   the type at the use point — never matching syntax (rule #10). Full
-   plan and confidence tiers: `prompt-narrowing-diagnostics.md`.
-
-   Build order:
-   - **D1** — method/deref on a provably-`Undef` receiver (the `else` of
-     `if (defined $x)`, etc.). Definite bug, highest confidence, default-on.
-   - **D2** — deref of an un-narrowed `Optional` (the nullable-deref lint),
-     with a quick-fix that inserts the `defined` guard the narrower then
-     consumes. Opt-in.
-   - The redundant/contradictory-guard family (always-true / always-false
-     guards) once a confident prior type + MRO-relatedness check is in place.
-
-   Each reuses the existing `collect_diagnostics` seam and the planned
-   PL-code framework (`prompt-cli-tools.md`) — no parallel mechanism.
-
-   Note: the "method-doesn't-exist on a narrowed receiver" diagnostic
-   needs no new code for **in-file** classes — the existing
-   `unresolved-method` pass already reads the narrowed receiver type, so
-   `if ($x->isa('Foo')) { $x->bogus }` flags today when `Foo` is defined
-   in the same file. Extending it to classes defined in *other* files is a
-   separate, shared limitation of that pass (the `is_local_class` gate in
-   `symbols.rs`), tracked in `prompt-narrowing-diagnostics.md`.
+1. **Narrowing / Optional — diagnostics + completeness.** The
+   flow-narrowing + `Optional<T>` + `Undef` lattice has landed (decision
+   records: `adr/flow-narrowing.md`, `adr/optional-types.md`), so a
+   value's type now answers "are you `undef` here?", "might you be?", "are
+   you the class this guard tested?". Two threads build on it:
+   - **Diagnostics** — turn those answers into bug detection (undef/Optional
+     derefs, redundant or contradictory guards). A diagnostic is just a
+     consumer that asks the type at the use point, never matching syntax
+     (rule #10). Plan, tiers, and build order: `prompt-narrowing-diagnostics.md`.
+   - **Completeness** — widen what the narrower recognizes: direct-element
+     places (`$hash{key}`, `$arr[0]`), and dynamic-key places
+     (`$self->{$k}`) where the key scalar is stable enough to stay sound.
+     `prompt-flow-narrowing.md` / `prompt-optional-types.md`.
 2. **DBIC out of core — phases 2–3.** Phase 1 landed (`visit_dbic_*`
    gone; `frameworks/dbic.rhai`, trigger `ClassIsa("DBIx::Class")`).
    Remaining: meta-method suppression → manifest (the `universal_methods`
