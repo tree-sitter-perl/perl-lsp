@@ -1,11 +1,11 @@
 -- Demo wrapper config for the asciinema screencast (driven by asciinema_drive.sh):
--- the REAL perl-lsp setup from test_nvim_init.lua, plus an on-screen caption and a
+-- the REAL perl-lsp setup from e2e/init.lua, plus an on-screen caption and a
 -- few helpers that make the recording DETERMINISTIC (the live LSP/completion paths
 -- are racy under scripted PTY input).
 --
 -- Resolve paths relative to THIS file, so we don't depend on the launch CWD.
 local HERE = debug.getinfo(1, "S").source:sub(2):match("(.*/)") -- .../demo/
-dofile(HERE .. "../test_nvim_init.lua")
+dofile(HERE .. "../e2e/init.lua")
 
 -- Pin the LSP root to demo/ (not the outer repo via its .git) so `use lib 'lib'`
 -- and the workspace index resolve Bank.pm/Account.pm. The driver also cd's into

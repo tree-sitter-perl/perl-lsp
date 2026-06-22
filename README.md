@@ -247,7 +247,7 @@ cargo build --release
 
 ```bash
 cargo test                                    # 900+ unit tests
-cargo build --release && ./run_e2e.sh         # 10 nvim-driven e2e suites (requires nvim)
+cargo build --release && ./e2e/run.sh         # 10 nvim-driven e2e suites (requires nvim)
 ```
 
 ## License

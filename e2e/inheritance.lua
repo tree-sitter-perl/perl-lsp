@@ -3,7 +3,7 @@
 --
 -- Usage:
 --   cargo build --release
---   PERL5LIB=$PWD/test_files/lib nvim --headless --clean -u test_nvim_init.lua -l test_e2e_inheritance.lua
+--   PERL5LIB=$PWD/test_files/lib nvim --headless --clean -u e2e/init.lua -l e2e/inheritance.lua
 
 vim.opt.rtp:prepend(".")
 

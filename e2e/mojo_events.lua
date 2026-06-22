@@ -1,6 +1,6 @@
 -- E2E tests for the mojo-events plugin — uses the cross-file
 -- consumer fixture (test_files/plugin_events_consumer.pl).
--- Usage: nvim --headless --clean -u test_nvim_init.lua -l test_e2e_mojo_events.lua
+-- Usage: nvim --headless --clean -u e2e/init.lua -l e2e/mojo_events.lua
 --
 -- The producer (test_files/lib/Demo/Plugin/Producer.pm) wires up
 -- 'ready' / 'failed' / 'done' handlers via $self->on(EVT, sub {...}).

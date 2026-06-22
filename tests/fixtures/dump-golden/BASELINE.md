@@ -28,9 +28,9 @@ shift it. They are a per-branch regression net, not a CI artifact.
 | Suite | Count | Source |
 |---|---|---|
 | `cargo test` | 494 passed, 0 failed | `/tmp/baseline.txt` (not committed; reproducible) |
-| `./run_e2e.sh` | 93 passed across 5 nvim suites (27 + 25 + 7 + 14 + 20), 0 failed | `/tmp/baseline-e2e.txt` |
+| `./e2e/run.sh` | 93 passed across 5 nvim suites (27 + 25 + 7 + 14 + 20), 0 failed | `/tmp/baseline-e2e.txt` |
 
-Re-capture: `cargo test 2>&1 | tail -1` and `./run_e2e.sh 2>&1 | tail -10`.
+Re-capture: `cargo test 2>&1 | tail -1` and `./e2e/run.sh 2>&1 | tail -10`.
 
 ## At-risk test surface (internal-field readers)
 

@@ -7,7 +7,7 @@
 --
 -- Usage:
 --   cargo build --release
---   nvim --headless --clean -u test_nvim_init.lua -l test_e2e_roles.lua
+--   nvim --headless --clean -u e2e/init.lua -l e2e/roles.lua
 
 vim.opt.rtp:prepend(".")
 

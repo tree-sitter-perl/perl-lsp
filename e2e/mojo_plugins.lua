@@ -1,5 +1,5 @@
 -- E2E tests for the Mojo plugin family — uses test_files/plugin_mojo_demo.pl.
--- Usage: nvim --headless --clean -u test_nvim_init.lua -l test_e2e_mojo_plugins.lua
+-- Usage: nvim --headless --clean -u e2e/init.lua -l e2e/mojo_plugins.lua
 --
 -- Covers four plugins in one fixture (the demo file deliberately
 -- exercises all of them):

@@ -1,6 +1,6 @@
 -- Headless verification that the demo fixture exercises the features we record.
 -- Run from repo root:
---   nvim --headless --clean -u test_nvim_init.lua -l demo/verify.lua
+--   nvim --headless --clean -u e2e/init.lua -l demo/verify.lua
 package.path = package.path .. ";./lua/?.lua"
 local lsp = require("test.lsp")
 

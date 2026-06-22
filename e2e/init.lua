@@ -1,5 +1,5 @@
 -- Throwaway nvim config for testing perl-lsp
--- Usage: nvim --clean -u test_nvim_init.lua test_files/sample.pl
+-- Usage: nvim --clean -u e2e/init.lua test_files/sample.pl
 
 -- Minimal settings
 vim.opt.number = true
@@ -9,13 +9,13 @@ vim.opt.completeopt = { "menuone", "noselect", "popup" }
 vim.opt.pumheight = 15
 
 -- Path to the built binary. Override with PERL_LSP_BIN to point at a
--- different server (e.g. EffortlessMetrics `perllsp`) for comparison runs.
+-- different server binary for comparison runs.
 local lsp_bin = vim.env.PERL_LSP_BIN
   and vim.fn.fnamemodify(vim.env.PERL_LSP_BIN, ":p")
   or vim.fn.fnamemodify("target/release/perl-lsp", ":p")
 
 -- Debug mode: set PERL_LSP_DEBUG=1 env var before launching nvim to enable.
---   PERL_LSP_DEBUG=1 nvim --clean -u test_nvim_init.lua test_files/sample.pl
+--   PERL_LSP_DEBUG=1 nvim --clean -u e2e/init.lua test_files/sample.pl
 -- Then tail the log: tail -f /tmp/perl-lsp.log
 local debug_mode = vim.env.PERL_LSP_DEBUG == "1"
 local log_level = debug_mode and "debug" or "warn"

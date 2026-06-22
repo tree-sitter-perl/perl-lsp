@@ -1,5 +1,5 @@
 -- E2E tests for the array intelligence hop — uses test_files/array_hop_demo.pl.
--- Usage: nvim --headless --clean -u test_nvim_init.lua -l test_e2e_array_hop.lua
+-- Usage: nvim --headless --clean -u e2e/init.lua -l e2e/array_hop.lua
 --
 -- The fixture chains: const fold (DEFAULT_NAME → 'alice') → Mojo helper
 -- synth → coderef return → array contribution → array projection →
