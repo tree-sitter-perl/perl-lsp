@@ -13227,11 +13227,20 @@ impl<'a> Builder<'a> {
                 )
             );
             if !preserve {
+                // Tag an optional return so `--dump-package` explains the
+                // `{T, undef}` join that produced it.
+                let mut evidence = vec!["symbol_bag".to_string()];
+                if matches!(
+                    return_types.get(&sub_name),
+                    Some(InferredType::Optional(_))
+                ) {
+                    evidence.push("optional_join".into());
+                }
                 return_provenance.insert(
                     sub_name,
                     crate::file_analysis::TypeProvenance::ReducerFold {
                         reducer: "return_arms".into(),
-                        evidence: vec!["symbol_bag".into()],
+                        evidence,
                     },
                 );
             }
