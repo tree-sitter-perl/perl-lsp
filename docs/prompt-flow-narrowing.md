@@ -4,6 +4,8 @@
 Executable spec / playground: `test_files/narrowing_playground.pl`.
 
 Residual forward work:
+- dynamic-key places (`$self->{$k}`, plain-scalar key) — stable iff the
+  key scalar is; truncate on `$k` reassignment. See the ADR's Residual.
 - elsif-chain cumulative negation (intersection across conditions);
 - general `Not` / `Difference` negation — parked, no positive lookup
   target, no consumer value;

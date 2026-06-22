@@ -78,6 +78,15 @@ iteration (clear-and-emit on tag `defined_narrowing`).
 
 ## Residual
 
+- **Dynamic-key places** (`$self->{$k}` where `$k` is a plain scalar) —
+  narrowable: such a place is stable iff both the container `$self` *and*
+  the key scalar `$k` are stable, so the delta is (a) let
+  `canonical_place_path` accept a plain-scalar key (keyed by spelling,
+  *not* an arbitrary key expression like `$self->{compute()}`) and (b)
+  add one truncation rule — reassigning `$k` ends the region. Inherits
+  the constant-key aliasing conservatism (a write via a *different* key
+  spelling that equals `$k` at runtime doesn't truncate — already true
+  for constant keys; a precision gap, never a crash).
 - elsif-chain cumulative negation (needs intersection across conditions);
 - general `Not`/`Difference` negation — parked, no positive lookup
   target, no consumer value;
