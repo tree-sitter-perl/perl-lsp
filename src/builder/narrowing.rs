@@ -14,10 +14,21 @@ use crate::file_analysis::{InferredType, Span};
 
 use super::{connector_keyword_between, point_lt, raw_leading_op, raw_mid_op, Builder};
 
-/// The subject a guard narrows. v1a recognizes plain scalars; the
-/// `Place` arm (`$self->{x}`) lands with the access-path canonicalizer.
+/// The subject a guard narrows — a plain scalar, or a constant
+/// hash/array place (`$self->{x}`) keyed by its source spelling.
 pub(super) enum NarrowSubject {
     Variable(String),
+    Place { key: String, root: String },
+}
+
+/// Classify a guard's operand into the subject it narrows: a plain
+/// scalar (`Variable`), else a constant place path (`Place`).
+fn narrow_subject_of(node: Node, src: &[u8]) -> Option<NarrowSubject> {
+    if let Some(v) = crate::cst::canonical_var_name(node, src) {
+        return Some(NarrowSubject::Variable(v));
+    }
+    let (key, root) = crate::cst::canonical_place_path(node, src)?;
+    Some(NarrowSubject::Place { key, root })
 }
 
 /// A recognized guard fact: the subject, the type it proves, and whether
@@ -62,12 +73,15 @@ fn string_literal_text(node: Node, source: &[u8]) -> Option<String> {
     content.filter(|s| !s.is_empty())
 }
 
-/// The scalar argument of a `func1op_call_expression` (`ref($x)` /
-/// `ref $x`), if its argument is a plain scalar.
-fn func1op_scalar_arg<'a>(node: Node<'a>) -> Option<Node<'a>> {
+/// The subject argument of a `func1op_call_expression` (`ref($x)` /
+/// `ref $self->{x}`) — a plain scalar or a place element.
+fn func1op_subject_arg<'a>(node: Node<'a>) -> Option<Node<'a>> {
     for i in 0..node.named_child_count() {
         let c = node.named_child(i)?;
-        if c.kind() == "scalar" {
+        if matches!(
+            c.kind(),
+            "scalar" | "hash_element_expression" | "array_element_expression"
+        ) {
             return Some(c);
         }
     }
@@ -118,10 +132,10 @@ fn recognize_isa_guard(call: Node, source: &[u8]) -> Option<GuardFact> {
     if method != "isa" && method != "DOES" {
         return None;
     }
-    let var = crate::cst::canonical_var_name(mc.invocant()?, source)?;
+    let subject = narrow_subject_of(mc.invocant()?, source)?;
     let class = string_literal_text(call.child_by_field_name("arguments")?, source)?;
     Some(GuardFact {
-        subject: NarrowSubject::Variable(var),
+        subject,
         narrowed: InferredType::ClassName(class),
         asserts_when_true: true,
     })
@@ -146,10 +160,10 @@ fn recognize_ref_eq_guard(eq: Node, source: &[u8]) -> Option<GuardFact> {
     if fname != "ref" && fname != "reftype" {
         return None;
     }
-    let var = crate::cst::canonical_var_name(func1op_scalar_arg(ref_call)?, source)?;
+    let subject = narrow_subject_of(func1op_subject_arg(ref_call)?, source)?;
     let ty = ref_string_to_type(&string_literal_text(lit, source)?)?;
     Some(GuardFact {
-        subject: NarrowSubject::Variable(var),
+        subject,
         narrowed: ty,
         asserts_when_true: true,
     })
@@ -270,19 +284,79 @@ impl<'a> Builder<'a> {
     /// truncating the region at the first reassignment of the subject.
     fn emit_narrowing_fact(&mut self, fact: GuardFact, region: Span, container: Node<'a>) {
         use crate::witnesses::{Witness, WitnessAttachment, WitnessPayload, WitnessSource};
-        let NarrowSubject::Variable(var) = fact.subject;
-        let end = self
-            .first_subject_write(&var, region, container)
-            .unwrap_or(region.end);
+        let (name, end) = match fact.subject {
+            NarrowSubject::Variable(var) => {
+                let end = self.first_subject_write(&var, region, container);
+                (var, end)
+            }
+            NarrowSubject::Place { key, root } => {
+                let end = self.first_place_invalidation(&key, &root, region, container);
+                (key, end)
+            }
+        };
+        let end = end.unwrap_or(region.end);
         if !point_lt(region.start, end) {
             return; // truncated to nothing
         }
         self.bag.push(Witness {
-            attachment: WitnessAttachment::Variable { name: var, scope: self.current_scope() },
+            attachment: WitnessAttachment::Variable { name, scope: self.current_scope() },
             source: WitnessSource::Builder("narrowing".into()),
             payload: WitnessPayload::InferredType(fact.narrowed),
             span: Span { start: region.start, end },
         });
+    }
+
+    /// Point of the first operation in `container` (at or after
+    /// `region.start`) that could disturb place `key` rooted at `root`:
+    /// a write to the slot, or any non-place-access use of `root` (a root
+    /// write, a method call on `root`, `root` passed as an argument). A
+    /// place READ keeps `root` as the base of a `->{…}` access, so it
+    /// doesn't trip the root rule. Conservative — it under-narrows.
+    fn first_place_invalidation(
+        &self,
+        key: &str,
+        root: &str,
+        region: Span,
+        container: Node<'a>,
+    ) -> Option<Point> {
+        fn consider(node: Node, after: Point, best: &mut Option<Point>) {
+            let p = node.start_position();
+            if !point_lt(p, after) && best.map_or(true, |b| point_lt(p, b)) {
+                *best = Some(p);
+            }
+        }
+        fn scan(node: Node, key: &str, root: &str, after: Point, src: &[u8], best: &mut Option<Point>) {
+            if node.kind() == "assignment_expression" {
+                if let Some(left) = node.child_by_field_name("left") {
+                    if crate::cst::canonical_place_path(left, src).map(|(k, _)| k).as_deref()
+                        == Some(key)
+                    {
+                        consider(node, after, best);
+                    }
+                }
+            }
+            if node.kind() == "scalar"
+                && crate::cst::canonical_var_name(node, src).as_deref() == Some(root)
+            {
+                // Guarded = `root` is the base of a place access (`$self->{…}`),
+                // i.e. a read of some slot — not an opaque use.
+                let guarded = node.parent().map_or(false, |p| {
+                    matches!(p.kind(), "hash_element_expression" | "array_element_expression")
+                        && p.named_child(0) == Some(node)
+                });
+                if !guarded {
+                    consider(node, after, best);
+                }
+            }
+            for i in 0..node.named_child_count() {
+                if let Some(c) = node.named_child(i) {
+                    scan(c, key, root, after, src, best);
+                }
+            }
+        }
+        let mut best = None;
+        scan(container, key, root, region.start, self.source, &mut best);
+        best
     }
 
     /// Point of the first reassignment of `$var` inside `container` at or

@@ -15185,3 +15185,97 @@ fn narrow_conjunction_intersects() {
         "&&-chain narrows on the isa conjunct",
     );
 }
+
+// ── Place narrowing (v1b): `$self->{x}` ──
+
+/// Class an invocant resolves to for the method-call ref named `method`.
+fn invocant_class_of(fa: &FileAnalysis, method: &str) -> Option<String> {
+    let r = fa
+        .refs
+        .iter()
+        .find(|r| r.target_name == method && matches!(r.kind, RefKind::MethodCall { .. }))
+        .unwrap_or_else(|| panic!("no method-call ref for {method}"));
+    fa.method_call_invocant_class(r, None)
+}
+
+#[test]
+fn narrow_place_block_if_isa() {
+    let fa = build_fa(
+        "package P;\nsub f {\n    my ($self) = @_;\n    if ($self->{h}->isa('Foo')) {\n        $self->{h}->go;\n    }\n}",
+    );
+    assert_eq!(
+        fa.inferred_type_via_bag("$self->{h}", Point::new(4, 8)),
+        Some(InferredType::ClassName("Foo".into())),
+        "place isa guard narrows the slot inside the block",
+    );
+    assert_eq!(invocant_class_of(&fa, "go").as_deref(), Some("Foo"));
+}
+
+#[test]
+fn narrow_place_early_return() {
+    let fa = build_fa(
+        "package P;\nsub f {\n    my ($self) = @_;\n    return unless $self->{cfg}->isa('Cfg');\n    $self->{cfg}->load;\n}",
+    );
+    assert_eq!(invocant_class_of(&fa, "load").as_deref(), Some("Cfg"));
+}
+
+#[test]
+fn narrow_place_method_on_value_keeps_slot() {
+    // A method call on the slot's VALUE doesn't disturb the slot, so both
+    // uses stay narrowed.
+    let fa = build_fa(
+        "package P;\nsub f {\n    my ($self) = @_;\n    return unless $self->{db}->isa('Schema');\n    $self->{db}->connect;\n    $self->{db}->disconnect;\n}",
+    );
+    assert_eq!(invocant_class_of(&fa, "connect").as_deref(), Some("Schema"));
+    assert_eq!(invocant_class_of(&fa, "disconnect").as_deref(), Some("Schema"));
+}
+
+#[test]
+fn narrow_place_truncated_by_slot_write() {
+    let fa = build_fa(
+        "package P;\nsub f {\n    my ($self) = @_;\n    return unless $self->{x}->isa('Foo');\n    $self->{x}->before;\n    $self->{x} = other();\n    $self->{x}->after;\n}",
+    );
+    assert_eq!(invocant_class_of(&fa, "before").as_deref(), Some("Foo"));
+    assert_ne!(
+        invocant_class_of(&fa, "after").as_deref(),
+        Some("Foo"),
+        "writing the slot truncates the narrowing",
+    );
+}
+
+#[test]
+fn narrow_place_truncated_by_opaque_root_op() {
+    let fa = build_fa(
+        "package P;\nsub f {\n    my ($self) = @_;\n    return unless $self->{x}->isa('Foo');\n    $self->{x}->before;\n    $self->reset;\n    $self->{x}->after;\n}",
+    );
+    assert_eq!(invocant_class_of(&fa, "before").as_deref(), Some("Foo"));
+    assert_ne!(
+        invocant_class_of(&fa, "after").as_deref(),
+        Some("Foo"),
+        "an opaque op on the root ($self->reset) truncates the narrowing",
+    );
+}
+
+#[test]
+fn narrow_place_dynamic_key_skipped() {
+    let fa = build_fa(
+        "package P;\nsub f {\n    my ($self, $k) = @_;\n    return unless $self->{$k}->isa('Foo');\n    $self->{$k}->go;\n}",
+    );
+    assert_ne!(
+        invocant_class_of(&fa, "go").as_deref(),
+        Some("Foo"),
+        "a dynamic key is not a stable place — no narrowing",
+    );
+}
+
+#[test]
+fn narrow_place_ref_eq() {
+    let fa = build_fa(
+        "package P;\nsub f {\n    my ($self) = @_;\n    return unless ref($self->{cfg}) eq 'HASH';\n    my $v = $self->{cfg};\n}",
+    );
+    assert_eq!(
+        fa.inferred_type_via_bag("$self->{cfg}", Point::new(4, 12)),
+        Some(InferredType::HashRef),
+        "ref(place) eq 'HASH' narrows the slot",
+    );
+}

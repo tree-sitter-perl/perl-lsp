@@ -181,6 +181,16 @@ place's writes can hide behind **aliasing**: `$self->reset` or
 
 ### v1a — variables · v1b — places (one feature, two flowing increments)
 
+**Status:** v1a landed; v1b landed for single-hop places — a constant
+hash/array projection off a scalar root (`$self->{x}`, `$self->[0]`).
+Multi-hop chains (`$self->{a}{b}`) and zero-arg accessor projections
+(`$self->name`) are the remaining follow-up. A place is keyed by its
+source spelling on the existing `Variable` attachment (the doc's "a
+`Place` witness is *just* a span-scoped slot witness" — so the engine,
+narrow-filter, and scope-walk are untouched); the place-vs-variable
+distinction lives only in the truncation rule and the one
+`method_call_invocant_class` query seam.
+
 The narrowing soundness lives **entirely on the emit side**, so places
 are *additive*, not a query-path rewrite — provided v1a's seams admit
 them from day one:
