@@ -54,7 +54,7 @@ jobs:
           version: v0.11.0
 
       - name: Run e2e tests
-        run: ./run_e2e.sh
+        run: ./e2e/run.sh
 
   gold-corpus:
     name: Gold corpus

@@ -17,7 +17,7 @@ lost a GPU/capture race against the popup's brief redraw; asciinema doesn't.
 ```
 asciinema_drive.sh   nvim in a sized tmux pane, driven by `tmux send-keys`,
                      recorded with `asciinema rec`
-demo_init.lua        nvim config: the real perl-lsp setup (test_nvim_init.lua)
+demo_init.lua        nvim config: the real perl-lsp setup (e2e/init.lua)
                      + captions + determinism helpers
 agg                  renders the .cast -> gif; ffmpeg -> mp4/webm
 ```

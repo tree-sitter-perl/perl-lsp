@@ -8,8 +8,8 @@
     "name": "tree-sitter-perl",
     "url": "https://github.com/tree-sitter-perl"
   },
-  "homepage": "https://github.com/tree-sitter-perl/perl-tree-sitter-lsp",
-  "repository": "https://github.com/tree-sitter-perl/perl-tree-sitter-lsp",
+  "homepage": "https://github.com/tree-sitter-perl/perl-lsp",
+  "repository": "https://github.com/tree-sitter-perl/perl-lsp",
   "license": "Artistic-2.0",
   "keywords": ["perl", "lsp", "language-server", "type-inference", "mojolicious", "moo", "moose", "dbix-class"]
 }

@@ -1,5 +1,5 @@
 -- E2E tests for DBIC parametric ResultSet — uses test_files/dbic_parametric_demo.pl.
--- Usage: nvim --headless --clean -u test_nvim_init.lua -l test_e2e_dbic_parametric.lua
+-- Usage: nvim --headless --clean -u e2e/init.lua -l e2e/dbic_parametric.lua
 --
 -- Walks the typing chain residual Part 5c added:
 --   $schema->resultset('Schema::Result::User')

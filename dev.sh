@@ -15,4 +15,4 @@ cargo build --release 2>&1
 export PERL5LIB="${PERL5LIB:-}:$PWD/test_files/lib"
 
 file="${1:-test_files/frameworks.pl}"
-exec nvim --clean -u test_nvim_init.lua "$file"
+exec nvim --clean -u e2e/init.lua "$file"

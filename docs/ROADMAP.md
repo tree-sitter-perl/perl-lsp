@@ -62,7 +62,7 @@ Hardening:
   `FileAnalysis::inferred_type` — index when profiling flags them.
 - DBIC parametric column-key completion at an empty `->search({ | })`
   (goto-def proves the chain; `complete_keyval_args` lacks the
-  parametric-receiver branch; pin in `test_e2e_dbic_parametric.lua`).
+  parametric-receiver branch; pin in `e2e/dbic_parametric.lua`).
 - Cursor-context qualified-path/invocant detection should ask the
   tree, not byte-walk (`extract_package_from_prefix` & sibling).
 - `return_via_edge` chases lack `TypeProvenance` (stamp

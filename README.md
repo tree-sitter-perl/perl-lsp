@@ -2,6 +2,8 @@
 
 A Perl language server with deep semantic intelligence. Built on [tree-sitter-perl](https://github.com/tree-sitter-perl/tree-sitter-perl) and tower-lsp.
 
+[![crates.io](https://img.shields.io/crates/v/perl-lsp.svg)](https://crates.io/crates/perl-lsp) [![CI](https://img.shields.io/github/actions/workflow/status/tree-sitter-perl/perl-lsp/ci.yml?branch=main)](https://github.com/tree-sitter-perl/perl-lsp/actions/workflows/ci.yml) [![VS Code](https://img.shields.io/badge/VS%20Code-Marketplace-blue)](https://marketplace.visualstudio.com/items?itemName=tree-sitter-perl.vscode-perl-lsp) [![License](https://img.shields.io/crates/l/perl-lsp.svg)](LICENSE)
+
 ![perl-lsp: cross-file type inference, completion, goto-def and rename](demo/perl-lsp.gif)
 
 *Hover infers `$acct` is an `Account` through the imported `make_account()`; goto-def jumps into `Bank.pm`; completion lists the class's methods; renaming the accessor cascades across files. ([demo/](demo/))*
@@ -208,9 +210,12 @@ perl-lsp --check . --severity warning
 
 Framework intelligence (Mojolicious, Minion, …) ships as bundled
 [Rhai](https://rhai.rs) plugins. You can add your own: drop any
-`*.rhai` file into the directory named by `$PERL_LSP_PLUGIN_DIR` and
-restart the server. Plugin sources are fingerprinted, so editing one
-invalidates the cross-file cache automatically.
+`*.rhai` file into your project's `.perl-lsp/` directory — auto-discovered
+at the workspace root, no configuration needed — and restart the server.
+For a personal collection you want loaded across every project, point
+`$PERL_LSP_PLUGIN_DIR` at it instead; both directories are searched.
+Plugin sources are fingerprinted, so editing one invalidates the
+cross-file cache automatically.
 
 ### Generating a plugin for an `Import::Base` kit
 
@@ -233,16 +238,16 @@ See `perl-gen/README.md` for full usage and
 ## Building from Source
 
 ```bash
-git clone https://github.com/tree-sitter-perl/perl-tree-sitter-lsp
-cd perl-tree-sitter-lsp
+git clone https://github.com/tree-sitter-perl/perl-lsp
+cd perl-lsp
 cargo build --release
 ```
 
 ## Testing
 
 ```bash
-cargo test                                    # 317 unit tests
-cargo build --release && ./run_e2e.sh         # 93 e2e tests (requires nvim)
+cargo test                                    # 900+ unit tests
+cargo build --release && ./e2e/run.sh         # 10 nvim-driven e2e suites (requires nvim)
 ```
 
 ## License

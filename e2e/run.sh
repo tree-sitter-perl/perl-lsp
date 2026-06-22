@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Run from the repo root: fixtures (test_files/), the lua harness (lua/test/
+# via rtp), and the release binary are all root-relative, and the SQLite cache
+# is keyed on the canonical root. Lets `./e2e/run.sh` work from any CWD.
+cd "$(dirname "${BASH_SOURCE[0]}")/.."
+
 export PERL5LIB="${PERL5LIB:-$PWD/test_files/lib}"
 
 bin="${PERL_LSP_BIN:-./target/release/perl-lsp}"
@@ -18,16 +23,16 @@ bin="${PERL_LSP_BIN:-./target/release/perl-lsp}"
 "$bin" --check "$PWD" --severity warning >/dev/null 2>&1 || true
 
 suites=(
-  test_e2e.lua
-  test_e2e_types.lua
-  test_e2e_cross_file.lua
-  test_e2e_inheritance.lua
-  test_e2e_frameworks.lua
-  test_e2e_array_hop.lua
-  test_e2e_mojo_plugins.lua
-  test_e2e_mojo_events.lua
-  test_e2e_dbic_parametric.lua
-  test_e2e_roles.lua
+  core.lua
+  types.lua
+  cross_file.lua
+  inheritance.lua
+  frameworks.lua
+  array_hop.lua
+  mojo_plugins.lua
+  mojo_events.lua
+  dbic_parametric.lua
+  roles.lua
 )
 
 total_passed=0
@@ -44,7 +49,7 @@ for test in "${suites[@]}"; do
   # per-suite tallies; echo it back so per-test ✓/✗ stays visible.)
   p=0; f=0; rc=0
   for attempt in 1 2; do
-    if output=$(nvim --headless --clean -u test_nvim_init.lua -l "$test" 2>&1); then rc=0; else rc=$?; fi
+    if output=$(nvim --headless --clean -u e2e/init.lua -l "e2e/$test" 2>&1); then rc=0; else rc=$?; fi
     # Per-suite summary lines look like `N passed, M failed` (with ANSI codes).
     summary=$(echo "$output" | sed 's/\x1b\[[0-9;]*m//g' | grep -E '^[0-9]+ passed, [0-9]+ failed' | tail -1 || true)
     p=0; f=0

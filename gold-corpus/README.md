@@ -86,7 +86,7 @@ Two earlier repo-keyed matrices cover definition + type-inference rows organized
 
 ## Editor-only capabilities (not CLI-queryable — covered by e2e)
 
-The following capabilities have **no CLI query mode** and are therefore **not** covered by this corpus. They are exercised by `run_e2e.sh` (drives a real nvim LSP client). This corpus does not pretend to cover them:
+The following capabilities have **no CLI query mode** and are therefore **not** covered by this corpus. They are exercised by `e2e/run.sh` (drives a real nvim LSP client). This corpus does not pretend to cover them:
 
 - inlayHint
 - foldingRange

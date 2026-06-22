@@ -9,7 +9,7 @@ return {
   },
   docs = {
     description = [[
-https://github.com/tree-sitter-perl/perl-tree-sitter-lsp
+https://github.com/tree-sitter-perl/perl-lsp
 
 A Perl language server built on tree-sitter-perl. Features type inference,
 cross-file module resolution, framework intelligence (Moo/Moose/Mojo::Base/DBIC),

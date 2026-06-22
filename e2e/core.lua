@@ -1,5 +1,5 @@
 -- E2E tests for perl-lsp via headless nvim
--- Usage: nvim --headless --clean -u test_nvim_init.lua -l test_e2e.lua
+-- Usage: nvim --headless --clean -u e2e/init.lua -l e2e/core.lua
 
 vim.opt.rtp:prepend(".")
 

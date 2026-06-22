@@ -1,5 +1,5 @@
 -- E2E tests for type inference — uses test_files/type_obstacle_course.pl
--- Usage: nvim --headless --clean -u test_nvim_init.lua -l test_e2e_types.lua
+-- Usage: nvim --headless --clean -u e2e/init.lua -l e2e/types.lua
 
 vim.opt.rtp:prepend(".")
 
