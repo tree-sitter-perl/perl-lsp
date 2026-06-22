@@ -6854,6 +6854,23 @@ impl<'a> Builder<'a> {
                 node.child_by_field_name("alternative"),
             ];
             for arm in arms.into_iter().flatten() {
+                // `undef` and the empty list `()` (a `stub_expression`,
+                // which coerces to undef in scalar context) make the ternary
+                // optional; mark either like a `return undef` arm so
+                // `BranchArmFold` lifts `{T, undef}` to `Optional<T>`.
+                if matches!(arm.kind(), "undef_expression" | "stub_expression") {
+                    self.bag.push(Witness {
+                        attachment: arm_att.clone(),
+                        source: WitnessSource::Builder("undef_arm".into()),
+                        payload: WitnessPayload::Fact {
+                            family: "undef_arm".into(),
+                            key: String::new(),
+                            value: crate::witnesses::FactValue::Bool(true),
+                        },
+                        span: node_to_span(arm),
+                    });
+                    continue;
+                }
                 // Make sure the arm's own Expr(span) carries its
                 // payload, then collect it on the BranchArm attachment.
                 self.emit_expr_witness(arm);
