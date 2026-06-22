@@ -5,33 +5,35 @@ This file is only what's NEXT, in order.
 
 ## Now (in order)
 
-1. **Narrowing / Optional diagnostics** — the bug-detection payoff of the
-   flow-narrowing + `Optional<T>` + `Undef` lattice. Plan +
-   confidence/value tiers in `prompt-narrowing-diagnostics.md`. Build
-   order: D1 (method/deref on a provably-`Undef` receiver — definite
-   bug, default-on) → D2 (unguarded `Optional` deref + the interactive
-   quick-fix) → the redundant/contradictory-guard family. Reuses the
-   `collect_diagnostics` seam + the planned PL-code framework
-   (`prompt-cli-tools.md`); each fires by asking the type at the use
-   point, never by syntax (rule #10).
+1. **Narrowing / Optional diagnostics** — turn the type lattice into bug
+   detection. The flow-narrowing + `Optional<T>` + `Undef` lattice has
+   landed (decision records: `adr/flow-narrowing.md`,
+   `adr/optional-types.md`; remaining production/coverage gaps:
+   `prompt-flow-narrowing.md`, `prompt-optional-types.md`), so a value's
+   type now answers "are you `undef` here?", "might you be?", "are you the
+   class this guard tested?". A diagnostic is just a consumer that asks
+   the type at the use point — never matching syntax (rule #10). Full
+   plan and confidence tiers: `prompt-narrowing-diagnostics.md`.
 
-   *D8 (narrowed receiver → existing `unresolved-method`) already fires
-   for local classes* — the unresolved-method pass queries
-   `inferred_type_via_bag(invocant, use_point)`, which observes the
-   span-scoped narrowing witness, so `if ($x->isa('Foo')) { $x->bogus }`
-   already flags when `Foo` is defined in-file. Residual D8 is only the
-   cross-file class case (the `is_local_class` gate), which is the base
-   diagnostic's limitation, not narrowing-specific.
+   Build order:
+   - **D1** — method/deref on a provably-`Undef` receiver (the `else` of
+     `if (defined $x)`, etc.). Definite bug, highest confidence, default-on.
+   - **D2** — deref of an un-narrowed `Optional` (the nullable-deref lint),
+     with a quick-fix that inserts the `defined` guard the narrower then
+     consumes. Opt-in.
+   - The redundant/contradictory-guard family (always-true / always-false
+     guards) once a confident prior type + MRO-relatedness check is in place.
 
-   *Foundation landed (PR stack #82–#90 merged to `main`; #91 in
-   review):* flow narrowing (variables, single/multi-hop places),
-   `Optional<T>` (return-undef, bare `return;`, ternary incl. empty-list
-   `()` arm, `Maybe[T]`), `defined`/`blessed` stripping, the `Undef`
-   negative lattice, provenance. #91 (bare `return;` → `Optional`) is the
-   wide, gold-corpus-moving tail — held for the gold diff. ADRs:
-   `adr/flow-narrowing.md`, `adr/optional-types.md`; forward work (place
-   coverage, production gaps, deferred negation):
-   `prompt-flow-narrowing.md`, `prompt-optional-types.md`.
+   Each reuses the existing `collect_diagnostics` seam and the planned
+   PL-code framework (`prompt-cli-tools.md`) — no parallel mechanism.
+
+   Note: the "method-doesn't-exist on a narrowed receiver" diagnostic
+   needs no new code for **in-file** classes — the existing
+   `unresolved-method` pass already reads the narrowed receiver type, so
+   `if ($x->isa('Foo')) { $x->bogus }` flags today when `Foo` is defined
+   in the same file. Extending it to classes defined in *other* files is a
+   separate, shared limitation of that pass (the `is_local_class` gate in
+   `symbols.rs`), tracked in `prompt-narrowing-diagnostics.md`.
 2. **DBIC out of core — phases 2–3.** Phase 1 landed (`visit_dbic_*`
    gone; `frameworks/dbic.rhai`, trigger `ClassIsa("DBIx::Class")`).
    Remaining: meta-method suppression → manifest (the `universal_methods`
