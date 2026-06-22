@@ -484,3 +484,31 @@ fn optional_maybe_isa_instance() {
         "Maybe[InstanceOf['Foo']] accessor returns Optional<Foo>",
     );
 }
+
+// ── cst reuse: grouping peel + plain-literal strictness flow through
+//    the shared `cst` primitives (cst::peel_groups /
+//    cst::first_named_child_where / cst::plain_string_literal_text) ──
+
+
+#[test]
+fn narrow_isa_interpolated_arg_stays_wide() {
+    // plain_string_literal_text rejects interpolation, so `isa("$cls")`
+    // is NOT a literal class-name guard and must not narrow.
+    let fa = build_fa(
+        "package P;\nsub f {\n    my ($x, $cls) = @_;\n    return unless $x->isa(\"$cls\");\n    $x->go;\n}",
+    );
+    assert_eq!(
+        invocant_class_of(&fa, "go").as_deref(),
+        None,
+        "interpolated isa arg is not a literal class name",
+    );
+}
+
+#[test]
+fn narrow_ref_eq_paren_wrapped_arg() {
+    // first_named_child_where peels the `(...)` around the ref() operand.
+    let fa = build_fa(
+        "package P;\nsub f {\n    my ($x) = @_;\n    return unless ref(($x)) eq 'Foo';\n    $x->go;\n}",
+    );
+    assert_eq!(invocant_class_of(&fa, "go").as_deref(), Some("Foo"));
+}
