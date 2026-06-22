@@ -9,22 +9,29 @@ This file is only what's NEXT, in order.
    flow-narrowing + `Optional<T>` + `Undef` lattice. Plan +
    confidence/value tiers in `prompt-narrowing-diagnostics.md`. Build
    order: D1 (method/deref on a provably-`Undef` receiver — definite
-   bug, default-on) → D8 (narrowed receiver feeds the existing
-   `unresolved-method`) → D2 (unguarded `Optional` deref + the
-   interactive quick-fix) → the redundant/contradictory-guard family.
-   Reuses the `collect_diagnostics` seam + the planned PL-code framework
+   bug, default-on) → D2 (unguarded `Optional` deref + the interactive
+   quick-fix) → the redundant/contradictory-guard family. Reuses the
+   `collect_diagnostics` seam + the planned PL-code framework
    (`prompt-cli-tools.md`); each fires by asking the type at the use
    point, never by syntax (rule #10).
 
-   *Foundation landed (PR stack #82–#91, unmerged):* flow narrowing
-   (variables, single/multi-hop places), `Optional<T>` (return-undef,
-   bare `return;`, ternary, `Maybe[T]`), `defined`/`blessed` stripping,
-   the `Undef` negative lattice, provenance. ADRs:
-   `adr/flow-narrowing.md`, `adr/optional-types.md`. Deferred
-   within that arc: `SlotTypeFold` Optional production, bareword
-   Type::Tiny `Maybe[…]`, elsif-chain cumulative negation, and general
-   `Not`/`Difference` negation (parked — no positive lookup target, no
-   consumer value).
+   *D8 (narrowed receiver → existing `unresolved-method`) already fires
+   for local classes* — the unresolved-method pass queries
+   `inferred_type_via_bag(invocant, use_point)`, which observes the
+   span-scoped narrowing witness, so `if ($x->isa('Foo')) { $x->bogus }`
+   already flags when `Foo` is defined in-file. Residual D8 is only the
+   cross-file class case (the `is_local_class` gate), which is the base
+   diagnostic's limitation, not narrowing-specific.
+
+   *Foundation landed (PR stack #82–#90 merged to `main`; #91 in
+   review):* flow narrowing (variables, single/multi-hop places),
+   `Optional<T>` (return-undef, bare `return;`, ternary incl. empty-list
+   `()` arm, `Maybe[T]`), `defined`/`blessed` stripping, the `Undef`
+   negative lattice, provenance. #91 (bare `return;` → `Optional`) is the
+   wide, gold-corpus-moving tail — held for the gold diff. ADRs:
+   `adr/flow-narrowing.md`, `adr/optional-types.md`; forward work (place
+   coverage, production gaps, deferred negation):
+   `prompt-flow-narrowing.md`, `prompt-optional-types.md`.
 2. **DBIC out of core — phases 2–3.** Phase 1 landed (`visit_dbic_*`
    gone; `frameworks/dbic.rhai`, trigger `ClassIsa("DBIx::Class")`).
    Remaining: meta-method suppression → manifest (the `universal_methods`

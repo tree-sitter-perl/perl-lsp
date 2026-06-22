@@ -116,10 +116,23 @@ to violate. Park until declared returns/params land.
 ### D8 — method-doesn't-exist on a narrowed receiver
 Narrowing makes a previously-unknown receiver class known (`if
 ($x->isa('Foo')) { $x->bogus }`). This is **not a new diagnostic** —
-it's wiring the narrowed invocant class into the *existing*
-`unresolved-method` path (`collect_diagnostics`), so `$x->bogus` flags
-when `Foo` + ancestors don't define `bogus`. Lowest-infra, high-value:
-narrowing extends the reach of a diagnostic that already exists.
+the existing `unresolved-method` pass already queries
+`inferred_type_via_bag(invocant, use_point)`, which observes the
+span-scoped narrowing witness, so **the local-class case already fires
+today** (verified: `if ($x->isa('Foo')) { $x->bogus }` flags when `Foo`
+is defined in-file and lacks `bogus`).
+
+**Residual = the cross-file class case.** The pass's `is_local_class`
+gate (`symbols.rs`, checks only the current file's symbols) short-circuits
+before method resolution runs, so a narrowed cross-file class
+(`$x->isa('Some::Dep')`) doesn't flag even though the narrowing resolves
+`ClassName("Some::Dep")` and `resolve_method_in_ancestors` /
+`class_has_unresolved_ancestor` already take a `module_index`. Lifting D8
+cross-file = relaxing that gate to "local OR cross-file-resolvable with a
+*complete* ancestor chain" (the unresolved-ancestor honest-silent guard
+is the existing safety valve — without it, every external class with an
+out-of-workspace parent would false-positive). Same gate the whole
+`unresolved-method` diagnostic shares; not narrowing-specific.
 
 ### D9 — dead code after exhaustive early-exit
 `return unless defined $x; …; if (!defined $x) { DEAD }`. Needs a
