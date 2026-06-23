@@ -1,9 +1,11 @@
-# ADR: Stack graphs — evaluated (with a spike + benchmark), not adopted
+# Eval: Stack graphs — evaluated (with a spike + benchmark), not adopted
 
 > Status: **decided — do not adopt** (revisit trigger at the end).
-> Supersedes the one-paragraph dismissal in `docs/prompt-graph-walking.md`
-> ("Out of scope") with measured evidence: a running stack-graphs spike, a
-> coverage census of the gold corpus, and a dependency/LOC cost count.
+> An *eval* (see `docs/evals/README.md`), not an ADR: it records an
+> investigation + throwaway spike whose outcome was "change nothing." It backs
+> the one-paragraph dismissal in `docs/prompt-graph-walking.md` ("Out of
+> scope") with measured evidence: a running stack-graphs spike, a coverage
+> census of the gold corpus, and a dependency/LOC cost count.
 
 ## The question
 
@@ -58,7 +60,7 @@ dependencies difficult to recover via static analysis."
 
 ## The spike (we actually built it)
 
-`docs/stack-graphs-spike.rs` — a runnable program against `stack-graphs = 0.14`
+`docs/evals/stack-graphs-spike.rs` — a runnable program against `stack-graphs = 0.14`
 that builds name-binding graphs by hand (faithful adaptations of the upstream
 `sequenced_import_star` and `class_field_through_function_parameter` fixtures to
 Perl surface syntax) and runs the real `ForwardPartialPathStitcher`. Results:
@@ -189,7 +191,7 @@ no latency headroom for stack graphs to unlock.
 
 ## Reproduce
 
-- Spike: copy `docs/stack-graphs-spike.rs` into a crate with
+- Spike: copy `docs/evals/stack-graphs-spike.rs` into a crate with
   `stack-graphs = "0.14"` as `src/main.rs`; `cargo run --release`.
 - Coverage census: the `semantic_area` aggregation over `gold-corpus/fixtures/*.json`.
 - Baseline timing: `gold-corpus/run.pl` (needs the pinned substrate; CI installs

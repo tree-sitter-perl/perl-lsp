@@ -1,4 +1,4 @@
-// Stack-graphs evaluation spike — see docs/adr/stack-graphs-evaluation.md.
+// Stack-graphs evaluation spike — see docs/evals/stack-graphs.md.
 // NOT part of the perl-lsp build. To run: place in a fresh crate's src/main.rs
 // with `stack-graphs = "0.14"` in Cargo.toml, then `cargo run --release`.
 //

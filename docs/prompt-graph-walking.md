@@ -116,7 +116,7 @@ shaping the node.
   (`adr/graph-walking.md`).
 - **Stack-graphs upstream** — evaluated with a running spike + a gold-corpus
   coverage census + a dependency/LOC count; **not adopted**. Full write-up:
-  `docs/adr/stack-graphs-evaluation.md` (spike: `docs/stack-graphs-spike.rs`).
+  `docs/evals/stack-graphs.md` (spike: `docs/evals/stack-graphs-spike.rs`).
   The short of it: stack graphs do name binding, not type inference, and in
   Perl the dominant `$obj->method` case is type-gated — so they'd cover ~38%
   of resolution rows while re-encoding rules we already have, and leave the
