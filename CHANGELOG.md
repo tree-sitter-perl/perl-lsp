@@ -6,6 +6,12 @@ crate / VS Code extension versions.
 
 ## Unreleased
 
+## v0.5.3 - 2026-06-23
+
+### Licensing
+
+- Switched to MIT instead of Artistic license (more permissive)
+
 ## v0.5.2 — 2026-06-22
 
 ### Type narrowing
