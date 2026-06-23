@@ -3,7 +3,7 @@ name: perl-lsp
 description: Perl language server built on tree-sitter-perl
 homepage: https://github.com/tree-sitter-perl/perl-tree-sitter-lsp
 licenses:
-  - Artistic-2.0
+  - MIT
 languages:
   - Perl
 categories:

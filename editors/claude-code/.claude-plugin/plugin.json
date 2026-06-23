@@ -10,6 +10,6 @@
   },
   "homepage": "https://github.com/tree-sitter-perl/perl-lsp",
   "repository": "https://github.com/tree-sitter-perl/perl-lsp",
-  "license": "Artistic-2.0",
+  "license": "MIT",
   "keywords": ["perl", "lsp", "language-server", "type-inference", "mojolicious", "moo", "moose", "dbix-class"]
 }

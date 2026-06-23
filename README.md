@@ -252,4 +252,4 @@ cargo build --release && ./e2e/run.sh         # 10 nvim-driven e2e suites (requi
 
 ## License
 
-Artistic License 2.0 — same as Perl itself.
+[MIT](LICENSE)

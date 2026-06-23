@@ -4,7 +4,7 @@
   "description": "Perl IntelliSense — autocomplete, go-to-definition, hover, and project-wide cross-file rename. Type inference and framework intelligence (Moo/Moose, Mojolicious, DBIx::Class), powered by tree-sitter-perl.",
   "version": "0.5.2",
   "publisher": "tree-sitter-perl",
-  "license": "Artistic-2.0",
+  "license": "MIT",
   "icon": "icon.png",
   "repository": {
     "type": "git",

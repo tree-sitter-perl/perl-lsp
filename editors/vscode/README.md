@@ -96,4 +96,4 @@ Framework smarts ship as [Rhai](https://rhai.rs) plugins, and you can add your o
 
 ## License
 
-[Artistic License 2.0](https://github.com/tree-sitter-perl/perl-lsp/blob/main/LICENSE) — same as Perl itself.
+[MIT](https://github.com/tree-sitter-perl/perl-lsp/blob/main/LICENSE)
