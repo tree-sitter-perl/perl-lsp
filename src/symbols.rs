@@ -740,10 +740,10 @@ fn completion_items_native(
         CursorContext::Variable { sigil } => analysis.complete_variables(point, sigil),
         CursorContext::Method { ref invocant_type, ref invocant_text } => {
             if let Some(ref ty) = invocant_type {
-                // `completion_class_name` peels `Optional<Foo>` to `Foo` so an
-                // unguarded optional receiver still offers its methods —
-                // completion is suggestive, unlike sound dispatch/hover.
-                if let Some(cn) = ty.completion_class_name() {
+                // `class_name_lenient` peels `Optional<Foo>` to `Foo` so an
+                // unguarded optional receiver still offers its methods — the
+                // same lenient receiver projection goto/hover/refs now use.
+                if let Some(cn) = ty.class_name_lenient() {
                     analysis.complete_methods_for_class(cn, Some(module_index))
                 } else {
                     // Ref types get deref snippet completions (handled below)

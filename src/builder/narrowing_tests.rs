@@ -186,16 +186,55 @@ fn optional_blessed_narrows_to_inner() {
 }
 
 #[test]
-fn optional_without_defined_does_not_dispatch() {
-    // Without the guard, $r stays Optional<Foo>, which dispatches nowhere
-    // (an optional is not definitely an instance).
+fn optional_dispatches_leniently_without_guard() {
+    // An unguarded Optional<Foo> still resolves its method receiver to Foo
+    // (lenient navigation — goto/hover/completion shouldn't go dark just
+    // because a `defined` guard hasn't been written; a future deref
+    // diagnostic owns the "might be undef" warning). The lattice keeps the
+    // value typed Optional<Foo> — only the receiver projection peels.
     let fa = build_fa(
         "package P;\nsub maybe { return undef unless 1; return Foo->new; }\nsub use_it {\n    my $r = maybe();\n    $r->go;\n}",
     );
     assert_eq!(
+        fa.inferred_type_via_bag("$r", Point::new(4, 4)),
+        Some(InferredType::Optional(Box::new(InferredType::ClassName("Foo".into())))),
+        "the value stays typed Optional<Foo> (the lattice is unchanged)",
+    );
+    assert_eq!(
+        invocant_class_of(&fa, "go").as_deref(),
+        Some("Foo"),
+        "the receiver dispatches leniently to Foo without a guard",
+    );
+}
+
+#[test]
+fn optional_receiver_goto_def_resolves() {
+    // The motivating case: goto-def on a method called on an unguarded
+    // Optional<Foo> lands on Foo's method, via the stamped nav edge that
+    // `method_call_invocant_class` now resolves leniently.
+    let fa = build_fa(
+        "package Foo;\nsub go { my ($self) = @_; }\npackage P;\nsub maybe { return undef unless 1; return Foo->new; }\nsub use_it {\n    my $r = maybe();\n    $r->go;\n}",
+    );
+    let foo_go = fa.symbols.iter().find(|s| s.name == "go").unwrap();
+    // Cursor on the `go` token of `$r->go`.
+    assert_eq!(
+        fa.find_definition(Point::new(6, 8), None),
+        Some(foo_go.selection_span),
+        "goto-def lands on Foo::go through the optional receiver",
+    );
+}
+
+#[test]
+fn undef_receiver_does_not_dispatch() {
+    // A provably-Undef receiver dispatches nowhere — you can't navigate the
+    // methods of nothing. `Undef` peels to None, unlike `Optional`.
+    let fa = build_fa(
+        "package P;\nsub f {\n    my ($x) = @_;\n    return if defined $x;\n    $x->go;\n}",
+    );
+    assert_eq!(
         invocant_class_of(&fa, "go").as_deref(),
         None,
-        "Optional<Foo> must be narrowed before it can dispatch",
+        "a definitely-Undef receiver stays dark",
     );
 }
 

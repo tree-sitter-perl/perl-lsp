@@ -1059,14 +1059,17 @@ impl InferredType {
         }
     }
 
-    /// The dispatchable class for **completion**, leniently peeling
-    /// `Optional<...>` layers. Dispatch / hover / diagnostics correctly
-    /// refuse an optional (`class_name()` stays `None` — it is not
-    /// *definitely* an instance), but completion is suggestive: on an
-    /// `Optional<Foo>` receiver it should still offer `Foo`'s methods,
-    /// since the author may simply not have written the `defined` guard
-    /// yet. `Undef` peels to nothing — it is definitely not an object.
-    pub fn completion_class_name(&self) -> Option<&str> {
+    /// The class this value **dispatches / navigates to**, leniently
+    /// peeling `Optional<...>` layers. Distinct from `class_name()` (which
+    /// the fold's return-type math relies on staying strict — a sub that
+    /// returns `Optional<Foo>` must keep *typing* as `Optional<Foo>`):
+    /// this is the consumer-side projection for receiver resolution, where
+    /// an `Optional<Foo>` should still resolve methods/goto/hover on `Foo`.
+    /// The author may simply not have written the `defined` guard yet; a
+    /// future deref diagnostic owns the "might be undef" warning, not the
+    /// silence of a dead receiver. `Undef` peels to nothing — it is
+    /// definitely not an object.
+    pub fn class_name_lenient(&self) -> Option<&str> {
         let mut t = self;
         while let Some(inner) = t.optional_inner() {
             t = inner;
@@ -6098,7 +6101,7 @@ impl FileAnalysis {
             if invocant.contains("->") || invocant.contains('{') || invocant.contains('[') {
                 if let Some(cn) = self
                     .inferred_type_via_bag_ctx(invocant, span.start, module_index)
-                    .and_then(|t| t.class_name().map(|s| s.to_string()))
+                    .and_then(|t| t.class_name_lenient().map(|s| s.to_string()))
                 {
                     return Some(cn);
                 }
@@ -6112,7 +6115,7 @@ impl FileAnalysis {
         if let Some(span) = invocant_span {
             if let Some(cn) = self
                 .expr_type_at_span(*span, module_index)
-                .and_then(|t| t.class_name().map(|s| s.to_string()))
+                .and_then(|t| t.class_name_lenient().map(|s| s.to_string()))
             {
                 return Some(cn);
             }
@@ -6151,7 +6154,7 @@ impl FileAnalysis {
                                     module_index,
                                     None,
                                 )
-                                .and_then(|t| t.class_name().map(|s| s.to_string()))
+                                .and_then(|t| t.class_name_lenient().map(|s| s.to_string()))
                             {
                                 return Some(cn);
                             }
@@ -6176,7 +6179,7 @@ impl FileAnalysis {
         if first == b'$' || first == b'@' || first == b'%' {
             if let Some(cn) = self
                 .inferred_type_via_bag_ctx(invocant, point, module_index)
-                .and_then(|t| t.class_name().map(|s| s.to_string()))
+                .and_then(|t| t.class_name_lenient().map(|s| s.to_string()))
             {
                 return Some(cn);
             }
