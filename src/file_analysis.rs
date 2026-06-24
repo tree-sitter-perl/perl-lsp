@@ -1059,6 +1059,24 @@ impl InferredType {
         }
     }
 
+    /// The class this value **dispatches / navigates to**, leniently
+    /// peeling `Optional<...>` layers. Distinct from `class_name()` (which
+    /// the fold's return-type math relies on staying strict — a sub that
+    /// returns `Optional<Foo>` must keep *typing* as `Optional<Foo>`):
+    /// this is the consumer-side projection for receiver resolution, where
+    /// an `Optional<Foo>` should still resolve methods/goto/hover on `Foo`.
+    /// The author may simply not have written the `defined` guard yet; a
+    /// future deref diagnostic owns the "might be undef" warning, not the
+    /// silence of a dead receiver. `Undef` peels to nothing — it is
+    /// definitely not an object.
+    pub fn class_name_lenient(&self) -> Option<&str> {
+        let mut t = self;
+        while let Some(inner) = t.optional_inner() {
+            t = inner;
+        }
+        t.class_name()
+    }
+
     /// `->{key}` narrowing on a structurally-typed hash (rule #10: ask
     /// the value). `Some(Some(t))` = key present with a known value
     /// type; `Some(None)` = key present, value type unknown; `None` =
@@ -6072,17 +6090,18 @@ impl FileAnalysis {
             return self.enclosing_class_for_scope(r.scope);
         }
 
-        // Flow-narrowing: a place invocant (`$self->{x}`) refined by a guard
-        // resolves at the use-site point, ahead of the functional deref
-        // chase — narrowing is strictly more precise where it applies
-        // (docs/adr/flow-narrowing.md, v1b). Keyed on the invocant's own
-        // spelling, the place narrowing witness rides the `Variable` query
-        // path like any scalar.
+        // Flow-narrowing: a place invocant — arrow (`$self->{x}`) or direct
+        // (`$h{k}` / `$h[0]`) — refined by a guard resolves at the use-site
+        // point, ahead of the functional deref chase, since narrowing is
+        // strictly more precise where it applies (docs/adr/flow-narrowing.md).
+        // Keyed on the invocant's own spelling, the place narrowing witness
+        // rides the `Variable` query path like any scalar. `is_element_place`
+        // tells a real place from a scalar deref (`${$ref}` is not a hash).
         if let Some(span) = invocant_span {
-            if invocant.contains("->") {
+            if InvocantText::parse(invocant).is_element_place() {
                 if let Some(cn) = self
                     .inferred_type_via_bag_ctx(invocant, span.start, module_index)
-                    .and_then(|t| t.class_name().map(|s| s.to_string()))
+                    .and_then(|t| t.class_name_lenient().map(|s| s.to_string()))
                 {
                     return Some(cn);
                 }
@@ -6096,7 +6115,7 @@ impl FileAnalysis {
         if let Some(span) = invocant_span {
             if let Some(cn) = self
                 .expr_type_at_span(*span, module_index)
-                .and_then(|t| t.class_name().map(|s| s.to_string()))
+                .and_then(|t| t.class_name_lenient().map(|s| s.to_string()))
             {
                 return Some(cn);
             }
@@ -6135,7 +6154,7 @@ impl FileAnalysis {
                                     module_index,
                                     None,
                                 )
-                                .and_then(|t| t.class_name().map(|s| s.to_string()))
+                                .and_then(|t| t.class_name_lenient().map(|s| s.to_string()))
                             {
                                 return Some(cn);
                             }
@@ -6160,7 +6179,7 @@ impl FileAnalysis {
         if first == b'$' || first == b'@' || first == b'%' {
             if let Some(cn) = self
                 .inferred_type_via_bag_ctx(invocant, point, module_index)
-                .and_then(|t| t.class_name().map(|s| s.to_string()))
+                .and_then(|t| t.class_name_lenient().map(|s| s.to_string()))
             {
                 return Some(cn);
             }
