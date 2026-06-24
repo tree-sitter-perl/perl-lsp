@@ -49,7 +49,9 @@ side of a `defined` guard), never from the arm join.
   'Maybe[T]'` via `map_isa_to_type` recursing on the inner constraint.
 - **Consumption:** `defined`/`blessed` strip `Optional<T> → T`
   (`flow-narrowing.md`); the `else`/`return if` negative narrows to
-  `Undef`.
+  `Undef`. **Completion** additionally peels an unguarded `Optional<T>` to
+  offer `T`'s methods (`completion_class_name`) — suggestive only; sound
+  paths keep refusing it.
 
 Provenance: an `Optional` return is tagged `optional_join` in its
 `TypeProvenance::ReducerFold` evidence so `--dump-package` explains it.

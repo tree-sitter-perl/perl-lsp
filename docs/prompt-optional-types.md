@@ -32,5 +32,11 @@
 
 ### Consumption
 
-Diagnostics on unguarded `Optional` / known-`Undef` derefs:
-`docs/prompt-narrowing-diagnostics.md`.
+- **Completion peels the optional** — **landed.** A `$x->` receiver typed
+  `Optional<Foo>` offers `Foo`'s methods via
+  `InferredType::completion_class_name`. Completion-only leniency: sound
+  paths (dispatch / hover / goto) still refuse the optional, because an
+  optional is not *definitely* an instance — but the author may not have
+  written the `defined` guard yet. See `docs/prompt-flow-narrowing.md`.
+- Diagnostics on unguarded `Optional` / known-`Undef` derefs:
+  `docs/prompt-narrowing-diagnostics.md`.

@@ -1059,6 +1059,21 @@ impl InferredType {
         }
     }
 
+    /// The dispatchable class for **completion**, leniently peeling
+    /// `Optional<...>` layers. Dispatch / hover / diagnostics correctly
+    /// refuse an optional (`class_name()` stays `None` — it is not
+    /// *definitely* an instance), but completion is suggestive: on an
+    /// `Optional<Foo>` receiver it should still offer `Foo`'s methods,
+    /// since the author may simply not have written the `defined` guard
+    /// yet. `Undef` peels to nothing — it is definitely not an object.
+    pub fn completion_class_name(&self) -> Option<&str> {
+        let mut t = self;
+        while let Some(inner) = t.optional_inner() {
+            t = inner;
+        }
+        t.class_name()
+    }
+
     /// `->{key}` narrowing on a structurally-typed hash (rule #10: ask
     /// the value). `Some(Some(t))` = key present with a known value
     /// type; `Some(None)` = key present, value type unknown; `None` =
@@ -6072,14 +6087,15 @@ impl FileAnalysis {
             return self.enclosing_class_for_scope(r.scope);
         }
 
-        // Flow-narrowing: a place invocant (`$self->{x}`) refined by a guard
-        // resolves at the use-site point, ahead of the functional deref
-        // chase — narrowing is strictly more precise where it applies
-        // (docs/adr/flow-narrowing.md, v1b). Keyed on the invocant's own
-        // spelling, the place narrowing witness rides the `Variable` query
-        // path like any scalar.
+        // Flow-narrowing: a place invocant — arrow (`$self->{x}`) or direct
+        // (`$h{k}` / `$h[0]`) — refined by a guard resolves at the use-site
+        // point, ahead of the functional deref chase, since narrowing is
+        // strictly more precise where it applies (docs/adr/flow-narrowing.md).
+        // Keyed on the invocant's own spelling, the place narrowing witness
+        // rides the `Variable` query path like any scalar; the subscript
+        // (`->` / `{` / `[`) is what distinguishes a place from a plain var.
         if let Some(span) = invocant_span {
-            if invocant.contains("->") {
+            if invocant.contains("->") || invocant.contains('{') || invocant.contains('[') {
                 if let Some(cn) = self
                     .inferred_type_via_bag_ctx(invocant, span.start, module_index)
                     .and_then(|t| t.class_name().map(|s| s.to_string()))
