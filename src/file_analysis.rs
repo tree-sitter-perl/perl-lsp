@@ -4253,6 +4253,41 @@ impl FileAnalysis {
         out
     }
 
+    /// The rep a `ref…eq` / `isa` GUARD established for `subject` at `point`,
+    /// read from **narrowing-sourced witnesses only**. Distinct from
+    /// `inferred_type_via_bag`: a `$x->{k}` deref pushes a zero-extent
+    /// `HashRef` belief sitting exactly at the use point, which would mask the
+    /// guard's rep under the merged query — so D6 reads the guard's assertion
+    /// directly. Innermost (narrowest) containing region wins. `None` when no
+    /// guard narrows the subject here (so D6 fires only on guard-narrowed
+    /// reps, per the plan).
+    pub fn guard_narrowed_rep(&self, subject: &str, point: Point) -> Option<InferredType> {
+        use crate::witnesses::{WitnessAttachment, WitnessPayload, WitnessSource};
+        let mut best: Option<&crate::witnesses::Witness> = None;
+        for w in self.witnesses.filter(|w| {
+            matches!(&w.source, WitnessSource::Builder(s) if s == "narrowing" || s == "defined_narrowing")
+                && matches!(&w.attachment, WitnessAttachment::Variable { name, .. } if name == subject)
+        }) {
+            if !contains_point(&w.span, point) {
+                continue;
+            }
+            if !matches!(&w.payload, WitnessPayload::InferredType(_)) {
+                continue;
+            }
+            let innermost = match best {
+                None => true,
+                Some(b) => (w.span.start.row, w.span.start.column) >= (b.span.start.row, b.span.start.column),
+            };
+            if innermost {
+                best = Some(w);
+            }
+        }
+        match best.map(|w| &w.payload) {
+            Some(WitnessPayload::InferredType(t)) => Some(t.clone()),
+            _ => None,
+        }
+    }
+
     /// Gated dispatch candidates in THIS file whose receiver couldn't be
     /// typed (`ReceiverUntyped`) — the genuine typing gaps the opt-in
     /// `unresolved-dispatch` diagnostic surfaces. `DoesNotApply` is a settled

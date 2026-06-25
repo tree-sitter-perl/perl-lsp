@@ -239,6 +239,7 @@ impl LanguageServer for Backend {
                 unresolved_method_cross_file: flag("unresolvedMethodCrossFile"),
                 optional_deref: flag("optionalDeref"),
                 redundant_guard: flag("redundantGuard"),
+                deref_shape: flag("derefShape"),
             };
         }
 

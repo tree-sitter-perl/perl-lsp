@@ -2492,6 +2492,13 @@ pub struct DiagnosticOptions {
     /// already `Foo` or an unrelated class). Off by default — needs confident
     /// prior types and MRO relatedness, so it earns trust before promotion.
     pub redundant_guard: bool,
+    /// Fire `deref-shape-mismatch` (D6): a hash deref `$x->{k}` on a receiver
+    /// confidently typed array- or code-shaped — a guaranteed "Not a HASH
+    /// reference" die. Restricted to array/code reps (never the default type,
+    /// so no HashRef-default false positives); object and hash receivers are
+    /// untouched. Off by default. Array-deref / code-call mismatches are the
+    /// documented residual (they need the array/code deref sites).
+    pub deref_shape: bool,
 }
 
 pub fn collect_diagnostics(
@@ -2842,6 +2849,37 @@ pub fn collect_diagnostics(
                 });
             }
             _ => {}
+        }
+
+        // D6 — hash deref on an array/code-shaped receiver. Read the
+        // GUARD-narrowed rep specifically (a `$x->{k}` self-infers a
+        // zero-extent `HashRef` at the use point that would mask it under the
+        // merged query, so only a `ref…eq 'ARRAY'`/`'CODE'` guard surfaces
+        // here). Both reps die under `->{...}` at runtime; objects and hashes
+        // never reach this arm.
+        if options.deref_shape && matches!(site.form, DerefForm::HashKey) {
+            if let Some(rep) = analysis.guard_narrowed_rep(&site.receiver, site.span.start) {
+                let shape = if rep.is_array_shaped() {
+                    Some("an array ref")
+                } else if matches!(rep, InferredType::CodeRef { .. }) {
+                    Some("a code ref")
+                } else {
+                    None
+                };
+                if let Some(shape) = shape {
+                    diagnostics.push(Diagnostic {
+                        range: span_to_range(site.span),
+                        severity: Some(DiagnosticSeverity::WARNING),
+                        code: Some(NumberOrString::String("deref-shape-mismatch".into())),
+                        source: Some("perl-lsp".into()),
+                        message: format!(
+                            "'{}' is {} here; a `->{{...}}` hash deref dies at runtime",
+                            site.receiver, shape,
+                        ),
+                        ..Default::default()
+                    });
+                }
+            }
         }
     }
 

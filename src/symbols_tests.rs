@@ -693,6 +693,110 @@ sub g {
     );
 }
 
+// D6 — hash deref on a guard-narrowed array/code-shaped receiver. Reads the
+// guard's rep specifically (the deref self-infers HashRef otherwise), so it
+// fires only when a `ref…eq` guard proved the non-hash rep.
+fn deref_shape_diags(source: &str) -> Vec<String> {
+    let analysis = parse_analysis(source);
+    let idx = crate::module_index::ModuleIndex::new_for_test();
+    let on = DiagnosticOptions { deref_shape: true, ..Default::default() };
+    collect_diagnostics(&analysis, &idx, on)
+        .into_iter()
+        .filter(|d| matches!(&d.code, Some(NumberOrString::String(c)) if c == "deref-shape-mismatch"))
+        .map(|d| d.message)
+        .collect()
+}
+
+#[test]
+fn d6_hash_deref_on_arrayref_guard_fires() {
+    let src = r#"
+package Main;
+sub g {
+    my ($self, $x) = @_;
+    if (ref($x) eq 'ARRAY') {
+        return $x->{key};
+    }
+    return;
+}
+1;
+"#;
+    let diags = deref_shape_diags(src);
+    assert_eq!(diags.len(), 1, "hash deref on a ref-eq-ARRAY-narrowed receiver fires: {:?}", diags);
+    assert!(diags[0].contains("array ref"), "{}", diags[0]);
+}
+
+#[test]
+fn d6_hash_deref_on_coderef_guard_fires() {
+    let src = r#"
+package Main;
+sub g {
+    my ($self, $x) = @_;
+    if (ref($x) eq 'CODE') {
+        return $x->{key};
+    }
+    return;
+}
+1;
+"#;
+    let diags = deref_shape_diags(src);
+    assert_eq!(diags.len(), 1, "{:?}", diags);
+    assert!(diags[0].contains("code ref"), "{}", diags[0]);
+}
+
+#[test]
+fn d6_no_guard_does_not_fire() {
+    // Not guard-narrowed → D6 stays silent (the literal's rep is masked by the
+    // deref's own HashRef belief; firing here is out of scope by design).
+    let src = r#"
+package Main;
+sub g {
+    my $x = [1, 2, 3];
+    return $x->{key};
+}
+1;
+"#;
+    assert!(deref_shape_diags(src).is_empty(), "non-guard deref is the documented residual");
+}
+
+#[test]
+fn d6_hash_guard_does_not_fire() {
+    // `ref eq 'HASH'` then a hash deref is correct — no mismatch.
+    let src = r#"
+package Main;
+sub g {
+    my ($self, $x) = @_;
+    if (ref($x) eq 'HASH') {
+        return $x->{key};
+    }
+    return;
+}
+1;
+"#;
+    assert!(deref_shape_diags(src).is_empty(), "hash deref on a HASH-narrowed receiver is correct");
+}
+
+#[test]
+fn d6_off_by_default() {
+    let src = r#"
+package Main;
+sub g {
+    my ($self, $x) = @_;
+    if (ref($x) eq 'ARRAY') {
+        return $x->{key};
+    }
+    return;
+}
+1;
+"#;
+    let analysis = parse_analysis(src);
+    let idx = crate::module_index::ModuleIndex::new_for_test();
+    let diags = collect_diagnostics(&analysis, &idx, DiagnosticOptions::default());
+    assert!(
+        !diags.iter().any(|d| matches!(&d.code, Some(NumberOrString::String(c)) if c == "deref-shape-mismatch")),
+        "deref-shape is opt-in",
+    );
+}
+
 #[test]
 fn test_code_action_from_diagnostic() {
     let source = "use Carp qw(croak);\ncarp('oops');\n";

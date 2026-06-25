@@ -433,6 +433,7 @@ fn cli_check(args: &[String]) {
             .any(|a| a == "--unresolved-method-cross-file"),
         optional_deref: args.iter().any(|a| a == "--optional-deref"),
         redundant_guard: args.iter().any(|a| a == "--redundant-guard"),
+        deref_shape: args.iter().any(|a| a == "--deref-shape"),
     };
 
     if args.iter().any(|a| a == "--timings") {
