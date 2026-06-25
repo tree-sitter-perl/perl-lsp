@@ -5,7 +5,7 @@ use tree_sitter::{Point, Tree};
 use crate::cursor_context::{self, CursorContext};
 use crate::file_analysis::{
     contains_point, format_inferred_type, CompletionCandidate, CrossFileLookup, FileAnalysis, FoldKind,
-    DerefForm, HandlerOwner, InferredType, OutlineSymbol, ParamInfo, RefKind, Span,
+    DerefForm, GuardVerdict, HandlerOwner, InferredType, OutlineSymbol, ParamInfo, RefKind, Span,
     SymKind as FaSymKind, SymbolDetail, PRIORITY_AUTO_ADD_QW, PRIORITY_BARE_IMPORT,
     PRIORITY_EXPLICIT_IMPORT, PRIORITY_UNIMPORTED,
 };
@@ -2486,6 +2486,12 @@ pub struct DiagnosticOptions {
     /// construction. "May be undef", not "is" — opt-in, INFORMATION severity,
     /// with a guard-insertion quick-fix. Off by default.
     pub optional_deref: bool,
+    /// Fire `redundant-guard` (D3) / `contradictory-guard` (D4): a guard whose
+    /// outcome is constant given the subject's prior type (`if (defined $x)`
+    /// where `$x` is already a confident value; `$x->isa('Foo')` where `$x` is
+    /// already `Foo` or an unrelated class). Off by default — needs confident
+    /// prior types and MRO relatedness, so it earns trust before promotion.
+    pub redundant_guard: bool,
 }
 
 pub fn collect_diagnostics(
@@ -2836,6 +2842,27 @@ pub fn collect_diagnostics(
                 });
             }
             _ => {}
+        }
+    }
+
+    // D3/D4 — a guard whose outcome the lattice already fixes: redundant
+    // (always true → the `else` is dead) or contradictory (always false →
+    // the `then` is dead). Opt-in; gated hard on confident prior types in
+    // `guard_redundancies` (rule #10 — the type answers, never the syntax).
+    if options.redundant_guard {
+        for (span, verdict, message) in analysis.guard_redundancies(Some(module_index)) {
+            let code = match verdict {
+                GuardVerdict::AlwaysTrue => "redundant-guard",
+                GuardVerdict::AlwaysFalse => "contradictory-guard",
+            };
+            diagnostics.push(Diagnostic {
+                range: span_to_range(span),
+                severity: Some(DiagnosticSeverity::INFORMATION),
+                code: Some(NumberOrString::String(code.into())),
+                source: Some("perl-lsp".into()),
+                message,
+                ..Default::default()
+            });
         }
     }
 

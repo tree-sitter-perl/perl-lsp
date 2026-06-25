@@ -1884,6 +1884,47 @@ pub struct DerefSite {
     pub form: DerefForm,
 }
 
+/// What a recorded guard tests about its subject — the build-time
+/// recognition (`builder/narrowing.rs`) projected to a query-time fact so
+/// the redundant/contradictory-guard diagnostics (D3/D4) can compare it
+/// against the subject's prior type without re-walking the tree.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum GuardPredicate {
+    /// `isa`/`DOES`/`ref…eq` proving a concrete type.
+    IsType(InferredType),
+    /// `defined`/`blessed` — asserts the subject is not undef.
+    Defined,
+}
+
+/// A guard condition recorded at build time for the redundancy diagnostics
+/// (D3/D4). The narrowing engine already recognizes these; this captures
+/// the subject + predicate + the point to read the subject's PRIOR type
+/// (in the guard, before any narrowed region).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GuardSite {
+    /// Subject's source spelling (`$x`, or a place key).
+    pub subject: String,
+    pub scope: ScopeId,
+    pub predicate: GuardPredicate,
+    /// Whether the predicate holds where the guard EXPRESSION is true (`!`
+    /// flips it) — lets D3/D4 resolve always-true vs always-false.
+    pub asserts_when_true: bool,
+    /// Diagnostic range (the guard condition).
+    pub span: Span,
+    /// Where to read the subject's prior (un-narrowed) type.
+    #[serde(with = "PointDef")]
+    pub before_point: Point,
+}
+
+/// A D3/D4 verdict on a recorded guard, ready for `symbols.rs` to render.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GuardVerdict {
+    /// The condition is always true given the subject's prior type (D3).
+    AlwaysTrue,
+    /// The condition is always false (D4).
+    AlwaysFalse,
+}
+
 // ---- Import ----
 
 /// One name brought into scope by a `use` statement.
@@ -2325,6 +2366,13 @@ pub struct FileAnalysis {
     #[serde(default)]
     pub provisional_dispatches: Vec<ProvisionalDispatch>,
 
+    /// Guard conditions recognized by the narrowing engine, recorded for the
+    /// redundant/contradictory-guard diagnostics (D3/D4). Open-doc only in
+    /// practice (we don't diagnose deps), but rides the cache blob like every
+    /// other field.
+    #[serde(default)]
+    pub guard_sites: Vec<GuardSite>,
+
     /// Plugin `param_types()` role-contract TCs, each gated on the enclosing
     /// package's `isa` the rule's `in_role` class. The builder emits one per
     /// matching sub declaration UNCONDITIONALLY (no local-ancestry
@@ -2450,6 +2498,7 @@ pub struct FileAnalysisParts {
     pub witnesses: crate::witnesses::WitnessBag,
     pub package_framework: HashMap<String, crate::witnesses::FrameworkFact>,
     pub provisional_dispatches: Vec<ProvisionalDispatch>,
+    pub guard_sites: Vec<GuardSite>,
     pub gated_param_types: Vec<ReceiverGated<TypeConstraint>>,
     pub attr_projections: Vec<AttrProjection>,
     pub reassigned_scalars: HashSet<String>,
@@ -2597,6 +2646,7 @@ impl FileAnalysis {
             mut witnesses,
             package_framework,
             provisional_dispatches,
+            guard_sites,
             gated_param_types,
             attr_projections,
             reassigned_scalars,
@@ -2634,6 +2684,7 @@ impl FileAnalysis {
             base_witness_count: 0,
             base_ref_count: 0,
             provisional_dispatches,
+            guard_sites,
             gated_param_types,
             attr_projections,
             reassigned_scalars,
@@ -4102,6 +4153,102 @@ impl FileAnalysis {
                     form,
                 });
             }
+        }
+        out
+    }
+
+    /// True if `ancestor` is on `descendant`'s inheritance chain (or they are
+    /// the same class) — the relatedness test D4 uses to avoid flagging a
+    /// legitimate downcast as a contradiction.
+    fn is_ancestor_of(
+        &self,
+        ancestor: &str,
+        descendant: &str,
+        module_index: Option<&dyn CrossFileLookup>,
+    ) -> bool {
+        let mut found = false;
+        self.for_each_ancestor_class(descendant, module_index, |c| {
+            if c == ancestor {
+                found = true;
+                std::ops::ControlFlow::Break(())
+            } else {
+                std::ops::ControlFlow::Continue(())
+            }
+        });
+        found
+    }
+
+    /// D3/D4: each recorded guard whose outcome is constant given its
+    /// subject's prior (pre-guard) type — redundant (always-true) or
+    /// contradictory (always-false). Only fires on a *confident* prior type
+    /// (a concrete class / rep / `Undef`); an absent or merely-Optional prior
+    /// leaves the guard meaningful and is skipped (rule #10 — ask the type).
+    /// Scoped to `isa`/`DOES` (class) and `defined`/`blessed` guards; rep
+    /// `ref…eq` guards are the documented residual.
+    pub fn guard_redundancies(
+        &self,
+        module_index: Option<&dyn CrossFileLookup>,
+    ) -> Vec<(Span, GuardVerdict, String)> {
+        let mut out = Vec::new();
+        for g in &self.guard_sites {
+            let Some(prior) =
+                self.inferred_type_via_bag_ctx(&g.subject, g.before_point, module_index)
+            else {
+                continue;
+            };
+            // (definitely satisfies the raw predicate, definitely contradicts it)
+            let (satisfied, contradicted) = match &g.predicate {
+                GuardPredicate::Defined => match &prior {
+                    InferredType::Undef => (false, true),
+                    // The genuine "maybe undef" — the guard is doing its job.
+                    InferredType::Optional(_) => continue,
+                    // Any other concrete type is definitely defined.
+                    _ => (true, false),
+                },
+                GuardPredicate::IsType(InferredType::ClassName(target)) => {
+                    let Some(prior_cls) = prior.class_name() else { continue };
+                    if prior_cls == target
+                        || self.is_ancestor_of(target, prior_cls, module_index)
+                    {
+                        (true, false) // prior is-a target
+                    } else if self.is_ancestor_of(prior_cls, target, module_index) {
+                        continue; // target is a subclass of prior — a legit downcast
+                    } else {
+                        (false, true) // unrelated concrete classes
+                    }
+                }
+                // Rep `ref…eq` guards (HASH/ARRAY/CODE) — residual.
+                GuardPredicate::IsType(_) => continue,
+            };
+            let always_true =
+                (satisfied && g.asserts_when_true) || (contradicted && !g.asserts_when_true);
+            let always_false =
+                (satisfied && !g.asserts_when_true) || (contradicted && g.asserts_when_true);
+            let verdict = if always_true {
+                GuardVerdict::AlwaysTrue
+            } else if always_false {
+                GuardVerdict::AlwaysFalse
+            } else {
+                continue;
+            };
+            let subject = &g.subject;
+            let detail = match (&verdict, &g.predicate) {
+                (GuardVerdict::AlwaysTrue, GuardPredicate::Defined) => {
+                    format!("'{subject}' is always defined here; this guard is redundant")
+                }
+                (GuardVerdict::AlwaysFalse, GuardPredicate::Defined) => {
+                    format!("'{subject}' is undef here; this guard can never pass")
+                }
+                (GuardVerdict::AlwaysTrue, GuardPredicate::IsType(t)) => format!(
+                    "'{subject}' is already {}; this guard is redundant",
+                    format_inferred_type(t),
+                ),
+                (GuardVerdict::AlwaysFalse, GuardPredicate::IsType(t)) => format!(
+                    "'{subject}' is not {} here; this guard can never pass",
+                    format_inferred_type(t),
+                ),
+            };
+            out.push((g.span, verdict, detail));
         }
         out
     }

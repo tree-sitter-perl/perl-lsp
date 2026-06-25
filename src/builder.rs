@@ -295,6 +295,7 @@ fn build_with_plugins_inner(
         method_call_ref_dedup: std::collections::HashSet::new(),
         route_branded_refs: std::collections::HashSet::new(),
         defined_narrowings: Vec::new(),
+        guard_sites: Vec::new(),
         anon_sub_symbol_by_span: std::collections::HashMap::new(),
         modifier_invocant_pos: None,
     };
@@ -546,6 +547,7 @@ fn build_with_plugins_inner(
         witnesses: b.bag,
         package_framework: b.package_framework,
         provisional_dispatches: b.provisional_dispatches,
+        guard_sites: b.guard_sites,
         attr_projections: b.attr_projections,
         gated_param_types: b.gated_param_types,
         reassigned_scalars: b.reassigned_scalars,
@@ -1604,6 +1606,11 @@ struct Builder<'a> {
     /// Recorded `defined`/`blessed` guards whose `Optional<T> → T` strip
     /// is re-derived each fold iteration (`emit_defined_narrowing_witnesses`).
     defined_narrowings: Vec<narrowing::DefinedNarrowing>,
+
+    /// Recognized guard conditions, for the redundant/contradictory-guard
+    /// diagnostics (D3/D4). Recorded alongside narrowing emission; moved into
+    /// `FileAnalysis.guard_sites`.
+    guard_sites: Vec<crate::file_analysis::GuardSite>,
 
     /// Span (of the `anonymous_subroutine_expression` node) →
     /// SymbolId of the synthesized `(anon)` Sub symbol. Populated by

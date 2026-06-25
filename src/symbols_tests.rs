@@ -550,6 +550,149 @@ fn d2_quick_fix_inserts_defined_guard() {
     );
 }
 
+// D3 (redundant-guard) / D4 (contradictory-guard) — a guard whose outcome
+// the lattice already fixes, given the subject's prior type.
+fn guard_diags(source: &str) -> Vec<(String, String)> {
+    let analysis = parse_analysis(source);
+    let idx = crate::module_index::ModuleIndex::new_for_test();
+    let on = DiagnosticOptions { redundant_guard: true, ..Default::default() };
+    collect_diagnostics(&analysis, &idx, on)
+        .into_iter()
+        .filter_map(|d| match &d.code {
+            Some(NumberOrString::String(c))
+                if c == "redundant-guard" || c == "contradictory-guard" =>
+            {
+                Some((c.clone(), d.message))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn d3_defined_guard_on_confident_value_is_redundant() {
+    let src = r#"
+package Foo;
+sub new { bless {}, shift }
+sub name { "f" }
+package Main;
+sub g {
+    my $x = Foo->new;
+    if (defined $x) {
+        return $x->name;
+    }
+    return;
+}
+1;
+"#;
+    let diags = guard_diags(src);
+    assert_eq!(diags.len(), 1, "redundant defined guard: {:?}", diags);
+    assert_eq!(diags[0].0, "redundant-guard");
+}
+
+#[test]
+fn d4_defined_guard_on_undef_is_contradictory() {
+    let src = r#"
+package Main;
+sub g {
+    my ($self, $x) = @_;
+    return if defined $x;
+    if (defined $x) {
+        return 1;
+    }
+    return;
+}
+1;
+"#;
+    let diags = guard_diags(src);
+    assert!(
+        diags.iter().any(|(c, _)| c == "contradictory-guard"),
+        "defined guard on a proven-undef subject is contradictory: {:?}",
+        diags,
+    );
+}
+
+#[test]
+fn d3_isa_redundant_same_and_subclass() {
+    let src = r#"
+package Base;
+sub new { bless {}, shift }
+package Foo;
+our @ISA = ('Base');
+package Main;
+sub g {
+    my $x = Foo->new;
+    if ($x->isa('Foo')) { return 1; }
+    if ($x->isa('Base')) { return 2; }
+    return;
+}
+1;
+"#;
+    let diags = guard_diags(src);
+    assert_eq!(diags.len(), 2, "both same-class and ancestor isa are redundant: {:?}", diags);
+    assert!(diags.iter().all(|(c, _)| c == "redundant-guard"), "{:?}", diags);
+}
+
+#[test]
+fn d4_isa_unrelated_class_is_contradictory() {
+    let src = r#"
+package Foo;
+sub new { bless {}, shift }
+package Bar;
+package Main;
+sub g {
+    my $x = Foo->new;
+    if ($x->isa('Bar')) { return 1; }
+    return;
+}
+1;
+"#;
+    let diags = guard_diags(src);
+    assert_eq!(diags.len(), 1, "{:?}", diags);
+    assert_eq!(diags[0].0, "contradictory-guard");
+}
+
+#[test]
+fn d4_isa_downcast_is_inconclusive() {
+    // $x is the BASE; testing isa(child) is a legitimate downcast — not flagged.
+    let src = r#"
+package Base;
+sub new { bless {}, shift }
+package Sub;
+our @ISA = ('Base');
+package Main;
+sub g {
+    my $x = Base->new;
+    if ($x->isa('Sub')) { return 1; }
+    return;
+}
+1;
+"#;
+    assert!(guard_diags(src).is_empty(), "a downcast guard must not be flagged: {:?}", guard_diags(src));
+}
+
+#[test]
+fn d3_d4_off_by_default() {
+    let src = r#"
+package Foo;
+sub new { bless {}, shift }
+package Main;
+sub g {
+    my $x = Foo->new;
+    if (defined $x) { return 1; }
+    return;
+}
+1;
+"#;
+    let analysis = parse_analysis(src);
+    let idx = crate::module_index::ModuleIndex::new_for_test();
+    let diags = collect_diagnostics(&analysis, &idx, DiagnosticOptions::default());
+    assert!(
+        !diags.iter().any(|d| matches!(&d.code, Some(NumberOrString::String(c)) if c == "redundant-guard" || c == "contradictory-guard")),
+        "guard redundancy is opt-in",
+    );
+}
+
 #[test]
 fn test_code_action_from_diagnostic() {
     let source = "use Carp qw(croak);\ncarp('oops');\n";
