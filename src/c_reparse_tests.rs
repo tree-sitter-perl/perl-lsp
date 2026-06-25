@@ -118,3 +118,4 @@ fn lexer_hack_cross_file_typedef_stays_declaration() {
     assert_eq!(rw, src, "type LHS → no rewrite, declaration stands");
     assert_eq!(stmt_kind_at(&parse(&mut p, &rw), 0), "declaration");
 }
+

@@ -44,6 +44,8 @@ fn layer_map() -> HashMap<&'static str, Layer> {
         ("cpp_reparse", Build),
         // C lexer-hack resolution via the symbol table (B1 spike)
         ("c_reparse", Build),
+        // C preprocessor #ifdef config selection (A2 spike)
+        ("c_preproc", Build),
         ("module_index", Index),
         ("module_resolver", Index),
         ("module_cache", Index),
