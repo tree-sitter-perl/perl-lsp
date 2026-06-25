@@ -1863,12 +1863,73 @@ pub struct UntypedDispatch {
 /// The dereference form at a `DerefSite` — what the receiver is being used
 /// as, which decides both the diagnostic wording and (for D6) the rep the
 /// access demands.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DerefForm {
     /// `$x->method(...)` — carries the method name.
     Method(String),
     /// `$x->{key}` hash dereference.
     HashKey,
+    /// `$x->[i]` array dereference.
+    ArrayIndex,
+    /// `$x->(...)` code-ref call.
+    Call,
+}
+
+impl DerefForm {
+    /// The container rep this form requires of its receiver, if any. A method
+    /// call requires nothing structural (any object/value can receive one).
+    pub fn demands_rep(&self) -> Option<RepKind> {
+        match self {
+            DerefForm::HashKey => Some(RepKind::Hash),
+            DerefForm::ArrayIndex => Some(RepKind::Array),
+            DerefForm::Call => Some(RepKind::Code),
+            DerefForm::Method(_) => None,
+        }
+    }
+
+    /// Human phrase for diagnostics ("a hash deref", …).
+    pub fn access_phrase(&self) -> &'static str {
+        match self {
+            DerefForm::HashKey => "a `->{...}` hash deref",
+            DerefForm::ArrayIndex => "a `->[...]` array deref",
+            DerefForm::Call => "a `->(...)` call",
+            DerefForm::Method(_) => "a method call",
+        }
+    }
+}
+
+/// The container rep of a value — what `ref()` reports. The D6 axis: a deref
+/// form demands one rep; a guard may prove the receiver is another.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RepKind {
+    Hash,
+    Array,
+    Code,
+}
+
+impl RepKind {
+    /// The rep of a type, if it has a concrete container rep. `ClassName`
+    /// (a blessed object) answers `None` — it can legitimately overload any
+    /// deref, so it is never a mismatch.
+    pub fn of(ty: &InferredType) -> Option<RepKind> {
+        if ty.is_hash_shaped() {
+            Some(RepKind::Hash)
+        } else if ty.is_array_shaped() {
+            Some(RepKind::Array)
+        } else if matches!(ty, InferredType::CodeRef { .. }) {
+            Some(RepKind::Code)
+        } else {
+            None
+        }
+    }
+
+    pub fn noun(self) -> &'static str {
+        match self {
+            RepKind::Hash => "a hash ref",
+            RepKind::Array => "an array ref",
+            RepKind::Code => "a code ref",
+        }
+    }
 }
 
 /// A scalar-receiver dereference paired with the receiver's narrowed type
@@ -1881,6 +1942,16 @@ pub struct DerefSite {
     pub receiver: String,
     /// Receiver type at the use point, with narrowing applied.
     pub receiver_ty: InferredType,
+    pub form: DerefForm,
+}
+
+/// A builder-recorded arrow-deref receiver for the forms that carry no
+/// typed ref of their own (`$x->[i]`, `$x->()`) — the array/code analog of
+/// the method-call and hash-deref refs `deref_receiver_sites` reads.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ArrowDerefSite {
+    pub receiver: String,
+    pub span: Span,
     pub form: DerefForm,
 }
 
@@ -2373,6 +2444,12 @@ pub struct FileAnalysis {
     #[serde(default)]
     pub guard_sites: Vec<GuardSite>,
 
+    /// Arrow-deref receivers for `$x->[i]` / `$x->()` — the forms with no
+    /// typed ref. `deref_receiver_sites` merges these with the method-call /
+    /// hash-deref refs so the deref diagnostics cover every arrow form.
+    #[serde(default)]
+    pub arrow_deref_sites: Vec<ArrowDerefSite>,
+
     /// Plugin `param_types()` role-contract TCs, each gated on the enclosing
     /// package's `isa` the rule's `in_role` class. The builder emits one per
     /// matching sub declaration UNCONDITIONALLY (no local-ancestry
@@ -2499,6 +2576,7 @@ pub struct FileAnalysisParts {
     pub package_framework: HashMap<String, crate::witnesses::FrameworkFact>,
     pub provisional_dispatches: Vec<ProvisionalDispatch>,
     pub guard_sites: Vec<GuardSite>,
+    pub arrow_deref_sites: Vec<ArrowDerefSite>,
     pub gated_param_types: Vec<ReceiverGated<TypeConstraint>>,
     pub attr_projections: Vec<AttrProjection>,
     pub reassigned_scalars: HashSet<String>,
@@ -2647,6 +2725,7 @@ impl FileAnalysis {
             package_framework,
             provisional_dispatches,
             guard_sites,
+            arrow_deref_sites,
             gated_param_types,
             attr_projections,
             reassigned_scalars,
@@ -2685,6 +2764,7 @@ impl FileAnalysis {
             base_ref_count: 0,
             provisional_dispatches,
             guard_sites,
+            arrow_deref_sites,
             gated_param_types,
             attr_projections,
             reassigned_scalars,
@@ -4151,6 +4231,20 @@ impl FileAnalysis {
                     receiver,
                     receiver_ty: ty,
                     form,
+                });
+            }
+        }
+        // Array (`$x->[i]`) / code (`$x->()`) derefs have no typed ref; the
+        // builder records them so they join the same stream.
+        for s in &self.arrow_deref_sites {
+            if let Some(ty) =
+                self.inferred_type_via_bag_ctx(&s.receiver, s.span.start, module_index)
+            {
+                out.push(DerefSite {
+                    span: s.span,
+                    receiver: s.receiver.clone(),
+                    receiver_ty: ty,
+                    form: s.form.clone(),
                 });
             }
         }

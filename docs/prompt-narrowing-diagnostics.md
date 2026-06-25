@@ -14,11 +14,12 @@ never matching syntax (rule #10): `FileAnalysis::deref_receiver_sites`
 (D3/D4). D1 is always-on (`undef-deref`, WARNING); the rest are opt-in
 `DiagnosticOptions` flags (`optionalDeref`, `redundantGuard`,
 `derefShape`, `unresolvedMethodCrossFile`) mirrored as `--…` CLI flags,
-default-off until each earns trust. Covered deref forms are the
-method-call invocant and scalar hash deref; **array (`$x->[i]`) and code
-(`$x->()`) deref sites carry no receiver-typed ref today and are the
-standing residual** that bounds D6's other directions and any future
-deref-receiver diagnostic.
+default-off until each earns trust. All four arrow-deref forms are
+covered: the method-call invocant and scalar hash deref come from refs;
+array (`$x->[i]`) and code (`$x->()`) derefs carry no typed ref, so the
+builder records them as `arrow_deref_sites` and `deref_receiver_sites`
+merges the two sources. D6 generalizes over them via `DerefForm::demands_rep`
+vs `RepKind::of(guard_rep)` — one axis, every direction.
 
 **The thesis.** A value's type at a point now answers questions it
 couldn't before — "are you `undef` here?", "might you be `undef`?", "are
@@ -182,7 +183,10 @@ not the dead guard. Park until a reachability pass exists.
    (rep `ref…eq` redundancy is the residual).
 5. **D6** (deref shape mismatch) — LANDED behind `derefShape`, WARNING,
    guard-narrowed reps only (reads `guard_narrowed_rep`, not the merged
-   type, to dodge the deref's self-inferred `HashRef`).
+   type, to dodge the deref's self-inferred rep). Covers every form ×
+   every guarded rep (`$x->{k}` on array/code, `$x->[i]` on hash/code,
+   `$x->()` on hash/array) via the `demands_rep`/`RepKind::of` axis;
+   objects (`RepKind::of` → `None`) are never a mismatch.
 6. **D5** — SUBSUMED by D3 (above). **D7 / D9** — PARKED with explicit
    unblock conditions (declared sink types / a reachability pass).
 

@@ -5,7 +5,7 @@ use tree_sitter::{Point, Tree};
 use crate::cursor_context::{self, CursorContext};
 use crate::file_analysis::{
     contains_point, format_inferred_type, CompletionCandidate, CrossFileLookup, FileAnalysis, FoldKind,
-    DerefForm, GuardVerdict, HandlerOwner, InferredType, OutlineSymbol, ParamInfo, RefKind, Span,
+    GuardVerdict, HandlerOwner, InferredType, OutlineSymbol, ParamInfo, RefKind, Span,
     SymKind as FaSymKind, SymbolDetail, PRIORITY_AUTO_ADD_QW, PRIORITY_BARE_IMPORT,
     PRIORITY_EXPLICIT_IMPORT, PRIORITY_UNIMPORTED,
 };
@@ -2806,36 +2806,20 @@ pub fn collect_diagnostics(
     for site in analysis.deref_receiver_sites(Some(module_index)) {
         match &site.receiver_ty {
             InferredType::Undef => {
-                let message = match &site.form {
-                    DerefForm::Method(name) => format!(
-                        "'{}' is undef here; calling '{}' on it dies at runtime",
-                        site.receiver, name,
-                    ),
-                    DerefForm::HashKey => format!(
-                        "'{}' is undef here; dereferencing it dies at runtime",
-                        site.receiver,
-                    ),
-                };
                 diagnostics.push(Diagnostic {
                     range: span_to_range(site.span),
                     severity: Some(DiagnosticSeverity::WARNING),
                     code: Some(NumberOrString::String("undef-deref".into())),
                     source: Some("perl-lsp".into()),
-                    message,
+                    message: format!(
+                        "'{}' is undef here; {} on it dies at runtime",
+                        site.receiver,
+                        site.form.access_phrase(),
+                    ),
                     ..Default::default()
                 });
             }
             InferredType::Optional(_) if options.optional_deref => {
-                let message = match &site.form {
-                    DerefForm::Method(name) => format!(
-                        "'{}' may be undef here; calling '{}' on it could die — guard with `defined`",
-                        site.receiver, name,
-                    ),
-                    DerefForm::HashKey => format!(
-                        "'{}' may be undef here; dereferencing it could die — guard with `defined`",
-                        site.receiver,
-                    ),
-                };
                 diagnostics.push(Diagnostic {
                     range: span_to_range(site.span),
                     severity: Some(DiagnosticSeverity::INFORMATION),
@@ -2844,40 +2828,45 @@ pub fn collect_diagnostics(
                     // The quick-fix reads the receiver back to synthesize
                     // `return unless defined $r;`.
                     data: Some(serde_json::json!({ "receiver": site.receiver })),
-                    message,
+                    message: format!(
+                        "'{}' may be undef here; {} on it could die — guard with `defined`",
+                        site.receiver,
+                        site.form.access_phrase(),
+                    ),
                     ..Default::default()
                 });
             }
             _ => {}
         }
 
-        // D6 — hash deref on an array/code-shaped receiver. Read the
-        // GUARD-narrowed rep specifically (a `$x->{k}` self-infers a
-        // zero-extent `HashRef` at the use point that would mask it under the
-        // merged query, so only a `ref…eq 'ARRAY'`/`'CODE'` guard surfaces
-        // here). Both reps die under `->{...}` at runtime; objects and hashes
-        // never reach this arm.
-        if options.deref_shape && matches!(site.form, DerefForm::HashKey) {
-            if let Some(rep) = analysis.guard_narrowed_rep(&site.receiver, site.span.start) {
-                let shape = if rep.is_array_shaped() {
-                    Some("an array ref")
-                } else if matches!(rep, InferredType::CodeRef { .. }) {
-                    Some("a code ref")
-                } else {
-                    None
-                };
-                if let Some(shape) = shape {
-                    diagnostics.push(Diagnostic {
-                        range: span_to_range(site.span),
-                        severity: Some(DiagnosticSeverity::WARNING),
-                        code: Some(NumberOrString::String("deref-shape-mismatch".into())),
-                        source: Some("perl-lsp".into()),
-                        message: format!(
-                            "'{}' is {} here; a `->{{...}}` hash deref dies at runtime",
-                            site.receiver, shape,
-                        ),
-                        ..Default::default()
-                    });
+        // D6 — a deref whose form demands one container rep while a `ref…eq`
+        // guard proved the receiver is another (a guaranteed runtime die).
+        // Read the GUARD-narrowed rep specifically: a deref self-infers its
+        // own demanded rep as a zero-extent witness at the use point, masking
+        // any conflict under the merged query, so only a guard surfaces here.
+        // `RepKind::of` answers `None` for objects (overloadable) — never a
+        // mismatch.
+        if options.deref_shape {
+            if let Some(demanded) = site.form.demands_rep() {
+                if let Some(rep) = analysis
+                    .guard_narrowed_rep(&site.receiver, site.span.start)
+                    .and_then(|t| crate::file_analysis::RepKind::of(&t))
+                {
+                    if rep != demanded {
+                        diagnostics.push(Diagnostic {
+                            range: span_to_range(site.span),
+                            severity: Some(DiagnosticSeverity::WARNING),
+                            code: Some(NumberOrString::String("deref-shape-mismatch".into())),
+                            source: Some("perl-lsp".into()),
+                            message: format!(
+                                "'{}' is {} here; {} dies at runtime",
+                                site.receiver,
+                                rep.noun(),
+                                site.form.access_phrase(),
+                            ),
+                            ..Default::default()
+                        });
+                    }
                 }
             }
         }
