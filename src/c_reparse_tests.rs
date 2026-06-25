@@ -1,5 +1,5 @@
-//! Measures B1: the C lexer hack resolved by the symbol table, in-file
-//! and (the differentiator) cross-file.
+//! Measures B1: the C lexer hack resolved by REPARSE — the corrected
+//! tree is canonical, so downstream consumers need no side-table.
 
 use super::*;
 
@@ -13,103 +13,108 @@ fn parse(p: &mut tree_sitter::Parser, src: &str) -> Tree {
     p.parse(src, None).unwrap()
 }
 
+/// The kind of the statement node covering byte `at`.
+fn stmt_kind_at(tree: &Tree, at: usize) -> String {
+    let mut node = tree
+        .root_node()
+        .named_descendant_for_byte_range(at, at)
+        .unwrap();
+    while let Some(par) = node.parent() {
+        if par.kind() == "translation_unit" || par.kind() == "compound_statement" {
+            break;
+        }
+        node = par;
+    }
+    node.kind().to_string()
+}
+
 #[test]
-fn lexer_hack_same_syntax_opposite_verdict() {
-    // The textbook ambiguity, both arms in one file. `t` is a type,
-    // `a` is a value — identical syntax `_ * _;`, opposite meaning,
-    // decided purely by the symbol table.
+fn lexer_hack_same_syntax_opposite_tree() {
+    // Identical syntax `_ * _;`, opposite meaning. After reparse the
+    // TREE itself is correct — no consultation, no verdict side-table.
     let mut p = c_parser();
     let src = "typedef int t;\nint a;\nt * x;\na * y;\n";
     let tree = parse(&mut p, src);
     let table = SymbolTable::from_tree(&tree, src.as_bytes());
-    assert!(table.types.contains("t"), "typedef collected: {table:?}");
-    assert!(table.values.contains("a"), "variable collected: {table:?}");
 
-    let verdicts = resolve_lexer_hacks(&tree, src.as_bytes(), &table);
-    assert!(
-        verdicts.contains(&LexerHack::Declaration { type_name: "t".into(), var_name: "x".into() }),
-        "`t * x;` is a pointer declaration: {verdicts:?}",
-    );
-    assert!(
-        verdicts.contains(&LexerHack::Multiply { lhs: "a".into(), rhs: "y".into() }),
-        "`a * y;` is a multiply, NOT a declaration of `y`: {verdicts:?}",
-    );
+    let (rewritten, map) = disambiguate(&tree, src, &table);
+    assert!(rewritten.contains("(a * y)"), "value site wrapped: {rewritten:?}");
+    assert!(rewritten.contains("\nt * x;"), "type site untouched: {rewritten:?}");
 
-    // the zero-FP payoff: no phantom variable `y` is minted.
-    let declared: Vec<&str> = verdicts.iter().filter_map(|v| v.declares_var()).collect();
-    assert!(declared.contains(&"x"), "x is declared");
-    assert!(!declared.contains(&"y"), "y must NOT be declared (it's a multiply operand)");
+    let after = parse(&mut p, &rewritten);
+    let tx = rewritten.find("t * x").unwrap();
+    let ay = rewritten.find("a * y").unwrap();
+    assert_eq!(stmt_kind_at(&after, tx), "declaration", "t is a type → pointer decl");
+    assert_eq!(stmt_kind_at(&after, ay), "expression_statement", "a is a value → multiply");
+
+    // anchor remap: the `y` in the rewritten source points at original `y`.
+    let y_t = rewritten.find('y').unwrap();
+    assert_eq!(&src[map.to_original(y_t)..map.to_original(y_t) + 1], "y");
 }
 
 #[test]
-fn lexer_hack_unknown_name_keeps_declaration_default() {
-    // Conservative posture: with no evidence that the first name is a
-    // value, we keep tree-sitter's declaration default — no speculative
-    // flips, no false positives.
+fn lexer_hack_unknown_name_is_identity() {
+    // Conservative: no evidence the first name is a value → no rewrite,
+    // tree-sitter's declaration default stands. Zero false positives.
     let mut p = c_parser();
     let src = "Mystery * p;\n";
     let tree = parse(&mut p, src);
     let table = SymbolTable::from_tree(&tree, src.as_bytes());
-    let verdicts = resolve_lexer_hacks(&tree, src.as_bytes(), &table);
-    assert_eq!(
-        verdicts,
-        vec![LexerHack::Declaration { type_name: "Mystery".into(), var_name: "p".into() }],
-        "unknown first name → trust the default",
-    );
+    let (rewritten, _) = disambiguate(&tree, src, &table);
+    assert_eq!(rewritten, src, "unknown first name → identity (no flip)");
 }
 
 #[test]
 fn lexer_hack_cross_file_flip_via_header() {
-    // THE DIFFERENTIATOR. tree-sitter is blind to the header, so it
-    // guesses `gain * level;` is a declaration. The cross-file symbol
-    // table knows `gain` is a VALUE (extern int from the header) and
-    // flips it to a multiply — resolution tree-sitter structurally
-    // cannot do, and the perl-lsp cross-file engine does by construction.
+    // THE DIFFERENTIATOR. tree-sitter is blind to the header, so
+    // `gain * level;` stays its wrong declaration guess. Merge the
+    // header's `extern int gain` (gain is a value) and the reparse
+    // rewrites it to a multiply — resolution tree-sitter structurally
+    // cannot do; the perl-lsp cross-file table does by construction.
     let mut p = c_parser();
-
     let header = "extern int gain;\n";
     let htree = parse(&mut p, header);
     let header_table = SymbolTable::from_tree(&htree, header.as_bytes());
-    assert!(header_table.values.contains("gain"), "header exposes gain as a value");
+    assert!(header_table.values.contains("gain"));
 
     let src = "void f(void) {\n    gain * level;\n}\n";
     let stree = parse(&mut p, src);
 
-    // local-only view: gain is unknown → declaration default (the bug)
+    // local-only: gain unknown → identity, the wrong declaration stays
     let local = SymbolTable::from_tree(&stree, src.as_bytes());
-    assert_eq!(
-        resolve_lexer_hacks(&stree, src.as_bytes(), &local),
-        vec![LexerHack::Declaration { type_name: "gain".into(), var_name: "level".into() }],
-        "without the header, tree-sitter's wrong guess stands",
-    );
+    let (local_rw, _) = disambiguate(&stree, src, &local);
+    assert_eq!(local_rw, src, "without the header, the bug stands");
+    let at = src.find("gain").unwrap();
+    assert_eq!(stmt_kind_at(&parse(&mut p, src), at), "declaration", "blind = wrong");
 
-    // cross-file view: merge the header fact → the flip
+    // cross-file: merge the header fact → the reparse flips it
     let mut merged = local.clone();
     merged.merge(&header_table);
+    let (rw, _) = disambiguate(&stree, src, &merged);
+    assert!(rw.contains("(gain * level)"), "flipped: {rw:?}");
+    let after = parse(&mut p, &rw);
     assert_eq!(
-        resolve_lexer_hacks(&stree, src.as_bytes(), &merged),
-        vec![LexerHack::Multiply { lhs: "gain".into(), rhs: "level".into() }],
-        "the header's `extern int gain` flips it to a multiply",
+        stmt_kind_at(&after, rw.find("gain").unwrap()),
+        "expression_statement",
+        "the header's `extern int gain` makes it a multiply",
     );
 }
 
 #[test]
-fn lexer_hack_cross_file_confirms_typedef() {
-    // The type direction: a header typedef makes `Pixel * p;` a genuine
-    // declaration — and we KNOW it rather than guessing. (Here the
-    // default agrees, but the table makes it a fact, not luck.)
+fn lexer_hack_cross_file_typedef_stays_declaration() {
+    // The type direction: a header typedef keeps `Pixel * p;` a genuine
+    // declaration (the default agrees, and the table makes it a fact).
     let mut p = c_parser();
     let header = "typedef struct Pixel Pixel;\n";
     let htree = parse(&mut p, header);
     let htable = SymbolTable::from_tree(&htree, header.as_bytes());
-    assert!(htable.types.contains("Pixel"), "header typedef collected: {htable:?}");
+    assert!(htable.types.contains("Pixel"));
 
     let src = "Pixel * p;\n";
     let stree = parse(&mut p, src);
     let mut table = SymbolTable::from_tree(&stree, src.as_bytes());
     table.merge(&htable);
-    assert_eq!(
-        resolve_lexer_hacks(&stree, src.as_bytes(), &table),
-        vec![LexerHack::Declaration { type_name: "Pixel".into(), var_name: "p".into() }],
-    );
+    let (rw, _) = disambiguate(&stree, src, &table);
+    assert_eq!(rw, src, "type LHS → no rewrite, declaration stands");
+    assert_eq!(stmt_kind_at(&parse(&mut p, &rw), 0), "declaration");
 }
