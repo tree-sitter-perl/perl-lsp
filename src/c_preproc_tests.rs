@@ -107,3 +107,71 @@ fn a2_unresolved_condition_routes_to_probe() {
     // conservative default: unresolved #if is false → the #else is live
     assert!(sel.source.contains("oldapi") && !sel.source.contains("newapi"), "{:?}", sel.source);
 }
+
+// ---- parallel realities: don't PICK a config, cover BOTH and reduce ----
+
+fn fn_names(p: &mut tree_sitter::Parser, src: &str) -> Vec<String> {
+    let tree = p.parse(src, None).unwrap();
+    let q = tree_sitter::Query::new(
+        &tree_sitter_c::LANGUAGE.into(),
+        "(function_definition declarator: (function_declarator declarator: (identifier) @n))",
+    ).unwrap();
+    let mut out = Vec::new();
+    let mut cur = tree_sitter::QueryCursor::new();
+    use tree_sitter::StreamingIterator;
+    let mut it = cur.matches(&q, tree.root_node(), src.as_bytes());
+    while let Some(m) = it.next() {
+        for c in m.captures { out.push(c.node.utf8_text(src.as_bytes()).unwrap().to_string()); }
+    }
+    out
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum Presence { Always, When(String) }
+
+#[test]
+fn a2_parallel_realities_reduce_to_presence_conditions() {
+    // Config-INDEPENDENT: no user config. We fork both realities of the
+    // single #ifdef, blank-and-parse each (clean trees), and REDUCE —
+    // a symbol present in ALL realities is unconditional; one present in
+    // some is tagged with its presence condition. This is "reparse
+    // except parallel realities": the dead branch in reality A is the
+    // live branch in reality B.
+    let mut p = c_parser();
+    let src = "\
+int common(void){return 0;}
+#ifdef DEBUG
+int dbg(void){return 1;}
+#else
+int rel(void){return 0;}
+#endif
+";
+    // the two realities (this is the per-#ifdef cross product; here N=1)
+    let off = select_config(src, &Config::new());
+    let on = select_config(src, &Config::new().with("DEBUG", "1"));
+    let names_off = fn_names(&mut p, &off.source);
+    let names_on = fn_names(&mut p, &on.source);
+
+    // reduce: union, tagged by which realities each symbol appears in
+    let all: std::collections::BTreeSet<&String> = names_off.iter().chain(&names_on).collect();
+    let presence: Vec<(String, Presence)> = all
+        .into_iter()
+        .map(|n| {
+            let in_on = names_on.contains(n);
+            let in_off = names_off.contains(n);
+            let pres = match (in_on, in_off) {
+                (true, true) => Presence::Always,
+                (true, false) => Presence::When("defined(DEBUG)".into()),
+                (false, true) => Presence::When("!defined(DEBUG)".into()),
+                (false, false) => unreachable!(),
+            };
+            (n.clone(), pres)
+        })
+        .collect();
+
+    // BOTH branches' symbols are in the analysis, each condition-tagged —
+    // without ever choosing a build config.
+    assert!(presence.contains(&("common".into(), Presence::Always)), "{presence:?}");
+    assert!(presence.contains(&("dbg".into(), Presence::When("defined(DEBUG)".into()))), "{presence:?}");
+    assert!(presence.contains(&("rel".into(), Presence::When("!defined(DEBUG)".into()))), "{presence:?}");
+}
