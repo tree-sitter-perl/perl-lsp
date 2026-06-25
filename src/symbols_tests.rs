@@ -451,6 +451,105 @@ sub g {
     );
 }
 
+// D2 — unguarded `Optional<T>` dereference (opt-in). `maybe_get` returns
+// `Optional<Foo>` via the bare-`return` idiom; an unguarded `$r->...` fires,
+// a `defined`-guarded one does not.
+fn optional_deref_diags(source: &str) -> Vec<Diagnostic> {
+    let analysis = parse_analysis(source);
+    let idx = crate::module_index::ModuleIndex::new_for_test();
+    let on = DiagnosticOptions { optional_deref: true, ..Default::default() };
+    collect_diagnostics(&analysis, &idx, on)
+        .into_iter()
+        .filter(|d| matches!(&d.code, Some(NumberOrString::String(c)) if c == "optional-deref"))
+        .collect()
+}
+
+const OPTIONAL_SRC: &str = r#"
+package Foo;
+sub new { bless {}, shift }
+sub name { "foo" }
+package P;
+sub maybe_get {
+    my ($self) = @_;
+    return unless $self->{ok};
+    return Foo->new;
+}
+sub use_it {
+    my ($self) = @_;
+    my $r = $self->maybe_get;
+    return $r->name;
+}
+1;
+"#;
+
+#[test]
+fn d2_unguarded_optional_deref_fires_when_enabled() {
+    let diags = optional_deref_diags(OPTIONAL_SRC);
+    assert_eq!(diags.len(), 1, "unguarded Optional deref fires: {:?}",
+        diags.iter().map(|d| &d.message).collect::<Vec<_>>());
+    assert_eq!(diags[0].severity, Some(DiagnosticSeverity::INFORMATION));
+    assert!(diags[0].message.contains("may be undef"), "{}", diags[0].message);
+}
+
+#[test]
+fn d2_off_by_default() {
+    let analysis = parse_analysis(OPTIONAL_SRC);
+    let idx = crate::module_index::ModuleIndex::new_for_test();
+    let diags = collect_diagnostics(&analysis, &idx, DiagnosticOptions::default());
+    assert!(
+        !diags.iter().any(|d| matches!(&d.code, Some(NumberOrString::String(c)) if c == "optional-deref")),
+        "optional-deref must be silent without the opt-in",
+    );
+}
+
+#[test]
+fn d2_guarded_optional_does_not_fire() {
+    // `defined` strips the Optional → no warning on the guarded use.
+    let src = r#"
+package Foo;
+sub new { bless {}, shift }
+sub name { "foo" }
+package P;
+sub maybe_get {
+    my ($self) = @_;
+    return unless $self->{ok};
+    return Foo->new;
+}
+sub use_it {
+    my ($self) = @_;
+    my $r = $self->maybe_get;
+    if (defined $r) {
+        return $r->name;
+    }
+    return;
+}
+1;
+"#;
+    assert!(optional_deref_diags(src).is_empty(), "defined-guarded Optional must not fire");
+}
+
+#[test]
+fn d2_quick_fix_inserts_defined_guard() {
+    let analysis = parse_analysis(OPTIONAL_SRC);
+    let idx = crate::module_index::ModuleIndex::new_for_test();
+    let on = DiagnosticOptions { optional_deref: true, ..Default::default() };
+    let diags = collect_diagnostics(&analysis, &idx, on);
+    let uri = Url::parse("file:///t.pl").unwrap();
+    let actions = code_actions(&diags, &analysis, &uri);
+    let action = actions.iter().find_map(|a| match a {
+        CodeActionOrCommand::CodeAction(ca) if ca.title.contains("return unless defined") => Some(ca),
+        _ => None,
+    });
+    let action = action.expect("a guard quick-fix is offered");
+    let edits = action.edit.as_ref().unwrap().changes.as_ref().unwrap().get(&uri).unwrap();
+    assert_eq!(edits.len(), 1);
+    assert!(
+        edits[0].new_text.contains("return unless defined $r;"),
+        "quick-fix inserts the guard: {:?}",
+        edits[0].new_text,
+    );
+}
+
 #[test]
 fn test_code_action_from_diagnostic() {
     let source = "use Carp qw(croak);\ncarp('oops');\n";

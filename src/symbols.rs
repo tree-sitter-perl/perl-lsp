@@ -2479,6 +2479,13 @@ pub struct DiagnosticOptions {
     /// static walker can't see (the diag-09/10 Log4perl-accessor class), so
     /// it earns trust before promotion. See docs/prompt-narrowing-diagnostics.md.
     pub unresolved_method_cross_file: bool,
+    /// Fire `optional-deref` (D2) when a receiver is `Optional<T>` at an
+    /// unguarded use point (a possible undef deref — the strictNullChecks
+    /// analog). Narrowing strips the `Optional` under a dominating
+    /// `defined`/`blessed` guard, so a surviving `Optional` is unguarded by
+    /// construction. "May be undef", not "is" — opt-in, INFORMATION severity,
+    /// with a guard-insertion quick-fix. Off by default.
+    pub optional_deref: bool,
 }
 
 pub fn collect_diagnostics(
@@ -2778,28 +2785,58 @@ pub fn collect_diagnostics(
     // *may be* — so this is always-on `WARNING`, the one narrowing diagnostic
     // that doesn't wait behind an opt-in flag (rule #10: it reads the type
     // at the use point, never the syntax). See docs/prompt-narrowing-diagnostics.md.
+    // D2 (`optional-deref`) shares this same lattice read: a receiver typed
+    // `Optional<T>` at an UNGUARDED use point — narrowing already strips the
+    // `Optional` wherever a `defined`/`blessed` guard dominates, so a
+    // surviving `Optional` here is unguarded by construction. "May be undef",
+    // not "is" → opt-in, INFORMATION, with a guard-insertion quick-fix.
     for site in analysis.deref_receiver_sites(Some(module_index)) {
-        if !matches!(site.receiver_ty, InferredType::Undef) {
-            continue;
+        match &site.receiver_ty {
+            InferredType::Undef => {
+                let message = match &site.form {
+                    DerefForm::Method(name) => format!(
+                        "'{}' is undef here; calling '{}' on it dies at runtime",
+                        site.receiver, name,
+                    ),
+                    DerefForm::HashKey => format!(
+                        "'{}' is undef here; dereferencing it dies at runtime",
+                        site.receiver,
+                    ),
+                };
+                diagnostics.push(Diagnostic {
+                    range: span_to_range(site.span),
+                    severity: Some(DiagnosticSeverity::WARNING),
+                    code: Some(NumberOrString::String("undef-deref".into())),
+                    source: Some("perl-lsp".into()),
+                    message,
+                    ..Default::default()
+                });
+            }
+            InferredType::Optional(_) if options.optional_deref => {
+                let message = match &site.form {
+                    DerefForm::Method(name) => format!(
+                        "'{}' may be undef here; calling '{}' on it could die — guard with `defined`",
+                        site.receiver, name,
+                    ),
+                    DerefForm::HashKey => format!(
+                        "'{}' may be undef here; dereferencing it could die — guard with `defined`",
+                        site.receiver,
+                    ),
+                };
+                diagnostics.push(Diagnostic {
+                    range: span_to_range(site.span),
+                    severity: Some(DiagnosticSeverity::INFORMATION),
+                    code: Some(NumberOrString::String("optional-deref".into())),
+                    source: Some("perl-lsp".into()),
+                    // The quick-fix reads the receiver back to synthesize
+                    // `return unless defined $r;`.
+                    data: Some(serde_json::json!({ "receiver": site.receiver })),
+                    message,
+                    ..Default::default()
+                });
+            }
+            _ => {}
         }
-        let message = match &site.form {
-            DerefForm::Method(name) => format!(
-                "'{}' is undef here; calling '{}' on it dies at runtime",
-                site.receiver, name,
-            ),
-            DerefForm::HashKey => format!(
-                "'{}' is undef here; dereferencing it dies at runtime",
-                site.receiver,
-            ),
-        };
-        diagnostics.push(Diagnostic {
-            range: span_to_range(site.span),
-            severity: Some(DiagnosticSeverity::WARNING),
-            code: Some(NumberOrString::String("undef-deref".into())),
-            source: Some("perl-lsp".into()),
-            message,
-            ..Default::default()
-        });
     }
 
     // 5f: role-requires-unfulfilled — the composer-mismatch contract
@@ -3104,6 +3141,14 @@ pub fn code_actions(
     let mut actions = Vec::new();
 
     for diag in diagnostics {
+        // D2 guard-insertion quick-fix.
+        if matches!(&diag.code, Some(NumberOrString::String(s)) if s == "optional-deref") {
+            if let Some(action) = make_optional_guard_action(uri, diag) {
+                actions.push(action);
+            }
+            continue;
+        }
+
         let code_matches = matches!(
             &diag.code,
             Some(NumberOrString::String(s)) if s == "unresolved-function"
@@ -3178,6 +3223,34 @@ pub fn code_actions(
     }
 
     actions
+}
+
+/// D2 quick-fix: insert `return unless defined $r;` on its own line just
+/// before the flagged dereference. Indented to the receiver's column (the
+/// diagnostic range start), which is exact for a statement-leading deref and
+/// harmless otherwise. Produces precisely the guard the narrower then
+/// consumes to strip the `Optional`.
+fn make_optional_guard_action(uri: &Url, diag: &Diagnostic) -> Option<CodeActionOrCommand> {
+    let receiver = diag.data.as_ref()?.get("receiver")?.as_str()?;
+    let indent = " ".repeat(diag.range.start.character as usize);
+    let insert_pos = Position { line: diag.range.start.line, character: 0 };
+    let edit = TextEdit {
+        range: Range { start: insert_pos, end: insert_pos },
+        new_text: format!("{}return unless defined {};\n", indent, receiver),
+    };
+    let mut changes = HashMap::new();
+    changes.insert(uri.clone(), vec![edit]);
+    Some(CodeActionOrCommand::CodeAction(CodeAction {
+        title: format!("Guard: return unless defined {}", receiver),
+        kind: Some(CodeActionKind::QUICKFIX),
+        diagnostics: Some(vec![diag.clone()]),
+        edit: Some(WorkspaceEdit {
+            changes: Some(changes),
+            ..Default::default()
+        }),
+        is_preferred: Some(true),
+        ..Default::default()
+    }))
 }
 
 /// Generate a code action that adds a function to an existing `qw()` import list.

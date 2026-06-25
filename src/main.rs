@@ -431,6 +431,7 @@ fn cli_check(args: &[String]) {
         unresolved_method_cross_file: args
             .iter()
             .any(|a| a == "--unresolved-method-cross-file"),
+        optional_deref: args.iter().any(|a| a == "--optional-deref"),
     };
 
     if args.iter().any(|a| a == "--timings") {
