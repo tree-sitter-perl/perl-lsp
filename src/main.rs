@@ -17,6 +17,7 @@ mod plugin_cli;
 mod pod;
 mod query_cache;
 mod query_extract;
+mod reparse;
 mod resolve;
 mod symbols;
 mod timings;

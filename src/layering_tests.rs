@@ -38,6 +38,8 @@ fn layer_map() -> HashMap<&'static str, Layer> {
         ("query_extract", Build),
         // test-only C++ macro corpus consumed by query_extract_tests
         ("cpp_obstacle", Build),
+        // stratified reparse seam (Perl prototype reparenthesizer spike)
+        ("reparse", Build),
         ("module_index", Index),
         ("module_resolver", Index),
         ("module_cache", Index),
