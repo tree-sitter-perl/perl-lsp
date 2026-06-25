@@ -46,3 +46,4 @@ rhai = { version = "1.23", features = ["sync", "serde"] }
 tree-sitter-python = "0.25"
 tree-sitter-r = "1.2"
 tree-sitter-cmake = "0.7"
+tree-sitter-cpp = "0.23"

@@ -36,6 +36,8 @@ fn layer_map() -> HashMap<&'static str, Layer> {
         ("cpanfile", Build),
         ("query_cache", Build),
         ("query_extract", Build),
+        // test-only C++ macro corpus consumed by query_extract_tests
+        ("cpp_obstacle", Build),
         ("module_index", Index),
         ("module_resolver", Index),
         ("module_cache", Index),

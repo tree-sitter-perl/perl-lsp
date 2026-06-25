@@ -742,6 +742,216 @@ fn cmake_outline_targets_vars_and_interpolated_refs() {
     assert!(!skel.refs.iter().any(|r| r.name == "PRIVATE"));
 }
 
+// ---- C++ obstacle course: measure macro-induced parse damage ----
+
+#[path = "cpp_obstacle.rs"]
+mod cpp_obstacle;
+
+fn cpp_parser() -> tree_sitter::Parser {
+    let mut p = tree_sitter::Parser::new();
+    p.set_language(&tree_sitter_cpp::LANGUAGE.into()).unwrap();
+    p
+}
+
+/// (error_nodes, missing_nodes, deepest_error_byte_span_total)
+fn count_damage(node: tree_sitter::Node) -> (usize, usize, usize) {
+    let mut errors = 0;
+    let mut missing = 0;
+    let mut err_bytes = 0;
+    let mut cursor = node.walk();
+    let mut stack = vec![node];
+    while let Some(n) = stack.pop() {
+        if n.is_error() {
+            errors += 1;
+            err_bytes += n.end_byte() - n.start_byte();
+        }
+        if n.is_missing() {
+            missing += 1;
+        }
+        for c in n.children(&mut cursor) {
+            stack.push(c);
+        }
+    }
+    (errors, missing, err_bytes)
+}
+
+/// Does the identifier `name` appear ANYWHERE as a named leaf in the
+/// tree? (i.e. is there at least a token the skeleton could capture).
+fn name_present(node: tree_sitter::Node, src: &[u8], name: &str) -> bool {
+    let mut cursor = node.walk();
+    let mut stack = vec![node];
+    while let Some(n) = stack.pop() {
+        if n.named_child_count() == 0 && n.utf8_text(src).ok() == Some(name) {
+            return true;
+        }
+        for c in n.children(&mut cursor) {
+            stack.push(c);
+        }
+    }
+    false
+}
+
+#[test]
+fn cpp_obstacle_course_damage_report() {
+    use cpp_obstacle::SAMPLES;
+    let mut parser = cpp_parser();
+    println!("\n===== C++ macro obstacle course: parse-damage report =====");
+    println!(
+        "{:<18} {:>6} {:>7} {:>8}  {:>5}  expected-names-reachable",
+        "sample", "errors", "missing", "err-byte", "names"
+    );
+    let mut total_err = 0;
+    let mut total_reach = 0;
+    let mut total_names = 0;
+    for s in SAMPLES {
+        let tree = parser.parse(s.src, None).unwrap();
+        let root = tree.root_node();
+        let (errors, missing, err_bytes) = count_damage(root);
+        let reachable: Vec<&str> = s
+            .expected
+            .iter()
+            .copied()
+            .filter(|n| name_present(root, s.src.as_bytes(), n))
+            .collect();
+        let lost: Vec<&str> = s
+            .expected
+            .iter()
+            .copied()
+            .filter(|n| !reachable.contains(n))
+            .collect();
+        total_err += errors;
+        total_reach += reachable.len();
+        total_names += s.expected.len();
+        println!(
+            "{:<18} {:>6} {:>7} {:>8}  {:>2}/{:<2}  lost: {:?}",
+            s.name,
+            errors,
+            missing,
+            err_bytes,
+            reachable.len(),
+            s.expected.len(),
+            lost,
+        );
+    }
+    println!(
+        "----- totals: {total_err} error nodes; {total_reach}/{total_names} \
+         expected names reachable as tokens -----\n"
+    );
+    // The report is the deliverable; this guard just ensures the corpus
+    // parses at all (no panic) and the baseline is clean.
+    let clean = &SAMPLES[0];
+    let tree = parser.parse(clean.src, None).unwrap();
+    let (errors, _, _) = count_damage(tree.root_node());
+    assert_eq!(errors, 0, "clean baseline must parse error-free");
+}
+
+#[test]
+fn dbg_cpp_cst() {
+    use cpp_obstacle::SAMPLES;
+    let mut parser = cpp_parser();
+    for s in SAMPLES {
+        let tree = parser.parse(s.src, None).unwrap();
+        println!("\n========== {} ==========\n{}", s.name, tree.root_node().to_sexp());
+    }
+}
+
+fn cpp_skel(src: &str) -> SkeletonAnalysis {
+    let mut parser = cpp_parser();
+    let tree = parser.parse(src, None).unwrap();
+    extract(&tree, src.as_bytes(), &cpp_pack()).unwrap()
+}
+
+#[test]
+fn cpp_tier1_extraction_report() {
+    use cpp_obstacle::SAMPLES;
+    println!("\n===== C++ Tier-1 skeleton extraction (pack through driver) =====");
+    let mut got_total = 0;
+    let mut exp_total = 0;
+    for s in SAMPLES {
+        let skel = cpp_skel(s.src);
+        let names: Vec<String> = skel.symbols.iter().map(|s| s.name.clone()).collect();
+        let hit: Vec<&str> = s.expected.iter().copied().filter(|n| names.iter().any(|g| g == n)).collect();
+        let miss: Vec<&str> = s.expected.iter().copied().filter(|n| !hit.contains(n)).collect();
+        got_total += hit.len();
+        exp_total += s.expected.len();
+        let kinds: Vec<String> = skel
+            .symbols
+            .iter()
+            .map(|s| format!("{}:{}", s.kind, s.name))
+            .collect();
+        println!(
+            "{:<18} {:>2}/{:<2}  miss: {:<28}  extracted: {:?}",
+            s.name,
+            hit.len(),
+            s.expected.len(),
+            format!("{miss:?}"),
+            kinds,
+        );
+    }
+    println!("----- Tier-1 recall: {got_total}/{exp_total} expected symbols extracted -----\n");
+}
+
+#[test]
+fn cpp_clean_baseline_outline() {
+    let skel = cpp_skel(cpp_obstacle::SAMPLES[0].src);
+    let defs: Vec<(String, String)> =
+        skel.symbols.iter().map(|s| (s.kind.clone(), s.name.clone())).collect();
+    assert!(defs.contains(&("class".into(), "Shape".into())), "{defs:?}");
+    assert!(defs.contains(&("class".into(), "Circle".into())), "{defs:?}");
+    assert!(defs.contains(&("method".into(), "area".into())), "{defs:?}");
+    assert!(defs.contains(&("var".into(), "radius".into())), "{defs:?}");
+    assert!(defs.contains(&("sub".into(), "main".into())), "{defs:?}");
+    // namespace stickiness: Shape/Circle carry package=geo
+    let shape = skel.symbols.iter().find(|s| s.name == "Shape").unwrap();
+    assert_eq!(shape.package.as_deref(), Some("geo"), "namespace context");
+}
+
+#[test]
+fn cpp_cross_file_include_resolution_and_rename() {
+    let dir = std::env::temp_dir().join(format!("qx-cpp-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let header = "int compute(int x);\n";
+    std::fs::write(dir.join("util.h"), header).unwrap();
+    let main_src = "#include \"util.h\"\n\nint main() {\n    return compute(41);\n}\n";
+
+    let main_skel = cpp_skel(main_src);
+    let imports = main_skel.imports.clone();
+    assert_eq!(imports, vec!["util.h"], "quoted include captured clean: {imports:?}");
+
+    let idx = crate::module_index::ModuleIndex::new_for_test();
+    resolve_imports_with_pack(&imports, &dir, &cpp_pack(), &mut cpp_parser, &idx).unwrap();
+    assert!(idx.get_cached("util.h").is_some(), "#include must resolve util.h");
+
+    // cross-file rename: cursor on the call `compute` in main → def in
+    // util.h + call in main, through the production resolve/refs path
+    let store = crate::file_store::FileStore::new();
+    let pm = std::path::PathBuf::from("/fake/cpp/main.cpp");
+    let ph = std::path::PathBuf::from("/fake/cpp/util.h");
+    store.insert_workspace(pm.clone(), main_skel.into_file_analysis());
+    store.insert_workspace(ph.clone(), cpp_skel(header).into_file_analysis());
+
+    let fa_view = store.workspace_raw().get(&pm).unwrap().clone();
+    let point = tree_sitter::Point { row: 3, column: 11 };
+    let target = match crate::resolve::resolve_symbol(&fa_view, point, None) {
+        Some(crate::resolve::ResolvedTarget::Target(t)) => t,
+        other => panic!("expected target, got {other:?}"),
+    };
+    assert_eq!(target.name, "compute");
+    let locs = crate::resolve::refs_to(&store, None, &target, crate::resolve::RoleMask::EDITABLE);
+    let files: Vec<String> = locs
+        .iter()
+        .map(|l| match &l.key {
+            crate::file_store::FileKey::Path(p) => {
+                p.file_name().unwrap().to_string_lossy().to_string()
+            }
+            _ => unreachable!(),
+        })
+        .collect();
+    assert!(files.contains(&"util.h".to_string()), "def in header: {files:?}");
+    assert!(files.contains(&"main.cpp".to_string()), "call in main: {files:?}");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
 #[test]
 fn cmake_cross_file_function_rename_and_subdirectory_resolution() {
     let dir = std::env::temp_dir().join(format!("qx-cmake-{}", std::process::id()));

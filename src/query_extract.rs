@@ -288,6 +288,26 @@ pub fn cmake_pack() -> LangPack {
     }
 }
 
+pub fn cpp_pack() -> LangPack {
+    LangPack {
+        query_source: include_str!("../queries/cpp/skeleton.scm"),
+        shape_name: |_, raw| raw.to_string(),
+        default_name: |_| None,
+        annot_type: |_| None,
+        ctor_class: |_| None,
+        // #include "a/b.h" / <vector>: strip the delimiters; a quoted
+        // path is workspace-relative verbatim, a system header resolves
+        // through include dirs (library_roots, later). Tier 1: identity.
+        module_paths: |m| {
+            let p = m.trim_matches(|c: char| c == '"' || c == '<' || c == '>');
+            vec![p.to_string()]
+        },
+        shape_ctor: |_| false,
+        import_call: |_, _| None,
+        cmd_effects: |_| vec![],
+    }
+}
+
 /// `expr.lit.<t>` suffix → type. ENGINE-side vocabulary, not per-pack:
 /// the suffix set names the engine's value lattice, packs just choose
 /// which nodes carry each suffix.
