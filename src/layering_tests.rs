@@ -48,6 +48,8 @@ fn layer_map() -> HashMap<&'static str, Layer> {
         ("c_preproc", Build),
         // C #ifdef superposition → presence-tagged return union (spike)
         ("c_superpose", Build),
+        // overload-on-param Pi-type monomorphization (spike)
+        ("overload_pi", Build),
         ("module_index", Index),
         ("module_resolver", Index),
         ("module_cache", Index),

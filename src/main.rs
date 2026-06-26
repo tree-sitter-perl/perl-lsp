@@ -19,6 +19,7 @@ mod query_cache;
 mod c_preproc;
 mod c_reparse;
 mod c_superpose;
+mod overload_pi;
 mod cpp_reparse;
 mod query_extract;
 mod reparse;
