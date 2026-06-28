@@ -62,6 +62,13 @@ pub struct Template {
     pub dependent_types: Vec<(String, String)>,
     /// `name<...>` uses inside the body (args may be Param or Concrete).
     pub body_instantiations: Vec<Instantiation>,
+    /// Value parameters: `(var, type-param)` for `process(T x)` → `(x, T)`.
+    /// The bridge to the dispatch lattice — a body call's arg type is the
+    /// substituted type-param of the value-param it names.
+    pub value_params: Vec<(String, String)>,
+    /// Calls in the body to a (possibly overloaded) function: `(callee,
+    /// arg-var-names)`. `sink(x)` → `("sink", ["x"])`.
+    pub body_calls: Vec<(String, Vec<String>)>,
 }
 
 /// What a concrete instantiation resolves to once projected — the
@@ -89,13 +96,25 @@ pub fn collect_templates(tree: &Tree, src: &[u8]) -> HashMap<String, Template> {
         else {
             continue;
         };
+        let value_params = func
+            .child_by_field_name("declarator")
+            .map(|d| value_params_in(d, src))
+            .unwrap_or_default();
         let body = func.child_by_field_name("body").unwrap_or(func);
         let dependent_types = dependent_types_in(body, src);
         let body_instantiations =
             instantiations_in(body, src).into_iter().map(|i| classify(i, &params)).collect();
+        let body_calls = body_calls_in(body, src);
         out.insert(
             name.clone(),
-            Template { name, params, dependent_types, body_instantiations },
+            Template {
+                name,
+                params,
+                dependent_types,
+                body_instantiations,
+                value_params,
+                body_calls,
+            },
         );
     }
     out
@@ -215,6 +234,46 @@ fn dependent_types_in(body: Node, src: &[u8]) -> Vec<(String, String)> {
         .collect()
 }
 
+/// `(var, type-param-name)` for each `T x` parameter whose type is a bare
+/// `type_identifier` (a template type-param, in this PoC).
+fn value_params_in(declarator: Node, src: &[u8]) -> Vec<(String, String)> {
+    let Some(list) = first_descendant(declarator, "parameter_list") else { return vec![] };
+    descendants(list, "parameter_declaration")
+        .into_iter()
+        .filter_map(|p| {
+            let ty = p.child_by_field_name("type")?;
+            if ty.kind() != "type_identifier" {
+                return None;
+            }
+            let var = p.child_by_field_name("declarator")?.utf8_text(src).ok()?.to_string();
+            Some((var, ty.utf8_text(src).ok()?.to_string()))
+        })
+        .collect()
+}
+
+/// `(callee, [arg-var-names])` for plain calls `f(a, b)` in the body —
+/// excluding template instantiations (`g<T>(...)`, handled separately).
+fn body_calls_in(body: Node, src: &[u8]) -> Vec<(String, Vec<String>)> {
+    descendants(body, "call_expression")
+        .into_iter()
+        .filter_map(|call| {
+            let f = call.child_by_field_name("function")?;
+            if f.kind() != "identifier" {
+                return None; // field_expression (member call) / template_function: not here
+            }
+            let callee = f.utf8_text(src).ok()?.to_string();
+            let args = call.child_by_field_name("arguments")?;
+            let mut cur = args.walk();
+            let arg_vars = args
+                .named_children(&mut cur)
+                .filter(|n| n.kind() == "identifier")
+                .filter_map(|n| n.utf8_text(src).ok().map(str::to_string))
+                .collect();
+            Some((callee, arg_vars))
+        })
+        .collect()
+}
+
 fn instantiations_in(body: Node, src: &[u8]) -> Vec<(String, Vec<String>)> {
     descendants(body, "template_function")
         .into_iter()
@@ -230,7 +289,9 @@ fn read_template_function(node: Node, src: &[u8]) -> Option<(String, Vec<String>
     let targs: Vec<String> = args
         .named_children(&mut cur)
         .filter(|n| n.kind() == "type_descriptor")
-        .filter_map(|td| first_descendant(td, "type_identifier").and_then(|t| t.utf8_text(src).ok()))
+        // the arg type may be a type_identifier (Widget) OR a primitive
+        // (int) — take the `type` field directly, not just type_identifier.
+        .filter_map(|td| td.child_by_field_name("type").and_then(|t| t.utf8_text(src).ok()))
         .map(str::to_string)
         .collect();
     Some((name, targs))

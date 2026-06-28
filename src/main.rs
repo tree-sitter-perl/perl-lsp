@@ -23,6 +23,7 @@ mod overload_pi;
 mod perl_generators;
 mod cpp_multidispatch;
 mod cpp_templates;
+mod cpp_template_join;
 mod cpp_reparse;
 mod query_extract;
 mod reparse;

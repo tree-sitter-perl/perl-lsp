@@ -46,6 +46,8 @@ fn layer_map() -> HashMap<&'static str, Layer> {
         ("cpp_multidispatch", Build),
         // C++ templates as witnesses + projection PoC (spike)
         ("cpp_templates", Build),
+        // join: template projection -> dispatch lattice (spike)
+        ("cpp_template_join", Build),
         // C lexer-hack resolution via the symbol table (B1 spike)
         ("c_reparse", Build),
         // C preprocessor #ifdef config selection (A2 spike)
