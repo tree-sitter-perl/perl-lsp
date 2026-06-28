@@ -20,6 +20,7 @@ mod c_preproc;
 mod c_reparse;
 mod c_superpose;
 mod overload_pi;
+mod perl_generators;
 mod cpp_multidispatch;
 mod cpp_templates;
 mod cpp_reparse;

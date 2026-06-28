@@ -54,6 +54,8 @@ fn layer_map() -> HashMap<&'static str, Layer> {
         ("c_superpose", Build),
         // overload-on-param Pi-type monomorphization (spike)
         ("overload_pi", Build),
+        // productive Perl projection: plugin symbol generators (spike)
+        ("perl_generators", Build),
         ("module_index", Index),
         ("module_resolver", Index),
         ("module_cache", Index),
