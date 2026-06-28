@@ -36,6 +36,8 @@ fn layer_map() -> HashMap<&'static str, Layer> {
         ("cpanfile", Build),
         ("query_cache", Build),
         ("query_extract", Build),
+        // multi-language serving seam (LanguageDriver keystone)
+        ("language_driver", Build),
         // test-only C++ macro corpus consumed by query_extract_tests
         ("cpp_obstacle", Build),
         // stratified reparse seam (Perl prototype reparenthesizer spike)

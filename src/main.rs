@@ -22,6 +22,7 @@ mod c_superpose;
 mod overload_pi;
 mod perl_generators;
 mod cpp_multidispatch;
+mod language_driver;
 mod cpp_templates;
 mod cpp_template_join;
 mod cpp_reparse;
@@ -146,6 +147,14 @@ async fn main() {
             cli_parse(&args[2]);
             return;
         }
+        Some("--languages") => {
+            cli_languages();
+            return;
+        }
+        Some("--lang-analyze") if args.len() >= 3 => {
+            cli_lang_analyze(&args[2]);
+            return;
+        }
         _ => {}
     }
 
@@ -157,6 +166,48 @@ async fn main() {
     let (service, socket) = LspService::new(Backend::new);
 
     Server::new(stdin, stdout, socket).serve(service).await;
+}
+
+/// Print the languages this distribution was compiled to serve. A
+/// default build prints `perl`; a `cpp-lsp` build (`--features cpp`)
+/// prints `perl, cpp`.
+fn cli_languages() {
+    let reg = crate::language_driver::LanguageRegistry::with_enabled();
+    println!(
+        "perl-lsp {} — languages: {}",
+        env!("CARGO_PKG_VERSION"),
+        reg.languages().join(", "),
+    );
+}
+
+/// Analyze one file through its `LanguageDriver` and dump the outline —
+/// the multi-language seam at the CLI. Routes by extension; a `.cpp`
+/// file goes through the C++ driver (macro reparse → extract) when this
+/// binary was built `--features cpp`.
+fn cli_lang_analyze(file: &str) {
+    let reg = crate::language_driver::LanguageRegistry::with_enabled();
+    let path = std::path::Path::new(file);
+    let Some(driver) = reg.for_path(path) else {
+        eprintln!("no driver for {file} (this build serves: {})", reg.languages().join(", "));
+        std::process::exit(1);
+    };
+    let Ok(src) = std::fs::read_to_string(path) else {
+        eprintln!("cannot read {file}");
+        std::process::exit(1);
+    };
+    let fa = driver.analyze(&src);
+    println!("# {file} [{}] — {} symbols", driver.id(), fa.symbols.len());
+    for s in &fa.symbols {
+        let pkg = s.package.as_deref().unwrap_or("");
+        let sep = if pkg.is_empty() { "" } else { "::" };
+        println!(
+            "{:<8} {pkg}{sep}{}\t{}:{}",
+            format!("{:?}", s.kind),
+            s.name,
+            s.span.start.row + 1,
+            s.span.start.column + 1,
+        );
+    }
 }
 
 fn print_usage() {
