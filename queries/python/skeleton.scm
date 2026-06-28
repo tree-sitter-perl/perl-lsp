@@ -47,3 +47,12 @@
 (float) @expr.lit.number
 (list) @expr.lit.arrayref
 (dictionary) @expr.lit.hashref
+
+; Guard narrowing: `if isinstance(x, Foo): <body>` refines x to Foo
+; inside the block. The pack's narrow_guard predicate maps the guard
+; (isinstance) + type token to the refinement; core scopes it to @scope.
+(if_statement
+  condition: (call
+    function: (identifier) @narrow.guard
+    arguments: (argument_list (identifier) @narrow.var (identifier) @narrow.type))
+  consequence: (block) @scope)

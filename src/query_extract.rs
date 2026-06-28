@@ -159,6 +159,13 @@ pub struct LangPack {
     /// its positional arguments. The @cmd/@cmd.arg captures deliver
     /// (name, ordered args); this predicate classifies.
     pub cmd_effects: fn(cmd: &str) -> Vec<CmdEffect>,
+    /// Guard narrowing: given the guard token (`@narrow.guard` — a
+    /// function/operator like `isinstance`, `ref`) and the type token
+    /// (`@narrow.type`), the refined type that holds inside the guarded
+    /// block, or `None` if this guard doesn't narrow. The pack owns
+    /// "which guard means which refinement" (rule #10); core just scopes
+    /// the witness to the block.
+    pub narrow_guard: fn(guard: &str, type_text: &str) -> Option<InferredType>,
 }
 
 /// One effect of a command-dispatched statement.
@@ -196,6 +203,7 @@ pub fn perl_pack() -> LangPack {
         shape_ctor: |_| false,
         import_call: |_, _| None,
         cmd_effects: |_| vec![],
+        narrow_guard: |_, _| None,
     }
 }
 
@@ -228,6 +236,8 @@ pub fn python_pack() -> LangPack {
         shape_ctor: |_| false,
         import_call: |_, _| None,
         cmd_effects: |_| vec![],
+        // `isinstance(x, Foo)` narrows x to Foo inside the guard.
+        narrow_guard: |guard, ty| (guard == "isinstance").then(|| InferredType::ClassName(ty.to_string())),
     }
 }
 
@@ -250,6 +260,7 @@ pub fn r_pack() -> LangPack {
             _ => None,
         },
         cmd_effects: |_| vec![],
+        narrow_guard: |_, _| None,
     }
 }
 
@@ -285,6 +296,7 @@ pub fn cmake_pack() -> LangPack {
             "include" | "add_subdirectory" => vec![CmdEffect::Import { arg: 0 }],
             _ => vec![],
         },
+        narrow_guard: |_, _| None,
     }
 }
 
@@ -331,6 +343,7 @@ pub fn cpp_pack() -> LangPack {
         shape_ctor: |_| false,
         import_call: |_, _| None,
         cmd_effects: |_| vec![],
+        narrow_guard: |_, _| None,
     }
 }
 
@@ -450,6 +463,16 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     // expr-literal spans, for narrowing an Edge target onto the actual
     // literal when the rhs node wraps it.
     let mut lit_spans: Vec<(usize, usize, Span)> = Vec::new();
+    // guard narrowing: match_id → (var, narrowed-type-text). A guard
+    // (`isinstance(x, Foo)`, `ref $x eq 'Foo'`, `dynamic_cast<Foo>`) and
+    // its guarded `@scope` share a match; when that scope is pushed we
+    // emit a Variable witness scoped to the block — so the narrowed type
+    // holds INSIDE the guard and nowhere else (scope = the refinement's
+    // extent). The condition's captures precede the block in source, so
+    // by the time the `@scope` event fires these are populated.
+    let mut narrow_var: HashMap<usize, String> = HashMap::new();
+    let mut narrow_type: HashMap<usize, String> = HashMap::new();
+    let mut narrow_guard: HashMap<usize, String> = HashMap::new();
 
     for e in &events {
         while scope_stack.len() > 1
@@ -474,6 +497,37 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                 });
                 scope_stack.push((e.end_byte, id));
                 out.scope_count += 1;
+                // a guard narrowing whose block is THIS scope → the
+                // refined type holds within `id` (and is invisible
+                // outside it). annot_type maps primitive guards; anything
+                // else is a class refinement.
+                if let (Some(var), Some(ty), Some(guard)) = (
+                    narrow_var.get(&e.match_id),
+                    narrow_type.get(&e.match_id),
+                    narrow_guard.get(&e.match_id),
+                ) {
+                    if let Some(refined) = (pack.narrow_guard)(guard, ty) {
+                        let span = Span { start: e.start, end: e.start };
+                        out.witnesses.push(crate::witnesses::Witness {
+                            attachment: crate::witnesses::WitnessAttachment::Variable {
+                                name: (pack.shape_name)("ref.var", var),
+                                scope: id,
+                            },
+                            source: crate::witnesses::WitnessSource::Builder("skeleton-narrow".into()),
+                            payload: crate::witnesses::WitnessPayload::InferredType(refined),
+                            span,
+                        });
+                    }
+                }
+            }
+            "narrow.var" => {
+                narrow_var.insert(e.match_id, e.text.clone());
+            }
+            "narrow.type" => {
+                narrow_type.insert(e.match_id, e.text.clone());
+            }
+            "narrow.guard" => {
+                narrow_guard.insert(e.match_id, e.text.clone());
             }
             cap if cap.starts_with("context.") => {
                 // Replace any context at the same depth; deeper ones

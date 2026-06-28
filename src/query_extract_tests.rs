@@ -1116,3 +1116,36 @@ fn cmake_cross_file_function_rename_and_subdirectory_resolution() {
 }
 
 
+
+
+#[test]
+fn python_isinstance_narrows_within_the_guard() {
+    // `if isinstance(x, Foo): ...` refines x to Foo INSIDE the block and
+    // nowhere else — guard narrowing via scoped witness.
+    let src = "\
+class Foo:
+    def run(self):
+        pass
+x = maybe()
+if isinstance(x, Foo):
+    x.run()
+y = 1
+";
+    let mut parser = python_parser();
+    let tree = parser.parse(src, None).unwrap();
+    let skel = extract(&tree, src.as_bytes(), &python_pack()).unwrap();
+    let fa = skel.into_file_analysis();
+    use crate::file_analysis::InferredType;
+    // inside the guard (row 5, `x.run()`): x is Foo
+    assert_eq!(
+        fa.inferred_type_via_bag("x", tree_sitter::Point { row: 5, column: 4 }),
+        Some(InferredType::ClassName("Foo".into())),
+        "narrowed inside the guard",
+    );
+    // after the guard (row 6): the refinement does not leak
+    assert_eq!(
+        fa.inferred_type_via_bag("x", tree_sitter::Point { row: 6, column: 0 }),
+        None,
+        "narrowing scoped to the block — gone after",
+    );
+}
