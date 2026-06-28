@@ -28,17 +28,34 @@ real generator plugin.
 
 ---
 
-## Tier 1 — THE KEYSTONE (next real project)
+## Tier 1 — THE KEYSTONE (first slice LANDED)
 
-**`LanguageDriver` foundation** 📋 — already designed in
-`docs/prompt-multi-language.md` (registry + `FileAnalysis.language` +
-two `refs_to`/workspace-symbol filters; per-language `ModuleIndex`).
+**`LanguageDriver` foundation** 🚧→✅ first slice on `spike/cpp-support`
+(`src/language_driver.rs`).
 
-Why keystone: **every C/C++ spike below is a standalone module that can't
-become real until there is a driver to host it.** Land this and ~8 spikes
-convert from evidence to features in one stroke. Effort: days (pure
-refactor for the Perl path; the existing test suite is the net). Single
-highest-leverage move for the Mobileye direction.
+LANDED (additive, Perl path untouched, default suite 1062/0):
+- `LanguageDriver` trait + `LanguageRegistry`; `PerlDriver` (wraps the
+  builder) + generic `PackDriver` (grammar + `LangPack` + optional
+  pre-parse transform).
+- **Feature-gated distribution**: `cpp`/`python`/`r`/`cmake` features
+  (optional grammar deps); default build links no pack grammar. A
+  `cpp-lsp` = `cargo build --features cpp`; `--features all-langs` serves
+  all five. `--languages` / `--lang-analyze <file>` prove it at the CLI
+  (a macro-heavy `.cpp` routes through the reparse seam and outlines).
+
+STILL DEFERRED (the risky part — needs e2e, do with review, NOT blind):
+- **Async LSP backend routing.** `document.rs` / `backend.rs`
+  `did_open`/`did_change` still hardwire Perl; routing them through the
+  registry (by `language_id` / extension) + watcher globs is what makes
+  `cpp-lsp` work *in an editor* (not just the CLI). Per
+  `docs/prompt-multi-language.md` §"Touch points".
+- **`FileAnalysis.language` tag + the two cross-file filters** (refs_to /
+  workspace-symbol) so a Python `helper` doesn't match a Perl `helper`.
+- **Per-language `ModuleIndex`** (keyspace isolation).
+
+Why keystone: **every C/C++ spike below is a standalone module that the
+driver now hosts.** The CLI slice proves the seam; the backend routing +
+language-tag is what turns the spikes into editor features.
 
 Spikes waiting on the keystone (all 🚧 on `spike/cpp-support`, all green):
 

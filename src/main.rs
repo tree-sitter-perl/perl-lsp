@@ -254,6 +254,12 @@ fn print_usage() {
     eprintln!("  perl-lsp --parse <file|-->                             Print tree-sitter parse tree");
     eprintln!("                                                         (`-` reads from stdin)");
     eprintln!();
+    eprintln!("MULTI-LANGUAGE (pack drivers, opt-in at build time):");
+    eprintln!("  perl-lsp --languages                                   Languages this build serves");
+    eprintln!("  perl-lsp --lang-analyze <file>                         Analyze a file via its driver");
+    eprintln!("                                                         (route by extension; dump outline)");
+    eprintln!("    Build a cpp-lsp:  cargo build --features cpp   (or --features all-langs)");
+    eprintln!();
     eprintln!("  perl-lsp --version                                     Print version");
 }
 
