@@ -32,3 +32,20 @@ fn registry_serves_cpp_when_enabled() {
     assert!(reg.languages().contains(&"cpp"));
     assert_eq!(reg.for_path(std::path::Path::new("x.cpp")).map(|d| d.id()), Some("cpp"));
 }
+
+#[cfg(feature = "cpp")]
+#[test]
+fn cpp_macro_recovered_spans_are_in_original_coords() {
+    // A declarator-position macro expands to a long attribute, shifting
+    // byte positions. The recovered `Box` symbol must point at the
+    // ORIGINAL `Box`, not the expanded coordinate.
+    let src = "#define API __attribute__((visibility(\"default\")))\nclass API Box { public: int width; };\n";
+    let fa = cpp_driver().analyze(src);
+    let boxsym = fa.symbols.iter().find(|s| s.name == "Box").expect("Box recovered");
+    // original: `class API Box {` → Box at row 1, col 10
+    let p = boxsym.selection_span.start;
+    assert_eq!((p.row, p.column), (1, 10), "Box span in ORIGINAL coords: {:?}", p);
+    // and the original source at that point really is "Box"
+    let line = src.lines().nth(1).unwrap();
+    assert_eq!(&line[p.column..p.column + 3], "Box");
+}

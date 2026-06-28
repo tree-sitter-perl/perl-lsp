@@ -67,8 +67,11 @@ pub struct PackDriver {
     exts: &'static [&'static str],
     make_parser: fn() -> tree_sitter::Parser,
     pack: fn() -> crate::query_extract::LangPack,
-    /// Source → source, run before parsing (e.g. C++ macro expansion).
-    transform: Option<fn(&mut tree_sitter::Parser, &str) -> String>,
+    /// Source → (transformed source, anchor map), run before parsing
+    /// (C++ macro expansion). The map remaps the extracted spans back to
+    /// ORIGINAL coordinates so the editor's positions are correct even
+    /// after expansion. `None` = pass-through (identity).
+    transform: Option<fn(&mut tree_sitter::Parser, &str) -> (String, crate::cpp_reparse::SpliceMap)>,
 }
 
 #[cfg(any(feature = "cpp", feature = "python", feature = "r", feature = "cmake"))]
@@ -84,13 +87,18 @@ impl LanguageDriver for PackDriver {
     }
     fn analyze(&self, source: &str) -> FileAnalysis {
         let mut parser = (self.make_parser)();
-        let src = match self.transform {
+        let (src, map) = match self.transform {
             Some(t) => t(&mut parser, source),
-            None => source.to_string(),
+            None => (source.to_string(), crate::cpp_reparse::SpliceMap::default()),
         };
         let Some(tree) = parser.parse(&src, None) else { return FileAnalysis::new(Default::default()) };
         match crate::query_extract::extract(&tree, src.as_bytes(), &(self.pack)()) {
-            Ok(skel) => skel.into_file_analysis(),
+            Ok(mut skel) => {
+                // remap extracted spans from transformed → original coords
+                // (no-op for identity / pass-through languages).
+                remap_spans(&mut skel, &src, source, &map);
+                skel.into_file_analysis()
+            }
             Err(_) => FileAnalysis::new(Default::default()),
         }
     }
@@ -110,8 +118,9 @@ fn cpp_driver() -> PackDriver {
             p
         },
         pack: crate::query_extract::cpp_pack,
-        // reparse past the preprocessor before extraction
-        transform: Some(|parser, src| crate::cpp_reparse::preprocess_validated(parser, src).0),
+        // reparse past the preprocessor before extraction; the anchor map
+        // carries the recovered spans back to the original coordinates.
+        transform: Some(crate::cpp_reparse::preprocess_validated),
     }
 }
 
@@ -158,6 +167,65 @@ fn cmake_driver() -> PackDriver {
         },
         pack: crate::query_extract::cmake_pack,
         transform: None,
+    }
+}
+
+/// Remap extracted skeleton spans from transformed coords back to
+/// original source coords via the anchor map. A no-op for an identity
+/// map (clean/pass-through files round-trip byte→point→byte unchanged),
+/// so it's safe to always call. Covers navigation spans (symbols / refs
+/// / scopes); witness spans (type queries) are the follow-up.
+#[cfg(any(feature = "cpp", feature = "python", feature = "r", feature = "cmake"))]
+fn remap_spans(
+    skel: &mut crate::query_extract::SkeletonAnalysis,
+    transformed: &str,
+    original: &str,
+    map: &crate::cpp_reparse::SpliceMap,
+) {
+    use tree_sitter::Point;
+    let t = LineIndex::new(transformed);
+    let o = LineIndex::new(original);
+    let r = |p: Point| -> Point { o.point(map.to_original(t.byte(p))) };
+    for s in &mut skel.symbols {
+        s.start = r(s.start);
+        s.end = r(s.end);
+        s.name_start = r(s.name_start);
+        s.name_end = r(s.name_end);
+    }
+    for rf in &mut skel.refs {
+        rf.start = r(rf.start);
+        rf.end = r(rf.end);
+    }
+    for sc in &mut skel.scopes {
+        sc.span.start = r(sc.span.start);
+        sc.span.end = r(sc.span.end);
+    }
+}
+
+/// Line-start byte offsets, for Point↔byte conversion (Point.column is a
+/// byte offset within its row).
+#[cfg(any(feature = "cpp", feature = "python", feature = "r", feature = "cmake"))]
+struct LineIndex {
+    starts: Vec<usize>,
+}
+
+#[cfg(any(feature = "cpp", feature = "python", feature = "r", feature = "cmake"))]
+impl LineIndex {
+    fn new(s: &str) -> Self {
+        let mut starts = vec![0];
+        for (i, b) in s.bytes().enumerate() {
+            if b == b'\n' {
+                starts.push(i + 1);
+            }
+        }
+        LineIndex { starts }
+    }
+    fn byte(&self, p: tree_sitter::Point) -> usize {
+        self.starts.get(p.row).copied().unwrap_or(0) + p.column
+    }
+    fn point(&self, byte: usize) -> tree_sitter::Point {
+        let row = self.starts.partition_point(|&s| s <= byte).saturating_sub(1);
+        tree_sitter::Point { row, column: byte - self.starts[row] }
     }
 }
 
