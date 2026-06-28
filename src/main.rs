@@ -107,6 +107,10 @@ async fn main() {
             cli_workspace_symbol(&args[2], &args[3]);
             return;
         }
+        Some("--heatmap") if args.len() >= 3 => {
+            cli_heatmap(&args[2], &args[3..]);
+            return;
+        }
         Some("--batch") if args.len() >= 3 => {
             cli_batch(&args[2]);
             return;
@@ -177,6 +181,11 @@ fn print_usage() {
     eprintln!("  perl-lsp --rename <root> <file> <line> <col> <new>     Cross-file rename");
     eprintln!("  perl-lsp --workspace-symbol <root> <query>             Search symbols");
     eprintln!("  perl-lsp --batch <root>                                Stream JSONL queries (one startup, many)");
+    eprintln!();
+    eprintln!("INSIGHT:");
+    eprintln!("  perl-lsp --heatmap <root> [--csv] [--include-deps] [--all]");
+    eprintln!("                                                         Per-symbol usage (fan-in/fan-out)");
+    eprintln!("                                                         + unreferenced-symbol candidates (JSON/CSV)");
     eprintln!();
     eprintln!("PLUGIN AUTHORING:");
     eprintln!("  perl-lsp --plugin-check <file.rhai>                    Lint a Rhai plugin");
@@ -1499,6 +1508,229 @@ fn cli_workspace_symbol(root: &str, query: &str) {
         query: Some(query.to_string()), newname: None,
     };
     print_run_one(&ws, &idx, &req);
+}
+
+/// --heatmap <root> [--csv] [--include-deps] [--all] — Code-usage heatmap.
+///
+/// Emits per-symbol USAGE metrics computed over the EXISTING cross-file
+/// reference graph (the same `refs_to` machinery references/rename use) — it
+/// is a reporting view, not a new analysis tier:
+///
+///   * fan_in  — how many reference sites a symbol has across the workspace
+///               (call sites; the symbol's own declaration is excluded).
+///   * fan_out — how many DISTINCT callees a sub/method references in its body
+///               (cheap intra-file span containment; `null` for packages).
+///   * dead_code_candidate — fan_in == 0 AND no reachability guard fired.
+///
+/// HONEST LABEL: a "dead-code candidate" here is an UNREFERENCED SYMBOL — a
+/// reachability heuristic, NOT MISRA C:2012 Rule 2.2 dead code (undecidable).
+/// We OVER-APPROXIMATE reachability (sound for "is it live?", may under-report
+/// dead): a symbol is treated as reachable (never flagged) when it is exported,
+/// is a constructor, or — for methods, when ANY file in the workspace dispatches
+/// dynamically (`$obj->$method`) — could be reached through an edge the static
+/// graph can't see. Failure modes: symbolic code refs (`\&name`, `&{$n}`),
+/// `can`/`->$method` with an unresolved name, `AUTOLOAD`, and string `eval` are
+/// invisible; function candidates assume none of these reach them.
+fn cli_heatmap(root: &str, opts: &[String]) {
+    use file_analysis::{AccessKind, Namespace, SymKind};
+    use std::collections::HashSet;
+
+    let csv = opts.iter().any(|a| a == "--csv");
+    let include_deps = opts.iter().any(|a| a == "--include-deps");
+    // By default only candidate-eligible kinds (subs/methods/packages with a
+    // body) are listed; `--all` keeps every counted symbol in `symbols`.
+    let emit_all = opts.iter().any(|a| a == "--all");
+
+    let (ws, idx) = cli_full_startup(root);
+
+    // Workspace-level soundness gate. Any dynamic method dispatch makes the
+    // static call graph an under-approximation of method reachability, so a
+    // zero-fan-in METHOD can't be proven dead.
+    let mut dynamic_dispatch_sites: u64 = 0;
+    for entry in ws.workspace_raw().iter() {
+        dynamic_dispatch_sites += entry.value().dynamic_dispatch_sites as u64;
+    }
+    let has_dynamic_dispatch = dynamic_dispatch_sites > 0;
+
+    // References across open + workspace files; `--include-deps` also walks
+    // cached @INC modules so a library symbol used only from a dependency
+    // shows nonzero fan-in.
+    let mask = if include_deps {
+        resolve::RoleMask::VISIBLE
+    } else {
+        resolve::RoleMask::EDITABLE
+    };
+
+    let within = |outer: &file_analysis::Span, inner: &file_analysis::Span| {
+        let s = |p: &tree_sitter::Point| (p.row, p.column);
+        s(&inner.start) >= s(&outer.start) && s(&inner.end) <= s(&outer.end)
+    };
+
+    let mut sources = SourceCache::new();
+    let mut symbol_rows: Vec<serde_json::Value> = Vec::new();
+    let mut dead_rows: Vec<serde_json::Value> = Vec::new();
+
+    // Stable file order so output is deterministic across runs.
+    let mut entries: Vec<(std::path::PathBuf, std::sync::Arc<file_analysis::FileAnalysis>)> = ws
+        .workspace_raw()
+        .iter()
+        .map(|e| (e.key().clone(), std::sync::Arc::clone(e.value())))
+        .collect();
+    entries.sort_by(|a, b| a.0.cmp(&b.0));
+
+    for (path, analysis) in &entries {
+        let path_str = path.display().to_string();
+        for sym in &analysis.symbols {
+            let Some(target) = resolve::TargetRef::for_symbol(sym, analysis, Some(&idx)) else {
+                continue;
+            };
+
+            // fan_in = reference sites minus the symbol's declaration(s).
+            let locs = resolve::refs_to(&ws, Some(&idx), &target, mask);
+            let fan_in = locs
+                .iter()
+                .filter(|l| l.access != AccessKind::Declaration)
+                .count();
+
+            // fan_out = distinct callee names referenced inside this body
+            // (subs/methods only). Packages have no body to scan.
+            let is_callable = matches!(sym.kind, SymKind::Sub | SymKind::Method);
+            let fan_out: Option<usize> = if is_callable {
+                let mut callees: HashSet<&str> = HashSet::new();
+                for r in &analysis.refs {
+                    if matches!(
+                        r.kind,
+                        file_analysis::RefKind::FunctionCall { .. }
+                            | file_analysis::RefKind::MethodCall { .. }
+                            | file_analysis::RefKind::DispatchCall { .. }
+                    ) && within(&sym.span, &r.span)
+                    {
+                        callees.insert(r.unqualified_target_name());
+                    }
+                }
+                // Don't count self-recursion as fan-out to itself.
+                callees.remove(sym.name.as_str());
+                Some(callees.len())
+            } else {
+                None
+            };
+
+            let exported = analysis.exports_name(&sym.name);
+            let native = matches!(sym.namespace, Namespace::Language);
+
+            // Reachability guard — why a zero-fan-in symbol is NOT flagged dead.
+            // Ordered most-specific-first.
+            let guard: Option<&'static str> = if fan_in > 0 {
+                None
+            } else if exported {
+                Some("exported")
+            } else if conventions::is_constructor_name(&sym.name) {
+                Some("constructor")
+            } else if !native {
+                // Framework-synthesized accessors/handlers — the user didn't
+                // write them, and the framework calls them through machinery
+                // the static graph doesn't model.
+                Some("framework-synthesized")
+            } else if matches!(sym.kind, SymKind::Package | SymKind::Class | SymKind::Module) {
+                // Packages are reachable through too many invisible vectors
+                // (`require`, app entrypoints, dynamic class strings) to flag.
+                Some("package-implicit-use")
+            } else if has_dynamic_dispatch
+                && matches!(sym.kind, SymKind::Sub | SymKind::Method)
+                && sym.package.as_deref().is_some_and(|p| p != "main")
+            {
+                // A sub declared in a class can be invoked as `$obj->name`;
+                // an unresolved dynamic dispatch ANYWHERE in the workspace
+                // could target it, so the static graph can't prove it dead.
+                // `main`-script free functions are excluded — they're not
+                // class methods, so their FunctionCall graph is authoritative.
+                Some("dynamic-dispatch")
+            } else {
+                None
+            };
+
+            let dead = fan_in == 0 && guard.is_none();
+            let (line, col) =
+                sources.display(&path_str, sym.selection_span.start.row, sym.selection_span.start.column);
+            let kind = format!("{:?}", sym.kind);
+
+            let row = serde_json::json!({
+                "name": sym.name,
+                "kind": kind,
+                "package": sym.package,
+                "file": path_str,
+                "line": line,
+                "col": col,
+                "fan_in": fan_in,
+                "fan_out": fan_out,
+                "exported": exported,
+                "dead_code_candidate": dead,
+                "reachable_guard": guard,
+            });
+
+            if dead {
+                dead_rows.push(row.clone());
+            }
+            if emit_all || is_callable || dead {
+                symbol_rows.push(row);
+            }
+        }
+    }
+
+    // Heaviest fan-in first — the hotspots a reader wants up top.
+    symbol_rows.sort_by(|a, b| {
+        b["fan_in"].as_u64().cmp(&a["fan_in"].as_u64())
+            .then_with(|| a["file"].as_str().cmp(&b["file"].as_str()))
+            .then_with(|| a["line"].as_u64().cmp(&b["line"].as_u64()))
+    });
+
+    if csv {
+        println!("name,kind,package,file,line,col,fan_in,fan_out,exported,dead_code_candidate,reachable_guard");
+        let cell = |v: &serde_json::Value| -> String {
+            match v {
+                serde_json::Value::Null => String::new(),
+                serde_json::Value::String(s) => csv_escape(s),
+                other => other.to_string(),
+            }
+        };
+        for r in &symbol_rows {
+            println!(
+                "{},{},{},{},{},{},{},{},{},{},{}",
+                cell(&r["name"]), cell(&r["kind"]), cell(&r["package"]), cell(&r["file"]),
+                cell(&r["line"]), cell(&r["col"]), cell(&r["fan_in"]), cell(&r["fan_out"]),
+                cell(&r["exported"]), cell(&r["dead_code_candidate"]), cell(&r["reachable_guard"]),
+            );
+        }
+        return;
+    }
+
+    let out = serde_json::json!({
+        "schema": "perl-lsp.heatmap.v1",
+        "kind": "usage-heatmap",
+        "label": "dead_code_candidate = UNREFERENCED SYMBOL (reachability heuristic); NOT MISRA C:2012 Rule 2.2 dead code, which is undecidable",
+        "soundness": "over-approximate reachability: exported symbols, constructors, framework-synthesized members, packages, and (when dynamic_dispatch_sites > 0) all methods are treated as reachable and never flagged",
+        "root": root,
+        "files_indexed": entries.len(),
+        "dynamic_dispatch_sites": dynamic_dispatch_sites,
+        "include_deps": include_deps,
+        "summary": {
+            "symbols_reported": symbol_rows.len(),
+            "dead_code_candidates": dead_rows.len(),
+        },
+        "symbols": symbol_rows,
+        "dead_code_candidates": dead_rows,
+    });
+    println!("{}", serde_json::to_string_pretty(&out).unwrap());
+}
+
+/// Minimal RFC-4180 CSV field escaping: quote when the value contains a
+/// comma, quote, or newline; double embedded quotes.
+fn csv_escape(s: &str) -> String {
+    if s.contains([',', '"', '\n', '\r']) {
+        format!("\"{}\"", s.replace('"', "\"\""))
+    } else {
+        s.to_string()
+    }
 }
 
 /// --clear-cache [<root>] — Remove the SQLite module cache.

@@ -78,6 +78,41 @@ impl TargetRef {
         TargetRef { name, kind, method_classes: Vec::new() }
     }
 
+    /// Build the fan-in target for a heatmap pass over a *declared* symbol.
+    /// Returns `None` for kinds with no meaningful cross-file reference count
+    /// (lexical variables, hash-key/field slots, plugin namespaces, handlers).
+    /// `refs_to` over the result counts both the declaration and every call
+    /// site; the heatmap subtracts the declarations to get fan-in.
+    pub fn for_symbol(
+        sym: &crate::file_analysis::Symbol,
+        origin: &FileAnalysis,
+        module_index: Option<&dyn CrossFileLookup>,
+    ) -> Option<Self> {
+        // Anonymous subs (`(anon)`) and any non-identifier-named symbol have
+        // no nameable reference graph — their name would cross-link every
+        // other anon. They're reachable through the coderef they bind to.
+        if !sym
+            .name
+            .starts_with(|c: char| c.is_alphabetic() || c == '_')
+        {
+            return None;
+        }
+        match sym.kind {
+            SymKind::Sub => Some(TargetRef::new(
+                sym.name.clone(),
+                TargetKind::Sub { package: sym.package.clone() },
+            )),
+            SymKind::Method => {
+                let class = sym.package.clone()?;
+                Some(TargetRef::method(sym.name.clone(), class, origin, module_index))
+            }
+            SymKind::Package | SymKind::Class | SymKind::Module => {
+                Some(TargetRef::new(sym.name.clone(), TargetKind::Package))
+            }
+            _ => None,
+        }
+    }
+
     /// Rename policy, asked of the target rather than re-encoded per handler:
     /// callables and packages rewrite everywhere; hash keys are in-file-only
     /// by design (an unowned spelling elsewhere may be a different key);
