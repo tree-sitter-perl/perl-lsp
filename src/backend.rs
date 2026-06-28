@@ -227,20 +227,20 @@ impl LanguageServer for Backend {
         // Opt-in diagnostics from `initializationOptions.diagnostics`.
         // `{ "diagnostics": { "unresolvedDispatch": true } }` enables the
         // QA/plugin-author `unresolved-dispatch` channel; absent = off.
-        if let Some(opts) = &params.initialization_options {
-            let diag = opts.get("diagnostics");
-            let flag = |key: &str| {
-                diag.and_then(|d| d.get(key))
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(false)
-            };
-            *self.diag_options.lock().unwrap() = symbols::DiagnosticOptions {
-                unresolved_dispatch: flag("unresolvedDispatch"),
-                unresolved_method_cross_file: flag("unresolvedMethodCrossFile"),
-                optional_deref: flag("optionalDeref"),
-                redundant_guard: flag("redundantGuard"),
-                deref_shape: flag("derefShape"),
-            };
+        // The `diagnostics` sub-object deserializes straight into
+        // `DiagnosticOptions` (the struct is the schema — camelCase keys,
+        // absent ones default to false). A malformed value leaves the
+        // defaults in place rather than failing initialize.
+        if let Some(diag) = params
+            .initialization_options
+            .as_ref()
+            .and_then(|o| o.get("diagnostics"))
+        {
+            if let Ok(parsed) =
+                serde_json::from_value::<symbols::DiagnosticOptions>(diag.clone())
+            {
+                *self.diag_options.lock().unwrap() = parsed;
+            }
         }
 
         Ok(InitializeResult {

@@ -53,6 +53,10 @@ Plugin genericity:
   from `value_shape`/`arg_names`, options from `classified_pairs`).
 
 Hardening:
+- Options schema: `DiagnosticOptions` is serde-driven (the struct is the
+  schema). A `Config` god-struct (own-at-top, pass-slices), a generated
+  editor schema (`schemars`), and the per-code-config shape wait for their
+  forcing functions — `prompt-config-schema.md`.
 - Fold safety net: `eprintln!` → `tracing::error!` (builder.rs
   ~12061) + a synthetic-oscillator test so the release-mode
   `MAX_FOLD_ITERATIONS` break can't bit-rot.

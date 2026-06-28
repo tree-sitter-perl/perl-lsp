@@ -2462,9 +2462,19 @@ fn is_perl_builtin(name: &str) -> bool {
 
 /// Opt-in diagnostic toggles. Defaults are all-off for the QA/plugin-author
 /// channels (noise for end users); the always-on hints (`unresolved-function`
-/// / `unresolved-method`) ignore this. Parsed from `initializationOptions`
-/// in `backend.rs`. See `docs/adr/receiver-gated-dispatch.md`.
-#[derive(Debug, Clone, Copy, Default)]
+/// / `unresolved-method`) ignore this.
+///
+/// **The struct is the schema.** `rename_all = "camelCase"` makes each field
+/// its own LSP key under `initializationOptions.diagnostics`, so `backend.rs`
+/// parses the whole block with one `serde_json::from_value` — no hand-mapped
+/// key strings to drift. `default` fills any absent key with `false`. The CLI
+/// surface (`DiagnosticOptions::from_cli_args`) is the one spelling serde
+/// can't derive; `cli_flags_match_diagnostic_option_fields` guards it against
+/// drift. A `Config` god-struct, a generated editor schema, and richer
+/// per-code config are a design note in `docs/prompt-config-schema.md`. See
+/// `docs/adr/receiver-gated-dispatch.md`, `docs/adr/narrowing-diagnostics.md`.
+#[derive(Debug, Clone, Copy, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", default)]
 pub struct DiagnosticOptions {
     /// Fire `unresolved-dispatch` when a known dispatch verb's receiver can't
     /// be typed (`GateResult::ReceiverUntyped`) — never on a settled
@@ -2492,13 +2502,29 @@ pub struct DiagnosticOptions {
     /// already `Foo` or an unrelated class). Off by default — needs confident
     /// prior types and MRO relatedness, so it earns trust before promotion.
     pub redundant_guard: bool,
-    /// Fire `deref-shape-mismatch` (D6): a hash deref `$x->{k}` on a receiver
-    /// confidently typed array- or code-shaped — a guaranteed "Not a HASH
-    /// reference" die. Restricted to array/code reps (never the default type,
-    /// so no HashRef-default false positives); object and hash receivers are
-    /// untouched. Off by default. Array-deref / code-call mismatches are the
-    /// documented residual (they need the array/code deref sites).
+    /// Fire `deref-shape-mismatch` (D6): a deref whose form demands one
+    /// container rep while a `ref…eq` guard proved another (`$x->{k}` on
+    /// array/code, `$x->[i]` on hash/code, `$x->()` on hash/array) — a
+    /// guaranteed runtime die. Guard-narrowed reps only; objects are never a
+    /// mismatch. Off by default.
     pub deref_shape: bool,
+}
+
+impl DiagnosticOptions {
+    /// Parse the opt-in flags from CLI args (`--optional-deref`, …). The kebab
+    /// flag for each field mirrors its serde camelCase key; the mapping is
+    /// explicit here (serde doesn't parse argv) and pinned by
+    /// `cli_flags_match_diagnostic_option_fields`.
+    pub fn from_cli_args(args: &[String]) -> Self {
+        let has = |flag: &str| args.iter().any(|a| a == flag);
+        DiagnosticOptions {
+            unresolved_dispatch: has("--unresolved-dispatch"),
+            unresolved_method_cross_file: has("--unresolved-method-cross-file"),
+            optional_deref: has("--optional-deref"),
+            redundant_guard: has("--redundant-guard"),
+            deref_shape: has("--deref-shape"),
+        }
+    }
 }
 
 pub fn collect_diagnostics(

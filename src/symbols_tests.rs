@@ -898,6 +898,68 @@ sub g {
     assert!(deref_shape_diags(src).is_empty(), "array deref on an ARRAY-narrowed receiver is correct");
 }
 
+// --- DiagnosticOptions: the struct is the schema ---
+
+fn camel_to_kebab(s: &str) -> String {
+    let mut out = String::new();
+    for c in s.chars() {
+        if c.is_ascii_uppercase() {
+            out.push('-');
+            out.push(c.to_ascii_lowercase());
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// Every `DiagnosticOptions` field must be settable via its canonical
+/// `--kebab` CLI flag, derived from the serde camelCase key. serde itself
+/// enumerates the fields (via serialization), so adding a field with no CLI
+/// flag — or a mistyped flag — fails this test. Guards the one surface serde
+/// can't derive (`from_cli_args`) against drift.
+#[test]
+fn cli_flags_match_diagnostic_option_fields() {
+    let keys: Vec<String> = serde_json::to_value(DiagnosticOptions::default())
+        .unwrap()
+        .as_object()
+        .unwrap()
+        .keys()
+        .cloned()
+        .collect();
+    assert!(!keys.is_empty(), "expected at least one option field");
+
+    for key in &keys {
+        let flag = format!("--{}", camel_to_kebab(key));
+        let parsed = serde_json::to_value(DiagnosticOptions::from_cli_args(&[flag.clone()])).unwrap();
+        let set: Vec<&String> = parsed
+            .as_object()
+            .unwrap()
+            .iter()
+            .filter(|(_, v)| v.as_bool() == Some(true))
+            .map(|(k, _)| k)
+            .collect();
+        assert_eq!(
+            set,
+            vec![key],
+            "CLI flag `{}` should set exactly the `{}` field (drift between from_cli_args and the struct)",
+            flag,
+            key,
+        );
+    }
+}
+
+/// The LSP side is pure serde: a camelCase key under `diagnostics` sets its
+/// field; absent keys default to false; unknown keys are ignored.
+#[test]
+fn diagnostic_options_deserialize_from_lsp_shape() {
+    let v = serde_json::json!({ "optionalDeref": true, "somethingUnknown": true });
+    let opts: DiagnosticOptions = serde_json::from_value(v).unwrap();
+    assert!(opts.optional_deref, "camelCase key sets the field");
+    assert!(!opts.redundant_guard, "absent key defaults to false");
+    assert!(!opts.unresolved_dispatch, "absent key defaults to false");
+}
+
 #[test]
 fn test_code_action_from_diagnostic() {
     let source = "use Carp qw(croak);\ncarp('oops');\n";

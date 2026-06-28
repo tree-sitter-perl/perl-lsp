@@ -426,15 +426,7 @@ fn cli_check(args: &[String]) {
     let min_severity = get_arg_value(args, "--severity").unwrap_or("warning");
     let min_rank = severity_rank(min_severity);
     // Opt-in QA channel, mirrors the LSP `initializationOptions` toggle.
-    let options = symbols::DiagnosticOptions {
-        unresolved_dispatch: args.iter().any(|a| a == "--unresolved-dispatch"),
-        unresolved_method_cross_file: args
-            .iter()
-            .any(|a| a == "--unresolved-method-cross-file"),
-        optional_deref: args.iter().any(|a| a == "--optional-deref"),
-        redundant_guard: args.iter().any(|a| a == "--redundant-guard"),
-        deref_shape: args.iter().any(|a| a == "--deref-shape"),
-    };
+    let options = symbols::DiagnosticOptions::from_cli_args(args);
 
     if args.iter().any(|a| a == "--timings") {
         timings::enable();
