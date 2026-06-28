@@ -103,3 +103,4 @@ fn end_to_end_dispatch_from_a_call_sites_literals() {
     assert!(matches!(dispatch(&s["area"], &[arg_int], ), Dispatch::Resolved(sig) if sig.ret == Ty::Int));
     assert!(matches!(dispatch(&s["area"], &[arg_dbl]), Dispatch::Resolved(sig) if sig.ret == Ty::Double));
 }
+
