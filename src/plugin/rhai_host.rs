@@ -181,6 +181,7 @@ pub struct RhaiPlugin {
     type_constraint_names: Vec<String>,
     app_surface_consumers: Vec<String>,
     role_makers: Vec<String>,
+    generators: Vec<crate::plugin::GeneratorDef>,
     arg_name_verbs: Vec<String>,
     topic_route_dsl: Option<crate::plugin::TopicRouteDsl>,
     engine: Arc<Engine>,
@@ -369,6 +370,27 @@ impl RhaiPlugin {
             }
         }
 
+        // `generators()` — symbol-generator manifest; same optional,
+        // fail-safe array-of-maps contract as dispatch_verbs.
+        let mut generators: Vec<crate::plugin::GeneratorDef> = Vec::new();
+        if signatures.iter().any(|n| n == "generators") {
+            match engine.call_fn::<Array>(&mut rhai::Scope::new(), &ast, "generators", ()) {
+                Ok(arr) => {
+                    for d in arr {
+                        match from_dynamic::<crate::plugin::GeneratorDef>(&d) {
+                            Ok(g) => generators.push(g),
+                            Err(e) => log::error!(
+                                "plugin `{}` generators() bad entry: {}",
+                                id,
+                                e
+                            ),
+                        }
+                    }
+                }
+                Err(e) => log::error!("plugin `{}` generators() failed: {}", id, e),
+            }
+        }
+
         // `arg_name_verbs()` — call verbs wanting flat-arg-name
         // extraction; same optional, fail-safe array-of-strings shape.
         let mut arg_name_verbs: Vec<String> = Vec::new();
@@ -419,6 +441,7 @@ impl RhaiPlugin {
             type_constraint_names,
             app_surface_consumers,
             role_makers,
+            generators,
             arg_name_verbs,
             topic_route_dsl,
             engine,
@@ -517,6 +540,10 @@ impl FrameworkPlugin for RhaiPlugin {
 
     fn role_makers(&self) -> &[String] {
         &self.role_makers
+    }
+
+    fn generators(&self) -> &[crate::plugin::GeneratorDef] {
+        &self.generators
     }
 
     fn arg_name_verbs(&self) -> &[String] {
@@ -860,6 +887,43 @@ mod tests {
             }
             other => panic!("unexpected emission: {:?}", other),
         }
+    }
+
+    #[test]
+    fn generators_manifest_parses_from_rhai() {
+        // The symbol-generator manifest round-trips through Rhai maps:
+        // flat `#{ emit, kind }` / `#{ generate, args }` actions.
+        let src = r#"
+            fn id() { "gen-demo" }
+            fn triggers() { [ #{ Always: () } ] }
+            fn generators() {
+                [
+                    #{ name: "make_crud_helpers", params: ["thing"], actions: [
+                        #{ emit: "${thing}_id", kind: "accessor" },
+                        #{ emit: "get_${thing}", kind: "method" },
+                    ] },
+                    #{ name: "make_resource", params: ["res"], actions: [
+                        #{ emit: "${res}_table", kind: "accessor" },
+                        #{ generate: "make_crud_helpers", args: ["${res}"] },
+                    ] },
+                ]
+            }
+        "#;
+        let engine = Arc::new(make_engine());
+        let plugin = RhaiPlugin::from_source(src, engine).expect("compiles");
+        let gens = plugin.generators();
+        assert_eq!(gens.len(), 2);
+
+        let crud = gens.iter().find(|g| g.name == "make_crud_helpers").unwrap();
+        assert_eq!(crud.params, vec!["thing".to_string()]);
+        assert_eq!(crud.actions.len(), 2);
+        assert_eq!(crud.actions[0].emit.as_deref(), Some("${thing}_id"));
+        assert_eq!(crud.actions[0].kind.as_deref(), Some("accessor"));
+
+        let res = gens.iter().find(|g| g.name == "make_resource").unwrap();
+        let nested = res.actions.iter().find(|a| a.generate.is_some()).unwrap();
+        assert_eq!(nested.generate.as_deref(), Some("make_crud_helpers"));
+        assert_eq!(nested.args, vec!["${res}".to_string()]);
     }
 
     #[test]
