@@ -20,7 +20,7 @@ fn registry_serves_perl_by_default() {
 fn cpp_driver_analyzes_through_reparse() {
     // a declarator-position macro that would otherwise destroy the class
     let src = "#define API __attribute__((visibility(\"default\")))\nclass API Box { public: int width; };\n";
-    let fa = CppDriver.analyze(src);
+    let fa = cpp_driver().analyze(src);
     assert!(fa.symbols.iter().any(|s| s.name == "Box"), "macro-recovered class: {:?}", fa.symbols.iter().map(|s| &s.name).collect::<Vec<_>>());
     assert!(fa.symbols.iter().any(|s| s.name == "width"));
 }

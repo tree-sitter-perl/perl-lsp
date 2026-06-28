@@ -20,6 +20,11 @@ default = []
 # `--features cpp`; the grammar is a runtime dep only under its feature,
 # so the default Perl build never links it.
 cpp = ["dep:tree-sitter-cpp"]
+python = ["dep:tree-sitter-python"]
+r = ["dep:tree-sitter-r"]
+cmake = ["dep:tree-sitter-cmake"]
+# All pack languages — a maximal multi-language build.
+all-langs = ["cpp", "python", "r", "cmake"]
 # Compile the workspace-scale `refs_to` perf bench
 # (`bench_refs_to_invocant_resolution`). Off by default so the
 # regular `cargo test` doesn't carry a long-running synthetic
@@ -49,6 +54,9 @@ rhai = { version = "1.23", features = ["sync", "serde"] }
 # Pack grammars — optional, runtime deps under their language feature.
 # (Also dev-deps below so the spike tests always have them.)
 tree-sitter-cpp = { version = "0.23", optional = true }
+tree-sitter-python = { version = "0.25", optional = true }
+tree-sitter-r = { version = "1.2", optional = true }
+tree-sitter-cmake = { version = "0.7", optional = true }
 
 [dev-dependencies]
 tree-sitter-python = "0.25"
