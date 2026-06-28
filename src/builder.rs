@@ -284,6 +284,7 @@ fn build_with_plugins_inner(
         role_requires: std::collections::HashMap::new(),
         contract_symbols: std::collections::HashSet::new(),
         dynamic_parent_packages: std::collections::HashSet::new(),
+        dynamic_dispatch_sites: 0,
         role_maker_modules: std::collections::HashSet::new(),
         role_packages: std::collections::HashSet::new(),
         lite_brand: vec![None],
@@ -553,6 +554,7 @@ fn build_with_plugins_inner(
         role_requires: b.role_requires,
         contract_symbols: b.contract_symbols,
         dynamic_parent_packages: b.dynamic_parent_packages,
+        dynamic_dispatch_sites: b.dynamic_dispatch_sites,
         role_packages: b.role_packages,
         plugin_loads: b.plugin_loads,
         loader_config_params: b.loader_config_params,
@@ -1545,6 +1547,16 @@ struct Builder<'a> {
     /// literal name (runtime-generated roles). Flushed into
     /// `FileAnalysis.dynamic_parent_packages`.
     dynamic_parent_packages: std::collections::HashSet<String>,
+
+    /// Count of dynamic method-dispatch sites (`$obj->$method(...)`) whose
+    /// method name is a scalar, not a bareword. Such a call never becomes a
+    /// nameable `MethodCall` ref (the dispatched method is unknown at build
+    /// time unless const-folding resolves it), so it is invisible to the
+    /// static reference graph. Flushed into
+    /// `FileAnalysis.dynamic_dispatch_sites`; the heatmap reads it as the
+    /// soundness gate that keeps zero-fan-in methods OFF the dead-code list
+    /// (Perl may reach them through this invisible edge).
+    dynamic_dispatch_sites: u32,
 
     /// Modules whose `use` makes the consuming package a role — the
     /// union of every plugin's `role_makers()` manifest (the base
@@ -10345,6 +10357,11 @@ impl<'a> Builder<'a> {
         if let Some(ref name) = method_name {
             // Dynamic method dispatch: $self->$method() — resolve $method if known
             if name.starts_with('$') {
+                // Record the dynamic-dispatch site regardless of whether
+                // const-folding resolves it: folding is best-effort, so the
+                // dispatched method may still be invisible to the static graph.
+                // The heatmap's dead-code pass reads this as a soundness gate.
+                self.dynamic_dispatch_sites = self.dynamic_dispatch_sites.saturating_add(1);
                 if let Some(resolved) = self.resolve_constant_strings(name, 0) {
                     for rname in resolved {
                         let idx = self.refs.len();
