@@ -1811,6 +1811,7 @@ impl<'a> Builder<'a> {
             namespace,
             outline_label: None,
             attributes: Vec::new(),
+            deref_stack: Vec::new(),
         });
         id
     }

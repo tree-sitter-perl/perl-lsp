@@ -431,6 +431,52 @@ pub struct Symbol {
     /// symbols. Surfaced in pack hover.
     #[serde(default)]
     pub attributes: Vec<String>,
+    /// The pointer/reference declarator stack a typed variable carries,
+    /// outermost→leaf (`Box** pp` → `[Pointer, Pointer]`, `Box*& rp` →
+    /// `[Reference, Pointer]`). Pointer-ness is dropped for type RESOLUTION
+    /// (the leaf class answers member access), so this rides alongside for
+    /// the consumers that need the real shape: hover renders the exact type
+    /// (`pp: Box**`), and member-access DX knows which operator the depth
+    /// requires (`pp->` wants `(*pp)->`). Empty for non-pointer symbols and
+    /// every non-pack language. See `docs/adr/pointer-stack.md`.
+    #[serde(default)]
+    pub deref_stack: Vec<DerefStep>,
+}
+
+/// One level of a pointer/reference declarator chain. `annotations` holds
+/// the per-level qualifiers as written (`const`, `volatile`, `restrict`,
+/// `_Atomic`, …) — kept GENERIC rather than typed flags so new qualifiers
+/// and the diagnostics that read them (const-correctness: "write through a
+/// `const` pointer") needn't reshape the type. They don't change deref depth
+/// — display + diagnostics only, never navigation. Mirrors the free-string
+/// approach of `Symbol.attributes`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DerefStep {
+    pub kind: DerefKind,
+    #[serde(default)]
+    pub annotations: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DerefKind {
+    Pointer,
+    Reference,
+}
+
+impl DerefStep {
+    /// The written symbol for this level (`*` / `&`) plus any per-level
+    /// qualifiers, as it reads left-to-right after the base type.
+    pub fn render(&self) -> String {
+        let mut s = String::from(match self.kind {
+            DerefKind::Pointer => "*",
+            DerefKind::Reference => "&",
+        });
+        for a in &self.annotations {
+            s.push(' ');
+            s.push_str(a);
+        }
+        s
+    }
 }
 
 impl Symbol {
@@ -3700,6 +3746,7 @@ impl FileAnalysis {
                     namespace: Namespace::Language,
                     outline_label: None,
                     attributes: Vec::new(),
+                    deref_stack: Vec::new(),
                 });
             }
         }

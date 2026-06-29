@@ -1163,11 +1163,14 @@ fn render_symbol_hover(
 ) -> String {
     if matches!(sym.kind, FaSymKind::Variable | FaSymKind::Field) {
         if let Some(ty) = analysis.inferred_type_via_bag(&sym.name, type_point) {
-            let disp = ty
+            let base = ty
                 .class_name()
                 .map(String::from)
                 .unwrap_or_else(|| crate::file_analysis::format_inferred_type(&ty));
-            return format!("```{}\n{}: {}\n```\n\n*variable*", language, sym.name, disp);
+            // The deref stack restores the exact pointer/reference type that
+            // resolution drops (`pp: Box**`, `c: Box* const`).
+            let stars: String = sym.deref_stack.iter().map(|s| s.render()).collect();
+            return format!("```{}\n{}: {}{}\n```\n\n*variable*", language, sym.name, base, stars);
         }
     }
     let line = source.lines().nth(line_at.row).unwrap_or("").trim();

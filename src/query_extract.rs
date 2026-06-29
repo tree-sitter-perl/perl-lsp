@@ -46,6 +46,9 @@ pub struct SkelSymbol {
     /// Declared return type (`@rettype`), for methods/functions — drives
     /// method-return resolution + chaining through MethodOnClass.
     pub return_type: Option<InferredType>,
+    /// Pointer/reference declarator stack, unravelled by `peel_nested` from
+    /// a `@nested.target` capture (empty otherwise). Flows to `Symbol.deref_stack`.
+    pub deref_stack: Vec<crate::file_analysis::DerefStep>,
 }
 
 #[derive(Debug, Clone)]
@@ -125,6 +128,7 @@ impl SkeletonAnalysis {
                 namespace: crate::file_analysis::Namespace::Language,
                 outline_label: None,
                 attributes: Vec::new(),
+                deref_stack: s.deref_stack.clone(),
             })
             .collect();
         // Tag a typedef-struct's members with its name. `typedef struct
@@ -395,6 +399,18 @@ pub struct LangPack {
     /// semantics → the pack owns it (NOT core `conventions.rs`, which is
     /// Perl's `$self`/`$class`).
     pub receiver_names: &'static [&'static str],
+    /// Declarator node kinds that nest into a pointer/reference stack, each
+    /// mapped to the deref it contributes. A `@nested.target` capture on such
+    /// a chain is unravelled generically by `peel_nested` — the pack supplies
+    /// the grammar, core supplies the walk. Empty = no nesting (the capture
+    /// is then simply absent from the pack's query).
+    pub nested_peel: &'static [(&'static str, crate::file_analysis::DerefKind)],
+    /// The leaf node kind a `nested_peel` chain bottoms out at (`identifier`).
+    pub nested_leaf: &'static str,
+    /// Per-level annotation node kinds collected onto each `DerefStep`
+    /// (`type_qualifier` → `const`/`volatile`/`restrict`). Generic so new
+    /// qualifiers + const-correctness diagnostics needn't touch core.
+    pub nested_annot_kinds: &'static [&'static str],
 }
 
 /// One effect of a command-dispatched statement.
@@ -435,6 +451,9 @@ pub fn perl_pack() -> LangPack {
         narrow_guard: |_, _| None,
         trigger_chars: &["$", "@", "%", ">", ":", "{"],
         receiver_names: &[],
+        nested_peel: &[],
+        nested_leaf: "",
+        nested_annot_kinds: &[],
     }
 }
 
@@ -471,6 +490,9 @@ pub fn python_pack() -> LangPack {
         narrow_guard: |guard, ty| (guard == "isinstance").then(|| InferredType::ClassName(ty.to_string())),
         trigger_chars: &["."],
         receiver_names: &["self", "cls"],
+        nested_peel: &[],
+        nested_leaf: "",
+        nested_annot_kinds: &[],
     }
 }
 
@@ -496,6 +518,9 @@ pub fn r_pack() -> LangPack {
         narrow_guard: |_, _| None,
         trigger_chars: &["$", "@", ":"],
         receiver_names: &[],
+        nested_peel: &[],
+        nested_leaf: "",
+        nested_annot_kinds: &[],
     }
 }
 
@@ -534,6 +559,9 @@ pub fn cmake_pack() -> LangPack {
         narrow_guard: |_, _| None,
         trigger_chars: &["{", "("],
         receiver_names: &[],
+        nested_peel: &[],
+        nested_leaf: "",
+        nested_annot_kinds: &[],
     }
 }
 
@@ -586,6 +614,12 @@ pub fn cpp_pack() -> LangPack {
         narrow_guard: |_, _| None,
         trigger_chars: &[".", ">", ":"],
         receiver_names: &["this"],
+        nested_peel: &[
+            ("pointer_declarator", crate::file_analysis::DerefKind::Pointer),
+            ("reference_declarator", crate::file_analysis::DerefKind::Reference),
+        ],
+        nested_leaf: "identifier",
+        nested_annot_kinds: &["type_qualifier"],
     }
 }
 
@@ -617,6 +651,48 @@ struct Event {
     match_id: usize,
 }
 
+/// Unravel a pointer/reference declarator chain (the `@nested.target`
+/// capture) to its leaf identifier + the per-level deref stack. The pack
+/// declares which node kinds nest (`nested_peel`), which kind is the leaf
+/// (`nested_leaf`), and which kinds are per-level annotations
+/// (`nested_annot_kinds`, e.g. `type_qualifier`) — core walks generically,
+/// branching on no grammar name of its own. Outermost level first, which is
+/// also left-to-right display order after the base type (`Box*&` →
+/// `[Pointer, Reference]`). Depth-capped against a pathological tree.
+fn peel_nested<'a>(
+    mut node: tree_sitter::Node<'a>,
+    pack: &LangPack,
+    src: &[u8],
+) -> Option<(tree_sitter::Node<'a>, Vec<crate::file_analysis::DerefStep>)> {
+    use crate::file_analysis::DerefStep;
+    let mut stack = Vec::new();
+    for _ in 0..32 {
+        if let Some((_, kind)) = pack.nested_peel.iter().find(|(k, _)| *k == node.kind()) {
+            let mut annotations = Vec::new();
+            let mut inner = None;
+            let mut cur = node.walk();
+            for ch in node.children(&mut cur) {
+                if pack.nested_annot_kinds.contains(&ch.kind()) {
+                    if let Ok(t) = ch.utf8_text(src) {
+                        annotations.push(t.to_string());
+                    }
+                } else if pack.nested_peel.iter().any(|(k, _)| *k == ch.kind())
+                    || ch.kind() == pack.nested_leaf
+                {
+                    inner = Some(ch);
+                }
+            }
+            stack.push(DerefStep { kind: *kind, annotations });
+            node = inner?;
+        } else if node.kind() == pack.nested_leaf {
+            return Some((node, stack));
+        } else {
+            return None;
+        }
+    }
+    None
+}
+
 pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAnalysis, String> {
     let language = tree.language();
     let query = Query::new(&language, pack.query_source).map_err(|e| format!("query: {e}"))?;
@@ -628,6 +704,10 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
 
     // ---- flatten matches into ordered events ----
     let mut events: Vec<Event> = Vec::new();
+    // match_id → the pointer/reference declarator stack a `@nested.target`
+    // capture unravelled to. Read by the `def.*` handler to stamp the symbol.
+    let mut nested_stacks: std::collections::HashMap<usize, Vec<crate::file_analysis::DerefStep>> =
+        std::collections::HashMap::new();
     let mut cursor = QueryCursor::new();
     let mut matches = cursor.matches(&query, tree.root_node(), source);
     let mut match_counter = 0usize;
@@ -635,12 +715,36 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
         match_counter += 1;
         for c in m.captures {
             let node = c.node;
+            let cap = cap_names[c.index as usize].as_str();
+            // `@nested.target`: a pointer/reference declarator CHAIN of any
+            // depth. Peel it (where the node is live) to the leaf identifier
+            // + the deref stack, then emit the leaf as if the query had
+            // captured it directly — downstream join/symbol/witness paths are
+            // unchanged, and arbitrary nesting works without enumerating it.
+            if cap == "nested.target" {
+                if let Some((leaf, stack)) = peel_nested(node, pack, source) {
+                    nested_stacks.insert(match_counter, stack);
+                    let ltext = leaf.utf8_text(source).unwrap_or("").to_string();
+                    for syn in ["flow.target", "def.local"] {
+                        events.push(Event {
+                            start_byte: leaf.start_byte(),
+                            end_byte: leaf.end_byte(),
+                            start: leaf.start_position(),
+                            end: leaf.end_position(),
+                            cap: syn.to_string(),
+                            text: ltext.clone(),
+                            match_id: match_counter,
+                        });
+                    }
+                }
+                continue;
+            }
             events.push(Event {
                 start_byte: node.start_byte(),
                 end_byte: node.end_byte(),
                 start: node.start_position(),
                 end: node.end_position(),
-                cap: cap_names[c.index as usize].clone(),
+                cap: cap.to_string(),
                 text: node.utf8_text(source).unwrap_or("").to_string(),
                 match_id: match_counter,
             });
@@ -860,6 +964,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                     return_type: rettype_by_match
                         .get(&e.match_id)
                         .and_then(|t| (pack.annot_type)(t)),
+                    deref_stack: nested_stacks.get(&e.match_id).cloned().unwrap_or_default(),
                 });
             }
             "ref.label" => {
@@ -1116,6 +1221,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                             scope_depth: 0,
                             scope: *scope,
                             return_type: None,
+                            deref_stack: Vec::new(),
                         });
                     }
                 }

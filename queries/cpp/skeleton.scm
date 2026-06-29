@@ -190,48 +190,17 @@
   type: (_) @type.annot
   declarator: (identifier) @flow.target @def.local)
 
-; pointer-declared locals: `T* p;`, `T* p = init;`, and the
-; condition-form `if (Derived* d = dynamic_cast<Derived*>(b))` — the
-; pointee names the variable's class (pointer-ness dropped for nav). The
-; cast-in-condition is captured by the bare form (its `value` field is
-; on the declaration, simply ignored here).
+; pointer / reference locals of ANY depth, bare and initialized — `T* p;`,
+; `T** pp;`, `T& r = x;`, `if (Derived* d = dynamic_cast<...>(b))`. The
+; @nested.target chain is unravelled by core (see params). The init form also
+; carries @flow.source so the initializer's type flows to the leaf.
 (declaration
   type: (_) @type.annot
-  declarator: (pointer_declarator
-    declarator: (identifier) @flow.target @def.local))
-; double-pointer local `T** pp;` — nested pointer_declarator.
-(declaration
-  type: (_) @type.annot
-  declarator: (pointer_declarator
-    declarator: (pointer_declarator
-      declarator: (identifier) @flow.target @def.local)))
-; triple / quadruple pointer locals (enumerated, see params above).
-(declaration
-  type: (_) @type.annot
-  declarator: (pointer_declarator
-    declarator: (pointer_declarator
-      declarator: (pointer_declarator
-        declarator: (identifier) @flow.target @def.local))))
-(declaration
-  type: (_) @type.annot
-  declarator: (pointer_declarator
-    declarator: (pointer_declarator
-      declarator: (pointer_declarator
-        declarator: (pointer_declarator
-          declarator: (identifier) @flow.target @def.local)))))
+  declarator: [(pointer_declarator) (reference_declarator)] @nested.target)
 (declaration
   type: (_) @type.annot
   declarator: (init_declarator
-    declarator: (pointer_declarator declarator: (identifier) @flow.target @def.local)
-    value: (_) @flow.source))
-; reference-declared locals: `T& r = x;` (the referent names the class).
-(declaration
-  type: (_) @type.annot
-  declarator: (reference_declarator (identifier) @flow.target @def.local))
-(declaration
-  type: (_) @type.annot
-  declarator: (init_declarator
-    declarator: (reference_declarator (identifier) @flow.target @def.local)
+    declarator: [(pointer_declarator) (reference_declarator)] @nested.target
     value: (_) @flow.source))
 
 ; ---- function PARAMETERS carry a type too (the dominant embedded site:
@@ -240,35 +209,14 @@
 (parameter_declaration
   type: (_) @type.annot
   declarator: (identifier) @flow.target @def.local)
+; pointer / reference parameters of ANY depth — `Handle* h`, `OP** op_p`,
+; `char**** x`, `Box*& rp`. One @nested.target capture; core (`peel_nested`)
+; unravels the declarator chain to the leaf identifier + the deref stack
+; (arbitrary depth, cv-qualifiers per level), emitting the leaf as a synthetic
+; @flow.target/@def.local. The plain-value form above has no chain.
 (parameter_declaration
   type: (_) @type.annot
-  declarator: (pointer_declarator declarator: (identifier) @flow.target @def.local))
-; double pointer `OP** op_p` (perl5's dominant out-param shape) — a nested
-; pointer_declarator the single-level pattern misses.
-(parameter_declaration
-  type: (_) @type.annot
-  declarator: (pointer_declarator
-    declarator: (pointer_declarator
-      declarator: (identifier) @flow.target @def.local)))
-; triple / quadruple pointer (`char***`, `int****`) — tree-sitter queries
-; can't express arbitrary declarator nesting, so depths are enumerated; the
-; driver is capture-event-based (no tree walk) so it can't peel them either.
-(parameter_declaration
-  type: (_) @type.annot
-  declarator: (pointer_declarator
-    declarator: (pointer_declarator
-      declarator: (pointer_declarator
-        declarator: (identifier) @flow.target @def.local))))
-(parameter_declaration
-  type: (_) @type.annot
-  declarator: (pointer_declarator
-    declarator: (pointer_declarator
-      declarator: (pointer_declarator
-        declarator: (pointer_declarator
-          declarator: (identifier) @flow.target @def.local)))))
-(parameter_declaration
-  type: (_) @type.annot
-  declarator: (reference_declarator (identifier) @flow.target @def.local))
+  declarator: [(pointer_declarator) (reference_declarator)] @nested.target)
 
 ; ---- literals + variable reads (the edge-chase substrate) ----
 (number_literal) @expr.lit.number

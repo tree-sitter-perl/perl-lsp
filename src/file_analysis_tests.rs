@@ -156,6 +156,7 @@ fn test_resolve_sub_return_type() {
             namespace: Namespace::Language,
             outline_label: None,
             attributes: Vec::new(),
+            deref_stack: Vec::new(),
         }],
         ..Default::default()
     });
