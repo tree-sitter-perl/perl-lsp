@@ -341,7 +341,10 @@ pub fn cpp_pack() -> LangPack {
                     let typeish = !t.is_empty()
                         && !t.contains(' ')
                         && t.chars().next().is_some_and(|c| c.is_alphabetic() || c == '_');
-                    typeish.then(|| ClassName(t.to_string()))
+                    // Strip the namespace qualifier — classes/members are
+                    // keyed by the unqualified name (@context.class), so
+                    // `geo::Circle` must type as `Circle` to resolve.
+                    typeish.then(|| ClassName(t.rsplit("::").next().unwrap_or(t).to_string()))
                 }
             }
         },

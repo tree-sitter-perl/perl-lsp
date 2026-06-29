@@ -946,9 +946,12 @@ int main() {
     let inside = tree_sitter::Point { row: 6, column: 4 };
     assert_eq!(fa.inferred_type_via_bag("n", inside), Some(InferredType::Numeric), "int decl");
     assert_eq!(fa.inferred_type_via_bag("s", inside), Some(InferredType::String), "std::string decl");
+    // The namespace qualifier is stripped — classes/members are keyed by
+    // the unqualified name (@context.class), so `geo::Circle` types as
+    // `Circle` and member completion resolves through the hierarchy.
     assert_eq!(
         fa.inferred_type_via_bag("c", inside),
-        Some(InferredType::ClassName("geo::Circle".into())),
+        Some(InferredType::ClassName("Circle".into())),
         "class-instance decl",
     );
     // `auto m = n` — the cross-variable edge chase: m → Expr(n) →
