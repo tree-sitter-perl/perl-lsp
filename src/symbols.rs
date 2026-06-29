@@ -1075,7 +1075,7 @@ fn ref_type_snippet_completions(ty: &InferredType) -> Vec<CompletionItem> {
 pub fn member_completion_for_class(
     analysis: &FileAnalysis,
     class: &str,
-    module_index: &ModuleIndex,
+    module_index: &dyn crate::file_analysis::CrossFileLookup,
 ) -> Option<Vec<CompletionItem>> {
     let candidates = analysis.complete_members_for_class(class, Some(module_index));
     if candidates.is_empty() {

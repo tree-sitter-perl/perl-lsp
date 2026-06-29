@@ -4343,6 +4343,43 @@ impl FileAnalysis {
         candidates
     }
 
+    /// Push a class's DATA fields (class-body `Variable`/`Field` members,
+    /// not method locals — anchored on the method-declaration scope) into
+    /// `candidates`, deduped by `seen`. Called per-class in the ancestor
+    /// walk: on `self` for local classes, on a cached module's analysis
+    /// for cross-file ones.
+    fn collect_class_fields(
+        &self,
+        cls: &str,
+        candidates: &mut Vec<CompletionCandidate>,
+        seen: &mut HashSet<String>,
+    ) {
+        let class_body = self
+            .symbols
+            .iter()
+            .find(|s| {
+                matches!(s.kind, SymKind::Sub | SymKind::Method) && self.symbol_in_class(s.id, cls)
+            })
+            .map(|m| m.scope);
+        for sym in &self.symbols {
+            if matches!(sym.kind, SymKind::Variable | SymKind::Field)
+                && self.symbol_in_class(sym.id, cls)
+                && class_body.is_none_or(|cb| sym.scope == cb)
+                && seen.insert(sym.name.clone())
+            {
+                candidates.push(CompletionCandidate {
+                    label: sym.name.clone(),
+                    kind: sym.kind,
+                    detail: None,
+                    insert_text: None,
+                    sort_priority: PRIORITY_LOCAL,
+                    additional_edits: vec![],
+                    display_override: None,
+                });
+            }
+        }
+    }
+
     /// Members (methods + data fields) of a class for pack-language member
     /// completion (`obj.` / `obj->`). Unlike `complete_methods_for_class`
     /// (Perl-shaped: methods + a synthesized `new`), this includes data
@@ -4366,30 +4403,15 @@ impl FileAnalysis {
         // apart), so anchor on where each class's methods are declared —
         // that IS the body scope, whichever node carries it.
         self.for_each_ancestor_class(class_name, module_index, |cls| {
-            let class_body = self
-                .symbols
-                .iter()
-                .find(|s| {
-                    matches!(s.kind, SymKind::Sub | SymKind::Method)
-                        && self.symbol_in_class(s.id, cls)
-                })
-                .map(|m| m.scope);
-            for sym in &self.symbols {
-                if matches!(sym.kind, SymKind::Variable | SymKind::Field)
-                    && self.symbol_in_class(sym.id, cls)
-                    && class_body.is_none_or(|cb| sym.scope == cb)
-                    && !seen.contains(&sym.name)
-                {
-                    seen.insert(sym.name.clone());
-                    candidates.push(CompletionCandidate {
-                        label: sym.name.clone(),
-                        kind: sym.kind,
-                        detail: None,
-                        insert_text: None,
-                        sort_priority: PRIORITY_LOCAL,
-                        additional_edits: vec![],
-                        display_override: None,
-                    });
+            self.collect_class_fields(cls, &mut candidates, &mut seen);
+            // a class defined in ANOTHER file — pull its fields from the
+            // cached module so cross-file member completion is complete
+            // (methods already cross via collect_ancestor_methods).
+            if let Some(mi) = module_index {
+                if let Some(cached) = mi.get_cached(cls) {
+                    cached
+                        .analysis
+                        .collect_class_fields(cls, &mut candidates, &mut seen);
                 }
             }
             std::ops::ControlFlow::Continue(())

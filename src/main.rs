@@ -350,6 +350,12 @@ fn cli_full_startup(root: &str) -> (file_store::FileStore, module_index::ModuleI
     let ws = file_store::FileStore::new();
     let indexed = module_resolver::index_workspace_with_index(&root_path, &ws, Some(&module_index));
     eprintln!("Indexed {} files", indexed);
+    // Pack languages (C++/Python/…) → per-language sub-indexes (separate
+    // caches, no cross-language overlap), attached to the hub for routing.
+    let pack_indexed = module_resolver::index_pack_languages(&root_path, &module_index);
+    if pack_indexed > 0 {
+        eprintln!("Indexed {} pack-language files", pack_indexed);
+    }
 
     let mut inc_paths = module_resolver::discover_inc_paths();
     module_resolver::add_project_lib_paths(&mut inc_paths, &root_path);

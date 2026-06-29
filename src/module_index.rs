@@ -230,6 +230,11 @@ pub struct ModuleIndex {
     workspace_root: Arc<WorkspaceRootChannel>,
     /// Callback to trigger diagnostic re-publish after module resolution.
     refresh_diagnostics: Arc<dyn Fn() + Send + Sync>,
+    /// Per-language sub-indexes (`"cpp"`, `"python"`, …) — kept SEPARATE
+    /// (own cache, own `modules-{lang}.db`) so names never comingle across
+    /// languages. The Perl index is the hub; query routing picks the right
+    /// one by the queried file's language. Generic: any pack language.
+    pack_indexes: Arc<DashMap<String, Arc<ModuleIndex>>>,
 }
 
 impl ModuleIndex {
@@ -273,6 +278,7 @@ impl ModuleIndex {
             cache,
             edges,
             loaded_modules: Arc::new(DashMap::new()),
+            pack_indexes: Arc::new(DashMap::new()),
             workspace_modules: Arc::new(DashMap::new()),
             loader_config_shapes: Arc::new(DashMap::new()),
             stale_modules,
@@ -555,6 +561,7 @@ impl ModuleIndex {
             cache,
             edges,
             loaded_modules: Arc::new(DashMap::new()),
+            pack_indexes: Arc::new(DashMap::new()),
             workspace_modules: Arc::new(DashMap::new()),
             loader_config_shapes: Arc::new(DashMap::new()),
             stale_modules,
@@ -604,6 +611,7 @@ impl ModuleIndex {
             cache,
             edges,
             loaded_modules: Arc::new(DashMap::new()),
+            pack_indexes: Arc::new(DashMap::new()),
             workspace_modules: Arc::new(DashMap::new()),
             loader_config_shapes: Arc::new(DashMap::new()),
             stale_modules,
@@ -707,12 +715,24 @@ impl ModuleIndex {
         self.cache.insert(module_name, Some(cached));
     }
 
-    /// Register a pack-language file (C++) under each CLASS name it
-    /// defines — unlike Perl (one package per file), a C++ header holds
-    /// many classes, and cross-file lookup is class-keyed. So
-    /// `get_cached("Box")` finds the header defining `Box`, and the same
+    /// Register a pack-language file under each CLASS name it defines —
+    /// unlike Perl (one package per file), a C++ header / Python module
+    /// holds many classes, and cross-file lookup is class-keyed. Language-
+    /// GENERIC (keys on `SymKind::Class`), so every pack language gets
+    /// cross-file from one indexer + its own per-language ModuleIndex.
+    /// `get_cached("Box")` finds the file defining `Box`, and the same
     /// MethodOnClass / member-completion machinery resolves across files.
-    pub fn register_cpp_classes(&self, path: std::path::PathBuf, analysis: Arc<FileAnalysis>) {
+    /// Attach a per-language sub-index (`"cpp"`, `"python"`, …).
+    pub fn attach_pack_index(&self, lang: &str, idx: Arc<ModuleIndex>) {
+        self.pack_indexes.insert(lang.to_string(), idx);
+    }
+
+    /// The sub-index for `lang`, if this distribution indexes it.
+    pub fn pack_index(&self, lang: &str) -> Option<Arc<ModuleIndex>> {
+        self.pack_indexes.get(lang).map(|e| e.value().clone())
+    }
+
+    pub fn register_classes(&self, path: std::path::PathBuf, analysis: Arc<FileAnalysis>) {
         use crate::file_analysis::SymKind;
         let path = std::fs::canonicalize(&path).unwrap_or(path);
         let cached = Arc::new(CachedModule::new(path, analysis.clone()));

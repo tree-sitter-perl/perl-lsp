@@ -1,0 +1,13 @@
+{
+  "capability": "completion",
+  "rows": [
+    {
+      "id": "cpp-cross-file-member-completion",
+      "difficulty": "hard", "semantic_area": "cpp-multilang-crossfile",
+      "lang": "cpp", "root": "gold-corpus/cpp-fixture/xfile",
+      "file": "app.cpp", "line": 3, "col": 6,
+      "expect": { "all": ["grow", "width"], "none": [] },
+      "status": "gold"
+    }
+  ]
+}

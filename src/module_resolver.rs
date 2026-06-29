@@ -737,6 +737,69 @@ pub fn index_workspace_with_index(
     count.load(Ordering::Relaxed)
 }
 
+/// Index pack-language files (C++/Python/…) into per-language sub-indexes
+/// attached to `hub`. GENERIC: registry-driven, so every served pack
+/// language gets cross-file from this one walk. Each language keeps its
+/// OWN `ModuleIndex` (separate cache — names never comingle across
+/// languages), files registered by CLASS name. In-memory for now; the
+/// per-language `modules-{lang}.db` persistence is a follow-up.
+pub fn index_pack_languages(
+    root: &std::path::Path,
+    hub: &crate::module_index::ModuleIndex,
+) -> usize {
+    use ignore::types::TypesBuilder;
+    use ignore::WalkBuilder;
+    use rayon::prelude::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let reg = crate::language_driver::LanguageRegistry::with_enabled();
+    let total = AtomicUsize::new(0);
+    for lang in reg.languages() {
+        if lang == "perl" {
+            continue;
+        }
+        let exts: Vec<&'static str> = reg
+            .for_id(lang)
+            .map(|d| d.extensions().to_vec())
+            .unwrap_or_default();
+        if exts.is_empty() {
+            continue;
+        }
+        let mut tb = TypesBuilder::new();
+        for ext in &exts {
+            let _ = tb.add(lang, &format!("*.{ext}"));
+        }
+        let _ = tb.select(lang);
+        let Ok(types) = tb.build() else { continue };
+        let paths: Vec<PathBuf> = WalkBuilder::new(root)
+            .types(types)
+            .build()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_type().map(|t| t.is_file()).unwrap_or(false))
+            .filter(|e| e.metadata().map(|m| m.len() < 2_000_000).unwrap_or(false))
+            .map(|e| e.into_path())
+            .collect();
+        if paths.is_empty() {
+            continue;
+        }
+        let pack_index = std::sync::Arc::new(crate::module_index::ModuleIndex::new_for_cli());
+        paths.par_iter().for_each(|path| {
+            let reg = crate::language_driver::LanguageRegistry::with_enabled();
+            let Some(driver) = reg.for_path(path).filter(|d| d.id() == lang) else { return };
+            let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let source = std::fs::read_to_string(path).ok()?;
+                Some(driver.analyze_with_path(&source, Some(path)))
+            }));
+            if let Ok(Some(analysis)) = res {
+                pack_index.register_classes(path.clone(), std::sync::Arc::new(analysis));
+                total.fetch_add(1, Ordering::Relaxed);
+            }
+        });
+        hub.attach_pack_index(lang, pack_index);
+    }
+    total.load(Ordering::Relaxed)
+}
+
 /// Scan @INC directories for .pm files, populating the available_modules map.
 /// Fast — no file reads, just directory traversal + path→module name conversion.
 fn scan_inc_module_names(inc_paths: &[PathBuf], available: &DashMap<String, PathBuf>) {

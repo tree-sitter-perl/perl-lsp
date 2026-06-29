@@ -26,15 +26,21 @@ pub fn pack_completion(
         if let Some(driver) =
             crate::language_driver::LanguageRegistry::with_enabled().for_id(language)
         {
+            // Cross-file resolves against THIS language's sub-index (its
+            // own cache — no cross-language overlap), falling back to the
+            // hub when none is attached.
+            let pack = module_index.pack_index(language);
+            let xidx: &dyn crate::file_analysis::CrossFileLookup =
+                pack.as_deref().map_or(module_index, |i| i);
             let cursor = crate::cursor_sentinel::point_to_byte(source, point);
             let mut parser = driver.make_parser();
             if let Some(class) = crate::cursor_sentinel::receiver_type_at_incremental(
-                &mut parser, cfg, source, tree, cursor, analysis, Some(module_index),
+                &mut parser, cfg, source, tree, cursor, analysis, Some(xidx),
             )
             .and_then(|ty| ty.class_name().map(|s| s.to_string()))
             {
                 if let Some(items) =
-                    symbols::member_completion_for_class(analysis, &class, module_index)
+                    symbols::member_completion_for_class(analysis, &class, xidx)
                 {
                     return items;
                 }
@@ -410,6 +416,10 @@ impl LanguageServer for Backend {
                         &files,
                         Some(&module_index),
                     );
+                    // Pack languages → per-language sub-indexes (separate
+                    // caches) attached to the hub, so cross-file resolves in
+                    // the editor too. Additive; Perl indexing unchanged.
+                    crate::module_resolver::index_pack_languages(&root_path, &module_index);
 
                     // End progress
                     rt.block_on(client.send_notification::<notification::Progress>(
