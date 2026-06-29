@@ -1,0 +1,13 @@
+{
+  "capability": "completion",
+  "rows": [
+    {
+      "id": "cpp-completion-member-access",
+      "difficulty": "simple", "semantic_area": "cpp-multilang",
+      "lang": "cpp", "root": "gold-corpus/cpp-fixture",
+      "file": "members.cpp", "line": 9, "col": 7,
+      "expect": { "all": ["grow", "width", "height"], "none": ["use_box"] },
+      "status": "gold"
+    }
+  ]
+}

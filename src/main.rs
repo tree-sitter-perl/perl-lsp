@@ -965,9 +965,15 @@ fn run_one(
         }
         "completion" => {
             let doc = cli_open_document(file, idx);
-            let items = tphase!("completion_items", symbols::completion_items(
-                &doc.analysis, &doc.tree, &doc.text, pos, idx,
-                Some(doc.stable_outline.package_lines())));
+            // Pack languages: member (sentinel) → in-scope, via the same
+            // path the LSP server uses; Perl keeps cursor-context.
+            let items = if doc.language != "perl" {
+                backend::pack_completion(&doc.analysis, &doc.text, &doc.tree, point, doc.language, idx)
+            } else {
+                tphase!("completion_items", symbols::completion_items(
+                    &doc.analysis, &doc.tree, &doc.text, pos, idx,
+                    Some(doc.stable_outline.package_lines())))
+            };
             let mut out = String::new();
             for it in &items {
                 match &it.detail {

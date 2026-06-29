@@ -10,6 +10,42 @@ use crate::file_store::{FileKey, FileStore};
 use crate::module_index::ModuleIndex;
 use crate::symbols;
 
+/// Pack-language completion: member access (sentinel reparse → receiver
+/// span → type → members) with an in-scope-symbol fallback. Shared by the
+/// LSP completion handler and the CLI/--batch mirror so the editor and
+/// gold agree. Perl completion stays in `cursor_context`.
+pub fn pack_completion(
+    analysis: &crate::file_analysis::FileAnalysis,
+    source: &str,
+    tree: &tree_sitter::Tree,
+    point: tree_sitter::Point,
+    language: &str,
+    module_index: &ModuleIndex,
+) -> Vec<CompletionItem> {
+    if let Some(cfg) = crate::cursor_sentinel::lang_cfg(language) {
+        if let Some(driver) =
+            crate::language_driver::LanguageRegistry::with_enabled().for_id(language)
+        {
+            let cursor = crate::cursor_sentinel::point_to_byte(source, point);
+            let mut parser = driver.make_parser();
+            if let Some(recv) = crate::cursor_sentinel::receiver_at_incremental(
+                &mut parser, cfg, source, tree, cursor,
+            ) {
+                let span = crate::file_analysis::Span {
+                    start: crate::cursor_sentinel::byte_to_point(source, recv.start),
+                    end: crate::cursor_sentinel::byte_to_point(source, recv.end),
+                };
+                if let Some(items) =
+                    symbols::member_completion_for_span(analysis, span, module_index)
+                {
+                    return items;
+                }
+            }
+        }
+    }
+    symbols::in_scope_completion(analysis, point)
+}
+
 pub struct Backend {
     client: Client,
     files: Arc<FileStore>,
@@ -659,33 +695,15 @@ impl LanguageServer for Backend {
             None => return Ok(None),
         };
         if doc.language != "perl" {
-            let point = symbols::position_to_point(pos);
-            // Member completion: sentinel reparse recovers the receiver of
-            // a `.`/`->` access (the node tree-sitter erases on incomplete
-            // input), then span → type → members. Falls through to
-            // in-scope completion when the cursor isn't a member access.
-            if let Some(cfg) = crate::cursor_sentinel::lang_cfg(doc.language) {
-                let reg = crate::language_driver::LanguageRegistry::with_enabled();
-                if let Some(driver) = reg.for_id(doc.language) {
-                    let cursor = crate::cursor_sentinel::point_to_byte(&doc.text, point);
-                    let mut parser = driver.make_parser();
-                    if let Some(recv) = crate::cursor_sentinel::receiver_at_incremental(
-                        &mut parser, cfg, &doc.text, &doc.tree, cursor,
-                    ) {
-                        let span = crate::file_analysis::Span {
-                            start: crate::cursor_sentinel::byte_to_point(&doc.text, recv.start),
-                            end: crate::cursor_sentinel::byte_to_point(&doc.text, recv.end),
-                        };
-                        if let Some(items) = symbols::member_completion_for_span(
-                            &doc.analysis, span, &self.module_index,
-                        ) {
-                            return Ok(Some(CompletionResponse::Array(items)));
-                        }
-                    }
-                }
-            }
-            let items = symbols::in_scope_completion(&doc.analysis, point);
-            return Ok((!items.is_empty()).then(|| CompletionResponse::Array(items)));
+            let items = pack_completion(
+                &doc.analysis,
+                &doc.text,
+                &doc.tree,
+                symbols::position_to_point(pos),
+                doc.language,
+                &self.module_index,
+            );
+            return Ok((!items.is_empty()).then_some(CompletionResponse::Array(items)));
         }
         let items = symbols::completion_items(
             &doc.analysis,
