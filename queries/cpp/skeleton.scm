@@ -150,6 +150,12 @@
   type: (_) @type.annot
   declarator: (field_identifier) @flow.target)
 
+; ---- C goto labels: `done:` is a nav target, `goto done;` jumps to it.
+; The def is an unpackaged Variable symbol (outline-hidden, like a local);
+; the goto resolves to it function-wide (order-independent — forward gotos).
+(labeled_statement label: (statement_identifier) @def.label)
+(goto_statement label: (statement_identifier) @ref.label)
+
 ; ---- calls ----
 (call_expression function: (identifier) @ref.call) @expr.call
 (call_expression

@@ -71,6 +71,11 @@ pub struct SkeletonAnalysis {
     /// to the nearest visible Variable declaration by lexical scope walk →
     /// local goto-def + hover. Resolution runs in `into_file_analysis`.
     pub var_reads: Vec<(String, crate::file_analysis::ScopeId, crate::file_analysis::Span)>,
+    /// `goto LABEL` refs (`@ref.label`): (name, scope, span). Resolve to the
+    /// `LABEL:` def (a Variable symbol from `@def.label`) function-wide —
+    /// scope-chain walk WITHOUT the declared-before constraint (a forward
+    /// goto is valid C).
+    pub label_refs: Vec<(String, crate::file_analysis::ScopeId, crate::file_analysis::Span)>,
 }
 
 impl SkeletonAnalysis {
@@ -257,6 +262,32 @@ impl SkeletonAnalysis {
                     kind: crate::file_analysis::RefKind::Variable,
                     span: *read_span,
                     scope: *read_scope,
+                    target_name: name.clone(),
+                    access: crate::file_analysis::AccessKind::Read,
+                    resolves_to: Some(did),
+                    resolved_method_target: None,
+                });
+            }
+        }
+        // `goto LABEL` → the `LABEL:` def, function-wide: first matching
+        // Variable on the scope chain, NO declared-before constraint (a
+        // forward goto is valid).
+        for (name, ref_scope, ref_span) in &self.label_refs {
+            let Some(cands) = defs_by_name.get(name) else { continue };
+            let mut cur = Some(*ref_scope);
+            let mut resolved: Option<SymbolId> = None;
+            while let Some(sc) = cur {
+                if let Some((_, _, did)) = cands.iter().find(|(dscope, _, _)| *dscope == sc) {
+                    resolved = Some(*did);
+                    break;
+                }
+                cur = scope_parent.get(&sc).copied().flatten();
+            }
+            if let Some(did) = resolved {
+                local_refs.push(crate::file_analysis::Ref {
+                    kind: crate::file_analysis::RefKind::Variable,
+                    span: *ref_span,
+                    scope: *ref_scope,
                     target_name: name.clone(),
                     access: crate::file_analysis::AccessKind::Read,
                     resolves_to: Some(did),
@@ -808,6 +839,13 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                         .get(&e.match_id)
                         .and_then(|t| (pack.annot_type)(t)),
                 });
+            }
+            "ref.label" => {
+                out.label_refs.push((
+                    (pack.shape_name)("def.label", &e.text),
+                    cur_scope,
+                    Span { start: e.start, end: e.end },
+                ));
             }
             cap if cap.starts_with("ref.") => {
                 // Generic suppression: a "reference" inside a def's own
