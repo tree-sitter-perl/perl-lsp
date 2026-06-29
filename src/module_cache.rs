@@ -52,10 +52,17 @@ pub fn cache_dir_for_workspace(workspace_root: Option<&str>) -> Option<PathBuf> 
 }
 
 #[cfg(not(test))]
-pub fn open_cache_db(workspace_root: Option<&str>) -> Option<Connection> {
+pub fn open_cache_db(workspace_root: Option<&str>, lang: &str) -> Option<Connection> {
     let dir = cache_dir_for_workspace(workspace_root)?;
     std::fs::create_dir_all(&dir).ok()?;
-    let db_path = dir.join("modules.db");
+    // Per-language DB — Perl keeps `modules.db` (back-compat), every pack
+    // language gets its own `modules-{lang}.db` so names never comingle on
+    // disk (a Perl `Box` and a C++ class `Box` live in different files).
+    let db_path = if lang == "perl" {
+        dir.join("modules.db")
+    } else {
+        dir.join(format!("modules-{lang}.db"))
+    };
     log::info!("Module cache: {:?}", db_path);
 
     match Connection::open(&db_path) {
@@ -82,7 +89,7 @@ pub fn open_cache_db(workspace_root: Option<&str>) -> Option<Connection> {
 }
 
 #[cfg(test)]
-pub fn open_cache_db(_workspace_root: Option<&str>) -> Option<Connection> {
+pub fn open_cache_db(_workspace_root: Option<&str>, _lang: &str) -> Option<Connection> {
     None
 }
 

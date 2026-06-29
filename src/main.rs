@@ -352,7 +352,8 @@ fn cli_full_startup(root: &str) -> (file_store::FileStore, module_index::ModuleI
     eprintln!("Indexed {} files", indexed);
     // Pack languages (C++/Python/…) → per-language sub-indexes (separate
     // caches, no cross-language overlap), attached to the hub for routing.
-    let pack_indexed = module_resolver::index_pack_languages(&root_path, &module_index);
+    let pack_indexed =
+        module_resolver::index_pack_languages(&root_path, Some(&root_uri), &module_index);
     if pack_indexed > 0 {
         eprintln!("Indexed {} pack-language files", pack_indexed);
     }
@@ -360,7 +361,7 @@ fn cli_full_startup(root: &str) -> (file_store::FileStore, module_index::ModuleI
     let mut inc_paths = module_resolver::discover_inc_paths();
     module_resolver::add_project_lib_paths(&mut inc_paths, &root_path);
 
-    let db = module_cache::open_cache_db(Some(&root_uri));
+    let db = module_cache::open_cache_db(Some(&root_uri), "perl");
     let mut stale_set: std::collections::HashSet<String> = std::collections::HashSet::new();
     if let Some(ref conn) = db {
         let _ = module_cache::validate_inc_paths(conn, &inc_paths);

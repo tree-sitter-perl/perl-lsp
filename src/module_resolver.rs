@@ -59,7 +59,7 @@ pub fn spawn_resolver(
             log::info!("@INC scan: {} modules available", available_modules.len());
 
             // Warm the in-memory cache from SQLite.
-            let db = module_cache::open_cache_db(ws_root.as_deref());
+            let db = module_cache::open_cache_db(ws_root.as_deref(), "perl");
             if let Some(ref conn) = db {
                 let _ = module_cache::validate_inc_paths(conn, &inc_paths);
                 let _ = module_cache::validate_plugin_fingerprint(
@@ -343,7 +343,7 @@ pub fn spawn_test_resolver(
 
             scan_inc_module_names(&inc_paths, &available_modules);
 
-            let db = module_cache::open_cache_db(ws_root.as_deref());
+            let db = module_cache::open_cache_db(ws_root.as_deref(), "perl");
             if let Some(ref conn) = db {
                 let _ = module_cache::validate_inc_paths(conn, &inc_paths);
                 let _ = module_cache::validate_plugin_fingerprint(
@@ -741,16 +741,22 @@ pub fn index_workspace_with_index(
 /// attached to `hub`. GENERIC: registry-driven, so every served pack
 /// language gets cross-file from this one walk. Each language keeps its
 /// OWN `ModuleIndex` (separate cache — names never comingle across
-/// languages), files registered by CLASS name. In-memory for now; the
-/// per-language `modules-{lang}.db` persistence is a follow-up.
+/// languages), files registered by CLASS name. PERSISTED to a separate
+/// `modules-{lang}.db`: warm valid analyses from disk (mtime/size +
+/// EXTRACT_VERSION validated), re-analyze only new/changed/stale files,
+/// and write the fresh ones back — so a big monorepo doesn't re-analyze
+/// every header each launch. `cache_key` is the workspace root the cache
+/// dir hashes on (`None` ⇒ no persistence, e.g. tests).
 pub fn index_pack_languages(
     root: &std::path::Path,
+    cache_key: Option<&str>,
     hub: &crate::module_index::ModuleIndex,
 ) -> usize {
     use ignore::types::TypesBuilder;
     use ignore::WalkBuilder;
     use rayon::prelude::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
 
     let reg = crate::language_driver::LanguageRegistry::with_enabled();
     let total = AtomicUsize::new(0);
@@ -782,8 +788,39 @@ pub fn index_pack_languages(
         if paths.is_empty() {
             continue;
         }
-        let pack_index = std::sync::Arc::new(crate::module_index::ModuleIndex::new_for_cli());
+        let pack_index = Arc::new(crate::module_index::ModuleIndex::new_for_cli());
+        let conn = module_cache::open_cache_db(cache_key, lang);
+
+        // WARM: load valid cached analyses (keyed by file path), register
+        // their classes, and remember which paths are fresh so the walk
+        // skips re-analyzing them. Version-stale rows are re-analyzed.
+        let mut warmed: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
+        if let Some(ref conn) = conn {
+            let temp: DashMap<String, Option<Arc<CachedModule>>> = DashMap::new();
+            let (_n, stale_names) = module_cache::warm_cache(conn, &temp);
+            let stale: std::collections::HashSet<String> = stale_names.into_iter().collect();
+            for entry in temp.iter() {
+                if stale.contains(entry.key()) {
+                    continue;
+                }
+                if let Some(cached) = entry.value() {
+                    pack_index.register_classes(cached.path.clone(), cached.analysis.clone());
+                    warmed.insert(cached.path.clone());
+                }
+            }
+        }
+
+        // Analyze only the new/changed/stale files (parallel); collect the
+        // fresh analyses for a sequential write (rusqlite Connection isn't
+        // Sync). register_classes happens here so cross-file works even
+        // when persistence is off.
+        let fresh: std::sync::Mutex<Vec<(PathBuf, Arc<crate::file_analysis::FileAnalysis>)>> =
+            std::sync::Mutex::new(Vec::new());
         paths.par_iter().for_each(|path| {
+            let canon = path.canonicalize().unwrap_or_else(|_| path.clone());
+            if warmed.contains(&canon) {
+                return; // valid cache hit
+            }
             let reg = crate::language_driver::LanguageRegistry::with_enabled();
             let Some(driver) = reg.for_path(path).filter(|d| d.id() == lang) else { return };
             let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -791,10 +828,25 @@ pub fn index_pack_languages(
                 Some(driver.analyze_with_path(&source, Some(path)))
             }));
             if let Ok(Some(analysis)) = res {
-                pack_index.register_classes(path.clone(), std::sync::Arc::new(analysis));
+                let arc = Arc::new(analysis);
+                pack_index.register_classes(path.clone(), arc.clone());
+                fresh.lock().unwrap().push((canon, arc));
                 total.fetch_add(1, Ordering::Relaxed);
             }
         });
+
+        // WRITE the fresh analyses back (keyed by canonical path).
+        if let Some(ref conn) = conn {
+            for (path, arc) in fresh.into_inner().unwrap() {
+                let cached = Arc::new(CachedModule::new(path.clone(), arc));
+                module_cache::save_to_db(
+                    conn,
+                    &path.to_string_lossy(),
+                    &Some(cached),
+                    "workspace",
+                );
+            }
+        }
         hub.attach_pack_index(lang, pack_index);
     }
     total.load(Ordering::Relaxed)

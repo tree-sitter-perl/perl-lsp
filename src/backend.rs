@@ -417,9 +417,14 @@ impl LanguageServer for Backend {
                         Some(&module_index),
                     );
                     // Pack languages → per-language sub-indexes (separate
-                    // caches) attached to the hub, so cross-file resolves in
-                    // the editor too. Additive; Perl indexing unchanged.
-                    crate::module_resolver::index_pack_languages(&root_path, &module_index);
+                    // caches, own modules-{lang}.db) attached to the hub, so
+                    // cross-file resolves in the editor too. Additive; Perl
+                    // indexing unchanged.
+                    crate::module_resolver::index_pack_languages(
+                        &root_path,
+                        Some(root_uri.as_str()),
+                        &module_index,
+                    );
 
                     // End progress
                     rt.block_on(client.send_notification::<notification::Progress>(
