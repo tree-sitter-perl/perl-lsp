@@ -32,6 +32,14 @@
   name: (type_identifier) @def.class.name @context.class
   body: (field_declaration_list) @scope) @def.class
 
+; out-of-line nested class definition `class Outer::Inner { ... }` — the
+; name is a qualified_identifier; @qualifier carries the `Outer::` owner.
+(class_specifier
+  name: (qualified_identifier
+    scope: (_) @qualifier
+    name: (type_identifier) @def.class.name @context.class)
+  body: (field_declaration_list) @scope) @def.class
+
 ; ---- inheritance: `class Circle : public Shape` → Circle parent Shape.
 ; A dedicated pattern (non-inheriting classes keep matching the body
 ; pattern above); one @parent per base, so multiple inheritance works.

@@ -20,10 +20,15 @@ CRASH) → minimal-repro each interesting case → fix or codify as gold
 
 | gap | found in | freq | plan |
 |---|---|---|---|
-| nested qualified class `class A::B` → `Sub`, wrong kind | leveldb | low | fold into the qualified-declarator fix |
 | `concept X = ...` emits no symbol | range-v3 (raw C++20) | low | new symbol kind — deeper |
 
 ## Robustness
 spdlog 107 headers: 0 crashes; after cross-file macros, structure-corrupt
 4→1, empty 14→12. Self-ref OOM was the only crash across ~360 files (6
 projects) — now guarded.
+
+## Re-sweep validation (after cross-file macros + template fix)
+
+- **nlohmann/json** (47 headers): 40 ok, 6 empty (all macro-only/forward-decl
+  — legit), **0 real structure-corrupt (was 4), 0 crash**. The cross-file
+  namespace-macro fix fully resolved json's corruption.

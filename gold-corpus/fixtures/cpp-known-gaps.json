@@ -55,6 +55,23 @@
         ]
       },
       "status": "gold"
+    },
+    {
+      "id": "cpp-nested-qualified-class",
+      "difficulty": "moderate",
+      "semantic_area": "cpp-multilang",
+      "lang": "cpp",
+      "root": "gold-corpus/cpp-fixture",
+      "file": "nested.cpp",
+      "line": 0,
+      "col": 0,
+      "expect": {
+        "all": [
+          "\"kind\":\"Class\",\"line\":\"4\",\"name\":\"Iter\""
+        ],
+        "none": []
+      },
+      "status": "gold"
     }
   ]
 }
