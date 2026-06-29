@@ -20,6 +20,7 @@ pub fn pack_completion(
     tree: &tree_sitter::Tree,
     point: tree_sitter::Point,
     language: &str,
+    path: Option<&std::path::Path>,
     module_index: &ModuleIndex,
 ) -> Vec<CompletionItem> {
     if let Some(cfg) = crate::cursor_sentinel::lang_cfg(language) {
@@ -47,7 +48,65 @@ pub fn pack_completion(
             }
         }
     }
-    symbols::in_scope_completion(analysis, point)
+    let mut items = symbols::in_scope_completion(analysis, point);
+    macro_completion(source, point, language, path, &mut items);
+    items
+}
+
+/// Identifier-context macro completion (C preprocessor): the `#define`s
+/// reachable through `#include`s — the API surface (perl5: `Newx`/`SvPV`).
+/// The file's OWN `#define`s are already symbols (in `items`); this adds the
+/// cross-file ones. Prefix-filtered server-side (a macro-heavy include
+/// closure reaches thousands — perl.h alone is ~2000), and the header cache
+/// is warm from analyze, so the re-gather is cheap.
+fn macro_completion(
+    source: &str,
+    point: tree_sitter::Point,
+    language: &str,
+    path: Option<&std::path::Path>,
+    items: &mut Vec<CompletionItem>,
+) {
+    if language != "cpp" {
+        return; // only C/C++ have a preprocessor
+    }
+    let Some(p) = path else { return };
+    let reg = crate::language_driver::LanguageRegistry::with_enabled();
+    let Some(driver) = reg.for_id(language) else { return };
+    let cursor = crate::cursor_sentinel::point_to_byte(source, point);
+    let bytes = source.as_bytes();
+    let mut start = cursor;
+    while start > 0 && (bytes[start - 1].is_ascii_alphanumeric() || bytes[start - 1] == b'_') {
+        start -= 1;
+    }
+    let prefix = &source[start..cursor];
+    if prefix.is_empty() {
+        return; // no bare-cursor dump of the whole macro table
+    }
+    let mut parser = driver.make_parser();
+    let macros = crate::cpp_reparse::included_macros(p, source, &mut parser);
+    let seen: std::collections::HashSet<String> =
+        items.iter().map(|i| i.label.clone()).collect();
+    for (name, m) in &macros {
+        if !name.starts_with(prefix) || seen.contains(name) {
+            continue;
+        }
+        let (kind, detail) = match &m.params {
+            Some(params) => (
+                CompletionItemKind::FUNCTION,
+                format!("#define {}({})", name, params.join(", ")),
+            ),
+            None => (
+                CompletionItemKind::CONSTANT,
+                format!("#define {} {}", name, m.body.trim()),
+            ),
+        };
+        items.push(CompletionItem {
+            label: name.clone(),
+            kind: Some(kind),
+            detail: Some(detail),
+            ..Default::default()
+        });
+    }
 }
 
 pub struct Backend {
@@ -714,6 +773,7 @@ impl LanguageServer for Backend {
                 &doc.tree,
                 symbols::position_to_point(pos),
                 doc.language,
+                doc.path.as_deref(),
                 &self.module_index,
             );
             return Ok((!items.is_empty()).then_some(CompletionResponse::Array(items)));

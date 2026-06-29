@@ -69,3 +69,20 @@ Fix landed regardless: the transitive macro gather is now **breadth-first**
 (closest includes win the budget) instead of depth-first, where a deep
 early include could starve a direct sibling. Correctness improvement;
 spdlog/json/cross-file all still green.
+
+## Follow-ups from live perl5 use (op.c)
+- **goto-def on local vars** — C local variable references don't resolve to
+  their declaration. Needs local-var ref→def resolution in the pack path
+  (the skeleton emits @flow.target on declarations + @expr.read.var on
+  reads; the resolve step is missing for pack languages).
+- **function defs hidden behind signature macros** — perl5 functions are
+  `OP * Perl_newOP(pTHX_ I32 type, ...)`; if `pTHX_`/`pTHX` (thread-context
+  macros from perl.h) aren't expanded, the function_declarator corrupts and
+  the function symbol vanishes. THE dominant perl5 idiom — investigate.
+- **goto labels** — C `label:` / `goto label;` are real navigation targets
+  (label defs + goto refs). Add nav entries (def + goto-def from the
+  `goto`). Not yet handled.
+- **perf**: cold macro gather at completion on perl5 ~6s (CLI cold). The LSP
+  warms the header cache at analyze, but the per-completion re-gather over
+  perl.h's closure is heavy — needs a cached macro table (compute once on
+  open/change, not per keystroke).
