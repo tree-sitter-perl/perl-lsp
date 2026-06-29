@@ -140,9 +140,18 @@ pub fn collect_macros(tree: &Tree, src: &[u8]) -> BTreeMap<String, Macro> {
     out
 }
 
+/// Largest a macro body may grow to during pre-expansion — a backstop
+/// against pathological chains (the self-reference case is already cut by
+/// the blue-paint guard; this bounds non-self fan-out too).
+const MAX_BODY_LEN: usize = 64 * 1024;
+
 /// Strip line continuations and collapse the multi-line macro body to
 /// single-line text suitable for in-place splicing.
 fn clean_body(raw: &str) -> String {
+    // tree-sitter folds a trailing line comment into `preproc_arg`; the C
+    // preprocessor strips comments, so drop it. Without this,
+    // `#define M x  // M M` puts `M` in M's body — a self-reference.
+    let raw = raw.find("//").map_or(raw, |i| &raw[..i]);
     raw.replace("\\\n", " ")
         .replace('\\', " ")
         .split_whitespace()
@@ -157,8 +166,10 @@ fn pre_expand_bodies(macros: &BTreeMap<String, Macro>) -> BTreeMap<String, Macro
     for _ in 0..8 {
         let mut changed = false;
         let snapshot = out.clone();
-        for m in out.values_mut() {
-            let expanded = expand_text(&m.body, &snapshot);
+        for (name, m) in out.iter_mut() {
+            // Blue paint: a macro never re-expands itself inside its own
+            // body (C's rule) — without it `#define M M M` explodes.
+            let expanded = expand_text(&m.body, &snapshot, Some(name));
             if expanded != m.body {
                 m.body = expanded;
                 changed = true;
@@ -177,12 +188,16 @@ fn is_ident_byte(b: u8) -> bool {
 
 /// Expand object-like macros in a free text fragment (used for body
 /// pre-expansion; no arg machinery — function-like refs in bodies are
-/// left for the source pass).
-fn expand_text(text: &str, macros: &BTreeMap<String, Macro>) -> String {
+/// left for the source pass). `exclude` is the macro being expanded (blue
+/// paint: it isn't re-expanded in its own body).
+fn expand_text(text: &str, macros: &BTreeMap<String, Macro>, exclude: Option<&str>) -> String {
     let bytes = text.as_bytes();
     let mut out = String::with_capacity(text.len());
     let mut i = 0;
     while i < bytes.len() {
+        if out.len() > MAX_BODY_LEN {
+            return out;
+        }
         if is_ident_byte(bytes[i]) && (i == 0 || !is_ident_byte(bytes[i - 1])) {
             let start = i;
             while i < bytes.len() && is_ident_byte(bytes[i]) {
@@ -190,7 +205,7 @@ fn expand_text(text: &str, macros: &BTreeMap<String, Macro>) -> String {
             }
             let word = &text[start..i];
             match macros.get(word) {
-                Some(m) if m.params.is_none() => out.push_str(&m.body),
+                Some(m) if m.params.is_none() && Some(word) != exclude => out.push_str(&m.body),
                 _ => out.push_str(word),
             }
             continue;

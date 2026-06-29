@@ -1,0 +1,13 @@
+{
+  "capability": "outline",
+  "rows": [
+    {
+      "id": "cpp-selfref-macro-no-oom",
+      "difficulty": "hard", "semantic_area": "cpp-multilang-macros",
+      "lang": "cpp", "root": "gold-corpus/cpp-fixture",
+      "file": "selfref_macro.cpp", "line": 0, "col": 0,
+      "expect": { "all": ["\"kind\":\"Class\",\"line\":\"5\",\"name\":\"Gadget\""], "none": [] },
+      "status": "gold"
+    }
+  ]
+}
