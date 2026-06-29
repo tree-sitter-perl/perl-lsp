@@ -100,7 +100,7 @@ pub struct PackDriver {
             &Path,
             &str,
             &mut tree_sitter::Parser,
-        ) -> std::collections::BTreeMap<String, crate::cpp_reparse::Macro>,
+        ) -> std::sync::Arc<std::collections::BTreeMap<String, crate::cpp_reparse::Macro>>,
     >,
 }
 
@@ -124,7 +124,7 @@ impl LanguageDriver for PackDriver {
         // #defined elsewhere (SPDLOG_NAMESPACE_BEGIN) expands here.
         let external = match (self.gather_macros, path) {
             (Some(g), Some(p)) => g(p, source, &mut parser),
-            _ => std::collections::BTreeMap::new(),
+            _ => std::sync::Arc::new(std::collections::BTreeMap::new()),
         };
         let (src, map) = match self.transform {
             Some(t) => t(&mut parser, source, &external),

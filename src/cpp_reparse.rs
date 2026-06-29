@@ -286,7 +286,58 @@ pub fn preprocess_validated_with(
 /// path, discovered not configured). Bounded: depth + visited + header
 /// caps; best-effort — unresolvable includes are skipped. The file's OWN
 /// macros are NOT included here (the caller collects those).
+/// Cached transitive-macro table, keyed by (file, its #include set). The
+/// gather walks the whole include closure (perl.h reaches ~2000 macros over
+/// hundreds of headers — seconds cold), so re-running it per completion
+/// keystroke is untenable. The analyze pass warms this on open; completion
+/// reuses it for free. Invalidates when the file's `#include` lines change
+/// (header *content* edits mid-session aren't tracked — reopen to refresh).
+type MacroTable = BTreeMap<String, Macro>;
+fn macro_table_cache() -> &'static std::sync::Mutex<
+    std::collections::HashMap<std::path::PathBuf, (u64, std::sync::Arc<MacroTable>)>,
+> {
+    static C: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<std::path::PathBuf, (u64, std::sync::Arc<MacroTable>)>>,
+    > = std::sync::OnceLock::new();
+    C.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+/// Hash of the file's `#include` directives — the cache key's variable part.
+/// Cheap (one line scan); stable across edits that don't touch includes.
+fn include_set_hash(src: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    for line in src.lines() {
+        let t = line.trim_start();
+        if t.starts_with('#') && t[1..].trim_start().starts_with("include") {
+            t.hash(&mut h);
+        }
+    }
+    h.finish()
+}
+
 pub fn included_macros(
+    file_path: &std::path::Path,
+    src: &str,
+    parser: &mut tree_sitter::Parser,
+) -> std::sync::Arc<MacroTable> {
+    let key = file_path.to_path_buf();
+    let inc_hash = include_set_hash(src);
+    if let Ok(cache) = macro_table_cache().lock() {
+        if let Some((h, m)) = cache.get(&key) {
+            if *h == inc_hash {
+                return m.clone();
+            }
+        }
+    }
+    let map = std::sync::Arc::new(gather_included_macros(file_path, src, parser));
+    if let Ok(mut cache) = macro_table_cache().lock() {
+        cache.insert(key, (inc_hash, map.clone()));
+    }
+    map
+}
+
+fn gather_included_macros(
     file_path: &std::path::Path,
     src: &str,
     parser: &mut tree_sitter::Parser,

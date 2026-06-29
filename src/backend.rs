@@ -86,7 +86,7 @@ fn macro_completion(
     let macros = crate::cpp_reparse::included_macros(p, source, &mut parser);
     let seen: std::collections::HashSet<String> =
         items.iter().map(|i| i.label.clone()).collect();
-    for (name, m) in &macros {
+    for (name, m) in macros.iter() {
         if !name.starts_with(prefix) || seen.contains(name) {
             continue;
         }
