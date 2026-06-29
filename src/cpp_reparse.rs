@@ -293,15 +293,61 @@ pub fn included_macros(
 ) -> BTreeMap<String, Macro> {
     let mut macros = BTreeMap::new();
     let mut seen = std::collections::HashSet::new();
-    if let Some(p) = file_path.canonicalize().ok() {
+    if let Ok(p) = file_path.canonicalize() {
         seen.insert(p);
     }
-    for inc in include_paths(src, parser) {
-        if let Some(path) = resolve_include(file_path, &inc) {
-            gather_macros_rec(&path, parser, &mut macros, &mut seen, 0);
+    // BREADTH-first: the file's DIRECT includes first, then theirs — the
+    // closest (most relevant) headers win the budget. Depth-first let a
+    // deep early include starve a direct sibling (abseil: mutex.h's tree
+    // exhausted the cap before reaching thread_annotations.h's
+    // ABSL_GUARDED_BY, so member declarations stayed corrupt).
+    let mut queue: std::collections::VecDeque<std::path::PathBuf> = include_paths(src, parser)
+        .iter()
+        .filter_map(|inc| resolve_include(file_path, inc))
+        .collect();
+    while let Some(path) = queue.pop_front() {
+        if seen.len() > 1000 {
+            break;
+        }
+        let Ok(canon) = path.canonicalize() else { continue };
+        if !seen.insert(canon.clone()) {
+            continue;
+        }
+        let info = header_info(&canon, parser);
+        let Some(info) = info else { continue };
+        for (k, v) in &info.macros {
+            macros.entry(k.clone()).or_insert_with(|| v.clone());
+        }
+        for inc in &info.includes {
+            if let Some(next) = resolve_include(&canon, inc) {
+                queue.push_back(next);
+            }
         }
     }
     macros
+}
+
+/// A header's cached (macros + include edges), by (path, mtime). The cache
+/// makes the per-edit re-gather cheap (warm hits skip read+parse).
+fn header_info(canon: &std::path::Path, parser: &mut tree_sitter::Parser) -> Option<std::sync::Arc<CachedHeader>> {
+    let mtime = std::fs::metadata(canon).and_then(|m| m.modified()).ok();
+    let hit = header_cache()
+        .lock()
+        .ok()
+        .and_then(|c| c.get(canon).and_then(|(t, info)| (Some(*t) == mtime).then(|| info.clone())));
+    if let Some(info) = hit {
+        return Some(info);
+    }
+    let src = std::fs::read_to_string(canon).ok()?;
+    let tree = parser.parse(&src, None)?;
+    let info = std::sync::Arc::new(CachedHeader {
+        macros: collect_macros(&tree, src.as_bytes()),
+        includes: include_paths_tree(&tree, &src),
+    });
+    if let (Some(t), Ok(mut c)) = (mtime, header_cache().lock()) {
+        c.insert(canon.to_path_buf(), (t, info.clone()));
+    }
+    Some(info)
 }
 
 /// A header's own #defines + its include edges — cached by (path, mtime)
@@ -321,50 +367,6 @@ type HeaderCache = std::collections::HashMap<
 fn header_cache() -> &'static std::sync::Mutex<HeaderCache> {
     static C: std::sync::OnceLock<std::sync::Mutex<HeaderCache>> = std::sync::OnceLock::new();
     C.get_or_init(|| std::sync::Mutex::new(HeaderCache::new()))
-}
-
-fn gather_macros_rec(
-    path: &std::path::Path,
-    parser: &mut tree_sitter::Parser,
-    macros: &mut BTreeMap<String, Macro>,
-    seen: &mut std::collections::HashSet<std::path::PathBuf>,
-    depth: usize,
-) {
-    if depth > 16 || seen.len() > 500 {
-        return;
-    }
-    let Some(canon) = path.canonicalize().ok() else { return };
-    if !seen.insert(canon.clone()) {
-        return;
-    }
-    let mtime = std::fs::metadata(&canon).and_then(|m| m.modified()).ok();
-    let hit = header_cache()
-        .lock()
-        .ok()
-        .and_then(|c| c.get(&canon).and_then(|(t, info)| (Some(*t) == mtime).then(|| info.clone())));
-    let info = match hit {
-        Some(info) => info,
-        None => {
-            let Ok(src) = std::fs::read_to_string(&canon) else { return };
-            let Some(tree) = parser.parse(&src, None) else { return };
-            let info = std::sync::Arc::new(CachedHeader {
-                macros: collect_macros(&tree, src.as_bytes()),
-                includes: include_paths_tree(&tree, &src),
-            });
-            if let (Some(t), Ok(mut c)) = (mtime, header_cache().lock()) {
-                c.insert(canon.clone(), (t, info.clone()));
-            }
-            info
-        }
-    };
-    for (k, v) in &info.macros {
-        macros.entry(k.clone()).or_insert_with(|| v.clone());
-    }
-    for inc in &info.includes {
-        if let Some(next) = resolve_include(&canon, inc) {
-            gather_macros_rec(&next, parser, macros, seen, depth + 1);
-        }
-    }
 }
 
 /// Resolve a quoted include like `spdlog/common.h` to a real path: walk up

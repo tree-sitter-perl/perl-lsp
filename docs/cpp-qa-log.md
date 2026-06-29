@@ -52,3 +52,20 @@ are analyzed. So cross-file method returns + goto-def into another header
 aren't active yet; that's the next cross-file piece (a cpp workspace
 indexer, mirroring the Perl module_resolver). Single-file + inheritance
 within the file work today.
+
+## Sweep: abseil + the macro-soup tail
+
+abseil sample (88 headers): 79 ok, 6 empty, 3 structure-corrupt, 0 crash.
+The 3 corrupt (blocking_counter.h, …) are abseil's **conditional,
+multi-definition, version-mangled macros** (`ABSL_NAMESPACE_BEGIN` →
+`namespace absl { inline namespace <version> {`, `ABSL_GUARDED_BY`
+`#if`-guarded) gathered across a huge transitive include tree. Every
+*self-contained* repro works — nested inline-namespace macros, GUARDED_BY,
+the exact private-member combo. The corruption only appears with abseil's
+real config.h soup, where which `#define` wins is order/cap-sensitive. A
+deep library-specific tail, NOT a general gap (spdlog/json/re2 clean).
+
+Fix landed regardless: the transitive macro gather is now **breadth-first**
+(closest includes win the budget) instead of depth-first, where a deep
+early include could starve a direct sibling. Correctness improvement;
+spdlog/json/cross-file all still green.
