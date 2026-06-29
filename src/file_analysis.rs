@@ -4365,6 +4365,9 @@ impl FileAnalysis {
             if matches!(sym.kind, SymKind::Variable | SymKind::Field)
                 && self.symbol_in_class(sym.id, cls)
                 && class_body.is_none_or(|cb| sym.scope == cb)
+                // the receiver param (`self`/`cls`) is tagged with the class
+                // by the sticky context but is NOT a member.
+                && !crate::conventions::is_conventional_invocant_name(&sym.name)
                 && seen.insert(sym.name.clone())
             {
                 candidates.push(CompletionCandidate {

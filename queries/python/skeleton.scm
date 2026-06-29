@@ -5,10 +5,22 @@
 (class_definition
   name: (identifier) @def.class.name @context.package) @def.class @scope
 
+; inheritance: `class Dog(Animal):` → Dog parent Animal (one @parent per
+; base; member completion + method resolution walk the ancestors).
+(class_definition
+  name: (identifier) @def.class.name
+  superclasses: (argument_list (identifier) @parent))
+
 (function_definition
   name: (identifier) @def.sub.name) @def.sub
 
 (function_definition) @scope
+
+; `self.attr = ...` → an instance attribute: a member of the enclosing
+; class (the sticky @context.package tags it). THE dominant Python member
+; idiom — without it `obj.` offers no data attributes.
+(assignment
+  left: (attribute attribute: (identifier) @def.var.name @def.var))
 
 (parameters
   (identifier) @def.var.name @def.var)
