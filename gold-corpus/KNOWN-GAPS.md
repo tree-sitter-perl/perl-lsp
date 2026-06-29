@@ -200,3 +200,21 @@ class. **Subsystem:** first-param-self heuristic (`detect_first_param_type`).
 Quickest wins: the signature-help invocant gate, imported-names in completion,
 the `bootstrap` loader recognition, and the `(shift, shift)` param extraction —
 all "the producer already has the signal, just consult it."
+
+## C++ (multi-language tier)
+
+QA'd against spdlog (107 headers): **0 crashes**, 93/107 outline with
+symbols (3189 total). The dominant real-world gap is the
+**namespace-wrapping macro idiom** — `SPDLOG_NAMESPACE_BEGIN` /
+`FOOLIB_NAMESPACE_BEGIN`, where the open/close macros are `#define`d in a
+DIFFERENT header. Single-file analysis can't expand them (cpp_reparse only
+expands same-file `#define`s), so the parse corrupts: the wrapped `class`
+is lost and its methods leak as free functions.
+
+| case | impact on spdlog |
+|---|---|
+| cross-file namespace macro | 14 headers empty + ≥4 with a `class` decl but 0 classes (e.g. `logger.h`: `class logger` lost, 62 methods → 62 free `Sub`s) |
+
+Fixture: `cpp-xfail-cross-file-namespace-macro` (xfail → XPASS when fixed).
+Fix: cross-file macro resolution — resolve `#include`s, gather `#define`s,
+expand before extraction. The single biggest lever for real-world C++.
