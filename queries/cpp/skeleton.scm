@@ -199,6 +199,12 @@
   type: (_) @type.annot
   declarator: (pointer_declarator
     declarator: (identifier) @flow.target @def.local))
+; double-pointer local `T** pp;` — nested pointer_declarator.
+(declaration
+  type: (_) @type.annot
+  declarator: (pointer_declarator
+    declarator: (pointer_declarator
+      declarator: (identifier) @flow.target @def.local)))
 (declaration
   type: (_) @type.annot
   declarator: (init_declarator
@@ -223,6 +229,13 @@
 (parameter_declaration
   type: (_) @type.annot
   declarator: (pointer_declarator declarator: (identifier) @flow.target @def.local))
+; double pointer `OP** op_p` (perl5's dominant out-param shape) — a nested
+; pointer_declarator the single-level pattern misses.
+(parameter_declaration
+  type: (_) @type.annot
+  declarator: (pointer_declarator
+    declarator: (pointer_declarator
+      declarator: (identifier) @flow.target @def.local)))
 (parameter_declaration
   type: (_) @type.annot
   declarator: (reference_declarator (identifier) @flow.target @def.local))
