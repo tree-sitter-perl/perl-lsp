@@ -90,15 +90,18 @@ pub struct PackDriver {
     filenames: &'static [&'static str],
     make_parser: fn() -> tree_sitter::Parser,
     pack: fn() -> crate::query_extract::LangPack,
-    /// (source, external macros) → (transformed source, anchor map), run
-    /// before parsing (C++ macro expansion). The map remaps extracted
-    /// spans back to ORIGINAL coordinates. `None` = pass-through (identity).
+    /// (source, external macros) → (transformed source, anchor map, recovered
+    /// declarator macros), run before parsing (C++ macro expansion). The map
+    /// remaps extracted spans back to ORIGINAL coordinates; the recovered
+    /// `(class_name, macro_token)` pairs let the analyze path stamp the
+    /// attribute-macro signal onto each recovered class. `None` = pass-through
+    /// (identity, no recoveries).
     transform: Option<
         fn(
             &mut tree_sitter::Parser,
             &str,
             &std::collections::BTreeMap<String, crate::cpp_reparse::Macro>,
-        ) -> (String, crate::cpp_reparse::SpliceMap),
+        ) -> (String, crate::cpp_reparse::SpliceMap, Vec<(String, String)>),
     >,
     /// Path-aware cross-file macro gather (C++ #include resolution). Given
     /// the file path + source, returns macros from #included headers to
@@ -137,9 +140,9 @@ impl LanguageDriver for PackDriver {
             (Some(g), Some(p)) => g(p, source, &mut parser),
             _ => std::sync::Arc::new(std::collections::BTreeMap::new()),
         };
-        let (src, map) = match self.transform {
+        let (src, map, recovered) = match self.transform {
             Some(t) => t(&mut parser, source, &external),
-            None => (source.to_string(), crate::cpp_reparse::SpliceMap::default()),
+            None => (source.to_string(), crate::cpp_reparse::SpliceMap::default(), Vec::new()),
         };
         let Some(tree) = parser.parse(&src, None) else { return FileAnalysis::new(Default::default()) };
         match crate::query_extract::extract(&tree, src.as_bytes(), &(self.pack)()) {
@@ -147,7 +150,9 @@ impl LanguageDriver for PackDriver {
                 // remap extracted spans from transformed → original coords
                 // (no-op for identity / pass-through languages).
                 remap_spans(&mut skel, &src, source, &map);
-                skel.into_file_analysis()
+                let mut fa = skel.into_file_analysis();
+                apply_attribute_macros(&mut fa, &recovered);
+                fa
             }
             Err(_) => FileAnalysis::new(Default::default()),
         }
@@ -230,6 +235,33 @@ fn cmake_driver() -> PackDriver {
         pack: crate::query_extract::cmake_pack,
         transform: None,
         gather_macros: None,
+    }
+}
+
+/// Stamp attribute-macro signals onto recovered classes. For each
+/// `(class_name, macro_token)` the declarator-macro strip recovered, look the
+/// token up in the plugin-declared attribute-macro vocabulary; when known, add
+/// its signal (`exported`/`deprecated`) to the class symbol's `attributes`.
+/// The class is recovered either way (the strip is the unknown-macro safety
+/// net) — only the SIGNAL is plugin-gated: core owns the recovery mechanism,
+/// the plugin owns what the macro means (rule #10).
+#[cfg(any(feature = "cpp", feature = "python", feature = "r", feature = "cmake"))]
+fn apply_attribute_macros(fa: &mut FileAnalysis, recovered: &[(String, String)]) {
+    use crate::file_analysis::SymKind;
+    if recovered.is_empty() {
+        return;
+    }
+    let signals = crate::plugin::default_plugin_registry().attribute_macro_signals();
+    for (class_name, macro_token) in recovered {
+        let Some(signal) = signals.get(macro_token) else { continue };
+        for sym in &mut fa.symbols {
+            if matches!(sym.kind, SymKind::Class)
+                && &sym.name == class_name
+                && !sym.attributes.contains(signal)
+            {
+                sym.attributes.push(signal.clone());
+            }
+        }
     }
 }
 

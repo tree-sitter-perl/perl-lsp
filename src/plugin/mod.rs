@@ -749,6 +749,27 @@ pub struct DispatchVerb {
     pub name_arg_index: usize,
 }
 
+/// A plugin-declared "this declarator-position macro is an attribute, and
+/// here is what it SIGNALS" rule. The motivating case is C++ export/visibility
+/// macros (`class Q_CORE_EXPORT Foo {...}`): the heuristic in
+/// `cpp_reparse::strip_declarator_macros` already RECOVERS the class behind any
+/// unknown macro (the blunt safety net), but it discards the macro's meaning. A
+/// plugin declares the known macros and their signal so the recovered class
+/// carries it as an annotation (`Symbol.attributes`). `signal` is a free string
+/// (`"exported"`, `"deprecated"`, …) — the open vocabulary lives in the plugin,
+/// not core (rule #10).
+///
+/// Like `overrides` / `dispatch_verbs`, this manifest is NOT trigger-gated —
+/// it's read from every loaded plugin and unioned.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AttributeMacro {
+    /// The macro token in declarator position (`Q_CORE_EXPORT`, `Q_DEPRECATED`).
+    pub name: String,
+    /// What the macro signals about the declaration it decorates
+    /// (`"exported"`, `"deprecated"`). Stored verbatim on the class symbol.
+    pub signal: String,
+}
+
 /// A method that LOADS a module, naming it in a positional string
 /// argument — `$app->plugin('X')`, `$app->plugin($_) for qw/A B/`.
 /// Recognized TRIGGER-INDEPENDENTLY (like `DispatchVerb`): the load
@@ -859,6 +880,14 @@ pub trait FrameworkPlugin: Send + Sync {
     /// in the enrichment pass (cross-file receiver isa resolution) — see
     /// `DispatchVerb`. Default empty; only dispatch-style plugins declare.
     fn dispatch_verbs(&self) -> &[DispatchVerb] {
+        &[]
+    }
+
+    /// Static attribute-macro manifest — declarator-position macros and what
+    /// they signal (see `AttributeMacro`). Read once at plugin load, unioned,
+    /// and applied to recovered classes in the pack analyze path. Default
+    /// empty; only the C++ attributes plugin declares.
+    fn attribute_macros(&self) -> &[AttributeMacro] {
         &[]
     }
 
@@ -1201,6 +1230,21 @@ impl PluginRegistry {
     /// Trigger-independent, same rationale as `overrides`.
     pub fn dispatch_verbs<'a>(&'a self) -> impl Iterator<Item = &'a DispatchVerb> + 'a {
         self.plugins.iter().flat_map(|p| p.dispatch_verbs().iter())
+    }
+
+    /// Yield every attribute-macro declaration across the registry.
+    /// Trigger-independent, same rationale as `dispatch_verbs`.
+    pub fn attribute_macros<'a>(&'a self) -> impl Iterator<Item = &'a AttributeMacro> + 'a {
+        self.plugins.iter().flat_map(|p| p.attribute_macros().iter())
+    }
+
+    /// Collapse the attribute-macro union into a `macro name → signal` map —
+    /// the lookup the pack analyze path performs per recovered class. A later
+    /// plugin's entry for the same name wins (registration order).
+    pub fn attribute_macro_signals(&self) -> std::collections::HashMap<String, String> {
+        self.attribute_macros()
+            .map(|m| (m.name.clone(), m.signal.clone()))
+            .collect()
     }
 
     pub fn load_verbs<'a>(&'a self) -> impl Iterator<Item = &'a LoadVerb> + 'a {

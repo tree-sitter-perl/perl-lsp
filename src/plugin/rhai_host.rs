@@ -20,7 +20,7 @@ use crate::file_analysis::{HashKeyOwner, InferredType, Span};
 use tree_sitter::Point;
 
 use super::{
-    CallContext, CompletionQueryContext, ConstraintParam, DispatchVerb, EmitAction,
+    AttributeMacro, CallContext, CompletionQueryContext, ConstraintParam, DispatchVerb, EmitAction,
     FrameworkPlugin, ParamType, PluginCompletionAnswer, PluginSigHelpAnswer, SigHelpQueryContext,
     Trigger, TypeOverride, UseContext,
 };
@@ -176,6 +176,7 @@ pub struct RhaiPlugin {
     triggers: Vec<Trigger>,
     overrides: Vec<TypeOverride>,
     dispatch_verbs: Vec<DispatchVerb>,
+    attribute_macros: Vec<AttributeMacro>,
     load_verbs: Vec<crate::plugin::LoadVerb>,
     param_types: Vec<ParamType>,
     type_constraint_names: Vec<String>,
@@ -264,6 +265,26 @@ impl RhaiPlugin {
                     }
                 }
                 Err(e) => log::error!("plugin `{}` dispatch_verbs() failed: {}", id, e),
+            }
+        }
+
+        // `attribute_macros()` — same optional, fail-safe contract as overrides.
+        let mut attribute_macros: Vec<AttributeMacro> = Vec::new();
+        if signatures.iter().any(|n| n == "attribute_macros") {
+            match engine.call_fn::<Array>(&mut rhai::Scope::new(), &ast, "attribute_macros", ()) {
+                Ok(arr) => {
+                    for d in arr {
+                        match from_dynamic::<AttributeMacro>(&d) {
+                            Ok(v) => attribute_macros.push(v),
+                            Err(e) => log::error!(
+                                "plugin `{}` attribute_macros() bad entry: {}",
+                                id,
+                                e
+                            ),
+                        }
+                    }
+                }
+                Err(e) => log::error!("plugin `{}` attribute_macros() failed: {}", id, e),
             }
         }
 
@@ -414,6 +435,7 @@ impl RhaiPlugin {
             triggers,
             overrides,
             dispatch_verbs,
+            attribute_macros,
             load_verbs,
             param_types,
             type_constraint_names,
@@ -497,6 +519,10 @@ impl FrameworkPlugin for RhaiPlugin {
 
     fn dispatch_verbs(&self) -> &[DispatchVerb] {
         &self.dispatch_verbs
+    }
+
+    fn attribute_macros(&self) -> &[AttributeMacro] {
+        &self.attribute_macros
     }
 
     fn load_verbs(&self) -> &[crate::plugin::LoadVerb] {
@@ -634,6 +660,7 @@ const BUNDLED: &[(&str, &str)] = &[
     ("dancer", include_str!("../../frameworks/dancer.rhai")),
     ("moo", include_str!("../../frameworks/moo.rhai")),
     ("catalyst", include_str!("../../frameworks/catalyst.rhai")),
+    ("cpp-attributes", include_str!("../../frameworks/cpp-attributes.rhai")),
 ];
 
 pub fn load_bundled(engine: Arc<Engine>) -> Vec<Box<dyn FrameworkPlugin>> {
@@ -927,6 +954,7 @@ mod tests {
             ("dancer", include_str!("../../frameworks/dancer.rhai")),
             ("moo", include_str!("../../frameworks/moo.rhai")),
             ("catalyst", include_str!("../../frameworks/catalyst.rhai")),
+            ("cpp-attributes", include_str!("../../frameworks/cpp-attributes.rhai")),
         ] {
             RhaiPlugin::from_source(src, engine.clone())
                 .unwrap_or_else(|e| panic!("{}.rhai failed to compile: {e}", id));
@@ -1197,6 +1225,54 @@ mod tests {
             InferredType::ClassName("Foo".into())
         );
         assert_eq!(ovs[0].reason, "test");
+    }
+
+    #[test]
+    fn rhai_attribute_macros_read_at_compile_time_and_unioned() {
+        // A plugin declaring `attribute_macros()` exposes the manifest via
+        // FrameworkPlugin::attribute_macros (read once at load, like
+        // overrides/dispatch_verbs), and a registry collapses the union into
+        // the name→signal map the pack analyze path looks tokens up in.
+        let src = r#"
+            fn id() { "demo-attrs" }
+            fn triggers() { [] }
+            fn attribute_macros() {
+                [
+                    #{ name: "MY_EXPORT", signal: "exported" },
+                    #{ name: "MY_DEPRECATED", signal: "deprecated" },
+                ]
+            }
+        "#;
+        let engine = Arc::new(make_engine());
+        let plugin = RhaiPlugin::from_source(src, engine).expect("compiles");
+        let macros = plugin.attribute_macros();
+        assert_eq!(macros.len(), 2);
+        assert_eq!(macros[0].name, "MY_EXPORT");
+        assert_eq!(macros[0].signal, "exported");
+
+        let mut reg = crate::plugin::PluginRegistry::new();
+        reg.register(Box::new(plugin));
+        let signals = reg.attribute_macro_signals();
+        assert_eq!(signals.get("MY_EXPORT").map(String::as_str), Some("exported"));
+        assert_eq!(signals.get("MY_DEPRECATED").map(String::as_str), Some("deprecated"));
+        assert_eq!(signals.get("UNKNOWN"), None);
+    }
+
+    #[test]
+    fn bundled_cpp_attributes_declares_qt_exports() {
+        // The bundled cpp-attributes plugin is the C++ vocabulary: Qt export
+        // macros signal "exported", deprecation macros "deprecated".
+        let engine = Arc::new(make_engine());
+        let bundled = load_bundled(engine);
+        let plugin = bundled
+            .iter()
+            .find(|p| p.id() == "cpp-attributes")
+            .expect("cpp-attributes is bundled");
+        let macros = plugin.attribute_macros();
+        let signal = |name: &str| macros.iter().find(|m| m.name == name).map(|m| m.signal.as_str());
+        assert_eq!(signal("Q_CORE_EXPORT"), Some("exported"));
+        assert_eq!(signal("Q_DECL_IMPORT"), Some("exported"));
+        assert_eq!(signal("Q_DEPRECATED"), Some("deprecated"));
     }
 
     #[test]

@@ -16,6 +16,22 @@
       "file": "sample.cpp", "line": 1, "col": 6,
       "expect": { "all": ["class Shape", "*class*"], "none": [] },
       "status": "gold"
+    },
+    {
+      "id": "cpp-hover-attribute-macro-exported",
+      "difficulty": "simple", "semantic_area": "cpp-multilang",
+      "lang": "cpp", "root": "gold-corpus/cpp-fixture",
+      "file": "attr_macro.cpp", "line": 3, "col": 20,
+      "expect": { "all": ["Q_CORE_EXPORT Gadget", "*class*", "*exported*"], "none": ["*deprecated*"] },
+      "status": "gold"
+    },
+    {
+      "id": "cpp-hover-unknown-macro-recovered-no-signal",
+      "difficulty": "simple", "semantic_area": "cpp-multilang",
+      "lang": "cpp", "root": "gold-corpus/cpp-fixture",
+      "file": "attr_macro.cpp", "line": 9, "col": 21,
+      "expect": { "all": ["Widget", "*class*"], "none": ["*exported*", "*deprecated*"] },
+      "status": "gold"
     }
   ]
 }

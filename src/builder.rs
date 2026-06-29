@@ -1810,6 +1810,7 @@ impl<'a> Builder<'a> {
             detail,
             namespace,
             outline_label: None,
+            attributes: Vec::new(),
         });
         id
     }

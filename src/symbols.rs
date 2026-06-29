@@ -1117,7 +1117,16 @@ pub fn pack_hover_markdown(
             return Some(format!("```{}\n{}: {}\n```\n\n*variable*", language, sym.name, class));
         }
     }
-    Some(format!("```{}\n{}\n```\n\n*{}*", language, sig, kind))
+    let mut out = format!("```{}\n{}\n```\n\n*{}*", language, sig, kind);
+    // Surface a class's attribute-macro signals (`exported`, `deprecated`) the
+    // pack stamped from its declarator-position macro — proves the signal
+    // survived recovery + caching.
+    if matches!(sym.kind, FaSymKind::Class) {
+        for attr in &sym.attributes {
+            out.push_str(&format!("\n\n*{}*", attr));
+        }
+    }
+    Some(out)
 }
 
 pub fn pack_hover(

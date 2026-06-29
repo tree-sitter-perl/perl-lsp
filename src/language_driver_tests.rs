@@ -23,6 +23,33 @@ fn cpp_driver_analyzes_through_reparse() {
     let fa = cpp_driver().analyze(src);
     assert!(fa.symbols.iter().any(|s| s.name == "Box"), "macro-recovered class: {:?}", fa.symbols.iter().map(|s| &s.name).collect::<Vec<_>>());
     assert!(fa.symbols.iter().any(|s| s.name == "width"));
+    // The unknown-macro safety net: `API` isn't in the attribute-macro
+    // vocabulary, so the class is recovered but carries NO signal.
+    let boxsym = fa.symbols.iter().find(|s| s.name == "Box").unwrap();
+    assert!(boxsym.attributes.is_empty(), "unknown macro → no signal: {:?}", boxsym.attributes);
+}
+
+#[cfg(feature = "cpp")]
+#[test]
+fn cpp_known_attribute_macro_signals_the_recovered_class() {
+    // A KNOWN declarator macro (Qt's Q_CORE_EXPORT, in the bundled
+    // cpp-attributes vocabulary) recovers the class AND stamps its signal.
+    let src = "class Q_CORE_EXPORT Widget { public: int x; };\n";
+    let fa = cpp_driver().analyze(src);
+    let widget = fa.symbols.iter().find(|s| s.name == "Widget")
+        .unwrap_or_else(|| panic!("Widget recovered: {:?}", fa.symbols.iter().map(|s| &s.name).collect::<Vec<_>>()));
+    assert!(widget.attributes.contains(&"exported".to_string()),
+        "Q_CORE_EXPORT signals exported: {:?}", widget.attributes);
+}
+
+#[cfg(feature = "cpp")]
+#[test]
+fn cpp_deprecated_attribute_macro_signals_the_recovered_class() {
+    let src = "class Q_DEPRECATED OldThing { public: int x; };\n";
+    let fa = cpp_driver().analyze(src);
+    let sym = fa.symbols.iter().find(|s| s.name == "OldThing").expect("OldThing recovered");
+    assert!(sym.attributes.contains(&"deprecated".to_string()),
+        "Q_DEPRECATED signals deprecated: {:?}", sym.attributes);
 }
 
 #[cfg(feature = "cpp")]

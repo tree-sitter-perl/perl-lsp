@@ -424,6 +424,13 @@ pub struct Symbol {
     /// workspace-symbol.
     #[serde(default)]
     pub outline_label: Option<String>,
+    /// Free-string annotations the language pack attaches to this symbol —
+    /// today, the signal a recovered C++ class's declarator-position
+    /// attribute macro carried (`exported`, `deprecated`), looked up in the
+    /// plugin-declared attribute-macro vocabulary. Empty for ordinary
+    /// symbols. Surfaced in pack hover.
+    #[serde(default)]
+    pub attributes: Vec<String>,
 }
 
 impl Symbol {
@@ -3692,6 +3699,7 @@ impl FileAnalysis {
                     },
                     namespace: Namespace::Language,
                     outline_label: None,
+                    attributes: Vec::new(),
                 });
             }
         }

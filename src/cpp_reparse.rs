@@ -261,10 +261,15 @@ pub fn parse_damage(node: tree_sitter::Node) -> usize {
 /// valid C++ names the type once (the sole exception is `class Name final`).
 /// Blank the macro token with spaces (same length → every extracted span
 /// stays put, no SpliceMap needed) so the class parses. Runs unconditionally
-/// — a no-op on normal `class Name {`.
-fn strip_declarator_macros(src: &str) -> String {
+/// — a no-op on normal `class Name {`. Returns the rewritten source plus the
+/// `(class_name, macro_token)` pairs it recovered — the analyze path looks the
+/// token up in the attribute-macro manifest to annotate the class with what
+/// the macro signals (`exported`/`deprecated`); an unknown token still
+/// recovers the class, it just carries no signal.
+fn strip_declarator_macros(src: &str) -> (String, Vec<(String, String)>) {
     let bytes = src.as_bytes();
     let mut out = src.to_string();
+    let mut recovered: Vec<(String, String)> = Vec::new();
     // SAFETY: only ASCII spaces are written, over ASCII identifier bytes —
     // length-preserving and UTF-8-valid.
     let ob = unsafe { out.as_bytes_mut() };
@@ -297,6 +302,7 @@ fn strip_declarator_macros(src: &str) -> String {
         if id1e > id1s && id2e > id2s && head {
             let id2 = &src[id2s..id2e];
             if id2 != "final" && id2 != "sealed" {
+                recovered.push((id2.to_string(), src[id1s..id1e].to_string()));
                 for b in &mut ob[id1s..id1e] {
                     *b = b' ';
                 }
@@ -304,7 +310,7 @@ fn strip_declarator_macros(src: &str) -> String {
         }
         i += kwlen;
     }
-    out
+    (out, recovered)
 }
 
 /// Expand, then **let the parser validate**: keep the transform only if
@@ -339,23 +345,26 @@ pub fn preprocess_validated_with(
     parser: &mut tree_sitter::Parser,
     src: &str,
     external: &BTreeMap<String, Macro>,
-) -> (String, SpliceMap) {
+) -> (String, SpliceMap, Vec<(String, String)>) {
     // Blank unresolved declarator-position macros first (length-preserving,
     // unconditional — recovers `class Q_CORE_EXPORT Foo` even when the macro
-    // is unreachable). Spans stay in original coordinates.
-    let stripped = strip_declarator_macros(src);
+    // is unreachable). Spans stay in original coordinates. `recovered` carries
+    // each (class_name, macro_token) so the analyze path can annotate the
+    // class with the macro's signal — surviving regardless of which return
+    // arm fires below, since `src` is the stripped text throughout.
+    let (stripped, recovered) = strip_declarator_macros(src);
     let src = stripped.as_str();
     let Some(tree) = parser.parse(src, None) else {
-        return (src.to_string(), SpliceMap::default());
+        return (src.to_string(), SpliceMap::default(), recovered);
     };
     let before = parse_damage(tree.root_node());
     let (rewritten, map) = preprocess_with(&tree, src, external);
     if rewritten == src {
-        return (rewritten, map);
+        return (rewritten, map, recovered);
     }
     match parser.parse(&rewritten, None) {
-        Some(after) if parse_damage(after.root_node()) <= before => (rewritten, map),
-        _ => (src.to_string(), SpliceMap::default()),
+        Some(after) if parse_damage(after.root_node()) <= before => (rewritten, map, recovered),
+        _ => (src.to_string(), SpliceMap::default(), recovered),
     }
 }
 

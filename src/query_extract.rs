@@ -124,6 +124,7 @@ impl SkeletonAnalysis {
                 detail: SymbolDetail::None,
                 namespace: crate::file_analysis::Namespace::Language,
                 outline_label: None,
+                attributes: Vec::new(),
             })
             .collect();
         // Tag a typedef-struct's members with its name. `typedef struct
