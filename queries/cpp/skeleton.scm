@@ -164,6 +164,12 @@
 (field_declaration
   type: (_) @type.annot
   declarator: (field_identifier) @flow.target)
+; pointer / reference data members of any depth (`Box* inner;`, `Node** next;`).
+; The leaf is a field_identifier, so core mints a @def.var (a class member),
+; not a @def.local — `peel_nested`'s leaf→def-capture map handles that.
+(field_declaration
+  type: (_) @type.annot
+  declarator: [(pointer_declarator) (reference_declarator)] @nested.target)
 
 ; ---- C goto labels: `done:` is a nav target, `goto done;` jumps to it.
 ; The def is an unpackaged Variable symbol (outline-hidden, like a local);

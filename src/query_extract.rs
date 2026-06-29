@@ -405,8 +405,11 @@ pub struct LangPack {
     /// the grammar, core supplies the walk. Empty = no nesting (the capture
     /// is then simply absent from the pack's query).
     pub nested_peel: &'static [(&'static str, crate::file_analysis::DerefKind)],
-    /// The leaf node kind a `nested_peel` chain bottoms out at (`identifier`).
-    pub nested_leaf: &'static str,
+    /// Leaf node kinds a `nested_peel` chain bottoms out at, each mapped to
+    /// the `def.*` capture the synthetic leaf event mints — `identifier`→
+    /// `def.local`, `field_identifier`→`def.var` (so a pointer field still
+    /// outlines as a class member).
+    pub nested_leaves: &'static [(&'static str, &'static str)],
     /// Per-level annotation node kinds collected onto each `DerefStep`
     /// (`type_qualifier` → `const`/`volatile`/`restrict`). Generic so new
     /// qualifiers + const-correctness diagnostics needn't touch core.
@@ -452,7 +455,7 @@ pub fn perl_pack() -> LangPack {
         trigger_chars: &["$", "@", "%", ">", ":", "{"],
         receiver_names: &[],
         nested_peel: &[],
-        nested_leaf: "",
+        nested_leaves: &[],
         nested_annot_kinds: &[],
     }
 }
@@ -491,7 +494,7 @@ pub fn python_pack() -> LangPack {
         trigger_chars: &["."],
         receiver_names: &["self", "cls"],
         nested_peel: &[],
-        nested_leaf: "",
+        nested_leaves: &[],
         nested_annot_kinds: &[],
     }
 }
@@ -519,7 +522,7 @@ pub fn r_pack() -> LangPack {
         trigger_chars: &["$", "@", ":"],
         receiver_names: &[],
         nested_peel: &[],
-        nested_leaf: "",
+        nested_leaves: &[],
         nested_annot_kinds: &[],
     }
 }
@@ -560,7 +563,7 @@ pub fn cmake_pack() -> LangPack {
         trigger_chars: &["{", "("],
         receiver_names: &[],
         nested_peel: &[],
-        nested_leaf: "",
+        nested_leaves: &[],
         nested_annot_kinds: &[],
     }
 }
@@ -618,7 +621,7 @@ pub fn cpp_pack() -> LangPack {
             ("pointer_declarator", crate::file_analysis::DerefKind::Pointer),
             ("reference_declarator", crate::file_analysis::DerefKind::Reference),
         ],
-        nested_leaf: "identifier",
+        nested_leaves: &[("identifier", "def.local"), ("field_identifier", "def.var")],
         nested_annot_kinds: &["type_qualifier"],
     }
 }
@@ -654,7 +657,7 @@ struct Event {
 /// Unravel a pointer/reference declarator chain (the `@nested.target`
 /// capture) to its leaf identifier + the per-level deref stack. The pack
 /// declares which node kinds nest (`nested_peel`), which kind is the leaf
-/// (`nested_leaf`), and which kinds are per-level annotations
+/// (`nested_leaves`), and which kinds are per-level annotations
 /// (`nested_annot_kinds`, e.g. `type_qualifier`) — core walks generically,
 /// branching on no grammar name of its own. Outermost level first, which is
 /// also left-to-right display order after the base type (`Box*&` →
@@ -663,8 +666,9 @@ fn peel_nested<'a>(
     mut node: tree_sitter::Node<'a>,
     pack: &LangPack,
     src: &[u8],
-) -> Option<(tree_sitter::Node<'a>, Vec<crate::file_analysis::DerefStep>)> {
+) -> Option<(tree_sitter::Node<'a>, Vec<crate::file_analysis::DerefStep>, &'static str)> {
     use crate::file_analysis::DerefStep;
+    let is_leaf = |k: &str| pack.nested_leaves.iter().find(|(lk, _)| *lk == k);
     let mut stack = Vec::new();
     for _ in 0..32 {
         if let Some((_, kind)) = pack.nested_peel.iter().find(|(k, _)| *k == node.kind()) {
@@ -677,15 +681,18 @@ fn peel_nested<'a>(
                         annotations.push(t.to_string());
                     }
                 } else if pack.nested_peel.iter().any(|(k, _)| *k == ch.kind())
-                    || ch.kind() == pack.nested_leaf
+                    || is_leaf(ch.kind()).is_some()
                 {
                     inner = Some(ch);
                 }
             }
             stack.push(DerefStep { kind: *kind, annotations });
             node = inner?;
-        } else if node.kind() == pack.nested_leaf {
-            return Some((node, stack));
+        } else if let Some((_, def_cap)) = is_leaf(node.kind()) {
+            // The leaf kind decides the symbol the synthetic event mints —
+            // `identifier`→`def.local` (param/local), `field_identifier`→
+            // `def.var` (a class member), so fields outline as members.
+            return Some((node, stack, def_cap));
         } else {
             return None;
         }
@@ -722,10 +729,10 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
             // captured it directly — downstream join/symbol/witness paths are
             // unchanged, and arbitrary nesting works without enumerating it.
             if cap == "nested.target" {
-                if let Some((leaf, stack)) = peel_nested(node, pack, source) {
+                if let Some((leaf, stack, def_cap)) = peel_nested(node, pack, source) {
                     nested_stacks.insert(match_counter, stack);
                     let ltext = leaf.utf8_text(source).unwrap_or("").to_string();
-                    for syn in ["flow.target", "def.local"] {
+                    for syn in ["flow.target", def_cap] {
                         events.push(Event {
                             start_byte: leaf.start_byte(),
                             end_byte: leaf.end_byte(),
