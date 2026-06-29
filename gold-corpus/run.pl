@@ -97,7 +97,9 @@ sub run_cmd {                       # argv -> (stdout, crashed?)  [stderr droppe
     return ($out, (WIFSIGNALED($st) || ($st >> 8) == 134) ? 1 : 0);
 }
 sub _bn { my $s = shift; $s =~ s{^/.*/([^/]+)$}{$1}; return $s; }       # abs path -> basename
-sub _text_bn { my $s = shift; $s =~ s{/\S*?/([^/\s":]+\.(?:pm|pl|t|pod))}{$1}g; return $s; }
+# Reduce absolute source paths to basenames so text-cap assertions are
+# portable. Covers Perl + the pack-language extensions (multi-language gold).
+sub _text_bn { my $s = shift; $s =~ s{/\S*?/([^/\s":]+\.(?:pm|pl|t|pod|cpp|cc|cxx|hpp|hh|h|py|R|r|cmake))}{$1}g; return $s; }
 sub normalize {
     my ($cap, $raw) = @_;
     if ($JSON_CAP{$cap}) {

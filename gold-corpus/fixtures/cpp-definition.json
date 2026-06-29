@@ -1,0 +1,17 @@
+{
+  "capability": "definition",
+  "rows": [
+    {
+      "id": "cpp-definition-call-to-free-function",
+      "difficulty": "simple",
+      "semantic_area": "cpp-multilang",
+      "lang": "cpp",
+      "root": "gold-corpus/cpp-fixture",
+      "file": "sample.cpp",
+      "line": 16,
+      "col": 12,
+      "expect": { "all": ["sample.cpp:13:5"], "none": [] },
+      "status": "gold"
+    }
+  ]
+}

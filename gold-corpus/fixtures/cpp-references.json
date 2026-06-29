@@ -1,0 +1,23 @@
+{
+  "capability": "references",
+  "rows": [
+    {
+      "id": "cpp-references-free-function-def-and-call",
+      "difficulty": "simple",
+      "semantic_area": "cpp-multilang",
+      "lang": "cpp",
+      "root": "gold-corpus/cpp-fixture",
+      "file": "sample.cpp",
+      "line": 12,
+      "col": 4,
+      "expect": {
+        "all": [
+          "\"file\":\"sample.cpp\",\"line\":\"13\"",
+          "\"file\":\"sample.cpp\",\"line\":\"17\""
+        ],
+        "none": []
+      },
+      "status": "gold"
+    }
+  ]
+}
