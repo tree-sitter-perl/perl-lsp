@@ -809,7 +809,7 @@ pub fn index_pack_languages(
                     continue;
                 }
                 if let Some(cached) = entry.value() {
-                    pack_index.register_classes(cached.path.clone(), cached.analysis.clone());
+                    pack_index.register_symbols(cached.path.clone(), cached.analysis.clone());
                     warmed.insert(cached.path.clone());
                 }
             }
@@ -817,7 +817,7 @@ pub fn index_pack_languages(
 
         // Analyze only the new/changed/stale files (parallel); collect the
         // fresh analyses for a sequential write (rusqlite Connection isn't
-        // Sync). register_classes happens here so cross-file works even
+        // Sync). register_symbols happens here so cross-file works even
         // when persistence is off.
         let fresh: std::sync::Mutex<Vec<(PathBuf, Arc<crate::file_analysis::FileAnalysis>)>> =
             std::sync::Mutex::new(Vec::new());
@@ -834,7 +834,7 @@ pub fn index_pack_languages(
             }));
             if let Ok(Some(analysis)) = res {
                 let arc = Arc::new(analysis);
-                pack_index.register_classes(path.clone(), arc.clone());
+                pack_index.register_symbols(path.clone(), arc.clone());
                 fresh.lock().unwrap().push((canon, arc));
                 total.fetch_add(1, Ordering::Relaxed);
             }

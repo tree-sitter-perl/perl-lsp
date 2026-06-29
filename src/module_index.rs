@@ -732,12 +732,31 @@ impl ModuleIndex {
         self.pack_indexes.get(lang).map(|e| e.value().clone())
     }
 
-    pub fn register_classes(&self, path: std::path::PathBuf, analysis: Arc<FileAnalysis>) {
+    /// Register a pack-language file's named top-level entities — classes
+    /// AND free functions — by name, so cross-file member completion (`obj.`
+    /// → the class's file) and function goto-def (`compute()` → the file that
+    /// declares/defines it) both resolve. Last writer wins on a name
+    /// collision; a function_definition registered after its prototype means
+    /// goto-def lands on the body. Methods need no entry — they resolve
+    /// through their class's file.
+    pub fn register_symbols(&self, path: std::path::PathBuf, analysis: Arc<FileAnalysis>) {
         use crate::file_analysis::SymKind;
         let path = std::fs::canonicalize(&path).unwrap_or(path);
         let cached = Arc::new(CachedModule::new(path, analysis.clone()));
         for sym in &analysis.symbols {
-            if matches!(sym.kind, SymKind::Class) {
+            // Classes/typedefs (types), free functions, and FILE-SCOPE
+            // values (globals, object-like macros, enum constants). A
+            // file-scope value is an unpackaged Variable not nested in a
+            // function — locals (function-scoped) are excluded.
+            let is_exportable = matches!(sym.kind, SymKind::Class | SymKind::Sub)
+                || (matches!(sym.kind, SymKind::Variable)
+                    && sym.package.is_none()
+                    && analysis
+                        .scopes
+                        .iter()
+                        .find(|s| s.id == sym.scope)
+                        .is_some_and(|s| matches!(s.kind, crate::file_analysis::ScopeKind::File)));
+            if is_exportable {
                 self.workspace_modules.insert(sym.name.clone(), ());
                 self.cache.insert(sym.name.clone(), Some(cached.clone()));
             }

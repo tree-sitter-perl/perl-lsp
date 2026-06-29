@@ -412,6 +412,34 @@ pub fn find_definition(
         }
     }
 
+
+    // Generic cross-file goto-def for a call that didn't resolve locally or
+    // via Perl imports. Pack languages register free functions + file-scope
+    // vars/macros by name (register_symbols), so look the name up in the
+    // cross-file index -> the file that declares/defines it -> that symbol.
+    // (Perl's cache is keyed by MODULE name, so a bare-name lookup no-ops.)
+    if let Some(r) = analysis.ref_at(point) {
+        if matches!(r.kind, RefKind::FunctionCall { .. }) {
+            let name = r.unqualified_target_name();
+            if let Some(cached) = module_index.get_cached(name) {
+                if let Some(sym) = cached.analysis.symbols.iter().find(|s| {
+                    s.name == name
+                        && matches!(
+                            s.kind,
+                            crate::file_analysis::SymKind::Sub
+                                | crate::file_analysis::SymKind::Variable
+                        )
+                }) {
+                    if let Ok(uri) = Url::from_file_path(&cached.path) {
+                        return Some(GotoDefinitionResponse::Scalar(Location {
+                            uri,
+                            range: span_to_range(sym.selection_span),
+                        }));
+                    }
+                }
+            }
+        }
+    }
     None
 }
 

@@ -582,12 +582,13 @@ impl LanguageServer for Backend {
             Some(doc) => doc,
             None => return Ok(None),
         };
-        Ok(symbols::find_definition(
-            &doc.analysis,
-            pos,
-            uri,
-            &self.module_index,
-        ))
+        // cpp/pack functions live in the per-language sub-index; route there
+        // so cross-file function goto-def resolves (Perl uses the hub).
+        let pack = (doc.language != "perl")
+            .then(|| self.module_index.pack_index(doc.language))
+            .flatten();
+        let idx = pack.as_deref().unwrap_or(&self.module_index);
+        Ok(symbols::find_definition(&doc.analysis, pos, uri, idx))
     }
 
     async fn goto_implementation(
