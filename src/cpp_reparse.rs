@@ -253,6 +253,60 @@ pub fn parse_damage(node: tree_sitter::Node) -> usize {
     n
 }
 
+/// Length-preserving blanking of an UNRESOLVED declarator-position macro.
+/// `class API_EXPORT Foo {` — an export macro from a GENERATED header (Qt's
+/// `Q_CORE_EXPORT`, never in the source tree) the gather can't reach —
+/// parses as a corrupt function and the class evaporates. A class/struct
+/// head with TWO identifiers before its body has a macro in the first slot:
+/// valid C++ names the type once (the sole exception is `class Name final`).
+/// Blank the macro token with spaces (same length → every extracted span
+/// stays put, no SpliceMap needed) so the class parses. Runs unconditionally
+/// — a no-op on normal `class Name {`.
+fn strip_declarator_macros(src: &str) -> String {
+    let bytes = src.as_bytes();
+    let mut out = src.to_string();
+    // SAFETY: only ASCII spaces are written, over ASCII identifier bytes —
+    // length-preserving and UTF-8-valid.
+    let ob = unsafe { out.as_bytes_mut() };
+    let mut i = 0;
+    while i < bytes.len() {
+        let kwlen = if bytes[i..].starts_with(b"class") {
+            5
+        } else if bytes[i..].starts_with(b"struct") {
+            6
+        } else {
+            i += 1;
+            continue;
+        };
+        let word_boundary = (i == 0 || !is_ident_byte(bytes[i - 1]))
+            && bytes.get(i + kwlen).is_some_and(|b| b.is_ascii_whitespace());
+        if !word_boundary {
+            i += kwlen;
+            continue;
+        }
+        // IDENT1 (candidate macro), then IDENT2 (candidate name).
+        let mut p = i + kwlen;
+        let skip_ws = |p: &mut usize| while *p < bytes.len() && bytes[*p].is_ascii_whitespace() { *p += 1; };
+        let read_id = |p: &mut usize| { let s = *p; while *p < bytes.len() && is_ident_byte(bytes[*p]) { *p += 1; } (s, *p) };
+        skip_ws(&mut p);
+        let (id1s, id1e) = read_id(&mut p);
+        skip_ws(&mut p);
+        let (id2s, id2e) = read_id(&mut p);
+        skip_ws(&mut p);
+        let head = p < bytes.len() && matches!(bytes[p], b'{' | b':' | b'<');
+        if id1e > id1s && id2e > id2s && head {
+            let id2 = &src[id2s..id2e];
+            if id2 != "final" && id2 != "sealed" {
+                for b in &mut ob[id1s..id1e] {
+                    *b = b' ';
+                }
+            }
+        }
+        i += kwlen;
+    }
+    out
+}
+
 /// Expand, then **let the parser validate**: keep the transform only if
 /// it does not increase parse damage. This is the doc's load-bearing
 /// principle — an expansion that helps (declarator macros, simple
@@ -286,6 +340,11 @@ pub fn preprocess_validated_with(
     src: &str,
     external: &BTreeMap<String, Macro>,
 ) -> (String, SpliceMap) {
+    // Blank unresolved declarator-position macros first (length-preserving,
+    // unconditional — recovers `class Q_CORE_EXPORT Foo` even when the macro
+    // is unreachable). Spans stay in original coordinates.
+    let stripped = strip_declarator_macros(src);
+    let src = stripped.as_str();
     let Some(tree) = parser.parse(src, None) else {
         return (src.to_string(), SpliceMap::default());
     };
