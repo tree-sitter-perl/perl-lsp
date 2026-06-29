@@ -19,10 +19,14 @@
   (macro_command
     (argument_list . (argument) @def.sub.name))) @def.sub @scope
 
-; ---- every command: name + ordered args, classified by the pack ----
+; ---- every command: name + its FIRST argument (the entity it declares —
+; `set(VAR ...)`, `add_library(TARGET ...)`; all cmake Def effects are
+; name_arg:0). The `.` anchor is load-bearing: without it the pattern
+; matched once PER argument, so `set(V ${X} PARENT_SCOPE)` named the var
+; ref + the keyword as defs too. ----
 (normal_command
   (identifier) @cmd
-  (argument_list (argument) @cmd.arg))
+  (argument_list . (argument) @cmd.arg))
 ; commands with no arguments still get their invocation ref
 (normal_command
   (identifier) @cmd)
