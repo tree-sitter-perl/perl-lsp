@@ -59,12 +59,14 @@
   declarator: (function_declarator
     declarator: (identifier) @def.sub.name)) @def.sub @scope
 (function_definition
+  type: (_) @rettype
   declarator: (function_declarator
     declarator: (field_identifier) @def.method.name)) @def.method @scope
 ; out-of-line definition `RetT Class::method(...) { ... }` — @qualifier
 ; carries the `Class::` so the method attributes to its class, not the
 ; enclosing namespace.
 (function_definition
+  type: (_) @rettype
   declarator: (function_declarator
     declarator: (qualified_identifier
       scope: (_) @qualifier
@@ -86,16 +88,21 @@
       name: (identifier) @def.method.name))) @def.method
 
 ; ---- in-class method declarations (prototypes) & member fields ----
+; @rettype carries the declared return type → the method's return-type
+; witness (drives `box.getInner().` chaining through MethodOnClass).
 (field_declaration
+  type: (_) @rettype
   declarator: (function_declarator
     declarator: (field_identifier) @def.method.name)) @def.method
 ; pointer- / reference-returning methods (`Foo* m()`, `Foo& m()`):
 ; the function_declarator nests inside a pointer/reference wrapper.
 (field_declaration
+  type: (_) @rettype
   declarator: (pointer_declarator
     declarator: (function_declarator
       declarator: (field_identifier) @def.method.name))) @def.method
 (field_declaration
+  type: (_) @rettype
   declarator: (reference_declarator
     (function_declarator
       declarator: (field_identifier) @def.method.name))) @def.method

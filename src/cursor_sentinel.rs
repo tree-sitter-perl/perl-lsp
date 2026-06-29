@@ -302,12 +302,29 @@ fn resolve_node_type(
     analysis: &FileAnalysis,
     module_index: Option<&dyn CrossFileLookup>,
 ) -> Option<InferredType> {
+    // a member ACCESS `recv.field` — field-on-class.
     if cfg.member_kinds.contains(&node.kind()) {
         let base = node.named_child(0)?;
         let field = node.named_child(node.named_child_count() - 1)?;
         let class = resolve_node_type(base, cfg, src, analysis, module_index)?.class_name()?.to_string();
         let field_name = field.utf8_text(src.as_bytes()).ok()?;
         return analysis.field_type_on_class(&class, field_name, module_index);
+    }
+    // a method CALL `recv.method(...)` — the method's return on the
+    // receiver's class, resolved through MethodOnClass (inheritance +
+    // cross-file flow through the same chase, no special-casing).
+    if node.kind() == "call_expression" {
+        let func = node.child_by_field_name("function")?;
+        if cfg.member_kinds.contains(&func.kind()) {
+            let recv = func.named_child(0)?;
+            let method = func.named_child(func.named_child_count() - 1)?;
+            let class = resolve_node_type(recv, cfg, src, analysis, module_index)?
+                .class_name()?
+                .to_string();
+            let method_name = method.utf8_text(src.as_bytes()).ok()?;
+            return analysis.find_method_return_type(&class, method_name, module_index, None);
+        }
+        return None;
     }
     let span = Span { start: node.start_position(), end: node.end_position() };
     analysis.expr_type_at_span(span, module_index)

@@ -2,11 +2,57 @@
   "capability": "completion",
   "rows": [
     {
-      "id": "cpp-xfail-chained-method-call",
-      "difficulty": "hard", "semantic_area": "cpp-multilang",
-      "lang": "cpp", "root": "gold-corpus/cpp-fixture",
-      "file": "methodchain.cpp", "line": 12, "col": 17,
-      "expect": { "all": ["deep", "leaf"], "none": [] },
+      "id": "cpp-chained-method-call",
+      "difficulty": "hard",
+      "semantic_area": "cpp-multilang",
+      "lang": "cpp",
+      "root": "gold-corpus/cpp-fixture",
+      "file": "methodchain.cpp",
+      "line": 12,
+      "col": 17,
+      "expect": {
+        "all": [
+          "deep",
+          "leaf"
+        ],
+        "none": [
+          "grow"
+        ]
+      },
+      "status": "gold"
+    },
+    {
+      "id": "cpp-inherited-method-return-chain",
+      "difficulty": "hard",
+      "semantic_area": "cpp-multilang",
+      "lang": "cpp",
+      "root": "gold-corpus/cpp-fixture",
+      "file": "inhchain.cpp",
+      "line": 14,
+      "col": 13,
+      "expect": {
+        "all": [
+          "deep"
+        ],
+        "none": []
+      },
+      "status": "gold"
+    },
+    {
+      "id": "cpp-xfail-auto-deduced-return",
+      "difficulty": "hard",
+      "semantic_area": "cpp-multilang",
+      "lang": "cpp",
+      "root": "gold-corpus/cpp-fixture",
+      "file": "autoret.cpp",
+      "line": 12,
+      "col": 17,
+      "expect": {
+        "all": [
+          "deep"
+        ],
+        "none": []
+      },
       "status": "xfail"
     }
   ]

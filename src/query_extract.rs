@@ -43,6 +43,9 @@ pub struct SkelSymbol {
     /// Innermost `@scope` nesting depth (0 = file).
     pub scope_depth: usize,
     pub scope: crate::file_analysis::ScopeId,
+    /// Declared return type (`@rettype`), for methods/functions — drives
+    /// method-return resolution + chaining through MethodOnClass.
+    pub return_type: Option<InferredType>,
 }
 
 #[derive(Debug, Clone)]
@@ -116,6 +119,52 @@ impl SkeletonAnalysis {
                 && s.package.as_deref().is_some_and(|p| class_names.contains(p))
             {
                 s.kind = SymKind::Method;
+            }
+        }
+        // Writeback-lite: route method returns through MethodOnClass so
+        // `box.getInner().` chains, inherited returns, and cross-file all
+        // resolve via the SAME chase Perl uses — no bypass. Declared
+        // returns need no fixpoint (the type is in the syntax); only the
+        // edge-minting half of the fold's writeback is needed here.
+        {
+            use crate::witnesses::{Witness, WitnessAttachment as WA, WitnessPayload as WP, WitnessSource};
+            let mk = |att: WA, pay: WP, span: Span| Witness {
+                attachment: att,
+                source: WitnessSource::Builder("cpp_method_return".into()),
+                payload: pay,
+                span,
+            };
+            for (i, sym) in symbols.iter().enumerate() {
+                if !matches!(sym.kind, SymKind::Method | SymKind::Sub) {
+                    continue;
+                }
+                if let Some(ret) = &self.symbols[i].return_type {
+                    bag.push(mk(WA::Symbol(sym.id), WP::InferredType(ret.clone()), sym.span));
+                }
+                if matches!(sym.kind, SymKind::Method) {
+                    if let Some(class) = &sym.package {
+                        bag.push(mk(
+                            WA::MethodOnClass { class: class.clone(), name: sym.name.clone() },
+                            WP::Edge(WA::Symbol(sym.id)),
+                            sym.span,
+                        ));
+                    }
+                }
+            }
+            // Inheritance edges: MethodOnClass{child,m} → Edge(parent,m), so
+            // the registry walks the MRO for an inherited method's return.
+            for (child, parent) in &self.parents {
+                for sym in &symbols {
+                    if matches!(sym.kind, SymKind::Method)
+                        && sym.package.as_deref() == Some(parent.as_str())
+                    {
+                        bag.push(mk(
+                            WA::MethodOnClass { class: child.clone(), name: sym.name.clone() },
+                            WP::Edge(WA::MethodOnClass { class: parent.clone(), name: sym.name.clone() }),
+                            sym.span,
+                        ));
+                    }
+                }
             }
         }
         let refs: Vec<crate::file_analysis::Ref> = self
@@ -457,9 +506,11 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     // ---- join def name-captures to their def event ----
     use std::collections::HashMap;
     let mut names_by_match: HashMap<(usize, String), (String, Point, Point)> = HashMap::new();
-    // `@qualifier` (a `Class::` on an out-of-line def) — pre-collected like
-    // names because the `@def` event fires before the inner qualifier.
+    // `@qualifier` (a `Class::` on an out-of-line def) and `@rettype` (a
+    // method's declared return type) — pre-collected like names because the
+    // `@def` event fires before these inner captures.
     let mut qualifier_by_match: HashMap<usize, String> = HashMap::new();
+    let mut rettype_by_match: HashMap<usize, String> = HashMap::new();
     for e in &events {
         if let Some(prefix) = e.cap.strip_suffix(".name") {
             names_by_match
@@ -467,6 +518,9 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
         }
         if e.cap == "qualifier" {
             qualifier_by_match.insert(e.match_id, e.text.clone());
+        }
+        if e.cap == "rettype" {
+            rettype_by_match.insert(e.match_id, e.text.clone());
         }
     }
 
@@ -651,6 +705,9 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                     package: pkg,
                     scope_depth: scope_stack.len(),
                     scope: cur_scope,
+                    return_type: rettype_by_match
+                        .get(&e.match_id)
+                        .and_then(|t| (pack.annot_type)(t)),
                 });
             }
             cap if cap.starts_with("ref.") => {
@@ -892,6 +949,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                             package: None,
                             scope_depth: 0,
                             scope: *scope,
+                            return_type: None,
                         });
                     }
                 }

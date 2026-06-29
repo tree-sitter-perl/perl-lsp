@@ -13,6 +13,7 @@ CRASH) → minimal-repro each interesting case → fix or codify as gold
 | cross-file namespace macro (`SPDLOG_NAMESPACE_BEGIN` in another header) | spdlog | **FIXED** — cross-file macro resolution (gather #defines from #included headers) | cpp-cross-file-namespace-macro-resolved (gold), ns_macro (xfail: unincluded) |
 | self-referential macro OOM (`#define M x // M M`) | Dear ImGui | **FIXED** — blue-paint guard + comment strip + size cap | cpp-selfref-macro-no-oom (gold) |
 | out-of-line `Class::method` loses qualifier (attributed to namespace) | leveldb, fmt | **FIXED** — `@qualifier` capture → package | cpp-out-of-line-method-qualifier (gold) |
+| chained METHOD calls (`box.getX().`, incl. inherited) | (design) | **FIXED** — method-return writeback-lite through MethodOnClass | cpp-chained-method-call, cpp-inherited-method-return-chain (gold) |
 | template member fn classified as `Sub` | json, fmt, range-v3 | **FIXED** — a sub owned by a class is a method (into_file_analysis) | cpp-template-member-is-method (gold) |
 | macro-recovered spans in original coords | (design) | FIXED earlier | — |
 
@@ -38,9 +39,6 @@ projects) — now guarded.
 - **`concept X = ...` emits no symbol** (cpp-xfail-concept-symbol). Needs a
   `Concept` SymKind (or a least-wrong mapping) — a model ripple. Low
   frequency (libs hide concepts behind their own macros).
-- **Chained METHOD calls** `box.getX().` (cpp-xfail-chained-method-call).
-  Field chains (`box.x.`) work; method chains need the method's RETURN
-  type, which the cpp pack can't store the way fields do (fields are
-  variables with witnesses; method returns aren't, and the pack doesn't
-  run the type-fold). Needs method return-type emission + a class-keyed
-  query.
+- **`auto`/deduced return types** (cpp-xfail-auto-deduced-return). The
+  return depends on the body, which needs the iterative fold the cpp pack
+  doesn't run. Declared returns work; `auto` is the tail.
