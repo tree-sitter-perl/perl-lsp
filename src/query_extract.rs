@@ -76,6 +76,10 @@ pub struct SkeletonAnalysis {
     /// scope-chain walk WITHOUT the declared-before constraint (a forward
     /// goto is valid C).
     pub label_refs: Vec<(String, crate::file_analysis::ScopeId, crate::file_analysis::Span)>,
+    /// The pack's receiver param names (Python `self`/`cls`). A Variable so
+    /// named is the method receiver, not a class member — its (wrongly
+    /// sticky-tagged) class package is cleared in `into_file_analysis`.
+    pub receiver_names: Vec<String>,
 }
 
 impl SkeletonAnalysis {
@@ -324,6 +328,10 @@ impl SkeletonAnalysis {
             package_parents,
             ..Default::default()
         });
+        // Pack-declared receiver names ride the FA so core's member /
+        // outline filters can exclude them generically (lang semantics in
+        // the pack, generic logic in core).
+        fa.receiver_names = std::mem::take(&mut self.receiver_names);
         // Seal base_*_count so a later enrich pass (the CLI/--batch path
         // runs it unconditionally) truncates to the FULL analysis, not to
         // zero — otherwise enrichment wipes every pack-language symbol.
@@ -379,6 +387,13 @@ pub struct LangPack {
     /// completion (and reports the char in `CompletionContext`) when one is
     /// typed. C++ `. > :` cover `.`/`->`/`::`; the member path keys off them.
     pub trigger_chars: &'static [&'static str],
+    /// The language's method-RECEIVER parameter names (Python `self`/`cls`,
+    /// C++ `this`). A receiver param is lexically inside the class body, so
+    /// the sticky class context tags it — but it is NOT a member. Extraction
+    /// clears its package so it reads as a plain local. Lang-specific
+    /// semantics → the pack owns it (NOT core `conventions.rs`, which is
+    /// Perl's `$self`/`$class`).
+    pub receiver_names: &'static [&'static str],
 }
 
 /// One effect of a command-dispatched statement.
@@ -418,6 +433,7 @@ pub fn perl_pack() -> LangPack {
         cmd_effects: |_| vec![],
         narrow_guard: |_, _| None,
         trigger_chars: &["$", "@", "%", ">", ":", "{"],
+        receiver_names: &[],
     }
 }
 
@@ -453,6 +469,7 @@ pub fn python_pack() -> LangPack {
         // `isinstance(x, Foo)` narrows x to Foo inside the guard.
         narrow_guard: |guard, ty| (guard == "isinstance").then(|| InferredType::ClassName(ty.to_string())),
         trigger_chars: &["."],
+        receiver_names: &["self", "cls"],
     }
 }
 
@@ -477,6 +494,7 @@ pub fn r_pack() -> LangPack {
         cmd_effects: |_| vec![],
         narrow_guard: |_, _| None,
         trigger_chars: &["$", "@", ":"],
+        receiver_names: &[],
     }
 }
 
@@ -514,6 +532,7 @@ pub fn cmake_pack() -> LangPack {
         },
         narrow_guard: |_, _| None,
         trigger_chars: &["{", "("],
+        receiver_names: &[],
     }
 }
 
@@ -565,6 +584,7 @@ pub fn cpp_pack() -> LangPack {
         cmd_effects: |_| vec![],
         narrow_guard: |_, _| None,
         trigger_chars: &[".", ">", ":"],
+        receiver_names: &["this"],
     }
 }
 
@@ -656,6 +676,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
 
     // ---- the state machine: scope stack + sticky contexts ----
     let mut out = SkeletonAnalysis::default();
+    out.receiver_names = pack.receiver_names.iter().map(|s| s.to_string()).collect();
     // (end_byte, ScopeId) — real Scope rows are minted as we go so the
     // resulting FileAnalysis carries a genuine lexical tree.
     let mut scope_stack: Vec<(usize, crate::file_analysis::ScopeId)> = Vec::new();

@@ -2182,6 +2182,14 @@ pub struct FileAnalysis {
     #[serde(default)]
     pub package_ranges: Vec<PackageRange>,
 
+    /// The language's method-RECEIVER param names (Python `self`/`cls`),
+    /// from the LangPack. A receiver is lexically inside the class so the
+    /// sticky context tags it, but it is NOT a member — member completion
+    /// and the outline exclude these names. Empty for Perl (its receiver
+    /// convention lives in `conventions.rs`).
+    #[serde(default)]
+    pub receiver_names: Vec<String>,
+
     /// Parent classes for each package in this file.
     /// Populated by the builder from use parent/base, @ISA, and class :isa.
     pub package_parents: HashMap<String, Vec<String>>,
@@ -2568,6 +2576,7 @@ impl FileAnalysis {
         } = parts;
         witnesses.rebuild_index();
         let mut fa = FileAnalysis {
+            receiver_names: Vec::new(),
             scopes,
             symbols,
             refs,
@@ -4365,9 +4374,7 @@ impl FileAnalysis {
             if matches!(sym.kind, SymKind::Variable | SymKind::Field)
                 && self.symbol_in_class(sym.id, cls)
                 && class_body.is_none_or(|cb| sym.scope == cb)
-                // the receiver param (`self`/`cls`) is tagged with the class
-                // by the sticky context but is NOT a member.
-                && !crate::conventions::is_conventional_invocant_name(&sym.name)
+                && !self.receiver_names.contains(&sym.name)
                 && seen.insert(sym.name.clone())
             {
                 candidates.push(CompletionCandidate {
@@ -7499,6 +7506,11 @@ impl FileAnalysis {
 
         for sym in &self.symbols {
             if sym.scope != parent_scope {
+                continue;
+            }
+            // The method receiver (`self`/`cls`) is tagged with the class by
+            // the sticky context but isn't outline structure.
+            if matches!(sym.kind, SymKind::Variable) && self.receiver_names.contains(&sym.name) {
                 continue;
             }
             // Local variables — navigation targets (goto-def, hover) but not

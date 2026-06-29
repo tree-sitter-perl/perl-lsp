@@ -19,8 +19,7 @@
 pub fn is_conventional_invocant_name(name: &str) -> bool {
     matches!(
         name.strip_prefix('$').unwrap_or(name),
-        // self/class/this/proto: Perl; cls: Python classmethod receiver.
-        "self" | "class" | "this" | "proto" | "cls"
+        "self" | "class" | "this" | "proto"
     )
 }
 
