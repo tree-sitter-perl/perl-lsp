@@ -114,13 +114,18 @@ impl SkeletonAnalysis {
                 resolved_method_target: None,
             })
             .collect();
-        FileAnalysis::new(FileAnalysisParts {
+        let mut fa = FileAnalysis::new(FileAnalysisParts {
             scopes: self.scopes,
             symbols,
             refs,
             witnesses: bag,
             ..Default::default()
-        })
+        });
+        // Seal base_*_count so a later enrich pass (the CLI/--batch path
+        // runs it unconditionally) truncates to the FULL analysis, not to
+        // zero — otherwise enrichment wipes every pack-language symbol.
+        fa.finalize_post_walk();
+        fa
     }
 }
 

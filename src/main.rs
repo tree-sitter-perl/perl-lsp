@@ -724,6 +724,17 @@ fn cli_open_document(file: &str, idx: &module_index::ModuleIndex) -> document::D
         eprintln!("Cannot read {}: {}", file, e);
         std::process::exit(1);
     });
+    // Route a pack language (cpp, ...) through its driver so the CLI
+    // cursor handlers (definition/references/highlight/…) match the LSP
+    // server. Perl + unknown extensions keep Document::new + enrichment.
+    let reg = language_driver::LanguageRegistry::with_enabled();
+    let pack = reg.for_path(std::path::Path::new(file)).filter(|d| d.id() != "perl");
+    if let Some(driver) = pack {
+        return tphase!("Document::new_routed", document::Document::new_routed(text, driver).unwrap_or_else(|| {
+            eprintln!("Parse failed: {}", file);
+            std::process::exit(1);
+        }));
+    }
     let mut doc = tphase!("Document::new (parse+build)", document::Document::new(text).unwrap_or_else(|| {
         eprintln!("Parse failed: {}", file);
         std::process::exit(1);
