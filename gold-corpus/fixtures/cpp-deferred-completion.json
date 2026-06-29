@@ -1,0 +1,13 @@
+{
+  "capability": "completion",
+  "rows": [
+    {
+      "id": "cpp-xfail-chained-method-call",
+      "difficulty": "hard", "semantic_area": "cpp-multilang",
+      "lang": "cpp", "root": "gold-corpus/cpp-fixture",
+      "file": "methodchain.cpp", "line": 12, "col": 17,
+      "expect": { "all": ["deep", "leaf"], "none": [] },
+      "status": "xfail"
+    }
+  ]
+}

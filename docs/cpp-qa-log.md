@@ -32,3 +32,15 @@ projects) — now guarded.
 - **nlohmann/json** (47 headers): 40 ok, 6 empty (all macro-only/forward-decl
   — legit), **0 real structure-corrupt (was 4), 0 crash**. The cross-file
   namespace-macro fix fully resolved json's corruption.
+
+## Deferred (xfail — need a model change, tracked → XPASS when fixed)
+
+- **`concept X = ...` emits no symbol** (cpp-xfail-concept-symbol). Needs a
+  `Concept` SymKind (or a least-wrong mapping) — a model ripple. Low
+  frequency (libs hide concepts behind their own macros).
+- **Chained METHOD calls** `box.getX().` (cpp-xfail-chained-method-call).
+  Field chains (`box.x.`) work; method chains need the method's RETURN
+  type, which the cpp pack can't store the way fields do (fields are
+  variables with witnesses; method returns aren't, and the pack doesn't
+  run the type-fold). Needs method return-type emission + a class-keyed
+  query.
