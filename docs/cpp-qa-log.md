@@ -72,9 +72,24 @@ spdlog/json/cross-file all still green.
 
 ## Follow-ups from live perl5 use (op.c)
 - **goto-def on local vars** — C local variable references don't resolve to
-  their declaration. Needs local-var ref→def resolution in the pack path
-  (the skeleton emits @flow.target on declarations + @expr.read.var on
-  reads; the resolve step is missing for pack languages).
+  their declaration: the pack emits `@expr.read.var` only as a *type*
+  witness and `@flow.target` only for *type tracking* — neither a Symbol nor
+  a resolvable Ref. Implementation plan (a real feature, ~the size of the
+  type-witness join):
+  1. Distinguish local/param `@flow.target` (from `declaration` /
+     `parameter_declaration`) from FIELD `@flow.target` (from
+     `field_declaration` — already a `@def.var` Symbol). They share the
+     capture today; add a distinct capture (`@def.local`) or tag by source
+     pattern so we don't double-emit fields.
+  2. Emit local/param decls as Variable Symbols (scoped to the body).
+  3. Emit `@expr.read.var` reads ALSO as Refs; resolve each to the nearest
+     decl by walking `Scope.parent` (name match, declared-before by point).
+     Only emit the Ref when a local decl matches — else leave it for the
+     existing function-by-name goto-def.
+  4. Outline: `outline_children_of` recurses into Sub/Method bodies, so
+     local Variables would clutter. Skip Variables whose enclosing scope is
+     a Sub/Block (not a Class) — a general fix (Perl locals shouldn't be in
+     the outline either; verify no Perl regression).
 - **function defs hidden behind signature macros** — perl5 functions are
   `OP * Perl_newOP(pTHX_ I32 type, ...)`; if `pTHX_`/`pTHX` (thread-context
   macros from perl.h) aren't expanded, the function_declarator corrupts and
