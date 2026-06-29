@@ -758,6 +758,11 @@ pub fn index_pack_languages(
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
 
+    // Persist the transitive macro table across sessions (kills the
+    // cold-start gather over perl.h's closure) — pointed at this workspace's
+    // cache dir.
+    crate::cpp_reparse::set_macro_persist_dir(module_cache::cache_dir_for_workspace(cache_key));
+
     let reg = crate::language_driver::LanguageRegistry::with_enabled();
     let total = AtomicUsize::new(0);
     for lang in reg.languages() {

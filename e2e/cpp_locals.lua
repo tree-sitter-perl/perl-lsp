@@ -37,4 +37,4 @@ t.test("outline hides locals, keeps fields+funcs", function()
   if t.ok(N, not set["result"] and not set["factor"], "no result/factor: " .. vim.inspect(names)) then t.pass(N) end
 end)
 
-t.done()
+t.finish()

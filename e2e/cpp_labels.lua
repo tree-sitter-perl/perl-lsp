@@ -18,4 +18,4 @@ t.test("labels are hidden from the outline", function()
   local set = {}; for _, n in ipairs(names) do set[n] = true end
   if t.ok(N, set["f"] and not set["done"], "f shown, done hidden: " .. vim.inspect(names)) then t.pass(N) end
 end)
-t.done()
+t.finish()

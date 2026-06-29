@@ -33,7 +33,7 @@
 use std::collections::BTreeMap;
 use tree_sitter::{Query, QueryCursor, StreamingIterator, Tree};
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Macro {
     /// `Some(params)` = function-like; `None` = object-like.
     pub params: Option<Vec<String>>,
@@ -337,6 +337,75 @@ fn include_set_hash(src: &str) -> u64 {
     h.finish()
 }
 
+/// Bump when the persisted macro-table format or the gather's semantics
+/// change in a way that invalidates on-disk blobs.
+const MACRO_CACHE_VERSION: i64 = 1;
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct PersistedMacros {
+    include_hash: u64,
+    version: i64,
+    /// Every transitively-#included header + its mtime — the table is valid
+    /// only while none of them changed (cross-session correctness; the
+    /// in-memory cache leans on include_hash alone within a session).
+    headers: Vec<(std::path::PathBuf, i64)>,
+    table: MacroTable,
+}
+
+/// On-disk macro-table cache dir, set once at startup (the CLI / LSP know
+/// the workspace root → cache dir). `None` ⇒ persistence off (tests).
+fn macro_persist_dir() -> &'static std::sync::OnceLock<Option<std::path::PathBuf>> {
+    static D: std::sync::OnceLock<Option<std::path::PathBuf>> = std::sync::OnceLock::new();
+    &D
+}
+
+/// Point the persisted macro cache at a workspace's cache dir (a `macros/`
+/// subdir under it). Idempotent; first call wins.
+pub fn set_macro_persist_dir(workspace_cache_dir: Option<std::path::PathBuf>) {
+    let resolved = workspace_cache_dir.map(|d| {
+        let p = d.join("macros");
+        let _ = std::fs::create_dir_all(&p);
+        p
+    });
+    let _ = macro_persist_dir().set(resolved);
+}
+
+fn persist_path(file_path: &std::path::Path) -> Option<std::path::PathBuf> {
+    use std::hash::{Hash, Hasher};
+    let dir = macro_persist_dir().get()?.clone()?;
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    file_path.hash(&mut h);
+    Some(dir.join(format!("{:016x}.bin", h.finish())))
+}
+
+fn load_persisted(file_path: &std::path::Path, inc_hash: u64) -> Option<MacroTable> {
+    let p = persist_path(file_path)?;
+    let raw = zstd::decode_all(std::fs::read(&p).ok()?.as_slice()).ok()?;
+    let pm: PersistedMacros = bincode::deserialize(&raw).ok()?;
+    if pm.include_hash != inc_hash || pm.version != MACRO_CACHE_VERSION {
+        return None;
+    }
+    if pm.headers.iter().any(|(hp, mt)| mtime_secs(hp) != *mt) {
+        return None; // a header changed on disk
+    }
+    Some(pm.table)
+}
+
+fn save_persisted(
+    file_path: &std::path::Path,
+    inc_hash: u64,
+    headers: Vec<(std::path::PathBuf, i64)>,
+    table: &MacroTable,
+) {
+    let Some(p) = persist_path(file_path) else { return };
+    let pm = PersistedMacros { include_hash: inc_hash, version: MACRO_CACHE_VERSION, headers, table: table.clone() };
+    if let Ok(raw) = bincode::serialize(&pm) {
+        if let Ok(z) = zstd::encode_all(raw.as_slice(), 3) {
+            let _ = std::fs::write(&p, z);
+        }
+    }
+}
+
 pub fn included_macros(
     file_path: &std::path::Path,
     src: &str,
@@ -344,6 +413,7 @@ pub fn included_macros(
 ) -> std::sync::Arc<MacroTable> {
     let key = file_path.to_path_buf();
     let inc_hash = include_set_hash(src);
+    // 1. in-memory (this session)
     if let Ok(cache) = macro_table_cache().lock() {
         if let Some((h, m)) = cache.get(&key) {
             if *h == inc_hash {
@@ -351,19 +421,31 @@ pub fn included_macros(
             }
         }
     }
-    let map = std::sync::Arc::new(gather_included_macros(file_path, src, parser));
-    if let Ok(mut cache) = macro_table_cache().lock() {
-        cache.insert(key, (inc_hash, map.clone()));
+    // 2. on-disk (across sessions) — kills the cold-start gather
+    if let Some(table) = load_persisted(file_path, inc_hash) {
+        let arc = std::sync::Arc::new(table);
+        if let Ok(mut cache) = macro_table_cache().lock() {
+            cache.insert(key, (inc_hash, arc.clone()));
+        }
+        return arc;
     }
-    map
+    // 3. gather cold, then warm both tiers
+    let (table, headers) = gather_included_macros(file_path, src, parser);
+    save_persisted(file_path, inc_hash, headers, &table);
+    let arc = std::sync::Arc::new(table);
+    if let Ok(mut cache) = macro_table_cache().lock() {
+        cache.insert(key, (inc_hash, arc.clone()));
+    }
+    arc
 }
 
 fn gather_included_macros(
     file_path: &std::path::Path,
     src: &str,
     parser: &mut tree_sitter::Parser,
-) -> BTreeMap<String, Macro> {
+) -> (BTreeMap<String, Macro>, Vec<(std::path::PathBuf, i64)>) {
     let mut macros = BTreeMap::new();
+    let mut headers: Vec<(std::path::PathBuf, i64)> = Vec::new();
     let mut seen = std::collections::HashSet::new();
     if let Ok(p) = file_path.canonicalize() {
         seen.insert(p);
@@ -387,6 +469,7 @@ fn gather_included_macros(
         }
         let info = header_info(&canon, parser);
         let Some(info) = info else { continue };
+        headers.push((canon.clone(), mtime_secs(&canon)));
         for (k, v) in &info.macros {
             macros.entry(k.clone()).or_insert_with(|| v.clone());
         }
@@ -396,7 +479,18 @@ fn gather_included_macros(
             }
         }
     }
-    macros
+    (macros, headers)
+}
+
+/// File mtime in whole seconds since the epoch (0 if unreadable) — the
+/// persisted macro table's per-header validation stamp.
+fn mtime_secs(path: &std::path::Path) -> i64 {
+    std::fs::metadata(path)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
 }
 
 /// A header's cached (macros + include edges), by (path, mtime). The cache

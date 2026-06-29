@@ -18,4 +18,4 @@ t.test("thread-context wrapper newThing() -> Perl_newThing", function()
   local def = lsp.def_line(buf, l, c)
   if t.eq(N, b.find_line(buf, "int Perl_newThing"), def, "newThing resolves to Perl_newThing") then t.pass(N) end
 end)
-t.done()
+t.finish()
