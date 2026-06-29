@@ -79,7 +79,7 @@ impl SkeletonAnalysis {
         for w in self.witnesses {
             bag.push(w);
         }
-        let symbols: Vec<Symbol> = self
+        let mut symbols: Vec<Symbol> = self
             .symbols
             .iter()
             .enumerate()
@@ -102,6 +102,22 @@ impl SkeletonAnalysis {
                 outline_label: None,
             })
             .collect();
+        // A function whose owning package is a CLASS is a method. Covers
+        // template members, which tree-sitter parses as a plain
+        // `declaration` (identifier, not field_identifier) so they classify
+        // as Sub — but a sub owned by a class is a method, by definition.
+        let class_names: std::collections::HashSet<String> = symbols
+            .iter()
+            .filter(|s| matches!(s.kind, SymKind::Class))
+            .map(|s| s.name.clone())
+            .collect();
+        for s in &mut symbols {
+            if matches!(s.kind, SymKind::Sub)
+                && s.package.as_deref().is_some_and(|p| class_names.contains(p))
+            {
+                s.kind = SymKind::Method;
+            }
+        }
         let refs: Vec<crate::file_analysis::Ref> = self
             .refs
             .iter()

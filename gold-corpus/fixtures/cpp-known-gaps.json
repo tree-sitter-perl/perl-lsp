@@ -36,6 +36,25 @@
         ]
       },
       "status": "gold"
+    },
+    {
+      "id": "cpp-template-member-is-method",
+      "difficulty": "moderate",
+      "semantic_area": "cpp-multilang",
+      "lang": "cpp",
+      "root": "gold-corpus/cpp-fixture",
+      "file": "tmpl_member.cpp",
+      "line": 0,
+      "col": 0,
+      "expect": {
+        "all": [
+          "\"kind\":\"Method\",\"line\":\"3\",\"name\":\"add\""
+        ],
+        "none": [
+          "\"kind\":\"Sub\",\"line\":\"3\",\"name\":\"add\""
+        ]
+      },
+      "status": "gold"
     }
   ]
 }

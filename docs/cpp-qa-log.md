@@ -13,13 +13,13 @@ CRASH) → minimal-repro each interesting case → fix or codify as gold
 | cross-file namespace macro (`SPDLOG_NAMESPACE_BEGIN` in another header) | spdlog | **FIXED** — cross-file macro resolution (gather #defines from #included headers) | cpp-cross-file-namespace-macro-resolved (gold), ns_macro (xfail: unincluded) |
 | self-referential macro OOM (`#define M x // M M`) | Dear ImGui | **FIXED** — blue-paint guard + comment strip + size cap | cpp-selfref-macro-no-oom (gold) |
 | out-of-line `Class::method` loses qualifier (attributed to namespace) | leveldb, fmt | **FIXED** — `@qualifier` capture → package | cpp-out-of-line-method-qualifier (gold) |
+| template member fn classified as `Sub` | json, fmt, range-v3 | **FIXED** — a sub owned by a class is a method (into_file_analysis) | cpp-template-member-is-method (gold) |
 | macro-recovered spans in original coords | (design) | FIXED earlier | — |
 
 ## Open (scout-found, not yet fixed)
 
 | gap | found in | freq | plan |
 |---|---|---|---|
-| template member fn → `Sub` not `Method` | json, fmt, range-v3 | high | classification fix when a `template<>` clause precedes a member |
 | nested qualified class `class A::B` → `Sub`, wrong kind | leveldb | low | fold into the qualified-declarator fix |
 | `concept X = ...` emits no symbol | range-v3 (raw C++20) | low | new symbol kind — deeper |
 
