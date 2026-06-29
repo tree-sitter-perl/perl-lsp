@@ -196,7 +196,7 @@ fn cli_lang_analyze(file: &str) {
         eprintln!("cannot read {file}");
         std::process::exit(1);
     };
-    let fa = driver.analyze(&src);
+    let fa = driver.analyze_with_path(&src, Some(std::path::Path::new(path)));
     println!("# {file} [{}] — {} symbols", driver.id(), fa.symbols.len());
     for s in &fa.symbols {
         let pkg = s.package.as_deref().unwrap_or("");
@@ -283,7 +283,7 @@ fn parse_file(path: &str) -> (String, tree_sitter::Tree, file_analysis::FileAnal
             eprintln!("Parse failed: {}", path);
             std::process::exit(1);
         });
-        let analysis = driver.analyze(&source);
+        let analysis = driver.analyze_with_path(&source, Some(std::path::Path::new(path)));
         return (source, tree, analysis);
     }
     let mut parser = module_resolver::create_parser();
@@ -731,7 +731,7 @@ fn cli_open_document(file: &str, idx: &module_index::ModuleIndex) -> document::D
     let reg = language_driver::LanguageRegistry::with_enabled();
     let pack = reg.for_path(std::path::Path::new(file)).filter(|d| d.id() != "perl");
     if let Some(driver) = pack {
-        return tphase!("Document::new_routed", document::Document::new_routed(text, driver).unwrap_or_else(|| {
+        return tphase!("Document::new_routed", document::Document::new_routed(text, driver, Some(std::path::PathBuf::from(file))).unwrap_or_else(|| {
             eprintln!("Parse failed: {}", file);
             std::process::exit(1);
         }));

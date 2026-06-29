@@ -26,6 +26,12 @@ pub trait LanguageDriver: Send + Sync {
     fn make_parser(&self) -> tree_sitter::Parser;
     /// Source → `FileAnalysis`.
     fn analyze(&self, source: &str) -> FileAnalysis;
+    /// Source + the file's path → `FileAnalysis`. The path lets a driver
+    /// resolve cross-file context (C++ gathers `#define`s from `#include`d
+    /// headers so namespace/export macros expand). Default ignores it.
+    fn analyze_with_path(&self, source: &str, _path: Option<&Path>) -> FileAnalysis {
+        self.analyze(source)
+    }
     /// Module name → workspace-relative candidate paths.
     fn module_paths(&self, module: &str) -> Vec<String>;
     /// Completion trigger characters for this language — the registry
@@ -76,11 +82,26 @@ pub struct PackDriver {
     exts: &'static [&'static str],
     make_parser: fn() -> tree_sitter::Parser,
     pack: fn() -> crate::query_extract::LangPack,
-    /// Source → (transformed source, anchor map), run before parsing
-    /// (C++ macro expansion). The map remaps the extracted spans back to
-    /// ORIGINAL coordinates so the editor's positions are correct even
-    /// after expansion. `None` = pass-through (identity).
-    transform: Option<fn(&mut tree_sitter::Parser, &str) -> (String, crate::cpp_reparse::SpliceMap)>,
+    /// (source, external macros) → (transformed source, anchor map), run
+    /// before parsing (C++ macro expansion). The map remaps extracted
+    /// spans back to ORIGINAL coordinates. `None` = pass-through (identity).
+    transform: Option<
+        fn(
+            &mut tree_sitter::Parser,
+            &str,
+            &std::collections::BTreeMap<String, crate::cpp_reparse::Macro>,
+        ) -> (String, crate::cpp_reparse::SpliceMap),
+    >,
+    /// Path-aware cross-file macro gather (C++ #include resolution). Given
+    /// the file path + source, returns macros from #included headers to
+    /// seed `transform`. `None` = no cross-file macros.
+    gather_macros: Option<
+        fn(
+            &Path,
+            &str,
+            &mut tree_sitter::Parser,
+        ) -> std::collections::BTreeMap<String, crate::cpp_reparse::Macro>,
+    >,
 }
 
 #[cfg(any(feature = "cpp", feature = "python", feature = "r", feature = "cmake"))]
@@ -95,9 +116,18 @@ impl LanguageDriver for PackDriver {
         (self.make_parser)()
     }
     fn analyze(&self, source: &str) -> FileAnalysis {
+        self.analyze_with_path(source, None)
+    }
+    fn analyze_with_path(&self, source: &str, path: Option<&Path>) -> FileAnalysis {
         let mut parser = (self.make_parser)();
+        // Cross-file macros from #included headers (C++), so a macro
+        // #defined elsewhere (SPDLOG_NAMESPACE_BEGIN) expands here.
+        let external = match (self.gather_macros, path) {
+            (Some(g), Some(p)) => g(p, source, &mut parser),
+            _ => std::collections::BTreeMap::new(),
+        };
         let (src, map) = match self.transform {
-            Some(t) => t(&mut parser, source),
+            Some(t) => t(&mut parser, source, &external),
             None => (source.to_string(), crate::cpp_reparse::SpliceMap::default()),
         };
         let Some(tree) = parser.parse(&src, None) else { return FileAnalysis::new(Default::default()) };
@@ -132,7 +162,8 @@ fn cpp_driver() -> PackDriver {
         pack: crate::query_extract::cpp_pack,
         // reparse past the preprocessor before extraction; the anchor map
         // carries the recovered spans back to the original coordinates.
-        transform: Some(crate::cpp_reparse::preprocess_validated),
+        transform: Some(crate::cpp_reparse::preprocess_validated_with),
+        gather_macros: Some(crate::cpp_reparse::included_macros),
     }
 }
 
@@ -148,6 +179,7 @@ fn python_driver() -> PackDriver {
         },
         pack: crate::query_extract::python_pack,
         transform: None,
+        gather_macros: None,
     }
 }
 
@@ -163,6 +195,7 @@ fn r_driver() -> PackDriver {
         },
         pack: crate::query_extract::r_pack,
         transform: None,
+        gather_macros: None,
     }
 }
 
@@ -179,6 +212,7 @@ fn cmake_driver() -> PackDriver {
         },
         pack: crate::query_extract::cmake_pack,
         transform: None,
+        gather_macros: None,
     }
 }
 

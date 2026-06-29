@@ -1,0 +1,13 @@
+{
+  "capability": "outline",
+  "rows": [
+    {
+      "id": "cpp-cross-file-namespace-macro-resolved",
+      "difficulty": "hard", "semantic_area": "cpp-multilang-macros",
+      "lang": "cpp", "root": "gold-corpus/cpp-fixture",
+      "file": "macroproj/app.cpp", "line": 0, "col": 0,
+      "expect": { "all": ["\"kind\":\"Class\",\"line\":\"2\",\"name\":\"Widget\""], "none": [] },
+      "status": "gold"
+    }
+  ]
+}

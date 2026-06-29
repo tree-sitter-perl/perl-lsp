@@ -23,18 +23,25 @@ pub struct Document {
     /// tree/cursor handlers (completion, signature-help, selection-range)
     /// are Perl cursor-context-specific and skip when this isn't "perl".
     pub language: &'static str,
+    /// The file's path, for cross-file analysis (C++ resolves #include'd
+    /// macros relative to it). `None` for Perl / unrouted docs.
+    pub path: Option<std::path::PathBuf>,
 }
 
 impl Document {
     /// Build a pack-language document through its driver (the multi-
     /// language path). Holds the original-source tree + the driver's
     /// analysis. Full reparse on update (no incremental for v1).
-    pub fn new_routed(text: String, driver: &dyn crate::language_driver::LanguageDriver) -> Option<Self> {
+    pub fn new_routed(
+        text: String,
+        driver: &dyn crate::language_driver::LanguageDriver,
+        path: Option<std::path::PathBuf>,
+    ) -> Option<Self> {
         let mut parser = driver.make_parser();
         let tree = parser.parse(&text, None)?;
-        let analysis = driver.analyze(&text);
+        let analysis = driver.analyze_with_path(&text, path.as_deref());
         let stable_outline = StableOutline::from_analysis(&analysis);
-        Some(Document { text, tree, analysis, stable_outline, language: driver.id() })
+        Some(Document { text, tree, analysis, stable_outline, language: driver.id(), path })
     }
 
     pub fn new(text: String) -> Option<Self> {
@@ -56,7 +63,7 @@ impl Document {
         let analysis = crate::timings::phase("build()", || builder::build(&tree, text.as_bytes()));
         let stable_outline =
             crate::timings::phase("stable_outline", || StableOutline::from_analysis(&analysis));
-        Some(Document { text, tree, analysis, stable_outline, language: "perl" })
+        Some(Document { text, tree, analysis, stable_outline, language: "perl", path: None })
     }
 
     pub fn update(&mut self, new_text: String) {
@@ -70,7 +77,7 @@ impl Document {
                     self.tree = tree;
                 }
                 self.text = new_text;
-                self.analysis = driver.analyze(&self.text);
+                self.analysis = driver.analyze_with_path(&self.text, self.path.as_deref());
                 self.stable_outline.update(&self.analysis, &self.text);
             }
             return;

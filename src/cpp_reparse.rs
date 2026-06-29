@@ -242,10 +242,149 @@ pub fn preprocess_validated(parser: &mut tree_sitter::Parser, src: &str) -> (Str
     }
 }
 
+/// `preprocess_validated` seeded with EXTERNAL macros from #included
+/// headers — the cross-file path. Same validate-by-reparse gate (keep the
+/// rewrite only if it doesn't raise parse damage).
+pub fn preprocess_validated_with(
+    parser: &mut tree_sitter::Parser,
+    src: &str,
+    external: &BTreeMap<String, Macro>,
+) -> (String, SpliceMap) {
+    let Some(tree) = parser.parse(src, None) else {
+        return (src.to_string(), SpliceMap::default());
+    };
+    let before = parse_damage(tree.root_node());
+    let (rewritten, map) = preprocess_with(&tree, src, external);
+    if rewritten == src {
+        return (rewritten, map);
+    }
+    match parser.parse(&rewritten, None) {
+        Some(after) if parse_damage(after.root_node()) <= before => (rewritten, map),
+        _ => (src.to_string(), SpliceMap::default()),
+    }
+}
+
+/// Gather macros from a C++ file's transitively `#include`d headers, so a
+/// macro `#define`d in another header (the `SPDLOG_NAMESPACE_BEGIN` idiom)
+/// can be expanded in this file. Quoted includes resolve relative to the
+/// file's dir, walking ancestor dirs as include roots (the classic search
+/// path, discovered not configured). Bounded: depth + visited + header
+/// caps; best-effort — unresolvable includes are skipped. The file's OWN
+/// macros are NOT included here (the caller collects those).
+pub fn included_macros(
+    file_path: &std::path::Path,
+    src: &str,
+    parser: &mut tree_sitter::Parser,
+) -> BTreeMap<String, Macro> {
+    let mut macros = BTreeMap::new();
+    let mut seen = std::collections::HashSet::new();
+    if let Some(p) = file_path.canonicalize().ok() {
+        seen.insert(p);
+    }
+    for inc in include_paths(src, parser) {
+        if let Some(path) = resolve_include(file_path, &inc) {
+            gather_macros_rec(&path, parser, &mut macros, &mut seen, 0);
+        }
+    }
+    macros
+}
+
+fn gather_macros_rec(
+    path: &std::path::Path,
+    parser: &mut tree_sitter::Parser,
+    macros: &mut BTreeMap<String, Macro>,
+    seen: &mut std::collections::HashSet<std::path::PathBuf>,
+    depth: usize,
+) {
+    if depth > 16 || seen.len() > 500 {
+        return;
+    }
+    let Some(canon) = path.canonicalize().ok() else { return };
+    if !seen.insert(canon) {
+        return;
+    }
+    let Ok(src) = std::fs::read_to_string(path) else { return };
+    let Some(tree) = parser.parse(&src, None) else { return };
+    for (k, v) in collect_macros(&tree, src.as_bytes()) {
+        macros.entry(k).or_insert(v);
+    }
+    for inc in include_paths_tree(&tree, &src) {
+        if let Some(next) = resolve_include(path, &inc) {
+            gather_macros_rec(&next, parser, macros, seen, depth + 1);
+        }
+    }
+}
+
+/// Resolve a quoted include like `spdlog/common.h` to a real path: walk up
+/// from the file's dir, first ancestor `R` where `R/<inc>` exists wins.
+fn resolve_include(file_path: &std::path::Path, inc: &str) -> Option<std::path::PathBuf> {
+    let mut dir = file_path.parent()?;
+    loop {
+        let cand = dir.join(inc);
+        if cand.is_file() {
+            return Some(cand);
+        }
+        dir = dir.parent()?;
+    }
+}
+
+fn include_paths(src: &str, parser: &mut tree_sitter::Parser) -> Vec<String> {
+    match parser.parse(src, None) {
+        Some(tree) => include_paths_tree(&tree, src),
+        None => Vec::new(),
+    }
+}
+
+/// Every include's path, quoted (`"x/y.h"`) and angle-bracket
+/// (`<lib/y.h>`) alike — library headers write project includes with
+/// `<>`, and the walk-up resolver finds both (true system headers like
+/// `<vector>` simply don't resolve in the workspace, and are skipped).
+fn include_paths_tree(tree: &Tree, src: &str) -> Vec<String> {
+    let lang = tree.language();
+    let q = Query::new(
+        &lang,
+        r#"
+        (preproc_include path: (string_literal (string_content) @p))
+        (preproc_include path: (system_lib_string) @s)
+        "#,
+    )
+    .expect("include query");
+    let names = q.capture_names().to_vec();
+    let mut out = Vec::new();
+    let mut cursor = QueryCursor::new();
+    let mut it = cursor.matches(&q, tree.root_node(), src.as_bytes());
+    while let Some(m) = it.next() {
+        for c in m.captures {
+            let Ok(t) = c.node.utf8_text(src.as_bytes()) else { continue };
+            match names[c.index as usize] {
+                "p" => out.push(t.to_string()),
+                "s" => out.push(t.trim_start_matches('<').trim_end_matches('>').to_string()),
+                _ => {}
+            }
+        }
+    }
+    out
+}
+
 /// The transform: expand macro invocations in `src`, returning the
 /// rewritten source and the anchor map. Single source-level pass.
 pub fn preprocess(tree: &Tree, src: &str) -> (String, SpliceMap) {
-    let macros = pre_expand_bodies(&collect_macros(tree, src.as_bytes()));
+    preprocess_with(tree, src, &BTreeMap::new())
+}
+
+/// `preprocess` plus EXTERNAL macros (gathered from #included headers via
+/// `included_macros`). The file's own #defines win on conflict; the
+/// external set fills in cross-file names like `SPDLOG_NAMESPACE_BEGIN`.
+pub fn preprocess_with(
+    tree: &Tree,
+    src: &str,
+    external: &BTreeMap<String, Macro>,
+) -> (String, SpliceMap) {
+    let mut macros = collect_macros(tree, src.as_bytes());
+    for (k, v) in external {
+        macros.entry(k.clone()).or_insert_with(|| v.clone());
+    }
+    let macros = pre_expand_bodies(&macros);
     if macros.is_empty() {
         return (src.to_string(), SpliceMap::default());
     }

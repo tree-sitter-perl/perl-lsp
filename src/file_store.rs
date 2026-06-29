@@ -87,7 +87,7 @@ impl FileStore {
         let path = url.to_file_path().ok();
         let pack = path.as_ref().and_then(|p| reg.for_path(p)).filter(|d| d.id() != "perl");
         let doc = match pack {
-            Some(driver) => match Document::new_routed(text, driver) {
+            Some(driver) => match Document::new_routed(text, driver, path.clone()) {
                 Some(d) => d,
                 None => return false,
             },
