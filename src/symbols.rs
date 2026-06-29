@@ -1117,13 +1117,60 @@ pub fn pack_hover_markdown(
     source: &str,
     point: Point,
     language: &str,
+    module_index: Option<&dyn crate::file_analysis::CrossFileLookup>,
 ) -> Option<String> {
-    let sym = analysis.symbol_at(point).or_else(|| {
+    // Cursor on a def, or on a call/ref naming a LOCAL def.
+    let local = analysis.symbol_at(point).or_else(|| {
         let r = analysis.ref_at(point)?;
         let name = r.unqualified_target_name();
         analysis.symbols.iter().find(|s| s.name == name)
-    })?;
-    let line = source.lines().nth(sym.span.start.row)?.trim();
+    });
+    if let Some(sym) = local {
+        return Some(render_symbol_hover(sym, source, &sym.span.start, language, analysis, point));
+    }
+    // Cross-file: a call whose target isn't local — look the function up in
+    // the cross-file index and render its signature from the defining file.
+    let midx = module_index?;
+    let r = analysis.ref_at(point)?;
+    if !matches!(r.kind, RefKind::FunctionCall { .. }) {
+        return None;
+    }
+    let name = r.unqualified_target_name();
+    let cached = midx.get_cached(name)?;
+    let sym = cached
+        .analysis
+        .symbols
+        .iter()
+        .find(|s| s.name == name && matches!(s.kind, FaSymKind::Sub))?;
+    let text = std::fs::read_to_string(&cached.path).ok()?;
+    let fname = cached.path.file_name().and_then(|f| f.to_str()).unwrap_or("");
+    let mut out = render_symbol_hover(sym, &text, &sym.span.start, language, &cached.analysis, sym.span.start);
+    out.push_str(&format!("\n\n— `{}`", fname));
+    Some(out)
+}
+
+/// Render a symbol's hover. Variables/fields show `name: type` (the inferred
+/// type — exact class for objects, generic for primitives) rather than the
+/// raw decl line, which for a PARAM is the whole function signature. Other
+/// kinds show their declaration line + kind (+ class attribute signals).
+fn render_symbol_hover(
+    sym: &crate::file_analysis::Symbol,
+    source: &str,
+    line_at: &Point,
+    language: &str,
+    analysis: &FileAnalysis,
+    type_point: Point,
+) -> String {
+    if matches!(sym.kind, FaSymKind::Variable | FaSymKind::Field) {
+        if let Some(ty) = analysis.inferred_type_via_bag(&sym.name, type_point) {
+            let disp = ty
+                .class_name()
+                .map(String::from)
+                .unwrap_or_else(|| crate::file_analysis::format_inferred_type(&ty));
+            return format!("```{}\n{}: {}\n```\n\n*variable*", language, sym.name, disp);
+        }
+    }
+    let line = source.lines().nth(line_at.row).unwrap_or("").trim();
     let sig = line.trim_end_matches([' ', '{', ';']).trim();
     let kind = match sym.kind {
         FaSymKind::Sub => "function",
@@ -1133,28 +1180,13 @@ pub fn pack_hover_markdown(
         FaSymKind::Variable | FaSymKind::Field => "variable",
         _ => "symbol",
     };
-    // For a variable, surface its inferred CLASS — the resolved object type
-    // (`box: Box`, a chain result) the syntactic decl line doesn't spell
-    // out. Primitives fall through to the decl line (which already shows the
-    // type).
-    if matches!(sym.kind, FaSymKind::Variable | FaSymKind::Field) {
-        if let Some(class) = analysis
-            .inferred_type_via_bag(&sym.name, point)
-            .and_then(|t| t.class_name().map(str::to_string))
-        {
-            return Some(format!("```{}\n{}: {}\n```\n\n*variable*", language, sym.name, class));
-        }
-    }
     let mut out = format!("```{}\n{}\n```\n\n*{}*", language, sig, kind);
-    // Surface a class's attribute-macro signals (`exported`, `deprecated`) the
-    // pack stamped from its declarator-position macro — proves the signal
-    // survived recovery + caching.
     if matches!(sym.kind, FaSymKind::Class) {
         for attr in &sym.attributes {
             out.push_str(&format!("\n\n*{}*", attr));
         }
     }
-    Some(out)
+    out
 }
 
 pub fn pack_hover(
@@ -1162,8 +1194,9 @@ pub fn pack_hover(
     source: &str,
     point: Point,
     language: &str,
+    module_index: Option<&dyn crate::file_analysis::CrossFileLookup>,
 ) -> Option<Hover> {
-    let value = pack_hover_markdown(analysis, source, point, language)?;
+    let value = pack_hover_markdown(analysis, source, point, language, module_index)?;
     Some(Hover {
         contents: HoverContents::Markup(MarkupContent {
             kind: MarkupKind::Markdown,

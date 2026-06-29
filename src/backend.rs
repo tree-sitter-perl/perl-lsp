@@ -742,11 +742,16 @@ impl LanguageServer for Backend {
         // Perl's hover renderer is Perl-specific; pack languages get a
         // language-agnostic declaration-line hover.
         if doc.language != "perl" {
+            // Route cross-file (function hover) to the per-language sub-index.
+            let pack = self.module_index.pack_index(doc.language);
+            let xidx: &dyn crate::file_analysis::CrossFileLookup =
+                pack.as_deref().map_or(&*self.module_index, |i| i);
             return Ok(symbols::pack_hover(
                 &doc.analysis,
                 &doc.text,
                 symbols::position_to_point(pos),
                 doc.language,
+                Some(xidx),
             ));
         }
         Ok(symbols::hover_info(

@@ -730,7 +730,19 @@ fn cli_hover(root: Option<&str>, file: &str, line_str: &str, col_str: &str) {
         }
         None => {
             let (source, _tree, analysis) = parse_file(file);
-            if let Some(markdown) = analysis.hover_info(point, &source, None) {
+            // Pack languages get the language-agnostic renderer (matches the
+            // LSP); no index here, so cross-file function hover is unavailable
+            // in this form (use the root form for that). Perl keeps hover_info.
+            let reg = language_driver::LanguageRegistry::with_enabled();
+            let pack_lang = reg
+                .for_path(std::path::Path::new(file))
+                .map(|d| d.id())
+                .filter(|id| *id != "perl");
+            let markdown = match pack_lang {
+                Some(lang) => symbols::pack_hover_markdown(&analysis, &source, point, lang, None),
+                None => analysis.hover_info(point, &source, None),
+            };
+            if let Some(markdown) = markdown {
                 println!("{}", markdown);
             } else {
                 eprintln!("No hover info at {}:{}", line_str, col_str);
@@ -1068,7 +1080,10 @@ fn run_one(
             if let Some(lang) = reg.for_path(std::path::Path::new(file))
                 .map(|d| d.id()).filter(|id| *id != "perl")
             {
-                return symbols::pack_hover_markdown(&analysis, &source, point, lang)
+                let pack = idx.pack_index(lang);
+                let xidx: &dyn crate::file_analysis::CrossFileLookup =
+                    pack.as_deref().map_or(idx, |i| i);
+                return symbols::pack_hover_markdown(&analysis, &source, point, lang, Some(xidx))
                     .ok_or_else(|| format!("No hover info at {}:{}", req.line, req.col));
             }
             resolve_imports_blocking(idx, &analysis);

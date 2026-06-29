@@ -41,17 +41,24 @@ pub struct LangCfg {
     pub member_kinds: &'static [&'static str],
     /// Node kinds we must NOT splice into (string/char/comment).
     pub skip_kinds: &'static [&'static str],
+    /// Transparent wrappers a receiver peels through to the same CLASS:
+    /// `(expr)`, `*p` (deref), `&obj` (address-of) all reach the operand's
+    /// members (pointer-/reference-ness is dropped for member resolution).
+    pub wrapper_kinds: &'static [&'static str],
 }
 
 pub const CPP: LangCfg = LangCfg {
     // `box.m` and `box->m` both parse as field_expression.
     member_kinds: &["field_expression"],
     skip_kinds: &["string_literal", "char_literal", "raw_string_literal", "comment"],
+    // `(*p).m`, `(&o)->m`: paren wrap + `*`/`&` are `pointer_expression`.
+    wrapper_kinds: &["parenthesized_expression", "pointer_expression"],
 };
 
 pub const PYTHON: LangCfg = LangCfg {
     member_kinds: &["attribute"],
     skip_kinds: &["string", "string_content", "comment", "concatenated_string"],
+    wrapper_kinds: &["parenthesized_expression"],
 };
 
 /// Per-language sentinel config by driver id. `None` = no member-access
@@ -325,6 +332,12 @@ fn resolve_node_type(
             return analysis.find_method_return_type(&class, method_name, module_index, None);
         }
         return None;
+    }
+    // Transparent wrappers — `(expr)`, `*p`, `&obj` — denote the same class
+    // as their operand (pointer-/reference-ness dropped). Peel and recurse so
+    // `(*p).m` / `(&o)->m` reach the members `p->m` does.
+    if cfg.wrapper_kinds.contains(&node.kind()) {
+        return resolve_node_type(node.named_child(0)?, cfg, src, analysis, module_index);
     }
     let span = Span { start: node.start_position(), end: node.end_position() };
     analysis.expr_type_at_span(span, module_index)
