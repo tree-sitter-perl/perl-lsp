@@ -1,0 +1,21 @@
+{
+  "capability": "hover",
+  "rows": [
+    {
+      "id": "cpp-hover-free-function-signature",
+      "difficulty": "simple", "semantic_area": "cpp-multilang",
+      "lang": "cpp", "root": "gold-corpus/cpp-fixture",
+      "file": "sample.cpp", "line": 12, "col": 4,
+      "expect": { "all": ["int compute(int x)", "*function*"], "none": ["```perl"] },
+      "status": "gold"
+    },
+    {
+      "id": "cpp-hover-class",
+      "difficulty": "simple", "semantic_area": "cpp-multilang",
+      "lang": "cpp", "root": "gold-corpus/cpp-fixture",
+      "file": "sample.cpp", "line": 1, "col": 6,
+      "expect": { "all": ["class Shape", "*class*"], "none": [] },
+      "status": "gold"
+    }
+  ]
+}

@@ -1,0 +1,13 @@
+{
+  "capability": "document-highlight",
+  "rows": [
+    {
+      "id": "cpp-document-highlight-def-and-call",
+      "difficulty": "simple", "semantic_area": "cpp-multilang",
+      "lang": "cpp", "root": "gold-corpus/cpp-fixture",
+      "file": "sample.cpp", "line": 12, "col": 4,
+      "expect": { "all": ["sample.cpp:13:5", "sample.cpp:17:13"], "none": [] },
+      "status": "gold"
+    }
+  ]
+}

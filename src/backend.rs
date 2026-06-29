@@ -634,6 +634,16 @@ impl LanguageServer for Backend {
             Some(doc) => doc,
             None => return Ok(None),
         };
+        // Perl's hover renderer is Perl-specific; pack languages get a
+        // language-agnostic declaration-line hover.
+        if doc.language != "perl" {
+            return Ok(symbols::pack_hover(
+                &doc.analysis,
+                &doc.text,
+                symbols::position_to_point(pos),
+                doc.language,
+            ));
+        }
         Ok(symbols::hover_info(
             &doc.analysis,
             &doc.text,

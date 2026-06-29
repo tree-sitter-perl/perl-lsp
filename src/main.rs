@@ -933,6 +933,15 @@ fn run_one(
         }
         "hover" => {
             let (source, _t, mut analysis) = parse_file(file);
+            // Pack languages get the language-agnostic declaration hover
+            // (matches the LSP server); Perl keeps its rich renderer.
+            let reg = language_driver::LanguageRegistry::with_enabled();
+            if let Some(lang) = reg.for_path(std::path::Path::new(file))
+                .map(|d| d.id()).filter(|id| *id != "perl")
+            {
+                return symbols::pack_hover_markdown(&analysis, &source, point, lang)
+                    .ok_or_else(|| format!("No hover info at {}:{}", req.line, req.col));
+            }
             resolve_imports_blocking(idx, &analysis);
             analysis.enrich_imported_types_with_keys(Some(idx));
             analysis.hover_info(point, &source, Some(idx))

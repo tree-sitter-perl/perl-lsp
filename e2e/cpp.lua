@@ -62,4 +62,22 @@ t.test("completion: in-scope symbols include compute + main", function()
   if t.contains(N, labels, "main", "completion labels") then t.pass(N) end
 end)
 
+
+t.test("hover: compute shows its signature", function()
+  local N = "hover compute"
+  local dl, dc = b.find_pos(buf, "int compute(int x)")
+  if not t.ok(N, dl, "no compute def") then return end
+  local h = lsp.hover_text(buf, dl, dc + 4)
+  if not t.ok(N, h, "no hover") then return end
+  if t.ok(N, h:find("int compute", 1, true) ~= nil, "hover has signature: " .. tostring(h)) then t.pass(N) end
+end)
+
+t.test("document-highlight: compute def + call", function()
+  local N = "highlight compute"
+  local dl, dc = b.find_pos(buf, "int compute(int x)")
+  if not t.ok(N, dl, "no compute def") then return end
+  local lines = lsp.reference_lines(buf, dl, dc + 4)  -- highlight uses same machinery
+  if t.ok(N, lines and #lines >= 2, "expected def+call, got " .. #lines) then t.pass(N) end
+end)
+
 t.finish()

@@ -1063,6 +1063,51 @@ fn ref_type_snippet_completions(ty: &InferredType) -> Vec<CompletionItem> {
     }
 }
 
+/// Language-agnostic hover for pack languages: the symbol's declaration
+/// line in a language-appropriate code fence + its kind. Resolves a
+/// cursor on a def directly, or on a call/ref to the local def it names.
+/// The Perl `hover_info` renderer is Perl-specific (```perl fences,
+/// method-resolution prose); pack languages get this instead.
+pub fn pack_hover_markdown(
+    analysis: &FileAnalysis,
+    source: &str,
+    point: Point,
+    language: &str,
+) -> Option<String> {
+    let sym = analysis.symbol_at(point).or_else(|| {
+        let r = analysis.ref_at(point)?;
+        let name = r.unqualified_target_name();
+        analysis.symbols.iter().find(|s| s.name == name)
+    })?;
+    let line = source.lines().nth(sym.span.start.row)?.trim();
+    let sig = line.trim_end_matches([' ', '{', ';']).trim();
+    let kind = match sym.kind {
+        FaSymKind::Sub => "function",
+        FaSymKind::Method => "method",
+        FaSymKind::Class => "class",
+        FaSymKind::Package => "namespace",
+        FaSymKind::Variable | FaSymKind::Field => "variable",
+        _ => "symbol",
+    };
+    Some(format!("```{}\n{}\n```\n\n*{}*", language, sig, kind))
+}
+
+pub fn pack_hover(
+    analysis: &FileAnalysis,
+    source: &str,
+    point: Point,
+    language: &str,
+) -> Option<Hover> {
+    let value = pack_hover_markdown(analysis, source, point, language)?;
+    Some(Hover {
+        contents: HoverContents::Markup(MarkupContent {
+            kind: MarkupKind::Markdown,
+            value,
+        }),
+        range: None,
+    })
+}
+
 pub fn hover_info(
     analysis: &FileAnalysis,
     source: &str,
