@@ -52,4 +52,14 @@ t.test("rename: compute touches def and call", function()
   if t.ok(N, n >= 2, "rename should touch def + call, got " .. n) then t.pass(N) end
 end)
 
+
+t.test("completion: in-scope symbols include compute + main", function()
+  local N = "completion in-scope"
+  local ml, mc = b.find_pos(buf, "int n = compute")
+  if not t.ok(N, ml, "no 'int n' line") then return end
+  local labels = lsp.completion_labels(buf, ml, mc + 8)
+  if not t.contains(N, labels, "compute", "completion labels") then return end
+  if t.contains(N, labels, "main", "completion labels") then t.pass(N) end
+end)
+
 t.finish()

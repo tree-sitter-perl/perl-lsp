@@ -652,10 +652,15 @@ impl LanguageServer for Backend {
             Some(doc) => doc,
             None => return Ok(None),
         };
-        // cursor-context completion is Perl-specific; pack languages get
-        // no completion in v1 (symbol-table completion is a follow-up).
+        // Member completion (the `.`/`->` receiver seam) is cursor-context,
+        // still Perl-only. Pack languages get language-agnostic in-scope
+        // symbol completion (half 1) — the client filters by prefix.
         if doc.language != "perl" {
-            return Ok(None);
+            let items = symbols::in_scope_completion(
+                &doc.analysis,
+                symbols::position_to_point(pos),
+            );
+            return Ok((!items.is_empty()).then(|| CompletionResponse::Array(items)));
         }
         let items = symbols::completion_items(
             &doc.analysis,
