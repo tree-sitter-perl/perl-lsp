@@ -1,0 +1,13 @@
+{
+  "capability": "outline",
+  "rows": [
+    {
+      "id": "c-define-macros-as-symbols",
+      "difficulty": "moderate", "semantic_area": "c-misra-macros",
+      "lang": "cpp", "root": "gold-corpus/cpp-fixture",
+      "file": "cdefs.h", "line": 0, "col": 0,
+      "expect": { "all": ["\"name\":\"MAX_SIZE\"", "\"kind\":\"Sub\",\"line\":\"1\",\"name\":\"MIN\""], "none": [] },
+      "status": "gold"
+    }
+  ]
+}

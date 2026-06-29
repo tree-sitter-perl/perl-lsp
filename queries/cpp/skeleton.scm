@@ -16,6 +16,13 @@
 (preproc_include path: (string_literal (string_content) @import.name))
 (preproc_include path: (system_lib_string) @import.name)
 
+; ---- #define macros become SYMBOLS (completion / goto-def / outline).
+; For a macro-heavy API (perl5: Newx/SvPV; embedded HALs) the macros ARE
+; the surface. Object-like (`#define MAX 1`) → a constant (Variable);
+; function-like (`#define MIN(a,b) ...`) → a callable (Sub).
+(preproc_def name: (identifier) @def.var.name) @def.var
+(preproc_function_def name: (identifier) @def.sub.name) @def.sub
+
 ; ---- namespaces: a Package SYMBOL (so its members nest under it in the
 ; outline) + a sticky context + a real scope for its body ----
 (namespace_definition
