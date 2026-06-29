@@ -1,0 +1,11 @@
+{
+  "capability": "outline",
+  "rows": [{
+    "id": "cpp-destructor-extracted",
+    "difficulty": "moderate", "semantic_area": "cpp-members",
+    "lang": "cpp", "root": "gold-corpus/cpp-fixture",
+    "file": "dtor.cpp", "line": 0, "col": 0,
+    "expect": { "all": ["\"kind\":\"Method\",\"line\":\"4\",\"name\":\"~Widget\""], "none": [] },
+    "status": "gold"
+  }]
+}

@@ -140,6 +140,21 @@
   declarator: (reference_declarator
     (function_declarator
       declarator: (field_identifier) @def.method.name))) @def.method
+; destructor `~Widget()` — tree-sitter parses it as a `declaration` (no
+; return type), with a `destructor_name` declarator, so the field_declaration
+; method patterns above miss it. @def.sub + the in-class method
+; reclassification make it a Method. (Constructors are field_identifiers
+; and already match.)
+(declaration
+  declarator: (function_declarator
+    declarator: (destructor_name) @def.sub.name)) @def.sub
+; out-of-line `Class::~Class() {...}` / `Class::Class() {...}` definitions.
+(function_definition
+  declarator: (function_declarator
+    declarator: (qualified_identifier
+      scope: (_) @qualifier
+      name: (destructor_name) @def.method.name))) @def.method @scope
+
 (field_declaration
   declarator: (field_identifier) @def.var.name) @def.var
 ; a data member's TYPE — the type witness needs field_declaration (the
