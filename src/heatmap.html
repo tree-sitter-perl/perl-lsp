@@ -210,16 +210,23 @@ function squarify(items, x, y, w, h) {
   return out;
 }
 
-function groupByPackage(symbols) {
+// `main` (and packageless) symbols are the default catch-all shared across
+// every script — not a cohesive unit — so bucket them by file. Real packages
+// group whole, even if reopened across files.
+function inDefaultPackage(s) { return !s.package || s.package === "main"; }
+function baseName(f) { return (f || "").split("/").pop(); }
+function bucketLabel(s) { return inDefaultPackage(s) ? baseName(s.file) : s.package; }
+
+function groupSymbols(symbols) {
   const map = new Map();
   for (const s of symbols) {
-    const pkg = s.package || "(main)";
-    if (!map.has(pkg)) map.set(pkg, []);
-    map.get(pkg).push(s);
+    const key = inDefaultPackage(s) ? "file:" + s.file : s.package;
+    if (!map.has(key)) map.set(key, { pkg: bucketLabel(s), syms: [] });
+    map.get(key).syms.push(s);
   }
   // value = fan_in + 1 so zero-fan-in symbols still occupy a cell.
-  const groups = [...map.entries()].map(([pkg, syms]) => ({
-    pkg, syms, value: syms.reduce((a, s) => a + (s.fan_in || 0) + 1, 0),
+  const groups = [...map.values()].map(g => ({
+    pkg: g.pkg, syms: g.syms, value: g.syms.reduce((a, s) => a + (s.fan_in || 0) + 1, 0),
   }));
   groups.sort((a, b) => b.value - a.value);
   return groups;
@@ -235,7 +242,7 @@ function renderTreemap() {
   svg.setAttribute("width", W); svg.setAttribute("height", H);
   svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
 
-  const groups = groupByPackage(SYMBOLS);
+  const groups = groupSymbols(SYMBOLS);
   const cells = squarify(groups.map(g => ({ ...g, value: g.value })), 1, 1, W - 2, H - 2);
   for (const cell of cells) {
     const g = document.createElementNS(svg.namespaceURI, "g");
@@ -292,7 +299,7 @@ function renderButterfly() {
     const outPct = ((s.fan_out || 0) / MAX_FAN_OUT) * 100;
     const dead = s.dead_code_candidate ? " dead" : "";
     html += `<div class="barwrap l" data-key="${attr(filterKey(s))}"><span class="barval r">${s.fan_in || 0}</span><div class="bar in" style="width:${inPct}%"></div></div>`;
-    html += `<div class="name${dead}" data-key="${attr(filterKey(s))}" title="${attr(s.package || "")}">${esc(s.name)}<br><small>${esc(s.package || "")}</small></div>`;
+    html += `<div class="name${dead}" data-key="${attr(filterKey(s))}" title="${attr(s.package || "")}">${esc(s.name)}<br><small>${esc(bucketLabel(s))}</small></div>`;
     html += `<div class="barwrap" data-key="${attr(filterKey(s))}"><div class="bar out" style="width:${outPct}%"></div><span class="barval l">${s.fan_out == null ? "·" : s.fan_out}</span></div>`;
   }
   html += "</div>";
