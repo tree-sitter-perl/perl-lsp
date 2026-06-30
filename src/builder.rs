@@ -1817,13 +1817,24 @@ impl<'a> Builder<'a> {
                 let name = name.to_string();
                 let at = t.start_position();
                 let scope = self.scope_at_point(at);
-                self.flow_edges.push(crate::file_analysis::FlowEdge {
+                // Lower as a FALLBACK only: a refined eager TC (a direct
+                // InferredType witness, resolvable pre-fold) wins; the query
+                // Edge fills in when the walk left the variable untyped (the
+                // cross-file-chain case the manual `assign_edge` used to cover).
+                let already_typed = self.bag_query_variable(&name, scope, at).is_some();
+                let fe = crate::file_analysis::FlowEdge {
                     target_name: name,
                     target_scope: scope,
                     target_at: at,
                     source: source_span,
                     extraction: crate::file_analysis::Extraction::Whole,
-                });
+                };
+                if !already_typed {
+                    if let Some(w) = fe.lower_to_witness() {
+                        self.bag.push(w);
+                    }
+                }
+                self.flow_edges.push(fe);
             }
         }
     }
@@ -6402,30 +6413,11 @@ impl<'a> Builder<'a> {
                             inferred_type: it,
                         });
                     }
-                } else if let Some(vt) = self.get_var_text_from_lhs(left) {
-                    // RHS didn't resolve at build time — typically a cross-file
-                    // method chain whose type needs the module index, absent
-                    // during the parallel per-file workspace build. Mint a
-                    // value-flow edge (Whole) and lower it: the bag gets the
-                    // SAME `Variable → Edge(Expr)` it always did (a query
-                    // carrying the index chases it lazily — "edges, not
-                    // values"), now with the source span kept for provenance.
-                    // Zero-extent span at the assignment start — a non-zero
-                    // span would make the resolved Variable witness subject to
-                    // point-containment narrowing and get skipped at every use
-                    // past the assignment.
-                    let fe = crate::file_analysis::FlowEdge {
-                        target_name: vt,
-                        target_scope: self.current_scope(),
-                        target_at: node_to_span(node).start,
-                        source: node_to_span(right),
-                        extraction: crate::file_analysis::Extraction::Whole,
-                    };
-                    if let Some(w) = fe.lower_to_witness() {
-                        self.bag.push(w);
-                    }
-                    self.flow_edges.push(fe);
                 }
+                // The unresolved single-var case (a cross-file chain that
+                // didn't type at walk time) is now minted + lowered by the
+                // declarative `@flow` query pass (`mint_flow_edges_via_query`),
+                // as a fallback that doesn't override the eager TC above.
                 // Always record call/method-call bindings (independent
                 // of whether the bag resolved a type) — they're the
                 // source-sub linkage that hash-key ownership fixup
