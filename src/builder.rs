@@ -10520,6 +10520,30 @@ impl<'a> Builder<'a> {
                     // resolve through the same `Operator(RowOf(
                     // Receiver))` substitution.
                     self.emit_parametric_return_expr_decls(&ty);
+                } else if self.is_fluent_verb_call(node) {
+                    // A fluent verb (`$rs->search`) returns its invocant's type
+                    // UNCHANGED. Edge the call's type to the invocant's rather
+                    // than minting one — any invocant type flows through, no
+                    // re-mint (edges-not-values). Skip the standard MethodOnClass
+                    // edge: `search` has no return-type def to resolve through.
+                    if let RefKind::MethodCall { invocant_span: Some(inv_span), .. } =
+                        self.refs[idx].kind
+                    {
+                        self.parametric_emitted_refs.insert(idx);
+                        let r_span = self.refs[idx].span;
+                        self.bag.push(crate::witnesses::Witness {
+                            attachment: crate::witnesses::WitnessAttachment::Expression(
+                                crate::witnesses::RefIdx(idx as u32),
+                            ),
+                            source: crate::witnesses::WitnessSource::Builder(
+                                "fluent_passthrough".into(),
+                            ),
+                            payload: crate::witnesses::WitnessPayload::Edge(
+                                crate::witnesses::WitnessAttachment::Expr(inv_span),
+                            ),
+                            span: r_span,
+                        });
+                    }
                 }
             }
         }
@@ -11212,21 +11236,20 @@ impl<'a> Builder<'a> {
                 .unwrap_or_else(|| "DBIx::Class::ResultSet".to_string());
             return Some(InferredType::Parametric(ParametricType::ResultSet { base, row: row_class }));
         }
-        // A plugin-declared fluent verb (`$rs->search`): the call returns the
-        // invocant's type UNCHANGED, so it only fires on an actual resultset.
-        // DBIC has no `Class->search` — search/find live on the resultset, which
-        // only comes from `$schema->resultset('X')` (typed above); a Result class
-        // or row invocant gets no typing. The verb list is the plugin's (#10/#8).
-        if self.plugins.fluent_verbs().any(|v| v == mtext) {
-            let invocant = node.child_by_field_name("invocant")?;
-            if let Some(ty @ InferredType::Parametric(ParametricType::ResultSet { .. })) =
-                self.invocant_type_at_node(invocant)
-            {
-                return Some(ty);
-            }
-            return None;
-        }
         None
+    }
+
+    /// Is this call a plugin-declared FLUENT verb (`$rs->search`)? A fluent verb
+    /// returns its invocant's type UNCHANGED — whatever it is — so the call site
+    /// edges the call's type to the invocant's rather than minting one (DBIC's
+    /// `search`/`search_rs` keep a resultset a resultset; this stays generic).
+    /// The verb list is the plugin's (#10/#8).
+    fn is_fluent_verb_call(&self, node: Node<'a>) -> bool {
+        node.kind() == "method_call_expression"
+            && node
+                .child_by_field_name("method")
+                .and_then(|m| m.utf8_text(self.source).ok())
+                .is_some_and(|m| self.plugins.fluent_verbs().any(|v| v == m))
     }
 
     /// Push `ReturnExpr` declarations on `MethodOnClass{base, m}`
