@@ -164,16 +164,6 @@ impl SkeletonAnalysis {
                 }
             }
         }
-        if std::env::var("CPP_DUMP_MEMBERS").is_ok() {
-            for c in symbols.iter().filter(|s| matches!(s.kind, SymKind::Class)) {
-                let members: Vec<&str> = symbols
-                    .iter()
-                    .filter(|s| s.package.as_deref() == Some(c.name.as_str()))
-                    .map(|s| s.name.as_str())
-                    .collect();
-                eprintln!("CPP_DUMP_MEMBERS class '{}' members={:?}", c.name, members);
-            }
-        }
 
         // A function whose owning package is a CLASS is a method. Covers
         // template members, which tree-sitter parses as a plain

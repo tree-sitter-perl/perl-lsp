@@ -86,6 +86,22 @@
     declarator: (pointer_declarator
       declarator: (type_identifier) @def.class.name))) @def.class
 
+; typedef of a NAMED tag whose body is elsewhere: `typedef struct op OP;`
+; (perl5's dominant idiom — `struct op` is defined in op.h, OP is the public
+; name). OP is an ALIAS for the tag, so record the tag as OP's @parent: member
+; completion + goto-def then see through the alias to `struct op`'s fields via
+; the cross-file ancestor walk. (The bodied forms above already give the tag
+; its own members; this only adds the alias edge.)
+(type_definition
+  type: (struct_specifier name: (type_identifier) @parent)
+  declarator: (type_identifier) @def.class.name) @def.class
+(type_definition
+  type: (union_specifier name: (type_identifier) @parent)
+  declarator: (type_identifier) @def.class.name) @def.class
+(type_definition
+  type: (enum_specifier name: (type_identifier) @parent)
+  declarator: (type_identifier) @def.class.name) @def.class
+
 ; ---- free functions & out-of-line / inline method definitions ----
 ; the name lives at the bottom of the declarator chain; one pattern per
 ; shape it can take (plain / member / qualified / pointer-return).
