@@ -748,17 +748,30 @@ impl ModuleIndex {
             // values (globals, object-like macros, enum constants). A
             // file-scope value is an unpackaged Variable not nested in a
             // function — locals (function-scoped) are excluded.
-            let is_exportable = matches!(sym.kind, SymKind::Class | SymKind::Sub)
-                || (matches!(sym.kind, SymKind::Variable)
-                    && sym.package.is_none()
-                    && analysis
-                        .scopes
-                        .iter()
-                        .find(|s| s.id == sym.scope)
-                        .is_some_and(|s| matches!(s.kind, crate::file_analysis::ScopeKind::File)));
-            if is_exportable {
-                self.workspace_modules.insert(sym.name.clone(), ());
+            let is_file_value = matches!(sym.kind, SymKind::Variable)
+                && sym.package.is_none()
+                && analysis
+                    .scopes
+                    .iter()
+                    .find(|s| s.id == sym.scope)
+                    .is_some_and(|s| matches!(s.kind, crate::file_analysis::ScopeKind::File));
+            if !(matches!(sym.kind, SymKind::Class | SymKind::Sub) || is_file_value) {
+                continue;
+            }
+            self.workspace_modules.insert(sym.name.clone(), ());
+            // A TYPE wins the cache slot over a callable/value of the same
+            // name. C reuses names freely — a `#define OP(x)` macro in one
+            // header (a Sub) vs the `OP` typedef in another (a Class). Member
+            // completion + ancestor resolution key on the TYPE, so a Class
+            // OVERWRITES; a Sub/value only FILLS an empty slot. Race-free
+            // under the parallel index: the Class insert always wins, the
+            // or_insert never clobbers a Class already present.
+            if matches!(sym.kind, SymKind::Class) {
                 self.cache.insert(sym.name.clone(), Some(cached.clone()));
+            } else {
+                self.cache
+                    .entry(sym.name.clone())
+                    .or_insert_with(|| Some(cached.clone()));
             }
         }
     }
