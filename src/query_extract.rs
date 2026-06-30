@@ -63,6 +63,11 @@ pub struct SkelRef {
     /// invocant types query-time via `expr_type_at_span(span)` (text → the
     /// `InvocantName`). `None` for plain calls / var refs.
     pub invocant: Option<(crate::file_analysis::Span, String)>,
+    /// The written member operator (`.`/`->`) + its span, mapped from the
+    /// `@member.op` token's kind via the pack `op_map`, `Some` only when the
+    /// IMMEDIATE receiver is a simple variable. Rides onto the MethodCall ref
+    /// so operator-correctness is a ref query, not a separate walk.
+    pub member_op: Option<(crate::file_analysis::MemberOp, crate::file_analysis::Span)>,
 }
 
 #[derive(Debug, Default)]
@@ -88,10 +93,6 @@ pub struct SkeletonAnalysis {
     /// named is the method receiver, not a class member — its (wrongly
     /// sticky-tagged) class package is cleared in `into_file_analysis`.
     pub receiver_names: Vec<String>,
-    /// `receiver OP member` sites (simple-variable receivers) for the
-    /// member-access operator-DX consumer. Collected by a dedicated walk
-    /// over `pack.member_kinds`, not the skeleton query.
-    pub member_access_sites: Vec<crate::file_analysis::MemberAccessSite>,
 }
 
 impl SkeletonAnalysis {
@@ -331,6 +332,7 @@ impl SkeletonAnalysis {
                             invocant: crate::conventions::InvocantName::assume_canonical(inv_text),
                             invocant_span: Some(inv_span),
                             method_name_span: Span { start: r.start, end: r.end },
+                            member_op: r.member_op,
                         }
                     }
                     _ => return None,
@@ -358,7 +360,6 @@ impl SkeletonAnalysis {
             refs,
             witnesses: bag,
             package_parents,
-            member_access_sites: std::mem::take(&mut self.member_access_sites),
             ..Default::default()
         });
         // Pack-declared receiver names ride the FA so core's member /
@@ -440,9 +441,16 @@ pub struct LangPack {
     /// each site (simple-variable receiver, operator token span, `->` vs
     /// `.`) for the operator-DX consumer (`p.` on a `Box*` should be `->`).
     /// The receiver is the first named child; the operator is the anonymous
-    /// child between the two named children. Empty = no member-access DX
-    /// (Perl, and packs whose member access isn't operator-correctable).
-    pub member_kinds: &'static [&'static str],
+    /// The member operator's grammar token KIND → the `MemberOp` it means
+    /// (`"->"`→Arrow, `"."`→Dot). The `operator:` field of a member access is
+    /// captured as `@member.op`; the engine maps its `kind()` through this
+    /// table. An OPEN set: unmapped kinds (`.*`) get no op-DX, never a guess.
+    /// Empty = no member-operator DX (Perl, single-operator packs).
+    pub op_map: &'static [(&'static str, crate::file_analysis::MemberOp)],
+    /// Simple-variable node kinds (`identifier`). op-DX fires ONLY when the
+    /// IMMEDIATE member-access receiver is one — the receiver whose
+    /// `deref_stack` resolves by name to decide the expected operator.
+    pub simple_var_kinds: &'static [&'static str],
 }
 
 /// A declarative peel: descend a wrapper chain tree-sitter's fixed-depth
@@ -506,7 +514,8 @@ pub fn perl_pack() -> LangPack {
         receiver_names: &[],
         nested_peel: PeelSpec { wrappers: &[], annot_kinds: &[], leaf_to_def: &[], record_stack: true },
         recv_peel: PeelSpec { wrappers: &[], annot_kinds: &[], leaf_to_def: &[], record_stack: false },
-        member_kinds: &[],
+        op_map: &[],
+        simple_var_kinds: &[],
     }
 }
 
@@ -545,7 +554,8 @@ pub fn python_pack() -> LangPack {
         receiver_names: &["self", "cls"],
         nested_peel: PeelSpec { wrappers: &[], annot_kinds: &[], leaf_to_def: &[], record_stack: true },
         recv_peel: PeelSpec { wrappers: &[], annot_kinds: &[], leaf_to_def: &[], record_stack: false },
-        member_kinds: &[],
+        op_map: &[],
+        simple_var_kinds: &[],
     }
 }
 
@@ -573,7 +583,8 @@ pub fn r_pack() -> LangPack {
         receiver_names: &[],
         nested_peel: PeelSpec { wrappers: &[], annot_kinds: &[], leaf_to_def: &[], record_stack: true },
         recv_peel: PeelSpec { wrappers: &[], annot_kinds: &[], leaf_to_def: &[], record_stack: false },
-        member_kinds: &[],
+        op_map: &[],
+        simple_var_kinds: &[],
     }
 }
 
@@ -614,7 +625,8 @@ pub fn cmake_pack() -> LangPack {
         receiver_names: &[],
         nested_peel: PeelSpec { wrappers: &[], annot_kinds: &[], leaf_to_def: &[], record_stack: true },
         recv_peel: PeelSpec { wrappers: &[], annot_kinds: &[], leaf_to_def: &[], record_stack: false },
-        member_kinds: &[],
+        op_map: &[],
+        simple_var_kinds: &[],
     }
 }
 
@@ -696,9 +708,11 @@ pub fn cpp_pack() -> LangPack {
             leaf_to_def: &[],
             record_stack: false,
         },
-        // `box.m` and `box->m` both parse as field_expression — the one
-        // member-access shape, operator distinguished by the inner token.
-        member_kinds: &["field_expression"],
+        op_map: &[
+            ("->", crate::file_analysis::MemberOp::Arrow),
+            (".", crate::file_analysis::MemberOp::Dot),
+        ],
+        simple_var_kinds: &["identifier"],
     }
 }
 
@@ -796,6 +810,9 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     // capture unravelled to. Read by the `def.*` handler to stamp the symbol.
     let mut nested_stacks: std::collections::HashMap<usize, Vec<crate::file_analysis::DerefStep>> =
         std::collections::HashMap::new();
+    // match_id → was the IMMEDIATE member-access receiver a simple variable?
+    // Recorded at construction (the un-peeled node); gates op-DX at the mint.
+    let mut member_simple: std::collections::HashMap<usize, bool> = std::collections::HashMap::new();
     let mut cursor = QueryCursor::new();
     let mut matches = cursor.matches(&query, tree.root_node(), source);
     let mut match_counter = 0usize;
@@ -832,6 +849,9 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
             // node is live, so the minted MethodCall ref's invocant_span lands
             // on the inner expression `expr_type_at_span` already types.
             if cap == "member.recv" {
+                // op-DX applies only to a bare-variable immediate receiver
+                // (its deref_stack resolves by name); a wrapper/chain doesn't.
+                member_simple.insert(match_counter, pack.simple_var_kinds.contains(&node.kind()));
                 let inner = peel(node, &pack.recv_peel, source)
                     .map(|(leaf, _, _)| leaf)
                     .unwrap_or(node);
@@ -876,6 +896,10 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     // `@member.recv` → the receiver span of a `recv.field` access, joined to
     // its `@ref.member` by match_id so the minted MethodCall ref carries it.
     let mut member_recv: HashMap<usize, (crate::file_analysis::Span, String)> = HashMap::new();
+    // `@member.op` → the written operator mapped through `pack.op_map` + its
+    // span; joined to `@ref.member` so op-DX rides the minted ref.
+    let mut member_op_raw: HashMap<usize, (crate::file_analysis::MemberOp, crate::file_analysis::Span)> =
+        HashMap::new();
     for e in &events {
         if let Some(prefix) = e.cap.strip_suffix(".name") {
             names_by_match
@@ -1090,6 +1114,17 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                     (crate::file_analysis::Span { start: e.start, end: e.end }, e.text.clone()),
                 );
             }
+            "member.op" => {
+                // Map the operator token's KIND (== its text, an anonymous
+                // token) to a MemberOp via the pack's open op_map. Unmapped
+                // (`.*`) → no entry → no op-DX. No source-text re-decision.
+                if let Some((_, op)) = pack.op_map.iter().find(|(k, _)| *k == e.text) {
+                    member_op_raw.insert(
+                        e.match_id,
+                        (*op, crate::file_analysis::Span { start: e.start, end: e.end }),
+                    );
+                }
+            }
             cap if cap.starts_with("ref.") => {
                 // Generic suppression: a "reference" inside a def's own
                 // header is the declaration, not a use.
@@ -1101,6 +1136,12 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                         s == e.start_byte || en == e.end_byte
                     });
                 if !inside_def {
+                    let member_op = member_simple
+                        .get(&e.match_id)
+                        .copied()
+                        .unwrap_or(false)
+                        .then(|| member_op_raw.get(&e.match_id).copied())
+                        .flatten();
                     out.refs.push(SkelRef {
                         kind: e.cap.strip_prefix("ref.").unwrap().to_string(),
                         name: (pack.shape_name)(&e.cap, &e.text),
@@ -1108,6 +1149,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                         end: e.end,
                         scope: cur_scope,
                         invocant: member_recv.get(&e.match_id).cloned(),
+                        member_op,
                     });
                 }
             }
@@ -1323,6 +1365,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
             end: cmd_span.end,
             scope: *scope,
             invocant: None,
+            member_op: None,
         });
         for effect in (pack.cmd_effects)(cmd) {
             match effect {
@@ -1355,6 +1398,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                                 end: span.end,
                                 scope: *scope,
                                 invocant: None,
+                                member_op: None,
                             });
                         }
                     }
@@ -1409,63 +1453,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
             });
         }
     }
-    collect_member_sites(tree.root_node(), pack, source, &mut out.member_access_sites);
     Ok(out)
-}
-
-/// Walk the whole tree recording `receiver OP member` sites for the
-/// operator-DX consumer. Only simple-variable receivers are kept — the
-/// shape whose `deref_stack` the diagnostic pass can resolve by name (a
-/// chained `a.b.c` receiver isn't a variable, so it self-skips). No-op for
-/// packs without `member_kinds`.
-fn collect_member_sites(
-    root: tree_sitter::Node,
-    pack: &LangPack,
-    source: &[u8],
-    out: &mut Vec<crate::file_analysis::MemberAccessSite>,
-) {
-    if pack.member_kinds.is_empty() {
-        return;
-    }
-    let mut stack = vec![root];
-    while let Some(node) = stack.pop() {
-        if pack.member_kinds.contains(&node.kind()) {
-            if let Some(site) = member_site(node, source) {
-                out.push(site);
-            }
-        }
-        let mut cur = node.walk();
-        for ch in node.children(&mut cur) {
-            stack.push(ch);
-        }
-    }
-}
-
-/// One member-access node → its site, when the receiver is a simple
-/// identifier. The operator is the anonymous child whose text is `.`/`->`
-/// (reading what the user WROTE — the expected operator is decided later
-/// off the receiver's `deref_stack`, never off this token).
-fn member_site(
-    node: tree_sitter::Node,
-    source: &[u8],
-) -> Option<crate::file_analysis::MemberAccessSite> {
-    use crate::file_analysis::{MemberAccessSite, Span};
-    let receiver = node.named_child(0)?;
-    if receiver.kind() != "identifier" {
-        return None;
-    }
-    let name = receiver.utf8_text(source).ok()?.to_string();
-    let mut cur = node.walk();
-    let op = node.children(&mut cur).find(|ch| {
-        !ch.is_named() && matches!(ch.utf8_text(source), Ok(".") | Ok("->"))
-    })?;
-    let arrow = op.utf8_text(source) == Ok("->");
-    Some(MemberAccessSite {
-        receiver: name,
-        receiver_at: receiver.start_position(),
-        op_span: Span { start: op.start_position(), end: op.end_position() },
-        arrow,
-    })
 }
 
 fn byte_range_of(events: &[Event], match_id: usize, cap: &str) -> Option<(usize, usize)> {

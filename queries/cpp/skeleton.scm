@@ -205,6 +205,7 @@
 ; share one pattern.
 (field_expression
   argument: (_) @member.recv
+  operator: _ @member.op
   field: (field_identifier) @ref.member)
 
 ; ---- type witnesses: C++ leaks types at every DECLARATION site (its

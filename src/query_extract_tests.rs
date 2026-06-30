@@ -1211,10 +1211,8 @@ void f() {
 }
 ";
     let fa = cpp_skel(src).into_file_analysis();
-    let sites = &fa.member_access_sites;
-    // p.w, b->w, pp.w all recorded (simple-variable receivers).
-    assert_eq!(sites.len(), 3, "three member-access sites: {sites:?}");
-
+    // op-DX rides the MethodCall refs now (p.w, b->w, pp.w each mint one with
+    // a `member_op`); the mismatch query joins each with its receiver's stack.
     let mm = fa.member_op_mismatches();
     assert_eq!(mm.len(), 2, "p and b mismatch; pp is DEEP/show-only: {mm:?}");
 

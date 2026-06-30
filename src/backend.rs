@@ -184,7 +184,7 @@ impl Backend {
                         doc.analysis.enrich_imported_types_with_keys(Some(module_index.as_ref()));
                         symbols::collect_diagnostics(&doc.analysis, module_index, options)
                     } else {
-                        symbols::pack_member_op_diagnostics(&doc.analysis, &doc.language)
+                        symbols::pack_member_op_diagnostics(&doc.analysis)
                     };
                     pending.push((uri.clone(), diagnostics));
                 });
@@ -256,7 +256,7 @@ impl Backend {
             }
             let diags = files
                 .get_open(&uri)
-                .map(|doc| symbols::pack_member_op_diagnostics(&doc.analysis, doc.language));
+                .map(|doc| symbols::pack_member_op_diagnostics(&doc.analysis));
             if let Some(diags) = diags {
                 client.publish_diagnostics(uri, diags, None).await;
             }
@@ -339,7 +339,7 @@ impl Backend {
             // operator-mismatch check, which is high-confidence (it fires
             // only when a recorded site's typed operator disagrees with its
             // receiver's known pointer depth — no calibration guesswork).
-            Some(doc) => symbols::pack_member_op_diagnostics(&doc.analysis, &doc.language),
+            Some(doc) => symbols::pack_member_op_diagnostics(&doc.analysis),
             None => vec![],
         };
         self.client

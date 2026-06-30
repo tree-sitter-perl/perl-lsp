@@ -3289,15 +3289,12 @@ fn find_use_insertion_position(
 /// replacement text and `range` for where to write it.
 const MEMBER_OP_CODE: &str = "member-access-operator";
 
-/// Mode B: the operator-mismatch diagnostics for a pack language. One
-/// WARNING per `member_op_mismatches()` entry, each self-describing (range =
-/// the operator token, `data.operator` = the correct token) so the quick-fix
-/// needs no re-analysis. Gated to pack languages — Perl never produces these
-/// (its `member_access_sites` is empty, but gate anyway for clarity).
-pub fn pack_member_op_diagnostics(analysis: &FileAnalysis, language: &str) -> Vec<Diagnostic> {
-    if language == "perl" {
-        return Vec::new();
-    }
+/// Mode B: the operator-mismatch diagnostics. One WARNING per
+/// `member_op_mismatches()` entry, each self-describing (range = the operator
+/// token, `data.operator` = the correct token) so the quick-fix needs no
+/// re-analysis. Language-agnostic: Perl's `MethodCall` refs carry no
+/// `member_op` (one operator), so the query is empty by construction — no gate.
+pub fn pack_member_op_diagnostics(analysis: &FileAnalysis) -> Vec<Diagnostic> {
     analysis
         .member_op_mismatches()
         .into_iter()

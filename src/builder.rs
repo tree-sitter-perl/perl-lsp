@@ -556,9 +556,6 @@ fn build_with_plugins_inner(
         role_packages: b.role_packages,
         plugin_loads: b.plugin_loads,
         loader_config_params: b.loader_config_params,
-        // Perl has no operator-correctable member access (`->` is the one
-        // arrow; `.` is string concat). Pack languages fill this.
-        member_access_sites: Vec::new(),
     });
     // Finalize: run the legacy text-based MCB resolver as a fallback.
     // For every assignment the unified typer (run before
@@ -3160,6 +3157,7 @@ impl<'a> Builder<'a> {
                         invocant: crate::conventions::InvocantName::assume_canonical(invocant),
                         invocant_span,
                         method_name_span: span,
+                        member_op: None,
                     },
                     span,
                     scope: self.current_scope(),
@@ -8293,6 +8291,7 @@ impl<'a> Builder<'a> {
                                         // narrows the renamable span to the `m` tail
                                         // (rule #7), mirroring FunctionCall.
                                         method_name_span: crate::cst::fq_tail_span(method, name),
+                                        member_op: None,
                                     },
                                     span: node_to_span(n),
                                     scope,
@@ -10358,6 +10357,7 @@ impl<'a> Builder<'a> {
                                 invocant: invocant.clone().unwrap_or_default(),
                                 invocant_span,
                                 method_name_span,
+                                member_op: None,
                             },
                             node_to_span(node),
                             rname,
@@ -10377,6 +10377,7 @@ impl<'a> Builder<'a> {
                         invocant: invocant.clone().unwrap_or_default(),
                         invocant_span,
                         method_name_span,
+                        member_op: None,
                     },
                     node_to_span(node),
                     name.clone(),

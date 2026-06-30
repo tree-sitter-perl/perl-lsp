@@ -518,27 +518,6 @@ pub fn expected_member_op(stack: &[DerefStep]) -> Option<MemberOp> {
     }
 }
 
-/// A `receiver OP member` access site recorded at extraction (pack
-/// languages only — empty for Perl and every non-pack file). Tree-free
-/// downstream: the diagnostic pass resolves `receiver` → its symbol's
-/// `deref_stack` and compares the typed operator against
-/// `expected_member_op`. Only simple-variable receivers are recorded —
-/// the receiver whose `deref_stack` we can resolve by name. See
-/// `docs/adr/pointer-stack.md` (member-access DX consumer).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct MemberAccessSite {
-    /// Simple-variable receiver name (`p` in `p->m`).
-    pub receiver: String,
-    /// Receiver token start — anchors the in-scope symbol lookup.
-    #[serde(with = "PointDef")]
-    pub receiver_at: Point,
-    /// Span of the `.`/`->` operator token (the quick-fix / completion
-    /// edit replaces exactly this).
-    pub op_span: Span,
-    /// The operator as written: `->` (true) vs `.` (false).
-    pub arrow: bool,
-}
-
 /// A member-access whose typed operator disagrees with the operator its
 /// receiver's pointer depth requires. `op_span` covers the written
 /// operator token; replace it with `expected.as_str()`.
@@ -892,6 +871,11 @@ pub enum RefKind {
         invocant_span: Option<Span>,
         /// Span of just the method name (for rename — r.span covers the whole expression).
         method_name_span: Span,
+        /// The member operator a pack wrote (`.`/`->`) + its token span, `Some`
+        /// ONLY when the IMMEDIATE receiver is a simple variable (op-DX applies
+        /// — its `deref_stack` decides the expected operator). `None` for Perl
+        /// (one operator) and wrapper/chain receivers.
+        member_op: Option<(MemberOp, Span)>,
     },
     PackageRef,
     HashKeyAccess {
@@ -2497,11 +2481,6 @@ pub struct FileAnalysis {
     #[serde(default)]
     pub loader_config_params: Vec<LoaderConfigParam>,
 
-    /// `receiver OP member` sites recorded at pack-language extraction,
-    /// for the member-access operator-DX consumer (`p.` on a `Box* p`
-    /// wants `->`). Empty for Perl and non-pack files.
-    #[serde(default)]
-    pub member_access_sites: Vec<MemberAccessSite>,
 
     // Indices (built in post-pass — skipped by serde; call rebuild_all_indices() after deserialize)
     #[serde(skip, default)]
@@ -2569,7 +2548,6 @@ pub struct FileAnalysisParts {
     pub role_packages: HashSet<String>,
     pub plugin_loads: Vec<PluginLoadFact>,
     pub loader_config_params: Vec<LoaderConfigParam>,
-    pub member_access_sites: Vec<MemberAccessSite>,
 }
 
 /// "This file loads plugin `name`, passing the config value at
@@ -2717,7 +2695,6 @@ impl FileAnalysis {
             role_packages,
             plugin_loads,
             loader_config_params,
-            member_access_sites,
         } = parts;
         witnesses.rebuild_index();
         let mut fa = FileAnalysis {
@@ -2756,7 +2733,6 @@ impl FileAnalysis {
             role_packages,
             plugin_loads,
             loader_config_params,
-            member_access_sites,
             scope_starts: Vec::new(),
             symbols_by_name: HashMap::new(),
             symbols_by_scope: HashMap::new(),
@@ -3228,22 +3204,31 @@ impl FileAnalysis {
 
     /// Member accesses whose typed operator disagrees with their
     /// receiver's pointer depth — the single-level `.`↔`->` mismatches.
-    /// Pure read over `member_access_sites` (recorded at extraction) joined
-    /// with each receiver's `deref_stack`; DEEP receivers (`Box**`) yield no
-    /// `MemberOp` and are skipped (show-only, no token-swap fix). The one
-    /// source both the diagnostic pass and any other consumer share.
+    /// Pure read over the MEMBER REFS — each `MethodCall` ref carrying a
+    /// `member_op` (a simple-variable receiver) joined with that receiver's
+    /// `deref_stack`. DEEP receivers (`Box**`) yield no `MemberOp` and are
+    /// skipped (show-only, no token-swap fix). The op-DX is the ref now, not a
+    /// separate `member_access_sites` walk.
     pub fn member_op_mismatches(&self) -> Vec<MemberOpMismatch> {
         let mut out = Vec::new();
-        for site in &self.member_access_sites {
-            let Some(stack) = self.var_deref_stack_at(&site.receiver, site.receiver_at) else {
+        for r in &self.refs {
+            let RefKind::MethodCall {
+                invocant,
+                invocant_span: Some(span),
+                member_op: Some((typed, op_span)),
+                ..
+            } = &r.kind
+            else {
+                continue;
+            };
+            let Some(stack) = self.var_deref_stack_at(invocant, span.start) else {
                 continue;
             };
             let Some(expected) = expected_member_op(stack) else {
                 continue; // DEEP — needs a wrap, not a swap
             };
-            let typed = if site.arrow { MemberOp::Arrow } else { MemberOp::Dot };
-            if typed != expected {
-                out.push(MemberOpMismatch { op_span: site.op_span, typed, expected });
+            if *typed != expected {
+                out.push(MemberOpMismatch { op_span: *op_span, typed: *typed, expected });
             }
         }
         out
