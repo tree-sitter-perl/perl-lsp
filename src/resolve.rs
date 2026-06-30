@@ -78,15 +78,24 @@ impl TargetRef {
         TargetRef { name, kind, method_classes: Vec::new() }
     }
 
-    /// Rename policy, asked of the target rather than re-encoded per handler:
-    /// callables and packages rewrite everywhere; hash keys are in-file-only
-    /// by design (an unowned spelling elsewhere may be a different key);
-    /// handler cross-file rename isn't wired yet. References intentionally
-    /// ignores this — it walks every target kind cross-file.
+    /// Which targets rename through `refs_to` (cross-file, owner/scope-
+    /// structural) rather than the single-file `rename_at` fallback —
+    /// references walks *every* kind cross-file; rename is being brought into
+    /// line one kind at a time (see `docs/rename-bidirectional-audit.md`).
+    /// `HashKeyOfSub` joined once producer↔consumer owner identity was unified
+    /// (enrichment stamps the consumer access with the producer's package, and
+    /// the consumer-side completion stub is gone — the producer's real def is
+    /// the single source). Still single-file: `HashKeyOfClass` (Moo slots need
+    /// the projection-group arm — finding #2) and `Handler` (event names need
+    /// rename-ready spans — their span includes the surrounding quotes today).
     pub fn supports_cross_file_rename(&self) -> bool {
         matches!(
             self.kind,
-            TargetKind::Sub { .. } | TargetKind::Method { .. } | TargetKind::Package
+            TargetKind::Sub { .. }
+                | TargetKind::Method { .. }
+                | TargetKind::Package
+                | TargetKind::HashKeyOfSub { .. }
+                | TargetKind::Handler { .. }
         )
     }
 
@@ -198,23 +207,35 @@ pub fn resolve_symbol(
     if let (Some(idx), Some(r)) = (module_index, analysis.ref_at(point)) {
         use crate::file_analysis::HashKeyOwner;
         match &r.kind {
-            RefKind::HashKeyAccess { owner: None, .. } => {
-                if let Some(HashKeyOwner::Sub { package: Some(class), name }) =
-                    analysis.deferred_hash_key_owner(r, module_index)
-                {
-                    if crate::conventions::is_constructor_name(&name) {
-                        if let Some(cached) = idx.get_cached(&class) {
-                            if let Some(p) = cached
-                                .analysis
-                                .field_projections_named(&r.target_name, &class)
-                            {
-                                return Some(group_from_projections(
-                                    p,
-                                    &cached.analysis,
-                                    Some(cached.path.clone()),
-                                    module_index,
-                                ));
-                            }
+            RefKind::HashKeyAccess { owner, .. } => {
+                // The owning class lives elsewhere; reach it so a consumer-side
+                // cursor on `$obj->{attr}` (internal slot, `Class` owner) or a
+                // deferred constructor key (`owner: None`) resolves to the same
+                // projection group the class file mints.
+                let class = match owner {
+                    Some(HashKeyOwner::Class(c)) => Some(c.clone()),
+                    _ => match analysis.deferred_hash_key_owner(r, module_index) {
+                        Some(HashKeyOwner::Sub { package: Some(c), name })
+                            if crate::conventions::is_constructor_name(&name) =>
+                        {
+                            Some(c)
+                        }
+                        Some(HashKeyOwner::Class(c)) => Some(c),
+                        _ => None,
+                    },
+                };
+                if let Some(class) = class {
+                    if let Some(cached) = idx.get_cached(&class) {
+                        if let Some(p) = cached
+                            .analysis
+                            .field_projections_named(&r.target_name, &class)
+                        {
+                            return Some(group_from_projections(
+                                p,
+                                &cached.analysis,
+                                Some(cached.path.clone()),
+                                module_index,
+                            ));
                         }
                     }
                 }
@@ -308,6 +329,12 @@ pub struct RefLocation {
     /// migrate to `refs_to` in a follow-up.
     #[allow(dead_code)]
     pub access: AccessKind,
+    /// Whether rename may rewrite this span. `false` for a site whose name has
+    /// no literal token to replace — a const-folded event name
+    /// (`my $e = 'ready'; $obj->on($e)`) whose dispatch span IS the variable.
+    /// References lists it (it's a real use); rename skips it (rewriting the
+    /// variable would corrupt it). True for every literal occurrence.
+    pub rewritable: bool,
 }
 
 impl RefLocation {
@@ -359,6 +386,18 @@ fn group_from_projections(
             target: TargetRef::new(
                 p.bare.clone(),
                 TargetKind::InternalHashKey { class: p.class.clone() },
+            ),
+            rename: MemberRename::Bare,
+        });
+    }
+    if p.has_class_key {
+        // `Class`-backed attr (DBIC column): a `HashKeyOfClass` member catches
+        // every `attr`-named key use `found_by`-style — direct deref plus
+        // search/find/update arg keys owned `Sub{class, verb}`.
+        members.push(GroupMember {
+            target: TargetRef::new(
+                p.bare.clone(),
+                TargetKind::HashKeyOfClass(p.class.clone()),
             ),
             rename: MemberRename::Bare,
         });
@@ -418,12 +457,14 @@ pub fn group_refs(
             key: origin.clone(),
             span: *span,
             access: AccessKind::Read,
+            rewritable: true,
         })
         .collect();
     out.extend(pinned_spans.iter().map(|(path, span)| RefLocation {
         key: FileKey::Path(path.clone()),
         span: *span,
         access: AccessKind::Read,
+        rewritable: true,
     }));
     for m in members {
         let mask = mask_override
@@ -459,7 +500,7 @@ pub fn group_rename_edits(
         .iter()
         .map(|span| {
             (
-                RefLocation { key: origin.clone(), span: *span, access: AccessKind::Read },
+                RefLocation { key: origin.clone(), span: *span, access: AccessKind::Read, rewritable: true },
                 bare_new.to_string(),
             )
         })
@@ -470,6 +511,7 @@ pub fn group_rename_edits(
                 key: FileKey::Path(path.clone()),
                 span: *span,
                 access: AccessKind::Read,
+                rewritable: true,
             },
             bare_new.to_string(),
         )
@@ -635,6 +677,7 @@ pub fn implementations_of(
                         key: FileKey::Path(cached.path.clone()),
                         span: s.selection_span,
                         access: AccessKind::Declaration,
+                        rewritable: true,
                     });
                 }
             }
@@ -661,6 +704,16 @@ fn key_for_sort(k: &FileKey) -> PathBuf {
 
 fn file_key_eq(a: &FileKey, b: &FileKey) -> bool {
     key_for_sort(a) == key_for_sort(b)
+}
+
+/// A name spelled by a variable at `span` — a `Variable`/`ContainerAccess`
+/// ref covers it exactly. The signal that a dispatch site is const-folded
+/// (`$obj->on($evt)`): its name span IS the `$evt` token, so rename must not
+/// rewrite it. Literal names never coincide with a variable ref.
+fn span_variable_spelled(analysis: &FileAnalysis, span: Span) -> bool {
+    analysis.refs.iter().any(|r| {
+        matches!(r.kind, RefKind::Variable | RefKind::ContainerAccess) && r.span == span
+    })
 }
 
 /// True when `sym` is a declaration of `target` (decl-span match).
@@ -793,6 +846,13 @@ fn collect_from_analysis(
     let mut rename_chain_cache: std::collections::HashMap<String, Vec<String>> =
         std::collections::HashMap::new();
 
+    // Only handler (event) names can be spelled by a variable (const-folded
+    // `$obj->on($evt)`); for every other target kind the span is a literal name
+    // token, always rewritable. Gating the variable-overlap scan to handlers
+    // keeps it off the hot path.
+    let is_handler = matches!(target.kind, TargetKind::Handler { .. });
+    let rewritable_at = |span: Span| !(is_handler && span_variable_spelled(analysis, span));
+
     // Include declaration spans when this file defines the target.
     for sym in &analysis.symbols {
         if symbol_defines_target(sym, target) {
@@ -800,6 +860,7 @@ fn collect_from_analysis(
                 key: key.clone(),
                 span: sym.selection_span,
                 access: AccessKind::Declaration,
+                rewritable: rewritable_at(sym.selection_span),
             });
         }
     }
@@ -830,7 +891,16 @@ fn collect_from_analysis(
             (TargetKind::Sub { .. } | TargetKind::Method { .. },
              RefKind::FunctionCall { resolved_package }) => {
                 let scope = callable_scope_for_refs.as_ref().unwrap();
-                resolved_package == scope
+                // A bare imported call the single-file walk couldn't pin
+                // (`use Bank;` auto-imports `@EXPORT`, invisible at build) has
+                // `resolved_package: None`. Re-derive it here — where the index
+                // is in hand — so a rename from the source sub reaches the
+                // consumer call site (the lazy seam method dispatch + deferred
+                // hash-key owners use elsewhere in this fn).
+                match resolved_package {
+                    Some(_) => resolved_package == scope,
+                    None => &analysis.deferred_call_package(r, module_index) == scope,
+                }
             }
             (TargetKind::Sub { .. } | TargetKind::Method { .. },
              RefKind::MethodCall { .. }) => {
@@ -873,10 +943,13 @@ fn collect_from_analysis(
                 Some(HashKeyOwner::Sub { package: op, name: on }) => {
                     op == package && on == name
                 }
-                // Deferred (`owner: None`): the build-time gate couldn't see
-                // the class — re-derive the owner here, where the index is
-                // in hand (same lazy seam method dispatch uses above).
-                None => analysis
+                // owner `None` (build gate blind) OR `Variable` (the var is
+                // bound to an imported call enrichment didn't reach in this
+                // unenriched workspace file) — re-derive cross-file, the same
+                // lazy seam method dispatch + deferred owners use above. This
+                // is what makes a producer-origin rename reach the consumer's
+                // `$c->{key}` access without depending on open-doc enrichment.
+                _ => analysis
                     .deferred_hash_key_owner(r, module_index)
                     .is_some_and(|o| {
                         matches!(
@@ -885,7 +958,6 @@ fn collect_from_analysis(
                                 if op == *package && on == *name
                         )
                     }),
-                Some(_) => false,
             },
             (TargetKind::HashKeyOfClass(wanted), RefKind::HashKeyAccess { owner, .. }) => {
                 // `Class(wanted)` is the canonical shape for "this
@@ -932,6 +1004,7 @@ fn collect_from_analysis(
                 key: key.clone(),
                 span,
                 access: r.access,
+                rewritable: rewritable_at(span),
             });
         }
     }
@@ -950,6 +1023,7 @@ fn collect_from_analysis(
                     key: key.clone(),
                     span: applied.span,
                     access: AccessKind::Read,
+                    rewritable: rewritable_at(applied.span),
                 });
             }
         }
