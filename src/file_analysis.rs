@@ -572,12 +572,23 @@ impl FlowEdge {
     /// projected-edge lowering and return `None` for now (no type witness yet,
     /// the FlowEdge itself still records the provenance).
     pub fn lower_to_witness(&self) -> Option<crate::witnesses::Witness> {
-        use crate::witnesses::{Witness, WitnessAttachment, WitnessPayload, WitnessSource};
-        let payload = match self.extraction {
-            Extraction::Whole => {
-                WitnessPayload::Edge(WitnessAttachment::Expr(self.source))
-            }
-            _ => return None,
+        use crate::witnesses::{
+            ProjectionStep, Witness, WitnessAttachment, WitnessPayload, WitnessSource,
+        };
+        let payload = match &self.extraction {
+            // The whole source value flows in.
+            Extraction::Whole => WitnessPayload::Edge(WitnessAttachment::Expr(self.source)),
+            // The Nth list element — a projection through `element_at(n)` at
+            // query time (`None` for a scalar source, which has no element n).
+            Extraction::Positional(n) => WitnessPayload::Projected {
+                base: WitnessAttachment::Expr(self.source),
+                step: ProjectionStep::ArrayIndex(*n as i32),
+            },
+            // A slurpy tail (`@rest`) carries the source's element type — the
+            // whole-source edge approximates it (same element lattice).
+            Extraction::Slurpy(_) => WitnessPayload::Edge(WitnessAttachment::Expr(self.source)),
+            // KeyOf awaits its HashKey-projection lowering (a later stage).
+            Extraction::KeyOf(_) => return None,
         };
         Some(Witness {
             attachment: WitnessAttachment::Variable {

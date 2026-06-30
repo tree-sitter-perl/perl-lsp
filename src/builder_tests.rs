@@ -15133,3 +15133,27 @@ fn plugin_loads_recorded_trigger_independent_and_multivalue() {
 
 #[path = "builder/narrowing_tests.rs"]
 mod narrowing;
+
+#[test]
+fn list_assign_literal_types_each_slot() {
+    // `my ($a, $b) = (10, "str")` types BOTH slots (was first-var-only/None).
+    // Each var edges to its own list element's span via a FlowEdge.
+    let src = "package T;
+sub f {
+    my ($a, $b) = (10, \"str\");
+}
+1;
+";
+    let fa = build_fa(src);
+    let p = tree_sitter::Point::new(3, 0);
+    assert_eq!(
+        fa.inferred_type_via_bag("$a", p),
+        Some(crate::file_analysis::InferredType::Numeric),
+        "first slot ($a) types from element 0"
+    );
+    assert_eq!(
+        fa.inferred_type_via_bag("$b", p),
+        Some(crate::file_analysis::InferredType::String),
+        "second slot ($b) types from element 1"
+    );
+}

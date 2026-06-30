@@ -6299,7 +6299,41 @@ impl<'a> Builder<'a> {
                         }
                     }
                 }
-                if let Some(it) = inferred {
+                if let Some(targets) = self.lhs_list_targets(left) {
+                    // List / destructuring assignment (`my ($a, $b) = RHS`):
+                    // a FlowEdge per slot. When the RHS is a LITERAL list, edge
+                    // each var straight to its element's own span (Whole — the
+                    // element types directly); otherwise a Positional projection
+                    // of the whole source. (The single-var paths below are
+                    // untouched.) Fixes the prior bug where only the first var
+                    // typed — every other slot was dropped.
+                    let elem_nodes = self.list_element_nodes(right);
+                    let rhs_span = node_to_span(right);
+                    let at = node_to_span(node).start;
+                    for (vt, extraction) in targets {
+                        let (source, extraction) = match (&elem_nodes, &extraction) {
+                            (Some(nodes), crate::file_analysis::Extraction::Positional(n))
+                                if *n < nodes.len() =>
+                            {
+                                // Edge straight to the element + ensure it's typed.
+                                self.emit_expr_witness(nodes[*n]);
+                                (node_to_span(nodes[*n]), crate::file_analysis::Extraction::Whole)
+                            }
+                            _ => (rhs_span, extraction),
+                        };
+                        let fe = crate::file_analysis::FlowEdge {
+                            target_name: vt,
+                            target_scope: self.current_scope(),
+                            target_at: at,
+                            source,
+                            extraction,
+                        };
+                        if let Some(w) = fe.lower_to_witness() {
+                            self.bag.push(w);
+                        }
+                        self.flow_edges.push(fe);
+                    }
+                } else if let Some(it) = inferred {
                     if let Some(vt) = self.get_var_text_from_lhs(left) {
                         self.push_type_constraint(TypeConstraint {
                             variable: vt,
@@ -11422,6 +11456,59 @@ impl<'a> Builder<'a> {
             return lhs.utf8_text(self.source).ok().map(|s| s.to_string());
         }
         None
+    }
+
+    /// The targets of a LIST/destructuring assignment LHS (`my ($a, $b) =
+    /// …`) with each one's positional extraction — `Some` ONLY for a paren
+    /// list (the `variables` field); `None` for a single `my $x`, leaving the
+    /// existing single-var path untouched. A scalar at slot N is `Positional(N)`,
+    /// a slurpy `@rest`/`%opts` is `Slurpy(N)` (consumes the tail).
+    fn lhs_list_targets(
+        &self,
+        lhs: Node<'a>,
+    ) -> Option<Vec<(String, crate::file_analysis::Extraction)>> {
+        use crate::file_analysis::Extraction;
+        if lhs.kind() != "variable_declaration" {
+            return None;
+        }
+        // A single `my $x` uses the `variable` field; a list `my ($a, $b)` uses
+        // the (repeated) `variables` field. The former is not a list.
+        if lhs.child_by_field_name("variable").is_some() {
+            return None;
+        }
+        let mut out = Vec::new();
+        let mut cursor = lhs.walk();
+        let mut pos = 0usize;
+        for child in lhs.named_children(&mut cursor) {
+            let extraction = match child.kind() {
+                "scalar" => Extraction::Positional(pos),
+                "array" | "hash" => Extraction::Slurpy(pos),
+                _ => continue,
+            };
+            if let Ok(t) = child.utf8_text(self.source) {
+                out.push((t.to_string(), extraction));
+            }
+            pos += 1;
+        }
+        (!out.is_empty()).then_some(out)
+    }
+
+    /// The per-element NODES of a literal-list RHS (`(10, "str")` → [10,
+    /// "str"]), so a list assignment can edge each LHS var straight to its
+    /// element (emit its witness + use its own span — no container projection).
+    /// `None` when the RHS isn't a literal list (`@arr`, a call) — that path
+    /// needs the source typed as a Positional container instead.
+    fn list_element_nodes(&self, node: Node<'a>) -> Option<Vec<Node<'a>>> {
+        let inner = if node.kind() == "parenthesized_expression" {
+            node.named_child(0)?
+        } else {
+            node
+        };
+        if inner.kind() != "list_expression" {
+            return None;
+        }
+        let mut cursor = inner.walk();
+        Some(inner.named_children(&mut cursor).collect())
     }
 
     fn get_hash_var_from_element(&self, node: Node<'a>) -> Option<String> {
