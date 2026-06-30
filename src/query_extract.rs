@@ -718,7 +718,13 @@ pub fn cpp_pack() -> LangPack {
         shape_ctor: |_| false,
         import_call: |_, _| None,
         cmd_effects: |_| vec![],
-        narrow_guard: |_, _| None,
+        // `if (dynamic_cast<Derived*>(b))` proves `b` is a `Derived` inside —
+        // the cpp analog of python `isinstance`. The pointer-ness is dropped for
+        // navigation (like declared pointer locals), so the refinement is the
+        // pointee class.
+        narrow_guard: |guard, ty| {
+            (guard == "dynamic_cast").then(|| InferredType::ClassName(ty.to_string()))
+        },
         trigger_chars: &[".", ">", ":"],
         receiver_names: &["this"],
         nested_peel: PeelSpec {
@@ -973,6 +979,10 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     // flow.assign joins: match_id → (target name+scope, source span)
     let mut flow_targets: HashMap<usize, (String, ScopeId, Point)> = HashMap::new();
     let mut flow_sources: HashMap<usize, Span> = HashMap::new();
+    // Rebind shapes with no inflowing value (loop vars: `for x in …`,
+    // `for (auto x : …)`) — they mint a `Rebind` FlowEdge so the narrowing
+    // cutoff sees them, exactly like Perl's `foreach` var.
+    let mut flow_rebinds: Vec<(String, ScopeId, Point)> = Vec::new();
     let mut annots: HashMap<usize, String> = HashMap::new();
     // keyed-shape collection: ctor + keys grouped per @expr.shape span
     let mut shape_spans: Vec<(usize, usize, Span)> = Vec::new();
@@ -1237,6 +1247,9 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                     ((pack.shape_name)("def.var", &e.text), cur_scope, e.start),
                 );
             }
+            "flow.rebind" => {
+                flow_rebinds.push(((pack.shape_name)("def.var", &e.text), cur_scope, e.start));
+            }
             "flow.source" => {
                 flow_sources.insert(e.match_id, Span { start: e.start, end: e.end });
             }
@@ -1494,6 +1507,17 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                 extraction: crate::file_analysis::Extraction::Whole,
             });
         }
+    }
+    // Bind-shape rebinds (loop vars): no inflowing value, recorded for the
+    // narrowing cutoff (`Rebind` lowers to nothing — provenance only).
+    for (name, scope, at) in flow_rebinds {
+        out.flow_edges.push(crate::file_analysis::FlowEdge {
+            target_name: name,
+            target_scope: scope,
+            target_at: at,
+            source: Span { start: at, end: at },
+            extraction: crate::file_analysis::Extraction::Rebind,
+        });
     }
     // Lower the value-flow edges to type-tier witnesses (the bag is canonical
     // for types; the edges are the provenance tier above it).

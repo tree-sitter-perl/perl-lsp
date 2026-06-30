@@ -48,6 +48,11 @@
   left: (identifier) @flow.target
   type: (type) @type.annot)
 
+; `for x in items:` — the loop var rebinds per element (a Rebind, no inflowing
+; type yet) so the narrowing cutoff ends a region at the loop.
+(for_statement
+  left: (identifier) @flow.rebind)
+
 (call
   function: (identifier) @ref.call) @expr.call
 (call

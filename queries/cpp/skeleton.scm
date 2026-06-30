@@ -254,3 +254,24 @@
 (number_literal) @expr.lit.number
 (string_literal) @expr.lit.string
 (identifier) @expr.read.var
+
+; ---- bind shapes + guard narrowing (the value-flow tier, cpp side) ----
+
+; `for (auto x : items)` — the range-for var rebinds per element (a Rebind, no
+; inflowing type yet) so the narrowing cutoff ends a region at the loop.
+(for_range_loop
+  declarator: (identifier) @flow.rebind)
+
+; `if (dynamic_cast<Derived*>(b)) { b->... }` narrows b to Derived INSIDE the
+; block — the cpp analog of python `isinstance`. The pack's narrow_guard maps
+; `dynamic_cast` + the template type to the refinement; core scopes it to
+; @scope and the edge-driven cutoff ends it at any rebind of b.
+(if_statement
+  condition: (condition_clause
+    value: (call_expression
+      function: (template_function
+        name: (identifier) @narrow.guard
+        arguments: (template_argument_list
+          (type_descriptor type: (type_identifier) @narrow.type)))
+      arguments: (argument_list (identifier) @narrow.var)))
+  consequence: (compound_statement) @scope)

@@ -1188,6 +1188,59 @@ y = 1
 }
 
 #[test]
+fn python_for_loop_var_rebind_truncates_narrowing() {
+    // A `for x in …` loop INSIDE the guard rebinds x (the loop var leaks in
+    // Python) — so the narrowing ends at the loop, via the bind-shape Rebind
+    // edge feeding the cutoff.
+    let src = "\
+class Foo:
+    def run(self):
+        pass
+x = maybe()
+if isinstance(x, Foo):
+    x.run()
+    for x in items:
+        pass
+    x.run()
+";
+    let mut parser = python_parser();
+    let tree = parser.parse(src, None).unwrap();
+    let skel = extract(&tree, src.as_bytes(), &python_pack()).unwrap();
+    let fa = skel.into_file_analysis();
+    use crate::file_analysis::InferredType;
+    assert_eq!(
+        fa.inferred_type_via_bag("x", tree_sitter::Point { row: 5, column: 4 }),
+        Some(InferredType::ClassName("Foo".into())),
+        "narrowed before the loop",
+    );
+    assert_ne!(
+        fa.inferred_type_via_bag("x", tree_sitter::Point { row: 8, column: 4 }),
+        Some(InferredType::ClassName("Foo".into())),
+        "the loop var rebinds x → narrowing truncated",
+    );
+}
+
+#[test]
+fn cpp_dynamic_cast_guard_narrows() {
+    // `if (dynamic_cast<Derived*>(b))` refines b to Derived inside the block —
+    // the cpp analog of python isinstance, via the now-wired narrow_guard.
+    let src = "\
+void f(Base* b) {
+    if (dynamic_cast<Derived*>(b)) {
+        b->run();
+    }
+}
+";
+    let fa = cpp_skel(src).into_file_analysis();
+    use crate::file_analysis::InferredType;
+    assert_eq!(
+        fa.inferred_type_via_bag("b", tree_sitter::Point { row: 2, column: 8 }),
+        Some(InferredType::ClassName("Derived".into())),
+        "dynamic_cast narrows b to Derived inside the guard",
+    );
+}
+
+#[test]
 fn cpp_pointer_declared_vars_get_their_pointee_type() {
     // `T* p;` and the dynamic_cast condition-form both type the var to
     // the pointee class (pointer-ness dropped for navigation).
