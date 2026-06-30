@@ -17,21 +17,20 @@ ARC 2  Flow combinator / value-flow tier (FlowEdge spine) 🔵 IN PROGRESS
        B  query lowers as fallback; retire manual assign_edge ✅
        C  list/destructuring onto the query ............. ✅
        D  array-source Sequence typing .................. ✅
-       E  narrowing cutoff-on-edges ..................... 🔵
-          finding: cutoff needed — a narrowing is a SCOPED
-            ASSERTION over a region, not a temporal value, so a
-            later reassignment edge does NOT supersede it; it must
-            be explicitly region-bounded. (Contrast slice B: an
-            assignment TC IS a temporal value the edge reproduces,
-            so that fixup was redundant.)
-          prerequisite: COMPLETE bind coverage (below) — else the
-            edge-driven cutoff silently under-truncates and narrowing
-            leaks past unrecorded rebinds.
-       E0 binding-shape coverage ....................... 🔵 ← current
-          every rebind shape mints a FlowEdge: bare `my`/`local`
-            (→ Cleared/Undef), `foreach` var (element flow), `our`
-            (rebind-only), lvalue-sub. Then cutoff = "earliest edge
-            targeting $x in region", and `cst::rebinds_scalar` deletes.
+       E  narrowing cutoff-on-edges ..................... ✅
+          finding: cutoff needed — a narrowing is a SCOPED ASSERTION
+            over a region, not a temporal value, so a later reassignment
+            edge does NOT supersede it; it must be explicitly
+            region-bounded. (Contrast slice B: an assignment TC IS a
+            temporal value the edge reproduces, so that fixup was redundant.)
+          LANDED: `cst::rebinds_scalar` deleted; cutoff is the shared
+            `earliest_rebind_in`, edge-driven, consumed by Perl AND the
+            query engine → cpp `dynamic_cast` + python `isinstance`
+            narrowing both sound. (See the cross-language table below.)
+       E0 binding-shape coverage ....................... ✅
+          perl `my`/`local`/`foreach`, cpp range-for, python `for x in`
+            all mint Rebind edges. (Cleared→Undef typing deferred to the
+            narrowing tier — a clear is a region assertion, not a witness.)
        F  folded_from rename provenance ................. ⬜
        G  eager→edge single source ..................... ⬜
 
@@ -66,32 +65,25 @@ first-class cpp feature, not a Perl quirk. Every tier we build should be
 spine, the bind shapes, the narrowing guards. If a tier only works for Perl,
 the seam isn't actually generic yet.
 
-### Cross-language narrowing/bind backlog (the generality steps)
+### Cross-language narrowing/bind — LANDED
 
-Current state (verified): the `narrow_guard` LangPack hook spans languages, but
-coverage is uneven, and the **rebind cutoff has no cross-language consumer yet**
-— it lives in the Perl builder (`first_subject_write`), not the query engine.
+The narrowing tier is now genuinely cross-language: one shared cutoff
+(`file_analysis::earliest_rebind_in`, edge-driven) consumed by both the Perl
+builder AND the query engine. The grammar scan (`cst::rebinds_scalar`) is gone.
 
-| language | `@flow` assign/decl | bind shapes (rebind) | `narrow_guard` |
-|----------|---------------------|----------------------|----------------|
-| perl     | ✅                  | ✅ `my`/`local`/`foreach` → Rebind | ✅ defined/ref/blessed |
-| cpp      | ✅                  | ⬜ range-for, `std::move`-from     | ⬜ STUBBED (`\|_,_\| None`) — wire `dynamic_cast`/`if(opt)`/`holds_alternative` |
-| python   | ✅                  | ⬜ `for x in`, `x: T`, `del x`     | ✅ `isinstance` |
+| language | `@flow` assign/decl | bind shapes (rebind) | `narrow_guard` | cutoff |
+|----------|---------------------|----------------------|----------------|--------|
+| perl     | ✅                  | ✅ `my`/`local`/`foreach` | ✅ defined/ref/blessed | ✅ edges |
+| cpp      | ✅                  | ✅ range-for (`std::move` ⬜) | ✅ `dynamic_cast` (`opt`/`variant` ⬜) | ✅ edges |
+| python   | ✅                  | ✅ `for x in` (`del`/annot ⬜) | ✅ `isinstance` | ✅ edges |
 
-The steps, in dependency order — DON'T mint cpp/python rebinds before there's a
-reader, or they're edges into a void:
-
-1. **Generic narrowing-cutoff (ARC 2/E):** lift `first_subject_write` off the
-   Perl CST scan onto a FlowEdge query (`earliest edge targeting $x in region`).
-   This is what makes rebinds *consumable* by any language — the cutoff becomes
-   language-agnostic the moment it reads edges instead of `cst::rebinds_scalar`.
-2. **Per-language bind captures** (once #1 lands): cpp range-for /
-   structured-binding / `std::move`; python `for`/annotation/`del` → `Rebind`
-   FlowEdges via each skeleton + the shared `query_extract` minter. (cpp `T x;`
-   is NOT a clear — it's a typed default-init via `@type.annot`.)
-3. **cpp `narrow_guard` wiring:** `dynamic_cast<T*>` → `T*`, `if(opt)` /
-   `has_value()` → engaged, `holds_alternative<T>`/`get_if<T>` → `T`. The hook
-   exists; cpp just returns `None` today.
+Remaining long-tail (additive, each a `.scm` pattern + maybe a `narrow_guard`
+arm; the cutoff already reads whatever edges they mint):
+- cpp `std::move(x)` rebind, structured bindings `auto [a,b] = …`.
+- cpp `narrow_guard`: `if(opt)`/`has_value()` → engaged, `holds_alternative<T>`
+  / `get_if<T>` → `T` (needs an optional/variant lattice — a real type-model
+  step, not just a wire).
+- python `del x` rebind, walrus `:=` already flows.
 
 ## On-target discipline
 
