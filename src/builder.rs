@@ -4684,8 +4684,8 @@ impl<'a> Builder<'a> {
             // on the variable, so a lexical hash-key rename rewrites the def too
             // — not just the `$h{k}` accesses (else the hash would still define
             // the old key and the renamed reads would miss).
-            // `child_by_field_name("right")` returns the `(` token here, so find
-            // the RHS by named child instead (the non-`left` list/hash).
+            // `child_by_field_name("right")` still returns the `(` token on an
+            // assignment, so find the RHS by named child (the non-`left` list).
             if sigil == '%' {
                 if let Some(rhs) = node.parent().filter(|p| p.kind() == "assignment_expression").and_then(|p| {
                     (0..p.named_child_count())
