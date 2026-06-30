@@ -29,6 +29,15 @@
   left: (scalar) @flow.target
   right: (_) @flow.source)
 
+; bare LIST reassignment `($x, $y) = EXPR` (no `my` — the LHS is a
+; list_expression, not a variable_declaration). `left:` does NOT match a
+; list_expression in queries (same field quirk as `right:`/parens), so anchor
+; the LHS as the FIRST child (`.`). Each slot rebinds: the cutoff + positional
+; typing. Two RHS forms (bare; parenthesized-list around the `right:` quirk).
+(assignment_expression
+  . (list_expression) @flow.lhs
+  right: (_) @flow.source)
+
 ; --- binding shapes (no inflowing value) — the rebind coverage the narrowing
 ; --- cutoff needs, plus a real type where the bind clears the var. ---
 

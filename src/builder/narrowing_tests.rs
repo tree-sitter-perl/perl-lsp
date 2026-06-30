@@ -133,7 +133,8 @@ fn narrow_truncated_at_reassignment() {
 // Truncation must recognize EVERY way Perl rebinds a scalar, not just
 // `$x = …` / `my $x` — else a stale narrowing leaks past the rebind (an
 // always-on false `undef-deref` for the `defined`-guard flavor). One test
-// per binding shape `cst::rebinds_scalar` must catch.
+// per binding shape; the cutoff (`first_subject_write_via_edges`) reads the
+// FlowEdge set, so each shape must mint a `@flow` edge targeting the subject.
 
 #[test]
 fn narrow_truncated_at_list_assignment() {
@@ -730,3 +731,4 @@ fn narrow_ref_eq_paren_wrapped_arg() {
     );
     assert_eq!(invocant_class_of(&fa, "go").as_deref(), Some("Foo"));
 }
+

@@ -296,6 +296,7 @@ fn build_with_plugins_inner(
         method_call_ref_dedup: std::collections::HashSet::new(),
         route_branded_refs: std::collections::HashSet::new(),
         defined_narrowings: Vec::new(),
+        pending_narrowings: Vec::new(),
         anon_sub_symbol_by_span: std::collections::HashMap::new(),
         modifier_invocant_pos: None,
     };
@@ -391,6 +392,11 @@ fn build_with_plugins_inner(
     // for now (no lowering) — the shapes' types still come from the walk; this
     // proves the query path before it subsumes the manual minting.
     bphase!("flow_query", b.mint_flow_edges_via_query(tree));
+
+    // Narrowing cutoffs: now that the FlowEdges exist, truncate each recognized
+    // narrowed region at the first edge that rebinds its subject (the
+    // edge-driven replacement for the `cst::rebinds_scalar` walk) and emit.
+    bphase!("narrowing_cutoffs", b.apply_narrowing_cutoffs());
 
     // Export-list member refs: a `@EXPORT` / `@EXPORT_OK` / `%EXPORT_TAGS`
     // member naming a local sub gets a FunctionCall ref back to it. Runs
@@ -1616,6 +1622,10 @@ struct Builder<'a> {
     /// Recorded `defined`/`blessed` guards whose `Optional<T> → T` strip
     /// is re-derived each fold iteration (`emit_defined_narrowing_witnesses`).
     defined_narrowings: Vec<narrowing::DefinedNarrowing>,
+    /// Recognized narrowings whose region cutoff resolves post-walk against the
+    /// minted FlowEdges (`apply_narrowing_cutoffs`) — the edge-driven rebind
+    /// truncation that replaced the `cst::rebinds_scalar` grammar scan.
+    pending_narrowings: Vec<narrowing::PendingNarrow>,
 
     /// Span (of the `anonymous_subroutine_expression` node) →
     /// SymbolId of the synthesized `(anon)` Sub symbol. Populated by
@@ -11636,11 +11646,14 @@ impl<'a> Builder<'a> {
         lhs: Node<'a>,
     ) -> Option<Vec<(String, crate::file_analysis::Extraction)>> {
         use crate::file_analysis::Extraction;
-        if lhs.kind() != "variable_declaration" {
+        // `my ($a, $b)` (variable_declaration) OR a bare `($a, $b) = …`
+        // reassignment (a `list_expression` LHS — no `my`).
+        if !matches!(lhs.kind(), "variable_declaration" | "list_expression") {
             return None;
         }
         // A single `my $x` uses the `variable` field; a list `my ($a, $b)` uses
-        // the (repeated) `variables` field. The former is not a list.
+        // the (repeated) `variables` field. The former is not a list. (A
+        // `list_expression` has no `variable` field, so it falls through.)
         if lhs.child_by_field_name("variable").is_some() {
             return None;
         }

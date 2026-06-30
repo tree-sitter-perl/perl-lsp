@@ -19,6 +19,7 @@ use super::{connector_keyword_between, point_lt, raw_leading_op, raw_mid_op, Bui
 /// (`$self->{x}`, `$h{k}`, `$self->{$k}`) keyed by its source spelling.
 /// `key_vars` are the place's dynamic-key scalars (`$k` in `$self->{$k}`);
 /// reassigning any of them ends the narrowing region.
+#[derive(Clone)]
 pub(super) enum NarrowSubject {
     Variable(String),
     Place { key: String, root: String, key_vars: Vec<String> },
@@ -93,6 +94,21 @@ pub(super) struct DefinedNarrowing {
     scope: ScopeId,
     region: Span,
     query_point: Point,
+}
+
+/// A recognized narrowing whose region cutoff is computed AFTER the walk —
+/// once `mint_flow_edges_via_query` has run, so the scalar-rebind truncation
+/// reads FlowEdges (`apply_narrowing_cutoffs`) instead of a CST scan. The
+/// PLACE-container invalidation IS a CST mutation scan, so it's pre-computed
+/// inline (`place_cut`) where the node is in hand; the scalar cutoffs (subject
+/// / dynamic-key vars) defer. `scope` is captured at recognition time (the
+/// walk's `current_scope`), invisible post-walk.
+pub(super) struct PendingNarrow {
+    subject: NarrowSubject,
+    op: NarrowOp,
+    region: Span,
+    scope: ScopeId,
+    place_cut: Option<Point>,
 }
 
 /// Map a `ref(...) eq STRING` right-hand string to the type it proves.
@@ -474,51 +490,26 @@ impl<'a> Builder<'a> {
         region: Span,
         container: Node<'a>,
     ) {
-        use crate::witnesses::{Witness, WitnessAttachment, WitnessPayload, WitnessSource};
-        let (name, end) = match subject {
-            NarrowSubject::Variable(var) => {
-                let end = self.first_subject_write(var, region, container);
-                (var.clone(), end)
+        // The PLACE-container invalidation is a CST mutation scan (a place is
+        // disturbed by a write to its container/prefix, not by a scalar
+        // rebind) — compute it now, while `container` is in hand. The
+        // SCALAR-rebind cutoff (the subject, or a place's dynamic-key vars)
+        // defers to `apply_narrowing_cutoffs`, which reads the post-walk
+        // FlowEdges: a rebind is "an edge targeting the subject", not a grammar
+        // scan. `scope` is captured here (the walk's live `current_scope`).
+        let place_cut = match subject {
+            NarrowSubject::Place { key, root, .. } => {
+                self.first_place_invalidation(key, root, region, container)
             }
-            NarrowSubject::Place { key, root, key_vars } => {
-                // The place is stable while its container/prefixes AND every
-                // dynamic-key scalar are unchanged; truncate at the earliest
-                // disturbance of either.
-                let mut end = self.first_place_invalidation(key, root, region, container);
-                for kv in key_vars {
-                    let kv_end = self.first_subject_write(kv, region, container);
-                    end = earliest_point(end, kv_end);
-                }
-                (key.clone(), end)
-            }
+            NarrowSubject::Variable(_) => None,
         };
-        let end = end.unwrap_or(region.end);
-        if !point_lt(region.start, end) {
-            return; // truncated to nothing
-        }
-        let region = Span { start: region.start, end };
-        let scope = self.current_scope();
-        match op {
-            NarrowOp::To(ty) => {
-                self.bag.push(Witness {
-                    attachment: WitnessAttachment::Variable { name, scope },
-                    source: WitnessSource::Builder("narrowing".into()),
-                    payload: WitnessPayload::InferredType(ty),
-                    span: region,
-                });
-            }
-            // `defined`/`blessed` strip `Optional<T>` to `T`, but the
-            // subject's type may only converge in the fold (a sub return),
-            // so record it and re-derive in `emit_defined_narrowing_witnesses`.
-            NarrowOp::StripOptional { query_point } => {
-                self.defined_narrowings.push(DefinedNarrowing {
-                    name,
-                    scope,
-                    region,
-                    query_point,
-                });
-            }
-        }
+        self.pending_narrowings.push(PendingNarrow {
+            subject: subject.clone(),
+            op,
+            region,
+            scope: self.current_scope(),
+            place_cut,
+        });
     }
 
     /// Re-emittable: `defined`/`blessed` narrowing. For each recorded
@@ -639,30 +630,66 @@ impl<'a> Builder<'a> {
         best
     }
 
-    /// Point of the first reassignment of `$var` inside `container` at or
-    /// after `region.start` — the narrowing region's truncation bound.
-    fn first_subject_write(&self, var: &str, region: Span, container: Node<'a>) -> Option<Point> {
-        // Truncate the narrowed region at the first node that rebinds `$var`,
-        // in ANY of Perl's binding shapes (`cst::rebinds_scalar` is the single
-        // detector — assignment, `my`/`local`, list-assign, foreach loop var,
-        // lvalue-sub). Recursing into every node and taking the earliest hit
-        // keeps the truncation conservative (a rebind in a nested branch only
-        // shrinks the region — under-narrowing, never a false `Undef`).
-        fn scan(node: Node, var: &str, after: Point, src: &[u8], best: &mut Option<Point>) {
-            if crate::cst::rebinds_scalar(node, var, src) {
-                let p = node.start_position();
-                if !point_lt(p, after) && best.map_or(true, |b| point_lt(p, b)) {
-                    *best = Some(p);
+    /// Point of the first FlowEdge that rebinds `$var` within `region` — the
+    /// narrowing region's truncation bound. A rebind IS a value flowing into
+    /// the subject (assignment / `my`·`local` clear / list slot / `foreach`
+    /// var — every shape that mints a bind/assign edge), so this reads the
+    /// EDGE SET, not the CST. Language-agnostic: any LangPack feeding FlowEdges
+    /// gets the cutoff for free (the seam the grammar scan couldn't cross).
+    fn first_subject_write_via_edges(&self, var: &str, region: Span) -> Option<Point> {
+        self.flow_edges
+            .iter()
+            .filter(|fe| fe.target_name == var)
+            .map(|fe| fe.target_at)
+            .filter(|p| !point_lt(*p, region.start) && point_lt(*p, region.end))
+            .min_by_key(|p| (p.row, p.column))
+    }
+
+    /// Post-walk: resolve every recognized narrowing's region cutoff against
+    /// the now-minted FlowEdges, then emit — `To` → a scoped `InferredType`
+    /// witness; `StripOptional` → a `DefinedNarrowing` the fold re-derives.
+    /// Deferred from the walk precisely so the scalar-rebind truncation can
+    /// read edges (minted post-walk). The PLACE-container cutoff was already
+    /// pre-computed inline (`place_cut`) where its node was in hand.
+    pub(super) fn apply_narrowing_cutoffs(&mut self) {
+        use crate::witnesses::{Witness, WitnessAttachment, WitnessPayload, WitnessSource};
+        let pending = std::mem::take(&mut self.pending_narrowings);
+        for pn in pending {
+            let (name, end) = match &pn.subject {
+                NarrowSubject::Variable(var) => {
+                    (var.clone(), self.first_subject_write_via_edges(var, pn.region))
                 }
+                NarrowSubject::Place { key, key_vars, .. } => {
+                    let mut end = pn.place_cut;
+                    for kv in key_vars {
+                        end = earliest_point(end, self.first_subject_write_via_edges(kv, pn.region));
+                    }
+                    (key.clone(), end)
+                }
+            };
+            let end = end.unwrap_or(pn.region.end);
+            if !point_lt(pn.region.start, end) {
+                continue; // truncated to nothing
             }
-            for i in 0..node.named_child_count() {
-                if let Some(c) = node.named_child(i) {
-                    scan(c, var, after, src, best);
+            let region = Span { start: pn.region.start, end };
+            match pn.op {
+                NarrowOp::To(ty) => {
+                    self.bag.push(Witness {
+                        attachment: WitnessAttachment::Variable { name, scope: pn.scope },
+                        source: WitnessSource::Builder("narrowing".into()),
+                        payload: WitnessPayload::InferredType(ty),
+                        span: region,
+                    });
+                }
+                NarrowOp::StripOptional { query_point } => {
+                    self.defined_narrowings.push(DefinedNarrowing {
+                        name,
+                        scope: pn.scope,
+                        region,
+                        query_point,
+                    });
                 }
             }
         }
-        let mut best = None;
-        scan(container, var, region.start, self.source, &mut best);
-        best
     }
 }
