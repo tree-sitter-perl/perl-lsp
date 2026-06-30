@@ -15157,3 +15157,21 @@ sub f {
         "second slot ($b) types from element 1"
     );
 }
+
+#[test]
+fn flow_query_pass_mints_with_builder_scope() {
+    // The declarative @flow query (queries/perl/flow.scm), run inside build(),
+    // mints a FlowEdge for $x with the builder's OWN scope. The Perl-on-query-
+    // engine path: shape captured in .scm, scope + mint in the builder.
+    let fa = build_fa("package T;
+sub f {
+  my $x = 42;
+}
+1;
+");
+    assert!(
+        fa.flow_edges.iter().any(|fe| fe.target_name == "$x"),
+        "@flow query pass should mint a FlowEdge for $x: {:?}",
+        fa.flow_edges
+    );
+}

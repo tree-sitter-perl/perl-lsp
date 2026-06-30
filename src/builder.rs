@@ -386,6 +386,12 @@ fn build_with_plugins_inner(
     // Post-pass 1: resolve variable refs -> resolves_to
     bphase!("resolve_variable_refs", b.resolve_variable_refs());
 
+    // Value-flow capture: run the declarative `@flow` query (the assignment
+    // SHAPES) and mint FlowEdges with the builder's own scope. Provenance-only
+    // for now (no lowering) — the shapes' types still come from the walk; this
+    // proves the query path before it subsumes the manual minting.
+    bphase!("flow_query", b.mint_flow_edges_via_query(tree));
+
     // Export-list member refs: a `@EXPORT` / `@EXPORT_OK` / `%EXPORT_TAGS`
     // member naming a local sub gets a FunctionCall ref back to it. Runs
     // post-walk because subs are usually declared after the export list.
@@ -1766,6 +1772,60 @@ impl<'a> Builder<'a> {
             }
         }
         best.map(|(id, _)| id).unwrap_or(ScopeId(0))
+    }
+
+    /// Run the declarative `@flow` query (`queries/perl/flow.scm`) and mint a
+    /// FlowEdge per `(target, source)` with the builder's OWN scope. The
+    /// assignment shapes are captured in the `.scm`; the minting + scope live
+    /// here — the same FlowEdge concept the cpp pack produces. The forcing-
+    /// function start of Perl-on-the-query-engine. Provenance-only for now
+    /// (no lowering): the shapes' types still come from the walk.
+    fn mint_flow_edges_via_query(&mut self, tree: &Tree) {
+        use tree_sitter::{Query, QueryCursor, StreamingIterator};
+        static FLOW_SCM: &str = include_str!("../queries/perl/flow.scm");
+        let lang = tree.language();
+        let query = match Query::new(&lang, FLOW_SCM) {
+            Ok(q) => q,
+            Err(_) => return,
+        };
+        let cap_names: Vec<String> = query.capture_names().iter().map(|s| s.to_string()).collect();
+        // Collect (targets, source) per match FIRST — the cursor borrows
+        // `self.source`, so we can't mutate `self.flow_edges` until it drops.
+        let mut pending: Vec<(Vec<Node>, Node)> = Vec::new();
+        {
+            let mut cursor = QueryCursor::new();
+            let mut matches = cursor.matches(&query, tree.root_node(), self.source);
+            while let Some(m) = matches.next() {
+                let mut targets: Vec<Node> = Vec::new();
+                let mut source: Option<Node> = None;
+                for c in m.captures {
+                    match cap_names[c.index as usize].as_str() {
+                        "flow.target" => targets.push(c.node),
+                        "flow.source" => source = Some(c.node),
+                        _ => {}
+                    }
+                }
+                if let Some(src) = source {
+                    pending.push((targets, src));
+                }
+            }
+        }
+        for (targets, src) in pending {
+            let source_span = node_to_span(src);
+            for t in targets {
+                let Ok(name) = t.utf8_text(self.source) else { continue };
+                let name = name.to_string();
+                let at = t.start_position();
+                let scope = self.scope_at_point(at);
+                self.flow_edges.push(crate::file_analysis::FlowEdge {
+                    target_name: name,
+                    target_scope: scope,
+                    target_at: at,
+                    source: source_span,
+                    extraction: crate::file_analysis::Extraction::Whole,
+                });
+            }
+        }
     }
 
     // ---- Symbol/Ref creation ----
