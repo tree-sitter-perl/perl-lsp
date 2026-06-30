@@ -263,6 +263,41 @@ impl Backend {
         });
     }
 
+    /// Resolve a `recv->field` / `recv.field` member access at `pos` to
+    /// `(receiver class, field name)` via the sentinel reparse — which peels
+    /// `*`/`&`/parens, so `(*op_p)->op_type` resolves like `op_p`. The shared
+    /// front half of member goto-def + member hover (a field access is not a
+    /// captured ref, so both go through the cursor, not `find_definition`).
+    fn pack_member_at(
+        &self,
+        doc: &crate::document::Document,
+        pos: Position,
+        idx: &dyn crate::file_analysis::CrossFileLookup,
+    ) -> Option<(String, String)> {
+        let cfg = crate::cursor_sentinel::lang_cfg(doc.language)?;
+        let cursor = crate::cursor_sentinel::point_to_byte(&doc.text, symbols::position_to_point(pos));
+        let bytes = doc.text.as_bytes();
+        let is_id = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
+        let mut start = cursor;
+        while start > 0 && is_id(bytes[start - 1]) {
+            start -= 1;
+        }
+        let mut end = cursor;
+        while end < bytes.len() && is_id(bytes[end]) {
+            end += 1;
+        }
+        if start == end {
+            return None;
+        }
+        let field = doc.text[start..end].to_string();
+        let reg = crate::language_driver::LanguageRegistry::with_enabled();
+        let mut parser = reg.for_id(doc.language)?.make_parser();
+        let ctx = crate::cursor_sentinel::member_completion_ctx_incremental(
+            &mut parser, cfg, &doc.text, &doc.tree, cursor, &doc.analysis, Some(idx),
+        )?;
+        Some((ctx.receiver_type?.class_name()?.to_string(), field))
+    }
+
     fn enrich_analysis(&self, uri: &Url) {
         if let Some(mut doc) = self.files.get_open_mut(uri) {
             // enrichment is Perl-flavored (imported-type/hash-key keys);
@@ -684,7 +719,28 @@ impl LanguageServer for Backend {
             .then(|| self.module_index.pack_index(doc.language))
             .flatten();
         let idx = pack.as_deref().unwrap_or(&self.module_index);
-        Ok(symbols::find_definition(&doc.analysis, pos, uri, idx))
+        if let Some(resp) = symbols::find_definition(&doc.analysis, pos, uri, idx) {
+            return Ok(Some(resp));
+        }
+        // A struct/class member access (`obj->field`) is not a captured ref —
+        // resolve the receiver at the cursor + jump to the field's def site.
+        if doc.language != "perl" {
+            if let Some((class, field)) = self.pack_member_at(&doc, pos, idx) {
+                if let Some((path, span)) = doc.analysis.member_def_site(&class, &field, Some(idx)) {
+                    let target = match path {
+                        Some(p) => Url::from_file_path(&p).ok(),
+                        None => Some(uri.clone()),
+                    };
+                    if let Some(target) = target {
+                        return Ok(Some(GotoDefinitionResponse::Scalar(Location {
+                            uri: target,
+                            range: symbols::span_to_range(span),
+                        })));
+                    }
+                }
+            }
+        }
+        Ok(None)
     }
 
     async fn goto_implementation(
@@ -842,13 +898,29 @@ impl LanguageServer for Backend {
             let pack = self.module_index.pack_index(doc.language);
             let xidx: &dyn crate::file_analysis::CrossFileLookup =
                 pack.as_deref().map_or(&*self.module_index, |i| i);
-            return Ok(symbols::pack_hover(
+            if let Some(h) = symbols::pack_hover(
                 &doc.analysis,
                 &doc.text,
                 symbols::position_to_point(pos),
                 doc.language,
                 Some(xidx),
-            ));
+            ) {
+                return Ok(Some(h));
+            }
+            // A member access (`obj->field`) is not a captured symbol/ref —
+            // resolve the receiver at the cursor + render the field's type.
+            if let Some((class, field)) = self.pack_member_at(&doc, pos, xidx) {
+                if let Some(line) = doc.analysis.member_hover(&class, &field, Some(xidx)) {
+                    return Ok(Some(Hover {
+                        contents: HoverContents::Markup(MarkupContent {
+                            kind: MarkupKind::Markdown,
+                            value: format!("```{}\n{}\n```\n\n*field*", doc.language, line),
+                        }),
+                        range: None,
+                    }));
+                }
+            }
+            return Ok(None);
         }
         Ok(symbols::hover_info(
             &doc.analysis,

@@ -4594,6 +4594,82 @@ impl FileAnalysis {
         candidates
     }
 
+    /// The DEFINITION site of data member `field` on `class` (or an
+    /// ancestor): the field symbol's file + selection span. `None` path = the
+    /// field lives in THIS analysis (current file); `Some(path)` = a
+    /// cross-file class. Drives goto-def on `obj->field`. Same cross-file
+    /// ancestor walk as member completion.
+    pub fn member_def_site(
+        &self,
+        class: &str,
+        field: &str,
+        module_index: Option<&dyn CrossFileLookup>,
+    ) -> Option<(Option<std::path::PathBuf>, Span)> {
+        let mut found = None;
+        self.for_each_ancestor_class(class, module_index, |cls| {
+            let is_member = |s: &&Symbol| {
+                matches!(s.kind, SymKind::Variable | SymKind::Field)
+                    && s.name == field
+                    && s.package.as_deref() == Some(cls)
+            };
+            if let Some(sym) = self.symbols.iter().find(is_member) {
+                found = Some((None, sym.selection_span));
+                return std::ops::ControlFlow::Break(());
+            }
+            if let Some(cached) = module_index.and_then(|mi| mi.get_cached(cls)) {
+                if let Some(sym) = cached.analysis.symbols.iter().find(is_member) {
+                    found = Some((Some(cached.path.clone()), sym.selection_span));
+                    return std::ops::ControlFlow::Break(());
+                }
+            }
+            std::ops::ControlFlow::Continue(())
+        });
+        found
+    }
+
+    /// `field: type` for hover on `obj->field` — the member's name + its
+    /// rendered type (exact class for objects + the pointer stack, generic
+    /// for primitives), resolved through the cross-file ancestor walk. Reads
+    /// the type from the field's OWNING analysis (self or the cached module).
+    pub fn member_hover(
+        &self,
+        class: &str,
+        field: &str,
+        module_index: Option<&dyn CrossFileLookup>,
+    ) -> Option<String> {
+        let render = |analysis: &FileAnalysis, cls: &str| -> Option<String> {
+            let sym = analysis.symbols.iter().find(|s| {
+                matches!(s.kind, SymKind::Variable | SymKind::Field)
+                    && s.name == field
+                    && s.package.as_deref() == Some(cls)
+            })?;
+            let ty = analysis.inferred_type_via_bag(field, sym.span.end);
+            let base = ty
+                .as_ref()
+                .map(|t| t.class_name().map(String::from).unwrap_or_else(|| format_inferred_type(t)));
+            let stars: String = sym.deref_stack.iter().map(|s| s.render()).collect();
+            Some(match base {
+                Some(b) => format!("{}: {}{}", field, b, stars),
+                None => field.to_string(),
+            })
+        };
+        let mut result = None;
+        self.for_each_ancestor_class(class, module_index, |cls| {
+            if let Some(h) = render(self, cls) {
+                result = Some(h);
+                return std::ops::ControlFlow::Break(());
+            }
+            if let Some(cached) = module_index.and_then(|mi| mi.get_cached(cls)) {
+                if let Some(h) = render(&cached.analysis, cls) {
+                    result = Some(h);
+                    return std::ops::ControlFlow::Break(());
+                }
+            }
+            std::ops::ControlFlow::Continue(())
+        });
+        result
+    }
+
     /// The declared type of data field `field` on `class` (or an ancestor)
     /// — a member's type for pack-language member-access chains (`a.b.`).
     /// Finds the field symbol (package == the class) and reads its bag type.
