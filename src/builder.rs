@@ -275,6 +275,7 @@ fn build_with_plugins_inner(
         param_type_wildcards: Vec::new(),
         plugin_loads: Vec::new(),
         loader_config_params: Vec::new(),
+        flow_edges: Vec::new(),
         any_requires_action_attr: false,
         provisional_dispatches: Vec::new(),
         gated_param_types: Vec::new(),
@@ -557,8 +558,7 @@ fn build_with_plugins_inner(
         column_keyed_verbs: b.plugins.column_keyed_verbs().map(|s| s.to_string()).collect(),
         plugin_loads: b.plugin_loads,
         loader_config_params: b.loader_config_params,
-        // Stage 2 bridges the Perl assignment sites onto FlowEdges; empty here.
-        flow_edges: Vec::new(),
+        flow_edges: b.flow_edges,
     });
     // Finalize: run the legacy text-based MCB resolver as a fallback.
     // For every assignment the unified typer (run before
@@ -1484,6 +1484,9 @@ struct Builder<'a> {
     /// config at enrichment. Flushed into
     /// `FileAnalysis.loader_config_params`.
     loader_config_params: Vec<crate::file_analysis::LoaderConfigParam>,
+    /// Value-flow edges minted at assignment sites — the provenance tier; each
+    /// lowers to the same type witness the builder used to push inline.
+    flow_edges: Vec<crate::file_analysis::FlowEdge>,
     /// Rules from `param_types()` with `method: None` — applied to every sub
     /// declaration in a matching class, regardless of method name. The
     /// "every action in a controller" case (Catalyst `$c`).
@@ -6308,26 +6311,26 @@ impl<'a> Builder<'a> {
                 } else if let Some(vt) = self.get_var_text_from_lhs(left) {
                     // RHS didn't resolve at build time — typically a cross-file
                     // method chain whose type needs the module index, absent
-                    // during the parallel per-file workspace build. Don't drop
-                    // it to a dead end: link the variable to the RHS expr as an
-                    // EDGE so a query that carries the index chases it lazily
-                    // ("Edges, not values"). In-file chains never reach here —
-                    // they resolved above and materialized.
-                    use crate::witnesses::{Witness, WitnessAttachment, WitnessPayload, WitnessSource};
-                    let scope = self.current_scope();
-                    let rhs_span = node_to_span(right);
-                    // Zero-extent span at the assignment start — same convention
-                    // as `push_type_constraint`. A non-zero span would make the
-                    // resolved Variable witness subject to point-containment
-                    // narrowing and get skipped at any query point past the
-                    // assignment (which is every real use of the variable).
-                    let at = node_to_span(node).start;
-                    self.bag.push(Witness {
-                        attachment: WitnessAttachment::Variable { name: vt, scope },
-                        source: WitnessSource::Builder("assign_edge".into()),
-                        payload: WitnessPayload::Edge(WitnessAttachment::Expr(rhs_span)),
-                        span: Span { start: at, end: at },
-                    });
+                    // during the parallel per-file workspace build. Mint a
+                    // value-flow edge (Whole) and lower it: the bag gets the
+                    // SAME `Variable → Edge(Expr)` it always did (a query
+                    // carrying the index chases it lazily — "edges, not
+                    // values"), now with the source span kept for provenance.
+                    // Zero-extent span at the assignment start — a non-zero
+                    // span would make the resolved Variable witness subject to
+                    // point-containment narrowing and get skipped at every use
+                    // past the assignment.
+                    let fe = crate::file_analysis::FlowEdge {
+                        target_name: vt,
+                        target_scope: self.current_scope(),
+                        target_at: node_to_span(node).start,
+                        source: node_to_span(right),
+                        extraction: crate::file_analysis::Extraction::Whole,
+                    };
+                    if let Some(w) = fe.lower_to_witness() {
+                        self.bag.push(w);
+                    }
+                    self.flow_edges.push(fe);
                 }
                 // Always record call/method-call bindings (independent
                 // of whether the bag resolved a type) — they're the
