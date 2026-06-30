@@ -124,6 +124,12 @@ pub struct Backend {
     /// resolver refresh callback (which also publishes diagnostics), hence the
     /// atomic. Default off — QA/plugin-author channel.
     unresolved_dispatch: Arc<std::sync::atomic::AtomicBool>,
+    /// Per-document edit generation. Each `did_change` bumps it; a debounced
+    /// rebuild task only proceeds if its captured generation is still the
+    /// latest — so a burst of keystrokes triggers ONE analysis (~0.7s on a
+    /// big macro-heavy C file) after typing settles, not one per keystroke.
+    /// Pack languages only; Perl rebuilds synchronously (cheap).
+    change_gen: Arc<dashmap::DashMap<Url, u64>>,
 }
 
 impl Backend {
@@ -196,7 +202,65 @@ impl Backend {
             client,
             files,
             unresolved_dispatch,
+            change_gen: Arc::new(dashmap::DashMap::new()),
         }
+    }
+
+    /// After a debounce, rebuild the pack analysis for `uri` OFF the document
+    /// lock (snapshot text → `spawn_blocking` build → write back) + publish
+    /// diagnostics — but only while `generation` is still the latest edit, so
+    /// a burst of keystrokes collapses to ONE rebuild after typing settles.
+    fn spawn_debounced_rebuild(&self, uri: Url, generation: u64) {
+        let files = Arc::clone(&self.files);
+        let module_index = Arc::clone(&self.module_index);
+        let client = self.client.clone();
+        let change_gen = Arc::clone(&self.change_gen);
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+            let is_latest = || change_gen.get(&uri).map(|v| *v) == Some(generation);
+            if !is_latest() {
+                return;
+            }
+            // Snapshot the latest text off the lock; build on a blocking
+            // thread so the ~0.7s analysis never stalls completion/hover.
+            let Some((text, path, language)) = files
+                .get_open(&uri)
+                .map(|d| (d.text.clone(), d.path.clone(), d.language))
+            else {
+                return;
+            };
+            let analysis = tokio::task::spawn_blocking(move || {
+                crate::language_driver::LanguageRegistry::with_enabled()
+                    .for_id(language)
+                    .map(|d| d.analyze_with_path(&text, path.as_deref()))
+            })
+            .await
+            .ok()
+            .flatten();
+            let Some(analysis) = analysis else {
+                return;
+            };
+            if !is_latest() {
+                return; // a newer keystroke superseded this build
+            }
+            for imp in &analysis.imports {
+                module_index.request_resolve(&imp.module_name);
+            }
+            for parents in analysis.package_parents.values() {
+                for parent in parents {
+                    module_index.request_resolve(parent);
+                }
+            }
+            if let Some(mut doc) = files.get_open_mut(&uri) {
+                doc.apply_rebuilt(analysis);
+            }
+            let diags = files
+                .get_open(&uri)
+                .map(|doc| symbols::pack_member_op_diagnostics(&doc.analysis, doc.language));
+            if let Some(diags) = diags {
+                client.publish_diagnostics(uri, diags, None).await;
+            }
+        });
     }
 
     fn enrich_analysis(&self, uri: &Url) {
@@ -540,22 +604,41 @@ impl LanguageServer for Backend {
 
     async fn did_change(&self, params: DidChangeTextDocumentParams) {
         let uri = params.text_document.uri;
-        if let Some(change) = params.content_changes.into_iter().next() {
+        let Some(change) = params.content_changes.into_iter().next() else {
+            return;
+        };
+        let language = match self.files.get_open(&uri) {
+            Some(doc) => doc.language,
+            None => return,
+        };
+        // Perl rebuilds synchronously — its build is cheap. Pack languages
+        // (macro-heavy C: ~0.7s/rebuild) update the tree/text immediately so
+        // position features stay live, and DEBOUNCE the analysis so a burst
+        // of keystrokes pays one rebuild after typing settles, not one each.
+        if language == "perl" {
             if let Some(mut doc) = self.files.get_open_mut(&uri) {
                 doc.update(change.text);
-                // Resolve any new imports that appeared during editing.
                 for imp in &doc.analysis.imports {
                     self.module_index.request_resolve(&imp.module_name);
                 }
-                // Resolve parent classes for inheritance.
                 for parents in doc.analysis.package_parents.values() {
                     for parent in parents {
                         self.module_index.request_resolve(parent);
                     }
                 }
             }
+            self.publish_diagnostics(&uri).await;
+            return;
         }
-        self.publish_diagnostics(&uri).await;
+        if let Some(mut doc) = self.files.get_open_mut(&uri) {
+            doc.update_text_only(change.text);
+        }
+        let generation = {
+            let mut e = self.change_gen.entry(uri.clone()).or_insert(0);
+            *e += 1;
+            *e
+        };
+        self.spawn_debounced_rebuild(uri, generation);
     }
 
     async fn did_save(&self, params: DidSaveTextDocumentParams) {
