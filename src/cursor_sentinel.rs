@@ -169,22 +169,25 @@ pub fn receiver_at(
 fn find_sentinel<'a>(root: Node<'a>, patched: &str, cursor: usize) -> Option<Node<'a>> {
     let end = cursor + SENTINEL.len();
     let mut node = root.descendant_for_byte_range(cursor, end)?;
-    // Descend / climb to the exact identifier token carrying the text.
-    loop {
-        if node.utf8_text(patched.as_bytes()).ok() == Some(SENTINEL) && node.child_count() == 0 {
-            return Some(node);
-        }
-        // Try a named child that exactly covers the sentinel.
-        let mut found = None;
+    // Descend to the leaf token carrying the sentinel. Completing IN PLACE of
+    // an existing `->member` (`o->|op_type`, the common "edit a member" case)
+    // patches to `o->__CURSOR__op_type`, so the sentinel is MERGED into the
+    // identifier — accept the leaf that CONTAINS it, not only an exact
+    // `__CURSOR__` token (which only happens at a bare trailing `->`).
+    while node.child_count() > 0 {
         let mut cur = node.walk();
-        for c in node.named_children(&mut cur) {
-            if c.start_byte() == cursor && c.end_byte() == end {
-                found = Some(c);
-                break;
-            }
+        let child = node
+            .children(&mut cur)
+            .find(|c| c.start_byte() <= cursor && c.end_byte() >= end);
+        match child {
+            Some(c) => node = c,
+            None => return None,
         }
-        node = found?;
     }
+    node.utf8_text(patched.as_bytes())
+        .ok()
+        .filter(|t| t.contains(SENTINEL))
+        .map(|_| node)
 }
 
 /// Walk up from the sentinel to the member-access node that owns it.
