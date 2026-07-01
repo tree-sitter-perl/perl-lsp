@@ -433,6 +433,12 @@ pub struct LangPack {
     /// "which guard means which refinement" (rule #10); core just scopes
     /// the witness to the block.
     pub narrow_guard: fn(guard: Option<&str>, type_text: &str) -> Option<InferredType>,
+    /// Does calling `method` on a variable REBIND it — putting a moved-from
+    /// object back into a known state (`clear`/`reset`/`assign`/…)? Used to end
+    /// a moved-from region (and any narrowing) at the reset call, so a use after
+    /// it is clean. Pack-owned language vocab (like `op_map` / `ctor_class`):
+    /// core asks the value, never enumerates names itself.
+    pub rebind_method: fn(method: &str) -> bool,
     /// Completion trigger characters for the LSP
     /// `completionProvider.triggerCharacters` slot — the client auto-fires
     /// completion (and reports the char in `CompletionContext`) when one is
@@ -536,6 +542,7 @@ pub fn perl_pack() -> LangPack {
         import_call: |_, _| None,
         cmd_effects: |_| vec![],
         narrow_guard: |_, _| None,
+        rebind_method: |_| false,
         trigger_chars: &["$", "@", "%", ">", ":", "{"],
         receiver_names: &[],
         nested_peel: PeelSpec { wrappers: &[], annot_kinds: &[], leaf_to_def: &[], record_stack: true },
@@ -579,6 +586,7 @@ pub fn python_pack() -> LangPack {
         cmd_effects: |_| vec![],
         // `isinstance(x, Foo)` narrows x to Foo inside the guard.
         narrow_guard: |guard, ty| (guard == Some("isinstance")).then(|| InferredType::ClassName(ty.to_string())),
+        rebind_method: |_| false,
         trigger_chars: &["."],
         receiver_names: &["self", "cls"],
         nested_peel: PeelSpec { wrappers: &[], annot_kinds: &[], leaf_to_def: &[], record_stack: true },
@@ -617,6 +625,7 @@ pub fn r_pack() -> LangPack {
         },
         cmd_effects: |_| vec![],
         narrow_guard: |_, _| None,
+        rebind_method: |_| false,
         trigger_chars: &["$", "@", ":"],
         receiver_names: &[],
         nested_peel: PeelSpec { wrappers: &[], annot_kinds: &[], leaf_to_def: &[], record_stack: true },
@@ -662,6 +671,7 @@ pub fn cmake_pack() -> LangPack {
             _ => vec![],
         },
         narrow_guard: |_, _| None,
+        rebind_method: |_| false,
         trigger_chars: &["{", "("],
         receiver_names: &[],
         nested_peel: PeelSpec { wrappers: &[], annot_kinds: &[], leaf_to_def: &[], record_stack: true },
@@ -744,6 +754,13 @@ pub fn cpp_pack() -> LangPack {
                 _ => return None,
             };
             Some(InferredType::ClassName(class))
+        },
+        // Rebinding methods: a moved-from object is put back into a known state
+        // by these std container/optional/smart-ptr resets, so a use after one
+        // is NOT a use-after-move. (An ordinary `x.use()` is not here, so the
+        // canonical bug still flags.)
+        rebind_method: |m| {
+            matches!(m, "clear" | "reset" | "assign" | "emplace" | "swap")
         },
         trigger_chars: &[".", ">", ":"],
         receiver_names: &["this"],
@@ -956,12 +973,16 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
             });
         }
     }
-    // Source order; outermost first on ties so scopes push before
-    // their contents.
+    // Source order; outermost first on ties so scopes push before their
+    // contents. A `@scope` on the SAME node as a `@def` (a function_definition
+    // carries its own body scope) must open AFTER the def is recorded, so the
+    // symbol attributes to its ENCLOSING scope, not its own body — hence scope
+    // sorts last among identical-span ties.
     events.sort_by(|a, b| {
         a.start_byte
             .cmp(&b.start_byte)
             .then(b.end_byte.cmp(&a.end_byte))
+            .then((a.cap == "scope").cmp(&(b.cap == "scope")))
     });
 
     // ---- join def name-captures to their def event ----
@@ -991,26 +1012,22 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
             rettype_by_match.insert(e.match_id, e.text.clone());
         }
     }
-    // var name → its declared-type text, joined per declaration match. Feeds the
-    // token-less optional-engagement narrowing (`if (opt)`): the guard names no
-    // type, so the refinement reads the subject's declared `std::optional<T>`.
-    let mut annot_text_by_var: HashMap<String, String> = HashMap::new();
-    {
-        let mut annot_by_match: HashMap<usize, &str> = HashMap::new();
-        for e in &events {
-            if e.cap == "type.annot" {
-                annot_by_match.insert(e.match_id, e.text.as_str());
-            }
-        }
-        for e in &events {
-            if e.cap == "flow.target" {
-                if let Some(annot) = annot_by_match.get(&e.match_id) {
-                    annot_text_by_var
-                        .insert((pack.shape_name)("ref.var", &e.text), annot.to_string());
-                }
-            }
+    // (var name, declaring scope) → its declared-type text, joined per
+    // declaration match. Feeds the token-less optional-engagement narrowing
+    // (`if (opt)`): the guard names no type, so the refinement reads the
+    // subject's declared `std::optional<T>`. Keyed by SCOPE (not bare name), so
+    // two functions each declaring an `opt` of a DIFFERENT `optional<T>` peel
+    // the right inner type — resolved by the guard's scope chain at consumption.
+    // Populated inside the main loop (a decl's scope is only known there); the
+    // type-annot half is pre-collected here since it precedes the declarator.
+    let mut annot_by_match: HashMap<usize, String> = HashMap::new();
+    for e in &events {
+        if e.cap == "type.annot" {
+            annot_by_match.insert(e.match_id, e.text.clone());
         }
     }
+    let mut annot_text_by_var: HashMap<(String, crate::file_analysis::ScopeId), String> =
+        HashMap::new();
 
     // ---- the state machine: scope stack + sticky contexts ----
     let mut out = SkeletonAnalysis::default();
@@ -1092,6 +1109,23 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
         }
     }
     let mut pending_context: HashMap<usize, String> = HashMap::new();
+    // A guard narrowing tags its consequence block `@narrow.block` (NOT `@scope`)
+    // so the block mints exactly one scope from the general arm-scope pattern;
+    // this maps a block's start byte → the narrow match, so when that arm @scope
+    // is pushed we recover the guard's var/type/token by block position.
+    let mut narrow_block_start: HashMap<usize, usize> = HashMap::new();
+    for e in &events {
+        if e.cap == "narrow.block" {
+            narrow_block_start.entry(e.start_byte).or_insert(e.match_id);
+        }
+    }
+    // Unevaluated-operand regions (`noexcept(...)`/`sizeof(...)`/`decltype(...)`):
+    // a `std::move` whose call sits inside one is a type-trait, not a move.
+    let unevaluated: Vec<(usize, usize)> = events
+        .iter()
+        .filter(|e| e.cap == "unevaluated")
+        .map(|e| (e.start_byte, e.end_byte))
+        .collect();
 
     for e in &events {
         while scope_stack.len() > 1
@@ -1124,21 +1158,35 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                     }
                     context_stack.push((scope_stack.len(), text));
                 }
-                // a guard narrowing whose block is THIS scope → the
-                // refined type holds within `id` (and is invisible
-                // outside it). annot_type maps primitive guards; anything
-                // else is a class refinement.
-                if let Some(var) = narrow_var.get(&e.match_id) {
-                    let subject = (pack.shape_name)("ref.var", var);
+                // a guard narrowing whose block is THIS scope → the refined type
+                // holds within `id` (invisible outside it). Two join shapes:
+                // the narrow condition either shares this @scope's match (python:
+                // `consequence: (block) @scope`), or tagged the block by position
+                // (`@narrow.block`) so the refinement rides a general arm @scope
+                // without a fragile duplicate (cpp if/else arms).
+                let narrow_mid = narrow_block_start
+                    .get(&e.start_byte)
+                    .copied()
+                    .filter(|nmid| narrow_var.contains_key(nmid))
+                    .or_else(|| narrow_var.contains_key(&e.match_id).then_some(e.match_id));
+                if let Some((nmid, var)) =
+                    narrow_mid.and_then(|nmid| narrow_var.get(&nmid).map(|v| (nmid, v.clone())))
+                {
+                    let subject = (pack.shape_name)("ref.var", &var);
                     // Type text: the guard's own `@narrow.type` when it names one
                     // (`dynamic_cast<Derived*>`), else the subject's declared type
                     // (the optional-engagement form peels `T` from it). The guard
                     // token is absent for the bare `if (opt)` truthiness form.
-                    let ty = narrow_type
-                        .get(&e.match_id)
-                        .cloned()
-                        .or_else(|| annot_text_by_var.get(&subject).cloned());
-                    let guard = narrow_guard.get(&e.match_id).map(String::as_str);
+                    // Resolve the subject's declared type up the guard's scope
+                    // chain (innermost first), so a same-named var in a sibling
+                    // function never supplies the inner type — the nearest
+                    // enclosing declaration of `subject` wins.
+                    let ty = narrow_type.get(&nmid).cloned().or_else(|| {
+                        scope_stack.iter().rev().find_map(|&(_, sid)| {
+                            annot_text_by_var.get(&(subject.clone(), sid)).cloned()
+                        })
+                    });
+                    let guard = narrow_guard.get(&nmid).map(String::as_str);
                     if let Some(refined) = ty.and_then(|t| (pack.narrow_guard)(guard, &t)) {
                         // Defer: the region cutoff (first rebind edge) needs the
                         // FlowEdges, minted after this loop. Carry the FULL
@@ -1172,8 +1220,16 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                 move_var_txt.insert(e.match_id, e.text.clone());
             }
             "move.call" => {
-                move_call
-                    .insert(e.match_id, (Span { start: e.start, end: e.end }, cur_scope));
+                // Drop moves inside an unevaluated operand — they never execute,
+                // so nothing is moved-from (rule #10: the property is "does this
+                // move run", asked of the region, not a shape-branch downstream).
+                let unevaluated_move = unevaluated
+                    .iter()
+                    .any(|&(s, en)| e.start_byte >= s && e.end_byte <= en);
+                if !unevaluated_move {
+                    move_call
+                        .insert(e.match_id, (Span { start: e.start, end: e.end }, cur_scope));
+                }
             }
             cap if cap.starts_with("context.") => {
                 // If this match's `@scope` starts AFTER this context, the
@@ -1276,6 +1332,25 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                         .unwrap_or(false)
                         .then(|| member_op_raw.get(&e.match_id).copied())
                         .flatten();
+                    // Reset-via-method: a rebinding method call on a simple-var
+                    // receiver (`x.clear()`/`.reset()`/`.assign()`) puts a
+                    // moved-from object back into a known state — a rebind. Mint
+                    // a Rebind FlowEdge at the RECEIVER position so the moved-from
+                    // window (and the narrowing cutoff) end there, sparing the
+                    // receiver read itself. The pack owns which method names
+                    // rebind (cpp vocab, like its op_map / ctor_class).
+                    if e.cap == "ref.member"
+                        && (pack.rebind_method)(&e.text)
+                        && member_simple.get(&e.match_id).copied().unwrap_or(false)
+                    {
+                        if let Some((recv_span, recv_text)) = member_recv.get(&e.match_id) {
+                            flow_rebinds.push((
+                                (pack.shape_name)("def.var", recv_text),
+                                cur_scope,
+                                recv_span.start,
+                            ));
+                        }
+                    }
                     out.refs.push(SkelRef {
                         kind: e.cap.strip_prefix("ref.").unwrap().to_string(),
                         name: (pack.shape_name)(&e.cap, &e.text),
@@ -1330,6 +1405,16 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                     e.match_id,
                     ((pack.shape_name)("def.var", &e.text), cur_scope, e.start),
                 );
+                // Record the declared-type text keyed by (var, DECLARING scope)
+                // for the token-less optional-engagement narrowing. cur_scope is
+                // only known here (scopes mint during this walk); the type-annot
+                // half was pre-collected (it precedes the declarator in source).
+                if let Some(annot) = annot_by_match.get(&e.match_id) {
+                    annot_text_by_var.insert(
+                        ((pack.shape_name)("ref.var", &e.text), cur_scope),
+                        annot.clone(),
+                    );
+                }
             }
             "flow.rebind" => {
                 flow_rebinds.push(((pack.shape_name)("def.var", &e.text), cur_scope, e.start));

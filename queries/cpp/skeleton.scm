@@ -105,13 +105,20 @@
 ; ---- free functions & out-of-line / inline method definitions ----
 ; the name lives at the bottom of the declarator chain; one pattern per
 ; shape it can take (plain / member / qualified / pointer-return).
+;
+; @scope is minted SEPARATELY, by the universal `(function_definition) @scope`
+; below — one pattern for EVERY body shape (operator[]/operator=/conversion
+; operators/constructors/destructors/templated/out-of-line), so no function's
+; body ever leaks into the enclosing class scope. The name patterns here only
+; carry @def; they no longer double as the scope source (which missed the
+; operator/cast/in-class-destructor declarator shapes).
 (function_definition
   declarator: (function_declarator
-    declarator: (identifier) @def.sub.name)) @def.sub @scope
+    declarator: (identifier) @def.sub.name)) @def.sub
 (function_definition
   type: (_) @rettype
   declarator: (function_declarator
-    declarator: (field_identifier) @def.method.name)) @def.method @scope
+    declarator: (field_identifier) @def.method.name)) @def.method
 ; out-of-line definition `RetT Class::method(...) { ... }` — @qualifier
 ; carries the `Class::` so the method attributes to its class, not the
 ; enclosing namespace.
@@ -120,11 +127,22 @@
   declarator: (function_declarator
     declarator: (qualified_identifier
       scope: (_) @qualifier
-      name: (identifier) @def.method.name))) @def.method @scope
+      name: (identifier) @def.method.name))) @def.method
 (function_definition
   declarator: (pointer_declarator
     declarator: (function_declarator
-      declarator: (identifier) @def.sub.name))) @def.sub @scope
+      declarator: (identifier) @def.sub.name))) @def.sub
+
+; every function body is a lexical scope — one node-kind, so operator methods
+; (`operator[]`/`operator=`), conversion operators (`operator bool()`),
+; constructors (with or without member-init lists), destructors (in-class
+; `~S()` + out-of-line `S::~S()`), templated methods, and out-of-line
+; `Ret Class::m()` bodies ALL mint a @scope, not just the plain/field/qualified
+; declarator shapes the name patterns above enumerate. Params sit inside the
+; function_definition span, so they scope to the function (drives declared-type
+; inference); the scope-based moved-from region + narrowing cutoff no longer
+; leak across scope-less sibling functions.
+(function_definition) @scope
 
 ; ---- top-level / namespaced function prototypes (the bulk of any
 ; header file) — a `declaration`, not a `function_definition` ----
@@ -165,11 +183,12 @@
   declarator: (function_declarator
     declarator: (destructor_name) @def.sub.name)) @def.sub
 ; out-of-line `Class::~Class() {...}` / `Class::Class() {...}` definitions.
+; (@scope comes from the universal `(function_definition) @scope` above.)
 (function_definition
   declarator: (function_declarator
     declarator: (qualified_identifier
       scope: (_) @qualifier
-      name: (destructor_name) @def.method.name))) @def.method @scope
+      name: (destructor_name) @def.method.name))) @def.method
 
 (field_declaration
   declarator: (field_identifier) @def.var.name) @def.var
@@ -281,6 +300,15 @@
     name: (identifier) @move.name)
   arguments: (argument_list (identifier) @move.var)) @move.call
 
+; unevaluated operands — `noexcept(...)` / `sizeof(...)` / `decltype(...)`
+; don't RUN their operand, so a `std::move` inside one never moves anything.
+; Extraction records these regions and drops moves whose call sits inside one
+; (the noexcept-specifier `noexcept(noexcept(T(std::move(b))))` is the dominant
+; real-world spelling — the move there is a type-trait, not a move).
+(noexcept) @unevaluated
+(sizeof_expression) @unevaluated
+(decltype) @unevaluated
+
 ; `if (dynamic_cast<Derived*>(b)) { b->... }` narrows b to Derived INSIDE the
 ; block — the cpp analog of python `isinstance`. The pack's narrow_guard maps
 ; `dynamic_cast` + the template type to the refinement; core scopes it to
@@ -293,7 +321,7 @@
         arguments: (template_argument_list
           (type_descriptor type: (type_identifier) @narrow.type)))
       arguments: (argument_list (identifier) @narrow.var)))
-  consequence: (compound_statement) @scope)
+  consequence: (compound_statement) @narrow.block)
 
 ; `std::optional<T>` engaged-state narrowing. Guard-testing an optional as
 ; engaged proves it HOLDS a T inside the block, so `opt->m` / `*opt` resolve on
@@ -307,11 +335,23 @@
 ; checks the one-token hook can't express, so it's left out.
 (if_statement
   condition: (condition_clause value: (identifier) @narrow.var)
-  consequence: (compound_statement) @scope)
+  consequence: (compound_statement) @narrow.block)
 (if_statement
   condition: (condition_clause
     value: (call_expression
       function: (field_expression
         argument: (identifier) @narrow.var
         field: (field_identifier) @narrow.guard)))
-  consequence: (compound_statement) @scope)
+  consequence: (compound_statement) @narrow.block)
+
+; ---- branch arms are lexical scopes (conditional-move soundness) ----
+; if/else arm bodies each mint a @scope, so a `std::move` in one arm bounds its
+; moved-from region to THAT arm — a read in a sibling arm (or after the if) is
+; in a different scope subtree and never false-flags. This is ALSO the scope a
+; guard narrowing above attaches to: extraction joins the @narrow.block (the
+; condition-tagged consequence) to the general arm @scope by block position, so
+; the block mints exactly ONE scope (no fragile duplicate). Switch cases are not
+; compound_statements, so a per-case region is a residual (a move+read across
+; two `case:` labels still shares the switch-body scope).
+(if_statement consequence: (compound_statement) @scope)
+(if_statement alternative: (else_clause (compound_statement) @scope))

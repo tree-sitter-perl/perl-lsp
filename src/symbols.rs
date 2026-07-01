@@ -3354,14 +3354,18 @@ pub fn pack_use_after_move_diagnostics(analysis: &FileAnalysis) -> Vec<Diagnosti
 /// One seam so a backend dispatch never enumerates the individual checks.
 pub fn pack_diagnostics(analysis: &FileAnalysis) -> Vec<Diagnostic> {
     let diags = pack_member_op_diagnostics(analysis);
-    // use-after-move is NOT emitted yet: a real-project audit (json/spdlog/redis)
-    // found it ~100% false positives — dominated by the cpp function-scope gap
-    // (operators/ctors/out-of-line `Class::method` mint no `@scope`, so a move's
-    // moved-from region leaks across sibling functions), plus conditional moves
-    // (if/else arms aren't scopes) and reset-via-method/by-ref/swap not counting
-    // as rebinds. `pack_use_after_move_diagnostics` + its test stay; re-wire here
-    // once those FP classes close (scope-coverage fix first — it also fixes cpp
-    // narrowing leaking across those same function shapes).
+    // use-after-move stays GATED. A real-project re-audit (json/fmt/spdlog on the
+    // library headers that showed 105 FPs) drops to 17 after: per-function-body
+    // @scope (operators/casts/dtors no longer leak the moved-from region across
+    // siblings), if/else arm scopes + method-reset rebinds (conditional +
+    // reset-via-method FPs), and dropping moves in unevaluated operands
+    // (noexcept/sizeof/decltype). The residual 17 need analysis this tier can't
+    // do: partial/member move (move a base subobject, then use other members —
+    // thread_pool), braceless/ternary conditional move on a returning path
+    // (fmt/json), switch-case conditional move (binary_reader), and
+    // pass-by-mutable-ref reset (interprocedural). 17 false warnings on common
+    // headers is still bad signal, so keep it dark. `pack_use_after_move_diagnostics`
+    // + its tests stay; re-wire here once the residual classes close.
     diags
 }
 

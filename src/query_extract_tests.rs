@@ -1246,6 +1246,88 @@ void f() {
 }
 
 #[test]
+fn cpp_conditional_move_does_not_flag_sibling_arm() {
+    // GOAL-2.1: if/else arms are their own @scope now, so a `std::move` in the
+    // `if` arm bounds its moved-from region to that arm — the read of `x` in the
+    // `else` arm (and after the if) is a different scope subtree, not flagged.
+    let src = "\
+void f(bool c) {
+  Widget x;
+  if (c) {
+    sink(std::move(x));
+  } else {
+    x.use();
+  }
+  x.use();
+}
+";
+    let fa = cpp_skel(src).into_file_analysis();
+    let diags = crate::symbols::pack_use_after_move_diagnostics(&fa);
+    assert_eq!(
+        diags.len(),
+        0,
+        "the move is scoped to the if-arm — sibling else / post-if reads are clean: {diags:?}",
+    );
+}
+
+#[test]
+fn cpp_conditional_move_still_flags_same_arm_read() {
+    // The arm scoping must not over-suppress: a read AFTER the move IN THE SAME
+    // arm is still the real use-after-move bug.
+    let src = "\
+void f(bool c) {
+  Widget x;
+  if (c) {
+    sink(std::move(x));
+    x.use();
+  }
+}
+";
+    let fa = cpp_skel(src).into_file_analysis();
+    let diags = crate::symbols::pack_use_after_move_diagnostics(&fa);
+    assert_eq!(diags.len(), 1, "same-arm read after move is still flagged: {diags:?}");
+    assert_eq!(diags[0].range.start.line, 4, "the row-4 same-arm read: {diags:?}");
+}
+
+#[test]
+fn cpp_reset_via_method_ends_moved_from_region() {
+    // GOAL-2.2: a rebinding method call (`x.clear()`) puts the moved-from object
+    // back into a known state — the moved-from region ends at the reset, so the
+    // reset's own receiver read AND the later `x.use()` are clean.
+    let src = "\
+void f() {
+  Widget x;
+  sink(std::move(x));
+  x.clear();
+  x.use();
+}
+";
+    let fa = cpp_skel(src).into_file_analysis();
+    let diags = crate::symbols::pack_use_after_move_diagnostics(&fa);
+    assert_eq!(
+        diags.len(),
+        0,
+        "x.clear() rebinds x — the reset and the post-reset use are clean: {diags:?}",
+    );
+}
+
+#[test]
+fn cpp_non_reset_method_after_move_still_flags() {
+    // The rebind-method set is specific: an ordinary method call (`x.use()`) is
+    // NOT a reset, so the canonical use-after-move still flags.
+    let src = "\
+void f() {
+  Widget x;
+  sink(std::move(x));
+  x.use();
+}
+";
+    let fa = cpp_skel(src).into_file_analysis();
+    let diags = crate::symbols::pack_use_after_move_diagnostics(&fa);
+    assert_eq!(diags.len(), 1, "non-reset use after move still flags: {diags:?}");
+}
+
+#[test]
 fn cpp_dynamic_cast_guard_narrows() {
     // `if (dynamic_cast<Derived*>(b))` refines b to Derived inside the block —
     // the cpp analog of python isinstance, via the now-wired narrow_guard.
@@ -1312,6 +1394,40 @@ void f(std::optional<Widget> a, std::optional<Widget> b) {
         fa.inferred_type_via_bag("b", tree_sitter::Point { row: 8, column: 8 }),
         widget(),
         "`has_value()` narrows the engaged optional to its inner Widget",
+    );
+}
+
+#[test]
+fn cpp_optional_same_name_narrows_to_own_inner_type_per_function() {
+    // GOAL-3 regression: `annot_text_by_var` is keyed by (name, SCOPE), so two
+    // functions each with a `std::optional<...> opt` of a DIFFERENT inner type
+    // peel the RIGHT T. Pre-fix it was keyed by bare name — last-declaration-
+    // wins gave BOTH functions the last one's inner type.
+    let src = "\
+void f(std::optional<Widget> opt) {
+    if (opt) {
+        opt->run();
+    }
+}
+void g(std::optional<Gadget> opt) {
+    if (opt) {
+        opt->go();
+    }
+}
+";
+    let fa = cpp_skel(src).into_file_analysis();
+    use crate::file_analysis::InferredType;
+    // f's opt narrows to its own Widget (row 2)…
+    assert_eq!(
+        fa.inferred_type_via_bag("opt", tree_sitter::Point { row: 2, column: 8 }),
+        Some(InferredType::ClassName("Widget".into())),
+        "f's opt peels Widget from its OWN std::optional<Widget>",
+    );
+    // …and g's opt narrows to its own Gadget (row 7), not a sibling's inner type.
+    assert_eq!(
+        fa.inferred_type_via_bag("opt", tree_sitter::Point { row: 7, column: 8 }),
+        Some(InferredType::ClassName("Gadget".into())),
+        "g's opt peels Gadget from its OWN std::optional<Gadget> — no cross-fn leak",
     );
 }
 
@@ -1427,3 +1543,32 @@ void f() {
     assert!(mm.iter().all(|m| m.op_span.start.row != 7), "pp is show-only");
 }
 
+#[test]
+fn cpp_move_in_scopeless_operator_body_does_not_leak_to_sibling() {
+    // GOAL-1 regression: the `operator[]` body mints its OWN @scope now (the
+    // universal `(function_definition) @scope`). Before, operator/cast/dtor
+    // shapes minted none, so a `std::move` inside one attributed to the
+    // enclosing CLASS scope — and its moved-from region covered every sibling
+    // method, false-flagging their reads of a same-named var. The move here is
+    // inside `operator[]` (a shape that had no scope); `b()`'s read of `x` must
+    // NOT be flagged.
+    let src = "\
+struct S {
+  int operator[](int i) {
+    Widget x;
+    sink(std::move(x));
+    return 0;
+  }
+  void b() {
+    x.use();
+  }
+};
+";
+    let fa = cpp_skel(src).into_file_analysis();
+    let diags = crate::symbols::pack_use_after_move_diagnostics(&fa);
+    assert_eq!(
+        diags.len(),
+        0,
+        "operator[]'s move is scoped to its own body — no leak to sibling b(): {diags:?}",
+    );
+}
