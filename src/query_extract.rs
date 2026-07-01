@@ -98,6 +98,10 @@ pub struct SkeletonAnalysis {
     pub symbols: Vec<SkelSymbol>,
     pub refs: Vec<SkelRef>,
     pub imports: Vec<String>,
+    /// `#include`/`import` path tokens with spans: (raw path text, path-token
+    /// span). Goto-def on the token resolves the header; the span is what the
+    /// bare `imports` list drops. Carried onto `FileAnalysis.include_directives`.
+    pub import_sites: Vec<(String, crate::file_analysis::Span)>,
     pub scope_count: usize,
     pub scopes: Vec<crate::file_analysis::Scope>,
     pub witnesses: Vec<crate::witnesses::Witness>,
@@ -502,6 +506,14 @@ impl SkeletonAnalysis {
         // outline filters can exclude them generically (lang semantics in
         // the pack, generic logic in core).
         fa.receiver_names = std::mem::take(&mut self.receiver_names);
+        // Include/import path tokens carry a span so goto-def can resolve the
+        // header (the bare `imports` list is span-less). Resolution to an
+        // absolute path happens where the file path is in hand (the driver).
+        fa.include_directives = self
+            .import_sites
+            .drain(..)
+            .map(|(raw, span)| (span, raw))
+            .collect();
         // Seal base_*_count so a later enrich pass (the CLI/--batch path
         // runs it unconditionally) truncates to the FULL analysis, not to
         // zero — otherwise enrichment wipes every pack-language symbol.
@@ -1514,7 +1526,11 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                     });
                 }
             }
-            "import.name" => out.imports.push(e.text.clone()),
+            "import.name" => {
+                out.import_sites
+                    .push((e.text.clone(), Span { start: e.start, end: e.end }));
+                out.imports.push(e.text.clone());
+            }
             cap if cap.starts_with("expr.lit.") => {
                 let suffix = cap.strip_prefix("expr.lit.").unwrap();
                 if let Some(t) = lit_type(suffix) {

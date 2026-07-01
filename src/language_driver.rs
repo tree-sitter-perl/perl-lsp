@@ -131,6 +131,11 @@ pub struct PackDriver {
     /// parses clean), and mint the synthetic base + parent edges. `None` for
     /// packs without a preprocessor.
     member_blocks: Option<fn(&mut tree_sitter::Parser, &str) -> crate::cpp_reparse::MemberBlockPlan>,
+    /// Transitive `#include` closure (C preprocessor only): file path + source →
+    /// canonical header paths this file reaches — the cross-file VISIBILITY key
+    /// (`ScopedLookup` ranks `get_cached` candidates by it). `None` for packs
+    /// with no include model.
+    include_closure: Option<fn(&Path, &str) -> Vec<String>>,
 }
 
 #[cfg(any(feature = "cpp", feature = "python", feature = "r", feature = "cmake"))]
@@ -196,6 +201,12 @@ impl LanguageDriver for PackDriver {
                 }
                 let mut fa = skel.into_file_analysis();
                 apply_attribute_macros(&mut fa, &recovered);
+                // The file's include closure is the cross-file visibility key
+                // (`ScopedLookup`). Computed here — the driver holds the path the
+                // resolver needs; empty on-open until the header cache warms.
+                if let (Some(f), Some(p)) = (self.include_closure, path) {
+                    fa.include_closure = crate::timings::phase("cpp.include_closure", || f(p, source));
+                }
                 // Macro identity lane: collect every `#define` off the ORIGINAL
                 // source (spans in user coordinates, no splice remap needed).
                 if let Some(collect) = self.collect_macro_defs {
@@ -237,6 +248,7 @@ fn cpp_driver() -> PackDriver {
         gather_macros: Some(crate::cpp_reparse::included_macros_pre_expanded),
         collect_macro_defs: Some(crate::cpp_reparse::collect_macro_defs),
         member_blocks: Some(crate::cpp_reparse::plan_member_blocks),
+        include_closure: Some(crate::cpp_reparse::include_closure),
     }
 }
 
@@ -256,6 +268,7 @@ fn python_driver() -> PackDriver {
         gather_macros: None,
         collect_macro_defs: None,
         member_blocks: None,
+        include_closure: None,
     }
 }
 
@@ -275,6 +288,7 @@ fn r_driver() -> PackDriver {
         gather_macros: None,
         collect_macro_defs: None,
         member_blocks: None,
+        include_closure: None,
     }
 }
 
@@ -295,6 +309,7 @@ fn cmake_driver() -> PackDriver {
         gather_macros: None,
         collect_macro_defs: None,
         member_blocks: None,
+        include_closure: None,
     }
 }
 

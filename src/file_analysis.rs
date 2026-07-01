@@ -217,11 +217,28 @@ impl<'a> SubInfo<'a> {
 /// `witnesses::BagContext`, hence the `&mut dyn FnMut` callback params.
 pub trait CrossFileLookup {
     fn get_cached(&self, module_name: &str) -> Option<std::sync::Arc<CachedModule>>;
+    /// `get_cached` scoped to a querying file's VISIBILITY set (its own path +
+    /// its `#include` closure) — see `ModuleIndex::get_cached_scoped`. Default:
+    /// ignore the scope (identical to `get_cached`), so non-index impls and
+    /// languages with no include model are unaffected. `ScopedLookup` and the
+    /// pack `ModuleIndex` override it to rank same-name candidates by reachability.
+    fn get_cached_scoped(
+        &self,
+        module_name: &str,
+        _visible: &std::collections::HashSet<String>,
+    ) -> Option<std::sync::Arc<CachedModule>> {
+        self.get_cached(module_name)
+    }
     fn parents_cached(&self, module_name: &str) -> Vec<String>;
     fn modules_with_symbol(&self, name: &str) -> Vec<String>;
     fn find_exporters(&self, func_name: &str) -> Vec<String>;
     fn defining_module_cached(&self, entry: &str, name: &str) -> Option<std::sync::Arc<CachedModule>>;
     fn module_declaring_method_in_package(&self, name: &str, class: &str) -> Option<String>;
+    /// The on-disk path a module name resolves to (Perl module goto-def).
+    /// Default `None` for impls without a path map.
+    fn module_path_cached(&self, _module_name: &str) -> Option<std::path::PathBuf> {
+        None
+    }
     fn for_each_cached(&self, f: &mut dyn FnMut(&str, &std::sync::Arc<CachedModule>));
     fn for_each_reexport_module(
         &self,
@@ -242,6 +259,92 @@ pub trait CrossFileLookup {
     /// INCLUDING packageless entrypoint scripts, which never enter the
     /// module cache.
     fn for_each_loader_shape(&self, f: &mut dyn FnMut(&str, &InferredType));
+}
+
+/// A `CrossFileLookup` decorator scoped to ONE querying file's include-closure
+/// visibility. Every cross-file resolution routed through it ranks same-name
+/// candidates by reachability (`get_cached` → `inner.get_cached_scoped`), so a
+/// file resolves `class Box` to the `Box` it can actually see — not an unrelated
+/// file's same-named class (C's flat linkage). Wrap the pack index once per
+/// request at the LSP/CLI entry point; every downstream `get_cached` inherits
+/// the scope with no threaded parameter. `visible` empty ⇒ transparent
+/// (Perl / unwarmed on-open). `docs/adr/macro-handling.md`.
+pub struct ScopedLookup<'a> {
+    inner: &'a dyn CrossFileLookup,
+    visible: std::collections::HashSet<String>,
+}
+
+impl<'a> ScopedLookup<'a> {
+    /// Build the visibility set from a querying file's include closure plus its
+    /// own path (a file always sees the classes it declares itself). Canonicalize
+    /// the self path so it matches the candidates' canonical `CachedModule.path`.
+    pub fn new(
+        inner: &'a dyn CrossFileLookup,
+        include_closure: &[String],
+        self_path: Option<&std::path::Path>,
+    ) -> Self {
+        let mut visible: std::collections::HashSet<String> =
+            include_closure.iter().cloned().collect();
+        if let Some(p) = self_path {
+            let canon = std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+            visible.insert(canon.to_string_lossy().into_owned());
+        }
+        ScopedLookup { inner, visible }
+    }
+}
+
+impl<'a> CrossFileLookup for ScopedLookup<'a> {
+    fn get_cached(&self, module_name: &str) -> Option<std::sync::Arc<CachedModule>> {
+        self.inner.get_cached_scoped(module_name, &self.visible)
+    }
+    fn get_cached_scoped(
+        &self,
+        module_name: &str,
+        _visible: &std::collections::HashSet<String>,
+    ) -> Option<std::sync::Arc<CachedModule>> {
+        self.inner.get_cached_scoped(module_name, &self.visible)
+    }
+    fn parents_cached(&self, module_name: &str) -> Vec<String> {
+        self.inner.parents_cached(module_name)
+    }
+    fn modules_with_symbol(&self, name: &str) -> Vec<String> {
+        self.inner.modules_with_symbol(name)
+    }
+    fn find_exporters(&self, func_name: &str) -> Vec<String> {
+        self.inner.find_exporters(func_name)
+    }
+    fn defining_module_cached(&self, entry: &str, name: &str) -> Option<std::sync::Arc<CachedModule>> {
+        self.inner.defining_module_cached(entry, name)
+    }
+    fn module_declaring_method_in_package(&self, name: &str, class: &str) -> Option<String> {
+        self.inner.module_declaring_method_in_package(name, class)
+    }
+    fn module_path_cached(&self, module_name: &str) -> Option<std::path::PathBuf> {
+        self.inner.module_path_cached(module_name)
+    }
+    fn for_each_cached(&self, f: &mut dyn FnMut(&str, &std::sync::Arc<CachedModule>)) {
+        self.inner.for_each_cached(f)
+    }
+    fn for_each_reexport_module(
+        &self,
+        start: Vec<String>,
+        visit: &mut dyn FnMut(&std::sync::Arc<CachedModule>) -> std::ops::ControlFlow<()>,
+    ) {
+        self.inner.for_each_reexport_module(start, visit)
+    }
+    fn for_each_entity_bridged_to(
+        &self,
+        class_name: &str,
+        f: &mut dyn FnMut(&str, &std::sync::Arc<CachedModule>, &Symbol),
+    ) {
+        self.inner.for_each_entity_bridged_to(class_name, f)
+    }
+    fn direct_children_of(&self, class: &str) -> Vec<(String, String)> {
+        self.inner.direct_children_of(class)
+    }
+    fn for_each_loader_shape(&self, f: &mut dyn FnMut(&str, &InferredType)) {
+        self.inner.for_each_loader_shape(f)
+    }
 }
 
 // ---- Serde proxy for tree_sitter::Point ----
@@ -2672,6 +2775,21 @@ pub struct FileAnalysis {
     #[serde(default)]
     pub macro_defs: Vec<MacroDef>,
 
+    /// `#include "x.h"` / `<x.h>` directives: (path-token span, raw path text).
+    /// Goto-def on the path token resolves the header like `use` resolves a
+    /// module. Pack-language only; Perl leaves it empty.
+    #[serde(default)]
+    pub include_directives: Vec<(Span, String)>,
+
+    /// This file's transitive `#include` closure — canonical header paths it
+    /// reaches. The cross-file VISIBILITY key: a name resolves preferentially to
+    /// a definition in a file this set contains (`ScopedLookup` ranks
+    /// `get_cached` candidates by reachability; `docs/adr/macro-handling.md`,
+    /// "the include-closure lie"). Pack-language only; Perl leaves it empty, so
+    /// the ranking is a no-op there (empty closure → global winner unchanged).
+    #[serde(default)]
+    pub include_closure: Vec<String>,
+
     /// Raw domain-typing sites: each `slot`-field access that interacts
     /// with a `value` token (`slot == V`, `slot = V`) at `slot_span`. The
     /// value's enum is resolved cross-file at query time (an enumerator
@@ -2981,6 +3099,10 @@ impl FileAnalysis {
             domain_sites,
             // Populated by the pack driver post-construction (macro identity lane).
             macro_defs: Vec::new(),
+            // Populated post-construction: `include_directives` from the skeleton,
+            // `include_closure` by the driver (it holds the resolving file path).
+            include_directives: Vec::new(),
+            include_closure: Vec::new(),
             scope_starts: Vec::new(),
             symbols_by_name: HashMap::new(),
             symbols_by_scope: HashMap::new(),

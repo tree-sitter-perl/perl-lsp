@@ -298,3 +298,41 @@ fn test_children_index_survives_warm_rebuild_and_purge() {
         "purge on re-registration must drop the stale parent edge",
     );
 }
+
+/// Include-closure visibility: two files each declare `class Box`. A scoped
+/// lookup resolves to the `Box` the querying file can SEE (its include set),
+/// not the global path-order winner — and falls back to that winner when NONE
+/// is reachable (no legit indirect resolution is dropped). `ScopedLookup` /
+/// `docs/adr/macro-handling.md`, "the include-closure lie".
+#[cfg(feature = "cpp")]
+#[test]
+fn get_cached_scoped_prefers_reachable_same_name_class() {
+    use std::collections::HashSet;
+    let reg = crate::language_driver::LanguageRegistry::with_enabled();
+    let driver = reg.for_id("cpp").expect("cpp driver");
+    let a = Arc::new(driver.analyze_with_path(
+        "class Box { public: void a_only(); };\n",
+        Some(std::path::Path::new("/fake/a.cpp")),
+    ));
+    let b = Arc::new(driver.analyze_with_path(
+        "class Box { public: void b_only(); };\n",
+        Some(std::path::Path::new("/fake/b.cpp")),
+    ));
+    let idx = ModuleIndex::new_for_test();
+    idx.register_symbols(PathBuf::from("/fake/a.cpp"), a);
+    idx.register_symbols(PathBuf::from("/fake/b.cpp"), b);
+
+    let has = |m: &Option<Arc<CachedModule>>, name: &str| {
+        m.as_ref()
+            .is_some_and(|c| c.analysis.symbols.iter().any(|s| s.name == name))
+    };
+    let scope = |p: &str| -> HashSet<String> { [p.to_string()].into_iter().collect() };
+
+    // Empty scope = global winner: smallest canonical path (a.cpp).
+    assert!(has(&idx.get_cached_scoped("Box", &HashSet::new()), "a_only"));
+    // Scoped to each file → THAT file's Box.
+    assert!(has(&idx.get_cached_scoped("Box", &scope("/fake/b.cpp")), "b_only"));
+    assert!(has(&idx.get_cached_scoped("Box", &scope("/fake/a.cpp")), "a_only"));
+    // Scope names an unrelated file → nothing reachable → global winner (a.cpp).
+    assert!(has(&idx.get_cached_scoped("Box", &scope("/fake/other.cpp")), "a_only"));
+}

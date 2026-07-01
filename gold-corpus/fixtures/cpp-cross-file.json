@@ -8,6 +8,15 @@
       "file": "app.cpp", "line": 3, "col": 6,
       "expect": { "all": ["grow", "width"], "none": [] },
       "status": "gold"
+    },
+    {
+      "id": "cpp-include-scoped-name-collision",
+      "difficulty": "hard", "semantic_area": "cpp-multilang-crossfile",
+      "lang": "cpp", "root": "gold-corpus/cpp-fixture/incscope",
+      "file": "app.cpp", "line": 3, "col": 6,
+      "comment": "app.cpp #includes mineh.h (Widget::mine); decoy.cpp declares a colliding Widget::theirs it never sees. Include-scoped resolution must pick the Widget app.cpp reaches, not the global path-order winner (decoy.cpp).",
+      "expect": { "all": ["mine"], "none": ["theirs"] },
+      "status": "gold"
     }
   ]
 }

@@ -45,6 +45,23 @@ fn module_defines_class(m: &CachedModule, name: &str) -> bool {
         .any(|s| matches!(s.kind, SymKind::Class) && s.name == name)
 }
 
+/// Pick the winner among same-name candidates by the SAME total order
+/// `register_symbols` uses for the global cache slot: a TYPE (Class) beats a
+/// Sub/value, then the smallest canonical path breaks the tie (order-independent
+/// — no reliance on registration order). Factored so the scoped lookup and the
+/// registration winner agree by construction.
+fn best_candidate(cands: &[&Arc<CachedModule>], name: &str) -> Option<Arc<CachedModule>> {
+    cands
+        .iter()
+        .copied()
+        .max_by(|a, b| {
+            let (ac, bc) = (module_defines_class(a, name), module_defines_class(b, name));
+            // Class beats non-class; then SMALLER path wins (reverse for max_by).
+            ac.cmp(&bc).then_with(|| b.path.cmp(&a.path))
+        })
+        .cloned()
+}
+
 // ---- Internal sync primitives (pub(crate) for resolver thread) ----
 
 /// Thread-safe queue: Mutex<Vec> + Condvar.
@@ -246,6 +263,13 @@ pub struct ModuleIndex {
     /// languages. The Perl index is the hub; query routing picks the right
     /// one by the queried file's language. Generic: any pack language.
     pack_indexes: Arc<DashMap<String, Arc<ModuleIndex>>>,
+    /// ALL cross-file candidates per name (not just the single winner in
+    /// `cache`) — pack languages only. C linkage is globally flat, so two
+    /// unrelated files can each define `class Box`; `cache` picks one
+    /// deterministic winner, but a query from file F wants the candidate F can
+    /// actually SEE (its `#include` closure). `get_cached_scoped` ranks these by
+    /// reachability. `docs/adr/macro-handling.md`, "the include-closure lie".
+    all_defs: Arc<DashMap<String, Vec<Arc<CachedModule>>>>,
 }
 
 impl ModuleIndex {
@@ -290,6 +314,7 @@ impl ModuleIndex {
             edges,
             loaded_modules: Arc::new(DashMap::new()),
             pack_indexes: Arc::new(DashMap::new()),
+            all_defs: Arc::new(DashMap::new()),
             workspace_modules: Arc::new(DashMap::new()),
             loader_config_shapes: Arc::new(DashMap::new()),
             stale_modules,
@@ -347,6 +372,32 @@ impl ModuleIndex {
     /// Return the cached CachedModule for a module name. Never does I/O.
     pub fn get_cached(&self, module_name: &str) -> Option<Arc<CachedModule>> {
         self.cache.get(module_name).and_then(|entry| entry.clone())
+    }
+
+    /// Like `get_cached`, but scoped to a querying file's VISIBILITY set
+    /// (`visible` = canonical paths of the file + its `#include` closure). When
+    /// two files define the same name (C's flat linkage), prefer the candidate
+    /// the querying file can actually SEE; fall back to the global winner when
+    /// NONE is reachable (so a legit indirect resolution never regresses).
+    /// `visible` empty (Perl, or an unwarmed on-open file) ⇒ identical to
+    /// `get_cached`. `docs/adr/macro-handling.md`, "the include-closure lie".
+    pub fn get_cached_scoped(
+        &self,
+        module_name: &str,
+        visible: &std::collections::HashSet<String>,
+    ) -> Option<Arc<CachedModule>> {
+        if !visible.is_empty() {
+            if let Some(cands) = self.all_defs.get(module_name) {
+                let reachable: Vec<&Arc<CachedModule>> = cands
+                    .iter()
+                    .filter(|c| visible.contains(&c.path.to_string_lossy().into_owned()))
+                    .collect();
+                if let Some(best) = best_candidate(&reachable, module_name) {
+                    return Some(best);
+                }
+            }
+        }
+        self.get_cached(module_name)
     }
 
     /// Breadth-first walk over re-export edges (`reexport_modules`), starting
@@ -573,6 +624,7 @@ impl ModuleIndex {
             edges,
             loaded_modules: Arc::new(DashMap::new()),
             pack_indexes: Arc::new(DashMap::new()),
+            all_defs: Arc::new(DashMap::new()),
             workspace_modules: Arc::new(DashMap::new()),
             loader_config_shapes: Arc::new(DashMap::new()),
             stale_modules,
@@ -623,6 +675,7 @@ impl ModuleIndex {
             edges,
             loaded_modules: Arc::new(DashMap::new()),
             pack_indexes: Arc::new(DashMap::new()),
+            all_defs: Arc::new(DashMap::new()),
             workspace_modules: Arc::new(DashMap::new()),
             loader_config_shapes: Arc::new(DashMap::new()),
             stale_modules,
@@ -773,6 +826,18 @@ impl ModuleIndex {
                 continue;
             }
             self.workspace_modules.insert(sym.name.clone(), ());
+            // Keep EVERY candidate for `name` (not just the winner below), so a
+            // scoped query can pick the one reachable from its include closure.
+            // Keyed by path: a re-registered file (edit, or prototype→definition)
+            // REPLACES its own candidate so the scoped lookup never serves a
+            // stale analysis, and duplicate paths never stack.
+            {
+                let mut v = self.all_defs.entry(sym.name.clone()).or_default();
+                match v.iter().position(|c| c.path == cached.path) {
+                    Some(i) => v[i] = cached.clone(),
+                    None => v.push(cached.clone()),
+                }
+            }
             // A TYPE wins the cache slot over a callable/value of the same
             // name. C reuses names freely — a `#define OP(x)` macro in one
             // header (a Sub) vs the `OP` typedef in another (a Class). Member
@@ -1035,8 +1100,20 @@ impl CrossFileLookup for ModuleIndex {
         self.get_cached(module_name)
     }
 
+    fn get_cached_scoped(
+        &self,
+        module_name: &str,
+        visible: &std::collections::HashSet<String>,
+    ) -> Option<Arc<CachedModule>> {
+        self.get_cached_scoped(module_name, visible)
+    }
+
     fn parents_cached(&self, module_name: &str) -> Vec<String> {
         self.parents_cached(module_name)
+    }
+
+    fn module_path_cached(&self, module_name: &str) -> Option<PathBuf> {
+        self.module_path_cached(module_name)
     }
 
     fn modules_with_symbol(&self, name: &str) -> Vec<String> {

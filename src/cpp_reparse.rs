@@ -1123,6 +1123,106 @@ fn resolve_include(file_path: &std::path::Path, inc: &str) -> Option<std::path::
     None
 }
 
+/// Resolve one `#include` path token (quoted or angle-bracket) to a real file,
+/// workspace-first then toolchain roots. The public seam for goto-def on an
+/// `#include` path token (`FileAnalysis::include_directives`).
+pub fn resolve_include_path(file_path: &std::path::Path, inc: &str) -> Option<std::path::PathBuf> {
+    resolve_include(file_path, inc)
+}
+
+/// Every `#include` directive's raw path text, by a cheap per-line scan (no
+/// parse) — the header BFS only needs the paths, so this stays far lighter than
+/// `header_info`'s full tree parse. Quoted `"x.h"` and angle-bracket `<x.h>`
+/// alike (the walk-up resolver finds project headers written either way).
+fn scan_include_directives(src: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for line in src.lines() {
+        let t = line.trim_start();
+        let Some(rest) = t.strip_prefix('#') else { continue };
+        let rest = rest.trim_start();
+        let Some(rest) = rest.strip_prefix("include") else { continue };
+        let rest = rest.trim_start();
+        let path = match rest.as_bytes().first() {
+            Some(b'"') => rest[1..].split('"').next(),
+            Some(b'<') => rest[1..].split('>').next(),
+            _ => None,
+        };
+        if let Some(p) = path {
+            if !p.is_empty() {
+                out.push(p.to_string());
+            }
+        }
+    }
+    out
+}
+
+type IncludeClosureCache =
+    std::collections::HashMap<std::path::PathBuf, (u64, std::sync::Arc<Vec<String>>)>;
+
+fn include_closure_cache() -> &'static std::sync::Mutex<IncludeClosureCache> {
+    static C: std::sync::OnceLock<std::sync::Mutex<IncludeClosureCache>> =
+        std::sync::OnceLock::new();
+    C.get_or_init(|| std::sync::Mutex::new(IncludeClosureCache::new()))
+}
+
+/// The transitive `#include` closure of `file_path`, as canonical path strings
+/// (sorted, unique) — the cross-file VISIBILITY key (`docs/adr/macro-handling.md`,
+/// "the include-closure lie"): a name resolves preferentially to a definition in
+/// a file this set reaches. BFS over the include graph via a cheap line scan;
+/// memoized by (path, include-set hash) so the per-edit re-analyze is warm.
+///
+/// Respects the on-open cached-only gate: on open an unwarmed file returns an
+/// empty closure — like cross-file macros, the background re-analyze fills it —
+/// so the first open never blocks on the cold header walk. An empty closure is
+/// safe: the visibility ranking degrades to the global winner (today's behavior).
+pub fn include_closure(file_path: &std::path::Path, src: &str) -> Vec<String> {
+    let key = file_path.to_path_buf();
+    let inc_hash = include_set_hash(src);
+    if let Ok(cache) = include_closure_cache().lock() {
+        if let Some((h, c)) = cache.get(&key) {
+            if *h == inc_hash {
+                return (**c).clone();
+            }
+        }
+    }
+    if gather_cached_only() {
+        return Vec::new(); // on-open: don't block on the cold header walk
+    }
+    let mut seen = std::collections::HashSet::new();
+    if let Ok(p) = file_path.canonicalize() {
+        seen.insert(p);
+    }
+    let mut out: Vec<String> = Vec::new();
+    let mut frontier: Vec<std::path::PathBuf> = scan_include_directives(src)
+        .iter()
+        .filter_map(|inc| resolve_include(file_path, inc))
+        .collect();
+    while !frontier.is_empty() {
+        let mut next: Vec<std::path::PathBuf> = Vec::new();
+        for path in frontier.drain(..) {
+            let Ok(canon) = path.canonicalize() else { continue };
+            if !seen.insert(canon.clone()) {
+                continue;
+            }
+            out.push(canon.to_string_lossy().into_owned());
+            if let Ok(hsrc) = std::fs::read_to_string(&canon) {
+                for inc in scan_include_directives(&hsrc) {
+                    if let Some(nx) = resolve_include(&canon, &inc) {
+                        next.push(nx);
+                    }
+                }
+            }
+        }
+        frontier = next;
+    }
+    out.sort();
+    out.dedup();
+    if let Ok(mut cache) = include_closure_cache().lock() {
+        cache.insert(key, (inc_hash, std::sync::Arc::new(out.clone())));
+    }
+    out
+}
+
 fn include_paths(src: &str, parser: &mut tree_sitter::Parser) -> Vec<String> {
     match parser.parse(src, None) {
         Some(tree) => include_paths_tree(&tree, src),
