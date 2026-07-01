@@ -8,6 +8,26 @@ markers are point-in-time; the *structure* is the durable part.
 > query-engine seam. cpp-first; Python is a generality forcer (no hard DX
 > runs); everything resolves via ref/edge, never a cursor-time shape pile.
 
+## READY QUEUE — fire sequentially (each lands + merges before the next)
+
+The macro arc is **DONE** (goto-def / hover / typing / roles; real op.c `op_type`
+= 235 refs, hover `uint16_t`, gd→op.h:55, `BASEOP` a navigable Class). Design in
+`docs/adr/macro-handling.md`. Remaining, in order:
+
+1. **enum-variant goto-def** — REGRESSION: gd is dark on `OP_SCOPE` & friends
+   (op.c:186). Enumerator *uses* no longer resolve to their `enum opcode` def
+   cross-file (likely fallout from the `@def.var`→`@def.enumerator` container
+   wiring). Bug — fix first.
+2. **domain typing** (`op_type → opcode`) — unblocked now that slice 3 gives the
+   single `BASEOP.op_type` subject. `Field`-attachment fold + `DomainCompare`
+   witness + the free navigation bridge. Design: the domain spike
+   (`docs/prompt-domain-typing.md`, distilled from the throwaway).
+3. **include-closure visibility** (ADR slice 4) — `C = Perl, everything exported`:
+   scope cross-file resolution by include-reachability (make cpp a `module_index`
+   consumer) + the cheap `#include`-goto-def sub-win.
+4. **function-typing + expansion flip** (ADR slice 5) — the coupled finale;
+   biggest blast radius, last.
+
 ```
 ARC 1  cpp seam refactor ............................... ✅ DONE
        member-as-ref, Peel combinator, op-DX-on-ref, LangPack fold
