@@ -1,0 +1,1 @@
+#define XKIND unsigned short

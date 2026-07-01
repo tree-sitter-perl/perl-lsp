@@ -285,6 +285,30 @@ pub struct Span {
 }
 
 
+/// A single `#define` — the identity/navigation lane's view of a macro (the
+/// type lane models the same `#define` as a `TypeName` edge; this is the
+/// symbol/edge side goto-def consults). One per `#define`, so a config-variant
+/// macro `#define`d N times under N different `#if`s is N `MacroDef`s sharing a
+/// name — the complete set `cpp_macro_model` ranks. `#[serde(default)]` on the
+/// field: cache blobs written before this lane deserialize with no macro defs.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MacroDef {
+    pub name: String,
+    /// `Some(params)` = function-like; `None` = object-like.
+    pub params: Option<Vec<String>>,
+    pub body: String,
+    /// Enclosing `#if`/`#ifdef`/`#else` conditions, OUTERMOST first — the config
+    /// guard trail (`cpp_macro_model`). Empty = unconditional. What the
+    /// reachability rank is computed from.
+    pub guards: Vec<String>,
+    /// The `#define NAME` span — where goto-def lands.
+    pub selection_span: Span,
+    /// A direct-delegation wrapper's callee: when the body is a single call
+    /// `G(args)`, `Some("G")` — the see-through target goto-def also offers
+    /// (`SvREFCNT_inc → Perl_SvREFCNT_inc`). `None` otherwise.
+    pub delegate: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FoldRange {
     pub start_line: usize,
@@ -2641,6 +2665,13 @@ pub struct FileAnalysis {
     #[serde(default)]
     pub moved_from: Vec<(String, Span, ScopeId)>,
 
+    /// Every `#define` in this file — the macro identity/navigation lane. One
+    /// entry per `#define` (config variants share a name). Goto-def consults
+    /// this to prefer the `#define` over a use's self-span, rank variants, and
+    /// see through delegation wrappers. Pack-language only; Perl leaves it empty.
+    #[serde(default)]
+    pub macro_defs: Vec<MacroDef>,
+
 
     // Indices (built in post-pass — skipped by serde; call rebuild_all_indices() after deserialize)
     #[serde(skip, default)]
@@ -2912,6 +2943,8 @@ impl FileAnalysis {
             loader_config_params,
             flow_edges,
             moved_from,
+            // Populated by the pack driver post-construction (macro identity lane).
+            macro_defs: Vec::new(),
             scope_starts: Vec::new(),
             symbols_by_name: HashMap::new(),
             symbols_by_scope: HashMap::new(),

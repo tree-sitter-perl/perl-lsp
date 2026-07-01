@@ -1,0 +1,55 @@
+{
+  "capability": "definition",
+  "rows": [
+    {
+      "id": "cpp-macro-goto-bare-use-prefers-define",
+      "difficulty": "moderate",
+      "semantic_area": "cpp-multilang-macros",
+      "lang": "cpp",
+      "root": "gold-corpus/cpp-fixture",
+      "file": "macrogoto/baremacro.c",
+      "line": 1, "col": 0,
+      "expect": { "all": ["baremacro.c:1:9"], "none": ["baremacro.c:2:"] },
+      "status": "gold"
+    },
+    {
+      "id": "cpp-macro-goto-crossfile-object-like",
+      "difficulty": "moderate",
+      "semantic_area": "cpp-multilang-macros",
+      "lang": "cpp",
+      "root": "gold-corpus/cpp-fixture",
+      "file": "macrogoto/xuse.c",
+      "line": 1, "col": 0,
+      "expect": { "all": ["xkind.h:1:9"], "none": [] },
+      "status": "gold"
+    },
+    {
+      "id": "cpp-macro-goto-config-variant-ranked-multi-location",
+      "difficulty": "hard",
+      "semantic_area": "cpp-multilang-macros",
+      "lang": "cpp",
+      "root": "gold-corpus/cpp-fixture",
+      "file": "macrogoto/platuse.c",
+      "line": 1, "col": 0,
+      "expect": {
+        "all": ["platmacro.h:4:11\nplatmacro.h:2:11  (unreachable: WIN32 undefined)"],
+        "none": []
+      },
+      "status": "gold"
+    },
+    {
+      "id": "cpp-macro-goto-delegation-see-through",
+      "difficulty": "hard",
+      "semantic_area": "cpp-multilang-macros",
+      "lang": "cpp",
+      "root": "gold-corpus/cpp-fixture",
+      "file": "macrogoto/deleg.c",
+      "line": 2, "col": 16,
+      "expect": {
+        "all": ["deleg.c:2:9", "deleg.c:1:5  (delegates to Perl_Inc)"],
+        "none": []
+      },
+      "status": "gold"
+    }
+  ]
+}

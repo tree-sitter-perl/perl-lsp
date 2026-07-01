@@ -188,7 +188,11 @@ fn cached_query(slot: &'static OnceLock<Query>, lang: &tree_sitter::Language, sr
 /// ancestors of the def. Both the dedup'd table (expansion side) and the
 /// variant-preserving collection route through here so the guard trail is
 /// captured once.
-fn walk_macro_defs(tree: &Tree, src: &[u8], mut emit: impl FnMut(String, Macro)) {
+fn walk_macro_defs(
+    tree: &Tree,
+    src: &[u8],
+    mut emit: impl FnMut(String, Macro, (tree_sitter::Point, tree_sitter::Point)),
+) {
     let query = cached_query(&MACRO_DEF_Q, &tree.language(), MACRO_DEF_QUERY);
     let names: Vec<&str> = query.capture_names().to_vec();
     let mut cursor = QueryCursor::new();
@@ -229,21 +233,84 @@ fn walk_macro_defs(tree: &Tree, src: &[u8], mut emit: impl FnMut(String, Macro))
         }
         let guards = name_node.map(|n| guard_trail(n, src)).unwrap_or_default();
         let def_line = name_node.map(|n| n.start_position().row).unwrap_or(0);
+        let name_span = name_node
+            .map(|n| (n.start_position(), n.end_position()))
+            .unwrap_or_default();
         if let (Some(n), Some(b)) = (oname, obody) {
-            emit(n, Macro { params: None, body: b, guards: guards.clone(), def_line });
+            emit(n, Macro { params: None, body: b, guards: guards.clone(), def_line }, name_span);
         }
         if let (Some(n), Some(p), Some(b)) = (fname, fparams, fbody) {
-            emit(n, Macro { params: Some(p), body: b, guards, def_line });
+            emit(n, Macro { params: Some(p), body: b, guards, def_line }, name_span);
         }
     }
 }
 
 pub fn collect_macros(tree: &Tree, src: &[u8]) -> BTreeMap<String, Macro> {
     let mut out = BTreeMap::new();
-    walk_macro_defs(tree, src, |n, m| {
+    walk_macro_defs(tree, src, |n, m, _span| {
         out.insert(n, m);
     });
     out
+}
+
+/// The macro identity/navigation lane: every `#define` as a `MacroDef` carrying
+/// its guard trail, def-site span, and — for a direct-delegation wrapper —
+/// the callee it forwards to. Consumed by goto-def (`#define`-preference,
+/// reachability-ranked multi-location, see-through). Parses `source` fresh so
+/// def spans are in ORIGINAL coordinates (the expansion tree splices usages).
+pub fn collect_macro_defs(
+    parser: &mut tree_sitter::Parser,
+    source: &str,
+) -> Vec<crate::file_analysis::MacroDef> {
+    use crate::file_analysis::{MacroDef, Span};
+    let Some(tree) = parser.parse(source, None) else { return Vec::new() };
+    let src = source.as_bytes();
+    let mut out = Vec::new();
+    walk_macro_defs(&tree, src, |name, m, (start, end)| {
+        let delegate = m.params.is_some().then(|| delegation_target(&m.body)).flatten();
+        out.push(MacroDef {
+            name,
+            params: m.params,
+            body: m.body,
+            guards: m.guards,
+            selection_span: Span { start, end },
+            delegate,
+        });
+    });
+    out
+}
+
+/// A direct-delegation body — a single call `G(args)` whose whole point is to
+/// forward to `G` (`SvREFCNT_inc(sv)` → `Perl_SvREFCNT_inc(MUTABLE_SV(sv))`).
+/// Returns the callee identifier `G` when the body IS exactly one such call
+/// (a leading identifier immediately followed by a balanced `(...)` that spans
+/// to the end), else `None`. General over the shape — no per-name table.
+fn delegation_target(body: &str) -> Option<String> {
+    let body = body.trim();
+    let paren = body.find('(')?;
+    let callee = body[..paren].trim();
+    if callee.is_empty() || !callee.bytes().all(|c| c == b'_' || c.is_ascii_alphanumeric()) {
+        return None;
+    }
+    if callee.as_bytes()[0].is_ascii_digit() {
+        return None;
+    }
+    // The call must span the whole body: walk the parens, and nothing but
+    // whitespace may follow the matching close (`F(x) + 1` is not delegation).
+    let mut depth = 0i32;
+    for (i, c) in body.bytes().enumerate().skip(paren) {
+        match c {
+            b'(' => depth += 1,
+            b')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return body[i + 1..].trim().is_empty().then(|| callee.to_string());
+                }
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 /// The COMPLETE variant set per macro name — every `#define`, not the
@@ -255,7 +322,7 @@ pub fn collect_macro_variants(
     src: &[u8],
 ) -> BTreeMap<String, Vec<Macro>> {
     let mut out: BTreeMap<String, Vec<Macro>> = BTreeMap::new();
-    walk_macro_defs(tree, src, |n, m| {
+    walk_macro_defs(tree, src, |n, m, _span| {
         out.entry(n).or_default().push(m);
     });
     out

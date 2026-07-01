@@ -1022,13 +1022,44 @@ fn run_one(
 
     match req.q.as_str() {
         "definition" => {
-            let (_source, _tree, mut analysis) = parse_file(file);
+            let (source, _tree, mut analysis) = parse_file(file);
             resolve_imports_blocking(idx, &analysis);
             analysis.enrich_imported_types_with_keys(Some(idx));
             let abs = std::fs::canonicalize(file).unwrap_or_else(|_| std::path::PathBuf::from(file));
             let uri = tower_lsp::lsp_types::Url::from_file_path(&abs)
                 .unwrap_or_else(|_| tower_lsp::lsp_types::Url::parse("file:///unknown").unwrap());
-            if let Some(resp) = symbols::find_definition(&analysis, pos, &uri, idx) {
+            // Pack languages resolve cross-file through their sub-index (matches
+            // the LSP server); Perl uses the hub. The CLI mirror MUST route here
+            // or cross-file macro/function goto-def silently misses.
+            let reg = language_driver::LanguageRegistry::with_enabled();
+            let pack = reg.for_path(std::path::Path::new(file))
+                .map(|d| d.id()).filter(|id| *id != "perl")
+                .and_then(|lang| idx.pack_index(lang));
+            let xidx: &dyn crate::file_analysis::CrossFileLookup =
+                pack.as_deref().map_or(idx as &dyn crate::file_analysis::CrossFileLookup, |i| i);
+            // Macro-aware goto-def owns a macro-named word — ranked, all sites
+            // kept (labeled), see-through delegate appended. `docs/adr/macro-handling.md`.
+            if pack.is_some() {
+                if let Some(macros) =
+                    symbols::pack_macro_definition(&analysis, &source, point, &uri, xidx)
+                {
+                    let mut sources = SourceCache::new();
+                    let mut lines = Vec::new();
+                    for m in macros {
+                        let path = m.uri.to_file_path().map(|p| p.display().to_string())
+                            .unwrap_or_else(|_| m.uri.to_string());
+                        let (line, col) = sources.display(
+                            &path, m.range.start.line as usize, m.range.start.character as usize);
+                        let label = m.label.map(|l| format!("  ({l})")).unwrap_or_default();
+                        lines.push(format!("{}:{}:{}{}", path, line, col, label));
+                    }
+                    return Ok(lines.join("\n"));
+                }
+            }
+            // Pack cross-file symbol goto-def needs the pack index; Perl's
+            // module-keyed lookup is unaffected by passing the hub.
+            let idx_for_find: &module_index::ModuleIndex = pack.as_deref().unwrap_or(idx);
+            if let Some(resp) = symbols::find_definition(&analysis, pos, &uri, idx_for_find) {
                 use tower_lsp::lsp_types::GotoDefinitionResponse;
                 let first = match resp {
                     GotoDefinitionResponse::Scalar(loc) => Some(loc),
