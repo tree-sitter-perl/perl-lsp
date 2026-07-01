@@ -77,6 +77,31 @@ unsigned short`). Abstraction for inference, concrete leaf for the human.
 - **See-through** — a direct-delegation wrapper's goto-def reaches the delegate
   (`SvREFCNT_inc → Perl_SvREFCNT_inc`) via a delegation value-witness.
 
+### Resolution visibility = the include-closure lie (generalizes beyond macros)
+
+C linkage is globally flat, so today every symbol registers into one global
+namespace — and two unrelated translation units that both declare `class Box`
+(fixtures, vendored deps, multiple independent binaries, generated variants)
+**collide**. The determinism fix made the collision *stable* (order-independent
+winner) but not *correct*: a file can still resolve a name to a same-named
+symbol it can't actually see. This surfaced as the autoret flakiness — the real
+bug was "cross-file resolution of two same-named classes is arbitrary."
+
+The fiction that fixes it: **scope cross-file *resolution* by include-
+reachability.** A file resolves names only against symbols reachable from *its*
+include closure — `autoret.cpp` sees *its* `Box`, `methodchain.cpp` sees *its*.
+It's a lie (linkage is global) but it's the visibility the programmer reasons
+with ("what's in scope *here*"), and it's the **same lie the gather already
+tells for macros** (a file's macros = its include closure). Making the symbol
+model tell it too is consistency, not novelty.
+
+Shape: keep the **global registry** (find-anywhere, portability) and add a
+**reachability filter/rank** on resolution — identical to the macro multi-def
+ranking above (all defs kept, ranked by config-reachability). It reuses that
+machinery (`cpp_macro_model::classify` + the per-file include closure the
+gather already computes). Symbol resolution and macro resolution converge on
+one pattern: **global set + reachability scope.**
+
 ## Parked (we'll get there — correctness on a solid base, deepen as needed)
 
 - **Parametric return** (`#define ID(x) (x)` → the arg's type) — arity/union tier.
@@ -87,7 +112,17 @@ unsigned short`). Abstraction for inference, concrete leaf for the human.
 - Determinism precondition: the join-vs-chase winner must be a **principled,
   deterministic** rule, not witness/iteration order (owned by the flakiness
   fix). The function-like *return-typing* slice waits on that verdict.
-- Slice order: (1) goto-def overhaul (registration + `#define`-preference +
-  reachability-ranked multi-location + see-through) — disjoint, highest value;
-  (2) function-like implied return typing (after determinism); (3) expansion
-  policy flip (biggest blast radius — after the splice/gather work stabilizes).
+- Slice order (independent slices first; the coupled pair last):
+  1. **goto-def overhaul** — **LANDED** (959b388).
+  2. **provenance-leaf hover display** — recover the config-active variant's
+     concrete leaf (`unsigned short`) for hover while typing stays the
+     abstraction (`Numeric`). Independent, self-contained; owns the deferred
+     `op_type` xfail row (promotes it on landing).
+  3. **resolution visibility = include-closure scope** — the lie above; reuses
+     slice 1's reachability machinery. Correctness for vendored/monorepo name
+     collisions. Independent of the expansion policy.
+  4. **function-like implied return typing + expansion policy flip** — COUPLED:
+     the "unexpanded macro parses as a `call_expression` → sub-return bag path"
+     mechanism only exists once expansion is parse-repair-only. So the flip and
+     the typing land together (biggest blast radius, last, after the
+     splice/gather work stabilizes).
