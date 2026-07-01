@@ -280,7 +280,7 @@ pub fn find_definition(
     analysis: &FileAnalysis,
     pos: Position,
     uri: &Url,
-    module_index: &ModuleIndex,
+    module_index: &dyn crate::file_analysis::CrossFileLookup,
 ) -> Option<GotoDefinitionResponse> {
     let point = position_to_point(pos);
 
@@ -751,6 +751,41 @@ fn config_variant_leaf_display(
 /// variants across files never pruned), reachability-RANKED config-active
 /// first, plus any direct-delegation see-through target. `None` when the word
 /// is not a macro (the generic path then runs).
+/// Goto-def on an `#include "x.h"` / `<x.h>` path token → the resolved header
+/// file (`#include` = `use`; the header is the module). `self_path` is the
+/// including file — the search anchor for the walk-up include resolver.
+/// Returns a whole-file location (range 0:0); only cpp has an include model.
+#[cfg(feature = "cpp")]
+pub fn pack_include_definition(
+    analysis: &FileAnalysis,
+    point: Point,
+    self_path: Option<&std::path::Path>,
+) -> Option<Location> {
+    let raw = analysis
+        .include_directives
+        .iter()
+        .find(|(span, _)| crate::file_analysis::contains_point(span, point))
+        .map(|(_, raw)| raw.clone())?;
+    // `"foo.h"` captures the string CONTENT (no quotes); `<sys/x.h>` captures the
+    // whole token — strip the angle brackets so the resolver sees a bare path.
+    let inc = raw.trim_matches(|c| c == '<' || c == '>' || c == '"');
+    let base = self_path?;
+    let header = crate::cpp_reparse::resolve_include_path(base, inc)?;
+    let uri = Url::from_file_path(&header).ok()?;
+    Some(Location {
+        uri,
+        range: Range::new(Position::new(0, 0), Position::new(0, 0)),
+    })
+}
+#[cfg(not(feature = "cpp"))]
+pub fn pack_include_definition(
+    _analysis: &FileAnalysis,
+    _point: Point,
+    _self_path: Option<&std::path::Path>,
+) -> Option<Location> {
+    None
+}
+
 pub fn pack_macro_definition(
     analysis: &FileAnalysis,
     source: &str,
@@ -839,7 +874,7 @@ fn resolve_pack_symbol_location(
 fn dispatch_handler_locations(
     owner: &crate::file_analysis::HandlerOwner,
     name: &str,
-    module_index: &ModuleIndex,
+    module_index: &dyn crate::file_analysis::CrossFileLookup,
 ) -> Option<GotoDefinitionResponse> {
     use crate::file_analysis::SymbolDetail;
     let mut locs: Vec<Location> = Vec::new();
@@ -2966,7 +3001,7 @@ fn classify_import(
     import: &crate::file_analysis::Import,
     func_name: &str,
     cached: Option<&CachedModule>,
-    module_index: &ModuleIndex,
+    module_index: &dyn CrossFileLookup,
 ) -> Option<(ImportResolution, String)> {
     if let Some(cached) = cached {
         let surface = cached.analysis.export_surface_with_index(module_index);
@@ -3000,7 +3035,7 @@ fn classify_import(
 fn resolve_imported_function_classified<'a>(
     analysis: &'a FileAnalysis,
     func_name: &str,
-    module_index: &ModuleIndex,
+    module_index: &dyn crate::file_analysis::CrossFileLookup,
 ) -> Option<(&'a crate::file_analysis::Import, Option<std::path::PathBuf>, String, ImportResolution)> {
     let mut best: Option<(
         &'a crate::file_analysis::Import,
@@ -3033,7 +3068,7 @@ fn resolve_imported_function_classified<'a>(
 fn resolve_imported_function<'a>(
     analysis: &'a FileAnalysis,
     func_name: &str,
-    module_index: &ModuleIndex,
+    module_index: &dyn crate::file_analysis::CrossFileLookup,
 ) -> Option<(&'a crate::file_analysis::Import, std::path::PathBuf, String)> {
     // Goto-def needs a concrete module path to jump to.
     resolve_imported_function_classified(analysis, func_name, module_index)

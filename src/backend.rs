@@ -33,8 +33,12 @@ pub fn pack_completion(
             // own cache — no cross-language overlap), falling back to the
             // hub when none is attached.
             let pack = module_index.pack_index(language);
-            let xidx: &dyn crate::file_analysis::CrossFileLookup =
+            let base_idx: &dyn crate::file_analysis::CrossFileLookup =
                 pack.as_deref().map_or(module_index, |i| i);
+            // Scope member/type resolution to the file's include closure.
+            let scoped = crate::file_analysis::ScopedLookup::new(
+                base_idx, &analysis.include_closure, path);
+            let xidx: &dyn crate::file_analysis::CrossFileLookup = &scoped;
             let cursor = crate::cursor_sentinel::point_to_byte(source, point);
             let mut parser = driver.make_parser();
             if let Some(ctx) = crate::cursor_sentinel::member_completion_ctx_incremental(
@@ -888,12 +892,26 @@ impl LanguageServer for Backend {
         let pack = (doc.language != "perl")
             .then(|| self.module_index.pack_index(doc.language))
             .flatten();
-        let idx = pack.as_deref().unwrap_or(&self.module_index);
+        let base_idx = pack.as_deref().unwrap_or(&self.module_index);
+        // Resolve names against THIS file's include closure (C's flat linkage:
+        // prefer the `class Box` this file can see). Transparent for Perl.
+        let self_path = uri.to_file_path().ok();
+        let scoped = crate::file_analysis::ScopedLookup::new(
+            base_idx, &doc.analysis.include_closure, self_path.as_deref());
+        let idx: &dyn crate::file_analysis::CrossFileLookup = &scoped;
         // Macro-aware goto-def OWNS a macro-named word (pack languages): the
         // `#define` wins over a use's self-span, variants come back ranked, and
         // a delegation wrapper offers its callee. Runs BEFORE `find_definition`
         // so gap #1 (bare use → itself) never surfaces. `docs/adr/macro-handling.md`.
         if doc.language != "perl" {
+            // `#include "x.h"` path → the resolved header (`#include` = `use`).
+            if doc.language == "cpp" {
+                if let Some(loc) = symbols::pack_include_definition(
+                    &doc.analysis, symbols::position_to_point(pos), self_path.as_deref())
+                {
+                    return Ok(Some(GotoDefinitionResponse::Scalar(loc)));
+                }
+            }
             if let Some(macros) =
                 symbols::pack_macro_definition(&doc.analysis, &doc.text, symbols::position_to_point(pos), uri, idx)
             {
@@ -1100,10 +1118,15 @@ impl LanguageServer for Backend {
         // Perl's hover renderer is Perl-specific; pack languages get a
         // language-agnostic declaration-line hover.
         if doc.language != "perl" {
-            // Route cross-file (function hover) to the per-language sub-index.
+            // Route cross-file (function hover) to the per-language sub-index,
+            // scoped to this file's include closure.
             let pack = self.module_index.pack_index(doc.language);
-            let xidx: &dyn crate::file_analysis::CrossFileLookup =
+            let base_idx: &dyn crate::file_analysis::CrossFileLookup =
                 pack.as_deref().map_or(&*self.module_index, |i| i);
+            let self_path = uri.to_file_path().ok();
+            let scoped = crate::file_analysis::ScopedLookup::new(
+                base_idx, &doc.analysis.include_closure, self_path.as_deref());
+            let xidx: &dyn crate::file_analysis::CrossFileLookup = &scoped;
             if let Some(h) = symbols::pack_hover(
                 &doc.analysis,
                 &doc.text,

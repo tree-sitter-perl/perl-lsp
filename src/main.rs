@@ -1046,11 +1046,23 @@ fn run_one(
             // the LSP server); Perl uses the hub. The CLI mirror MUST route here
             // or cross-file macro/function goto-def silently misses.
             let reg = language_driver::LanguageRegistry::with_enabled();
-            let pack = reg.for_path(std::path::Path::new(file))
-                .map(|d| d.id()).filter(|id| *id != "perl")
-                .and_then(|lang| idx.pack_index(lang));
-            let xidx: &dyn crate::file_analysis::CrossFileLookup =
+            let lang_id = reg.for_path(std::path::Path::new(file))
+                .map(|d| d.id()).filter(|id| *id != "perl");
+            let pack = lang_id.and_then(|lang| idx.pack_index(lang));
+            let base_idx: &dyn crate::file_analysis::CrossFileLookup =
                 pack.as_deref().map_or(idx as &dyn crate::file_analysis::CrossFileLookup, |i| i);
+            // Resolve names against this file's include closure (matches the LSP).
+            let scoped = crate::file_analysis::ScopedLookup::new(
+                base_idx, &analysis.include_closure, Some(abs.as_path()));
+            let xidx: &dyn crate::file_analysis::CrossFileLookup = &scoped;
+            // `#include "x.h"` path → the resolved header (`#include` = `use`).
+            if lang_id == Some("cpp") {
+                if let Some(loc) = symbols::pack_include_definition(&analysis, point, Some(abs.as_path())) {
+                    let path = loc.uri.to_file_path().map(|p| p.display().to_string())
+                        .unwrap_or_else(|_| loc.uri.to_string());
+                    return Ok(format!("{}:{}:{}", path, loc.range.start.line + 1, loc.range.start.character + 1));
+                }
+            }
             // Macro-aware goto-def owns a macro-named word — ranked, all sites
             // kept (labeled), see-through delegate appended. `docs/adr/macro-handling.md`.
             if pack.is_some() {
@@ -1070,10 +1082,9 @@ fn run_one(
                     return Ok(lines.join("\n"));
                 }
             }
-            // Pack cross-file symbol goto-def needs the pack index; Perl's
-            // module-keyed lookup is unaffected by passing the hub.
-            let idx_for_find: &module_index::ModuleIndex = pack.as_deref().unwrap_or(idx);
-            if let Some(resp) = symbols::find_definition(&analysis, pos, &uri, idx_for_find) {
+            // Pack cross-file symbol goto-def uses the include-scoped pack index;
+            // Perl's module-keyed lookup is unaffected (empty closure = the hub).
+            if let Some(resp) = symbols::find_definition(&analysis, pos, &uri, xidx) {
                 use tower_lsp::lsp_types::GotoDefinitionResponse;
                 // Print EVERY offered location (one per line), ranked as
                 // returned: a plain goto-def yields one; a domain-typed field
@@ -1195,8 +1206,12 @@ fn run_one(
                 .map(|d| d.id()).filter(|id| *id != "perl")
             {
                 let pack = idx.pack_index(lang);
-                let xidx: &dyn crate::file_analysis::CrossFileLookup =
+                let base_idx: &dyn crate::file_analysis::CrossFileLookup =
                     pack.as_deref().map_or(idx, |i| i);
+                let self_path = std::fs::canonicalize(file).ok();
+                let scoped = crate::file_analysis::ScopedLookup::new(
+                    base_idx, &analysis.include_closure, self_path.as_deref());
+                let xidx: &dyn crate::file_analysis::CrossFileLookup = &scoped;
                 return symbols::pack_hover_markdown(&analysis, &source, point, lang, Some(xidx))
                     .ok_or_else(|| format!("No hover info at {}:{}", req.line, req.col));
             }

@@ -33,7 +33,7 @@
         ],
         "none": []
       },
-      "status": "xfail"
+      "status": "gold"
     },
     {
       "id": "cpp-member-block-field-goto-def",
