@@ -4891,6 +4891,84 @@ impl FileAnalysis {
         }
     }
 
+    /// The type SPELLING a field's declared type edges to — the `TypeName(n)`
+    /// target of the field's `Variable → Edge(TypeName(n))` witness (`op_type`
+    /// declared `PERL_BITFIELD16` → `Some("PERL_BITFIELD16")`). This is the
+    /// alias/macro name whose provenance chain hover walks for the concrete
+    /// leaf; the flow type (`inferred_type_via_bag`) is the join abstraction the
+    /// same edge resolves to. `None` when the field's declared type is a
+    /// primitive/committed value rather than an alias edge. Reads the field's
+    /// OWNING analysis (cross-file fields resolve, like `field_type_on_class`).
+    pub fn member_type_spelling(
+        &self,
+        class: &str,
+        field: &str,
+        module_index: Option<&dyn CrossFileLookup>,
+    ) -> Option<String> {
+        match self.resolve_method_in_ancestors(class, field, module_index)? {
+            MethodResolution::Local { sym_id, .. } => {
+                self.type_name_edge_of(&self.symbol(sym_id).name, self.symbol(sym_id).scope)
+            }
+            MethodResolution::CrossFile { class, .. } => {
+                let cached = module_index?.get_cached(&class)?;
+                let sym = cached.analysis.symbols.iter().find(|s| {
+                    matches!(s.kind, SymKind::Variable | SymKind::Field)
+                        && s.name == field
+                        && s.package.as_deref() == Some(class.as_str())
+                })?;
+                cached.analysis.type_name_edge_of(&sym.name, sym.scope)
+            }
+        }
+    }
+
+    /// The `TypeName(n)` a `Variable{name, scope}` declared type edges to, read
+    /// from the recorded witness bag (the alias edge the skeleton emits for a
+    /// class-shaped declared type). Scope-matched so two same-named fields in
+    /// different structs don't cross-wire.
+    pub(crate) fn type_name_edge_of(&self, name: &str, scope: ScopeId) -> Option<String> {
+        use crate::witnesses::{WitnessAttachment, WitnessPayload};
+        self.witnesses.all().iter().find_map(|w| match (&w.attachment, &w.payload) {
+            (
+                WitnessAttachment::Variable { name: n, scope: s },
+                WitnessPayload::Edge(WitnessAttachment::TypeName(target)),
+            ) if n == name && *s == scope => Some(target.clone()),
+            _ => None,
+        })
+    }
+
+    /// Resolve a type-alias/macro spelling to its terminal concrete type by
+    /// chasing the recorded `TypeName` alias graph (`U16 → U16TYPE → unsigned
+    /// short`), cross-file capable. A thin `TypeName(name)` registry query —
+    /// the same chase the field's flow type already performs, exposed so a
+    /// display consumer can walk a chosen macro-variant body to its leaf
+    /// without re-deriving the graph. `None` when the spelling doesn't resolve
+    /// past itself (an unresolved `TypeName` is terminal → `ClassName(name)`,
+    /// which this returns as-is for the caller to compare against the input).
+    pub fn resolve_type_name(
+        &self,
+        name: &str,
+        module_index: Option<&dyn CrossFileLookup>,
+    ) -> Option<InferredType> {
+        use crate::witnesses::{
+            FrameworkFact, ReducedValue, ReducerQuery, ReducerRegistry, WitnessAttachment,
+        };
+        let att = WitnessAttachment::TypeName(name.to_string());
+        let ctx = self.bag_context(module_index);
+        let q = ReducerQuery {
+            attachment: &att,
+            point: None,
+            framework: FrameworkFact::Plain,
+            arity_hint: None,
+            receiver: None,
+            context: Some(&ctx),
+        };
+        let reg = ReducerRegistry::with_defaults();
+        match reg.query(&self.witnesses, &q) {
+            ReducedValue::Type(t) => Some(t),
+            _ => None,
+        }
+    }
+
     /// Recursively collect methods from a class and its ancestors, deduping by name.
     fn collect_ancestor_methods(
         &self,

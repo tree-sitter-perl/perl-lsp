@@ -93,6 +93,26 @@ void f(SV* p) { p->x; }
 }
 
 #[test]
+fn resolve_type_name_walks_alias_chain_to_leaf() {
+    // The display-side leaf recovery chases a chosen spelling through the same
+    // `TypeName` graph the flow type uses — `U16 → unsigned short`.
+    let fa = fa("typedef unsigned short U16;\n");
+    assert_eq!(
+        fa.resolve_type_name("U16", None),
+        Some(InferredType::ClassName("unsigned short".into())),
+    );
+}
+
+#[test]
+fn member_type_spelling_recovers_the_alias_edge() {
+    // A field declared with an alias spelling records a `Variable →
+    // Edge(TypeName(spelling))` witness; `member_type_spelling` recovers that
+    // spelling — the macro/alias name hover walks for the concrete leaf.
+    let fa = fa("typedef unsigned short U16;\nstruct S { U16 op_type; };\n");
+    assert_eq!(fa.member_type_spelling("S", "op_type", None).as_deref(), Some("U16"));
+}
+
+#[test]
 fn typedef_struct_receiver_member_type() {
     // A `typedef struct S_ { int field_f; } S;` receiver `S* p` resolves the
     // member `field_f` — the typedef case of the plain-struct member lookup.
