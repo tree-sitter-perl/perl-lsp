@@ -476,25 +476,22 @@ pub struct MacroGotoLocation {
     pub label: Option<String>,
 }
 
-/// Macro-aware goto-def (the identity/navigation lane, `docs/adr/macro-handling.md`).
-/// When the cursor word names a `#define` — same-file OR cross-file — this
-/// OWNS the answer, preempting the generic symbol path so a bare use resolves
-/// to the `#define`, never its own span. Returns EVERY def site (config
-/// variants across files never pruned), reachability-RANKED config-active
-/// first, plus any direct-delegation see-through target. `None` when the word
-/// is not a macro (the generic path then runs).
-pub fn pack_macro_definition(
+/// Every `#define` of `word` across this file + the cached modules, ranked
+/// config-active first by the SAME total order goto-def and hover both consume
+/// (`docs/adr/macro-handling.md`): reachability rank, then (path, row, col) so
+/// the winner is deterministic across processes (the cache iterates in
+/// randomized DashMap order). Empty when `word` names no macro. This is the one
+/// place the variant set is gathered + reachability-classified — goto-def
+/// returns all of them, hover walks the top one's alias chain to its leaf.
+fn ranked_macro_variants(
     analysis: &FileAnalysis,
-    source: &str,
-    point: Point,
+    word: &str,
     uri: &Url,
     module_index: &dyn CrossFileLookup,
-) -> Option<Vec<MacroGotoLocation>> {
-    use crate::cpp_macro_model::{classify, KnownConfig, Reachability};
+) -> Vec<(crate::file_analysis::MacroDef, Url, crate::cpp_macro_model::Reachability)> {
+    use crate::cpp_macro_model::{classify, KnownConfig};
     use crate::file_analysis::MacroDef;
     use std::collections::HashSet;
-
-    let word = word_at_point(source, point)?;
 
     // One pass over every cached module + this file: collect the def sites for
     // `word` (config variants live in different headers — win32.h vs perl.h; we
@@ -545,7 +542,7 @@ pub fn pack_macro_definition(
     });
 
     if sites.is_empty() {
-        return None; // not a macro — let the generic goto-def path answer.
+        return Vec::new();
     }
 
     // The include-guard idiom `#ifndef X … #define X … #endif` guards a macro's
@@ -558,10 +555,8 @@ pub fn pack_macro_definition(
 
     // Rank, active-first. Never prune — a lower-ranked (e.g. win32) def stays,
     // labeled. The secondary (path, line, col) key is a TOTAL order so the
-    // result is deterministic across processes: `sites` are gathered in
-    // DashMap iteration order (randomized per-process), so same-rank variants
-    // would otherwise flip between runs.
-    let mut ranked: Vec<(MacroDef, Url, Reachability)> = sites
+    // result is deterministic across processes.
+    let mut ranked: Vec<(MacroDef, Url, _)> = sites
         .into_iter()
         .map(|(m, u)| {
             let r = classify(&m.guards, &cfg);
@@ -575,6 +570,67 @@ pub fn pack_macro_definition(
             .then_with(|| ma.selection_span.start.row.cmp(&mb.selection_span.start.row))
             .then_with(|| ma.selection_span.start.column.cmp(&mb.selection_span.start.column))
     });
+    ranked
+}
+
+/// The concrete-leaf DISPLAY for a field/variable whose declared type is a
+/// config-variant type macro (`docs/adr/macro-handling.md`, "Typing vs.
+/// display"). The type that FLOWS stays the join abstraction (`Numeric`); this
+/// recovers the human-facing leaf by walking provenance: pick the
+/// reachability-active variant of `spelling` (the SAME ranking goto-def uses),
+/// then chase that variant body's `TypeName` alias chain to its terminal
+/// concrete spelling (`PERL_BITFIELD16 → U16 → U16TYPE → unsigned short`).
+/// `None` when `spelling` isn't a config-variant macro, or the chase doesn't
+/// reach a leaf more concrete than the variant body itself — the caller then
+/// renders the flow type unchanged.
+fn config_variant_leaf_display(
+    analysis: &FileAnalysis,
+    spelling: &str,
+    module_index: &dyn CrossFileLookup,
+) -> Option<String> {
+    // Hover reads only the winning variant's BODY, never its location, so the
+    // queried file's own uri is immaterial — a placeholder keys its local
+    // `macro_defs` without colliding with the real cross-file def uris.
+    let local = Url::parse("file:///__hover_local__").ok()?;
+    let ranked = ranked_macro_variants(analysis, spelling, &local, module_index);
+    // A single-variant (or non-) macro flows to its leaf already; only the
+    // config-variant JOIN abstraction needs the display-side variant pick.
+    if ranked.len() < 2 {
+        return None;
+    }
+    let body = ranked.first()?.0.body.trim();
+    // Walk the chosen variant body's alias chain to its terminal concrete type.
+    // Only override when the chase reached a NAMED concrete leaf (`unsigned
+    // short`) PAST the body spelling — a bare primitive family (`unsigned` →
+    // `Numeric`) carries no richer spelling than the flow abstraction already
+    // shows, so leave the flow type in place.
+    let leaf = analysis.resolve_type_name(body, Some(module_index))?;
+    let display = leaf.class_name()?;
+    if display == body {
+        return None;
+    }
+    Some(display.to_string())
+}
+
+/// Macro-aware goto-def (the identity/navigation lane, `docs/adr/macro-handling.md`).
+/// When the cursor word names a `#define` — same-file OR cross-file — this
+/// OWNS the answer, preempting the generic symbol path so a bare use resolves
+/// to the `#define`, never its own span. Returns EVERY def site (config
+/// variants across files never pruned), reachability-RANKED config-active
+/// first, plus any direct-delegation see-through target. `None` when the word
+/// is not a macro (the generic path then runs).
+pub fn pack_macro_definition(
+    analysis: &FileAnalysis,
+    source: &str,
+    point: Point,
+    uri: &Url,
+    module_index: &dyn CrossFileLookup,
+) -> Option<Vec<MacroGotoLocation>> {
+    let word = word_at_point(source, point)?;
+    let ranked = ranked_macro_variants(analysis, word, uri, module_index);
+    if ranked.is_empty() {
+        return None; // not a macro — let the generic goto-def path answer.
+    }
 
     let mut out: Vec<MacroGotoLocation> = Vec::new();
     for (m, u, r) in &ranked {
@@ -1357,7 +1413,17 @@ pub fn pack_hover_markdown(
     // class, then the field's `name: type` — the same ref goto-def lands on.
     if matches!(r.kind, RefKind::MethodCall { .. }) {
         let cn = analysis.method_call_invocant_class(r, Some(midx))?;
-        let h = analysis.member_hover(&cn, r.unqualified_target_name(), Some(midx))?;
+        let field = r.unqualified_target_name();
+        // The member's declared type may be a config-variant macro whose flow
+        // type is the join abstraction (`Numeric`). Display the concrete leaf
+        // recovered from the config-active variant's alias chain instead.
+        if let Some(leaf) = analysis
+            .member_type_spelling(&cn, field, Some(midx))
+            .and_then(|sp| config_variant_leaf_display(analysis, &sp, midx))
+        {
+            return Some(format!("```{}\n{}: {}\n```\n\n*field*", language, field, leaf));
+        }
+        let h = analysis.member_hover(&cn, field, Some(midx))?;
         return Some(format!("```{}\n{}\n```\n\n*field*", language, h));
     }
     if !matches!(r.kind, RefKind::FunctionCall { .. }) {
@@ -1394,11 +1460,19 @@ fn render_symbol_hover(
 ) -> String {
     if matches!(sym.kind, FaSymKind::Variable | FaSymKind::Field) {
         if let Some(ty) = analysis.inferred_type_via_bag_ctx(&sym.name, type_point, module_index) {
+            // Config-variant macro type → display the concrete leaf recovered
+            // from the config-active variant's alias chain, not the join
+            // abstraction the type flows as.
+            let display = module_index
+                .and_then(|midx| {
+                    analysis
+                        .type_name_edge_of(&sym.name, sym.scope)
+                        .and_then(|sp| config_variant_leaf_display(analysis, &sp, midx))
+                })
+                .unwrap_or_else(|| sym.display_type(&ty));
             return format!(
                 "```{}\n{}: {}\n```\n\n*variable*",
-                language,
-                sym.name,
-                sym.display_type(&ty)
+                language, sym.name, display
             );
         }
     }
