@@ -19,13 +19,21 @@ The macro arc is **DONE** (goto-def / hover / typing / roles; real op.c `op_type
    cross-file (likely fallout from the `@def.var`→`@def.enumerator` container
    wiring). Bug — fix first.
 2. **domain typing** (`op_type → opcode`) — unblocked now that slice 3 gives the
-   single `BASEOP.op_type` subject. `Field`-attachment fold + `DomainCompare`
-   witness + the free navigation bridge. Design: the domain spike
-   (`docs/prompt-domain-typing.md`, distilled from the throwaway).
-3. **include-closure visibility** (ADR slice 4) — `C = Perl, everything exported`:
+   single `BASEOP.op_type` subject. Defines the **language-generic
+   `Field{owner, name}`** attachment (the project-wide fold onto a storage slot)
+   + `DomainCompare` witness + the free navigation bridge; C emission first.
+   Design: the domain spike (`docs/prompt-domain-typing.md`).
+3. **unified field-slot primitive** (C + Perl fields, core + plugin) — wire the
+   Perl *sources* onto the same `Field{owner, name}` subject: Corinna `field`,
+   the existing `HashKey{Def,Access,Owner}` machinery, Moo/Moose `has`, DBIC/Mojo
+   columns. Same fold, per-flavor emission (Perl access is varied + dynamic —
+   the labor is routing accesses, not the primitive). Unlocks refs-splat +
+   domain typing + cross-class field analysis for Perl fields, source-agnostic
+   (rule #10 — a Corinna field and a Moo attr are one subject downstream).
+4. **include-closure visibility** (ADR slice 4) — `C = Perl, everything exported`:
    scope cross-file resolution by include-reachability (make cpp a `module_index`
    consumer) + the cheap `#include`-goto-def sub-win.
-4. **function-typing + expansion flip** (ADR slice 5) — the coupled finale;
+5. **function-typing + expansion flip** (ADR slice 5) — the coupled finale;
    biggest blast radius, last.
 
 ```
