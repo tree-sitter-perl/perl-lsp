@@ -20,6 +20,12 @@ return function(opts)
   vim.opt.completeopt = { "menuone", "noselect", "popup" }
   vim.opt.pumheight = 15
 
+  -- Window navigation (muscle memory): Ctrl-h/j/k/l
+  vim.keymap.set("n", "<C-h>", "<C-w>h")
+  vim.keymap.set("n", "<C-j>", "<C-w>j")
+  vim.keymap.set("n", "<C-k>", "<C-w>k")
+  vim.keymap.set("n", "<C-l>", "<C-w>l")
+
   -- Built binary. Override with PERL_LSP_BIN for comparison runs.
   local lsp_bin = vim.env.PERL_LSP_BIN
     and vim.fn.fnamemodify(vim.env.PERL_LSP_BIN, ":p")
@@ -58,6 +64,7 @@ return function(opts)
 
       -- Navigation
       vim.keymap.set("n", "gd", vim.lsp.buf.definition, kopts)
+      vim.keymap.set("n", "gi", vim.lsp.buf.implementation, kopts)
       vim.keymap.set("n", "gr", vim.lsp.buf.references, kopts)
       vim.keymap.set("n", "K", vim.lsp.buf.hover, kopts)
 
@@ -184,7 +191,7 @@ return function(opts)
         end,
       })
 
-      print(opts.attach_message or "perl-lsp attached! gd=def gr=refs K=hover <leader>rn=rename <leader>o=symbols <leader>f=format")
+      print(opts.attach_message or "perl-lsp attached! gd=def gi=impl gr=refs K=hover <leader>rn=rename <leader>o=symbols <leader>f=format")
     end,
   })
 end

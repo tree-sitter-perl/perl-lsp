@@ -6,7 +6,7 @@ local here = vim.fn.fnamemodify(debug.getinfo(1, "S").source:sub(2), ":h")
 dofile(here .. "/dev_lsp.lua")({
   filetypes = { "perl" },
   root_markers = { ".git", "Makefile", "cpanfile", "Makefile.PL", "Build.PL" },
-  attach_message = "perl-lsp attached! gd=def gr=refs K=hover <leader>rn=rename <leader>o=symbols <leader>f=format",
+  attach_message = "perl-lsp attached! gd=def gi=impl gr=refs K=hover <leader>rn=rename <leader>o=symbols <leader>f=format",
 })
 
 -- Semantic token highlight groups for perl-lsp — loud and distinct for QA.

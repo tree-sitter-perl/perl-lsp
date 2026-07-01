@@ -5,7 +5,7 @@ local here = vim.fn.fnamemodify(debug.getinfo(1, "S").source:sub(2), ":h")
 dofile(here .. "/dev_lsp.lua")({
   filetypes = { "c", "cpp" },
   root_markers = { ".git", "CMakeLists.txt", "Makefile", "configure", "compile_commands.json" },
-  attach_message = "cpp-lsp attached! gd=def gr=refs K=hover <leader>rn=rename <leader>o=symbols <leader>f=format",
+  attach_message = "cpp-lsp attached! gd=def gi=impl gr=refs K=hover <leader>rn=rename <leader>o=symbols <leader>f=format",
 })
 
 -- Semantic token colors — base groups apply to c/cpp (Perl uses .perl-suffixed).
