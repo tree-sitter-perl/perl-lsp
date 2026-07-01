@@ -57,10 +57,30 @@ ARC 4  cpp LSP experience .............................. 🔵 IN PROGRESS
              case, partial/member move) — beyond the flow tier. Function +
              test kept, unwired in `pack_diagnostics`. Re-wire when the FP
              classes close.
+         · TYPE-CONSTRAINED completion .................... ⬜ (sick)
+             at a typed slot (`x.` where x:T, a `T`-typed arg position, a
+             return slot), offer only members/values whose type matches the
+             EXPECTED type — rank/filter completions by the type tier we
+             already have. Flow-aware, additive; clangd does a weak version.
 
-       OUT OF REACH (needs a compiler frontend, honestly conceded): full
-         overload-resolution LATTICE (ICS/SFINAE/partial-ordering), template
-         instantiation types, accurate ADL, preprocessor-exact macro expansion.
+       KNOWN LIVE BUGS (op.c stress — ⬜, being investigated):
+         · macro/type goto-def resolves the WRONG def: `PERL_BITFIELD16` use
+             in op.h jumps to win32.h's `#define` instead of op.h's local
+             typedef (line 45). Root smell: the gather collects macros from
+             `#if`-guarded-OUT headers (win32.h on linux) because it doesn't
+             EVALUATE `#if` — "modeling macros wrong". Fix axis: wire the
+             stdlib-probe predefined macros into `#if` eval + prefer the
+             local/nearest def. THE priority correctness bug.
+         · `op_p` member completion peel `(*op_p)->` not firing.
+         · `op_type` hover shows a spurious/random line.
+         · op.c still slow per-analyze (the `cpp.gather` lever, above).
+
+       ADDITIVE DEPTH (spiked — NOT out of reach): overload resolution, ADL,
+         and template instantiation are ADDITIVE layers, each a per-depth
+         accuracy/cost tradeoff we evaluate rather than a wall. Templates are
+         framed as PROJECTIONS (lands well). We don't have to be compiler-grade
+         at every corner to be useful at the common one; the honest line is
+         "which depth is worth it here", not "impossible".
 
        PLUMBING (`==perl`→capability): diagnostics already DISPATCH (cpp gets
          `pack_member_op` + the gated use-after-move), so not fully gated; the
@@ -99,8 +119,9 @@ same-name optional inner-type — is fixed via `(name, scope)`-keyed `annot_text
 - ARC 1–3 hardened the seam (shared; cpp benefits). Done / mostly done.
 - **ARC 4 is now the active front** — and it split cleanly into PERF (the DX
   blocker, largely fixed bar the gather cache) and FLOW DIFFERENTIATORS (the
-  narrowing family enabled; use-after-move honestly gated). The OUT-OF-REACH
-  line (overload lattice / templates / ADL) is conceded, not promised — that's
-  what keeps trust.
+  narrowing family enabled; use-after-move honestly gated). Overload / ADL /
+  templates(-as-projections) are ADDITIVE depth we've spiked — evaluated as a
+  per-level tradeoff, not conceded. Trust comes from being honest about WHICH
+  depth we've turned on, not from pretending the ceiling is a wall.
 - ARC 5 (ship) still ahead; the remaining gates are the gather-cache perf win,
   the file-watch plumbing, and deciding what's "good enough to ship."
