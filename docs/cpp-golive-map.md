@@ -35,6 +35,16 @@ The macro arc is **DONE** (goto-def / hover / typing / roles; real op.c `op_type
    consumer) + the cheap `#include`-goto-def sub-win.
 5. **function-typing + expansion flip** (ADR slice 5) — the coupled finale;
    biggest blast radius, last.
+6. **refs symmetry audit** (LAST — over everything) — gr (find-references) is
+   systematically weaker than gd (goto-def): enum variants don't gr to their
+   uses; a macro at its `#define` doesn't gr to uses; fields / globals / roles /
+   typedefs / includes likely the same. **Invariant to enforce: any resolution
+   gd does forward (use→def), gr MUST mirror backward (def→uses) on the SAME
+   key.** Forward is one lookup; backward needs every use to emit a ref the
+   reverse index finds by that key. Audit each symbol kind we've touched via
+   `--definition`/`--references` round-trips on real perl5 (and fixtures), close
+   every asymmetry, and lock each as a gold pair (gd row + gr row) so it can't
+   regress back to one-directional.
 
 ```
 ARC 1  cpp seam refactor ............................... ✅ DONE
