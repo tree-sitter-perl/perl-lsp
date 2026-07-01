@@ -122,6 +122,10 @@ pub struct PackDriver {
             &mut tree_sitter::Parser,
         ) -> std::sync::Arc<crate::cpp_reparse::PreExpandedExternal>,
     >,
+    /// The macro identity/navigation lane collector (C preprocessor only):
+    /// original source → every `#define` as a `MacroDef` (guard trail, def
+    /// span, delegation callee). `None` for packs without a preprocessor.
+    collect_macro_defs: Option<fn(&mut tree_sitter::Parser, &str) -> Vec<crate::file_analysis::MacroDef>>,
 }
 
 #[cfg(any(feature = "cpp", feature = "python", feature = "r", feature = "cmake"))]
@@ -169,6 +173,11 @@ impl LanguageDriver for PackDriver {
                 emit_external_type_aliases(&mut skel.witnesses, &external, (self.pack)().annot_type);
                 let mut fa = skel.into_file_analysis();
                 apply_attribute_macros(&mut fa, &recovered);
+                // Macro identity lane: collect every `#define` off the ORIGINAL
+                // source (spans in user coordinates, no splice remap needed).
+                if let Some(collect) = self.collect_macro_defs {
+                    fa.macro_defs = collect(&mut parser, source);
+                }
                 fa
             }
             Err(_) => FileAnalysis::new(Default::default()),
@@ -203,6 +212,7 @@ fn cpp_driver() -> PackDriver {
         // carries the recovered spans back to the original coordinates.
         transform: Some(crate::cpp_reparse::preprocess_validated_with),
         gather_macros: Some(crate::cpp_reparse::included_macros_pre_expanded),
+        collect_macro_defs: Some(crate::cpp_reparse::collect_macro_defs),
     }
 }
 
@@ -220,6 +230,7 @@ fn python_driver() -> PackDriver {
         pack: crate::query_extract::python_pack,
         transform: None,
         gather_macros: None,
+        collect_macro_defs: None,
     }
 }
 
@@ -237,6 +248,7 @@ fn r_driver() -> PackDriver {
         pack: crate::query_extract::r_pack,
         transform: None,
         gather_macros: None,
+        collect_macro_defs: None,
     }
 }
 
@@ -255,6 +267,7 @@ fn cmake_driver() -> PackDriver {
         pack: crate::query_extract::cmake_pack,
         transform: None,
         gather_macros: None,
+        collect_macro_defs: None,
     }
 }
 

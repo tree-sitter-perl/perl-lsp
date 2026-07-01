@@ -31,6 +31,19 @@ function M.def_line(buf, line, col)
   return nil
 end
 
+--- All 0-indexed def-result line numbers (multi-location goto-def, e.g. a
+--- macro's ranked def sites + see-through delegate). Order preserved.
+function M.def_lines(buf, line, col)
+  local result = M.request(buf, "textDocument/definition", M.pos_params(buf, line, col))
+  if not result then return {} end
+  local locs = vim.islist(result) and result or { result }
+  local out = {}
+  for _, loc in ipairs(locs) do
+    if loc and loc.range then out[#out + 1] = loc.range.start.line end
+  end
+  return out
+end
+
 --- Get definition result as { uri, line } or nil.
 function M.def_location(buf, line, col)
   local result = M.request(buf, "textDocument/definition", M.pos_params(buf, line, col))

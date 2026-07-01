@@ -889,6 +889,21 @@ impl LanguageServer for Backend {
             .then(|| self.module_index.pack_index(doc.language))
             .flatten();
         let idx = pack.as_deref().unwrap_or(&self.module_index);
+        // Macro-aware goto-def OWNS a macro-named word (pack languages): the
+        // `#define` wins over a use's self-span, variants come back ranked, and
+        // a delegation wrapper offers its callee. Runs BEFORE `find_definition`
+        // so gap #1 (bare use → itself) never surfaces. `docs/adr/macro-handling.md`.
+        if doc.language != "perl" {
+            if let Some(macros) =
+                symbols::pack_macro_definition(&doc.analysis, &doc.text, symbols::position_to_point(pos), uri, idx)
+            {
+                let locs: Vec<Location> = macros
+                    .into_iter()
+                    .map(|m| Location { uri: m.uri, range: m.range })
+                    .collect();
+                return Ok(Some(GotoDefinitionResponse::Array(locs)));
+            }
+        }
         if let Some(resp) = symbols::find_definition(&doc.analysis, pos, uri, idx) {
             return Ok(Some(resp));
         }

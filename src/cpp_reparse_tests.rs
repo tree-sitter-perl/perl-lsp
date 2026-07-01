@@ -387,3 +387,35 @@ fn splicemap_binsearch_matches_linear_scan() {
         }
     }
 }
+
+/// The macro identity lane: `collect_macro_defs` captures each `#define` with
+/// its def span and — for a function-like DIRECT-DELEGATION wrapper — the
+/// callee it forwards to. Only a body that IS one whole call `G(args)` is a
+/// delegation; `F(x) + 1` and object-like macros are not.
+#[test]
+fn collect_macro_defs_recognizes_delegation() {
+    let mut p = cpp_parser();
+    let src = "\
+#define WRAP(x) realFunc(x)
+#define THREADED(x) Perl_new(aTHX_ x)
+#define NOTDELEG(x) realFunc(x) + 1
+#define OBJLIKE 100
+";
+    let defs = crate::cpp_reparse::collect_macro_defs(&mut p, src);
+    let by_name: std::collections::HashMap<&str, &crate::file_analysis::MacroDef> =
+        defs.iter().map(|d| (d.name.as_str(), d)).collect();
+
+    assert_eq!(by_name["WRAP"].delegate.as_deref(), Some("realFunc"));
+    assert_eq!(by_name["THREADED"].delegate.as_deref(), Some("Perl_new"));
+    // A call that is only PART of the body is not delegation.
+    assert_eq!(by_name["NOTDELEG"].delegate, None);
+    // Object-like macros never delegate (no params).
+    assert_eq!(by_name["OBJLIKE"].delegate, None);
+    assert!(by_name["OBJLIKE"].params.is_none());
+    assert!(by_name["WRAP"].params.is_some());
+
+    // The def span lands on the macro NAME (not the `#define` keyword).
+    let wrap = by_name["WRAP"];
+    assert_eq!(wrap.selection_span.start.row, 0);
+    assert_eq!(wrap.selection_span.start.column, 8); // after "#define "
+}
