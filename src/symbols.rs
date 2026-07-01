@@ -3353,8 +3353,15 @@ pub fn pack_use_after_move_diagnostics(analysis: &FileAnalysis) -> Vec<Diagnosti
 /// Every pack-language (non-Perl) diagnostic for an analysis, concatenated.
 /// One seam so a backend dispatch never enumerates the individual checks.
 pub fn pack_diagnostics(analysis: &FileAnalysis) -> Vec<Diagnostic> {
-    let mut diags = pack_member_op_diagnostics(analysis);
-    diags.extend(pack_use_after_move_diagnostics(analysis));
+    let diags = pack_member_op_diagnostics(analysis);
+    // use-after-move is NOT emitted yet: a real-project audit (json/spdlog/redis)
+    // found it ~100% false positives — dominated by the cpp function-scope gap
+    // (operators/ctors/out-of-line `Class::method` mint no `@scope`, so a move's
+    // moved-from region leaks across sibling functions), plus conditional moves
+    // (if/else arms aren't scopes) and reset-via-method/by-ref/swap not counting
+    // as rebinds. `pack_use_after_move_diagnostics` + its test stay; re-wire here
+    // once those FP classes close (scope-coverage fix first — it also fixes cpp
+    // narrowing leaking across those same function shapes).
     diags
 }
 
