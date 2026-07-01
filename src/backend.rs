@@ -136,6 +136,13 @@ pub struct Backend {
     /// method-override references/rename use the precise dispatch scope instead
     /// of the default whole-hierarchy family. Set once at init.
     dispatch_override: Arc<std::sync::atomic::AtomicBool>,
+    /// Workspace indexing is LAZY + per-language: a family's index runs on the
+    /// first `did_open` of a file in it, not eagerly at `initialized`. So a C++
+    /// session in a mixed tree (e.g. perl5) never pays to index the 4000+ `.pm`
+    /// files it can't use — that eager perl scan was the multi-minute first-open
+    /// stall. One-shot latches, swap-guarded.
+    perl_indexed: Arc<std::sync::atomic::AtomicBool>,
+    pack_indexed: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl Backend {
@@ -154,6 +161,67 @@ impl Backend {
         } else {
             crate::resolve::OverrideScope::Hierarchy
         }
+    }
+
+    /// Index the opened file's language FAMILY's workspace, once, in the
+    /// background. `perl` → the `.pm/.pl/.t` scan; any pack language (C++/
+    /// Python/…) → the pack-language scan. Latched per family so a C++-only
+    /// session never touches the perl tree, and vice versa.
+    fn ensure_workspace_indexed(&self, language: &str) {
+        use std::sync::atomic::Ordering;
+        let want_perl = language == "perl";
+        let latch = if want_perl { &self.perl_indexed } else { &self.pack_indexed };
+        if latch.swap(true, Ordering::Relaxed) {
+            return; // already indexed (or in flight)
+        }
+        let files = Arc::clone(&self.files);
+        let client = self.client.clone();
+        let module_index = Arc::clone(&self.module_index);
+        let root = self.module_index.workspace_root();
+        tokio::task::spawn_blocking(move || {
+            let Some(root_uri) = root else { return };
+            let Some(root_path) = root_uri.strip_prefix("file://") else { return };
+            let root_path = PathBuf::from(root_path);
+            let rt = tokio::runtime::Handle::current();
+            let token = NumberOrString::String(format!(
+                "perl-lsp/workspace-index-{}",
+                if want_perl { "perl" } else { "pack" }
+            ));
+            let _ = rt.block_on(client.send_request::<request::WorkDoneProgressCreate>(
+                WorkDoneProgressCreateParams { token: token.clone() },
+            ));
+            rt.block_on(client.send_notification::<notification::Progress>(ProgressParams {
+                token: token.clone(),
+                value: ProgressParamsValue::WorkDone(WorkDoneProgress::Begin(
+                    WorkDoneProgressBegin {
+                        title: "Indexing workspace".into(),
+                        cancellable: Some(false),
+                        message: Some("Scanning files...".into()),
+                        percentage: Some(0),
+                    },
+                )),
+            }));
+            let count = if want_perl {
+                crate::module_resolver::index_workspace_with_index(
+                    &root_path,
+                    &files,
+                    Some(&module_index),
+                )
+            } else {
+                crate::module_resolver::index_pack_languages(
+                    &root_path,
+                    Some(root_uri.as_str()),
+                    &module_index,
+                );
+                0
+            };
+            rt.block_on(client.send_notification::<notification::Progress>(ProgressParams {
+                token,
+                value: ProgressParamsValue::WorkDone(WorkDoneProgress::End(WorkDoneProgressEnd {
+                    message: Some(format!("Indexed {} files", count)),
+                })),
+            }));
+        });
     }
 }
 
@@ -219,6 +287,8 @@ impl Backend {
             unresolved_dispatch,
             change_gen: Arc::new(dashmap::DashMap::new()),
             dispatch_override: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            perl_indexed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            pack_indexed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
     }
 
@@ -606,65 +676,10 @@ impl LanguageServer for Backend {
         }];
         let _ = self.client.register_capability(registrations).await;
 
-        // Spawn workspace indexing in background with progress reporting
-        let files = Arc::clone(&self.files);
-        let client = self.client.clone();
-        let module_index = Arc::clone(&self.module_index);
-        let root = self.module_index.workspace_root();
-        tokio::task::spawn_blocking(move || {
-            if let Some(root_uri) = root {
-                if let Some(root_path) = root_uri.strip_prefix("file://") {
-                    let root_path = PathBuf::from(root_path);
-                    let rt = tokio::runtime::Handle::current();
-                    let token = NumberOrString::String("perl-lsp/workspace-index".to_string());
-
-                    // Start progress
-                    let _ = rt.block_on(client.send_request::<request::WorkDoneProgressCreate>(
-                        WorkDoneProgressCreateParams { token: token.clone() },
-                    ));
-                    rt.block_on(client.send_notification::<notification::Progress>(
-                        ProgressParams {
-                            token: token.clone(),
-                            value: ProgressParamsValue::WorkDone(WorkDoneProgress::Begin(
-                                WorkDoneProgressBegin {
-                                    title: "Indexing workspace".into(),
-                                    cancellable: Some(false),
-                                    message: Some("Scanning files...".into()),
-                                    percentage: Some(0),
-                                },
-                            )),
-                        },
-                    ));
-
-                    let count = crate::module_resolver::index_workspace_with_index(
-                        &root_path,
-                        &files,
-                        Some(&module_index),
-                    );
-                    // Pack languages → per-language sub-indexes (separate
-                    // caches, own modules-{lang}.db) attached to the hub, so
-                    // cross-file resolves in the editor too. Additive; Perl
-                    // indexing unchanged.
-                    crate::module_resolver::index_pack_languages(
-                        &root_path,
-                        Some(root_uri.as_str()),
-                        &module_index,
-                    );
-
-                    // End progress
-                    rt.block_on(client.send_notification::<notification::Progress>(
-                        ProgressParams {
-                            token,
-                            value: ProgressParamsValue::WorkDone(WorkDoneProgress::End(
-                                WorkDoneProgressEnd {
-                                    message: Some(format!("Indexed {} files", count)),
-                                },
-                            )),
-                        },
-                    ));
-                }
-            }
-        });
+        // Workspace indexing is LAZY + per-language — the first `did_open` of a
+        // family triggers `ensure_workspace_indexed`, so a C++ session in a
+        // mixed tree never eagerly scans the 4000+ `.pm` files it can't use
+        // (that eager perl scan was the multi-minute first-open stall).
     }
 
     async fn shutdown(&self) -> Result<()> {
@@ -676,6 +691,9 @@ impl LanguageServer for Backend {
         let text = params.text_document.text;
         if self.files.open(uri.clone(), text) {
             if let Some(doc) = self.files.get_open(&uri) {
+                // Lazily index this file's language family (once) — the reason a
+                // C++ open no longer waits on the perl tree.
+                self.ensure_workspace_indexed(&doc.language);
                 // Enqueue imports for background resolution (non-blocking).
                 for imp in &doc.analysis.imports {
                     self.module_index.request_resolve(&imp.module_name);
