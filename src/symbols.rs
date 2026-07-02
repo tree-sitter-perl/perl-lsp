@@ -484,29 +484,40 @@ pub fn find_definition(
         // it (a Perl `package Foo;` line, a cpp `struct op` / typedef name);
         // fall back to the top of the file.
         if matches!(r.kind, RefKind::PackageRef) {
-            if let Some(path) = module_index.module_path_cached(&r.target_name) {
-                if let Ok(module_uri) = Url::from_file_path(&path) {
-                    use crate::file_analysis::SymKind;
-                    let range = module_index
-                        .get_cached(&r.target_name)
-                        .and_then(|cached| {
-                            cached
-                                .analysis
-                                .symbols
-                                .iter()
-                                .find(|s| {
-                                    s.name == r.target_name
-                                        && matches!(
-                                            s.kind,
-                                            SymKind::Package | SymKind::Class | SymKind::Module
-                                        )
-                                })
-                                .map(|s| span_to_range(s.selection_span))
+            use crate::file_analysis::SymKind;
+            // Resolve the CachedModule ONCE and take path AND range from it —
+            // pairing `module_path_cached`'s file with a separately-scoped
+            // `get_cached`'s range splices two candidates when the name is
+            // defined in more than one file (wrong file at a row that doesn't
+            // exist in it).
+            if let Some(cached) = module_index.get_cached(&r.target_name) {
+                if let Ok(module_uri) = Url::from_file_path(&cached.path) {
+                    let range = cached
+                        .analysis
+                        .symbols
+                        .iter()
+                        .find(|s| {
+                            s.name == r.target_name
+                                && matches!(
+                                    s.kind,
+                                    SymKind::Package | SymKind::Class | SymKind::Module
+                                )
                         })
+                        .map(|s| span_to_range(s.selection_span))
                         .unwrap_or_default();
                     return Some(GotoDefinitionResponse::Scalar(Location {
                         uri: module_uri,
                         range,
+                    }));
+                }
+            }
+            // No analysis cached: the path map alone still beats no answer —
+            // land at the top of the file.
+            if let Some(path) = module_index.module_path_cached(&r.target_name) {
+                if let Ok(module_uri) = Url::from_file_path(&path) {
+                    return Some(GotoDefinitionResponse::Scalar(Location {
+                        uri: module_uri,
+                        range: Range::default(),
                     }));
                 }
             }

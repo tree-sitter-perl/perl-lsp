@@ -1499,14 +1499,26 @@ fn run_rename(
         .unwrap_or_else(|_| std::path::PathBuf::from(file));
     let (_s, _t, mut analysis) = parse_file(file);
     analysis.enrich_imported_types_with_keys(Some(idx));
-    let resolved = resolve::resolve_symbol_scoped(&analysis, point, Some(idx), override_scope_from_env())
+    // Pack languages resolve + collect through their sub-index, scoped to
+    // this file's include closure — the same routing references uses, so
+    // rename can't act on a different target than references just listed.
+    let reg = language_driver::LanguageRegistry::with_enabled();
+    let lang_id = reg.for_path(std::path::Path::new(file))
+        .map(|d| d.id()).filter(|id| *id != "perl");
+    let pack = lang_id.and_then(|lang| idx.pack_index(lang));
+    let base_idx: &dyn crate::file_analysis::CrossFileLookup =
+        pack.as_deref().map_or(idx as &dyn crate::file_analysis::CrossFileLookup, |i| i);
+    let closure = analysis.include_closure.clone();
+    let scoped = crate::file_analysis::ScopedLookup::new(
+        base_idx, &closure, Some(file_path.as_path()));
+    let resolved = resolve::resolve_symbol_scoped(&analysis, point, Some(&scoped), override_scope_from_env())
         .ok_or_else(|| format!("Nothing renameable at {}:{}", point.row, point.column))?;
     let mut all_edits: HashMap<String, Vec<serde_json::Value>> = HashMap::new();
     let (locations, replacement) = match resolved {
         resolve::ResolvedTarget::Target(t) if t.supports_cross_file_rename() => {
             let _staged = ScopedWorkspaceEntry::insert(ws, file_path, analysis);
             (
-                resolve::refs_to(ws, Some(idx), &t, resolve::RoleMask::EDITABLE),
+                resolve::rename_locations(ws, Some(base_idx), &t, pack.is_some())?,
                 new_name.to_string(),
             )
         }

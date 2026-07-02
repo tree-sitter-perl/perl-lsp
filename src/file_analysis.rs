@@ -246,6 +246,17 @@ pub trait CrossFileLookup {
     fn module_path_cached(&self, _module_name: &str) -> Option<std::path::PathBuf> {
         None
     }
+    /// The querying file's visibility scope when this lookup is bound to one
+    /// (`ScopedLookup`): its own canonical path + the visible set (self path ∪
+    /// include closure, canonical strings). `None` for unscoped indexes.
+    /// The backward reference gate mints a pack target's `def_paths` from this
+    /// so def→uses matching runs under the SAME visibility forward resolution
+    /// uses (`resolve::pack_def_paths`).
+    fn visibility_scope(
+        &self,
+    ) -> Option<(&std::path::Path, &std::collections::HashSet<String>)> {
+        None
+    }
     fn for_each_cached(&self, f: &mut dyn FnMut(&str, &std::sync::Arc<CachedModule>));
     /// Visit every distinct cached FILE exactly once. `for_each_cached` is
     /// keyed by NAME with one winner per key, so a pack file that loses every
@@ -296,6 +307,7 @@ pub trait CrossFileLookup {
 pub struct ScopedLookup<'a> {
     inner: &'a dyn CrossFileLookup,
     visible: std::collections::HashSet<String>,
+    self_path: Option<std::path::PathBuf>,
 }
 
 impl<'a> ScopedLookup<'a> {
@@ -309,11 +321,12 @@ impl<'a> ScopedLookup<'a> {
     ) -> Self {
         let mut visible: std::collections::HashSet<String> =
             include_closure.iter().cloned().collect();
-        if let Some(p) = self_path {
+        let self_path = self_path.map(|p| {
             let canon = std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
             visible.insert(canon.to_string_lossy().into_owned());
-        }
-        ScopedLookup { inner, visible }
+            canon
+        });
+        ScopedLookup { inner, visible, self_path }
     }
 }
 
@@ -350,7 +363,20 @@ impl<'a> CrossFileLookup for ScopedLookup<'a> {
         self.inner.module_declaring_method_in_package(name, class)
     }
     fn module_path_cached(&self, module_name: &str) -> Option<std::path::PathBuf> {
-        self.inner.module_path_cached(module_name)
+        // Scope-aware: the path must name the same candidate the scoped
+        // `get_cached` answers with, or a consumer that pairs this path with a
+        // scoped range splices two different files (wrong file at a
+        // nonexistent position). Fall back to the raw path map only when no
+        // analysis is cached at all.
+        self.inner
+            .get_cached_scoped(module_name, &self.visible)
+            .map(|c| c.path.clone())
+            .or_else(|| self.inner.module_path_cached(module_name))
+    }
+    fn visibility_scope(
+        &self,
+    ) -> Option<(&std::path::Path, &std::collections::HashSet<String>)> {
+        self.self_path.as_deref().map(|p| (p, &self.visible))
     }
     fn for_each_cached(&self, f: &mut dyn FnMut(&str, &std::sync::Arc<CachedModule>)) {
         self.inner.for_each_cached(f)

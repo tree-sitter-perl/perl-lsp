@@ -1,0 +1,85 @@
+{
+ "capability": "references",
+ "rows": [
+  {
+   "id": "cpp-visgate-static-tu-separation",
+   "difficulty": "moderate",
+   "semantic_area": "cpp-visibility-gate",
+   "lang": "cpp",
+   "root": "gold-corpus/cpp-fixture/visgate",
+   "file": "f1.c",
+   "line": 0,
+   "col": 11,
+   "expect": {
+    "all": [
+     "\"file\":\"f1.c\",\"line\":\"1\"",
+     "\"file\":\"f1.c\",\"line\":\"2\""
+    ],
+    "none": [
+     "f2.c"
+    ]
+   },
+   "status": "gold"
+  },
+  {
+   "id": "cpp-visgate-same-named-enum-disjoint-closures",
+   "difficulty": "moderate",
+   "semantic_area": "cpp-visibility-gate",
+   "lang": "cpp",
+   "root": "gold-corpus/cpp-fixture/visgate",
+   "file": "ha.h",
+   "line": 0,
+   "col": 11,
+   "expect": {
+    "all": [
+     "\"file\":\"ha.h\",\"line\":\"1\"",
+     "\"file\":\"ua.c\",\"line\":\"2\""
+    ],
+    "none": [
+     "hb.h",
+     "ub.c"
+    ]
+   },
+   "status": "gold"
+  },
+  {
+   "id": "cpp-visgate-member-use-side-separation",
+   "difficulty": "moderate",
+   "semantic_area": "cpp-visibility-gate",
+   "lang": "cpp",
+   "root": "gold-corpus/cpp-fixture/visgate",
+   "file": "use.c",
+   "line": 1,
+   "col": 32,
+   "expect": {
+    "all": [
+     "\"file\":\"s.h\",\"line\":\"1\"",
+     "\"file\":\"use.c\",\"line\":\"2\""
+    ],
+    "none": []
+   },
+   "status": "gold"
+  },
+  {
+   "id": "cpp-visgate-delegation-alias-no-cross-language-noise",
+   "difficulty": "hard",
+   "semantic_area": "cpp-visibility-gate",
+   "lang": "cpp",
+   "root": "gold-corpus/cpp-fixture/visgate",
+   "file": "util.c",
+   "line": 1,
+   "col": 5,
+   "expect": {
+    "all": [
+     "\"file\":\"embed.h\",\"line\":\"1\"",
+     "\"file\":\"util.c\",\"line\":\"2\"",
+     "\"file\":\"util.c\",\"line\":\"3\""
+    ],
+    "none": [
+     "Noise.pm"
+    ]
+   },
+   "status": "gold"
+  }
+ ]
+}

@@ -1,0 +1,63 @@
+{
+ "capability": "rename",
+ "rows": [
+  {
+   "id": "cpp-rename-member-completeness-def-side",
+   "difficulty": "moderate",
+   "semantic_area": "cpp-rename-pack",
+   "lang": "cpp",
+   "root": "gold-corpus/cpp-fixture/visgate",
+   "file": "s.h",
+   "line": 0,
+   "col": 16,
+   "newname": "vg_sort",
+   "expect": {
+    "all": [
+     "visgate/s.h",
+     "visgate/use.c",
+     "\"new_text\":\"vg_sort\""
+    ],
+    "none": []
+   },
+   "status": "gold"
+  },
+  {
+   "id": "cpp-rename-member-completeness-use-side",
+   "difficulty": "moderate",
+   "semantic_area": "cpp-rename-pack",
+   "lang": "cpp",
+   "root": "gold-corpus/cpp-fixture/visgate",
+   "file": "use.c",
+   "line": 1,
+   "col": 32,
+   "newname": "vg_sort",
+   "expect": {
+    "all": [
+     "visgate/s.h",
+     "visgate/use.c",
+     "\"new_text\":\"vg_sort\""
+    ],
+    "none": []
+   },
+   "status": "gold"
+  },
+  {
+   "id": "cpp-rename-delegated-target-refuses-partial",
+   "difficulty": "hard",
+   "semantic_area": "cpp-rename-pack",
+   "lang": "cpp",
+   "root": "gold-corpus/cpp-fixture/visgate",
+   "file": "util.c",
+   "line": 1,
+   "col": 5,
+   "newname": "Perl_die_x",
+   "expect": {
+    "all": [],
+    "none": [
+     "new_text"
+    ]
+   },
+   "status": "gold"
+  }
+ ]
+}
