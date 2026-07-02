@@ -3004,6 +3004,7 @@ fn test_group_rename_rederives_mapped_members_cross_file() {
         &pinned_spans,
         &members,
         "extent",
+        RoleMask::EDITABLE,
     );
     let user_edits: Vec<_> = edits
         .iter()
@@ -3044,6 +3045,7 @@ fn moo_explicit_string_accessor_renames_its_defining_string() {
     };
     let edits = group_rename_edits(
         &store, None, &FileKey::Path(path.clone()), &local_spans, &pinned_spans, &members, "dim",
+        RoleMask::EDITABLE,
     );
     let lines: Vec<&str> = src.lines().collect();
     let materialized: Vec<(String, String)> = edits
@@ -3216,6 +3218,7 @@ fn package_var_main_global_does_not_cross_scripts() {
     };
     let edits = group_rename_edits(
         &store, None, &FileKey::Path(a.clone()), &local_spans, &pinned_spans, &members, "settings",
+        RoleMask::EDITABLE,
     );
     assert!(
         edits.iter().all(|(l, _)| matches!(&l.key, FileKey::Path(p) if p == &a)),
@@ -3366,6 +3369,7 @@ fn dbic_column_rename_reaches_single_arg_call_keys() {
     };
     let edits = group_rename_edits(
         &store, None, &FileKey::Path(path.clone()), &local_spans, &pinned_spans, &members, "RENAMED",
+        RoleMask::EDITABLE,
     );
     let rows: std::collections::BTreeSet<usize> = edits.iter().map(|(l, _)| l.span.start.row).collect();
     // Column def (row 2) + the `update` and `find` arg keys (both row 3).
@@ -3397,6 +3401,7 @@ fn dbic_column_rename_multiarg_search_excludes_attrs_hash() {
     };
     let edits = group_rename_edits(
         &store, None, &FileKey::Path(path.clone()), &local_spans, &pinned_spans, &members, "X",
+        RoleMask::EDITABLE,
     );
     let lines: Vec<&str> = src.lines().collect();
     for (l, _) in &edits {
@@ -3432,6 +3437,7 @@ fn dbic_column_rename_reaches_fluent_resultset_chain() {
     };
     let edits = group_rename_edits(
         &store, None, &FileKey::Path(path.clone()), &local_spans, &pinned_spans, &members, "RENAMED",
+        RoleMask::EDITABLE,
     );
     let lines: Vec<&str> = src.lines().collect();
     for (l, _) in &edits {
@@ -3474,6 +3480,7 @@ sub go {\n\
     };
     let edits = group_rename_edits(
         &store, None, &FileKey::Path(path.clone()), &local_spans, &pinned_spans, &members, "X",
+        RoleMask::EDITABLE,
     );
     let rows: std::collections::BTreeSet<usize> = edits.iter().map(|(l, _)| l.span.start.row).collect();
     // def (2), find-condition arg (6), accessor (8) — NOT the `$row->{name}`
@@ -3517,6 +3524,7 @@ fn moo_attr_group_includes_cross_file_constructor_key() {
     };
     let edits = group_rename_edits(
         &store, Some(&idx), &FileKey::Path(lib.clone()), &local_spans, &pinned_spans, &members, "X",
+        RoleMask::EDITABLE,
     );
     // app.pl row 1 is the `Widget->new(name => …)` ctor key.
     assert!(
@@ -3571,6 +3579,7 @@ fn inherited_attr_rename_reaches_subclass_constructor_key() {
     };
     let edits = group_rename_edits(
         &store, Some(&idx), &FileKey::Path(animal.clone()), &local_spans, &pinned_spans, &members, "X",
+        RoleMask::EDITABLE,
     );
     assert!(
         edits.iter().any(|(l, _)| matches!(&l.key, FileKey::Path(p) if p == &app) && l.span.start.row == 1),
@@ -3605,6 +3614,7 @@ fn corinna_field_subclass_does_not_bleed_to_ancestor() {
     };
     let edits = group_rename_edits(
         &store, Some(&idx), &FileKey::Path(deriv.clone()), &local_spans, &pinned_spans, &members, "vol",
+        RoleMask::EDITABLE,
     );
     assert!(
         edits.iter().all(|(l, _)| matches!(&l.key, FileKey::Path(p) if p == &deriv)),
@@ -3640,6 +3650,7 @@ fn overridden_attr_renames_whole_family_symmetrically() {
         };
         let mut got: Vec<String> = group_rename_edits(
             &store, Some(&idx), &FileKey::Path(path.clone()), &local_spans, &pinned_spans, &members, "X",
+            RoleMask::EDITABLE,
         )
         .iter()
         .map(|(l, _)| match &l.key {
@@ -3682,6 +3693,7 @@ fn dbic_multi_key_hashref_links_all_columns() {
     };
     let edits = group_rename_edits(
         &store, None, &FileKey::Path(path.clone()), &local_spans, &pinned_spans, &members, "X",
+        RoleMask::EDITABLE,
     );
     assert!(
         edits.iter().any(|(l, _)| l.span.start.row == 3),
@@ -3740,6 +3752,7 @@ fn dbic_custom_sub_shadowing_verb_is_not_column_keyed() {
     };
     let edits = group_rename_edits(
         &store, None, &FileKey::Path(path.clone()), &local_spans, &pinned_spans, &members, "X",
+        RoleMask::EDITABLE,
     );
     assert!(
         edits.iter().all(|(l, _)| l.span.start.row != 4),
@@ -3767,6 +3780,7 @@ fn dbic_scalar_cond_does_not_column_key_attrs_hash() {
     };
     let edits = group_rename_edits(
         &store, None, &FileKey::Path(path.clone()), &local_spans, &pinned_spans, &members, "X",
+        RoleMask::EDITABLE,
     );
     assert!(
         edits.iter().all(|(l, _)| l.span.start.row != 3),
@@ -3800,6 +3814,7 @@ fn dbic_column_rename_reaches_cross_file_consumer_arg_key() {
     };
     let edits = group_rename_edits(
         &store, Some(&idx), &FileKey::Path(lib.clone()), &local_spans, &pinned_spans, &members, "X",
+        RoleMask::EDITABLE,
     );
     assert!(
         edits.iter().any(|(l, _)| matches!(&l.key, FileKey::Path(p) if p == &app)),
@@ -3983,6 +3998,7 @@ fn test_internal_slot_pokes_join_group_cross_file() {
         &pinned_spans,
         &members,
         "extent",
+        RoleMask::EDITABLE,
     );
     assert!(
         edits.iter().any(|(l, t)| {
@@ -4026,6 +4042,7 @@ fn rename_from_bless_key_reaches_self_slot_accesses() {
     let edits = group_rename_edits(
         &store, None, &FileKey::Path(path.clone()),
         &local_spans, &pinned_spans, &members, "log",
+        RoleMask::EDITABLE,
     );
     // bless key (1) + two $self->{history} accesses (rows 2, 3) = 3 spellings.
     assert_eq!(
@@ -4087,4 +4104,112 @@ fn test_implementations_of_role_requires_fans_out_to_composers() {
     // Non-Method targets have no descendant-implementation semantics.
     let pkg_target = TargetRef::new("My::Role".to_string(), TargetKind::Package);
     assert!(implementations_of(&origin, Some(&idx), &pkg_target).is_empty());
+}
+
+// ---- CandidateSet: one construction, every feature a projection ----
+// docs/adr/resolution-candidate-set.md
+
+/// Two workspace files, cursor on the producer's `sub foo` decl. The set's
+/// projections must agree with each other: rename is the references image
+/// (minus policy-excluded sites), never an independent walk.
+fn candidate_fixture() -> (FileStore, std::sync::Arc<FileAnalysis>, PathBuf, PathBuf) {
+    let store = FileStore::new();
+    let path_a = PathBuf::from("/tmp/cs_test_a.pm");
+    let path_b = PathBuf::from("/tmp/cs_test_b.pm");
+    let fa_a = std::sync::Arc::new(parse(
+        "package A;\nour @EXPORT_OK = qw/foo/;\nsub foo { 42 }\n1;\n",
+    ));
+    store.insert_workspace_arc(path_a.clone(), fa_a.clone());
+    let fa_b = parse("package B;\nuse A qw/foo/;\nsub bar { foo(); }\n1;\n");
+    store.insert_workspace(path_b.clone(), fa_b);
+    (store, fa_a, path_a, path_b)
+}
+
+#[test]
+fn candidate_set_rename_is_subset_of_references() {
+    let (store, fa_a, path_a, path_b) = candidate_fixture();
+    // Cursor on `foo` in `sub foo` (row 2, col 4).
+    let cs = resolve(
+        &store,
+        &fa_a,
+        FileKey::Path(path_a.clone()),
+        tree_sitter::Point { row: 2, column: 4 },
+        None,
+        OverrideScope::default(),
+    );
+    assert!(cs.renameable(), "a package sub is a cross-file renameable");
+
+    let refs = cs.references();
+    assert!(
+        refs.iter().any(|r| matches!(&r.key, FileKey::Path(p) if p == &path_a)
+            && r.access == AccessKind::Declaration),
+        "references include the decl in A: {refs:?}",
+    );
+    assert!(
+        refs.iter().any(|r| matches!(&r.key, FileKey::Path(p) if p == &path_b)),
+        "references include the call in B: {refs:?}",
+    );
+
+    // Rename is the same set + policy — every edit span must be a reference
+    // span (partial-edit-beyond-references is unrepresentable).
+    let edits = cs.rename_edits("food");
+    assert!(!edits.is_empty());
+    for (loc, text) in &edits {
+        assert_eq!(text, "food");
+        assert!(
+            refs.iter().any(|r| file_key_eq(&r.key, &loc.key) && r.span == loc.span),
+            "rename edit at {loc:?} is not in the references image",
+        );
+    }
+    // And the B call site is edited (rename didn't silently shrink to one file).
+    assert!(
+        edits.iter().any(|(l, _)| matches!(&l.key, FileKey::Path(p) if p == &path_b)),
+        "rename reaches the consumer call site: {edits:?}",
+    );
+}
+
+/// THE symmetry invariant: a visibility change made once, at construction,
+/// moves every projection together. No projection has its own copy of the
+/// axis to forget.
+#[test]
+fn candidate_set_visibility_axis_flows_to_every_projection() {
+    let (store, fa_a, path_a, path_b) = candidate_fixture();
+    let point = tree_sitter::Point { row: 2, column: 4 };
+
+    let wide = resolve(&store, &fa_a, FileKey::Path(path_a.clone()), point, None, OverrideScope::default());
+    let wide_refs = wide.references();
+    let wide_edits = wide.rename_edits("food");
+    assert!(wide_refs.iter().any(|r| matches!(&r.key, FileKey::Path(p) if p == &path_b)));
+    assert!(wide_edits.iter().any(|(l, _)| matches!(&l.key, FileKey::Path(p) if p == &path_b)));
+
+    // One knob turned at construction: exclude the WORKSPACE tier.
+    let narrow = resolve(&store, &fa_a, FileKey::Path(path_a), point, None, OverrideScope::default())
+        .with_visibility(RoleMask::OPEN);
+    assert!(
+        narrow.references().is_empty(),
+        "references projection inherits the narrowed visibility",
+    );
+    assert!(
+        narrow.rename_edits("food").is_empty(),
+        "rename projection inherits the SAME narrowed visibility — not its own copy",
+    );
+}
+
+/// Lexical cursors: the set still answers, from the origin file's in-file
+/// machinery — handlers no longer branch on resolution shape themselves.
+#[test]
+fn candidate_set_local_projections() {
+    let store = FileStore::new();
+    let src = "my $count = 0;\n$count++;\nprint $count;\n";
+    let fa = parse(src);
+    let key = FileKey::Path(PathBuf::from("/tmp/cs_local.pl"));
+    // Cursor on `$count` decl (row 0, col 3).
+    let cs = resolve(&store, &fa, key, tree_sitter::Point { row: 0, column: 3 }, None, OverrideScope::default());
+    assert!(matches!(cs.resolution(), Some(ResolvedTarget::Local)));
+    assert!(cs.renameable());
+    let refs = cs.references();
+    assert_eq!(refs.len(), 3, "decl + two uses: {refs:?}");
+    let edits = cs.rename_edits("$total");
+    assert_eq!(edits.len(), 3, "rename covers the same in-file set: {edits:?}");
+    assert!(cs.implementations().is_empty());
 }

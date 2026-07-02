@@ -442,6 +442,205 @@ pub fn resolve_symbol_scoped(
     })
 }
 
+/// The canonical answer to "what does this name mean, from here" — and the
+/// one object every navigation feature projects from. Identity (what the
+/// cursor resolves to), visibility (which file roles a walk may see), edges
+/// (override families / groups / descendants), and per-site policy
+/// (`rewritable`, per-member rename texts) are all owned here; goto-def,
+/// references, rename, and implementations are projections of the same set,
+/// so an axis added to construction is inherited by every feature at once.
+/// See `docs/adr/resolution-candidate-set.md`.
+///
+/// Borrow discipline: the set only ever READS the stores (projections walk
+/// via `FileStore::for_each_open`), so an LSP handler may hold its open-doc
+/// read guard for the set's whole lifetime.
+pub struct CandidateSet<'a> {
+    files: &'a FileStore,
+    origin: &'a FileAnalysis,
+    origin_key: FileKey,
+    point: tree_sitter::Point,
+    module_index: Option<&'a dyn CrossFileLookup>,
+    /// Identity, minted once via `resolve_symbol_scoped`. `None` = nothing
+    /// cross-file-resolvable at the cursor; local projections (in-file
+    /// references, goto-def) still answer from `origin`.
+    resolution: Option<ResolvedTarget>,
+    /// Visibility for a `Target` resolution, memoized — computed by
+    /// `references_mask_for` on first use (group members keep their
+    /// per-member masks inside the group projections).
+    visibility: std::sync::OnceLock<RoleMask>,
+    /// Construction-time visibility override: when set, EVERY projection
+    /// (references, rename, group walks) scopes to it — the seam future
+    /// axes (closure visibility, language boundaries) plug into.
+    visibility_override: Option<RoleMask>,
+}
+
+/// Cursor → CandidateSet: the single resolution entry point. Handlers and
+/// CLI mirrors construct the set once and project; none of them re-derive
+/// identity, visibility, or per-site policy on their own.
+pub fn resolve<'a>(
+    files: &'a FileStore,
+    origin: &'a FileAnalysis,
+    origin_key: FileKey,
+    point: tree_sitter::Point,
+    module_index: Option<&'a dyn CrossFileLookup>,
+    scope: OverrideScope,
+) -> CandidateSet<'a> {
+    let resolution = resolve_symbol_scoped(origin, point, module_index, scope);
+    CandidateSet {
+        files,
+        origin,
+        origin_key,
+        point,
+        module_index,
+        resolution,
+        visibility: std::sync::OnceLock::new(),
+        visibility_override: None,
+    }
+}
+
+impl<'a> CandidateSet<'a> {
+    /// Constrain every projection to `mask`. The one knob demonstrating the
+    /// symmetry invariant: narrowing visibility here narrows references AND
+    /// rename AND group walks together — no per-feature re-application.
+    pub fn with_visibility(mut self, mask: RoleMask) -> Self {
+        self.visibility_override = Some(mask);
+        self.visibility = std::sync::OnceLock::new();
+        self
+    }
+
+    /// What the cursor resolved to. Exposed for callers that need
+    /// target-level policy questions (e.g. diagnostics asking a target's
+    /// kind); projections below cover the feature verbs.
+    pub fn resolution(&self) -> Option<&ResolvedTarget> {
+        self.resolution.as_ref()
+    }
+
+    /// The set-level visibility for a `Target` resolution: the override when
+    /// present, else `references_mask_for`'s editable-vs-visible verdict.
+    fn target_visibility(&self, target: &TargetRef) -> RoleMask {
+        *self.visibility.get_or_init(|| {
+            self.visibility_override
+                .unwrap_or_else(|| references_mask_for(self.files, self.module_index, target))
+        })
+    }
+
+    /// The backward image of the set: every reference (declarations + use
+    /// sites) across the visible universe. Lexical/unowned cursors answer
+    /// from the origin file's in-file union.
+    pub fn references(&self) -> Vec<RefLocation> {
+        match &self.resolution {
+            Some(ResolvedTarget::Target(t)) => {
+                let mask = self.target_visibility(t);
+                refs_to(self.files, self.module_index, t, mask)
+            }
+            Some(ResolvedTarget::Group { local_spans, pinned_spans, members }) => group_refs(
+                self.files,
+                self.module_index,
+                &self.origin_key,
+                local_spans,
+                pinned_spans,
+                members,
+                self.visibility_override,
+            ),
+            Some(ResolvedTarget::Local) | None => self
+                .origin
+                .find_references(self.point, self.module_index)
+                .into_iter()
+                .map(|span| RefLocation {
+                    key: self.origin_key.clone(),
+                    span,
+                    access: AccessKind::Read,
+                    rewritable: true,
+                })
+                .collect(),
+        }
+    }
+
+    /// Whether rename at this cursor would produce edits — the prepareRename
+    /// gate. Mirrors `rename_edits`' arms so the box is offered exactly where
+    /// edits exist.
+    pub fn renameable(&self) -> bool {
+        match &self.resolution {
+            Some(ResolvedTarget::Target(t)) if t.supports_cross_file_rename() => true,
+            Some(ResolvedTarget::Group { .. }) => true,
+            Some(_) => self
+                .origin
+                .rename_at(self.point, "x")
+                .is_some_and(|e| !e.is_empty()),
+            None => false,
+        }
+    }
+
+    /// Rename = the references image + rewritability policy, with each span
+    /// paired to ITS replacement text (bare vs re-derived affixed accessor
+    /// names for groups). Policy lives on the set/locations, not in handlers:
+    /// non-rewritable sites (const-folded names) are references but never
+    /// edits, and the walk stops at editable space. Empty = nothing
+    /// renameable here.
+    pub fn rename_edits(&self, new_name: &str) -> Vec<(RefLocation, String)> {
+        let editable = self
+            .visibility_override
+            .map(|m| m & RoleMask::EDITABLE)
+            .unwrap_or(RoleMask::EDITABLE);
+        match &self.resolution {
+            Some(ResolvedTarget::Target(t)) if t.supports_cross_file_rename() => {
+                refs_to(self.files, self.module_index, t, editable)
+                    .into_iter()
+                    .filter(|loc| loc.rewritable)
+                    .map(|loc| (loc, new_name.to_string()))
+                    .collect()
+            }
+            Some(ResolvedTarget::Group { local_spans, pinned_spans, members }) => {
+                // Group spellings are bare name tokens; a sigil on the typed
+                // name applies only to variable-shaped members' own rules.
+                let bare_new = new_name.trim_start_matches(['$', '@', '%']);
+                group_rename_edits(
+                    self.files,
+                    self.module_index,
+                    &self.origin_key,
+                    local_spans,
+                    pinned_spans,
+                    members,
+                    bare_new,
+                    editable,
+                )
+            }
+            // Lexical variables, unowned hash keys, non-cross-file targets:
+            // the origin file's rename machinery owns the edit set.
+            Some(_) => self
+                .origin
+                .rename_at(self.point, new_name)
+                .unwrap_or_default()
+                .into_iter()
+                .map(|(span, text)| {
+                    (
+                        RefLocation {
+                            key: self.origin_key.clone(),
+                            span,
+                            access: AccessKind::Read,
+                            rewritable: true,
+                        },
+                        text,
+                    )
+                })
+                .collect(),
+            None => Vec::new(),
+        }
+    }
+
+    /// The family/descendants walk over the set: every override/composer
+    /// definition of a Method target. Non-callable resolutions have no
+    /// implementation semantics.
+    pub fn implementations(&self) -> Vec<RefLocation> {
+        match &self.resolution {
+            Some(ResolvedTarget::Target(t)) => {
+                implementations_of(self.origin, self.module_index, t)
+            }
+            _ => Vec::new(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TargetKind {
     /// An `our` (package-global) variable. `package` is the declaring
@@ -674,6 +873,7 @@ pub fn is_valid_rename_name(new_name: &str) -> bool {
 /// member's replacement text (bare for plain spellings, re-derived for
 /// affixed accessors). Bare-member spans win collisions — a synthesized
 /// accessor's decl token IS the group decl the bare edit covers.
+#[allow(clippy::too_many_arguments)]
 pub fn group_rename_edits(
     files: &FileStore,
     module_index: Option<&dyn CrossFileLookup>,
@@ -682,6 +882,7 @@ pub fn group_rename_edits(
     pinned_spans: &[(PathBuf, Span)],
     members: &[GroupMember],
     bare_new: &str,
+    mask: RoleMask,
 ) -> Vec<(RefLocation, String)> {
     let mut out: Vec<(RefLocation, String)> = local_spans
         .iter()
@@ -716,7 +917,7 @@ pub fn group_rename_edits(
     );
     for m in ordered {
         let Some(text) = m.rename.text_for(bare_new) else { continue };
-        for loc in refs_to(files, module_index, &m.target, RoleMask::EDITABLE) {
+        for loc in refs_to(files, module_index, &m.target, mask) {
             out.push((loc, text.clone()));
         }
     }
@@ -740,7 +941,7 @@ pub fn refs_to(
     // Open files (canonical — workspace entries for open paths are skipped).
     let mut covered_paths: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
     if mask.contains(RoleMask::OPEN) {
-        files.for_each_open_mut(|url, doc| {
+        files.for_each_open(|url, doc| {
             let url = url.clone();
             if let Ok(p) = url.to_file_path() {
                 covered_paths.insert(p);
@@ -750,7 +951,7 @@ pub fn refs_to(
     } else {
         // Even if open isn't in the mask, track the paths so a WORKSPACE walk
         // doesn't duplicate them (an open file's pre-close state isn't meaningful).
-        files.for_each_open_mut(|url, _doc| {
+        files.for_each_open(|url, _doc| {
             if let Ok(p) = url.to_file_path() {
                 covered_paths.insert(p);
             }
@@ -1014,7 +1215,7 @@ pub fn references_mask_for(
     target: &TargetRef,
 ) -> RoleMask {
     let mut found_in_editable = false;
-    files.for_each_open_mut(|_url, doc| {
+    files.for_each_open(|_url, doc| {
         if doc.analysis.symbols.iter().any(|s| symbol_defines_target(s, target)) {
             found_in_editable = true;
         }

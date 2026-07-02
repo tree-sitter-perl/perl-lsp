@@ -666,6 +666,7 @@ impl LanguageServer for Backend {
                     &pinned_spans,
                     &members,
                     bare_new,
+                    crate::resolve::RoleMask::EDITABLE,
                 );
                 Ok(edit_pairs_to_workspace_edit(edits))
             }

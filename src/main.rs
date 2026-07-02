@@ -1100,6 +1100,7 @@ fn run_rename(
             let bare_new = new_name.trim_start_matches(['$', '@', '%']);
             let edits = resolve::group_rename_edits(
                 ws, Some(idx), &origin, &local_spans, &pinned_spans, &members, bare_new,
+                resolve::RoleMask::EDITABLE,
             );
             for (loc, text) in edits {
                 let path = match &loc.key {
