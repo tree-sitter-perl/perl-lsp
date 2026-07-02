@@ -280,7 +280,25 @@ projection design commitments (forks below) bind.
   immediately; PR #100 is subordinate — at maximum we close the open PR and
   re-extract the Perl generator surface from the unified engine. The
   unification leads; the PR follows.
-- **4 PENDING — the user's call**, tradeoffs on the table: (A) one family
+- **4 LOCKED: per-spec identity + `Specializes` edge (B w/ A's presentation).**
+  Settled by the inheritance/composition analysis: the decisive test is
+  MEMBER FALLTHROUGH — inheritance augments-and-overrides; specialization
+  REPLACES WHOLESALE (a spec inherits nothing; fmt's primary is body-less),
+  so `package_parents` would corrupt member resolution. Composition shares
+  members; specs share only the name + parameter contract. What specialization
+  IS: **dispatch, not hierarchy** — the third instance of our selection seam
+  (UnionOnArgs selects by arity; ReceiverGated by receiver; specialization by
+  type-arg pattern). Model: per-spec Class symbols; a new
+  `EdgeKind::Specializes` in GraphView (member resolution does NOT traverse
+  it; goto-implementation/family-view DOES); a spec may ALSO carry a real
+  parent edge (the fmt idiom `formatter<X> : formatter<string_view>` —
+  inheritance is opt-in per spec, and per-spec identity carries both edges
+  for free); selection presented via the ranked never-prune multi-location
+  discipline, specificity = exact > partial-pattern > primary (NOT C++'s
+  full partial-ordering — additive depth). The two template jobs map to the
+  two mechanisms: bodied generic code = PROJECTION (lazy, fork 1); body-less
+  typeclass/extension-point = SELECTION (this fork).
+  Original tradeoffs kept below: (A) one family
   (the macro config-variant model) vs (B) per-spec symbols + `specializes`
   edges. Recommendation: **B's identity with A's presentation** — per-spec
   symbols (specializations are all live simultaneously with DISTINCT member
