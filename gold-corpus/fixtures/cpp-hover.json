@@ -237,6 +237,26 @@
         ]
       },
       "status": "gold"
+    },
+    {
+      "id": "cpp-hover-member-after-same-line-macro-splice",
+      "difficulty": "moderate",
+      "semantic_area": "cpp-parse-repair",
+      "lang": "cpp",
+      "root": "gold-corpus/cpp-fixture",
+      "status": "gold",
+      "file": "splice_member.c",
+      "line": 5,
+      "col": 9,
+      "expect": {
+        "all": [
+          "size: Numeric",
+          "*field*"
+        ],
+        "none": [
+          "struct Widget {"
+        ]
+      }
     }
   ]
 }
