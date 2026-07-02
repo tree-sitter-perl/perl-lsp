@@ -469,16 +469,6 @@ fn dispatch_handler_locations(
     })
 }
 
-pub fn find_references(analysis: &FileAnalysis, pos: Position, uri: &Url, module_index: Option<&dyn CrossFileLookup>) -> Vec<Location> {
-    analysis.find_references(position_to_point(pos), module_index)
-        .into_iter()
-        .map(|span| Location {
-            uri: uri.clone(),
-            range: span_to_range(span),
-        })
-        .collect()
-}
-
 pub fn rename(
     analysis: &FileAnalysis,
     pos: Position,

@@ -542,45 +542,17 @@ impl LanguageServer for Backend {
             None => return Ok(None),
         };
 
-        use crate::resolve::{group_refs, refs_to, resolve_symbol_scoped, ResolvedTarget};
-
-        let point = symbols::position_to_point(pos);
-        let target = match resolve_symbol_scoped(&doc.analysis, point, Some(&*self.module_index), self.override_scope()) {
-            Some(ResolvedTarget::Target(t)) => t,
-            Some(ResolvedTarget::Group { local_spans, pinned_spans, members }) => {
-                let origin = FileKey::Url(uri.clone());
-                drop(doc);
-                let results = group_refs(
-                    &self.files,
-                    Some(&*self.module_index),
-                    &origin,
-                    &local_spans,
-                    &pinned_spans,
-                    &members,
-                    None,
-                );
-                return Ok(refs_to_locations(results));
-            }
-            // Lexical / unowned — single-file references.
-            Some(ResolvedTarget::Local) | None => {
-                let refs = symbols::find_references(
-                    &doc.analysis, pos, uri, Some(&*self.module_index),
-                );
-                return Ok(if refs.is_empty() { None } else { Some(refs) });
-            }
-        };
-
-        // Cross-file walk. Scope to editable space when the target is a
-        // project symbol so "find references" never scans CPAN; widen to
-        // VISIBLE only for dependency-defined targets. See `references_mask_for`.
-        drop(doc); // release the DashMap read lock before the resolve walk
-        let mask = crate::resolve::references_mask_for(
+        // One construction, one projection — target/group/lexical branching,
+        // visibility, and the cross-file walk all live inside the set.
+        let cs = crate::resolve::resolve(
             &self.files,
+            &doc.analysis,
+            FileKey::Url(uri.clone()),
+            symbols::position_to_point(pos),
             Some(&*self.module_index),
-            &target,
+            self.override_scope(),
         );
-        let results = refs_to(&self.files, Some(&*self.module_index), &target, mask);
-        Ok(refs_to_locations(results))
+        Ok(refs_to_locations(cs.references()))
     }
 
     async fn prepare_rename(

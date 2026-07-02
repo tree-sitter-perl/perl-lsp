@@ -777,42 +777,26 @@ fn run_one(
             analysis.enrich_imported_types_with_keys(Some(idx));
             let file_path = std::path::Path::new(file).canonicalize()
                 .unwrap_or_else(|_| std::path::PathBuf::from(file));
-            let resolved = resolve::resolve_symbol_scoped(&analysis, point, Some(idx), override_scope_from_env());
+            // Stage the enriched origin, then construct the set from the staged
+            // snapshot — the same one-construction/one-projection shape as the
+            // LSP handler, so CLI and editor answers can't diverge.
+            let _staged = ScopedWorkspaceEntry::insert(ws, file_path.clone(), analysis);
+            let origin = ws.workspace_raw().get(&file_path).map(|r| r.value().clone())
+                .expect("origin staged above");
+            let cs = resolve::resolve(
+                ws, &origin, file_store::FileKey::Path(file_path), point,
+                Some(idx), override_scope_from_env(),
+            );
             let mut sources = SourceCache::new();
             let mut results = Vec::new();
-            match resolved {
-                Some(resolve::ResolvedTarget::Local) | None => {
-                    let path_str = file_path.display().to_string();
-                    for span in &analysis.find_references(point, Some(idx)) {
-                        let (line, col) = sources.display(&path_str, span.start.row, span.start.column);
-                        results.push(serde_json::json!({"file": path_str, "line": line, "col": col}));
-                    }
-                }
-                Some(resolved) => {
-                    let origin = file_store::FileKey::Path(file_path.clone());
-                    let _staged = ScopedWorkspaceEntry::insert(ws, file_path.clone(), analysis);
-                    let locs = match resolved {
-                        resolve::ResolvedTarget::Target(t) => {
-                            let mask = resolve::references_mask_for(ws, Some(idx), &t);
-                            resolve::refs_to(ws, Some(idx), &t, mask)
-                        }
-                        resolve::ResolvedTarget::Group { local_spans, pinned_spans, members } => {
-                            resolve::group_refs(
-                                ws, Some(idx), &origin, &local_spans, &pinned_spans, &members, None,
-                            )
-                        }
-                        resolve::ResolvedTarget::Local => unreachable!("handled above"),
-                    };
-                    for loc in locs {
-                        let path = match &loc.key {
-                            file_store::FileKey::Path(p) => p.display().to_string(),
-                            file_store::FileKey::Url(u) => u.to_file_path()
-                                .map(|p| p.display().to_string()).unwrap_or_else(|_| u.to_string()),
-                        };
-                        let (line, col) = sources.display(&path, loc.span.start.row, loc.span.start.column);
-                        results.push(serde_json::json!({"file": path, "line": line, "col": col}));
-                    }
-                }
+            for loc in cs.references() {
+                let path = match &loc.key {
+                    file_store::FileKey::Path(p) => p.display().to_string(),
+                    file_store::FileKey::Url(u) => u.to_file_path()
+                        .map(|p| p.display().to_string()).unwrap_or_else(|_| u.to_string()),
+                };
+                let (line, col) = sources.display(&path, loc.span.start.row, loc.span.start.column);
+                results.push(serde_json::json!({"file": path, "line": line, "col": col}));
             }
             Ok(serde_json::to_string_pretty(&results).unwrap())
         }
