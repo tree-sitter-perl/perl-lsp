@@ -128,6 +128,15 @@ impl SpliceMap {
         }
     }
 
+    /// Every expansion's ORIGINAL byte extent, in order. Each edit IS a
+    /// macro use the transform erased from the parsed text — the driver
+    /// re-mints a reference at each site so an expanded use still answers
+    /// find-references (rule #7: every meaningful token gets a ref; rule #9:
+    /// derived facts trace to source).
+    pub fn expansion_sites(&self) -> impl Iterator<Item = (usize, usize)> + '_ {
+        self.edits.iter().map(|&(os, oe, _)| (os, oe))
+    }
+
     /// If `transformed` falls INSIDE a replacement (a macro expansion),
     /// return the replacement's ORIGINAL extent `(orig_start, orig_end)` —
     /// the macro-call site. A symbol/ref that came out of an expansion
@@ -274,7 +283,14 @@ pub fn collect_macro_defs(
     let src = source.as_bytes();
     let mut out = Vec::new();
     walk_macro_defs(&tree, src, |name, m, (start, end)| {
-        let delegate = m.params.is_some().then(|| delegation_target(&m.body)).flatten();
+        // Function-like: a whole-body single call `G(args)`. Object-like: a
+        // bare-identifier ALIAS (`#define op_prune_chain_head
+        // Perl_op_prune_chain_head`, perl5's non-threaded embed.h shape) —
+        // the same forwarding edge, spelled without params.
+        let delegate = match m.params {
+            Some(_) => delegation_target(&m.body),
+            None => bare_identifier(&m.body),
+        };
         out.push(MacroDef {
             name,
             params: m.params,
@@ -292,6 +308,19 @@ pub fn collect_macro_defs(
 /// Returns the callee identifier `G` when the body IS exactly one such call
 /// (a leading identifier immediately followed by a balanced `(...)` that spans
 /// to the end), else `None`. General over the shape — no per-name table.
+/// A body that is nothing but one identifier — an object-like alias's
+/// forwarding target. Digit-leading (a number) is not an identifier.
+fn bare_identifier(body: &str) -> Option<String> {
+    let body = body.trim();
+    if body.is_empty()
+        || body.as_bytes()[0].is_ascii_digit()
+        || !body.bytes().all(|c| c == b'_' || c.is_ascii_alphanumeric())
+    {
+        return None;
+    }
+    Some(body.to_string())
+}
+
 fn delegation_target(body: &str) -> Option<String> {
     let body = body.trim();
     let paren = body.find('(')?;

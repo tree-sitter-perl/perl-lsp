@@ -35,7 +35,7 @@
         ],
         "none": []
       },
-      "status": "xfail"
+      "status": "gold"
     },
     {
       "id": "cpp-hitlist-struct-refs",
@@ -53,7 +53,7 @@
         ],
         "none": []
       },
-      "status": "xfail"
+      "status": "gold"
     },
     {
       "id": "cpp-member-block-field-refs-splat",
@@ -88,6 +88,151 @@
           "\"file\":\"domain_enum.c\",\"line\":\"7\"",
           "\"file\":\"domain_enum.c\",\"line\":\"10\"",
           "\"file\":\"domain_enum.c\",\"line\":\"11\""
+        ],
+        "none": []
+      },
+      "status": "gold"
+    },
+    {
+      "id": "cpp-sym-enum-variant-def-to-uses",
+      "difficulty": "hard",
+      "semantic_area": "cpp-symmetry",
+      "lang": "cpp",
+      "root": "gold-corpus/cpp-fixture",
+      "file": "xenum/opcodes.h",
+      "line": 2,
+      "col": 4,
+      "expect": {
+        "all": [
+          "\"file\":\"use.c\",\"line\":\"3\"",
+          "\"file\":\"opcodes.h\",\"line\":\"3\""
+        ],
+        "none": []
+      },
+      "status": "gold"
+    },
+    {
+      "id": "cpp-sym-enum-variant-use-site-matches-def-site",
+      "difficulty": "hard",
+      "semantic_area": "cpp-symmetry",
+      "lang": "cpp",
+      "root": "gold-corpus/cpp-fixture",
+      "file": "xenum/use.c",
+      "line": 2,
+      "col": 18,
+      "expect": {
+        "all": [
+          "\"file\":\"use.c\",\"line\":\"3\"",
+          "\"file\":\"opcodes.h\",\"line\":\"3\""
+        ],
+        "none": []
+      },
+      "status": "gold"
+    },
+    {
+      "id": "cpp-sym-fnmacro-def-to-uses",
+      "difficulty": "moderate",
+      "semantic_area": "cpp-symmetry",
+      "lang": "cpp",
+      "root": "gold-corpus/cpp-fixture",
+      "file": "macrogoto/deleg.c",
+      "line": 1,
+      "col": 8,
+      "expect": {
+        "all": [
+          "\"file\":\"deleg.c\",\"line\":\"2\"",
+          "\"col\":\"17\",\"file\":\"deleg.c\",\"line\":\"3\""
+        ],
+        "none": []
+      },
+      "status": "gold"
+    },
+    {
+      "id": "cpp-sym-member-def-to-splat",
+      "difficulty": "hard",
+      "semantic_area": "cpp-symmetry",
+      "lang": "cpp",
+      "root": "gold-corpus/cpp-fixture",
+      "file": "member_block.cpp",
+      "line": 2,
+      "col": 31,
+      "expect": {
+        "all": [
+          "\"file\":\"member_block.cpp\",\"line\":\"3\"",
+          "\"col\":\"21\",\"file\":\"member_block.cpp\",\"line\":\"9\"",
+          "\"col\":\"21\",\"file\":\"member_block.cpp\",\"line\":\"10\""
+        ],
+        "none": []
+      },
+      "status": "gold"
+    },
+    {
+      "id": "cpp-sym-typedef-def-to-uses",
+      "difficulty": "moderate",
+      "semantic_area": "cpp-symmetry",
+      "lang": "cpp",
+      "root": "gold-corpus/cpp-fixture",
+      "file": "sympair/typedefpair.c",
+      "line": 0,
+      "col": 23,
+      "expect": {
+        "all": [
+          "\"file\":\"typedefpair.c\",\"line\":\"2\"",
+          "\"file\":\"typedefpair.c\",\"line\":\"3\""
+        ],
+        "none": []
+      },
+      "status": "gold"
+    },
+    {
+      "id": "cpp-sym-global-def-to-uses",
+      "difficulty": "moderate",
+      "semantic_area": "cpp-symmetry",
+      "lang": "cpp",
+      "root": "gold-corpus/cpp-fixture",
+      "file": "sympair/globalpair.c",
+      "line": 0,
+      "col": 4,
+      "expect": {
+        "all": [
+          "\"col\":\"21\",\"file\":\"globalpair.c\",\"line\":\"2\"",
+          "\"file\":\"globalpair.c\",\"line\":\"1\""
+        ],
+        "none": []
+      },
+      "status": "gold"
+    },
+    {
+      "id": "cpp-sym-delegation-backward-wrapper-calls",
+      "difficulty": "hard",
+      "semantic_area": "cpp-symmetry",
+      "lang": "cpp",
+      "root": "gold-corpus/cpp-fixture",
+      "file": "sympair/delegpair.c",
+      "line": 0,
+      "col": 4,
+      "expect": {
+        "all": [
+          "\"col\":\"23\",\"file\":\"delegpair.c\",\"line\":\"3\"",
+          "\"file\":\"delegpair.c\",\"line\":\"1\""
+        ],
+        "none": []
+      },
+      "status": "gold"
+    },
+    {
+      "id": "cpp-sym-include-reverse-who-includes",
+      "difficulty": "moderate",
+      "semantic_area": "cpp-symmetry",
+      "lang": "cpp",
+      "root": "gold-corpus/cpp-fixture",
+      "file": "inc_nav.cpp",
+      "line": 0,
+      "col": 10,
+      "expect": {
+        "all": [
+          "\"file\":\"inc_nav.cpp\",\"line\":\"1\"",
+          "\"file\":\"inc_nav2.cpp\",\"line\":\"1\""
         ],
         "none": []
       },

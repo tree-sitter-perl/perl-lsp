@@ -229,6 +229,13 @@ pub trait CrossFileLookup {
     ) -> Option<std::sync::Arc<CachedModule>> {
         self.get_cached(module_name)
     }
+    /// EVERY cached file defining `name` (the pack index's full candidate
+    /// table), not just the one-winner `get_cached` view — for consumers that
+    /// must weigh candidates themselves (definition-over-prototype). Default:
+    /// the winner alone.
+    fn def_candidates(&self, name: &str) -> Vec<std::sync::Arc<CachedModule>> {
+        self.get_cached(name).into_iter().collect()
+    }
     fn parents_cached(&self, module_name: &str) -> Vec<String>;
     fn modules_with_symbol(&self, name: &str) -> Vec<String>;
     fn find_exporters(&self, func_name: &str) -> Vec<String>;
@@ -240,6 +247,23 @@ pub trait CrossFileLookup {
         None
     }
     fn for_each_cached(&self, f: &mut dyn FnMut(&str, &std::sync::Arc<CachedModule>));
+    /// Visit every distinct cached FILE exactly once. `for_each_cached` is
+    /// keyed by NAME with one winner per key, so a pack file that loses every
+    /// name tie (two fixtures both declaring `is_scope`) is invisible there —
+    /// any whole-project sweep (find-references, macro variants, include
+    /// reverse) must use this instead. Default: path-dedup over
+    /// `for_each_cached` (correct for the Perl hub, whose module-name keys
+    /// are unique per file); the pack index overrides with its complete
+    /// per-file candidate table.
+    fn for_each_cached_file(&self, f: &mut dyn FnMut(&std::sync::Arc<CachedModule>)) {
+        let mut seen: std::collections::HashSet<std::path::PathBuf> =
+            std::collections::HashSet::new();
+        self.for_each_cached(&mut |_n, cached| {
+            if seen.insert(cached.path.clone()) {
+                f(cached);
+            }
+        });
+    }
     fn for_each_reexport_module(
         &self,
         start: Vec<String>,
@@ -304,6 +328,12 @@ impl<'a> CrossFileLookup for ScopedLookup<'a> {
     ) -> Option<std::sync::Arc<CachedModule>> {
         self.inner.get_cached_scoped(module_name, &self.visible)
     }
+    fn def_candidates(&self, name: &str) -> Vec<std::sync::Arc<CachedModule>> {
+        // Unscoped by design: consumers of the full candidate table weigh
+        // definition-ness themselves, and a definition legitimately lives
+        // OUTSIDE the querying file's closure (a `.c` body nobody includes).
+        self.inner.def_candidates(name)
+    }
     fn parents_cached(&self, module_name: &str) -> Vec<String> {
         self.inner.parents_cached(module_name)
     }
@@ -324,6 +354,9 @@ impl<'a> CrossFileLookup for ScopedLookup<'a> {
     }
     fn for_each_cached(&self, f: &mut dyn FnMut(&str, &std::sync::Arc<CachedModule>)) {
         self.inner.for_each_cached(f)
+    }
+    fn for_each_cached_file(&self, f: &mut dyn FnMut(&std::sync::Arc<CachedModule>)) {
+        self.inner.for_each_cached_file(f)
     }
     fn for_each_reexport_module(
         &self,
@@ -8659,6 +8692,96 @@ impl FileAnalysis {
             }
         }
         false
+    }
+
+    /// Is `sym` a class's OWN content — a member declared in the class body
+    /// (struct field, member-block-macro role member) or an enum constant
+    /// (which leaks into the scope that contains the enum) — as opposed to a
+    /// lexical local that merely inherited the class as sticky context? A
+    /// pack-language local declared inside an inline method carries the class
+    /// in `package` too, so the package tag alone cannot distinguish them;
+    /// the structure of the declaring scope relative to the class span can:
+    ///
+    /// * enum constant — its scope CONTAINS the whole class (enum) span;
+    /// * direct member — its scope sits inside the class span but its parent
+    ///   does not (the class body / a role-macro member region, whose scope
+    ///   has no parent at all);
+    /// * lexical local — its scope's parent is still inside the class span
+    ///   (a function body), so it fails both tests.
+    ///
+    /// This is the backward (def→uses) gate mirroring how a USE reaches the
+    /// def forward: members via the ancestor walk, enum constants via the
+    /// bare-name cross-file lookup. Perl symbols never qualify (variables
+    /// and Corinna fields carry sigils; callables aren't Variable/Field).
+    pub(crate) fn symbol_is_class_content(&self, sym: &Symbol) -> bool {
+        if !matches!(sym.kind, SymKind::Variable | SymKind::Field) {
+            return false;
+        }
+        if sym.name.starts_with(['$', '@', '%']) {
+            return false;
+        }
+        let Some(pkg) = sym.package.as_deref() else { return false };
+        let sc = self.scope(sym.scope);
+        // Role-macro member region: `inject_member_blocks` mints a synthetic
+        // PARENTLESS non-file scope per member-block macro, tagged with the
+        // role as its package — the walk itself never produces a parentless
+        // block (everything nests under the File root). The role's Class
+        // span can sit on an ALIAS `#define` far from the member tokens
+        // (perl5's `#define BASEOP BASEOP_DEFINITION`), so span containment
+        // cannot be required here.
+        if sc.parent.is_none()
+            && !matches!(sc.kind, ScopeKind::File)
+            && sc.package.as_deref() == Some(pkg)
+        {
+            return true;
+        }
+        let contains = |o: &Span, i: &Span| {
+            (o.start.row, o.start.column) <= (i.start.row, i.start.column)
+                && (i.end.row, i.end.column) <= (o.end.row, o.end.column)
+        };
+        let Some(class_span) = self
+            .symbols_named(pkg)
+            .iter()
+            .map(|&sid| self.symbol(sid))
+            .filter(|c| matches!(c.kind, SymKind::Class) && contains(&c.span, &sym.span))
+            .map(|c| c.span)
+            .next()
+        else {
+            return false;
+        };
+        // Enum-constant leak: declared in the scope that contains the enum.
+        if contains(&sc.span, &class_span) {
+            return true;
+        }
+        // Direct member: the declaring scope is the class's own body — its
+        // parent sits outside the class span (a local's parent, the class
+        // body, sits inside).
+        match sc.parent {
+            None => true,
+            Some(p) => !contains(&class_span, &self.scope(p).span),
+        }
+    }
+
+    /// Is `sym` a file-scope value a bare name reaches from anywhere — a C
+    /// global, an object-like `#define`'s symbol, an anonymous-enum constant?
+    /// Package-less + sigil-less + declared in the root scope. The backward
+    /// mirror of the generic by-name cross-file goto-def tail. Perl never
+    /// qualifies: its variables carry sigils, its callables aren't Variable.
+    pub(crate) fn symbol_is_file_scope_value(&self, sym: &Symbol) -> bool {
+        // `ScopeKind::File` is the SAME gate `register_symbols` keys the
+        // by-name cross-file index on — forward and backward share the key.
+        matches!(sym.kind, SymKind::Variable)
+            && sym.package.is_none()
+            && !sym.name.starts_with(['$', '@', '%'])
+            && matches!(self.scope(sym.scope).kind, ScopeKind::File)
+    }
+
+    /// Does `name` name a `#define` in this file? (`selection_span` match
+    /// optional: `at` narrows to "this exact def site".)
+    pub(crate) fn names_macro_def(&self, name: &str, at: Option<Span>) -> bool {
+        self.macro_defs
+            .iter()
+            .any(|m| m.name == name && at.is_none_or(|s| m.selection_span == s))
     }
 
     /// Find the definition span of a package or class by name.

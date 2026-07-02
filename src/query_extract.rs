@@ -514,6 +514,20 @@ impl SkeletonAnalysis {
             }
         }
 
+        // A `@ref.type` on a def's OWN name token (class/enum/typedef
+        // declaring itself) is the declaration, not a use — suppress by
+        // exact selection-span match so the Symbol stays the only claimant.
+        let decl_name_spans: std::collections::HashSet<(usize, usize, usize, usize)> = symbols
+            .iter()
+            .map(|s| {
+                (
+                    s.selection_span.start.row,
+                    s.selection_span.start.column,
+                    s.selection_span.end.row,
+                    s.selection_span.end.column,
+                )
+            })
+            .collect();
         let mut refs: Vec<crate::file_analysis::Ref> = self
             .refs
             .iter()
@@ -533,6 +547,20 @@ impl SkeletonAnalysis {
                             method_name_span: Span { start: r.start, end: r.end },
                             member_op: r.member_op,
                         }
+                    }
+                    // A type-position name (`Widget w;`, `struct op* o`, a
+                    // base-class clause): the same PackageRef a Perl package
+                    // use carries, so type gd/gr ride the Package machinery.
+                    "type" => {
+                        if decl_name_spans.contains(&(
+                            r.start.row,
+                            r.start.column,
+                            r.end.row,
+                            r.end.column,
+                        )) {
+                            return None;
+                        }
+                        RefKind::PackageRef
                     }
                     _ => return None,
                 };
@@ -1574,14 +1602,19 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
             }
             cap if cap.starts_with("ref.") => {
                 // Generic suppression: a "reference" inside a def's own
-                // header is the declaration, not a use.
-                let inside_def = def_name_spans
-                    .iter()
-                    .any(|&(s, en)| e.start_byte >= s && e.end_byte <= en && {
-                        // only suppress when it IS the def name region
-                        // (cheap heuristic: same start)
-                        s == e.start_byte || en == e.end_byte
-                    });
+                // header is the declaration, not a use. `ref.type` is exempt:
+                // a prototype's RETURN type is the def node's first token
+                // (`Widget make_widget();` starts at `Widget`), which is a
+                // genuine use — its decl-name overlap is suppressed precisely
+                // (exact selection-span match) in `into_file_analysis`.
+                let inside_def = e.cap != "ref.type"
+                    && def_name_spans
+                        .iter()
+                        .any(|&(s, en)| e.start_byte >= s && e.end_byte <= en && {
+                            // only suppress when it IS the def name region
+                            // (cheap heuristic: same start)
+                            s == e.start_byte || en == e.end_byte
+                        });
                 if !inside_def {
                     let member_op = member_simple
                         .get(&e.match_id)

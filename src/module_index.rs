@@ -270,6 +270,11 @@ pub struct ModuleIndex {
     /// actually SEE (its `#include` closure). `get_cached_scoped` ranks these by
     /// reachability. `docs/adr/macro-handling.md`, "the include-closure lie".
     all_defs: Arc<DashMap<String, Vec<Arc<CachedModule>>>>,
+    /// Every pack file registered, keyed by canonical path — including files
+    /// that declare NOTHING registrable (a header-only `#include` shim). The
+    /// name-keyed views can't reach those, but whole-project sweeps
+    /// (`for_each_cached_file`) must.
+    all_files: Arc<DashMap<std::path::PathBuf, Arc<CachedModule>>>,
 }
 
 impl ModuleIndex {
@@ -315,6 +320,7 @@ impl ModuleIndex {
             loaded_modules: Arc::new(DashMap::new()),
             pack_indexes: Arc::new(DashMap::new()),
             all_defs: Arc::new(DashMap::new()),
+            all_files: Arc::new(DashMap::new()),
             workspace_modules: Arc::new(DashMap::new()),
             loader_config_shapes: Arc::new(DashMap::new()),
             stale_modules,
@@ -625,6 +631,7 @@ impl ModuleIndex {
             loaded_modules: Arc::new(DashMap::new()),
             pack_indexes: Arc::new(DashMap::new()),
             all_defs: Arc::new(DashMap::new()),
+            all_files: Arc::new(DashMap::new()),
             workspace_modules: Arc::new(DashMap::new()),
             loader_config_shapes: Arc::new(DashMap::new()),
             stale_modules,
@@ -676,6 +683,7 @@ impl ModuleIndex {
             loaded_modules: Arc::new(DashMap::new()),
             pack_indexes: Arc::new(DashMap::new()),
             all_defs: Arc::new(DashMap::new()),
+            all_files: Arc::new(DashMap::new()),
             workspace_modules: Arc::new(DashMap::new()),
             loader_config_shapes: Arc::new(DashMap::new()),
             stale_modules,
@@ -807,6 +815,9 @@ impl ModuleIndex {
         use crate::file_analysis::SymKind;
         let path = std::fs::canonicalize(&path).unwrap_or(path);
         let cached = Arc::new(CachedModule::new(path, analysis.clone()));
+        // Unconditional: even a file declaring nothing registrable (an
+        // include-only shim) must be reachable by whole-project sweeps.
+        self.all_files.insert(cached.path.clone(), cached.clone());
         for sym in &analysis.symbols {
             // Classes/typedefs (types), free functions, and FILE-SCOPE
             // values (globals, object-like macros, enum constants). A
@@ -1134,6 +1145,36 @@ impl CrossFileLookup for ModuleIndex {
 
     fn for_each_cached(&self, f: &mut dyn FnMut(&str, &Arc<CachedModule>)) {
         self.for_each_cached(f)
+    }
+
+    fn def_candidates(&self, name: &str) -> Vec<Arc<CachedModule>> {
+        match self.all_defs.get(name) {
+            Some(cands) if !cands.is_empty() => cands.clone(),
+            // Perl hub: `all_defs` is pack-only, fall back to the winner.
+            _ => self.get_cached(name).into_iter().collect(),
+        }
+    }
+
+    fn for_each_cached_file(&self, f: &mut dyn FnMut(&Arc<CachedModule>)) {
+        // `all_files` is the complete per-path registry (pack indexes, fed by
+        // `register_symbols`) — the name-keyed views can't see a file that
+        // lost all its name ties OR declares nothing registrable. The Perl
+        // hub's cache is written directly (module-name keys, unique per
+        // file), so union it in for both worlds.
+        let mut seen: std::collections::HashSet<std::path::PathBuf> =
+            std::collections::HashSet::new();
+        for entry in self.all_files.iter() {
+            if seen.insert(entry.key().clone()) {
+                f(entry.value());
+            }
+        }
+        for entry in self.cache.iter() {
+            if let Some(ref cached) = *entry.value() {
+                if seen.insert(cached.path.clone()) {
+                    f(cached);
+                }
+            }
+        }
     }
 
     fn for_each_reexport_module(

@@ -322,6 +322,16 @@
   type: (_) @type.annot
   declarator: [(pointer_declarator) (reference_declarator)] @nested.target)
 
+; ---- type-name uses: every `type_identifier` in type position is a
+; REFERENCE to the named type (rule #7 — `Widget w;`, `struct op* o`, a
+; base-class clause, a typedef/alias spelling, a type-alias macro like
+; `PERL_BITFIELD16`). Minted as the same `PackageRef` a Perl package-name
+; use carries, so type goto-def / find-references flow through the
+; existing Package machinery. Def-site name tokens (a class/enum/typedef
+; declaring its own name) are suppressed at extraction — a declaration is
+; the Symbol, not a use of itself. ----
+(type_identifier) @ref.type
+
 ; ---- literals + variable reads (the edge-chase substrate) ----
 (number_literal) @expr.lit.number
 (string_literal) @expr.lit.string

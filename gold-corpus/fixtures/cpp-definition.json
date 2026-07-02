@@ -103,6 +103,74 @@
         "none": []
       },
       "status": "gold"
+    },
+    {
+      "id": "cpp-sym-typedef-use-to-def",
+      "difficulty": "moderate",
+      "semantic_area": "cpp-symmetry",
+      "lang": "cpp",
+      "root": "gold-corpus/cpp-fixture",
+      "file": "sympair/typedefpair.c",
+      "line": 1,
+      "col": 0,
+      "expect": {
+        "all": [
+          "typedefpair.c:1:24"
+        ],
+        "none": []
+      },
+      "status": "gold"
+    },
+    {
+      "id": "cpp-sym-global-use-to-def",
+      "difficulty": "moderate",
+      "semantic_area": "cpp-symmetry",
+      "lang": "cpp",
+      "root": "gold-corpus/cpp-fixture",
+      "file": "sympair/globalpair.c",
+      "line": 1,
+      "col": 20,
+      "expect": {
+        "all": [
+          "globalpair.c:1:5"
+        ],
+        "none": []
+      },
+      "status": "gold"
+    },
+    {
+      "id": "cpp-sym-type-use-to-def",
+      "difficulty": "moderate",
+      "semantic_area": "cpp-symmetry",
+      "lang": "cpp",
+      "root": "gold-corpus/cpp-fixture",
+      "file": "struct_refs.cpp",
+      "line": 1,
+      "col": 0,
+      "expect": {
+        "all": [
+          "struct_refs.cpp:1:8"
+        ],
+        "none": []
+      },
+      "status": "gold"
+    },
+    {
+      "id": "cpp-sym-enum-variant-use-to-def",
+      "difficulty": "moderate",
+      "semantic_area": "cpp-symmetry",
+      "lang": "cpp",
+      "root": "gold-corpus/cpp-fixture",
+      "file": "xenum/use.c",
+      "line": 2,
+      "col": 16,
+      "expect": {
+        "all": [
+          "opcodes.h:3:5"
+        ],
+        "none": []
+      },
+      "status": "gold"
     }
   ]
 }

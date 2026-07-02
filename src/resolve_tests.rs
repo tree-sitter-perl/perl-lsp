@@ -4124,3 +4124,130 @@ fn test_implementations_of_role_requires_fans_out_to_composers() {
     let pkg_target = TargetRef::new("My::Role".to_string(), TargetKind::Package);
     assert!(implementations_of(&origin, Some(&idx), &pkg_target).is_empty());
 }
+
+/// The pack-language backward lanes: def→uses on the SAME key the forward
+/// (use→def) resolutions use — enum constants / members (Method{class}),
+/// macros + globals (FileScopeValue), delegation aliases.
+#[cfg(feature = "cpp")]
+mod pack_symmetry {
+    use super::*;
+    use crate::file_analysis::AccessKind;
+
+    fn cpp(source: &str) -> FileAnalysis {
+        crate::language_driver::LanguageRegistry::with_enabled()
+            .for_id("cpp")
+            .unwrap()
+            .analyze(source)
+    }
+
+    #[test]
+    fn enum_constant_def_reaches_bare_reads_across_files() {
+        let store = FileStore::new();
+        let decl = cpp("enum opcode { OP_NULL, OP_SCOPE };\n");
+        // Resolve at the OP_SCOPE def token (row 0, col 24).
+        let target = match resolve_symbol(&decl, tree_sitter::Point::new(0, 24), None) {
+            Some(ResolvedTarget::Target(t)) => t,
+            other => panic!("enum-constant def resolves to a Method target: {other:?}"),
+        };
+        assert_eq!(target.kind, TargetKind::Method { class: "opcode".to_string() });
+        store.insert_workspace(PathBuf::from("/tmp/sym_opcodes.h"), decl);
+        store.insert_workspace(
+            PathBuf::from("/tmp/sym_use.c"),
+            cpp("int is_scope(int t) {\n    return t == OP_SCOPE;\n}\n"),
+        );
+        let results = refs_to(&store, None, &target, RoleMask::EDITABLE);
+        assert!(
+            results.iter().any(|r| matches!(&r.key, FileKey::Path(p) if p.ends_with("sym_use.c"))
+                && r.span.start == tree_sitter::Point::new(1, 16)),
+            "the bare value read matches by name: {results:?}"
+        );
+        assert!(
+            results.iter().any(|r| r.access == AccessKind::Declaration),
+            "the enumerator decl is included: {results:?}"
+        );
+    }
+
+    #[test]
+    fn pack_local_in_inline_method_stays_local() {
+        // A local inside an inline method carries the class as sticky
+        // `package`; it must resolve Local, never fan out as class content.
+        let fa = cpp("class Box {\npublic:\n  void grow() { int localx = 1; localx += 2; }\n};\n");
+        let resolved = resolve_symbol(&fa, tree_sitter::Point::new(2, 20), None);
+        assert!(
+            matches!(resolved, Some(ResolvedTarget::Local)),
+            "a lexical local is Local: {resolved:?}"
+        );
+    }
+
+    #[test]
+    fn object_like_macro_def_reaches_value_and_type_uses() {
+        let store = FileStore::new();
+        let fa = cpp("#define MAX 100\n#define BITS unsigned\nint a = MAX;\nBITS b;\n");
+        let target = match resolve_symbol(&fa, tree_sitter::Point::new(0, 9), None) {
+            Some(ResolvedTarget::Target(t)) => t,
+            other => panic!("a `#define` def is a FileScopeValue target: {other:?}"),
+        };
+        assert_eq!(target.kind, TargetKind::FileScopeValue);
+        // The type-alias spelling resolves too (a PackageRef use).
+        let type_target = match resolve_symbol(&fa, tree_sitter::Point::new(1, 9), None) {
+            Some(ResolvedTarget::Target(t)) => t,
+            other => panic!("type-alias `#define`: {other:?}"),
+        };
+        store.insert_workspace(PathBuf::from("/tmp/sym_macro.c"), fa);
+        let results = refs_to(&store, None, &target, RoleMask::EDITABLE);
+        assert!(
+            results.iter().any(|r| r.span.start == tree_sitter::Point::new(2, 8)),
+            "the value use (expanded or left) is reached: {results:?}"
+        );
+        assert!(
+            results.iter().any(|r| r.access == AccessKind::Declaration),
+            "the `#define` decl is included: {results:?}"
+        );
+        let type_results = refs_to(&store, None, &type_target, RoleMask::EDITABLE);
+        assert!(
+            type_results.iter().any(|r| r.span.start.row == 3),
+            "the type-position use of a type-alias macro is reached: {type_results:?}"
+        );
+    }
+
+    #[test]
+    fn delegation_alias_makes_wrapper_calls_references_of_the_real_function() {
+        // gd sees through `#define WRAP(x) real(x)` forward; gr on `real`
+        // must traverse the edge BACKWARD: WRAP's call sites are references
+        // to `real` — listed, but never rewritable (the token spells WRAP).
+        let store = FileStore::new();
+        let fa = cpp("int real(int x);\n#define WRAP(x) real(x)\nvoid f() { WRAP(1); }\n");
+        let target = match resolve_symbol(&fa, tree_sitter::Point::new(0, 5), None) {
+            Some(ResolvedTarget::Target(t)) => t,
+            other => panic!("free function target: {other:?}"),
+        };
+        store.insert_workspace(PathBuf::from("/tmp/sym_deleg.c"), fa);
+        let results = refs_to(&store, None, &target, RoleMask::EDITABLE);
+        let wrap_call = results
+            .iter()
+            .find(|r| r.span.start == tree_sitter::Point::new(2, 11))
+            .unwrap_or_else(|| panic!("WRAP call site is a reference to `real`: {results:?}"));
+        assert!(!wrap_call.rewritable, "an alias site never renames");
+    }
+
+    #[test]
+    fn file_scope_global_def_reaches_bare_reads() {
+        let store = FileStore::new();
+        let a = cpp("int global_counter;\n");
+        let target = match resolve_symbol(&a, tree_sitter::Point::new(0, 6), None) {
+            Some(ResolvedTarget::Target(t)) => t,
+            other => panic!("a file-scope global is a FileScopeValue target: {other:?}"),
+        };
+        assert_eq!(target.kind, TargetKind::FileScopeValue);
+        store.insert_workspace(PathBuf::from("/tmp/sym_glob.h"), a);
+        store.insert_workspace(
+            PathBuf::from("/tmp/sym_glob_use.c"),
+            cpp("int f() { return global_counter; }\n"),
+        );
+        let results = refs_to(&store, None, &target, RoleMask::EDITABLE);
+        assert!(
+            results.iter().any(|r| matches!(&r.key, FileKey::Path(p) if p.ends_with("sym_glob_use.c"))),
+            "cross-file bare read matches by name: {results:?}"
+        );
+    }
+}

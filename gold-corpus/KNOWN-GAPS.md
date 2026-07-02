@@ -218,3 +218,19 @@ is lost and its methods leak as free functions.
 Fixture: `cpp-xfail-cross-file-namespace-macro` (xfail → XPASS when fixed).
 Fix: cross-file macro resolution — resolve `#include`s, gather `#define`s,
 expand before extraction. The single biggest lever for real-world C++.
+
+## Refs symmetry (gd↔gr) — honest residuals
+
+The symmetry invariant (every forward use→def resolution has a matching
+def→uses backward walk on the SAME key) holds for macros (object- and
+function-like, incl. config variants), enum constants, struct/role members,
+type names (struct/typedef/class), file-scope globals, `#include`
+(who-includes-this-header), and macro delegation (wrapper call sites are
+references of the wrapped function). Deliberately out of scope / honest gaps:
+
+| case | note |
+|---|---|
+| template-wrapped symbols (`fmt` struct gr = 0 refs) | template extraction is the next arc — defs inside `template_declaration` aren't extracted at all, so BOTH directions are dark (not a gd-only asymmetry) |
+| rename through a macro alias / expanded use | alias call sites and expansion-erased uses are listed by references but marked non-rewritable (the token spells the macro's name); `FileScopeValue` targets are excluded from cross-file rename entirely — pack rename is its own arc |
+| role-macro (`BASEOP`) gr does not list composer structs as "uses" | the standalone-in-struct-body use IS listed (the blanked token is re-minted); the composing struct itself shows via goto-implementation semantics, not references |
+| C++ `using X = T;` alias name | mints no symbol yet, so the alias name token reads as a self-referencing type use |

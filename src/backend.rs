@@ -579,6 +579,25 @@ fn locations_to_workspace_edit(
 
 /// Convert a resolve::RefLocation list into the LSP Location list expected by
 /// the `references` response, stable-sorted and deduplicated by (uri, span).
+/// Union domain-bridge extras with a handler's main result set, keeping the
+/// sorted/deduped shape. `None` only when BOTH sides are empty, so a
+/// domain-only answer (find-refs on an enum whose direct uses are elsewhere)
+/// still surfaces.
+fn merge_locations(extra: Vec<Location>, main: Option<Vec<Location>>) -> Option<Vec<Location>> {
+    let mut locations = main.unwrap_or_default();
+    locations.extend(extra);
+    if locations.is_empty() {
+        return None;
+    }
+    locations.sort_by(|a, b| {
+        a.uri.as_str().cmp(b.uri.as_str())
+            .then_with(|| a.range.start.line.cmp(&b.range.start.line))
+            .then_with(|| a.range.start.character.cmp(&b.range.start.character))
+    });
+    locations.dedup_by(|a, b| a.uri == b.uri && a.range == b.range);
+    Some(locations)
+}
+
 fn refs_to_locations(results: Vec<crate::resolve::RefLocation>) -> Option<Vec<Location>> {
     let mut locations: Vec<Location> = results
         .into_iter()
@@ -975,42 +994,86 @@ impl LanguageServer for Backend {
         use crate::resolve::{group_refs, refs_to, resolve_symbol_scoped, ResolvedTarget};
 
         let point = symbols::position_to_point(pos);
-        let target = match resolve_symbol_scoped(&doc.analysis, point, Some(&*self.module_index), self.override_scope()) {
+        // Pack languages resolve + collect through their sub-index (mirrors
+        // goto-def and the CLI) — the hub only knows Perl modules, so a cpp
+        // query against it silently misses every cross-file use.
+        let pack = (doc.language != "perl")
+            .then(|| self.module_index.pack_index(doc.language))
+            .flatten();
+        let base_idx: &dyn crate::file_analysis::CrossFileLookup = match pack.as_deref() {
+            Some(i) => i,
+            None => &*self.module_index,
+        };
+        let self_path = uri.to_file_path().ok();
+        // `#include` reverse — "who includes this header" — owns the path
+        // token exclusively (the backward mirror of include goto-def).
+        if doc.language == "cpp" {
+            if let Some(incs) = symbols::pack_include_references(
+                &doc.analysis, point, self_path.as_deref(), base_idx)
+            {
+                let locs: Vec<Location> = incs
+                    .into_iter()
+                    .filter_map(|(path, span)| {
+                        Some(Location {
+                            uri: Url::from_file_path(&path).ok()?,
+                            range: symbols::span_to_range(span),
+                        })
+                    })
+                    .collect();
+                return Ok((!locs.is_empty()).then_some(locs));
+            }
+        }
+        // Reverse domain bridge: find-refs on an enum (or enumerator)
+        // surfaces the field-slot sites whose recovered domain is that enum.
+        let mut extra: Vec<Location> = Vec::new();
+        if let Some(pidx) = pack.as_deref() {
+            for (path, span) in symbols::domain_backrefs(&doc.analysis, point, pidx) {
+                if let Ok(u) = Url::from_file_path(&path) {
+                    extra.push(Location { uri: u, range: symbols::span_to_range(span) });
+                }
+            }
+        }
+        // Resolve names against THIS file's include closure (transparent for
+        // Perl: empty closure = the plain index).
+        let scoped = crate::file_analysis::ScopedLookup::new(
+            base_idx, &doc.analysis.include_closure, self_path.as_deref());
+        let target = match resolve_symbol_scoped(&doc.analysis, point, Some(&scoped), self.override_scope()) {
             Some(ResolvedTarget::Target(t)) => t,
             Some(ResolvedTarget::Group { local_spans, pinned_spans, members }) => {
                 let origin = FileKey::Url(uri.clone());
                 drop(doc);
                 let results = group_refs(
                     &self.files,
-                    Some(&*self.module_index),
+                    Some(base_idx),
                     &origin,
                     &local_spans,
                     &pinned_spans,
                     &members,
                     None,
                 );
-                return Ok(refs_to_locations(results));
+                return Ok(merge_locations(extra, refs_to_locations(results)));
             }
             // Lexical / unowned — single-file references.
             Some(ResolvedTarget::Local) | None => {
-                let refs = symbols::find_references(
-                    &doc.analysis, pos, uri, Some(&*self.module_index),
-                );
-                return Ok(if refs.is_empty() { None } else { Some(refs) });
+                let refs = symbols::find_references(&doc.analysis, pos, uri, Some(&scoped));
+                return Ok(merge_locations(extra, (!refs.is_empty()).then_some(refs)));
             }
         };
 
         // Cross-file walk. Scope to editable space when the target is a
         // project symbol so "find references" never scans CPAN; widen to
-        // VISIBLE only for dependency-defined targets. See `references_mask_for`.
+        // VISIBLE only for dependency-defined targets — and always for pack
+        // languages, whose files ride the per-language cache (the DEPENDENCY
+        // role), not the Perl workspace store. See `references_mask_for`.
+        let is_pack = pack.is_some();
         drop(doc); // release the DashMap read lock before the resolve walk
-        let mask = crate::resolve::references_mask_for(
-            &self.files,
-            Some(&*self.module_index),
-            &target,
-        );
-        let results = refs_to(&self.files, Some(&*self.module_index), &target, mask);
-        Ok(refs_to_locations(results))
+        let mask = if is_pack {
+            crate::resolve::RoleMask::VISIBLE
+        } else {
+            crate::resolve::references_mask_for(&self.files, Some(base_idx), &target)
+        };
+        let results = refs_to(&self.files, Some(base_idx), &target, mask);
+        Ok(merge_locations(extra, refs_to_locations(results)))
     }
 
     async fn prepare_rename(

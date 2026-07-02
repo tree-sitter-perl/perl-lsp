@@ -417,6 +417,104 @@ pub fn resolve_symbol_scoped(
             TargetKind::PackageVar { package },
         )));
     }
+    // Pack-language backward lanes: def→uses mirrors of resolutions goto-def
+    // already does forward, on the SAME key. All gates are structural facts
+    // Perl analyses never exhibit (sigil-less Variable/Field symbols,
+    // `macro_defs`), so Perl cursors fall through untouched.
+    if let Some(sym) = analysis.symbol_at(point) {
+        // A `#define`'s own def site (its symbol's selection span IS a
+        // MacroDef). The forward macro lane keys on the bare word
+        // (`pack_macro_definition`); the backward target carries the same
+        // name-keyed identity — object-like AND function-like.
+        if analysis.names_macro_def(&sym.name, Some(sym.selection_span)) {
+            return Some(ResolvedTarget::Target(TargetRef::new(
+                sym.name.clone(),
+                TargetKind::FileScopeValue,
+            )));
+        }
+        // A struct/role member (`op_type` in the `BASEOP` block) and an enum
+        // constant (`OP_SCOPE`, carrying its enum as `package`) are BOTH
+        // package-tagged sigil-less Variable/Field defs — the DEF can't tell
+        // them apart; only the USE shape differs (a member is a member-access
+        // `MethodCall`, an enum constant a bare `Variable` value read). Both
+        // resolve to the SAME `Method{class}` target their uses resolve to;
+        // `collect_from_analysis` matches both shapes. The structural
+        // class-content gate keeps a lexical local out — a pack local inside
+        // an inline method carries the class as sticky `package` too, so the
+        // package tag alone would over-claim.
+        if analysis.symbol_is_class_content(sym) {
+            let class = sym.package.clone().expect("class content is package-tagged");
+            return Some(ResolvedTarget::Target(TargetRef::method(
+                sym.name.clone(),
+                class,
+                analysis,
+                module_index,
+                scope,
+            )));
+        }
+        // A file-scope global / anonymous-enum constant: bare-name-keyed,
+        // like the generic cross-file goto-def tail that resolves its uses.
+        if analysis.symbol_is_file_scope_value(sym) {
+            return Some(ResolvedTarget::Target(TargetRef::new(
+                sym.name.clone(),
+                TargetKind::FileScopeValue,
+            )));
+        }
+    }
+    // The same lanes from a USE site, so gr from a use equals gr from the
+    // def: a bare read / type token that resolves (locally or by name
+    // cross-file) to a macro, class content, or file-scope value mints the
+    // identical target the def site does.
+    if let Some(r) = analysis.ref_at(point) {
+        if matches!(r.kind, RefKind::Variable | RefKind::PackageRef) {
+            let class_or_value = |a: &FileAnalysis, s: &crate::file_analysis::Symbol| {
+                if a.names_macro_def(&s.name, Some(s.selection_span))
+                    || a.symbol_is_file_scope_value(s)
+                {
+                    Some(None)
+                } else if a.symbol_is_class_content(s) {
+                    Some(s.package.clone())
+                } else {
+                    None
+                }
+            };
+            let resolved: Option<Option<String>> = match r.resolves_to {
+                Some(id) => class_or_value(analysis, analysis.symbol(id)),
+                None if analysis.names_macro_def(&r.target_name, None) => Some(None),
+                None => module_index
+                    .and_then(|idx| idx.get_cached(&r.target_name))
+                    .and_then(|cached| {
+                        if cached.analysis.names_macro_def(&r.target_name, None) {
+                            return Some(None);
+                        }
+                        cached
+                            .analysis
+                            .symbols
+                            .iter()
+                            .filter(|s| s.name == r.target_name)
+                            .find_map(|s| class_or_value(&cached.analysis, s))
+                    }),
+            };
+            match resolved {
+                Some(Some(class)) => {
+                    return Some(ResolvedTarget::Target(TargetRef::method(
+                        r.target_name.clone(),
+                        class,
+                        analysis,
+                        module_index,
+                        scope,
+                    )));
+                }
+                Some(None) => {
+                    return Some(ResolvedTarget::Target(TargetRef::new(
+                        r.target_name.clone(),
+                        TargetKind::FileScopeValue,
+                    )));
+                }
+                None => {}
+            }
+        }
+    }
     Some(match analysis.rename_kind_at(point, module_index)? {
         RenameKind::Variable => ResolvedTarget::Local,
         RenameKind::HashKey(name) => match analysis.hash_key_owner_at(point) {
@@ -484,6 +582,17 @@ pub enum TargetKind {
         owner: HandlerOwner,
         name: String,
     },
+    /// A pack-language file-scope value reachable by BARE NAME from any file
+    /// that can see it (C's flat linkage): an object- or function-like
+    /// `#define`, a global variable, an anonymous-enum constant. The backward
+    /// (def→uses) mirror of the by-name forward resolutions — the macro
+    /// goto-def lane and the generic cross-file name tail — so both
+    /// directions share one key: the bare name. Matches every `#define` of
+    /// the name (config variants included, never pruned), file-scope
+    /// `Variable` decls, and name-keyed bare reads / unresolved calls /
+    /// type-position uses. Never minted from a Perl cursor (Perl variables
+    /// carry sigils; Perl callables aren't `Variable` symbols).
+    FileScopeValue,
 }
 
 /// A located reference in some file.
@@ -737,6 +846,12 @@ pub fn refs_to(
 ) -> Vec<RefLocation> {
     let mut out = Vec::new();
 
+    // Names that reach the target through a macro delegation edge — the
+    // BACKWARD half of goto-def's see-through (`#define IncRef(sv)
+    // Perl_Inc(sv)` means every `IncRef(...)` call site is a reference to
+    // `Perl_Inc`). Computed once per query; empty for Perl.
+    let aliases = delegation_aliases(files, module_index, target, mask);
+
     // Open files (canonical — workspace entries for open paths are skipped).
     let mut covered_paths: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
     if mask.contains(RoleMask::OPEN) {
@@ -745,7 +860,7 @@ pub fn refs_to(
             if let Ok(p) = url.to_file_path() {
                 covered_paths.insert(p);
             }
-            collect_from_analysis(&FileKey::Url(url), &doc.analysis, target, module_index, &mut out);
+            collect_from_analysis(&FileKey::Url(url), &doc.analysis, target, &aliases, module_index, &mut out);
         });
     } else {
         // Even if open isn't in the mask, track the paths so a WORKSPACE walk
@@ -763,16 +878,23 @@ pub fn refs_to(
             if covered_paths.contains(entry.key()) {
                 continue;
             }
-            collect_from_analysis(&FileKey::Path(entry.key().clone()), entry.value(), target, module_index, &mut out);
+            covered_paths.insert(entry.key().clone());
+            collect_from_analysis(&FileKey::Path(entry.key().clone()), entry.value(), target, &aliases, module_index, &mut out);
         }
     }
 
-    // Dependencies (read-only modules from @INC).
+    // Dependencies (read-only modules from @INC / the pack-language cache).
+    // Per-FILE sweep (`for_each_cached_file`): the name-keyed view both
+    // repeats files and HIDES a file that lost every name tie. Skip paths an
+    // open/workspace copy already covered — those are fresher.
     if mask.contains(RoleMask::DEPENDENCY) {
         if let Some(idx) = module_index {
-            idx.for_each_cached(&mut |_module_name, cached| {
+            idx.for_each_cached_file(&mut |cached| {
+                if !covered_paths.insert(cached.path.clone()) {
+                    return;
+                }
                 let key = FileKey::Path(cached.path.clone());
-                collect_from_analysis(&key, &cached.analysis, target, module_index, &mut out);
+                collect_from_analysis(&key, &cached.analysis, target, &aliases, module_index, &mut out);
             });
         }
     }
@@ -882,6 +1004,61 @@ pub fn implementations_of(
     out
 }
 
+/// The macro names whose call sites dispatch to `target` through delegation
+/// edges (`MacroDef::delegate`), transitively (`#define A(x) B(x)`,
+/// `#define B(x) F(x)` — both A and B reach F). The backward mirror of the
+/// forward see-through offer in `pack_macro_definition`. Only callable-
+/// name-keyed kinds have a delegation surface; the DEPENDENCY sweep is
+/// gated on the mask so a Perl EDITABLE query never touches the dep cache.
+/// Sorted for deterministic output.
+fn delegation_aliases(
+    files: &FileStore,
+    module_index: Option<&dyn CrossFileLookup>,
+    target: &TargetRef,
+    mask: RoleMask,
+) -> Vec<String> {
+    if !matches!(
+        target.kind,
+        TargetKind::Sub { .. } | TargetKind::Method { .. } | TargetKind::FileScopeValue
+    ) {
+        return Vec::new();
+    }
+    let mut pairs: Vec<(String, String)> = Vec::new();
+    let mut add = |a: &FileAnalysis| {
+        for m in &a.macro_defs {
+            if let Some(d) = &m.delegate {
+                pairs.push((m.name.clone(), d.clone()));
+            }
+        }
+    };
+    files.for_each_open_mut(|_url, doc| add(&doc.analysis));
+    for entry in files.workspace_raw().iter() {
+        add(entry.value());
+    }
+    if mask.contains(RoleMask::DEPENDENCY) {
+        if let Some(idx) = module_index {
+            idx.for_each_cached_file(&mut |cached| add(&cached.analysis));
+        }
+    }
+    if pairs.is_empty() {
+        return Vec::new();
+    }
+    // Reverse-transitive chase: every name whose delegation chain reaches
+    // the target's name.
+    let mut out: Vec<String> = Vec::new();
+    let mut frontier: Vec<String> = vec![target.name.clone()];
+    while let Some(cur) = frontier.pop() {
+        for (n, d) in &pairs {
+            if *d == cur && *n != target.name && !out.contains(n) {
+                out.push(n.clone());
+                frontier.push(n.clone());
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
 fn key_for_sort(k: &FileKey) -> PathBuf {
     match k {
         FileKey::Path(p) => p.clone(),
@@ -929,7 +1106,13 @@ fn span_is_folded_name(analysis: &FileAnalysis, span: Span, include_calls: bool)
 /// True when `sym` is a declaration of `target` (decl-span match).
 /// Shared by `collect_from_analysis` (to emit decl locations) and
 /// `mask_for_target` (to decide whether the def lives in editable space).
-fn symbol_defines_target(sym: &crate::file_analysis::Symbol, target: &TargetRef) -> bool {
+/// `analysis` is the file the symbol lives in — the structural gates
+/// (class-content, macro spans) need its scopes/macro table.
+fn symbol_defines_target(
+    sym: &crate::file_analysis::Symbol,
+    target: &TargetRef,
+    analysis: &FileAnalysis,
+) -> bool {
     use crate::file_analysis::{DeclKind, HashKeyOwner, SymbolDetail};
     if sym.name != target.name {
         return false;
@@ -972,14 +1155,15 @@ fn symbol_defines_target(sym: &crate::file_analysis::Symbol, target: &TargetRef)
                 .iter()
                 .any(|c| Some(c.as_str()) == sym.package.as_deref())
                 || sym.package.as_deref() == Some(class.as_str());
-            // A data member (cpp `o->field`) mints the same MethodCall ref as a
-            // method, so its `Variable`/`Field` decl is the target's declaration
-            // too. `on_chain` (package ∈ family) already excludes package-less
-            // locals — a plain Perl `my $x` never matches a Method target.
-            matches!(
-                sym.kind,
-                SymKind::Sub | SymKind::Method | SymKind::Variable | SymKind::Field
-            ) && on_chain
+            // A data member (cpp `o->field`) or enum constant mints the same
+            // by-name uses a method does, so its `Variable`/`Field` decl is
+            // the target's declaration too — gated by the structural
+            // class-content check, because a pack LOCAL inside an inline
+            // method also carries the class as sticky `package` and must
+            // never read as a member declaration.
+            (matches!(sym.kind, SymKind::Sub | SymKind::Method)
+                || analysis.symbol_is_class_content(sym))
+                && on_chain
         }
         TargetKind::Package => matches!(
             sym.kind,
@@ -1007,6 +1191,14 @@ fn symbol_defines_target(sym: &crate::file_analysis::Symbol, target: &TargetRef)
                     SymbolDetail::Handler { owner: o, .. } if o == owner
                 )
         }
+        // Every `#define` of the name is a declaration (config variants in
+        // different headers all surface, matching the forward macro lane's
+        // never-prune rule — a `#define`'s symbol can be Variable, Sub, or a
+        // member-block role's Class), as is a file-scope global's def.
+        TargetKind::FileScopeValue => {
+            analysis.names_macro_def(&sym.name, Some(sym.selection_span))
+                || analysis.symbol_is_file_scope_value(sym)
+        }
     }
 }
 
@@ -1022,13 +1214,13 @@ pub fn references_mask_for(
 ) -> RoleMask {
     let mut found_in_editable = false;
     files.for_each_open_mut(|_url, doc| {
-        if doc.analysis.symbols.iter().any(|s| symbol_defines_target(s, target)) {
+        if doc.analysis.symbols.iter().any(|s| symbol_defines_target(s, target, &doc.analysis)) {
             found_in_editable = true;
         }
     });
     if !found_in_editable {
         for entry in files.workspace_raw().iter() {
-            if entry.value().symbols.iter().any(|s| symbol_defines_target(s, target)) {
+            if entry.value().symbols.iter().any(|s| symbol_defines_target(s, target, entry.value())) {
                 found_in_editable = true;
                 break;
             }
@@ -1143,10 +1335,31 @@ fn collect_from_analysis(
     key: &FileKey,
     analysis: &FileAnalysis,
     target: &TargetRef,
+    aliases: &[String],
     module_index: Option<&dyn CrossFileLookup>,
     out: &mut Vec<RefLocation>,
 ) {
     use crate::file_analysis::HashKeyOwner;
+
+    // Pack languages: name lookups during matching (invocant typing, the
+    // typedef chase) must resolve against THIS file's include closure — the
+    // same visibility goto-def uses at this file's cursors — or a scanned
+    // file's `o->op_type` types against a globally-arbitrary same-named
+    // candidate and the site silently drops out. Transparent for Perl
+    // (empty closure = the plain index).
+    let scoped_storage: Option<crate::file_analysis::ScopedLookup>;
+    let module_index: Option<&dyn CrossFileLookup> = match module_index {
+        Some(idx) if !analysis.include_closure.is_empty() => {
+            let path = key_for_sort(key);
+            scoped_storage = Some(crate::file_analysis::ScopedLookup::new(
+                idx,
+                &analysis.include_closure,
+                Some(path.as_path()),
+            ));
+            Some(scoped_storage.as_ref().unwrap() as &dyn CrossFileLookup)
+        }
+        other => other,
+    };
 
     // Package globals match by package + (qualified) name, not the callable
     // scope machinery below — and their spans need sigil handling — so collect
@@ -1181,7 +1394,7 @@ fn collect_from_analysis(
 
     // Include declaration spans when this file defines the target.
     for sym in &analysis.symbols {
-        if symbol_defines_target(sym, target) {
+        if symbol_defines_target(sym, target, analysis) {
             out.push(RefLocation {
                 key: key.clone(),
                 span: sym.selection_span,
@@ -1207,13 +1420,27 @@ fn collect_from_analysis(
         } else {
             r.target_name == target.name
         };
-        if !name_matches {
+        // A use spelled through a delegating macro (`IncRef(x)` where
+        // `#define IncRef(sv) Perl_Inc(sv)`, or the object-like alias
+        // `#define op_prune_chain_head Perl_op_prune_chain_head`) IS a use of
+        // the target — the backward see-through. Call-shaped when the use was
+        // left unexpanded, a bare Variable read when the expansion erased it
+        // (the re-minted read carries the alias's name). Bypasses the package
+        // gates below (the delegation edge already pinned the identity) and
+        // is never rewritable (the token spells the MACRO's name).
+        let alias_matched = !name_matches
+            && matches!(
+                r.kind,
+                RefKind::FunctionCall { .. } | RefKind::Variable | RefKind::PackageRef
+            )
+            && aliases.iter().any(|a| a == r.unqualified_target_name());
+        if !name_matches && !alias_matched {
             continue;
         }
         // Sub + Method both match any call into that scope — function
         // or method shape — per the "same callable, two shapes"
         // invariant. Filter is a single scope comparison.
-        let matches_kind = match (&target.kind, &r.kind) {
+        let matches_kind = alias_matched || match (&target.kind, &r.kind) {
             (TargetKind::Sub { .. } | TargetKind::Method { .. },
              RefKind::FunctionCall { resolved_package }) => {
                 let scope = callable_scope_for_refs.as_ref().unwrap();
@@ -1260,8 +1487,22 @@ fn collect_from_analysis(
                                 // `$child->m` and `$base->m` rename together.
                                 // (Every family member is a descendant of the
                                 // root, so inheriting-without-override calls are
-                                // covered by membership.)
+                                // covered by membership.) The family walk runs
+                                // INVERSE edges from the origin file, which can
+                                // miss aliases declared elsewhere (perl5's
+                                // `typedef struct op OP` lives in perl.h, so
+                                // `OP` isn't in `op`'s computed family) — the
+                                // UPWARD chain from the invocant's class needs
+                                // no inverse index, so admit a class whose
+                                // chain reaches the family.
                                 target.method_classes.iter().any(|c| c == &cn)
+                                    || rename_chain_cache
+                                        .entry(cn.clone())
+                                        .or_insert_with(|| {
+                                            analysis.method_rename_chain(&cn, method, module_index)
+                                        })
+                                        .iter()
+                                        .any(|c| target.method_classes.iter().any(|f| f == c))
                             } else {
                                 // Dispatch: the call matches only if it
                                 // dispatches to THIS def — `$child->m` reaches an
@@ -1281,6 +1522,44 @@ fn collect_from_analysis(
                 }
             }
             (TargetKind::Package, RefKind::PackageRef) => true,
+            // A pack-language enum constant / member read by BARE name
+            // (`x = OP_SCOPE`, `case OP_SCOPE:`) — a `Variable` ref the
+            // generic goto-def resolves to this def by name (the value-read
+            // half of the shared Variable/Field DEF). `name_matches` already
+            // pinned the name; an UNRESOLVED read is the cross-file case the
+            // by-name goto-def owns, and a resolved read counts only when it
+            // binds the target's own class content (a genuinely-local
+            // variable — even one carrying the class as sticky package —
+            // stays out via the structural gate).
+            (TargetKind::Method { class }, RefKind::Variable) => match r.resolves_to {
+                None => true,
+                Some(id) => {
+                    let s = analysis.symbol(id);
+                    analysis.symbol_is_class_content(s)
+                        && (s.package.as_deref() == Some(class.as_str())
+                            || target
+                                .method_classes
+                                .iter()
+                                .any(|c| Some(c.as_str()) == s.package.as_deref()))
+                }
+            },
+            // A file-scope value's uses, all bare-name-keyed like its forward
+            // resolutions: a value read (object-like macro / global / enum
+            // constant), a type-position token (a type-alias `#define` used as
+            // a declared type), or an unresolved call (function-like macro —
+            // a package-pinned call belongs to that package's sub, not here).
+            (TargetKind::FileScopeValue, RefKind::Variable) => match r.resolves_to {
+                None => true,
+                Some(id) => {
+                    let s = analysis.symbol(id);
+                    analysis.names_macro_def(&s.name, Some(s.selection_span))
+                        || analysis.symbol_is_file_scope_value(s)
+                }
+            },
+            (TargetKind::FileScopeValue, RefKind::PackageRef) => true,
+            (TargetKind::FileScopeValue, RefKind::FunctionCall { resolved_package }) => {
+                resolved_package.is_none()
+            }
             (
                 TargetKind::HashKeyOfSub { package, name },
                 RefKind::HashKeyAccess { owner, .. },
@@ -1366,7 +1645,7 @@ fn collect_from_analysis(
                 key: key.clone(),
                 span,
                 access: r.access,
-                rewritable: rewritable_at(span),
+                rewritable: !alias_matched && rewritable_at(span),
             });
             // A call folded from a variable (`my $m = 'process'; $self->$m()`)
             // has a non-rewritable name token above; the rewrite belongs on the
