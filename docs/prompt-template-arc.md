@@ -272,7 +272,29 @@ projection design commitments (forks below) bind.
 
 ---
 
-## 4. Open design forks — the user's calls
+## 4. Design forks — DECIDED (user, 2026-07-02) except #4
+
+- **1 LOCKED: lazy** ("lazy for certain").
+- **2 LOCKED: primaries + explicit instantiations in outline.**
+- **3 LOCKED — OVERRIDES the rec below: unify NOW.** The engines merge
+  immediately; PR #100 is subordinate — at maximum we close the open PR and
+  re-extract the Perl generator surface from the unified engine. The
+  unification leads; the PR follows.
+- **4 PENDING — the user's call**, tradeoffs on the table: (A) one family
+  (the macro config-variant model) vs (B) per-spec symbols + `specializes`
+  edges. Recommendation: **B's identity with A's presentation** — per-spec
+  symbols (specializations are all live simultaneously with DISTINCT member
+  tables, so member resolution demands real identity; a config-variant macro
+  is a SUPERPOSITION — config-exclusive alternatives — where rank/join is
+  honest, but siblings-coexisting is a different beast), `specializes` edge
+  in GraphView, and the macro arc's ranked never-prune multi-location as the
+  *presentation* when a use resolves against the family (matching spec first,
+  primary + siblings kept). Spec-match specificity = the pragmatic ladder
+  (exact args > partial pattern > primary), NOT C++'s full partial-ordering
+  algorithm — additive depth, later.
+- **5 LOCKED: the `ParametricType::Instance` flavor.**
+
+Original fork writeups (kept for the reasoning):
 
 1. **Lazy vs eager projection.** Eager = pre-materialize per-instantiation
    answers at build (what `instantiate_to_fixpoint` does); lazy = keep one
