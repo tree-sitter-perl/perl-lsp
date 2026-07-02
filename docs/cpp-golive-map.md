@@ -80,6 +80,12 @@ import (`use`), field slot = one shared subject. Same machinery, C surface.
    shapes, always-`None` fields (e.g. `NominalDomain.storage`). A /simplify-
    style sweep over the arc's touched files, guarded by the full net.
 
+**Next arc, mapped:** TEMPLATES — tee-off brief in
+`docs/prompt-template-arc.md` (measured shape matrix: primaries already
+extract, the dark residue is specializations/explicit-instantiation/
+out-of-line members/instance-typing; projections model mapped onto PR #100;
+slice sequence + the user's design forks).
+
 **Deferred (recorded, not queued):** Perl domain typing (needs a synthetic
 constant-group / `Type::Tiny` enum-domain model — `docs/adr/field-projections.md`);
 type-constrained completion at domain slots (`op_type == |` → `OP_*`; needs
