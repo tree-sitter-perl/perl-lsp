@@ -336,3 +336,43 @@ fn get_cached_scoped_prefers_reachable_same_name_class() {
     // Scope names an unrelated file → nothing reachable → global winner (a.cpp).
     assert!(has(&idx.get_cached_scoped("Box", &scope("/fake/other.cpp")), "a_only"));
 }
+
+/// Completion GATHERING over the include closure: only names with a candidate
+/// inside the visibility set are enumerated — unlike resolution there is NO
+/// global fallback, so a file that doesn't include a header never gets its
+/// names offered. Deterministic (sorted by name).
+#[cfg(feature = "cpp")]
+#[test]
+fn visible_defs_with_prefix_gates_on_closure() {
+    use std::collections::HashSet;
+    let reg = crate::language_driver::LanguageRegistry::with_enabled();
+    let driver = reg.for_id("cpp").expect("cpp driver");
+    let header = Arc::new(driver.analyze_with_path(
+        "enum opcode { OP_NULL, OP_SCOPE };\nint op_name(int t);\n",
+        Some(std::path::Path::new("/fake/opcodes.h")),
+    ));
+    let other = Arc::new(driver.analyze_with_path(
+        "int OP_ELSEWHERE = 1;\n",
+        Some(std::path::Path::new("/fake/other.h")),
+    ));
+    let idx = ModuleIndex::new_for_test();
+    idx.register_symbols(PathBuf::from("/fake/opcodes.h"), header);
+    idx.register_symbols(PathBuf::from("/fake/other.h"), other);
+
+    let closure: HashSet<String> = ["/fake/opcodes.h".to_string()].into_iter().collect();
+    let names: Vec<String> = idx
+        .visible_defs_with_prefix("OP_", &closure)
+        .into_iter()
+        .map(|(n, _)| n)
+        .collect();
+    // Sorted, closure-gated: OP_ELSEWHERE (other.h, unreachable) excluded.
+    assert_eq!(names, vec!["OP_NULL", "OP_SCOPE"]);
+    let funcs: Vec<String> = idx
+        .visible_defs_with_prefix("op_", &closure)
+        .into_iter()
+        .map(|(n, _)| n)
+        .collect();
+    assert_eq!(funcs, vec!["op_name"]);
+    // Empty closure ⇒ nothing (no global fallback for gathering).
+    assert!(idx.visible_defs_with_prefix("OP_", &HashSet::new()).is_empty());
+}

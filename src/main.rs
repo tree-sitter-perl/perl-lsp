@@ -1240,7 +1240,9 @@ fn run_one(
             // Pack languages: member (sentinel) → in-scope, via the same
             // path the LSP server uses; Perl keeps cursor-context.
             let items = if doc.language != "perl" {
-                backend::pack_completion(&doc.analysis, &doc.text, &doc.tree, point, doc.language, doc.path.as_deref(), idx)
+                tphase!("completion_items", backend::pack_completion(
+                    &doc.analysis, &doc.text, &doc.tree, point, doc.language,
+                    doc.path.as_deref(), idx).0)
             } else {
                 tphase!("completion_items", symbols::completion_items(
                     &doc.analysis, &doc.tree, &doc.text, pos, idx,

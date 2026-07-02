@@ -54,15 +54,21 @@ import (`use`), field slot = one shared subject. Same machinery, C surface.
    fixtures, close every gd-only asymmetry through the `refs_to`/
    `resolve_symbol` seam, lock each kind as a GOLD PAIR (gd row + gr row).
    Known-dark: enum-variant gr, macro-at-`#define` gr.
-6b. **cross-file identifier completion** 🔵 (parallel with #6 — disjoint files) —
-   editor-found: completing in op.c offers NO `OP_NULL`/opcode entries. CLI
-   confirms: cpp bare-identifier completion candidates are SAME-FILE ONLY
-   (`PERL_IN_OP_C`, `op_p`, …) — the cross-file index is never consulted for
-   gathering. The completion face of "C = Perl, everything exported": candidates
-   must include include-closure-visible file-scope symbols (enum constants,
-   functions, macros, typedefs), reusing the visibility slice's `include_closure`
-   + `ScopedLookup` (built for resolution, unused for gathering). The minimal
-   fixture masked it (same-file enum) — real-file validation required.
+6b. **cross-file identifier completion** ✅ LANDED — the completion face of
+   "C = Perl, everything exported": bare-identifier candidates now include the
+   file-scope symbols (enum constants, functions, typedefs, globals) of every
+   header in the include closure. Gathering rides the visibility slice —
+   `ModuleIndex::visible_defs_with_prefix` enumerates `all_defs` gated to the
+   closure (NO global fallback: a non-includer never sees a header's names),
+   sharing `FileAnalysis::is_linkage_visible` with `register_symbols` so
+   "resolvable" and "offered" can't drift. Prefix-gated server-side (like
+   macros) + `is_incomplete: true` so clients re-request per keystroke;
+   own-file wins dedup and ranks first. op.c `OP_` → 417 opcode enumerators
+   (`opcode — opnames.h`), gather ~2 ms. Gold: cpp-cross-file.json
+   bare-identifier trio (enum constants / function / non-includer negative).
+   Residual: proto.h variadic decls (`Perl_croak(pTHX_ ..., ...)`) never
+   register a Sub symbol — an extraction gap, so they're absent from BOTH
+   goto-def and completion (same set, by construction).
 7. **cruft cleanup pass** ⬜ NEXT (after #6) — the arc accumulated fast:
    back-compat wrappers, superseded comments, dead gates, duplicated fixture
    shapes, always-`None` fields (e.g. `NominalDomain.storage`). A /simplify-

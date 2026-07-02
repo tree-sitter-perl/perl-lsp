@@ -17,6 +17,33 @@
       "comment": "app.cpp #includes mineh.h (Widget::mine); decoy.cpp declares a colliding Widget::theirs it never sees. Include-scoped resolution must pick the Widget app.cpp reaches, not the global path-order winner (decoy.cpp).",
       "expect": { "all": ["mine"], "none": ["theirs"] },
       "status": "gold"
+    },
+    {
+      "id": "cpp-bare-identifier-cross-file-enum-constants",
+      "difficulty": "hard", "semantic_area": "cpp-multilang-crossfile",
+      "lang": "cpp", "root": "gold-corpus/cpp-fixture/xenum",
+      "file": "use.c", "line": 6, "col": 19,
+      "comment": "Bare-identifier completion at an OP_ prefix must offer the enum constants of an INCLUDED header (opcodes.h), not just own-file symbols — the include closure is C's import list.",
+      "expect": { "all": ["OP_NULL", "OP_SCOPE"], "none": ["OP_LOCAL"] },
+      "status": "gold"
+    },
+    {
+      "id": "cpp-bare-identifier-cross-file-function",
+      "difficulty": "hard", "semantic_area": "cpp-multilang-crossfile",
+      "lang": "cpp", "root": "gold-corpus/cpp-fixture/xenum",
+      "file": "use.c", "line": 5, "col": 15,
+      "comment": "A free function declared in an included header (op_name in opcodes.h) is a bare-identifier completion candidate.",
+      "expect": { "all": ["op_name"], "none": [] },
+      "status": "gold"
+    },
+    {
+      "id": "cpp-bare-identifier-closure-gates-non-includers",
+      "difficulty": "moderate", "semantic_area": "cpp-multilang-crossfile",
+      "lang": "cpp", "root": "gold-corpus/cpp-fixture/xenum",
+      "file": "lone.c", "line": 2, "col": 19,
+      "comment": "lone.c does NOT include opcodes.h — the closure is the gate, so its enum constants must not be offered despite matching the OP_ prefix; own-file OP_LOCAL still is.",
+      "expect": { "all": ["OP_LOCAL"], "none": ["OP_NULL", "OP_SCOPE"] },
+      "status": "gold"
     }
   ]
 }

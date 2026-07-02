@@ -400,6 +400,40 @@ impl ModuleIndex {
         self.get_cached(module_name)
     }
 
+    /// Completion-GATHERING mirror of `get_cached_scoped`: enumerate every
+    /// registered name starting with `prefix` that has a definition candidate
+    /// inside `visible` (canonical paths — the querying file's `#include`
+    /// closure). Unlike resolution there is NO global fallback — an empty or
+    /// non-matching closure yields nothing, so a file never gets offered
+    /// symbols from headers it doesn't include. Deterministic: sorted by
+    /// name; among reachable candidates the tie breaks exactly like
+    /// `get_cached_scoped` (class-over-value, then smallest path).
+    pub fn visible_defs_with_prefix(
+        &self,
+        prefix: &str,
+        visible: &std::collections::HashSet<String>,
+    ) -> Vec<(String, Arc<CachedModule>)> {
+        if visible.is_empty() {
+            return Vec::new();
+        }
+        let mut out: Vec<(String, Arc<CachedModule>)> = Vec::new();
+        for entry in self.all_defs.iter() {
+            if !entry.key().starts_with(prefix) {
+                continue;
+            }
+            let reachable: Vec<&Arc<CachedModule>> = entry
+                .value()
+                .iter()
+                .filter(|c| c.path.to_str().is_some_and(|p| visible.contains(p)))
+                .collect();
+            if let Some(best) = best_candidate(&reachable, entry.key()) {
+                out.push((entry.key().clone(), best));
+            }
+        }
+        out.sort_by(|a, b| a.0.cmp(&b.0));
+        out
+    }
+
     /// Breadth-first walk over re-export edges (`reexport_modules`), starting
     /// from `start` and visiting each reachable cached module — the start
     /// modules first, then whatever they re-export. `visit` returns
@@ -808,21 +842,10 @@ impl ModuleIndex {
         let path = std::fs::canonicalize(&path).unwrap_or(path);
         let cached = Arc::new(CachedModule::new(path, analysis.clone()));
         for sym in &analysis.symbols {
-            // Classes/typedefs (types), free functions, and FILE-SCOPE
-            // values (globals, object-like macros, enum constants). A
-            // file-scope value is a Variable whose scope is the file — locals
-            // (function-scoped) and struct/namespace members (their own
-            // body scope) are excluded by scope alone. A C enum constant
-            // leaks to file scope yet carries its parent enum as a *type*
-            // `package` (for hover); that annotation must NOT hide it from
-            // the by-name cross-file index, so key off scope, not package.
-            let is_file_value = matches!(sym.kind, SymKind::Variable)
-                && analysis
-                    .scopes
-                    .iter()
-                    .find(|s| s.id == sym.scope)
-                    .is_some_and(|s| matches!(s.kind, crate::file_analysis::ScopeKind::File));
-            if !(matches!(sym.kind, SymKind::Class | SymKind::Sub) || is_file_value) {
+            // The C-linkage surface (`FileAnalysis::is_linkage_visible`) —
+            // the same predicate completion gathering uses, so every name
+            // registered here is also offerable and vice versa.
+            if !analysis.is_linkage_visible(sym) {
                 continue;
             }
             self.workspace_modules.insert(sym.name.clone(), ());
