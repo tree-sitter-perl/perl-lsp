@@ -83,6 +83,16 @@ import (`use`), field slot = one shared subject. Same machinery, C surface.
    Residual: proto.h variadic decls (`Perl_croak(pTHX_ ..., ...)`) never
    register a Sub symbol — an extraction gap, so they're absent from BOTH
    goto-def and completion (same set, by construction).
+6c. **resolution CandidateSet** (`docs/adr/resolution-candidate-set.md`) —
+   THE structural fix for the recurring symmetry disease (5 instances: gr
+   matrix, completion gathering, C1 visibility, C2 rename, win32 ranking).
+   One semantic core `resolve(ctx, name) → CandidateSet` (candidates ∪
+   visibility ∪ edges ∪ ranking, computed once); every feature a projection.
+   Symmetry by construction, not diligence — the resolution tier's witness
+   bag. **Lands on MAIN first** (the seam isn't cpp-specific), then
+   main→spike merge migrates the cpp axes (ScopedLookup/delegation/
+   FileScopeValue) into it as the template arc's opening slice. Sequenced:
+   after wave-1/2 interim fixes stop the bleeding.
 7. **cruft cleanup pass** ⬜ NEXT — the arc accumulated fast:
    back-compat wrappers, superseded comments, dead gates, duplicated fixture
    shapes, always-`None` fields (e.g. `NominalDomain.storage`). A /simplify-
