@@ -795,6 +795,15 @@ pub fn index_pack_languages(
         }
         let pack_index = Arc::new(crate::module_index::ModuleIndex::new_for_cli());
         let conn = module_cache::open_cache_db(cache_key, lang);
+        // A generation built under different analysis inputs (toolchain
+        // change — or its probe FAILURE, which empties the system include
+        // roots) must not be warmed: hard-clear, same as `validate_inc_paths`.
+        if let (Some(ref conn), Some(driver)) = (&conn, reg.for_id(lang)) {
+            let _ = module_cache::validate_input_fingerprint(
+                conn,
+                driver.analysis_input_fingerprint(),
+            );
+        }
 
         // WARM: load valid cached analyses (keyed by file path), register
         // their classes, and remember which paths are fresh so the walk
@@ -855,6 +864,96 @@ pub fn index_pack_languages(
         hub.attach_pack_index(lang, pack_index);
     }
     total.load(Ordering::Relaxed)
+}
+
+/// In-session invalidation for a changed (saved/watched) or deleted pack
+/// file — the H1 seam. The include closure is the cross-file visibility
+/// key, so it is also the REVERSE-dependency key: a consumer is any
+/// registered file whose `include_closure` contains the changed path.
+/// Order matters: evict the per-file analysis caches FIRST (macro tables,
+/// pre-expanded variants, closures) so the re-analyses here — and the
+/// open documents' background refresh after — re-gather instead of
+/// serving the frozen tables. Blocking (Rayon inside); callers run it
+/// off the message loop.
+pub fn pack_file_changed(
+    root_uri: Option<&str>,
+    hub: &crate::module_index::ModuleIndex,
+    path: &std::path::Path,
+    deleted: bool,
+) {
+    use rayon::prelude::*;
+    use std::sync::Arc;
+    let reg = crate::language_driver::LanguageRegistry::with_enabled();
+    let Some(driver) = reg.for_path(path) else { return };
+    if driver.id() == "perl" {
+        return;
+    }
+    let lang = driver.id();
+    let canon = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let canon_str = canon.to_string_lossy().into_owned();
+    let pack = hub.pack_index(lang);
+
+    let mut consumers: Vec<PathBuf> = Vec::new();
+    if let Some(ref pack) = pack {
+        pack.for_each_registered_file(&mut |cm| {
+            if cm.analysis.include_closure.iter().any(|c| c == &canon_str) {
+                consumers.push(cm.path.clone());
+            }
+        });
+    }
+
+    let mut evict: std::collections::HashSet<PathBuf> = consumers.iter().cloned().collect();
+    evict.insert(canon.clone());
+    crate::cpp_reparse::evict_analysis_caches(&evict);
+
+    if deleted {
+        if let Some(ref pack) = pack {
+            pack.unregister_file(&canon);
+        }
+    }
+
+    // Re-analyze the changed file (unless deleted) + every consumer
+    // (parallel), then swap registrations. Unregister-then-register so names
+    // the new version no longer defines don't linger in `all_defs` / the
+    // cache winner slot. Consumers re-analyze on delete too — their splices
+    // and closures baked the departed header.
+    let mut targets: Vec<PathBuf> = Vec::with_capacity(consumers.len() + 1);
+    if !deleted {
+        targets.push(canon);
+    }
+    targets.extend(consumers);
+    targets.sort();
+    targets.dedup();
+    let results: Vec<(PathBuf, Arc<crate::file_analysis::FileAnalysis>)> = targets
+        .par_iter()
+        .filter_map(|p| {
+            let reg = crate::language_driver::LanguageRegistry::with_enabled();
+            let driver = reg.for_path(p).filter(|d| d.id() == lang)?;
+            let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let source = std::fs::read_to_string(p).ok()?;
+                Some(driver.analyze_with_path(&source, Some(p)))
+            }));
+            match res {
+                Ok(Some(analysis)) => Some((p.clone(), Arc::new(analysis))),
+                _ => None,
+            }
+        })
+        .collect();
+    if let Some(ref pack) = pack {
+        for (p, arc) in &results {
+            pack.unregister_file(p);
+            pack.register_symbols(p.clone(), arc.clone());
+        }
+    }
+    // Refresh the persisted rows so the next session warms the new
+    // generation (a consumer's OWN stamp didn't change — without this
+    // rewrite the deps_stamp check would force a cold re-analyze).
+    if let Some(conn) = module_cache::open_cache_db(root_uri, lang) {
+        for (p, arc) in &results {
+            let cached = Arc::new(CachedModule::new(p.clone(), arc.clone()));
+            module_cache::save_to_db(&conn, &p.to_string_lossy(), &Some(cached), "workspace");
+        }
+    }
 }
 
 /// Scan @INC directories for .pm files, populating the available_modules map.

@@ -2849,6 +2849,16 @@ pub struct FileAnalysis {
     #[serde(default)]
     pub include_closure: Vec<String>,
 
+    /// This analysis was produced from degraded inputs — a parse/extract
+    /// failure, or a skipped cross-file macro gather (the on-open
+    /// cached-only path). Degraded analyses may be SERVED (best effort
+    /// beats nothing) but must never be PERSISTED: a cache row is
+    /// validated only by its source file's stamp, so a frozen degraded
+    /// blob would be re-served every future session. serde(skip): warm
+    /// blobs are non-degraded by construction, no on-disk representation.
+    #[serde(skip, default)]
+    pub degraded: bool,
+
     /// Raw domain-typing sites: each `slot`-field access that interacts
     /// with a `value` token (`slot == V`, `slot = V`) at `slot_span`. The
     /// value's enum is resolved cross-file at query time (an enumerator
@@ -3162,6 +3172,7 @@ impl FileAnalysis {
             // `include_closure` by the driver (it holds the resolving file path).
             include_directives: Vec::new(),
             include_closure: Vec::new(),
+            degraded: false,
             scope_starts: Vec::new(),
             symbols_by_name: HashMap::new(),
             symbols_by_scope: HashMap::new(),

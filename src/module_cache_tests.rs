@@ -293,3 +293,119 @@ fn test_full_file_analysis_survives_roundtrip() {
 
     let _ = std::fs::remove_file(&pm);
 }
+
+/// M1: two same-length writes within the same whole second must still
+/// invalidate the row — the stamp is nanosecond-mtime + size, not whole
+/// seconds. Retries until both writes land in one second so the assertion
+/// exercises exactly the old failure window.
+#[test]
+fn same_second_same_size_rewrite_invalidates_row() {
+    let conn = test_db();
+    let dir = std::env::temp_dir();
+    let pm = dir.join("SubSecond_m1.pm");
+    let secs = |t: std::time::SystemTime| {
+        t.duration_since(std::time::SystemTime::UNIX_EPOCH).unwrap().as_secs()
+    };
+    for _ in 0..20 {
+        std::fs::write(&pm, "package SubSecond;\nsub a { 1 }\n1;\n").unwrap();
+        let s1 = std::fs::metadata(&pm).unwrap().modified().unwrap();
+        let source = std::fs::read_to_string(&pm).unwrap();
+        let cached = Some(parse_source_to_cached(&source, &pm));
+        save_to_db(&conn, "SubSecond", &cached, "import");
+        // Same byte length, different content.
+        std::fs::write(&pm, "package SubSecond;\nsub b { 2 }\n1;\n").unwrap();
+        let s2 = std::fs::metadata(&pm).unwrap().modified().unwrap();
+        if secs(s1) == secs(s2) {
+            let cache: DashMap<String, Option<Arc<CachedModule>>> = DashMap::new();
+            let (n, _) = warm_cache(&conn, &cache);
+            assert_eq!(n, 0, "same-second same-size rewrite must invalidate the row");
+            let _ = std::fs::remove_file(&pm);
+            return;
+        }
+        conn.execute("DELETE FROM modules", []).unwrap();
+    }
+    panic!("could not land both writes in one second");
+}
+
+/// M2: a consumer row is valid only while its whole include closure is
+/// unchanged — its OWN (stamp, size) can't see a header edit, the
+/// deps_stamp must.
+#[test]
+fn header_change_invalidates_consumer_row_via_deps_stamp() {
+    let conn = test_db();
+    let dir = std::env::temp_dir();
+    let hdr = dir.join("dep_hdr_m2.h");
+    std::fs::write(&hdr, "#define LIMIT 5\n").unwrap();
+    let hdr_canon = hdr.canonicalize().unwrap().to_string_lossy().into_owned();
+    let pm = dir.join("dep_consumer_m2.pm");
+    std::fs::write(&pm, "package Consumer;\n1;\n").unwrap();
+
+    let source = std::fs::read_to_string(&pm).unwrap();
+    let mut parser = tree_sitter::Parser::new();
+    parser.set_language(&ts_parser_perl::LANGUAGE.into()).unwrap();
+    let tree = parser.parse(&source, None).unwrap();
+    let mut fa = crate::builder::build(&tree, source.as_bytes());
+    fa.include_closure = vec![hdr_canon];
+    let cached = Some(Arc::new(CachedModule::new(pm.clone(), Arc::new(fa))));
+    save_to_db(&conn, "Consumer", &cached, "workspace");
+
+    // Unchanged closure → row warms.
+    let cache: DashMap<String, Option<Arc<CachedModule>>> = DashMap::new();
+    let (n, _) = warm_cache(&conn, &cache);
+    assert_eq!(n, 1, "row valid while the closure is unchanged");
+
+    // Header changes; the consumer file itself does not.
+    std::fs::write(&hdr, "#define LIMIT 5\n#define LIMIT2 7\n").unwrap();
+    let cache: DashMap<String, Option<Arc<CachedModule>>> = DashMap::new();
+    let (n, _) = warm_cache(&conn, &cache);
+    assert_eq!(n, 0, "header edit must invalidate the consumer's row");
+
+    let _ = std::fs::remove_file(&pm);
+    let _ = std::fs::remove_file(&hdr);
+}
+
+/// H8: a degraded analysis (parse/extract failure, skipped gather) must
+/// never be persisted — the row would validate on the source stamp alone
+/// and re-serve the degraded blob every future session.
+#[test]
+fn degraded_analysis_is_not_persisted() {
+    let conn = test_db();
+    let dir = std::env::temp_dir();
+    let pm = dir.join("Degraded_h8.pm");
+    std::fs::write(&pm, "package Degraded;\n1;\n").unwrap();
+
+    let source = std::fs::read_to_string(&pm).unwrap();
+    let mut parser = tree_sitter::Parser::new();
+    parser.set_language(&ts_parser_perl::LANGUAGE.into()).unwrap();
+    let tree = parser.parse(&source, None).unwrap();
+    let mut fa = crate::builder::build(&tree, source.as_bytes());
+    fa.degraded = true;
+    let cached = Some(Arc::new(CachedModule::new(pm.clone(), Arc::new(fa))));
+    save_to_db(&conn, "Degraded", &cached, "workspace");
+
+    let rows: i64 = conn
+        .query_row("SELECT COUNT(*) FROM modules", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(rows, 0, "degraded analyses must not reach the persist tier");
+    let _ = std::fs::remove_file(&pm);
+}
+
+/// H8: the analysis-input fingerprint (toolchain identity, including its
+/// probe FAILURE) hard-clears the table on change — a generation built
+/// under degraded/different inputs is never warmed under the current ones.
+#[test]
+fn input_fingerprint_change_clears_table() {
+    let conn = test_db();
+    validate_input_fingerprint(&conn, 0xA).unwrap();
+    save_to_db(&conn, "Foo", &None, "workspace");
+
+    validate_input_fingerprint(&conn, 0xA).unwrap();
+    let cache: DashMap<String, Option<Arc<CachedModule>>> = DashMap::new();
+    let (n, _) = warm_cache(&conn, &cache);
+    assert_eq!(n, 1, "same inputs: cache survives");
+
+    validate_input_fingerprint(&conn, 0xB).unwrap();
+    let cache: DashMap<String, Option<Arc<CachedModule>>> = DashMap::new();
+    let (n, _) = warm_cache(&conn, &cache);
+    assert_eq!(n, 0, "changed inputs: table cleared");
+}

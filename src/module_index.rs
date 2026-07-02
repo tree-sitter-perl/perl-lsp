@@ -913,6 +913,59 @@ impl ModuleIndex {
         }
     }
 
+    /// Remove a pack file's registrations: its `all_files` entry, its
+    /// candidates in `all_defs`, and any global cache-slot wins — re-picking
+    /// the winner among the remaining candidates with the SAME total order
+    /// registration uses, so the slot never dangles on a deleted/edited file.
+    /// The in-session inverse of `register_symbols` (deletes; and a changed
+    /// file unregisters first so names its new version no longer defines
+    /// don't linger).
+    pub fn unregister_file(&self, path: &std::path::Path) {
+        let canon = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+        let Some((_, old)) = self.all_files.remove(&canon) else { return };
+        for sym in &old.analysis.symbols {
+            if !old.analysis.is_linkage_visible(sym) {
+                continue;
+            }
+            if let Some(mut v) = self.all_defs.get_mut(&sym.name) {
+                v.retain(|c| c.path != canon);
+            }
+            self.all_defs.remove_if(&sym.name, |_, v| v.is_empty());
+            let survivor = self
+                .all_defs
+                .get(&sym.name)
+                .and_then(|v| best_candidate(&v.iter().collect::<Vec<_>>(), &sym.name));
+            // Only touch the cache slot if the departing file held it.
+            let held = self
+                .cache
+                .get(&sym.name)
+                .map(|e| matches!(e.value(), Some(c) if c.path == canon))
+                .unwrap_or(false);
+            if held {
+                match survivor {
+                    Some(cand) => {
+                        self.cache.insert(sym.name.clone(), Some(cand));
+                    }
+                    None => {
+                        self.cache.remove(&sym.name);
+                    }
+                }
+            }
+            if !self.all_defs.contains_key(&sym.name) {
+                self.workspace_modules.remove(&sym.name);
+            }
+        }
+    }
+
+    /// Every file registered via `register_symbols` — the reverse-dependency
+    /// sweep surface (a changed header's consumers are the registered files
+    /// whose `include_closure` contains it).
+    pub fn for_each_registered_file(&self, f: &mut dyn FnMut(&Arc<CachedModule>)) {
+        for entry in self.all_files.iter() {
+            f(entry.value());
+        }
+    }
+
     /// Rebuild the reverse index (`func → modules`) from the current cache.
     /// `warm_cache` writes straight into `cache_raw()` and never touches the
     /// reverse index, so a CLI/full-startup warm path that skips this leaves

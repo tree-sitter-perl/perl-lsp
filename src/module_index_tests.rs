@@ -376,3 +376,70 @@ fn visible_defs_with_prefix_gates_on_closure() {
     // Empty closure ⇒ nothing (no global fallback for gathering).
     assert!(idx.visible_defs_with_prefix("OP_", &HashSet::new()).is_empty());
 }
+
+/// The in-session inverse of `register_symbols` (H1): unregistering a file
+/// removes its `all_defs` candidates and re-picks the global cache winner
+/// among the survivors with the SAME total order registration uses.
+#[cfg(feature = "cpp")]
+#[test]
+fn unregister_file_removes_defs_and_repicks_winner() {
+    use std::collections::HashSet;
+    let reg = crate::language_driver::LanguageRegistry::with_enabled();
+    let driver = reg.for_id("cpp").expect("cpp driver");
+    let a = Arc::new(driver.analyze_with_path(
+        "class Box { public: void a_only(); };\n",
+        Some(std::path::Path::new("/fake/a.cpp")),
+    ));
+    let b = Arc::new(driver.analyze_with_path(
+        "class Box { public: void b_only(); };\n",
+        Some(std::path::Path::new("/fake/b.cpp")),
+    ));
+    let idx = ModuleIndex::new_for_test();
+    idx.register_symbols(PathBuf::from("/fake/a.cpp"), a);
+    idx.register_symbols(PathBuf::from("/fake/b.cpp"), b);
+
+    let has = |m: &Option<Arc<CachedModule>>, name: &str| {
+        m.as_ref()
+            .is_some_and(|c| c.analysis.symbols.iter().any(|s| s.name == name))
+    };
+    // a.cpp holds the winner slot (smallest path).
+    assert!(has(&idx.get_cached("Box"), "a_only"));
+
+    idx.unregister_file(std::path::Path::new("/fake/a.cpp"));
+    // The slot re-picks the surviving candidate...
+    assert!(has(&idx.get_cached("Box"), "b_only"));
+    // ...and the departed candidate is gone from the scoped view too.
+    let scope: HashSet<String> = ["/fake/a.cpp".to_string()].into_iter().collect();
+    assert!(has(&idx.get_cached_scoped("Box", &scope), "b_only"));
+
+    idx.unregister_file(std::path::Path::new("/fake/b.cpp"));
+    assert!(idx.get_cached("Box").is_none(), "no survivors: slot removed");
+}
+
+/// A changed file re-registers via unregister-then-register (the
+/// `pack_file_changed` swap): names its new version no longer defines
+/// must not linger in any view.
+#[cfg(feature = "cpp")]
+#[test]
+fn edit_swap_drops_names_the_new_version_lost() {
+    let reg = crate::language_driver::LanguageRegistry::with_enabled();
+    let driver = reg.for_id("cpp").expect("cpp driver");
+    let v1 = Arc::new(driver.analyze_with_path(
+        "class Box { public: int w; };\nint helper();\n",
+        Some(std::path::Path::new("/fake/edit.h")),
+    ));
+    let idx = ModuleIndex::new_for_test();
+    idx.register_symbols(PathBuf::from("/fake/edit.h"), v1);
+    assert!(idx.get_cached("Box").is_some());
+    assert!(idx.get_cached("helper").is_some());
+
+    let v2 = Arc::new(driver.analyze_with_path(
+        "class Crate { public: int w; };\n",
+        Some(std::path::Path::new("/fake/edit.h")),
+    ));
+    idx.unregister_file(std::path::Path::new("/fake/edit.h"));
+    idx.register_symbols(PathBuf::from("/fake/edit.h"), v2);
+    assert!(idx.get_cached("Box").is_none(), "dropped class gone");
+    assert!(idx.get_cached("helper").is_none(), "dropped function gone");
+    assert!(idx.get_cached("Crate").is_some(), "new class registered");
+}

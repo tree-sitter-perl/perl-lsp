@@ -762,8 +762,9 @@ pub fn preprocess_validated_with(
 /// gather walks the whole include closure (perl.h reaches ~2000 macros over
 /// hundreds of headers — seconds cold), so re-running it per completion
 /// keystroke is untenable. The analyze pass warms this on open; completion
-/// reuses it for free. Invalidates when the file's `#include` lines change
-/// (header *content* edits mid-session aren't tracked — reopen to refresh).
+/// reuses it for free. Invalidates when the file's `#include` lines change;
+/// header *content* edits evict through `evict_analysis_caches` (the
+/// did_save / watched-files invalidation path).
 type MacroTable = BTreeMap<String, Macro>;
 fn macro_table_cache() -> &'static std::sync::Mutex<
     std::collections::HashMap<std::path::PathBuf, (u64, std::sync::Arc<MacroTable>)>,
@@ -790,15 +791,20 @@ fn include_set_hash(src: &str) -> u64 {
 
 /// Bump when the persisted macro-table format or the gather's semantics
 /// change in a way that invalidates on-disk blobs.
-const MACRO_CACHE_VERSION: i64 = 2;
+const MACRO_CACHE_VERSION: i64 = 3;
 
 #[derive(serde::Serialize, serde::Deserialize)]
 struct PersistedMacros {
     include_hash: u64,
     version: i64,
-    /// Every transitively-#included header + its mtime — the table is valid
-    /// only while none of them changed (cross-session correctness; the
-    /// in-memory cache leans on include_hash alone within a session).
+    /// The toolchain the gather resolved system includes against — a probe
+    /// failure (or a compiler upgrade) changes which headers the closure
+    /// reaches, so a table built under one toolchain must not validate
+    /// under another.
+    toolchain: u64,
+    /// Every transitively-#included header + its content stamp — the table
+    /// is valid only while none of them changed (cross-session correctness;
+    /// the in-memory cache leans on include_hash alone within a session).
     headers: Vec<(std::path::PathBuf, i64)>,
     table: MacroTable,
 }
@@ -833,10 +839,13 @@ fn load_persisted(file_path: &std::path::Path, inc_hash: u64) -> Option<MacroTab
     let p = persist_path(file_path)?;
     let raw = zstd::decode_all(std::fs::read(&p).ok()?.as_slice()).ok()?;
     let pm: PersistedMacros = bincode::deserialize(&raw).ok()?;
-    if pm.include_hash != inc_hash || pm.version != MACRO_CACHE_VERSION {
+    if pm.include_hash != inc_hash
+        || pm.version != MACRO_CACHE_VERSION
+        || pm.toolchain != toolchain_fingerprint()
+    {
         return None;
     }
-    if pm.headers.iter().any(|(hp, mt)| mtime_secs(hp) != *mt) {
+    if pm.headers.iter().any(|(hp, st)| file_stamp(hp) != *st) {
         return None; // a header changed on disk
     }
     Some(pm.table)
@@ -849,7 +858,13 @@ fn save_persisted(
     table: &MacroTable,
 ) {
     let Some(p) = persist_path(file_path) else { return };
-    let pm = PersistedMacros { include_hash: inc_hash, version: MACRO_CACHE_VERSION, headers, table: table.clone() };
+    let pm = PersistedMacros {
+        include_hash: inc_hash,
+        version: MACRO_CACHE_VERSION,
+        toolchain: toolchain_fingerprint(),
+        headers,
+        table: table.clone(),
+    };
     if let Ok(raw) = bincode::serialize(&pm) {
         if let Ok(z) = zstd::encode_all(raw.as_slice(), 3) {
             let _ = std::fs::write(&p, z);
@@ -958,11 +973,21 @@ pub struct PreExpandedExternal {
     /// `is_identifier_alias`-retained BEFORE expansion, matching the old
     /// merge-then-retain-then-fixpoint order.
     alias: ExpandedVariant,
+    /// The gather was SKIPPED (cached-only miss on open), not run: this
+    /// empty table is a stand-in, not the truth. Analyses built from it
+    /// are marked degraded so the persist tier never freezes them.
+    pub degraded: bool,
 }
 
 impl PreExpandedExternal {
     pub fn empty() -> Self {
         Self::default()
+    }
+
+    /// The cached-only miss: empty AND flagged so downstream consumers know
+    /// the external table is a placeholder, not a real (possibly empty) gather.
+    fn degraded_empty() -> Self {
+        PreExpandedExternal { degraded: true, ..Self::default() }
     }
 
     fn from_raw(raw: std::sync::Arc<MacroTable>) -> Self {
@@ -976,7 +1001,7 @@ impl PreExpandedExternal {
             alias_src.retain(|_, m| is_identifier_alias(m));
             (full, ExpandedVariant::of(&alias_src))
         });
-        PreExpandedExternal { raw, full, alias }
+        PreExpandedExternal { raw, full, alias, degraded: false }
     }
 
     fn variant(&self, alias_only: bool) -> &ExpandedVariant {
@@ -1055,7 +1080,7 @@ pub fn included_macros_pre_expanded(
     // table lands cleanly once it warms and this file is re-analyzed.
     let raw = match included_macros_inner(file_path, src, parser, !gather_cached_only()) {
         Some(raw) => raw,
-        None => return std::sync::Arc::new(PreExpandedExternal::empty()),
+        None => return std::sync::Arc::new(PreExpandedExternal::degraded_empty()),
     };
     let pe = std::sync::Arc::new(PreExpandedExternal::from_raw(raw));
     if let Ok(mut cache) = pre_expanded_cache().lock() {
@@ -1139,7 +1164,7 @@ fn gather_included_macros(
         let mut next: Vec<std::path::PathBuf> = Vec::new();
         for (canon, info) in level.iter().zip(infos) {
             let Some(info) = info else { continue };
-            headers.push((canon.clone(), mtime_secs(canon)));
+            headers.push((canon.clone(), file_stamp(canon)));
             for (k, v) in &info.macros {
                 macros.entry(k.clone()).or_insert_with(|| v.clone());
             }
@@ -1154,15 +1179,22 @@ fn gather_included_macros(
     (macros, headers)
 }
 
-/// File mtime in whole seconds since the epoch (0 if unreadable) — the
-/// persisted macro table's per-header validation stamp.
-fn mtime_secs(path: &std::path::Path) -> i64 {
-    std::fs::metadata(path)
-        .and_then(|m| m.modified())
-        .ok()
-        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
+/// The persisted macro table's per-header validation stamp: a hash of
+/// (mtime nanos, size). Whole-second mtimes miss two same-length writes
+/// within one second (generated headers, rapid saves) — nanosecond
+/// precision plus size closes that window. 0 if unreadable.
+fn file_stamp(path: &std::path::Path) -> i64 {
+    use std::hash::{Hash, Hasher};
+    let Ok(meta) = std::fs::metadata(path) else { return 0 };
+    let Ok(mtime) = meta.modified() else { return 0 };
+    let nanos = mtime
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    nanos.hash(&mut h);
+    meta.len().hash(&mut h);
+    h.finish() as i64
 }
 
 /// A header's cached (macros + include edges), by (path, mtime). The cache
@@ -1221,6 +1253,26 @@ pub fn toolchain_info() -> Option<&'static crate::cpp_toolchain::ToolchainInfo> 
             .and_then(|c| crate::cpp_toolchain::probe(&c, None))
     })
     .as_ref()
+}
+
+/// Identity of the analysis-input toolchain: compiler version + system
+/// include roots + predefined macros, or a distinct sentinel when the probe
+/// failed. Rides every persist-tier validation key (macro tables, the
+/// pack modules DB) so a degraded generation — probe failure silently
+/// emptying the system include roots — can never freeze into the cache
+/// and be re-served after the toolchain comes back.
+pub fn toolchain_fingerprint() -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    match toolchain_info() {
+        Some(t) => {
+            t.compiler_version.hash(&mut h);
+            t.include_dirs.hash(&mut h);
+            t.predefined_macros.hash(&mut h);
+        }
+        None => "no-toolchain".hash(&mut h),
+    }
+    h.finish()
 }
 
 /// System/stdlib include roots, in compiler search order — the `<...>` fallback
@@ -1357,6 +1409,35 @@ pub fn include_closure(file_path: &std::path::Path, src: &str) -> Vec<String> {
         cache.insert(key, (inc_hash, std::sync::Arc::new(out.clone())));
     }
     out
+}
+
+/// Drop every per-file analysis cache entry for the given files (CANONICAL
+/// paths): the tier-1 macro table, its pre-expanded variants, the include
+/// closure, and the header parse cache. The in-session invalidation seam —
+/// a saved/changed pack file evicts itself + every consumer whose closure
+/// contains it, so the next analyze re-gathers instead of serving the
+/// frozen table (cache keys are whatever path `analyze_with_path` got, so
+/// membership is checked on the canonicalized key).
+pub fn evict_analysis_caches(files: &std::collections::HashSet<std::path::PathBuf>) {
+    let hit = |key: &std::path::PathBuf| {
+        files.contains(key)
+            || key
+                .canonicalize()
+                .map(|c| files.contains(&c))
+                .unwrap_or(false)
+    };
+    if let Ok(mut c) = macro_table_cache().lock() {
+        c.retain(|k, _| !hit(k));
+    }
+    if let Ok(mut c) = pre_expanded_cache().lock() {
+        c.retain(|k, _| !hit(k));
+    }
+    if let Ok(mut c) = include_closure_cache().lock() {
+        c.retain(|k, _| !hit(k));
+    }
+    if let Ok(mut c) = header_cache().lock() {
+        c.retain(|k, _| !hit(k));
+    }
 }
 
 fn include_paths(src: &str, parser: &mut tree_sitter::Parser) -> Vec<String> {
