@@ -54,6 +54,15 @@ import (`use`), field slot = one shared subject. Same machinery, C surface.
    fixtures, close every gd-only asymmetry through the `refs_to`/
    `resolve_symbol` seam, lock each kind as a GOLD PAIR (gd row + gr row).
    Known-dark: enum-variant gr, macro-at-`#define` gr.
+6b. **cross-file identifier completion** 🔵 (parallel with #6 — disjoint files) —
+   editor-found: completing in op.c offers NO `OP_NULL`/opcode entries. CLI
+   confirms: cpp bare-identifier completion candidates are SAME-FILE ONLY
+   (`PERL_IN_OP_C`, `op_p`, …) — the cross-file index is never consulted for
+   gathering. The completion face of "C = Perl, everything exported": candidates
+   must include include-closure-visible file-scope symbols (enum constants,
+   functions, macros, typedefs), reusing the visibility slice's `include_closure`
+   + `ScopedLookup` (built for resolution, unused for gathering). The minimal
+   fixture masked it (same-file enum) — real-file validation required.
 7. **cruft cleanup pass** ⬜ NEXT (after #6) — the arc accumulated fast:
    back-compat wrappers, superseded comments, dead gates, duplicated fixture
    shapes, always-`None` fields (e.g. `NominalDomain.storage`). A /simplify-
