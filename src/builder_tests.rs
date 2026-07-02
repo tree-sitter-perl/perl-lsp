@@ -5408,7 +5408,7 @@ sub run {
                 owner: HandlerOwner::Class("Producer".to_string()),
                 name: "ready".to_string(),
             },
-            method_classes: Vec::new(), scope: crate::resolve::OverrideScope::Dispatch,
+            method_classes: Vec::new(), scope: crate::resolve::OverrideScope::Dispatch, def_paths: Vec::new(),
         },
         RoleMask::EDITABLE,
     );
@@ -11972,7 +11972,7 @@ fn sub_exporter_member_goto_def_and_references() {
             kind: TargetKind::Sub {
                 package: Some("My::Exp".to_string()),
             },
-            method_classes: Vec::new(), scope: crate::resolve::OverrideScope::Dispatch,
+            method_classes: Vec::new(), scope: crate::resolve::OverrideScope::Dispatch, def_paths: Vec::new(),
         },
         RoleMask::EDITABLE,
     );
@@ -12620,7 +12620,7 @@ sub go {
             &TargetRef {
                 name: name.to_string(),
                 kind: TargetKind::Sub { package: Some("Foo".to_string()) },
-                method_classes: Vec::new(), scope: crate::resolve::OverrideScope::Dispatch,
+                method_classes: Vec::new(), scope: crate::resolve::OverrideScope::Dispatch, def_paths: Vec::new(),
             },
             RoleMask::EDITABLE,
         );
@@ -12738,7 +12738,7 @@ sub go {
             &TargetRef {
                 name: name.to_string(),
                 kind: TargetKind::Sub { package: Some("Foo".to_string()) },
-                method_classes: Vec::new(), scope: crate::resolve::OverrideScope::Dispatch,
+                method_classes: Vec::new(), scope: crate::resolve::OverrideScope::Dispatch, def_paths: Vec::new(),
             },
             RoleMask::EDITABLE,
         );
@@ -13505,7 +13505,7 @@ sub retry {
             kind: TargetKind::Sub {
                 package: Some("QA::C".to_string()),
             },
-            method_classes: Vec::new(), scope: crate::resolve::OverrideScope::Dispatch,
+            method_classes: Vec::new(), scope: crate::resolve::OverrideScope::Dispatch, def_paths: Vec::new(),
         },
         RoleMask::EDITABLE,
     );
@@ -13625,7 +13625,7 @@ sub opt_b { 'b' }
             kind: TargetKind::Sub {
                 package: Some("QA::E".to_string()),
             },
-            method_classes: Vec::new(), scope: crate::resolve::OverrideScope::Dispatch,
+            method_classes: Vec::new(), scope: crate::resolve::OverrideScope::Dispatch, def_paths: Vec::new(),
         },
         RoleMask::EDITABLE,
     );

@@ -595,26 +595,27 @@ impl Backend {
     }
 }
 
-/// Build a WorkspaceEdit by finding every reference to `target` in the editable
-/// workspace and replacing each ref's span with `new_name`.
+/// Build a WorkspaceEdit by finding every reference to `target` and replacing
+/// each ref's span with `new_name`.
 ///
 /// Rename shares the same resolution path as references — both go through
-/// `refs_to(EDITABLE)`. This is the single place that decides which spans get
-/// edited, so rename and references can't diverge on which call sites qualify.
-/// `refs_to` handles inheritance fan-out for Method targets (via
-/// `method_rename_chain`) so callers on child classes of a base method are
-/// included without any special-casing here.
+/// `refs_to`. `resolve::rename_locations` is the single policy point deciding
+/// which spans get edited (mask per routing: Perl stops at EDITABLE, pack
+/// widens to its per-language cache) and when to REFUSE instead of emitting a
+/// partial edit — so rename and references can't diverge on which call sites
+/// qualify, and a refusal reads the same over LSP and CLI. `refs_to` handles
+/// inheritance fan-out for Method targets (via `method_rename_chain`) so
+/// callers on child classes of a base method are included without any
+/// special-casing here.
 fn rename_via_refs_to(
     files: &FileStore,
     module_index: Option<&dyn crate::file_analysis::CrossFileLookup>,
     target: &crate::resolve::TargetRef,
     new_name: &str,
-) -> Option<WorkspaceEdit> {
-    use crate::resolve::{refs_to, RoleMask};
-
-    // Rename must not touch deps — EDITABLE stops at workspace/open files.
-    let locations = refs_to(files, module_index, target, RoleMask::EDITABLE);
-    locations_to_workspace_edit(locations, new_name)
+    pack: bool,
+) -> std::result::Result<Option<WorkspaceEdit>, String> {
+    let locations = crate::resolve::rename_locations(files, module_index, target, pack)?;
+    Ok(locations_to_workspace_edit(locations, new_name))
 }
 
 /// `(RefLocation, text)` pairs → one `WorkspaceEdit` (per-member texts).
@@ -1072,13 +1073,25 @@ impl LanguageServer for Backend {
 
         use crate::resolve::{implementations_of, resolve_symbol, ResolvedTarget};
         let point = symbols::position_to_point(pos);
-        let target = match resolve_symbol(&doc.analysis, point, Some(&*self.module_index)) {
+        // Same pack routing + include-closure scope as references/rename, so
+        // the resolved target can't diverge across the three verbs.
+        let pack = (doc.language != "perl")
+            .then(|| self.module_index.pack_index(doc.language))
+            .flatten();
+        let base_idx: &dyn crate::file_analysis::CrossFileLookup = match pack.as_deref() {
+            Some(i) => i,
+            None => &*self.module_index,
+        };
+        let self_path = uri.to_file_path().ok();
+        let scoped = crate::file_analysis::ScopedLookup::new(
+            base_idx, &doc.analysis.include_closure, self_path.as_deref());
+        let target = match resolve_symbol(&doc.analysis, point, Some(&scoped)) {
             Some(ResolvedTarget::Target(t)) => t,
             // Groups (field projections) and lexicals have no
             // descendant-implementation semantics.
             _ => return Ok(None),
         };
-        let results = implementations_of(&doc.analysis, Some(&*self.module_index), &target);
+        let results = implementations_of(&doc.analysis, Some(&scoped), &target);
         drop(doc);
         Ok(refs_to_locations(results).map(GotoDefinitionResponse::Array))
     }
@@ -1186,6 +1199,25 @@ impl LanguageServer for Backend {
             None => return Ok(None),
         };
         let point = symbols::position_to_point(params.position);
+        // Same pack routing as the rename handler, so this gate probes the
+        // target rename would actually act on.
+        let pack = (doc.language != "perl")
+            .then(|| self.module_index.pack_index(doc.language))
+            .flatten();
+        let base_idx: &dyn crate::file_analysis::CrossFileLookup = match pack.as_deref() {
+            Some(i) => i,
+            None => &*self.module_index,
+        };
+        let self_path = params.text_document.uri.to_file_path().ok();
+        let scoped = crate::file_analysis::ScopedLookup::new(
+            base_idx, &doc.analysis.include_closure, self_path.as_deref());
+        // The rename box's range + placeholder, captured while the doc lock is
+        // held (the pack probe below drops it before walking the store).
+        let box_at = doc
+            .analysis
+            .symbol_at(point)
+            .map(|sym| (sym.selection_span, sym.name.clone()))
+            .or_else(|| doc.analysis.ref_at(point).map(|r| (r.span, r.target_name.clone())));
         // Only offer a rename box where `rename` would actually produce edits.
         // Accepting on any `symbol_at`/`ref_at` hit is a UX trap: positions like
         // `@_` or an ownerless constructor key resolve to nothing renameable, so
@@ -1196,10 +1228,20 @@ impl LanguageServer for Backend {
         let renameable = match resolve_symbol_scoped(
             &doc.analysis,
             point,
-            Some(&*self.module_index),
+            Some(&scoped),
             self.override_scope(),
         ) {
-            Some(ResolvedTarget::Target(t)) if t.supports_cross_file_rename() => true,
+            Some(ResolvedTarget::Target(t)) if t.supports_cross_file_rename() => {
+                if pack.is_some() {
+                    // Reflect reality: reject what rename would refuse (an
+                    // alias-spelled site in the set) or no-op on.
+                    drop(doc);
+                    crate::resolve::rename_locations(&self.files, Some(base_idx), &t, true)
+                        .is_ok_and(|locs| locs.iter().any(|l| l.rewritable))
+                } else {
+                    true
+                }
+            }
             Some(ResolvedTarget::Group { .. }) => true,
             Some(_) => doc.analysis.rename_at(point, "x").is_some_and(|e| !e.is_empty()),
             None => false,
@@ -1207,19 +1249,10 @@ impl LanguageServer for Backend {
         if !renameable {
             return Ok(None);
         }
-        if let Some(sym) = doc.analysis.symbol_at(point) {
-            return Ok(Some(PrepareRenameResponse::RangeWithPlaceholder {
-                range: symbols::span_to_range(sym.selection_span),
-                placeholder: sym.name.clone(),
-            }));
-        }
-        if let Some(r) = doc.analysis.ref_at(point) {
-            return Ok(Some(PrepareRenameResponse::RangeWithPlaceholder {
-                range: symbols::span_to_range(r.span),
-                placeholder: r.target_name.clone(),
-            }));
-        }
-        Ok(None)
+        Ok(box_at.map(|(span, placeholder)| PrepareRenameResponse::RangeWithPlaceholder {
+            range: symbols::span_to_range(span),
+            placeholder,
+        }))
     }
 
     async fn rename(&self, params: RenameParams) -> Result<Option<WorkspaceEdit>> {
@@ -1239,10 +1272,25 @@ impl LanguageServer for Backend {
         };
 
         let point = symbols::position_to_point(pos);
-        match resolve_symbol_scoped(&doc.analysis, point, Some(&*self.module_index), self.override_scope()) {
+        // Pack languages resolve + collect through their sub-index, scoped to
+        // this file's include closure — the same preamble references uses, or
+        // rename resolves a different target than references just listed.
+        let pack = (doc.language != "perl")
+            .then(|| self.module_index.pack_index(doc.language))
+            .flatten();
+        let base_idx: &dyn crate::file_analysis::CrossFileLookup = match pack.as_deref() {
+            Some(i) => i,
+            None => &*self.module_index,
+        };
+        let self_path = uri.to_file_path().ok();
+        let scoped = crate::file_analysis::ScopedLookup::new(
+            base_idx, &doc.analysis.include_closure, self_path.as_deref());
+        match resolve_symbol_scoped(&doc.analysis, point, Some(&scoped), self.override_scope()) {
             Some(ResolvedTarget::Target(target)) if target.supports_cross_file_rename() => {
+                let is_pack = pack.is_some();
                 drop(doc);
-                Ok(rename_via_refs_to(&self.files, Some(&*self.module_index), &target, new_name))
+                rename_via_refs_to(&self.files, Some(base_idx), &target, new_name, is_pack)
+                    .map_err(tower_lsp::jsonrpc::Error::invalid_params)
             }
             Some(ResolvedTarget::Group { local_spans, pinned_spans, members }) => {
                 // Every spelling of the group, everywhere editable; each
