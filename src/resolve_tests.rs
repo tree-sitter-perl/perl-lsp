@@ -4213,3 +4213,19 @@ fn candidate_set_local_projections() {
     assert_eq!(edits.len(), 3, "rename covers the same in-file set: {edits:?}");
     assert!(cs.implementations().is_empty());
 }
+
+/// Goto-def is the forward projection of the same set: cursor on a call,
+/// definitions() lands on the decl in the origin file.
+#[test]
+fn candidate_set_definitions_local() {
+    let store = FileStore::new();
+    let src = "sub greet { 1 }\ngreet();\n";
+    let fa = parse(src);
+    let key = FileKey::Path(PathBuf::from("/tmp/cs_defs.pl"));
+    // Cursor on the call `greet` (row 1, col 2).
+    let cs = resolve(&store, &fa, key, tree_sitter::Point { row: 1, column: 2 }, None, OverrideScope::default());
+    let defs = cs.definitions();
+    assert_eq!(defs.len(), 1, "one local def: {defs:?}");
+    assert_eq!(defs[0].span.start.row, 0, "decl on line 0: {defs:?}");
+    assert_eq!(defs[0].access, AccessKind::Declaration);
+}

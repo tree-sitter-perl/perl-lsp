@@ -4,12 +4,13 @@ use tree_sitter::{Point, Tree};
 
 use crate::cursor_context::{self, CursorContext};
 use crate::file_analysis::{
-    contains_point, format_inferred_type, CompletionCandidate, CrossFileLookup, FileAnalysis, FoldKind,
+    format_inferred_type, CompletionCandidate, CrossFileLookup, FileAnalysis, FoldKind,
     HandlerOwner, InferredType, OutlineSymbol, ParamInfo, RefKind, Span,
     SymKind as FaSymKind, SymbolDetail, PRIORITY_AUTO_ADD_QW, PRIORITY_BARE_IMPORT,
     PRIORITY_EXPLICIT_IMPORT, PRIORITY_UNIMPORTED,
 };
 use crate::module_index::{CachedModule, ModuleIndex, SubInfo};
+use crate::resolve::{resolve_imported_function, ImportResolution};
 use std::sync::Arc;
 
 // ---- Coordinate conversion ----
@@ -177,296 +178,37 @@ pub fn symbol_to_workspace_info(sym: &crate::file_analysis::Symbol, uri: Url) ->
     })
 }
 
+/// Goto-definition: the forward projection of the resolution CandidateSet,
+/// adapted to LSP types. One location → Scalar; several (stacked handler
+/// registrations) → Array so the editor shows a picker.
 pub fn find_definition(
+    files: &crate::file_store::FileStore,
     analysis: &FileAnalysis,
     pos: Position,
     uri: &Url,
     module_index: &ModuleIndex,
 ) -> Option<GotoDefinitionResponse> {
-    let point = position_to_point(pos);
-
-    // Query-time dispatch goto-def: a `$minion->enqueue('task')` whose
-    // receiver isa-resolves (possibly cross-file) jumps to the handler, even
-    // when no `DispatchCall` ref was materialized for this site. The gate is
-    // applied in `dispatch_at`; we just map the resolved handler to its
-    // definition. Runs before `find_definition` because the cursor is on the
-    // name-string arg, which `find_definition` would otherwise treat as a
-    // plain string literal. See `docs/adr/receiver-gated-dispatch.md`.
-    if let Some(applied) = analysis.dispatch_at(point, Some(module_index)) {
-        if let Some(resp) = dispatch_handler_locations(&applied.owner, &applied.name, module_index) {
-            return Some(resp);
-        }
+    let cs = crate::resolve::resolve(
+        files,
+        analysis,
+        crate::file_store::FileKey::Url(uri.clone()),
+        position_to_point(pos),
+        Some(module_index),
+        crate::resolve::OverrideScope::default(),
+    );
+    let locs: Vec<Location> = cs
+        .definitions()
+        .into_iter()
+        .filter_map(|l| {
+            let uri = l.to_url()?;
+            Some(Location { uri, range: span_to_range(l.span) })
+        })
+        .collect();
+    match locs.len() {
+        0 => None,
+        1 => Some(GotoDefinitionResponse::Scalar(locs.into_iter().next().unwrap())),
+        _ => Some(GotoDefinitionResponse::Array(locs)),
     }
-
-    // Try local definition first
-    if let Some(span) = analysis.find_definition(point, Some(module_index)) {
-        return Some(GotoDefinitionResponse::Scalar(Location {
-            uri: uri.clone(),
-            range: span_to_range(span),
-        }));
-    }
-
-    // Cross-file hash-key defs. Two shapes share the lookup:
-    //   * deferred ctor key (`owner: None`) — the build-time gate
-    //     couldn't see the class; derive the owner now (enclosing call's
-    //     invocant class, index in hand);
-    //   * resolved Class owner (`$row->{name}` upgraded post-fold to
-    //     `Class(NestedRow)`) whose class — and therefore its
-    //     `add_columns` / `has` / `:param` HashKeyDef — lives elsewhere.
-    // Either way: the class's cached analysis carries the def.
-    if let Some(r) = analysis.ref_at(point) {
-        if let RefKind::HashKeyAccess { ref owner, .. } = r.kind {
-            let owner = match owner {
-                Some(o) => Some(o.clone()),
-                None => analysis.deferred_hash_key_owner(r, Some(module_index)),
-            };
-            let class = match &owner {
-                Some(crate::file_analysis::HashKeyOwner::Sub { package: Some(c), .. }) => {
-                    Some(c.clone())
-                }
-                Some(crate::file_analysis::HashKeyOwner::Class(c)) => Some(c.clone()),
-                _ => None,
-            };
-            if let (Some(owner), Some(class)) = (owner, class) {
-                if let Some(cached) = module_index.get_cached(&class) {
-                    if let Some(def) = cached
-                        .analysis
-                        .hash_key_defs_for_owner(&owner)
-                        .into_iter()
-                        .find(|d| d.name == r.target_name)
-                    {
-                        if let Ok(module_uri) = Url::from_file_path(&cached.path) {
-                            return Some(GotoDefinitionResponse::Scalar(Location {
-                                uri: module_uri,
-                                range: span_to_range(def.selection_span),
-                            }));
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    // Check if cursor is on a function call that matches an imported symbol
-    if let Some(r) = analysis.ref_at(point) {
-        if matches!(r.kind, RefKind::FunctionCall { .. }) {
-            if let Some((import, module_path, remote_name)) =
-                resolve_imported_function(analysis, &r.target_name, module_index)
-            {
-                // Jump to the module's use statement in the current file
-                // (or the .pm file if we can resolve it). Cross-file
-                // sub_info lookup uses REMOTE name — distinct from
-                // target_name for renaming imports.
-                // Re-export aware: the def may live in a module `import.module_name`
-                // re-exports (Test::Most → Test::More's `ok`). Chase the edges to
-                // the defining module; fall back to the directly-`use`d path.
-                let defining = module_index.defining_module_cached(&import.module_name, &remote_name);
-                let module_path = defining
-                    .as_ref()
-                    .map(|m| m.path.clone())
-                    .unwrap_or(module_path);
-                if let Ok(module_uri) = Url::from_file_path(&module_path) {
-                    // The defining sub's line in the .pm — `Some` only when the
-                    // module (or one it re-exports) defines the remote name.
-                    let def_line = defining
-                        .and_then(|cached| cached.sub_info(&remote_name).map(|s| s.def_line()));
-
-                    // One-hop to the defining sub whenever we actually know
-                    // where it is (cursor on the call site OR on the import
-                    // name). Landing on the local `use` line was never the
-                    // goal — it's the consumer's import, not the definition.
-                    // The two-element Array (use stmt + def) made many editors
-                    // jump to the first entry = the `use` line. When the module
-                    // isn't cached (`def_line` is None) we can't pin the sub, so
-                    // fall back to the local `use` statement — an acceptable
-                    // landing until the resolver warms that module.
-                    if let Some(line) = def_line {
-                        return Some(GotoDefinitionResponse::Scalar(Location {
-                            uri: module_uri,
-                            range: Range {
-                                start: Position { line, character: 0 },
-                                end: Position { line, character: 0 },
-                            },
-                        }));
-                    }
-
-                    // Cursor on the import name with an unresolved def: jump to
-                    // the top of the .pm (better than the consumer's use line).
-                    if contains_point(&import.span, point) {
-                        return Some(GotoDefinitionResponse::Scalar(Location {
-                            uri: module_uri,
-                            range: Range::default(),
-                        }));
-                    }
-                }
-                // Fall back to just the use statement
-                return Some(GotoDefinitionResponse::Scalar(Location {
-                    uri: uri.clone(),
-                    range: span_to_range(import.span),
-                }));
-            }
-
-            // Fully-qualified call (`Foo::Bar::baz()`) with no import: the
-            // qualifier names the package directly. `find_definition`
-            // already handled the same-file case; here the defining package
-            // lives in another module. Resolve via `resolved_package` (the
-            // qualifier) and the bare sub name.
-            if let RefKind::FunctionCall { resolved_package: Some(pkg) } = &r.kind {
-                let bare = r.unqualified_target_name();
-                if let Some(path) = module_index.module_path_cached(pkg) {
-                    if let Ok(module_uri) = Url::from_file_path(&path) {
-                        let def_line = module_index
-                            .get_cached(pkg)
-                            .and_then(|cached| cached.sub_info(bare).map(|s| s.def_line()));
-                        return Some(GotoDefinitionResponse::Scalar(Location {
-                            uri: module_uri,
-                            range: Range {
-                                start: Position { line: def_line.unwrap_or(0), character: 0 },
-                                end: Position { line: def_line.unwrap_or(0), character: 0 },
-                            },
-                        }));
-                    }
-                }
-            }
-
-        }
-
-        // Fully-qualified variable read (`$Foo::Bar::x`, `@Pkg::arr`):
-        // the package lives in another module. `find_definition` handled
-        // the same-file case via `resolves_to`; here resolve the package
-        // global through the module index, mirroring the FQ-call path.
-        // Honest miss (no jump) when the package or its decl is absent.
-        if let Some((pkg, name)) = r.qualified_var_target() {
-            if let Some(path) = module_index.module_path_cached(pkg) {
-                if let Ok(module_uri) = Url::from_file_path(&path) {
-                    if let Some(def_line) = module_index
-                        .get_cached(pkg)
-                        .and_then(|cached| cached.package_var_def_line(&name, pkg))
-                    {
-                        return Some(GotoDefinitionResponse::Scalar(Location {
-                            uri: module_uri,
-                            range: Range {
-                                start: Position { line: def_line, character: 0 },
-                                end: Position { line: def_line, character: 0 },
-                            },
-                        }));
-                    }
-                }
-            }
-        }
-
-        // Cross-file package goto-def: resolve module name via module index
-        if matches!(r.kind, RefKind::PackageRef) {
-            if let Some(path) = module_index.module_path_cached(&r.target_name) {
-                if let Ok(module_uri) = Url::from_file_path(&path) {
-                    return Some(GotoDefinitionResponse::Scalar(Location {
-                        uri: module_uri,
-                        range: Range::default(),
-                    }));
-                }
-            }
-        }
-
-        // Cross-file DispatchCall goto-def: a `$consumer->emit('ready', ...)`
-        // in one file should jump to `$producer->on('ready', sub)` in
-        // another. `find_definition` above only walks the current file's
-        // symbols; for DispatchCall we enumerate every cached module
-        // looking for Handlers matching (owner, name). Multiple stacked
-        // registrations → return all as an Array so the editor can show
-        // the picker.
-        if let RefKind::DispatchCall { owner: Some(owner), .. } = &r.kind {
-            if let Some(resp) = dispatch_handler_locations(owner, &r.target_name, module_index) {
-                return Some(resp);
-            }
-        }
-
-        // Cross-file method goto-def: resolve inherited methods through module index
-        if matches!(r.kind, RefKind::MethodCall { .. }) {
-            use crate::file_analysis::MethodResolution;
-            // FQ `$o->Foo::Bar::m` dispatches the bare `m` on the named class.
-            let method = r.unqualified_target_name();
-            let class_name = analysis.method_call_invocant_class(r, Some(module_index));
-            if let Some(ref cn) = class_name {
-                // The invocant resolved (e.g. a plugin-bridged route token
-                // → controller class) but the controller lives in THIS
-                // file: jump to the local method symbol. The build-time
-                // freeze normally serves same-file dispatch, but a bridged
-                // invocant is never frozen (its class needs the index), so
-                // re-resolve here.
-                if let Some(MethodResolution::Local { sym_id, .. }) =
-                    analysis.resolve_method_in_ancestors(cn, method, Some(module_index))
-                {
-                    if let Some(sym) = analysis.symbols.iter().find(|s| s.id == sym_id) {
-                        return Some(GotoDefinitionResponse::Scalar(Location {
-                            uri: uri.clone(),
-                            range: span_to_range(sym.selection_span),
-                        }));
-                    }
-                }
-                if let Some(MethodResolution::CrossFile { ref class, ref def_module }) = analysis.resolve_method_in_ancestors(cn, method, Some(module_index)) {
-                    // One path for both: a real inherited method lives in
-                    // `class`'s own module; a plugin-bridged helper lives in
-                    // `def_module` (the bridging file). Same lookup either way.
-                    let module = def_module.as_deref().unwrap_or(class);
-                    if let Some(cached) = module_index.get_cached(module) {
-                        if let Some(sub_info) = cached.sub_info(method) {
-                            if let Ok(module_uri) = Url::from_file_path(&cached.path) {
-                                let line = sub_info.def_line();
-                                let def_range = Range {
-                                    start: Position { line, character: 0 },
-                                    end: Position { line, character: 0 },
-                                };
-                                return Some(GotoDefinitionResponse::Scalar(Location {
-                                    uri: module_uri,
-                                    range: def_range,
-                                }));
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    None
-}
-
-/// All `Handler` definitions matching `(owner, name)` across cached modules.
-/// A dispatch (`$emitter->emit('ready')`) can target stacked registrations
-/// in different files; multiple hits return an `Array` so the editor shows a
-/// picker. Shared by the materialized-ref path and the query-time
-/// `dispatch_at` path so both resolve handlers identically.
-fn dispatch_handler_locations(
-    owner: &crate::file_analysis::HandlerOwner,
-    name: &str,
-    module_index: &ModuleIndex,
-) -> Option<GotoDefinitionResponse> {
-    use crate::file_analysis::SymbolDetail;
-    let mut locs: Vec<Location> = Vec::new();
-    for module_name in module_index.modules_with_symbol(name) {
-        let Some(cached) = module_index.get_cached(&module_name) else { continue };
-        for sym in &cached.analysis.symbols {
-            if sym.name != name { continue; }
-            if let SymbolDetail::Handler { owner: o, .. } = &sym.detail {
-                if o == owner {
-                    if let Ok(module_uri) = Url::from_file_path(&cached.path) {
-                        locs.push(Location {
-                            uri: module_uri,
-                            range: span_to_range(sym.selection_span),
-                        });
-                    }
-                }
-            }
-        }
-    }
-    if locs.is_empty() {
-        return None;
-    }
-    Some(if locs.len() == 1 {
-        GotoDefinitionResponse::Scalar(locs.into_iter().next().unwrap())
-    } else {
-        GotoDefinitionResponse::Array(locs)
-    })
 }
 
 fn fa_completion_kind(kind: &FaSymKind) -> CompletionItemKind {
@@ -2247,113 +1989,6 @@ fn unimported_function_completions(
     // Sort for deterministic order
     candidates.sort_by(|a, b| a.label.cmp(&b.label).then(a.detail.cmp(&b.detail)));
     candidates
-}
-
-/// How a function name relates to an importing `use` statement. Both
-/// goto-def and the unresolved-function diagnostic read this one verdict so
-/// they can never disagree on whether a name is resolvable as imported
-/// (NAV § (c): the divergent-export-surface root cause).
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum ImportResolution {
-    /// The name is brought into the caller's namespace: named in `qw(...)`,
-    /// pulled in by a `:tag` selector against the producer surface, or
-    /// auto-imported by a bare `use Foo;`. Goto-def jumps; the diagnostic
-    /// stays silent (the name is genuinely available here).
-    Brought,
-    /// The name is exported by the imported module but this `use` didn't
-    /// bring it in (e.g. a named `qw(other)` that omits it). Goto-def can
-    /// still jump to the def; the diagnostic offers the "exported but not
-    /// imported" hint.
-    ExportedNotBrought,
-}
-
-/// Classify a name against a single import. Routes through the consumer
-/// evaluator (`imported_names`) so the verdict is exactly "is this name in the
-/// bound set this `use` produces" — the single notion of import binding that
-/// diagnostics, goto-def, and references all read (NAV § (c)). Returns the
-/// resolved verdict plus the REMOTE (origin) name for the matched local name.
-///
-/// `cached` is the producer's `FileAnalysis` when known; its `export_surface`
-/// expands `:tag` selectors and supplies the `@EXPORT` defaults for a bare
-/// `use`. When absent (module not yet cached), the evaluator still binds
-/// explicitly-named `qw()` imports — those don't need the surface — so an
-/// explicit named import is never spuriously flagged while the resolver warms.
-fn classify_import(
-    import: &crate::file_analysis::Import,
-    func_name: &str,
-    cached: Option<&CachedModule>,
-    module_index: &ModuleIndex,
-) -> Option<(ImportResolution, String)> {
-    if let Some(cached) = cached {
-        let surface = cached.analysis.export_surface_with_index(module_index);
-        let bound = crate::file_analysis::imported_names(import, &surface);
-        if let Some((_local, remote)) = bound.iter().find(|(local, _)| local == func_name) {
-            return Some((ImportResolution::Brought, remote.clone()));
-        }
-        // Not bound by this `use`, but on the producer surface → the actionable
-        // "exported but not imported" hint (a named `qw(other)` omitting it, or
-        // an `@EXPORT_OK` name reached only by a bare `use` — GATE-5).
-        if surface.exports(func_name) {
-            return Some((ImportResolution::ExportedNotBrought, func_name.to_string()));
-        }
-        return None;
-    }
-    // Module not cached yet: only an explicitly-named import can be judged
-    // `Brought` without the producer surface (tags / bare-use defaults need it).
-    // This keeps a `qw(foo)` import from being flagged while the resolver warms,
-    // and never resolves a bare/tagged name it can't actually verify.
-    if let Some(sym) = import.imported_symbols.iter().find(|s| s.local_name == *func_name) {
-        return Some((ImportResolution::Brought, sym.remote().to_string()));
-    }
-    None
-}
-
-/// Best resolution of `func_name` across all imports: the matched import, its
-/// remote name, the resolvability verdict, and — when known — the module path
-/// for navigation. `Brought` wins over `ExportedNotBrought` when several
-/// imports relate. The single resolvability query goto-def, the diagnostic, and
-/// references all read, so they can never disagree on the bound set.
-fn resolve_imported_function_classified<'a>(
-    analysis: &'a FileAnalysis,
-    func_name: &str,
-    module_index: &ModuleIndex,
-) -> Option<(&'a crate::file_analysis::Import, Option<std::path::PathBuf>, String, ImportResolution)> {
-    let mut best: Option<(
-        &'a crate::file_analysis::Import,
-        Option<std::path::PathBuf>,
-        String,
-        ImportResolution,
-    )> = None;
-    for import in &analysis.imports {
-        let cached = module_index.get_cached(&import.module_name);
-        let Some((res, remote)) = classify_import(import, func_name, cached.as_deref(), module_index) else { continue };
-        let path = cached
-            .as_ref()
-            .map(|c| c.path.clone())
-            .or_else(|| module_index.module_path_cached(&import.module_name));
-        // `Brought` is the strongest verdict; once found, keep it.
-        if matches!(best, Some((_, _, _, ImportResolution::Brought))) {
-            continue;
-        }
-        best = Some((import, path, remote, res));
-    }
-    best
-}
-
-/// Find which import provides a given function name, with a concrete module
-/// path to jump to. Returns the matched Import, the module's path, and the
-/// REMOTE name (the sub's actual name in the source module — differs from the
-/// caller's `func_name` only for renaming imports like `del` → `delete`).
-/// Callers use the remote name for `cached.sub_info(...)` lookups so
-/// hover/gd/sig-help reach the real sub.
-fn resolve_imported_function<'a>(
-    analysis: &'a FileAnalysis,
-    func_name: &str,
-    module_index: &ModuleIndex,
-) -> Option<(&'a crate::file_analysis::Import, std::path::PathBuf, String)> {
-    // Goto-def needs a concrete module path to jump to.
-    resolve_imported_function_classified(analysis, func_name, module_index)
-        .and_then(|(import, path, remote, _)| path.map(|p| (import, p, remote)))
 }
 
 fn completion_detail_for_import(

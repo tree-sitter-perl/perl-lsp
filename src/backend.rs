@@ -445,6 +445,7 @@ impl LanguageServer for Backend {
             None => return Ok(None),
         };
         Ok(symbols::find_definition(
+            &self.files,
             &doc.analysis,
             pos,
             uri,

@@ -2776,7 +2776,7 @@ sub action ($c) {\n\
     };
 
     let uri = Url::parse("file:///consumer.pl").unwrap();
-    let resp = find_definition(&consumer, pos, &uri, &idx);
+    let resp = find_definition(&crate::file_store::FileStore::new(), &consumer, pos, &uri, &idx);
 
     let loc = match resp {
         Some(GotoDefinitionResponse::Scalar(loc)) => loc,
@@ -2839,7 +2839,7 @@ sub day_of_week {\n\
     };
 
     let uri = Url::parse("file:///datetime.pl").unwrap();
-    let resp = find_definition(&consumer, pos, &uri, &idx);
+    let resp = find_definition(&crate::file_store::FileStore::new(), &consumer, pos, &uri, &idx);
     let loc = match resp {
         Some(GotoDefinitionResponse::Scalar(loc)) => loc,
         Some(GotoDefinitionResponse::Array(mut v)) if !v.is_empty() => v.remove(0),
@@ -2889,7 +2889,7 @@ my @s = @My::Vars::servers;\n\
     };
 
     let uri = Url::parse("file:///consumer.pl").unwrap();
-    let resp = find_definition(&consumer, pos, &uri, &idx);
+    let resp = find_definition(&crate::file_store::FileStore::new(), &consumer, pos, &uri, &idx);
     let loc = match resp {
         Some(GotoDefinitionResponse::Scalar(loc)) => loc,
         other => panic!("expected goto-def for FQ var, got {other:?}"),
@@ -2921,7 +2921,7 @@ fn fq_variable_read_unknown_package_is_honest_miss() {
         character: (byte - prefix.rfind('\n').map(|i| i + 1).unwrap_or(0)) as u32,
     };
     let uri = Url::parse("file:///consumer.pl").unwrap();
-    let resp = find_definition(&consumer, pos, &uri, &idx);
+    let resp = find_definition(&crate::file_store::FileStore::new(), &consumer, pos, &uri, &idx);
     assert!(resp.is_none(), "unknown package must be an honest miss, got {resp:?}");
 }
 
@@ -3339,7 +3339,7 @@ sub startup {
         line: pre.matches('\n').count() as u32,
         character: (list_at - pre.rfind('\n').map(|i| i + 1).unwrap_or(0)) as u32,
     };
-    let resp = find_definition(&fa, pos, &uri, &idx);
+    let resp = find_definition(&crate::file_store::FileStore::new(), &fa, pos, &uri, &idx);
     let loc = match resp {
         Some(GotoDefinitionResponse::Scalar(loc)) => loc,
         Some(GotoDefinitionResponse::Array(mut v)) if !v.is_empty() => v.remove(0),
@@ -3857,7 +3857,7 @@ my $v = helper_fn(21);\n";
     };
 
     let uri = Url::parse("file:///consumer.pl").unwrap();
-    let resp = find_definition(&consumer, pos, &uri, &idx);
+    let resp = find_definition(&crate::file_store::FileStore::new(), &consumer, pos, &uri, &idx);
     let loc = match resp {
         Some(GotoDefinitionResponse::Scalar(loc)) => loc,
         other => panic!("expected a single-hop Scalar to the module sub, got {other:?}"),
@@ -3899,7 +3899,7 @@ Foo->bar();\n";
         character: (byte - prefix.rfind('\n').map(|i| i + 1).unwrap_or(0)) as u32 + 1,
     };
     let uri = Url::parse("file:///test.pl").unwrap();
-    let resp = find_definition(&analysis, pos, &uri, &idx);
+    let resp = find_definition(&crate::file_store::FileStore::new(), &analysis, pos, &uri, &idx);
     let loc = match resp {
         Some(GotoDefinitionResponse::Scalar(loc)) => loc,
         other => panic!("expected goto-def on class invocant, got {other:?}"),
@@ -3933,7 +3933,7 @@ Foo->bar();\n";
         character: (byte - prefix.rfind('\n').map(|i| i + 1).unwrap_or(0)) as u32,
     };
     let uri = Url::parse("file:///test.pl").unwrap();
-    let resp = find_definition(&analysis, pos, &uri, &idx);
+    let resp = find_definition(&crate::file_store::FileStore::new(), &analysis, pos, &uri, &idx);
     let loc = match resp {
         Some(GotoDefinitionResponse::Scalar(loc)) => loc,
         other => panic!("expected goto-def on method token, got {other:?}"),
@@ -3991,7 +3991,7 @@ fn gd_resolves(source: &str, name: &str, idx: &crate::module_index::ModuleIndex)
         character: (byte - prefix.rfind('\n').map(|i| i + 1).unwrap_or(0)) as u32,
     };
     let uri = Url::parse("file:///consumer.pl").unwrap();
-    let loc = match find_definition(&analysis, pos, &uri, idx) {
+    let loc = match find_definition(&crate::file_store::FileStore::new(), &analysis, pos, &uri, idx) {
         Some(GotoDefinitionResponse::Scalar(loc)) => Some(loc),
         Some(GotoDefinitionResponse::Array(mut v)) if !v.is_empty() => Some(v.remove(0)),
         _ => None,
@@ -4166,7 +4166,7 @@ fn gd_resolves_to(
         character: (byte - prefix.rfind('\n').map(|i| i + 1).unwrap_or(0)) as u32,
     };
     let uri = Url::parse("file:///consumer.pl").unwrap();
-    let loc = match find_definition(&analysis, pos, &uri, idx) {
+    let loc = match find_definition(&crate::file_store::FileStore::new(), &analysis, pos, &uri, idx) {
         Some(GotoDefinitionResponse::Scalar(loc)) => Some(loc),
         Some(GotoDefinitionResponse::Array(mut v)) if !v.is_empty() => Some(v.remove(0)),
         _ => None,
@@ -4366,6 +4366,7 @@ class Point {
     let uri = Url::parse("file:///tmp/sym_defer_consumer.pl").unwrap();
     // Cursor on `x` (row 1, col 19).
     let resp = find_definition(
+        &crate::file_store::FileStore::new(),
         &analysis,
         Position { line: 1, character: 19 },
         &uri,

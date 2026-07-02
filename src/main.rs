@@ -752,7 +752,7 @@ fn run_one(
             let abs = std::fs::canonicalize(file).unwrap_or_else(|_| std::path::PathBuf::from(file));
             let uri = tower_lsp::lsp_types::Url::from_file_path(&abs)
                 .unwrap_or_else(|_| tower_lsp::lsp_types::Url::parse("file:///unknown").unwrap());
-            if let Some(resp) = symbols::find_definition(&analysis, pos, &uri, idx) {
+            if let Some(resp) = symbols::find_definition(ws, &analysis, pos, &uri, idx) {
                 use tower_lsp::lsp_types::GotoDefinitionResponse;
                 let first = match resp {
                     GotoDefinitionResponse::Scalar(loc) => Some(loc),
