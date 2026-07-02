@@ -64,6 +64,23 @@
         "none": []
       },
       "status": "gold"
+    },
+    {
+      "id": "cpp-outline-brace-init-var-not-a-phantom-class",
+      "difficulty": "moderate",
+      "semantic_area": "cpp-parse-repair",
+      "lang": "cpp",
+      "root": "gold-corpus/cpp-fixture",
+      "status": "gold",
+      "file": "brace_init.cpp",
+      "expect": {
+        "all": [
+          "{\"col\":\"15\",\"kind\":\"Variable\",\"line\":\"2\",\"name\":\"p\"}"
+        ],
+        "none": [
+          "\"kind\":\"Class\",\"line\":\"2\",\"name\":\"p\""
+        ]
+      }
     }
   ]
 }

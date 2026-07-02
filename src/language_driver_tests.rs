@@ -253,3 +253,192 @@ fn expanded_macro_uses_still_carry_refs() {
         .count();
     assert_eq!(baseop_uses, 2, "struct op {{ BASEOP }} and struct unop {{ BASEOP ... }}");
 }
+
+// --- H3: brace-init declarations must survive `strip_declarator_macros` ---
+
+#[cfg(feature = "cpp")]
+#[test]
+fn cpp_brace_init_declaration_survives_declarator_strip() {
+    use crate::file_analysis::{RefKind, SymKind};
+    let src = "struct Point { int x; int y; };\nint main() {\n  struct Point p {1, 2};\n  return p.x;\n}\n";
+    let fa = cpp_driver().analyze(src);
+    // No phantom Class minted from the declared variable.
+    assert!(
+        !fa.symbols.iter().any(|s| s.name == "p" && s.kind == SymKind::Class),
+        "brace-init var must not become a Class: {:?}",
+        fa.symbols.iter().map(|s| (&s.name, s.kind)).collect::<Vec<_>>()
+    );
+    // The type use on the declaration line keeps its ref.
+    assert!(
+        fa.refs.iter().any(|r| r.target_name == "Point" && r.span.start.row == 2),
+        "Point use on the brace-init line refs: {:?}",
+        fa.refs.iter().map(|r| (&r.target_name, r.span.start)).collect::<Vec<_>>()
+    );
+    // Member resolution through the declared variable still works.
+    let inv = fa
+        .refs
+        .iter()
+        .find_map(|r| match &r.kind {
+            RefKind::MethodCall { invocant_span: Some(sp), .. } if r.target_name == "x" => Some(*sp),
+            _ => None,
+        })
+        .expect("p.x minted a member ref with an invocant span");
+    let t = fa.expr_type_at_span(inv, None).expect("receiver types");
+    assert_eq!(t.class_name(), Some("Point"), "p types as Point: {t:?}");
+}
+
+#[cfg(feature = "cpp")]
+#[test]
+fn cpp_empty_brace_init_not_stripped() {
+    use crate::file_analysis::SymKind;
+    let src = "void f() {\n  struct sockaddr_in addr {};\n}\n";
+    let fa = cpp_driver().analyze(src);
+    assert!(
+        !fa.symbols.iter().any(|s| s.name == "addr" && s.kind == SymKind::Class),
+        "empty brace-init var must not become a Class: {:?}",
+        fa.symbols.iter().map(|s| (&s.name, s.kind)).collect::<Vec<_>>()
+    );
+}
+
+#[cfg(feature = "cpp")]
+#[test]
+fn cpp_range_for_struct_binding_not_stripped() {
+    use crate::file_analysis::SymKind;
+    let src = "struct Point { int x; };\nvoid f(int n) {\n  for (struct Point q : points) { n += q.x; }\n}\n";
+    let fa = cpp_driver().analyze(src);
+    assert!(
+        !fa.symbols.iter().any(|s| s.name == "q" && s.kind == SymKind::Class),
+        "range-for binding must not become a Class: {:?}",
+        fa.symbols.iter().map(|s| (&s.name, s.kind)).collect::<Vec<_>>()
+    );
+    assert!(
+        fa.refs.iter().any(|r| r.target_name == "Point" && r.span.start.row == 2),
+        "Point use inside the for head refs"
+    );
+}
+
+// --- H4: every span-bearing skeleton field is remapped after a splice ---
+
+/// The doc repro: an object-like macro expansion on the SAME line before a
+/// member access shifts every following column; the four fields
+/// (`invocant` / `member_op` / `import_sites` / `domain_sites`) must come
+/// back in ORIGINAL coordinates like refs/witnesses do.
+#[cfg(feature = "cpp")]
+fn h4_fixture() -> crate::file_analysis::FileAnalysis {
+    let src = "#define LOG emit_log_record_with_a_long_name(1, 2, 3)\nvoid emit_log_record_with_a_long_name(int a, int b, int c);\nstruct Widget { int size; };\nint main() {\n  struct Widget w;\n  LOG; w.size = 5;\n  return w.size;\n}\n";
+    cpp_driver().analyze(src)
+}
+
+#[cfg(feature = "cpp")]
+fn h4_member_ref(
+    fa: &crate::file_analysis::FileAnalysis,
+) -> (crate::file_analysis::Span, Option<(crate::file_analysis::MemberOp, crate::file_analysis::Span)>) {
+    use crate::file_analysis::RefKind;
+    fa.refs
+        .iter()
+        .find_map(|r| match &r.kind {
+            RefKind::MethodCall { invocant_span: Some(sp), member_op, .. }
+                if r.target_name == "size" && r.span.start.row == 5 =>
+            {
+                Some((*sp, *member_op))
+            }
+            _ => None,
+        })
+        .expect("w.size on the spliced line minted a member ref with an invocant span")
+}
+
+#[cfg(feature = "cpp")]
+#[test]
+fn cpp_splice_remaps_invocant_span() {
+    let fa = h4_fixture();
+    let (inv, _) = h4_member_ref(&fa);
+    // original line 5: `  LOG; w.size = 5;` — `w` at col 7.
+    assert_eq!(
+        ((inv.start.row, inv.start.column), (inv.end.row, inv.end.column)),
+        ((5, 7), (5, 8)),
+        "invocant span in ORIGINAL coords: {inv:?}"
+    );
+    // The money query: member resolution through the remapped span.
+    let t = fa.expr_type_at_span(inv, None).expect("receiver types after splice");
+    assert_eq!(t.class_name(), Some("Widget"), "w types as Widget: {t:?}");
+}
+
+#[cfg(feature = "cpp")]
+#[test]
+fn cpp_splice_remaps_member_op_span() {
+    use crate::file_analysis::MemberOp;
+    let fa = h4_fixture();
+    let (_, op) = h4_member_ref(&fa);
+    let (op, sp) = op.expect("member op recorded");
+    assert_eq!(op, MemberOp::Dot);
+    assert_eq!(
+        ((sp.start.row, sp.start.column), (sp.end.row, sp.end.column)),
+        ((5, 8), (5, 9)),
+        "member-op span in ORIGINAL coords: {sp:?}"
+    );
+}
+
+/// Synthetic single-splice map + skeleton: pin each remaining field family
+/// (`import_sites`, `domain_sites`) through `remap_spans` directly, so a
+/// same-line shift is exercised even where real syntax can't put one (an
+/// `#include` must be line-initial).
+#[cfg(feature = "cpp")]
+fn h4_synthetic() -> (String, String, crate::cpp_reparse::SpliceMap) {
+    let src = "#define LOG emit_log_record_with_a_long_name(1, 2, 3)\nvoid f() { LOG; tail(); }\n";
+    let mut parser = tree_sitter::Parser::new();
+    parser.set_language(&tree_sitter_cpp::LANGUAGE.into()).unwrap();
+    let (rewritten, map) = crate::cpp_reparse::preprocess_validated(&mut parser, src);
+    assert_ne!(rewritten, src, "the LOG use must actually splice");
+    (src.to_string(), rewritten, map)
+}
+
+#[cfg(feature = "cpp")]
+#[test]
+fn cpp_splice_remaps_import_sites() {
+    use crate::file_analysis::Span;
+    use tree_sitter::Point;
+    let (src, rewritten, map) = h4_synthetic();
+    // `tail` in original coords (row 1 col 16); its transformed column
+    // shifted right by the splice on the same line.
+    let tcol = rewritten.lines().nth(1).unwrap().find("tail").unwrap();
+    assert_ne!(tcol, 16, "splice shifted the same-line column");
+    let sp = Span {
+        start: Point { row: 1, column: tcol },
+        end: Point { row: 1, column: tcol + 4 },
+    };
+    let mut skel = crate::query_extract::SkeletonAnalysis::default();
+    skel.import_sites.push(("tail.h".to_string(), sp));
+    remap_spans(&mut skel, &rewritten, &src, &map);
+    let got = skel.import_sites[0].1;
+    assert_eq!(
+        ((got.start.row, got.start.column), (got.end.row, got.end.column)),
+        ((1, 16), (1, 20)),
+        "import-site span back in ORIGINAL coords: {got:?}"
+    );
+}
+
+#[cfg(feature = "cpp")]
+#[test]
+fn cpp_splice_remaps_domain_sites() {
+    use crate::file_analysis::{DomainSite, Span};
+    use tree_sitter::Point;
+    let (src, rewritten, map) = h4_synthetic();
+    let tcol = rewritten.lines().nth(1).unwrap().find("tail").unwrap();
+    let sp = Span {
+        start: Point { row: 1, column: tcol },
+        end: Point { row: 1, column: tcol + 4 },
+    };
+    let mut skel = crate::query_extract::SkeletonAnalysis::default();
+    skel.domain_sites.push(DomainSite {
+        slot: "op_type".to_string(),
+        value: "OP_NULL".to_string(),
+        slot_span: sp,
+    });
+    remap_spans(&mut skel, &rewritten, &src, &map);
+    let got = skel.domain_sites[0].slot_span;
+    assert_eq!(
+        ((got.start.row, got.start.column), (got.end.row, got.end.column)),
+        ((1, 16), (1, 20)),
+        "domain-site span back in ORIGINAL coords: {got:?}"
+    );
+}

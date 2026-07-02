@@ -171,6 +171,40 @@
         "none": []
       },
       "status": "gold"
+    },
+    {
+      "id": "cpp-definition-brace-init-member-through-declared-var",
+      "difficulty": "moderate",
+      "semantic_area": "cpp-parse-repair",
+      "lang": "cpp",
+      "root": "gold-corpus/cpp-fixture",
+      "status": "gold",
+      "file": "brace_init.cpp",
+      "line": 3,
+      "col": 11,
+      "expect": {
+        "all": [
+          "brace_init.cpp:1:20"
+        ],
+        "none": []
+      }
+    },
+    {
+      "id": "cpp-definition-member-after-same-line-macro-splice",
+      "difficulty": "moderate",
+      "semantic_area": "cpp-parse-repair",
+      "lang": "cpp",
+      "root": "gold-corpus/cpp-fixture",
+      "status": "gold",
+      "file": "splice_member.c",
+      "line": 5,
+      "col": 9,
+      "expect": {
+        "all": [
+          "splice_member.c:3:21"
+        ],
+        "none": []
+      }
     }
   ]
 }

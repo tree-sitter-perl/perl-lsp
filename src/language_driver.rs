@@ -501,8 +501,17 @@ fn emit_external_type_aliases(
 /// Remap extracted skeleton spans from transformed coords back to
 /// original source coords via the anchor map. A no-op for an identity
 /// map (clean/pass-through files round-trip byte→point→byte unchanged),
-/// so it's safe to always call. Covers navigation spans (symbols / refs
-/// / scopes); witness spans (type queries) are the follow-up.
+/// so it's safe to always call.
+///
+/// EVERY span-bearing field the extraction produced pre-remap must pass
+/// through here — one missed field means its consumer silently queries
+/// transformed coordinates that no longer match anything after a
+/// length-changing splice (the class of bug: member resolution dying on
+/// the spliced line while the rest of the file works). The exhaustive
+/// destructuring (no `..`) is the enforcement: adding a field to
+/// `SkeletonAnalysis` / `SkelRef` / `SkelSymbol` fails to compile HERE
+/// until the new field's spans — or its span-lessness, bound as `_` —
+/// are accounted for.
 #[cfg(any(feature = "cpp", feature = "python", feature = "r", feature = "cmake"))]
 fn remap_spans(
     skel: &mut crate::query_extract::SkeletonAnalysis,
@@ -514,12 +523,6 @@ fn remap_spans(
     let t = LineIndex::new(transformed);
     let o = LineIndex::new(original);
     let r = |p: Point| -> Point { o.point(map.to_original(t.byte(p))) };
-    for s in &mut skel.symbols {
-        s.start = r(s.start);
-        s.end = r(s.end);
-        s.name_start = r(s.name_start);
-        s.name_end = r(s.name_end);
-    }
     // A ref/read that came OUT of a macro expansion collapses to a
     // zero-width point under `to_original` (every expanded byte maps to the
     // splice site) — goto-def/hover would then miss it. Give it the macro
@@ -531,15 +534,79 @@ fn remap_spans(
             None => (r(start), r(end)),
         }
     };
-    for rf in &mut skel.refs {
-        (rf.start, rf.end) = remap_span(rf.start, rf.end);
+    let rspan = |sp: crate::file_analysis::Span| -> crate::file_analysis::Span {
+        let (start, end) = remap_span(sp.start, sp.end);
+        crate::file_analysis::Span { start, end }
+    };
+
+    let crate::query_extract::SkeletonAnalysis {
+        symbols,
+        refs,
+        imports: _,
+        import_sites,
+        scope_count: _,
+        scopes,
+        witnesses,
+        parents: _,
+        var_reads,
+        label_refs,
+        receiver_names: _,
+        flow_edges,
+        moved_from,
+        domain_sites,
+        macro_returns: _,
+    } = skel;
+
+    for s in symbols.iter_mut() {
+        let crate::query_extract::SkelSymbol {
+            kind: _,
+            name: _,
+            start,
+            end,
+            name_start,
+            name_end,
+            package: _,
+            scope_depth: _,
+            scope: _,
+            return_type: _,
+            deref_stack: _,
+        } = s;
+        *start = r(*start);
+        *end = r(*end);
+        *name_start = r(*name_start);
+        *name_end = r(*name_end);
     }
-    for (_, _, span) in &mut skel.var_reads {
-        (span.start, span.end) = remap_span(span.start, span.end);
+    for rf in refs.iter_mut() {
+        let crate::query_extract::SkelRef {
+            kind: _,
+            name: _,
+            start,
+            end,
+            scope: _,
+            invocant,
+            member_op,
+        } = rf;
+        (*start, *end) = remap_span(*start, *end);
+        // The invocant span is consumed via `expr_type_at_span` (member
+        // resolution); the member-op span rides the MethodCall ref. Both
+        // die on the spliced line if left in transformed coords.
+        if let Some((sp, _text)) = invocant {
+            *sp = rspan(*sp);
+        }
+        if let Some((_op, sp)) = member_op {
+            *sp = rspan(*sp);
+        }
     }
-    for sc in &mut skel.scopes {
+    for (_, _, span) in var_reads.iter_mut() {
+        *span = rspan(*span);
+    }
+    for sc in scopes.iter_mut() {
         sc.span.start = r(sc.span.start);
         sc.span.end = r(sc.span.end);
+    }
+    // `#include` path tokens — goto-def on the token is span-keyed.
+    for (_, span) in import_sites.iter_mut() {
+        *span = rspan(*span);
     }
     // Witness spans (the type tier). A length-changing splice (`PBF op_type` →
     // `unsigned op_type`) shifts every span AFTER it, so a declared-type
@@ -549,15 +616,11 @@ fn remap_spans(
     // through a payload edge target — so `expr_type_at_span` and the temporal
     // ordering all speak original coordinates, like refs.
     use crate::witnesses::{WitnessAttachment, WitnessPayload};
-    let rspan = |sp: crate::file_analysis::Span| -> crate::file_analysis::Span {
-        let (start, end) = remap_span(sp.start, sp.end);
-        crate::file_analysis::Span { start, end }
-    };
     let remap_att = |a: &mut WitnessAttachment| match a {
         WitnessAttachment::Expr(sp) | WitnessAttachment::BranchArm(sp) => *sp = rspan(*sp),
         _ => {}
     };
-    for w in &mut skel.witnesses {
+    for w in witnesses.iter_mut() {
         remap_att(&mut w.attachment);
         match &mut w.payload {
             WitnessPayload::Edge(t)
@@ -569,16 +632,27 @@ fn remap_spans(
         w.span = rspan(w.span);
     }
     // Value-flow edges (the provenance tier above the bag) + label/goto refs +
-    // moved-from sites all carry transformed spans too.
-    for fe in &mut skel.flow_edges {
-        fe.target_at = r(fe.target_at);
-        fe.source = rspan(fe.source);
+    // moved-from sites + domain-typing sites all carry transformed spans too.
+    for fe in flow_edges.iter_mut() {
+        let crate::file_analysis::FlowEdge {
+            target_name: _,
+            target_scope: _,
+            target_at,
+            source,
+            extraction: _,
+        } = fe;
+        *target_at = r(*target_at);
+        *source = rspan(*source);
     }
-    for (_, _, span) in &mut skel.label_refs {
+    for (_, _, span) in label_refs.iter_mut() {
         *span = rspan(*span);
     }
-    for (_, span, _) in &mut skel.moved_from {
+    for (_, span, _) in moved_from.iter_mut() {
         *span = rspan(*span);
+    }
+    for ds in domain_sites.iter_mut() {
+        let crate::file_analysis::DomainSite { slot: _, value: _, slot_span } = ds;
+        *slot_span = rspan(*slot_span);
     }
 }
 

@@ -586,21 +586,31 @@ pub fn parse_damage(node: tree_sitter::Node) -> usize {
 /// `Q_CORE_EXPORT`, never in the source tree) the gather can't reach —
 /// parses as a corrupt function and the class evaporates. A class/struct
 /// head with TWO identifiers before its body has a macro in the first slot:
-/// valid C++ names the type once (the sole exception is `class Name final`).
+/// valid C++ names the type once (the exceptions — `class Name final`,
+/// brace-init declarations, range-for bindings — are excluded below).
 /// Blank the macro token with spaces (same length → every extracted span
-/// stays put, no SpliceMap needed) so the class parses. Runs unconditionally
-/// — a no-op on normal `class Name {`. Returns the rewritten source plus the
-/// `(class_name, macro_token)` pairs it recovered — the analyze path looks the
-/// token up in the attribute-macro manifest to annotate the class with what
-/// the macro signals (`exported`/`deprecated`); an unknown token still
-/// recovers the class, it just carries no signal.
-fn strip_declarator_macros(src: &str) -> (String, Vec<(String, String)>) {
+/// stays put, no SpliceMap needed) so the class parses. Returns the
+/// rewritten source plus the `(class_name, macro_token)` pairs it recovered
+/// — the analyze path looks the token up in the attribute-macro manifest to
+/// annotate the class with what the macro signals (`exported`/`deprecated`);
+/// an unknown token still recovers the class, it just carries no signal.
+///
+/// The parse-damage gate can't police this repair: the misparse it fixes
+/// (`class API_EXPORT Foo { … }` as a bogus function_definition) contains
+/// ZERO error nodes, and so does the valid C++11 it must not touch
+/// (`struct Point p {1, 2};`). Instead each candidate is gated on **type-
+/// position context** from a parse of the untouched source: valid C++ spells
+/// `struct ID1 ID2 ⟨head⟩` only when the head token opens a *value* or *loop*
+/// construct (a brace initializer, a range-for binding) — a closed grammar
+/// fact, so those (plus comment/string text, which is not code at all) are
+/// skipped and everything else is the misparse this repair exists for.
+fn strip_declarator_macros(
+    parser: &mut tree_sitter::Parser,
+    src: &str,
+) -> (String, Vec<(String, String)>) {
     let bytes = src.as_bytes();
-    let mut out = src.to_string();
-    let mut recovered: Vec<(String, String)> = Vec::new();
-    // SAFETY: only ASCII spaces are written, over ASCII identifier bytes —
-    // length-preserving and UTF-8-valid.
-    let ob = unsafe { out.as_bytes_mut() };
+    // (macro span, name span, head-token byte) candidate sites, textually.
+    let mut candidates: Vec<((usize, usize), (usize, usize), usize)> = Vec::new();
     let mut i = 0;
     while i < bytes.len() {
         let kwlen = if bytes[i..].starts_with(b"class") {
@@ -630,13 +640,47 @@ fn strip_declarator_macros(src: &str) -> (String, Vec<(String, String)>) {
         if id1e > id1s && id2e > id2s && head {
             let id2 = &src[id2s..id2e];
             if id2 != "final" && id2 != "sealed" {
-                recovered.push((id2.to_string(), src[id1s..id1e].to_string()));
-                for b in &mut ob[id1s..id1e] {
-                    *b = b' ';
-                }
+                candidates.push(((id1s, id1e), (id2s, id2e), p));
             }
         }
         i += kwlen;
+    }
+    if candidates.is_empty() {
+        return (src.to_string(), Vec::new());
+    }
+    let tree = parser.parse(src, None);
+    let valid_context = |head: usize| -> bool {
+        let Some(t) = &tree else { return false };
+        let Some(n) = t
+            .root_node()
+            .named_descendant_for_byte_range(head, head + 1)
+        else {
+            return false;
+        };
+        matches!(
+            n.kind(),
+            // `struct Point p {1, 2};` / `struct sockaddr_in addr {};`
+            "initializer_list"
+            // `for (struct Point p : v)`
+            | "for_range_loop"
+            // not code — blanking would mint phantom recovered pairs
+            | "comment" | "string_literal" | "raw_string_literal"
+            | "string_content" | "char_literal"
+        )
+    };
+    let mut out = src.to_string();
+    let mut recovered: Vec<(String, String)> = Vec::new();
+    // SAFETY: only ASCII spaces are written, over ASCII identifier bytes —
+    // length-preserving and UTF-8-valid.
+    let ob = unsafe { out.as_bytes_mut() };
+    for ((id1s, id1e), (id2s, id2e), head) in candidates {
+        if valid_context(head) {
+            continue;
+        }
+        recovered.push((src[id2s..id2e].to_string(), src[id1s..id1e].to_string()));
+        for b in &mut ob[id1s..id1e] {
+            *b = b' ';
+        }
     }
     (out, recovered)
 }
@@ -675,12 +719,12 @@ pub fn preprocess_validated_with(
     external: &PreExpandedExternal,
 ) -> (String, SpliceMap, Vec<(String, String)>) {
     // Blank unresolved declarator-position macros first (length-preserving,
-    // unconditional — recovers `class Q_CORE_EXPORT Foo` even when the macro
-    // is unreachable). Spans stay in original coordinates. `recovered` carries
-    // each (class_name, macro_token) so the analyze path can annotate the
-    // class with the macro's signal — surviving regardless of which return
+    // parse-context-gated — recovers `class Q_CORE_EXPORT Foo` even when the
+    // macro is unreachable). Spans stay in original coordinates. `recovered`
+    // carries each (class_name, macro_token) so the analyze path can annotate
+    // the class with the macro's signal — surviving regardless of which return
     // arm fires below, since `src` is the stripped text throughout.
-    let (stripped, recovered) = strip_declarator_macros(src);
+    let (stripped, recovered) = strip_declarator_macros(parser, src);
     let src = stripped.as_str();
     let Some(tree) = parser.parse(src, None) else {
         return (src.to_string(), SpliceMap::default(), recovered);

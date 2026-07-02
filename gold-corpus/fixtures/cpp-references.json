@@ -237,6 +237,24 @@
         "none": []
       },
       "status": "gold"
+    },
+    {
+      "id": "cpp-references-brace-init-type-use-kept",
+      "difficulty": "moderate",
+      "semantic_area": "cpp-parse-repair",
+      "lang": "cpp",
+      "root": "gold-corpus/cpp-fixture",
+      "status": "gold",
+      "file": "brace_init.cpp",
+      "line": 0,
+      "col": 7,
+      "expect": {
+        "all": [
+          "{\"col\":\"8\",\"file\":\"brace_init.cpp\",\"line\":\"1\"}",
+          "{\"col\":\"10\",\"file\":\"brace_init.cpp\",\"line\":\"3\"}"
+        ],
+        "none": []
+      }
     }
   ]
 }
