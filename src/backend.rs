@@ -14,6 +14,13 @@ use crate::symbols;
 /// span → type → members) with an in-scope-symbol fallback. Shared by the
 /// LSP completion handler and the CLI/--batch mirror so the editor and
 /// gold agree. Perl completion stays in `cursor_context`.
+///
+/// The returned flag is LSP `is_incomplete`: true when the bare-identifier
+/// half consulted prefix-gated cross-file sources (macros / include-closure
+/// symbols) — those are filtered server-side by the typed prefix, so the
+/// client must re-request as the prefix changes instead of trusting its
+/// cached list. Member completion and closure-less languages return a
+/// complete list (false).
 pub fn pack_completion(
     analysis: &crate::file_analysis::FileAnalysis,
     source: &str,
@@ -22,7 +29,7 @@ pub fn pack_completion(
     language: &str,
     path: Option<&std::path::Path>,
     module_index: &ModuleIndex,
-) -> Vec<CompletionItem> {
+) -> (Vec<CompletionItem>, bool) {
     if let Some(driver) =
         crate::language_driver::LanguageRegistry::with_enabled().for_id(language)
     {
@@ -54,15 +61,105 @@ pub fn pack_completion(
                     if let Some(items) =
                         symbols::member_completion_for_class(analysis, &class, xidx, ctx.op_fix)
                     {
-                        return items;
+                        return (items, false);
                     }
                 }
             }
         }
     }
     let mut items = symbols::in_scope_completion(analysis, point);
-    macro_completion(source, point, language, path, &mut items);
-    items
+    let macros_live = macro_completion(source, point, language, path, &mut items);
+    let closure_live =
+        closure_symbol_completion(analysis, source, point, language, module_index, &mut items);
+    (items, macros_live || closure_live)
+}
+
+/// The identifier chars immediately before the byte cursor — the typed
+/// prefix that cross-file gathering filters on server-side.
+fn identifier_prefix(source: &str, cursor: usize) -> &str {
+    let bytes = source.as_bytes();
+    let cursor = cursor.min(bytes.len());
+    let mut start = cursor;
+    while start > 0 && (bytes[start - 1].is_ascii_alphanumeric() || bytes[start - 1] == b'_') {
+        start -= 1;
+    }
+    &source[start..cursor]
+}
+
+/// Bare-identifier cross-file completion: the file-scope symbols of every
+/// header in the file's `#include` closure — C's import surface ("C = Perl,
+/// everything exported": the closure is the import list, so enum constants,
+/// free functions, typedefs and globals from included headers are candidates
+/// exactly like imported subs are for Perl). Enumeration is gated to
+/// closure-member files (`visible_defs_with_prefix` — a file that doesn't
+/// include a header never sees its names) and prefix-gated like macros (no
+/// bare-cursor dump of a large closure). Own-file symbols win dedup; closure
+/// items sort after them (`~` sorts past every identifier char). Cross-file
+/// `#define`s arrive via `macro_completion`, which also reaches headers the
+/// workspace index never parsed; the dedup order makes its richer
+/// `#define`-body detail win for names both sources know.
+///
+/// Returns whether this source is live for the file (a non-empty closure) —
+/// the `is_incomplete` signal, independent of whether the current prefix
+/// matched anything.
+fn closure_symbol_completion(
+    analysis: &crate::file_analysis::FileAnalysis,
+    source: &str,
+    point: tree_sitter::Point,
+    language: &str,
+    module_index: &ModuleIndex,
+    items: &mut Vec<CompletionItem>,
+) -> bool {
+    if analysis.include_closure.is_empty() {
+        return false;
+    }
+    let cursor = crate::cursor_sentinel::point_to_byte(source, point);
+    let prefix = identifier_prefix(source, cursor);
+    if prefix.is_empty() {
+        return true; // live source, waiting for a prefix
+    }
+    let pack = module_index.pack_index(language);
+    let idx: &ModuleIndex = pack.as_deref().unwrap_or(module_index);
+    let visible: std::collections::HashSet<String> =
+        analysis.include_closure.iter().cloned().collect();
+    let seen: std::collections::HashSet<String> =
+        items.iter().map(|i| i.label.clone()).collect();
+    let defs = crate::timings::phase("completion.closure_symbols", || {
+        idx.visible_defs_with_prefix(prefix, &visible)
+    });
+    for (name, cached) in defs {
+        if seen.contains(&name) {
+            continue;
+        }
+        let Some(sym) = cached
+            .analysis
+            .symbols_named(&name)
+            .iter()
+            .map(|id| cached.analysis.symbol(*id))
+            .find(|s| cached.analysis.is_linkage_visible(s))
+        else {
+            continue;
+        };
+        let header = cached
+            .path
+            .file_name()
+            .map(|f| f.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        // An enum constant carries its parent enum as `package` — show
+        // "opcode — opnames.h" so the domain reads at a glance.
+        let detail = match sym.package.as_deref() {
+            Some(p) if !p.is_empty() => format!("{} — {}", p, header),
+            _ => header,
+        };
+        items.push(CompletionItem {
+            label: name.clone(),
+            kind: Some(symbols::fa_completion_kind(&sym.kind)),
+            detail: Some(detail),
+            sort_text: Some(format!("~{}", name)),
+            ..Default::default()
+        });
+    }
+    true
 }
 
 /// Identifier-context macro completion (C preprocessor): the `#define`s
@@ -71,28 +168,27 @@ pub fn pack_completion(
 /// cross-file ones. Prefix-filtered server-side (a macro-heavy include
 /// closure reaches thousands — perl.h alone is ~2000), and the header cache
 /// is warm from analyze, so the re-gather is cheap.
+///
+/// Returns whether this source is live for the file (C preprocessor + a
+/// path to gather from) — the `is_incomplete` signal, independent of
+/// whether the current prefix matched anything.
 fn macro_completion(
     source: &str,
     point: tree_sitter::Point,
     language: &str,
     path: Option<&std::path::Path>,
     items: &mut Vec<CompletionItem>,
-) {
+) -> bool {
     if language != "cpp" {
-        return; // only C/C++ have a preprocessor
+        return false; // only C/C++ have a preprocessor
     }
-    let Some(p) = path else { return };
+    let Some(p) = path else { return false };
     let reg = crate::language_driver::LanguageRegistry::with_enabled();
-    let Some(driver) = reg.for_id(language) else { return };
+    let Some(driver) = reg.for_id(language) else { return false };
     let cursor = crate::cursor_sentinel::point_to_byte(source, point);
-    let bytes = source.as_bytes();
-    let mut start = cursor;
-    while start > 0 && (bytes[start - 1].is_ascii_alphanumeric() || bytes[start - 1] == b'_') {
-        start -= 1;
-    }
-    let prefix = &source[start..cursor];
+    let prefix = identifier_prefix(source, cursor);
     if prefix.is_empty() {
-        return; // no bare-cursor dump of the whole macro table
+        return true; // no bare-cursor dump of the whole macro table
     }
     let mut parser = driver.make_parser();
     let macros = crate::cpp_reparse::included_macros(p, source, &mut parser);
@@ -116,9 +212,13 @@ fn macro_completion(
             label: name.clone(),
             kind: Some(kind),
             detail: Some(detail),
+            // Cross-file candidates rank after own-file symbols (which
+            // carry no sort_text, so clients sort them by bare label).
+            sort_text: Some(format!("~{}", name)),
             ..Default::default()
         });
     }
+    true
 }
 
 pub struct Backend {
@@ -1235,7 +1335,7 @@ impl LanguageServer for Backend {
             None => return Ok(None),
         };
         if doc.language != "perl" {
-            let items = pack_completion(
+            let (items, is_incomplete) = pack_completion(
                 &doc.analysis,
                 &doc.text,
                 &doc.tree,
@@ -1244,7 +1344,17 @@ impl LanguageServer for Backend {
                 doc.path.as_deref(),
                 &self.module_index,
             );
-            return Ok((!items.is_empty()).then_some(CompletionResponse::Array(items)));
+            if items.is_empty() && !is_incomplete {
+                return Ok(None);
+            }
+            // Prefix-gated cross-file gathering (macros, include-closure
+            // symbols) filters server-side, so the client must re-request
+            // as the typed prefix changes rather than reuse a cached list.
+            return Ok(Some(if is_incomplete {
+                CompletionResponse::List(CompletionList { is_incomplete: true, items })
+            } else {
+                CompletionResponse::Array(items)
+            }));
         }
         let items = symbols::completion_items(
             &doc.analysis,

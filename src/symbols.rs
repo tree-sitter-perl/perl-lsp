@@ -1055,7 +1055,7 @@ pub fn rename(
     })
 }
 
-fn fa_completion_kind(kind: &FaSymKind) -> CompletionItemKind {
+pub(crate) fn fa_completion_kind(kind: &FaSymKind) -> CompletionItemKind {
     match kind {
         FaSymKind::Sub => CompletionItemKind::FUNCTION,
         FaSymKind::Method => CompletionItemKind::METHOD,

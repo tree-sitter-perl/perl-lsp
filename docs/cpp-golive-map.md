@@ -68,14 +68,22 @@ import (`use`), field slot = one shared subject. Same machinery, C surface.
    hitlist xfails promoted. Residuals in `gold-corpus/KNOWN-GAPS.md` ("Refs
    symmetry"): template-wrapped symbols (next arc, dark BOTH ways), pack
    rename through aliases (listed, non-rewritable, not renamed).
-6b. **cross-file identifier completion** 🔵 IN PROGRESS (agent) — editor-found:
-   completing in op.c offers NO `OP_NULL`/opcode entries. cpp bare-identifier
-   completion candidates are SAME-FILE ONLY — the cross-file index is never
-   consulted for gathering. The completion face of "C = Perl, everything
-   exported": candidates = own file ∪ include-closure-visible file-scope
-   symbols, reusing `include_closure` + `ScopedLookup` (built for resolution,
-   unused for gathering). The same-file minimal fixture masked it.
-7. **cruft cleanup pass** ⬜ NEXT (after #6/6b) — the arc accumulated fast:
+6b. **cross-file identifier completion** ✅ LANDED — the completion face of
+   "C = Perl, everything exported": bare-identifier candidates now include the
+   file-scope symbols (enum constants, functions, typedefs, globals) of every
+   header in the include closure. Gathering rides the visibility slice —
+   `ModuleIndex::visible_defs_with_prefix` enumerates `all_defs` gated to the
+   closure (NO global fallback: a non-includer never sees a header's names),
+   sharing `FileAnalysis::is_linkage_visible` with `register_symbols` so
+   "resolvable" and "offered" can't drift. Prefix-gated server-side (like
+   macros) + `is_incomplete: true` so clients re-request per keystroke;
+   own-file wins dedup and ranks first. op.c `OP_` → 417 opcode enumerators
+   (`opcode — opnames.h`), gather ~2 ms. Gold: cpp-cross-file.json
+   bare-identifier trio (enum constants / function / non-includer negative).
+   Residual: proto.h variadic decls (`Perl_croak(pTHX_ ..., ...)`) never
+   register a Sub symbol — an extraction gap, so they're absent from BOTH
+   goto-def and completion (same set, by construction).
+7. **cruft cleanup pass** ⬜ NEXT — the arc accumulated fast:
    back-compat wrappers, superseded comments, dead gates, duplicated fixture
    shapes, always-`None` fields (e.g. `NominalDomain.storage`). A /simplify-
    style sweep over the arc's touched files, guarded by the full net.

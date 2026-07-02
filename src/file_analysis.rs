@@ -5646,6 +5646,29 @@ impl FileAnalysis {
         self.symbols_by_name.get(name).map(|v| v.as_slice()).unwrap_or(&[])
     }
 
+    /// The C-linkage "everything exported" test: is `sym` part of this
+    /// file's cross-file surface? Types (class/struct/typedef), functions,
+    /// and FILE-SCOPE values (globals, object-like macros, enum constants).
+    /// A file-scope value is a Variable whose scope is the file — locals
+    /// (function-scoped) and struct/namespace members (their own body
+    /// scope) are excluded by scope alone. A C enum constant leaks to file
+    /// scope yet carries its parent enum as a *type* `package` (for hover);
+    /// that annotation must NOT hide it, so key off scope, not package.
+    /// Shared by cross-file registration (`ModuleIndex::register_symbols`)
+    /// and include-closure completion gathering, so "resolvable" and
+    /// "offered" never drift apart.
+    pub fn is_linkage_visible(&self, sym: &Symbol) -> bool {
+        match sym.kind {
+            SymKind::Class | SymKind::Sub => true,
+            SymKind::Variable => self
+                .scopes
+                .iter()
+                .find(|s| s.id == sym.scope)
+                .is_some_and(|s| matches!(s.kind, ScopeKind::File)),
+            _ => false,
+        }
+    }
+
     /// Find all symbols in a given scope.
     #[allow(dead_code)]
     pub fn symbols_in_scope(&self, scope: ScopeId) -> &[SymbolId] {
