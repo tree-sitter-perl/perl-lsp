@@ -51,6 +51,14 @@ pub trait LanguageDriver: Send + Sync {
     fn lang_pack(&self) -> Option<crate::query_extract::LangPack> {
         None
     }
+    /// Fingerprint of the EXTERNAL inputs this driver's analyses depend on
+    /// beyond the source files themselves (C++: the probed toolchain — its
+    /// system include roots decide what a gather reaches). The persist tier
+    /// keys on it so an analysis built under one input generation is never
+    /// served under another. 0 = no external inputs.
+    fn analysis_input_fingerprint(&self) -> u64 {
+        0
+    }
 }
 
 /// Perl — the reference driver. Wraps the production builder; behaviour
@@ -136,6 +144,10 @@ pub struct PackDriver {
     /// (`ScopedLookup` ranks `get_cached` candidates by it). `None` for packs
     /// with no include model.
     include_closure: Option<fn(&Path, &str) -> Vec<String>>,
+    /// External analysis-input fingerprint (see
+    /// `LanguageDriver::analysis_input_fingerprint`). `None` = no external
+    /// inputs (fingerprint 0).
+    input_fingerprint: Option<fn() -> u64>,
 }
 
 #[cfg(any(feature = "cpp", feature = "python", feature = "r", feature = "cmake"))]
@@ -179,7 +191,11 @@ impl LanguageDriver for PackDriver {
             Some(t) => crate::timings::phase("cpp.transform", || t(&mut parser, parse_input, &external)),
             None => (parse_input.to_string(), crate::cpp_reparse::SpliceMap::default(), Vec::new()),
         };
-        let Some(tree) = parser.parse(&src, None) else { return FileAnalysis::new(Default::default()) };
+        let Some(tree) = parser.parse(&src, None) else {
+            let mut fa = FileAnalysis::new(Default::default());
+            fa.degraded = true;
+            return fa;
+        };
         match crate::query_extract::extract(&tree, src.as_bytes(), &(self.pack)()) {
             Ok(mut skel) => {
                 // remap extracted spans from transformed → original coords
@@ -227,9 +243,23 @@ impl LanguageDriver for PackDriver {
                 if let (Some(f), Some(p)) = (self.include_closure, path) {
                     fa.include_closure = crate::timings::phase("cpp.include_closure", || f(p, source));
                 }
+                // A skipped gather (on-open cached-only miss) analyzed with a
+                // placeholder external table — servable, never cacheable.
+                fa.degraded = external.degraded;
                 fa
             }
-            Err(_) => FileAnalysis::new(Default::default()),
+            Err(e) => {
+                // Fail LOUD, and mark the empty stand-in degraded so the
+                // persist tier can't freeze it (H8: a cached empty analysis
+                // is re-served forever — the source file never changes).
+                log::warn!(
+                    "query extract failed for {:?}: {e:?} — serving an empty (non-cacheable) analysis",
+                    path
+                );
+                let mut fa = FileAnalysis::new(Default::default());
+                fa.degraded = true;
+                fa
+            }
         }
     }
     fn module_paths(&self, module: &str) -> Vec<String> {
@@ -240,6 +270,9 @@ impl LanguageDriver for PackDriver {
     }
     fn trigger_chars(&self) -> &[&'static str] {
         (self.pack)().trigger_chars
+    }
+    fn analysis_input_fingerprint(&self) -> u64 {
+        self.input_fingerprint.map(|f| f()).unwrap_or(0)
     }
 }
 
@@ -264,6 +297,7 @@ fn cpp_driver() -> PackDriver {
         collect_macro_defs: Some(crate::cpp_reparse::collect_macro_defs),
         member_blocks: Some(crate::cpp_reparse::plan_member_blocks),
         include_closure: Some(crate::cpp_reparse::include_closure),
+        input_fingerprint: Some(crate::cpp_reparse::toolchain_fingerprint),
     }
 }
 
@@ -284,6 +318,7 @@ fn python_driver() -> PackDriver {
         collect_macro_defs: None,
         member_blocks: None,
         include_closure: None,
+        input_fingerprint: None,
     }
 }
 
@@ -304,6 +339,7 @@ fn r_driver() -> PackDriver {
         collect_macro_defs: None,
         member_blocks: None,
         include_closure: None,
+        input_fingerprint: None,
     }
 }
 
@@ -325,6 +361,7 @@ fn cmake_driver() -> PackDriver {
         collect_macro_defs: None,
         member_blocks: None,
         include_closure: None,
+        input_fingerprint: None,
     }
 }
 

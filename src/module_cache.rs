@@ -106,13 +106,21 @@ pub fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
             file_size        INTEGER NOT NULL,
             source           TEXT NOT NULL DEFAULT 'import',
             analysis         BLOB,
-            extract_version  INTEGER NOT NULL DEFAULT 0
+            extract_version  INTEGER NOT NULL DEFAULT 0,
+            deps_stamp       INTEGER NOT NULL DEFAULT 0
         );
         CREATE TABLE IF NOT EXISTS builtins (
             name TEXT PRIMARY KEY,
             doc  TEXT NOT NULL
         );",
     )?;
+    // Pre-existing tables (same schema version) predate `deps_stamp`; add it
+    // in place rather than bumping SCHEMA_VERSION (a bump drops every row —
+    // old rows carry 0, which validates only for empty-closure analyses, so
+    // stale pack rows re-analyze while Perl caches survive the upgrade).
+    let _ = conn.execute_batch(
+        "ALTER TABLE modules ADD COLUMN deps_stamp INTEGER NOT NULL DEFAULT 0;",
+    );
 
     let version: Option<String> = conn
         .query_row(
@@ -134,7 +142,8 @@ pub fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
                     file_size        INTEGER NOT NULL,
                     source           TEXT NOT NULL DEFAULT 'import',
                     analysis         BLOB,
-                    extract_version  INTEGER NOT NULL DEFAULT 0
+                    extract_version  INTEGER NOT NULL DEFAULT 0,
+                    deps_stamp       INTEGER NOT NULL DEFAULT 0
                 );",
             )?;
             conn.execute(
@@ -280,12 +289,47 @@ pub fn validate_plugin_fingerprint(conn: &Connection, fingerprint: &str) -> rusq
     Ok(())
 }
 
-fn mtime_as_secs(path: &std::path::Path) -> Option<(i64, i64)> {
+/// The row validation stamp: (mtime hashed at NANOSECOND precision, size).
+/// Whole seconds miss two same-length writes within one second (generated
+/// files, rapid saves) — the M1 staleness window. The `mtime_secs` column
+/// name is historical; the value is an opaque equality-checked stamp.
+fn file_stamp(path: &std::path::Path) -> Option<(i64, i64)> {
+    use std::hash::{Hash, Hasher};
     let meta = std::fs::metadata(path).ok()?;
     let mtime = meta.modified().ok()?;
-    let secs = mtime.duration_since(SystemTime::UNIX_EPOCH).ok()?.as_secs() as i64;
+    let nanos = mtime
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    nanos.hash(&mut h);
     let size = meta.len() as i64;
-    Some((secs, size))
+    Some((h.finish() as i64, size))
+}
+
+/// Stamp over every file in an analysis' include closure — the ANALYSIS-INPUT
+/// half of a pack row's validation key. A consumer `.c` row bakes its headers'
+/// macro splices and type witnesses; its own (stamp, size) can't see a header
+/// edit, so the closure stamp must (M2). Perl analyses have an empty closure
+/// → 0, so the Perl path pays nothing. `stat_memo` dedups stats across a warm
+/// run (closures overlap heavily — op.c and sv.c share ~90% of perl5's tree).
+fn closure_stamp(
+    closure: &[String],
+    stat_memo: &mut std::collections::HashMap<String, (i64, i64)>,
+) -> i64 {
+    use std::hash::{Hash, Hasher};
+    if closure.is_empty() {
+        return 0;
+    }
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    for p in closure {
+        let stamp = *stat_memo
+            .entry(p.clone())
+            .or_insert_with(|| file_stamp(std::path::Path::new(p)).unwrap_or((0, -1)));
+        p.hash(&mut h);
+        stamp.hash(&mut h);
+    }
+    h.finish() as i64
 }
 
 /// Serialize FileAnalysis via bincode then compress with zstd.
@@ -307,7 +351,7 @@ pub fn warm_cache(
     cache: &DashMap<String, Option<Arc<CachedModule>>>,
 ) -> (usize, Vec<String>) {
     let mut stmt = match conn.prepare(
-        "SELECT module_name, path, mtime_secs, file_size, analysis, extract_version FROM modules",
+        "SELECT module_name, path, mtime_secs, file_size, analysis, extract_version, deps_stamp FROM modules",
     ) {
         Ok(s) => s,
         Err(_) => return (0, Vec::new()),
@@ -321,6 +365,7 @@ pub fn warm_cache(
             row.get::<_, i64>(3)?,
             row.get::<_, Option<Vec<u8>>>(4)?,
             row.get::<_, i64>(5)?,
+            row.get::<_, i64>(6)?,
         ))
     }) {
         Ok(r) => r,
@@ -329,8 +374,11 @@ pub fn warm_cache(
 
     let mut count = 0usize;
     let mut stale_names = Vec::new();
+    // Closure members overlap heavily across rows; stat each once per warm.
+    let mut stat_memo: std::collections::HashMap<String, (i64, i64)> =
+        std::collections::HashMap::new();
     for row in rows.flatten() {
-        let (module_name, path_str, cached_mtime, cached_size, analysis_blob, row_extract_version) = row;
+        let (module_name, path_str, cached_mtime, cached_size, analysis_blob, row_extract_version, row_deps_stamp) = row;
 
         // Negative sentinel: empty path + NULL blob.
         if path_str.is_empty() {
@@ -342,7 +390,7 @@ pub fn warm_cache(
         let path = PathBuf::from(&path_str);
 
         // Validate mtime — skip entries where the file changed on disk.
-        if let Some((disk_mtime, disk_size)) = mtime_as_secs(&path) {
+        if let Some((disk_mtime, disk_size)) = file_stamp(&path) {
             if disk_mtime != cached_mtime || disk_size != cached_size {
                 continue;
             }
@@ -359,6 +407,12 @@ pub fn warm_cache(
             Some(blob) if !blob.is_empty() => {
                 match decode_analysis(&blob) {
                     Some(fa) => {
+                        // A pack file's analysis bakes its headers (splices,
+                        // witnesses, closure): the row is valid only while the
+                        // whole closure is unchanged, not just the file itself.
+                        if closure_stamp(&fa.include_closure, &mut stat_memo) != row_deps_stamp {
+                            continue;
+                        }
                         cache.insert(
                             module_name,
                             Some(Arc::new(CachedModule::new(path, Arc::new(fa)))),
@@ -387,23 +441,63 @@ pub fn save_to_db(
     result: &Option<Arc<CachedModule>>,
     source: &str,
 ) {
-    let (path_str, mtime, size, analysis_blob) = match result {
+    let (path_str, mtime, size, analysis_blob, deps_stamp) = match result {
         Some(cached) => {
-            let (mtime, size) = mtime_as_secs(&cached.path).unwrap_or((0, 0));
+            // Degraded analyses (parse/extract failure, skipped gather) must
+            // not be persisted: the row would validate on the source file's
+            // stamp alone and re-serve the degraded blob every session (H8).
+            if cached.analysis.degraded {
+                return;
+            }
+            let (mtime, size) = file_stamp(&cached.path).unwrap_or((0, 0));
             let blob = encode_analysis(&cached.analysis);
-            (cached.path.to_string_lossy().to_string(), mtime, size, blob)
+            let deps = closure_stamp(
+                &cached.analysis.include_closure,
+                &mut std::collections::HashMap::new(),
+            );
+            (cached.path.to_string_lossy().to_string(), mtime, size, blob, deps)
         }
-        None => (String::new(), 0i64, 0i64, None),
+        None => (String::new(), 0i64, 0i64, None, 0i64),
     };
 
     let r = conn.execute(
-        "INSERT OR REPLACE INTO modules (module_name, path, mtime_secs, file_size, source, analysis, extract_version)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-        params![module_name, path_str, mtime, size, source, analysis_blob, EXTRACT_VERSION],
+        "INSERT OR REPLACE INTO modules (module_name, path, mtime_secs, file_size, source, analysis, extract_version, deps_stamp)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        params![module_name, path_str, mtime, size, source, analysis_blob, EXTRACT_VERSION, deps_stamp],
     );
     if let Err(e) = r {
         log::warn!("Failed to save module cache for '{}': {}", module_name, e);
     }
+}
+
+/// Drop the modules table when the driver's external analysis inputs (the
+/// C++ toolchain: system include roots, predefined macros — or its probe
+/// FAILURE) changed since the rows were written. Same meta-row pattern as
+/// `validate_inc_paths`: a generation built under degraded/different inputs
+/// must not be served under the current ones (H8).
+pub fn validate_input_fingerprint(conn: &Connection, fingerprint: u64) -> rusqlite::Result<()> {
+    let fingerprint = format!("{:016x}", fingerprint);
+    let stored: Option<String> = conn
+        .query_row(
+            "SELECT value FROM meta WHERE key = 'input_fingerprint'",
+            [],
+            |row| row.get(0),
+        )
+        .ok();
+
+    if stored.as_deref() != Some(&fingerprint) {
+        log::info!(
+            "Analysis inputs changed (was {:?}, now {}), clearing module cache",
+            stored,
+            fingerprint
+        );
+        conn.execute("DELETE FROM modules", [])?;
+        conn.execute(
+            "INSERT OR REPLACE INTO meta (key, value) VALUES ('input_fingerprint', ?1)",
+            params![fingerprint],
+        )?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]

@@ -480,3 +480,46 @@ struct s { int x; };
     assert!(plan.is_empty(), "no member-block macros here");
     assert_eq!(plan.blanked_source, src, "source unchanged");
 }
+
+/// H1 lock: the tier-1 caches are keyed by (file, include-set) and cannot
+/// see header CONTENT edits; `evict_analysis_caches` is the invalidation
+/// seam the save/watcher path drives. After eviction, the macro table and
+/// the include closure re-gather against the new bytes.
+#[test]
+fn evict_analysis_caches_recovers_header_content_edits() {
+    let dir = std::env::temp_dir().join(format!("evict_seam_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let hdr = dir.join("hdr.h");
+    let hdr2 = dir.join("hdr2.h");
+    let main_c = dir.join("main.c");
+    std::fs::write(&hdr, "#define LIMIT 5\n").unwrap();
+    let src = "#include \"hdr.h\"\nint x = LIMIT;\n";
+    std::fs::write(&main_c, src).unwrap();
+
+    let mut p = cpp_parser();
+    let t1 = included_macros(&main_c, src, &mut p);
+    assert!(t1.contains_key("LIMIT"));
+    assert!(!t1.contains_key("LIMIT2"));
+    assert_eq!(include_closure(&main_c, src).len(), 1);
+
+    // Edit the header: new macro + a new nested include. The consuming
+    // file's OWN include set is unchanged, so both caches keep serving
+    // the old world by design...
+    std::fs::write(&hdr2, "#define NESTED 1\n").unwrap();
+    std::fs::write(&hdr, "#include \"hdr2.h\"\n#define LIMIT 5\n#define LIMIT2 7\n").unwrap();
+    let t2 = included_macros(&main_c, src, &mut p);
+    assert!(!t2.contains_key("LIMIT2"), "tier-1 hit: content edit invisible until evicted");
+    assert_eq!(include_closure(&main_c, src).len(), 1, "closure cache: same");
+
+    // ...until the invalidation seam evicts the consumer.
+    let evict: std::collections::HashSet<std::path::PathBuf> =
+        [main_c.canonicalize().unwrap(), hdr.canonicalize().unwrap()]
+            .into_iter()
+            .collect();
+    evict_analysis_caches(&evict);
+    let t3 = included_macros(&main_c, src, &mut p);
+    assert!(t3.contains_key("LIMIT2"), "fresh gather sees the header edit");
+    assert!(t3.contains_key("NESTED"), "and the new nested include");
+    assert_eq!(include_closure(&main_c, src).len(), 2, "closure re-walked");
+    let _ = std::fs::remove_dir_all(&dir);
+}

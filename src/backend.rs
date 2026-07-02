@@ -247,6 +247,14 @@ pub struct Backend {
     /// stall. One-shot latches, swap-guarded.
     perl_indexed: Arc<std::sync::atomic::AtomicBool>,
     pack_indexed: Arc<std::sync::atomic::AtomicBool>,
+    /// Did the client advertise `window.workDoneProgress`? Server-initiated
+    /// progress (`window/workDoneProgress/create`) is only legal — and only
+    /// useful — when it did; sending it anyway wedges indexing behind a
+    /// request minimal clients never answer.
+    work_done_progress: Arc<std::sync::atomic::AtomicBool>,
+    /// Serializes pack-file invalidation runs (did_save + watcher events can
+    /// race on the same header; unregister/register swaps must not interleave).
+    pack_change_lock: Arc<std::sync::Mutex<()>>,
 }
 
 impl Backend {
@@ -282,6 +290,12 @@ impl Backend {
         let client = self.client.clone();
         let module_index = Arc::clone(&self.module_index);
         let root = self.module_index.workspace_root();
+        // Server-initiated progress requires the client capability; a client
+        // that never advertised it may also never ANSWER the create request —
+        // and indexing must proceed regardless (LSP spec; M7).
+        let progress = self
+            .work_done_progress
+            .load(std::sync::atomic::Ordering::Relaxed);
         tokio::task::spawn_blocking(move || {
             let Some(root_uri) = root else { return };
             let Some(root_path) = root_uri.strip_prefix("file://") else { return };
@@ -291,20 +305,27 @@ impl Backend {
                 "perl-lsp/workspace-index-{}",
                 if want_perl { "perl" } else { "pack" }
             ));
-            let _ = rt.block_on(client.send_request::<request::WorkDoneProgressCreate>(
-                WorkDoneProgressCreateParams { token: token.clone() },
-            ));
-            rt.block_on(client.send_notification::<notification::Progress>(ProgressParams {
-                token: token.clone(),
-                value: ProgressParamsValue::WorkDone(WorkDoneProgress::Begin(
-                    WorkDoneProgressBegin {
-                        title: "Indexing workspace".into(),
-                        cancellable: Some(false),
-                        message: Some("Scanning files...".into()),
-                        percentage: Some(0),
-                    },
-                )),
-            }));
+            if progress {
+                // Belt-and-braces timeout: even a capable client that stalls
+                // on the reply must not block indexing behind it.
+                let _ = rt.block_on(tokio::time::timeout(
+                    std::time::Duration::from_secs(2),
+                    client.send_request::<request::WorkDoneProgressCreate>(
+                        WorkDoneProgressCreateParams { token: token.clone() },
+                    ),
+                ));
+                rt.block_on(client.send_notification::<notification::Progress>(ProgressParams {
+                    token: token.clone(),
+                    value: ProgressParamsValue::WorkDone(WorkDoneProgress::Begin(
+                        WorkDoneProgressBegin {
+                            title: "Indexing workspace".into(),
+                            cancellable: Some(false),
+                            message: Some("Scanning files...".into()),
+                            percentage: Some(0),
+                        },
+                    )),
+                }));
+            }
             let count = if want_perl {
                 crate::module_resolver::index_workspace_with_index(
                     &root_path,
@@ -319,12 +340,16 @@ impl Backend {
                 );
                 0
             };
-            rt.block_on(client.send_notification::<notification::Progress>(ProgressParams {
-                token,
-                value: ProgressParamsValue::WorkDone(WorkDoneProgress::End(WorkDoneProgressEnd {
-                    message: Some(format!("Indexed {} files", count)),
-                })),
-            }));
+            if progress {
+                rt.block_on(client.send_notification::<notification::Progress>(ProgressParams {
+                    token,
+                    value: ProgressParamsValue::WorkDone(WorkDoneProgress::End(
+                        WorkDoneProgressEnd {
+                            message: Some(format!("Indexed {} files", count)),
+                        },
+                    )),
+                }));
+            }
         });
     }
 }
@@ -393,6 +418,8 @@ impl Backend {
             dispatch_override: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             perl_indexed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             pack_indexed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            work_done_progress: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            pack_change_lock: Arc::new(std::sync::Mutex::new(())),
         }
     }
 
@@ -462,9 +489,23 @@ impl Backend {
     /// document when it lands. A no-op-fast on a warm gather (the analyze just
     /// re-runs against the cache). Perl needs no gather and is skipped.
     fn spawn_pack_gather_refresh(&self, uri: Url) {
-        let files = Arc::clone(&self.files);
-        let module_index = Arc::clone(&self.module_index);
-        let client = self.client.clone();
+        Self::spawn_pack_doc_refresh(
+            Arc::clone(&self.files),
+            Arc::clone(&self.module_index),
+            self.client.clone(),
+            uri,
+        );
+    }
+
+    /// The body of the gather refresh, associated-fn shaped so background
+    /// tasks (the pack-file invalidation path) can refresh open documents
+    /// with their own clones.
+    fn spawn_pack_doc_refresh(
+        files: Arc<FileStore>,
+        module_index: Arc<ModuleIndex>,
+        client: Client,
+        uri: Url,
+    ) {
         tokio::spawn(async move {
             let Some((text, path, language)) = files
                 .get_open(&uri)
@@ -507,6 +548,61 @@ impl Backend {
                 .map(|doc| symbols::pack_diagnostics(&doc.analysis));
             if let Some(diags) = diags {
                 client.publish_diagnostics(uri, diags, None).await;
+            }
+        });
+    }
+
+    /// A pack file's bytes changed on disk (save or watcher event) — run the
+    /// H1 invalidation off the message loop: evict its per-file caches +
+    /// every consumer's (reverse-closure), re-register the pack index, then
+    /// refresh every OPEN pack document whose include closure contains the
+    /// changed file (or that IS it), so in-session edits become visible
+    /// without a restart.
+    fn schedule_pack_invalidate(&self, path: PathBuf, deleted: bool) {
+        let files = Arc::clone(&self.files);
+        let module_index = Arc::clone(&self.module_index);
+        let client = self.client.clone();
+        let lock = Arc::clone(&self.pack_change_lock);
+        let root = self.module_index.workspace_root();
+        tokio::spawn(async move {
+            let canon = path.canonicalize().unwrap_or_else(|_| path.clone());
+            {
+                let module_index = Arc::clone(&module_index);
+                let canon = canon.clone();
+                let _ = tokio::task::spawn_blocking(move || {
+                    let _g = lock.lock().unwrap_or_else(|e| e.into_inner());
+                    crate::module_resolver::pack_file_changed(
+                        root.as_deref(),
+                        &module_index,
+                        &canon,
+                        deleted,
+                    );
+                })
+                .await;
+            }
+            // Open consumers re-analyze AFTER the eviction so their gather
+            // runs cold against the new header bytes.
+            let canon_str = canon.to_string_lossy().into_owned();
+            let mut to_refresh: Vec<Url> = Vec::new();
+            files.for_each_analysis(|key, analysis| {
+                if let FileKey::Url(u) = key {
+                    let is_self = !deleted
+                        && u.to_file_path()
+                            .ok()
+                            .map(|p| p.canonicalize().unwrap_or(p) == canon)
+                            .unwrap_or(false);
+                    if is_self || analysis.include_closure.iter().any(|c| c == &canon_str) {
+                        to_refresh.push(u);
+                    }
+                }
+            });
+            for uri in to_refresh {
+                Self::spawn_pack_doc_refresh(
+                    Arc::clone(&files),
+                    Arc::clone(&module_index),
+                    client.clone(),
+                    uri,
+                );
             }
         });
     }
@@ -742,6 +838,17 @@ impl LanguageServer for Backend {
         // plugin set and the per-project cache key can't disagree.
         crate::plugin::rhai_host::set_workspace_root(root);
 
+        // Server-initiated progress is capability-gated (M7): only send
+        // `window/workDoneProgress/create` to clients that opted in.
+        let wdp = params
+            .capabilities
+            .window
+            .as_ref()
+            .and_then(|w| w.work_done_progress)
+            .unwrap_or(false);
+        self.work_done_progress
+            .store(wdp, std::sync::atomic::Ordering::Relaxed);
+
         // Opt-in diagnostics from `initializationOptions.diagnostics`.
         // `{ "diagnostics": { "unresolvedDispatch": true } }` enables the
         // QA/plugin-author `unresolved-dispatch` channel; absent = off.
@@ -870,16 +977,26 @@ impl LanguageServer for Backend {
             .log_message(MessageType::INFO, "perl-lsp initialized")
             .await;
 
-        // Register file watchers for workspace indexing
+        // Register file watchers for workspace indexing — every served
+        // language's extensions (Perl + pack languages), so out-of-editor
+        // changes to a header/pack file reach the invalidation path too.
+        let watchers: Vec<FileSystemWatcher> = {
+            let reg = crate::language_driver::LanguageRegistry::with_enabled();
+            reg.languages()
+                .into_iter()
+                .filter_map(|id| reg.for_id(id))
+                .flat_map(|d| d.extensions().iter())
+                .map(|ext| FileSystemWatcher {
+                    glob_pattern: GlobPattern::String(format!("**/*.{ext}")),
+                    kind: None,
+                })
+                .collect()
+        };
         let registrations = vec![Registration {
             id: "perl-file-watcher".to_string(),
             method: "workspace/didChangeWatchedFiles".to_string(),
             register_options: Some(serde_json::to_value(DidChangeWatchedFilesRegistrationOptions {
-                watchers: vec![
-                    FileSystemWatcher { glob_pattern: GlobPattern::String("**/*.pm".into()), kind: None },
-                    FileSystemWatcher { glob_pattern: GlobPattern::String("**/*.pl".into()), kind: None },
-                    FileSystemWatcher { glob_pattern: GlobPattern::String("**/*.t".into()), kind: None },
-                ],
+                watchers,
             }).unwrap()),
         }];
         let _ = self.client.register_capability(registrations).await;
@@ -971,12 +1088,24 @@ impl LanguageServer for Backend {
     }
 
     async fn did_save(&self, params: DidSaveTextDocumentParams) {
+        let uri = params.text_document.uri;
+        let pack_path = self
+            .files
+            .get_open(&uri)
+            .filter(|doc| doc.language != "perl")
+            .and_then(|_| uri.to_file_path().ok());
         if let Some(text) = params.text {
-            let uri = params.text_document.uri;
             if let Some(mut doc) = self.files.get_open_mut(&uri) {
                 doc.update(text);
             }
             self.publish_diagnostics(&uri).await;
+        }
+        // The saved bytes are on disk: re-register this file's indexed copy,
+        // evict the macro/closure caches it participates in, and refresh its
+        // open consumers (H1 — a saved header must become visible to its
+        // includers without a restart). Runs regardless of includeText.
+        if let Some(path) = pack_path {
+            self.schedule_pack_invalidate(path, false);
         }
     }
 
@@ -1654,14 +1783,32 @@ impl LanguageServer for Backend {
     }
 
     async fn did_change_watched_files(&self, params: DidChangeWatchedFilesParams) {
+        // Route by language: pack files go through the invalidation seam
+        // (re-register + reverse-closure eviction — the old path parsed
+        // them with the Perl parser); Perl keeps the direct re-index.
+        let mut perl_changes: Vec<(PathBuf, FileChangeType)> = Vec::new();
+        {
+            let reg = crate::language_driver::LanguageRegistry::with_enabled();
+            for change in params.changes {
+                let Ok(path) = change.uri.to_file_path() else { continue };
+                match reg.for_path(&path).map(|d| d.id()) {
+                    Some(id) if id != "perl" => {
+                        self.schedule_pack_invalidate(
+                            path,
+                            change.typ == FileChangeType::DELETED,
+                        );
+                    }
+                    _ => perl_changes.push((path, change.typ)),
+                }
+            }
+        }
+        if perl_changes.is_empty() {
+            return;
+        }
         let files = Arc::clone(&self.files);
         tokio::task::spawn_blocking(move || {
-            for change in params.changes {
-                let path = match change.uri.to_file_path() {
-                    Ok(p) => p,
-                    Err(_) => continue,
-                };
-                match change.typ {
+            for (path, typ) in perl_changes {
+                match typ {
                     FileChangeType::DELETED => {
                         files.remove_workspace(&path);
                     }
