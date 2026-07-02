@@ -199,18 +199,27 @@ impl LanguageDriver for PackDriver {
                 if let Some(plan) = &plan {
                     inject_member_blocks(&mut skel, plan, (self.pack)().annot_type);
                 }
+                // Macro identity lane: collect every `#define` off the ORIGINAL
+                // source (spans in user coordinates, no splice remap needed).
+                let macro_defs = self
+                    .collect_macro_defs
+                    .map(|collect| collect(&mut parser, source))
+                    .unwrap_or_default();
+                // Function-like macro typing (the expansion flip's payoff): a
+                // left-unexpanded macro call parses as `call_expression`, so the
+                // macro is a package-global sub. Type it from its body — delegation
+                // reuses the see-through target, else a param-independent body type
+                // — and hand `into_file_analysis` the hints to lower onto the
+                // final `SymbolId`s. `docs/adr/macro-handling.md`.
+                skel.macro_returns = macro_return_hints(&macro_defs, &mut parser);
                 let mut fa = skel.into_file_analysis();
+                fa.macro_defs = macro_defs;
                 apply_attribute_macros(&mut fa, &recovered);
                 // The file's include closure is the cross-file visibility key
                 // (`ScopedLookup`). Computed here — the driver holds the path the
                 // resolver needs; empty on-open until the header cache warms.
                 if let (Some(f), Some(p)) = (self.include_closure, path) {
                     fa.include_closure = crate::timings::phase("cpp.include_closure", || f(p, source));
-                }
-                // Macro identity lane: collect every `#define` off the ORIGINAL
-                // source (spans in user coordinates, no splice remap needed).
-                if let Some(collect) = self.collect_macro_defs {
-                    fa.macro_defs = collect(&mut parser, source);
                 }
                 fa
             }
@@ -349,6 +358,36 @@ fn apply_attribute_macros(fa: &mut FileAnalysis, recovered: &[(String, String)])
 /// delivers `o->op_type` resolution / hover / the references splat — no parallel
 /// field resolution. Spans are already in ORIGINAL coordinates.
 #[cfg(any(feature = "cpp", feature = "python", feature = "r", feature = "cmake"))]
+/// Type each function-like macro from its body: delegation (`#define F(x)
+/// G(x)`) reuses the see-through target as a value edge, else a param-
+/// independent body type (`#define SQ(x) ((x)*(x))` → Numeric). First def wins
+/// per name (a config-variant macro's arms are a later union tier). Object-like
+/// macros are skipped — their value/type lanes ride edges, not the sub-return
+/// path.
+#[cfg(any(feature = "cpp", feature = "python", feature = "r", feature = "cmake"))]
+fn macro_return_hints(
+    macro_defs: &[crate::file_analysis::MacroDef],
+    parser: &mut tree_sitter::Parser,
+) -> Vec<(String, crate::query_extract::MacroReturnHint)> {
+    use crate::query_extract::MacroReturnHint;
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for m in macro_defs.iter().filter(|m| m.params.is_some()) {
+        if !seen.insert(m.name.clone()) {
+            continue;
+        }
+        let hint = match &m.delegate {
+            Some(g) => Some(MacroReturnHint::Delegate(g.clone())),
+            None => crate::cpp_reparse::classify_body_type(parser, &m.body)
+                .map(MacroReturnHint::Concrete),
+        };
+        if let Some(hint) = hint {
+            out.push((m.name.clone(), hint));
+        }
+    }
+    out
+}
+
 fn inject_member_blocks(
     skel: &mut crate::query_extract::SkeletonAnalysis,
     plan: &crate::cpp_reparse::MemberBlockPlan,

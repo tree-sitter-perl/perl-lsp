@@ -120,3 +120,38 @@ fn cpp_enumerator_carries_parent_enum_as_container_and_type() {
         "enumerators leak into the enclosing (file) scope");
 }
 
+
+#[cfg(feature = "cpp")]
+#[test]
+fn function_like_macro_types_from_its_body() {
+    // The expansion flip: `SQ(3)` is LEFT as a call, so the macro is a package-
+    // global sub the sub-return path types. `((x)*(x))` is a numeric expression
+    // whatever `x` is (param-independent), so the use types integer.
+    use crate::file_analysis::InferredType;
+    let src = "#define SQ(x) ((x) * (x))\nvoid g(void) { auto b = SQ(3); }\n";
+    let fa = cpp_driver().analyze(src);
+    assert!(fa.symbols.iter().any(|s| s.name == "SQ"), "macro is a sub symbol");
+    assert_eq!(
+        fa.inferred_type_via_bag("b", tree_sitter::Point { row: 1, column: 20 }),
+        Some(InferredType::Numeric),
+        "SQ(3) types integer from its body, not a phantom `SQ` class",
+    );
+}
+
+#[cfg(feature = "cpp")]
+#[test]
+fn delegation_macro_types_as_the_wrapped_functions_return() {
+    // `#define WRAP(x) real(x)` — F's return IS G's return, an edge to the
+    // callee's own return (the see-through value-witness, reusing the slice-1
+    // delegation target).
+    use crate::file_analysis::InferredType;
+    let src = "int real(int x) { return x; }\n#define WRAP(x) real(x)\nvoid g(void) { auto d = WRAP(4); }\n";
+    let fa = cpp_driver().analyze(src);
+    assert_eq!(
+        fa.inferred_type_via_bag("d", tree_sitter::Point { row: 2, column: 20 }),
+        Some(InferredType::Numeric),
+        "WRAP delegates to real → real's return type flows through",
+    );
+    // exactly one `real` sub (the dual @def.sub patterns dedup by span).
+    assert_eq!(fa.symbols.iter().filter(|s| s.name == "real").count(), 1);
+}

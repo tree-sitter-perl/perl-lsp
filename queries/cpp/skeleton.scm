@@ -140,6 +140,14 @@
 ; body ever leaks into the enclosing class scope. The name patterns here only
 ; carry @def; they no longer double as the scope source (which missed the
 ; operator/cast/in-class-destructor declarator shapes).
+; A free function carries its declared return type like a method does, so a
+; call (and a function-like macro delegating to it) types through the sub-return
+; path. A type-less definition (a constructor `Foo(){}`, K&R) still matches the
+; second, rettype-free pattern; @def.sub dedups by name in `into_file_analysis`.
+(function_definition
+  type: (_) @rettype
+  declarator: (function_declarator
+    declarator: (identifier) @def.sub.name)) @def.sub
 (function_definition
   declarator: (function_declarator
     declarator: (identifier) @def.sub.name)) @def.sub

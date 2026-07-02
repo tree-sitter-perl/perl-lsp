@@ -169,6 +169,12 @@ const INCLUDE_QUERY: &str = r#"
 (preproc_include path: (system_lib_string) @s)
 "#;
 
+/// A function-like macro use that already parses as a call — the "leave" set
+/// for the expansion flip (`clean_call_sites`).
+const CALL_QUERY: &str = r#"
+(call_expression function: (identifier) @f)
+"#;
+
 /// Compile-once cache for this pipeline's queries. Every tree here comes
 /// from the one `tree_sitter_cpp` grammar (the C/C++ driver), so a single
 /// `Query` per source is reused across every reparse instead of rebuilding
@@ -177,6 +183,7 @@ const INCLUDE_QUERY: &str = r#"
 static MACRO_DEF_Q: OnceLock<Query> = OnceLock::new();
 static EXCLUDE_Q: OnceLock<Query> = OnceLock::new();
 static INCLUDE_Q: OnceLock<Query> = OnceLock::new();
+static CALL_Q: OnceLock<Query> = OnceLock::new();
 
 fn cached_query(slot: &'static OnceLock<Query>, lang: &tree_sitter::Language, src: &str) -> &'static Query {
     slot.get_or_init(|| Query::new(lang, src).expect("cpp_reparse query"))
@@ -311,6 +318,62 @@ fn delegation_target(body: &str) -> Option<String> {
         }
     }
     None
+}
+
+/// The param-INDEPENDENT type a function-like macro body evaluates to — the
+/// implied return of `#define F(x) …expr…` when the result type doesn't depend
+/// on the argument (`((x)*(x))` is `Numeric` whatever `x` is). Returns `None`
+/// for a bare-param body (`(x)`) or anything argument-dependent (PARKED per the
+/// ADR: parametric return is a later tier). Delegation bodies (`G(x)`) are
+/// handled by the caller via `MacroDef::delegate` — this is the non-delegation
+/// expression lane. A tiny recursive classifier over the parsed body, not a
+/// full type engine: C's binary/comparison/bitwise/shift/logical operators all
+/// yield a numeric value regardless of operand types, so the common wrapper
+/// macro types without arg inference.
+pub fn classify_body_type(
+    parser: &mut tree_sitter::Parser,
+    body: &str,
+) -> Option<crate::file_analysis::InferredType> {
+    // Wrap so the body parses as an initializer expression the tree exposes
+    // cleanly (a bare `((x)*(x))` alone is a MISSING-`;` statement).
+    let wrapped = format!("int __macro_ret__ = {body};");
+    let tree = parser.parse(&wrapped, None)?;
+    let decl = tree.root_node().named_child(0)?;
+    // declaration → declarator: (init_declarator) → value:
+    let value = decl
+        .child_by_field_name("declarator")
+        .filter(|n| n.kind() == "init_declarator")
+        .and_then(|n| n.child_by_field_name("value"))?;
+    classify_expr_node(value)
+}
+
+fn classify_expr_node(node: tree_sitter::Node) -> Option<crate::file_analysis::InferredType> {
+    use crate::file_analysis::InferredType;
+    match node.kind() {
+        "number_literal" | "char_literal" | "true" | "false" | "sizeof_expression" => {
+            Some(InferredType::Numeric)
+        }
+        "string_literal" | "concatenated_string" | "raw_string_literal" => {
+            Some(InferredType::String)
+        }
+        // Every C binary operator (arithmetic / comparison / bitwise / shift /
+        // logical) produces a numeric value — the operand types don't change
+        // that, so the result is param-independent.
+        "binary_expression" => Some(InferredType::Numeric),
+        "parenthesized_expression" | "unary_expression" => {
+            node.named_child(0).and_then(classify_expr_node)
+        }
+        // A ternary is param-independent only if both arms agree.
+        "conditional_expression" => {
+            let a = node.child_by_field_name("consequence").and_then(classify_expr_node);
+            let b = node.child_by_field_name("alternative").and_then(classify_expr_node);
+            match (a, b) {
+                (Some(x), Some(y)) if x == y => Some(x),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
 }
 
 /// The COMPLETE variant set per macro name — every `#define`, not the
@@ -1447,6 +1510,23 @@ fn preprocess_with_mode_inner(
         return (src.to_string(), SpliceMap::default());
     }
     let excludes = exclusion_spans(tree);
+    // The expansion-policy flip: leave a use unexpanded when it already parses
+    // clean, expand only where leaving it raises `parse_damage` (parse-repair).
+    // `error_spans` is that per-use oracle. The alias-salvage mode is exempt —
+    // it runs only as the whole-file fallback after the gated expansion still
+    // raised damage, and its job is to preserve identifier-alias name
+    // indirection on the CLEAN uses the gate would otherwise leave.
+    //
+    // The expansion-policy flip (`docs/adr/macro-handling.md`, three modes):
+    // a function-like macro whose use ALREADY parses as a clean `call_
+    // expression` is LEFT unexpanded — the existing sub-return bag path then
+    // types the call for free (a function-like macro IS a package-global sub
+    // typed from its body). Only function-like uses that DON'T parse as a call
+    // (member-block field-slot misparse `DECLARE_DYNAMIC(x)`, statement soup,
+    // args-in-declarator) fall through to expansion (parse-repair). Object-like
+    // macros are unaffected — their value/type lanes ride edges, and leaving an
+    // attribute/declarator macro is a silent misparse the parser doesn't flag.
+    let leave_calls = (!alias_only).then(|| clean_call_sites(tree)).unwrap_or_default();
     let bytes = src.as_bytes();
     let mut splices: Vec<Splice> = Vec::new();
     // `excludes` is sorted + disjoint and `start` only advances, so a
@@ -1454,6 +1534,7 @@ fn preprocess_with_mode_inner(
     // intervals that end at/before the current word, then the frontier
     // interval is the only one that can contain it.
     let mut ex = 0usize;
+    let mut lc = 0usize;
     let mut i = 0;
     while i < bytes.len() {
         if is_ident_byte(bytes[i]) && (i == 0 || !is_ident_byte(bytes[i - 1])) {
@@ -1468,7 +1549,16 @@ fn preprocess_with_mode_inner(
             if ex < excludes.len() && excludes[ex].0 <= start {
                 continue; // start ∈ [s, e) of the frontier exclude → skip
             }
+            // `leave_calls` (sorted, from the same left-to-right tree walk) is
+            // consulted with a forward cursor like `excludes`.
+            while lc < leave_calls.len() && leave_calls[lc] < start {
+                lc += 1;
+            }
+            let is_clean_call = lc < leave_calls.len() && leave_calls[lc] == start;
             if let Some(m) = eff.get(word) {
+                if m.params.is_some() && is_clean_call {
+                    continue; // leave: parses clean as a call → sub-return types it
+                }
                 match &m.params {
                     None => splices.push(Splice {
                         start,
@@ -1582,6 +1672,34 @@ fn exclusion_spans(tree: &Tree) -> Vec<(usize, usize)> {
         }
     }
     merged
+}
+
+/// Start bytes (SORTED) of every function identifier that heads a clean
+/// `call_expression` — `f(args)` where the parser committed to a call, not a
+/// misparse. This is the per-use "leave" oracle for the expansion flip: a
+/// function-like macro use that already parses as a clean call is left
+/// unexpanded (the sub-return bag path types it). A function-like macro pasted
+/// where a call can't stand — a struct-body field slot (`DECLARE_DYNAMIC(x)` →
+/// `field_declaration`), statement soup — never yields a `call_expression`
+/// here, so it falls through to expansion (parse-repair). `docs/adr/macro-
+/// handling.md`.
+fn clean_call_sites(tree: &Tree) -> Vec<usize> {
+    let query = cached_query(&CALL_Q, &tree.language(), CALL_QUERY);
+    let mut starts = Vec::new();
+    let mut cursor = QueryCursor::new();
+    let mut it = cursor.matches(query, tree.root_node(), b"" as &[u8]);
+    while let Some(m) = it.next() {
+        for c in m.captures {
+            // The capture is the function identifier; its parent is the
+            // `call_expression`. A call the parser flagged as broken is not a
+            // trustworthy "leave" — let it expand.
+            if c.node.parent().is_some_and(|p| !p.has_error()) {
+                starts.push(c.node.start_byte());
+            }
+        }
+    }
+    starts.sort_unstable();
+    starts
 }
 
 fn apply(src: &str, splices: &mut [Splice]) -> (String, SpliceMap) {

@@ -133,6 +133,23 @@ pub struct SkeletonAnalysis {
     /// at query time); folds onto `Field{owner, name}` for the int-used-as-enum
     /// domain (`op_type` → `opcode`).
     pub domain_sites: Vec<crate::file_analysis::DomainSite>,
+    /// Function-like macros the driver typed from their bodies (the expansion
+    /// flip's payoff: a left-unexpanded macro call is a `call_expression`, so
+    /// the macro IS a package-global sub the sub-return path types). Resolved to
+    /// final `SymbolId`s in `into_file_analysis`: the macro's `Symbol` gets its
+    /// return witness, and each call site an `Expr → Edge(Symbol)` so the call
+    /// reflects the body's type. `docs/adr/macro-handling.md`.
+    pub macro_returns: Vec<(String, MacroReturnHint)>,
+}
+
+/// What a function-like macro's return resolves to (`SkeletonAnalysis::
+/// macro_returns`). `Delegate` reuses the existing see-through target
+/// (`MacroDef::delegate`) as a value edge (F's return = G's return);
+/// `Concrete` is a body-classified param-independent type.
+#[derive(Debug, Clone)]
+pub enum MacroReturnHint {
+    Delegate(String),
+    Concrete(InferredType),
 }
 
 impl SkeletonAnalysis {
@@ -152,8 +169,52 @@ impl SkeletonAnalysis {
             self.symbols
                 .retain(|s| s.kind != "class" || seen.insert(s.name.clone()));
         }
+        // A free function matches both the rettype-carrying and the rettype-free
+        // `@def.sub` pattern (a type-less constructor/K&R def only the latter) —
+        // one node, two SkelSymbols. Keep the one WITH a return type; dedup by
+        // the name span (same node → identical span).
+        {
+            use std::collections::HashMap;
+            let mut best: HashMap<(usize, usize, usize, usize), bool> = HashMap::new();
+            for s in &self.symbols {
+                if s.kind == "sub" {
+                    let key = (s.name_start.row, s.name_start.column, s.name_end.row, s.name_end.column);
+                    let has = s.return_type.is_some();
+                    best.entry(key).and_modify(|v| *v |= has).or_insert(has);
+                }
+            }
+            let mut kept: std::collections::HashSet<(usize, usize, usize, usize)> = Default::default();
+            self.symbols.retain(|s| {
+                if s.kind != "sub" {
+                    return true;
+                }
+                let key = (s.name_start.row, s.name_start.column, s.name_end.row, s.name_end.column);
+                // Keep the rettype-bearing copy; if none has one, keep the first.
+                if best.get(&key) == Some(&true) && s.return_type.is_none() {
+                    return false;
+                }
+                kept.insert(key)
+            });
+        }
+        // A function-like macro left unexpanded is a call. When its name is
+        // uppercase the ctor convention mis-fired an `Expr → ClassName(macro)`
+        // witness at the call — drop those; the macro's real return (its body's
+        // type) is emitted below. Keyed on the macro NAME the ctor witness
+        // carries, not the call span (which lives on the whole-call node).
+        let macro_names: std::collections::HashSet<&str> =
+            self.macro_returns.iter().map(|(n, _)| n.as_str()).collect();
+        let mut macro_call_spans: Vec<(Span, String)> = Vec::new();
         let mut bag = crate::witnesses::WitnessBag::default();
         for w in self.witnesses {
+            use crate::witnesses::{WitnessAttachment as WA, WitnessPayload as WP};
+            if let (WA::Expr(span), WP::InferredType(InferredType::ClassName(cn))) =
+                (&w.attachment, &w.payload)
+            {
+                if macro_names.contains(cn.as_str()) {
+                    macro_call_spans.push((*span, cn.clone()));
+                    continue; // the ctor mis-fire — replaced by the macro return
+                }
+            }
             bag.push(w);
         }
         let mut symbols: Vec<Symbol> = self
@@ -326,6 +387,38 @@ impl SkeletonAnalysis {
                             sym.span,
                         ));
                     }
+                }
+            }
+            // Function-like macro typing: the macro's `Symbol` carries its
+            // body's implied return (delegation → an Edge to the callee's own
+            // return, else the classified concrete type), so a left-unexpanded
+            // call `F(args)` types through the sub-return path. Each mis-fired
+            // ctor call span (stripped above) is re-sourced as an Edge to the
+            // macro's Symbol, so the enclosing `auto x = F(..)` / `x = F(..)`
+            // reflects the body type instead of the phantom class.
+            let sub_sid: std::collections::HashMap<&str, SymbolId> = symbols
+                .iter()
+                .filter(|s| matches!(s.kind, SymKind::Sub))
+                .map(|s| (s.name.as_str(), s.id))
+                .collect();
+            for (name, hint) in &self.macro_returns {
+                let Some(&sid) = sub_sid.get(name.as_str()) else { continue };
+                let span = symbols[sid.0 as usize].span;
+                let pay = match hint {
+                    crate::query_extract::MacroReturnHint::Delegate(g) => {
+                        sub_sid.get(g.as_str()).map(|&gsid| WP::Edge(WA::Symbol(gsid)))
+                    }
+                    crate::query_extract::MacroReturnHint::Concrete(t) => {
+                        Some(WP::InferredType(t.clone()))
+                    }
+                };
+                if let Some(pay) = pay {
+                    bag.push(mk(WA::Symbol(sid), pay, span));
+                }
+            }
+            for (span, name) in &macro_call_spans {
+                if let Some(&sid) = sub_sid.get(name.as_str()) {
+                    bag.push(mk(WA::Expr(*span), WP::Edge(WA::Symbol(sid)), *span));
                 }
             }
         }
