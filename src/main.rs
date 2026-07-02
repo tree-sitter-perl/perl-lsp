@@ -804,20 +804,25 @@ fn run_one(
             let (_s, _t, mut analysis) = parse_file(file);
             resolve_imports_blocking(idx, &analysis);
             analysis.enrich_imported_types_with_keys(Some(idx));
+            let file_path = std::path::Path::new(file).canonicalize()
+                .unwrap_or_else(|_| std::path::PathBuf::from(file));
+            let _staged = ScopedWorkspaceEntry::insert(ws, file_path.clone(), analysis);
+            let origin = ws.workspace_raw().get(&file_path).map(|r| r.value().clone())
+                .expect("origin staged above");
+            let cs = resolve::resolve(
+                ws, &origin, file_store::FileKey::Path(file_path), point,
+                Some(idx), resolve::OverrideScope::default(),
+            );
             let mut sources = SourceCache::new();
             let mut results = Vec::new();
-            if let Some(resolve::ResolvedTarget::Target(t)) =
-                resolve::resolve_symbol(&analysis, point, Some(idx))
-            {
-                for loc in resolve::implementations_of(&analysis, Some(idx), &t) {
-                    let path = match &loc.key {
-                        file_store::FileKey::Path(p) => p.display().to_string(),
-                        file_store::FileKey::Url(u) => u.to_file_path()
-                            .map(|p| p.display().to_string()).unwrap_or_else(|_| u.to_string()),
-                    };
-                    let (line, col) = sources.display(&path, loc.span.start.row, loc.span.start.column);
-                    results.push(serde_json::json!({"file": path, "line": line, "col": col}));
-                }
+            for loc in cs.implementations() {
+                let path = match &loc.key {
+                    file_store::FileKey::Path(p) => p.display().to_string(),
+                    file_store::FileKey::Url(u) => u.to_file_path()
+                        .map(|p| p.display().to_string()).unwrap_or_else(|_| u.to_string()),
+                };
+                let (line, col) = sources.display(&path, loc.span.start.row, loc.span.start.column);
+                results.push(serde_json::json!({"file": path, "line": line, "col": col}));
             }
             Ok(serde_json::to_string_pretty(&results).unwrap())
         }

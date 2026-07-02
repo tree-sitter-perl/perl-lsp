@@ -463,17 +463,18 @@ impl LanguageServer for Backend {
             None => return Ok(None),
         };
 
-        use crate::resolve::{implementations_of, resolve_symbol, ResolvedTarget};
-        let point = symbols::position_to_point(pos);
-        let target = match resolve_symbol(&doc.analysis, point, Some(&*self.module_index)) {
-            Some(ResolvedTarget::Target(t)) => t,
-            // Groups (field projections) and lexicals have no
-            // descendant-implementation semantics.
-            _ => return Ok(None),
-        };
-        let results = implementations_of(&doc.analysis, Some(&*self.module_index), &target);
-        drop(doc);
-        Ok(refs_to_locations(results).map(GotoDefinitionResponse::Array))
+        // The family/descendants projection of the same set references and
+        // rename resolve from. Groups (field projections) and lexicals have
+        // no descendant-implementation semantics — the projection is empty.
+        let cs = crate::resolve::resolve(
+            &self.files,
+            &doc.analysis,
+            FileKey::Url(uri.clone()),
+            symbols::position_to_point(pos),
+            Some(&*self.module_index),
+            crate::resolve::OverrideScope::default(),
+        );
+        Ok(refs_to_locations(cs.implementations()).map(GotoDefinitionResponse::Array))
     }
 
     async fn references(&self, params: ReferenceParams) -> Result<Option<Vec<Location>>> {
