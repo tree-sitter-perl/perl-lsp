@@ -8,53 +8,63 @@ markers are point-in-time; the *structure* is the durable part.
 > query-engine seam. cpp-first; Python is a generality forcer (no hard DX
 > runs); everything resolves via ref/edge, never a cursor-time shape pile.
 
-## READY QUEUE — fire sequentially (each lands + merges before the next)
+## THE MACRO/SEMANTIC ARC — landed (the dogfooding→design→queue run)
 
-The macro arc is **DONE** (goto-def / hover / typing / roles; real op.c `op_type`
-= 235 refs, hover `uint16_t`, gd→op.h:55, `BASEOP` a navigable Class). Design in
-`docs/adr/macro-handling.md`. Remaining, in order:
+The full arc, from "cpp-lsp is completely useless" (hitlist.md, real op.c/fmt
+dogfooding) to a semantic macro layer. The durable shape: **every C construct,
+correctly named, turned out to BE a Perl construct** — config-variant macro =
+superposition (arm-fold), field-block copypasta = role (`with` edge), include =
+import (`use`), field slot = one shared subject. Same machinery, C surface.
 
-1. **enum-variant goto-def** — REGRESSION: gd is dark on `OP_SCOPE` & friends
-   (op.c:186). Enumerator *uses* no longer resolve to their `enum opcode` def
-   cross-file (likely fallout from the `@def.var`→`@def.enumerator` container
-   wiring). Bug — fix first.
-2. **domain typing** (`op_type → opcode`) — unblocked now that slice 3 gives the
-   single `BASEOP.op_type` subject. Defines the **language-generic
-   `Field{owner, name}`** attachment (the project-wide fold onto a storage slot)
-   + `DomainCompare` witness + the free navigation bridge; C emission first.
-   Design: the domain spike (`docs/prompt-domain-typing.md`).
-3. **unified field-slot primitive** (C + Perl fields, core + plugin) — ✅ refs
-   + subject landed; domain typing DEFERRED. `FileAnalysis::field_subject`
-   mints the canonical `Field{owner, name}` subject for any Perl field access
-   (owner = declaring class via the `resolve_method_in_ancestors` ancestor
-   walk); `field_subject_of_ref` routes every access SHAPE (accessor call,
-   `$self->{k}` hash-slot deref, Corinna field variable) onto it, never
-   branching on flavor (rule #10). Refs-splat was already source-agnostic via
-   the `AttrProjection`/`Group` machinery (`docs/adr/field-projections.md`) —
-   the same `(class, attr)` identity — and now shares the `Field` primitive
-   with C; a gold references row (`ref-mojo-path-charset-field-both-forms`)
-   locks the dual-form convergence. **Deferred:** Perl *domain* typing (emit
-   `DomainCompare` at Perl comparison/assignment sites) — Perl has no C-style
-   enum grouping, so `resolve_enumerator_enum`'s "value → named enum" hop has
-   no natural Perl analog (`use constant OPEN => …; use constant CLOSED => …`
-   are independent subs with no shared domain name). Wants a synthetic
-   Perl-constant-group / `Type::Tiny` enum domain first — a separate chunk,
-   and it changes the serialized `domain_sites` shape (EXTRACT_VERSION bump).
-4. **include-closure visibility** (ADR slice 4) — `C = Perl, everything exported`:
-   scope cross-file resolution by include-reachability (make cpp a `module_index`
-   consumer) + the cheap `#include`-goto-def sub-win.
-5. **function-typing + expansion flip** (ADR slice 5) — the coupled finale;
-   biggest blast radius, last.
-6. **refs symmetry audit** (LAST — over everything) — gr (find-references) is
-   systematically weaker than gd (goto-def): enum variants don't gr to their
-   uses; a macro at its `#define` doesn't gr to uses; fields / globals / roles /
-   typedefs / includes likely the same. **Invariant to enforce: any resolution
-   gd does forward (use→def), gr MUST mirror backward (def→uses) on the SAME
-   key.** Forward is one lookup; backward needs every use to emit a ref the
-   reverse index finds by that key. Audit each symbol kind we've touched via
-   `--definition`/`--references` round-trips on real perl5 (and fixtures), close
-   every asymmetry, and lock each as a gold pair (gd row + gr row) so it can't
-   regress back to one-directional.
+- **Foundations:** determinism smoking-gun (two RandomState-order type
+  decisions: DashMap class-winner race + HashMap witness order — now
+  order-independent/sorted); query-compile memoize (85s hang → 2.2s suite) +
+  init pre-warm (10× first-goto-def); lazy per-language index (op.c first-open
+  50s→s); parallel memoized gather (warm 1413→106ms); lifecycle exit-on-EOF +
+  CLI malformed-flag guard (orphan leaks).
+- **Macro arc** (`docs/adr/macro-handling.md`): goto-def overhaul (`#define`-
+  preference, cross-file registration, reachability-RANKED multi-location —
+  never prune, portability — delegation see-through); provenance-leaf hover
+  (typing = the join abstraction, display = the config-active concrete leaf);
+  member-block macros = ROLES (blank-don't-expand; `BASEOP` a navigable Class;
+  op_type: 235-ref splat via the ordinary ancestor walk); expansion flip
+  (leave/blank/expand, per-use parse-damage gate) + function-like macros typed
+  as global subs (delegation returns via Edge).
+- **Semantic tier:** enum members carry their enum (`OP_CONST: opcode`);
+  cross-file gd for bare value reads (enum variants + globals); DOMAIN typing
+  (`Field{owner,name}` — the project-wide storage-slot fold; `op_type: opcode`
+  headline + storage drill-down; bidirectional bridge, 944 sites); Perl fields
+  bridged onto the same subject (AttrProjection ∪ Field — source-agnostic
+  splat); include-closure visibility (rank-not-filter; same-name TU collision
+  fixed CORRECTLY, not just deterministically) + `#include` goto-def.
+- **Working style that made it go:** design locked with the user BEFORE
+  agents (the role/blank/edges forks); one slice per agent, disjoint files,
+  merge+full-verify+push between; xfail rows authored RED from the hitlist,
+  promoted on landing; honest partials (use-after-move gated, Perl domain
+  deferred) recorded, not forced.
+
+## READY QUEUE
+
+1–5 ✅ LANDED (see the arc record above). Remaining:
+
+6. **refs symmetry audit** 🔵 IN PROGRESS (agent, re-fired after an API-outage
+   kill; seeded with the predecessor's `resolve.rs` fragment) — **invariant:
+   any resolution gd does forward (use→def), gr MUST mirror backward
+   (def→uses) on the SAME key.** Audit kind × {gd, gr} on real perl5 +
+   fixtures, close every gd-only asymmetry through the `refs_to`/
+   `resolve_symbol` seam, lock each kind as a GOLD PAIR (gd row + gr row).
+   Known-dark: enum-variant gr, macro-at-`#define` gr.
+7. **cruft cleanup pass** ⬜ NEXT (after #6) — the arc accumulated fast:
+   back-compat wrappers, superseded comments, dead gates, duplicated fixture
+   shapes, always-`None` fields (e.g. `NominalDomain.storage`). A /simplify-
+   style sweep over the arc's touched files, guarded by the full net.
+
+**Deferred (recorded, not queued):** Perl domain typing (needs a synthetic
+constant-group / `Type::Tiny` enum-domain model — `docs/adr/field-projections.md`);
+type-constrained completion at domain slots (`op_type == |` → `OP_*`; needs
+cursor-context work); use-after-move re-wire (needs path-sensitivity);
+per-toolchain global system-header cache (behind toolchain discovery);
+parametric macro return; flag-set domains (`op_flags`/`OPf_*`).
 
 ```
 ARC 1  cpp seam refactor ............................... ✅ DONE
