@@ -1,14 +1,18 @@
 //! Unified query surface across FileStore + ModuleIndex.
 //!
-//! All cross-file LSP queries (references, rename, workspace/symbol) route
-//! through this module so that each handler is a one-liner against a single
-//! role-masked function instead of reinventing the per-tier walk.
+//! `resolve(cursor) → CandidateSet` is the one resolution entry point:
+//! identity (`resolve_symbol_scoped`'s Target/Group/Local verdict),
+//! visibility (RoleMask), edges, and per-site policy are owned by the set,
+//! and every navigation verb — goto-def, references, rename, prepareRename,
+//! implementations — is a projection of it. Handlers and CLI mirrors are
+//! one-liners over a projection; none re-derives identity or the per-tier
+//! walk inline (that's how the CLI and LSP used to disagree on hash-key
+//! references, and how visibility axes used to reach one feature and miss
+//! its siblings). See `docs/adr/resolution-candidate-set.md`.
 //!
-//! `resolve_symbol` is the inverse direction: cursor → target. Every handler
-//! that wants "what does this position refer to, cross-file" (LSP references,
-//! LSP rename, the CLI mirrors of both) calls it and then hands the
-//! `TargetRef` to `refs_to`. Handlers never re-derive the mapping inline —
-//! that's how the CLI and LSP used to disagree on hash-key references.
+//! `refs_to` / `group_refs` / `references_mask_for` are the set's internals
+//! (still exercised directly by tests); new axes go into CandidateSet
+//! construction, never into a handler.
 
 use std::path::PathBuf;
 
