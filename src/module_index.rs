@@ -14,6 +14,7 @@
 //! - `module_cache.rs` — SQLite persistence (schema v9, bincode+zstd blobs)
 //! - `cpanfile.rs` — cpanfile parsing
 
+#[cfg(test)]
 use std::path::PathBuf;
 use std::sync::{Arc, Condvar, Mutex};
 
@@ -388,13 +389,6 @@ impl ModuleIndex {
             }
         });
         found
-    }
-
-    /// Return cached module path only — never does I/O.
-    pub fn module_path_cached(&self, module_name: &str) -> Option<PathBuf> {
-        self.cache
-            .get(module_name)
-            .and_then(|entry| entry.as_ref().map(|m| m.path.clone()))
     }
 
     /// Return cached parent classes for a module's primary package.

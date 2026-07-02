@@ -162,6 +162,16 @@ impl FileStore {
         }
     }
 
+    /// Read-only iteration over open Documents. Query paths (`refs_to`,
+    /// `references_mask_for`) use this so a caller may hold a `get_open` read
+    /// guard while the walk runs — the mutable variant takes shard write locks
+    /// and would deadlock against that guard.
+    pub fn for_each_open<F: FnMut(&Url, &Document)>(&self, mut f: F) {
+        for entry in self.open.iter() {
+            f(entry.key(), entry.value());
+        }
+    }
+
     /// Call `f` for every file-path backed analysis in the store — open files
     /// first (canonical), then workspace files (skipping paths already covered
     /// by an open entry). Borrowed, not cloned.
