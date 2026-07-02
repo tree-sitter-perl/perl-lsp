@@ -199,6 +199,12 @@ impl LanguageDriver for PackDriver {
                 if let Some(plan) = &plan {
                     inject_member_blocks(&mut skel, plan, (self.pack)().annot_type);
                 }
+                // Expanded / blanked macro USES vanish from the parsed text,
+                // so no query capture can ref them — re-mint each as a
+                // variable read at its ORIGINAL span (the splice map + the
+                // member-block blank diff know every site), so find-references
+                // on a macro reaches uses the expansion erased (rule #7/#9).
+                mint_erased_macro_reads(&mut skel, source, &map, plan.as_ref());
                 // Macro identity lane: collect every `#define` off the ORIGINAL
                 // source (spans in user coordinates, no splice remap needed).
                 let macro_defs = self
@@ -573,6 +579,75 @@ fn remap_spans(
     }
     for (_, span, _) in &mut skel.moved_from {
         *span = rspan(*span);
+    }
+}
+
+/// Re-mint a variable read at every macro use the transform ERASED from the
+/// parsed text — expansion splices (the map's edits, original coordinates)
+/// and member-block blanks (length-preserving, recovered by diffing the
+/// blanked source). Without these the use has no token in the tree, so no
+/// query capture can ref it and find-references on the macro goes dark.
+/// Runs after `remap_spans` (skeleton scopes already in original coords),
+/// before `into_file_analysis` (which resolves/mints the actual refs).
+#[cfg(any(feature = "cpp", feature = "python", feature = "r", feature = "cmake"))]
+fn mint_erased_macro_reads(
+    skel: &mut crate::query_extract::SkeletonAnalysis,
+    original: &str,
+    map: &crate::cpp_reparse::SpliceMap,
+    plan: Option<&crate::cpp_reparse::MemberBlockPlan>,
+) {
+    use crate::file_analysis::{ScopeId, Span};
+    let bytes = original.as_bytes();
+    let is_id = |c: u8| c == b'_' || c.is_ascii_alphanumeric();
+    let mut sites: Vec<usize> = map.expansion_sites().map(|(os, _)| os).collect();
+    if let Some(plan) = plan {
+        let blanked = plan.blanked_source.as_bytes();
+        if blanked.len() == bytes.len() && blanked != bytes {
+            let mut i = 0;
+            while i < bytes.len() {
+                if bytes[i] != blanked[i] {
+                    let start = i;
+                    while i < bytes.len() && bytes[i] != blanked[i] {
+                        i += 1;
+                    }
+                    sites.push(start);
+                } else {
+                    i += 1;
+                }
+            }
+        }
+    }
+    if sites.is_empty() {
+        return;
+    }
+    let o = LineIndex::new(original);
+    for os in sites {
+        let mut e = os;
+        while e < bytes.len() && is_id(bytes[e]) {
+            e += 1;
+        }
+        if e == os {
+            continue;
+        }
+        let name = original[os..e].to_string();
+        let span = Span { start: o.point(os), end: o.point(e) };
+        // Innermost skeleton scope containing the site (root when none).
+        let mut scope = ScopeId(0);
+        let mut best: Option<crate::file_analysis::Span> = None;
+        for sc in &skel.scopes {
+            let within = (sc.span.start.row, sc.span.start.column)
+                <= (span.start.row, span.start.column)
+                && (span.end.row, span.end.column) <= (sc.span.end.row, sc.span.end.column);
+            if within
+                && best.is_none_or(|b| {
+                    (sc.span.start.row, sc.span.start.column) >= (b.start.row, b.start.column)
+                })
+            {
+                best = Some(sc.span);
+                scope = sc.id;
+            }
+        }
+        skel.var_reads.push((name, scope, span));
     }
 }
 

@@ -1121,29 +1121,54 @@ fn run_one(
             analysis.enrich_imported_types_with_keys(Some(idx));
             let file_path = std::path::Path::new(file).canonicalize()
                 .unwrap_or_else(|_| std::path::PathBuf::from(file));
-            let resolved = resolve::resolve_symbol_scoped(&analysis, point, Some(idx), override_scope_from_env());
             let mut sources = SourceCache::new();
             let mut results = Vec::new();
-            // Reverse domain bridge: a find-refs on an enum (or an enumerator)
-            // surfaces the field-slot sites whose domain is that enum. Uses the
-            // pack index (op_type sites live in pack-language files).
-            {
-                let reg = language_driver::LanguageRegistry::with_enabled();
-                let pack = reg.for_path(std::path::Path::new(file))
-                    .map(|d| d.id()).filter(|id| *id != "perl")
-                    .and_then(|lang| idx.pack_index(lang));
-                if let Some(pidx) = pack.as_deref() {
-                    for (path, span) in symbols::domain_backrefs(&analysis, point, pidx) {
+            // Pack languages route through their sub-index (matches goto-def
+            // and the LSP server) — the hub only knows Perl modules, so
+            // resolving/collecting against it silently misses every
+            // cross-file cpp use. Perl keeps the hub (empty closure = no-op).
+            let reg = language_driver::LanguageRegistry::with_enabled();
+            let lang_id = reg.for_path(std::path::Path::new(file))
+                .map(|d| d.id()).filter(|id| *id != "perl");
+            let pack = lang_id.and_then(|lang| idx.pack_index(lang));
+            let base_idx: &dyn crate::file_analysis::CrossFileLookup =
+                pack.as_deref().map_or(idx as &dyn crate::file_analysis::CrossFileLookup, |i| i);
+            // `#include` reverse — "who includes this header" — owns the path
+            // token exclusively (its backward mirror of include goto-def).
+            if lang_id == Some("cpp") {
+                if let Some(incs) = symbols::pack_include_references(
+                    &analysis, point, Some(file_path.as_path()), base_idx)
+                {
+                    for (path, span) in incs {
                         let ps = path.display().to_string();
                         let (line, col) = sources.display(&ps, span.start.row, span.start.column);
                         results.push(serde_json::json!({"file": ps, "line": line, "col": col}));
                     }
+                    return Ok(serde_json::to_string_pretty(&results).unwrap());
+                }
+            }
+            // Clone the closure: `analysis` is moved into the staged
+            // workspace entry below while the scoped view must stay usable
+            // for the Local-arm fallback.
+            let closure = analysis.include_closure.clone();
+            let scoped = crate::file_analysis::ScopedLookup::new(
+                base_idx, &closure, Some(file_path.as_path()));
+            let xidx: &dyn crate::file_analysis::CrossFileLookup = &scoped;
+            let resolved = resolve::resolve_symbol_scoped(&analysis, point, Some(xidx), override_scope_from_env());
+            // Reverse domain bridge: a find-refs on an enum (or an enumerator)
+            // surfaces the field-slot sites whose domain is that enum. Uses the
+            // pack index (op_type sites live in pack-language files).
+            if let Some(pidx) = pack.as_deref() {
+                for (path, span) in symbols::domain_backrefs(&analysis, point, pidx) {
+                    let ps = path.display().to_string();
+                    let (line, col) = sources.display(&ps, span.start.row, span.start.column);
+                    results.push(serde_json::json!({"file": ps, "line": line, "col": col}));
                 }
             }
             match resolved {
                 Some(resolve::ResolvedTarget::Local) | None => {
                     let path_str = file_path.display().to_string();
-                    for span in &analysis.find_references(point, Some(idx)) {
+                    for span in &analysis.find_references(point, Some(xidx)) {
                         let (line, col) = sources.display(&path_str, span.start.row, span.start.column);
                         results.push(serde_json::json!({"file": path_str, "line": line, "col": col}));
                     }
@@ -1153,12 +1178,20 @@ fn run_one(
                     let _staged = ScopedWorkspaceEntry::insert(ws, file_path.clone(), analysis);
                     let locs = match resolved {
                         resolve::ResolvedTarget::Target(t) => {
-                            let mask = resolve::references_mask_for(ws, Some(idx), &t);
-                            resolve::refs_to(ws, Some(idx), &t, mask)
+                            // Pack files live in the per-language cache (the
+                            // DEPENDENCY role), not the Perl workspace store —
+                            // VISIBLE reaches them; `references_mask_for`'s
+                            // editable-scoping is a Perl/CPAN concern.
+                            let mask = if pack.is_some() {
+                                resolve::RoleMask::VISIBLE
+                            } else {
+                                resolve::references_mask_for(ws, Some(base_idx), &t)
+                            };
+                            resolve::refs_to(ws, Some(base_idx), &t, mask)
                         }
                         resolve::ResolvedTarget::Group { local_spans, pinned_spans, members } => {
                             resolve::group_refs(
-                                ws, Some(idx), &origin, &local_spans, &pinned_spans, &members, None,
+                                ws, Some(base_idx), &origin, &local_spans, &pinned_spans, &members, None,
                             )
                         }
                         resolve::ResolvedTarget::Local => unreachable!("handled above"),

@@ -155,3 +155,101 @@ fn delegation_macro_types_as_the_wrapped_functions_return() {
     // exactly one `real` sub (the dual @def.sub patterns dedup by span).
     assert_eq!(fa.symbols.iter().filter(|s| s.name == "real").count(), 1);
 }
+
+#[cfg(feature = "cpp")]
+#[test]
+fn class_content_gate_admits_members_not_locals() {
+    // The refs-symmetry def→uses gate: a member (or role-macro member, or
+    // enum constant) is the class's OWN content; a lexical local inside an
+    // inline method carries the class as sticky `package` too and must NOT
+    // pass, or find-references on its decl would fan out name-keyed
+    // across the workspace.
+    let fa = cpp_driver().analyze(
+        "class Box {\npublic:\n  void grow() { int localx = 1; localx += 2; }\n  int width;\n};\nenum Color { RED, GREEN };\n",
+    );
+    let sym = |n: &str| fa.symbols.iter().find(|s| s.name == n).unwrap();
+    assert!(fa.symbol_is_class_content(sym("width")), "direct member");
+    assert!(fa.symbol_is_class_content(sym("RED")), "enum constant (leaked scope)");
+    assert!(
+        !fa.symbol_is_class_content(sym("localx")),
+        "a local in an inline method has the class as sticky package but is NOT class content"
+    );
+    // Role-macro members (`#define BASEOP ... op_type ...`) live in a
+    // parentless synthetic scope inside the macro's Class span.
+    let src = std::fs::read_to_string("gold-corpus/cpp-fixture/member_block.cpp").unwrap();
+    let fa = cpp_driver().analyze(&src);
+    assert!(fa.symbol_is_class_content(sym_in(&fa, "op_type")), "role-macro member");
+    assert!(fa.symbol_is_class_content(sym_in(&fa, "op_refcnt")), "role-macro member");
+    assert!(!fa.symbol_is_class_content(sym_in(&fa, "o")), "function param");
+}
+
+#[cfg(feature = "cpp")]
+fn sym_in<'a>(
+    fa: &'a crate::file_analysis::FileAnalysis,
+    n: &str,
+) -> &'a crate::file_analysis::Symbol {
+    fa.symbols.iter().find(|s| s.name == n).unwrap()
+}
+
+#[cfg(feature = "cpp")]
+#[test]
+fn file_scope_value_gate() {
+    // `#define MAX 1` mints a file-scope Variable symbol; `int g;` is a
+    // global; both are bare-name-keyed values (FileScopeValue targets). A
+    // local never is.
+    let fa = cpp_driver().analyze("#define MAX 1\nint g;\nvoid f() { int loc = MAX + g; }\n");
+    assert!(fa.symbol_is_file_scope_value(sym_in(&fa, "MAX")));
+    assert!(fa.symbol_is_file_scope_value(sym_in(&fa, "g")));
+    assert!(!fa.symbol_is_file_scope_value(sym_in(&fa, "loc")));
+    assert!(fa.names_macro_def("MAX", None));
+    assert!(!fa.names_macro_def("g", None));
+}
+
+#[cfg(feature = "cpp")]
+#[test]
+fn type_uses_are_package_refs() {
+    use crate::file_analysis::RefKind;
+    // `Widget` in `Widget make_widget();` / `Widget global_w;` is a USE of
+    // the type (rule #7) — a PackageRef, same as a Perl package-name use —
+    // while the decl's own name token stays the Symbol's alone.
+    let fa = cpp_driver().analyze("struct Widget { int w; };\nWidget make_widget();\nWidget global_w;\n");
+    let type_refs: Vec<_> = fa
+        .refs
+        .iter()
+        .filter(|r| matches!(r.kind, RefKind::PackageRef) && r.target_name == "Widget")
+        .collect();
+    assert_eq!(type_refs.len(), 2, "two uses, decl-name suppressed: {type_refs:?}");
+    assert!(type_refs.iter().all(|r| r.span.start.row >= 1));
+}
+
+#[cfg(feature = "cpp")]
+#[test]
+fn expanded_macro_uses_still_carry_refs() {
+    use crate::file_analysis::RefKind;
+    // An object-like value macro's uses are EXPANDED out of the parsed text;
+    // the splice map re-mints a Variable read at each original site so
+    // find-references on the `#define` still reaches them (rule #7/#9).
+    let src = std::fs::read_to_string("gold-corpus/cpp-fixture/macro_refs.h").unwrap();
+    let fa = cpp_driver().analyze(&src);
+    let uses: Vec<_> = fa
+        .refs
+        .iter()
+        .filter(|r| {
+            matches!(r.kind, RefKind::Variable)
+                && r.target_name == "MYFLAG"
+                && r.span.start.row > 0
+        })
+        .map(|r| (r.span.start.row, r.span.start.column))
+        .collect();
+    assert_eq!(uses, vec![(1, 12), (2, 12), (2, 21)], "all three expanded uses: {uses:?}");
+    // Member-block (role) macro uses are BLANKED, not expanded — the blank
+    // diff re-mints those too.
+    let src = std::fs::read_to_string("gold-corpus/cpp-fixture/member_block.cpp").unwrap();
+    let fa = cpp_driver().analyze(&src);
+    let baseop_uses = fa
+        .refs
+        .iter()
+        .filter(|r| matches!(r.kind, RefKind::Variable) && r.target_name == "BASEOP")
+        .count();
+    assert_eq!(baseop_uses, 2, "struct op {{ BASEOP }} and struct unop {{ BASEOP ... }}");
+}

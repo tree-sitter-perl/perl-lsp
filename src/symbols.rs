@@ -206,11 +206,7 @@ pub fn domain_backrefs(
         });
     let Some(enum_name) = target else { return Vec::new() };
     let mut out: Vec<(std::path::PathBuf, crate::file_analysis::Span)> = Vec::new();
-    let mut seen: std::collections::HashSet<std::path::PathBuf> = std::collections::HashSet::new();
-    module_index.for_each_cached(&mut |_n, cached| {
-        if !seen.insert(cached.path.clone()) {
-            return;
-        }
+    module_index.for_each_cached_file(&mut |cached| {
         for span in cached.analysis.field_sites_for_enum(&enum_name, Some(module_index)) {
             out.push((cached.path.clone(), span));
         }
@@ -483,13 +479,34 @@ pub fn find_definition(
             }
         }
 
-        // Cross-file package goto-def: resolve module name via module index
+        // Cross-file package/type goto-def: resolve the name via the module
+        // index. Land on the declaring symbol when the cached analysis knows
+        // it (a Perl `package Foo;` line, a cpp `struct op` / typedef name);
+        // fall back to the top of the file.
         if matches!(r.kind, RefKind::PackageRef) {
             if let Some(path) = module_index.module_path_cached(&r.target_name) {
                 if let Ok(module_uri) = Url::from_file_path(&path) {
+                    use crate::file_analysis::SymKind;
+                    let range = module_index
+                        .get_cached(&r.target_name)
+                        .and_then(|cached| {
+                            cached
+                                .analysis
+                                .symbols
+                                .iter()
+                                .find(|s| {
+                                    s.name == r.target_name
+                                        && matches!(
+                                            s.kind,
+                                            SymKind::Package | SymKind::Class | SymKind::Module
+                                        )
+                                })
+                                .map(|s| span_to_range(s.selection_span))
+                        })
+                        .unwrap_or_default();
                     return Some(GotoDefinitionResponse::Scalar(Location {
                         uri: module_uri,
-                        range: Range::default(),
+                        range,
                     }));
                 }
             }
@@ -655,13 +672,9 @@ fn ranked_macro_variants(
             push(m, uri, &mut sites, &mut seen);
         }
     }
-    // The pack cache is keyed by symbol NAME, so each module appears once per
-    // name it declares — visit each distinct file's macro table only once.
-    let mut visited_paths: HashSet<std::path::PathBuf> = HashSet::new();
-    module_index.for_each_cached(&mut |_n, cached| {
-        if !visited_paths.insert(cached.path.clone()) {
-            return;
-        }
+    // Per-FILE sweep: the name-keyed cache view both repeats files and hides
+    // a file that lost every name tie.
+    module_index.for_each_cached_file(&mut |cached| {
         let file_uri = Url::from_file_path(&cached.path).ok();
         for m in &cached.analysis.macro_defs {
             note(m, &mut defined, &mut universe);
@@ -786,6 +799,66 @@ pub fn pack_include_definition(
     None
 }
 
+/// Find-references on an `#include` path token: every `#include` directive —
+/// across this file + the cached pack modules — that resolves to the SAME
+/// header ("who includes this header"), the backward mirror of the include
+/// goto-def on the same key (the resolved header path, so `"x.h"` and a
+/// differently-spelled directive reaching the same file group together).
+/// `None` when the cursor isn't on an include directive; both references
+/// handlers (LSP + CLI) call this before the general resolve so the path
+/// token never leaks into name-keyed resolution. Sorted (path, position)
+/// for deterministic output.
+#[cfg(feature = "cpp")]
+pub fn pack_include_references(
+    analysis: &FileAnalysis,
+    point: Point,
+    self_path: Option<&std::path::Path>,
+    module_index: &dyn CrossFileLookup,
+) -> Option<Vec<(std::path::PathBuf, crate::file_analysis::Span)>> {
+    let raw = analysis
+        .include_directives
+        .iter()
+        .find(|(span, _)| crate::file_analysis::contains_point(span, point))
+        .map(|(_, raw)| raw.clone())?;
+    let trim = |r: &str| r.trim_matches(|c| c == '<' || c == '>' || c == '"').to_string();
+    let base = self_path?;
+    let header = crate::cpp_reparse::resolve_include_path(base, &trim(&raw))?;
+    let mut out: Vec<(std::path::PathBuf, crate::file_analysis::Span)> = Vec::new();
+    let mut collect = |path: &std::path::Path, a: &FileAnalysis| {
+        for (span, r) in &a.include_directives {
+            if crate::cpp_reparse::resolve_include_path(path, &trim(r)).as_deref()
+                == Some(header.as_path())
+            {
+                out.push((path.to_path_buf(), *span));
+            }
+        }
+    };
+    collect(base, analysis);
+    // Per-FILE sweep; skip the cursor file (fresh copy already collected).
+    module_index.for_each_cached_file(&mut |cached| {
+        if cached.path == base {
+            return;
+        }
+        collect(&cached.path, &cached.analysis);
+    });
+    out.sort_by(|a, b| {
+        a.0.cmp(&b.0).then_with(|| {
+            (a.1.start.row, a.1.start.column).cmp(&(b.1.start.row, b.1.start.column))
+        })
+    });
+    out.dedup();
+    Some(out)
+}
+#[cfg(not(feature = "cpp"))]
+pub fn pack_include_references(
+    _analysis: &FileAnalysis,
+    _point: Point,
+    _self_path: Option<&std::path::Path>,
+    _module_index: &dyn CrossFileLookup,
+) -> Option<Vec<(std::path::PathBuf, crate::file_analysis::Span)>> {
+    None
+}
+
 pub fn pack_macro_definition(
     analysis: &FileAnalysis,
     source: &str,
@@ -848,7 +921,12 @@ fn word_at_point(source: &str, point: Point) -> Option<&str> {
 }
 
 /// Resolve a pack-language symbol NAME (a delegate callee, a free function) to
-/// its def location — local symbol first, then the cross-file index.
+/// its def location — local symbols and the cross-file index, preferring a
+/// DEFINITION over a prototype: a definition's body mints a scope spanning
+/// the symbol (the universal `(function_definition) @scope`), a declaration
+/// doesn't, so `fix_optchain` see-through lands in op.c, not proto.h. Ties
+/// break local-first then (path, position) so the pick is deterministic
+/// across the cache's randomized iteration order.
 fn resolve_pack_symbol_location(
     analysis: &FileAnalysis,
     name: &str,
@@ -857,13 +935,51 @@ fn resolve_pack_symbol_location(
 ) -> Option<Location> {
     use crate::file_analysis::SymKind;
     let wanted = |k: &SymKind| matches!(k, SymKind::Sub | SymKind::Variable | SymKind::Class);
-    if let Some(sym) = analysis.symbols.iter().find(|s| s.name == name && wanted(&s.kind)) {
-        return Some(Location { uri: uri.clone(), range: span_to_range(sym.selection_span) });
+    let has_body = |a: &FileAnalysis, s: &crate::file_analysis::Symbol| {
+        a.scopes.iter().any(|sc| sc.span == s.span)
+    };
+    // (bodied, local, path, row, col) — smaller sorts first after the
+    // bodied/local flags are inverted below.
+    let mut candidates: Vec<(bool, bool, String, usize, usize, Location)> = Vec::new();
+    for sym in analysis.symbols.iter().filter(|s| s.name == name && wanted(&s.kind)) {
+        candidates.push((
+            has_body(analysis, sym),
+            true,
+            uri.to_string(),
+            sym.selection_span.start.row,
+            sym.selection_span.start.column,
+            Location { uri: uri.clone(), range: span_to_range(sym.selection_span) },
+        ));
     }
-    let cached = module_index.get_cached(name)?;
-    let sym = cached.analysis.symbols.iter().find(|s| s.name == name && wanted(&s.kind))?;
-    let u = Url::from_file_path(&cached.path).ok()?;
-    Some(Location { uri: u, range: span_to_range(sym.selection_span) })
+    // The FULL candidate table for `name` — a definition legitimately lives
+    // in a file the one-winner `get_cached` view (or the include closure)
+    // never serves (`Perl_fix_optchain`'s body is in peep.c; proto.h wins
+    // the scoped lookup).
+    let mut seen_paths: std::collections::HashSet<std::path::PathBuf> =
+        std::collections::HashSet::new();
+    for cached in module_index.def_candidates(name) {
+        if !seen_paths.insert(cached.path.clone()) {
+            continue;
+        }
+        let Ok(u) = Url::from_file_path(&cached.path) else { continue };
+        for sym in cached.analysis.symbols.iter().filter(|s| s.name == name && wanted(&s.kind)) {
+            candidates.push((
+                has_body(&cached.analysis, sym),
+                false,
+                u.to_string(),
+                sym.selection_span.start.row,
+                sym.selection_span.start.column,
+                Location { uri: u.clone(), range: span_to_range(sym.selection_span) },
+            ));
+        }
+    }
+    candidates.sort_by(|a, b| {
+        b.0.cmp(&a.0) // bodied first
+            .then_with(|| b.1.cmp(&a.1)) // then local
+            .then_with(|| a.2.cmp(&b.2))
+            .then_with(|| (a.3, a.4).cmp(&(b.3, b.4)))
+    });
+    candidates.into_iter().next().map(|c| c.5)
 }
 
 /// All `Handler` definitions matching `(owner, name)` across cached modules.

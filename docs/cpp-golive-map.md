@@ -47,13 +47,27 @@ import (`use`), field slot = one shared subject. Same machinery, C surface.
 
 1–5 ✅ LANDED (see the arc record above). Remaining:
 
-6. **refs symmetry audit** 🔵 IN PROGRESS (agent, re-fired after an API-outage
-   kill; seeded with the predecessor's `resolve.rs` fragment) — **invariant:
-   any resolution gd does forward (use→def), gr MUST mirror backward
-   (def→uses) on the SAME key.** Audit kind × {gd, gr} on real perl5 +
-   fixtures, close every gd-only asymmetry through the `refs_to`/
-   `resolve_symbol` seam, lock each kind as a GOLD PAIR (gd row + gr row).
-   Known-dark: enum-variant gr, macro-at-`#define` gr.
+6. ✅ **refs symmetry audit** — **invariant: any resolution gd does forward
+   (use→def), gr mirrors backward (def→uses) on the SAME key.** Landed
+   through the `refs_to`/`resolve_symbol` seam: enum constants + struct/role
+   members resolve their DEF to the same `Method{class}` target their uses
+   resolve to (structural class-content gate — a pack local carrying the
+   sticky class package never fans out); macros + globals are name-keyed
+   `FileScopeValue` targets (every `#define` variant is a decl; expansion-
+   erased and blanked uses are re-minted as reads off the splice map / blank
+   diff); type names emit `PackageRef` refs (gd AND gr were dark); `#include`
+   gr = who-includes-this-header on the resolved path; macro delegation
+   traverses BACKWARD (wrapper call sites are references of the wrapped
+   function — `Perl_op_prune_chain_head` finds its `op_prune_chain_head`
+   sites), and see-through gd prefers the DEFINITION over a prototype
+   (`fix_optchain` → peep.c, not proto.h). Whole-project sweeps ride
+   `for_each_cached_file` (the name-keyed cache view hides tie-losers and
+   symbol-less files). Real-perl5: `op_type` def → 396-site splat; `OP_SCOPE`
+   def → 976 uses; `OPf_KIDS` 141; `OpTYPE_set` 58. Gold pairs per kind in
+   `cpp-references.json`/`cpp-definition.json` (+`sympair/` fixtures); both
+   hitlist xfails promoted. Residuals in `gold-corpus/KNOWN-GAPS.md` ("Refs
+   symmetry"): template-wrapped symbols (next arc, dark BOTH ways), pack
+   rename through aliases (listed, non-rewritable, not renamed).
 7. **cruft cleanup pass** ⬜ NEXT (after #6) — the arc accumulated fast:
    back-compat wrappers, superseded comments, dead gates, duplicated fixture
    shapes, always-`None` fields (e.g. `NominalDomain.storage`). A /simplify-
