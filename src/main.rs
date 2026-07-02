@@ -1066,59 +1066,27 @@ fn run_rename(
         .unwrap_or_else(|_| std::path::PathBuf::from(file));
     let (_s, _t, mut analysis) = parse_file(file);
     analysis.enrich_imported_types_with_keys(Some(idx));
-    let resolved = resolve::resolve_symbol_scoped(&analysis, point, Some(idx), override_scope_from_env())
-        .ok_or_else(|| format!("Nothing renameable at {}:{}", point.row, point.column))?;
+    // Same shape as the LSP handler: stage the origin, construct the set
+    // once, project the rename — the per-arm policy (cross-file vs group vs
+    // single-file, rewritability) lives on the set.
+    let _staged = ScopedWorkspaceEntry::insert(ws, file_path.clone(), analysis);
+    let origin = ws.workspace_raw().get(&file_path).map(|r| r.value().clone())
+        .expect("origin staged above");
+    let cs = resolve::resolve(
+        ws, &origin, file_store::FileKey::Path(file_path), point,
+        Some(idx), override_scope_from_env(),
+    );
+    if cs.resolution().is_none() {
+        return Err(format!("Nothing renameable at {}:{}", point.row, point.column));
+    }
     let mut all_edits: HashMap<String, Vec<serde_json::Value>> = HashMap::new();
-    let (locations, replacement) = match resolved {
-        resolve::ResolvedTarget::Target(t) if t.supports_cross_file_rename() => {
-            let _staged = ScopedWorkspaceEntry::insert(ws, file_path, analysis);
-            (
-                resolve::refs_to(ws, Some(idx), &t, resolve::RoleMask::EDITABLE),
-                new_name.to_string(),
-            )
-        }
-        resolve::ResolvedTarget::Group { local_spans, pinned_spans, members } => {
-            // Per-member replacement texts (bare vs affixed accessors).
-            let origin = file_store::FileKey::Path(file_path.clone());
-            let _staged = ScopedWorkspaceEntry::insert(ws, file_path, analysis);
-            let bare_new = new_name.trim_start_matches(['$', '@', '%']);
-            let edits = resolve::group_rename_edits(
-                ws, Some(idx), &origin, &local_spans, &pinned_spans, &members, bare_new,
-                resolve::RoleMask::EDITABLE,
-            );
-            for (loc, text) in edits {
-                let path = match &loc.key {
-                    file_store::FileKey::Path(p) => p.display().to_string(),
-                    file_store::FileKey::Url(u) => u.to_file_path()
-                        .map(|p| p.display().to_string()).unwrap_or_else(|_| u.to_string()),
-                };
-                all_edits.entry(path).or_default().push(span_to_json(loc.span, text));
-            }
-            return Ok(serde_json::to_string_pretty(&serde_json::json!(all_edits)).unwrap());
-        }
-        // Lexical variables, hash keys, handlers: single-file rename — the
-        // same policy split the LSP rename handler reads off the target.
-        _ => {
-            if let Some(edits) = analysis.rename_at(point, new_name) {
-                let json_edits: Vec<_> = edits.into_iter()
-                    .map(|(span, text)| span_to_json(span, text)).collect();
-                all_edits.insert(file_path.display().to_string(), json_edits);
-            }
-            return Ok(serde_json::to_string_pretty(&serde_json::json!(all_edits)).unwrap());
-        }
-    };
-    for loc in locations {
-        // A non-rewritable site (a const-folded event name spelled by a
-        // variable) is a reference, not a renameable literal — skip it.
-        if !loc.rewritable {
-            continue;
-        }
+    for (loc, text) in cs.rename_edits(new_name) {
         let path = match &loc.key {
             file_store::FileKey::Path(p) => p.display().to_string(),
             file_store::FileKey::Url(u) => u.to_file_path()
                 .map(|p| p.display().to_string()).unwrap_or_else(|_| u.to_string()),
         };
-        all_edits.entry(path).or_default().push(span_to_json(loc.span, replacement.clone()));
+        all_edits.entry(path).or_default().push(span_to_json(loc.span, text));
     }
     Ok(serde_json::to_string_pretty(&serde_json::json!(all_edits)).unwrap())
 }

@@ -123,28 +123,6 @@ impl Backend {
     }
 }
 
-/// Build a WorkspaceEdit by finding every reference to `target` in the editable
-/// workspace and replacing each ref's span with `new_name`.
-///
-/// Rename shares the same resolution path as references — both go through
-/// `refs_to(EDITABLE)`. This is the single place that decides which spans get
-/// edited, so rename and references can't diverge on which call sites qualify.
-/// `refs_to` handles inheritance fan-out for Method targets (via
-/// `method_rename_chain`) so callers on child classes of a base method are
-/// included without any special-casing here.
-fn rename_via_refs_to(
-    files: &FileStore,
-    module_index: Option<&dyn crate::file_analysis::CrossFileLookup>,
-    target: &crate::resolve::TargetRef,
-    new_name: &str,
-) -> Option<WorkspaceEdit> {
-    use crate::resolve::{refs_to, RoleMask};
-
-    // Rename must not touch deps — EDITABLE stops at workspace/open files.
-    let locations = refs_to(files, module_index, target, RoleMask::EDITABLE);
-    locations_to_workspace_edit(locations, new_name)
-}
-
 /// `(RefLocation, text)` pairs → one `WorkspaceEdit` (per-member texts).
 fn edit_pairs_to_workspace_edit(
     edits: Vec<(crate::resolve::RefLocation, String)>,
@@ -166,42 +144,6 @@ fn edit_pairs_to_workspace_edit(
         None
     } else {
         Some(WorkspaceEdit { changes: Some(all_changes), ..Default::default() })
-    }
-}
-
-/// `RefLocation`s → one `WorkspaceEdit` writing `new_name` at every span.
-/// Callers guarantee every span covers exactly the renamable token
-/// (bare-name spans for groups, selection/name spans from `refs_to`).
-fn locations_to_workspace_edit(
-    locations: Vec<crate::resolve::RefLocation>,
-    new_name: &str,
-) -> Option<WorkspaceEdit> {
-    if locations.is_empty() {
-        return None;
-    }
-    let mut all_changes: std::collections::HashMap<Url, Vec<TextEdit>> =
-        std::collections::HashMap::new();
-    for loc in locations {
-        // Skip non-rewritable sites (a const-folded event name spelled by a
-        // variable): it's a reference, not a literal to rewrite. References
-        // (`refs_to_locations`) keeps it; only rename drops it.
-        if !loc.rewritable {
-            continue;
-        }
-        if let Some(uri) = loc.to_url() {
-            all_changes.entry(uri).or_default().push(TextEdit {
-                range: symbols::span_to_range(loc.span),
-                new_text: new_name.to_string(),
-            });
-        }
-    }
-    if all_changes.is_empty() {
-        None
-    } else {
-        Some(WorkspaceEdit {
-            changes: Some(all_changes),
-            ..Default::default()
-        })
     }
 }
 
@@ -559,7 +501,6 @@ impl LanguageServer for Backend {
         &self,
         params: TextDocumentPositionParams,
     ) -> Result<Option<PrepareRenameResponse>> {
-        use crate::resolve::{resolve_symbol_scoped, ResolvedTarget};
         let doc = match self.files.get_open(&params.text_document.uri) {
             Some(doc) => doc,
             None => return Ok(None),
@@ -568,22 +509,18 @@ impl LanguageServer for Backend {
         // Only offer a rename box where `rename` would actually produce edits.
         // Accepting on any `symbol_at`/`ref_at` hit is a UX trap: positions like
         // `@_` or an ownerless constructor key resolve to nothing renameable, so
-        // the user gets a box that silently no-ops. Mirror the rename handler's
-        // branching, probing the single-file `rename_at` for the kinds it routes
-        // there — which is why this gate tracks new single-file renameables (a
-        // lexical hash key) automatically, with no change here.
-        let renameable = match resolve_symbol_scoped(
+        // the user gets a box that silently no-ops. `renameable()` mirrors
+        // `rename_edits`' arms on the same set, so this gate tracks new
+        // renameable kinds automatically, with no change here.
+        let cs = crate::resolve::resolve(
+            &self.files,
             &doc.analysis,
+            FileKey::Url(params.text_document.uri.clone()),
             point,
             Some(&*self.module_index),
             self.override_scope(),
-        ) {
-            Some(ResolvedTarget::Target(t)) if t.supports_cross_file_rename() => true,
-            Some(ResolvedTarget::Group { .. }) => true,
-            Some(_) => doc.analysis.rename_at(point, "x").is_some_and(|e| !e.is_empty()),
-            None => false,
-        };
-        if !renameable {
+        );
+        if !cs.renameable() {
             return Ok(None);
         }
         if let Some(sym) = doc.analysis.symbol_at(point) {
@@ -602,8 +539,6 @@ impl LanguageServer for Backend {
     }
 
     async fn rename(&self, params: RenameParams) -> Result<Option<WorkspaceEdit>> {
-        use crate::resolve::{resolve_symbol_scoped, ResolvedTarget};
-
         let uri = &params.text_document_position.text_document.uri;
         let pos = params.text_document_position.position;
         let new_name = &params.new_name;
@@ -617,38 +552,20 @@ impl LanguageServer for Backend {
             None => return Ok(None),
         };
 
-        let point = symbols::position_to_point(pos);
-        match resolve_symbol_scoped(&doc.analysis, point, Some(&*self.module_index), self.override_scope()) {
-            Some(ResolvedTarget::Target(target)) if target.supports_cross_file_rename() => {
-                drop(doc);
-                Ok(rename_via_refs_to(&self.files, Some(&*self.module_index), &target, new_name))
-            }
-            Some(ResolvedTarget::Group { local_spans, pinned_spans, members }) => {
-                // Every spelling of the group, everywhere editable; each
-                // member carries its own replacement (bare vs re-derived
-                // affixed accessor names).
-                let origin = FileKey::Url(uri.clone());
-                drop(doc);
-                let bare_new = new_name.trim_start_matches(['$', '@', '%']);
-                let edits = crate::resolve::group_rename_edits(
-                    &self.files,
-                    Some(&*self.module_index),
-                    &origin,
-                    &local_spans,
-                    &pinned_spans,
-                    &members,
-                    bare_new,
-                    crate::resolve::RoleMask::EDITABLE,
-                );
-                Ok(edit_pairs_to_workspace_edit(edits))
-            }
-            // Lexical variables, hash keys, handlers: single-file rename
-            // (policy lives on `TargetRef::supports_cross_file_rename`).
-            Some(_) => {
-                Ok(symbols::rename(&doc.analysis, pos, uri, new_name))
-            }
-            None => Ok(None),
-        }
+        // Rename is the references image + policy, projected from the same
+        // set: cross-file walk for workspace-stable targets, per-member texts
+        // for groups, the origin file's rename machinery for lexicals — and
+        // non-rewritable sites (const-folded names) excluded on the location,
+        // not in this handler.
+        let cs = crate::resolve::resolve(
+            &self.files,
+            &doc.analysis,
+            FileKey::Url(uri.clone()),
+            symbols::position_to_point(pos),
+            Some(&*self.module_index),
+            self.override_scope(),
+        );
+        Ok(edit_pairs_to_workspace_edit(cs.rename_edits(new_name)))
     }
 
     async fn hover(&self, params: HoverParams) -> Result<Option<Hover>> {

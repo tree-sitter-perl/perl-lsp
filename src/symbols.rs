@@ -469,31 +469,6 @@ fn dispatch_handler_locations(
     })
 }
 
-pub fn rename(
-    analysis: &FileAnalysis,
-    pos: Position,
-    uri: &Url,
-    new_name: &str,
-) -> Option<WorkspaceEdit> {
-    let edits = analysis.rename_at(position_to_point(pos), new_name)?;
-
-    let text_edits: Vec<TextEdit> = edits
-        .into_iter()
-        .map(|(span, new_text)| TextEdit {
-            range: span_to_range(span),
-            new_text,
-        })
-        .collect();
-
-    let mut changes = HashMap::new();
-    changes.insert(uri.clone(), text_edits);
-
-    Some(WorkspaceEdit {
-        changes: Some(changes),
-        ..Default::default()
-    })
-}
-
 fn fa_completion_kind(kind: &FaSymKind) -> CompletionItemKind {
     match kind {
         FaSymKind::Sub => CompletionItemKind::FUNCTION,
