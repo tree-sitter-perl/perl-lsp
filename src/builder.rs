@@ -291,6 +291,7 @@ fn build_with_plugins_inner(
         lite_brand: vec![None],
         topic_dsls,
         reassigned_scalars: std::collections::HashSet::new(),
+        scalar_reassign_writes: Vec::new(),
         key_writes: Vec::new(),
         method_call_arity: std::collections::HashMap::new(),
         parametric_emitted_refs: std::collections::HashSet::new(),
@@ -813,6 +814,51 @@ impl<'a> Builder<'a> {
                 source: WitnessSource::Builder("implicit_return".into()),
                 payload: WitnessPayload::Edge(WitnessAttachment::Expr(expr_span)),
                 span: sym_span,
+            });
+        }
+
+        // Reassignment barriers. Each whole-scalar write becomes a
+        // `reassign_barrier` Fact on the attachment the variable's
+        // standing beliefs live on (first scope up the chain with
+        // Variable witnesses — the same probe the mutation-extension
+        // pass uses). The temporal fold then drops beliefs older than
+        // the latest barrier before the query point: a write whose RHS
+        // typed pushes its own TC at the same position (>= keeps it);
+        // a write we couldn't type leaves only the barrier, widening
+        // to unknown instead of resurrecting the stale belief.
+        // The write's own chain-typing edge is scope-keyed at the WRITE's
+        // scope, while the belief to erase may live scopes up (a decl in
+        // the sub body, the write in a loop block). Barrier every chain
+        // scope that holds witnesses — the read-side walk answers from
+        // whichever attachment it reaches first, so each needs its own
+        // boundary.
+        let barrier_pushes: Vec<(String, ScopeId, Span)> = self
+            .scalar_reassign_writes
+            .iter()
+            .flat_map(|(name, scope, span)| {
+                crate::file_analysis::scope_chain_of(&self.scopes, *scope)
+                    .into_iter()
+                    .filter(|sid| {
+                        let att = WitnessAttachment::Variable {
+                            name: name.clone(),
+                            scope: *sid,
+                        };
+                        !self.bag.for_attachment(&att).is_empty()
+                    })
+                    .map(|sid| (name.clone(), sid, *span))
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        for (name, scope, span) in barrier_pushes {
+            self.bag.push(Witness {
+                attachment: WitnessAttachment::Variable { name, scope },
+                source: WitnessSource::Builder("reassign_barrier".into()),
+                payload: WitnessPayload::Fact {
+                    family: "reassign_barrier".into(),
+                    key: String::new(),
+                    value: FactValue::Bool(true),
+                },
+                span,
             });
         }
 
@@ -1607,6 +1653,14 @@ struct Builder<'a> {
     /// variable itself; element writes go to `key_writes` instead).
     /// Flushed into `FileAnalysis.reassigned_scalars`.
     reassigned_scalars: std::collections::HashSet<String>,
+    /// Every whole-scalar reassignment site (name, scope at the write,
+    /// write span). `populate_witness_bag` turns each into a
+    /// `reassign_barrier` Fact on the variable's belief attachment: a
+    /// write is a belief boundary, so a stale type must not survive an
+    /// assignment whose RHS we couldn't type (`my $ct = undef;
+    /// while (…) { $ct = f($_); } … defined $ct` — the loop write is
+    /// invisible to the outer temporal fold without the barrier).
+    scalar_reassign_writes: Vec<(String, ScopeId, Span)>,
 
     /// `$var->{key} = …` writes in walk order — input to the
     /// mutation-extension pass (shape extension / open-widening).
@@ -2506,7 +2560,7 @@ impl<'a> Builder<'a> {
             // post-walk correctness; same reason as the `$self`
             // case above.
             "func1op_call_expression" if self.is_shift_call(node) => {
-                if !self.shift_is_invocant_here(node) {
+                if !self.shift_is_invocant_here(node) || !self.shift_denotes_invocant(node) {
                     return None;
                 }
                 self.package_for_node(node).map(InferredType::ClassName)
@@ -2571,6 +2625,9 @@ impl<'a> Builder<'a> {
             }
             "function_call_expression" | "ambiguous_function_call_expression" => {
                 if self.is_shift_call(node) {
+                    if !self.shift_denotes_invocant(node) {
+                        return None;
+                    }
                     return self.package_for_node(node).map(InferredType::ClassName);
                 }
                 let func = node.child_by_field_name("function")?;
@@ -4551,6 +4608,74 @@ impl<'a> Builder<'a> {
         self.get_var_text_from_lhs(left)
     }
 
+    /// Does this `shift` denote the sub's INVOCANT (and so type as the
+    /// enclosing class)? Expression position (`shift->method`, `bless {},
+    /// shift`) always does — it reads arg 0 directly. A declaration
+    /// binding (`my $x = shift`) does only when `$x` is the receiver:
+    /// a conventional invocant name, or the sub's extracted invocant
+    /// param. `my $uri = shift;` — the SECOND shift — is a plain
+    /// argument read; typing it as the class was the audit's
+    /// `defined $value`-guard false-positive maker.
+    fn shift_denotes_invocant(&self, node: Node<'a>) -> bool {
+        // Climb to the binding assignment, stopping at the statement
+        // boundary (no binding → expression position → invocant).
+        let mut cur = node;
+        let assign = loop {
+            let Some(p) = cur.parent() else { return true };
+            match p.kind() {
+                "assignment_expression" => break p,
+                "expression_statement" | "block" => return true,
+                _ => cur = p,
+            }
+        };
+        // The shift must sit on the RHS; a shift inside the LHS (odd,
+        // but cheap to guard) is not a binding of it.
+        let Some(left) = assign.child_by_field_name("left") else { return true };
+        let Some(var) = self.get_var_text_from_lhs(left) else { return true };
+        if crate::conventions::is_conventional_invocant_name(&var) {
+            return true;
+        }
+        // The sub's extracted param list knows which param is the
+        // invocant (params[0] for methods; params[1] under `around`).
+        // Scope-derived (not the live walk stack) so the post-walk
+        // chain-typing callers resolve identically.
+        let scope = self.scope_at_point(node.start_position());
+        let sub_scope_name = crate::file_analysis::scope_chain_of(&self.scopes, scope)
+            .into_iter()
+            .find_map(|sid| match &self.scopes[sid.0 as usize].kind {
+                ScopeKind::Sub { name } | ScopeKind::Method { name } => {
+                    Some((sid, name.clone()))
+                }
+                _ => None,
+            })
+            // An anonymous sub's first arg is a callback payload, not a
+            // receiver — the audit's `Maybe`-checker false-positive shape
+            // (`sub { my $value = shift; return if !defined($value) }`).
+            // Only a conventional name (handled above) types there.
+            .filter(|(_, name)| name != "(anon)");
+        let invocant_param = sub_scope_name
+            .and_then(|(sid, name)| self.find_sub_symbol_for(&name, sid))
+            .and_then(|sid| self.symbols.iter().find(|s| s.id == sid))
+            .and_then(|sym| match &sym.detail {
+                // The marked invocant when extraction decided one, else
+                // the FIRST positional — in a named sub of an OO-by-
+                // convention package that slot IS the receiver regardless
+                // of its name (`my $x = shift` in a Mojo class).
+                // Anonymous subs never reach here (no named Sub scope):
+                // their first arg is a callback payload, not a receiver,
+                // so they stay on the conventional-name rule above —
+                // that's the audit's `Maybe`-checker false-positive shape
+                // (`sub { my $value = shift; return if !defined $value }`).
+                SymbolDetail::Sub { params, .. } => params
+                    .iter()
+                    .find(|p| p.is_invocant)
+                    .or(params.first())
+                    .map(|p| p.name.clone()),
+                _ => None,
+            });
+        invocant_param.as_deref() == Some(var.as_str())
+    }
+
     /// Check if a node is a `shift` call (bare or with parens).
     fn is_shift_call(&self, node: Node<'a>) -> bool {
         match node.kind() {
@@ -6396,7 +6521,34 @@ impl<'a> Builder<'a> {
                 // ternaries; Edge payloads resolve through the
                 // registry's materialization.
                 self.emit_expr_witness(right);
-                let mut inferred = self.bag_query_expr_span(node_to_span(right));
+                // A postfix-conditional write (`$isbn = undef if …`) may not
+                // happen — an unconditional belief from it is wrong on both
+                // axes: conditionality (the honest post-statement type is
+                // old-or-new — widen, don't assert) and position (the TC
+                // anchors at statement start, so a deref inside the guard
+                // condition itself would read the not-yet-happened write;
+                // `$isbn = undef if $isbn && !$isbn->is_valid` fed D1 a
+                // false "is undef" for the `->is_valid` call). Skip the
+                // belief; the write's reassign barrier still lands, which
+                // IS the widening.
+                let conditional_write = {
+                    let mut cur = node;
+                    loop {
+                        match cur.parent() {
+                            Some(p) if p.kind() == "postfix_conditional_expression" => {
+                                break true
+                            }
+                            Some(p) if p.kind() == "expression_statement" => break false,
+                            Some(p) => cur = p,
+                            None => break false,
+                        }
+                    }
+                };
+                let mut inferred = if conditional_write {
+                    None
+                } else {
+                    self.bag_query_expr_span(node_to_span(right))
+                };
                 // `my %h = (k => v, …)` — the list IS a hash literal in
                 // this position, the hashref's second spelling. The
                 // list's own Expr witness can't carry that (its meaning
@@ -6418,14 +6570,17 @@ impl<'a> Builder<'a> {
                             inferred_type: it,
                         });
                     }
-                } else if let Some(vt) = self.get_var_text_from_lhs(left) {
+                } else if let Some(vt) =
+                    (!conditional_write).then(|| self.get_var_text_from_lhs(left)).flatten()
+                {
                     // RHS didn't resolve at build time — typically a cross-file
                     // method chain whose type needs the module index, absent
                     // during the parallel per-file workspace build. Don't drop
                     // it to a dead end: link the variable to the RHS expr as an
                     // EDGE so a query that carries the index chases it lazily
                     // ("Edges, not values"). In-file chains never reach here —
-                    // they resolved above and materialized.
+                    // they resolved above and materialized. (Conditional writes
+                    // skip the edge for the same reason they skip the TC.)
                     use crate::witnesses::{Witness, WitnessAttachment, WitnessPayload, WitnessSource};
                     let scope = self.current_scope();
                     let rhs_span = node_to_span(right);
@@ -7556,6 +7711,35 @@ impl<'a> Builder<'a> {
                 && !crate::cst::is_element_access_base(node)
             {
                 self.reassigned_scalars.insert(text.to_string());
+                // Barrier position is the enclosing STATEMENT's start, so
+                // the same statement's own TC (whose constraint_span also
+                // starts at/inside the statement) survives the fold's
+                // `>= barrier` rule while earlier statements' beliefs
+                // don't. Two exclusions:
+                // - a DECLARATION (`my $x = …`) is the first binding, not
+                //   a belief-erasing reassignment — and its barrier would
+                //   wrongly kill the sub-spanning `FirstParam` TC of
+                //   `my $self = shift`;
+                // - no expression_statement ancestor (a foreach header
+                //   var): loop-var typing spans the whole loop and isn't
+                //   a reassignment of a prior belief.
+                if text.starts_with('$') {
+                    let mut stmt = node;
+                    while let Some(p) = stmt.parent() {
+                        match p.kind() {
+                            "variable_declaration" => break,
+                            "expression_statement" => {
+                                self.scalar_reassign_writes.push((
+                                    text.to_string(),
+                                    self.current_scope(),
+                                    node_to_span(p),
+                                ));
+                                break;
+                            }
+                            _ => stmt = p,
+                        }
+                    }
+                }
             }
             // Hash variables escape only by reference-taking (`\%h`):
             // a bare `%h` in a call or list FLATTENS TO COPIES — the

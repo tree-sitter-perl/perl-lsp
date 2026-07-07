@@ -569,13 +569,19 @@ impl WitnessReducer for FrameworkAwareTypeFold {
     }
 
     fn claims(&self, w: &Witness) -> bool {
-        matches!(
+        if !matches!(
             w.attachment,
             WitnessAttachment::Variable { .. } | WitnessAttachment::Expression(_)
-        ) && matches!(
-            w.payload,
-            WitnessPayload::InferredType(_) | WitnessPayload::Observation(_)
-        )
+        ) {
+            return false;
+        }
+        match &w.payload {
+            WitnessPayload::InferredType(_) | WitnessPayload::Observation(_) => true,
+            // Whole-scalar reassignment marker — a belief boundary the
+            // temporal fold honors (see reduce).
+            WitnessPayload::Fact { family, .. } => family == "reassign_barrier",
+            _ => false,
+        }
     }
 
     fn reduce(&self, ws: &[&Witness], q: &ReducerQuery) -> ReducedValue {
@@ -633,12 +639,42 @@ impl WitnessReducer for FrameworkAwareTypeFold {
         let mut re = false;
         let mut plain_type: Option<InferredType> = None;
 
+        // A whole-scalar reassignment is a belief boundary: witnesses
+        // strictly BEFORE the latest barrier (that is itself at or before
+        // the query point) describe a value the write replaced. A typed
+        // write pushes its own TC at the barrier's position (>= keeps
+        // it); an untypeable write leaves only the barrier, so the fold
+        // widens to unknown instead of resurrecting the stale belief
+        // (`my $ct = undef; while (…) { $ct = f($_) } … defined $ct`).
+        // A barrier is in effect only for query points past its whole
+        // STATEMENT (span end): a read inside the write statement itself
+        // (`… if $isbn && !$isbn->is_valid` — the condition runs first)
+        // still sees the pre-write belief. It then drops beliefs from
+        // strictly earlier statements (span start comparison), so the
+        // same statement's own TC — anchored at the statement start —
+        // survives its own barrier.
+        let latest_barrier: Option<Point> = narrow_point.and_then(|point| {
+            ws.iter()
+                .filter(|w| {
+                    matches!(&w.payload,
+                        WitnessPayload::Fact { family, .. } if family == "reassign_barrier")
+                        && w.span.end <= point
+                })
+                .map(|w| w.span.start)
+                .max()
+        });
+
         for w in ws {
             // Temporal ordering: only consider witnesses emitted at or
             // before the query point — a later reassignment shouldn't
             // influence a lookup at an earlier line.
             if let Some(point) = narrow_point {
                 if w.span.start > point {
+                    continue;
+                }
+            }
+            if let Some(barrier) = latest_barrier {
+                if w.span.start < barrier {
                     continue;
                 }
             }

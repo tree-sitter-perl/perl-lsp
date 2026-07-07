@@ -20,17 +20,20 @@ This file is only what's NEXT, in order.
    (`prompt-method-resolution-residuals.md` §4 rides the long-distance
    provenance tier).
 
-   *Promotion audit over the gold substrate (July 2026, all flags on):*
-   `undef-deref` (always-on) 8 sites, all verified; `derefShape` 0 hits;
-   `optionalDeref` 45 (honest Optional productions; noise class = value
-   flow beyond static reach, e.g. an arity-and-value-gated undef arm in
-   `Path::Class::Dir::new`); `redundantGuard`/`contradictory` 115+58,
-   with one dominant false-positive class: a stale belief surviving an
-   untypeable reassignment (`my $x = shift` typed to the enclosing class,
-   `my $x = undef; $x = f($y) if …`). That class is the queued
-   **conditional-reassignment disagreement-to-widen** work — closing it
-   is the gate for promoting `redundantGuard`; `optionalDeref` could
-   promote first if the INFO severity is judged quiet enough.
+   *Promotion audit over the gold substrate (July 2026, all flags on,
+   after the disagreement-to-widen tier landed):* `undef-deref`
+   (always-on) 8 sites — exact parity with the pre-branch baseline;
+   `derefShape` 0 hits; `optionalDeref` 35 (honest Optional productions;
+   residual noise = value flow beyond static reach, e.g. an
+   arity-and-value-gated undef arm in `Path::Class::Dir::new`);
+   `redundantGuard` 59 (was 115) and `contradictory` 34 (was 53) after
+   reassignment barriers + the shift-invocant gate; `unresolved-method`
+   −180 from the same fixes. Remaining known noise classes: open-world
+   dispatch (a base class's own all-undef method typing `$self->m` when
+   the runtime receiver is a subclass — the Openness axis,
+   `prompt-graph-walking.md`) and the named-helper first-param-self
+   over-reach (`gold-corpus/KNOWN-GAPS.md`). `optionalDeref` looks
+   promotable at INFO severity; `redundantGuard` after an Openness gate.
 2. **DBIC out of core — phase 3.** Phases 1–2 landed (`visit_dbic_*`
    gone; `frameworks/dbic.rhai` owns arg-name verbs, column-keyed verbs,
    fluent verbs, and meta-method suppression via the `meta_methods()`
@@ -49,9 +52,13 @@ Type intelligence:
 - Residual fact classes Parts 1–5 (invocant mutations, hash-key
   unions, method loops, functional operators, value-indexed returns)
   — `prompt-type-inference-residual.md`.
-- Conditional-reassignment disagreement-to-widen (`$spec = {...}
-  unless ref $spec`) — replaces the `reassigned_scalars` trust-gate
-  clause with a real lattice fold.
+- Conditional-reassignment disagreement-to-widen — the widening tier
+  LANDED (reassign barriers: an untypeable write drops earlier beliefs;
+  a postfix-conditional write never asserts, only widens). Residual:
+  the true JOIN for typed conditional writes (`$spec = {...} unless ref
+  $spec` could keep `HashRef|prior` instead of widening to unknown) —
+  that's the real lattice fold, wanted when precision (not soundness)
+  becomes the complaint.
 - A4 v2: cross-FILE slot writes (`$self->{k} = Obj->new` in another
   file) — the `MethodOnClass` bridge pattern.
 

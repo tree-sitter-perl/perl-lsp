@@ -15396,3 +15396,111 @@ fn overridden_method_never_answers_with_parent_type() {
     let t = fa.inferred_type_via_bag_ctx("$path", tree_sitter::Point::new(16, 20), Some(&idx));
     assert_eq!(t, None, "overridden file()'s unresolved return must not inherit Base's Undef");
 }
+// ---- Reassignment barriers (disagreement-to-widen, audit FP class) ----
+
+#[test]
+fn reassign_barrier_untypeable_write_widens_stale_undef() {
+    // The LWP::MediaTypes shape: decl-undef, an untypeable write inside a
+    // loop, a `defined` guard after. The stale `Undef` must not survive
+    // the write — the guard is doing its job, not "never passes".
+    let src = "sub guess {\n    my $ct = undef;\n    while (my $x = nxt()) {\n        $ct = lookup($x);\n    }\n    return unless defined $ct;\n    return $ct;\n}\n";
+    let fa = build_fa(src);
+    // Query at the guard line (row 5).
+    assert_eq!(
+        fa.inferred_type_via_bag("$ct", Point::new(5, 26)),
+        None,
+        "belief must widen across the untypeable loop write",
+    );
+}
+
+#[test]
+fn reassign_barrier_typed_write_keeps_its_own_type() {
+    // A typed reassignment's own TC lands at the same statement as the
+    // barrier — it survives, and later reads see it.
+    let src = "sub f {\n    my $x = undef;\n    $x = 'hello';\n    my $y = $x;\n}\n";
+    let fa = build_fa(src);
+    assert_eq!(
+        fa.inferred_type_via_bag("$x", Point::new(3, 12)),
+        Some(InferredType::String),
+        "the typed write's own belief must survive its barrier",
+    );
+}
+
+#[test]
+fn reassign_barrier_no_write_keeps_decl_belief() {
+    // No reassignment → the decl belief stands (undef-deref D1 still has
+    // its straight-line signal).
+    let src = "sub f {\n    my $x = undef;\n    my $y = $x;\n}\n";
+    let fa = build_fa(src);
+    assert_eq!(
+        fa.inferred_type_via_bag("$x", Point::new(2, 12)),
+        Some(InferredType::Undef),
+    );
+}
+// ---- shift-invocant gating ----
+
+#[test]
+fn second_shift_is_not_the_invocant() {
+    // `my $uri = shift;` (the SECOND shift) is a plain argument read —
+    // typing it as the enclosing class made `defined $uri`-style guards
+    // read as redundant/contradictory (the audit FP class).
+    let src = "package Foo;\nsub file {\n    my $class = shift;\n    my $uri = shift;\n    my $x = $uri;\n}\n";
+    let fa = build_fa(src);
+    assert_eq!(
+        fa.inferred_type_via_bag("$class", Point::new(4, 4)),
+        Some(InferredType::ClassName("Foo".into())),
+        "the invocant param keeps its class",
+    );
+    assert_ne!(
+        fa.inferred_type_via_bag("$uri", Point::new(4, 4)),
+        Some(InferredType::ClassName("Foo".into())),
+        "a second shift must not type as the class",
+    );
+}
+
+#[test]
+fn expression_position_shift_still_receiver() {
+    // `shift->_generate_route(...)` — expression-position shift reads
+    // arg 0 directly; still the receiver.
+    let src = "package Foo;\nsub patch { shift->helper() }\nsub helper { my $self = shift; return $self; }\n";
+    let fa = build_fa(src);
+    assert_eq!(
+        fa.find_method_return_type("Foo", "patch", None, Some(0)),
+        Some(InferredType::ClassName("Foo".into())),
+        "shift->method chains must keep receiver typing",
+    );
+}
+#[test]
+fn anon_sub_shift_binding_not_class_typed() {
+    // The Types::Standard::StrMatch checker shape: an anonymous sub's
+    // `my $value = shift` binds a callback payload, not a receiver —
+    // typing it as the enclosing class made `return if !defined($value)`
+    // read as a contradictory guard (the audit FP class).
+    let src = "package T;\nuse parent 'X';\nsub compile {\n    my $cb = sub {\n        my $value = shift;\n        return if !defined($value);\n        return 1;\n    };\n    $cb;\n}\n";
+    let fa = build_fa(src);
+    assert_ne!(
+        fa.inferred_type_via_bag("$value", Point::new(5, 8)),
+        Some(InferredType::ClassName("T".into())),
+        "an anon sub's first shift is not the invocant",
+    );
+}
+#[test]
+fn postfix_conditional_write_widens_not_asserts() {
+    // `$isbn = undef if $isbn && !$isbn->is_valid;` — the write may not
+    // happen, and the condition's own deref precedes it. No unconditional
+    // Undef belief; the barrier widens instead.
+    let src = "sub _isbn {\n    my $isbn = Business::ISBN->new(shift);\n    $isbn = undef if $isbn && !$isbn->is_valid;\n    return $isbn;\n}\n";
+    let fa = build_fa(src);
+    // At the deref inside the condition (row 2), the ctor class holds.
+    assert_eq!(
+        fa.inferred_type_via_bag("$isbn", Point::new(2, 30)),
+        Some(InferredType::ClassName("Business::ISBN".into())),
+        "the condition's deref must read the pre-write type",
+    );
+    // After the statement (row 3), the belief is widened — old-or-undef.
+    assert_eq!(
+        fa.inferred_type_via_bag("$isbn", Point::new(3, 12)),
+        None,
+        "a conditional write widens the belief",
+    );
+}
