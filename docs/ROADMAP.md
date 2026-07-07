@@ -5,24 +5,31 @@ This file is only what's NEXT, in order.
 
 ## Now (in order)
 
-1. **Narrowing / Optional — completeness.** The flow-narrowing +
-   `Optional<T>` + `Undef` lattice and the bug-detection diagnostics it
-   feeds have both landed (decision records: `adr/flow-narrowing.md`,
+1. **Diagnostic flag graduation.** The narrowing/Optional lattice is
+   complete through its production gaps (element places, dynamic-key
+   places, `return ()` / all-undef arms, slot Optional lifts, bareword
+   `Maybe[T]` — decision records: `adr/flow-narrowing.md`,
    `adr/optional-types.md`, `adr/narrowing-diagnostics.md`). What remains
-   is **completeness** — widen what the narrower recognizes: direct-element
-   places (`$hash{key}`, `$arr[0]`), and dynamic-key places (`$self->{$k}`)
-   where the key scalar is stable enough to stay sound
-   (`prompt-flow-narrowing.md` / `prompt-optional-types.md`) — and graduate
-   the opt-in diagnostic flags to default-on per code as the gold substrate
-   and real projects show no false-positive flood (the promotion path in
-   `adr/narrowing-diagnostics.md`).
-2. **DBIC out of core — phases 2–3.** Phase 1 landed (`visit_dbic_*`
-   gone; `frameworks/dbic.rhai`, trigger `ClassIsa("DBIx::Class")`).
-   Remaining: meta-method suppression → manifest (the `universal_methods`
-   rule-#10 debt still hardcoded in `symbols.rs`) and parametric
-   emission + per-method return projection (the one axis-shaped piece).
-   Ladder in `prompt-dbic-as-plugin.md`. Ends with core plugin-free
-   except generic dispatch.
+   is **trust**: graduate the opt-in diagnostic flags to default-on per
+   code as the gold substrate and real projects show no false-positive
+   flood (the promotion path in `adr/narrowing-diagnostics.md`).
+   `unresolvedMethodCrossFile` is WORKSPACE-scoped and its known
+   false-positive classes are closed (monkey_patch synthesis, `handles`
+   delegation incl. the Sub::HandlesVia curried shape, plugin-owned
+   meta-method suppression) — it still promotes last
+   (`prompt-method-resolution-residuals.md` §4 rides the long-distance
+   provenance tier).
+2. **DBIC out of core — phase 3.** Phases 1–2 landed (`visit_dbic_*`
+   gone; `frameworks/dbic.rhai` owns arg-name verbs, column-keyed verbs,
+   fluent verbs, and meta-method suppression via the `meta_methods()`
+   manifest). Remaining: parametric *emission* out of core
+   (`extract_resultset_parametric` + the hardcoded
+   `DBIx::Class::ResultSet` base still live in `builder.rs`) and
+   per-method return projection — the one axis-shaped piece; a
+   `parametric_returns` manifest field may sidestep full
+   type-system-encoding; decide at the boundary, not before. Ladder in
+   `prompt-dbic-as-plugin.md`. Ends with core plugin-free except generic
+   dispatch.
 
 ## Queued (pull-driven — QA findings decide order)
 

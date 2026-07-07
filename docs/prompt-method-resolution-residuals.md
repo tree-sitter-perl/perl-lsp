@@ -10,31 +10,26 @@ closed. The remaining false positives cluster into four gaps below — most also
 improve completion / hover / goto-def, not just the lint. Until they're closed,
 the cross-file form stays opt-in.
 
-## 1. `monkey_patch`-generated methods → bundled plugin
+## 1. `monkey_patch`-generated methods → bundled plugin — ✅ LANDED
 
-Classes that install methods at load time via a `monkey_patch $class => $name
-=> sub {…}` loop (`Mojo::Util::monkey_patch`, `Sub::Install`,
-`Class::Method::Modifiers`) expose no static `sub` — e.g. `Mojo::UserAgent`'s
-HTTP-verb methods (`get`/`post`/`put`/`delete`/…) are generated this way. But
-the registration call site **is** visible in source. A bundled plugin (or core)
-should recognize `monkey_patch` / `install`-shaped registrations and synthesize
-the named methods, the same way Moo `has` synthesizes accessors. Knowable in
-the engine.
+`frameworks/monkey-patch.rhai` synthesizes the named methods from
+`monkey_patch $class => $name => sub {…}` registrations (string class,
+`__PACKAGE__`, multi-pair calls, and loop registrations via the
+`string_values` fan-out). Dynamic class / unfolded names are honest
+misses. Residual: the `Sub::Install` / `Class::Method::Modifiers` family
+uses a hashref-options shape (`install_sub({ code, into, as })`) — it
+rides the same plugin once `CallContext` classifies hashref args for
+function calls.
 
-## 2. `Sub::HandlesVia` `handles => { … }` delegations → bundled Moo plugin
+## 2. `Sub::HandlesVia` `handles => { … }` delegations → bundled Moo plugin — ✅ LANDED
 
-`has $attr => (handles => { method => [target, @args], … })` (Sub::HandlesVia,
-and the Moo/Moose `handles` family) delegates named methods onto the consuming
-class. These aren't synthesized today — the same shape as Moo accessor
-synthesis but for delegated names.
-
-This is **bundled-plugin** territory, NOT core. The accessor-option vocabulary
-(`predicate`/`clearer`/`writer`/…/`handles`) already lives in the bundled Moo
-plugin (`frameworks/moo.rhai`): core walks the `has` CST into decision-ready
-options (rule #1) and the plugin owns which keyword maps to which synthesized
-method (rule #10). Adding `handles => { … }` delegation is the plugin emitting
-the delegated method names — a per-keyword delegation table baked into core
-would be exactly the rule-#10 violation to avoid.
+The Moo/Moose `handles` family (hashref `local => remote`, arrayref
+`[qw/m/]`) already synthesized; the Sub::HandlesVia curried shape
+(`handles => { local => [remote, @args] }`) now does too — the HashPairs
+classification pair-walks via `cst::pair_nodes`, an arrayref value
+contributes its first string element as the remote, and a non-string
+value no longer shifts alignment of the pairs after it. The vocabulary
+stays in `frameworks/moo.rhai` (rule #10), the CST walk in core (rule #1).
 
 ## 3. Opaque generated / XS classes → scoping + probe-gen
 
@@ -42,11 +37,11 @@ Fully generated API clients (OpenAPI/Swagger codegen), XS classes, and
 Exporter-injected method sets have no statically visible method declarations at
 all — there is nothing in source to read. Two complementary mitigations:
 
-- **WORKSPACE-only scoping for the cross-file lint.** Flag a receiver only when
-  its class is one you wrote (WORKSPACE role); stay silent on pure
-  `@INC`/DEPENDENCY classes, where generated/XS methods you can't see are
-  common. The `RoleMask` already distinguishes these — a principled gate, not
-  whack-a-mole.
+- **WORKSPACE-only scoping for the cross-file lint.** ✅ LANDED — the lint
+  fires only for classes registered from the workspace tree
+  (`ModuleIndex::is_workspace_module`); pure `@INC`/DEPENDENCY classes,
+  where generated/XS methods you can't see are common, stay silent. A
+  principled gate, not whack-a-mole.
 - **Probe-based plugin generation.** Run the generator against a recording
   probe to capture the produced method surface and emit a plugin (see the
   generator-coderef probe direction).

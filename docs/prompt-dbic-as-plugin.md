@@ -23,9 +23,11 @@ synthesis out. Only phase 3 below still touches the axis question.
    moved onto the same registration gate. `load_components` parent
    registration stays core (generic parent machinery). Custom-resultset
    discovery + per-column `data_type` typing are deferred to phase 3.
-2. **Meta-method suppression → manifest.** The DBIC entries in
-   `symbols.rs`' `universal_methods` (comment-flagged debt) become a
-   plugin manifest field; core's diagnostic consults the registry.
+2. **Meta-method suppression → manifest.** ✅ LANDED. The
+   `meta_methods()` manifest field (dbic.rhai + moo.rhai) bakes the
+   registry union into `FileAnalysis.meta_methods`; the
+   unresolved-method diagnostic consults it, and core's
+   `universal_methods` holds only the true UNIVERSAL:: surface.
 3. **Parametric emission + per-method projection** (the tables below)
    — the one genuinely axis-shaped piece. A `parametric_returns`
    manifest field may sidestep full type-system-encoding; decide at
