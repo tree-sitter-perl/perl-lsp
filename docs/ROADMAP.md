@@ -3,55 +3,62 @@
 Landed work lives in `docs/adr/` and `CHANGELOG.md` — never here.
 This file is only what's NEXT, in order.
 
-## Now (in order)
+## Now — the scheduled epics (in order)
 
-1. **Diagnostic flag graduation.** The narrowing/Optional lattice is
-   complete through its production gaps (element places, dynamic-key
-   places, `return ()` / all-undef arms, slot Optional lifts, bareword
-   `Maybe[T]` — decision records: `adr/flow-narrowing.md`,
-   `adr/optional-types.md`, `adr/narrowing-diagnostics.md`). What remains
-   is **trust**: graduate the opt-in diagnostic flags to default-on per
-   code as the gold substrate and real projects show no false-positive
-   flood (the promotion path in `adr/narrowing-diagnostics.md`).
-   `unresolvedMethodCrossFile` is WORKSPACE-scoped and its known
-   false-positive classes are closed (monkey_patch synthesis, `handles`
-   delegation incl. the Sub::HandlesVia curried shape, plugin-owned
-   meta-method suppression) — it still promotes last
-   (`prompt-method-resolution-residuals.md` §4 rides the long-distance
-   provenance tier).
+Each epic has a self-contained implementation prompt under
+`docs/epics/` — mission, exact code anchors, phase ladder with
+acceptance criteria, invariants, and the verification gate. Implementers
+start THERE (after CLAUDE.md); this section is only the schedule.
+
+1. **Epic 1 — DBIC out of core, phase 3** →
+   `docs/epics/01-dbic-phase-3.md`. Parametric emission + per-base
+   semantics move to declarative plugin manifests
+   (`parametric_bases()` / `parametric_mints()`); the per-method
+   projection table completes; the two pinned gaps close
+   (custom-resultset discovery, `->search({ | })` column completion).
+   Ends with core plugin-free except generic dispatch — the phase
+   ladder's end state. Design corpus: `prompt-dbic-as-plugin.md`.
+
+2. **Epic 2 — Openness** → `docs/epics/02-openness.md`. One structural
+   verdict ("walk the namespace chain; Open suppresses, exhausted
+   Closed warns") subsumes the pile of per-diagnostic suppression
+   rules, resolves `SUPER::`/qualified names instead of skipping them,
+   gates the D4 open-world-dispatch noise, and then executes the flag
+   promotion the audit evidence below supports. Design corpus:
+   `prompt-graph-walking.md` (Scope nodes), `open-problems.md`
+   (qualified-name suppression), `adr/narrowing-diagnostics.md`
+   (promotion path).
 
    *Promotion audit over the gold substrate (July 2026, all flags on,
-   after the disagreement-to-widen tier landed):* `undef-deref`
-   (always-on) 8 sites — exact parity with the pre-branch baseline;
-   `derefShape` 0 hits; `optionalDeref` 35 (honest Optional productions;
-   residual noise = value flow beyond static reach, e.g. an
-   arity-and-value-gated undef arm in `Path::Class::Dir::new`);
-   `redundantGuard` 59 (was 115) and `contradictory` 34 (was 53) after
-   reassignment barriers + the shift-invocant gate; `unresolved-method`
-   −180 from the same fixes. Remaining known noise classes: open-world
-   dispatch (a base class's own all-undef method typing `$self->m` when
-   the runtime receiver is a subclass — the Openness axis,
-   `prompt-graph-walking.md`) and the named-helper first-param-self
-   over-reach (`gold-corpus/KNOWN-GAPS.md`). `optionalDeref` looks
-   promotable at INFO severity; `redundantGuard` after an Openness gate.
-2. **DBIC out of core — phase 3.** Phases 1–2 landed (`visit_dbic_*`
-   gone; `frameworks/dbic.rhai` owns arg-name verbs, column-keyed verbs,
-   fluent verbs, and meta-method suppression via the `meta_methods()`
-   manifest). Remaining: parametric *emission* out of core
-   (`extract_resultset_parametric` + the hardcoded
-   `DBIx::Class::ResultSet` base still live in `builder.rs`) and
-   per-method return projection — the one axis-shaped piece; a
-   `parametric_returns` manifest field may sidestep full
-   type-system-encoding; decide at the boundary, not before. Ladder in
-   `prompt-dbic-as-plugin.md`. Ends with core plugin-free except generic
-   dispatch.
+   after the disagreement-to-widen tier landed) — the evidence Epic 2
+   §Phase E consumes:* `undef-deref` (always-on) 8 sites — exact parity
+   with the pre-branch baseline; `derefShape` 0 hits; `optionalDeref`
+   35 (honest Optional productions; residual noise = value flow beyond
+   static reach, e.g. an arity-and-value-gated undef arm in
+   `Path::Class::Dir::new`); `redundantGuard` 59 (was 115) and
+   `contradictory` 34 (was 53) after reassignment barriers + the
+   shift-invocant gate; `unresolved-method` −180 from the same fixes.
+   Remaining known noise classes: open-world dispatch (Epic 2 Phase D)
+   and the named-helper first-param-self over-reach
+   (`gold-corpus/KNOWN-GAPS.md`). `optionalDeref` looks promotable at
+   INFO severity now; `redundantGuard` after the Phase D gate;
+   `unresolvedMethodCrossFile` still promotes last.
+
+3. **Epic 3 — Value provenance, tier 1** →
+   `docs/epics/03-value-provenance.md`. Residual fact classes Parts 1,
+   2, and 5a (invocant-mutation consumers, hash-key unions,
+   value-indexed returns) as emitter+reducer pairs on the bag. The
+   named gate for un-parking instance brands and the untyped-receiver
+   residual. Design corpus: `prompt-type-inference-residual.md`.
 
 ## Queued (pull-driven — QA findings decide order)
 
 Type intelligence:
-- Residual fact classes Parts 1–5 (invocant mutations, hash-key
-  unions, method loops, functional operators, value-indexed returns)
-  — `prompt-type-inference-residual.md`.
+- Residual fact classes Parts 3–4 (method loops, functional
+  operators) and the 5c prefetch residual — after Epic 3;
+  `prompt-type-inference-residual.md`.
+- Constructor/field value flow — the remaining instance-brands
+  prerequisite once Epic 3 lands (`prompt-graph-walking.md` §PARKED).
 - Conditional-reassignment disagreement-to-widen — the widening tier
   LANDED (reassign barriers: an untypeable write drops earlier beliefs;
   a postfix-conditional write never asserts, only widens). Residual:
@@ -59,14 +66,10 @@ Type intelligence:
   $spec` could keep `HashRef|prior` instead of widening to unknown) —
   that's the real lattice fold, wanted when precision (not soundness)
   becomes the complaint.
-- A4 v2: cross-FILE slot writes (`$self->{k} = Obj->new` in another
-  file) — the `MethodOnClass` bridge pattern.
-
-Graph / diagnostics (graph-walking pillar landed; residual only):
-- Scope-node taxonomy + Openness diagnostic (`home_namespace`,
-  "when is an unresolved call real?") — forward work in
-  `prompt-graph-walking.md`; subsumes the coarse qualified-name
-  suppression noted in `open-problems.md`.
+Graph / diagnostics: the Openness axis moved to Now (Epic 2). Residual
+after it: `Symbol.home_namespace` field migration if a consumer beyond
+the diagnostic ever needs it (Epic 2 deliberately ships the query, not
+the field).
 
 Plugin genericity:
 - `has_options` final dissolution: the option pairing already moved out
