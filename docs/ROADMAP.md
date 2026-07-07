@@ -51,6 +51,23 @@ start THERE (after CLAUDE.md); this section is only the schedule.
    named gate for un-parking instance brands and the untyped-receiver
    residual. Design corpus: `prompt-type-inference-residual.md`.
 
+## On deck — Epics 4–12
+
+The full slate, one implementation prompt per epic, lives in
+`docs/epics/` — see `docs/epics/README.md` for the schedule table AND
+the coverage map that accounts for every `prompt-*.md` and open design
+item (scheduled / parked-with-condition / landed / out-of-scope).
+
+4. One-seam sweep: magic tokens + cst backlog → `epics/04`
+5. Duplicate-package identity (H1) → `epics/05`
+6. Gated cross-file emission (ClassIsa) → `epics/06`
+7. Rename provenance → `epics/07`
+8. Diagnostic framework: PL-codes, config, SARIF → `epics/08`
+9. Heatmap residuals: Handlers + framework-consumed → `epics/09`
+10. Mojo polish: routes, stash, hooks, chains → `epics/10`
+11. CLI analysis subcommands + `--migrate` → `epics/11`
+12. Program boundaries + MAIN-1 → `epics/12`
+
 ## Queued (pull-driven — QA findings decide order)
 
 Type intelligence:
@@ -82,23 +99,22 @@ Plugin genericity:
   from `value_shape`/`arg_names`, options from `classified_pairs`).
 
 Hardening:
-- Options schema: `DiagnosticOptions` is serde-driven (the struct is the
-  schema). A `Config` god-struct (own-at-top, pass-slices), a generated
-  editor schema (`schemars`), and the per-code-config shape wait for their
-  forcing functions — `prompt-config-schema.md`.
+- Options schema → **Epic 8** (`prompt-config-schema.md`'s forcing
+  function).
 - Fold safety net: `eprintln!` → `tracing::error!` (builder.rs
   ~12061) + a synthetic-oscillator test so the release-mode
   `MAX_FOLD_ITERATIONS` break can't bit-rot.
 - Full-bag scans in `apply_chain_typing_assignments` /
   `FileAnalysis::inferred_type` — index when profiling flags them.
-- DBIC parametric column-key completion at an empty `->search({ | })`
-  (goto-def proves the chain; `complete_keyval_args` lacks the
-  parametric-receiver branch; pin in `e2e/dbic_parametric.lua`).
+- DBIC parametric column-key completion at `->search({ | })` →
+  **Epic 1** Phase D.
 - Cursor-context qualified-path/invocant detection should ask the
-  tree, not byte-walk (`extract_package_from_prefix` & sibling).
+  tree, not byte-walk (`extract_package_from_prefix` & sibling) —
+  adjacent to Epic 4's item-3 collapse; fold in there if touching.
 - `return_via_edge` chases lack `TypeProvenance` (stamp
   `Delegation{kind: "callable_return_edge"}` on the chase).
-- cst/conventions migration backlog — `prompt-cst-migration.md`.
+- cst/conventions migration backlog — ranked items → **Epic 4**; the
+  long tail stays the strangler rule (`prompt-cst-migration.md`).
 - Unify autoquoted-key-as-literal into `cst::string_list`. Today
   `string_list` routes `autoquoted_bareword` through the caller's
   `fold` (const resolution), so the DSL-arg callers (`extract_arg_name_list`)
@@ -118,9 +134,9 @@ Hardening:
   urgent (the per-caller fold is correct, just not DRY).
 
 QA tail:
-- MAIN-1 (`main::` across `require`) and H1 (duplicate packages) —
-  designs in `qa-design-items.md`. MooseX::Role::Parameterized — no
-  design yet.
+- MAIN-1 → **Epic 12**; H1 → **Epic 5** (designs in
+  `qa-design-items.md`). MooseX::Role::Parameterized — parked: the
+  runtime-export-generator open problem wearing role clothes.
 - Per-row known gaps: `gold-corpus/KNOWN-GAPS.md` (xfail rows are the
   live tracker).
 
@@ -146,15 +162,12 @@ QA tail:
 
 ## Backburner (user-facing, ship-when-ready)
 
-- Mojo polish: route naming/url_for, stash intelligence, hooks,
-  transitive plugin chains, config completion —
-  `prompt-mojo-todo.md`.
-- CLI diagnostic framework (PL-codes, suppression, SARIF), --migrate —
-  `prompt-cli-tools.md`.
-- Ref provenance: constant-fold `folded_from`, package→file rename,
-  inheritance override scoping — `prompt-ref-provenance.md`.
+- Mojo polish → **Epic 10**; CLI diagnostic framework → **Epic 8**;
+  analysis subcommands + `--migrate` → **Epic 11**; ref provenance →
+  **Epic 7** (all scheduled — see `docs/epics/README.md`).
 - Aspirational type features (effects/throws) —
-  `prompt-type-system-futures.md`.
+  `prompt-type-system-futures.md` (its narrowing pillar landed as
+  `adr/flow-narrowing.md`; only the effects pillar remains).
 - Web extension — `prompt-wasm-web-extension.md` (the crate split it
   assumed was executed and REJECTED; branch `workspace-split` is the
   playbook if wasm ever forces it).
