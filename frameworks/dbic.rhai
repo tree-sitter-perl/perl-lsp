@@ -40,6 +40,15 @@ fn column_keyed_verbs() {
      "update", "update_or_create", "create", "new", "count", "single"]
 }
 
+// Class-level DSL verbs inherited from DBIx::Class::Core with no visible
+// `sub` anywhere the walker can see — the unresolved-method diagnostic
+// consults this union so `__PACKAGE__->set_primary_key(...)` never flags.
+fn meta_methods() {
+    ["add_columns", "add_column", "set_primary_key", "table",
+     "resultset_class", "has_many", "has_one", "belongs_to", "might_have",
+     "many_to_many", "load_components"]
+}
+
 // Fluent verbs — the call returns the invocant's type UNCHANGED, so they only
 // apply to an actual resultset (`$rs->search` → a same-row resultset). DBIC has
 // no `Class->search`: search/find live on the resultset, which only comes from

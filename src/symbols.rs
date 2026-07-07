@@ -2198,21 +2198,12 @@ pub fn collect_diagnostics(
     }
 
     // 5e: Unresolved method diagnostics for locally-defined classes.
-    // Rule-#10 debt: the framework entries below (DBIC/Moose) belong to the
-    // frameworks, not core diagnostics — they move out when plugins can
-    // register meta-methods (docs/prompt-dbic-as-plugin.md) or the Openness
-    // rule lands (docs/prompt-graph-walking.md, Openness).
+    // Only the genuinely UNIVERSAL:: surface lives here; framework
+    // meta-methods (DBIC's `add_columns`, Moose's `meta`/`does`) come from
+    // the plugins' `meta_methods()` manifests, baked into
+    // `analysis.meta_methods` at build time.
     let universal_methods = [
-        "new", "AUTOLOAD", "DESTROY", "can", "isa", "DOES",
-        // Moose adds lowercase `does` alongside UNIVERSAL's uppercase DOES.
-        "does",
-        "VERSION",
-        // DBIC meta-methods (inherited from DBIx::Class::Core)
-        "add_columns", "add_column", "set_primary_key", "table", "resultset_class",
-        "has_many", "has_one", "belongs_to", "might_have", "many_to_many",
-        "load_components",
-        // Moose/Moo meta-methods
-        "meta",
+        "new", "AUTOLOAD", "DESTROY", "can", "isa", "DOES", "VERSION",
     ];
     for r in &analysis.refs {
         let (invocant, _invocant_span) = match &r.kind {
@@ -2226,8 +2217,10 @@ pub fn collect_diagnostics(
         };
         let method_name = &r.target_name;
 
-        // Skip universal methods
-        if universal_methods.contains(&method_name.as_str()) {
+        // Skip universal methods and plugin-declared framework meta-methods.
+        if universal_methods.contains(&method_name.as_str())
+            || analysis.meta_methods.contains(method_name.as_str())
+        {
             continue;
         }
 

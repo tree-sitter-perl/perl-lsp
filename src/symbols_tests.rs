@@ -360,6 +360,30 @@ fn unresolved_method_diags(
 }
 
 #[test]
+fn framework_meta_methods_suppressed_via_plugin_manifest() {
+    // `set_primary_key` / `meta` have no visible `sub` anywhere — they're
+    // framework meta-methods, declared by the dbic/moo plugins'
+    // `meta_methods()` manifests and baked into `analysis.meta_methods`.
+    // Core's diagnostic holds only the true UNIVERSAL:: list.
+    let src = r#"
+package Foo;
+sub real { 1 }
+package Main;
+sub g {
+    Foo->set_primary_key('id');
+    Foo->meta;
+}
+1;
+"#;
+    let idx = crate::module_index::ModuleIndex::new_for_test();
+    let diags = unresolved_method_diags(src, &idx, DiagnosticOptions::default());
+    assert!(
+        diags.is_empty(),
+        "plugin-declared meta-methods must not flag as unresolved: {diags:?}",
+    );
+}
+
+#[test]
 fn d8_narrowed_local_class_fires_by_default() {
     // The local-class narrowing case is always-on (no flag) — the receiver
     // narrows to an in-file class that lacks the method.

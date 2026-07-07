@@ -202,6 +202,7 @@ pub struct RhaiPlugin {
     app_surface_consumers: Vec<String>,
     role_makers: Vec<String>,
     column_keyed_verbs: Vec<String>,
+    meta_methods: Vec<String>,
     fluent_verbs: Vec<String>,
     arg_name_verbs: Vec<String>,
     topic_route_dsl: Option<crate::plugin::TopicRouteDsl>,
@@ -412,6 +413,27 @@ impl RhaiPlugin {
             }
         }
 
+        // `meta_methods()` — class-level DSL verbs the framework installs
+        // with no visible declaration; same optional, fail-safe shape.
+        let mut meta_methods: Vec<String> = Vec::new();
+        if signatures.iter().any(|n| n == "meta_methods") {
+            match engine.call_fn::<Array>(&mut rhai::Scope::new(), &ast, "meta_methods", ()) {
+                Ok(arr) => {
+                    for d in arr {
+                        match from_dynamic::<String>(&d) {
+                            Ok(s) => meta_methods.push(s),
+                            Err(e) => log::error!(
+                                "plugin `{}` meta_methods() bad entry: {}",
+                                id,
+                                e
+                            ),
+                        }
+                    }
+                }
+                Err(e) => log::error!("plugin `{}` meta_methods() failed: {}", id, e),
+            }
+        }
+
         // `fluent_verbs()` — verbs whose call type follows the invocant; same
         // optional, fail-safe array-of-strings shape.
         let mut fluent_verbs: Vec<String> = Vec::new();
@@ -484,6 +506,7 @@ impl RhaiPlugin {
             app_surface_consumers,
             role_makers,
             column_keyed_verbs,
+            meta_methods,
             fluent_verbs,
             arg_name_verbs,
             topic_route_dsl,
@@ -587,6 +610,10 @@ impl FrameworkPlugin for RhaiPlugin {
 
     fn column_keyed_verbs(&self) -> &[String] {
         &self.column_keyed_verbs
+    }
+
+    fn meta_methods(&self) -> &[String] {
+        &self.meta_methods
     }
 
     fn fluent_verbs(&self) -> &[String] {

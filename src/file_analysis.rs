@@ -2564,6 +2564,12 @@ pub struct FileAnalysis {
     /// here so query-time owner resolution can mint the column owner cross-file.
     #[serde(default)]
     pub column_keyed_verbs: HashSet<String>,
+    /// Framework meta-methods — class-level DSL verbs installed on every
+    /// consuming class with no visible `sub` (`add_columns`, `meta`). The
+    /// plugin-declared union, baked here so the unresolved-method
+    /// diagnostic's suppression list is plugin-owned, not hardcoded.
+    #[serde(default)]
+    pub meta_methods: HashSet<String>,
     /// Number of dynamic method-dispatch sites (`$obj->$method(...)`) in
     /// this file — calls whose method name is a scalar, not a bareword.
     /// They produce no nameable `MethodCall` ref (unless const-folding
@@ -2652,6 +2658,7 @@ pub struct FileAnalysisParts {
     pub dynamic_parent_packages: HashSet<String>,
     pub role_packages: HashSet<String>,
     pub column_keyed_verbs: HashSet<String>,
+    pub meta_methods: HashSet<String>,
     pub dynamic_dispatch_sites: u32,
     pub plugin_loads: Vec<PluginLoadFact>,
     pub loader_config_params: Vec<LoaderConfigParam>,
@@ -2813,6 +2820,7 @@ impl FileAnalysis {
             dynamic_parent_packages,
             role_packages,
             column_keyed_verbs,
+            meta_methods,
             dynamic_dispatch_sites,
             plugin_loads,
             loader_config_params,
@@ -2854,6 +2862,7 @@ impl FileAnalysis {
             dynamic_parent_packages,
             role_packages,
             column_keyed_verbs,
+            meta_methods,
             dynamic_dispatch_sites,
             plugin_loads,
             loader_config_params,

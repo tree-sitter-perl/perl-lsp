@@ -562,6 +562,7 @@ fn build_with_plugins_inner(
         dynamic_dispatch_sites: b.dynamic_dispatch_sites,
         role_packages: b.role_packages,
         column_keyed_verbs: b.plugins.column_keyed_verbs().map(|s| s.to_string()).collect(),
+        meta_methods: b.plugins.meta_methods().map(|s| s.to_string()).collect(),
         plugin_loads: b.plugin_loads,
         loader_config_params: b.loader_config_params,
     });
