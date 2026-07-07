@@ -368,6 +368,36 @@ impl FrameworkFact {
     }
 }
 
+// ---- Shared fact-family / source-tag identifiers ----
+
+/// The Fact `family` strings and builder source tags that form a
+/// producer↔consumer contract between the builder's emission sites and
+/// the reducers here. A bare literal on either side is a silent-unlink
+/// typo hazard (the fold just stops seeing the fact); both sides
+/// reference these so the identifier is compiler-checked.
+pub(crate) mod tags {
+    /// `SymbolReturnArm` Fact: a `return;` / `return undef` / `return ()`
+    /// arm — no rvalue type to ride an Edge; the arm join counts it.
+    pub(crate) const FACT_UNDEF_ARM: &str = "undef_arm";
+    /// `SymbolReturnArm` Fact: a value arm, typed or not — the all-undef
+    /// verdict must account for arms whose Edge never materialized.
+    pub(crate) const FACT_VALUE_ARM: &str = "value_arm";
+    /// `SlotType` Fact: a slot write whose RHS didn't type — blocks the
+    /// fold's definitive all-undef claim (partial story).
+    pub(crate) const FACT_OPAQUE_SLOT_WRITE: &str = "opaque_slot_write";
+    /// `Variable` Fact: a whole-scalar reassignment statement — the
+    /// temporal fold's belief barrier (span = the write's statement).
+    pub(crate) const FACT_REASSIGN_BARRIER: &str = "reassign_barrier";
+    /// `HashKey` Fact: a hash-key write observed on the owner (feeds
+    /// `mutated_keys_on_class` dynamic-key completion).
+    pub(crate) const FACT_MUTATION: &str = "mutation";
+    /// Writeback source tag on `MethodOnClass(class, m) → Edge(Symbol)`
+    /// primaries — doubles as the "a local definition exists" fact the
+    /// inheritance fallback walk gates on (an override's parent must
+    /// never answer for it).
+    pub(crate) const TAG_LOCAL_RETURN: &str = "local_return";
+}
+
 // ---- Witness bag ----
 
 /// Attachment-indexed bag. Kept separate from the raw witness vec so
@@ -579,7 +609,7 @@ impl WitnessReducer for FrameworkAwareTypeFold {
             WitnessPayload::InferredType(_) | WitnessPayload::Observation(_) => true,
             // Whole-scalar reassignment marker — a belief boundary the
             // temporal fold honors (see reduce).
-            WitnessPayload::Fact { family, .. } => family == "reassign_barrier",
+            WitnessPayload::Fact { family, .. } => family == tags::FACT_REASSIGN_BARRIER,
             _ => false,
         }
     }
@@ -657,7 +687,7 @@ impl WitnessReducer for FrameworkAwareTypeFold {
             ws.iter()
                 .filter(|w| {
                     matches!(&w.payload,
-                        WitnessPayload::Fact { family, .. } if family == "reassign_barrier")
+                        WitnessPayload::Fact { family, .. } if family == tags::FACT_REASSIGN_BARRIER)
                         && w.span.end <= point
                 })
                 .map(|w| w.span.start)
@@ -845,7 +875,7 @@ impl WitnessReducer for BranchArmFold {
         }
         match &w.payload {
             WitnessPayload::InferredType(_) => true,
-            WitnessPayload::Fact { family, .. } => family == "undef_arm",
+            WitnessPayload::Fact { family, .. } => family == tags::FACT_UNDEF_ARM,
             _ => false,
         }
     }
@@ -856,7 +886,7 @@ impl WitnessReducer for BranchArmFold {
         for w in ws {
             match &w.payload {
                 WitnessPayload::InferredType(t) => typed.push(t.clone()),
-                WitnessPayload::Fact { family, .. } if family == "undef_arm" => undef_arms += 1,
+                WitnessPayload::Fact { family, .. } if family == tags::FACT_UNDEF_ARM => undef_arms += 1,
                 _ => {}
             }
         }
@@ -911,7 +941,7 @@ impl WitnessReducer for SymbolReturnArmFold {
             // Edge whose target never materializes leaves no InferredType,
             // so the all-undef gate counts arms through these Facts.
             WitnessPayload::Fact { family, .. } => {
-                family == "undef_arm" || family == "value_arm"
+                family == tags::FACT_UNDEF_ARM || family == tags::FACT_VALUE_ARM
             }
             _ => false,
         }
@@ -924,10 +954,10 @@ impl WitnessReducer for SymbolReturnArmFold {
         for w in ws {
             match &w.payload {
                 WitnessPayload::InferredType(t) => arms.push(t.clone()),
-                WitnessPayload::Fact { family, .. } if family == "undef_arm" => {
+                WitnessPayload::Fact { family, .. } if family == tags::FACT_UNDEF_ARM => {
                     has_undef_arm = true
                 }
-                WitnessPayload::Fact { family, .. } if family == "value_arm" => {
+                WitnessPayload::Fact { family, .. } if family == tags::FACT_VALUE_ARM => {
                     value_arms += 1
                 }
                 _ => {}
@@ -978,7 +1008,7 @@ impl WitnessReducer for SlotTypeFold {
             WitnessPayload::InferredType(_) => true,
             // The "a write we couldn't type exists" marker — gates the
             // all-undef verdict on having seen the whole story.
-            WitnessPayload::Fact { family, .. } => family == "opaque_slot_write",
+            WitnessPayload::Fact { family, .. } => family == tags::FACT_OPAQUE_SLOT_WRITE,
             _ => false,
         }
     }
@@ -993,7 +1023,7 @@ impl WitnessReducer for SlotTypeFold {
         let mut arms: Vec<InferredType> = Vec::new();
         for w in ws {
             match &w.payload {
-                WitnessPayload::Fact { family, .. } if family == "opaque_slot_write" => {
+                WitnessPayload::Fact { family, .. } if family == tags::FACT_OPAQUE_SLOT_WRITE => {
                     opaque_writes += 1;
                 }
                 WitnessPayload::InferredType(t) => match t {
@@ -1666,7 +1696,7 @@ impl ReducerRegistry {
                 // canonical miscarriage). The writeback's `local_return`
                 // witness IS the "a local definition exists" fact.
                 let has_local_override = bag.for_attachment(q.attachment).iter().any(|w| {
-                    matches!(&w.source, WitnessSource::Builder(t) if t == "local_return")
+                    matches!(&w.source, WitnessSource::Builder(t) if t == tags::TAG_LOCAL_RETURN)
                 });
                 if has_local_override {
                     return ReducedValue::None;

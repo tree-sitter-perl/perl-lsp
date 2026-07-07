@@ -1158,6 +1158,13 @@ impl InferredType {
     /// non-constraint type. This is the rule-#10 "ask the value" entry
     /// point: `has`'s isa→accessor projection calls it without ever
     /// matching on the constraint's shape itself.
+    /// Is this the definitive bottom (`Undef`)? Consumers deciding
+    /// whether a value can back a contract ask the value, not match the
+    /// variant (rule #10).
+    pub fn is_undef(&self) -> bool {
+        matches!(self, InferredType::Undef)
+    }
+
     pub fn constrained_inner(&self) -> Option<&InferredType> {
         match self {
             InferredType::TypeConstraintOf(inner) => Some(inner),
@@ -1551,6 +1558,23 @@ pub const APP_SURFACE_CLASS: &str = "Mojolicious::_AppSurface";
 /// wrapper. A scope has one parent and no cycles, so this is a linked-
 /// list climb, not a graph walk — the graph deliberately does not model
 /// it (`docs/adr/graph-walking.md`).
+/// Names of the Sub/Method symbols `class` itself defines — the override
+/// set that must shadow inherited answers wherever a parent walk
+/// enumerates methods (Perl dispatch goes to the local sub, so a
+/// parent's type must never answer for a name in this set). Shared by
+/// the writeback's local inheritance edges and enrichment's cross-file
+/// projection so the rule can't drift between them.
+pub(crate) fn own_method_names<'a>(
+    symbols: &'a [Symbol],
+    class: &'a str,
+) -> impl Iterator<Item = String> + 'a {
+    symbols.iter().filter_map(move |s| {
+        (matches!(s.kind, SymKind::Sub | SymKind::Method)
+            && s.package.as_deref() == Some(class))
+        .then(|| s.name.clone())
+    })
+}
+
 pub fn scope_chain_of(scopes: &[Scope], start: ScopeId) -> Vec<ScopeId> {
     let mut chain = Vec::new();
     let mut current = Some(start);
@@ -3690,7 +3714,7 @@ impl FileAnalysis {
                 }
                 if matches!(
                     &w.payload,
-                    WitnessPayload::Fact { family, .. } if family == "mutation"
+                    WitnessPayload::Fact { family, .. } if family == crate::witnesses::tags::FACT_MUTATION
                 ) && !out.contains(name)
                 {
                     out.push(name.clone());
@@ -4027,11 +4051,7 @@ impl FileAnalysis {
                 // under an overriding `Mac::file` is the canonical
                 // miscarriage). Seed the seen-set with the child's own
                 // method names so no parent edge is minted for them.
-                emitted_for_child.extend(self.symbols.iter().filter_map(|s| {
-                    (matches!(s.kind, SymKind::Sub | SymKind::Method)
-                        && s.package.as_deref() == Some(child.as_str()))
-                    .then(|| s.name.clone())
-                }));
+                emitted_for_child.extend(own_method_names(&self.symbols, child));
                 for parent in parents {
                     if parent == child {
                         continue;

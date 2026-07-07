@@ -741,7 +741,7 @@ impl<'a> Builder<'a> {
                 attachment: WitnessAttachment::HashKey { owner, name: key.clone() },
                 source: WitnessSource::Builder("invocant_mutation".into()),
                 payload: WitnessPayload::Fact {
-                    family: "mutation".into(),
+                    family: crate::witnesses::tags::FACT_MUTATION.into(),
                     key: "written_at".into(),
                     value: crate::witnesses::FactValue::Str(key),
                 },
@@ -761,7 +761,7 @@ impl<'a> Builder<'a> {
                     attachment: WitnessAttachment::SlotType { class, key },
                     source: WitnessSource::Builder("slot_type".into()),
                     payload: WitnessPayload::Fact {
-                        family: "opaque_slot_write".into(),
+                        family: crate::witnesses::tags::FACT_OPAQUE_SLOT_WRITE.into(),
                         key: String::new(),
                         value: FactValue::Bool(true),
                     },
@@ -852,9 +852,9 @@ impl<'a> Builder<'a> {
         for (name, scope, span) in barrier_pushes {
             self.bag.push(Witness {
                 attachment: WitnessAttachment::Variable { name, scope },
-                source: WitnessSource::Builder("reassign_barrier".into()),
+                source: WitnessSource::Builder(crate::witnesses::tags::FACT_REASSIGN_BARRIER.into()),
                 payload: WitnessPayload::Fact {
-                    family: "reassign_barrier".into(),
+                    family: crate::witnesses::tags::FACT_REASSIGN_BARRIER.into(),
                     key: String::new(),
                     value: FactValue::Bool(true),
                 },
@@ -886,16 +886,7 @@ impl<'a> Builder<'a> {
             tail_value_arms.push((sym_id, span));
         }
         for (sym_id, span) in tail_value_arms {
-            self.bag.push(Witness {
-                attachment: WitnessAttachment::SymbolReturnArm(sym_id),
-                source: WitnessSource::Builder("value_arm".into()),
-                payload: WitnessPayload::Fact {
-                    family: "value_arm".into(),
-                    key: String::new(),
-                    value: FactValue::Bool(true),
-                },
-                span,
-            });
+            self.push_value_arm_fact(sym_id, span);
         }
     }
 
@@ -1133,6 +1124,12 @@ fn point_lt(a: tree_sitter::Point, b: tree_sitter::Point) -> bool {
 /// gates on (for `emit_arity_return_witnesses`), and the body span
 /// (the `Expr(span)` key both `emit_arity_return_witnesses` and
 /// `seed_return_types_from_bag` query inline via `bag_query_expr_span`).
+/// Sentinel name for anonymous-sub scopes and symbols. One definition —
+/// producers (scope + symbol creation) and consumers (the shift-invocant
+/// gate) share it, so "is this sub anonymous?" is never a re-typed
+/// string compare.
+const ANON_SUB_NAME: &str = "(anon)";
+
 struct ReturnInfo {
     /// The scope (Sub/Method) this return belongs to.
     scope: ScopeId,
@@ -4377,7 +4374,7 @@ impl<'a> Builder<'a> {
         let span = node_to_span(node);
         self.ensure_anon_sub_symbol(node, &params);
         self.push_scope(
-            ScopeKind::Sub { name: "(anon)".into() },
+            ScopeKind::Sub { name: ANON_SUB_NAME.into() },
             span,
             None,
         );
@@ -4405,7 +4402,7 @@ impl<'a> Builder<'a> {
             return *id;
         }
         let sym_id = self.add_symbol(
-            "(anon)".into(),
+            ANON_SUB_NAME.into(),
             SymKind::Sub,
             span,
             self.sub_keyword_span(node).unwrap_or(span),
@@ -4617,16 +4614,12 @@ impl<'a> Builder<'a> {
     /// argument read; typing it as the class was the audit's
     /// `defined $value`-guard false-positive maker.
     fn shift_denotes_invocant(&self, node: Node<'a>) -> bool {
-        // Climb to the binding assignment, stopping at the statement
-        // boundary (no binding → expression position → invocant).
-        let mut cur = node;
-        let assign = loop {
-            let Some(p) = cur.parent() else { return true };
-            match p.kind() {
-                "assignment_expression" => break p,
-                "expression_statement" | "block" => return true,
-                _ => cur = p,
-            }
+        // No binding assignment within the statement → expression
+        // position (`shift->method`) → the receiver read itself.
+        let Some(assign) =
+            crate::cst::stmt_context(node).and_then(|c| c.binding_assignment)
+        else {
+            return true;
         };
         // The shift must sit on the RHS; a shift inside the LHS (odd,
         // but cheap to guard) is not a binding of it.
@@ -4638,7 +4631,11 @@ impl<'a> Builder<'a> {
         // The sub's extracted param list knows which param is the
         // invocant (params[0] for methods; params[1] under `around`).
         // Scope-derived (not the live walk stack) so the post-walk
-        // chain-typing callers resolve identically.
+        // chain-typing callers resolve identically. Anonymous subs are
+        // excluded: their first arg is a callback payload, not a
+        // receiver — the audit's `Maybe`-checker false-positive shape
+        // (`sub { my $value = shift; return if !defined($value) }`) —
+        // so only a conventional name (above) types there.
         let scope = self.scope_at_point(node.start_position());
         let sub_scope_name = crate::file_analysis::scope_chain_of(&self.scopes, scope)
             .into_iter()
@@ -4648,11 +4645,7 @@ impl<'a> Builder<'a> {
                 }
                 _ => None,
             })
-            // An anonymous sub's first arg is a callback payload, not a
-            // receiver — the audit's `Maybe`-checker false-positive shape
-            // (`sub { my $value = shift; return if !defined($value) }`).
-            // Only a conventional name (handled above) types there.
-            .filter(|(_, name)| name != "(anon)");
+            .filter(|(_, name)| name != ANON_SUB_NAME);
         let invocant_param = sub_scope_name
             .and_then(|(sid, name)| self.find_sub_symbol_for(&name, sid))
             .and_then(|sid| self.symbols.iter().find(|s| s.id == sid))
@@ -4661,11 +4654,6 @@ impl<'a> Builder<'a> {
                 // the FIRST positional — in a named sub of an OO-by-
                 // convention package that slot IS the receiver regardless
                 // of its name (`my $x = shift` in a Mojo class).
-                // Anonymous subs never reach here (no named Sub scope):
-                // their first arg is a callback payload, not a receiver,
-                // so they stay on the conventional-name rule above —
-                // that's the audit's `Maybe`-checker false-positive shape
-                // (`sub { my $value = shift; return if !defined $value }`).
                 SymbolDetail::Sub { params, .. } => params
                     .iter()
                     .find(|p| p.is_invocant)
@@ -6531,19 +6519,8 @@ impl<'a> Builder<'a> {
                 // false "is undef" for the `->is_valid` call). Skip the
                 // belief; the write's reassign barrier still lands, which
                 // IS the widening.
-                let conditional_write = {
-                    let mut cur = node;
-                    loop {
-                        match cur.parent() {
-                            Some(p) if p.kind() == "postfix_conditional_expression" => {
-                                break true
-                            }
-                            Some(p) if p.kind() == "expression_statement" => break false,
-                            Some(p) => cur = p,
-                            None => break false,
-                        }
-                    }
-                };
+                let conditional_write = crate::cst::stmt_context(node)
+                    .is_some_and(|c| c.under_postfix_conditional);
                 let mut inferred = if conditional_write {
                     None
                 } else {
@@ -7231,9 +7208,9 @@ impl<'a> Builder<'a> {
                 if matches!(arm.kind(), "undef_expression" | "stub_expression") {
                     self.bag.push(Witness {
                         attachment: arm_att.clone(),
-                        source: WitnessSource::Builder("undef_arm".into()),
+                        source: WitnessSource::Builder(crate::witnesses::tags::FACT_UNDEF_ARM.into()),
                         payload: WitnessPayload::Fact {
-                            family: "undef_arm".into(),
+                            family: crate::witnesses::tags::FACT_UNDEF_ARM.into(),
                             key: String::new(),
                             value: crate::witnesses::FactValue::Bool(true),
                         },
@@ -7340,6 +7317,25 @@ impl<'a> Builder<'a> {
         }
     }
 
+    /// One `value_arm` counting Fact on the sub's return-arm attachment.
+    /// Pushed for every value arm — typed or not — because an Edge whose
+    /// target never materializes leaves no trace in the fold, and the
+    /// all-undef verdict (`{undef arms only} → Undef`) must not fire
+    /// while an untypeable value arm exists.
+    fn push_value_arm_fact(&mut self, sym_id: SymbolId, span: Span) {
+        use crate::witnesses::{FactValue, Witness, WitnessAttachment, WitnessPayload, WitnessSource};
+        self.bag.push(Witness {
+            attachment: WitnessAttachment::SymbolReturnArm(sym_id),
+            source: WitnessSource::Builder(crate::witnesses::tags::FACT_VALUE_ARM.into()),
+            payload: WitnessPayload::Fact {
+                family: crate::witnesses::tags::FACT_VALUE_ARM.into(),
+                key: String::new(),
+                value: FactValue::Bool(true),
+            },
+            span,
+        });
+    }
+
     /// Publish witnesses for one explicit `return EXPR`:
     /// - `Expr(body_span)` is populated by `emit_expr_witness` —
     ///   directly with the body's payload for non-ternary, or
@@ -7374,9 +7370,9 @@ impl<'a> Builder<'a> {
         if is_undef_arm {
             self.bag.push(Witness {
                 attachment: WitnessAttachment::SymbolReturnArm(sym_id),
-                source: WitnessSource::Builder("undef_arm".into()),
+                source: WitnessSource::Builder(crate::witnesses::tags::FACT_UNDEF_ARM.into()),
                 payload: WitnessPayload::Fact {
-                    family: "undef_arm".into(),
+                    family: crate::witnesses::tags::FACT_UNDEF_ARM.into(),
                     key: String::new(),
                     value: FactValue::Bool(true),
                 },
@@ -7390,20 +7386,7 @@ impl<'a> Builder<'a> {
                 payload: WitnessPayload::Edge(WitnessAttachment::Expr(arm_span)),
                 span: arm_span,
             });
-            // Every value arm is also counted with a Fact: an Edge whose
-            // target never materializes leaves no trace in the fold, and
-            // the all-undef gate (`{undef arms only} → Undef`) must not
-            // fire when an untypeable value arm exists.
-            self.bag.push(Witness {
-                attachment: WitnessAttachment::SymbolReturnArm(sym_id),
-                source: WitnessSource::Builder("value_arm".into()),
-                payload: WitnessPayload::Fact {
-                    family: "value_arm".into(),
-                    key: String::new(),
-                    value: FactValue::Bool(true),
-                },
-                span: arm_span,
-            });
+            self.push_value_arm_fact(sym_id, arm_span);
         }
         self.bag.push(Witness {
             attachment: WitnessAttachment::Symbol(sym_id),
@@ -7724,20 +7707,14 @@ impl<'a> Builder<'a> {
                 //   var): loop-var typing spans the whole loop and isn't
                 //   a reassignment of a prior belief.
                 if text.starts_with('$') {
-                    let mut stmt = node;
-                    while let Some(p) = stmt.parent() {
-                        match p.kind() {
-                            "variable_declaration" => break,
-                            "expression_statement" => {
-                                self.scalar_reassign_writes.push((
-                                    text.to_string(),
-                                    self.current_scope(),
-                                    node_to_span(p),
-                                ));
-                                break;
-                            }
-                            _ => stmt = p,
-                        }
+                    if let Some(c) =
+                        crate::cst::stmt_context(node).filter(|c| !c.in_declaration)
+                    {
+                        self.scalar_reassign_writes.push((
+                            text.to_string(),
+                            self.current_scope(),
+                            node_to_span(c.statement),
+                        ));
                     }
                 }
             }
@@ -9865,8 +9842,7 @@ impl<'a> Builder<'a> {
                 // attribute is a mutable slot, so `Undef` as a return CONTRACT
                 // is a lie the moment anyone sets it (and D1 would flag every
                 // `$self->parent->…` as a guaranteed die). No claim instead.
-                let getter_type =
-                    getter_type.filter(|t| !matches!(t, InferredType::Undef));
+                let getter_type = getter_type.filter(|t| !t.is_undef());
                 let fluent_type = self
                     .current_package
                     .as_ref()
@@ -13906,7 +13882,7 @@ impl<'a> Builder<'a> {
     ) {
         use crate::witnesses::{Witness, WitnessAttachment, WitnessPayload, WitnessSource};
 
-        self.bag.remove_by_source_tag("local_return");
+        self.bag.remove_by_source_tag(crate::witnesses::tags::TAG_LOCAL_RETURN);
         self.bag.remove_by_source_tag("plugin_bridge");
         self.bag.remove_by_source_tag("inheritance");
 
@@ -13962,7 +13938,7 @@ impl<'a> Builder<'a> {
                         class,
                         name: sym.name.clone(),
                     },
-                    source: WitnessSource::Builder("local_return".into()),
+                    source: WitnessSource::Builder(crate::witnesses::tags::TAG_LOCAL_RETURN.into()),
                     payload: WitnessPayload::Edge(WitnessAttachment::Symbol(sym.id)),
                     span: sym.span,
                 });
@@ -14042,11 +14018,8 @@ impl<'a> Builder<'a> {
             // projection in `enrich_imported_types_with_keys`.
             let mut emitted_for_child: std::collections::HashSet<String> =
                 std::collections::HashSet::new();
-            emitted_for_child.extend(self.symbols.iter().filter_map(|s| {
-                (matches!(s.kind, SymKind::Sub | SymKind::Method)
-                    && s.package.as_deref() == Some(child.as_str()))
-                .then(|| s.name.clone())
-            }));
+            emitted_for_child
+                .extend(crate::file_analysis::own_method_names(&self.symbols, child));
             for parent in parents {
                 if parent == child {
                     continue;
