@@ -7,7 +7,7 @@ verification gate. An implementing session starts with `CLAUDE.md`,
 then its epic file, then the epic's listed design docs.
 
 Ordering is a schedule, not a dependency graph — dependencies are
-stated inside each epic. Epics 4–12 are mutually independent unless
+stated inside each epic. Epics 4–13 are mutually independent unless
 their docs say otherwise; 1–3 come first because they finish the
 standing roadmap commitments.
 
@@ -25,6 +25,7 @@ standing roadmap commitments.
 | 10 | [Mojo polish: routes, stash, hooks, chains](10-mojo-polish.md) | L | — |
 | 11 | [CLI analysis subcommands + --migrate](11-cli-analysis-and-migrate.md) | L | 8/9 for the two lint aliases |
 | 12 | [Program boundaries + MAIN-1](12-program-boundaries.md) | M | brands-half waits on 3 |
+| 13 | [Type::Tiny completeness: check-guards, import-scoped vocab](13-type-tiny-completeness.md) | S–M | — |
 
 ## Coverage map — every `docs/prompt-*.md` and open design item
 
@@ -42,6 +43,7 @@ residuals, or (d) explicitly out of scope. Nothing is unaccounted for.
 | `prompt-type-inference-residual.md` Part 5c residuals (prefetch, `join =>` keys) | Queued; natural follow-on to Epic 1 |
 | `prompt-type-inference-residual.md` Part 7 (Rhai reducers) | **Parked**: wants a second concrete consumer beyond route aggregation |
 | `prompt-magic-tokens.md` | **Epic 4** (phases A–B) |
+| Type::Tiny surface (`adr/type-constraints.md` + `frameworks/type-tiny.rhai`) | Constraint model + vocabulary LANDED; check-fn guards, import-scoped gate, and the typetiny completion xfail → **Epic 13**; `ArrayRef[T]` elements parked with sequence-types; house Type::Library generators stay on the runtime-export open problem |
 | `prompt-cst-migration.md` items 1–5, 7 | **Epic 4** (phases C–G); item 6 is a standing strangler rule, not schedulable |
 | `qa-design-items.md` §H1 | **Epic 5** |
 | `qa-design-items.md` §MAIN-1 | **Epic 12** (phase C) |

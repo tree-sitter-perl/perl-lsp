@@ -17,8 +17,9 @@
 // (optional receivers dispatch leniently), and feeds the optional-deref
 // diagnostics the honest maybe-undef type.
 //
-// Import scoping (docs/prompt-type-constraint-types.md §"Future: registration
-// moves to the injection level"): when a package does `use Types::Standard
+// Import scoping (design: docs/adr/type-constraints.md; the package-scoped
+// gate + check-guards are docs/epics/13-type-tiny-completeness.md): when a
+// package does `use Types::Standard
 // qw/Str Int/`, those names become known via an Import action — suppressing
 // unresolved-function diagnostics for explicitly imported type constants.
 // `-all` / `:all` / bare use → full vocab emitted.  `Clove::Types` and

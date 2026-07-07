@@ -51,7 +51,7 @@ start THERE (after CLAUDE.md); this section is only the schedule.
    named gate for un-parking instance brands and the untyped-receiver
    residual. Design corpus: `prompt-type-inference-residual.md`.
 
-## On deck — Epics 4–12
+## On deck — Epics 4–13
 
 The full slate, one implementation prompt per epic, lives in
 `docs/epics/` — see `docs/epics/README.md` for the schedule table AND
@@ -67,6 +67,7 @@ item (scheduled / parked-with-condition / landed / out-of-scope).
 10. Mojo polish: routes, stash, hooks, chains → `epics/10`
 11. CLI analysis subcommands + `--migrate` → `epics/11`
 12. Program boundaries + MAIN-1 → `epics/12`
+13. Type::Tiny completeness: check-guards, import-scoped vocab → `epics/13`
 
 ## Queued (pull-driven — QA findings decide order)
 
