@@ -1443,9 +1443,48 @@ fn test_return_type_bare_return_optional() {
 
 #[test]
 fn test_return_type_all_bare_returns() {
-    // All bare returns → no return type
+    // Every arm is a provable undef → the definitive `Undef`, not the
+    // silent None (docs/adr/optional-types.md). Feeds the method-on-Undef
+    // and always-false-guard diagnostics.
     let fa = build_fa("sub noop {\n    return;\n}");
-    assert_eq!(fa.sub_return_type_at_arity("noop", None), None);
+    assert_eq!(
+        fa.sub_return_type_at_arity("noop", None),
+        Some(InferredType::Undef)
+    );
+}
+
+#[test]
+fn test_return_type_all_undef_returns() {
+    // `sub f { return undef }` — the explicit spelling of the same fact.
+    let fa = build_fa("sub nothing {\n    return undef;\n}");
+    assert_eq!(
+        fa.sub_return_type_at_arity("nothing", None),
+        Some(InferredType::Undef)
+    );
+}
+
+#[test]
+fn test_return_type_undef_arm_with_fallthrough_tail_not_undef() {
+    // `return undef if $x; compute()` — the fallthrough tail is a value
+    // arm the per-`return` walk never sees. The all-undef gate must not
+    // fire: the sub returns compute()'s value when the guard fails.
+    let fa = build_fa("sub gated {\n    my ($x) = @_;\n    return undef if $x;\n    compute();\n}");
+    assert_ne!(
+        fa.sub_return_type_at_arity("gated", None),
+        Some(InferredType::Undef)
+    );
+}
+
+#[test]
+fn test_return_type_empty_list_return_optional() {
+    // `return ()` coerces to undef in scalar context — an undef arm, same
+    // as bare `return;`, so `{T, ()}` lifts to Optional<T>.
+    let fa = build_fa("sub find {\n    return () unless 1;\n    return { row => 1 };\n}");
+    let t = fa.sub_return_type_at_arity("find", None);
+    assert!(
+        matches!(&t, Some(InferredType::Optional(inner)) if inner.is_hash_shaped()),
+        "Optional<hash-shaped>, got {t:?}",
+    );
 }
 
 #[test]
@@ -10976,17 +11015,47 @@ fn moo_instanceof_isa_types_both_getter_and_writer() {
 
 /// `Maybe[InstanceOf['Foo']]` — the nested constructor is itself a constraint
 /// value. The core types the inner call (`TypeConstraintOf(ClassName(Foo))`)
-/// into the param's `ty`; the `Maybe` passthrough fold projects its inner, so
-/// the accessor returns `Foo` (optionalness unmodeled — unwrap for resolution).
+/// into the param's `ty`; the `Maybe` fold projects the inner and lifts it to
+/// `Optional<Foo>` — the accessor value is honestly maybe-undef (optional
+/// receivers dispatch leniently, and the optional-deref lint sees the truth).
 #[test]
-fn moo_maybe_instanceof_isa_unwraps_to_inner_class() {
+fn moo_maybe_instanceof_isa_lifts_to_optional_class() {
     let fa = build_fa(
         "package T;\nuse Moo;\nuse Types::Standard qw/Maybe InstanceOf/;\nhas thing => (is=>'ro', isa=>Maybe[InstanceOf['My::Thing']]);\n1;\n",
     );
+    let t = fa.sub_return_type_at_arity("thing", Some(0));
+    assert!(
+        matches!(&t, Some(InferredType::Optional(inner)) if inner.class_name() == Some("My::Thing")),
+        "Maybe[InstanceOf['My::Thing']] must type the accessor Optional<My::Thing>, got {t:?}",
+    );
+}
+
+/// Bareword `Maybe[Int]` — the base constant is a 0-arity constraint value;
+/// the plugin folds it to its rep and `Maybe` lifts to Optional. Parity with
+/// the quoted `isa => 'Maybe[Int]'` spelling.
+#[test]
+fn moo_bareword_maybe_int_isa_types_optional_numeric() {
+    let fa = build_fa(
+        "package T;\nuse Moo;\nuse Types::Standard qw/Maybe Int/;\nhas count => (is=>'ro', isa=>Maybe[Int]);\n1;\n",
+    );
     assert_eq!(
-        fa.sub_return_type_at_arity("thing", Some(0)),
-        Some(InferredType::ClassName("My::Thing".to_string())),
-        "Maybe[InstanceOf['My::Thing']] must unwrap to a My::Thing accessor return",
+        fa.sub_return_type_at_arity("count", Some(0)),
+        Some(InferredType::Optional(Box::new(InferredType::Numeric))),
+        "bareword Maybe[Int] must type the accessor Optional<Numeric>",
+    );
+}
+
+/// Bareword `isa => Int` (no wrapper) — the same 0-arity constant fold gives
+/// the accessor its rep, matching the quoted `isa => 'Int'` spelling.
+#[test]
+fn moo_bareword_int_isa_types_numeric() {
+    let fa = build_fa(
+        "package T;\nuse Moo;\nuse Types::Standard qw/Int/;\nhas count => (is=>'ro', isa=>Int);\n1;\n",
+    );
+    assert_eq!(
+        fa.sub_return_type_at_arity("count", Some(0)),
+        Some(InferredType::Numeric),
+        "bareword isa => Int must type the accessor Numeric",
     );
 }
 
@@ -14305,6 +14374,41 @@ fn slot_type_keyed_by_owner_class() {
     // The enclosing-package write lands on Bar, not Foo — no cross-contamination.
     let bar_h = slot_type(&fa, "Bar", "h").expect("SlotType{Bar,h} from $self write");
     assert_eq!(bar_h.class_name(), Some("Sidecar"), "got {bar_h:?}");
+}
+
+#[test]
+fn slot_type_typed_write_plus_undef_write_optional() {
+    // `{T, undef}` writes across methods lift the slot to `Optional<T>`:
+    // one method installs the helper, another clears it.
+    let src = "package Foo;\nsub init {\n  my $self = shift;\n  $self->{h} = Helper->new;\n}\nsub clear {\n  my $self = shift;\n  $self->{h} = undef;\n}\n";
+    let fa = build_fa(src);
+    let t = slot_type(&fa, "Foo", "h").expect("SlotType{Foo,h} should fold");
+    assert!(
+        matches!(&t, InferredType::Optional(inner) if inner.class_name() == Some("Helper")),
+        "Optional<Helper>, got {t:?}",
+    );
+}
+
+#[test]
+fn slot_type_all_undef_writes_undef() {
+    // Every observed write is undef → the slot IS undef.
+    let src = "package Foo;\nsub clear {\n  my $self = shift;\n  $self->{h} = undef;\n}\n";
+    let fa = build_fa(src);
+    assert_eq!(slot_type(&fa, "Foo", "h"), Some(InferredType::Undef));
+}
+
+#[test]
+fn slot_type_optional_rhs_write_optional() {
+    // Writing a maybe-undef value (`Optional<T>` RHS) makes the slot
+    // optional — the Optional strips into the undef flag and re-lifts,
+    // so it also agrees with a sibling plain-`T` write.
+    let src = "package Foo;\nsub maybe_helper {\n  return undef unless 1;\n  return Helper->new;\n}\nsub init {\n  my $self = shift;\n  $self->{h} = maybe_helper();\n}\nsub force {\n  my $self = shift;\n  $self->{h} = Helper->new;\n}\n";
+    let fa = build_fa(src);
+    let t = slot_type(&fa, "Foo", "h").expect("SlotType{Foo,h} should fold");
+    assert!(
+        matches!(&t, InferredType::Optional(inner) if inner.class_name() == Some("Helper")),
+        "Optional<Helper>, got {t:?}",
+    );
 }
 
 

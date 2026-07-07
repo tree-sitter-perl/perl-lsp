@@ -229,6 +229,7 @@ fn build_with_plugins_inner(
         return_infos: Vec::new(),
         pending_array_pushes: Vec::new(),
         last_expr_span: std::collections::HashMap::new(),
+        last_expr_is_return: std::collections::HashMap::new(),
         slot_write_rhs_span: std::collections::HashMap::new(),
         call_bindings: Vec::new(),
         method_call_bindings: Vec::new(),
@@ -648,7 +649,8 @@ impl<'a> Builder<'a> {
     /// inside the worklist, once `invocant_class` is filled.
     fn populate_witness_bag(&mut self) {
         use crate::witnesses::{
-            TypeObservation, Witness, WitnessAttachment, WitnessPayload, WitnessSource,
+            FactValue, TypeObservation, Witness, WitnessAttachment, WitnessPayload,
+            WitnessSource,
         };
 
         // Rep observations from `$v->{k}` access. Method-call return
@@ -782,6 +784,42 @@ impl<'a> Builder<'a> {
                 source: WitnessSource::Builder("implicit_return".into()),
                 payload: WitnessPayload::Edge(WitnessAttachment::Expr(expr_span)),
                 span: sym_span,
+            });
+        }
+
+        // Fallthrough tails are value arms. A sub with explicit returns
+        // can still fall off its final statement (`return undef if $x;
+        // compute()`), and that tail never passes through
+        // `publish_return_arm_witnesses`. Count it so the all-undef gate
+        // in `SymbolReturnArmFold` types a sub `Undef` only when every
+        // way out is provably undef. Conservative by construction: a
+        // stale `last_expr_span` (sub ends in a block statement) still
+        // counts as a value arm — under-claiming `Undef`, never lying.
+        let mut tail_value_arms: Vec<(SymbolId, Span)> = Vec::new();
+        for scope in &self.scopes {
+            if !matches!(scope.kind, ScopeKind::Sub { .. } | ScopeKind::Method { .. }) {
+                continue;
+            }
+            if !self.return_infos.iter().any(|ri| ri.scope == scope.id) {
+                continue;
+            }
+            let Some(span) = self.last_expr_span.get(&scope.id).copied() else { continue };
+            if self.last_expr_is_return.get(&scope.id).copied().unwrap_or(false) {
+                continue;
+            }
+            let Some(sym_id) = self.find_sub_symbol_for_scope(scope.id) else { continue };
+            tail_value_arms.push((sym_id, span));
+        }
+        for (sym_id, span) in tail_value_arms {
+            self.bag.push(Witness {
+                attachment: WitnessAttachment::SymbolReturnArm(sym_id),
+                source: WitnessSource::Builder("value_arm".into()),
+                payload: WitnessPayload::Fact {
+                    family: "value_arm".into(),
+                    key: String::new(),
+                    value: FactValue::Bool(true),
+                },
+                span,
             });
         }
     }
@@ -1307,6 +1345,12 @@ struct Builder<'a> {
     /// Types ride the bag; this map only carries the structural
     /// pointer to the source span.
     last_expr_span: std::collections::HashMap<ScopeId, Span>,
+    /// Whether the scope's last top-level statement IS a `return` —
+    /// distinguishes "the tail is one of the explicit return arms" from
+    /// "the tail is a fallthrough value expression" (`return undef if $x;
+    /// compute()`). The all-undef-arms gate needs the distinction: a
+    /// fallthrough tail is a value arm the per-`return` walk never sees.
+    last_expr_is_return: std::collections::HashMap<ScopeId, bool>,
     /// For each `$obj->{k} = <rhs>` hash-key WRITE, maps the key node's
     /// span (the span the matching `HashKeyAccess` Write ref carries) to
     /// the RHS expression's span. `populate_witness_bag`'s mutation loop
@@ -3651,6 +3695,8 @@ impl<'a> Builder<'a> {
                             // payload doesn't bake to a witness shape.
                             self.emit_expr_witness(child);
                             self.last_expr_span.insert(scope, node_to_span(child));
+                            self.last_expr_is_return
+                                .insert(scope, child.kind() == "return_expression");
                         }
                     }
                 }
@@ -6747,6 +6793,11 @@ impl<'a> Builder<'a> {
                 Some(WitnessPayload::InferredType(InferredType::String))
             }
             "number" => Some(WitnessPayload::InferredType(InferredType::Numeric)),
+            // A literal `undef` is the definitive bottom — closed under
+            // syntax. Makes undef WRITES visible: `$self->{x} = undef` seeds
+            // a `SlotType` arm the fold lifts to `Optional<T>`, and
+            // `my $x = undef` feeds the undef-deref diagnostic.
+            "undef_expression" => Some(WitnessPayload::InferredType(InferredType::Undef)),
             "anonymous_hash_expression" => {
                 Some(WitnessPayload::InferredType(self.hash_literal_type(node)))
             }
@@ -7127,13 +7178,14 @@ impl<'a> Builder<'a> {
         let Some(sub_name) = self.enclosing_sub_name() else { return };
         let Some(sym_id) = self.find_sub_symbol_for(&sub_name, scope) else { return };
 
-        // A bare `return;` and `return undef` are undef arms — the sub's
-        // value is optional. Neither has an rvalue type to ride an `Expr`
-        // edge, so mark the arm with a Fact the fold counts; the arm join
-        // lifts `{T, undef}` to `Optional<T>`.
+        // A bare `return;`, `return undef`, and `return ()` (a
+        // `stub_expression`, which coerces to undef in scalar context) are
+        // undef arms — the sub's value is optional. None has an rvalue type
+        // to ride an `Expr` edge, so mark the arm with a Fact the fold
+        // counts; the arm join lifts `{T, undef}` to `Optional<T>`.
         let is_undef_arm = match body {
             None => true,
-            Some(b) => b.kind() == "undef_expression",
+            Some(b) => matches!(b.kind(), "undef_expression" | "stub_expression"),
         };
         if is_undef_arm {
             self.bag.push(Witness {
@@ -7152,6 +7204,20 @@ impl<'a> Builder<'a> {
                 attachment: WitnessAttachment::SymbolReturnArm(sym_id),
                 source: WitnessSource::Builder("return_arm".into()),
                 payload: WitnessPayload::Edge(WitnessAttachment::Expr(arm_span)),
+                span: arm_span,
+            });
+            // Every value arm is also counted with a Fact: an Edge whose
+            // target never materializes leaves no trace in the fold, and
+            // the all-undef gate (`{undef arms only} → Undef`) must not
+            // fire when an untypeable value arm exists.
+            self.bag.push(Witness {
+                attachment: WitnessAttachment::SymbolReturnArm(sym_id),
+                source: WitnessSource::Builder("value_arm".into()),
+                payload: WitnessPayload::Fact {
+                    family: "value_arm".into(),
+                    key: String::new(),
+                    value: FactValue::Bool(true),
+                },
                 span: arm_span,
             });
         }

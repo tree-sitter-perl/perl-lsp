@@ -870,8 +870,13 @@ impl WitnessReducer for SymbolReturnArmFold {
         }
         match &w.payload {
             WitnessPayload::InferredType(_) => true,
-            // The `return undef` arm marker (no rvalue type to materialize).
-            WitnessPayload::Fact { family, .. } => family == "undef_arm",
+            // `undef_arm`: the `return undef` marker (no rvalue type to
+            // materialize). `value_arm`: the per-value-arm counter — an
+            // Edge whose target never materializes leaves no InferredType,
+            // so the all-undef gate counts arms through these Facts.
+            WitnessPayload::Fact { family, .. } => {
+                family == "undef_arm" || family == "value_arm"
+            }
             _ => false,
         }
     }
@@ -879,14 +884,25 @@ impl WitnessReducer for SymbolReturnArmFold {
     fn reduce(&self, ws: &[&Witness], _q: &ReducerQuery) -> ReducedValue {
         let mut arms: Vec<InferredType> = Vec::new();
         let mut has_undef_arm = false;
+        let mut value_arms = 0usize;
         for w in ws {
             match &w.payload {
                 WitnessPayload::InferredType(t) => arms.push(t.clone()),
                 WitnessPayload::Fact { family, .. } if family == "undef_arm" => {
                     has_undef_arm = true
                 }
+                WitnessPayload::Fact { family, .. } if family == "value_arm" => {
+                    value_arms += 1
+                }
                 _ => {}
             }
+        }
+        // Every arm is a provable undef → the definitive bottom `Undef`,
+        // not the silent `None`. Gated on zero value arms: `arms` being
+        // empty is NOT enough — an untypeable value arm leaves no
+        // InferredType but does leave its `value_arm` Fact.
+        if arms.is_empty() && has_undef_arm && value_arms == 0 {
+            return ReducedValue::Type(InferredType::Undef);
         }
         match crate::file_analysis::join_return_arms(&arms, has_undef_arm) {
             Some(t) => ReducedValue::Type(t),
@@ -924,13 +940,31 @@ impl WitnessReducer for SlotTypeFold {
     }
 
     fn reduce(&self, ws: &[&Witness], _q: &ReducerQuery) -> ReducedValue {
-        let arms: Vec<InferredType> = ws
-            .iter()
-            .filter_map(|w| match &w.payload {
-                WitnessPayload::InferredType(t) => Some(t.clone()),
-                _ => None,
-            })
-            .collect();
+        // Undef-ness is a flag, not an arm: an `undef` write (literal or a
+        // maybe-undef RHS) makes the slot optional without disturbing the
+        // agreement among the value writes. Strip it off, agree the value
+        // arms, re-lift `{T, undef} → Optional<T>` at the end.
+        let mut saw_undef = false;
+        let mut arms: Vec<InferredType> = Vec::new();
+        for w in ws {
+            let WitnessPayload::InferredType(t) = &w.payload else { continue };
+            match t {
+                InferredType::Undef => saw_undef = true,
+                InferredType::Optional(inner) => {
+                    saw_undef = true;
+                    arms.push((**inner).clone());
+                }
+                other => arms.push(other.clone()),
+            }
+        }
+        // Every observed write is undef → the slot IS undef.
+        if arms.is_empty() {
+            return if saw_undef {
+                ReducedValue::Type(InferredType::Undef)
+            } else {
+                ReducedValue::None
+            };
+        }
         // Two distinct class identities never agree: a slot can't be
         // both `A` and `B`. `class_name()` is the value's own "what
         // class am I" answer (rule #10) — distinct answers → None.
@@ -945,6 +979,9 @@ impl WitnessReducer for SlotTypeFold {
             }
         }
         match crate::file_analysis::resolve_return_type(&arms) {
+            Some(t) if saw_undef && !matches!(t, InferredType::Optional(_)) => {
+                ReducedValue::Type(InferredType::Optional(Box::new(t)))
+            }
             Some(t) => ReducedValue::Type(t),
             None => ReducedValue::None,
         }

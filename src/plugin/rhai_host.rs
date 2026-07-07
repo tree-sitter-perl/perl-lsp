@@ -74,8 +74,22 @@ pub fn make_engine() -> Engine {
         to_dynamic(InferredType::CodeRef { return_edge: None }).unwrap()
     });
     engine.register_fn("type_regexp", || to_dynamic(InferredType::Regexp).unwrap());
+    engine.register_fn("type_undef", || to_dynamic(InferredType::Undef).unwrap());
     engine.register_fn("type_class", |class: String| {
         to_dynamic(InferredType::ClassName(class)).unwrap_or(Dynamic::UNIT)
+    });
+    // Lift a type to `Optional<T>` (idempotent — an already-Optional value
+    // passes through). Unit-in → Unit-out so a fold can pipe a declined
+    // inner straight through without re-checking.
+    engine.register_fn("type_optional", |inner: Dynamic| -> Dynamic {
+        let Ok(t) = from_dynamic::<InferredType>(&inner) else {
+            return Dynamic::UNIT;
+        };
+        let lifted = match t {
+            InferredType::Optional(_) => t,
+            other => InferredType::Optional(Box::new(other)),
+        };
+        to_dynamic(lifted).unwrap_or(Dynamic::UNIT)
     });
 
     // Project a constraint type to what it constrains — the rhai mirror of
