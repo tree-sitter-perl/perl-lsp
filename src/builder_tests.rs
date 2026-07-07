@@ -14496,6 +14496,17 @@ fn slot_type_all_undef_writes_undef() {
 }
 
 #[test]
+fn slot_type_undef_init_plus_opaque_setter_no_claim() {
+    // The init-then-mutate idiom: `= undef` in the constructor, `= $param`
+    // in the setter. The setter's write is untypeable, so the typed story
+    // is partial — the definitive `Undef` (which would flag every
+    // downstream `$self->{h}->…` as a guaranteed die) must NOT fire.
+    let src = "package Foo;\nsub new {\n  my $self = bless {}, shift;\n  $self->{h} = undef;\n  return $self;\n}\nsub set_h {\n  $_[0]->{h} = $_[1];\n}\n";
+    let fa = build_fa(src);
+    assert_eq!(slot_type(&fa, "Foo", "h"), None);
+}
+
+#[test]
 fn slot_type_optional_rhs_write_optional() {
     // Writing a maybe-undef value (`Optional<T>` RHS) makes the slot
     // optional — the Optional strips into the undef flag and re-lifts,
@@ -15366,3 +15377,22 @@ fn plugin_loads_recorded_trigger_independent_and_multivalue() {
 
 #[path = "builder/narrowing_tests.rs"]
 mod narrowing;
+#[test]
+fn overridden_method_never_answers_with_parent_type() {
+    // `URI::file::Base::file { undef }` under an overriding `Mac::file`:
+    // dispatch goes to the LOCAL sub, so when the override's type doesn't
+    // resolve the honest answer is None — never the parent's `Undef`
+    // (which fed a false "guard can never pass" on `defined $path`).
+    let src = "package URI::file::Mac;\nuse parent 'URI::file::Base';\n\nsub file\n{\n    my $class = shift;\n    my $pre = \"\";\n    my @path;\n    return unless $pre || @path;\n    $pre . join(\":\", @path);\n}\n\nsub dir\n{\n    my $class = shift;\n    my $path = $class->file(@_);\n    return unless defined $path;\n    $path;\n}\n1;\n";
+    let mut fa = build_fa(src);
+    fa.finalize_post_walk();
+    let idx = crate::module_index::ModuleIndex::new_for_test();
+    let base_src = "package URI::file::Base;\nsub file\n{\n    undef;\n}\nsub dir { my $self = shift; $self->file(@_); }\n1;\n";
+    idx.insert_cache("URI::file::Base", Some(std::sync::Arc::new(crate::module_index::CachedModule::new(
+        std::path::PathBuf::from("/fake/URI/file/Base.pm"),
+        std::sync::Arc::new(build_fa(base_src)),
+    ))));
+    fa.enrich_imported_types_with_keys(Some(&idx));
+    let t = fa.inferred_type_via_bag_ctx("$path", tree_sitter::Point::new(16, 20), Some(&idx));
+    assert_eq!(t, None, "overridden file()'s unresolved return must not inherit Base's Undef");
+}

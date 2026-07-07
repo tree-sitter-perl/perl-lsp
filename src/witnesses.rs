@@ -935,8 +935,16 @@ impl WitnessReducer for SlotTypeFold {
     }
 
     fn claims(&self, w: &Witness) -> bool {
-        matches!(w.attachment, WitnessAttachment::SlotType { .. })
-            && matches!(w.payload, WitnessPayload::InferredType(_))
+        if !matches!(w.attachment, WitnessAttachment::SlotType { .. }) {
+            return false;
+        }
+        match &w.payload {
+            WitnessPayload::InferredType(_) => true,
+            // The "a write we couldn't type exists" marker — gates the
+            // all-undef verdict on having seen the whole story.
+            WitnessPayload::Fact { family, .. } => family == "opaque_slot_write",
+            _ => false,
+        }
     }
 
     fn reduce(&self, ws: &[&Witness], _q: &ReducerQuery) -> ReducedValue {
@@ -945,21 +953,31 @@ impl WitnessReducer for SlotTypeFold {
         // agreement among the value writes. Strip it off, agree the value
         // arms, re-lift `{T, undef} → Optional<T>` at the end.
         let mut saw_undef = false;
+        let mut opaque_writes = 0usize;
         let mut arms: Vec<InferredType> = Vec::new();
         for w in ws {
-            let WitnessPayload::InferredType(t) = &w.payload else { continue };
-            match t {
-                InferredType::Undef => saw_undef = true,
-                InferredType::Optional(inner) => {
-                    saw_undef = true;
-                    arms.push((**inner).clone());
+            match &w.payload {
+                WitnessPayload::Fact { family, .. } if family == "opaque_slot_write" => {
+                    opaque_writes += 1;
                 }
-                other => arms.push(other.clone()),
+                WitnessPayload::InferredType(t) => match t {
+                    InferredType::Undef => saw_undef = true,
+                    InferredType::Optional(inner) => {
+                        saw_undef = true;
+                        arms.push((**inner).clone());
+                    }
+                    other => arms.push(other.clone()),
+                },
+                _ => {}
             }
         }
-        // Every observed write is undef → the slot IS undef.
+        // Every observed write is undef → the slot IS undef — but only
+        // when every write WAS observed. The init-then-mutate idiom
+        // (`$self->{h} = undef` in new, `= $param` in the setter) leaves
+        // the typed story partial; the definitive claim would flag every
+        // downstream deref as a guaranteed die.
         if arms.is_empty() {
-            return if saw_undef {
+            return if saw_undef && opaque_writes == 0 {
                 ReducedValue::Type(InferredType::Undef)
             } else {
                 ReducedValue::None
@@ -1602,6 +1620,21 @@ impl ReducerRegistry {
                 // cross-file ∪ synthetic app-surface edge — `parents_of`
                 // is the single edge-injection site shared with the
                 // FA-side ancestor walks).
+                //
+                // Gated on the class NOT defining the method itself: an
+                // override dispatches to the LOCAL sub under Perl's MRO,
+                // so when its type didn't resolve the honest answer is
+                // None — never the parent's type (the parent never runs
+                // for this receiver; `URI::file::Base::file { undef }`
+                // under an overriding `URI::file::Mac::file` is the
+                // canonical miscarriage). The writeback's `local_return`
+                // witness IS the "a local definition exists" fact.
+                let has_local_override = bag.for_attachment(q.attachment).iter().any(|w| {
+                    matches!(&w.source, WitnessSource::Builder(t) if t == "local_return")
+                });
+                if has_local_override {
+                    return ReducedValue::None;
+                }
                 let parents = crate::file_analysis::parents_of(
                     class,
                     ctx.package_parents,

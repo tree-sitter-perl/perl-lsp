@@ -4021,6 +4021,17 @@ impl FileAnalysis {
                 // edge emission in `write_back_sub_return_types`.
                 let mut emitted_for_child: std::collections::HashSet<String> =
                     std::collections::HashSet::new();
+                // A locally-overridden method dispatches to the CHILD's
+                // sub — the parent never runs for this receiver, so its
+                // type must not answer (`URI::file::Base::file { undef }`
+                // under an overriding `Mac::file` is the canonical
+                // miscarriage). Seed the seen-set with the child's own
+                // method names so no parent edge is minted for them.
+                emitted_for_child.extend(self.symbols.iter().filter_map(|s| {
+                    (matches!(s.kind, SymKind::Sub | SymKind::Method)
+                        && s.package.as_deref() == Some(child.as_str()))
+                    .then(|| s.name.clone())
+                }));
                 for parent in parents {
                     if parent == child {
                         continue;

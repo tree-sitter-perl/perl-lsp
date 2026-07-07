@@ -697,7 +697,22 @@ impl<'a> Builder<'a> {
                 let resolved_owner = match owner {
                     Some(o @ (HashKeyOwner::Class(_) | HashKeyOwner::Sub { .. })) => Some(o.clone()),
                     _ => {
-                        if var_text == "$self" {
+                        // A conventional receiver spelling ($self/$class, the
+                        // positional `$_[0]`, `__PACKAGE__`) writes to the
+                        // enclosing class's slot. Classified by conventions.rs
+                        // — never by raw string compare — so `$_[0]->{k} =
+                        // $_[1]` setters count as writes too (the opaque-write
+                        // gate depends on seeing them).
+                        use crate::conventions::InvocantText;
+                        let is_receiver = match InvocantText::parse(var_text) {
+                            InvocantText::Scalar(name) => {
+                                crate::conventions::is_conventional_invocant_name(name)
+                            }
+                            InvocantText::PositionalReceiver
+                            | InvocantText::CurrentPackage => true,
+                            _ => false,
+                        };
+                        if is_receiver {
                             let scope = &self.scopes[r.scope.0 as usize];
                             scope.package.clone().map(HashKeyOwner::Class)
                         } else {
@@ -733,11 +748,24 @@ impl<'a> Builder<'a> {
             });
         }
         for (class, key, span, rhs_span) in slot_writes {
-            // Only seed when the RHS actually resolves to a type — a bare
-            // `Edge(Expr(rhs_span))` to an unresolved span folds to None,
-            // which is honest, but emitting nothing for `= shift` / `= $param`
-            // keeps the attachment absent entirely (no guess).
+            // A write whose RHS doesn't resolve (`= shift` / `= $param`)
+            // contributes no typed arm, but it must not vanish: the fold's
+            // all-undef verdict (`{undef} → Undef`) is only sound when we
+            // saw EVERY write, and `$self->{h} = undef; … set { $_[0]->{h}
+            // = $_[1] }` is exactly the init-then-mutate shape where the
+            // typed story is partial. The Fact records the opaque write so
+            // the fold declines the definitive claim.
             if self.bag_query_expr_span(rhs_span).is_none() {
+                self.bag.push(Witness {
+                    attachment: WitnessAttachment::SlotType { class, key },
+                    source: WitnessSource::Builder("slot_type".into()),
+                    payload: WitnessPayload::Fact {
+                        family: "opaque_slot_write".into(),
+                        key: String::new(),
+                        value: FactValue::Bool(true),
+                    },
+                    span,
+                });
                 continue;
             }
             self.bag.push(Witness {
@@ -9649,6 +9677,12 @@ impl<'a> Builder<'a> {
                 } else {
                     None
                 };
+                // `has parent => undef` means "starts empty, set later" — the
+                // attribute is a mutable slot, so `Undef` as a return CONTRACT
+                // is a lie the moment anyone sets it (and D1 would flag every
+                // `$self->parent->…` as a guaranteed die). No claim instead.
+                let getter_type =
+                    getter_type.filter(|t| !matches!(t, InferredType::Undef));
                 let fluent_type = self
                     .current_package
                     .as_ref()
@@ -11532,6 +11566,21 @@ impl<'a> Builder<'a> {
             if let Some(child) = node.named_child(i) {
                 if matches!(child.kind(), "container_variable" | "keyval_container_variable" | "scalar" | "hash") {
                     return child.utf8_text(self.source).ok().map(|s| s.to_string());
+                }
+                // The positional-receiver container (`$_[0]->{k}` in a
+                // shiftless setter) has no variable identity, but its
+                // conventional-receiver meaning is a classification
+                // consumers make via `InvocantText::parse` — carry the
+                // spelling through so they can.
+                if child.kind() == "array_element_expression" {
+                    if let Ok(text) = child.utf8_text(self.source) {
+                        if matches!(
+                            crate::conventions::InvocantText::parse(text),
+                            crate::conventions::InvocantText::PositionalReceiver
+                        ) {
+                            return Some(text.to_string());
+                        }
+                    }
                 }
             }
         }
@@ -13801,8 +13850,19 @@ impl<'a> Builder<'a> {
             // two edges on `MethodOnClass(child, m)` and the
             // materializer's latest-wins reducer would silently pick
             // the second-emitted parent.
+            //
+            // Seeded with the child's OWN method names: an override
+            // dispatches to the child's sub, so the parent's type must
+            // never answer for it — even (especially) when the local
+            // override's type didn't resolve. Mirrors the cross-file
+            // projection in `enrich_imported_types_with_keys`.
             let mut emitted_for_child: std::collections::HashSet<String> =
                 std::collections::HashSet::new();
+            emitted_for_child.extend(self.symbols.iter().filter_map(|s| {
+                (matches!(s.kind, SymKind::Sub | SymKind::Method)
+                    && s.package.as_deref() == Some(child.as_str()))
+                .then(|| s.name.clone())
+            }));
             for parent in parents {
                 if parent == child {
                     continue;
