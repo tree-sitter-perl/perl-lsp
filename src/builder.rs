@@ -9918,13 +9918,24 @@ impl<'a> Builder<'a> {
                 plugin::ValueShape::Str(node.utf8_text(self.source).unwrap_or("").to_string())
             }
             "anonymous_hash_expression" => {
-                let mut tokens: Vec<String> = Vec::new();
-                self.collect_hash_tokens(node, &mut tokens);
+                // Pair-walk (cst::pair_nodes — separator-agnostic, position
+                // keeps alignment even when a value isn't a string). An
+                // arrayref VALUE contributes its first string element: the
+                // Sub::HandlesVia curried-delegation shape
+                // (`local => [remote, @args]`) names its remote there.
                 let mut pairs = Vec::new();
-                let mut i = 0;
-                while i + 1 < tokens.len() {
-                    pairs.push((tokens[i].clone(), tokens[i + 1].clone()));
-                    i += 2;
+                for (k, v) in crate::cst::pair_nodes(node) {
+                    let Some(key) = self.extract_node_string(k) else { continue };
+                    let val = self.extract_node_string(v).or_else(|| {
+                        if v.kind() == "anonymous_array_expression" {
+                            self.extract_string_list(v).into_iter().next().map(|(s, _)| s)
+                        } else {
+                            None
+                        }
+                    });
+                    if let Some(val) = val {
+                        pairs.push((key, val));
+                    }
                 }
                 plugin::ValueShape::HashPairs(pairs)
             }
@@ -9943,55 +9954,6 @@ impl<'a> Builder<'a> {
             "bareword" | "autoquoted_bareword" => node.utf8_text(self.source).ok().map(|s| s.to_string()),
             "string_literal" | "interpolated_string_literal" => self.extract_string_content(node),
             _ => None,
-        }
-    }
-
-    /// Flatten a fat-comma hash node into alternating key/value strings,
-    /// recursing into tree-sitter-perl's right-associative nested
-    /// `list_expression` wrappers.
-    fn collect_hash_tokens(&self, node: Node<'_>, out: &mut Vec<String>) {
-        match node.kind() {
-            "anonymous_hash_expression" => {
-                for i in 0..node.child_count() {
-                    if let Some(child) = node.child(i) {
-                        if matches!(child.kind(), "list_expression" | "parenthesized_expression") {
-                            self.collect_hash_tokens(child, out);
-                            return;
-                        }
-                    }
-                }
-                self.collect_hash_tokens_flat(node, out);
-            }
-            "list_expression" | "parenthesized_expression" => {
-                self.collect_hash_tokens_flat(node, out);
-            }
-            _ => {
-                if let Some(s) = self.extract_node_string(node) {
-                    out.push(s);
-                }
-            }
-        }
-    }
-
-    fn collect_hash_tokens_flat(&self, node: Node<'_>, out: &mut Vec<String>) {
-        let count = node.child_count();
-        let mut i = 0;
-        while i < count {
-            if let Some(child) = node.child(i) {
-                match child.kind() {
-                    "=>" | "," => {}
-                    "list_expression" | "parenthesized_expression" => {
-                        self.collect_hash_tokens_flat(child, out);
-                    }
-                    _ if child.is_named() => {
-                        if let Some(s) = self.extract_node_string(child) {
-                            out.push(s);
-                        }
-                    }
-                    _ => {}
-                }
-            }
-            i += 1;
         }
     }
 

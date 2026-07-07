@@ -12446,6 +12446,104 @@ has 'logger' => (is => 'ro', isa => 'Log::Any', handles => { log => 'debug', war
 }
 
 #[test]
+fn test_monkey_patch_synthesizes_methods() {
+    // `monkey_patch $class => $name => sub {…}` installs methods with no
+    // static `sub` — the registration site is the declaration. String
+    // class + __PACKAGE__ + multiple (name => sub) pairs all synthesize.
+    let fa = build_fa(
+        "
+package My::Patcher;
+use Mojo::Util qw(monkey_patch);
+monkey_patch 'My::Target', hello => sub { my ($self) = @_; 1 };
+monkey_patch __PACKAGE__, world => sub { 2 }, again => sub { 3 };
+",
+    );
+    let method = |n: &str| {
+        fa.symbols
+            .iter()
+            .find(|s| s.name == n && s.kind == SymKind::Method)
+            .unwrap_or_else(|| panic!("monkey_patch must synthesize '{n}'"))
+    };
+    assert_eq!(
+        method("hello").package.as_deref(),
+        Some("My::Target"),
+        "string class arg targets the named class",
+    );
+    assert_eq!(
+        method("world").package.as_deref(),
+        Some("My::Patcher"),
+        "__PACKAGE__ targets the current package",
+    );
+    assert_eq!(
+        method("again").package.as_deref(),
+        Some("My::Patcher"),
+        "every (name => sub) pair in one call synthesizes",
+    );
+}
+
+#[test]
+fn test_monkey_patch_loop_registration_fans_out() {
+    // The Mojo::UserAgent idiom: one registration statement looped over a
+    // literal list — every folded candidate becomes a method.
+    let fa = build_fa(
+        "
+package My::UA;
+use Mojo::Util qw(monkey_patch);
+monkey_patch __PACKAGE__, $_ => sub { 1 } for qw(get post put);
+",
+    );
+    for n in ["get", "post", "put"] {
+        assert!(
+            fa.symbols.iter().any(|s| s.name == n && s.kind == SymKind::Method),
+            "loop registration must synthesize '{n}'",
+        );
+    }
+}
+
+#[test]
+fn test_monkey_patch_dynamic_class_and_name_honest_miss() {
+    // A runtime `$class` / unfolded name must synthesize NOTHING — an
+    // honest miss, never a guessed method.
+    let fa = build_fa(
+        "
+package My::Patcher;
+use Mojo::Util qw(monkey_patch);
+my $class = compute();
+monkey_patch $class, hello => sub { 1 };
+monkey_patch 'My::Target', lc($n) => sub { 2 };
+",
+    );
+    assert!(
+        !fa.symbols.iter().any(|s| s.kind == SymKind::Method && (s.name == "hello" || s.name.contains('$'))),
+        "dynamic registrations must not synthesize",
+    );
+}
+
+#[test]
+fn test_handles_curried_arrayref_value() {
+    // Sub::HandlesVia's curried shape: `local => [remote, @args]` — the
+    // remote is the array's first string element. The arrayref value must
+    // also not shift pair alignment: `dec => 'remove'` after it still
+    // synthesizes correctly.
+    let fa = build_fa(
+        "
+package Counter;
+use Moo;
+use Sub::HandlesVia;
+has 'items' => (is => 'ro', handles => { inc => ['add', 1], dec => 'remove' });
+",
+    );
+    let names: Vec<&str> = fa
+        .symbols
+        .iter()
+        .filter(|s| s.kind == SymKind::Method)
+        .map(|s| s.name.as_str())
+        .collect();
+    assert!(names.contains(&"inc"), "curried arrayref value synthesizes 'inc': {names:?}");
+    assert!(names.contains(&"dec"), "pair after an arrayref value stays aligned: {names:?}");
+}
+
+#[test]
 fn test_moose_has_handles_arrayref() {
     let fa = build_fa(
         "

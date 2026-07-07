@@ -735,6 +735,7 @@ const BUNDLED: &[(&str, &str)] = &[
     ("dancer", include_str!("../../frameworks/dancer.rhai")),
     ("moo", include_str!("../../frameworks/moo.rhai")),
     ("catalyst", include_str!("../../frameworks/catalyst.rhai")),
+    ("monkey-patch", include_str!("../../frameworks/monkey-patch.rhai")),
 ];
 
 pub fn load_bundled(engine: Arc<Engine>) -> Vec<Box<dyn FrameworkPlugin>> {
