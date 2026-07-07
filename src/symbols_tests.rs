@@ -346,6 +346,21 @@ fn cached_class(module: &str, methods: &[&str]) -> std::sync::Arc<crate::module_
     ))
 }
 
+/// Register a class as a WORKSPACE module (the path the cross-file
+/// unresolved-method lint fires for — a class the user wrote). Contrast
+/// `insert_cache`, which models a pure @INC/DEPENDENCY module.
+fn workspace_class(idx: &crate::module_index::ModuleIndex, module: &str, methods: &[&str]) {
+    let mut src = format!("package {};\n", module);
+    for m in methods {
+        src.push_str(&format!("sub {} {{}}\n", m));
+    }
+    src.push_str("1;\n");
+    idx.register_workspace_module(
+        std::path::PathBuf::from(format!("/fake/{}.pm", module.replace("::", "/"))),
+        std::sync::Arc::new(parse_analysis(&src)),
+    );
+}
+
 fn unresolved_method_diags(
     source: &str,
     idx: &crate::module_index::ModuleIndex,
@@ -418,7 +433,7 @@ sub g {
 1;
 "#;
     let idx = crate::module_index::ModuleIndex::new_for_test();
-    idx.insert_cache("My::Dep", Some(cached_class("My::Dep", &["known_method"])));
+    workspace_class(&idx, "My::Dep", &["known_method"]);
 
     // Default: cross-file extension off → no diagnostic.
     assert!(
@@ -426,11 +441,36 @@ sub g {
         "cross-file unresolved-method must stay silent without the opt-in",
     );
 
-    // Opt-in: the cross-file class is known and lacks `bogus` → fires.
+    // Opt-in: the workspace class is known and lacks `bogus` → fires.
     let on = DiagnosticOptions { unresolved_method_cross_file: true, ..Default::default() };
     let diags = unresolved_method_diags(src, &idx, on);
     assert_eq!(diags.len(), 1, "opt-in cross-file bogus fires: {:?}", diags);
     assert!(diags[0].contains("My::Dep"), "{}", diags[0]);
+}
+
+#[test]
+fn d8_dependency_class_stays_silent_even_with_flag() {
+    // The same shape, but the class comes from @INC (insert_cache — a
+    // DEPENDENCY, not a workspace file). Generated/XS/exporter-injected
+    // methods are invisible to the static walker exactly there, so the
+    // cross-file lint is WORKSPACE-scoped and stays silent.
+    let src = r#"
+package Main;
+sub g {
+    my ($self, $x) = @_;
+    if ($x->isa('My::Dep')) {
+        $x->bogus;
+    }
+}
+1;
+"#;
+    let idx = crate::module_index::ModuleIndex::new_for_test();
+    idx.insert_cache("My::Dep", Some(cached_class("My::Dep", &["known_method"])));
+    let on = DiagnosticOptions { unresolved_method_cross_file: true, ..Default::default() };
+    assert!(
+        unresolved_method_diags(src, &idx, on).is_empty(),
+        "a pure-dependency class must not be flagged even with the opt-in",
+    );
 }
 
 #[test]
@@ -446,7 +486,7 @@ sub g {
 1;
 "#;
     let idx = crate::module_index::ModuleIndex::new_for_test();
-    idx.insert_cache("My::Dep", Some(cached_class("My::Dep", &["known_method"])));
+    workspace_class(&idx, "My::Dep", &["known_method"]);
     let on = DiagnosticOptions { unresolved_method_cross_file: true, ..Default::default() };
     assert!(
         unresolved_method_diags(src, &idx, on).is_empty(),

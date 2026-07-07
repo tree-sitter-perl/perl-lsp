@@ -2258,8 +2258,15 @@ pub fn collect_diagnostics(
         let is_local_class = analysis.symbols.iter().any(|s| {
             matches!(s.kind, FaSymKind::Class | FaSymKind::Package) && s.name == class_name
         });
-        let is_cached_class =
-            options.unresolved_method_cross_file && module_index.get_cached(&class_name).is_some();
+        // Cross-file receivers only count when the class is one the USER
+        // wrote (registered from the workspace tree). Pure @INC/DEPENDENCY
+        // classes routinely carry codegen/XS/exporter-injected methods the
+        // static walker can't see — flagging those is noise, and the
+        // role split is the principled gate (docs/
+        // prompt-method-resolution-residuals.md §3).
+        let is_cached_class = options.unresolved_method_cross_file
+            && module_index.is_workspace_module(&class_name)
+            && module_index.get_cached(&class_name).is_some();
         if !is_local_class && !is_cached_class {
             continue;
         }
