@@ -19,6 +19,18 @@ This file is only what's NEXT, in order.
    meta-method suppression) — it still promotes last
    (`prompt-method-resolution-residuals.md` §4 rides the long-distance
    provenance tier).
+
+   *Promotion audit over the gold substrate (July 2026, all flags on):*
+   `undef-deref` (always-on) 8 sites, all verified; `derefShape` 0 hits;
+   `optionalDeref` 45 (honest Optional productions; noise class = value
+   flow beyond static reach, e.g. an arity-and-value-gated undef arm in
+   `Path::Class::Dir::new`); `redundantGuard`/`contradictory` 115+58,
+   with one dominant false-positive class: a stale belief surviving an
+   untypeable reassignment (`my $x = shift` typed to the enclosing class,
+   `my $x = undef; $x = f($y) if …`). That class is the queued
+   **conditional-reassignment disagreement-to-widen** work — closing it
+   is the gate for promoting `redundantGuard`; `optionalDeref` could
+   promote first if the INFO severity is judged quiet enough.
 2. **DBIC out of core — phase 3.** Phases 1–2 landed (`visit_dbic_*`
    gone; `frameworks/dbic.rhai` owns arg-name verbs, column-keyed verbs,
    fluent verbs, and meta-method suppression via the `meta_methods()`
