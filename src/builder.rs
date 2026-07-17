@@ -317,6 +317,7 @@ fn build_with_plugins_inner(
         dynamic_dispatch_sites: 0,
         role_maker_modules: std::collections::HashSet::new(),
         role_packages: std::collections::HashSet::new(),
+        dbic_source_name: None,
         topic_group_spans: Vec::new(),
         plugin_diagnostics: Vec::new(),
         topic_dsls,
@@ -614,6 +615,7 @@ fn build_with_plugins_inner(
         dynamic_parent_packages: b.dynamic_parent_packages,
         dynamic_dispatch_sites: b.dynamic_dispatch_sites,
         role_packages: b.role_packages,
+        dbic_source_name: b.dbic_source_name,
         column_keyed_verbs: b.plugins.column_keyed_verbs().map(|s| s.to_string()).collect(),
         plugin_loads: b.plugin_loads,
         loader_config_params: b.loader_config_params,
@@ -1746,6 +1748,10 @@ struct Builder<'a> {
     /// set, never re-derives from use lists.
     role_packages: std::collections::HashSet<String>,
 
+    /// DBIC `__PACKAGE__->source_name('X')` override captured during the
+    /// walk (see `FileAnalysis::dbic_source_name`).
+    dbic_source_name: Option<String>,
+
     /// Spans of topic-DSL group-scope calls (`group { … }` in lite),
     /// recorded during the walk so the fold-phase pattern dispatch can
     /// replay the topic-route base stack in document order.
@@ -2678,7 +2684,55 @@ impl<'a> Builder<'a> {
                 if Self::is_route_type(call_ty.as_ref()) {
                     return Some(self.brand_route_call(node, invocant_ty.as_ref(), call_ty));
                 }
-                call_ty
+                if call_ty.is_some() {
+                    return call_ty;
+                }
+                // The `Expression(refidx)` chase came up empty. Two
+                // receiver-relative fallbacks let a chain hop resolve
+                // DURING the fold — before `emit_method_call_return_edges`
+                // / `emit_invocant_expr_witnesses` (both post-fold) publish
+                // this call's edge. Without them, the variable a fluent /
+                // projecting chain is bound to (`my $art = $rs->search(
+                // ...)->first`) never gets a build-time TC, so hover /
+                // goto-def on it (which read the TC) stay dark.
+                //
+                // (a) Fluent verb (`$rs->search`) — returns its invocant's
+                //     type unchanged, so the receiver IS the answer.
+                if self.is_fluent_verb_call(node) {
+                    if invocant_ty.is_some() {
+                        return invocant_ty;
+                    }
+                }
+                // (b) Receiver-relative projection (`->first`/`->create` →
+                //     RowOf) declared on `MethodOnClass{recv.class, method}`
+                //     by `emit_parametric_return_expr_decls` (published in
+                //     the live walk, so it IS in the bag now). Query it with
+                //     the receiver threaded so `RowOf(Receiver)` projects to
+                //     the row class.
+                if let Some(recv) = &invocant_ty {
+                    if let Some(cls) = recv.class_name() {
+                        if let Some(mtext) = node
+                            .child_by_field_name("method")
+                            .and_then(|m| m.utf8_text(self.source).ok())
+                        {
+                            let method = crate::conventions::MethodToken::parse(mtext)
+                                .name()
+                                .to_string();
+                            let moc = crate::witnesses::WitnessAttachment::MethodOnClass {
+                                class: cls.to_string(),
+                                name: method,
+                            };
+                            if let Some(t) = self.bag_query_attachment_with(
+                                &moc,
+                                Some(arity),
+                                invocant_ty.clone(),
+                            ) {
+                                return Some(t);
+                            }
+                        }
+                    }
+                }
+                None
             }
             "coderef_call_expression" => {
                 // `$cb->(args)` — value-type IS whatever the operand's
@@ -10917,6 +10971,26 @@ impl<'a> Builder<'a> {
                     }
                 }
 
+                // `__PACKAGE__->source_name('X')` overrides this result
+                // class's DBIC source moniker (default = class basename).
+                // Class-level call only; the string arg is the moniker.
+                if name == "source_name" {
+                    let pkg_receiver = node
+                        .child_by_field_name("invocant")
+                        .and_then(|inv| inv.utf8_text(self.source).ok())
+                        .is_some_and(|t| {
+                            crate::conventions::is_current_package_token(t)
+                                || self.current_package.as_deref() == Some(t)
+                        });
+                    if pkg_receiver {
+                        if let Some(args) = node.child_by_field_name("arguments") {
+                            if let Some(sn) = self.first_string_literal_arg(args) {
+                                self.dbic_source_name = Some(sn);
+                            }
+                        }
+                    }
+                }
+
                 // `recv->resultset('Foo')` is closed under syntax: push the
                 // `Parametric` type at the call's `Expression(refidx)`, and
                 // mark the ref so `emit_method_call_return_edges` skips its
@@ -11759,6 +11833,62 @@ impl<'a> Builder<'a> {
             _ => {}
         }
         None
+    }
+
+    /// The scalar variable names in a paren-list LHS (`my ($a, $b)` /
+    /// `($a, $b) = ...`) — the list-context binding sites. Empty for a
+    /// scalar LHS (`my $x`) or a non-declaration. Arrays/hashes in the list
+    /// are skipped (they slurp, not bind a single row).
+    fn paren_list_scalars(&self, lhs: Node<'a>) -> Vec<String> {
+        let mut out = Vec::new();
+        // `my ($a, $b)` parses as a `variable_declaration` with one
+        // `variables` FIELD PER scalar (not a single list node), so walk the
+        // fielded children. A bare paren/list expression on the LHS holds its
+        // scalars as named children directly.
+        let mut cursor = lhs.walk();
+        match lhs.kind() {
+            "variable_declaration" => {
+                for c in lhs.children_by_field_name("variables", &mut cursor) {
+                    if c.kind() == "scalar" {
+                        if let Ok(t) = c.utf8_text(self.source) {
+                            out.push(t.to_string());
+                        }
+                    }
+                }
+            }
+            "parenthesized_expression" | "list_expression" => {
+                for i in 0..lhs.named_child_count() {
+                    if let Some(c) = lhs.named_child(i) {
+                        if c.kind() == "scalar" {
+                            if let Ok(t) = c.utf8_text(self.source) {
+                                out.push(t.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+        out
+    }
+
+    /// Innermost scope id containing `point` (the same smallest-span rule
+    /// `apply_chain_typing_assignments` uses), `ScopeId(0)` when none.
+    fn innermost_scope_id_at(&self, point: Point) -> ScopeId {
+        self.scopes
+            .iter()
+            .filter(|s| crate::file_analysis::contains_point(&s.span, point))
+            .min_by_key(|s| {
+                let r = (s.span.end.row.saturating_sub(s.span.start.row)) as u64;
+                let c = if s.span.start.row == s.span.end.row {
+                    s.span.end.column.saturating_sub(s.span.start.column) as u64
+                } else {
+                    0
+                };
+                r * 1_000_000 + c
+            })
+            .map(|s| s.id)
+            .unwrap_or(ScopeId(0))
     }
 
     fn get_var_text_from_lhs(&self, lhs: Node<'a>) -> Option<String> {
@@ -12942,8 +13072,70 @@ impl<'a> Builder<'a> {
                 node.child_by_field_name("left"),
                 node.child_by_field_name("right"),
             ) else { continue };
-            let Some(var) = self.get_var_text_from_lhs(left) else { continue };
             let span = node_to_span(node);
+
+            // List-context row extraction: `my ($a, $b, ...) = $rs->search(
+            // ...)` / `= $rs->all` — a resultset evaluated in LIST context
+            // yields ROWS, so each scalar binds a row (not the resultset).
+            // Runs BEFORE `get_var_text_from_lhs` (which returns None for a
+            // paren-list decl, so these sites got no typing at all before).
+            // The row moniker resolves to the FQ class at query time exactly
+            // like the `->first`/`->create` scalar case.
+            let list_scalars = self.paren_list_scalars(left);
+            if !list_scalars.is_empty() {
+                let saved = self.current_package.clone();
+                self.current_package = self.package_at_pos(span.start).map(|s| s.to_string());
+                let rhs = self.invocant_type_at_node(right);
+                // The row class the list binds to: the RHS is either the
+                // resultset itself (fluent `->search` / a bare `$rs`) or a
+                // row-list verb (`->all`/`->populate`) whose INVOCANT is the
+                // resultset — both yield rows of that resultset's row class.
+                // (Row-list verbs are DBIC's; this small set lives here with
+                // `extract_resultset_parametric` until the DBIC plugin owns
+                // the parametric semantics.)
+                let row_from = |t: &Option<InferredType>| match t {
+                    Some(InferredType::Parametric(
+                        crate::file_analysis::ParametricType::ResultSet { row, .. },
+                    )) => Some(row.clone()),
+                    _ => None,
+                };
+                let row = row_from(&rhs).or_else(|| {
+                    if right.kind() != "method_call_expression" {
+                        return None;
+                    }
+                    let m = right
+                        .child_by_field_name("method")
+                        .and_then(|m| m.utf8_text(self.source).ok())?;
+                    if m != "all" && m != "populate" {
+                        return None;
+                    }
+                    let inv_ty = right
+                        .child_by_field_name("invocant")
+                        .and_then(|inv| self.invocant_type_at_node(inv));
+                    row_from(&inv_ty)
+                });
+                self.current_package = saved;
+                if let Some(row) = row {
+                    let row_ty = InferredType::ClassName(row);
+                    let sid = self.innermost_scope_id_at(span.start);
+                    for name in list_scalars {
+                        let already = self.bag.all().iter().any(|w| {
+                            let crate::witnesses::WitnessPayload::InferredType(t) = &w.payload else {
+                                return false;
+                            };
+                            matches!(&w.attachment, crate::witnesses::WitnessAttachment::Variable { name: n, .. } if n == &name)
+                                && w.span.start == span.start
+                                && t.subsumes_narrowing(&row_ty)
+                        });
+                        if !already {
+                            to_push.push((name, sid, span, row_ty.clone()));
+                        }
+                    }
+                    continue;
+                }
+            }
+
+            let Some(var) = self.get_var_text_from_lhs(left) else { continue };
             // Compute the fresh type up front so the idempotency check
             // can compare informativeness. (Cheap: a bag chase on the
             // already-resolved RHS.)

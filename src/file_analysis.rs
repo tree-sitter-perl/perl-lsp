@@ -4193,6 +4193,16 @@ pub struct FileAnalysis {
     #[serde(default)]
     pub role_packages: HashSet<String>,
 
+    /// DBIC `__PACKAGE__->source_name('X')` override for this file's result
+    /// class — the registered SOURCE moniker when it differs from the class
+    /// basename. `None` = the moniker is the basename (the common case).
+    /// Consulted by `resolve_dbic_source_moniker` so a `resultset('X')`
+    /// whose `X` is a source_name (not a basename) still finds its class.
+    /// Per-file: the DBIC one-result-class-per-file convention makes this
+    /// unambiguous in practice.
+    #[serde(default)]
+    pub dbic_source_name: Option<String>,
+
     /// Method verbs whose first hashref arg is keyed by the receiver class's
     /// columns (DBIC `search`/`create`/…). The plugin-declared verb set, baked
     /// here so query-time owner resolution can mint the column owner cross-file.
@@ -4354,6 +4364,7 @@ pub struct FileAnalysisParts {
     pub contract_symbols: HashSet<SymbolId>,
     pub dynamic_parent_packages: HashSet<String>,
     pub role_packages: HashSet<String>,
+    pub dbic_source_name: Option<String>,
     pub column_keyed_verbs: HashSet<String>,
     pub dynamic_dispatch_sites: u32,
     pub plugin_loads: Vec<PluginLoadFact>,
@@ -4637,6 +4648,7 @@ impl FileAnalysis {
             contract_symbols,
             dynamic_parent_packages,
             role_packages,
+            dbic_source_name,
             column_keyed_verbs,
             dynamic_dispatch_sites,
             plugin_loads,
@@ -4691,6 +4703,7 @@ impl FileAnalysis {
             contract_symbols,
             dynamic_parent_packages,
             role_packages,
+            dbic_source_name,
             column_keyed_verbs,
             dynamic_dispatch_sites,
             plugin_loads,
@@ -5636,23 +5649,58 @@ impl FileAnalysis {
             point: None,
             framework: FrameworkFact::Plain,
             arity_hint: None,
-            receiver,
+            receiver: receiver.clone(),
             args: Vec::new(),
             context: Some(&ctx),
         };
-        match reg.query(&self.witnesses, &q) {
-            ReducedValue::Type(t) => {
-                // If the return is FirstParam, surface it as the
-                // ClassName of the enclosing package — callers chain
-                // against a concrete class, not a role.
-                if let InferredType::FirstParam { package } = t {
-                    Some(InferredType::ClassName(package))
-                } else {
-                    Some(t)
-                }
-            }
+        let primary = match reg.query(&self.witnesses, &q) {
+            ReducedValue::Type(t) => Some(t),
             _ => None,
-        }
+        };
+        // Fallback for a chain receiver whose class the BUILDER couldn't
+        // pin (so `emit_method_call_return_edges` never emitted the
+        // `Expression → Edge(MethodOnClass{class, method})` for this
+        // call): resolve the method's return via the receiver's class at
+        // QUERY time. This is what lets a receiver-relative projection
+        // — `$rs->search({...})->first` (RowOf on the fluent-search
+        // result, class only known once the fluent chain resolves) —
+        // type the row without an intermediate variable. Only fires when
+        // the primary Expression query is empty AND the receiver's class
+        // is known, so ordinary calls (whose build edge already answered)
+        // are untouched.
+        let resolved = primary.or_else(|| {
+            let class = receiver.as_ref()?.class_name()?.to_string();
+            let method = crate::conventions::MethodToken::parse(
+                &self.refs[ref_idx].target_name,
+            )
+            .name()
+            .to_string();
+            let arity = self.refs[ref_idx].arg_count.map(|c| c as u32);
+            let moc = WitnessAttachment::MethodOnClass { class, name: method };
+            let mq = ReducerQuery {
+                attachment: &moc,
+                point: None,
+                framework: FrameworkFact::Plain,
+                arity_hint: arity,
+                receiver,
+                args: Vec::new(),
+                context: Some(&ctx),
+            };
+            match reg.query(&self.witnesses, &mq) {
+                ReducedValue::Type(t) => Some(t),
+                _ => None,
+            }
+        });
+        resolved.map(|t| {
+            // If the return is FirstParam, surface it as the ClassName of
+            // the enclosing package — callers chain against a concrete
+            // class, not a role.
+            if let InferredType::FirstParam { package } = t {
+                InferredType::ClassName(package)
+            } else {
+                t
+            }
+        })
     }
 
     /// Registry query against `Expr(span)` — the bag attachment the
@@ -10177,6 +10225,22 @@ impl FileAnalysis {
         r: &Ref,
         module_index: Option<&dyn CrossFileLookup>,
     ) -> Option<String> {
+        let cn = self.method_call_invocant_class_raw(r, module_index)?;
+        // A DBIC resultset row projects to `ClassName(<source moniker>)` —
+        // the short registration name (`Artist`), not the FQ result class
+        // (`DBICTest::Schema::Artist`) where methods/columns live. Resolve
+        // it here (query time, index in hand) so goto-def / references on
+        // `$row->method` start the ancestor walk from a real class. Only a
+        // single-segment name that names no real class is a moniker
+        // candidate, so ordinary class receivers are untouched.
+        Some(self.resolve_dbic_source_moniker(cn, None, module_index))
+    }
+
+    fn method_call_invocant_class_raw(
+        &self,
+        r: &Ref,
+        module_index: Option<&dyn CrossFileLookup>,
+    ) -> Option<String> {
         let RefKind::MethodCall { invocant, invocant_span, .. } = &r.kind else {
             return None;
         };
@@ -10350,6 +10414,123 @@ impl FileAnalysis {
         }
 
         Some(invocant.to_string())
+    }
+
+    /// Resolve a DBIC source moniker (`Artist`) to the FQ result class
+    /// (`DBICTest::Schema::Artist`). DBIC's `$schema->resultset('Artist')`
+    /// names a row by its registered SOURCE moniker — by convention the
+    /// basename of a result class registered under a schema
+    /// (`load_classes`/`load_namespaces`), or its `source_name` override.
+    /// The row projection (`->find`/`->first`/`->create`) types the value
+    /// as `ClassName(moniker)`, which is not a real class; this maps it
+    /// back so downstream method/column resolution works.
+    ///
+    /// The convention (moniker = last `::` segment / source_name) is DBIC
+    /// knowledge, resolved GENERICALLY here via the cross-file index: a
+    /// candidate is any indexed class that (a) is a DBIC result class
+    /// (transitively isa `DBIx::Class`) and (b) whose basename or declared
+    /// `source_name` equals the moniker. When several match, `schema_hint`
+    /// (the receiver's concrete schema class, when known) scopes to sources
+    /// under it; otherwise the largest source family wins (the workspace's
+    /// primary schema), lexicographic tie-break. The residual — picking a
+    /// source when the `$schema` value is untyped — is the value-provenance
+    /// fork logged in `docs/open-forks.md`.
+    ///
+    /// `cn` passes through unchanged unless it is a single-segment name
+    /// that names no known class (the only moniker shape), so ordinary
+    /// receivers pay only a `class_exists` check.
+    pub(crate) fn resolve_dbic_source_moniker(
+        &self,
+        cn: String,
+        schema_hint: Option<&str>,
+        module_index: Option<&dyn CrossFileLookup>,
+    ) -> String {
+        if cn.contains("::") {
+            return cn;
+        }
+        let Some(mi) = module_index else { return cn };
+        if self.class_exists(&cn, module_index) {
+            return cn;
+        }
+        // Gather candidate result classes by basename / source_name match.
+        let mut candidates: Vec<String> = Vec::new();
+        mi.for_each_cached(&mut |name, cached| {
+            let basename = name.rsplit("::").next().unwrap_or(name);
+            let hits = basename == cn
+                || cached.analysis.dbic_source_name.as_deref() == Some(cn.as_str());
+            if hits && Self::class_is_dbic_result(name, mi) {
+                candidates.push(name.to_string());
+            }
+        });
+        if candidates.is_empty() {
+            return cn;
+        }
+        // Scope to the receiver's schema when it is a concrete schema whose
+        // namespace actually contains matches.
+        if let Some(sch) = schema_hint {
+            let scoped: Vec<String> = candidates
+                .iter()
+                .filter(|c| c.starts_with(&format!("{sch}::")))
+                .cloned()
+                .collect();
+            if !scoped.is_empty() {
+                candidates = scoped;
+            }
+        }
+        if candidates.len() == 1 {
+            return candidates.into_iter().next().unwrap();
+        }
+        // Ambiguous: prefer the candidate in the largest source family
+        // (the parent namespace shared by the most indexed classes — a
+        // proxy for the workspace's primary schema), lexicographic tie.
+        candidates.sort_by(|a, b| {
+            let fam = |c: &str| {
+                let parent = c.rsplit_once("::").map(|(p, _)| p).unwrap_or(c);
+                let prefix = format!("{parent}::");
+                let mut n = 0usize;
+                mi.for_each_cached(&mut |name, _| {
+                    if name.starts_with(&prefix) {
+                        n += 1;
+                    }
+                });
+                n
+            };
+            fam(b).cmp(&fam(a)).then_with(|| a.cmp(b))
+        });
+        candidates.into_iter().next().unwrap()
+    }
+
+    /// Is `class` a DBIC result class — transitively `isa DBIx::Class`
+    /// (through the cross-file parent graph) but NOT itself a schema or
+    /// resultset base? Depth-capped like the MRO walk. Used to gate
+    /// source-moniker resolution so a stray same-basename non-DBIC class
+    /// can't be mistaken for a row source.
+    fn class_is_dbic_result(class: &str, mi: &dyn CrossFileLookup) -> bool {
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut stack: Vec<String> = vec![class.to_string()];
+        let mut depth = 0;
+        let mut isa_dbic = false;
+        while let Some(c) = stack.pop() {
+            if depth > 40 {
+                break;
+            }
+            depth += 1;
+            if !seen.insert(c.clone()) {
+                continue;
+            }
+            // A result class descends from DBIx::Class::Core / ::Row (the
+            // row-behavior roots), never from ::Schema or ::ResultSet.
+            if c == "DBIx::Class::Core" || c == "DBIx::Class::Row" {
+                isa_dbic = true;
+            }
+            if c == "DBIx::Class::Schema" || c == "DBIx::Class::ResultSet" {
+                return false;
+            }
+            for p in mi.parents_cached(&c) {
+                stack.push(p);
+            }
+        }
+        isa_dbic
     }
 
     /// Resolve a plugin-bridged invocant *class key* to the workspace class

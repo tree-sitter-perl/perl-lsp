@@ -980,6 +980,165 @@ sub action {
     assert_eq!(def.unwrap().start.row, 4);
 }
 
+/// H7-8 probe: `->search({...})->first->col` — the RowOf projection
+/// must compose on a fluent-verb result INLINE (no intermediate var).
+#[test]
+fn probe_inline_search_first_to_row_method() {
+    let src = format!(
+        "{}
+package main;
+my $schema;
+my $n = $schema->resultset('Schema::Result::Users')->search({{ name => 'x' }})->first->name;
+",
+        USERS_RESULT,
+    );
+    let (fa, _tree) = parse_with_tree(&src);
+    let pt = point_at(&src, "->name");
+    let pt = Point::new(pt.row, pt.column + 2);
+    let def = fa.find_definition(pt, None);
+    assert_eq!(
+        def.map(|s| s.start.row),
+        Some(NAME_COL_DEF_ROW),
+        "inline search->first->name must dispatch against the row class. got: {:?}",
+        def,
+    );
+}
+
+/// H7-8 probe: `->create({...})->col` inline.
+#[test]
+fn probe_inline_create_to_row_method() {
+    let src = format!(
+        "{}
+package main;
+my $schema;
+my $n = $schema->resultset('Schema::Result::Users')->create({{ name => 'x' }})->name;
+",
+        USERS_RESULT,
+    );
+    let (fa, _tree) = parse_with_tree(&src);
+    let pt = point_at(&src, "->name");
+    let pt = Point::new(pt.row, pt.column + 2);
+    let def = fa.find_definition(pt, None);
+    assert_eq!(
+        def.map(|s| s.start.row),
+        Some(NAME_COL_DEF_ROW),
+        "inline create->name must dispatch against the row class. got: {:?}",
+        def,
+    );
+}
+
+/// H7-15: a DBIC source moniker (`Artist`) resolves cross-file to the FQ
+/// result class (`MyApp::Schema::Result::Artist`) so method dispatch on a
+/// projected row (`$schema->resultset('Artist')->first->cds`) reaches the
+/// row class's synthesized relationship accessor.
+#[test]
+fn source_moniker_resolves_to_fq_result_class_cross_file() {
+    let artist_src = "package MyApp::Schema::Result::Artist;
+use base 'DBIx::Class::Core';
+__PACKAGE__->add_columns(name => { data_type => 'varchar' });
+__PACKAGE__->has_many(cds => 'MyApp::Schema::Result::CD');
+1;
+";
+    let consumer_src = "package main;
+my $schema;
+my $x = $schema->resultset('Artist')->first->cds;
+";
+    let idx = ModuleIndex::new_for_test();
+    idx.register_workspace_module(
+        PathBuf::from("/tmp/h15_artist.pm"),
+        Arc::new(parse(artist_src)),
+    );
+    let mut consumer = parse(consumer_src);
+    consumer.enrich_imported_types_with_keys(Some(&idx));
+
+    // The `->cds` MethodCall ref's invocant resolves to the FQ result class,
+    // NOT the short moniker `Artist` (which names no class).
+    let cds_ref = consumer
+        .refs
+        .iter()
+        .find(|r| matches!(r.kind, RefKind::MethodCall { .. }) && r.target_name == "cds")
+        .expect("->cds ref");
+    let cn = consumer.method_call_invocant_class(cds_ref, Some(&idx));
+    assert_eq!(
+        cn.as_deref(),
+        Some("MyApp::Schema::Result::Artist"),
+        "resultset('Artist')->first->cds must resolve the row invocant to the \
+         FQ result class, got {:?}",
+        cn,
+    );
+}
+
+/// H7-15: a `__PACKAGE__->source_name('X')` override registers the moniker
+/// `X` for a class whose basename differs — `resultset('SourceNameArtists')`
+/// must find `...::ArtistSourceName`.
+#[test]
+fn source_name_override_resolves_moniker() {
+    let src = "package MyApp::Schema::Result::ArtistSourceName;
+use base 'DBIx::Class::Core';
+__PACKAGE__->source_name('SourceNameArtists');
+__PACKAGE__->add_columns(name => { data_type => 'varchar' });
+__PACKAGE__->has_many(cds => 'MyApp::Schema::Result::CD');
+1;
+";
+    let fa = parse(src);
+    assert_eq!(
+        fa.dbic_source_name.as_deref(),
+        Some("SourceNameArtists"),
+        "source_name('X') must be captured",
+    );
+    let consumer_src = "package main;
+my $schema;
+my $x = $schema->resultset('SourceNameArtists')->first->cds;
+";
+    let idx = ModuleIndex::new_for_test();
+    idx.register_workspace_module(PathBuf::from("/tmp/h15_sn.pm"), Arc::new(parse(src)));
+    let mut consumer = parse(consumer_src);
+    consumer.enrich_imported_types_with_keys(Some(&idx));
+    let cds_ref = consumer
+        .refs
+        .iter()
+        .find(|r| matches!(r.kind, RefKind::MethodCall { .. }) && r.target_name == "cds")
+        .expect("->cds ref");
+    let cn = consumer.method_call_invocant_class(cds_ref, Some(&idx));
+    assert_eq!(
+        cn.as_deref(),
+        Some("MyApp::Schema::Result::ArtistSourceName"),
+        "resultset('SourceNameArtists') must resolve via source_name to the \
+         result class, got {:?}",
+        cn,
+    );
+}
+
+/// H7-8: list-context row extraction — `my ($a, $b) = $rs->search(...)` /
+/// `->all` binds each scalar to the ROW class, so `$a->name` dispatches to
+/// the column accessor.
+#[test]
+fn list_context_row_extraction_types_each_scalar() {
+    let src = format!(
+        "{}
+package main;
+my $schema;
+my ($a, $b) = $schema->resultset('Schema::Result::Users')->search({{ name => 'x' }});
+my $n = $a->name;
+my ($c) = $schema->resultset('Schema::Result::Users')->all;
+my $m = $c->name;
+",
+        USERS_RESULT,
+    );
+    let (fa, _tree) = parse_with_tree(&src);
+    for needle in ["$a->name", "$c->name"] {
+        let pt = point_at(&src, needle);
+        let pt = Point::new(pt.row, pt.column + 4); // onto the method token
+        let def = fa.find_definition(pt, None);
+        assert_eq!(
+            def.map(|s| s.start.row),
+            Some(NAME_COL_DEF_ROW),
+            "{needle}: list-context row var must dispatch to the column accessor. got: {:?}",
+            def,
+        );
+    }
+}
+
 // ---- Tier 1 nested-hashkey: direct `$row->{col}` deref ----
 
 /// `$row->{name}` on a DBIC row does NOT resolve to the column: a column is a

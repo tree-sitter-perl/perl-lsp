@@ -30,6 +30,26 @@
       "col": 16,
       "status": "gold",
       "expect": { "all": ["DeepRow.pm:12:"], "none": [] }
+    },
+    {
+      "id": "dbic-inline-search-first-row-accessor",
+      "comment": "H7-8: an INLINE resultset->search->first chain (no intermediate variable) projects the row type, so goto-def on the trailing ->widgets reaches DeepRow.pm's has_many. The fluent-verb passthrough + RowOf projection compose on one expression.",
+      "root": "gold-corpus/nested-fixture",
+      "file": "deep.pl",
+      "line": 14,
+      "col": 77,
+      "status": "gold",
+      "expect": { "all": ["DeepRow.pm:16:"], "none": [] }
+    },
+    {
+      "id": "dbic-list-context-row-accessor",
+      "comment": "H7-8: list-context row extraction — my ($r) = $schema->resultset('DeepRow')->all binds $r to the row class, so goto-def on $r->title reaches the column def.",
+      "root": "gold-corpus/nested-fixture",
+      "file": "deep.pl",
+      "line": 18,
+      "col": 16,
+      "status": "gold",
+      "expect": { "all": ["DeepRow.pm:12:"], "none": [] }
     }
   ]
 }

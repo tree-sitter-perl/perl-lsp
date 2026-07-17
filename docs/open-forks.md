@@ -215,3 +215,53 @@ Format per entry:
   `gated_emissions` is deliberately NOT a projected Surface field, so nothing
   smuggled a span past the equality net; this is a design question about
   whether it SHOULD be one.)
+
+---
+
+## DBIC source-moniker disambiguation without a typed `$schema` — 2026-07-17 — OPEN (Claude)
+- **Context:** H7-15 (`docs/hitlist-7.md`). `$schema->resultset('Artist')`
+  names a row by its DBIC SOURCE MONIKER (`Artist`), not the FQ result class
+  (`DBICTest::Schema::Artist`). `resolve_dbic_source_moniker`
+  (`file_analysis.rs`) resolves it at query time: a candidate is any indexed
+  class that is a DBIC result (transitively `isa DBIx::Class::Core`/`::Row`)
+  whose basename or `source_name` equals the moniker. The CORRECT scoping is
+  the receiver's schema: DBIC registers `moniker → class` per schema
+  (`load_classes`/`load_namespaces`/`source_name`), so the schema value picks
+  the source unambiguously.
+- **The fork:** in the real DBIx-Class corpus the `$schema` value is
+  UNTYPED at the resultset call (`$schema = DBICTest->init_schema()` returns
+  through `compose_namespace`/`connect`; `$s = DBICTest::Schema->connect(...)`
+  types only to the generic `DBIx::Class::Schema` base). With no concrete
+  schema, the moniker is genuinely ambiguous — `Artist` matches three indexed
+  result classes (`DBICTest::Schema::Artist`, `ViewDeps::Result::Artist`,
+  `ViewDepsBad::Result::Artist`). Resolving it correctly needs the
+  long-distance value-provenance tier (`prompt-type-inference-residual.md`)
+  to type `$schema` to its concrete schema class — the same parked tier the
+  instance-brands work waits on.
+- **Options:**
+  - **A — largest-source-family heuristic (picked, reversible).** When the
+    schema is unknown and >1 candidate matches, pick the candidate whose
+    parent namespace holds the most indexed classes (a proxy for the
+    workspace's primary schema), lexicographic tie-break. Deterministic;
+    picks `DBICTest::Schema::Artist` on the corpus. `schema_hint` (threaded
+    as `None` today) already scopes correctly the moment `$schema` types to a
+    concrete schema, so this degrades to exact resolution for free.
+  - **B — schema-value provenance first.** Block moniker resolution on typing
+    `$schema` (model `connect`/`compose_namespace`/`init_schema` returns as
+    the concrete invocant class, cross-file). Correct, but a large separate
+    inference effort (the parked value-provenance tier).
+  - **C — resolve only when unambiguous.** Resolve a moniker only when
+    exactly one DBIC result matches; keep the short moniker otherwise. Honest
+    (never wrong) but leaves the corpus's `Artist` sites dark — fails the
+    goto-def/references acceptance.
+- **Picked:** A (reversible). The heuristic lives entirely in
+  `resolve_dbic_source_moniker`; deleting the family-size sort and returning
+  `None` on ambiguity reverts to C. The `schema_hint` parameter is the seam
+  where B plugs in — when `$schema` becomes typeable, thread the concrete
+  schema class and the heuristic never fires.
+- **Discussion needed:** is the largest-family heuristic acceptable as the
+  interim, or should moniker resolution wait for schema-value provenance (B)?
+  And should the moniker→class CONVENTION (basename / `source_name` under a
+  schema's result namespaces) move from core (`resolve_dbic_source_moniker`,
+  where it sits with `extract_resultset_parametric`) into the DBIC plugin
+  manifest when the DBIC-as-plugin port lands?

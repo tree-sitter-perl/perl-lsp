@@ -4857,7 +4857,18 @@ fn collect_from_analysis(
                 let method = r.unqualified_target_name();
                 {
                     let resolved_class = match r.resolved_method_target.as_ref() {
-                        Some(edge) => Some(edge.invocant_class().to_string()),
+                        // The frozen edge can carry an UNRESOLVED DBIC source
+                        // moniker (`Artist`) when it was stamped at build with
+                        // no index (a closed call-site file — enrichment
+                        // re-stamps OPEN docs only). Map it to the FQ result
+                        // class here, index in hand, so `$row->cds` sites match
+                        // the same target goto-def reaches. No-op for a class
+                        // that already resolves.
+                        Some(edge) => Some(analysis.resolve_dbic_source_moniker(
+                            edge.invocant_class().to_string(),
+                            None,
+                            module_index,
+                        )),
                         None => analysis.method_call_invocant_class(r, module_index),
                     };
                     match (resolved_class, scope) {
