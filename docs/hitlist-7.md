@@ -94,9 +94,22 @@ H7-8, H7-9, H7-13, H7-15.
 - **H7-8 inline `->search(...)->first` loses parametric row type** (DBIC F4) — OPEN:
   RowOf verb composed on a fluent-verb result inside one expression → no type;
   identical composition through an intermediate variable works (matrix in report).
-- **H7-9 `belongs_to` references stop at query's own file** (DBIC F10) — OPEN: 78 call
-  sites across 43 files, ~7-8 returned (count nondeterministic between runs —
-  separate smell). `__PACKAGE__->verb(...)` cross-file ref walk.
+- **H7-9 `belongs_to` references stop at query's own file** (DBIC F10) — LANDED (already
+  fixed by H7-16 `ca8ab85`; regression net on `h9-belongsto-refs`): both symptoms
+  were the `SQLITE_CANTOPEN` WAL-checkpoint race degrading the row-narrowed
+  candidate sweep — files whose blobs couldn't rehydrate during the window
+  silently dropped, and which files hit the race varied per run (the 8-vs-7
+  nondeterminism). With `open_reader_retrying` every on-disk blob stays
+  reachable, so the matcher runs over all candidate files: `--references` on the
+  `belongs_to` decl-cursor returns 64 hits across 43 files (every real
+  `__PACKAGE__->belongs_to` call site), IDENTICAL cold and warm, and
+  `PERL_LSP_REF_ROWS=0` / `PERL_LSP_NO_EVICT=1` agree — candidate discovery
+  (`ref_candidate_files` by name) and the receiver-gated cross-file ancestry
+  matcher (H7-5/H7-7) were both already correct. Residual misses are principled:
+  POD/comment/string-literal occurrences and the `$self->belongs_to` compat shim
+  (a different invocant shape). Net: `refs_to_package_verb_reaches_cross_file_call_sites`
+  (resolve_tests.rs) + gold row `ref-belongsto-package-verb-crossfile-descendants`
+  over `gold-corpus/belongsto-fixture`.
 - **H7-10 bogus `(anon) sub` completion item** (DBIC F5) — LANDED `8d0698f`: unresolved-receiver
   member slots (and even string-literal interiors) return one anonymous-sub item.
 - **H7-11 `has x => sub { $ENV{X} || 10 }` kills getter type** (mojo F5) — LANDED `8d0698f`: arity-0

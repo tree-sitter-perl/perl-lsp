@@ -433,6 +433,25 @@
       },
       "status": "gold",
       "note": "one field subject, source-agnostic: refs on `has charset` splat over BOTH the `$self->{charset}` hash-slot derefs (line 26) AND the `$self->charset` accessor calls (lines 84, 106). Guards the Field{owner,name} bridge — the consumer never branches on hash-key vs accessor flavor."
+    },
+    {
+      "id": "ref-belongsto-package-verb-crossfile-descendants",
+      "difficulty": "tricky",
+      "semantic_area": "crossfile-inheritance",
+      "root": "gold-corpus/belongsto-fixture",
+      "comment": "H7-9: references on a relationship verb (`link_to`, the DBIC `belongs_to`/`has_many` shape) defined in a component ancestor, anchored on the `sub` decl, reaches every `__PACKAGE__->link_to(...)` call site in descendant classes across files. Each call's receiver is `__PACKAGE__` (the descendant), which `isa` the verb's owner only through a CROSS-FILE parent chain (CD/Track -> Core -> Rel) — the ref matcher must confirm that ancestry via the index, exactly as CD -> BaseResult -> ...Core -> ...BelongsTo does.",
+      "file": "lib/My/Rel.pm",
+      "line": 4,
+      "col": 4,
+      "expect": {
+        "all": [
+          "\"file\":\"Rel.pm\",\"line\":\"5\"",
+          "\"file\":\"CD.pm\",\"line\":\"4\"",
+          "\"file\":\"Track.pm\",\"line\":\"4\""
+        ],
+        "none": []
+      },
+      "status": "gold"
     }
   ]
 }

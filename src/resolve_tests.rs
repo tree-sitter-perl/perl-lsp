@@ -4262,6 +4262,71 @@ fn test_implementations_finds_mixin_sibling_override() {
     );
 }
 
+/// H7-9: `references` on a framework verb (`belongs_to`/`has_many`/…) defined
+/// in a component/mixin ancestor, seeded from a cursor ON the `sub` decl, must
+/// reach every `__PACKAGE__->verb(...)` call site in descendant classes across
+/// files. The receiver of each call is `__PACKAGE__` (the descendant class),
+/// which `isa` the verb's owner only through a CROSS-FILE parent edge — the
+/// matcher must confirm that ancestry via the index, exactly as the real DBIC
+/// `CD → BaseResult → …Core → …Relationship::BelongsTo` chain does.
+#[test]
+fn refs_to_package_verb_reaches_cross_file_call_sites() {
+    use crate::module_index::ModuleIndex;
+    use std::sync::Arc;
+
+    let store = FileStore::new();
+    let idx = ModuleIndex::new_for_test();
+
+    let comp_path = PathBuf::from("/tmp/h9/Comp.pm");
+    let a_path = PathBuf::from("/tmp/h9/ClassA.pm");
+    let b_path = PathBuf::from("/tmp/h9/ClassB.pm");
+
+    // Component defines the verb. Two classes inherit it and invoke it via
+    // `__PACKAGE__->verb(...)` — the invocant is the descendant class, which
+    // reaches Comp only cross-file.
+    let comp_src = "package Comp;\nsub my_rel { my ($class, $rel, $target) = @_; 1 }\n1;\n";
+    let a_src = "package ClassA;\nuse base 'Comp';\n__PACKAGE__->my_rel( alpha => 'ClassA::Alpha' );\n1;\n";
+    let b_src = "package ClassB;\nuse base 'Comp';\n__PACKAGE__->my_rel( beta => 'ClassB::Beta' );\n1;\n";
+
+    for (path, src) in [(&comp_path, comp_src), (&a_path, a_src), (&b_path, b_src)] {
+        store.insert_workspace(path.clone(), parse(src));
+        idx.register_workspace_module(path.clone(), Arc::new(parse(src)));
+    }
+
+    // Seed the query exactly as the CLI does: cursor ON the `sub my_rel` decl
+    // token in Comp → `resolve()` → the `references()` projection.
+    let origin = parse(comp_src);
+    let decl_col = comp_src.lines().nth(1).unwrap().find("my_rel").unwrap() + 1;
+    let cs = resolve(
+        &store,
+        &origin,
+        FileKey::Path(comp_path.clone()),
+        tree_sitter::Point { row: 1, column: decl_col },
+        Some(&idx),
+        OverrideScope::default(),
+    );
+    let refs = cs.references();
+    let files: std::collections::HashSet<String> = refs
+        .iter()
+        .map(|r| match &r.key {
+            FileKey::Path(p) => p.file_name().unwrap().to_str().unwrap().to_string(),
+            FileKey::Url(u) => u.to_string(),
+        })
+        .collect();
+
+    assert!(files.contains("Comp.pm"), "verb decl missing: {:?}", files);
+    assert!(
+        files.contains("ClassA.pm"),
+        "__PACKAGE__->my_rel in ClassA (cross-file descendant) dropped: {:?}",
+        files,
+    );
+    assert!(
+        files.contains("ClassB.pm"),
+        "__PACKAGE__->my_rel in ClassB (cross-file descendant) dropped: {:?}",
+        files,
+    );
+}
+
 /// The implementations verb is seeded by a cursor ON a `sub NAME` decl too —
 /// which resolves to `Sub{package: Some(class)}`, not `Method{class}`. Perl
 /// has no sub/method distinction, so a package sub is a dispatch root exactly

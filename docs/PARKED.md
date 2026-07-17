@@ -140,10 +140,6 @@ why parked, what unblocks it. Prune on landing.
   nothing; the same composition through an intermediate variable works.
   Wave-3 candidate. Unblock: compose the parametric type across chained
   method calls without an intermediate binding.
-- **H7-9 `belongs_to` references stop at the query's own file** (DBIC F10):
-  `__PACKAGE__->verb(...)` synthesized-accessor refs don't fan cross-file
-  (78 sites / ~7-8 returned; count nondeterministic between runs — a
-  separate smell). Wave-3 candidate.
 - **H7-13 cpp member-field receiver completion doesn't narrow** (leveldb
   task 4, re2 F3): `field_->` / `field.` dumps the in-scope grab-bag instead
   of the field's real members; parameter/local receivers narrow correctly.
