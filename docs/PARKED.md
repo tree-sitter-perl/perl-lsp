@@ -357,16 +357,6 @@ why parked, what unblocks it. Prune on landing.
 - **leveldb `db_iter.cc` `k` else-branch dark spot** (leveldb task 4c):
   hover/def/refs all blank on `k` in one else-branch; unreduced (synthetic
   repro attempts failed). Coordinates in `findings-leveldb.md` task 4c.
-- **Include-guard `#define`s listed as kind Variable** in outline /
-  workspace-symbol: an include-guard macro has no value semantics but mints
-  a Variable symbol. Unblock: a distinct guard/macro symbol kind (or suppress
-  guard-shaped `#define`s from the symbol table).
-- **cpp macro transform is position-blind** (re2 `simplify.cc`): `#define
-  Simplify DontCallSimplify` rewrites occurrences BEFORE the `#define` line
-  too, so the extracted `Regexp::Simplify` def at :180 and the call at :31
-  carry the expanded name — the residual 2-ref shortfall on H7-2's references
-  acceptance. Extraction itself is correct; the fix belongs in
-  `cpp_reparse`'s expansion ordering (only expand at/after the directive).
 - **cpp namespace-blind rename identity** (H7-6 cpp half, leveldb task 5b):
   renaming a class like `Iterator` proposes edits inside vendored gtest —
   class-name identity is bare-name, not namespace-qualified, so unrelated

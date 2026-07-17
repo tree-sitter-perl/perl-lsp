@@ -170,12 +170,10 @@ H7-8, H7-9, H7-13, H7-15.
   (leveldb task 4b).
 - leveldb db_iter.cc `k` else-branch dark spot (hover/def/refs) — unreduced;
   coordinates in findings-leveldb.md task 4c; synthetic repro attempts failed.
-- include-guard `#define`s listed as kind Variable in outline/workspace-symbol.
 - `Modules: N resolved` counter static across a 40-min session (DBIC note) —
   possible contributor to H7-9.
-- cpp macro transform is position-blind: `#define Simplify DontCallSimplify`
-  (re2/simplify.cc:201) renames occurrences BEFORE the `#define` line too, so
-  the extracted `Regexp::Simplify` def at simplify.cc:180 and the call at :31
-  carry the expanded name — the residual 2-ref shortfall on H7-2's references
-  acceptance. Surfaced by H7-2; extraction itself is correct. Fix belongs in
-  cpp_reparse's expansion ordering (only expand at/after the directive).
+
+LANDED (round 8): include-guard `#define`s no longer surface as kind Variable
+(hidden from outline/workspace-symbol, still goto-def-able); cpp macro
+transform is position-aware (a use before its own `#define` keeps the real
+name — Regexp::Simplify references now includes simplify.cc:31 + :180).

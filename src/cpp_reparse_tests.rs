@@ -954,3 +954,74 @@ fn salvage_keeps_context_free_safe_groups_without_a_probe() {
     // have been probed (≤ 2 probes: its expansion + its blank retry).
     assert!(start_budget - budget <= 2, "safe group must not consume budget (used {})", start_budget - budget);
 }
+
+#[test]
+fn object_macro_does_not_expand_uses_before_its_define() {
+    // C preprocessor position semantics: `#define Simplify DontCallSimplify`
+    // affects only text AT/AFTER the directive. The out-of-line def and the
+    // call ABOVE it must keep the real name (re2 simplify.cc shape).
+    let mut p = cpp_parser();
+    let src = "\
+Regexp* Regexp::Simplify() {\n\
+  return this;\n\
+}\n\
+#define Simplify DontCallSimplify\n\
+Regexp* Foo() { return Simplify(); }\n";
+    let tree = parse(&mut p, src);
+    let (rewritten, _map) = preprocess_with(&tree, src, &PreExpandedExternal::empty());
+    // The pre-directive def keeps `Simplify`; the post-directive use expands.
+    assert!(
+        rewritten.contains("Regexp::Simplify()"),
+        "pre-directive def keeps real name: {rewritten}"
+    );
+    let after_directive = rewritten.split("#define").nth(1).unwrap_or("");
+    assert!(
+        after_directive.contains("DontCallSimplify"),
+        "post-directive use still expands: {rewritten}"
+    );
+    // And the def is never renamed away.
+    assert!(
+        !rewritten.starts_with("Regexp* Regexp::DontCallSimplify"),
+        "pre-directive def NOT expanded: {rewritten}"
+    );
+}
+
+#[test]
+fn macro_still_expands_uses_after_its_define() {
+    // The position guard must not suppress the normal case: a use after the
+    // `#define` still expands.
+    let mut p = cpp_parser();
+    let src = "#define FOO bar\nint FOO;\n";
+    let tree = parse(&mut p, src);
+    let (rewritten, _map) = preprocess_with(&tree, src, &PreExpandedExternal::empty());
+    assert!(rewritten.contains("int bar;"), "post-directive use expands: {rewritten}");
+}
+
+#[test]
+fn include_guard_names_are_recognized() {
+    let mut p = cpp_parser();
+    let src = "\
+#ifndef LEVELDB_FOO_H_\n\
+#define LEVELDB_FOO_H_\n\
+int real_symbol;\n\
+#endif\n";
+    let guards = crate::cpp_reparse::collect_include_guard_names(&mut p, src);
+    assert!(guards.contains("LEVELDB_FOO_H_"), "include guard recognized: {guards:?}");
+}
+
+#[test]
+fn valued_and_functional_ifndef_defines_are_not_guards() {
+    // A bodyless `#define X` inside `#ifndef X` is the guard; a valued or
+    // function-like conditional definition is a real entity, not plumbing.
+    let mut p = cpp_parser();
+    let src = "\
+#ifndef MAXVAL\n\
+#define MAXVAL 100\n\
+#endif\n\
+#ifndef MIN\n\
+#define MIN(a,b) ((a)<(b)?(a):(b))\n\
+#endif\n";
+    let guards = crate::cpp_reparse::collect_include_guard_names(&mut p, src);
+    assert!(!guards.contains("MAXVAL"), "valued define is not a guard: {guards:?}");
+    assert!(!guards.contains("MIN"), "function-like define is not a guard: {guards:?}");
+}

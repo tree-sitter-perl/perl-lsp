@@ -54,6 +54,27 @@ fn cpp_deprecated_attribute_macro_signals_the_recovered_class() {
 
 #[cfg(feature = "cpp")]
 #[test]
+fn cpp_include_guard_define_is_hidden_from_outline_but_resolvable() {
+    // `#ifndef X` / `#define X` include guards are compilation plumbing —
+    // folded from outline / workspace-symbol, but the symbol survives so
+    // goto-def / references still resolve (rule #7).
+    let src = "#ifndef FOO_BAR_H_\n#define FOO_BAR_H_\nint real_thing;\n#endif\n";
+    let fa = cpp_driver().analyze(src);
+    let guard = fa.symbols.iter().find(|s| s.name == "FOO_BAR_H_")
+        .expect("guard symbol still exists (resolvable)");
+    assert!(guard.hidden_in_outline(), "include guard hidden from listing views");
+    assert!(guard.attributes.iter().any(|a| a == "include_guard"),
+        "guard carries the value-borne marker: {:?}", guard.attributes);
+    // A non-guard object-like macro stays visible.
+    let src2 = "#define MAXLEN 100\nint real_thing;\n";
+    let fa2 = cpp_driver().analyze(src2);
+    if let Some(m) = fa2.symbols.iter().find(|s| s.name == "MAXLEN") {
+        assert!(!m.hidden_in_outline(), "a plain object-like macro is NOT hidden");
+    }
+}
+
+#[cfg(feature = "cpp")]
+#[test]
 fn registry_serves_cpp_when_enabled() {
     let reg = LanguageRegistry::with_enabled();
     assert!(reg.languages().contains(&"cpp"));

@@ -1341,11 +1341,14 @@ impl Symbol {
     /// view that enumerates symbols for humans (outline, workspace-symbol,
     /// usage heatmap) asks the symbol this rather than re-matching the detail.
     pub fn hidden_in_outline(&self) -> bool {
-        matches!(
-            &self.detail,
-            SymbolDetail::Sub { hide_in_outline: true, .. }
-                | SymbolDetail::Handler { hide_in_outline: true, .. }
-        )
+        // An include-guard `#define` is compilation plumbing, not a program
+        // entity — folded from listing views but still resolvable (rule #7).
+        self.attributes.iter().any(|a| a == "include_guard")
+            || matches!(
+                &self.detail,
+                SymbolDetail::Sub { hide_in_outline: true, .. }
+                    | SymbolDetail::Handler { hide_in_outline: true, .. }
+            )
     }
 }
 

@@ -1664,6 +1664,9 @@ fn run_one(
                     covered.insert(entry.key().clone());
                 }
                 for sym in &entry.value().symbols {
+                    if sym.hidden_in_outline() {
+                        continue;
+                    }
                     push(&sym.name, &sym.kind, file.clone(), sym.selection_span);
                 }
             }
@@ -1676,12 +1679,18 @@ fn run_one(
                     covered.insert(path.to_path_buf());
                 }
                 for sym in &analysis.symbols {
+                    if sym.hidden_in_outline() {
+                        continue;
+                    }
                     push(&sym.name, &sym.kind, file.clone(), sym.selection_span);
                 }
             });
             for hit in symbols::sym_row_search(idx, &q) {
                 let path = std::path::PathBuf::from(&hit.path);
                 if covered.contains(&path) {
+                    continue;
+                }
+                if hit.flags & file_analysis::SymRowSeed::FLAG_HIDDEN_IN_OUTLINE != 0 {
                     continue;
                 }
                 let Some(kind) = file_analysis::sym_kind_from_code(hit.kind) else { continue };

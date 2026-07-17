@@ -398,6 +398,18 @@ impl PackDriver {
             for (field, span) in body_refs.member_refs {
                 skel.macro_body_member_reads.push((field, span));
             }
+            // Include-guard `#define`s (`#ifndef X` / `#define X`) are pure
+            // compilation plumbing, not program entities — mark their symbol so
+            // outline / workspace-symbol fold it away (goto-def / references
+            // still resolve it). Object-like macro symbols carry kind "var".
+            let guards = crate::cpp_reparse::collect_include_guard_names(parser, source);
+            if !guards.is_empty() {
+                for s in skel.symbols.iter_mut() {
+                    if s.kind == "var" && guards.contains(&s.name) {
+                        s.attributes.push("include_guard".to_string());
+                    }
+                }
+            }
         }
         // Function-like macro typing (the expansion flip's payoff): a
         // left-unexpanded macro call parses as `call_expression`, so the

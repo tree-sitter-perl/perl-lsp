@@ -30,7 +30,7 @@
 //! exactly the "amortize full cpp to once" case. Deliberately not wired
 //! into the build pipeline; measured by `cpp_reparse_tests.rs`.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::OnceLock;
 use tree_sitter::{Query, QueryCursor, StreamingIterator, Tree};
 
@@ -876,6 +876,57 @@ fn guard_trail(node: tree_sitter::Node, src: &[u8]) -> Vec<String> {
 /// idiom (`#ifndef X` / `#define X` / ... / `#endif`). Structural, not a name
 /// list: any macro whose enclosing conditional it also defines is self-
 /// guarding, regardless of the guard's own spelling.
+/// Names `#define`d as their file's own include guard: a BODYLESS object-like
+/// `#define X` sitting directly inside `#ifndef X` (the self-guarding idiom
+/// `#ifndef X` / `#define X` / … / `#endif`). Such a macro is pure compilation
+/// plumbing — no program meaning — so symbol-listing views (outline /
+/// workspace-symbol) fold it away while goto-def / references still resolve it
+/// (rule #7: the token keeps its ref). Structural, not a name list. The
+/// bodyless requirement is the discriminator against a real conditional
+/// definition (`#ifndef MIN` / `#define MIN(a,b) …`, or a valued default), which
+/// the outline should keep.
+pub fn collect_include_guard_names(
+    parser: &mut tree_sitter::Parser,
+    source: &str,
+) -> std::collections::HashSet<String> {
+    let mut out = std::collections::HashSet::new();
+    let Some(tree) = parser.parse(source, None) else { return out };
+    let src = source.as_bytes();
+    let mut stack = vec![tree.root_node()];
+    while let Some(n) = stack.pop() {
+        if n.kind() == "preproc_ifdef" {
+            let is_ifndef = src
+                .get(n.start_byte()..)
+                .and_then(|s| std::str::from_utf8(s).ok())
+                .map(|s| s.trim_start().starts_with("#ifndef"))
+                .unwrap_or(false);
+            if is_ifndef {
+                if let Some(name) =
+                    n.child_by_field_name("name").and_then(|c| c.utf8_text(src).ok())
+                {
+                    let mut c = n.walk();
+                    let is_guard = n.named_children(&mut c).any(|child| {
+                        child.kind() == "preproc_def"
+                            && child
+                                .child_by_field_name("name")
+                                .and_then(|x| x.utf8_text(src).ok())
+                                == Some(name)
+                            && child.child_by_field_name("value").is_none()
+                    });
+                    if is_guard {
+                        out.insert(name.to_string());
+                    }
+                }
+            }
+        }
+        let mut c = n.walk();
+        for ch in n.children(&mut c) {
+            stack.push(ch);
+        }
+    }
+    out
+}
+
 fn is_self_defining_guard(p: tree_sitter::Node, name: &str, src: &[u8]) -> bool {
     let mut c = p.walk();
     let hit = p.named_children(&mut c).any(|child| {
@@ -2898,6 +2949,38 @@ fn span_contains(spans: &[(usize, usize)], cursor: &mut usize, pos: usize) -> bo
     *cursor < spans.len() && spans[*cursor].0 <= pos
 }
 
+/// Byte offset of the start of each source line, indexed by 0-based row.
+fn line_start_offsets(src: &str) -> Vec<usize> {
+    let mut v = vec![0usize];
+    for (i, b) in src.bytes().enumerate() {
+        if b == b'\n' {
+            v.push(i + 1);
+        }
+    }
+    v
+}
+
+/// The byte at which each file-LOCAL macro's object-like/function-like
+/// `#define` becomes active — the start of its directive line. A use of the
+/// name STRICTLY BEFORE this byte predates the definition and, per the C
+/// preprocessor, must NOT expand: `#define Simplify DontCallSimplify` at
+/// re2/simplify.cc:201 protects the out-of-line def `Regexp* Regexp::Simplify()`
+/// at :180 and the call at :31, which both keep the real name. Keyed by the
+/// FIRST definition (min row) so a later redefinition never retro-activates
+/// earlier uses. External (`#include`d) macros are absent here — they are
+/// active from the file's top, since we don't model include ordering.
+fn local_macro_activation(tree: &Tree, src: &str) -> HashMap<String, usize> {
+    let line_starts = line_start_offsets(src);
+    let mut out: HashMap<String, usize> = HashMap::new();
+    walk_macro_defs(tree, src.as_bytes(), |name, m, _span| {
+        let byte = line_starts.get(m.def_line).copied().unwrap_or(0);
+        out.entry(name)
+            .and_modify(|b| *b = (*b).min(byte))
+            .or_insert(byte);
+    });
+    out
+}
+
 fn compute_splices_inner(
     tree: &Tree,
     src: &str,
@@ -2912,6 +2995,10 @@ fn compute_splices_inner(
     if eff.is_empty() {
         return Vec::new();
     }
+    // Per the C preprocessor, an object-like `#define` applies only to text
+    // AT/AFTER its directive. Uses of a file-local macro name before its own
+    // `#define` (re2 `Simplify` → `DontCallSimplify`) must keep the real name.
+    let local_activation = local_macro_activation(tree, src);
     let excludes = exclusion_spans(tree, expand_region_bodies);
     // The HARD exclusions (strings/comments/directives) a context-free-safe
     // macro is *never* exempt from — only computed for the wide fallback, where
@@ -2990,6 +3077,14 @@ fn compute_splices_inner(
                 continue;
             }
             if let Some(m) = eff.get(word) {
+                // A use before its own file-local `#define` predates the
+                // definition — leave it unexpanded (C preprocessor position
+                // semantics). External macros are absent from the map (always
+                // active). `start` and the activation byte are both original
+                // coordinates, so the comparison is frame-consistent.
+                if local_activation.get(word).is_some_and(|&act| start < act) {
+                    continue;
+                }
                 if m.params.is_some() && is_clean_call {
                     continue; // leave: parses clean as a call → sub-return types it
                 }
