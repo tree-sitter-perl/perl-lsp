@@ -145,6 +145,70 @@ sub register {
     );
 }
 
+/// A variable typed in an outer scope (both a plain `my $x = Foo->new`
+/// assignment and a plugin-synthesized route-handler param) keeps its
+/// type when captured by a nested closure body — the scope-chain walk
+/// ascends through the closure boundary. The plugin case additionally
+/// exercises the Mojo::Lite route form with an intermediate
+/// default-values hash between the path and the handler sub
+/// (`any '/x' => {k => ''} => sub ($c) {...}`): the route-decl query's
+/// `@handler` capture must bind the trailing anonymous sub, not the
+/// intervening hash — otherwise the param list is empty and no
+/// controller type is synthesized (H8-1).
+#[test]
+fn closure_captured_typed_variable_survives_into_nested_sub() {
+    // Plain assignment shape: outer `my $x = Foo->new` captured by an
+    // inner `sub { $x->method }`.
+    let plain = r#"
+package Foo;
+sub new { bless {}, shift }
+sub method { return 42 }
+
+package main;
+my $x = Foo->new;
+my $cb = sub {
+    $x->method;
+};
+"#;
+    let fa = build_fa(plain);
+    // `$x` inside the closure body (row 8) resolves to Foo, same as at
+    // its declaration (row 6).
+    for (row, col) in [(6usize, 3usize), (8, 4)] {
+        let ty = fa.inferred_type_via_bag("$x", Point::new(row, col));
+        assert_eq!(
+            ty.and_then(|t| t.class_name().map(str::to_string)),
+            Some("Foo".to_string()),
+            "plain-assignment typed $x should resolve to Foo at {row}:{col}",
+        );
+    }
+
+    // Plugin-synthesized route param, with an intermediate defaults hash
+    // between path and handler — the H8-1 shape.
+    let route = r#"
+use Mojolicious::Lite -signatures;
+
+any '/*whatever' => {whatever => ''} => sub ($c) {
+    $c->render(text => 'ok');
+    my $cb = sub ($err) {
+        $c->render(data => $err, status => 400);
+    };
+};
+"#;
+    let fa = build_fa(route);
+    // `$c` in the outer route body (row 4) and inside the nested
+    // `->catch`-style closure body (row 6) both resolve to the
+    // controller.
+    for (row, col) in [(4usize, 4usize), (6, 8)] {
+        let ty = fa.inferred_type_via_bag("$c", Point::new(row, col));
+        assert_eq!(
+            ty.and_then(|t| t.class_name().map(str::to_string)),
+            Some("Mojolicious::Controller".to_string()),
+            "route-param typed $c should resolve to Mojolicious::Controller at {row}:{col} \
+             (intermediate defaults hash must not steal the @handler capture)",
+        );
+    }
+}
+
 /// The honest boundary: a helper name that is NOT statically decidable —
 /// a function call (`compute()`), or an interpolation over an unknown
 /// variable (`"x_$unknown"`) — synthesizes NOTHING. No guess, no

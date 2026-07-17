@@ -230,10 +230,10 @@ fn patterns() {
 ([
   (function_call_expression
     function: (_) @verb
-    arguments: (list_expression . (_) @path . (_)? @handler)) @call
+    arguments: (list_expression . (_) @path (anonymous_subroutine_expression)? @handler)) @call
   (ambiguous_function_call_expression
     function: (_) @verb
-    arguments: (list_expression . (_) @path . (_)? @handler)) @call
+    arguments: (list_expression . (_) @path (anonymous_subroutine_expression)? @handler)) @call
   (function_call_expression
     function: (_) @verb
     arguments: [(string_literal) (interpolated_string_literal) (scalar)] @path) @call
@@ -251,6 +251,9 @@ fn patterns() {
                 #{ src: "get '/users/profile' => sub { my $c = shift; };", matches: 1 },
                 #{ src: "under '/admin';", matches: 1 },
                 #{ src: "put('/x', sub {});", matches: 1 },
+                // Intermediate default-values hash between path and handler:
+                // @handler must still bind the trailing sub, not the hash.
+                #{ src: "any '/*w' => {w => ''} => sub ($c) { $c->render; };", matches: 1 },
                 #{ src: "getter '/x';", matches: 0 },
             ],
         },
