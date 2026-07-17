@@ -3032,12 +3032,39 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     // HashMap-iteration order, flipping the latest-wins winner per process.
     let mut flow_mids: Vec<&usize> = flow_targets.keys().collect();
     flow_mids.sort_unstable();
+    // A class/struct DATA MEMBER is visible throughout its class body
+    // regardless of declaration order (C++ member lookup is not sequential:
+    // a method reads a field declared later in a `private:` section below
+    // it). The type-witness temporal filter is position-based — it admits a
+    // witness only at/after its span — so a zero-width witness pinned to the
+    // field's decl point would be REJECTED for every read textually above it.
+    // Give the field's declared-type witness its class-body scope's span so
+    // "this type holds class-wide" is what the filter sees. Locals keep their
+    // decl-point span (flow narrowing is sequential and correct for them).
+    // Scopes are pushed in id order (`id = ScopeId(scopes.len())`), so a
+    // ScopeId indexes its own scope directly.
+    let field_scope_span: std::collections::HashMap<(String, ScopeId), Span> = out
+        .symbols
+        .iter()
+        .filter(|s| s.kind == "field")
+        .filter_map(|s| {
+            out.scopes
+                .get(s.scope.0 as usize)
+                .map(|sc| ((s.name.clone(), s.scope), sc.span))
+        })
+        .collect();
     for mid in flow_mids {
         let (name, scope, at) = &flow_targets[mid];
         let var = crate::witnesses::WitnessAttachment::Variable {
             name: name.clone(),
             scope: *scope,
         };
+        // Class-wide extent for a data member; the sequential decl point for a
+        // local (see `field_scope_span`).
+        let annot_span = field_scope_span
+            .get(&(name.clone(), *scope))
+            .copied()
+            .unwrap_or(Span { start: *at, end: *at });
         if let Some(annot) = annots.get(mid) {
             // A class-shaped declared type edges into the alias graph (it may
             // be a typedef — `U16 x;` where `typedef unsigned short U16`);
@@ -3058,7 +3085,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                     attachment: var.clone(),
                     source: crate::witnesses::WitnessSource::Builder(crate::witnesses::ANNOT_SOURCE.into()),
                     payload,
-                    span: Span { start: *at, end: *at },
+                    span: annot_span,
                 });
             }
         }

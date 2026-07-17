@@ -7204,9 +7204,25 @@ impl FileAnalysis {
                 matches!(s.kind, SymKind::Sub | SymKind::Method) && self.symbol_in_class(s.id, cls)
             })
             .map(|m| m.scope);
+        // A bodiless method DECLARATION (`void f(int arg1, int arg2);`) or a
+        // function-pointer typedef (`using F = void(*)(void* arg1)`) carries no
+        // `@scope.sub` body, so its parameters land directly on the class body
+        // scope with the sticky class package — indistinguishable from a data
+        // member by scope/kind alone (they're `Variable`, like inline-union
+        // members we DO want). A parameter's selection span sits inside a
+        // recorded parameter-list region; that's the value-borne discriminator
+        // (same idiom the use-after-move param check uses).
+        let contains = |outer: &Span, inner: &Span| {
+            (outer.start.row, outer.start.column) <= (inner.start.row, inner.start.column)
+                && (inner.end.row, inner.end.column) <= (outer.end.row, outer.end.column)
+        };
         for sym in &self.symbols {
             if matches!(sym.kind, SymKind::Variable | SymKind::Field)
                 && self.symbol_in_class(sym.id, cls)
+                && !self
+                    .param_regions
+                    .iter()
+                    .any(|pr| contains(pr, &sym.selection_span))
                 // the class body itself, or a nested container body inside it
                 // (an inline union's members complete flat on the struct) —
                 // but never a method body (its locals carry the sticky class
@@ -10527,6 +10543,38 @@ impl FileAnalysis {
             }
         }
         None
+    }
+
+    /// The class of the method enclosing `point` — the implicit-`this` class
+    /// for a bare member access in a method body. Read off the innermost
+    /// containing Sub/Method SYMBOL's package (not the body scope): an
+    /// out-of-line body (`Status DBImpl::Recover(...) { ... }`) is lexically at
+    /// file scope, so its body scope carries no package, but the peeled method
+    /// symbol does — reading it off the symbol covers in-class AND out-of-line
+    /// with one rule (the same seam `emit_return_fuel`'s sibling-call pin uses).
+    pub(crate) fn implicit_receiver_class_at(&self, point: Point) -> Option<String> {
+        self.symbols
+            .iter()
+            .filter(|s| matches!(s.kind, SymKind::Method | SymKind::Sub))
+            .filter(|s| contains_point(&s.span, point))
+            .min_by_key(|s| span_size(&s.span))
+            .and_then(|s| s.package.clone())
+    }
+
+    /// Is `name` a genuine LOCAL variable declaration (param or `Type x = …`)
+    /// visible at `point` — as opposed to a bare implicit-`this` member? A
+    /// member write (`prog_ = f()`, no declarator) mints flow witnesses but no
+    /// Variable SYMBOL, so the presence of a scope-visible Variable symbol is
+    /// the discriminator: a member never has one. Used to route receiver typing
+    /// — a local trusts its (flow-narrowed) value; a member resolves on the
+    /// enclosing class, dodging the phantom-local flow witnesses a member's
+    /// reassignment leaves behind.
+    pub(crate) fn has_local_variable_at(&self, name: &str, point: Point) -> bool {
+        let Some(scope) = self.scope_at(point) else { return false };
+        let chain = self.scope_chain(scope);
+        self.symbols.iter().any(|s| {
+            matches!(s.kind, SymKind::Variable) && s.name == name && chain.contains(&s.scope)
+        })
     }
 
     /// Test-only wrapper over the private `resolve_invocant_class`.

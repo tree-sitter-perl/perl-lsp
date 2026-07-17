@@ -7,7 +7,7 @@
       "semantic_area": "cpp-multilang-macros",
       "lang": "cpp",
       "root": "gold-corpus/cpp-fixture",
-      "comment": "Family M #1: `s->` on a struct pasting the function-like member-block macro `_SV_HEAD(void*)` lists ALL its fields — including the comment-blocked ones tree-sitter truncated from `preproc_arg`.",
+      "comment": "Family M #1: `s->` on a struct pasting the function-like member-block macro `_SV_HEAD(void*)` lists ALL its fields \u2014 including the comment-blocked ones tree-sitter truncated from `preproc_arg`.",
       "file": "svhead.c",
       "line": 14,
       "col": 20,
@@ -236,7 +236,7 @@
       "file": "braced_type.cpp",
       "line": 9,
       "col": 13,
-      "comment": "completion on `m.` where `FlatMap<int,int> m = {...}` — the declared-type-governs fix types `m` as the container, so members (at/insert) complete instead of the junk top-level fallback the Numeric misinference produced.",
+      "comment": "completion on `m.` where `FlatMap<int,int> m = {...}` \u2014 the declared-type-governs fix types `m` as the container, so members (at/insert) complete instead of the junk top-level fallback the Numeric misinference produced.",
       "expect": {
         "all": [
           "at",
@@ -315,6 +315,28 @@
         ]
       },
       "status": "xfail"
+    },
+    {
+      "id": "cpp-completion-field-receiver-narrows",
+      "difficulty": "hard",
+      "semantic_area": "cpp-multilang",
+      "lang": "cpp",
+      "root": "gold-corpus/cpp-fixture",
+      "comment": "H7-13: a class FIELD used as a member-access receiver (field_->) narrows to its class members, exactly like a param receiver \u2014 even though the field is declared textually BELOW the method (a C++ member is visible class-wide). Must NOT dump the in-scope grab-bag (sibling methods / the param).",
+      "file": "field_receiver.cpp",
+      "line": 10,
+      "col": 41,
+      "expect": {
+        "all": [
+          "value",
+          "run"
+        ],
+        "none": [
+          "use_field",
+          "use_param"
+        ]
+      },
+      "status": "gold"
     }
   ]
 }
