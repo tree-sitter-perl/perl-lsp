@@ -2199,6 +2199,25 @@ impl ModuleIndex {
                 v.push(spec.clone());
             }
         }
+        // Inverse inheritance edges: parent → child NAMES, so
+        // `direct_children_of` (the INHERITS_INV cross-file leg the
+        // implementations verb walks) can find the subclasses of a base. The
+        // Perl `feed()` path populates `children` via `parent_classes`; the
+        // pack path builds it here (it bypasses `feed`). Symmetric with the
+        // spec map above: the child NAME is a by-name key `get_cached`
+        // resolves, and `direct_children_of` re-checks each candidate's CURRENT
+        // `package_parents`, so a stale entry (an edit dropped a base)
+        // self-heals at read. `package_parents` survives every strip
+        // (`evict_axes` leaves it) and rides the warm-stub skeleton, so the arc
+        // carries it on the fresh, warm, and whole paths alike.
+        for (child, parents) in &analysis.package_parents {
+            for parent in parents {
+                let mut v = self.edges.children.entry(parent.clone()).or_default();
+                if !v.iter().any(|m| m == child) {
+                    v.push(child.clone());
+                }
+            }
+        }
     }
 
     /// Remove a pack file's registrations: its `all_files` entry, its

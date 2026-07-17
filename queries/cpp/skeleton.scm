@@ -147,6 +147,34 @@
   name: [(type_identifier) (template_type)] @def.class.name
   (base_class_clause
     (qualified_identifier name: (type_identifier) @parent)))
+; out-of-line nested class WITH a base (`class Block::Iter : public Iterator`,
+; `class Version::LevelFileNumIterator : public Iterator`): the class NAME is a
+; qualified_identifier (the def pattern above files it under its inner
+; type_identifier). The base patterns above only match a bare/template name, so
+; a qualified-named subclass never minted its `@parent` edge — invisible to the
+; INHERITS_INV implementations walk. Capture the SAME inner name as
+; @def.class.name (so the child edge joins the identity the class filed under)
+; plus every base spelling (bare / template / namespace-qualified).
+(class_specifier
+  name: (qualified_identifier name: (type_identifier) @def.class.name)
+  (base_class_clause (type_identifier) @parent))
+(struct_specifier
+  name: (qualified_identifier name: (type_identifier) @def.class.name)
+  (base_class_clause (type_identifier) @parent))
+(class_specifier
+  name: (qualified_identifier name: (type_identifier) @def.class.name)
+  (base_class_clause (template_type name: (type_identifier) @parent) @parent))
+(struct_specifier
+  name: (qualified_identifier name: (type_identifier) @def.class.name)
+  (base_class_clause (template_type name: (type_identifier) @parent) @parent))
+(class_specifier
+  name: (qualified_identifier name: (type_identifier) @def.class.name)
+  (base_class_clause
+    (qualified_identifier name: (type_identifier) @parent)))
+(struct_specifier
+  name: (qualified_identifier name: (type_identifier) @def.class.name)
+  (base_class_clause
+    (qualified_identifier name: (type_identifier) @parent)))
 (union_specifier name: (type_identifier) @def.class.name) @def.class
 ; a BODIED named union additionally scopes its members (outline nesting +
 ; the hover overlay's sibling group) and tags them with the union's name.

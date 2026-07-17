@@ -18,6 +18,48 @@
         "none": []
       },
       "status": "gold"
+    },
+    {
+      "id": "cpp-implementations-virtual-method-cross-file-overrides",
+      "difficulty": "hard",
+      "semantic_area": "cpp-inheritance",
+      "lang": "cpp",
+      "root": "gold-corpus/cpp-fixture",
+      "comment": "implementations on a pure-virtual base method reaches every cross-file override, via the INHERITS_INV descendant walk over the pack children reverse index (the leveldb Iterator::Seek gap: base-class relations were captured into package_parents but never wired into the pack index's children map). oval.cc's override sits on a QUALIFIED nested subclass (Shapes::OvalShape), exercising the qualified-name base-class-clause capture.",
+      "file": "inhimpl/ishape.h",
+      "line": 7,
+      "col": 18,
+      "expect": {
+        "all": [
+          "{\"col\":\"10\",\"file\":\"oval.cc\",\"line\":\"11\"}",
+          "{\"col\":\"10\",\"file\":\"rect.cc\",\"line\":\"4\"}"
+        ],
+        "none": [
+          "ishape.h"
+        ]
+      },
+      "status": "gold"
+    },
+    {
+      "id": "cpp-implementations-base-class-lists-subclasses",
+      "difficulty": "hard",
+      "semantic_area": "cpp-inheritance",
+      "lang": "cpp",
+      "root": "gold-corpus/cpp-fixture",
+      "comment": "implementations on a base CLASS token lists its concrete subclasses (the INHERITS_INV descendants' class defs), edge-gated so an unrelated same-named nested class never leaks in on bare-name identity (the leveldb SkipList::Iterator false positive). Includes the qualified nested subclass Shapes::OvalShape.",
+      "file": "inhimpl/ishape.h",
+      "line": 4,
+      "col": 6,
+      "expect": {
+        "all": [
+          "{\"col\":\"15\",\"file\":\"oval.cc\",\"line\":\"9\"}",
+          "{\"col\":\"7\",\"file\":\"rect.cc\",\"line\":\"2\"}"
+        ],
+        "none": [
+          "ishape.h"
+        ]
+      },
+      "status": "gold"
     }
   ]
 }

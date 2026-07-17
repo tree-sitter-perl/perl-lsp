@@ -1070,7 +1070,17 @@ impl<'a> CandidateSet<'a> {
         let mut out: Vec<RefLocation> = Vec::new();
         if let Some(idx) = self.module_index {
             if let Some(sym) = self.origin.symbol_at(self.point) {
-                if matches!(sym.kind, SymKind::Class) {
+                // Enums are `SymKind::Class` in cpp (no distinct kind), so gate
+                // the enum→field-slot bridge on the Class actually HAVING
+                // enumerators — otherwise a plain class fires it, and any field
+                // member whose owning class shares the class's name resolves as
+                // a bogus "enumerator of this enum" (leveldb `Iterator` matched
+                // SkipList::Iterator's `node_` field). An empty/real class has
+                // no enumerators → no domain sites key to it anyway, so this
+                // never suppresses a genuine enum result.
+                if matches!(sym.kind, SymKind::Class)
+                    && !self.origin.enum_members(&sym.name, Some(idx)).is_empty()
+                {
                     let enum_name = sym.name.clone();
                     idx.for_each_cached_file(&mut |cached| {
                         // `resolve_enumerator_enum`'s local arm reads the
@@ -3479,7 +3489,51 @@ pub fn implementations_of(
     // gr on the primary stays "uses of the primary"; the family is this
     // verb's answer (fork 4, docs/adr/cpp-templates.md).
     if matches!(target.kind, TargetKind::Package) {
-        return specialization_family(origin, module_index, &target.name);
+        let mut out = specialization_family(origin, module_index, &target.name);
+        // A plain base class (not a template primary): its "implementations"
+        // are the concrete subclasses — the INHERITS_INV descendants' class
+        // def sites. The edge graph gates this: an unrelated same-named nested
+        // class (SkipList::Iterator) has no INHERITS edge to the target, so it
+        // never appears in the descendant set even though the by-name index
+        // holds a Class of the same spelling.
+        if let Some(idx) = module_index {
+            let probe = crate::graph::GraphView::new(origin, Some(idx));
+            let mut descendants: Vec<String> = Vec::new();
+            probe.walk(
+                crate::graph::Node::Class(target.name.clone()),
+                crate::graph::EdgeKindMask::INHERITS_INV,
+                &mut |n| {
+                    if let crate::graph::Node::Class(c) = n {
+                        descendants.push(c.clone());
+                    }
+                    std::ops::ControlFlow::Continue(())
+                },
+            );
+            for pkg in &descendants {
+                for cached in idx.def_candidates(pkg) {
+                    let whole = idx.whole_present(&cached);
+                    for s in &whole.symbols {
+                        if &s.name == pkg && matches!(s.kind, SymKind::Class) {
+                            out.push(RefLocation {
+                                key: FileKey::Path(cached.path.clone()),
+                                span: s.selection_span,
+                                access: AccessKind::Declaration,
+                                rewritable: false,
+                                label: None,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+        out.sort_by(|a, b| {
+            key_for_sort(&a.key).cmp(&key_for_sort(&b.key)).then_with(|| {
+                (a.span.start.row, a.span.start.column)
+                    .cmp(&(b.span.start.row, b.span.start.column))
+            })
+        });
+        out.dedup_by(|a, b| file_key_eq(&a.key, &b.key) && a.span == b.span);
+        return out;
     }
     // Both class-bearing target kinds seed the dispatch fan-out: a
     // `Method{class}` (call-site cursor) and a `Sub{package: Some}` (cursor
