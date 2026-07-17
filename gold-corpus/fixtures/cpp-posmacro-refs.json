@@ -1,0 +1,17 @@
+{
+  "capability": "references",
+  "rows": [
+    {
+      "id": "cpp-position-macro-def-is-referenced-under-real-name",
+      "difficulty": "moderate", "semantic_area": "cpp-macro-position",
+      "lang": "cpp", "root": "gold-corpus/cpp-fixture",
+      "comment": "references on the Regexp::Simplify declaration reaches the out-of-line def that sits ABOVE the `#define Simplify DontCallSimplify` directive — the position-aware expansion leaves the pre-directive def its real name, so it answers the references verb (it did not, when the transform was position-blind and renamed it DontCallSimplify).",
+      "file": "posmacro/posmacro.cc", "line": 4, "col": 10,
+      "expect": {
+        "all": ["{\"col\":\"17\",\"file\":\"posmacro.cc\",\"line\":\"8\"}"],
+        "none": ["DontCallSimplify"]
+      },
+      "status": "gold"
+    }
+  ]
+}

@@ -1,0 +1,29 @@
+{
+  "capability": "outline",
+  "rows": [
+    {
+      "id": "cpp-position-macro-def-keeps-real-name",
+      "difficulty": "moderate", "semantic_area": "cpp-macro-position",
+      "lang": "cpp", "root": "gold-corpus/cpp-fixture",
+      "comment": "Object-like `#define Simplify DontCallSimplify` applies only AT/AFTER its directive (C preprocessor semantics). The out-of-line def ABOVE it keeps the real name — outline labels it Simplify/Method/Regexp, never the expanded DontCallSimplify (re2 simplify.cc shape).",
+      "file": "posmacro/posmacro.cc", "line": 0, "col": 0,
+      "expect": {
+        "all": ["\"kind\":\"Method\",\"line\":\"7\",\"name\":\"Simplify\",\"package\":\"Regexp\""],
+        "none": ["DontCallSimplify"]
+      },
+      "status": "gold"
+    },
+    {
+      "id": "cpp-include-guard-hidden-from-outline",
+      "difficulty": "easy", "semantic_area": "cpp-include-guard",
+      "lang": "cpp", "root": "gold-corpus/cpp-fixture",
+      "comment": "An `#ifndef X` / `#define X` include guard is compilation plumbing, not a program entity — folded from the outline (still goto-def-able). The guard name POSMACRO_H_ never appears as a Variable symbol.",
+      "file": "posmacro/posmacro.cc", "line": 0, "col": 0,
+      "expect": {
+        "all": ["\"name\":\"Regexp\""],
+        "none": ["POSMACRO_H_"]
+      },
+      "status": "gold"
+    }
+  ]
+}
