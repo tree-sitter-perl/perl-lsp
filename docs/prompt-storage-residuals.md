@@ -39,6 +39,24 @@ or by being explicitly declined.
   It is serde-carried, so if it ever grows to non-sparse volume it can be
   added to the strip axes like any other — no format change needed.
 
+### Resolved
+
+- **cpp gather caches — unbounded growth + no single-flight (H9-3).** RESOLVED.
+  The four `cpp_reparse.rs` gather caches (macro table, pre-expanded external,
+  header parse, include closure) were bare `OnceLock<Mutex<HashMap>>` with no
+  cap and check-release-compute-insert races. They now share one
+  `GatherCache<K,S,V>` wrapper: single-flight population (a key's first misser
+  claims it; siblings expanding the same header cone block on its result via a
+  condvar instead of recomputing), byte-accounted LRU eviction (never the
+  just-inserted key), and cancel-safe invalidation (an `evict_gather_caches`
+  during an in-flight compute drops the claimant's stale result; a waiter
+  recomputes — no deadlock, the state lock is never held across a compute).
+  Bounds (per cache, `PERL_LSP_GATHER_CACHE_MB` overrides all to one value; 0 =
+  never retain): `header_cache` 128 MiB (session-lived, shared by header path,
+  highest reuse); `macro_table_cache` 128 MiB (per-file raw merged closure);
+  `pre_expanded_cache` 128 MiB (full+alias expansion on top of raw);
+  `include_closure_cache` 64 MiB (per-file path lists, smallest per-entry).
+
 ## Wall clock
 
 - **cpp references sweep cost** (edit-bench, 2026-07-14; profile first).

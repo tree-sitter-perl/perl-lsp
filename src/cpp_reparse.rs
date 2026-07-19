@@ -1901,13 +1901,305 @@ fn node_has_field_list_ancestor(n: tree_sitter::Node) -> bool {
 /// header *content* edits evict through `evict_analysis_caches` (the
 /// did_save / watched-files invalidation path).
 type MacroTable = BTreeMap<String, Macro>;
-fn macro_table_cache() -> &'static std::sync::Mutex<
-    std::collections::HashMap<std::path::PathBuf, (u64, std::sync::Arc<MacroTable>)>,
-> {
-    static C: std::sync::OnceLock<
-        std::sync::Mutex<std::collections::HashMap<std::path::PathBuf, (u64, std::sync::Arc<MacroTable>)>>,
-    > = std::sync::OnceLock::new();
-    C.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+
+// ============================================================================
+// GatherCache — the ONE byte-capped, single-flight memo all four cpp gather
+// caches (macro table, pre-expanded external, header parse, include closure)
+// instantiate. It replaces the bare `OnceLock<Mutex<HashMap>>` those four used
+// to be (unbounded growth, check-release-compute-insert races). Two properties,
+// coupled by design (`docs/adr/memory-slice-2-lru.md`, the residency discipline
+// in CLAUDE.md, hitlist H9-3):
+//
+//   * SINGLE-FLIGHT population. The first worker to miss a key CLAIMS it and
+//     computes; siblings expanding the same header cone (op.c/sv.c share ~90% of
+//     their include closure) BLOCK on the claimant's result via a condvar
+//     instead of each recomputing the whole expansion. One spelling, four
+//     caches — never hand-rolled per cache (rule #10's spirit).
+//   * BYTE-ACCOUNTED LRU cap. Retention is bounded by `cap_bytes`; the LRU tail
+//     is evicted on insert, never the just-inserted key (a single oversized
+//     entry over the whole cap still resolves the query it was loaded for — the
+//     `PackBagCache` rule). A cap of 0 means never retain (compute-and-drop).
+//
+// The two are coupled: a cap makes eviction real, which makes recompute storms
+// possible on an evicted shared cone — single-flight collapses each storm to one
+// flight. Explicit invalidation (`evict_gather_caches`) removes matching entries
+// AND cancels any in-flight compute for those keys (the claimant's now-stale
+// result is dropped on publish; a waiter recomputes fresh). No deadlock: the
+// state lock is NEVER held across a compute, and invalidation only touches the
+// lock.
+
+/// What a single-flight compute produced. `Store` caches the value (byte-
+/// accounted, LRU-evicted); `Transient` returns it to the caller WITHOUT caching
+/// (a degraded / incomplete result that must re-derive next call). A compute
+/// returning `None` (the `try` variant) is a MISS — cache nothing, yield nothing.
+enum Fill<V> {
+    Store(V, usize),
+    Transient(V),
+}
+
+/// How a `resolve` call settled — lets a caller distinguish a cached answer
+/// (hit or freshly stored: authoritative/complete) from a transient one.
+enum Resolution {
+    Cached,
+    Transient,
+    Missed,
+}
+
+struct GatherEntry<S, V> {
+    stamp: S,
+    value: V,
+    bytes: usize,
+    last_used: u64,
+}
+
+struct GatherState<K, S, V> {
+    entries: HashMap<K, GatherEntry<S, V>>,
+    /// Keys with a compute currently running (their claimant owns population).
+    in_flight: std::collections::HashSet<K>,
+    /// In-flight keys an invalidation targeted mid-compute — the claimant drops
+    /// its result on publish so a stale table can't land after the invalidate.
+    cancelled: std::collections::HashSet<K>,
+    total_bytes: usize,
+    clock: u64,
+}
+
+pub struct GatherCache<K, S, V> {
+    state: std::sync::Mutex<GatherState<K, S, V>>,
+    ready: std::sync::Condvar,
+    cap_bytes: usize,
+}
+
+/// Releases an in-flight claim (and clears any cancel marker) even if `compute`
+/// panics — otherwise the key would stay `in_flight` forever and every waiter
+/// would wedge on the condvar. The success path disarms it after publishing
+/// under the lock.
+struct FlightGuard<'a, K, S, V>
+where
+    K: Eq + std::hash::Hash + Clone,
+{
+    cache: &'a GatherCache<K, S, V>,
+    key: &'a K,
+    armed: bool,
+}
+
+impl<K, S, V> Drop for FlightGuard<'_, K, S, V>
+where
+    K: Eq + std::hash::Hash + Clone,
+{
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        if let Ok(mut st) = self.cache.state.lock() {
+            st.in_flight.remove(self.key);
+            st.cancelled.remove(self.key);
+        }
+        self.cache.ready.notify_all();
+    }
+}
+
+impl<K, S, V> GatherCache<K, S, V>
+where
+    K: Eq + std::hash::Hash + Clone,
+    S: PartialEq + Clone,
+    V: Clone,
+{
+    fn new(cap_bytes: usize) -> Self {
+        GatherCache {
+            state: std::sync::Mutex::new(GatherState {
+                entries: HashMap::new(),
+                in_flight: std::collections::HashSet::new(),
+                cancelled: std::collections::HashSet::new(),
+                total_bytes: 0,
+                clock: 0,
+            }),
+            ready: std::sync::Condvar::new(),
+            cap_bytes,
+        }
+    }
+
+    /// Fetch the stamp-matching cached value or single-flight compute it; the
+    /// compute always yields a value (`Store`/`Transient`), so this never misses.
+    fn get_or_fill<F>(&self, key: K, stamp: S, compute: F) -> V
+    where
+        F: FnOnce() -> Fill<V>,
+    {
+        self.resolve(key, stamp, || Some(compute()))
+            .0
+            .expect("get_or_fill compute always yields a value")
+    }
+
+    /// Fetch or single-flight compute. `compute` returns `None` for a MISS
+    /// (cache nothing, yield `None` — e.g. the on-open cached-only skip, or a
+    /// header that failed to read).
+    fn get_or_try_fill<F>(&self, key: K, stamp: S, compute: F) -> Option<V>
+    where
+        F: FnOnce() -> Option<Fill<V>>,
+    {
+        self.resolve(key, stamp, compute).0
+    }
+
+    /// The single-flight + byte-cap core. Returns the value plus how it settled.
+    fn resolve<F>(&self, key: K, stamp: S, compute: F) -> (Option<V>, Resolution)
+    where
+        F: FnOnce() -> Option<Fill<V>>,
+    {
+        // 1. Acquire the key. A stamp-matching entry is a hit; a live in-flight
+        //    compute is waited on (the whole point — no duplicate expansion);
+        //    otherwise claim the key so siblings coalesce onto our compute.
+        {
+            let mut st = self.state.lock().expect("gather cache poisoned");
+            loop {
+                let fresh = st
+                    .entries
+                    .get(&key)
+                    .filter(|e| e.stamp == stamp)
+                    .map(|e| e.value.clone());
+                if let Some(v) = fresh {
+                    st.clock += 1;
+                    let c = st.clock;
+                    if let Some(e) = st.entries.get_mut(&key) {
+                        e.last_used = c;
+                    }
+                    return (Some(v), Resolution::Cached);
+                }
+                if st.in_flight.contains(&key) {
+                    st = self.ready.wait(st).expect("gather cache poisoned");
+                    continue;
+                }
+                st.in_flight.insert(key.clone());
+                break;
+            }
+        }
+
+        // 2. Compute with NO lock held (siblings block on the condvar meanwhile).
+        let mut guard = FlightGuard { cache: self, key: &key, armed: true };
+        let outcome = compute();
+
+        // 3. Publish under the lock. An invalidation that landed for this key
+        //    mid-compute (recorded in `cancelled`) drops our stale result.
+        let mut st = self.state.lock().expect("gather cache poisoned");
+        st.in_flight.remove(&key);
+        let cancelled = st.cancelled.remove(&key);
+        guard.armed = false;
+        let out = match outcome {
+            Some(Fill::Store(v, bytes)) => {
+                if !cancelled && self.cap_bytes > 0 {
+                    if let Some(old) = st.entries.remove(&key) {
+                        st.total_bytes -= old.bytes;
+                    }
+                    st.clock += 1;
+                    let c = st.clock;
+                    st.total_bytes += bytes;
+                    st.entries.insert(
+                        key.clone(),
+                        GatherEntry { stamp, value: v.clone(), bytes, last_used: c },
+                    );
+                    self.evict_to_cap(&mut st, &key);
+                }
+                (Some(v), Resolution::Cached)
+            }
+            Some(Fill::Transient(v)) => (Some(v), Resolution::Transient),
+            None => (None, Resolution::Missed),
+        };
+        drop(st);
+        self.ready.notify_all();
+        out
+    }
+
+    /// Drop LRU-tail entries until resident bytes are within cap. Never evicts
+    /// `keep` (the just-inserted key), matching `PackBagCache::evict_to_cap`.
+    fn evict_to_cap(&self, st: &mut GatherState<K, S, V>, keep: &K) {
+        while st.total_bytes > self.cap_bytes {
+            let victim = st
+                .entries
+                .iter()
+                .filter(|&(k, _)| k != keep)
+                .min_by_key(|(_, e)| e.last_used)
+                .map(|(k, _)| k.clone());
+            let Some(victim) = victim else { break };
+            if let Some(e) = st.entries.remove(&victim) {
+                st.total_bytes -= e.bytes;
+            }
+        }
+    }
+
+    /// Drop every entry whose key satisfies `pred` and cancel any in-flight
+    /// compute for such a key (its result is discarded on publish; a waiter
+    /// recomputes fresh). Holds only the state lock — never a compute — so it
+    /// can't deadlock a worker waiting on the condvar.
+    fn invalidate<P: Fn(&K) -> bool>(&self, pred: P) {
+        let mut st = self.state.lock().expect("gather cache poisoned");
+        let victims: Vec<K> = st.entries.keys().filter(|k| pred(k)).cloned().collect();
+        for k in victims {
+            if let Some(e) = st.entries.remove(&k) {
+                st.total_bytes -= e.bytes;
+            }
+        }
+        let flight: Vec<K> = st.in_flight.iter().filter(|k| pred(k)).cloned().collect();
+        for k in flight {
+            st.cancelled.insert(k);
+        }
+        drop(st);
+        self.ready.notify_all();
+    }
+
+    /// `(entries, resident_bytes)` — the exact accounted footprint (diagnostic).
+    fn stats(&self) -> (usize, usize) {
+        let st = self.state.lock().expect("gather cache poisoned");
+        (st.entries.len(), st.total_bytes)
+    }
+}
+
+/// Per-cache byte cap. Each of the four gather caches gets its own default
+/// (justified at its constructor); `PERL_LSP_GATHER_CACHE_MB` overrides ALL of
+/// them to one value (0 ⇒ never retain — the most aggressive footprint, for
+/// A/B'ing the cap's cost). Mirrors the `maxCacheMb` / `PERL_LSP_*` precedents.
+fn gather_cap_bytes(default_mb: usize) -> usize {
+    let mb = std::env::var("PERL_LSP_GATHER_CACHE_MB")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(default_mb);
+    mb.saturating_mul(1024 * 1024)
+}
+
+fn macro_heap_bytes(m: &Macro) -> usize {
+    m.body.capacity()
+        + m.params.as_ref().map_or(0, |p| p.iter().map(|s| s.capacity() + 24).sum())
+        + m.guards.iter().map(|s| s.capacity() + 24).sum::<usize>()
+        + 48
+}
+
+fn macro_table_heap_bytes(t: &MacroTable) -> usize {
+    t.iter().map(|(k, v)| k.capacity() + macro_heap_bytes(v) + 32).sum()
+}
+
+fn strings_heap_bytes<S: AsRef<str>>(v: &[S]) -> usize {
+    v.iter().map(|s| s.as_ref().len() + 24).sum()
+}
+
+/// `header_cache` default: 128 MiB. Shared across ALL files (deduped by header
+/// PATH, not by consuming file) and NOT dropped by the bulk-index
+/// `evict_gather_caches_keep_headers` — it lives for the whole session and is
+/// the highest-reuse, lowest-cost tier (~2.6 KB/header measured on re2), so 128
+/// MiB holds ~50K distinct headers before the LRU trims the cold tail.
+const HEADER_CACHE_MB: usize = 128;
+/// `macro_table_cache` default: 128 MiB. Per-file raw merged closure table
+/// (perl.h ≈ 2000 macros); 128 MiB matches the PackBagCache/enrichment-overlay
+/// budget class for the hottest gather tier.
+const MACRO_TABLE_CACHE_MB: usize = 128;
+/// `pre_expanded_cache` default: 128 MiB. Full+alias mutual pre-expansion ON
+/// TOP of the raw table — the biggest per-entry payload; same 128 MiB class.
+const PRE_EXPANDED_CACHE_MB: usize = 128;
+/// `include_closure_cache` default: 64 MiB. Per-file path-string lists only
+/// (~37 KB/file on abseil), so 64 MiB holds ~1700 files' closures — the
+/// smallest per-entry tier gets the smaller cap.
+const INCLUDE_CLOSURE_CACHE_MB: usize = 64;
+
+fn macro_table_cache() -> &'static GatherCache<std::path::PathBuf, u64, std::sync::Arc<MacroTable>> {
+    static C: OnceLock<GatherCache<std::path::PathBuf, u64, std::sync::Arc<MacroTable>>> =
+        OnceLock::new();
+    C.get_or_init(|| GatherCache::new(gather_cap_bytes(MACRO_TABLE_CACHE_MB)))
 }
 
 /// Hash of the file's `#include` directives — the cache key's variable part.
@@ -2044,33 +2336,26 @@ fn included_macros_inner(
 ) -> Option<std::sync::Arc<MacroTable>> {
     let key = file_path.to_path_buf();
     let inc_hash = include_set_hash(src);
-    // 1. in-memory (this session)
-    if let Ok(cache) = macro_table_cache().lock() {
-        if let Some((h, m)) = cache.get(&key) {
-            if *h == inc_hash {
-                return Some(m.clone());
-            }
+    // Tier 1 (in-memory, this session) IS the GatherCache hit. On a miss the
+    // single-flight claimant runs tiers 2+3; siblings on the same key wait for
+    // its result rather than re-paying the cold gather.
+    macro_table_cache().get_or_try_fill(key, inc_hash, || {
+        // Tier 2: on-disk (across sessions) — kills the cold-start gather.
+        if let Some(table) = load_persisted(file_path, inc_hash) {
+            let arc = std::sync::Arc::new(table);
+            let bytes = macro_table_heap_bytes(&arc);
+            return Some(Fill::Store(arc, bytes));
         }
-    }
-    // 2. on-disk (across sessions) — kills the cold-start gather
-    if let Some(table) = load_persisted(file_path, inc_hash) {
+        if !allow_cold {
+            return None; // on-open: don't block on the cold gather
+        }
+        // Tier 3: gather cold, warm disk + this cache.
+        let (table, headers) = gather_included_macros(file_path, src, parser);
+        save_persisted(file_path, inc_hash, headers, &table);
         let arc = std::sync::Arc::new(table);
-        if let Ok(mut cache) = macro_table_cache().lock() {
-            cache.insert(key, (inc_hash, arc.clone()));
-        }
-        return Some(arc);
-    }
-    if !allow_cold {
-        return None; // on-open: don't block on the cold gather
-    }
-    // 3. gather cold, then warm both tiers
-    let (table, headers) = gather_included_macros(file_path, src, parser);
-    save_persisted(file_path, inc_hash, headers, &table);
-    let arc = std::sync::Arc::new(table);
-    if let Ok(mut cache) = macro_table_cache().lock() {
-        cache.insert(key, (inc_hash, arc.clone()));
-    }
-    Some(arc)
+        let bytes = macro_table_heap_bytes(&arc);
+        Some(Fill::Store(arc, bytes))
+    })
 }
 
 /// One pre-expanded variant of the external table + the identifiers its bodies
@@ -2192,12 +2477,21 @@ fn body_identifiers(macros: &MacroTable) -> std::collections::HashSet<String> {
     out
 }
 
-type PreExpandedCache =
-    std::collections::HashMap<std::path::PathBuf, (u64, std::sync::Arc<PreExpandedExternal>)>;
+fn pre_expanded_cache() -> &'static GatherCache<std::path::PathBuf, u64, std::sync::Arc<PreExpandedExternal>>
+{
+    static C: OnceLock<
+        GatherCache<std::path::PathBuf, u64, std::sync::Arc<PreExpandedExternal>>,
+    > = OnceLock::new();
+    C.get_or_init(|| GatherCache::new(gather_cap_bytes(PRE_EXPANDED_CACHE_MB)))
+}
 
-fn pre_expanded_cache() -> &'static std::sync::Mutex<PreExpandedCache> {
-    static C: std::sync::OnceLock<std::sync::Mutex<PreExpandedCache>> = std::sync::OnceLock::new();
-    C.get_or_init(|| std::sync::Mutex::new(PreExpandedCache::new()))
+/// The full+alias expanded-variant payload ADDED on top of the raw table (the
+/// raw `Arc` is shared with `macro_table_cache`, so it is NOT counted here).
+fn pre_expanded_heap_bytes(pe: &PreExpandedExternal) -> usize {
+    macro_table_heap_bytes(&pe.full.table)
+        + pe.full.body_idents.iter().map(|s| s.len() + 24).sum::<usize>()
+        + macro_table_heap_bytes(&pe.alias.table)
+        + pe.alias.body_idents.iter().map(|s| s.len() + 24).sum::<usize>()
 }
 
 /// `included_macros` plus the one-time mutual pre-expansion of the external
@@ -2211,25 +2505,20 @@ pub fn included_macros_pre_expanded(
 ) -> std::sync::Arc<PreExpandedExternal> {
     let key = file_path.to_path_buf();
     let inc_hash = include_set_hash(src);
-    if let Ok(cache) = pre_expanded_cache().lock() {
-        if let Some((h, pe)) = cache.get(&key) {
-            if *h == inc_hash {
-                return pe.clone();
+    pre_expanded_cache().get_or_fill(key, inc_hash, || {
+        // In cached-only mode (on-open), a raw-table miss yields an EMPTY
+        // external set that is deliberately NOT cached (`Transient`) — so the
+        // background gather's real table lands cleanly once it warms and this
+        // file is re-analyzed.
+        match included_macros_inner(file_path, src, parser, !gather_cached_only()) {
+            Some(raw) => {
+                let pe = std::sync::Arc::new(PreExpandedExternal::from_raw(raw));
+                let bytes = pre_expanded_heap_bytes(&pe);
+                Fill::Store(pe, bytes)
             }
+            None => Fill::Transient(std::sync::Arc::new(PreExpandedExternal::degraded_empty())),
         }
-    }
-    // In cached-only mode (on-open), a raw-table miss yields an EMPTY external
-    // set that is deliberately NOT cached — so the background gather's real
-    // table lands cleanly once it warms and this file is re-analyzed.
-    let raw = match included_macros_inner(file_path, src, parser, !gather_cached_only()) {
-        Some(raw) => raw,
-        None => return std::sync::Arc::new(PreExpandedExternal::degraded_empty()),
-    };
-    let pe = std::sync::Arc::new(PreExpandedExternal::from_raw(raw));
-    if let Ok(mut cache) = pre_expanded_cache().lock() {
-        cache.insert(key, (inc_hash, pe.clone()));
-    }
-    pe
+    })
 }
 
 thread_local! {
@@ -2343,24 +2632,30 @@ fn file_stamp(path: &std::path::Path) -> i64 {
 /// A header's cached (macros + include edges), by (path, mtime). The cache
 /// makes the per-edit re-gather cheap (warm hits skip read+parse).
 fn header_info(canon: &std::path::Path, parser: &mut tree_sitter::Parser) -> Option<std::sync::Arc<CachedHeader>> {
-    let mtime = std::fs::metadata(canon).and_then(|m| m.modified()).ok();
-    let hit = header_cache()
-        .lock()
-        .ok()
-        .and_then(|c| c.get(canon).and_then(|(t, info)| (Some(*t) == mtime).then(|| info.clone())));
-    if let Some(info) = hit {
-        return Some(info);
-    }
-    let src = std::fs::read_to_string(canon).ok()?;
-    let tree = parser.parse(&src, None)?;
-    let info = std::sync::Arc::new(CachedHeader {
-        macros: collect_macros(&tree, src.as_bytes()),
-        includes: include_paths_tree(&tree, &src),
-    });
-    if let (Some(t), Ok(mut c)) = (mtime, header_cache().lock()) {
-        c.insert(canon.to_path_buf(), (t, info.clone()));
-    }
-    Some(info)
+    let mut build = |canon: &std::path::Path| -> Option<std::sync::Arc<CachedHeader>> {
+        let src = std::fs::read_to_string(canon).ok()?;
+        let tree = parser.parse(&src, None)?;
+        Some(std::sync::Arc::new(CachedHeader {
+            macros: collect_macros(&tree, src.as_bytes()),
+            includes: include_paths_tree(&tree, &src),
+        }))
+    };
+    // No mtime (metadata failed) ⇒ no stamp: compute uncached, as before.
+    let Some(mtime) = std::fs::metadata(canon).and_then(|m| m.modified()).ok() else {
+        return build(canon);
+    };
+    // Single-flight by (path, mtime): sibling TUs including the same header
+    // (op.c/sv.c share most of theirs) wait for ONE read+parse, not N.
+    header_cache().get_or_try_fill(canon.to_path_buf(), mtime, || {
+        build(canon).map(|info| {
+            let bytes = header_heap_bytes(&info);
+            Fill::Store(info, bytes)
+        })
+    })
+}
+
+fn header_heap_bytes(h: &CachedHeader) -> usize {
+    macro_table_heap_bytes(&h.macros) + strings_heap_bytes(&h.includes)
 }
 
 /// A header's own #defines + its include edges — cached by (path, mtime)
@@ -2372,14 +2667,12 @@ struct CachedHeader {
     includes: Vec<String>,
 }
 
-type HeaderCache = std::collections::HashMap<
-    std::path::PathBuf,
-    (std::time::SystemTime, std::sync::Arc<CachedHeader>),
->;
-
-fn header_cache() -> &'static std::sync::Mutex<HeaderCache> {
-    static C: std::sync::OnceLock<std::sync::Mutex<HeaderCache>> = std::sync::OnceLock::new();
-    C.get_or_init(|| std::sync::Mutex::new(HeaderCache::new()))
+fn header_cache(
+) -> &'static GatherCache<std::path::PathBuf, std::time::SystemTime, std::sync::Arc<CachedHeader>> {
+    static C: OnceLock<
+        GatherCache<std::path::PathBuf, std::time::SystemTime, std::sync::Arc<CachedHeader>>,
+    > = OnceLock::new();
+    C.get_or_init(|| GatherCache::new(gather_cap_bytes(HEADER_CACHE_MB)))
 }
 
 /// The default C/C++ toolchain's discovered surface (system include roots +
@@ -2495,13 +2788,11 @@ fn scan_include_directives(src: &str) -> Vec<String> {
     out
 }
 
-type IncludeClosureCache =
-    std::collections::HashMap<std::path::PathBuf, (u64, std::sync::Arc<Vec<String>>)>;
-
-fn include_closure_cache() -> &'static std::sync::Mutex<IncludeClosureCache> {
-    static C: std::sync::OnceLock<std::sync::Mutex<IncludeClosureCache>> =
-        std::sync::OnceLock::new();
-    C.get_or_init(|| std::sync::Mutex::new(IncludeClosureCache::new()))
+fn include_closure_cache(
+) -> &'static GatherCache<std::path::PathBuf, u64, std::sync::Arc<Vec<String>>> {
+    static C: OnceLock<GatherCache<std::path::PathBuf, u64, std::sync::Arc<Vec<String>>>> =
+        OnceLock::new();
+    C.get_or_init(|| GatherCache::new(gather_cap_bytes(INCLUDE_CLOSURE_CACHE_MB)))
 }
 
 /// The transitive `#include` closure of `file_path`, as canonical path strings
@@ -2528,60 +2819,62 @@ fn include_closure_cache() -> &'static std::sync::Mutex<IncludeClosureCache> {
 pub fn include_closure(file_path: &std::path::Path, src: &str) -> (Vec<String>, bool) {
     let key = file_path.to_path_buf();
     let inc_hash = include_set_hash(src);
-    if let Ok(cache) = include_closure_cache().lock() {
-        if let Some((h, c)) = cache.get(&key) {
-            if *h == inc_hash {
-                return ((**c).clone(), true);
-            }
+    // The walk runs single-flight on a miss. A hit or a freshly-stored (COMPLETE)
+    // closure resolves `Cached`; the cached-only placeholder and a truncated
+    // closure resolve `Transient` (returned, never cached) → `complete = false`.
+    let (arc, res) = include_closure_cache().resolve(key, inc_hash, || {
+        if gather_cached_only() {
+            // on-open placeholder: fill on background re-analyze
+            return Some(Fill::Transient(std::sync::Arc::new(Vec::new())));
         }
-    }
-    if gather_cached_only() {
-        return (Vec::new(), false); // on-open placeholder: fill on background re-analyze
-    }
-    let mut seen = std::collections::HashSet::new();
-    if let Ok(p) = file_path.canonicalize() {
-        seen.insert(p);
-    }
-    let mut out: Vec<String> = Vec::new();
-    let mut complete = true;
-    let mut frontier: Vec<std::path::PathBuf> = scan_include_directives(src)
-        .iter()
-        .filter_map(|inc| resolve_include(file_path, inc))
-        .collect();
-    while !frontier.is_empty() {
-        let mut next: Vec<std::path::PathBuf> = Vec::new();
-        for path in frontier.drain(..) {
-            let Ok(canon) = path.canonicalize() else { continue };
-            if !seen.insert(canon.clone()) {
-                continue;
-            }
-            out.push(canon.to_string_lossy().into_owned());
-            match std::fs::read_to_string(&canon) {
-                Ok(hsrc) => {
-                    for inc in scan_include_directives(&hsrc) {
-                        if let Some(nx) = resolve_include(&canon, &inc) {
-                            next.push(nx);
+        let mut seen = std::collections::HashSet::new();
+        if let Ok(p) = file_path.canonicalize() {
+            seen.insert(p);
+        }
+        let mut out: Vec<String> = Vec::new();
+        let mut complete = true;
+        let mut frontier: Vec<std::path::PathBuf> = scan_include_directives(src)
+            .iter()
+            .filter_map(|inc| resolve_include(file_path, inc))
+            .collect();
+        while !frontier.is_empty() {
+            let mut next: Vec<std::path::PathBuf> = Vec::new();
+            for path in frontier.drain(..) {
+                let Ok(canon) = path.canonicalize() else { continue };
+                if !seen.insert(canon.clone()) {
+                    continue;
+                }
+                out.push(canon.to_string_lossy().into_owned());
+                match std::fs::read_to_string(&canon) {
+                    Ok(hsrc) => {
+                        for inc in scan_include_directives(&hsrc) {
+                            if let Some(nx) = resolve_include(&canon, &inc) {
+                                next.push(nx);
+                            }
                         }
                     }
+                    // The header canonicalized (exists) but couldn't be read: its
+                    // transitive includes are silently dropped, truncating the
+                    // closure. Mark incomplete so the analysis isn't frozen.
+                    Err(_) => complete = false,
                 }
-                // The header canonicalized (exists) but couldn't be read: its
-                // transitive includes are silently dropped, truncating the
-                // closure. Mark incomplete so the analysis isn't frozen.
-                Err(_) => complete = false,
             }
+            frontier = next;
         }
-        frontier = next;
-    }
-    out.sort();
-    out.dedup();
-    // Only memoize a COMPLETE closure: a transient truncation must re-gather
-    // next call, not stick in the in-session cache.
-    if complete {
-        if let Ok(mut cache) = include_closure_cache().lock() {
-            cache.insert(key, (inc_hash, std::sync::Arc::new(out.clone())));
+        out.sort();
+        out.dedup();
+        let arc = std::sync::Arc::new(out);
+        // Only memoize a COMPLETE closure: a transient truncation must re-gather
+        // next call, not stick in the in-session cache.
+        if complete {
+            let bytes = strings_heap_bytes(&arc);
+            Some(Fill::Store(arc, bytes))
+        } else {
+            Some(Fill::Transient(arc))
         }
-    }
-    (out, complete)
+    });
+    let complete = matches!(res, Resolution::Cached);
+    (arc.map(|a| (*a).clone()).unwrap_or_default(), complete)
 }
 
 /// Drop every per-file analysis cache entry for the given files (CANONICAL
@@ -2617,19 +2910,14 @@ fn evict_gather_caches(files: &std::collections::HashSet<std::path::PathBuf>, dr
                 .map(|c| files.contains(&c))
                 .unwrap_or(false)
     };
-    if let Ok(mut c) = macro_table_cache().lock() {
-        c.retain(|k, _| !hit(k));
-    }
-    if let Ok(mut c) = pre_expanded_cache().lock() {
-        c.retain(|k, _| !hit(k));
-    }
-    if let Ok(mut c) = include_closure_cache().lock() {
-        c.retain(|k, _| !hit(k));
-    }
+    // `invalidate` drops matching entries AND cancels any in-flight compute for
+    // them (a claimant's stale result is discarded on publish; a waiter
+    // recomputes) — no deadlock, it only touches the state lock.
+    macro_table_cache().invalidate(&hit);
+    pre_expanded_cache().invalidate(&hit);
+    include_closure_cache().invalidate(&hit);
     if drop_headers {
-        if let Ok(mut c) = header_cache().lock() {
-            c.retain(|k, _| !hit(k));
-        }
+        header_cache().invalidate(&hit);
     }
 }
 
@@ -2639,48 +2927,15 @@ fn evict_gather_caches(files: &std::collections::HashSet<std::path::PathBuf>, dr
 /// the numbers track the actual macro-table blow-up. NOT wired into any query
 /// path — a diagnostic only.
 pub fn cache_size_report() -> String {
-    fn macro_bytes(m: &Macro) -> usize {
-        m.body.capacity()
-            + m.params.as_ref().map_or(0, |p| p.iter().map(|s| s.capacity() + 24).sum())
-            + m.guards.iter().map(|s| s.capacity() + 24).sum::<usize>()
-            + 48
-    }
-    fn table_bytes(t: &MacroTable) -> usize {
-        t.iter().map(|(k, v)| k.capacity() + macro_bytes(v) + 32).sum()
-    }
-    let (mut mt_n, mut mt_b) = (0usize, 0usize);
-    if let Ok(c) = macro_table_cache().lock() {
-        mt_n = c.len();
-        mt_b = c.values().map(|(_, t)| table_bytes(t)).sum();
-    }
-    let (mut hc_n, mut hc_b) = (0usize, 0usize);
-    if let Ok(c) = header_cache().lock() {
-        hc_n = c.len();
-        hc_b = c
-            .values()
-            .map(|(_, h)| table_bytes(&h.macros) + h.includes.iter().map(|s| s.capacity() + 24).sum::<usize>())
-            .sum();
-    }
+    // The caches now byte-account at insert time, so the resident footprint is
+    // read straight off each `GatherCache` (`macro_table_heap_bytes` etc. are
+    // the same estimators these totals were summed with).
+    let (mt_n, mt_b) = macro_table_cache().stats();
+    let (hc_n, hc_b) = header_cache().stats();
     // pre_expanded's `raw` Arc is SHARED with macro_table_cache (same
-    // allocation) — count only the ADDED full+alias expanded-variant tables.
-    let (mut pe_n, mut pe_b) = (0usize, 0usize);
-    if let Ok(c) = pre_expanded_cache().lock() {
-        pe_n = c.len();
-        pe_b = c
-            .values()
-            .map(|(_, pe)| {
-                table_bytes(&pe.full.table)
-                    + pe.full.body_idents.iter().map(|s| s.capacity() + 24).sum::<usize>()
-                    + table_bytes(&pe.alias.table)
-                    + pe.alias.body_idents.iter().map(|s| s.capacity() + 24).sum::<usize>()
-            })
-            .sum();
-    }
-    let (mut ic_n, mut ic_b) = (0usize, 0usize);
-    if let Ok(c) = include_closure_cache().lock() {
-        ic_n = c.len();
-        ic_b = c.values().map(|(_, v)| v.iter().map(|s| s.capacity() + 24).sum::<usize>()).sum();
-    }
+    // allocation) — its total counts only the ADDED full+alias variants.
+    let (pe_n, pe_b) = pre_expanded_cache().stats();
+    let (ic_n, ic_b) = include_closure_cache().stats();
     let mb = |b: usize| b as f64 / 1_048_576.0;
     format!(
         "cpp gather caches (heap payload est.):\n  header_cache:       {hc_n:>6} headers, {:>8.1} MB (shared across files)\n  macro_table_cache:  {mt_n:>6} files,   {:>8.1} MB (raw merged table, Arc-shared w/ pre_expanded)\n  pre_expanded_cache: {pe_n:>6} files,   {:>8.1} MB (full+alias expanded variants, ON TOP of raw)\n  include_closure:    {ic_n:>6} files,   {:>8.1} MB\n  TOTAL: {:>8.1} MB",

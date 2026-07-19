@@ -1025,3 +1025,180 @@ fn valued_and_functional_ifndef_defines_are_not_guards() {
     assert!(!guards.contains("MAXVAL"), "valued define is not a guard: {guards:?}");
     assert!(!guards.contains("MIN"), "function-like define is not a guard: {guards:?}");
 }
+
+// ============================================================================
+// GatherCache wrapper (H9-3): single-flight population, byte-cap LRU eviction,
+// and cancel-safe invalidation during an in-flight compute.
+// ============================================================================
+
+#[test]
+fn gather_cache_single_flight_computes_once() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Barrier};
+    // A cap large enough to retain the one entry; N racing threads on ONE key.
+    let cache: Arc<GatherCache<u32, u64, Arc<u64>>> = Arc::new(GatherCache::new(1 << 20));
+    let calls = Arc::new(AtomicUsize::new(0));
+    let n = 16usize;
+    let barrier = Arc::new(Barrier::new(n));
+    let mut handles = Vec::new();
+    for _ in 0..n {
+        let cache = cache.clone();
+        let calls = calls.clone();
+        let barrier = barrier.clone();
+        handles.push(std::thread::spawn(move || {
+            barrier.wait(); // maximize the race on the same key/stamp
+            let v = cache.get_or_fill(7u32, 1u64, || {
+                calls.fetch_add(1, Ordering::SeqCst);
+                // Hold the flight open so siblings pile onto the condvar.
+                std::thread::sleep(std::time::Duration::from_millis(50));
+                Fill::Store(Arc::new(42u64), 128)
+            });
+            assert_eq!(*v, 42);
+        }));
+    }
+    for h in handles {
+        h.join().unwrap();
+    }
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        1,
+        "single-flight: {n} racing threads computed the key exactly once"
+    );
+    let (len, bytes) = cache.stats();
+    assert_eq!((len, bytes), (1, 128), "one entry, byte-accounted");
+}
+
+#[test]
+fn gather_cache_cap_evicts_lru_keeps_just_inserted() {
+    use std::sync::Arc;
+    // Cap = 250 bytes; each entry is 100 bytes → holds 2, the 3rd evicts one.
+    let cache: GatherCache<u32, u64, Arc<u32>> = GatherCache::new(250);
+    for k in 0..2u32 {
+        cache.get_or_fill(k, 0, || Fill::Store(Arc::new(k), 100));
+    }
+    // Touch key 0 so key 1 becomes the LRU victim.
+    assert_eq!(*cache.get_or_fill(0, 0, || panic!("0 already resident")), 0);
+    // Insert key 2 → total would be 300 > 250, evict the LRU (key 1), keep 2.
+    cache.get_or_fill(2, 0, || Fill::Store(Arc::new(2u32), 100));
+    let (len, bytes) = cache.stats();
+    assert!(bytes <= 250, "resident bytes within cap: {bytes}");
+    assert_eq!(len, 2, "cap holds two 100-byte entries");
+    // key 1 (LRU) evicted; key 0 (touched) and key 2 (just-inserted) survive.
+    let mut recomputed_1 = false;
+    cache.get_or_fill(1, 0, || {
+        recomputed_1 = true;
+        Fill::Store(Arc::new(1u32), 100)
+    });
+    assert!(recomputed_1, "LRU victim key 1 was evicted and recomputed");
+    let mut recomputed_2 = false;
+    cache.get_or_fill(2, 0, || {
+        recomputed_2 = true;
+        Fill::Store(Arc::new(2u32), 100)
+    });
+    assert!(!recomputed_2, "just-inserted key 2 survived eviction");
+}
+
+#[test]
+fn gather_cache_cap_zero_never_retains() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+    let cache: GatherCache<u32, u64, Arc<u32>> = GatherCache::new(0);
+    let calls = Arc::new(AtomicUsize::new(0));
+    for _ in 0..3 {
+        let c = calls.clone();
+        let v = cache.get_or_fill(1u32, 0, || {
+            c.fetch_add(1, Ordering::SeqCst);
+            Fill::Store(Arc::new(9u32), 100)
+        });
+        assert_eq!(*v, 9);
+    }
+    assert_eq!(calls.load(Ordering::SeqCst), 3, "cap 0 caches nothing");
+    assert_eq!(cache.stats(), (0, 0));
+}
+
+#[test]
+fn gather_cache_transient_and_miss_are_not_cached() {
+    use std::sync::Arc;
+    let cache: GatherCache<u32, u64, Arc<u32>> = GatherCache::new(1 << 20);
+    // Transient: returned but never stored.
+    let v = cache.get_or_fill(1u32, 0, || Fill::Transient(Arc::new(5u32)));
+    assert_eq!(*v, 5);
+    assert_eq!(cache.stats(), (0, 0), "transient not cached");
+    // Miss: yields None, caches nothing.
+    let none = cache.get_or_try_fill(1u32, 0, || None);
+    assert!(none.is_none());
+    assert_eq!(cache.stats(), (0, 0), "miss not cached");
+}
+
+#[test]
+fn gather_cache_stale_stamp_recomputes_and_replaces() {
+    use std::sync::Arc;
+    let cache: GatherCache<u32, u64, Arc<u32>> = GatherCache::new(1 << 20);
+    cache.get_or_fill(1u32, 100, || Fill::Store(Arc::new(1u32), 64));
+    // Same key, NEW stamp → the old entry is stale, recompute & replace.
+    let mut recomputed = false;
+    let v = cache.get_or_fill(1u32, 200, || {
+        recomputed = true;
+        Fill::Store(Arc::new(2u32), 80)
+    });
+    assert!(recomputed, "stamp change forces recompute");
+    assert_eq!(*v, 2);
+    assert_eq!(cache.stats(), (1, 80), "stale entry replaced, bytes re-accounted");
+}
+
+#[test]
+fn gather_cache_invalidate_during_inflight_no_deadlock_fresh_recompute() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Barrier};
+    // A worker claims key 1 and computes slowly; mid-flight, invalidation fires
+    // for key 1. The claimant's (now-stale) result must be DROPPED, and a
+    // subsequent reader must get a FRESH compute — with no deadlock.
+    let cache: Arc<GatherCache<u32, u64, Arc<u32>>> = Arc::new(GatherCache::new(1 << 20));
+    let calls = Arc::new(AtomicUsize::new(0));
+    let entered = Arc::new(Barrier::new(2));
+
+    let c1 = cache.clone();
+    let calls1 = calls.clone();
+    let entered1 = entered.clone();
+    let worker = std::thread::spawn(move || {
+        c1.get_or_fill(1u32, 0, || {
+            calls1.fetch_add(1, Ordering::SeqCst);
+            entered1.wait(); // signal we are inside the flight
+            std::thread::sleep(std::time::Duration::from_millis(80));
+            Fill::Store(Arc::new(111u32), 64)
+        });
+    });
+
+    entered.wait(); // ensure the compute is in-flight before we invalidate
+    cache.invalidate(|k| *k == 1); // cancel the in-flight key 1
+    worker.join().unwrap(); // must not hang
+
+    // The cancelled result must not have landed.
+    assert_eq!(cache.stats().0, 0, "cancelled in-flight result was not cached");
+
+    // A fresh read recomputes cleanly.
+    let mut fresh = false;
+    let v = cache.get_or_fill(1u32, 0, || {
+        fresh = true;
+        Fill::Store(Arc::new(222u32), 64)
+    });
+    assert!(fresh, "post-invalidation reader gets a fresh compute");
+    assert_eq!(*v, 222);
+    assert_eq!(cache.stats(), (1, 64));
+    assert_eq!(calls.load(Ordering::SeqCst), 1, "the cancelled flight ran exactly once");
+}
+
+#[test]
+fn gather_cache_invalidate_predicate_selective() {
+    use std::sync::Arc;
+    let cache: GatherCache<u32, u64, Arc<u32>> = GatherCache::new(1 << 20);
+    for k in 0..4u32 {
+        cache.get_or_fill(k, 0, || Fill::Store(Arc::new(k), 50));
+    }
+    assert_eq!(cache.stats(), (4, 200));
+    cache.invalidate(|k| k % 2 == 0); // drop even keys
+    assert_eq!(cache.stats(), (2, 100), "only even keys evicted, bytes re-accounted");
+    // Odd keys still resident (no recompute).
+    assert_eq!(*cache.get_or_fill(1, 0, || panic!("1 still cached")), 1);
+    assert_eq!(*cache.get_or_fill(3, 0, || panic!("3 still cached")), 3);
+}
