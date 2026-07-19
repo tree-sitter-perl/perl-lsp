@@ -45,7 +45,9 @@ static REHYDRATION_MISSES: std::sync::atomic::AtomicUsize =
 /// How many evicted copies failed to rehydrate this process (each was
 /// served as a stripped resident — quietly incomplete answers). Zero in a
 /// healthy session; the strict gate (`PERL_LSP_STRICT_RESIDENCY`) panics
-/// at the first miss instead of counting.
+/// at the first miss instead of counting. Observability hook read by the
+/// residency tests; production reacts via the strict gate, not this reader.
+#[cfg(test)]
 pub fn rehydration_miss_count() -> usize {
     REHYDRATION_MISSES.load(std::sync::atomic::Ordering::Relaxed)
 }
@@ -509,8 +511,6 @@ pub struct ModuleIndex {
     queue: Arc<ResolveQueue>,
     resolved: Arc<ResolveNotify>,
     workspace_root: Arc<WorkspaceRootChannel>,
-    /// Callback to trigger diagnostic re-publish after module resolution.
-    refresh_diagnostics: Arc<dyn Fn() + Send + Sync>,
     /// Per-language sub-indexes (`"cpp"`, `"python"`, …) — kept SEPARATE
     /// (own cache, own `modules-{lang}.db`) so names never comingle across
     /// languages. The Perl index is the hub; query routing picks the right
@@ -629,8 +629,7 @@ impl ModuleIndex {
             condvar: Condvar::new(),
         });
 
-        let refresh = Arc::new(on_diagnostics_refresh);
-        let refresh_clone = Arc::clone(&refresh);
+        let refresh_clone = Arc::new(on_diagnostics_refresh);
         let long_lived = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let bag_cache: Arc<
             std::sync::RwLock<Option<Arc<crate::pack_bag_cache::PackBagCache>>>,
@@ -684,7 +683,6 @@ impl ModuleIndex {
             queue,
             resolved,
             workspace_root,
-            refresh_diagnostics: refresh,
         }
     }
 
@@ -1087,7 +1085,6 @@ impl ModuleIndex {
             queue,
             resolved,
             workspace_root,
-            refresh_diagnostics: Arc::new(|| {}),
         }
     }
 
@@ -1178,7 +1175,6 @@ impl ModuleIndex {
             queue,
             resolved,
             workspace_root,
-            refresh_diagnostics: Arc::new(|| {}),
         };
         // Unit nets exercise the seams' retries; production defaults OFF
         // (the server enables at initialize).

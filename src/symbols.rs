@@ -161,6 +161,9 @@ fn workspace_search_visible(kind: &crate::file_analysis::SymKind, hidden: bool, 
         && !lexical
 }
 
+// `SymbolInformation::deprecated` is a deprecated-but-required field of the
+// tower-lsp struct; we must supply it to construct the value.
+#[allow(deprecated)]
 pub fn symbol_to_workspace_info(sym: &crate::file_analysis::Symbol, uri: Url) -> Option<SymbolInformation> {
     if !workspace_search_visible(
         &sym.kind,
@@ -218,6 +221,8 @@ pub fn sym_row_search(
 
 /// `symbol_to_workspace_info`'s row twin — identical kind gate and
 /// hidden/lexical suppressions, sourced from the baked row flags.
+// `SymbolInformation::deprecated` is a deprecated-but-required field.
+#[allow(deprecated)]
 pub fn sym_row_to_workspace_info(
     hit: &crate::module_cache::SymRowHit,
 ) -> Option<SymbolInformation> {
@@ -650,8 +655,8 @@ pub fn completion_items_for_test(
     completion_items(&files, &key, analysis, tree, source, pos, module_index, stable_packages)
 }
 
-/// Original native completion path. Renamed from `completion_items`
-/// so the plugin-aware wrapper above can fall through to it.
+/// The native completion path — the plugin-aware `completion_items`
+/// wrapper above falls through to it.
 #[allow(clippy::too_many_arguments)]
 fn completion_items_native(
     files: &crate::file_store::FileStore,

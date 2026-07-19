@@ -373,10 +373,6 @@ pub mod path_intern {
             self.0.is_empty()
         }
 
-        pub fn len(&self) -> usize {
-            self.0.len()
-        }
-
         /// The member paths as shared strings (save path, visibility sets).
         pub fn iter_strs(&self) -> impl Iterator<Item = Arc<str>> + '_ {
             self.0.iter().map(|&id| str_of(id))
@@ -444,6 +440,11 @@ pub trait CrossFileLookup {
     /// Resident index copies have refs evicted after persist; the backward
     /// walk rehydrates the exact persisted analysis for candidate files.
     /// Default (never-evicted impls): a cheap `Arc` bump.
+    // The refs-axis twin of `bag_present`, kept for trait-family symmetry and
+    // exercised via the eviction tests; the backward walk currently reaches
+    // refs through `whole_present` / `ref_candidate_paths`, so no production
+    // caller dispatches this seam today.
+    #[allow(dead_code)]
     fn refs_present(
         &self,
         cached: &std::sync::Arc<CachedModule>,
@@ -4779,6 +4780,9 @@ impl FileAnalysis {
 
     /// True when `evict_refs` stripped this copy's refs: empty means "on
     /// disk, not resident", never "no references".
+    // Asserted by the eviction tests and read by the (currently unwired)
+    // `refs_present` seam; keep in step with `symbols_are_evicted`.
+    #[allow(dead_code)]
     pub fn refs_are_evicted(&self) -> bool {
         self.refs_evicted
     }

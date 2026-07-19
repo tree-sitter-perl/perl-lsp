@@ -1431,6 +1431,9 @@ pub(crate) const C_FIELD_DECL_PEEL: PeelSpec = PeelSpec {
 };
 
 /// One effect of a command-dispatched statement.
+// Variants are constructed only by `cmake_pack` (command languages) and read by
+// the generic cmd-effect match; both absent in a build without that feature.
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy)]
 pub enum CmdEffect {
     /// Argument `name_arg` declares an entity of `kind` ("var",
@@ -1489,6 +1492,9 @@ pub fn perl_pack() -> LangPack {
     }
 }
 
+// Registered by `python_driver` only under `feature = "python"` (and driven by
+// the pack tests); dead weight in a single-language build like `cpp`-only.
+#[allow(dead_code)]
 pub fn python_pack() -> LangPack {
     LangPack {
         query_source: include_str!("../queries/python/skeleton.scm"),
@@ -1538,6 +1544,8 @@ pub fn python_pack() -> LangPack {
     }
 }
 
+// Live only under `feature = "r"` (or the pack tests); see `python_pack`.
+#[allow(dead_code)]
 pub fn r_pack() -> LangPack {
     LangPack {
         query_source: include_str!("../queries/r/skeleton.scm"),
@@ -1576,6 +1584,9 @@ pub fn r_pack() -> LangPack {
     }
 }
 
+// Live only under `feature = "cmake"` (or the pack tests); see `python_pack`.
+// Sole constructor of the `CmdEffect` variants.
+#[allow(dead_code)]
 pub fn cmake_pack() -> LangPack {
     LangPack {
         query_source: include_str!("../queries/cmake/skeleton.scm"),
