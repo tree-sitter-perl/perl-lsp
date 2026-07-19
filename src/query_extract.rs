@@ -1242,6 +1242,12 @@ pub struct LangPack {
     /// branch (the token is path-shaped, not name-shaped, so it stays ahead of
     /// the name-keyed CandidateSet).
     pub include_path_tokens: bool,
+    /// Does this language have a C-style preprocessor — `#define` macros
+    /// reachable through `#include`s that identifier-context completion offers
+    /// as an API surface? True for C/C++; false for languages with no
+    /// preprocessor (Perl, Python, R, CMake). Gates `macro_completion` — asked
+    /// of the pack, never a language-name branch (rule #10).
+    pub preprocessor_macros: bool,
     /// Container membership (class/struct/union/namespace) is delimited by
     /// literal `{`/`}` in the source, so a member that lost its enclosing
     /// container to a tree-sitter misparse can be re-anchored by matching the
@@ -1485,6 +1491,7 @@ pub fn perl_pack() -> LangPack {
         rebind_method: |_| false,
         implicit_this_members: false,
         include_path_tokens: false,
+        preprocessor_macros: false,
         brace_scoped_members: false,
         trigger_chars: &["$", "@", "%", ">", ":", "{"],
         receiver_names: &[],
@@ -1532,6 +1539,7 @@ pub fn python_pack() -> LangPack {
         rebind_method: |_| false,
         implicit_this_members: false,
         include_path_tokens: false,
+        preprocessor_macros: false,
         brace_scoped_members: false,
         trigger_chars: &["."],
         receiver_names: &["self", "cls"],
@@ -1579,6 +1587,7 @@ pub fn r_pack() -> LangPack {
         rebind_method: |_| false,
         implicit_this_members: false,
         include_path_tokens: false,
+        preprocessor_macros: false,
         brace_scoped_members: false,
         trigger_chars: &["$", "@", ":"],
         receiver_names: &[],
@@ -1634,6 +1643,7 @@ pub fn cmake_pack() -> LangPack {
         rebind_method: |_| false,
         implicit_this_members: false,
         include_path_tokens: false,
+        preprocessor_macros: false,
         brace_scoped_members: false,
         trigger_chars: &["{", "("],
         receiver_names: &[],
@@ -1742,6 +1752,7 @@ pub fn cpp_pack() -> LangPack {
         // C/C++ methods read members with an implicit `this->`.
         implicit_this_members: true,
         include_path_tokens: true,
+        preprocessor_macros: true,
         brace_scoped_members: true,
         trigger_chars: &[".", ">", ":"],
         receiver_names: &["this"],

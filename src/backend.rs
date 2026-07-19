@@ -226,6 +226,17 @@ fn language_has_include_tokens(language: &str) -> bool {
         .is_some_and(|p| p.include_path_tokens)
 }
 
+/// Does this language's pack declare a C-style preprocessor — `#define` macros
+/// reachable through `#include`s that identifier-context completion offers?
+/// Asked of the pack via the single `for_id` lookup — Perl's driver has no
+/// `LangPack` so it answers false without a language-name branch (rule #10).
+fn language_has_preprocessor(language: &str) -> bool {
+    crate::language_driver::LanguageRegistry::with_enabled()
+        .for_id(language)
+        .and_then(|d| d.lang_pack())
+        .is_some_and(|p| p.preprocessor_macros)
+}
+
 /// The file's OWN `#define`s are already symbols (in `items`); this adds the
 /// cross-file ones. Prefix-filtered server-side (a macro-heavy include
 /// closure reaches thousands — perl.h alone is ~2000), and the header cache
@@ -241,8 +252,8 @@ fn macro_completion(
     path: Option<&std::path::Path>,
     items: &mut Vec<CompletionItem>,
 ) -> bool {
-    if language != "cpp" {
-        return false; // only C/C++ have a preprocessor
+    if !language_has_preprocessor(language) {
+        return false; // the pack declares its preprocessor; asked, never named
     }
     let Some(p) = path else { return false };
     let reg = crate::language_driver::LanguageRegistry::with_enabled();

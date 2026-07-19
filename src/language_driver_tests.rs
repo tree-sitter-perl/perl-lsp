@@ -626,6 +626,14 @@ fn implicit_field_read_pass_gated_by_pack_capability() {
         "cpp: #include path tokens resolve to headers");
     assert!(!crate::query_extract::python_pack().include_path_tokens,
         "python: imports are name-keyed, no path tokens");
+
+    // Preprocessor capability: only C/C++ has `#define` macros; other packs
+    // answer false, so macro completion gates on the pack, never a language
+    // name.
+    assert!(crate::query_extract::cpp_pack().preprocessor_macros,
+        "cpp: #define macros are a completion surface");
+    assert!(!crate::query_extract::python_pack().preprocessor_macros,
+        "python: no C preprocessor");
 }
 
 // Implicit-`this` sibling method CALLs — the call half of the same
