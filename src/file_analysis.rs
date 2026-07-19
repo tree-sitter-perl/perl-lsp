@@ -3020,65 +3020,110 @@ pub fn parents_of(
     parents
 }
 
-/// Does `class` equal `target` or descend from it? Walks local
-/// `package_parents` first, then the cross-file inheritance graph via
-/// `module_index.parents_cached`. The single isa-walk seam — both the
-/// `ReceiverGated` gate and `FileAnalysis::class_isa` route here, so the
-/// MRO is enumerated in exactly one place. Cycle-guarded by `seen`;
-/// `budget` caps TOTAL classes visited (not ancestry depth) — a backstop
-/// against a pathological graph, set well above any real MRO.
-/// `parents_cached` is keyed by module name, which coincides with the
-/// class name here.
+/// Per-node classification returned by an ancestry-walk predicate.
+enum WalkVerdict {
+    /// This class satisfies the query — short-circuit the walk to `true`.
+    Hit,
+    /// Not a match; keep walking its parents.
+    Miss,
+    /// Disqualifier — short-circuit the traversal (the walk returns `false`;
+    /// a predicate that needs to distinguish reject-from-exhaust reads its
+    /// own captured state, as `class_is_dbic_result` does).
+    Reject,
+}
+
+/// The single bounded ancestry DFS — `class_isa`, `class_isa_prefix`, and
+/// `class_is_dbic_result` all route here, so the inheritance graph is
+/// enumerated in exactly one place. `parents_of` supplies the per-node
+/// parent seam (local `package_parents` ∪ cross-file `parents_cached`, or
+/// cross-file-only for the DBIC gate); `predicate` classifies each visited
+/// class; `budget` caps TOTAL classes visited (not ancestry depth) — a
+/// per-call-site backstop against a pathological graph, set well above any
+/// real MRO. Returns `true` iff a `Hit` verdict terminated the walk; a
+/// `Reject` or exhaustion returns `false`. Cycle-guarded by `seen`.
+/// Long-term collapse target: GraphView's lazy `walk` over the inheritance
+/// edges (docs/adr/graph-walking.md).
+fn walk_ancestry(
+    origin: &str,
+    budget: usize,
+    mut parents_of: impl FnMut(&str) -> Vec<String>,
+    mut predicate: impl FnMut(&str) -> WalkVerdict,
+) -> bool {
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut stack: Vec<String> = vec![origin.to_string()];
+    let mut visited = 0;
+    while let Some(cur) = stack.pop() {
+        if visited > budget {
+            break;
+        }
+        visited += 1;
+        if !seen.insert(cur.clone()) {
+            continue;
+        }
+        match predicate(&cur) {
+            WalkVerdict::Hit => return true,
+            WalkVerdict::Reject => return false,
+            WalkVerdict::Miss => {}
+        }
+        for p in parents_of(&cur) {
+            stack.push(p);
+        }
+    }
+    false
+}
+
+/// The local+cross-file parent seam for the isa walkers: `package_parents`
+/// first (preserving push order under a budget truncation), then the
+/// cross-file graph via `module_index.parents_cached` (keyed by module
+/// name, which coincides with the class name here).
+fn isa_parents(
+    cur: &str,
+    package_parents: &HashMap<String, Vec<String>>,
+    module_index: Option<&dyn CrossFileLookup>,
+) -> Vec<String> {
+    let mut v = package_parents.get(cur).cloned().unwrap_or_default();
+    if let Some(idx) = module_index {
+        v.extend(idx.parents_cached(cur));
+    }
+    v
+}
+
+/// Does `class` equal `target` or descend from it? The single isa-walk seam
+/// — both the `ReceiverGated` gate and `FileAnalysis::class_isa` route
+/// through the shared [`walk_ancestry`] over the local+cross-file parent
+/// graph, so the MRO is enumerated in exactly one place.
 pub fn class_isa(
     class: &str,
     target: &str,
     package_parents: &HashMap<String, Vec<String>>,
     module_index: Option<&dyn CrossFileLookup>,
 ) -> bool {
-    if class == target {
-        return true;
-    }
-    let mut seen: HashSet<String> = HashSet::new();
-    let mut stack: Vec<String> = vec![class.to_string()];
-    let mut budget = 0;
-    while let Some(cur) = stack.pop() {
-        if budget > 200 {
-            break;
-        }
-        budget += 1;
-        if !seen.insert(cur.clone()) {
-            continue;
-        }
-        if cur == target {
-            return true;
-        }
-        if let Some(parents) = package_parents.get(&cur) {
-            for p in parents {
-                stack.push(p.clone());
+    walk_ancestry(
+        class,
+        200,
+        |cur| isa_parents(cur, package_parents, module_index),
+        |c| {
+            if c == target {
+                WalkVerdict::Hit
+            } else {
+                WalkVerdict::Miss
             }
-        }
-        if let Some(idx) = module_index {
-            for p in idx.parents_cached(&cur) {
-                stack.push(p);
-            }
-        }
-    }
-    false
+        },
+    )
 }
 
 /// Does `class`, or any of its transitive ancestors (cross-file), satisfy
 /// a plugin `ClassIsa(prefix)` trigger? The trigger's PREFIX semantics —
 /// exact match OR a `prefix::`-namespaced descendant — mirror
 /// `plugin::trigger_fires`, so this is the cross-file-aware analog of the
-/// build-time local-only `transitive_parents` gate. Same MRO seam as
-/// `class_isa` (local `package_parents` ∪ `parents_cached`), so the graph
-/// is walked in one place; the only difference is the per-node predicate
-/// is a prefix test, not exact equality. Deliberately NOT `parents_of`: the
-/// synthetic `APP_SURFACE_CLASS` edge is a method-dispatch bridge (Mojo
-/// helpers), not an `isa` relation, so a plugin `ClassIsa` gate must not
-/// treat an app-surface consumer as a descendant of the surface. Both
-/// isa-walk seams exclude it by construction. Cycle-guarded; total-visit
-/// budget backstops a pathological graph.
+/// build-time local-only `transitive_parents` gate. Shares [`walk_ancestry`]
+/// (the same local+cross-file seam as `class_isa`), so the graph is walked
+/// in one place; the only difference is the per-node predicate is a prefix
+/// test, not exact equality. Deliberately NOT `parents_of`: the synthetic
+/// `APP_SURFACE_CLASS` edge is a method-dispatch bridge (Mojo helpers), not
+/// an `isa` relation, so a plugin `ClassIsa` gate must not treat an
+/// app-surface consumer as a descendant of the surface. Both isa-walk seams
+/// exclude it by construction.
 pub fn class_isa_prefix(
     class: &str,
     prefix: &str,
@@ -3086,36 +3131,18 @@ pub fn class_isa_prefix(
     module_index: Option<&dyn CrossFileLookup>,
 ) -> bool {
     let ns = format!("{prefix}::");
-    let hits = |c: &str| c == prefix || c.starts_with(&ns);
-    if hits(class) {
-        return true;
-    }
-    let mut seen: HashSet<String> = HashSet::new();
-    let mut stack: Vec<String> = vec![class.to_string()];
-    let mut budget = 0;
-    while let Some(cur) = stack.pop() {
-        if budget > 200 {
-            break;
-        }
-        budget += 1;
-        if !seen.insert(cur.clone()) {
-            continue;
-        }
-        if hits(&cur) {
-            return true;
-        }
-        if let Some(parents) = package_parents.get(&cur) {
-            for p in parents {
-                stack.push(p.clone());
+    walk_ancestry(
+        class,
+        200,
+        |cur| isa_parents(cur, package_parents, module_index),
+        |c| {
+            if c == prefix || c.starts_with(&ns) {
+                WalkVerdict::Hit
+            } else {
+                WalkVerdict::Miss
             }
-        }
-        if let Some(idx) = module_index {
-            for p in idx.parents_cached(&cur) {
-                stack.push(p);
-            }
-        }
-    }
-    false
+        },
+    )
 }
 
 /// Three-way outcome of resolving a [`ReceiverGated`] value against a
@@ -10506,20 +10533,25 @@ impl FileAnalysis {
         // Ambiguous: prefer the candidate in the largest source family
         // (the parent namespace shared by the most indexed classes — a
         // proxy for the workspace's primary schema), lexicographic tie.
-        candidates.sort_by(|a, b| {
-            let fam = |c: &str| {
+        // Family sizes precomputed in ONE index sweep before the sort —
+        // the comparator otherwise called `for_each_cached` per comparison.
+        let prefixes: Vec<(String, String)> = candidates
+            .iter()
+            .map(|c| {
                 let parent = c.rsplit_once("::").map(|(p, _)| p).unwrap_or(c);
-                let prefix = format!("{parent}::");
-                let mut n = 0usize;
-                mi.for_each_cached(&mut |name, _| {
-                    if name.starts_with(&prefix) {
-                        n += 1;
-                    }
-                });
-                n
-            };
-            fam(b).cmp(&fam(a)).then_with(|| a.cmp(b))
+                (c.clone(), format!("{parent}::"))
+            })
+            .collect();
+        let mut fam_size: HashMap<String, usize> =
+            candidates.iter().map(|c| (c.clone(), 0usize)).collect();
+        mi.for_each_cached(&mut |name, _| {
+            for (cand, prefix) in &prefixes {
+                if name.starts_with(prefix) {
+                    *fam_size.get_mut(cand).unwrap() += 1;
+                }
+            }
         });
+        candidates.sort_by(|a, b| fam_size[b].cmp(&fam_size[a]).then_with(|| a.cmp(b)));
         candidates.into_iter().next().unwrap()
     }
 
@@ -10529,31 +10561,32 @@ impl FileAnalysis {
     /// source-moniker resolution so a stray same-basename non-DBIC class
     /// can't be mistaken for a row source.
     fn class_is_dbic_result(class: &str, mi: &dyn CrossFileLookup) -> bool {
-        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-        let mut stack: Vec<String> = vec![class.to_string()];
-        let mut depth = 0;
+        // A result class descends from DBIx::Class::Core / ::Row (the
+        // row-behavior roots), never from ::Schema or ::ResultSet. The
+        // Core/Row `Hit` is captured (not short-circuited) because a later
+        // ::Schema/::ResultSet ancestor must still be able to disqualify;
+        // `Reject` short-circuits that negative, and `rejected` distinguishes
+        // it from plain exhaustion. Deliberately cross-file-only (no local
+        // `package_parents` seam), depth-capped tighter than the isa walkers.
         let mut isa_dbic = false;
-        while let Some(c) = stack.pop() {
-            if depth > 40 {
-                break;
-            }
-            depth += 1;
-            if !seen.insert(c.clone()) {
-                continue;
-            }
-            // A result class descends from DBIx::Class::Core / ::Row (the
-            // row-behavior roots), never from ::Schema or ::ResultSet.
-            if c == "DBIx::Class::Core" || c == "DBIx::Class::Row" {
-                isa_dbic = true;
-            }
-            if c == "DBIx::Class::Schema" || c == "DBIx::Class::ResultSet" {
-                return false;
-            }
-            for p in mi.parents_cached(&c) {
-                stack.push(p);
-            }
-        }
-        isa_dbic
+        let mut rejected = false;
+        walk_ancestry(
+            class,
+            40,
+            |c| mi.parents_cached(c),
+            |c| {
+                if c == "DBIx::Class::Core" || c == "DBIx::Class::Row" {
+                    isa_dbic = true;
+                    WalkVerdict::Miss
+                } else if c == "DBIx::Class::Schema" || c == "DBIx::Class::ResultSet" {
+                    rejected = true;
+                    WalkVerdict::Reject
+                } else {
+                    WalkVerdict::Miss
+                }
+            },
+        );
+        isa_dbic && !rejected
     }
 
     /// Resolve a plugin-bridged invocant *class key* to the workspace class
@@ -10991,6 +11024,20 @@ impl FileAnalysis {
             std::ops::ControlFlow::Continue(())
         });
         // Root + all transitive descendants (`walk` excludes the origin).
+        self.descendant_family(root, module_index)
+    }
+
+    /// A root class plus every transitive descendant that inherits from it,
+    /// over PROVEN inheritance edges only (`GraphView`'s `INHERITS_INV`
+    /// walk, which excludes the origin — re-added as the family head).
+    /// The shared descendant-walk tail of `method_override_family` and
+    /// `owned_accessor_family`; the two differ only in how they choose the
+    /// root (contract-root search UP vs the owning class itself).
+    fn descendant_family(
+        &self,
+        root: String,
+        module_index: Option<&dyn CrossFileLookup>,
+    ) -> Vec<String> {
         let mut family = vec![root.clone()];
         let graph = crate::graph::GraphView::new(self, module_index);
         graph.walk(
@@ -11025,21 +11072,7 @@ impl FileAnalysis {
         class_name: &str,
         module_index: Option<&dyn CrossFileLookup>,
     ) -> Vec<String> {
-        let mut family = vec![class_name.to_string()];
-        let graph = crate::graph::GraphView::new(self, module_index);
-        graph.walk(
-            crate::graph::Node::Class(class_name.to_string()),
-            crate::graph::EdgeKindMask::INHERITS_INV,
-            &mut |n| {
-                if let crate::graph::Node::Class(c) = n {
-                    if !family.iter().any(|f| f == c) {
-                        family.push(c.clone());
-                    }
-                }
-                std::ops::ControlFlow::Continue(())
-            },
-        );
-        family
+        self.descendant_family(class_name.to_string(), module_index)
     }
 
     pub fn method_rename_chain(
