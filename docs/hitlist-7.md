@@ -77,9 +77,9 @@ H7-8, H7-9, H7-13, H7-15.
   `Trigger::ClassIsa("DBIx::Class")` evaluated on local-file-only parents → DBIC
   synthesis dark for 49/54 of DBIC's own test schema (2-hop
   `Result::* → DBICTest::BaseResult → DBIx::Class::Core`). 1-hop works (proof:
-  DBICTest::DynamicForeignCols::Computer). Known latent hazard —
-  `#[ignore]`d `probe_class_isa_trigger_through_cross_file_parent`
-  (builder_tests.rs:11515), `docs/prompt-enrichment-inheritance-residual.md`.
+  DBICTest::DynamicForeignCols::Computer). Regression net — the now-active
+  (no longer `#[ignore]`d) `probe_class_isa_trigger_through_cross_file_parent`
+  (builder_tests.rs:11853), `docs/prompt-enrichment-inheritance-residual.md`.
   97 `->cds` call sites / 0 found; rename/completion/goto-def all dark.
 - **H7-6 rename over-reach, both engines** (DBIC F7, leveldb task 5b) — LANDED `62426fa` (Perl owner-gate; cpp namespace-blind half parked, see PARKED.md): Perl —
   renaming a synthesized `id` column proposes 33 files incl. DBIx::Class::PK's

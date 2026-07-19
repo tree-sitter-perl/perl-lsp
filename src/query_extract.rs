@@ -1956,12 +1956,14 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
             // `@ool.def`: an out-of-line definition (`Ret Class::method(...) {}`).
             // The one general capture (fires for EVERY function_definition) —
             // peel the declarator to the function declarator, walk its qualified
-            // name to the leaf + owning class, and synthesize the same
-            // `def.method` / `def.method.name` / `qualifier` events the narrow
-            // per-shape patterns used to emit. A non-qualified declarator (free
-            // function / in-class method) yields nothing here — its own pattern
-            // owns it. Arbitrary declarator nesting + multi-level qualifiers
-            // (which fixed-depth S-queries can't express) work by construction.
+            // name to the leaf + owning class, and synthesize the
+            // `def.method` / `def.method.name` / `qualifier` events downstream
+            // extraction consumes — the same vocabulary the narrow per-shape
+            // patterns emit for the shapes they own. A non-qualified declarator
+            // (free function / in-class method) yields nothing here — its own
+            // pattern owns it. Arbitrary declarator nesting + multi-level
+            // qualifiers (which fixed-depth S-queries can't express) work by
+            // construction.
             if cap == "ool.def" {
                 if let Some((scope_text, leaf)) = node
                     .child_by_field_name("declarator")

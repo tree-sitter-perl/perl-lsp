@@ -49,10 +49,10 @@ cross-file/isa-based already, or (iii) BROKEN.
 
 Several bundled plugins fire on `ClassIsa` triggers (mojo-events
 `Mojo::EventEmitter`, minion `Minion`, mojo-helpers / mojo-routes
-`Mojolicious`, …). `PluginRegistry::applicable` (`plugin/mod.rs:991`)
+`Mojolicious`, …). `PluginRegistry::applicable` (`plugin/mod.rs:1460`)
 matches the trigger against the `parents` list, which the builder fills
-from `transitive_parents` — **local `package_parents` only**
-(`builder.rs:2121`, `:2175`, `:2200`).
+from `transitive_parents` (`builder.rs:3140`) — **local `package_parents`
+only** — at the dispatch sites (`builder/pattern_dispatch.rs:302`, `:543`).
 
 Consequence WAS: a class whose trigger-class ancestry is established
 cross-file did NOT get the plugin's emit hooks. E.g. `package Leaf; use
