@@ -618,6 +618,14 @@ fn implicit_field_read_pass_gated_by_pack_capability() {
         "python: a bare name is never self.field");
     assert!(crate::query_extract::cpp_pack().implicit_this_members,
         "cpp: methods read members with implicit this->");
+
+    // Include-token capability: only C/C++ has `#include`-style path tokens;
+    // name-keyed-import languages answer false, so goto-def / references gate
+    // on the pack, never a language name.
+    assert!(crate::query_extract::cpp_pack().include_path_tokens,
+        "cpp: #include path tokens resolve to headers");
+    assert!(!crate::query_extract::python_pack().include_path_tokens,
+        "python: imports are name-keyed, no path tokens");
 }
 
 // Implicit-`this` sibling method CALLs — the call half of the same

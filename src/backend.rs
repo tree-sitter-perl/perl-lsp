@@ -215,6 +215,17 @@ fn closure_symbol_completion(
 
 /// Identifier-context macro completion (C preprocessor): the `#define`s
 /// reachable through `#include`s — the API surface (perl5: `Newx`/`SvPV`).
+/// Does this language's pack declare `#include`-style path tokens (the
+/// header-is-the-module reference goto-def resolves and references reverses)?
+/// Asked of the pack via the single `for_id` lookup — Perl's driver has no
+/// `LangPack` so it answers false without a language-name branch (rule #10).
+fn language_has_include_tokens(language: &str) -> bool {
+    crate::language_driver::LanguageRegistry::with_enabled()
+        .for_id(language)
+        .and_then(|d| d.lang_pack())
+        .is_some_and(|p| p.include_path_tokens)
+}
+
 /// The file's OWN `#define`s are already symbols (in `items`); this adds the
 /// cross-file ones. Prefix-filtered server-side (a macro-heavy include
 /// closure reaches thousands — perl.h alone is ~2000), and the header cache
@@ -2066,8 +2077,9 @@ impl LanguageServer for Backend {
         let idx: &dyn crate::file_analysis::CrossFileLookup = &scoped;
         // `#include "x.h"` path → the resolved header (`#include` = `use`).
         // A path token, not a name — slot-shaped, so it stays ahead of the
-        // set (the ADR's honest boundary).
-        if language == "cpp" {
+        // set (the ADR's honest boundary). The pack declares whether it has
+        // include tokens; asked, never named.
+        if language_has_include_tokens(&language) {
             if let Some(loc) = symbols::pack_include_definition(
                 &analysis, symbols::position_to_point(pos), self_path.as_deref())
             {
@@ -2196,8 +2208,9 @@ impl LanguageServer for Backend {
         };
         let self_path = uri.to_file_path().ok();
         // `#include` reverse — "who includes this header" — owns the path
-        // token exclusively (the backward mirror of include goto-def).
-        if language == "cpp" {
+        // token exclusively (the backward mirror of include goto-def). The
+        // pack declares whether it has include tokens; asked, never named.
+        if language_has_include_tokens(&language) {
             if let Some(incs) = symbols::pack_include_references(
                 &analysis, point, self_path.as_deref(), base_idx)
             {

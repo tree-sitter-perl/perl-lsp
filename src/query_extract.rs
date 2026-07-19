@@ -1233,6 +1233,15 @@ pub struct LangPack {
     /// `language_driver::emit_return_fuel` — asked of the pack, never a
     /// language-name branch.
     pub implicit_this_members: bool,
+    /// Does this language have `#include`-style path tokens — a source-path
+    /// reference (the header IS the module, `#include` = `use`) that goto-def
+    /// resolves to a file and references reverses ("who includes this
+    /// header")? True for C/C++; false for languages whose imports are
+    /// name-keyed (Perl `use`, Python `import`). Gates the include-token lanes
+    /// in goto-def / references — asked of the pack, never a language-name
+    /// branch (the token is path-shaped, not name-shaped, so it stays ahead of
+    /// the name-keyed CandidateSet).
+    pub include_path_tokens: bool,
     /// Container membership (class/struct/union/namespace) is delimited by
     /// literal `{`/`}` in the source, so a member that lost its enclosing
     /// container to a tree-sitter misparse can be re-anchored by matching the
@@ -1475,6 +1484,7 @@ pub fn perl_pack() -> LangPack {
         narrow_guard: |_, _| None,
         rebind_method: |_| false,
         implicit_this_members: false,
+        include_path_tokens: false,
         brace_scoped_members: false,
         trigger_chars: &["$", "@", "%", ">", ":", "{"],
         receiver_names: &[],
@@ -1521,6 +1531,7 @@ pub fn python_pack() -> LangPack {
         narrow_guard: |guard, ty| (guard == Some("isinstance")).then(|| InferredType::ClassName(ty.to_string())),
         rebind_method: |_| false,
         implicit_this_members: false,
+        include_path_tokens: false,
         brace_scoped_members: false,
         trigger_chars: &["."],
         receiver_names: &["self", "cls"],
@@ -1567,6 +1578,7 @@ pub fn r_pack() -> LangPack {
         narrow_guard: |_, _| None,
         rebind_method: |_| false,
         implicit_this_members: false,
+        include_path_tokens: false,
         brace_scoped_members: false,
         trigger_chars: &["$", "@", ":"],
         receiver_names: &[],
@@ -1621,6 +1633,7 @@ pub fn cmake_pack() -> LangPack {
         narrow_guard: |_, _| None,
         rebind_method: |_| false,
         implicit_this_members: false,
+        include_path_tokens: false,
         brace_scoped_members: false,
         trigger_chars: &["{", "("],
         receiver_names: &[],
@@ -1728,6 +1741,7 @@ pub fn cpp_pack() -> LangPack {
         },
         // C/C++ methods read members with an implicit `this->`.
         implicit_this_members: true,
+        include_path_tokens: true,
         brace_scoped_members: true,
         trigger_chars: &[".", ">", ":"],
         receiver_names: &["this"],
