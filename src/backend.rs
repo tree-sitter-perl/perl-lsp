@@ -366,6 +366,12 @@ pub struct Backend {
     /// Serializes pack-file invalidation runs (did_save + watcher events can
     /// race on the same header; unregister/register swaps must not interleave).
     pack_change_lock: Arc<std::sync::Mutex<()>>,
+    /// Defers watcher invalidations that arrive DURING the initial pack bulk
+    /// index and reconciles them once at completion (H9-2). During the index
+    /// the pack sub-indexes aren't attached, so a live `pack_file_changed`
+    /// would drop the save; deferral + the H9-1 generation guard make the
+    /// end-of-index reconcile both complete and safe.
+    pack_coord: Arc<crate::module_resolver::PackChangeCoordinator>,
     /// Opt-in diagnostic toggles, set from `initializationOptions.diagnostics`.
     /// Shared with the resolver refresh callback (which also publishes
     /// diagnostics), hence the `Arc<Mutex<_>>`. `DiagnosticOptions` is `Copy`,
@@ -554,6 +560,15 @@ impl Backend {
         let heal_ctx = self.pack_heal_ctx();
         let bag_cache_bytes =
             self.max_cache_mb.load(std::sync::atomic::Ordering::Relaxed) as usize * 1024 * 1024;
+        // H9-2: mark the pack index in flight BEFORE it is scheduled, so a save
+        // racing the scheduling defers into the reconcile set instead of hitting
+        // an unattached (no-op) `pack_file_changed`. Perl uses the direct
+        // re-index path and never touches the coordinator.
+        let pack_coord = (!want_perl).then(|| Arc::clone(&self.pack_coord));
+        if let Some(ref coord) = pack_coord {
+            coord.begin_index();
+        }
+        let pack_change_lock = Arc::clone(&self.pack_change_lock);
         tokio::task::spawn_blocking(move || {
             // Announces completion (or the no-root early-out) to bounded waiters
             // on Drop — every exit path of this closure, panic included.
@@ -694,6 +709,31 @@ impl Backend {
                         },
                     )),
                 }));
+            }
+            // H9-2: the pack sub-indexes are now attached. Reconcile every save
+            // that arrived DURING the index (deferred to avoid the no-op /
+            // uncoordinated-double-work window) exactly once, off the same
+            // serialization lock steady-state invalidations use. The H9-1
+            // generation guard makes this safe: each reconcile reads current
+            // disk (the freshest generation) and outranks whatever the bulk pass
+            // registered from earlier bytes.
+            if let Some(coord) = pack_coord {
+                let deferred = coord.finish_index();
+                if !deferred.is_empty() {
+                    log::debug!(
+                        "pack index complete: reconciling {} deferred change(s)",
+                        deferred.len()
+                    );
+                    let _g = pack_change_lock.lock().unwrap_or_else(|e| e.into_inner());
+                    for (path, deleted) in deferred {
+                        crate::module_resolver::pack_file_changed(
+                            Some(root_uri.as_str()),
+                            &module_index,
+                            &path,
+                            deleted,
+                        );
+                    }
+                }
             }
             // Heal the cold-open degraded window: the index this file's family
             // needs has now ATTACHED (the latch marked KICKOFF; this is the
@@ -1222,6 +1262,7 @@ impl Backend {
             pack_indexed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             work_done_progress: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             pack_change_lock: Arc::new(std::sync::Mutex::new(())),
+            pack_coord: Arc::new(crate::module_resolver::PackChangeCoordinator::default()),
             diag_options,
             rename_options: Arc::new(std::sync::Mutex::new(crate::resolve::RenameOptions::default())),
             index_ready: Arc::new(IndexReady::default()),
@@ -1331,8 +1372,16 @@ impl Backend {
         let lock = Arc::clone(&self.pack_change_lock);
         let root = self.module_index.workspace_root();
         let heal_ctx = self.pack_heal_ctx();
+        let pack_coord = Arc::clone(&self.pack_coord);
         tokio::spawn(async move {
             let canon = path.canonicalize().unwrap_or_else(|_| path.clone());
+            // H9-2: if the initial pack index is still running, the sub-index
+            // isn't attached — invalidating now would be a no-op that drops the
+            // save. Defer it; the end-of-index reconcile re-runs it against
+            // current disk, and `heal_open_docs` re-publishes the open docs.
+            if pack_coord.note_change(&canon, deleted) {
+                return;
+            }
             {
                 let module_index = Arc::clone(&module_index);
                 let canon = canon.clone();

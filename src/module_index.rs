@@ -570,6 +570,18 @@ pub struct ModuleIndex {
     /// evicted, and rehydration after an edit persists would fetch the NEW
     /// generation's names.
     registered_names: Arc<DashMap<std::path::PathBuf, Vec<(String, bool)>>>,
+    /// The SOURCE generation (`module_cache::file_mtime_nanos`) the currently
+    /// registered pack analysis for a path was built from — the H9-1
+    /// stale-winner guard. `pack_file_changed`'s swap claims a path at its
+    /// event generation and registers only when the claim succeeds
+    /// (`incoming >= registered`), so a re-analysis that read pre-save bytes
+    /// (a lower generation) can never revert a fresher registration, and a
+    /// deferred-invalidation reconcile (H9-2) safely overrides only paths
+    /// whose registered generation is older than the save it reconciles. Empty
+    /// for a path the swap never touched (bulk/warm register ungated — they
+    /// are the baseline every real edit outranks, and the reconcile's
+    /// unregister+register replaces their entry outright).
+    registered_source_gen: Arc<DashMap<std::path::PathBuf, i64>>,
     /// Slice-2 rehydration store. Pack sub-indexes get theirs at
     /// construction (keyed to `modules-{lang}.db`); the Perl hub gets its
     /// own in `set_workspace_root` (keyed to `modules.db` — workspace
@@ -665,6 +677,7 @@ impl ModuleIndex {
             all_defs: Arc::new(DashMap::new()),
             all_files: Arc::new(DashMap::new()),
             registered_names: Arc::new(DashMap::new()),
+            registered_source_gen: Arc::new(DashMap::new()),
             freshness: Arc::new(crate::surface::FreshnessIndex::default()),
             enriched: Arc::new(DashMap::new()),
             registration_gen,
@@ -1067,6 +1080,7 @@ impl ModuleIndex {
             all_defs: Arc::new(DashMap::new()),
             all_files: Arc::new(DashMap::new()),
             registered_names: Arc::new(DashMap::new()),
+            registered_source_gen: Arc::new(DashMap::new()),
             freshness: Arc::new(crate::surface::FreshnessIndex::default()),
             enriched: Arc::new(DashMap::new()),
             registration_gen,
@@ -1157,6 +1171,7 @@ impl ModuleIndex {
             all_defs: Arc::new(DashMap::new()),
             all_files: Arc::new(DashMap::new()),
             registered_names: Arc::new(DashMap::new()),
+            registered_source_gen: Arc::new(DashMap::new()),
             freshness: Arc::new(crate::surface::FreshnessIndex::default()),
             enriched: Arc::new(DashMap::new()),
             registration_gen,
@@ -2236,6 +2251,41 @@ impl ModuleIndex {
                 }
             }
         }
+    }
+
+    /// Claim `path` at source generation `gen` (H9-1). Succeeds — recording
+    /// `gen` — iff `gen >= the generation already registered` (empty ⇒ the
+    /// baseline `i64::MIN`, so a first claim always wins). A tie succeeds so a
+    /// serialized fresh re-registration (the deferred-invalidation reconcile
+    /// running after the bulk index) still lands; only a STRICTLY older
+    /// generation — a re-analysis that read pre-save bytes — is rejected. The
+    /// check-and-update is atomic under the DashMap entry lock, so two racing
+    /// swaps can't both read-then-clobber. Callers that get `false` must NOT
+    /// register: they would revert a fresher copy.
+    pub(crate) fn claim_source_gen(&self, path: &std::path::Path, gen: i64) -> bool {
+        use dashmap::mapref::entry::Entry;
+        let canon = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+        match self.registered_source_gen.entry(canon) {
+            Entry::Occupied(mut e) => {
+                if gen >= *e.get() {
+                    *e.get_mut() = gen;
+                    true
+                } else {
+                    false
+                }
+            }
+            Entry::Vacant(e) => {
+                e.insert(gen);
+                true
+            }
+        }
+    }
+
+    /// Forget `path`'s source generation (H9-1) — a genuine delete, so a later
+    /// recreation claims from the baseline again.
+    pub(crate) fn forget_source_gen(&self, path: &std::path::Path) {
+        let canon = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+        self.registered_source_gen.remove(&canon);
     }
 
     /// Remove a pack file's registrations: its `all_files` entry, its

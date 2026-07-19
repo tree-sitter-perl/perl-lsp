@@ -212,6 +212,43 @@ fn workspace_index_progress_is_throttled_monotone_and_completes() {
     assert_eq!(last_total, n_files);
 }
 
+/// H9-2 deferral coordinator: while the initial pack index is in flight,
+/// watched-file changes DEFER into a bounded set (one entry per distinct path)
+/// reconciled exactly once at completion; before/after the index they run
+/// immediately. The flag check and queue insert are atomic with the drain, so a
+/// save is neither dropped from the queue nor skipped by the normal path.
+#[test]
+fn pack_change_coordinator_defers_during_index_and_reconciles_once() {
+    use crate::module_resolver::PackChangeCoordinator;
+    let coord = PackChangeCoordinator::default();
+    let p = |s: &str| std::path::PathBuf::from(s);
+
+    // Not in flight → run immediately (no deferral).
+    assert!(!coord.note_change(&p("/w/a.h"), false));
+    assert!(!coord.is_in_flight());
+
+    // In flight → changes defer.
+    coord.begin_index();
+    assert!(coord.is_in_flight());
+    assert!(coord.note_change(&p("/w/a.h"), false));
+    assert!(coord.note_change(&p("/w/b.h"), false));
+    // A repeated save of one path collapses to a single entry; the latest
+    // delete flag wins (the reconcile reads current disk regardless).
+    assert!(coord.note_change(&p("/w/a.h"), true));
+
+    // Completion clears the flag and drains exactly the distinct deferred paths.
+    let mut drained = coord.finish_index();
+    drained.sort();
+    assert!(!coord.is_in_flight());
+    assert_eq!(drained.len(), 2, "distinct paths, deduped");
+    assert_eq!(drained[0], (p("/w/a.h"), true), "last a.h save was a delete");
+    assert_eq!(drained[1], (p("/w/b.h"), false));
+
+    // After completion, changes run immediately again and the set is empty.
+    assert!(!coord.note_change(&p("/w/c.h"), false));
+    assert!(coord.finish_index().is_empty());
+}
+
 /// The pack-tier surface gate: a body/comment-only edit in a header leaves
 /// its span-free surface unchanged, so `pack_file_changed` re-analyzes the
 /// header ALONE and every consumer's registration survives untouched. A

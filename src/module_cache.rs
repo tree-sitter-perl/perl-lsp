@@ -631,6 +631,23 @@ pub fn file_stamp(path: &std::path::Path) -> Option<(i64, i64)> {
     Some((h.finish() as i64, size))
 }
 
+/// Raw mtime in nanoseconds since the epoch — an ORDERED source-generation
+/// currency, unlike `file_stamp`'s hashed-and-sized equality token. A later
+/// save has a strictly greater value (editors write mtime = now, monotone
+/// forward even across git operations), so the registration guard can reject
+/// a re-analysis built from an EARLIER generation: `pack_file_changed`'s swap
+/// registers a result only when its event generation is ≥ the one already
+/// registered for that path (H9-1 stale-winner race). `None` if unstattable.
+pub fn file_mtime_nanos(path: &std::path::Path) -> Option<i64> {
+    let meta = std::fs::metadata(path).ok()?;
+    let mtime = meta.modified().ok()?;
+    let nanos = mtime
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    Some(nanos as i64)
+}
+
 /// Stamp over every file in an analysis' include closure — the ANALYSIS-INPUT
 /// half of a pack row's validation key. A consumer `.c` row bakes its headers'
 /// macro splices and type witnesses; its own (stamp, size) can't see a header
