@@ -318,6 +318,16 @@ fn whole_copy_registration_sites_are_allowlisted() {
                 ("module_resolver", 2, "deferred writer halves — stripped arcs only"),
             ],
         ),
+        (
+            "register_materialized_whole",
+            vec![(
+                "module_index",
+                1,
+                "gated-emission CLI/batch materialization — plugin-triggered \
+                 files only (sparse by construction), one-shot startup, whole \
+                 copy deliberate so whole_present sees the emissions",
+            )],
+        ),
     ];
     let mut violations: Vec<String> = Vec::new();
     for (name, files) in &allow {

@@ -1230,9 +1230,31 @@ impl ModuleIndex {
         }
         for (name, path, analysis) in updates {
             let cm = Arc::new(CachedModule::new(path.clone(), analysis));
-            self.all_files.insert(path, cm.clone());
-            self.cache.insert(name, Some(cm));
+            self.register_materialized_whole(name, path, cm);
         }
+    }
+
+    /// Re-register a WHOLE (non-stripped) cached copy carrying materialized
+    /// gated emissions. The cache slot routes through `insert_cache` — the
+    /// canonical registration seam — so `edges.feed` publishes the freshly
+    /// synthesized accessors' name records (making them cross-file-visible)
+    /// and the loader-shape / import-gen bookkeeping runs; the path-keyed
+    /// registry pins the whole copy so `whole_present` answers with the
+    /// emissions and no per-query enriched-overlay hop is needed.
+    ///
+    /// WHOLE-COPY residency here is a deliberate, bounded exception (visible
+    /// to `whole_copy_registration_sites_are_allowlisted`): gated emissions
+    /// exist only for plugin-triggered files whose `ClassIsa` gate resolves
+    /// cross-file (sparse by construction), and materialization is
+    /// CLI/batch-only (one-shot startup) — the warm server never calls it.
+    fn register_materialized_whole(
+        &self,
+        name: String,
+        path: std::path::PathBuf,
+        cm: Arc<CachedModule>,
+    ) {
+        self.all_files.insert(path, cm.clone());
+        self.insert_cache(&name, Some(cm));
     }
 
     pub fn insert_cache(&self, module_name: &str, cached: Option<Arc<CachedModule>>) {
