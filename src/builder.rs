@@ -9624,8 +9624,46 @@ impl<'a> Builder<'a> {
                 .named_child(0)
                 .map(|c| self.enumerate_string_values(c))
                 .unwrap_or_default(),
+            // Case-folding named unary ops (`lc $name` over a `qw(...)` loop
+            // var — Mojo::UserAgent installs `get`/`post`/… this way). The
+            // operand folds; the op transforms each candidate. A closed,
+            // complete set of Perl's case operators.
+            "func1op_call_expression" => self.fold_case_op(expr),
             _ => vec![],
         }
+    }
+
+    /// Fold a `lc`/`uc`/`lcfirst`/`ucfirst` named-unary call over a
+    /// foldable operand, applying the case transform to each candidate.
+    /// Empty for any other unary op (honest miss, never a guess).
+    fn fold_case_op(&self, expr: Node<'a>) -> Vec<String> {
+        let text = expr.utf8_text(self.source).unwrap_or("");
+        let op = text
+            .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+            .next()
+            .unwrap_or("");
+        let operand = match expr.named_child(0) {
+            Some(c) => self.enumerate_string_values(c),
+            None => return vec![],
+        };
+        let first = |s: &str, upper: bool| -> String {
+            let mut cs = s.chars();
+            match cs.next() {
+                Some(c) if upper => c.to_uppercase().collect::<String>() + cs.as_str(),
+                Some(c) => c.to_lowercase().collect::<String>() + cs.as_str(),
+                None => String::new(),
+            }
+        };
+        operand
+            .into_iter()
+            .filter_map(|s| match op {
+                "lc" => Some(s.to_lowercase()),
+                "uc" => Some(s.to_uppercase()),
+                "lcfirst" => Some(first(&s, false)),
+                "ucfirst" => Some(first(&s, true)),
+                _ => None,
+            })
+            .collect()
     }
 
     /// Fold `$_` to the enclosing statement-modifier loop's topic list
@@ -9661,6 +9699,7 @@ impl<'a> Builder<'a> {
                 "string_literal" => self.extract_string_content(child).into_iter().collect(),
                 "interpolated_string_literal" => self.try_fold_interpolated_string(child),
                 "binary_expression" => self.try_fold_string_concat(child),
+                "func1op_call_expression" => self.fold_case_op(child),
                 "scalar" => {
                     let varname = child.named_child(0);
                     match varname.and_then(|v| v.utf8_text(self.source).ok()) {
