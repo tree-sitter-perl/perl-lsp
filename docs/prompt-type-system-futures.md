@@ -9,14 +9,16 @@ the payload rides and **how much control-flow** they need.
 
 ---
 
-## 1. Narrowing (flow-sensitivity)
+## 1. Narrowing (flow-sensitivity) — LANDED
 
 Flow-sensitive guard narrowing — `ref $x eq 'C'` / `_INSTANCE($x,'C')` /
 `$x->isa('C')` / `$x->can('m')`, negative guards (`unless`, early
 `return`/`die`), branch-scoped witnesses that re-widen at the join — landed as
-one pillar: `docs/adr/flow-narrowing.md`. The residual tail behind it (A4's
-cross-file / conditional-write slot writes, and the runtime `Mod->import`
-re-export form) is tracked in `docs/PARKED.md` / `docs/open-problems.md`.
+one pillar: `docs/adr/flow-narrowing.md` (+ `docs/adr/optional-types.md`,
+`docs/adr/narrowing-diagnostics.md` for places, polarity, and the diagnostics
+built on it). The residual tail behind it (A4's cross-file / conditional-write
+slot writes, and the runtime `Mod->import` re-export form) is tracked in
+`docs/PARKED.md` / `docs/open-problems.md`.
 
 ---
 

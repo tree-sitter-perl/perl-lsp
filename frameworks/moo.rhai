@@ -76,6 +76,14 @@ fn patterns() {
     ]
 }
 
+// Meta-methods the object system installs on every consuming class with no
+// visible `sub`: the MOP handle (`->meta`) and Moose's lowercase `does`
+// (alongside UNIVERSAL's uppercase DOES). Consulted by the
+// unresolved-method diagnostic's suppression list.
+fn meta_methods() {
+    ["meta", "does"]
+}
+
 fn triggers() {
     [
         #{ UsesModule: "Moo" },

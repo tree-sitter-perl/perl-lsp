@@ -1065,6 +1065,15 @@ pub trait FrameworkPlugin: Send + Sync {
         &[]
     }
 
+    /// Meta-methods this framework installs on every consuming class —
+    /// class-level DSL verbs with no visible `sub` declaration
+    /// (`__PACKAGE__->add_columns`, `$obj->meta`). The unresolved-method
+    /// diagnostic consults the registry union so framework DSL calls never
+    /// flag as unresolved. Default empty.
+    fn meta_methods(&self) -> &[String] {
+        &[]
+    }
+
     /// Fluent verbs — a call that returns the invocant's type unchanged (DBIC
     /// `search`/`search_rs` on a resultset → a same-row resultset). Only fires on
     /// an actual resultset invocant; the chain composes through the existing
@@ -1431,6 +1440,15 @@ impl PluginRegistry {
         self.plugins
             .iter()
             .flat_map(|p| p.column_keyed_verbs().iter().map(|s| s.as_str()))
+    }
+
+    /// Union of framework meta-methods across the registry — class-level
+    /// DSL verbs with no visible declaration. Baked onto `FileAnalysis`
+    /// for the unresolved-method diagnostic's suppression list.
+    pub fn meta_methods<'a>(&'a self) -> impl Iterator<Item = &'a str> + 'a {
+        self.plugins
+            .iter()
+            .flat_map(|p| p.meta_methods().iter().map(|s| s.as_str()))
     }
 
     /// Union of fluent verbs (call type follows the invocant) across the registry.

@@ -256,6 +256,7 @@ fn build_with_plugins_inner(
         return_infos: Vec::new(),
         pending_array_pushes: Vec::new(),
         last_expr_span: std::collections::HashMap::new(),
+        last_expr_is_return: std::collections::HashMap::new(),
         slot_write_rhs_span: std::collections::HashMap::new(),
         call_bindings: Vec::new(),
         method_call_bindings: Vec::new(),
@@ -322,6 +323,7 @@ fn build_with_plugins_inner(
         plugin_diagnostics: Vec::new(),
         topic_dsls,
         reassigned_scalars: std::collections::HashSet::new(),
+        scalar_reassign_writes: Vec::new(),
         key_writes: Vec::new(),
         method_call_arity: std::collections::HashMap::new(),
         parametric_emitted_refs: std::collections::HashSet::new(),
@@ -617,6 +619,7 @@ fn build_with_plugins_inner(
         role_packages: b.role_packages,
         dbic_source_name: b.dbic_source_name,
         column_keyed_verbs: b.plugins.column_keyed_verbs().map(|s| s.to_string()).collect(),
+        meta_methods: b.plugins.meta_methods().map(|s| s.to_string()).collect(),
         plugin_loads: b.plugin_loads,
         loader_config_params: b.loader_config_params,
         flow_edges: b.flow_edges,
@@ -711,7 +714,8 @@ impl<'a> Builder<'a> {
     /// inside the worklist, once `invocant_class` is filled.
     fn populate_witness_bag(&mut self) {
         use crate::witnesses::{
-            TypeObservation, Witness, WitnessAttachment, WitnessPayload, WitnessSource,
+            FactValue, TypeObservation, Witness, WitnessAttachment, WitnessPayload,
+            WitnessSource,
         };
 
         // Rep observations from `$v->{k}` access. Method-call return
@@ -757,7 +761,22 @@ impl<'a> Builder<'a> {
                 let resolved_owner = match owner {
                     Some(o @ (HashKeyOwner::Class(_) | HashKeyOwner::Sub { .. })) => Some(o.clone()),
                     _ => {
-                        if var_text == "$self" {
+                        // A conventional receiver spelling ($self/$class, the
+                        // positional `$_[0]`, `__PACKAGE__`) writes to the
+                        // enclosing class's slot. Classified by conventions.rs
+                        // — never by raw string compare — so `$_[0]->{k} =
+                        // $_[1]` setters count as writes too (the opaque-write
+                        // gate depends on seeing them).
+                        use crate::conventions::InvocantText;
+                        let is_receiver = match InvocantText::parse(var_text) {
+                            InvocantText::Scalar(name) => {
+                                crate::conventions::is_conventional_invocant_name(name)
+                            }
+                            InvocantText::PositionalReceiver
+                            | InvocantText::CurrentPackage => true,
+                            _ => false,
+                        };
+                        if is_receiver {
                             let scope = &self.scopes[r.scope.0 as usize];
                             scope.package.clone().map(HashKeyOwner::Class)
                         } else {
@@ -785,7 +804,7 @@ impl<'a> Builder<'a> {
                 attachment: WitnessAttachment::HashKey { owner, name: key.clone() },
                 source: WitnessSource::Builder("invocant_mutation".into()),
                 payload: WitnessPayload::Fact {
-                    family: "mutation".into(),
+                    family: crate::witnesses::tags::FACT_MUTATION.into(),
                     key: "written_at".into(),
                     value: crate::witnesses::FactValue::Str(key),
                 },
@@ -793,11 +812,24 @@ impl<'a> Builder<'a> {
             });
         }
         for (class, key, span, rhs_span) in slot_writes {
-            // Only seed when the RHS actually resolves to a type — a bare
-            // `Edge(Expr(rhs_span))` to an unresolved span folds to None,
-            // which is honest, but emitting nothing for `= shift` / `= $param`
-            // keeps the attachment absent entirely (no guess).
+            // A write whose RHS doesn't resolve (`= shift` / `= $param`)
+            // contributes no typed arm, but it must not vanish: the fold's
+            // all-undef verdict (`{undef} → Undef`) is only sound when we
+            // saw EVERY write, and `$self->{h} = undef; … set { $_[0]->{h}
+            // = $_[1] }` is exactly the init-then-mutate shape where the
+            // typed story is partial. The Fact records the opaque write so
+            // the fold declines the definitive claim.
             if self.bag_query_expr_span(rhs_span).is_none() {
+                self.bag.push(Witness {
+                    attachment: WitnessAttachment::SlotType { class, key },
+                    source: WitnessSource::Builder("slot_type".into()),
+                    payload: WitnessPayload::Fact {
+                        family: crate::witnesses::tags::FACT_OPAQUE_SLOT_WRITE.into(),
+                        key: String::new(),
+                        value: FactValue::Bool(true),
+                    },
+                    span,
+                });
                 continue;
             }
             self.bag.push(Witness {
@@ -846,6 +878,78 @@ impl<'a> Builder<'a> {
                 payload: WitnessPayload::Edge(WitnessAttachment::Expr(expr_span)),
                 span: sym_span,
             });
+        }
+
+        // Reassignment barriers. Each whole-scalar write becomes a
+        // `reassign_barrier` Fact on the attachment the variable's
+        // standing beliefs live on (first scope up the chain with
+        // Variable witnesses — the same probe the mutation-extension
+        // pass uses). The temporal fold then drops beliefs older than
+        // the latest barrier before the query point: a write whose RHS
+        // typed pushes its own TC at the same position (>= keeps it);
+        // a write we couldn't type leaves only the barrier, widening
+        // to unknown instead of resurrecting the stale belief.
+        // The write's own chain-typing edge is scope-keyed at the WRITE's
+        // scope, while the belief to erase may live scopes up (a decl in
+        // the sub body, the write in a loop block). Barrier every chain
+        // scope that holds witnesses — the read-side walk answers from
+        // whichever attachment it reaches first, so each needs its own
+        // boundary.
+        let barrier_pushes: Vec<(String, ScopeId, Span)> = self
+            .scalar_reassign_writes
+            .iter()
+            .flat_map(|(name, scope, span)| {
+                crate::file_analysis::scope_chain_of(&self.scopes, *scope)
+                    .into_iter()
+                    .filter(|sid| {
+                        let att = WitnessAttachment::Variable {
+                            name: name.clone(),
+                            scope: *sid,
+                        };
+                        !self.bag.for_attachment(&att).is_empty()
+                    })
+                    .map(|sid| (name.clone(), sid, *span))
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        for (name, scope, span) in barrier_pushes {
+            self.bag.push(Witness {
+                attachment: WitnessAttachment::Variable { name, scope },
+                source: WitnessSource::Builder(crate::witnesses::tags::FACT_REASSIGN_BARRIER.into()),
+                payload: WitnessPayload::Fact {
+                    family: crate::witnesses::tags::FACT_REASSIGN_BARRIER.into(),
+                    key: String::new(),
+                    value: FactValue::Bool(true),
+                },
+                span,
+            });
+        }
+
+        // Fallthrough tails are value arms. A sub with explicit returns
+        // can still fall off its final statement (`return undef if $x;
+        // compute()`), and that tail never passes through
+        // `publish_return_arm_witnesses`. Count it so the all-undef gate
+        // in `SymbolReturnArmFold` types a sub `Undef` only when every
+        // way out is provably undef. Conservative by construction: a
+        // stale `last_expr_span` (sub ends in a block statement) still
+        // counts as a value arm — under-claiming `Undef`, never lying.
+        let mut tail_value_arms: Vec<(SymbolId, Span)> = Vec::new();
+        for scope in &self.scopes {
+            if !matches!(scope.kind, ScopeKind::Sub { .. } | ScopeKind::Method { .. }) {
+                continue;
+            }
+            if !self.return_infos.iter().any(|ri| ri.scope == scope.id) {
+                continue;
+            }
+            let Some(span) = self.last_expr_span.get(&scope.id).copied() else { continue };
+            if self.last_expr_is_return.get(&scope.id).copied().unwrap_or(false) {
+                continue;
+            }
+            let Some(sym_id) = self.find_sub_symbol_for_scope(scope.id) else { continue };
+            tail_value_arms.push((sym_id, span));
+        }
+        for (sym_id, span) in tail_value_arms {
+            self.push_value_arm_fact(sym_id, span);
         }
     }
 
@@ -1179,6 +1283,12 @@ fn point_lt(a: tree_sitter::Point, b: tree_sitter::Point) -> bool {
 /// gates on (for `emit_arity_return_witnesses`), and the body span
 /// (the `Expr(span)` key both `emit_arity_return_witnesses` and
 /// `seed_return_types_from_bag` query inline via `bag_query_expr_span`).
+/// Sentinel name for anonymous-sub scopes and symbols. One definition —
+/// producers (scope + symbol creation) and consumers (the shift-invocant
+/// gate) share it, so "is this sub anonymous?" is never a re-typed
+/// string compare.
+const ANON_SUB_NAME: &str = "(anon)";
+
 struct ReturnInfo {
     /// The scope (Sub/Method) this return belongs to.
     scope: ScopeId,
@@ -1466,6 +1576,12 @@ struct Builder<'a> {
     /// Types ride the bag; this map only carries the structural
     /// pointer to the source span.
     last_expr_span: std::collections::HashMap<ScopeId, Span>,
+    /// Whether the scope's last top-level statement IS a `return` —
+    /// distinguishes "the tail is one of the explicit return arms" from
+    /// "the tail is a fallthrough value expression" (`return undef if $x;
+    /// compute()`). The all-undef-arms gate needs the distinction: a
+    /// fallthrough tail is a value arm the per-`return` walk never sees.
+    last_expr_is_return: std::collections::HashMap<ScopeId, bool>,
     /// For each `$obj->{k} = <rhs>` hash-key WRITE, maps the key node's
     /// span (the span the matching `HashKeyAccess` Write ref carries) to
     /// the RHS expression's span. `populate_witness_bag`'s mutation loop
@@ -1708,6 +1824,14 @@ struct Builder<'a> {
     /// variable itself; element writes go to `key_writes` instead).
     /// Flushed into `FileAnalysis.reassigned_scalars`.
     reassigned_scalars: std::collections::HashSet<String>,
+    /// Every whole-scalar reassignment site (name, scope at the write,
+    /// write span). `populate_witness_bag` turns each into a
+    /// `reassign_barrier` Fact on the variable's belief attachment: a
+    /// write is a belief boundary, so a stale type must not survive an
+    /// assignment whose RHS we couldn't type (`my $ct = undef;
+    /// while (…) { $ct = f($_); } … defined $ct` — the loop write is
+    /// invisible to the outer temporal fold without the barrier).
+    scalar_reassign_writes: Vec<(String, ScopeId, Span)>,
 
     /// `$var->{key} = …` writes in walk order — input to the
     /// mutation-extension pass (shape extension / open-widening).
@@ -2842,7 +2966,7 @@ impl<'a> Builder<'a> {
             // post-walk correctness; same reason as the `$self`
             // case above.
             "func1op_call_expression" if self.is_shift_call(node) => {
-                if !self.shift_is_invocant_here(node) {
+                if !self.shift_is_invocant_here(node) || !self.shift_denotes_invocant(node) {
                     return None;
                 }
                 self.package_for_node(node).map(InferredType::ClassName)
@@ -2907,6 +3031,9 @@ impl<'a> Builder<'a> {
             }
             "function_call_expression" | "ambiguous_function_call_expression" => {
                 if self.is_shift_call(node) {
+                    if !self.shift_denotes_invocant(node) {
+                        return None;
+                    }
                     return self.package_for_node(node).map(InferredType::ClassName);
                 }
                 let func = node.child_by_field_name("function")?;
@@ -3998,6 +4125,8 @@ impl<'a> Builder<'a> {
                             // payload doesn't bake to a witness shape.
                             self.emit_expr_witness(child);
                             self.last_expr_span.insert(scope, node_to_span(child));
+                            self.last_expr_is_return
+                                .insert(scope, child.kind() == "return_expression");
                         }
                     }
                 }
@@ -4592,7 +4721,7 @@ impl<'a> Builder<'a> {
         let span = node_to_span(node);
         self.ensure_anon_sub_symbol(node, &params);
         self.push_scope(
-            ScopeKind::Sub { name: "(anon)".into() },
+            ScopeKind::Sub { name: ANON_SUB_NAME.into() },
             span,
             None,
         );
@@ -4620,7 +4749,7 @@ impl<'a> Builder<'a> {
             return *id;
         }
         let sym_id = self.add_symbol(
-            "(anon)".into(),
+            ANON_SUB_NAME.into(),
             SymKind::Sub,
             span,
             self.sub_keyword_span(node).unwrap_or(span),
@@ -4821,6 +4950,65 @@ impl<'a> Builder<'a> {
         }
         let left = assign.child_by_field_name("left")?;
         self.get_var_text_from_lhs(left)
+    }
+
+    /// Does this `shift` denote the sub's INVOCANT (and so type as the
+    /// enclosing class)? Expression position (`shift->method`, `bless {},
+    /// shift`) always does — it reads arg 0 directly. A declaration
+    /// binding (`my $x = shift`) does only when `$x` is the receiver:
+    /// a conventional invocant name, or the sub's extracted invocant
+    /// param. `my $uri = shift;` — the SECOND shift — is a plain
+    /// argument read; typing it as the class was the audit's
+    /// `defined $value`-guard false-positive maker.
+    fn shift_denotes_invocant(&self, node: Node<'a>) -> bool {
+        // No binding assignment within the statement → expression
+        // position (`shift->method`) → the receiver read itself.
+        let Some(assign) =
+            crate::cst::stmt_context(node).and_then(|c| c.binding_assignment)
+        else {
+            return true;
+        };
+        // The shift must sit on the RHS; a shift inside the LHS (odd,
+        // but cheap to guard) is not a binding of it.
+        let Some(left) = assign.child_by_field_name("left") else { return true };
+        let Some(var) = self.get_var_text_from_lhs(left) else { return true };
+        if crate::conventions::is_conventional_invocant_name(&var) {
+            return true;
+        }
+        // The sub's extracted param list knows which param is the
+        // invocant (params[0] for methods; params[1] under `around`).
+        // Scope-derived (not the live walk stack) so the post-walk
+        // chain-typing callers resolve identically. Anonymous subs are
+        // excluded: their first arg is a callback payload, not a
+        // receiver — the audit's `Maybe`-checker false-positive shape
+        // (`sub { my $value = shift; return if !defined($value) }`) —
+        // so only a conventional name (above) types there.
+        let scope = self.scope_at_point(node.start_position());
+        let sub_scope_name = crate::file_analysis::scope_chain_of(&self.scopes, scope)
+            .into_iter()
+            .find_map(|sid| match &self.scopes[sid.0 as usize].kind {
+                ScopeKind::Sub { name } | ScopeKind::Method { name } => {
+                    Some((sid, name.clone()))
+                }
+                _ => None,
+            })
+            .filter(|(_, name)| name != ANON_SUB_NAME);
+        let invocant_param = sub_scope_name
+            .and_then(|(sid, name)| self.find_sub_symbol_for(&name, sid))
+            .and_then(|sid| self.symbols.iter().find(|s| s.id == sid))
+            .and_then(|sym| match &sym.detail {
+                // The marked invocant when extraction decided one, else
+                // the FIRST positional — in a named sub of an OO-by-
+                // convention package that slot IS the receiver regardless
+                // of its name (`my $x = shift` in a Mojo class).
+                SymbolDetail::Sub { params, .. } => params
+                    .iter()
+                    .find(|p| p.is_invocant)
+                    .or(params.first())
+                    .map(|p| p.name.clone()),
+                _ => None,
+            });
+        invocant_param.as_deref() == Some(var.as_str())
     }
 
     /// Check if a node is a `shift` call (bare or with parens).
@@ -6673,7 +6861,23 @@ impl<'a> Builder<'a> {
                 // ternaries; Edge payloads resolve through the
                 // registry's materialization.
                 self.emit_expr_witness(right);
-                let mut inferred = self.bag_query_expr_span(node_to_span(right));
+                // A postfix-conditional write (`$isbn = undef if …`) may not
+                // happen — an unconditional belief from it is wrong on both
+                // axes: conditionality (the honest post-statement type is
+                // old-or-new — widen, don't assert) and position (the TC
+                // anchors at statement start, so a deref inside the guard
+                // condition itself would read the not-yet-happened write;
+                // `$isbn = undef if $isbn && !$isbn->is_valid` fed D1 a
+                // false "is undef" for the `->is_valid` call). Skip the
+                // belief; the write's reassign barrier still lands, which
+                // IS the widening.
+                let conditional_write = crate::cst::stmt_context(node)
+                    .is_some_and(|c| c.under_postfix_conditional);
+                let mut inferred = if conditional_write {
+                    None
+                } else {
+                    self.bag_query_expr_span(node_to_span(right))
+                };
                 // `my %h = (k => v, …)` — the list IS a hash literal in
                 // this position, the hashref's second spelling. The
                 // list's own Expr witness can't carry that (its meaning
@@ -7110,6 +7314,11 @@ impl<'a> Builder<'a> {
                 Some(WitnessPayload::InferredType(InferredType::String))
             }
             "number" => Some(WitnessPayload::InferredType(InferredType::Numeric)),
+            // A literal `undef` is the definitive bottom — closed under
+            // syntax. Makes undef WRITES visible: `$self->{x} = undef` seeds
+            // a `SlotType` arm the fold lifts to `Optional<T>`, and
+            // `my $x = undef` feeds the undef-deref diagnostic.
+            "undef_expression" => Some(WitnessPayload::InferredType(InferredType::Undef)),
             "anonymous_hash_expression" => {
                 Some(WitnessPayload::InferredType(self.hash_literal_type(node)))
             }
@@ -7380,9 +7589,9 @@ impl<'a> Builder<'a> {
                 if matches!(arm.kind(), "undef_expression" | "stub_expression") {
                     self.bag.push(Witness {
                         attachment: arm_att.clone(),
-                        source: WitnessSource::Builder("undef_arm".into()),
+                        source: WitnessSource::Builder(crate::witnesses::tags::FACT_UNDEF_ARM.into()),
                         payload: WitnessPayload::Fact {
-                            family: "undef_arm".into(),
+                            family: crate::witnesses::tags::FACT_UNDEF_ARM.into(),
                             key: String::new(),
                             value: crate::witnesses::FactValue::Bool(true),
                         },
@@ -7535,6 +7744,25 @@ impl<'a> Builder<'a> {
         }
     }
 
+    /// One `value_arm` counting Fact on the sub's return-arm attachment.
+    /// Pushed for every value arm — typed or not — because an Edge whose
+    /// target never materializes leaves no trace in the fold, and the
+    /// all-undef verdict (`{undef arms only} → Undef`) must not fire
+    /// while an untypeable value arm exists.
+    fn push_value_arm_fact(&mut self, sym_id: SymbolId, span: Span) {
+        use crate::witnesses::{FactValue, Witness, WitnessAttachment, WitnessPayload, WitnessSource};
+        self.bag.push(Witness {
+            attachment: WitnessAttachment::SymbolReturnArm(sym_id),
+            source: WitnessSource::Builder(crate::witnesses::tags::FACT_VALUE_ARM.into()),
+            payload: WitnessPayload::Fact {
+                family: crate::witnesses::tags::FACT_VALUE_ARM.into(),
+                key: String::new(),
+                value: FactValue::Bool(true),
+            },
+            span,
+        });
+    }
+
     /// Publish witnesses for one explicit `return EXPR`:
     /// - `Expr(body_span)` is populated by `emit_expr_witness` —
     ///   directly with the body's payload for non-ternary, or
@@ -7557,20 +7785,21 @@ impl<'a> Builder<'a> {
         let Some(sub_name) = self.enclosing_sub_name() else { return };
         let Some(sym_id) = self.find_sub_symbol_for(&sub_name, scope) else { return };
 
-        // A bare `return;` and `return undef` are undef arms — the sub's
-        // value is optional. Neither has an rvalue type to ride an `Expr`
-        // edge, so mark the arm with a Fact the fold counts; the arm join
-        // lifts `{T, undef}` to `Optional<T>`.
+        // A bare `return;`, `return undef`, and `return ()` (a
+        // `stub_expression`, which coerces to undef in scalar context) are
+        // undef arms — the sub's value is optional. None has an rvalue type
+        // to ride an `Expr` edge, so mark the arm with a Fact the fold
+        // counts; the arm join lifts `{T, undef}` to `Optional<T>`.
         let is_undef_arm = match body {
             None => true,
-            Some(b) => b.kind() == "undef_expression",
+            Some(b) => matches!(b.kind(), "undef_expression" | "stub_expression"),
         };
         if is_undef_arm {
             self.bag.push(Witness {
                 attachment: WitnessAttachment::SymbolReturnArm(sym_id),
-                source: WitnessSource::Builder("undef_arm".into()),
+                source: WitnessSource::Builder(crate::witnesses::tags::FACT_UNDEF_ARM.into()),
                 payload: WitnessPayload::Fact {
-                    family: "undef_arm".into(),
+                    family: crate::witnesses::tags::FACT_UNDEF_ARM.into(),
                     key: String::new(),
                     value: FactValue::Bool(true),
                 },
@@ -7584,6 +7813,7 @@ impl<'a> Builder<'a> {
                 payload: WitnessPayload::Edge(WitnessAttachment::Expr(arm_span)),
                 span: arm_span,
             });
+            self.push_value_arm_fact(sym_id, arm_span);
         }
         self.bag.push(Witness {
             attachment: WitnessAttachment::Symbol(sym_id),
@@ -7910,6 +8140,29 @@ impl<'a> Builder<'a> {
                 && !crate::cst::is_element_access_base(node)
             {
                 self.reassigned_scalars.insert(text.to_string());
+                // Barrier position is the enclosing STATEMENT's start, so
+                // the same statement's own TC (whose constraint_span also
+                // starts at/inside the statement) survives the fold's
+                // `>= barrier` rule while earlier statements' beliefs
+                // don't. Two exclusions:
+                // - a DECLARATION (`my $x = …`) is the first binding, not
+                //   a belief-erasing reassignment — and its barrier would
+                //   wrongly kill the sub-spanning `FirstParam` TC of
+                //   `my $self = shift`;
+                // - no expression_statement ancestor (a foreach header
+                //   var): loop-var typing spans the whole loop and isn't
+                //   a reassignment of a prior belief.
+                if text.starts_with('$') {
+                    if let Some(c) =
+                        crate::cst::stmt_context(node).filter(|c| !c.in_declaration)
+                    {
+                        self.scalar_reassign_writes.push((
+                            text.to_string(),
+                            self.current_scope(),
+                            node_to_span(c.statement),
+                        ));
+                    }
+                }
             }
             // Hash variables escape only by reference-taking (`\%h`):
             // a bare `%h` in a call or list FLATTENS TO COPIES — the
@@ -10017,6 +10270,11 @@ impl<'a> Builder<'a> {
                 } else {
                     None
                 };
+                // `has parent => undef` means "starts empty, set later" — the
+                // attribute is a mutable slot, so `Undef` as a return CONTRACT
+                // is a lie the moment anyone sets it (and D1 would flag every
+                // `$self->parent->…` as a guaranteed die). No claim instead.
+                let getter_type = getter_type.filter(|t| !t.is_undef());
                 let fluent_type = self
                     .current_package
                     .as_ref()
@@ -10239,13 +10497,24 @@ impl<'a> Builder<'a> {
                 plugin::ValueShape::Str(node.utf8_text(self.source).unwrap_or("").to_string())
             }
             "anonymous_hash_expression" => {
-                let mut tokens: Vec<String> = Vec::new();
-                self.collect_hash_tokens(node, &mut tokens);
+                // Pair-walk (cst::pair_nodes — separator-agnostic, position
+                // keeps alignment even when a value isn't a string). An
+                // arrayref VALUE contributes its first string element: the
+                // Sub::HandlesVia curried-delegation shape
+                // (`local => [remote, @args]`) names its remote there.
                 let mut pairs = Vec::new();
-                let mut i = 0;
-                while i + 1 < tokens.len() {
-                    pairs.push((tokens[i].clone(), tokens[i + 1].clone()));
-                    i += 2;
+                for (k, v) in crate::cst::pair_nodes(node) {
+                    let Some(key) = self.extract_node_string(k) else { continue };
+                    let val = self.extract_node_string(v).or_else(|| {
+                        if v.kind() == "anonymous_array_expression" {
+                            self.extract_string_list(v).into_iter().next().map(|(s, _)| s)
+                        } else {
+                            None
+                        }
+                    });
+                    if let Some(val) = val {
+                        pairs.push((key, val));
+                    }
                 }
                 plugin::ValueShape::HashPairs(pairs)
             }
@@ -10264,55 +10533,6 @@ impl<'a> Builder<'a> {
             "bareword" | "autoquoted_bareword" => node.utf8_text(self.source).ok().map(|s| s.to_string()),
             "string_literal" | "interpolated_string_literal" => self.extract_string_content(node),
             _ => None,
-        }
-    }
-
-    /// Flatten a fat-comma hash node into alternating key/value strings,
-    /// recursing into tree-sitter-perl's right-associative nested
-    /// `list_expression` wrappers.
-    fn collect_hash_tokens(&self, node: Node<'_>, out: &mut Vec<String>) {
-        match node.kind() {
-            "anonymous_hash_expression" => {
-                for i in 0..node.child_count() {
-                    if let Some(child) = node.child(i) {
-                        if matches!(child.kind(), "list_expression" | "parenthesized_expression") {
-                            self.collect_hash_tokens(child, out);
-                            return;
-                        }
-                    }
-                }
-                self.collect_hash_tokens_flat(node, out);
-            }
-            "list_expression" | "parenthesized_expression" => {
-                self.collect_hash_tokens_flat(node, out);
-            }
-            _ => {
-                if let Some(s) = self.extract_node_string(node) {
-                    out.push(s);
-                }
-            }
-        }
-    }
-
-    fn collect_hash_tokens_flat(&self, node: Node<'_>, out: &mut Vec<String>) {
-        let count = node.child_count();
-        let mut i = 0;
-        while i < count {
-            if let Some(child) = node.child(i) {
-                match child.kind() {
-                    "=>" | "," => {}
-                    "list_expression" | "parenthesized_expression" => {
-                        self.collect_hash_tokens_flat(child, out);
-                    }
-                    _ if child.is_named() => {
-                        if let Some(s) = self.extract_node_string(child) {
-                            out.push(s);
-                        }
-                    }
-                    _ => {}
-                }
-            }
-            i += 1;
         }
     }
 
@@ -11975,6 +12195,21 @@ impl<'a> Builder<'a> {
             if let Some(child) = node.named_child(i) {
                 if matches!(child.kind(), "container_variable" | "keyval_container_variable" | "scalar" | "hash") {
                     return child.utf8_text(self.source).ok().map(|s| s.to_string());
+                }
+                // The positional-receiver container (`$_[0]->{k}` in a
+                // shiftless setter) has no variable identity, but its
+                // conventional-receiver meaning is a classification
+                // consumers make via `InvocantText::parse` — carry the
+                // spelling through so they can.
+                if child.kind() == "array_element_expression" {
+                    if let Ok(text) = child.utf8_text(self.source) {
+                        if matches!(
+                            crate::conventions::InvocantText::parse(text),
+                            crate::conventions::InvocantText::PositionalReceiver
+                        ) {
+                            return Some(text.to_string());
+                        }
+                    }
                 }
             }
         }
@@ -14232,7 +14467,7 @@ impl<'a> Builder<'a> {
     ) {
         use crate::witnesses::{Witness, WitnessAttachment, WitnessPayload, WitnessSource};
 
-        self.bag.remove_by_source_tag("local_return");
+        self.bag.remove_by_source_tag(crate::witnesses::tags::TAG_LOCAL_RETURN);
         self.bag.remove_by_source_tag("plugin_bridge");
         self.bag.remove_by_source_tag("inheritance");
 
@@ -14288,7 +14523,7 @@ impl<'a> Builder<'a> {
                         class,
                         name: sym.name.clone(),
                     },
-                    source: WitnessSource::Builder("local_return".into()),
+                    source: WitnessSource::Builder(crate::witnesses::tags::TAG_LOCAL_RETURN.into()),
                     payload: WitnessPayload::Edge(WitnessAttachment::Symbol(sym.id)),
                     span: sym.span,
                 });
@@ -14360,8 +14595,16 @@ impl<'a> Builder<'a> {
             // two edges on `MethodOnClass(child, m)` and the
             // materializer's latest-wins reducer would silently pick
             // the second-emitted parent.
+            //
+            // Seeded with the child's OWN method names: an override
+            // dispatches to the child's sub, so the parent's type must
+            // never answer for it — even (especially) when the local
+            // override's type didn't resolve. Mirrors the cross-file
+            // projection in `enrich_imported_types_with_keys`.
             let mut emitted_for_child: std::collections::HashSet<String> =
                 std::collections::HashSet::new();
+            emitted_for_child
+                .extend(crate::file_analysis::own_method_names(&self.symbols, child));
             for parent in parents {
                 if parent == child {
                     continue;

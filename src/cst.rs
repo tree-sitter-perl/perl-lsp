@@ -253,6 +253,55 @@ pub(crate) fn pair_nodes_in<'a>(children: &[Node<'a>]) -> Vec<(Node<'a>, Node<'a
     out
 }
 
+/// A node's enclosing STATEMENT plus the wrappers crossed climbing to it
+/// — the one place the "where does my statement start / what wraps me"
+/// grammar shape lives. Consumers ask the flags instead of re-spelling
+/// ancestor climbs with per-site stop-kind sets.
+pub(crate) struct StmtContext<'a> {
+    /// The `expression_statement` containing the node.
+    pub statement: Node<'a>,
+    /// Crossed a `postfix_conditional_expression` (`EXPR if COND`) —
+    /// whatever the node does is conditional on the statement's guard.
+    pub under_postfix_conditional: bool,
+    /// Crossed a `variable_declaration` — the node sits inside a
+    /// `my`/`our` declaration (a first binding, not a reassignment).
+    pub in_declaration: bool,
+    /// Nearest `assignment_expression` crossed, if any — for an RHS
+    /// node, the assignment that binds its value.
+    pub binding_assignment: Option<Node<'a>>,
+}
+
+/// Climb to the enclosing `expression_statement`, recording what was
+/// crossed. `None` when no statement ancestor exists (a foreach-header
+/// variable, a signature default) — callers treat that as "no statement
+/// context", each with its own conservative default.
+pub(crate) fn stmt_context(node: Node) -> Option<StmtContext> {
+    let mut under_postfix_conditional = false;
+    let mut in_declaration = false;
+    let mut binding_assignment: Option<Node> = None;
+    let mut cur = node;
+    while let Some(p) = cur.parent() {
+        match p.kind() {
+            "expression_statement" => {
+                return Some(StmtContext {
+                    statement: p,
+                    under_postfix_conditional,
+                    in_declaration,
+                    binding_assignment,
+                });
+            }
+            "postfix_conditional_expression" => under_postfix_conditional = true,
+            "variable_declaration" => in_declaration = true,
+            "assignment_expression" if binding_assignment.is_none() => {
+                binding_assignment = Some(p)
+            }
+            _ => {}
+        }
+        cur = p;
+    }
+    None
+}
+
 /// Pair-walk a container node: a bare `list_expression` /
 /// `parenthesized_expression`, or an `anonymous_hash_expression` (its inner
 /// list is unwrapped). Composition of [`flatten_list`] + [`pair_nodes_in`].
