@@ -7,7 +7,11 @@
 //
 // The Sub::Install / Class::Method::Modifiers family is the same capability
 // with a hashref-options shape (`install_sub({ code, into, as })`); it rides
-// this seam once CallContext classifies hashref args for function calls.
+// this seam once the arg projection classifies hashref args.
+//
+// The verb + arg shape live in the `patterns()` query; core computes the
+// `args` projection (the flattened call arguments as full ArgInfos, folding
+// included) and `on_match` owns the semantics — no tree walking here.
 
 fn id() { "monkey-patch" }
 
@@ -16,16 +20,61 @@ fn triggers() {
 }
 
 // monkey_patch $class, name => sub {…}, name2 => sub {…};
-fn on_function_call(ctx) {
+// Both spellings — parenless (`ambiguous_function_call_expression`) and
+// parenthesized (`function_call_expression`) — capture the argument list
+// under @args and read it through the `args` transition projection.
+fn patterns() {
+    let projections = #{ args: ["args"] };
+    [
+        #{
+            name: "monkey_patch_call",
+            query: `
+(ambiguous_function_call_expression
+  function: (function) @fn (#eq? @fn "monkey_patch")
+  arguments: (_) @args
+) @call
+`,
+            projections: projections,
+            // The expect harness runs each pattern's query independently;
+            // the parenless call is `ambiguous_function_call_expression`.
+            expect: [
+                #{ src: "monkey_patch 'C', hello => sub { 1 };", matches: 1 },
+                #{ src: "monkey_patch __PACKAGE__, a => sub { 1 }, b => sub { 2 };", matches: 1 },
+                #{ src: "monkey_patch(__PACKAGE__, get => sub { 1 });", matches: 0 },
+                #{ src: "warn 'hi';", matches: 0 },
+            ],
+        },
+        #{
+            name: "monkey_patch_call_paren",
+            query: `
+(function_call_expression
+  function: (function) @fn (#eq? @fn "monkey_patch")
+  arguments: (_) @args
+) @call
+`,
+            projections: projections,
+            // The parenthesized call is `function_call_expression`.
+            expect: [
+                #{ src: "monkey_patch(__PACKAGE__, get => sub { 1 });", matches: 1 },
+                #{ src: "monkey_patch 'C', hello => sub { 1 };", matches: 0 },
+            ],
+        },
+    ]
+}
+
+fn on_match(pattern, m) {
     let out = [];
-    if ctx.function_name != "monkey_patch" { return out; }
-    let args = ctx.args;
+
+    let args_cap = m.captures.args;
+    if args_cap == () { return out; }
+    let args = args_cap.args;
+    if args == () { return out; }
     if args.len() < 3 { return out; }
 
     // Target class: a literal string/bareword, or __PACKAGE__. A runtime
     // `$class` doesn't fold — honest miss, never a guess.
     let cls = args[0].string_value;
-    if args[0].text == "__PACKAGE__" { cls = ctx.current_package; }
+    if args[0].text == "__PACKAGE__" { cls = m["package"]; }
     if cls == () { return out; }
 
     // (name => sub) pairs from arg 1 on. Loop registrations

@@ -9607,15 +9607,46 @@ impl<'a> Builder<'a> {
             "string_literal" => self.extract_string_content(expr).into_iter().collect(),
             "interpolated_string_literal" => self.try_fold_interpolated_string(expr),
             "binary_expression" => self.try_fold_string_concat(expr),
-            "scalar" | "array" | "hash" | "bareword" => self
-                .resolve_constant_strings(expr.utf8_text(self.source).unwrap_or(""), 0)
-                .unwrap_or_default(),
+            "scalar" | "array" | "hash" | "bareword" => {
+                let text = expr.utf8_text(self.source).unwrap_or("");
+                let mut vals = self.resolve_constant_strings(text, 0).unwrap_or_default();
+                // `$_` under a statement-modifier loop folds to the loop's
+                // topic list. The walk-time binding (`visit_postfix_for`) is
+                // transient — scoped to the body visit — so the post-walk
+                // arg projection re-derives it from the enclosing
+                // `postfix_for_expression` on demand.
+                if vals.is_empty() && text == "$_" {
+                    vals = self.postfix_topic_values(expr);
+                }
+                vals
+            }
             "parenthesized_expression" | "list_expression" => expr
                 .named_child(0)
                 .map(|c| self.enumerate_string_values(c))
                 .unwrap_or_default(),
             _ => vec![],
         }
+    }
+
+    /// Fold `$_` to the enclosing statement-modifier loop's topic list
+    /// (`EXPR for qw(...)`). Re-derives what `visit_postfix_for` binds
+    /// transiently, so the post-walk arg projection sees the fan-out.
+    fn postfix_topic_values(&self, node: Node<'a>) -> Vec<String> {
+        let mut cur = node.parent();
+        while let Some(n) = cur {
+            if n.kind() == "postfix_for_expression" {
+                return match n.named_child(1) {
+                    Some(list_node) => self
+                        .extract_string_list(list_node)
+                        .into_iter()
+                        .map(|(s, _)| s)
+                        .collect(),
+                    None => vec![],
+                };
+            }
+            cur = n.parent();
+        }
+        vec![]
     }
 
     /// Fold a `.`-concatenation of constant-resolvable operands into name(s).
