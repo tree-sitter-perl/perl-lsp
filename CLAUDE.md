@@ -239,7 +239,7 @@ Inspect any snippet's CST with `perl-lsp --parse <file>` (or `echo '...' | perl-
 
 ## LSP capabilities
 
-documentSymbol, definition, references, hover, rename (+ prepareRename), completion, signatureHelp, inlayHint, documentHighlight, selectionRange, foldingRange, formatting (perltidy), rangeFormatting, semanticTokens/full, codeAction (auto-import), linkedEditingRange, workspace/symbol, diagnostics (unresolved function/method warnings).
+documentSymbol, definition, references, hover, rename (+ prepareRename), completion, signatureHelp, inlayHint, documentHighlight, selectionRange, foldingRange, formatting (perltidy), rangeFormatting, semanticTokens/full, codeAction (auto-import), workspace/symbol, diagnostics (unresolved function/method warnings).
 
 ## Key dependencies
 

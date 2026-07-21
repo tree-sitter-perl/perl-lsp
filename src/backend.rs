@@ -239,7 +239,13 @@ impl LanguageServer for Backend {
                     work_done_progress_options: Default::default(),
                 })),
                 document_range_formatting_provider: Some(OneOf::Left(true)),
-                linked_editing_range_provider: Some(LinkedEditingRangeServerCapabilities::Simple(true)),
+                // Off: clients with linked edits on by default (Zed) replay
+                // keystrokes into every returned range, so a mid-typed `$abel`
+                // whose `$a` prefix matches a declared variable live-renames
+                // the declaration (#116). Identifier occurrence sets don't fit
+                // this verb; re-enable only for an atomic slot like heredoc
+                // terminators.
+                linked_editing_range_provider: None,
                 completion_provider: Some(CompletionOptions {
                     trigger_characters: Some(vec![
                         "$".to_string(),
@@ -906,22 +912,12 @@ impl LanguageServer for Backend {
 
     async fn linked_editing_range(
         &self,
-        params: LinkedEditingRangeParams,
+        _params: LinkedEditingRangeParams,
     ) -> Result<Option<LinkedEditingRanges>> {
-        let uri = &params.text_document_position_params.text_document.uri;
-        let pos = params.text_document_position_params.position;
-        let doc = match self.files.get_open(uri) {
-            Some(doc) => doc,
-            None => return Ok(None),
-        };
-
-        match symbols::linked_editing_ranges(&doc.analysis, pos, Some(&*self.module_index)) {
-            Some(ranges) => Ok(Some(LinkedEditingRanges {
-                ranges,
-                word_pattern: None,
-            })),
-            None => Ok(None),
-        }
+        // Capability is off (see initialize); null here keeps clients that
+        // ignore capabilities from co-editing anyway. The occurrence set
+        // stays CLI-queryable via --linked-editing.
+        Ok(None)
     }
 }
 
