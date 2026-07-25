@@ -1443,9 +1443,48 @@ fn test_return_type_bare_return_optional() {
 
 #[test]
 fn test_return_type_all_bare_returns() {
-    // All bare returns → no return type
+    // Every arm is a provable undef → the definitive `Undef`, not the
+    // silent None (docs/adr/optional-types.md). Feeds the method-on-Undef
+    // and always-false-guard diagnostics.
     let fa = build_fa("sub noop {\n    return;\n}");
-    assert_eq!(fa.sub_return_type_at_arity("noop", None), None);
+    assert_eq!(
+        fa.sub_return_type_at_arity("noop", None),
+        Some(InferredType::Undef)
+    );
+}
+
+#[test]
+fn test_return_type_all_undef_returns() {
+    // `sub f { return undef }` — the explicit spelling of the same fact.
+    let fa = build_fa("sub nothing {\n    return undef;\n}");
+    assert_eq!(
+        fa.sub_return_type_at_arity("nothing", None),
+        Some(InferredType::Undef)
+    );
+}
+
+#[test]
+fn test_return_type_undef_arm_with_fallthrough_tail_not_undef() {
+    // `return undef if $x; compute()` — the fallthrough tail is a value
+    // arm the per-`return` walk never sees. The all-undef gate must not
+    // fire: the sub returns compute()'s value when the guard fails.
+    let fa = build_fa("sub gated {\n    my ($x) = @_;\n    return undef if $x;\n    compute();\n}");
+    assert_ne!(
+        fa.sub_return_type_at_arity("gated", None),
+        Some(InferredType::Undef)
+    );
+}
+
+#[test]
+fn test_return_type_empty_list_return_optional() {
+    // `return ()` coerces to undef in scalar context — an undef arm, same
+    // as bare `return;`, so `{T, ()}` lifts to Optional<T>.
+    let fa = build_fa("sub find {\n    return () unless 1;\n    return { row => 1 };\n}");
+    let t = fa.sub_return_type_at_arity("find", None);
+    assert!(
+        matches!(&t, Some(InferredType::Optional(inner)) if inner.is_hash_shaped()),
+        "Optional<hash-shaped>, got {t:?}",
+    );
 }
 
 #[test]
@@ -10976,17 +11015,47 @@ fn moo_instanceof_isa_types_both_getter_and_writer() {
 
 /// `Maybe[InstanceOf['Foo']]` — the nested constructor is itself a constraint
 /// value. The core types the inner call (`TypeConstraintOf(ClassName(Foo))`)
-/// into the param's `ty`; the `Maybe` passthrough fold projects its inner, so
-/// the accessor returns `Foo` (optionalness unmodeled — unwrap for resolution).
+/// into the param's `ty`; the `Maybe` fold projects the inner and lifts it to
+/// `Optional<Foo>` — the accessor value is honestly maybe-undef (optional
+/// receivers dispatch leniently, and the optional-deref lint sees the truth).
 #[test]
-fn moo_maybe_instanceof_isa_unwraps_to_inner_class() {
+fn moo_maybe_instanceof_isa_lifts_to_optional_class() {
     let fa = build_fa(
         "package T;\nuse Moo;\nuse Types::Standard qw/Maybe InstanceOf/;\nhas thing => (is=>'ro', isa=>Maybe[InstanceOf['My::Thing']]);\n1;\n",
     );
+    let t = fa.sub_return_type_at_arity("thing", Some(0));
+    assert!(
+        matches!(&t, Some(InferredType::Optional(inner)) if inner.class_name() == Some("My::Thing")),
+        "Maybe[InstanceOf['My::Thing']] must type the accessor Optional<My::Thing>, got {t:?}",
+    );
+}
+
+/// Bareword `Maybe[Int]` — the base constant is a 0-arity constraint value;
+/// the plugin folds it to its rep and `Maybe` lifts to Optional. Parity with
+/// the quoted `isa => 'Maybe[Int]'` spelling.
+#[test]
+fn moo_bareword_maybe_int_isa_types_optional_numeric() {
+    let fa = build_fa(
+        "package T;\nuse Moo;\nuse Types::Standard qw/Maybe Int/;\nhas count => (is=>'ro', isa=>Maybe[Int]);\n1;\n",
+    );
     assert_eq!(
-        fa.sub_return_type_at_arity("thing", Some(0)),
-        Some(InferredType::ClassName("My::Thing".to_string())),
-        "Maybe[InstanceOf['My::Thing']] must unwrap to a My::Thing accessor return",
+        fa.sub_return_type_at_arity("count", Some(0)),
+        Some(InferredType::Optional(Box::new(InferredType::Numeric))),
+        "bareword Maybe[Int] must type the accessor Optional<Numeric>",
+    );
+}
+
+/// Bareword `isa => Int` (no wrapper) — the same 0-arity constant fold gives
+/// the accessor its rep, matching the quoted `isa => 'Int'` spelling.
+#[test]
+fn moo_bareword_int_isa_types_numeric() {
+    let fa = build_fa(
+        "package T;\nuse Moo;\nuse Types::Standard qw/Int/;\nhas count => (is=>'ro', isa=>Int);\n1;\n",
+    );
+    assert_eq!(
+        fa.sub_return_type_at_arity("count", Some(0)),
+        Some(InferredType::Numeric),
+        "bareword isa => Int must type the accessor Numeric",
     );
 }
 
@@ -12374,6 +12443,104 @@ has 'logger' => (is => 'ro', isa => 'Log::Any', handles => { log => 'debug', war
         .collect();
     assert_eq!(log_sym.len(), 1, "handles hashref synthesizes 'log' method");
     assert_eq!(warning_sym.len(), 1, "handles hashref synthesizes 'warning' method");
+}
+
+#[test]
+fn test_monkey_patch_synthesizes_methods() {
+    // `monkey_patch $class => $name => sub {…}` installs methods with no
+    // static `sub` — the registration site is the declaration. String
+    // class + __PACKAGE__ + multiple (name => sub) pairs all synthesize.
+    let fa = build_fa(
+        "
+package My::Patcher;
+use Mojo::Util qw(monkey_patch);
+monkey_patch 'My::Target', hello => sub { my ($self) = @_; 1 };
+monkey_patch __PACKAGE__, world => sub { 2 }, again => sub { 3 };
+",
+    );
+    let method = |n: &str| {
+        fa.symbols
+            .iter()
+            .find(|s| s.name == n && s.kind == SymKind::Method)
+            .unwrap_or_else(|| panic!("monkey_patch must synthesize '{n}'"))
+    };
+    assert_eq!(
+        method("hello").package.as_deref(),
+        Some("My::Target"),
+        "string class arg targets the named class",
+    );
+    assert_eq!(
+        method("world").package.as_deref(),
+        Some("My::Patcher"),
+        "__PACKAGE__ targets the current package",
+    );
+    assert_eq!(
+        method("again").package.as_deref(),
+        Some("My::Patcher"),
+        "every (name => sub) pair in one call synthesizes",
+    );
+}
+
+#[test]
+fn test_monkey_patch_loop_registration_fans_out() {
+    // The Mojo::UserAgent idiom: one registration statement looped over a
+    // literal list — every folded candidate becomes a method.
+    let fa = build_fa(
+        "
+package My::UA;
+use Mojo::Util qw(monkey_patch);
+monkey_patch __PACKAGE__, $_ => sub { 1 } for qw(get post put);
+",
+    );
+    for n in ["get", "post", "put"] {
+        assert!(
+            fa.symbols.iter().any(|s| s.name == n && s.kind == SymKind::Method),
+            "loop registration must synthesize '{n}'",
+        );
+    }
+}
+
+#[test]
+fn test_monkey_patch_dynamic_class_and_name_honest_miss() {
+    // A runtime `$class` / unfolded name must synthesize NOTHING — an
+    // honest miss, never a guessed method.
+    let fa = build_fa(
+        "
+package My::Patcher;
+use Mojo::Util qw(monkey_patch);
+my $class = compute();
+monkey_patch $class, hello => sub { 1 };
+monkey_patch 'My::Target', lc($n) => sub { 2 };
+",
+    );
+    assert!(
+        !fa.symbols.iter().any(|s| s.kind == SymKind::Method && (s.name == "hello" || s.name.contains('$'))),
+        "dynamic registrations must not synthesize",
+    );
+}
+
+#[test]
+fn test_handles_curried_arrayref_value() {
+    // Sub::HandlesVia's curried shape: `local => [remote, @args]` — the
+    // remote is the array's first string element. The arrayref value must
+    // also not shift pair alignment: `dec => 'remove'` after it still
+    // synthesizes correctly.
+    let fa = build_fa(
+        "
+package Counter;
+use Moo;
+use Sub::HandlesVia;
+has 'items' => (is => 'ro', handles => { inc => ['add', 1], dec => 'remove' });
+",
+    );
+    let names: Vec<&str> = fa
+        .symbols
+        .iter()
+        .filter(|s| s.kind == SymKind::Method)
+        .map(|s| s.name.as_str())
+        .collect();
+    assert!(names.contains(&"inc"), "curried arrayref value synthesizes 'inc': {names:?}");
+    assert!(names.contains(&"dec"), "pair after an arrayref value stays aligned: {names:?}");
 }
 
 #[test]
@@ -14307,6 +14474,52 @@ fn slot_type_keyed_by_owner_class() {
     assert_eq!(bar_h.class_name(), Some("Sidecar"), "got {bar_h:?}");
 }
 
+#[test]
+fn slot_type_typed_write_plus_undef_write_optional() {
+    // `{T, undef}` writes across methods lift the slot to `Optional<T>`:
+    // one method installs the helper, another clears it.
+    let src = "package Foo;\nsub init {\n  my $self = shift;\n  $self->{h} = Helper->new;\n}\nsub clear {\n  my $self = shift;\n  $self->{h} = undef;\n}\n";
+    let fa = build_fa(src);
+    let t = slot_type(&fa, "Foo", "h").expect("SlotType{Foo,h} should fold");
+    assert!(
+        matches!(&t, InferredType::Optional(inner) if inner.class_name() == Some("Helper")),
+        "Optional<Helper>, got {t:?}",
+    );
+}
+
+#[test]
+fn slot_type_all_undef_writes_undef() {
+    // Every observed write is undef → the slot IS undef.
+    let src = "package Foo;\nsub clear {\n  my $self = shift;\n  $self->{h} = undef;\n}\n";
+    let fa = build_fa(src);
+    assert_eq!(slot_type(&fa, "Foo", "h"), Some(InferredType::Undef));
+}
+
+#[test]
+fn slot_type_undef_init_plus_opaque_setter_no_claim() {
+    // The init-then-mutate idiom: `= undef` in the constructor, `= $param`
+    // in the setter. The setter's write is untypeable, so the typed story
+    // is partial — the definitive `Undef` (which would flag every
+    // downstream `$self->{h}->…` as a guaranteed die) must NOT fire.
+    let src = "package Foo;\nsub new {\n  my $self = bless {}, shift;\n  $self->{h} = undef;\n  return $self;\n}\nsub set_h {\n  $_[0]->{h} = $_[1];\n}\n";
+    let fa = build_fa(src);
+    assert_eq!(slot_type(&fa, "Foo", "h"), None);
+}
+
+#[test]
+fn slot_type_optional_rhs_write_optional() {
+    // Writing a maybe-undef value (`Optional<T>` RHS) makes the slot
+    // optional — the Optional strips into the undef flag and re-lifts,
+    // so it also agrees with a sibling plain-`T` write.
+    let src = "package Foo;\nsub maybe_helper {\n  return undef unless 1;\n  return Helper->new;\n}\nsub init {\n  my $self = shift;\n  $self->{h} = maybe_helper();\n}\nsub force {\n  my $self = shift;\n  $self->{h} = Helper->new;\n}\n";
+    let fa = build_fa(src);
+    let t = slot_type(&fa, "Foo", "h").expect("SlotType{Foo,h} should fold");
+    assert!(
+        matches!(&t, InferredType::Optional(inner) if inner.class_name() == Some("Helper")),
+        "Optional<Helper>, got {t:?}",
+    );
+}
+
 
 #[test]
 fn test_braced_invocant_bless_is_receiver_poly() {
@@ -15164,3 +15377,130 @@ fn plugin_loads_recorded_trigger_independent_and_multivalue() {
 
 #[path = "builder/narrowing_tests.rs"]
 mod narrowing;
+#[test]
+fn overridden_method_never_answers_with_parent_type() {
+    // `URI::file::Base::file { undef }` under an overriding `Mac::file`:
+    // dispatch goes to the LOCAL sub, so when the override's type doesn't
+    // resolve the honest answer is None — never the parent's `Undef`
+    // (which fed a false "guard can never pass" on `defined $path`).
+    let src = "package URI::file::Mac;\nuse parent 'URI::file::Base';\n\nsub file\n{\n    my $class = shift;\n    my $pre = \"\";\n    my @path;\n    return unless $pre || @path;\n    $pre . join(\":\", @path);\n}\n\nsub dir\n{\n    my $class = shift;\n    my $path = $class->file(@_);\n    return unless defined $path;\n    $path;\n}\n1;\n";
+    let mut fa = build_fa(src);
+    fa.finalize_post_walk();
+    let idx = crate::module_index::ModuleIndex::new_for_test();
+    let base_src = "package URI::file::Base;\nsub file\n{\n    undef;\n}\nsub dir { my $self = shift; $self->file(@_); }\n1;\n";
+    idx.insert_cache("URI::file::Base", Some(std::sync::Arc::new(crate::module_index::CachedModule::new(
+        std::path::PathBuf::from("/fake/URI/file/Base.pm"),
+        std::sync::Arc::new(build_fa(base_src)),
+    ))));
+    fa.enrich_imported_types_with_keys(Some(&idx));
+    let t = fa.inferred_type_via_bag_ctx("$path", tree_sitter::Point::new(16, 20), Some(&idx));
+    assert_eq!(t, None, "overridden file()'s unresolved return must not inherit Base's Undef");
+}
+// ---- Reassignment barriers (disagreement-to-widen, audit FP class) ----
+
+#[test]
+fn reassign_barrier_untypeable_write_widens_stale_undef() {
+    // The LWP::MediaTypes shape: decl-undef, an untypeable write inside a
+    // loop, a `defined` guard after. The stale `Undef` must not survive
+    // the write — the guard is doing its job, not "never passes".
+    let src = "sub guess {\n    my $ct = undef;\n    while (my $x = nxt()) {\n        $ct = lookup($x);\n    }\n    return unless defined $ct;\n    return $ct;\n}\n";
+    let fa = build_fa(src);
+    // Query at the guard line (row 5).
+    assert_eq!(
+        fa.inferred_type_via_bag("$ct", Point::new(5, 26)),
+        None,
+        "belief must widen across the untypeable loop write",
+    );
+}
+
+#[test]
+fn reassign_barrier_typed_write_keeps_its_own_type() {
+    // A typed reassignment's own TC lands at the same statement as the
+    // barrier — it survives, and later reads see it.
+    let src = "sub f {\n    my $x = undef;\n    $x = 'hello';\n    my $y = $x;\n}\n";
+    let fa = build_fa(src);
+    assert_eq!(
+        fa.inferred_type_via_bag("$x", Point::new(3, 12)),
+        Some(InferredType::String),
+        "the typed write's own belief must survive its barrier",
+    );
+}
+
+#[test]
+fn reassign_barrier_no_write_keeps_decl_belief() {
+    // No reassignment → the decl belief stands (undef-deref D1 still has
+    // its straight-line signal).
+    let src = "sub f {\n    my $x = undef;\n    my $y = $x;\n}\n";
+    let fa = build_fa(src);
+    assert_eq!(
+        fa.inferred_type_via_bag("$x", Point::new(2, 12)),
+        Some(InferredType::Undef),
+    );
+}
+// ---- shift-invocant gating ----
+
+#[test]
+fn second_shift_is_not_the_invocant() {
+    // `my $uri = shift;` (the SECOND shift) is a plain argument read —
+    // typing it as the enclosing class made `defined $uri`-style guards
+    // read as redundant/contradictory (the audit FP class).
+    let src = "package Foo;\nsub file {\n    my $class = shift;\n    my $uri = shift;\n    my $x = $uri;\n}\n";
+    let fa = build_fa(src);
+    assert_eq!(
+        fa.inferred_type_via_bag("$class", Point::new(4, 4)),
+        Some(InferredType::ClassName("Foo".into())),
+        "the invocant param keeps its class",
+    );
+    assert_ne!(
+        fa.inferred_type_via_bag("$uri", Point::new(4, 4)),
+        Some(InferredType::ClassName("Foo".into())),
+        "a second shift must not type as the class",
+    );
+}
+
+#[test]
+fn expression_position_shift_still_receiver() {
+    // `shift->_generate_route(...)` — expression-position shift reads
+    // arg 0 directly; still the receiver.
+    let src = "package Foo;\nsub patch { shift->helper() }\nsub helper { my $self = shift; return $self; }\n";
+    let fa = build_fa(src);
+    assert_eq!(
+        fa.find_method_return_type("Foo", "patch", None, Some(0)),
+        Some(InferredType::ClassName("Foo".into())),
+        "shift->method chains must keep receiver typing",
+    );
+}
+#[test]
+fn anon_sub_shift_binding_not_class_typed() {
+    // The Types::Standard::StrMatch checker shape: an anonymous sub's
+    // `my $value = shift` binds a callback payload, not a receiver —
+    // typing it as the enclosing class made `return if !defined($value)`
+    // read as a contradictory guard (the audit FP class).
+    let src = "package T;\nuse parent 'X';\nsub compile {\n    my $cb = sub {\n        my $value = shift;\n        return if !defined($value);\n        return 1;\n    };\n    $cb;\n}\n";
+    let fa = build_fa(src);
+    assert_ne!(
+        fa.inferred_type_via_bag("$value", Point::new(5, 8)),
+        Some(InferredType::ClassName("T".into())),
+        "an anon sub's first shift is not the invocant",
+    );
+}
+#[test]
+fn postfix_conditional_write_widens_not_asserts() {
+    // `$isbn = undef if $isbn && !$isbn->is_valid;` — the write may not
+    // happen, and the condition's own deref precedes it. No unconditional
+    // Undef belief; the barrier widens instead.
+    let src = "sub _isbn {\n    my $isbn = Business::ISBN->new(shift);\n    $isbn = undef if $isbn && !$isbn->is_valid;\n    return $isbn;\n}\n";
+    let fa = build_fa(src);
+    // At the deref inside the condition (row 2), the ctor class holds.
+    assert_eq!(
+        fa.inferred_type_via_bag("$isbn", Point::new(2, 30)),
+        Some(InferredType::ClassName("Business::ISBN".into())),
+        "the condition's deref must read the pre-write type",
+    );
+    // After the statement (row 3), the belief is widened — old-or-undef.
+    assert_eq!(
+        fa.inferred_type_via_bag("$isbn", Point::new(3, 12)),
+        None,
+        "a conditional write widens the belief",
+    );
+}

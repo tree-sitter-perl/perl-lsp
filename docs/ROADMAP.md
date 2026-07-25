@@ -3,44 +3,91 @@
 Landed work lives in `docs/adr/` and `CHANGELOG.md` — never here.
 This file is only what's NEXT, in order.
 
-## Now (in order)
+## Now — the scheduled epics (in order)
 
-1. **Narrowing / Optional — completeness.** The flow-narrowing +
-   `Optional<T>` + `Undef` lattice and the bug-detection diagnostics it
-   feeds have both landed (decision records: `adr/flow-narrowing.md`,
-   `adr/optional-types.md`, `adr/narrowing-diagnostics.md`). What remains
-   is **completeness** — widen what the narrower recognizes: direct-element
-   places (`$hash{key}`, `$arr[0]`), and dynamic-key places (`$self->{$k}`)
-   where the key scalar is stable enough to stay sound
-   (`prompt-flow-narrowing.md` / `prompt-optional-types.md`) — and graduate
-   the opt-in diagnostic flags to default-on per code as the gold substrate
-   and real projects show no false-positive flood (the promotion path in
-   `adr/narrowing-diagnostics.md`).
-2. **DBIC out of core — phases 2–3.** Phase 1 landed (`visit_dbic_*`
-   gone; `frameworks/dbic.rhai`, trigger `ClassIsa("DBIx::Class")`).
-   Remaining: meta-method suppression → manifest (the `universal_methods`
-   rule-#10 debt still hardcoded in `symbols.rs`) and parametric
-   emission + per-method return projection (the one axis-shaped piece).
-   Ladder in `prompt-dbic-as-plugin.md`. Ends with core plugin-free
-   except generic dispatch.
+Each epic has a self-contained implementation prompt under
+`docs/epics/` — mission, exact code anchors, phase ladder with
+acceptance criteria, invariants, and the verification gate. Implementers
+start THERE (after CLAUDE.md); this section is only the schedule.
+
+1. **Epic 1 — DBIC out of core, phase 3** →
+   `docs/epics/01-dbic-phase-3.md`. Parametric emission + per-base
+   semantics move to declarative plugin manifests
+   (`parametric_bases()` / `parametric_mints()`); the per-method
+   projection table completes; the two pinned gaps close
+   (custom-resultset discovery, `->search({ | })` column completion).
+   Ends with core plugin-free except generic dispatch — the phase
+   ladder's end state. Design corpus: `prompt-dbic-as-plugin.md`.
+
+2. **Epic 2 — Openness** → `docs/epics/02-openness.md`. One structural
+   verdict ("walk the namespace chain; Open suppresses, exhausted
+   Closed warns") subsumes the pile of per-diagnostic suppression
+   rules, resolves `SUPER::`/qualified names instead of skipping them,
+   gates the D4 open-world-dispatch noise, and then executes the flag
+   promotion the audit evidence below supports. Design corpus:
+   `prompt-graph-walking.md` (Scope nodes), `open-problems.md`
+   (qualified-name suppression), `adr/narrowing-diagnostics.md`
+   (promotion path).
+
+   *Promotion audit over the gold substrate (July 2026, all flags on,
+   after the disagreement-to-widen tier landed) — the evidence Epic 2
+   §Phase E consumes:* `undef-deref` (always-on) 8 sites — exact parity
+   with the pre-branch baseline; `derefShape` 0 hits; `optionalDeref`
+   35 (honest Optional productions; residual noise = value flow beyond
+   static reach, e.g. an arity-and-value-gated undef arm in
+   `Path::Class::Dir::new`); `redundantGuard` 59 (was 115) and
+   `contradictory` 34 (was 53) after reassignment barriers + the
+   shift-invocant gate; `unresolved-method` −180 from the same fixes.
+   Remaining known noise classes: open-world dispatch (Epic 2 Phase D)
+   and the named-helper first-param-self over-reach
+   (`gold-corpus/KNOWN-GAPS.md`). `optionalDeref` looks promotable at
+   INFO severity now; `redundantGuard` after the Phase D gate;
+   `unresolvedMethodCrossFile` still promotes last.
+
+3. **Epic 3 — Value provenance, tier 1** →
+   `docs/epics/03-value-provenance.md`. Residual fact classes Parts 1,
+   2, and 5a (invocant-mutation consumers, hash-key unions,
+   value-indexed returns) as emitter+reducer pairs on the bag. The
+   named gate for un-parking instance brands and the untyped-receiver
+   residual. Design corpus: `prompt-type-inference-residual.md`.
+
+## On deck — Epics 4–13
+
+The full slate, one implementation prompt per epic, lives in
+`docs/epics/` — see `docs/epics/README.md` for the schedule table AND
+the coverage map that accounts for every `prompt-*.md` and open design
+item (scheduled / parked-with-condition / landed / out-of-scope).
+
+4. One-seam sweep: magic tokens + cst backlog → `epics/04`
+5. Duplicate-package identity (H1) → `epics/05`
+6. Gated cross-file emission (ClassIsa) → `epics/06`
+7. Rename provenance → `epics/07`
+8. Diagnostic framework: PL-codes, config, SARIF → `epics/08`
+9. Heatmap residuals: Handlers + framework-consumed → `epics/09`
+10. Mojo polish: routes, stash, hooks, chains → `epics/10`
+11. CLI analysis subcommands + `--migrate` → `epics/11`
+12. Program boundaries + MAIN-1 → `epics/12`
+13. Type::Tiny completeness: check-guards, import-scoped vocab → `epics/13`
 
 ## Queued (pull-driven — QA findings decide order)
 
 Type intelligence:
-- Residual fact classes Parts 1–5 (invocant mutations, hash-key
-  unions, method loops, functional operators, value-indexed returns)
-  — `prompt-type-inference-residual.md`.
-- Conditional-reassignment disagreement-to-widen (`$spec = {...}
-  unless ref $spec`) — replaces the `reassigned_scalars` trust-gate
-  clause with a real lattice fold.
-- A4 v2: cross-FILE slot writes (`$self->{k} = Obj->new` in another
-  file) — the `MethodOnClass` bridge pattern.
-
-Graph / diagnostics (graph-walking pillar landed; residual only):
-- Scope-node taxonomy + Openness diagnostic (`home_namespace`,
-  "when is an unresolved call real?") — forward work in
-  `prompt-graph-walking.md`; subsumes the coarse qualified-name
-  suppression noted in `open-problems.md`.
+- Residual fact classes Parts 3–4 (method loops, functional
+  operators) and the 5c prefetch residual — after Epic 3;
+  `prompt-type-inference-residual.md`.
+- Constructor/field value flow — the remaining instance-brands
+  prerequisite once Epic 3 lands (`prompt-graph-walking.md` §PARKED).
+- Conditional-reassignment disagreement-to-widen — the widening tier
+  LANDED (reassign barriers: an untypeable write drops earlier beliefs;
+  a postfix-conditional write never asserts, only widens). Residual:
+  the true JOIN for typed conditional writes (`$spec = {...} unless ref
+  $spec` could keep `HashRef|prior` instead of widening to unknown) —
+  that's the real lattice fold, wanted when precision (not soundness)
+  becomes the complaint.
+Graph / diagnostics: the Openness axis moved to Now (Epic 2). Residual
+after it: `Symbol.home_namespace` field migration if a consumer beyond
+the diagnostic ever needs it (Epic 2 deliberately ships the query, not
+the field).
 
 Plugin genericity:
 - `has_options` final dissolution: the option pairing already moved out
@@ -53,23 +100,22 @@ Plugin genericity:
   from `value_shape`/`arg_names`, options from `classified_pairs`).
 
 Hardening:
-- Options schema: `DiagnosticOptions` is serde-driven (the struct is the
-  schema). A `Config` god-struct (own-at-top, pass-slices), a generated
-  editor schema (`schemars`), and the per-code-config shape wait for their
-  forcing functions — `prompt-config-schema.md`.
+- Options schema → **Epic 8** (`prompt-config-schema.md`'s forcing
+  function).
 - Fold safety net: `eprintln!` → `tracing::error!` (builder.rs
   ~12061) + a synthetic-oscillator test so the release-mode
   `MAX_FOLD_ITERATIONS` break can't bit-rot.
 - Full-bag scans in `apply_chain_typing_assignments` /
   `FileAnalysis::inferred_type` — index when profiling flags them.
-- DBIC parametric column-key completion at an empty `->search({ | })`
-  (goto-def proves the chain; `complete_keyval_args` lacks the
-  parametric-receiver branch; pin in `e2e/dbic_parametric.lua`).
+- DBIC parametric column-key completion at `->search({ | })` →
+  **Epic 1** Phase D.
 - Cursor-context qualified-path/invocant detection should ask the
-  tree, not byte-walk (`extract_package_from_prefix` & sibling).
+  tree, not byte-walk (`extract_package_from_prefix` & sibling) —
+  adjacent to Epic 4's item-3 collapse; fold in there if touching.
 - `return_via_edge` chases lack `TypeProvenance` (stamp
   `Delegation{kind: "callable_return_edge"}` on the chase).
-- cst/conventions migration backlog — `prompt-cst-migration.md`.
+- cst/conventions migration backlog — ranked items → **Epic 4**; the
+  long tail stays the strangler rule (`prompt-cst-migration.md`).
 - Unify autoquoted-key-as-literal into `cst::string_list`. Today
   `string_list` routes `autoquoted_bareword` through the caller's
   `fold` (const resolution), so the DSL-arg callers (`extract_arg_name_list`)
@@ -89,9 +135,9 @@ Hardening:
   urgent (the per-caller fold is correct, just not DRY).
 
 QA tail:
-- MAIN-1 (`main::` across `require`) and H1 (duplicate packages) —
-  designs in `qa-design-items.md`. MooseX::Role::Parameterized — no
-  design yet.
+- MAIN-1 → **Epic 12**; H1 → **Epic 5** (designs in
+  `qa-design-items.md`). MooseX::Role::Parameterized — parked: the
+  runtime-export-generator open problem wearing role clothes.
 - Per-row known gaps: `gold-corpus/KNOWN-GAPS.md` (xfail rows are the
   live tracker).
 
@@ -117,15 +163,12 @@ QA tail:
 
 ## Backburner (user-facing, ship-when-ready)
 
-- Mojo polish: route naming/url_for, stash intelligence, hooks,
-  transitive plugin chains, config completion —
-  `prompt-mojo-todo.md`.
-- CLI diagnostic framework (PL-codes, suppression, SARIF), --migrate —
-  `prompt-cli-tools.md`.
-- Ref provenance: constant-fold `folded_from`, package→file rename,
-  inheritance override scoping — `prompt-ref-provenance.md`.
+- Mojo polish → **Epic 10**; CLI diagnostic framework → **Epic 8**;
+  analysis subcommands + `--migrate` → **Epic 11**; ref provenance →
+  **Epic 7** (all scheduled — see `docs/epics/README.md`).
 - Aspirational type features (effects/throws) —
-  `prompt-type-system-futures.md`.
+  `prompt-type-system-futures.md` (its narrowing pillar landed as
+  `adr/flow-narrowing.md`; only the effects pillar remains).
 - Web extension — `prompt-wasm-web-extension.md` (the crate split it
   assumed was executed and REJECTED; branch `workspace-split` is the
   playbook if wasm ever forces it).

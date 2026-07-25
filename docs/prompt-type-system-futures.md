@@ -10,7 +10,17 @@ the payload rides and **how much control-flow** they need.
 
 ---
 
-## 1. Narrowing (flow-sensitivity) — the "we don't model conditionals" pillar
+## 1. Narrowing (flow-sensitivity) — LANDED
+
+> **Status update (July 2026):** this pillar landed as the
+> flow-narrowing lattice — `docs/adr/flow-narrowing.md` +
+> `docs/adr/optional-types.md` + `docs/adr/narrowing-diagnostics.md`
+> cover guards (`ref…eq` / `isa` / `defined` / `blessed` / truthiness
+> bindings), places, polarity, and the diagnostics built on it. The
+> sketch below is kept as the original framing; only the effects
+> pillar (§2) remains forward work.
+
+### Original framing (historical)
 
 A guard refines a variable's type *within a branch*:
 

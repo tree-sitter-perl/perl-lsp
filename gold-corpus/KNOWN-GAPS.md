@@ -172,15 +172,17 @@ query-time seam, not the build-time `return_types` map. **Subsystem:** build-tim
 `return_types` seed vs query-time cross-file method-return composition.
 **Difficulty:** medium–high.
 
-### `diag-mojo-cookiejar-helper-fp` / `diag-mojo-daemon-callback-fp` — first-param-self over-reach in OO classes
-In an OO class, a plain helper (`sub _compare { my ($cookie,…)=@_ }`) or an
-anonymous callback (`on(request => sub { my $tx = shift; … })` ) has its first
-param typed as the enclosing class, so a method call on it (`$cookie->path`,
-`$tx->req`) fires a false `unresolved-method`. The `-strict` (non-OO module) case
-of this is now fixed; the in-OO-class helper/callback case is the harder residual —
-there's no clean static signal distinguishing a method from a helper in an OO
-class. **Subsystem:** first-param-self heuristic (`detect_first_param_type`).
-**Difficulty:** high (inherently ambiguous).
+### `diag-mojo-cookiejar-helper-fp` — first-param-self over-reach in OO classes
+In an OO class, a plain helper (`sub _compare { my ($cookie,…)=@_ }`) has its
+first param typed as the enclosing class, so a method call on it
+(`$cookie->path`) fires a false `unresolved-method`. The `-strict` (non-OO
+module) case is fixed, and the anonymous-callback case
+(`diag-mojo-daemon-callback-fp`, `on(request => sub { my $tx = shift; … })`)
+was promoted to gold — the shift gate keeps first-param-self out of anon subs
+(a callback's first arg is a payload, not a receiver). The named in-OO-class
+helper is the residual — there's no clean static signal distinguishing a
+method from a helper in an OO class. **Subsystem:** first-param-self heuristic
+(`detect_first_param_type`). **Difficulty:** high (inherently ambiguous).
 
 ---
 
@@ -195,7 +197,7 @@ class. **Subsystem:** first-param-self heuristic (`detect_first_param_type`).
 | def-16-codegen-type-function | Type::Library synthesis | medium |
 | completion-datetime-hashkey | slot-write harvest (A4 tail) | medium–high |
 | mojo-url clone *sub-return* (variable is fixed) | build-time `return_types` seed vs query-time cross-file method-return | medium–high |
-| diag-mojo-cookiejar/daemon first-param-self | invocant heuristic in OO class | **high** (ambiguous) |
+| diag-mojo-cookiejar first-param-self (named helper) | invocant heuristic in OO class | **high** (ambiguous) |
 
 Quickest wins: the signature-help invocant gate, imported-names in completion,
 the `bootstrap` loader recognition, and the `(shift, shift)` param extraction —

@@ -368,6 +368,36 @@ impl FrameworkFact {
     }
 }
 
+// ---- Shared fact-family / source-tag identifiers ----
+
+/// The Fact `family` strings and builder source tags that form a
+/// producer↔consumer contract between the builder's emission sites and
+/// the reducers here. A bare literal on either side is a silent-unlink
+/// typo hazard (the fold just stops seeing the fact); both sides
+/// reference these so the identifier is compiler-checked.
+pub(crate) mod tags {
+    /// `SymbolReturnArm` Fact: a `return;` / `return undef` / `return ()`
+    /// arm — no rvalue type to ride an Edge; the arm join counts it.
+    pub(crate) const FACT_UNDEF_ARM: &str = "undef_arm";
+    /// `SymbolReturnArm` Fact: a value arm, typed or not — the all-undef
+    /// verdict must account for arms whose Edge never materialized.
+    pub(crate) const FACT_VALUE_ARM: &str = "value_arm";
+    /// `SlotType` Fact: a slot write whose RHS didn't type — blocks the
+    /// fold's definitive all-undef claim (partial story).
+    pub(crate) const FACT_OPAQUE_SLOT_WRITE: &str = "opaque_slot_write";
+    /// `Variable` Fact: a whole-scalar reassignment statement — the
+    /// temporal fold's belief barrier (span = the write's statement).
+    pub(crate) const FACT_REASSIGN_BARRIER: &str = "reassign_barrier";
+    /// `HashKey` Fact: a hash-key write observed on the owner (feeds
+    /// `mutated_keys_on_class` dynamic-key completion).
+    pub(crate) const FACT_MUTATION: &str = "mutation";
+    /// Writeback source tag on `MethodOnClass(class, m) → Edge(Symbol)`
+    /// primaries — doubles as the "a local definition exists" fact the
+    /// inheritance fallback walk gates on (an override's parent must
+    /// never answer for it).
+    pub(crate) const TAG_LOCAL_RETURN: &str = "local_return";
+}
+
 // ---- Witness bag ----
 
 /// Attachment-indexed bag. Kept separate from the raw witness vec so
@@ -569,13 +599,19 @@ impl WitnessReducer for FrameworkAwareTypeFold {
     }
 
     fn claims(&self, w: &Witness) -> bool {
-        matches!(
+        if !matches!(
             w.attachment,
             WitnessAttachment::Variable { .. } | WitnessAttachment::Expression(_)
-        ) && matches!(
-            w.payload,
-            WitnessPayload::InferredType(_) | WitnessPayload::Observation(_)
-        )
+        ) {
+            return false;
+        }
+        match &w.payload {
+            WitnessPayload::InferredType(_) | WitnessPayload::Observation(_) => true,
+            // Whole-scalar reassignment marker — a belief boundary the
+            // temporal fold honors (see reduce).
+            WitnessPayload::Fact { family, .. } => family == tags::FACT_REASSIGN_BARRIER,
+            _ => false,
+        }
     }
 
     fn reduce(&self, ws: &[&Witness], q: &ReducerQuery) -> ReducedValue {
@@ -633,12 +669,42 @@ impl WitnessReducer for FrameworkAwareTypeFold {
         let mut re = false;
         let mut plain_type: Option<InferredType> = None;
 
+        // A whole-scalar reassignment is a belief boundary: witnesses
+        // strictly BEFORE the latest barrier (that is itself at or before
+        // the query point) describe a value the write replaced. A typed
+        // write pushes its own TC at the barrier's position (>= keeps
+        // it); an untypeable write leaves only the barrier, so the fold
+        // widens to unknown instead of resurrecting the stale belief
+        // (`my $ct = undef; while (…) { $ct = f($_) } … defined $ct`).
+        // A barrier is in effect only for query points past its whole
+        // STATEMENT (span end): a read inside the write statement itself
+        // (`… if $isbn && !$isbn->is_valid` — the condition runs first)
+        // still sees the pre-write belief. It then drops beliefs from
+        // strictly earlier statements (span start comparison), so the
+        // same statement's own TC — anchored at the statement start —
+        // survives its own barrier.
+        let latest_barrier: Option<Point> = narrow_point.and_then(|point| {
+            ws.iter()
+                .filter(|w| {
+                    matches!(&w.payload,
+                        WitnessPayload::Fact { family, .. } if family == tags::FACT_REASSIGN_BARRIER)
+                        && w.span.end <= point
+                })
+                .map(|w| w.span.start)
+                .max()
+        });
+
         for w in ws {
             // Temporal ordering: only consider witnesses emitted at or
             // before the query point — a later reassignment shouldn't
             // influence a lookup at an earlier line.
             if let Some(point) = narrow_point {
                 if w.span.start > point {
+                    continue;
+                }
+            }
+            if let Some(barrier) = latest_barrier {
+                if w.span.start < barrier {
                     continue;
                 }
             }
@@ -809,7 +875,7 @@ impl WitnessReducer for BranchArmFold {
         }
         match &w.payload {
             WitnessPayload::InferredType(_) => true,
-            WitnessPayload::Fact { family, .. } => family == "undef_arm",
+            WitnessPayload::Fact { family, .. } => family == tags::FACT_UNDEF_ARM,
             _ => false,
         }
     }
@@ -820,7 +886,7 @@ impl WitnessReducer for BranchArmFold {
         for w in ws {
             match &w.payload {
                 WitnessPayload::InferredType(t) => typed.push(t.clone()),
-                WitnessPayload::Fact { family, .. } if family == "undef_arm" => undef_arms += 1,
+                WitnessPayload::Fact { family, .. } if family == tags::FACT_UNDEF_ARM => undef_arms += 1,
                 _ => {}
             }
         }
@@ -870,8 +936,13 @@ impl WitnessReducer for SymbolReturnArmFold {
         }
         match &w.payload {
             WitnessPayload::InferredType(_) => true,
-            // The `return undef` arm marker (no rvalue type to materialize).
-            WitnessPayload::Fact { family, .. } => family == "undef_arm",
+            // `undef_arm`: the `return undef` marker (no rvalue type to
+            // materialize). `value_arm`: the per-value-arm counter — an
+            // Edge whose target never materializes leaves no InferredType,
+            // so the all-undef gate counts arms through these Facts.
+            WitnessPayload::Fact { family, .. } => {
+                family == tags::FACT_UNDEF_ARM || family == tags::FACT_VALUE_ARM
+            }
             _ => false,
         }
     }
@@ -879,14 +950,25 @@ impl WitnessReducer for SymbolReturnArmFold {
     fn reduce(&self, ws: &[&Witness], _q: &ReducerQuery) -> ReducedValue {
         let mut arms: Vec<InferredType> = Vec::new();
         let mut has_undef_arm = false;
+        let mut value_arms = 0usize;
         for w in ws {
             match &w.payload {
                 WitnessPayload::InferredType(t) => arms.push(t.clone()),
-                WitnessPayload::Fact { family, .. } if family == "undef_arm" => {
+                WitnessPayload::Fact { family, .. } if family == tags::FACT_UNDEF_ARM => {
                     has_undef_arm = true
+                }
+                WitnessPayload::Fact { family, .. } if family == tags::FACT_VALUE_ARM => {
+                    value_arms += 1
                 }
                 _ => {}
             }
+        }
+        // Every arm is a provable undef → the definitive bottom `Undef`,
+        // not the silent `None`. Gated on zero value arms: `arms` being
+        // empty is NOT enough — an untypeable value arm leaves no
+        // InferredType but does leave its `value_arm` Fact.
+        if arms.is_empty() && has_undef_arm && value_arms == 0 {
+            return ReducedValue::Type(InferredType::Undef);
         }
         match crate::file_analysis::join_return_arms(&arms, has_undef_arm) {
             Some(t) => ReducedValue::Type(t),
@@ -919,18 +1001,54 @@ impl WitnessReducer for SlotTypeFold {
     }
 
     fn claims(&self, w: &Witness) -> bool {
-        matches!(w.attachment, WitnessAttachment::SlotType { .. })
-            && matches!(w.payload, WitnessPayload::InferredType(_))
+        if !matches!(w.attachment, WitnessAttachment::SlotType { .. }) {
+            return false;
+        }
+        match &w.payload {
+            WitnessPayload::InferredType(_) => true,
+            // The "a write we couldn't type exists" marker — gates the
+            // all-undef verdict on having seen the whole story.
+            WitnessPayload::Fact { family, .. } => family == tags::FACT_OPAQUE_SLOT_WRITE,
+            _ => false,
+        }
     }
 
     fn reduce(&self, ws: &[&Witness], _q: &ReducerQuery) -> ReducedValue {
-        let arms: Vec<InferredType> = ws
-            .iter()
-            .filter_map(|w| match &w.payload {
-                WitnessPayload::InferredType(t) => Some(t.clone()),
-                _ => None,
-            })
-            .collect();
+        // Undef-ness is a flag, not an arm: an `undef` write (literal or a
+        // maybe-undef RHS) makes the slot optional without disturbing the
+        // agreement among the value writes. Strip it off, agree the value
+        // arms, re-lift `{T, undef} → Optional<T>` at the end.
+        let mut saw_undef = false;
+        let mut opaque_writes = 0usize;
+        let mut arms: Vec<InferredType> = Vec::new();
+        for w in ws {
+            match &w.payload {
+                WitnessPayload::Fact { family, .. } if family == tags::FACT_OPAQUE_SLOT_WRITE => {
+                    opaque_writes += 1;
+                }
+                WitnessPayload::InferredType(t) => match t {
+                    InferredType::Undef => saw_undef = true,
+                    InferredType::Optional(inner) => {
+                        saw_undef = true;
+                        arms.push((**inner).clone());
+                    }
+                    other => arms.push(other.clone()),
+                },
+                _ => {}
+            }
+        }
+        // Every observed write is undef → the slot IS undef — but only
+        // when every write WAS observed. The init-then-mutate idiom
+        // (`$self->{h} = undef` in new, `= $param` in the setter) leaves
+        // the typed story partial; the definitive claim would flag every
+        // downstream deref as a guaranteed die.
+        if arms.is_empty() {
+            return if saw_undef && opaque_writes == 0 {
+                ReducedValue::Type(InferredType::Undef)
+            } else {
+                ReducedValue::None
+            };
+        }
         // Two distinct class identities never agree: a slot can't be
         // both `A` and `B`. `class_name()` is the value's own "what
         // class am I" answer (rule #10) — distinct answers → None.
@@ -945,6 +1063,9 @@ impl WitnessReducer for SlotTypeFold {
             }
         }
         match crate::file_analysis::resolve_return_type(&arms) {
+            Some(t) if saw_undef && !matches!(t, InferredType::Optional(_)) => {
+                ReducedValue::Type(InferredType::Optional(Box::new(t)))
+            }
             Some(t) => ReducedValue::Type(t),
             None => ReducedValue::None,
         }
@@ -1565,6 +1686,21 @@ impl ReducerRegistry {
                 // cross-file ∪ synthetic app-surface edge — `parents_of`
                 // is the single edge-injection site shared with the
                 // FA-side ancestor walks).
+                //
+                // Gated on the class NOT defining the method itself: an
+                // override dispatches to the LOCAL sub under Perl's MRO,
+                // so when its type didn't resolve the honest answer is
+                // None — never the parent's type (the parent never runs
+                // for this receiver; `URI::file::Base::file { undef }`
+                // under an overriding `URI::file::Mac::file` is the
+                // canonical miscarriage). The writeback's `local_return`
+                // witness IS the "a local definition exists" fact.
+                let has_local_override = bag.for_attachment(q.attachment).iter().any(|w| {
+                    matches!(&w.source, WitnessSource::Builder(t) if t == tags::TAG_LOCAL_RETURN)
+                });
+                if has_local_override {
+                    return ReducedValue::None;
+                }
                 let parents = crate::file_analysis::parents_of(
                     class,
                     ctx.package_parents,
