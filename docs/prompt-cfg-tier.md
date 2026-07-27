@@ -120,6 +120,12 @@ dataflow verdicts become config-qualified ("null deref when
 `PERL_DEBUG` is off"), a checker class no built-config-only incumbent
 has.
 
+The atom is deliberately lossy (`if (n > 0)` → `Opaque`); when the
+condition is in a decidable symbolic fragment the guard ALSO keeps its
+`SymExpr` — the dormant payload §8's referee wakes (obligation P2).
+Atoms stay the always-on label; nothing reads the `SymExpr` until the
+refinement tier engages.
+
 ### 3.5 The φ — `Join { place, at }` attachment + `JoinFold` reducer
 
 **The bag already contains one φ:** `BranchArm(Span)` is a hand-built
@@ -153,7 +159,9 @@ Why the existing machinery can't fake it:
 each arm by its guard atom — single-subject path sensitivity, no path
 enumeration. Diagnostics ask a thin entry point
 (`place_state_at(place, point)`, the `inferred_type_via_bag` shape)
-that resolves the governing def-or-φ and queries the registry.
+that resolves the governing def-or-φ and queries the registry — with a
+provenance mode returning the arm trail it traversed (§8's obligation
+P1; the chase walks those arms anyway).
 
 Representation choice: v1 keeps φs **build-transient** (minted in the
 assembler, folded during the same build; only conclusions persist as
@@ -352,3 +360,82 @@ once summaries are Surface fields (§5). **Determinism** graduates to
 contractual (two runs → byte-identical output; the RandomState hunt
 already paid for it). Cyclomatic complexity is `ControlRegion`
 arithmetic; dead code/exports already ship in `--heatmap`.
+
+## 8. Forward: path-symbolic refinement — the demand-driven referee
+
+**Status: forward-looking; only the two provenance obligations below
+bind the base tier now.** The Coverity/Klocwork family runs symbolic
+execution as a *scout*: fork a symbolic state at every branch, carry a
+path condition, report when a bad state is satisfiably reachable.
+Exponential in branches, solver in the hot loop, cost paid globally
+whether or not anything is wrong — the second-engine mistake, and a
+non-starter for the interactive budget.
+
+The bolt-on shape inverts it: symbolic execution as a **referee over
+candidates the sparse tier already surfaced**. Precedents: Pinpoint
+(PLDI 2018 — sparse value-flow finds chains, SMT checks feasibility
+per candidate), Thresher (PLDI 2013 — an on-demand refuter that can
+only KILL findings, never mint them), Infer Pulse / incorrectness
+logic (POPL 2020 — under-approximate execution that PROVES a bug
+reachable, minting a concrete witness path). Cost flips from
+exponential-in-program to bounded-per-candidate; the tier engages the
+way the parametric ladder does (`ParametricType::Instance` carries the
+concrete spelling so substitution can run per-query, off the hot
+path): cheap representation preserves structure eagerly, heavy
+calculus runs on demand.
+
+Two honest directions, both composing with the FP discipline instead
+of fighting it:
+
+- **Refute**: every realizing path of a may-finding has an
+  unsatisfiable condition → the finding dies. This is what makes a
+  recall mode shippable — the noisy tier gets a referee before
+  anything reaches a user.
+- **Confirm**: one satisfiable path forces the bad state → the finding
+  upgrades to **must**, carrying its concrete path witness ("when `$c`
+  is false and `n <= 0` …"). The house-native direction: it
+  manufactures certainty, never findings.
+
+Budget overflows (paths per candidate, atoms per condition) degrade to
+*unknown → the finding stays may* — the budget can never invent or
+destroy soundness, only leave precision unharvested.
+
+### 8.1 The obligations that bind NOW
+
+Everything else in this section is additive later; these two are
+representation decisions that are free today and unrecoverable
+retrofits:
+
+- **P1 — the chase reports its arm trail.** `place_state_at` (§3.5)
+  must have a provenance mode returning the path skeleton it
+  traversed — `Vec<(join_at, arm_taken, guard_atom)>` — alongside the
+  verdict. The referee's entire input is this trail; a value-only
+  chase discards it at the moment it exists for free. (The same trail
+  is the hover-provenance story — "possibly-null because the else-arm
+  never assigned" — so it pays rent before the referee ever lands.)
+- **P2 — guards keep their `SymExpr` under the atom.** `PredicateAtom`
+  flattens `if (n > 0)` to `Opaque` by design; the extraction-time
+  lowering (query-time is tree-free) must ALSO record the condition in
+  a small symbolic IR — comparisons, linear integer arithmetic,
+  equality over symbolic values, boolean structure — when it fits the
+  fragment, `Opaque` otherwise. It rides `GuardRef` as a dormant
+  payload; no always-on consumer reads it.
+
+### 8.2 The checker ladder (all later, all additive)
+
+- **Rung 1 — SAT over atoms.** No arithmetic: collect atoms along the
+  candidate trail; same place + contradictory polarity → infeasible.
+  Kills the dominant real-world FP class — correlated branches
+  (`if ($ok) { $x = init() } … if ($ok) { $x->use }`) — with no
+  dependencies.
+- **Rung 2 — intervals / difference logic.** Hand-rolled decision
+  procedure; catches `n > 0` … `n <= 0` contradictions.
+- **Rung 3 — a real SMT solver behind a feature flag**, only if a
+  corpus audit shows rung 2 leaves value on the table. Treat like
+  perltidy: optional, external, absent → unknown.
+
+Placement: diagnostic finalization or CI-only (the `--use-after-move`
+opt-in precedent), never the interactive fold; memoized by finding
+fingerprint × file generation. Interprocedurally, path conditions
+crossing calls are *conditional effects* — the §5.2 hole's neighbor,
+one more reason that hole gates the effects design round.
