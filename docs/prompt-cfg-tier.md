@@ -413,6 +413,13 @@ retrofits:
   chase discards it at the moment it exists for free. (The same trail
   is the hover-provenance story — "possibly-null because the else-arm
   never assigned" — so it pays rent before the referee ever lands.)
+  **Instance brands are a second named consumer**
+  (`prompt-graph-walking.md` PARKED): brand = the birth-site of the
+  instance, and the birth-site rule is this chase in provenance mode —
+  the trail's terminal def identity, chased through aliases (the
+  binding-keyed `Place` kills the spike's spelling-key failure) and
+  the accessor's return edge, with φ joins folding multi-arm receivers
+  to an honest may-set of birth sites.
 - **P2 — guards keep their `SymExpr` under the atom.** `PredicateAtom`
   flattens `if (n > 0)` to `Opaque` by design; the extraction-time
   lowering (query-time is tree-free) must ALSO record the condition in

@@ -93,6 +93,15 @@ Prerequisite to un-park: the value-provenance layer of
 Part 5a value-indexed returns, and constructor/field value flow). When
 that lands, build the birth-site rule as one of its consumers.
 
+The CFG tier (`prompt-cfg-tier.md`) supplies the chase chassis for
+this: its P1 obligation (the `place_state_at` chase reports its trail)
+IS the birth-site trace — binding-keyed `Place`s see through the
+aliasing that killed the spike's spelling keys, and φ joins fold
+multi-arm receivers to an honest may-set of birth sites. Brands are
+named there as P1's second consumer; what this feature still waits on
+beyond it: Parts 2/5a above, the brand-key design round
+(`(birth-site, Option<home>)`), and the dispatch-gating consumer.
+
 ## Deferred: Scope nodes (the future taxonomy)
 
 `Node::Scope` + a PARENT edge would let the graph model lexical scopes,
