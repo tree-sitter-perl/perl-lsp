@@ -86,19 +86,24 @@ reachability (D9) and "does this arm fall through". Kinds:
   helper wrapping `exit`) arrives as a `NeverReturns` effect (§5) —
   never a name allowlist in core; only the builtins/syntax forms mint
   the ExitFact directly.
-- `Break { target } | Continue { target } | Goto { target }` —
-  `target: Option<Span>`, the **resolved jump destination, never a
-  label string** (a label name is a spelling; the span is the
-  semantics, and rename/refs already work span-side). Unlabeled
-  break/continue resolve structurally to the enclosing
-  `ControlRegion` — the assembler's job, no label involved. Labeled
-  forms and `goto` resolve through label refs: the C pack already
-  mints them (`@def.label`/`@ref.label`, goto-label nav), so cpp
-  targets ride `resolves_to`. Perl loop labels (`OUTER: while … last
-  OUTER`) currently mint NO ref — an extraction gap this entity
-  surfaces (and a free nav feature when filled). Until minted,
-  `target: None` degrades the enclosing function's reachability to
-  Opaque rather than guessing.
+- `Break | Continue | Goto` — **no target field at all.** A label
+  string is a spelling every consumer re-resolves; a baked resolved
+  span is just a label someone resolved early and stopped watching —
+  a materialized value that drifts (the edges-not-values smell), and
+  forward jumps (`goto done` before `done:`) can't even bake in one
+  pass. The destination is an **edge**: unlabeled break/continue
+  resolve structurally to the enclosing `ControlRegion` (the
+  assembler's job, no token names a destination); labeled forms and
+  `goto` resolve through the label REF at assembly time
+  (`ref_at(exit.span)` → `resolves_to` — the ref system already
+  handles def-after-use). One resolution owner: the CFG destination
+  and goto-def nav are the same fact and can't drift. The C pack
+  already mints label refs (`@def.label`/`@ref.label`); Perl loop
+  labels (`OUTER: while … last OUTER`) mint NO ref today — purely a
+  rule-#7 ref-emission gap (a free nav feature when filled). An
+  unresolved label ref degrades the enclosing function's reachability
+  to Opaque via ordinary unresolved-ref semantics — no bespoke
+  `Option`.
 
 ### 3.3 `Place` — the promotion of `NarrowSubject`
 
