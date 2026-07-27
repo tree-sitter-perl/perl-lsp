@@ -70,11 +70,35 @@ for free. Persisted, `#[serde(default)]`, `EXTRACT_VERSION` bump.
 
 ### 3.2 `ExitFact`
 
-`{ span, kind: Return | Throw | Break(label) | Continue(label) | Goto(label) }`
-per scope. Perl: `last`/`next`/`redo`, `die`; cpp: `goto` (reuse the
-label-nav refs), `return`, `throw`. Return *types* already ride
+`{ span, kind }` per scope. Return *types* already ride
 `SymbolReturnArm`; the *exit* is a separate control fact. Feeds
-reachability (D9) and "does this arm fall through".
+reachability (D9) and "does this arm fall through". Kinds:
+
+- `Return`.
+- `Unwind` — **catchable** frame exit (Perl `die`, cpp `throw`).
+  Pairs with the `Catchy` region kind: reachability after one depends
+  on enclosing catch arms (and, cross-frame, on callers via the §5
+  `MayThrow`/`MustThrow` effects).
+- `NoReturn` — **uncatchable** process/frame-fatal exit (`exit`,
+  `abort`): kills reachability unconditionally, no region rescues it.
+  Two kinds, not one `Throw`: D9 treats them differently, and only
+  `Unwind` feeds `Catchy` joins. NoReturn-ness of a *callee* (a
+  helper wrapping `exit`) arrives as a `NeverReturns` effect (§5) —
+  never a name allowlist in core; only the builtins/syntax forms mint
+  the ExitFact directly.
+- `Break { target } | Continue { target } | Goto { target }` —
+  `target: Option<Span>`, the **resolved jump destination, never a
+  label string** (a label name is a spelling; the span is the
+  semantics, and rename/refs already work span-side). Unlabeled
+  break/continue resolve structurally to the enclosing
+  `ControlRegion` — the assembler's job, no label involved. Labeled
+  forms and `goto` resolve through label refs: the C pack already
+  mints them (`@def.label`/`@ref.label`, goto-label nav), so cpp
+  targets ride `resolves_to`. Perl loop labels (`OUTER: while … last
+  OUTER`) currently mint NO ref — an extraction gap this entity
+  surfaces (and a free nav feature when filled). Until minted,
+  `target: None` degrades the enclosing function's reachability to
+  Opaque rather than guessing.
 
 ### 3.3 `Place` — the promotion of `NarrowSubject`
 
@@ -270,11 +294,15 @@ Decisions:
   become a Surface field **with an equality-net arm** (R1 applies). A
   body edit that doesn't change effects fans out to nobody. Bypassing
   Surface means rebuild-the-world or serve-stale — both disqualifying.
-- **Unwind flow.** `MayThrow`/`MustThrow` effects + the `Catchy`
-  region kind: the join after a guarded region gains an incoming arm
-  from every may-throw call inside it. Payoffs: D9 after a must-throw
-  call (`croak` then code), and honest suppression of undef-deref
-  inside `eval { }` where the deref IS the check.
+- **Unwind flow.** `MayThrow`/`MustThrow`/`NeverReturns` effects + the
+  `Catchy` region kind: the join after a guarded region gains an
+  incoming arm from every may-throw call inside it. `MustThrow` is
+  catchable (`croak` — an enclosing `Catchy` rescues reachability);
+  `NeverReturns` is not (an `exit` wrapper — reachability dies
+  regardless), mirroring the `Unwind`/`NoReturn` split on `ExitFact`
+  (§3.2). Payoffs: D9 after a must-throw call (`croak` then code),
+  and honest suppression of undef-deref inside `eval { }` where the
+  deref IS the check.
 - **No context sensitivity v1.** The two cheap forms that matter
   already exist: arity-keyed returns (`UnionOnArgs`) and
   receiver-keyed dispatch (`MethodOnClass`).
