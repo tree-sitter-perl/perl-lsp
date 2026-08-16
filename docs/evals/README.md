@@ -28,3 +28,7 @@ and whose outcome is a recommendation (often "change nothing").
 
 - [`stack-graphs.md`](stack-graphs.md) — stack graphs / scope graphs for name
   resolution. Verdict: **do not adopt** (spike: `stack-graphs-spike.rs`).
+- [`distributed-cache.md`](distributed-cache.md) — distributed analysis cache
+  (CI-published content-addressed blobs, locally overlaid). Verdict:
+  **direction recommended, not yet built** — prior-art census + the
+  failure-mode contract an implementation must satisfy.
