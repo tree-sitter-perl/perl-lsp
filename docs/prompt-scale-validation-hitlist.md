@@ -31,6 +31,7 @@ Detail for each is in its section below.
 | `pod.rs` multibyte panic | **CLOSED** `f47c002b` |
 | Fold-64 non-convergence | **CLOSED** `fed8ac00` |
 | `query_rec` 512-depth cap | **OPEN** — seen again during the #3 probe |
+| doing less cross-file enrichment work | **CLOSED x7** (B) — every proposal measured and rejected; numbers in `docs/adr/skipping-cross-file-work.md`, do not re-open without reading it |
 | hover empty on a module-name token | **CLOSED** (B) — two defects: the `PackageRef` arm swept only LOCAL symbols, and the CLI never built a CandidateSet for Perl at all |
 | `epoch.gen_stamp_missing = 1074` | **CLOSED** — explained, never a bug |
 
