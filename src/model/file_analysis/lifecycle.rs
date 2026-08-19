@@ -422,6 +422,139 @@ impl FileAnalysis {
                     }
                 }
             }
+            // Hover asks one question twice. `resolve_method_in_ancestors`
+            // climbs to the DEFINING class; `find_method_return_type` then
+            // asks `MethodOnClass{access_class, name}`, whose reducer climbs
+            // the same ancestry again inside the registry. Two walkers, one
+            // question — and the second is handed the access class even
+            // though the first already named the owner.
+            //
+            // The proposed fix is to route the second query at the owner
+            // (`method_return_type_on` already separates the dispatch class
+            // from the receiver VALUE, so `ReturnExpr::Receiver` still
+            // substitutes the access class). That is only a fix if the two
+            // walkers agree today; if they don't, it changes answers and the
+            // disagreement is the finding. Measured, not assumed.
+            if module_index.is_some() && crate::util::ghost_stats::probe("owner") {
+                if let Some(cn) = self.method_call_invocant_class(r, module_index) {
+                    let name = r.unqualified_target_name();
+                    let arity = r.arg_count.map(|c| c as usize);
+                    let owner = match self.resolve_method_in_ancestors(&cn, name, module_index) {
+                        Some(MethodResolution::Local { class, .. })
+                        | Some(MethodResolution::CrossFile { class, .. }) => Some(class),
+                        None => None,
+                    };
+                    if let Some(owner) = owner {
+                        crate::util::ghost_stats::count("owner.probe_total");
+                        crate::util::ghost_stats::count(if owner == cn {
+                            "owner.declared_on_access_class"
+                        } else {
+                            "owner.inherited"
+                        });
+                        // Denominators for the disagreement rate. Occurrences
+                        // are not shapes: 43 refs can be one method asked 43
+                        // times, and "0.3% of refs" would then be a claim
+                        // about the corpus rather than about the design.
+                        let shape = format!("{cn}|{owner}|{name}");
+                        crate::util::ghost_stats::count_distinct("owner.all.shapes", &shape);
+                        if owner != cn {
+                            crate::util::ghost_stats::count_distinct(
+                                "owner.inherited.shapes", &shape);
+                        }
+                        let _a0 = std::time::Instant::now();
+                        let a = self.find_method_return_type(&cn, name, module_index, arity);
+                        crate::util::ghost_stats::add_ns(
+                            "owner.ask_access_class", _a0.elapsed().as_nanos());
+                        let recv = InferredType::ClassName(cn.clone());
+                        let _b0 = std::time::Instant::now();
+                        let b =
+                            self.method_return_type_on(&owner, &recv, name, module_index, arity);
+                        crate::util::ghost_stats::add_ns(
+                            "owner.ask_owner_class", _b0.elapsed().as_nanos());
+                        crate::util::ghost_stats::count(match (&a, &b) {
+                            (Some(x), Some(y)) if x == y => "owner.agree_same_type",
+                            (None, None) => "owner.agree_no_type",
+                            (Some(_), Some(_)) => "owner.DISAGREE_type",
+                            (Some(_), None) => "owner.DISAGREE_owner_lost_it",
+                            (None, Some(_)) => "owner.owner_found_it",
+                        });
+                        // Why would anchoring at the owner LOSE an answer the
+                        // access class had? Two candidates, and they imply
+                        // different fixes: the framework fact is read off the
+                        // dispatch class (so anchoring moves it), or the chase
+                        // needs the child-anchored edges (so anchoring skips
+                        // them and no amount of context repair helps).
+                        if a.is_some() && b.is_none() {
+                            // 43 occurrences is a CANDIDATE count. How many
+                            // distinct (access, owner, method) shapes is the
+                            // number that says whether this generalises.
+                            crate::util::ghost_stats::count_distinct(
+                                "owner.lost.shapes",
+                                &format!("{cn}|{owner}|{name}"),
+                            );
+                            // The mechanism to separate: does the access class
+                            // carry its OWN witness for this method, which the
+                            // owner anchor then discards?
+                            let local_att =
+                                crate::model::witnesses::WitnessAttachment::MethodOnClass {
+                                    class: cn.clone(),
+                                    name: name.to_string(),
+                                };
+                            crate::util::ghost_stats::count(
+                                if self.witnesses.for_attachment(&local_att).is_empty() {
+                                    "owner.lost.no_local_witness_on_access"
+                                } else {
+                                    "owner.lost.local_witness_on_access"
+                                },
+                            );
+                            let fw_access = self.package_framework(&cn);
+                            let fw_owner = self.package_framework(&owner);
+                            crate::util::ghost_stats::count(if fw_access == fw_owner {
+                                "owner.lost.framework_same"
+                            } else {
+                                "owner.lost.framework_differs"
+                            });
+                            crate::util::ghost_stats::count(
+                                if self.packages.contains_key(owner.as_str()) {
+                                    "owner.lost.owner_declared_here"
+                                } else {
+                                    "owner.lost.owner_is_cross_file"
+                                },
+                            );
+                            // Owner anchor + the ACCESS class's framework: does
+                            // restoring that one fact recover the answer?
+                            let att = crate::model::witnesses::WitnessAttachment::MethodOnClass {
+                                class: owner.clone(),
+                                name: name.to_string(),
+                            };
+                            let ctx = self.bag_context(module_index);
+                            let q = crate::model::witnesses::ReducerQuery {
+                                attachment: &att,
+                                point: None,
+                                framework: fw_access.unwrap_or(
+                                    crate::model::witnesses::FrameworkFact::Plain,
+                                ),
+                                arity_hint: arity.map(|n| n as u32),
+                                receiver: Some(recv.clone()),
+                                args: Vec::new(),
+                                context: Some(&ctx),
+                            };
+                            let reg = crate::model::witnesses::ReducerRegistry::with_defaults();
+                            crate::util::ghost_stats::count(
+                                match reg.query(&self.witnesses, &q) {
+                                    crate::model::witnesses::ReducedValue::Type(_) => {
+                                        "owner.lost.recovered_by_framework"
+                                    }
+                                    crate::model::witnesses::ReducedValue::FactMap(_)
+                                    | crate::model::witnesses::ReducedValue::None => {
+                                        "owner.lost.still_lost"
+                                    }
+                                },
+                            );
+                        }
+                    }
+                }
+            }
             if module_index.is_some() {
                 match (r.method_target(), target.as_ref()) {
                     (Some(old), Some(new)) if old == new => {
