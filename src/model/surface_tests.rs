@@ -12,6 +12,54 @@ fn surface(source: &str) -> Surface {
     Surface::project(&build(source))
 }
 
+/// The Surface CANNOT gate `stamp_method_call_targets`, and this is why.
+///
+/// `MethodSurface::ret` is a LOCAL conclusion — projection runs with no module
+/// index, so a return type that depends on another file is honestly `None`.
+/// That collapses distinct cross-file answers onto the same projected value:
+/// two versions of a provider whose enriched return types differ can have a
+/// byte-identical Surface.
+///
+/// The consequence is not academic. `SurfaceVerdict::Unchanged` sets
+/// `skip_consumers` — "consumers stay fresh, the walk stops here" — so an edit
+/// like this invalidates nobody, while a consumer that froze a `MethodTarget`
+/// derived from this sub's return type is now holding a stale answer. Gating
+/// the re-stamp on freshness would therefore reintroduce exactly the silent
+/// verb-disagreement the eager re-stamp exists to prevent.
+///
+/// The two bodies below differ in which cross-file call they return. Locally
+/// neither resolves, so both project `ret: None`.
+#[test]
+fn a_cross_file_dependent_return_change_is_invisible_to_the_surface() {
+    let a = "package Acme::P;\nour @EXPORT_OK = qw(pick);\n\
+             sub pick {\n    my $x = Other::Alpha::make();\n    return $x;\n}\n1;\n";
+    let b = "package Acme::P;\nour @EXPORT_OK = qw(pick);\n\
+             sub pick {\n    my $x = Other::Beta::make();\n    return $x;\n}\n1;\n";
+
+    let sa = surface(a);
+    let sb = surface(b);
+
+    // Precondition: the return really is unresolved locally in both. If a
+    // future change makes these resolve without an index, this test is
+    // measuring nothing and must be re-authored rather than deleted.
+    let ret_of = |s: &Surface| {
+        s.packages
+            .iter()
+            .find(|p| p.name == "Acme::P")
+            .and_then(|p| p.methods.iter().find(|m| m.name == "pick"))
+            .map(|m| m.ret.clone())
+    };
+    assert_eq!(ret_of(&sa), Some(None), "precondition: `pick` must not resolve locally");
+    assert_eq!(ret_of(&sb), Some(None), "precondition: `pick` must not resolve locally");
+
+    assert_eq!(
+        sa, sb,
+        "two provider bodies with DIFFERENT cross-file return types project the \
+         same Surface — so `Unchanged` cannot mean `no consumer's frozen \
+         MethodTarget moved`"
+    );
+}
+
 /// R1 regression net: edits with NO cross-file-visible effect yield an
 /// EQUAL Surface — this equality is the freshness firewall. Every Surface
 /// field addition needs an arm here.
