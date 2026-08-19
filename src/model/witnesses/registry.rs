@@ -765,10 +765,10 @@ impl ReducerRegistry {
                                 args: q.args.clone(),
                                 context: q.context,
                             };
-                            if let ReducedValue::Type(t) = &*self.query_rec(bag, &sub_q, state) {
-                                Some(t.clone())
-                            } else {
-                                None
+                            match &*self.query_rec(bag, &sub_q, state) {
+                                ReducedValue::Type(t) => Some(t.clone()),
+                                ReducedValue::FactMap(_)
+                                | ReducedValue::None => None,
                             }
                         }
                     };
@@ -804,13 +804,14 @@ impl ReducerRegistry {
                         args: q.args.clone(),
                         context: q.context,
                     };
-                    if let ReducedValue::Type(t) = &*self.query_rec(bag, &sub_q, state) {
-                        out.push(Witness {
+                    match &*self.query_rec(bag, &sub_q, state) {
+                        ReducedValue::Type(t) => out.push(Witness {
                             attachment: w.attachment.clone(),
                             source: w.source.clone(),
                             payload: WitnessPayload::InferredType(t.clone()),
                             span: w.span,
-                        });
+                        }),
+                        ReducedValue::FactMap(_) | ReducedValue::None => {}
                     }
                 }
                 WitnessPayload::Projected { base, step } => {
@@ -841,7 +842,8 @@ impl ReducerRegistry {
                             };
                             match &*self.query_rec(bag, &sub_q, state) {
                                 ReducedValue::Type(t) => Some(t.clone()),
-                                _ => None,
+                                ReducedValue::FactMap(_)
+                                | ReducedValue::None => None,
                             }
                         }
                     };
@@ -873,7 +875,8 @@ impl ReducerRegistry {
                                     };
                                     match &*self.query_rec(bag, &sub_q, state) {
                                         ReducedValue::Type(t) => Some(t.clone()),
-                                        _ => None,
+                                        ReducedValue::FactMap(_)
+                                        | ReducedValue::None => None,
                                     }
                                 })
                             }
@@ -905,13 +908,14 @@ impl ReducerRegistry {
                         args: q.args.clone(),
                         context: q.context,
                     };
-                    if let ReducedValue::Type(t) = &*self.query_rec(bag, &sub_q, state) {
-                        out.push(Witness {
+                    match &*self.query_rec(bag, &sub_q, state) {
+                        ReducedValue::Type(t) => out.push(Witness {
                             attachment: w.attachment.clone(),
                             source: w.source.clone(),
                             payload: WitnessPayload::InferredType(t.clone()),
                             span: w.span,
-                        });
+                        }),
+                        ReducedValue::FactMap(_) | ReducedValue::None => {}
                     }
                 }
                 _ => out.push(w.clone()),
@@ -973,14 +977,17 @@ impl ReducerRegistry {
                 args: Vec::new(),
                 context: Some(ctx),
             };
-            if let ReducedValue::Type(t) = &*self.query_rec(bag, &q, state) {
-                let t = t.clone();
-                if t.class_name().is_some() || scope_binds_variable(bag, var, sid, point) {
-                    return Some(t);
+            match &*self.query_rec(bag, &q, state) {
+                ReducedValue::Type(t) => {
+                    let t = t.clone();
+                    if t.class_name().is_some() || scope_binds_variable(bag, var, sid, point) {
+                        return Some(t);
+                    }
+                    if weak.is_none() {
+                        weak = Some(t);
+                    }
                 }
-                if weak.is_none() {
-                    weak = Some(t);
-                }
+                ReducedValue::FactMap(_) | ReducedValue::None => {}
             }
         }
         weak

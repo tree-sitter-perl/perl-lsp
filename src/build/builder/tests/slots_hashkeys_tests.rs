@@ -149,7 +149,7 @@ fn slot_type(fa: &FileAnalysis, class: &str, key: &str) -> Option<InferredType> 
     let reg = ReducerRegistry::with_defaults();
     match reg.query(&fa.witnesses, &q) {
         ReducedValue::Type(t) => Some(t),
-        _ => None,
+        ReducedValue::FactMap(_) | ReducedValue::None => None,
     }
 }
 
