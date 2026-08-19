@@ -294,7 +294,7 @@ impl<'a> Builder<'a> {
                 };
                 let resolved = match reg.query(&self.bag, &q) {
                     ReducedValue::Type(t) => Some(t),
-                    _ => None,
+                    ReducedValue::FactMap(_) | ReducedValue::None => None,
                 };
                 // A brand is a route VALUE identity, never a sub
                 // return contract. Project it to its base class for
@@ -1067,7 +1067,7 @@ impl<'a> Builder<'a> {
         };
         match reg.query(&self.bag, &q) {
             ReducedValue::Type(t) => Some(t),
-            _ => None,
+            ReducedValue::FactMap(_) | ReducedValue::None => None,
         }
     }
 
@@ -1157,7 +1157,7 @@ impl<'a> Builder<'a> {
                 Some(InferredType::ClassName(package))
             }
             ReducedValue::Type(t) => Some(t),
-            _ => None,
+            ReducedValue::FactMap(_) | ReducedValue::None => None,
         }
     }
 
@@ -1436,10 +1436,9 @@ impl<'a> Builder<'a> {
                     args: Vec::new(),
                     context: Some(&ctx),
                 };
-                if let ReducedValue::Type(t) = reg.query(&self.bag, &q) {
-                    Some(t)
-                } else {
-                    None
+                match reg.query(&self.bag, &q) {
+                    ReducedValue::Type(t) => Some(t),
+                    ReducedValue::FactMap(_) | ReducedValue::None => None,
                 }
             });
 

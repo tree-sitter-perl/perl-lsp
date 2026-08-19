@@ -72,7 +72,7 @@ impl FileAnalysis {
         };
         match reg.query(&self.witnesses, &q) {
             ReducedValue::Type(t) => Some(t),
-            _ => None,
+            ReducedValue::FactMap(_) | ReducedValue::None => None,
         }
     }
 
@@ -144,10 +144,10 @@ impl FileAnalysis {
             context: Some(&ctx),
         };
         let reg = ReducerRegistry::with_defaults();
-        if let ReducedValue::Type(t) = reg.query(&self.witnesses, &q) {
-            return Some(t);
+        match reg.query(&self.witnesses, &q) {
+            ReducedValue::Type(t) => Some(t),
+            ReducedValue::FactMap(_) | ReducedValue::None => None,
         }
-        None
     }
 
     /// Format a method completion detail string, appending return type if known.
@@ -699,7 +699,9 @@ impl FileAnalysis {
         };
         let domain = match reg.query(&bag, &q) {
             ReducedValue::Type(InferredType::ClassName(d)) => d,
-            _ => return None,
+            ReducedValue::Type(_)
+            | ReducedValue::FactMap(_)
+            | ReducedValue::None => return None,
         };
         // Confidence = dominant share, recomputed from the same witnesses the
         // reducer folded (the coherence helper reports it deterministically).
@@ -833,7 +835,7 @@ impl FileAnalysis {
         let reg = ReducerRegistry::with_defaults();
         match reg.query(&self.witnesses, &q) {
             ReducedValue::Type(t) => Some(t),
-            _ => None,
+            ReducedValue::FactMap(_) | ReducedValue::None => None,
         }
     }
 

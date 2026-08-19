@@ -1195,3 +1195,81 @@ fn time_valued_env_vars_name_their_unit() {
         offenders.join("\n")
     );
 }
+
+/// `ReducedValue` is the type-inference answer, and a new variant on it is a
+/// sweep, not a widening: a catch-all arm — or an `if let` — swallows the new
+/// variant, compiles, and answers "no type" at exactly the sites that needed
+/// to understand it. Nothing fails; inference just goes dark.
+///
+/// So every consumer names its variants, the way `FileAnalysis::surface_feed`
+/// destructures with no `..`. Then the compiler produces the worklist. This
+/// scans for the shapes that would take the enforcement back out.
+#[test]
+fn every_reduced_value_match_names_its_variants() {
+    fn walk(dir: &std::path::Path, out: &mut Vec<PathBuf>) {
+        for entry in fs::read_dir(dir).expect("read dir") {
+            let p = entry.expect("dir entry").path();
+            if p.is_dir() {
+                walk(&p, out);
+            } else if p.extension().is_some_and(|e| e == "rs") {
+                out.push(p);
+            }
+        }
+    }
+    let mut files = Vec::new();
+    walk(&PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src"), &mut files);
+
+    let indent_of = |l: &str| l.len() - l.trim_start().len();
+    let mut violations = Vec::new();
+    for path in files {
+        let text = fs::read_to_string(&path).unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        for (i, line) in lines.iter().enumerate() {
+            let t = line.trim_start();
+            if t.starts_with("//") {
+                continue;
+            }
+            if t.starts_with("if let ReducedValue::") {
+                violations.push(format!(
+                    "{}:{}: `if let` on ReducedValue — spell it as a match, \
+                     empty arm and all",
+                    path.display(),
+                    i + 1
+                ));
+                continue;
+            }
+            // An arm on a ReducedValue match: scan its siblings (same
+            // indent, until the block dedents) for a catch-all. Nested
+            // matches sit deeper, so they don't trip this.
+            if !(t.starts_with("ReducedValue::") && t.contains("=>")) {
+                continue;
+            }
+            let arm_indent = indent_of(line);
+            for (j, sib) in lines.iter().enumerate().skip(i + 1) {
+                let s = sib.trim_start();
+                if s.is_empty() || s.starts_with("//") {
+                    continue;
+                }
+                if indent_of(sib) < arm_indent {
+                    break;
+                }
+                if indent_of(sib) == arm_indent
+                    && (s.starts_with("_ =>") || s.starts_with("_ if "))
+                {
+                    violations.push(format!(
+                        "{}:{}: catch-all arm on a ReducedValue match",
+                        path.display(),
+                        j + 1
+                    ));
+                    break;
+                }
+            }
+        }
+    }
+    assert!(
+        violations.is_empty(),
+        "a ReducedValue consumer must name every variant, so adding one is a \
+         compile error rather than silent `None`:\n{}",
+        violations.join("\n")
+    );
+}

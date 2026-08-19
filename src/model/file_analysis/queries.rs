@@ -441,7 +441,7 @@ impl FileAnalysis {
         };
         let primary = match reg.query(&self.witnesses, &q) {
             ReducedValue::Type(t) => Some(t),
-            _ => None,
+            ReducedValue::FactMap(_) | ReducedValue::None => None,
         };
         // Fallback for a chain receiver whose class the BUILDER couldn't
         // pin (so `emit_method_call_return_edges` never emitted the
@@ -474,7 +474,7 @@ impl FileAnalysis {
             };
             match reg.query(&self.witnesses, &mq) {
                 ReducedValue::Type(t) => Some(t),
-                _ => None,
+                ReducedValue::FactMap(_) | ReducedValue::None => None,
             }
         });
         resolved.map(|t| {
@@ -518,7 +518,7 @@ impl FileAnalysis {
         };
         match reg.query(&self.witnesses, &q) {
             ReducedValue::Type(t) => Some(t),
-            _ => None,
+            ReducedValue::FactMap(_) | ReducedValue::None => None,
         }
     }
 

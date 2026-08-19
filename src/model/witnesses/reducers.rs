@@ -62,17 +62,20 @@ pub struct BagContext<'a> {
 
 /// A reducer's answer.
 ///
-/// **Adding a variant here is not additive.** Every consumer matches
-/// `ReducedValue::Type(t) => Some(t), _ => None` — around a dozen such sites
-/// across `queries.rs`, `class_queries.rs`, `query.rs` and `registry.rs`. A new
-/// variant therefore compiles everywhere and answers `None` everywhere: type
-/// inference goes dark at the sites that would need to understand it, with no
-/// error to say so.
+/// **Adding a variant here is not additive** — so every `match` on it names
+/// its variants explicitly, no `_` catch-all, the way
+/// `FileAnalysis::surface_feed` destructures with no `..`. A new variant is
+/// then a compile error at each site that must decide what it means, instead
+/// of compiling everywhere and silently answering `None` — which is how type
+/// inference would go dark with nothing to say so. Keep it that way: a
+/// catch-all re-introduced here buys one line and costs the enforcement.
 ///
-/// So a variant carrying richer payload (the resolved owner alongside the type
-/// — see `docs/adr/skipping-cross-file-work.md`) has to convert those catch-alls
-/// into explicit arms in the same change. It is a wide, behaviour-risking sweep,
-/// not a widening.
+/// `if let ReducedValue::Type(t) = …` is the same hole wearing a different
+/// hat — it falls through silently and no exhaustiveness check reaches it —
+/// so those sites are spelled as matches too, even where the extra arm is
+/// empty. The payoff is that a variant carrying richer payload (the resolved
+/// owner alongside the type — see `docs/adr/skipping-cross-file-work.md`)
+/// arrives as a list of compile errors naming every site that must decide.
 ///
 /// `FactMap` is the reserved payload-bearing shape and is deliberately
 /// unproduced and unread; reaching for it does not avoid the above, because a

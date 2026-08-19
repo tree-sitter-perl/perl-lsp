@@ -43,8 +43,9 @@ pub fn query_sub_return_type(
             args: Vec::new(),
             context,
         };
-        if let ReducedValue::Type(t) = reg.query(bag, &q) {
-            return Some(t);
+        match reg.query(bag, &q) {
+            ReducedValue::Type(t) => return Some(t),
+            ReducedValue::FactMap(_) | ReducedValue::None => {}
         }
         // Cross-symbol dispatch within the sym's class (Mojo::Base
         // getter+writer share a name; at arity=1 the writer's answer is
@@ -72,8 +73,9 @@ pub fn query_sub_return_type(
                 args: Vec::new(),
                 context,
             };
-            if let ReducedValue::Type(t) = reg.query(bag, &q) {
-                return Some(t);
+            match reg.query(bag, &q) {
+                ReducedValue::Type(t) => return Some(t),
+                ReducedValue::FactMap(_) | ReducedValue::None => {}
             }
         }
     }
@@ -115,7 +117,7 @@ pub fn query_sub_return_type(
                 };
                 match reg.query(&full.witnesses, &q) {
                     ReducedValue::Type(t) => Some(Some(t)),
-                    _ => Some(None),
+                    ReducedValue::FactMap(_) | ReducedValue::None => Some(None),
                 }
             };
             // Two passes so the R4 retry can never SHADOW a later
@@ -203,12 +205,13 @@ pub fn query_sub_return_type(
                         args: Vec::new(),
                         context: Some(&cached_ctx),
                     };
-                    if let ReducedValue::Type(t) = reg.query(&full.witnesses, &q) {
-                        match &answer {
+                    match reg.query(&full.witnesses, &q) {
+                        ReducedValue::Type(t) => match &answer {
                             Some(existing) if *existing != t => ambiguous = true,
                             None => answer = Some(t),
                             _ => {}
-                        }
+                        },
+                        ReducedValue::FactMap(_) | ReducedValue::None => {}
                     }
                 }
                 if !ambiguous {
@@ -315,7 +318,7 @@ pub(crate) fn emit_mutation_extension_witnesses(
             };
             match reg.query(bag, &q) {
                 ReducedValue::Type(t) => Some(t),
-                _ => None,
+                ReducedValue::FactMap(_) | ReducedValue::None => None,
             }
         };
         let shape = match base {
