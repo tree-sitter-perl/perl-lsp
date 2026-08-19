@@ -74,12 +74,28 @@ chase it proposes **already exists** — `query_sub_return_type` walks
 > reason. The file-independent payload is the owner — `HashKeyOwner::Sub
 > { package, name }`.
 >
-> And carrying it is **not** a widening. Every consumer matches
-> `ReducedValue::Type(t) => Some(t), _ => None`, so a new variant compiles
-> everywhere and answers `None` everywhere — inference goes dark with no error.
-> `FactMap` does not avoid this: a reducer that returns it stops returning
-> `Type` for those same callers. Whatever lands must convert the catch-alls to
-> explicit arms in the same change.
+> And carrying it is **not** a widening. A catch-all arm swallows a new variant
+> silently — inference goes dark with no error — and `FactMap` does not avoid
+> this, because a reducer that returns it stops returning `Type` for those same
+> callers. Every consumer therefore now names its variants (`if let` included,
+> which falls through just as quietly and which no exhaustiveness check
+> reaches); `layering_tests::every_reduced_value_match_names_its_variants` keeps
+> it that way.
+>
+> Making the compiler produce the worklist is also what priced the design out.
+> **23 arms across 15 functions**, of which exactly two want an owner:
+> `class_queries::method_return_type_on` (hover's second ancestry walk) and
+> `query::query_sub_return_type` (which exporter answered). The other 13
+> functions — the five `registry::materialize` edge-chases, the build-time
+> `fold` queries, the structural drills — would gain an arm whose whole job is
+> to discard a payload they never asked for. And the two that want it return
+> `Option<InferredType>`, so a new variant dies at their signature anyway: the
+> load-bearing change is those two return types, not the enum.
+>
+> The shape that follows: leave `ReducedValue` alone and let the chase report
+> where it terminated, opt-in, to the callers that asked. `query_rec` already
+> holds the owner at each cross-file frame (`visible_def_candidates(idx,
+> class)`) and discards it.
 
 **5. Bake the unowned hash keys.** 17.4% of hash-key refs on the substrate
 (54.7% on Koha) carry no owner, and the question was whether local information
