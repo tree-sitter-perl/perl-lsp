@@ -272,6 +272,17 @@ impl FileAnalysis {
         // Collect resolutions first; `method_call_invocant_class` /
         // `resolve_method_in_ancestors` borrow `&self`, so we can't hold a
         // `&mut self.refs[i]` while calling them.
+        // MEASUREMENT: this pass is the dominant driver of cross-file bag
+        // rehydration (51% of sampled decode misses). Attribute its cache
+        // traffic to itself, and count how much of the ENRICHMENT re-stamp
+        // actually changes an answer the build already froze.
+        let _stamp = crate::util::ghost_stats::ScopedNs::start("stamp.total");
+        let _attrib = crate::util::ghost_stats::Attribute::start("stamp");
+        crate::util::ghost_stats::count(if module_index.is_some() {
+            "stamp.pass_enrichment"
+        } else {
+            "stamp.pass_build"
+        });
         let mut stamped: Vec<(usize, Option<MethodTarget>)> = Vec::new();
         for (i, r) in self.refs.iter().enumerate() {
             // A plugin-bridged invocant must NEVER freeze as a class:
@@ -284,7 +295,8 @@ impl FileAnalysis {
             {
                 continue;
             }
-            let target = self
+            crate::util::ghost_stats::count("stamp.methodcall_considered");
+            let target = crate::util::ghost_stats::timed("stamp.resolve", || self
                 .method_call_invocant_class(r, module_index)
                 .map(|cn| {
                     match self.resolve_method_in_ancestors(&cn, r.unqualified_target_name(), module_index) {
@@ -303,7 +315,21 @@ impl FileAnalysis {
                         // method-not-found arm returns None honestly.
                         _ => MethodTarget::CrossFile { invocant_class: cn },
                     }
-                });
+                }));
+            // The question: does the enrichment re-stamp change what the build
+            // already froze? Same answer = the walk that produced it was work
+            // nobody needed.
+            if module_index.is_some() {
+                match (r.method_target(), target.as_ref()) {
+                    (Some(old), Some(new)) if old == new => {
+                        crate::util::ghost_stats::count("stamp.unchanged")
+                    }
+                    (Some(_), Some(_)) => crate::util::ghost_stats::count("stamp.changed"),
+                    (None, Some(_)) => crate::util::ghost_stats::count("stamp.newly_resolved"),
+                    (Some(_), None) => crate::util::ghost_stats::count("stamp.would_erase"),
+                    (None, None) => crate::util::ghost_stats::count("stamp.still_unresolved"),
+                }
+            }
             stamped.push((i, target));
         }
         for (i, target) in stamped {
