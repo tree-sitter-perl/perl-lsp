@@ -54,6 +54,15 @@ v0.11.0 is the version CI pins (`rhysd/action-setup-vim`), so a local pass
 means the same thing a CI pass does. Run e2e yourself before calling a change
 verified.
 
+A suite that fails only on its **first** assertion (`no hover result`, then
+every later probe passes) is a startup-readiness race, not a logic bug — the
+first request is the only one that can arrive before the server is ready.
+`lua/test/lsp.lua::wait_for_analysis` is the gate; it polls `documentSymbol`
+rather than sleeping, because a fixed sleep is a guess about a gap that varies.
+If a suite still races, extend that gate to cover the verb it needs — do not
+add a sleep, and do not gate on the verb under assertion or the poll masks the
+regression the suite exists to catch.
+
 ## Architecture
 
 The source tree mirrors the layer DAG — a module's layer IS its top-level
