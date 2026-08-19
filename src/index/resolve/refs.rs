@@ -348,9 +348,29 @@ pub(super) fn matcher_view(
     };
     if needs_whole {
         crate::util::ghost_stats::count("refs.matcher_upgrade");
+        // Split by CAUSE: the arm that forced the upgrade is the target kind,
+        // so a whole-copy decode is attributable to unstamped method calls,
+        // unbaked hash keys, or live dispatches — a bare upgrade count cannot
+        // say which, and they have different fixes.
+        crate::util::ghost_stats::count(match &target.kind {
+            TargetKind::Handler { .. } => "refs.upgrade_by.handler",
+            TargetKind::Sub { .. } | TargetKind::Method { .. } => "refs.upgrade_by.methodcall",
+            TargetKind::HashKeyOfSub { .. }
+            | TargetKind::HashKeyOfBridged(_)
+            | TargetKind::InternalHashKey { .. } => "refs.upgrade_by.hashkey",
+            _ => "refs.upgrade_by.other",
+        });
         return idx.whole_present(cached);
     }
     crate::util::ghost_stats::count("refs.matcher_rows_view");
+    crate::util::ghost_stats::count(match &target.kind {
+        TargetKind::Handler { .. } => "refs.rowsview_by.handler",
+        TargetKind::Sub { .. } | TargetKind::Method { .. } => "refs.rowsview_by.methodcall",
+        TargetKind::HashKeyOfSub { .. }
+        | TargetKind::HashKeyOfBridged(_)
+        | TargetKind::InternalHashKey { .. } => "refs.rowsview_by.hashkey",
+        _ => "refs.rowsview_by.other",
+    });
     view
 }
 
