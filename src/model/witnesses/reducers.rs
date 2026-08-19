@@ -60,6 +60,23 @@ pub struct BagContext<'a> {
     pub app_surface_consumers: &'a [String],
 }
 
+/// A reducer's answer.
+///
+/// **Adding a variant here is not additive.** Every consumer matches
+/// `ReducedValue::Type(t) => Some(t), _ => None` — around a dozen such sites
+/// across `queries.rs`, `class_queries.rs`, `query.rs` and `registry.rs`. A new
+/// variant therefore compiles everywhere and answers `None` everywhere: type
+/// inference goes dark at the sites that would need to understand it, with no
+/// error to say so.
+///
+/// So a variant carrying richer payload (the resolved owner alongside the type
+/// — see `docs/adr/skipping-cross-file-work.md`) has to convert those catch-alls
+/// into explicit arms in the same change. It is a wide, behaviour-risking sweep,
+/// not a widening.
+///
+/// `FactMap` is the reserved payload-bearing shape and is deliberately
+/// unproduced and unread; reaching for it does not avoid the above, because a
+/// reducer that starts returning it stops returning `Type` for those callers.
 #[derive(Debug, Clone, PartialEq)]
 #[allow(dead_code)] // FactMap reserved for payload-bearing reducers
 pub enum ReducedValue {

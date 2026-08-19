@@ -72,7 +72,14 @@ chase it proposes **already exists** — `query_sub_return_type` walks
 > symbol" for the cross-file case that motivates the design.
 > `MethodResolution::CrossFile` already refuses to carry one for exactly this
 > reason. The file-independent payload is the owner — `HashKeyOwner::Sub
-> { package, name }` — and `ReducedValue::FactMap` is the seam for it.
+> { package, name }`.
+>
+> And carrying it is **not** a widening. Every consumer matches
+> `ReducedValue::Type(t) => Some(t), _ => None`, so a new variant compiles
+> everywhere and answers `None` everywhere — inference goes dark with no error.
+> `FactMap` does not avoid this: a reducer that returns it stops returning
+> `Type` for those same callers. Whatever lands must convert the catch-alls to
+> explicit arms in the same change.
 
 **5. Bake the unowned hash keys.** 17.4% of hash-key refs on the substrate
 (54.7% on Koha) carry no owner, and the question was whether local information
