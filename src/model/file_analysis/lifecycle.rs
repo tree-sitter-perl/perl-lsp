@@ -268,6 +268,64 @@ impl FileAnalysis {
     ///
     /// Contract: if the invocant class does not infer, store `None` (honest
     /// miss). No name-only fallback — that re-introduces the `->new` flood.
+    /// MEASUREMENT-ONLY: is `class`'s ancestry wholly LOCAL to this file?
+    ///
+    /// The proposed soundness argument for skipping an enrichment re-stamp is
+    /// that the index can only move the answer when the invocant's class has
+    /// cross-file ancestry — if the whole parent chain is declared here,
+    /// `resolve_method_in_ancestors` walks identical edges with or without an
+    /// index. This computes that property so it can be cross-tabulated against
+    /// what the re-stamp ACTUALLY changed. Per class, not per ref, which is the
+    /// granularity the argument turns on.
+    ///
+    /// Conservative in the direction that matters: anything it cannot verify
+    /// as local (class not declared here, dynamic parents, a parent the index
+    /// knows and we do not) answers false, so a `true` is the strong claim.
+    fn ancestry_is_wholly_local(
+        &self,
+        class: &str,
+        module_index: Option<&dyn CrossFileLookup>,
+        memo: &mut std::collections::HashMap<String, bool>,
+    ) -> bool {
+        if let Some(hit) = memo.get(class) {
+            return *hit;
+        }
+        memo.insert(class.to_string(), false); // cycle guard: assume not-local
+        let mut verdict = true;
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut stack = vec![class.to_string()];
+        while let Some(c) = stack.pop() {
+            if !seen.insert(c.clone()) {
+                continue;
+            }
+            if !self.packages.contains_key(&c) || self.has_dynamic_parents(&c) {
+                verdict = false;
+                break;
+            }
+            // A SPLIT package defeats the argument: the class is declared here,
+            // its parents may match, and yet the METHOD can live in another
+            // file's copy of the same package — so the index would resolve
+            // CrossFile where the local walk resolved Local. Require the class
+            // to be declared nowhere else before trusting the local chain.
+            if let Some(idx) = module_index {
+                if idx.visible_def_candidates(&c).len() > 1 {
+                    verdict = false;
+                    break;
+                }
+            }
+            let local: Vec<String> = self.declared_parents(&c).to_vec();
+            if let Some(idx) = module_index {
+                if idx.parents_cached(&c).iter().any(|p| !local.contains(p)) {
+                    verdict = false;
+                    break;
+                }
+            }
+            stack.extend(local);
+        }
+        memo.insert(class.to_string(), verdict);
+        verdict
+    }
+
     pub(crate) fn stamp_method_call_targets(&mut self, module_index: Option<&dyn CrossFileLookup>) {
         // Collect resolutions first; `method_call_invocant_class` /
         // `resolve_method_in_ancestors` borrow `&self`, so we can't hold a
@@ -283,6 +341,8 @@ impl FileAnalysis {
         } else {
             "stamp.pass_build"
         });
+        let mut local_memo: std::collections::HashMap<String, bool> =
+            std::collections::HashMap::new();
         let mut stamped: Vec<(usize, Option<MethodTarget>)> = Vec::new();
         for (i, r) in self.refs.iter().enumerate() {
             // A plugin-bridged invocant must NEVER freeze as a class:
@@ -331,6 +391,37 @@ impl FileAnalysis {
             // The question: does the enrichment re-stamp change what the build
             // already froze? Same answer = the walk that produced it was work
             // nobody needed.
+            if module_index.is_some() && crate::util::ghost_stats::enabled() {
+                // The decisive check: does ANY ref whose class is wholly local
+                // get a different answer from the index? A single one falsifies
+                // the soundness argument.
+                let _p0 = std::time::Instant::now();
+                let wholly_local = r
+                    .method_target()
+                    .map(|t| t.invocant_class().to_string())
+                    .map(|cn| self.ancestry_is_wholly_local(&cn, module_index, &mut local_memo))
+                    .unwrap_or(false);
+                crate::util::ghost_stats::add_ns("pred.cost", _p0.elapsed().as_nanos());
+                let changed_now = match (r.method_target(), target.as_ref()) {
+                    (Some(old), Some(new)) => old != new,
+                    (Some(_), None) | (None, Some(_)) => true,
+                    (None, None) => false,
+                };
+                match (wholly_local, changed_now) {
+                    (true, false) => {
+                        crate::util::ghost_stats::count("pred.local_and_stable")
+                    }
+                    (true, true) => {
+                        crate::util::ghost_stats::count("pred.LOCAL_BUT_CHANGED")
+                    }
+                    (false, false) => {
+                        crate::util::ghost_stats::count("pred.crossfile_and_stable")
+                    }
+                    (false, true) => {
+                        crate::util::ghost_stats::count("pred.crossfile_and_changed")
+                    }
+                }
+            }
             if module_index.is_some() {
                 match (r.method_target(), target.as_ref()) {
                     (Some(old), Some(new)) if old == new => {
