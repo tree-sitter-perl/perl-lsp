@@ -181,6 +181,27 @@ pub fn add_ns(tag: &str, nanos: u128) {
     e.1 += 1;
 }
 
+/// Add `n` to `tag`'s running total, for a quantity that is not a duration
+/// (bytes, rows, witnesses). Shares the accumulator so the report shows sums
+/// and call counts for both without a second table.
+pub fn add_n(tag: &str, n: u64) {
+    if !enabled() {
+        return;
+    }
+    let mut q = quantities().lock().unwrap_or_else(|e| e.into_inner());
+    let e = q.entry(tag.to_string()).or_insert((0, 0));
+    e.0 += n as u128;
+    e.1 += 1;
+}
+
+/// tag -> (total, sample count). Deliberately NOT the duration accumulator:
+/// rendering a witness count through a millisecond formatter reads as a
+/// timing and gets quoted as one.
+fn quantities() -> &'static Mutex<HashMap<String, (u128, u64)>> {
+    static Q: OnceLock<Mutex<HashMap<String, (u128, u64)>>> = OnceLock::new();
+    Q.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
 /// Time `body` into `tag`'s running total. Inert when the gate is off — not
 /// even an `Instant::now`, so an instrumented hot path costs nothing unmeasured.
 #[inline]
@@ -414,6 +435,20 @@ pub fn emit_attribution(moment: &str) {
                 let avg_us = if *n > 0 { *ns as f64 / *n as f64 / 1e3 } else { 0.0 };
                 out.push_str(&format!(
                     "[ghost-triggers]   {ms:>10.1} ms  n={n:<8} avg={avg_us:>9.1} us  {k}\n"
+                ));
+            }
+        }
+    }
+    {
+        let q = quantities().lock().unwrap_or_else(|e| e.into_inner());
+        if !q.is_empty() {
+            let mut rows: Vec<(&String, &(u128, u64))> = q.iter().collect();
+            rows.sort_by(|x, y| y.1 .0.cmp(&x.1 .0).then_with(|| x.0.cmp(y.0)));
+            out.push_str(&format!("[ghost-triggers {moment}] quantities:\n"));
+            for (k, (total, n)) in rows {
+                let avg = if *n > 0 { *total as f64 / *n as f64 } else { 0.0 };
+                out.push_str(&format!(
+                    "[ghost-triggers]   total={total:<12} n={n:<8} avg={avg:>10.1}  {k}\n"
                 ));
             }
         }

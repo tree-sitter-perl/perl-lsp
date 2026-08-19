@@ -316,8 +316,15 @@ impl FileAnalysis {
                     crate::util::ghost_stats::count("chase.candidate_skipped");
                     continue;
                 }
+                crate::util::ghost_stats::count_distinct(
+                    "chase.fetched", &cached.path.display().to_string());
                 let whole = crate::util::ghost_stats::timed(
                     "chase.bag_present", || idx.bag_present(&cached));
+                crate::util::ghost_stats::count("chase.fetched");
+                crate::util::ghost_stats::add_n(
+                    "chase.witnesses_rehydrated", whole.witnesses.len() as u64);
+                crate::util::ghost_stats::add_n(
+                    "chase.symbols_rehydrated", whole.symbols.len() as u64);
                 // Fetched on the first return-type MISS (fallback-on-miss): the
                 // exporter's own return may chain through ITS imports (A→B→C),
                 // materialized only after the exporter is itself enriched — the
