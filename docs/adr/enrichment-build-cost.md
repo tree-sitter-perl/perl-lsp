@@ -8,6 +8,10 @@ replace the whole-analysis copy with a small overlay of derived facts.
 **The copy was a real cost and is now gone. It was not the dominant one.**
 Measured, so the next attempt starts from numbers rather than from the idea.
 
+The dominant one is `stamp_method_call_targets`, and every proposal for doing
+less of it has closed — see `docs/adr/skipping-cross-file-work.md` for the
+seven and their numbers.
+
 ## Measurements
 
 150 substrate modules (`gold-corpus/local/lib/perl5`, 4 KB–400 KB, 58.8 MB of
