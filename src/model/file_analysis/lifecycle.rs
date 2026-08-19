@@ -146,13 +146,23 @@ impl FileAnalysis {
     /// end of the worklist (single emission point for "this sub's
     /// return type is known"). Cross-file imports do not get a local
     /// mirror; they resolve lazily through `query_sub_return_type`.
-    /// Drop the witness bag (the build-time type-inference scaffold) from
-    /// this resident analysis after the fold baked its conclusions into pinned
-    /// fields. The full bag rides the on-disk blob, so this is lossless — a
-    /// type query needing it rehydrates the exact persisted bag on demand
-    /// (`docs/adr/memory-slice-2-lru.md`). Clears both the `Vec<Witness>` and
-    /// its rebuilt index; touches no pinned field (refs, symbols, return_types,
-    /// ref bindings all survive). Idempotent.
+    /// Drop the witness bag (the build-time type-inference scaffold) from this
+    /// resident analysis. The full bag rides the on-disk blob, so this is
+    /// lossless — a type query needing it rehydrates the exact persisted bag on
+    /// demand (`docs/adr/memory-slice-2-lru.md`). Clears both the
+    /// `Vec<Witness>` and its rebuilt index; refs, symbols and ref bindings all
+    /// survive. Idempotent.
+    ///
+    /// What does NOT survive, and is easy to assume otherwise: a sub's RETURN
+    /// TYPE. The fold's conclusion is published by
+    /// `write_back_sub_return_types` as a `MethodOnClass{..} -> Edge(Symbol(id))`
+    /// witness — in the bag, by the "edges, not values" invariant, since
+    /// materialising it into a field would be the parallel store the worklist
+    /// rules forbid. There is no `return_types` field to fall back on. So
+    /// evicting here means every cross-file "what does this sub return" costs a
+    /// rehydrate, which is the whole reason enrichment's provider chase is
+    /// dominated by `bag_present` (measured: ~400 witnesses moved per return-type
+    /// query answered).
     pub fn evict_witness_bag(&mut self) {
         self.witnesses = crate::model::witnesses::WitnessBag::default();
         self.bag_evicted = true;
