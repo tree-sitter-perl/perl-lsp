@@ -90,6 +90,24 @@ pub fn enabled() -> bool {
     !matches!(sink(), Sink::Off)
 }
 
+/// Second gate, for a probe whose own cost would distort the run it measures.
+///
+/// Ordinary counters are free enough to ride `enabled()`. A probe that issues
+/// extra registry queries per ref is not: leaving it on the main gate taxes
+/// every future measurement by however much the probe costs, and the tax is
+/// invisible in the numbers it produces. `PERL_LSP_PROBES` is a comma-separated
+/// list of names (`PERL_LSP_PROBES=owner`); `all` enables every probe. Read
+/// once, so the check is a slice scan against a cached list.
+pub fn probe(name: &str) -> bool {
+    static P: OnceLock<Vec<String>> = OnceLock::new();
+    let list = P.get_or_init(|| {
+        std::env::var("PERL_LSP_PROBES")
+            .map(|v| v.split(',').map(|s| s.trim().to_string()).collect())
+            .unwrap_or_default()
+    });
+    enabled() && list.iter().any(|n| n == name || n == "all")
+}
+
 // ---------------------------------------------------------------------------
 // Trigger attribution (measurement-only, rides the same gate).
 //

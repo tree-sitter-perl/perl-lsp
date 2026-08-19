@@ -1,7 +1,7 @@
 # ADR: What cross-file enrichment costs, and every way of doing less of it that failed
 
-Cross-file enrichment is the dominant cost of a batch analysis. Seven distinct
-ways of doing less of it were proposed and measured; **all seven closed**. This
+Cross-file enrichment is the dominant cost of a batch analysis. Eight distinct
+ways of doing less of it were proposed and measured; **all eight closed**. This
 records the numbers so the next attempt starts from them rather than from the
 idea, and so a closed question is not re-opened on the strength of how
 plausible it sounds.
@@ -31,7 +31,7 @@ A miss is **6.1× cheaper** — it fails before the walk starts. Apportioning th
 phase's cost by ref COUNT is therefore wrong in a predictable direction, and
 was wrong every time it was tried.
 
-## The seven closed questions
+## The eight closed questions
 
 **1. Skip the re-stamp unconditionally.** 40.9% of the pass re-derives an
 answer the build already froze. Rejected: 116 refs in 26,864 (**0.43%**) resolve
@@ -120,6 +120,46 @@ identical in shape to three things that *were* worth fixing. It measures
 **2.7 ms, 0.10%** of the phase. The phase is the traversal (~99.9%), and the
 fixed-point loop is 1.09 rounds/file.
 
+**8. Route the return-type query at the owner the first walk already found.**
+Hover asks one `(class, method)` question twice: `resolve_method_in_ancestors`
+climbs to the declaring class, then `find_method_return_type` asks
+`MethodOnClass{access_class, name}` and the reducer climbs the same ancestry
+again inside the registry. Both hover arms already **bind** the owner from the
+first walk — they use it for the `"Child (from Parent)"` label — and then pass
+the access class to the second. The owner is in scope, one line up, unused.
+`method_return_type_on` separates the dispatch class from the receiver VALUE,
+so re-anchoring looked free.
+
+Measured with the `owner` probe (`PERL_LSP_PROBES=owner`): 13,534 probes over
+**5,779 distinct `(access, owner, method)` shapes**, 1,167 of them inherited.
+The owner anchor is **2.7× cheaper** — 43.0 µs against 114.3 µs — and agrees on
+13,491 of 13,534 occurrences.
+
+Rejected on the residual. The 43 disagreements are **one shape**:
+`Catalyst` / `Catalyst::Component` / `config`, where the owner anchor answers
+`None` and the access class answers `HashRef`. In all 43 the owner is
+cross-file and the ACCESS class carries its own `MethodOnClass{Catalyst,
+config}` witness, which re-anchoring discards; restoring the access class's
+framework recovers none of them, so it is the anchor and not the context.
+
+The reason it cannot be patched is the interesting part: **the two walkers mean
+different things by "owner".** `resolve_method_in_ancestors` answers *which
+class declares the symbol* — it climbs past `Catalyst` because no `Symbol` for
+`config` lives there. The bag answers *which attachment carries the witness* —
+and that is `Catalyst`. Neither is wrong. So a channel that reports "the owner"
+must pick one of the two notions and consumers cannot tell which they got: the
+owner is not a property of the answer, it is a property of which walker you
+asked. That is rule #10 wearing a provenance costume, and it retires the
+richer-`ReducedValue` design in item 4 for the same reason a variant would not
+have reached hover.
+
+> Limits, stated because one counterexample in 1,167 inherited shapes is thin:
+> this substrate contains exactly one Catalyst. It is enough to falsify "always
+> safe", which is what the design needed. It is not enough to say how often the
+> two notions diverge in general — Koha would test that, and is not runnable
+> here.
+
+
 ## The rules these bought
 
 **A structural smell is not evidence of cost.** Item 7 has the same shape as
@@ -131,6 +171,12 @@ directions: apportioning stamp cost by ref count (wrong by 6×), predicting the
 upgrade rate from the global unbaked rate (wrong population), computing
 rounds-per-file from another subsystem's file count (wrong by 5×). Counting the
 denominator has cost one line every time.
+
+**An occurrence count is not a shape count.** Item 8's 43 disagreements read
+like a 0.3% tail distributed across the corpus. They are one method asked 43
+times, in one distinct shape out of 1,167. The occurrence figure and the shape
+figure support opposite conclusions about whether a residual generalises, and
+only the second one was about the design. `count_distinct` is one line.
 
 **When a change has a local path and a cross-file path, the local path passing
 is not evidence.** Items 2, 3 and 4 each had a version that worked locally,
