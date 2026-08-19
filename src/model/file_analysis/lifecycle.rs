@@ -296,7 +296,12 @@ impl FileAnalysis {
                 continue;
             }
             crate::util::ghost_stats::count("stamp.methodcall_considered");
-            let target = crate::util::ghost_stats::timed("stamp.resolve", || self
+            // Time the resolve and bucket it BY OUTCOME. A failed ancestor walk
+            // may cost more than a successful one (it exhausts the chain rather
+            // than stopping at a hit), so apportioning the pass's cost by ref
+            // COUNT would misattribute it in an unknown direction.
+            let _t0 = std::time::Instant::now();
+            let target = (|| self
                 .method_call_invocant_class(r, module_index)
                 .map(|cn| {
                     match self.resolve_method_in_ancestors(&cn, r.unqualified_target_name(), module_index) {
@@ -315,7 +320,14 @@ impl FileAnalysis {
                         // method-not-found arm returns None honestly.
                         _ => MethodTarget::CrossFile { invocant_class: cn },
                     }
-                }));
+                }))();
+            if crate::util::ghost_stats::enabled() {
+                let ns = _t0.elapsed().as_nanos();
+                crate::util::ghost_stats::add_ns(
+                    if target.is_some() { "stamp.resolve_hit" } else { "stamp.resolve_miss" },
+                    ns,
+                );
+            }
             // The question: does the enrichment re-stamp change what the build
             // already froze? Same answer = the walk that produced it was work
             // nobody needed.
