@@ -429,6 +429,20 @@ impl FileAnalysis {
                 }
             })
             .collect();
+        // MEASUREMENT (Q6): how many HashKeyAccess refs owe their BAKED owner
+        // to this cross-file fixup, versus already having one from the build?
+        for r in self.refs.iter() {
+            if matches!(r.kind, RefKind::HashKeyAccess { .. }) {
+                crate::util::ghost_stats::count("hka.total");
+                match r.hash_key_owner() {
+                    Some(o) if !matches!(o, HashKeyOwner::Variable { .. }) => {
+                        crate::util::ghost_stats::count("hka.baked_before_fixup")
+                    }
+                    Some(_) => crate::util::ghost_stats::count("hka.variable_owned"),
+                    None => crate::util::ghost_stats::count("hka.unowned"),
+                }
+            }
+        }
         if !binding_by_var.is_empty() {
             for r in &mut self.refs {
                 if let RefKind::HashKeyAccess { ref var_text } = r.kind {
@@ -443,6 +457,7 @@ impl FileAnalysis {
                                 // Re-stamping the owner drops the stale
                                 // HashKeyDef link; the enrichment re-index
                                 // re-links against the new owner.
+                                crate::util::ghost_stats::count("hka.baked_by_fixup");
                                 r.bind_hash_key_owner(HashKeyOwner::Sub {
                                     package: pkg.clone(),
                                     name: func_name.clone(),
