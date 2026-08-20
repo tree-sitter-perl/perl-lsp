@@ -435,6 +435,81 @@ impl FileAnalysis {
             // substitutes the access class). That is only a fix if the two
             // walkers agree today; if they don't, it changes answers and the
             // disagreement is the finding. Measured, not assumed.
+            // Option A's blast radius, edge-filtered. "43 names have a
+            // same-named sub somewhere" is a NAME match; the family only
+            // widens if an INHERITS_INV edge actually connects the demander
+            // to the definer. That edge filter is the number nobody measured,
+            // and it is the difference between a Surface field and a code
+            // action that offers to write `requires`.
+            if crate::util::ghost_stats::probe("demands") {
+                if let Some(idx) = module_index {
+                    if let Some(cn) = self.method_call_invocant_class(r, module_index) {
+                        let name = r.unqualified_target_name();
+                        // Demanded here and provided by NOBODY up-chain — the
+                        // degenerate-singleton case pass 2 would fire on.
+                        if self
+                            .resolve_method_in_ancestors(&cn, name, module_index)
+                            .is_none()
+                        {
+                            crate::util::ghost_stats::count("demand.unresolved");
+                            crate::util::ghost_stats::count_distinct(
+                                "demand.shapes", &format!("{cn}|{name}"));
+                            let mut widens = false;
+                            let mut reachable = false;
+                            let graph = crate::model::graph::GraphView::new(self, Some(idx));
+                            graph.walk(
+                                crate::model::graph::Node::Class(cn.clone()),
+                                crate::model::graph::EdgeKindMask::INHERITS_INV,
+                                &mut |n| {
+                                    if let crate::model::graph::Node::Class(d) = n {
+                                        let defines = matches!(
+                                            self.resolve_method_in_ancestors(
+                                                d, name, module_index),
+                                            Some(MethodResolution::Local { class: ref c, .. })
+                                            | Some(MethodResolution::CrossFile {
+                                                class: ref c, .. })
+                                            if c == d
+                                        );
+                                        if defines {
+                                            widens = true;
+                                            return crate::model::graph::WalkControl::Stop;
+                                        }
+                                        // The motivating shape is NOT a
+                                        // descendant defining M: role R is
+                                        // demanded by consumer K, and a
+                                        // SIBLING role S composed into K
+                                        // provides it. S is not a descendant
+                                        // of R — it is reachable only THROUGH
+                                        // K. So also count "some descendant
+                                        // can SEE M", which covers it.
+                                        if !reachable
+                                            && self
+                                                .resolve_method_in_ancestors(
+                                                    d, name, module_index)
+                                                .is_some()
+                                        {
+                                            reachable = true;
+                                        }
+                                    }
+                                    crate::model::graph::WalkControl::Continue
+                                },
+                            );
+                            if widens {
+                                crate::util::ghost_stats::count("demand.WIDENS");
+                                crate::util::ghost_stats::count_distinct(
+                                    "demand.widen_shapes", &format!("{cn}|{name}"));
+                            } else {
+                                crate::util::ghost_stats::count("demand.no_descendant_defines");
+                            }
+                            if !widens && reachable {
+                                crate::util::ghost_stats::count("demand.SIBLING_REACHABLE");
+                                crate::util::ghost_stats::count_distinct(
+                                    "demand.sibling_shapes", &format!("{cn}|{name}"));
+                            }
+                        }
+                    }
+                }
+            }
             if module_index.is_some() && crate::util::ghost_stats::probe("owner") {
                 if let Some(cn) = self.method_call_invocant_class(r, module_index) {
                     let name = r.unqualified_target_name();
