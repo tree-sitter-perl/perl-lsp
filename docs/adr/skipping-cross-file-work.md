@@ -15,7 +15,7 @@ instrumentation cost.
 | phase | ms | note |
 |---|---|---|
 | `stamp_method_call_targets` | **~10,000** | 63% of all blob decodes |
-| `pattern_dispatch` | ~2,700 | ~99.9% of it the query traversal |
+| `pattern_dispatch` | 3,690 | 91.6% of it the query traversal |
 | the provider chase | 241 | was 1,541 before the export gate |
 
 `stamp` dominates and its cost is **success**, not failure: resolving an
@@ -117,8 +117,20 @@ property of the corpus.
 facts per match — package by linear scan, `use` set cloned, transitive parents
 rebuilt, 1,238 matches over 373 packages (×3.32). Textbook cardinality smell,
 identical in shape to three things that *were* worth fixing. It measures
-**2.7 ms, 0.10%** of the phase. The phase is the traversal (~99.9%), and the
-fixed-point loop is 1.09 rounds/file.
+**2.7 ms over 1,238 calls at 2.2 µs — 0.073%** of a 3,690 ms phase, of which
+`pd.collect` (the traversal) is 91.6%. The fixed-point loop is 1.09
+rounds/file.
+
+> The share figure here was first reported as "0.10% of a phase that is ~99.9%
+> traversal", and the traversal half of that was **my own denominator error**.
+> I divided `collect` by the sum of the timers I had added rather than by the
+> phase, so the regions I had not instrumented — `pd.loop` at 239 ms,
+> `pd.on_match` at 183 ms — were missing from the bottom of the fraction and
+> the top absorbed them. The 2.7 ms numerator was right and unchanged; only
+> what it was a fraction OF was wrong. Re-measured against #136's
+> instrumentation, which times the phase itself. #136 independently reports
+> the same gate share (0.07%), from a different box and a different
+> instrument.
 
 **8. Route the return-type query at the owner the first walk already found.**
 Hover asks one `(class, method)` question twice: `resolve_method_in_ancestors`
@@ -169,8 +181,15 @@ Three were worth fixing and it was not, and only measurement separated them.
 **Numerator measured, denominator assumed** is the recurring error, in both
 directions: apportioning stamp cost by ref count (wrong by 6×), predicting the
 upgrade rate from the global unbaked rate (wrong population), computing
-rounds-per-file from another subsystem's file count (wrong by 5×). Counting the
-denominator has cost one line every time.
+rounds-per-file from another subsystem's file count (wrong by 5×), and
+dividing a region by the timers on hand rather than by the phase (item 7's
+own "99.9% traversal", really 91.6%). Counting the denominator has cost one
+line every time.
+
+The last of those is the trap specific to *adding* instrumentation: the
+regions you just wrote feel like the whole, because they are the whole of what
+you can see. A share is only meaningful against a total that was measured
+independently of which probes you happened to place.
 
 **An occurrence count is not a shape count.** Item 8's 43 disagreements read
 like a 0.3% tail distributed across the corpus. They are one method asked 43
