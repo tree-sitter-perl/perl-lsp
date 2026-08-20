@@ -1459,6 +1459,13 @@ impl FileAnalysis {
     /// correct where the walk's sticky context desynced (macro-guarded
     /// namespace opens, mid-file scope desync). Callers gate on pack-shaped
     /// analyses; Perl attribution is total at build time.
+    ///
+    /// **Not usable on Perl.** It needs a `Package` SYMBOL whose span
+    /// CONTAINS the point, which is a brace-delimited pack namespace. Perl's
+    /// `package Foo;` spans one statement and contains nothing, so this
+    /// answers `None` for essentially every point in a Perl file (10,435 of
+    /// 10,436 imports on the substrate). `package_at` is the Perl accessor —
+    /// it reads `package_ranges`, which models "in effect from here".
     pub(crate) fn enclosing_package_of(&self, span: &Span) -> Option<String> {
         let contains = |o: &Span, i: &Span| {
             (o.start.row, o.start.column) <= (i.start.row, i.start.column)
