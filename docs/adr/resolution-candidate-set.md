@@ -114,7 +114,7 @@ Deliberately NOT on the set (the seam's edge, kept honest):
   handler names, keyval/`:param` keys, the `use Foo qw(|)` import-list
   slot (one named module's export surface). These enumerate the content OF
   an already-identified entity and ride the method/dispatch resolution
-  seams (`MethodOnClass`, `ReceiverGated`) — a different question than
+  seams (`PackageSymbol`, `ReceiverGated`) — a different question than
   "what names are visible from here." Folding them in would re-derive
   those seams, not unify them.
 - **Presentation**: labels, kinds, details, sort priorities, snippet

@@ -40,7 +40,7 @@ Type intelligence:
   unless ref $spec`) — replaces the `reassigned_scalars` trust-gate
   clause with a real lattice fold.
 - A4 v2: cross-FILE slot writes (`$self->{k} = Obj->new` in another
-  file) — the `MethodOnClass` bridge pattern.
+  file) — the `PackageSymbol` bridge pattern.
 
 Graph / diagnostics (graph-walking pillar landed; residual only):
 - Scope-node taxonomy + Openness diagnostic (`home_namespace`,

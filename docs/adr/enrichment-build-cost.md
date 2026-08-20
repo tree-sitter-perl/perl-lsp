@@ -78,7 +78,7 @@ Who reads an enriched analysis, and through what surface. The split matters:
 | consumer | reads via | recursive? |
 |---|---|---|
 | `query_sub_return_type`'s imported recursion (`witnesses/query.rs`) | witness bag | yes |
-| `MethodOnClass` cross-file primary (`witnesses/registry.rs`) | witness bag | yes |
+| `PackageSymbol` cross-file primary (`witnesses/registry.rs`) | witness bag | yes |
 | bridged-namespace bake (`witnesses/registry.rs`) | witness bag | yes |
 | forward slot-seeding retry (`witnesses/registry.rs`) | witness bag, pins the Arc | yes |
 | enrichment's own provider chase (`enrichment.rs`) | witness bag | yes |

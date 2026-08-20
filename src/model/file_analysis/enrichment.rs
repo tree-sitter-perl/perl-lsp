@@ -166,7 +166,7 @@ impl FileAnalysis {
                 if let Some(rt) = &gs.return_type {
                     // Plugin-priority `Symbol(sid) → InferredType`, matching
                     // the builder's Method emit. Class-scoped methods also get
-                    // the `MethodOnClass{class,name} → Edge(Symbol(sid))`
+                    // the `PackageSymbol{package,name} → Edge(Symbol(sid))`
                     // mirror the fold writeback would have pushed, so cross-
                     // file return-type queries resolve the relationship shape.
                     self.witnesses.push(Witness {
@@ -178,8 +178,8 @@ impl FileAnalysis {
                     if matches!(gs.kind, SymKind::Method | SymKind::Sub) {
                         if let Some(class) = &pkg {
                             self.witnesses.push(Witness {
-                                attachment: WitnessAttachment::MethodOnClass {
-                                    class: class.clone(),
+                                attachment: WitnessAttachment::PackageSymbol {
+                                    package: class.clone(),
                                     name: gs.name.clone(),
                                 },
                                 source: WitnessSource::Plugin(em.plugin_id.clone()),
@@ -527,13 +527,13 @@ impl FileAnalysis {
         self.fix_chain_receiver_hash_key_owners(module_index);
 
         // Cross-file inheritance edges. Local writeback emits
-        // `MethodOnClass(child, m) → Edge(MethodOnClass(parent, m))`
+        // `PackageSymbol(child, m) → Edge(PackageSymbol(parent, m))`
         // for every method `m` declared on a *local* parent. When
         // the parent class lives in another file (or its methods
         // do, via further parent chaining), we read the cached
         // analysis here and project the same edge shape into the
         // local bag. The registry's edge-chase then follows
-        // `MethodOnClass(child, m) → MethodOnClass(parent_cross, m)`
+        // `PackageSymbol(child, m) → PackageSymbol(parent_cross, m)`
         // and re-enters the cached parent's bag via the existing
         // cross-file primary lookup in `query_rec`.
         if let Some(idx) = module_index {
@@ -571,13 +571,13 @@ impl FileAnalysis {
                             continue;
                         }
                         self.witnesses.push(Witness {
-                            attachment: WitnessAttachment::MethodOnClass {
-                                class: child.clone(),
+                            attachment: WitnessAttachment::PackageSymbol {
+                                package: child.clone(),
                                 name: sym.name.clone(),
                             },
                             source: WitnessSource::Enrichment("inheritance_cross".to_string()),
-                            payload: WitnessPayload::Edge(WitnessAttachment::MethodOnClass {
-                                class: parent.clone(),
+                            payload: WitnessPayload::Edge(WitnessAttachment::PackageSymbol {
+                                package: parent.clone(),
                                 name: sym.name.clone(),
                             }),
                             span: zero,
@@ -624,7 +624,7 @@ impl FileAnalysis {
     }
 
     /// The MCB→bag bridge: each recorded `$var = $invocant->method()`
-    /// binding becomes a `Variable → Edge(MethodOnClass{class, method})`
+    /// binding becomes a `Variable → Edge(PackageSymbol{package, method})`
     /// witness (tag `mcb`), so the registry chases the method's return
     /// lazily — with whatever index the QUERY holds — instead of a value
     /// materialized here (edges, not values). The invocant class is
@@ -652,8 +652,8 @@ impl FileAnalysis {
                         scope: binding.scope,
                     },
                     source: WitnessSource::Builder("mcb".into()),
-                    payload: WitnessPayload::Edge(WitnessAttachment::MethodOnClass {
-                        class: cn,
+                    payload: WitnessPayload::Edge(WitnessAttachment::PackageSymbol {
+                        package: cn,
                         name: binding.method_name.clone(),
                     }),
                     // Zero-width at the assignment, the TC temporal

@@ -461,7 +461,7 @@ fn resolve_node_type(
         return analysis.member_value_type(&base_ty, field_name, module_index, None);
     }
     // a method CALL `recv.method(...)` — the method's return on the
-    // receiver's class, resolved through MethodOnClass (inheritance +
+    // receiver's class, resolved through PackageSymbol (inheritance +
     // cross-file flow through the same chase, no special-casing). The
     // receiver's full value threads through so a param-shaped return
     // (`T get()`) substitutes the instance's args.

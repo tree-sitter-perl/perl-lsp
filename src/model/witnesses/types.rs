@@ -42,15 +42,40 @@ pub enum WitnessAttachment {
     /// `Expr` for compound expressions). The per-sub fold reads
     /// `Edge(Expr(span))` arms via `Symbol(sub_id)`.
     Expr(Span),
-    /// Class-keyed method dispatch: "what does method `name` return on
-    /// class `class`?" — the cross-class disambiguation a name-keyed
-    /// attachment can't carry. Inheritance composes through
-    /// `Edge(MethodOnClass(parent, name))` witnesses the builder emits
-    /// per `package_parents[C]`, so the registry's cycle-guarded edge
-    /// chase walks the MRO with no procedural ancestor walker. With a
-    /// `BagContext.module_index`, the materialize step recurses into the
-    /// cached module's bag for `class`.
-    MethodOnClass { class: String, name: String },
+    /// An entry in a package's symbol table: "what does `name` resolve to
+    /// in package `package`?" — the cross-package disambiguation a
+    /// name-keyed attachment can't carry. Keyed by a plain package string,
+    /// which is why it is not `MethodOnClass`: the key is a namespace, and
+    /// plenty of packages that own one are not classes.
+    ///
+    /// Inheritance composes through `Edge(PackageSymbol(parent, name))`
+    /// witnesses the builder emits per `package_parents[C]`, so the
+    /// registry's cycle-guarded edge chase walks the MRO with no procedural
+    /// ancestor walker. With a `BagContext.module_index`, the materialize
+    /// step recurses into the cached module's bag for `package`.
+    ///
+    /// **Plugin-facing.** Rhai manifests build this variant by NAME through
+    /// serde, so the variant and field spellings are an API, not an internal
+    /// detail. `MethodOnClass` / `class` stay accepted so a third-party
+    /// `.rhai` written against the old names keeps working.
+    ///
+    /// **`package` is a Rhai reserved keyword — quote it, or write `pkg`:**
+    ///
+    /// ```text
+    /// #{ PackageSymbol: #{ "package": cls, name: m } }   // ok
+    /// #{ PackageSymbol: #{ pkg: cls,      name: m } }    // ok
+    /// #{ PackageSymbol: #{ package: cls,  name: m } }    // WHOLE SCRIPT DIES
+    /// ```
+    ///
+    /// Unquoted, the script fails to COMPILE, so the plugin loads not at all
+    /// — every emission it owns disappears, not just this edge. That is why
+    /// `pkg` is aliased: it is the spelling that cannot be got wrong.
+    #[serde(alias = "MethodOnClass")]
+    PackageSymbol {
+        #[serde(alias = "class", alias = "pkg")]
+        package: String,
+        name: String,
+    },
     /// Per-arm return collector for a sub. Each `return EXPR` arm pushes
     /// one `Edge(Expr(body_span))` here; the parent `Symbol(sub_id)`
     /// carries one `Edge(SymbolReturnArm(_))` so consumers querying the
@@ -90,7 +115,7 @@ pub enum WitnessAttachment {
     /// which keeps a plain struct tag or unknown class resolving to itself.
     /// Cross-file: the alias name is a Class symbol in its defining file,
     /// so `get_cached(name)` recurses into the header's bag (same shape as
-    /// the `MethodOnClass` bridge).
+    /// the `PackageSymbol` bridge).
     TypeName(String),
     /// A storage slot — a named field DECLARATION — keyed
     /// **language-generically** by `{owner, name}` (a C struct member, a
@@ -177,7 +202,7 @@ pub enum WitnessPayload {
     /// fluent-writer arm of `$obj->setter($v)` (arity ≥ 1), not the
     /// getter arm a hint-less `UnionOnArgs` defaults to. Emitted by
     /// `emit_method_call_return_edges` (`Expression(refidx)` → its
-    /// `MethodOnClass{class, method}` at the call's `count_call_args`);
+    /// `PackageSymbol{package, method}` at the call's `count_call_args`);
     /// chased like `Edge` but overrides `q.arity_hint` with `arity`.
     CallReturn { target: WitnessAttachment, arity: u32 },
     /// **Explicitly-qualified method dispatch** — the method token carried a
@@ -185,10 +210,10 @@ pub enum WitnessPayload {
     /// the method up on `method_lookup` but type the result relative to
     /// `receiver_class` (the invocant / enclosing class). Two spellings, one
     /// rule (see `emit_method_call_return_edges`):
-    ///   - `$obj->SUPER::m` → `method_lookup` is `MethodOnClass{<enclosing
+    ///   - `$obj->SUPER::m` → `method_lookup` is `PackageSymbol{<enclosing
     ///     package's parent>, m}` (SUPER searches the *writing* package's
     ///     `@ISA`, skipping it);
-    ///   - `$obj->Foo::Bar::m` → `method_lookup` is `MethodOnClass{Foo::Bar,
+    ///   - `$obj->Foo::Bar::m` → `method_lookup` is `PackageSymbol{Foo::Bar,
     ///     m}` (fully-qualified: search starts at the named class).
     /// In both, the call still blesses into the CALLER's class, so a ctor
     /// returning `ReturnExpr::ReceiverOr` must substitute the invocant — the
@@ -207,7 +232,7 @@ pub enum WitnessPayload {
     /// once on the symbol) and arity dispatch (Mojo `has`'s getter/writer
     /// collapse to a single `UnionOnArgs`).
     ///
-    /// Attached to `Symbol(_)` (per-sub) and `MethodOnClass{...}`
+    /// Attached to `Symbol(_)` (per-sub) and `PackageSymbol{...}`
     /// (class-keyed). Latest wins, so a plugin override re-publishes over
     /// a build-time inference.
     ReturnExpr(ReturnExpr),

@@ -248,7 +248,7 @@ fn on_match(pattern, m) {
                     let remote = pair[1];
                     let edge = ();
                     if cls != () {
-                        edge = #{ MethodOnClass: #{ class: cls, name: remote } };
+                        edge = #{ PackageSymbol: #{ "package": cls, name: remote } };
                     }
                     out += #{
                         Method: #{

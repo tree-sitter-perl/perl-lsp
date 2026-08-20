@@ -38,7 +38,7 @@ pub fn app_surface_parent(class: &str, consumers: &[String]) -> Option<String> {
 
 /// The full parent enumeration: real ancestors ∪ the synthetic
 /// app-surface edge. Every direct parent-enumeration site
-/// (`collect_ancestor_methods`, the `MethodOnClass` inheritance walk in
+/// (`collect_ancestor_methods`, the `PackageSymbol` inheritance walk in
 /// `witnesses/`) routes through here so they can't drift; graph walks
 /// compose the same two spellers per edge kind. Real ancestors come
 /// first; the surface is appended last so same-name overrides on a real

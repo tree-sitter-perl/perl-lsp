@@ -63,7 +63,7 @@ Why C over the alternatives:
 - **Eager index over all workspace files** re-enriches dependency/
   workspace `Arc`'d analyses in a post-index pass, introducing an
   ordering + invalidation lifecycle. Large, and it duplicates the lazy
-  resolution the type-inference `MethodOnClass` walk already proved is the
+  resolution the type-inference `PackageSymbol` walk already proved is the
   correctness floor for enrichment-bypassing callers.
 - **Query-time (C)** keeps the "no enrichment over deps" invariant and
   mirrors the type path: candidates are facts on the cache, resolution is

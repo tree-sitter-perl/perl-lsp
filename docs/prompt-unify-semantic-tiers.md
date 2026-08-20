@@ -51,10 +51,10 @@ strings won't.
 
 - `src/model/witnesses/` — `WitnessBag`, `WitnessAttachment` (`Symbol`,
   `SymbolReturnArm`, `Expr`, `BranchArm`, `Variable{name,scope}`,
-  `Expression(refidx)`, `TypeName`, `MethodOnClass{class,name}`,
+  `Expression(refidx)`, `TypeName`, `PackageSymbol{package,name}`,
   `SlotType{class,key}`), `ReducerRegistry::with_defaults()`, the
   reducers, `query_variable_type` / `query_sub_return_type`, the
-  cross-file fallback hops in `query_rec` (MethodOnClass primary +
+  cross-file fallback hops in `query_rec` (PackageSymbol primary +
   parents + bridged entities; SlotType primary + parents; TypeName
   terminal), `QueryState` pins/memo.
 - `src/model/file_analysis/` — the bag rides `FileAnalysis`
@@ -161,7 +161,7 @@ pub fn emit_expr_reads_variable(bag: &mut WitnessBag, span: Span,
                                 source: WitnessSource);
 
 /// A call-site return edge: Expression(refidx) →
-/// Edge(MethodOnClass{class, method}).
+/// Edge(PackageSymbol{package, method}).
 pub fn emit_call_return_edge(bag: &mut WitnessBag, refidx: usize,
                              class: &str, method: &str, span: Span,
                              source: WitnessSource);
@@ -265,7 +265,7 @@ extend it). First contributors, each behind a `LangPack` capability:
 1. **`CallReturnEdges`** (capability: reuse the member-call semantics
    the pack already has — if the language has method calls, it wants
    this; make it default-on for packs with member access). Emits
-   `Expression(refidx) → Edge(MethodOnClass{class, method})` for every
+   `Expression(refidx) → Edge(PackageSymbol{package, method})` for every
    `MethodCall` ref whose invocant class is known from the bag
    (receiver variable's `Variable → TypeName` chase). This is what lets
    `a.b().c()` type at BUILD time instead of per-query sentinel work.
@@ -330,7 +330,7 @@ overlay's own transitive walk composes hops, and full-closure keys would
 make every header edit move every key). Enrich = project provider facts
 the query-time chase currently re-derives per query; start with ONE
 fact: imported (included) class methods' return types as local
-`MethodOnClass{class,m} → Edge(...)` writeback edges, mirroring what
+`PackageSymbol{package,m} → Edge(...)` writeback edges, mirroring what
 Perl's enrichment projects for cross-file parents. Measure before
 widening: if the query-time chase already answers everything the gold
 corpus asks, keep the cpp policy MINIMAL (providers-only, empty

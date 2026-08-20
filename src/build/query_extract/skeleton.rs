@@ -18,7 +18,7 @@ pub struct SkelSymbol {
     pub package: Option<String>,
     pub scope: crate::model::file_analysis::ScopeId,
     /// Declared return type (`@rettype`), for methods/functions — drives
-    /// method-return resolution + chaining through MethodOnClass.
+    /// method-return resolution + chaining through PackageSymbol.
     pub return_type: Option<InferredType>,
     /// Pointer/reference declarator stack, unravelled by `peel_nested` from
     /// a `@nested.target` capture (empty otherwise). Flows to `Symbol.deref_stack`.
@@ -646,7 +646,7 @@ impl SkeletonAnalysis {
             }
             map
         };
-        // Writeback-lite: route method returns through MethodOnClass so
+        // Writeback-lite: route method returns through PackageSymbol so
         // `box.getInner().` chains, inherited returns, and cross-file all
         // resolve via the SAME chase Perl uses — no bypass. Declared
         // returns need no fixpoint (the type is in the syntax); only the
@@ -689,7 +689,7 @@ impl SkeletonAnalysis {
                 if matches!(sym.kind, SymKind::Method) {
                     if let Some(class) = &sym.package {
                         bag.push(mk(
-                            WA::MethodOnClass { class: class.clone(), name: sym.name.clone() },
+                            WA::PackageSymbol { package: class.clone(), name: sym.name.clone() },
                             WP::Edge(WA::Symbol(sym.id)),
                             sym.span,
                         ));
@@ -710,7 +710,7 @@ impl SkeletonAnalysis {
                     ));
                 }
             }
-            // Inheritance edges: MethodOnClass{child,m} → Edge(parent,m), so
+            // Inheritance edges: PackageSymbol{child,m} → Edge(parent,m), so
             // the registry walks the MRO for an inherited method's return.
             for (child, parent) in &self.parents {
                 for sym in &symbols {
@@ -718,8 +718,8 @@ impl SkeletonAnalysis {
                         && sym.package.as_deref() == Some(parent.as_str())
                     {
                         bag.push(mk(
-                            WA::MethodOnClass { class: child.clone(), name: sym.name.clone() },
-                            WP::Edge(WA::MethodOnClass { class: parent.clone(), name: sym.name.clone() }),
+                            WA::PackageSymbol { package: child.clone(), name: sym.name.clone() },
+                            WP::Edge(WA::PackageSymbol { package: parent.clone(), name: sym.name.clone() }),
                             sym.span,
                         ));
                     }

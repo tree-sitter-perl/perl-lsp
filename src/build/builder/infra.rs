@@ -122,7 +122,7 @@ impl<'a> Builder<'a> {
     /// in the glob string that differs from `current_package` (the file
     /// declares e.g. `package DateTime::PP`). The synthesized tail
     /// (`_ymd2rd`) must be keyed under the *named* package so
-    /// `MethodOnClass{DateTime, _ymd2rd}` resolves — not the file's
+    /// `PackageSymbol{DateTime, _ymd2rd}` resolves — not the file's
     /// own package. Every other caller keeps `current_package` via
     /// `add_symbol_ns`.
     pub(super) fn add_symbol_in_package(
@@ -347,7 +347,7 @@ impl<'a> Builder<'a> {
     ///     ERROR-recovery path where `visit_anonymous_sub` didn't
     ///     run; the body-span chase is still meaningful in that case.
     ///   - `refgen_expression` (`\&foo`, `\&Foo::bar`,
-    ///     `\&$const_folded`) → `MethodOnClass { class, name }`.
+    ///     `\&$const_folded`) → `PackageSymbol { package, name }`.
     ///     Bag's MRO + `module_index` machinery resolves it,
     ///     including cross-file. Bare names default `class` to
     ///     the current package; qualified names split at the
@@ -377,7 +377,7 @@ impl<'a> Builder<'a> {
                     (Some(c), n) => (c.to_string(), n.to_string()),
                     (None, _) => (self.current_package.clone()?, raw),
                 };
-                Some(crate::model::witnesses::WitnessAttachment::MethodOnClass { class, name })
+                Some(crate::model::witnesses::WitnessAttachment::PackageSymbol { package: class, name })
             }
             _ => None,
         }

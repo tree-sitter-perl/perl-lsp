@@ -131,7 +131,7 @@ harmless half:
 `obj(x)` all parse identically whether or not the operator/deref is
 overloaded; the overload only changes which sub runs. So overload is
 *operator-spelled method dispatch* — the worklist already resolves
-type-dependent dispatch monotonically (`MethodOnClass`, invocant
+type-dependent dispatch monotonically (`PackageSymbol`, invocant
 resolution), and overload rides the same path. It cannot interleave with
 the reparse because it produces types from a fixed parse; it never asks
 the parse to change.
@@ -339,7 +339,7 @@ seam.
 
 Open for the next pass: the validate gate is per-file, wants to be
 per-splice; the source pass is single, wants a fixpoint for nested
-calls (X-macros); method-call return typing (`MethodOnClass`) needs the
+calls (X-macros); method-call return typing (`PackageSymbol`) needs the
 class-shape emission the pack does not do yet; and none of it is wired
 into the build pipeline — these remain measured spikes, lifted when a
 second language ships in-editor (`prompt-multi-language.md`).

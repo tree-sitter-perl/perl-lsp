@@ -105,7 +105,7 @@ impl<'a> Builder<'a> {
     }
 
     /// Publish a multi-arm `UnionOnArgs` ReturnExpr on
-    /// `MethodOnClass{current_package, name}` so cross-symbol arity
+    /// `PackageSymbol{current_package, name}` so cross-symbol arity
     /// dispatch routes through one class-keyed declaration instead of
     /// whichever sym the "primary" rule picked first. A name with
     /// multiple syms (Mojo/Moo getter `name()` + writer `name($v)`)
@@ -138,8 +138,8 @@ impl<'a> Builder<'a> {
             end: Point { row: 0, column: 0 },
         };
         self.bag.push(crate::model::witnesses::Witness {
-            attachment: crate::model::witnesses::WitnessAttachment::MethodOnClass {
-                class,
+            attachment: crate::model::witnesses::WitnessAttachment::PackageSymbol {
+                package: class,
                 name: name.to_string(),
             },
             source: crate::model::witnesses::WitnessSource::Builder(
@@ -167,7 +167,7 @@ impl<'a> Builder<'a> {
     /// to its specific arity). Cross-symbol dispatch (getter+
     /// writer pair sharing `(class, name)`) is published by
     /// `publish_class_accessor_union` as a multi-arm UnionOnArgs
-    /// on `MethodOnClass{class, name}` so per-arity callers route
+    /// on `PackageSymbol{package, name}` so per-arity callers route
     /// to the right arm regardless of which sym they hit first.
     pub(super) fn record_framework_accessor_witness(
         &mut self,
@@ -208,7 +208,7 @@ impl<'a> Builder<'a> {
         // pushed once per Mojo attribute in `visit_has_call`'s
         // MojoBase branch, and on writeback's primary slot for Moo
         // accessors (writer returns same as getter, so the primary
-        // answers either arity correctly via `MethodOnClassReducer`).
+        // answers either arity correctly via `PackageSymbolReducer`).
         // Don't re-emit at the class-scoped attachment here — would
         // create overlapping single-arm unions that conflict with
         // the comprehensive multi-arm one.
@@ -465,7 +465,7 @@ impl<'a> Builder<'a> {
                         );
                     }
 
-                    // Cross-symbol union for `MethodOnClass{class, name}`.
+                    // Cross-symbol union for `PackageSymbol{package, name}`.
                     // Moo/Moose getter and rw writer share the same
                     // isa-derived return type, so the union is a
                     // single-arm `(Any, Concrete(t))` when an isa
@@ -581,7 +581,7 @@ impl<'a> Builder<'a> {
                     );
 
                     // Symbol-declarative ReturnExpr for class-keyed
-                    // dispatch. The chain typer's `MethodOnClass{class,
+                    // dispatch. The chain typer's `PackageSymbol{package,
                     // name}` chase (direct call, coderef-of-method,
                     // dynamic-method) substitutes `q.receiver` for
                     // `Receiver`, evaluating to the call's invocant

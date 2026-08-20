@@ -142,7 +142,7 @@ witness bag is the language-agnostic core, today, by construction.
 
 What spike 2 did NOT prove, in fairness: cross-file resolution for a
 second language (module-name → file strategy is per-language and
-unbuilt), method dispatch (`MethodOnClass` needs class-shape emission
+unbuilt), method dispatch (`PackageSymbol` needs class-shape emission
 the Python pack doesn't do yet), and any of ring 2 at production
 fidelity. The gradient from here is real work, but it is *additive*
 pack work against a fixed engine — not engine surgery.

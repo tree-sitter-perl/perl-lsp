@@ -8,7 +8,7 @@ use super::*;
 /// Cycle guard + result memo key for recursive bag queries, keyed by
 /// `(bag_ptr, attachment, receiver_identity, arity_hint)`. Per-bag
 /// entries stay separate so a legitimate cross-bag query for the same
-/// attachment (the common `MethodOnClass{C, m}` jump into C's own bag)
+/// attachment (the common `PackageSymbol{C, m}` jump into C's own bag)
 /// isn't misread as a cycle. The receiver **identity** + arity hint
 /// widen the key so two queries differing only in `receiver` /
 /// `arity_hint` aren't treated as duplicates — `UnionOnArgs` and
@@ -20,7 +20,7 @@ use super::*;
 /// resolve to different classes; a variant-only discriminant collapses
 /// them to one memo key and the memo hands Foo's answer to Bar (silent
 /// wrong type). A same-receiver diamond (the inheritance walk holds
-/// `q.receiver` constant within one `MethodOnClass` query) still hashes
+/// `q.receiver` constant within one `PackageSymbol` query) still hashes
 /// to one key, so memoization still kills the exponential re-chase.
 type VisitedKey = (usize, WitnessAttachment, Option<String>, Option<u32>);
 type VisitedSet = std::collections::HashSet<VisitedKey>;
@@ -78,7 +78,7 @@ fn receiver_key(r: &Option<InferredType>) -> Option<String> {
 }
 
 /// Receiver to substitute when a chase reaches a *fresh* method dispatch
-/// on `MethodOnClass{class}` (an `Edge` or `CallReturn` into a class's
+/// on `PackageSymbol{package}` (an `Edge` or `CallReturn` into a class's
 /// method): the receiver is that call's invocant, i.e. `class`. A fluent
 /// `ReturnExpr(Receiver)` substitutes the dispatch class.
 ///
@@ -234,9 +234,9 @@ impl ReducerRegistry {
         r.register(Box::new(BranchArmFold));
         r.register(Box::new(FrameworkAwareTypeFold));
         r.register(Box::new(ExprReturn));
-        // MethodOnClass primary-fallback after ReturnExprReducer so
+        // PackageSymbol primary-fallback after ReturnExprReducer so
         // per-arity declarations win when one matches.
-        r.register(Box::new(MethodOnClassReducer));
+        r.register(Box::new(PackageSymbolReducer));
         // TypeName is a disjoint attachment shape (typedef/using aliases),
         // so order isn't load-bearing — grouped with the other class-keyed
         // fallbacks. The `ClassName(name)` terminal lives in query_rec_body.
@@ -355,10 +355,10 @@ impl ReducerRegistry {
             }
         }
 
-        // Inheritance + bridge fallback for `MethodOnClass{C, m}` queries
+        // Inheritance + bridge fallback for `PackageSymbol{C, m}` queries
         // the local bag couldn't answer. Most cases are covered by
         // build-time edge emission (local writeback emits
-        // `MethodOnClass(child, m) → Edge(MethodOnClass(parent, m))`;
+        // `PackageSymbol(child, m) → Edge(PackageSymbol(parent, m))`;
         // enrichment projects the same for cross-file parents), resolved
         // by the generic edge-chase. This fallback covers the residual:
         // hand-crafted FAs / isolated tests, and cross-file
@@ -369,7 +369,7 @@ impl ReducerRegistry {
         //      file, recurse into its cached bag for C's direct facts.
         //   2. `package_parents[C]` (local) ∪ `parents_cached(C)`
         //      (cross-file) — the Perl DFS-MRO chain; recurse on
-        //      `MethodOnClass{P, m}` per parent.
+        //      `PackageSymbol{P, m}` per parent.
         //   3. `for_each_entity_bridged_to(class, ...)` — entities in
         //      other files' plugin namespaces bridged to `class`; query
         //      each cached bag by `Symbol(sym.id)` (per-FA SymbolIds
@@ -388,13 +388,13 @@ impl ReducerRegistry {
                 return ReducedValue::None;
             }
         }
-        if let WitnessAttachment::MethodOnClass { class, name } = q.attachment {
+        if let WitnessAttachment::PackageSymbol { package, name } = q.attachment {
             if let Some(ctx) = q.context {
                 // (1) Cross-file primary lookup — every candidate file
-                // declaring `class` (a reopened package's method lives in
+                // declaring `package` (a reopened package's method lives in
                 // whichever file defines it, not the name-slot winner).
                 if let Some(idx) = ctx.module_index {
-                    for cached in super::session::visible_def_candidates(idx, class).iter() {
+                    for cached in super::session::visible_def_candidates(idx, package).iter() {
                         // Rehydrate the target file's bag if its resident copy
                         // was Slice-2-evicted; the cross-file chase reads its
                         // witnesses (`docs/adr/memory-slice-2-lru.md`).
@@ -447,7 +447,7 @@ impl ReducerRegistry {
                             if v != ReducedValue::None {
                                 v
                             } else {
-                            // Fallback-on-miss (R4): the class file's method
+                            // Fallback-on-miss (R4): the package file's method
                             // return may chain through ITS OWN imports —
                             // invisible to the raw bag, present in the
                             // enriched overlay.
@@ -474,14 +474,14 @@ impl ReducerRegistry {
                 // is the single edge-injection site shared with the
                 // FA-side ancestor walks).
                 let parents = crate::model::file_analysis::parents_of(
-                    class,
+                    package,
                     ctx.package_parents,
                     ctx.module_index,
                     ctx.app_surface_consumers,
                 );
                 for p in parents {
-                    let parent_att = WitnessAttachment::MethodOnClass {
-                        class: p,
+                    let parent_att = WitnessAttachment::PackageSymbol {
+                        package: p,
                         name: name.clone(),
                     };
                     let sub_q = ReducerQuery {
@@ -499,15 +499,15 @@ impl ReducerRegistry {
                     }
                 }
                 // (3) Cross-file plugin-namespace bridges. Plugin entities
-                // declared in OTHER files bridged to `class` aren't
+                // declared in OTHER files bridged to `package` aren't
                 // reachable via the local bag's edges nor the cross-file
-                // primary (`get_cached(class)` returns the canonical class
+                // primary (`get_cached(package)` returns the canonical package
                 // file, not the bridging-plugin file). Ask each matching
                 // cached entity for `Symbol(sym.id)` at arity=None —
                 // bridged Methods aren't arity-discriminated.
                 if let Some(idx) = ctx.module_index {
                     let mut found: Option<InferredType> = None;
-                    idx.for_each_entity_bridged_to(class, &mut |_mod, cached, sym| {
+                    idx.for_each_entity_bridged_to(package, &mut |_mod, cached, sym| {
                         if found.is_some() {
                             return;
                         }
@@ -555,7 +555,7 @@ impl ReducerRegistry {
         // `SlotType{C, k}` the local bag couldn't answer: the typed
         // slot WRITE may live in C's own file (cross-file primary) or
         // anywhere up C's ancestry (a base class's BUILD populating
-        // `$self->{conn}`). Hops (1) and (2) of the `MethodOnClass`
+        // `$self->{conn}`). Hops (1) and (2) of the `PackageSymbol`
         // fallback above, same shared visited set; no bridge hop —
         // slot writes are real code, not plugin entities.
         if let WitnessAttachment::SlotType { class, key } = q.attachment {
@@ -590,7 +590,7 @@ impl ReducerRegistry {
                                 return v;
                             }
                             // Fallback-on-miss (R4), symmetric with the
-                            // MethodOnClass primary: a slot WRITE typed only in
+                            // PackageSymbol primary: a slot WRITE typed only in
                             // C's enriched copy resolves here. Today SlotType
                             // seeds are build-gated on a resolvable RHS
                             // (`builder.rs`), so a seed that exists already
@@ -644,7 +644,7 @@ impl ReducerRegistry {
         // `TypeName(name)` the local bag couldn't answer: the typedef may
         // live in another file (a header the alias name is a Class symbol
         // in). `get_cached(name)` finds that file; recurse into its bag —
-        // hop (1) of the `MethodOnClass` fallback, same shared visited set.
+        // hop (1) of the `PackageSymbol` fallback, same shared visited set.
         // Failing that, an unresolved alias IS a type of that name: the
         // one-alias-graph terminal (`ClassName(name)`), so a plain struct
         // tag / unknown class / primitive spelling resolves to itself.
@@ -735,24 +735,24 @@ impl ReducerRegistry {
                             )
                         }
                         _ => {
-                            // A `MethodOnClass{class,..}` reached through an edge is
+                            // A `PackageSymbol{package,..}` reached through an edge is
                             // a fresh method dispatch: its receiver is that call's
                             // invocant (`class`), so a fluent `ReturnExpr(Receiver)`
                             // substitutes the dispatch class — not whatever the outer
                             // query carried. Mirrors `query_sub_return_type`'s
                             // `effective_receiver`. The exception is an inheritance
-                            // hop (`MethodOnClass{child} → Edge(MethodOnClass{parent})`):
-                            // there the source is itself a `MethodOnClass`, and the
+                            // hop (`PackageSymbol{child} → Edge(PackageSymbol{parent})`):
+                            // there the source is itself a `PackageSymbol`, and the
                             // child's receiver must carry through so an inherited fluent
                             // accessor returns the child, not where `has` was declared.
                             let receiver = match target {
-                                WitnessAttachment::MethodOnClass { class, .. }
+                                WitnessAttachment::PackageSymbol { package, .. }
                                     if !matches!(
                                         q.attachment,
-                                        WitnessAttachment::MethodOnClass { .. }
+                                        WitnessAttachment::PackageSymbol { .. }
                                     ) =>
                                 {
-                                    fresh_dispatch_receiver(&q.receiver, class, q.context)
+                                    fresh_dispatch_receiver(&q.receiver, package, q.context)
                                 }
                                 _ => q.receiver.clone(),
                             };
@@ -786,12 +786,12 @@ impl ReducerRegistry {
                 WitnessPayload::CallReturn { target, arity } => {
                     // A fresh method dispatch at the call's own arity. The
                     // receiver is the dispatch class (`target`'s class, for
-                    // a `MethodOnClass`) so a fluent `Receiver` substitutes
+                    // a `PackageSymbol`) so a fluent `Receiver` substitutes
                     // it; the arity is the call site's, NOT the outer
                     // query's — that's the whole point of this variant.
                     let receiver = match target {
-                        WitnessAttachment::MethodOnClass { class, .. } => {
-                            fresh_dispatch_receiver(&q.receiver, class, q.context)
+                        WitnessAttachment::PackageSymbol { package, .. } => {
+                            fresh_dispatch_receiver(&q.receiver, package, q.context)
                         }
                         _ => q.receiver.clone(),
                     };

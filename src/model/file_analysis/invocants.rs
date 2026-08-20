@@ -303,7 +303,7 @@ impl FileAnalysis {
     /// tree-free member consumer routes through (the pack chain arm of
     /// `expr_type_at_span`, the sentinel's receiver typing, member hover).
     /// Dispatch runs the specificity ladder (`dispatch_of`), method
-    /// returns thread the (rebound) receiver into the `MethodOnClass`
+    /// returns thread the (rebound) receiver into the `PackageSymbol`
     /// query so `ReturnExpr::ParamOf` substitutes; a data field falls
     /// back to its declared type with the class's params substituted
     /// against the receiver's instance args.
@@ -655,7 +655,7 @@ impl FileAnalysis {
     ///     exact-span call-ref arm keeps Parametric flavors intact, so
     ///     DBIC row-class narrowing survives the hop).
     ///   * cross-file chain receiver → re-resolve the receiver's class
-    ///     fresh with the index and chase `MethodOnClass` through
+    ///     fresh with the index and chase `PackageSymbol` through
     ///     `find_method_return_type` (the one structure-from-refs step
     ///     the build-time bag can't pre-record).
     ///   * `$var` / `@var` / `%var` → `inferred_type_via_bag_ctx` (so
@@ -762,7 +762,7 @@ impl FileAnalysis {
         // enqueue` at enrichment), the build-time `Expr(span)` witness
         // is absent and `method_call_return_type_via_bag` has no edge to
         // chase. Re-resolve the receiver's own invocant class fresh with
-        // the index, then chase `MethodOnClass{class, method}` through
+        // the index, then chase `PackageSymbol{package, method}` through
         // `find_method_return_type` (ancestors + cross-file bridges via
         // the registry). This is the one structure-from-refs step the
         // bag can't pre-record, so it lives here, not in the builder.

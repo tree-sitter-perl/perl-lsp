@@ -109,7 +109,7 @@ the call site.
   one. Used by branch-arm folds, return-arm propagation, the
   implicit-last-expression chain.
 - `Expression(refidx)` is per-call-ref: it's the slot
-  `emit_method_call_return_edges` publishes Edge(MethodOnClass)
+  `emit_method_call_return_edges` publishes Edge(PackageSymbol)
   into. Method-call return-type queries read it.
 
 For non-call expressions there's no `Expression(refidx)` — only

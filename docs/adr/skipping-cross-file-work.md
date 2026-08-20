@@ -135,7 +135,7 @@ rounds/file.
 **8. Route the return-type query at the owner the first walk already found.**
 Hover asks one `(class, method)` question twice: `resolve_method_in_ancestors`
 climbs to the declaring class, then `find_method_return_type` asks
-`MethodOnClass{access_class, name}` and the reducer climbs the same ancestry
+`PackageSymbol{access_class, name}` and the reducer climbs the same ancestry
 again inside the registry. Both hover arms already **bind** the owner from the
 first walk — they use it for the `"Child (from Parent)"` label — and then pass
 the access class to the second. The owner is in scope, one line up, unused.
@@ -150,7 +150,7 @@ The owner anchor is **2.7× cheaper** — 43.0 µs against 114.3 µs — and agr
 Rejected on the residual. The 43 disagreements are **one shape**:
 `Catalyst` / `Catalyst::Component` / `config`, where the owner anchor answers
 `None` and the access class answers `HashRef`. In all 43 the owner is
-cross-file and the ACCESS class carries its own `MethodOnClass{Catalyst,
+cross-file and the ACCESS class carries its own `PackageSymbol{Catalyst,
 config}` witness, which re-anchoring discards; restoring the access class's
 framework recovers none of them, so it is the anchor and not the context.
 

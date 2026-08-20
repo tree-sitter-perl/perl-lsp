@@ -438,7 +438,7 @@ fn pack_store_selection_stays_in_lookup_for() {
 
 /// `FileAnalysis::inferred_type` is raw-seed-state introspection for tests
 /// only. Its last production caller (the MCB early-out) is gone — the
-/// MCB→bag bridge publishes `Edge(MethodOnClass)` witnesses and lets the
+/// MCB→bag bridge publishes `Edge(PackageSymbol)` witnesses and lets the
 /// registry's fold precedence arbitrate, so a new production
 /// `.inferred_type(` call re-opens a parallel type query beside
 /// `inferred_type_via_bag`.

@@ -445,7 +445,7 @@ struct Builder<'a> {
     /// `TypeConstraintOf` via the plugin's fold rather than its callee return.
     type_constraint_names: std::collections::HashSet<String>,
     /// Plugin `app_surface_consumers()` manifest union, flattened once.
-    /// Threaded into `BagContext` so the build-time `MethodOnClass`
+    /// Threaded into `BagContext` so the build-time `PackageSymbol`
     /// inheritance walk injects the synthetic app-surface parent the same
     /// way the query-time walks do (`file_analysis::parents_of`).
     app_surface_consumers: Vec<String>,
@@ -591,7 +591,7 @@ struct Builder<'a> {
     /// `InferredType::Parametric` witness on `Expression(refidx)`
     /// — `recv->resultset('Foo')` and search-family threading
     /// targets. `emit_method_call_return_edges` consults this set
-    /// and skips publishing its standard `Edge(MethodOnClass)` for
+    /// and skips publishing its standard `Edge(PackageSymbol)` for
     /// these refs, so the Parametric isn't masked by the receiver
     /// class's plain return-type entry. **Build-only**, like
     /// `method_call_invocant`.
@@ -606,7 +606,7 @@ struct Builder<'a> {
 
     /// Refs whose `Expression(refidx)` carries a `route_brand`
     /// `BrandedRoute` witness. `emit_method_call_return_edges` skips
-    /// these so its `Edge(MethodOnClass{Route, to})` (which folds to a
+    /// these so its `Edge(PackageSymbol{Route, to})` (which folds to a
     /// brandless `ClassName(Route)`) doesn't mask the brand. Same role
     /// as `parametric_emitted_refs`. Cleared+refilled each fold
     /// iteration by `emit_route_brand_witnesses`.

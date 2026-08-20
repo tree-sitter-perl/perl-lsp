@@ -3,7 +3,7 @@
 //!
 //! `QueryState`'s memo dedups within ONE `ReducerRegistry::query`. A
 //! backward reference walk issues one such query per candidate call site,
-//! and each re-derives the same `MethodOnClass{class, method}` lattice
+//! and each re-derives the same `PackageSymbol{package, method}` lattice
 //! from scratch — at 138k files (5–12 files declaring a common package
 //! name, mutual imports throughout) that re-derivation is combinatorial
 //! and the verb never returns. The session is the outer memo: opened for

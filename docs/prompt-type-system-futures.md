@@ -31,7 +31,7 @@ mechanism level. (Throws first; the effect-set generalizes — pure / IO / mutat
   `Symbol`'s reduced return value (`{ return: T, effects }`), exactly as `BrandedRoute` carries its
   defaults *in* the type rather than a parallel store (which "drifts" — bag-canonical ADR).
 - **Ride the bag's fold to a fixpoint.** Effects propagate along the **call/return edges** the bag
-  already chases for return-types (`Symbol`, `MethodOnClass`, call-bindings). A call to a `Throws`
+  already chases for return-types (`Symbol`, `PackageSymbol`, call-bindings). A call to a `Throws`
   sub adds `Throws` to the caller. Monotone (effect-set only grows) over a finite lattice ⇒ the
   existing worklist fixpoint terminates with no new driver.
 - **Overlay/union on combine**, like the brand overlay: an expression's effects = union of its

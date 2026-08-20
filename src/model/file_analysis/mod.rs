@@ -144,7 +144,7 @@ pub struct FileAnalysis {
     pub type_provenance: HashMap<SymbolId, TypeProvenance>,
 
     /// The witness bag. Canonical store for type facts:
-    /// every Variable type, Symbol/MethodOnClass return type, branch
+    /// every Variable type, Symbol/PackageSymbol return type, branch
     /// arm Edge, hash-key observation. `inferred_type_via_bag` reads
     /// here. The builder pushes directly via `push_type_constraint`
     /// (Variable witnesses with TC shape) and per-attachment emit

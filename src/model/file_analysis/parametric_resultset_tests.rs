@@ -824,7 +824,7 @@ sub action {
 
 /// **Composition: cross-file `\&Foo::bar` reference as helper
 /// callback.** The helper plugin synthesizes a Method whose return
-/// edges to `MethodOnClass{class: "Producer", name: "build_rs"}`.
+/// edges to `PackageSymbol{package: "Producer", name: "build_rs"}`.
 /// The bag's existing edge-chase resolves it through `module_index`
 /// — no consumer-side branching on whether the named sub lives
 /// in this file or another. If column-key resolution still works,
@@ -887,7 +887,7 @@ sub action {
         consumer_hit,
         "Mojo helper with `\\&Foo::bar` named-sub reference must compose \
          cross-file: the helper's return edge points at \
-         MethodOnClass{{class: Producer, name: build_rs}}, the bag \
+         PackageSymbol{{class: Producer, name: build_rs}}, the bag \
          chases that through module_index to find the row class, and \
          column-key resolution finds the call site. hits: {:?}",
         refs.iter().map(|r| (&r.key, r.span.start.row)).collect::<Vec<_>>(),

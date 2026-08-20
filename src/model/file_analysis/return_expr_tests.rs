@@ -8,14 +8,14 @@
 //!   accessor invoked via `\&Class::name; $cb->($obj)` /
 //!   `$cb->($obj, "v")`. The chain typer's coderef arm threads
 //!   `arity_hint` and `receiver` into the bag query;
-//!   `ReturnExprReducer` claims the `MethodOnClass{...}` union
+//!   `ReturnExprReducer` claims the `PackageSymbol{...}` union
 //!   and dispatches the call's arity into the right arm. Empty
 //!   arm answers the getter's `Concrete(default_t)`; AtLeast(1)
 //!   arm substitutes `Receiver` for fluent return.
 //!
 //! - **B** (`coderef_to_resultset_find_returns_row_class`) — DBIC
 //!   `find` / `single` / etc. declare `Operator(RowOf(Receiver))`
-//!   once on `MethodOnClass{base, method}` via
+//!   once on `PackageSymbol{base, method}` via
 //!   `emit_parametric_return_expr_decls`. The chain typer's
 //!   coderef-call arm chases that with the call's invocant as
 //!   receiver; substitution evaluates `RowOf(ResultSet{base, row})`
@@ -68,7 +68,7 @@ fn point_at(source: &str, needle: &str) -> Point {
 ///
 /// Mojo synth declares
 /// `UnionOnArgs { (Empty, Concrete(String)), (AtLeast(1), Receiver) }`
-/// on `MethodOnClass{Foo, name}`. The chain typer's coderef arm
+/// on `PackageSymbol{Foo, name}`. The chain typer's coderef arm
 /// passes `arity_hint = args.len() - 1 = 0` (subtracting the
 /// receiver from the coderef's arg count) and `receiver = $foo`'s
 /// type. `ReturnExprReducer` matches `Empty`, returns
@@ -132,7 +132,7 @@ my $sentinel;
 ///
 /// `emit_parametric_return_expr_decls` declares
 /// `Operator(RowOf(Receiver))` on
-/// `MethodOnClass{"DBIx::Class::ResultSet", "find"}` once per
+/// `PackageSymbol{"DBIx::Class::ResultSet", "find"}` once per
 /// resultset call seen. The chain typer's coderef arm chases with
 /// `receiver = $rs`'s `Parametric(ResultSet { row, .. })`.
 /// `ReturnExprReducer` substitutes Receiver, evaluates `RowOf(...)`

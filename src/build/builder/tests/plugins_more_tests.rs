@@ -956,7 +956,7 @@ sub canon { return "yes"; }
 }
 
 /// Self-method tail with a forward-defined target. `$self->later()`
-/// where `later` is declared after the caller. The MethodOnClass
+/// where `later` is declared after the caller. The PackageSymbol
 /// chase needs the callee's `Symbol(sid)` writeback, which only fires
 /// once the callee's own `Expr(body)` is populated — exercising the
 /// forward-ref fix on the inner sub's body, not the call site itself.

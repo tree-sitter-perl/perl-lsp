@@ -478,7 +478,7 @@ pub trait CrossFileLookup {
     }
     /// A cached module's analysis with its witness bag GUARANTEED present.
     /// Slice 2 evicts the bag from resident pack-index copies; every TYPE
-    /// query that reads a foreign file's bag (the `MethodOnClass` / `SlotType`
+    /// query that reads a foreign file's bag (the `PackageSymbol` / `SlotType`
     /// / `TypeName` cross-file chases, `def_candidates` return-type folds,
     /// cross-file field types) routes through here so the exact persisted bag
     /// rehydrates on demand. Default (Perl hub, tests, non-pack impls): a cheap

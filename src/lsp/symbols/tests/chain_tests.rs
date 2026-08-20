@@ -211,7 +211,7 @@ fn test_demo_file_chain_to_resolves_on_line_71() {
 
     // Cross-file enrichment — same step the backend runs on open.
     // Re-runs the MCB→bag bridge so `my $r = $app->routes;` carries a
-    // `Variable → Edge(MethodOnClass)` witness the registry chases with
+    // `Variable → Edge(PackageSymbol)` witness the registry chases with
     // the index. Without this, `FileStore::enrich_open` hasn't fired
     // yet and the whole chain is un-typed.
     analysis.enrich_imported_types_with_keys(Some(&idx));
@@ -1287,7 +1287,7 @@ sub action ($c) {\n\
 /// The fluent return is modeled as `ReturnExpr(Receiver)`, so its resolution
 /// substitutes the query's receiver. Before the receiver-reset fix, the consumer's
 /// call-site receiver (`Mojolicious::Controller`, the type of `$c`) leaked down the
-/// edge chase into `MethodOnClass{My::Other, acc}` and got substituted there. The
+/// edge chase into `PackageSymbol{My::Other, acc}` and got substituted there. The
 /// receiver for a method-call return must be that call's invocant (`My::Other`).
 #[test]
 fn cross_file_fluent_accessor_chain_return_type() {
@@ -1342,8 +1342,8 @@ sub action ($c) {\n\
 /// The MRO subtlety of the receiver-reset fix: a fluent `has` accessor declared
 /// on a PARENT but dispatched on a CHILD (`Child->new->acc($x)`) must return the
 /// *child*, not the class where `has` was declared. The receiver reset keys on the
-/// dispatch class (`MethodOnClass{Child}` → receiver `Child`); the inheritance hop
-/// to `MethodOnClass{Parent, acc}` must then carry that child receiver through so
+/// dispatch class (`PackageSymbol{Child}` → receiver `Child`); the inheritance hop
+/// to `PackageSymbol{Parent, acc}` must then carry that child receiver through so
 /// the parent's `ReturnExpr(Receiver)` substitutes `Child`.
 #[test]
 fn cross_file_inherited_fluent_accessor_returns_child() {

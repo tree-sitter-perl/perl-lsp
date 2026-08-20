@@ -141,7 +141,7 @@ can't dispatch to the row's column accessor.
 This is exactly the kind of per-base behavior the
 parametric-semantics registry exists for. The plugin declares
 the projection table; the core's `find_method_return_type` (or
-the bag's MethodOnClass reducer) consults it before falling
+the bag's PackageSymbol reducer) consults it before falling
 through to the generic ResultSet method lookup.
 
 ### Semantics

@@ -31,7 +31,7 @@ pub enum InferredType {
     ///     `Expr(body_last_expr_span)`. The bag walks that span's
     ///     own witnesses at query time, after the body is built.
     ///   - Named-sub references (`\&foo`, `\&Foo::bar`) →
-    ///     `MethodOnClass { class, name }`. Same attachment the
+    ///     `PackageSymbol { package, name }`. Same attachment the
     ///     bag's existing edge-chase uses for method dispatch —
     ///     resolves in-file via the named-sub's Symbol witnesses
     ///     AND cross-file via `module_index` (the bag transparently
@@ -188,7 +188,7 @@ pub enum ParametricType {
     /// A template/generic instance — `Box<Widget> b;` peeled from its
     /// declared-type spelling. `base` is the unqualified template name
     /// (`Box`) — the dispatch axis, so member gd / completion / refs
-    /// resolve through the SAME `MethodOnClass`/ancestor machinery a
+    /// resolve through the SAME `PackageSymbol`/ancestor machinery a
     /// plain class uses. `args` ride along un-consumed (each is a
     /// `ClassName(canonical spelling)` leaf or a nested `Instance`):
     /// they are the substitution witness instantiation-aware typing
@@ -252,7 +252,7 @@ impl ParametricType {
 
     /// Symbol-declarative projection table — list of `(method_name,
     /// ReturnExpr)` pairs the flavor publishes on
-    /// `MethodOnClass{base, method}` so consumers chasing through
+    /// `PackageSymbol{base, method}` so consumers chasing through
     /// inheritance / coderef-edge / dynamic-method routes hit the
     /// projection without the call-site `parametric_resultset` witness
     /// firing. Used by `emit_parametric_return_expr_decls`
@@ -262,8 +262,8 @@ impl ParametricType {
     /// `ReturnExpr::Operator(RowOf(Receiver))` evaluates at the
     /// reducer with `q.receiver = the call's invocant type`. For
     /// `\&MyRS::find; $cb->($rs, ...)`, the chain typer's coderef
-    /// arm sees the target is `MethodOnClass{MyRS, find}`,
-    /// inheritance walks to `MethodOnClass{DBIx::Class::ResultSet,
+    /// arm sees the target is `PackageSymbol{MyRS, find}`,
+    /// inheritance walks to `PackageSymbol{DBIx::Class::ResultSet,
     /// find}`, finds the `Operator(RowOf, Receiver)` declaration,
     /// substitutes `q.receiver = $rs`'s `Parametric(ResultSet)`,
     /// evaluates `RowOf(ResultSet { row, .. }) → ClassName(row)`.
@@ -736,7 +736,7 @@ impl InferredType {
     /// Witness-bag attachment whose type IS this callable's return
     /// when invoked. `Expr(span)` for anon-sub literals (resolves
     /// at query time via the body's last-expression witnesses);
-    /// `MethodOnClass{class, name}` for named-sub references
+    /// `PackageSymbol{package, name}` for named-sub references
     /// (`\&foo`, `\&Foo::bar` — resolves via the bag's existing
     /// MRO + cross-file machinery, same shape used by method
     /// dispatch). Returns `None` for opaque coderef sources.

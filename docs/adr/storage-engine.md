@@ -134,7 +134,7 @@ Closed workspace/dependency files answer enriched through
 fingerprint-and-generation-keyed copies, byte-capped and LRU-bounded,
 cycle-guarded, consulted FALLBACK-ON-MISS after the raw bag answers.
 Consumers: `query_sub_return_type`'s imported recursion and the
-`MethodOnClass` cross-file primary (`src/model/witnesses/`), the diagnostics
+`PackageSymbol` cross-file primary (`src/model/witnesses/`), the diagnostics
 sweep, and `--check`/`--dump-package`. See CLAUDE.md's "Cross-file
 enrichment" section for the full consumer/derivation contract — this ADR
 owns the Surface/freshness design that overlay is keyed on, not its

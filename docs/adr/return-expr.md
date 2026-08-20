@@ -19,7 +19,7 @@ The pre-existing pieces:
 - **Arity dispatch** lived in `FluentArityDispatch` — a bespoke
   reducer claiming `TypeObservation::ArityReturn { arg_count,
   return_type }` witnesses keyed on `Symbol(_)` and
-  `MethodOnClass{class, name}`. Each framework's accessor synth
+  `PackageSymbol{package, name}`. Each framework's accessor synth
   pushed its own observations; `SubReturnReducer` had an
   `arity_hint.is_some()` short-circuit so getter-vs-writer
   dispatch reached the class-keyed arm.
@@ -54,7 +54,7 @@ pub enum ArgGuard { Empty, Exact(u32), AtLeast(N), Any }
 ```
 
 Subs publish one `ReturnExpr` on whichever attachment carries the
-answer (`Symbol(sid)` for per-sym, `MethodOnClass{class, name}`
+answer (`Symbol(sid)` for per-sym, `PackageSymbol{package, name}`
 for cross-symbol class-keyed dispatch). `ReturnExprReducer`
 evaluates against a `ReducerQuery` — substituting `q.receiver` for
 `Receiver` placeholders, dispatching `UnionOnArgs` against
@@ -121,7 +121,7 @@ emission or through `ReturnExpr` substitution.
 When two symbols with the same name carry distinct per-arity
 returns (Mojo getter + writer at arities 0 and 1), per-Symbol
 attachments aren't enough — class-keyed lookups
-(`MethodOnClass{class, name}`) need to disambiguate. The helper
+(`PackageSymbol{package, name}`) need to disambiguate. The helper
 emits one multi-arm `UnionOnArgs` on the class slot:
 
 ```
@@ -168,7 +168,7 @@ edge exactly like named subs.
 
 | Old mechanism | Replacement | Site |
 |---|---|---|
-| `extract_resultset_parametric` call-site emit on `Expression(refidx)` | `emit_parametric_return_expr_decls` on `MethodOnClass{base, method}` | `builder.rs` |
+| `extract_resultset_parametric` call-site emit on `Expression(refidx)` | `emit_parametric_return_expr_decls` on `PackageSymbol{base, method}` | `builder.rs` |
 | `ParametricType::return_projection` per-flavor table | `ParametricType::return_method_declarations` | `file_analysis.rs` |
 | `TypeObservation::ArityReturn` variant + `FluentArityDispatch` reducer | `ReturnExpr::UnionOnArgs` + `ReturnExprReducer` | `witnesses.rs` |
 | `SubReturnReducer`'s `arity_hint.is_some()` short-circuit | `ReturnExprReducer` runs first; `SubReturnReducer` claims plain `Symbol + InferredType` only | `witnesses.rs` |
@@ -215,7 +215,7 @@ sequence flavors land.
 
 The DBIC-as-plugin port (`prompt-dbic-as-plugin.md`) was gated
 on this ADR. With `Operator(RowOf(Receiver))` declared once per
-flavor and threaded through `MethodOnClass{base, method}`, the
+flavor and threaded through `PackageSymbol{base, method}`, the
 plugin's emission becomes one `return_method_declarations()`
 return — no per-call-site walker, no per-method allowlist. The
 remaining gate is type-system encoding for axis dispatch.

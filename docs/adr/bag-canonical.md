@@ -56,11 +56,11 @@ inert for those. `return_infos` is walk-final by the time
 `populate_witness_bag` runs, so the gate `return_infos.is_empty()`
 is a one-shot decision and the edge needs no clear-and-emit tag.
 
-### Writeback mirrors `MethodOnClass` via `Edge(Symbol(sid))`
+### Writeback mirrors `PackageSymbol` via `Edge(Symbol(sid))`
 
 ```rust
 // write_back_sub_return_types, primary sym per (class, name):
-bag.push(MethodOnClass{class, name} + Builder("local_return")
+bag.push(PackageSymbol{package, name} + Builder("local_return")
          + Edge(Symbol(sym.id)));
 ```
 
@@ -76,7 +76,7 @@ subs.
 There is no `Builder.resolved_returns`. Walk-time synthesis pushes
 `Symbol(sid) + Plugin + InferredType(rt)` directly (free-fn and
 class-scoped both — the old `is_class_scoped` gate that relied on
-`resolved_returns → writeback → MethodOnClass` is gone).
+`resolved_returns → writeback → PackageSymbol` is gone).
 
 ### Single registry entry point
 

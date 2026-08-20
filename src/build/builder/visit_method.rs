@@ -210,7 +210,7 @@ impl<'a> Builder<'a> {
                 // `recv->resultset('Foo')` is closed under syntax: push the
                 // `Parametric` type at the call's `Expression(refidx)`, and
                 // mark the ref so `emit_method_call_return_edges` skips its
-                // standard `Edge(MethodOnClass)` — that edge would resolve to
+                // standard `Edge(PackageSymbol)` — that edge would resolve to
                 // plain `resultset` and mask the row-class arg.
                 if let Some(ty) = self.extract_resultset_parametric(node) {
                     self.parametric_emitted_refs.insert(idx);
@@ -227,7 +227,7 @@ impl<'a> Builder<'a> {
                     });
 
                     // Symbol-declarative ReturnExpr declarations on
-                    // `MethodOnClass{base, method}` are the single
+                    // `PackageSymbol{base, method}` are the single
                     // source of truth for the per-flavor projection
                     // table (find → RowOf, etc.). The chain typer's
                     // method-call arm threads the call's invocant as
@@ -241,7 +241,7 @@ impl<'a> Builder<'a> {
                     // A fluent verb (`$rs->search`) returns its invocant's type
                     // UNCHANGED. Edge the call's type to the invocant's rather
                     // than minting one — any invocant type flows through, no
-                    // re-mint (edges-not-values). Skip the standard MethodOnClass
+                    // re-mint (edges-not-values). Skip the standard PackageSymbol
                     // edge: `search` has no return-type def to resolve through.
                     if let RefKind::MethodCall { invocant_span: Some(inv_span), .. } =
                         self.refs[idx].kind
@@ -604,12 +604,12 @@ impl<'a> Builder<'a> {
                 .is_some_and(|m| self.plugins.fluent_verbs().any(|v| v == m))
     }
 
-    /// Push `ReturnExpr` declarations on `MethodOnClass{base, m}`
+    /// Push `ReturnExpr` declarations on `PackageSymbol{base, m}`
     /// for every projection method the flavor declares. Called
     /// after each `extract_resultset_parametric` hit so the chain
     /// typer's coderef-edge / dynamic-method / inheritance routes
     /// all see the same answer through the bag's standard
-    /// `MethodOnClass` chase. Latest-wins among duplicates: same
+    /// `PackageSymbol` chase. Latest-wins among duplicates: same
     /// `(base, method)` pair seen twice (two `resultset(...)` calls
     /// in one file) re-publishes the same ReturnExpr — the
     /// reducer's content equality on Operator(RowOf(Receiver))
@@ -631,8 +631,8 @@ impl<'a> Builder<'a> {
         };
         for (method_name, return_expr) in p.return_method_declarations() {
             self.bag.push(crate::model::witnesses::Witness {
-                attachment: crate::model::witnesses::WitnessAttachment::MethodOnClass {
-                    class: base_class.clone(),
+                attachment: crate::model::witnesses::WitnessAttachment::PackageSymbol {
+                    package: base_class.clone(),
                     name: method_name.to_string(),
                 },
                 source: crate::model::witnesses::WitnessSource::Builder(

@@ -78,12 +78,12 @@ impl FileAnalysis {
 
     /// Find a method's return type within a class/package, walking
     /// inheritance. Thin wrapper that queries the bag's class-keyed
-    /// `MethodOnClass{class, method}` attachment with the caller's
+    /// `PackageSymbol{package, method}` attachment with the caller's
     /// `arg_count` as arity hint. Inheritance composes through
     /// `package_parents` (carried in `BagContext`); cross-file
     /// classes resolve via `module_index`. No procedural ancestor
     /// walk; no procedural overload picking — the registry's
-    /// `ReturnExprReducer` claims `MethodOnClass + ReturnExpr` and
+    /// `ReturnExprReducer` claims `PackageSymbol + ReturnExpr` and
     /// the structural-walk code in `query_rec` handles MRO.
     pub(crate) fn find_method_return_type(
         &self,
@@ -110,7 +110,7 @@ impl FileAnalysis {
     }
 
     /// `find_method_return_type` with the receiver's FULL value threaded
-    /// into the `MethodOnClass` query — the receiver-relative shapes
+    /// into the `PackageSymbol` query — the receiver-relative shapes
     /// (`ReturnExpr::Receiver`, `Operator(RowOf/ParamOf)`) substitute the
     /// rich value (`Parametric(Instance { args })`) rather than a bare
     /// class projection. Callers with a value in hand pass it here (via
@@ -129,8 +129,8 @@ impl FileAnalysis {
             WitnessAttachment,
         };
         let framework = self.package_framework(class_name).unwrap_or(FrameworkFact::Plain);
-        let att = WitnessAttachment::MethodOnClass {
-            class: class_name.to_string(),
+        let att = WitnessAttachment::PackageSymbol {
+            package: class_name.to_string(),
             name: method_name.to_string(),
         };
         let ctx = self.bag_context(module_index);

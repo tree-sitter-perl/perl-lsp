@@ -2,7 +2,7 @@
 
 `QueryState` dedups within ONE `ReducerRegistry::query`. A backward
 reference walk issues one such query per candidate call site, and each
-re-derives the same `MethodOnClass{class, method}` lattice from scratch.
+re-derives the same `PackageSymbol{package, method}` lattice from scratch.
 At 138k files that re-derivation is combinatorial — 5–12 files declare a
 common package name, the chase is keyed by that name rather than by an
 import edge, and it recurses through every provider — and the verb does
@@ -22,7 +22,7 @@ once around a WALK — `CandidateSet::references()` (target minting resolves
 invocants too, so it belongs inside), `refs_to` for its other callers, and
 `FileStore::enrich_open`, because the open-doc heal runs the same cascade on
 a background thread. Nested enters ride the open one. While it is open the
-`MethodOnClass` /
+`PackageSymbol` /
 `SlotType` cross-file hops answer from a memo of **candidate
 contributions**: "what does the file at `path` contribute to this query".
 It also shares `visible_def_candidates` (a clone + sort of the whole
@@ -87,7 +87,7 @@ enough — the attribution matters more than the total:
 - **the memo** — breadth: the same candidate answered once per walk instead
   of once per call site;
 - **the budget at the cross-file BOUNDARY, not per hop** — gating hops
-  individually (the `MethodOnClass` candidate loop only) let the cheap hops
+  individually (the `PackageSymbol` candidate loop only) let the cheap hops
   through and the walk kept running. One gate at the entry to the whole
   cross-file fallback region is the honest placement;
 - **an enrichment depth cap** — depth: `ENRICHING` refuses only a path

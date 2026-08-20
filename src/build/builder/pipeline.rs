@@ -568,7 +568,7 @@ fn build_once(
     // PostFold filled `invocant_class` on MethodCall refs after the
     // worklist exited; re-emit method-call return edges so
     // Expression(refidx) chases resolve through to
-    // MethodOnClass{class, method} for any invocant freshly known.
+    // PackageSymbol{package, method} for any invocant freshly known.
     // Then push array contributions: spans queryable through the
     // freshly-published edges.
     bphase!("emit_mc_return_edges", b.emit_method_call_return_edges());
@@ -676,7 +676,7 @@ fn build_once(
         flow_edges: b.flow_edges,
     });
     // Finalize: the MCB→bag bridge (`emit_method_call_binding_edges`)
-    // publishes `Variable → Edge(MethodOnClass{...})` for every recorded
+    // publishes `Variable → Edge(PackageSymbol{...})` for every recorded
     // `$var = $invocant->method()` binding — the registry chases the
     // return lazily, cross-file once a query holds the index. Enrichment
     // re-runs the same bridge without a tree. Then owner fixup, target
@@ -756,7 +756,7 @@ impl<'a> Builder<'a> {
     /// walk via `push_type_constraint` and `bag.push` from the emit
     /// sites.
     ///
-    /// Method-call return edges (`Expression(refidx) → Edge(MethodOnClass{class, method})`)
+    /// Method-call return edges (`Expression(refidx) → Edge(PackageSymbol{package, method})`)
     /// are emitted later — by `emit_method_call_return_edges` from
     /// inside the worklist, once `invocant_class` is filled.
     pub(super) fn populate_witness_bag(&mut self) {
@@ -767,7 +767,7 @@ impl<'a> Builder<'a> {
         // Rep observations from `$v->{k}` access. Method-call return
         // edges on `Expression(refidx)` are emitted later — by the
         // chain-typing PostFold pass once `invocant_class` is filled —
-        // as `Edge(MethodOnClass{class, method})`. Without a known
+        // as `Edge(PackageSymbol{package, method})`. Without a known
         // class there's no class-keyed answer to chase to, so the
         // emission is gated by chain-typing's own progress.
         let mut hash_obs: Vec<(String, ScopeId, Span)> = Vec::new();

@@ -76,7 +76,7 @@ multi-language brief.
 `emit_method_call_binding_edges` (finalize + the enrichment re-run,
 append-only post-finalize like `emit_mutation_extension_witnesses`)
 publishes each `$var = $invocant->method()` binding as a
-`Variable → Edge(MethodOnClass{class, method})` witness (tag `mcb`); the
+`Variable → Edge(PackageSymbol{package, method})` witness (tag `mcb`); the
 registry chases the return lazily with whatever index the QUERY holds, so
 enrichment materializes no values and no early-out is needed — the fold's
 own precedence arbitrates. `FileAnalysis::inferred_type` is `#[cfg(test)]`

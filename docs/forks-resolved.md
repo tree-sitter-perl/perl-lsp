@@ -38,7 +38,7 @@ when, why), not the contract.
   $class->new(...)` through a cross-file base ctor staying untyped — was
   autopsied and turned out to be a plain BUG, not a fork: the
   receiver-polymorphic machinery (`ReturnExpr::ReceiverOr`, the
-  `MethodOnClass` chase, receiver threading) existed and worked end-to-end
+  `PackageSymbol` chase, receiver threading) existed and worked end-to-end
   for value-position bless, but the statement/assignment bless forms
   (`bless($object, $class); return $object` — the Bugzilla::Object idiom)
   never minted the deferred witness, and the Variable hop dropped the
@@ -503,7 +503,7 @@ The unwired seams landed 2026-07-12: bridged-plugin-entity chase
 (index-less by design — a ctx-ful leaf query would spawn a fresh cycle
 guard per bridged hop, so mutual bridges could recurse unbounded; the
 ENRICHING-guarded bake reaches the same transitive answer), SlotType
-primary (dormant twin of the MethodOnClass retry — SlotType seeds are
+primary (dormant twin of the PackageSymbol retry — SlotType seeds are
 build-gated on a resolvable RHS, so it goes live the moment slot
 seeding emits an unconditional edge), and enrichment's own import scan
 (enrichment is now transitive A→B→C; the cycle guard's first real

@@ -316,7 +316,7 @@ the capped run: **6.6x the consult work and still no answer.** So one query's
 demand exceeds 10.7 M consults. Cache fixes move the wall; they do not remove
 it.
 
-**3. Why: the answers are never memoized across consults.** MethodOnClass and
+**3. Why: the answers are never memoized across consults.** PackageSymbol and
 ancestry are re-derived per consult — `query_rec`'s seen-set dedups within a
 single chase only — multiplied by the 5–12 declaring files a common package
 name has at this scale.
@@ -394,7 +394,7 @@ including cyclic members; terminates without cycle detection; subsumes both the
 taint rule and the depth cap. K sized over the measured union of Koha's tail
 (12) and a deep-framework fixture.
 
-**Fix routing.** Primary: memoize MethodOnClass/ancestry **answers** across
+**Fix routing.** Primary: memoize PackageSymbol/ancestry **answers** across
 consults. The epoch-memo pattern is already proven in this codebase on the same
 shape — 9,358 key walks against 10.2 M memo hits — so this is applying an
 existing mechanism, not inventing one. And/or a fuel budget in CandidateSet
@@ -747,7 +747,7 @@ named inputs.
   with an IDENTICAL top-level answer. The mechanism is trivially reproducible;
   a shape where it changes a served answer is not, and that is what a fix
   needs. See the `QUERY_REC_DEPTH_CAP` doc comment.
-- **`query_rec` 512-depth cap hit** on `MethodOnClass` — cross-dist
+- **`query_rec` 512-depth cap hit** on `PackageSymbol` — cross-dist
   class-name collisions make merged ancestry pathological at corpus scale.
   This is the package-identity candidate relation meeting the real world, and
   it argues for filling the `ScopedLookup` visibility slot Perl still passes

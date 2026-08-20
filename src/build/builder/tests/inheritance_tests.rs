@@ -681,8 +681,8 @@ fn test_cross_bag_inheritance_cycle_does_not_overflow() {
     // package_parents only knows the local-side edge of the loop,
     // so the cycle only closes once the inheritance fallback in
     // `query_rec` crosses bags. A per-bag-only visited set lets the
-    // walk re-enter A's bag for `MethodOnClass{A, _}` after going
-    // through B, then re-enter B for `MethodOnClass{B, _}`, ad
+    // walk re-enter A's bag for `PackageSymbol{A, _}` after going
+    // through B, then re-enter B for `PackageSymbol{B, _}`, ad
     // infinitum until the stack overflows. Visited must compose
     // (bag, attachment) so the loop closes.
     use crate::index::module_index::ModuleIndex;

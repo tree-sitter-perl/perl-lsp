@@ -1964,7 +1964,7 @@ $x->makeFoo()->ping();
 }
 
 /// Highlights chain-hop case: receiver class only known via cross-file
-/// `MethodOnClass` resolution (`$x->makeFoo()->ping()` — `makeFoo`
+/// `PackageSymbol` resolution (`$x->makeFoo()->ping()` — `makeFoo`
 /// returns a cross-file class). The set's origin-narrowed projection
 /// threads the index through the same invocant ladder references uses,
 /// so both call sites group.

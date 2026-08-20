@@ -345,7 +345,7 @@ has 'name';
 ///
 /// Fix: framework synthesis publishes `ReturnExpr::UnionOnArgs`
 /// arms on `Symbol(sym_id)` (per-symbol arity arm) and a multi-arm
-/// `UnionOnArgs` on `MethodOnClass{class, name}` (cross-symbol arity
+/// `UnionOnArgs` on `PackageSymbol{package, name}` (cross-symbol arity
 /// dispatch scoped to the declaring class). `ReturnExprReducer`
 /// dispatches `q.arity_hint` against the union's `ArgGuard` branches
 /// regardless of which sister sym `find()` returned. See

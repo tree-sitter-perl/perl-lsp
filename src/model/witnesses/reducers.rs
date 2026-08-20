@@ -19,7 +19,7 @@ pub struct ReducerQuery<'a> {
     pub arity_hint: Option<u32>,
     /// Receiver type for `ReturnExpr::Receiver` substitution. Set by the
     /// chain typer's coderef/dynamic-method-call arms and by
-    /// `MethodOnClass{...}` chases originating from a method call with a
+    /// `PackageSymbol{...}` chases originating from a method call with a
     /// known invocant. `None` for build-time symbol probes — `Receiver`
     /// then evaluates to `None` rather than guessing.
     pub receiver: Option<InferredType>,
@@ -43,10 +43,10 @@ pub struct ReducerQuery<'a> {
 /// target whose resolution needs more than the bag itself.
 ///
 /// `module_index` lets materialization recurse into cached modules' bags
-/// when a `MethodOnClass{class,...}` names a class in another file.
+/// when a `PackageSymbol{package,...}` names a class in another file.
 /// `package_parents` is the per-class inheritance graph (Perl DFS-MRO);
-/// the registry walks it for `MethodOnClass{C, m}` queries the local bag
-/// can't answer, chasing `MethodOnClass{P, m}` per parent. Both are
+/// the registry walks it for `PackageSymbol{C, m}` queries the local bag
+/// can't answer, chasing `PackageSymbol{P, m}` per parent. Both are
 /// `None`/empty for in-file callers.
 pub struct BagContext<'a> {
     pub scopes: &'a [Scope],
@@ -54,7 +54,7 @@ pub struct BagContext<'a> {
     pub module_index: Option<&'a dyn crate::model::file_analysis::CrossFileLookup>,
     pub package_parents: &'a dyn crate::model::file_analysis::LocalParents,
     /// Manifest-declared app-surface consumer classes — threaded so the
-    /// `MethodOnClass` inheritance walk injects the synthetic surface
+    /// `PackageSymbol` inheritance walk injects the synthetic surface
     /// parent via `parents_of`, matching the FA-side ancestor walks.
     /// Empty for in-file callers that don't carry consumer state.
     pub app_surface_consumers: &'a [String],
@@ -538,7 +538,7 @@ impl WitnessReducer for SlotTypeFold {
 }
 
 // Sub-return delegation chains (`return other()`, `shift->method(...)`)
-// are `Edge(Symbol(...))` / `Edge(MethodOnClass{...})` payloads; registry
+// are `Edge(Symbol(...))` / `Edge(PackageSymbol{...})` payloads; registry
 // materialization chases them, so no procedural delegation pass remains.
 // `TypeProvenance::Delegation` is recorded at synthesis time by the
 // emitter that pushes the Edge, and preserved across worklist iterations.
@@ -580,7 +580,7 @@ impl WitnessReducer for ExprReturn {
 // Claims plain `InferredType` payloads on `Symbol(_)` — the id-keyed
 // "what does THIS sym return?" answer. Pushed by writeback (local
 // subs/methods) and hand-crafted test FileAnalyses. Class-scoped
-// multi-overload dispatch goes through `MethodOnClass{class, name}`
+// multi-overload dispatch goes through `PackageSymbol{package, name}`
 // instead. Latest wins, so a later writeback re-publish dominates;
 // registered AFTER every more-precise reducer (plugin override,
 // ReturnExpr arity dispatch) so those claim first. Per-arm answers route
@@ -613,7 +613,7 @@ impl WitnessReducer for SubReturnReducer {
 
 // ---- Class-keyed method-on-class reducer ----
 //
-// Claims `MethodOnClass{class, name}` carrying a plain `InferredType` —
+// Claims `PackageSymbol{package, name}` carrying a plain `InferredType` —
 // the class-scoped, name-keyed default return. `write_back_sub_return_types`
 // publishes the primary as `Edge(Symbol(sid))` (materialized to a type
 // before this reducer sees it). `ReturnExprReducer` runs first and
@@ -622,15 +622,15 @@ impl WitnessReducer for SubReturnReducer {
 // its `local_return` / `plugin_bridge` / `inheritance` witnesses each
 // fold iteration and re-publishes from current state.
 
-pub struct MethodOnClassReducer;
+pub struct PackageSymbolReducer;
 
-impl WitnessReducer for MethodOnClassReducer {
+impl WitnessReducer for PackageSymbolReducer {
     fn name(&self) -> &str {
         "method_on_class"
     }
 
     fn claims(&self, w: &Witness) -> bool {
-        matches!(w.attachment, WitnessAttachment::MethodOnClass { .. })
+        matches!(w.attachment, WitnessAttachment::PackageSymbol { .. })
             && matches!(w.payload, WitnessPayload::InferredType(_))
     }
 
@@ -687,7 +687,7 @@ impl WitnessReducer for TypeNameReducer {
 //
 // The domain is defeasible — it refines the human surfaces (hover / the
 // navigation bridge), never the storage type that flows. Nothing on the
-// flow axis (Variable/Expr/Symbol/MethodOnClass) queries `Field`, so
+// flow axis (Variable/Expr/Symbol/PackageSymbol) queries `Field`, so
 // returning the domain as a `ClassName` here can't leak into flow typing.
 
 pub struct DomainCoherenceFold;
@@ -802,11 +802,11 @@ impl WitnessReducer for PluginOverrideReducer {
 
 // ---- Return-expression reducer ----
 //
-// Claims `Symbol(_)` and `MethodOnClass{...}` attachments carrying a
+// Claims `Symbol(_)` and `PackageSymbol{...}` attachments carrying a
 // `ReturnExpr(_)` payload — the symbol-declarative return machinery.
 // Substitutes `q.receiver` for `Receiver`, dispatches `UnionOnArgs`
 // against `q.arity_hint`, and evaluates `Operator(RowOf(_))`. Registered
-// before `MethodOnClassReducer` / `SubReturnReducer` so declarative
+// before `PackageSymbolReducer` / `SubReturnReducer` so declarative
 // answers dominate primary-sym writeback.
 //
 // Per CLAUDE.md #10: no peeking at method names, classes, or payloads
@@ -824,7 +824,7 @@ impl WitnessReducer for ReturnExprReducer {
     fn claims(&self, w: &Witness) -> bool {
         // The policy lives on the payload, not the attachment: a
         // `ReturnExpr(_)` is a deferred (receiver/arity)-relative return
-        // wherever it's pushed. `Symbol(_)` / `MethodOnClass{..}` carry
+        // wherever it's pushed. `Symbol(_)` / `PackageSymbol{..}` carry
         // the class-keyed declarations; `Expr(_)` carries a method body's
         // own deferred return (`sub me { return $_[0] }` → `Receiver` on
         // the `$_[0]` body span), reached through the `SymbolReturnArm`
@@ -837,7 +837,7 @@ impl WitnessReducer for ReturnExprReducer {
         matches!(
             w.attachment,
             WitnessAttachment::Symbol(_)
-                | WitnessAttachment::MethodOnClass { .. }
+                | WitnessAttachment::PackageSymbol { .. }
                 | WitnessAttachment::Expr(_)
                 | WitnessAttachment::Variable { .. }
         ) && matches!(w.payload, WitnessPayload::ReturnExpr(_))

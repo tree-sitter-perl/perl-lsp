@@ -112,7 +112,7 @@ pub struct ArgInfo {
     /// ```
     ///
     /// Anon-sub origins yield `Expr(body_last_expr_span)`; named-
-    /// sub references yield `MethodOnClass{class, name}`, which
+    /// sub references yield `PackageSymbol{package, name}`, which
     /// resolves through the bag's MRO + `module_index` machinery
     /// — so cross-file `\&Foo::bar` works without any consumer-
     /// side branching. `None` for genuinely opaque coderefs
@@ -291,7 +291,7 @@ pub enum EmitAction {
         ///
         ///   - `Expr(span)` for anon-sub bodies (the bag walks
         ///     the body's last-expression witnesses).
-        ///   - `MethodOnClass{class, name}` for named-sub
+        ///   - `PackageSymbol{package, name}` for named-sub
         ///     references (the bag's MRO + cross-file machinery
         ///     resolves it).
         ///

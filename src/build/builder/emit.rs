@@ -231,7 +231,7 @@ impl<'a> Builder<'a> {
             // syntax (`Foo->new` → `ClassName("Foo")`), bake. Otherwise
             // Edge to the call's `Expression(refidx)` attachment;
             // `emit_method_call_return_edges` re-emits
-            // `Edge(MethodOnClass{class, method})` there once
+            // `Edge(PackageSymbol{package, method})` there once
             // `invocant_class` is filled, so the chase resolves through.
             "method_call_expression" => {
                 if let Some(class) = self.extract_constructor_class(node) {
@@ -327,7 +327,7 @@ impl<'a> Builder<'a> {
             // self-returning idiom). Its return value IS the call's
             // receiver, so emit the deferred `Receiver` placeholder:
             // `ReturnExprReducer` substitutes `q.receiver` at the call
-            // site, letting `Symbol(me)` / `MethodOnClass{C, me}` type
+            // site, letting `Symbol(me)` / `PackageSymbol{C, me}` type
             // a *chained* `$obj->me->me->...` to the receiver class at
             // arbitrary depth. A general `$arr[N]` read carries no
             // receiver semantics — leave it to the chain typer's
