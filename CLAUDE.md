@@ -57,11 +57,11 @@ verified.
 A suite that fails only on its **first** assertion (`no hover result`, then
 every later probe passes) is a startup-readiness race, not a logic bug — the
 first request is the only one that can arrive before the server is ready.
-`lua/test/lsp.lua::wait_for_analysis` is the gate; it polls `documentSymbol`
-rather than sleeping, because a fixed sleep is a guess about a gap that varies.
-If a suite still races, extend that gate to cover the verb it needs — do not
-add a sleep, and do not gate on the verb under assertion or the poll masks the
-regression the suite exists to catch.
+`lua/test/lsp.lua::open_and_attach` is the gate: it polls `documentSymbol`
+until the server answers with content, because a fixed sleep encodes the
+box speed that wrote it. If a suite still races, extend that poll to cover the
+verb it needs — do not add a sleep, and do not gate on the verb under
+assertion or the poll masks the regression the suite exists to catch.
 
 ## Architecture
 

@@ -734,45 +734,14 @@ pub fn implementations_of(
     // The composer fan-out is a graph walk: INHERITS_INV from the
     // contract's class — the first strangler-fig consumer ported onto
     // the one walker (docs/prompt-graph-walking.md).
-    let mut descendants: Vec<String> = Vec::new();
     let probe = crate::model::graph::GraphView::new(origin, Some(idx));
-    probe.walk(
-        crate::model::graph::Node::Class(class.clone()),
-        crate::model::graph::EdgeKindMask::INHERITS_INV,
-        &mut |n| {
-            if let crate::model::graph::Node::Class(c) = n {
-                descendants.push(c.clone());
-            }
-            crate::model::graph::WalkControl::Continue
-        },
-    );
-
-    // Mixin/sibling overrides. A concrete class assembles its dispatch table
-    // from MULTIPLE parents (Perl multi-parent composition: `load_components`,
-    // Moo/Moose `with` roles, `use base` with several bases). An override of
-    // the target's method can therefore live on a SIBLING PARENT of a shared
-    // descendant — a class that is an ancestor of some concrete descendant of
-    // the target yet is NOT itself a descendant of the target, so the
-    // INHERITS_INV sweep above never reaches it (DBIC's `Ordered` sits
-    // alongside `Row` in `Track`'s MRO, not beneath it). Surface these by
-    // walking UP each descendant's full MRO and collecting every co-ancestor:
-    // a class that shares a concrete descendant with the target participates
-    // in that descendant's dispatch for the method.
-    let mut implementers: std::collections::BTreeSet<String> =
-        descendants.iter().cloned().collect();
-    for d in &descendants {
-        probe.walk(
-            crate::model::graph::Node::Class(d.clone()),
-            crate::model::graph::EdgeKindMask::INHERITS
-                | crate::model::graph::EdgeKindMask::APP_SURFACE,
-            &mut |n| {
-                if let crate::model::graph::Node::Class(c) = n {
-                    implementers.insert(c.clone());
-                }
-                crate::model::graph::WalkControl::Continue
-            },
-        );
-    }
+    // Descendants PLUS their co-ancestors: an override can live on a SIBLING
+    // PARENT of a shared descendant (DBIC's `Ordered` sits alongside `Row` in
+    // `Track`'s MRO, not beneath it), which an INHERITS_INV sweep alone never
+    // reaches. `dispatch_participants` is that gather, shared with
+    // `method_override_family` — while each had its own walk, this verb found
+    // the sibling and `references` did not, from the same cursor.
+    let mut implementers = origin.dispatch_participants(class, Some(idx));
     // The target and its own ancestry are the CONTRACT side, not an
     // implementation: goto-def lands on the target itself, and a superclass
     // method sits BEHIND the target in every descendant's MRO (shadowed by the

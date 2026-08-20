@@ -318,8 +318,65 @@ impl FileAnalysis {
             }
             std::ops::ControlFlow::Continue(())
         });
-        // Root + all transitive descendants (`walk` excludes the origin).
-        self.descendant_family(root, module_index)
+        // Root + every class participating in its dispatch. Descendants
+        // alone would miss a sibling that composes into a shared consumer,
+        // which is where a role's caller lives — and `collect`'s membership
+        // test is what turns that miss into an empty references answer.
+        let mut family = self.descendant_family(root.clone(), module_index);
+        for p in self.dispatch_participants(&root, module_index) {
+            if !family.iter().any(|f| f == &p) {
+                family.push(p);
+            }
+        }
+        family
+    }
+
+    /// Every class that participates in `class`'s dispatch for a method:
+    /// the transitive `INHERITS_INV` descendants, PLUS the co-ancestors
+    /// those descendants reach walking back UP their own MRO.
+    ///
+    /// The co-ancestor half is what a descendants-only walk cannot see. A
+    /// concrete class assembles its dispatch table from SEVERAL parents
+    /// (Moo/Moose `with`, `load_components`, multi-base `use base`), so a
+    /// role that only CALLS `$self->m` sits alongside the role that defines
+    /// it — sibling parents of one composer, neither below the other. The
+    /// path between them is down to the shared composer and back up, which
+    /// is why `INHERITS_INV` alone returns nothing and the caller sees an
+    /// empty answer rather than a wrong one.
+    ///
+    /// One gather, two readers: `implementations_of` (which then subtracts
+    /// its own contract line) and `method_override_family`. They disagreed
+    /// while each had its own walk — `--implementations` found the sibling
+    /// and `references` did not, from the same cursor.
+    pub fn dispatch_participants(
+        &self,
+        class: &str,
+        module_index: Option<&dyn CrossFileLookup>,
+    ) -> std::collections::BTreeSet<String> {
+        use crate::model::graph::{EdgeKindMask, GraphView, Node, WalkControl};
+        let probe = GraphView::new(self, module_index);
+        let mut descendants: Vec<String> = Vec::new();
+        probe.walk(Node::Class(class.to_string()), EdgeKindMask::INHERITS_INV, &mut |n| {
+            if let Node::Class(c) = n {
+                descendants.push(c.clone());
+            }
+            WalkControl::Continue
+        });
+        let mut out: std::collections::BTreeSet<String> =
+            descendants.iter().cloned().collect();
+        for d in &descendants {
+            probe.walk(
+                Node::Class(d.clone()),
+                EdgeKindMask::INHERITS | EdgeKindMask::APP_SURFACE,
+                &mut |n| {
+                    if let Node::Class(c) = n {
+                        out.insert(c.clone());
+                    }
+                    WalkControl::Continue
+                },
+            );
+        }
+        out
     }
 
     /// A root class plus every transitive descendant that inherits from it,

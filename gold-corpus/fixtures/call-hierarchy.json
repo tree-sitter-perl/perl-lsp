@@ -70,6 +70,40 @@
       },
       "status": "gold",
       "note": "a package declaration is not a callable; prepare answers nothing rather than inventing an item."
+    },
+    {
+      "id": "ch-incoming-sibling-role-template-method",
+      "difficulty": "tricky",
+      "semantic_area": "roles",
+      "root": "gold-corpus/tmplmethod-fixture",
+      "file": "lib/My/Provider.pm",
+      "line": 3,
+      "col": 4,
+      "expect": {
+        "all": [
+          "{\"col\":\"5\",\"file\":\"Caller.pm\",\"kind\":\"Sub\",\"line\":\"7\",\"name\":\"run\",\"sites\":[{\"col\":\"19\",\"line\":\"9\"}]}"
+        ],
+        "none": []
+      },
+      "status": "gold",
+      "note": "The caller is a SIBLING role, not an ancestor: My::Caller calls $self->fetch_raw, My::Provider defines it, and only My::App composes both. An INHERITS_INV sweep from Provider never reaches Caller \u2014 the path is down to the composer and back up. `dispatch_participants` is the one gather both --implementations and the override family read, so references/call-hierarchy see the sibling that --implementations already saw. Note there is no `requires` here: the projection alone answers, so this shape needs no recorded obligation."
+    },
+    {
+      "id": "ch-incoming-abstract-base-template-method",
+      "difficulty": "tricky",
+      "semantic_area": "inheritance",
+      "root": "gold-corpus/tmplmethod-fixture",
+      "file": "lib/My/Concrete.pm",
+      "line": 3,
+      "col": 4,
+      "expect": {
+        "all": [
+          "{\"col\":\"5\",\"file\":\"AbstractBase.pm\",\"kind\":\"Sub\",\"line\":\"7\",\"name\":\"run\",\"sites\":[{\"col\":\"19\",\"line\":\"9\"}]}"
+        ],
+        "none": []
+      },
+      "status": "xfail",
+      "note": "What is missing here is the FACT, not the projection. My::AbstractBase calls $self->fetch_raw and My::Concrete defines it, but nothing records that the base has an obligation, so no edge connects them in either direction \u2014 unlike the sibling-role row above, where the composer supplies the path and the projection alone suffices. A `demands` lane (names a package's own bodies call on a conventional invocant and the file does not define) is what would convert this. Measured population: 107 of 2,516 distinct (class, method) shapes on the substrate \u2014 78 where a descendant defines the method, 29 where only a sibling can see it. Promote this row when that lands."
     }
   ]
 }
