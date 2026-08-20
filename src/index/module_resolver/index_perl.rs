@@ -91,6 +91,7 @@ pub fn index_workspace_with_index(
     types_builder.select("perl");
     let types = types_builder.build().unwrap();
 
+    let _walk_phase = crate::util::timings::PhaseGuard::start("index.path_walk");
     let mut paths: Vec<PathBuf> = WalkBuilder::new(root)
         .types(types)
         .build()
@@ -144,10 +145,14 @@ pub fn index_workspace_with_index(
     // files the CURRENT walk still includes — a path newly gitignored (or
     // newly over the size cap) must not resurrect from its cached row, and
     // its stale generation is dropped.
-    let canon_members: std::collections::HashSet<PathBuf> = paths
-        .iter()
-        .map(|p| p.canonicalize().unwrap_or_else(|_| p.clone()))
-        .collect();
+    drop(_walk_phase);
+    let canon_members: std::collections::HashSet<PathBuf> =
+        crate::util::timings::phase("index.canon_members", || {
+            paths
+                .iter()
+                .map(|p| p.canonicalize().unwrap_or_else(|_| p.clone()))
+                .collect()
+        });
 
     // WARM: stream valid 'workspace' rows — record projections from the
     // full decode, strip, register, drop. Stale/changed rows fall through
@@ -294,13 +299,17 @@ pub fn index_workspace_with_index(
                 |conn, batch: &[WsFresh]| {
                     for e in batch {
                         let path_str = e.path.to_string_lossy();
-                        module_cache::save_blob_to_db_stamped(
-                            conn, &path_str, &e.path, &e.closure, &e.blob, "workspace",
-                            e.stamp,
-                        );
-                        if let Err(err) = module_cache::shred_derived_rows(
-                            conn, &path_str, "workspace", &e.seeds, &e.sym_seeds,
-                        ) {
+                        crate::util::ghost_stats::timed("writer.save_blob", || {
+                            module_cache::save_blob_to_db_stamped(
+                                conn, &path_str, &e.path, &e.closure, &e.blob, "workspace",
+                                e.stamp,
+                            )
+                        });
+                        if let Err(err) = crate::util::ghost_stats::timed("writer.shred_rows", || {
+                            module_cache::shred_derived_rows(
+                                conn, &path_str, "workspace", &e.seeds, &e.sym_seeds,
+                            )
+                        }) {
                             log::warn!(
                                 "Failed to shred derived rows for {:?}: {}",
                                 e.path,
@@ -319,7 +328,9 @@ pub fn index_workspace_with_index(
                     if e.deferred {
                         files.insert_workspace_arc(e.path.clone(), e.arc.clone());
                         if let (Some(idx), Some(parts)) = (module_index, e.parts) {
-                            idx.register_workspace_residency(e.path, parts);
+                            crate::util::ghost_stats::timed("writer.register_residency", || {
+                                idx.register_workspace_residency(e.path, parts)
+                            });
                         }
                     }
                 },
@@ -371,7 +382,9 @@ pub fn index_workspace_with_index(
             // Blobs are keyed canonical (matches the warm rows + the CLI's
             // canonicalized origin staging); register under the same spelling
             // so cold and warm runs key the stores identically.
-            let canon = path.canonicalize().unwrap_or_else(|_| path.clone());
+            let canon = crate::util::ghost_stats::timed("walk.canonicalize", || {
+                path.canonicalize().unwrap_or_else(|_| path.clone())
+            });
             if warmed.contains(&canon) {
                 if let Some(cb) = progress {
                     let d = done.fetch_add(1, Ordering::Relaxed) + 1;

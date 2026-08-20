@@ -227,7 +227,12 @@ pub(crate) fn send_to_writer<E>(tx: &std::sync::mpsc::SyncSender<E>, entry: E) {
         // identical to one where the depth did nothing — and a drain number
         // from a run with zero parks says nothing about the depth.
         crate::util::ghost_stats::count("persist_queue.producer_parked");
-        std::thread::sleep(QUEUE_PARK);
+        // Park TIME, not just count: whether backpressure costs wall depends
+        // on how long producers actually sleep, which the count alone can't
+        // attribute.
+        crate::util::ghost_stats::timed("persist_queue.park_wait", || {
+            std::thread::sleep(QUEUE_PARK)
+        });
         waited = waited.saturating_add(QUEUE_PARK);
         if !warned && waited >= QUEUE_STALL_WARN {
             warned = true;
@@ -270,9 +275,13 @@ pub(crate) fn run_persist_writer<E>(
         let n = batch.len();
         let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let txn_open = conn.execute_batch("BEGIN IMMEDIATE").is_ok();
-            write_batch(conn, batch);
+            crate::util::ghost_stats::timed("writer.write_batch", || {
+                write_batch(conn, batch)
+            });
             let committed = txn_open
-                && match conn.execute_batch("COMMIT") {
+                && match crate::util::ghost_stats::timed("writer.commit", || {
+                    conn.execute_batch("COMMIT")
+                }) {
                     Ok(()) => true,
                     Err(err) => {
                         let _ = conn.execute_batch("ROLLBACK");
@@ -284,7 +293,9 @@ pub(crate) fn run_persist_writer<E>(
                 };
             if committed {
                 for e in batch.drain(..) {
-                    on_committed(e);
+                    crate::util::ghost_stats::timed("writer.on_committed", || {
+                        on_committed(e)
+                    });
                 }
             } else {
                 for e in batch.drain(..) {
@@ -302,7 +313,9 @@ pub(crate) fn run_persist_writer<E>(
             }
         }
     };
-    while let Ok(entry) = rx.recv() {
+    // `writer.recv_idle` separates "writer starved" (walk is the bottleneck)
+    // from "writer saturated" (its work throttles the walk via the bound).
+    while let Ok(entry) = crate::util::ghost_stats::timed("writer.recv_idle", || rx.recv()) {
         batch.push(entry);
         while batch.len() < PERSIST_CHUNK {
             match rx.try_recv() {

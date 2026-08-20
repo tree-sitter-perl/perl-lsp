@@ -151,6 +151,7 @@ impl ModuleIndex {
     /// occupant the workspace never owned (the @INC tier) is left alone.
     /// Evicted candidates replay their name feeds from the per-path records.
     fn rebuild_name_registration(&self, name: &str) {
+        let _t = crate::util::ghost_stats::ScopedNs::start("reg.rebuild_name");
         // `get_cached` answers can move here without a registration-gen
         // mint — the enrichment epoch must move too.
         self.core.note_shape_change();
@@ -160,9 +161,28 @@ impl ModuleIndex {
             .get(name)
             .map(|v| v.clone())
             .unwrap_or_default();
-        self.core.edges.purge_module(name);
-        for c in &cands {
-            self.core.edges.feed(name, &c.path, &c.analysis);
+        crate::util::ghost_stats::count_by("reg.refeed_candidates", cands.len() as u64);
+        // ABLATION LEVER (measurement only): `PERL_LSP_ABLATE_NAME_REBUILD=1`
+        // replaces the purge + full re-feed with a single feed of the
+        // newest candidate — behavior-equivalent on a COLD bulk index
+        // (feed is idempotent and purge only matters for re-registration),
+        // NOT safe for a long-lived server. Exists to attribute the
+        // superlinear registration term; remove with the instrumentation.
+        static ABLATE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        let ablate = *ABLATE
+            .get_or_init(|| std::env::var_os("PERL_LSP_ABLATE_NAME_REBUILD").is_some());
+        if ablate {
+            if let Some(c) = cands.last() {
+                self.core.edges.feed(name, &c.path, &c.analysis);
+            }
+        } else {
+            crate::util::ghost_stats::timed("reg.purge_module", || {
+                self.core.edges.purge_module(name)
+            });
+            let _f = crate::util::ghost_stats::ScopedNs::start("reg.refeed");
+            for c in &cands {
+                self.core.edges.feed(name, &c.path, &c.analysis);
+            }
         }
         if cands.is_empty() {
             if self.workspace_modules.remove(name).is_some() {
@@ -187,6 +207,7 @@ impl ModuleIndex {
             // Only @INC providers left: leave their slot alone.
             return;
         }
+        let _b = crate::util::ghost_stats::ScopedNs::start("reg.best_candidate");
         if let Some(best) =
             best_candidate(&refs, name, &|m, n| self.module_defines_class(m, n))
         {

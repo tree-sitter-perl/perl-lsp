@@ -234,6 +234,8 @@ impl ModuleEdgeIndexes {
         if self.fed_modules.remove(module_name).is_none() {
             return;
         }
+        crate::util::ghost_stats::count("reg.purge_sweep_taken");
+        let _t = crate::util::ghost_stats::ScopedNs::start("reg.purge_sweep");
         for map in [&self.names, &self.bridges, &self.children, &self.specs] {
             map.retain(|_key, bucket| {
                 bucket.remove(module_name);
