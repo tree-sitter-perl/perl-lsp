@@ -585,6 +585,64 @@ Where the arc points instead, in order:
    round-3 lesson generalizes: every sizing error in this arc came from
    reading a population by its total.
 
+## Round 5 — the ruling on the per-class form: build it, in a smaller shape than proposed
+
+The attribution settled two things at once: the binder-carrying-residual
+widening is retired (its only convertible population is 9.3%, and
+follows mostly abandon), and the dominant waste — 43,465 of 58,326
+wasted decodes per warm check — is absences on classes the map concludes
+about but cannot prove closed, where the decode's whole outcome is
+"not here, walk to a parent" (98.7% answer nothing; the
+`binder_dependent` control row at 98.8% PAID is what makes the table
+believable).
+
+**The ruling: build it — but the proposed form ("one per-class fact:
+absent keys inherit from these parents", evaluated into a consult-time
+`Follow`) reduces to something smaller and sounder. No new conclusion
+form, no constructed `Follow`, no per-class parent list.** The live
+ladder already IS the follow: candidates → parents → bridges, with
+`parents_of` asking the index. The only missing piece is a third
+absence verdict:
+
+- closed class: absent = **proven None** (today's rule, unchanged);
+- enumerated-but-not-closed class: absent = **proven not-LOCAL** — the
+  consult skips THIS candidate's decode and lets the existing ladder
+  continue (next candidate, then the parent walk, which itself consults
+  maps);
+- unknown class: absent = decode (today's rule, unchanged).
+
+Why this form wins:
+
+1. **It converts the 633-break population instead of fighting it.**
+   Attempt 1's breaks were inherited methods whose absence was read as
+   None — the ladder *stopped*. Under not-local semantics those same
+   absences *continue* to the parent walk and resolve correctly. The
+   failure mode that killed trust-every-absence is exactly the case
+   this verdict handles.
+2. **Ordering correctness is inherited, not re-proven.** A constructed
+   `Follow` returned from candidate 1's map would short-circuit
+   candidates 2..n — and a reopened package's method lives in a later
+   candidate. Not-local just continues the loop, so the
+   candidates-before-parents order and the bridge guard survive by
+   construction. Pin it anyway: a test where class C is reopened in a
+   second file that defines the method, asserting candidate 1's absence
+   does not skip candidate 2.
+3. **The soundness core is exactly one property**: per-candidate-file
+   local-enumeration completeness — "if K is absent from this file's
+   map, this file does not answer K locally." That is the same
+   enumeration question trusted absence already leans on for closed
+   classes (three attempts, 0 breaks under EQUIV), now load-bearing for
+   non-closed classes where today's decode has been silently covering
+   any gap. The residual failure shape is the bad one: a local override
+   missed by the bake serves the PARENT's answer — wrong, not slow — so
+   `PERL_LSP_CONCL_EQUIV` scores this from the first commit, not after
+   (the flag's third campaign, and the reason it exists).
+
+Expected coverage: the 43,465 directly; the other wasted rows (opaque /
+linkable / self-rung) are keys PRESENT as `OpenNone` — a chase that had
+local material it couldn't bake — and stay decodes; they are not
+absence's business.
+
 ## The follow-on that empties the guard's decode arm (later, not now)
 
 The bridge declaration is **local to the bridging file** — its plugin
