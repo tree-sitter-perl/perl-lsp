@@ -569,7 +569,7 @@ pub fn save_to_db(
 }
 
 #[cfg(test)]
-mod bag_share_probe {
+pub(super) mod bag_share_probe {
     //! What share of a stored FileAnalysis is the witness bag?
     //!
     //! `rows_for_diag` decodes the whole blob and then strips the bag, so a
@@ -766,5 +766,72 @@ mod bag_share_probe {
                 out.push(p);
             }
         }
+    }
+}
+
+/// How the conclusion bake classifies a real corpus, and how big the map is
+/// next to the bag it summarizes.
+///
+/// `cargo test --release probe_conclusion_bake -- --ignored --nocapture`
+#[cfg(test)]
+mod bake_probe {
+    #[test]
+    #[ignore]
+    fn probe_conclusion_bake() {
+        let root = std::path::Path::new("gold-corpus/local/lib/perl5");
+        if !root.is_dir() {
+            eprintln!("substrate absent — skipping");
+            return;
+        }
+        let mut files: Vec<std::path::PathBuf> = Vec::new();
+        super::bag_share_probe::collect_pm(root, &mut files, 0);
+        files.sort();
+        let mut parser = crate::build::builder::create_parser();
+        let registry = crate::model::witnesses::ReducerRegistry::with_defaults();
+
+        let (mut value, mut return_of, mut open, mut link) = (0usize, 0usize, 0usize, 0usize);
+        let (mut demoted, mut no_bare) = (0usize, 0usize);
+        let (mut map_bytes, mut bag_bytes, mut n) = (0usize, 0usize, 0usize);
+        for path in files.iter() {
+            let Ok(src) = std::fs::read_to_string(path) else { continue };
+            if src.len() > 1_000_000 {
+                continue;
+            }
+            let Some(tree) = parser.parse(&src, None) else { continue };
+            let fa = crate::build::builder::build(&tree, src.as_bytes());
+            let before_demoted = demoted;
+            let map = crate::model::witnesses::bake(
+                &fa.witnesses,
+                &registry,
+                &fa.packages.keys().cloned().collect(),
+            );
+            let _ = before_demoted;
+            for c in map.0.values() {
+                match c {
+                    crate::model::witnesses::Conclusion::Value(_) => value += 1,
+                    crate::model::witnesses::Conclusion::ReturnOf(_) => return_of += 1,
+                    crate::model::witnesses::Conclusion::Link { .. } => link += 1,
+                    crate::model::witnesses::Conclusion::OpenNone => open += 1,
+                }
+            }
+            map_bytes += bincode::serialize(&map).map(|v| v.len()).unwrap_or(0);
+            bag_bytes += bincode::serialize(&fa.witnesses).map(|v| v.len()).unwrap_or(0);
+            n += 1;
+        }
+        let _ = (&mut demoted, &mut no_bare);
+        let total = value + return_of + open + link;
+        println!("\n{n} files, {total} conclusions");
+        println!("  Value      {value:>7} ({:.1}%)", pct(value, total));
+        println!("  ReturnOf   {return_of:>7} ({:.1}%)", pct(return_of, total));
+        println!("  Link       {link:>7} ({:.1}%)", pct(link, total));
+        println!("  OpenNone   {open:>7} ({:.1}%)", pct(open, total));
+        println!(
+            "\nmap {map_bytes} bincode bytes vs bag {bag_bytes} — {:.1}% of the bag",
+            pct(map_bytes, bag_bytes)
+        );
+    }
+
+    fn pct(a: usize, b: usize) -> f64 {
+        if b == 0 { 0.0 } else { 100.0 * a as f64 / b as f64 }
     }
 }

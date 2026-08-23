@@ -30,6 +30,8 @@ mod query;
 pub use query::*;
 mod session;
 pub use session::*;
+mod conclusions;
+pub use conclusions::*;
 
 // ---- Witness bag ----
 
@@ -100,6 +102,14 @@ impl WitnessBag {
     #[allow(dead_code)]
     pub fn all(&self) -> &[Witness] {
         &self.witnesses
+    }
+
+    /// Every attachment the bag holds witnesses for — the enumeration the
+    /// conclusion bake walks. Reading the index rather than scanning the
+    /// witness vec is what makes "absent means None" checkable: the index IS
+    /// the set of keys the bag could answer.
+    pub fn attachments(&self) -> impl Iterator<Item = &WitnessAttachment> {
+        self.index.keys()
     }
 
     pub fn for_attachment(&self, att: &WitnessAttachment) -> Vec<&Witness> {
