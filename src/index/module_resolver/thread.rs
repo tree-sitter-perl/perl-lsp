@@ -35,6 +35,13 @@ pub(super) fn resolver_loop(core: Arc<IndexCore>, server: Option<ServerSession>)
             conn,
             &crate::build::plugin::rhai_host::plugin_fingerprint(),
         );
+        // Beside the plugin gate, and for the same reason: a cached artifact
+        // that describes a derivation we no longer run. This one clears
+        // conclusions only — the blobs stay, because the repair is a re-bake.
+        let _ = module_cache::validate_conclusion_fingerprint(
+            conn,
+            module_cache::CONCLUSION_FINGERPRINT,
+        );
         if server.is_some() {
             // Hydrate Perl builtin hover docs (cached in SQLite, re-parsed
             // from perlfunc.pod only when the perl version tag changes).

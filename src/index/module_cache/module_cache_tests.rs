@@ -1764,3 +1764,75 @@ fn a_failed_round_leaves_the_previous_generation_intact() {
          be served as complete"
     );
 }
+
+/// Persisting an analysis persists its conclusions, and they come back.
+///
+/// The bake rides inside `encode_analysis` precisely so a writer cannot
+/// persist the blob and forget the map. This is the test that says so: it
+/// exercises the real writer, not the bake in isolation.
+#[test]
+fn persisting_an_analysis_persists_its_conclusions() {
+    let conn = test_db();
+    let dir = std::env::temp_dir();
+    let pm = dir.join("concl_roundtrip.pm");
+    std::fs::write(
+        &pm,
+        "package CR;\nsub build { return LWP::UserAgent->new }\nsub s { return 'x' }\n1;\n",
+    )
+    .unwrap();
+    let cached = parse_source_to_cached(&std::fs::read_to_string(&pm).unwrap(), &pm);
+    let pm_str = pm.to_string_lossy().into_owned();
+    save_to_db(&conn, &pm_str, &Some(cached), "workspace");
+
+    let map = load_conclusions(&conn, &pm_str, current_generation(&conn)).expect(
+        "the writer persisted a blob but no conclusions — the store answers \
+         'not baked' for a file that was just baked",
+    );
+    assert!(!map.is_empty(), "an empty map round-tripped as success");
+
+    use crate::model::witnesses::{ConclusionKey, Outcome};
+    let key = ConclusionKey::MethodOnClass {
+        class: "CR".into(),
+        name: "build".into(),
+    };
+    match map.evaluate(&key, None, None, &[]) {
+        Outcome::Answer(t) => assert_eq!(
+            t.class_name().as_deref(),
+            Some("LWP::UserAgent"),
+            "the round-tripped conclusion changed meaning"
+        ),
+        other => panic!("expected a baked answer for {key:?}, got {other:?}"),
+    }
+    let _ = std::fs::remove_file(&pm);
+}
+
+/// A derivation change clears conclusions and KEEPS blobs.
+///
+/// The repair for a stale conclusion is one re-bake, which needs the blob.
+/// Dropping blobs here would turn it into a corpus re-parse for nothing — and
+/// the failure would be invisible, since everything still works, just slowly.
+#[test]
+fn a_derivation_change_clears_conclusions_but_keeps_blobs() {
+    let conn = test_db();
+    let dir = std::env::temp_dir();
+    let pm = dir.join("concl_fingerprint.pm");
+    std::fs::write(&pm, "package CF;\nsub f { return 'x' }\n1;\n").unwrap();
+    let cached = parse_source_to_cached(&std::fs::read_to_string(&pm).unwrap(), &pm);
+    let pm_str = pm.to_string_lossy().into_owned();
+    save_to_db(&conn, &pm_str, &Some(cached), "workspace");
+    assert!(load_conclusions(&conn, &pm_str, current_generation(&conn)).is_some());
+
+    validate_conclusion_fingerprint(&conn, "a-different-derivation").unwrap();
+
+    assert!(
+        load_conclusions(&conn, &pm_str, current_generation(&conn)).is_none(),
+        "conclusions survived a derivation change — they now describe a \
+         derivation that no longer exists, and nothing downstream can tell"
+    );
+    assert!(
+        load_one_diag(&conn, &pm_str, true).is_ok(),
+        "the blob was dropped along with the conclusions — the re-bake it \
+         exists to feed now costs a re-parse instead of a decode"
+    );
+    let _ = std::fs::remove_file(&pm);
+}

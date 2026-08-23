@@ -114,6 +114,12 @@ pub(super) fn closure_stamp(
 pub struct EncodedAnalysis {
     /// The analysis with its witness bag taken out.
     pub analysis: Vec<u8>,
+    /// The baked conclusions for this analysis, zstd+bincode. Rides with the
+    /// other halves for the same reason they ride with each other: a writer
+    /// that persisted the blob and forgot the map would leave the store
+    /// answering ABSENT for the file, and absent means "no answer" rather than
+    /// "not baked".
+    pub conclusions: Vec<u8>,
     /// The witness bag alone. NEVER empty for a row this code writes — the
     /// `bag IS NULL` test is how a reader tells a pre-split row (bag inline
     /// in `analysis`) from a post-split one, so an empty encoding here would
@@ -125,7 +131,7 @@ pub struct EncodedAnalysis {
 impl EncodedAnalysis {
     /// Total stored size, for the writers' byte accounting.
     pub fn len(&self) -> usize {
-        self.analysis.len() + self.bag.len()
+        self.analysis.len() + self.bag.len() + self.conclusions.len()
     }
 
     /// Re-decode both halves into the analysis they came from.
@@ -137,6 +143,12 @@ impl EncodedAnalysis {
     /// that answers every type query with silence.
     pub fn decode_whole(&self) -> Option<FileAnalysis> {
         decode_analysis_parts(&self.analysis, Some(&self.bag), true)
+    }
+
+    /// The baked map, decoded.
+    pub fn conclusion_map(&self) -> Option<crate::model::witnesses::ConclusionMap> {
+        let bin = zstd::decode_all(self.conclusions.as_slice()).ok()?;
+        bincode::deserialize(&bin).ok()
     }
 }
 
@@ -161,9 +173,37 @@ pub fn encode_analysis(fa: &FileAnalysis) -> Option<EncodedAnalysis> {
     let bin = bincode::serialize(bagless).ok()?;
     let analysis = zstd::encode_all(bin.as_slice(), ZSTD_LEVEL).ok()?;
     let bag_bin = bincode::serialize(&bag).ok()?;
-    let bag = zstd::encode_all(bag_bin.as_slice(), ZSTD_LEVEL).ok()?;
-    debug_assert!(!bag.is_empty(), "an empty bag blob would read as a pre-split row");
-    Some(EncodedAnalysis { analysis, bag })
+    let bag_blob = zstd::encode_all(bag_bin.as_slice(), ZSTD_LEVEL).ok()?;
+    debug_assert!(
+        !bag_blob.is_empty(),
+        "an empty bag blob would read as a pre-split row"
+    );
+    // Baked here rather than in the writer so the map cannot be forgotten:
+    // the same reason the bag and the analysis travel together. Measured at
+    // 0.31 ms/file against a 5.4 ms build — 5.8%.
+    // Escape hatch and A/B control, same shape as `PERL_LSP_PD_NO_COMBINE`:
+    // a new cost on the persist path should be switchable off without a
+    // rebuild, so its price can be measured rather than argued about.
+    let conclusions = if std::env::var("PERL_LSP_NO_BAKE").is_ok() {
+        Vec::new()
+    } else {
+    crate::util::ghost_stats::timed("persist.bake", || {
+        let map = crate::model::witnesses::bake(
+            &bag,
+            crate::model::witnesses::shared_registry(),
+            &fa.packages.keys().cloned().collect(),
+        );
+        bincode::serialize(&map)
+            .ok()
+            .and_then(|b| zstd::encode_all(b.as_slice(), ZSTD_LEVEL).ok())
+            .unwrap_or_default()
+    })
+    };
+    Some(EncodedAnalysis {
+        analysis,
+        bag: bag_blob,
+        conclusions,
+    })
 }
 
 /// Decompress + deserialize an analysis blob, installing `bag` when the
@@ -474,10 +514,39 @@ pub fn save_blob_to_db_stamped(
     if let Err(e) = r {
         log::warn!("Failed to save module blob for '{}': {}", module_name, e);
     }
+    persist_conclusions(conn, &path.to_string_lossy(), blob);
     // A rewritten modules row orphans any prior stub for the path — a stale
     // skeleton paired with a fresh stamp would be served as valid on the
     // next warm. Writers that have a fresh stub re-insert it right after.
     delete_stub(conn, &path.to_string_lossy());
+}
+
+/// Write the baked map beside the blob it was derived from.
+///
+/// At the CURRENT generation, not a new one: persisting a file is that file
+/// joining the world as it stands, not a round advancing it. Only a flush
+/// advances a generation, and the flush driver is not built yet — until it is,
+/// every reader pins the same generation and the retention machinery is
+/// correct-but-idle rather than wrong.
+///
+/// A failure here is logged, never fatal. The blob is already written and
+/// remains the derivation of record; a missing map costs a decode, which is
+/// the cost we had before this layer existed.
+fn persist_conclusions(conn: &Connection, path: &str, enc: &EncodedAnalysis) {
+    if enc.conclusions.is_empty() {
+        // The bake produced nothing encodable. Leaving no row is right: absent
+        // from the STORE means "not baked" (the reader falls back to a decode),
+        // which is a different question from a key being absent from a map.
+        return;
+    }
+    let at = current_generation(conn);
+    let r = conn.execute(
+        "INSERT OR REPLACE INTO conclusions (path, generation, map) VALUES (?1, ?2, ?3)",
+        params![path, at.0, enc.conclusions],
+    );
+    if let Err(e) = r {
+        log::warn!("Failed to save conclusions for '{path}': {e}");
+    }
 }
 
 /// Recompute a persisted row's `deps_stamp` from CURRENT disk state without
@@ -562,6 +631,9 @@ pub fn save_to_db(
         }
     };
     if !path_str.is_empty() {
+        if let Some(enc) = analysis_blob.as_ref() {
+            persist_conclusions(conn, &path_str, enc);
+        }
         // Same stale-stub guard as `save_blob_to_db_stamped`.
         delete_stub(conn, &path_str);
     }
@@ -792,19 +864,25 @@ mod bake_probe {
         let (mut value, mut return_of, mut open, mut link) = (0usize, 0usize, 0usize, 0usize);
         let (mut demoted, mut no_bare) = (0usize, 0usize);
         let (mut map_bytes, mut bag_bytes, mut n) = (0usize, 0usize, 0usize);
+        let mut bake_nanos: u64 = 0;
+        let mut build_nanos: u64 = 0;
         for path in files.iter() {
             let Ok(src) = std::fs::read_to_string(path) else { continue };
             if src.len() > 1_000_000 {
                 continue;
             }
             let Some(tree) = parser.parse(&src, None) else { continue };
+            let tb = std::time::Instant::now();
             let fa = crate::build::builder::build(&tree, src.as_bytes());
+            build_nanos += tb.elapsed().as_nanos() as u64;
             let before_demoted = demoted;
+            let t0 = std::time::Instant::now();
             let map = crate::model::witnesses::bake(
                 &fa.witnesses,
                 &registry,
                 &fa.packages.keys().cloned().collect(),
             );
+            bake_nanos += t0.elapsed().as_nanos() as u64;
             let _ = before_demoted;
             for c in map.0.values() {
                 match c {
@@ -828,6 +906,16 @@ mod bake_probe {
         println!(
             "\nmap {map_bytes} bincode bytes vs bag {bag_bytes} — {:.1}% of the bag",
             pct(map_bytes, bag_bytes)
+        );
+        // The bake's MARGINAL cost against the build it would ride along with.
+        // A bake that costs as much as the analysis it summarizes cannot live
+        // in the persist path, whatever it saves later.
+        println!(
+            "bake {:.0} ms over {n} files ({:.2} ms/file) vs build {:.0} ms — bake is {:.1}% of build",
+            bake_nanos as f64 / 1e6,
+            bake_nanos as f64 / 1e6 / n.max(1) as f64,
+            build_nanos as f64 / 1e6,
+            pct(bake_nanos as usize, build_nanos as usize)
         );
     }
 

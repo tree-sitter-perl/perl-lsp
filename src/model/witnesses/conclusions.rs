@@ -204,6 +204,17 @@ fn fresh_receiver(incoming: Option<&InferredType>, class: &str) -> InferredType 
     }
 }
 
+/// The process-wide default registry.
+///
+/// The bake runs per file on the persist path, and `with_defaults()` allocates
+/// a boxed reducer per entry. Query sites build one per call because they are
+/// answering one question; a bulk index answers thousands and would pay for
+/// the same immutable table every time.
+pub fn shared_registry() -> &'static ReducerRegistry {
+    static REG: std::sync::OnceLock<ReducerRegistry> = std::sync::OnceLock::new();
+    REG.get_or_init(ReducerRegistry::with_defaults)
+}
+
 /// Bake one analysis's bag into a map.
 ///
 /// Runs with `module_index: None` by construction — the caller passes a

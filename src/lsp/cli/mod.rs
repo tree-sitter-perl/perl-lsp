@@ -315,6 +315,13 @@ fn cli_full_startup(
             conn,
             &plugin::rhai_host::plugin_fingerprint(),
         );
+        // Beside the plugin gate, and for the same reason: a cached artifact
+        // that describes a derivation we no longer run. This one clears
+        // conclusions only — the blobs stay, because the repair is a re-bake.
+        let _ = module_cache::validate_conclusion_fingerprint(
+            conn,
+            module_cache::CONCLUSION_FINGERPRINT,
+        );
         let (warmed, stale) = timings::phase("cli::warm_inc_cache", || {
             module_cache::warm_cache(
                 conn,
