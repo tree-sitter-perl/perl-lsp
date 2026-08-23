@@ -207,11 +207,17 @@ pub fn encode_analysis(fa: &FileAnalysis) -> Option<EncodedAnalysis> {
                 )
             })
             .collect();
-        let map = crate::model::witnesses::bake_with_symbols(
+        let parents: Vec<(String, Vec<String>)> = fa
+            .packages
+            .keys()
+            .map(|c| (c.clone(), fa.declared_parents(c).to_vec()))
+            .collect();
+        let map = crate::model::witnesses::bake_full(
             &bag,
             crate::model::witnesses::shared_registry(),
             &fa.packages.keys().cloned().collect(),
             &syms,
+            &parents,
         );
         bincode::serialize(&map)
             .ok()

@@ -1684,7 +1684,7 @@ fn a_pinned_reader_does_not_see_a_later_generation() {
             ConclusionKey::SubByName("f".into()),
             Conclusion::Value(crate::model::file_analysis::InferredType::ClassName(t.into())),
         );
-        ConclusionMap(m)
+        ConclusionMap(m, Default::default())
     };
 
     let g1 = Generation(1);
@@ -1719,7 +1719,7 @@ fn pruning_keeps_what_the_pin_still_needs() {
             ConclusionKey::SubByName("f".into()),
             Conclusion::Value(crate::model::file_analysis::InferredType::ClassName(t.into())),
         );
-        ConclusionMap(m)
+        ConclusionMap(m, Default::default())
     };
     for g in 1..=4i64 {
         publish_generation(&conn, Generation(g), &[("/a.pm".to_string(), mk(&format!("G{g}")))])

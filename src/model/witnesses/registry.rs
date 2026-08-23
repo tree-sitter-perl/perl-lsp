@@ -573,12 +573,43 @@ impl ReducerRegistry {
                                     super::Outcome::None => {
                                         crate::util::ghost_stats::count("consult.baked_none");
                                         baked_said_absent = true;
+                                        // Absence is conclusive only for a
+                                        // class with NO ancestors at all. The
+                                        // per-file bake cannot establish that:
+                                        // Perl packages are open, and a file
+                                        // that REOPENS a package without
+                                        // repeating its `@ISA` sees a
+                                        // parentless class. `PPI::XSAccessor`
+                                        // does exactly that to `PPI::Token`,
+                                        // and it accounted for 75 of the
+                                        // equivalence breaks left after the
+                                        // per-file check.
+                                        //
+                                        // So the question is asked where the
+                                        // cross-file union lives, through the
+                                        // same `parents_of` every other
+                                        // ancestor walk uses.
+                                        let has_ancestors =
+                                            !crate::model::file_analysis::parents_of(
+                                                class,
+                                                ctx.package_parents,
+                                                ctx.module_index,
+                                                ctx.app_surface_consumers,
+                                            )
+                                            .is_empty();
+                                        if has_ancestors {
+                                            crate::util::ghost_stats::count(
+                                                "consult.absent_but_inherits",
+                                            );
+                                            baked_said_absent = false;
+                                        }
                                         // Under the equivalence flag, do NOT
                                         // trust it — fall through, run the
                                         // real chase, and let the arm below
                                         // report any answer that absence
                                         // claimed did not exist.
-                                        if super::trust_absent_conclusions()
+                                        if baked_said_absent
+                                            && super::trust_absent_conclusions()
                                             && !super::verify_absent_conclusions()
                                         {
                                             // Remember the None BEFORE

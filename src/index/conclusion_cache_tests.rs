@@ -12,7 +12,7 @@ fn map_of(n: usize) -> ConclusionMap {
             Conclusion::OpenNone,
         );
     }
-    ConclusionMap(m)
+    ConclusionMap(m, Default::default())
 }
 
 /// A path the store has nothing for must be re-queried at most once.

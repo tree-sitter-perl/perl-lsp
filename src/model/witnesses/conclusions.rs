@@ -99,7 +99,21 @@ pub enum Conclusion {
 
 /// Per-file map, persisted beside the blob and invalidated with it.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-pub struct ConclusionMap(pub HashMap<ConclusionKey, Conclusion>);
+pub struct ConclusionMap(
+    pub HashMap<ConclusionKey, Conclusion>,
+    /// Classes whose absence is CONCLUSIVE — every ancestor is declared in
+    /// this file, so a key missing from the map really is a proven `None`.
+    ///
+    /// The property belongs to the class, not the key. A class with a
+    /// cross-file parent can be asked about a method it inherits, which has no
+    /// attachment in this file's bag and therefore no key here — and reading
+    /// that absence as `None` is wrong 633 times per substrate check. We
+    /// cannot enumerate those keys (they are the PARENT's method names, which
+    /// this file does not know), so the answerable question is which classes
+    /// can be reasoned about at all.
+    #[serde(default)]
+    pub std::collections::HashSet<String>,
+);
 
 impl ConclusionMap {
     pub fn len(&self) -> usize {
@@ -126,9 +140,15 @@ impl ConclusionMap {
         args: &[InferredType],
     ) -> Outcome {
         let Some(c) = self.0.get(key) else {
-            // ABSENT. Sound only because the bake enumerates every key the bag
-            // could answer; a missed key would silently become None here.
-            return Outcome::None;
+            // ABSENT. Conclusive only for a class this file can reason about
+            // completely — see the `closed` field. For anything else the honest
+            // answer is "I do not know", which is a decode.
+            return match key {
+                ConclusionKey::MethodOnClass { class, .. } if !self.1.contains(class) => {
+                    Outcome::Decode
+                }
+                _ => Outcome::None,
+            };
         };
         match c {
             Conclusion::Value(t) => Outcome::Answer(t.clone()),
@@ -206,34 +226,34 @@ fn fresh_receiver(incoming: Option<&InferredType>, class: &str) -> InferredType 
 
 /// Whether an absent key may be trusted as a proven `None`.
 ///
-/// OFF, because it is measurably unsound today — and the prize for fixing it
-/// is large enough to say exactly how large.
+/// ON, but only for a class with no ancestors — and the caller enforces that,
+/// not this flag.
 ///
-/// Trusting absence takes the consult chase from 2,435 ms to 402 ms on a warm
-/// substrate check: an 83% cut in the compute half this whole design targets.
-/// Absence fires 126,767 times there against 1,304 served answers, so without
-/// it the layer is worth under 1% of consults. It is the win.
+/// Absence is the layer's win: it fires ~127k times per warm substrate check
+/// against ~1.3k served answers, so a version that cannot trust it is worth
+/// under 1% of consults. Trusting it soundly takes the consult chase from
+/// 2,375.9 ms to 1,817.3 ms and its calls from 109,003 to 63,768.
 ///
-/// It is also wrong 633 times out of those 126,767 — 0.5%. `PERL_LSP_CONCL_EQUIV`
-/// runs the chase anyway and compares: the map reports
-/// `MethodOnClass{Mojo::EventEmitter, new}` absent while the chase answers
-/// `ClassName("Mojo::Server")`. Receiver-polymorphic constructors inherited
-/// from a parent have no attachment in the child's bag, so the bake never
-/// enumerates a key for them, and absence is read as a proof it never was.
+/// The soundness rule took three tries and is worth stating so nobody
+/// relitigates it:
 ///
-/// WHAT MAKES THIS WORTH A COMMENT rather than a TODO: gold passes 502/0 with
-/// absence trusted, and `--dump-package` is byte-identical across Catalyst
-/// (145 KB), Type::Tiny (109 KB), Mojolicious (50 KB) and Moose (7 KB). Every
-/// end-to-end check we own says it is fine. They pass because the ladder
-/// routes around the missing answer — the parent walk finds it further up — so
-/// the output agrees and only the cost differs. End-to-end equality does not
-/// validate an intermediate claim when the system can route around the error.
+///   1. Trust every absence — 633 breaks per check. An inherited method has no
+///      attachment in the child's bag, so no key is enumerated for it.
+///   2. Trust it for classes whose declared parents are all local — 75 breaks.
+///      Perl packages are OPEN: `PPI::XSAccessor` reopens `package PPI::Token`
+///      without repeating its `@ISA`, so that file's bake sees a parentless
+///      class which in fact inherits from `PPI::Element`.
+///   3. Ask the INDEX, through the same `parents_of` every other ancestor walk
+///      uses — 0 breaks. Closedness is a property of the class across ALL
+///      files, and no per-file bake can establish it.
 ///
-/// Turn this on once the enumeration covers inherited and reducer-synthesized
-/// keys, and keep `PERL_LSP_CONCL_EQUIV` green over a real corpus as the proof.
+/// `PERL_LSP_CONCL_EQUIV` is the standing proof rather than a one-off: it runs
+/// the chase anyway and reports any answer an absence claimed did not exist.
+/// Green over the whole substrate. `PERL_LSP_NO_TRUST_ABSENT` reverts to
+/// deferring every absence to a decode.
 pub fn trust_absent_conclusions() -> bool {
     static TRUST: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *TRUST.get_or_init(|| std::env::var("PERL_LSP_TRUST_ABSENT").is_ok())
+    *TRUST.get_or_init(|| std::env::var("PERL_LSP_NO_TRUST_ABSENT").is_err())
 }
 
 /// Verify each trusted absence against the path it replaces.
@@ -293,6 +313,20 @@ pub fn bake_with_symbols(
     local_packages: &std::collections::HashSet<String>,
     symbols: &[(Option<String>, String, bool)],
 ) -> ConclusionMap {
+    bake_full(bag, registry, local_packages, symbols, &[])
+}
+
+/// `bake_with_symbols`, plus each class's declared parents.
+///
+/// Parents decide which classes are CLOSED — reasoned about completely from
+/// this file — and only a closed class may have its absences read as proofs.
+pub fn bake_full(
+    bag: &WitnessBag,
+    registry: &ReducerRegistry,
+    local_packages: &std::collections::HashSet<String>,
+    symbols: &[(Option<String>, String, bool)],
+    parents: &[(String, Vec<String>)],
+) -> ConclusionMap {
     let mut map = HashMap::new();
     let mut enumerate = |att: WitnessAttachment, map: &mut HashMap<_, _>| {
         let Some(key) = ConclusionKey::from_attachment(&att) else {
@@ -349,7 +383,36 @@ pub fn bake_with_symbols(
             }
         }
     }
-    ConclusionMap(map)
+    // A class is closed when every ancestor, transitively, is declared here.
+    // Transitively matters: a local parent with a foreign grandparent inherits
+    // methods this file has never seen, so treating the child as closed would
+    // reintroduce exactly the bug this field exists to stop.
+    let parent_of: HashMap<&str, &Vec<String>> =
+        parents.iter().map(|(c, ps)| (c.as_str(), ps)).collect();
+    let mut closed = std::collections::HashSet::new();
+    for class in local_packages {
+        let mut stack = vec![class.as_str()];
+        let mut seen = std::collections::HashSet::new();
+        let mut ok = true;
+        while let Some(c) = stack.pop() {
+            if !seen.insert(c.to_string()) {
+                continue;
+            }
+            if !local_packages.contains(c) {
+                ok = false;
+                break;
+            }
+            if let Some(ps) = parent_of.get(c) {
+                for p in ps.iter() {
+                    stack.push(p.as_str());
+                }
+            }
+        }
+        if ok {
+            closed.insert(class.clone());
+        }
+    }
+    ConclusionMap(map, closed)
 }
 
 /// One attachment's conclusion.
