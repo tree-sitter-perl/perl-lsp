@@ -366,9 +366,13 @@ verb with a fuller profile — the profile joins the overlay key, or the
 profile stays one-shot-CLI-only. The generational gate in this section
 remains the answer for the verbs that DO read targets.
 
-Landed CLI-only as ruled: measured 13–15% off `--check`'s
-enriched-snapshot phase (`consult.attempt` calls halved), set-identical
-at N=2,431 with a same-arm noise floor first. One rule the build earned:
+Landed CLI-only as ruled: **~5% of wall** against the parallelized
+sweep (the first-published 13–15% was measured against the serial sweep
+that no longer exists — the parallel rebase re-measure at n=8
+interleaved is the number of record; set identity re-verified at
+N=2,431). The per-thread accumulating phase region summed to 2.5× the
+wall it sits inside after parallelization — such a region is usable as
+a same-thread-count A/B ratio and never as a cost. One rule the build earned:
 **the A/B control must be reachable from the shipped configuration** —
 the ablation flag skips in the SAME direction as the profile, so once
 the verb declares a partial profile the full behavior is unreachable and
