@@ -18,6 +18,17 @@ pub const EXTRACT_VERSION: i64 = 184;
 /// next warm re-shreds rows from the already-decoded analyses for free.
 pub(super) const REF_ROWS_VERSION: &str = "6";
 
+/// Fingerprint over everything that can change what a derivation CONCLUDES,
+/// computed by `build.rs` at compile time.
+///
+/// Deliberately not a hand-maintained integer like its neighbours above. Those
+/// guard SHAPE: a stale one is caught the moment a decode fails loudly. This
+/// guards MEANING — a reducer edit leaves bytes that decode perfectly and
+/// answer wrongly — and there is nothing downstream to notice. A version
+/// someone has to remember to bump is the wrong instrument for a failure
+/// nothing else can see (`docs/prompt-conclusion-layer.md`).
+pub const CONCLUSION_FINGERPRINT: &str = env!("PERL_LSP_CONCLUSION_FINGERPRINT");
+
 pub fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS meta (

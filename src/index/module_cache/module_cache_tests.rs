@@ -1597,3 +1597,70 @@ fn pre_split_rows_are_filtered_not_guessed() {
     );
     let _ = std::fs::remove_file(&pm);
 }
+
+
+/// The conclusion fingerprint must describe the tree as it is RIGHT NOW.
+///
+/// The failure this catches is a stale constant: if `build.rs` ever stops
+/// re-running when a source file changes — a directory-level
+/// `rerun-if-changed`, a path it hashes but forgets to declare — the compiled
+/// constant keeps describing an older tree. Every baked conclusion then
+/// validates against a fingerprint that no longer means anything, which is
+/// exactly the hand-maintained version the derived one exists to replace, only
+/// now with nobody watching it.
+///
+/// The hash is recomputed here rather than shared with `build.rs`. A shared
+/// helper would agree with itself whatever it computed; two independent
+/// spellings that must agree is the only arrangement that can fail.
+#[test]
+fn the_conclusion_fingerprint_is_not_stale() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut files: Vec<std::path::PathBuf> = Vec::new();
+    fn walk(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+        let Ok(entries) = std::fs::read_dir(dir) else { return };
+        for e in entries.flatten() {
+            let p = e.path();
+            match e.file_type() {
+                Ok(t) if t.is_dir() => walk(&p, out),
+                Ok(t) if t.is_file() => out.push(p),
+                _ => {}
+            }
+        }
+    }
+    walk(&root.join("src"), &mut files);
+    if root.join("Cargo.lock").is_file() {
+        files.push(root.join("Cargo.lock"));
+    }
+    files.sort();
+    assert!(
+        files.len() > 100,
+        "walked only {} files — this test would pass vacuously",
+        files.len()
+    );
+
+    let mut acc: u64 = 0xcbf2_9ce4_8422_2325;
+    let mut fnv = |acc: &mut u64, bytes: &[u8]| {
+        for b in bytes {
+            *acc ^= *b as u64;
+            *acc = acc.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+    };
+    for path in &files {
+        let Ok(bytes) = std::fs::read(path) else { continue };
+        // Paths are hashed relative to the manifest, so the fingerprint does
+        // not change when the same tree is checked out somewhere else — a
+        // worktree and its origin must agree or every worktree re-bakes.
+        let rel = path.strip_prefix(root).unwrap_or(path);
+        fnv(&mut acc, rel.to_string_lossy().as_bytes());
+        fnv(&mut acc, b"\0");
+        fnv(&mut acc, &bytes);
+        fnv(&mut acc, b"\0");
+    }
+    assert_eq!(
+        format!("{acc:016x}"),
+        CONCLUSION_FINGERPRINT,
+        "the compiled-in conclusion fingerprint does not match the current \
+         source tree — build.rs did not re-run for some file it hashes, so \
+         the guard is describing a tree that no longer exists"
+    );
+}
