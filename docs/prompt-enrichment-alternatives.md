@@ -350,6 +350,22 @@ independent motivation for building it, joining the fingerprint-clear
 re-bake defect, the enrichment-recursion replacement, and the
 generational flush itself.
 
+One verb-scoped carve-out to the 94% figure, established by ablation
+after this section was written: for `--check` specifically the entire
+re-stamp is **dead computation** — diagnostics never read
+`method_target()` (its lanes type invocants via the bag and resolve
+methods directly), and skipping the re-stamp leaves the diagnostic set
+identical at two corpus scales. That skip is sound *by construction*
+(a verb not consuming a product need not pay for it), which is a
+different and stronger kind of soundness than any freshness gate — it
+is `LanguageScope`'s shape applied to enrichment: a verb-declared
+enrichment profile, never a `--check` special case. The binding
+constraint: the server's `enriched_snapshot` overlay is shared and
+fingerprint-keyed, so a profile-partial copy must never be served to a
+verb with a fuller profile — the profile joins the overlay key, or the
+profile stays one-shot-CLI-only. The generational gate in this section
+remains the answer for the verbs that DO read targets.
+
 One adjacent lever the miss-cost data licenses separately: a failed
 resolution costs 32× a hit because it exhausts the candidate space,
 and that space is the corpus because workspace-tier Perl passes
