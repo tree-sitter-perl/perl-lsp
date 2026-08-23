@@ -24,7 +24,7 @@ mod types;
 pub use types::*;
 mod reducers;
 pub use reducers::*;
-mod registry;
+pub(crate) mod registry;
 pub use registry::*;
 mod query;
 pub use query::*;

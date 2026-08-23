@@ -192,3 +192,146 @@ fn the_bake_does_not_depend_on_map_iteration_order() {
         }
     }
 }
+
+// ---- the Link walk ----
+
+use std::sync::Arc;
+
+fn m(entries: Vec<(ConclusionKey, Conclusion)>) -> Arc<ConclusionMap> {
+    Arc::new(ConclusionMap(
+        entries.into_iter().collect(),
+        Default::default(),
+    ))
+}
+
+fn moc(class: &str, name: &str) -> ConclusionKey {
+    ConclusionKey::MethodOnClass {
+        class: class.into(),
+        name: name.into(),
+    }
+}
+
+/// A `Link` chain resolves to the answer at its end, with no bag decoded.
+///
+/// Exercised directly rather than through the corpus: on the substrate today
+/// only 4 `Follow`s fire and all are incomplete, so the success path would
+/// otherwise ship untested. A walker that never succeeds in its own test suite
+/// is a walker nobody has run.
+#[test]
+fn a_link_chain_resolves_to_the_answer_at_its_end() {
+    let a = m(vec![(
+        moc("A", "f"),
+        Conclusion::Link {
+            target: moc("B", "f"),
+            arity: None,
+            receiver: ReceiverRule::Thread,
+        },
+    )]);
+    let b = m(vec![(
+        moc("B", "f"),
+        Conclusion::Value(crate::model::file_analysis::InferredType::HashRef),
+    )]);
+    let resolve = move |class: &str| match class {
+        "A" => vec![("/a.pm".to_string(), Some(a.clone()))],
+        "B" => vec![("/b.pm".to_string(), Some(b.clone()))],
+        _ => vec![],
+    };
+    let got = crate::model::witnesses::registry::follow_link_with(&resolve, &moc("A", "f"), &None, None, &[]);
+    assert_eq!(
+        got,
+        Some(crate::model::file_analysis::InferredType::HashRef),
+        "a two-hop Link chain did not reach its answer"
+    );
+}
+
+/// A cycle terminates instead of spinning, and degrades to a decode.
+#[test]
+fn a_cyclic_link_chain_terminates() {
+    let a = m(vec![(
+        moc("A", "f"),
+        Conclusion::Link {
+            target: moc("B", "f"),
+            arity: None,
+            receiver: ReceiverRule::Thread,
+        },
+    )]);
+    let b = m(vec![(
+        moc("B", "f"),
+        Conclusion::Link {
+            target: moc("A", "f"),
+            arity: None,
+            receiver: ReceiverRule::Thread,
+        },
+    )]);
+    let resolve = move |class: &str| match class {
+        "A" => vec![("/a.pm".to_string(), Some(a.clone()))],
+        "B" => vec![("/b.pm".to_string(), Some(b.clone()))],
+        _ => vec![],
+    };
+    let got = crate::model::witnesses::registry::follow_link_with(&resolve, &moc("A", "f"), &None, None, &[]);
+    assert_eq!(
+        got, None,
+        "a cyclic chain produced an answer; it must degrade to the decode instead"
+    );
+}
+
+/// An `OpenNone` anywhere on the chain degrades the whole walk.
+///
+/// The walk has no bag, so it cannot resolve what `OpenNone` defers. Returning
+/// a partial answer here would be the one failure mode this form has that
+/// serves a WRONG answer rather than costing a decode.
+#[test]
+fn an_open_none_on_the_chain_degrades_to_a_decode() {
+    let a = m(vec![(
+        moc("A", "f"),
+        Conclusion::Link {
+            target: moc("B", "f"),
+            arity: None,
+            receiver: ReceiverRule::Thread,
+        },
+    )]);
+    let b = m(vec![(moc("B", "f"), Conclusion::OpenNone)]);
+    let resolve = move |class: &str| match class {
+        "A" => vec![("/a.pm".to_string(), Some(a.clone()))],
+        "B" => vec![("/b.pm".to_string(), Some(b.clone()))],
+        _ => vec![],
+    };
+    assert_eq!(
+        crate::model::witnesses::registry::follow_link_with(&resolve, &moc("A", "f"), &None, None, &[]),
+        None,
+        "the walk answered past an OpenNone it cannot resolve"
+    );
+}
+
+/// A candidate that PROVES `None` does not stop the ladder — the next one is
+/// tried, exactly as the live chase's candidate loop does.
+///
+/// "Proves" is the load-bearing word, and it is why the empty map here declares
+/// `B` closed. An empty map for a class that is NOT closed returns `Decode`,
+/// not `None`: absence is only conclusive for a class whose ancestors are all
+/// accounted for. My first version of this test omitted that and expected the
+/// ladder to continue over an inconclusive absence — the walker was right and
+/// the expectation was wrong.
+#[test]
+fn a_none_candidate_does_not_stop_the_ladder() {
+    let empty = Arc::new(ConclusionMap(
+        Default::default(),
+        ["B".to_string()].into_iter().collect(),
+    ));
+    let real = m(vec![(
+        moc("B", "f"),
+        Conclusion::Value(crate::model::file_analysis::InferredType::ArrayRef),
+    )]);
+    let resolve = move |class: &str| match class {
+        "B" => vec![
+            ("/empty.pm".to_string(), Some(empty.clone())),
+            ("/real.pm".to_string(), Some(real.clone())),
+        ],
+        _ => vec![],
+    };
+    assert_eq!(
+        crate::model::witnesses::registry::follow_link_with(&resolve, &moc("B", "f"), &None, None, &[]),
+        Some(crate::model::file_analysis::InferredType::ArrayRef),
+        "the first candidate's None ended the walk instead of falling through"
+    );
+}

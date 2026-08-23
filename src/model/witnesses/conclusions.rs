@@ -269,6 +269,57 @@ pub fn verify_absent_conclusions() -> bool {
     *V.get_or_init(|| std::env::var("PERL_LSP_CONCL_EQUIV").is_ok())
 }
 
+/// How many map-to-map hops a `Follow` may take before giving up.
+///
+/// A `Link` chain is a graph walk over files, so it needs a bound of its own —
+/// the live chase's `VisitedKey` guards the live chase, not this projection. A
+/// cycle is caught by the visited set; the cap catches a long-but-acyclic
+/// chain, where continuing costs more than the decode it is replacing.
+pub const MAX_FOLLOW_HOPS: usize = 8;
+
+/// Marks the calling thread as running a BAKE rather than a live query.
+///
+/// The exit sites below cannot tell the difference on their own — both see
+/// `module_index: None` — and only a bake's misses are candidates for
+/// residualization. A live query with no index is an ordinary degraded lookup
+/// and must not be counted.
+pub struct BakeScope;
+
+thread_local! {
+    static IN_BAKE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+impl BakeScope {
+    pub fn enter() -> Self {
+        IN_BAKE.with(|f| f.set(true));
+        BakeScope
+    }
+}
+
+impl Drop for BakeScope {
+    fn drop(&mut self) {
+        IN_BAKE.with(|f| f.set(false));
+    }
+}
+
+/// Record that a bake reached a point where it would have consulted the index.
+///
+/// `nameable` says whether the would-be target has a portable `ConclusionKey`.
+/// The split is the whole decision: only a nameable exit can become a `Link`,
+/// so the ratio says how much of the `OpenNone` population this line of work
+/// can actually reach, and whether it is worth building the machinery for.
+pub fn note_bake_exit(site: &'static str, nameable: bool) {
+    if !IN_BAKE.with(|f| f.get()) {
+        return;
+    }
+    crate::util::ghost_stats::count(if nameable {
+        "residual.nameable"
+    } else {
+        "residual.poisoned"
+    });
+    crate::util::ghost_stats::count(&format!("residual.site.{site}"));
+}
+
 /// The process-wide default registry.
 ///
 /// The bake runs per file on the persist path, and `with_defaults()` allocates
@@ -327,6 +378,30 @@ pub fn bake_full(
     symbols: &[(Option<String>, String, bool)],
     parents: &[(String, Vec<String>)],
 ) -> ConclusionMap {
+    bake_in_context(bag, registry, local_packages, symbols, parents, None)
+}
+
+/// `bake_full` with the file's OWN context — scopes, frameworks, parents.
+///
+/// Withholding the module index is the design (a materialized cross-file value
+/// would freeze a world that can change without this file changing). Withholding
+/// everything else was an accident: passing `context: None` also denies the bake
+/// the file's scopes, per-package frameworks and LOCAL parent edges, so it could
+/// not walk a parent chain that lives entirely in this file. Some of
+/// `bake.no_bare_answer` was that rather than genuine cross-file dependence.
+///
+/// A local-only context is also what makes "where would the chase have gone"
+/// well-posed: with no context at all, the chase stops before it reaches the
+/// point where it would have asked the index.
+pub fn bake_in_context(
+    bag: &WitnessBag,
+    registry: &ReducerRegistry,
+    local_packages: &std::collections::HashSet<String>,
+    symbols: &[(Option<String>, String, bool)],
+    parents: &[(String, Vec<String>)],
+    ctx: Option<&super::reducers::BagContext<'_>>,
+) -> ConclusionMap {
+    let _bake = BakeScope::enter();
     let mut map = HashMap::new();
     let mut enumerate = |att: WitnessAttachment, map: &mut HashMap<_, _>| {
         let Some(key) = ConclusionKey::from_attachment(&att) else {
@@ -335,7 +410,7 @@ pub fn bake_full(
         if map.contains_key(&key) {
             return;
         }
-        let c = bake_one(bag, registry, &att, local_packages);
+        let c = bake_one(bag, registry, &att, local_packages, ctx);
         map.insert(key, c);
     };
     // Declared subs and methods first, so the attachment-index pass below
@@ -358,7 +433,7 @@ pub fn bake_full(
         let Some(key) = ConclusionKey::from_attachment(att) else {
             continue;
         };
-        let conclusion = bake_one(bag, registry, att, local_packages);
+        let conclusion = bake_one(bag, registry, att, local_packages, ctx);
         match map.entry(key) {
             std::collections::hash_map::Entry::Vacant(v) => {
                 v.insert(conclusion);
@@ -426,6 +501,7 @@ fn bake_one(
     registry: &ReducerRegistry,
     att: &WitnessAttachment,
     local_packages: &std::collections::HashSet<String>,
+    ctx: Option<&super::reducers::BagContext<'_>>,
 ) -> Conclusion {
     // A sole edge to a class this file does not declare is the cross-file
     // hop, and it residualizes rather than resolving. The bake runs with no
@@ -465,9 +541,10 @@ fn bake_one(
                 arity_hint: arity,
                 receiver,
                 args: Vec::new(),
-                // No context: the bake CANNOT reach another file, so every
-                // cross-file fallback residualizes instead of materializing.
-                context: None,
+                // The file's own context, with `module_index: None` — see
+                // `bake_in_context`. The index stays withheld by design; the
+                // rest is what lets a local parent chain resolve at all.
+                context: ctx,
             },
         )
     };

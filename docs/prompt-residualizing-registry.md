@@ -1,10 +1,14 @@
 # Design brief: a residualizing mode for the reducer registry
 
-**Status: designed, not implemented.** The question section below is the
-original brief; the **Design answer** section at the end settles the five
-sub-questions and stages the work. The conclusion layer
-(`docs/prompt-conclusion-layer.md`) is built and landed; this is the one
-thing standing between it and most of its value.
+**Status: in flight.** The question section below is the original brief.
+The first **Design answer** settles the five sub-questions and stages the
+work; slices 0 and 1 are landed (local-context bake, `Link` follow scored
+by the extended checker). The **Slice 0 measurement** found the bridge
+poison rate fatal-as-designed, and **Design answer, round 2** resolves it:
+the bridge arm becomes a consult-side guard on the existing class-keyed
+bridge map — never bake-time knowledge. The conclusion layer
+(`docs/prompt-conclusion-layer.md`) is built and landed; this brief is the
+one thing standing between it and most of its value.
 
 ## The gap, in one number
 
@@ -330,3 +334,153 @@ frontiers small. `OpenNone` hides the same dependence inside an opaque
 decode, where the diff cannot see it. The 91,525 number is the decode
 cost today; the same population is the propagation cost tomorrow, and
 `Link` retires both.
+
+---
+
+## Slice 0 measurement: the bridge poison is sound and nearly always vacuous
+
+Instrumented per the design answer's sub-question 1 (`residual.nameable` /
+`residual.poisoned` / per-site), over one substrate `--check`.
+
+| exit site | count | nameable? |
+|---|---|---|
+| `moc_primary` | 46,590 | yes |
+| `parent_walk` | 46,590 | yes |
+| `bridge` | 46,572 | **no — poisons** |
+| `slot_type` | 533 | yes |
+
+Read per EXIT that is 66.8% nameable. Read per CHASE it is far worse, and the
+per-chase reading is the one that governs: the three big sites are sequential
+fallbacks of the SAME chase (primary → parents → bridges), so a chase that ends
+with no answer has hit all three, and one poisoned exit poisons the chase.
+46,572 of 46,590 — **99.96% of chases touch the poisoning site.**
+
+That would have ended this line of work. It is also wrong, and the thing that
+makes it wrong is not visible from the bake.
+
+**In LIVE mode, the bridge consult yields nothing 131,658 times against 2,251
+that yield — it is vacuous 98.3% of the time.** A would-be consult that would
+have returned nothing is not a dependence, and counting it as one makes the
+poison rate look total when the real one is ~1.7%.
+
+So the bake-time rule "a bridge exit poisons" is SOUND but pessimistic by a
+factor of ~59, and the pessimism costs essentially the whole reachable
+population. The bake cannot currently do better, because whether any file
+bridges to class C is index-side knowledge and the bake has no index — by
+design.
+
+**Proposed refinement to the staging.** Make bridge-existence knowable at bake
+time, so the exit poisons only when it would really have found something:
+
+- an index-side set of classes that ANY file bridges to, consulted at bake —
+  cheap to build (the bridge registry already exists for
+  `for_each_entity_bridged_to`), and a set membership test rather than a walk;
+- or the same fact recorded per class in the map, decided consult-side where
+  the index is present — the shape the closedness check already uses, and it
+  has the same "the property is global, not per-file" character that made
+  closedness wrong to compute locally.
+
+Either way the measurement to re-run afterwards is the per-chase poison rate,
+not the per-exit ratio. **Whoever picks this up should not size the work from
+the 66.8%.**
+
+---
+
+# Design answer, round 2: the bridge arm becomes a consult-side guard
+
+Of the two refinements above, take the second — and take it in a stronger
+form than either as written: **the bake learns nothing about bridges, the
+map stores nothing about them, and the consult side guards every trust
+decision with a live O(1) test.**
+
+## Why the bake-time set is closedness attempt 2 again
+
+Consulting an index-side bridged-to set at bake bakes a **negative global
+fact** — "no file bridges to C" — into the map. The map's invalidation
+covers exactly two things: the derivation code (the `build.rs`
+fingerprint) and the file's own stamp. Foreign registry state is covered
+by neither, by design. So when a newly indexed file (or a new `.rhai`)
+starts bridging to C, nothing about the consumer file changed, no re-bake
+fires, and its map serves a `Link` that skips the bridged answer —
+durably, not per-file. That is the closedness mistake ("a global property
+computed from one file's view") in baked form, and it would also be the
+bake's first index read, breaking the invariant every soundness argument
+in this layer leans on. The staleness has no cheap fix: covering it means
+a new invalidation axis (bridge-set changes → every map baked under the
+old set), which is heavy machinery guarding a rare event.
+
+The consult side is closedness attempt 3, verbatim: the property is
+global, so ask it where the global union lives, at query time, where the
+index is present. It is self-healing in both directions with zero new
+invalidation machinery — a new bridge makes the guard fail → decode →
+right answer; a removed bridge makes it pass → trust.
+
+## The guard is already built
+
+`IndexCore.edges.bridges` is a class-keyed `DashMap<String, ModuleBucket>`
+(`module_index/parts.rs`), fed and purged on the one sanctioned edge
+write path — it is what `for_each_entity_bridged_to` reads. The guard is
+a non-empty-bucket test on that map: O(1), and NOT a new parallel reverse
+index (which the plugin ADR retired a class of). Use bucket-non-empty
+rather than key-exists — a purge can leave an empty bucket, and while a
+false "bridged" only costs a decode (sound, slow), there is no reason to
+pay it forever. The `CrossFileLookup` method carrying the predicate
+follows the delegate-each discipline `ScopedLookup` already enforces for
+the residency views.
+
+## Which conclusions the guard covers — and which it need not
+
+The live ladder is local reducers → primary → parents → **bridges**. A
+baked `Value` came from an arm that beats the bridge arm in every world,
+so `Value` (and `ReturnOf`) need no guard. The two forms that encode
+"everything before the bridge arm said None" are exactly the ones that
+must be guarded before trusting:
+
+- **absence** (trusted `None`), and
+- **`Link`** (and its coming fan-out — the ladder it encodes is
+  primary → parents, with the bridge arm deliberately outside it).
+
+With the guard in place, the bridge exit stops being a poison AND stops
+being a recorded residual: it leaves the residual's obligations entirely.
+The `Link` means "the primary→parents ladder"; the guard covers the third
+arm globally at trust time. The per-chase poison rate falls from 99.96%
+to the true per-class bridge rate.
+
+## The guard closes a latent hole that predates residualization
+
+Trusted absence today requires only "class has no ancestors"
+(`parents_of` empty). The bridge arm runs regardless of ancestry. So a
+parentless class that some file bridges to has its absence trusted RIGHT
+NOW — served `None` while the live chase answers through the bridge.
+`PERL_LSP_CONCL_EQUIV` shows 0 breaks on the substrate, which means the
+substrate happens to contain no parentless bridged class — corpus luck,
+not soundness. The guard closes that hole as a side effect, which is why
+it should land ahead of any `Link` widening, not with it.
+
+## Two measurements for whoever implements
+
+1. **The 98.3% vacuity is per-call; the guard is per-class.** If the
+   2,251 real yields concentrate in a few hot classes (Mojo app surfaces
+   are the obvious suspects), those classes' conclusions stay permanently
+   guarded-off — correct, but the decode cost then concentrates exactly
+   where bridges are real. A per-class yield histogram sizes the follow-on
+   below before anyone commits to it.
+2. **Placement:** there is one `map.evaluate` call site today
+   (the `PackageSymbol` primary in `registry.rs`); the guard goes there,
+   for `MethodOnClass` keys only — bridges do not apply to `SlotType`
+   ("slot writes are real code, not plugin entities") or `TypeName`. If a
+   second call site appears, wrap it (`evaluate_guarded` taking the
+   predicate) so the obligation is typed rather than remembered.
+
+## The follow-on that empties the guard's decode arm (later, not now)
+
+The bridge declaration is **local to the bridging file** — its plugin
+namespace names the target class. So the bridging file's own bake can
+evaluate its bridged entities and store them under portable
+`MethodOnClass{C, name}` keys. Note what that buys: `Symbol(sid)` is the
+attachment the live bridge consult cannot encode portably, but it is
+resolvable *locally at bake time* — the bake is exactly the place where
+file-internal attachments become portable. Then "bridged → decode"
+refines to "bridged → consult the bridging files' maps via the same
+`bridges` bucket," and the 1.7% pays a map lookup instead of a decode.
+Size it from the per-class histogram first.
