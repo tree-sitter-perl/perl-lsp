@@ -279,6 +279,54 @@ one-round as the degraded mode under sustained load. And one rule: a
 consult mid-flush — open doc included — reads gen N like everyone
 else, never a half-built N+1.
 
+#### 3c″. The diff must be on EVALUATED conclusions — the index-free map is not the cutoff artifact
+
+Stage 2 as built bakes each file's map **index-free** (deliberately —
+"edges, not values": a materialized cross-file value would freeze a
+world that can change without this file changing). That is the right
+*persisted* unit, and it is NOT the artifact §3c's diff may cut on. An
+index-free map captures only local conclusions: when C's map changes,
+B's map — local-only by construction — does not change, even though B's
+*answers* (which chase through to C) do. A propagation that cuts on
+index-free map diffs therefore stops at B and never reaches B's
+consumers. That is the closed Surface-freshness unsoundness
+(`skipping-cross-file-work.md` item 3) reproduced one level up:
+a local projection diffed as if it were a global conclusion.
+
+So the driver's diffed artifact is the **evaluated export surface** —
+each exported key's answer evaluated against the current store
+(following `Link`s, applying the absence rules) — recomputed when a
+provider in the file's closure re-enters the worklist and diffed
+against the previously evaluated set. The index-free map stays what is
+persisted and invalidated by the fingerprint; the evaluated surface is
+cheap (map lookups, no decodes) and is what makes the cutoff sound
+transitively: C's change diffs C's evaluated surface, which dirties B,
+whose evaluated surface diffs (through the Link/consult), which
+dirties A — or doesn't, and the chain cuts *there*, correctly.
+
+This also answers the re-stamp question the sweep measurements raised:
+**94% of `stamp_method_call_targets` re-evaluations consult the index
+and change nothing (`crossfile_and_stable`), and no sound gate for
+them exists today** — unconditional skip is 0.43% silent divergence
+(closed item 1), local-ancestry covers 2.9% and shrinks with corpus
+(closed item 2), Surface freshness is unsound (closed item 3). The
+sound gate is exactly this driver: stamp each file's frozen
+`MethodTarget`s with the conclusion-store generation they were derived
+under; a re-stamp is owed only to files a diffed evaluated surface
+reached through the worklist. Until the driver exists, the honest
+statement is that the 94% is not skippable — which is the fourth
+independent motivation for building it, joining the fingerprint-clear
+re-bake defect, the enrichment-recursion replacement, and the
+generational flush itself.
+
+One adjacent lever the miss-cost data licenses separately: a failed
+resolution costs 32× a hit because it exhausts the candidate space,
+and that space is the corpus because workspace-tier Perl passes
+visibility unscoped. `VisibilityAxis`/`ScopedLookup` narrowing (the
+@INC tier already landed; the workspace tier's slot is still empty)
+shrinks what a miss must exhaust, independently of any conclusion
+machinery.
+
 ### 3d. Durable demand-driven query memoization (salsa / red-green)
 
 Make each consult a tracked query: memoize
