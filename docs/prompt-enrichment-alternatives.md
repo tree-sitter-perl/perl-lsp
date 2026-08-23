@@ -279,6 +279,37 @@ one-round as the degraded mode under sustained load. And one rule: a
 consult mid-flush — open doc included — reads gen N like everyone
 else, never a half-built N+1.
 
+#### 3c′-v0. The driver's first slice: the background re-bake queue, not lazy consult-time repair
+
+The fingerprint-clear gap (conclusions wiped, blobs kept, nothing
+re-bakes; the layer dark until a manual full clear) gets the driver's
+minimal form, NOT a lazy bake-on-consult. Three reasons the lazy form
+loses:
+
+1. **It pays the bake at the worst time.** A consult-time bake needs the
+   whole analysis, so a consult on an evicted file pays a decode PLUS a
+   bake where today it pays only the decode — strictly worse until the
+   map exists, on the query path, which is the availability-hole shape
+   (no synchronous CPU where answers are owed).
+2. **It converges only over consulted keys**, so the measurement trap it
+   exists to fix survives mid-convergence: a run after a rebuild still
+   measures a partially-empty layer, just less predictably.
+3. **It makes readers writers.** The consult path is read-only by
+   architecture (async handlers zero I/O; writes live on the
+   resolver/persist threads). A lazy bake breaks that seam for a repair
+   the background can do trivially.
+
+The v0 queue: on fingerprint mismatch (startup) or clear, enumerate
+files with a valid blob and no valid conclusion row, enqueue, and drain
+on the persist writer in chunks (`write_in_chunks` discipline) — each
+item is decode-parts → `bake_full` → store. No diffing, no propagation,
+no generation semantics beyond what the store already stamps: this
+slice's whole contract is "the layer never stays dark," and the full
+§3c′ driver grows out of the same queue later. Gate:
+`conclcache.known_absent` returns to ~0 after a source edit + restart
+with no `--clear-cache`; warm-ready wall unmoved (the work is
+post-ready background); bar green.
+
 #### 3c″. The diff must be on EVALUATED conclusions — the index-free map is not the cutoff artifact
 
 Stage 2 as built bakes each file's map **index-free** (deliberately —
