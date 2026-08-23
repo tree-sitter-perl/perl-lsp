@@ -537,6 +537,54 @@ soundness, and `PERL_LSP_CONCL_EQUIV` is the induction check; there is
 no additional mechanism to build, but a follow-break must be triaged as
 "my frame rule" vs "the target's map" before either is blamed.
 
+## Round 4 — measured outcome: sound, and parked
+
+Both halves landed (recording `f337fc7`, poisoning `699488d8` — an
+opaque-frame counter, nesting, with a memo companion bit so a subtree
+first reached transparently cannot launder itself into a rung when
+re-reached from inside a combining frame). Follow breaks went 44 → 0;
+the 8 residual disagreements are cycle-guard artifacts, classified and
+reproducible.
+
+**And the feature buys nothing at today's map composition.** Decodes do
+not move (4,103 → 4,104): `follow_one` abandons at the first rung whose
+target map says `Decode`, and with ~84k `OpenNone` still in the maps
+that is nearly every walk — 7,992 incomplete follows against 34
+answered. The 91k `OpenNone` population is NOT cross-file exits waiting
+to be named; it is keys that genuinely need the bag.
+`PERL_LSP_MINT_LINKS` stays off, now for a measured cost reason rather
+than a soundness one.
+
+What this round retains: the poison machinery and its frame taxonomy
+(the opaque-frame table in the `699488d8` message), EQUIV scoring for
+`Follow`, the self-rung exclusion (left in, self-rungs converted nearly
+the whole `OpenNone` population into two-hop abandons: 14,923 incomplete
+vs 15 answered), and this negative result with its numbers. Do not
+re-open `Link` widening against the 91k aggregate.
+
+Where the arc points instead, in order:
+
+1. **The re-bake driver is now the blocking piece, and it has a
+   customer.** The open defect — a fingerprint change clears conclusions
+   and nothing re-bakes them, so the layer stays dark until a manual
+   full clear (`conclcache.known_absent` 156k in that state) — is the
+   first concrete job for the generational flush driver
+   (`docs/prompt-enrichment-alternatives.md` §3c′): on fingerprint
+   mismatch, clear and enqueue every file as generation 1's frontier;
+   "absent means decode" keeps the interim honest. The store is already
+   generation-stamped and idle. A source edit takes the same path, so
+   this is not a special case — it is the driver's cold-start.
+2. **Attribute `OpenNone` by cause before widening any conclusion
+   form.** The candidate widening is binder-carrying residuals (the
+   `CallReturn` shape — one arity and one receiver rule is exactly what
+   a call frame substitutes away, so `Link` cannot express it; the
+   algebra's dependent form `ReturnOf` is the precedent). Whether it is
+   worth building depends on the 91k's composition — per-cause counters
+   on the bake's demotions (`no_bare_answer` / binder-probe demotion /
+   poisoned residual / multi-arm) decide it, not the aggregate. The
+   round-3 lesson generalizes: every sizing error in this arc came from
+   reading a population by its total.
+
 ## The follow-on that empties the guard's decode arm (later, not now)
 
 The bridge declaration is **local to the bridging file** — its plugin
