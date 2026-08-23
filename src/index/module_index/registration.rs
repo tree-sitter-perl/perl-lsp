@@ -914,6 +914,31 @@ impl ModuleIndex {
         self.core.bag_cache.read().ok().and_then(|g| g.clone())
     }
 
+    pub fn set_conclusion_cache(
+        &self,
+        cache: Arc<crate::index::conclusion_cache::ConclusionCache>,
+    ) {
+        if let Ok(mut g) = self.core.conclusion_cache.write() {
+            *g = Some(cache);
+        }
+    }
+
+    pub(super) fn conclusion_cache_ref(
+        &self,
+    ) -> Option<Arc<crate::index::conclusion_cache::ConclusionCache>> {
+        self.core.conclusion_cache.read().ok().and_then(|g| g.clone())
+    }
+
+    /// A changed file's bake is void — drop it from the resident cache as well
+    /// as the store. Called beside `invalidate_bag_cache`, and for the same
+    /// reason: a resident derived copy outliving its source is how a stale
+    /// answer gets served with full confidence.
+    pub fn invalidate_conclusions(&self, path: &std::path::Path) {
+        if let Some(c) = self.conclusion_cache_ref() {
+            c.invalidate(path);
+        }
+    }
+
     /// Install the relational ref index's read-connection opener (once).
     /// Callable post-`Arc` (interior `OnceLock`) because the hub is shared
     /// before the workspace root — and therefore the cache path — is known.

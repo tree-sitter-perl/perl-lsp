@@ -89,6 +89,10 @@ pub(crate) struct IndexCore {
     /// install stays visible to them. See `docs/adr/memory-slice-2-lru.md`.
     pub(crate) bag_cache:
         Arc<std::sync::RwLock<Option<Arc<crate::index::pack_bag_cache::PackBagCache>>>>,
+    /// Resident baked conclusions, byte-bounded. Installed alongside the bag
+    /// cache; absent on an index with no store, which simply keeps decoding.
+    pub(crate) conclusion_cache:
+        Arc<std::sync::RwLock<Option<Arc<crate::index::conclusion_cache::ConclusionCache>>>>,
 }
 
 impl IndexCore {
@@ -118,6 +122,7 @@ impl IndexCore {
             shape_bumps: std::sync::atomic::AtomicU64::new(0),
             long_lived: std::sync::atomic::AtomicBool::new(false),
             bag_cache: Arc::new(std::sync::RwLock::new(None)),
+            conclusion_cache: Arc::new(std::sync::RwLock::new(None)),
         }
     }
 

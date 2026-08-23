@@ -506,6 +506,85 @@ impl ReducerRegistry {
                         if !super::session::spend_consult(idx) {
                             break;
                         }
+                        // THE CONCLUSION LOOKUP, ahead of the decode.
+                        //
+                        // This is the whole point of the layer: 78% of a
+                        // consult is the chase, not the fetch, and a baked
+                        // answer skips both. Placed after the session memo
+                        // (a hit there is cheaper still) and before
+                        // `bag_present` (which decodes).
+                        //
+                        // The three outcomes are NOT interchangeable:
+                        //   Answer  — serve it, no decode.
+                        //   None    — the map PROVES no answer; fall through
+                        //             to the next candidate exactly as a
+                        //             decoded miss would, still no decode.
+                        //   Decode  — `OpenNone`: unbakeable here, so pay the
+                        //             full price for this key alone.
+                        // A `Follow` is not yet honoured — see below.
+                        if let Some(key) =
+                            super::ConclusionKey::from_attachment(q.attachment)
+                        {
+                            if let Some(map) = idx.conclusions_for(&cached.path) {
+                                match map.evaluate(
+                                    &key,
+                                    q.receiver.as_ref(),
+                                    q.arity_hint,
+                                    &q.args,
+                                ) {
+                                    super::Outcome::Answer(t) => {
+                                        crate::util::ghost_stats::count("consult.baked_answer");
+                                        return ReducedValue::Type(t);
+                                    }
+                                    // ABSENT. The spec lets this mean a proven
+                                    // `None` and skip the candidate outright —
+                                    // "the sharpest knife in the design" — but
+                                    // that is sound only if the bake enumerated
+                                    // every key the bag could answer, and today
+                                    // it does not: it walks the bag's
+                                    // attachment index, while the live chase
+                                    // also answers keys that carry no witnesses
+                                    // (inheritance edges, reducer synthesis).
+                                    //
+                                    // A wrongly-absent key makes the ladder
+                                    // skip a candidate that would have
+                                    // answered; the answer is then found
+                                    // further up the parent walk, so the OUTPUT
+                                    // agrees and only the cost betrays it.
+                                    // Measured on `--dump-package Catalyst`:
+                                    // trusting absence took 892 decodes to
+                                    // 2,721 and 2.76s to 4.20s, byte-identical
+                                    // output throughout. A silent 3x, invisible
+                                    // to every correctness check we have.
+                                    //
+                                    // So absence falls through to the decode
+                                    // until the enumeration is provably
+                                    // complete. `PERL_LSP_TRUST_ABSENT` turns
+                                    // the knife back on for measuring that work
+                                    // as it lands.
+                                    super::Outcome::None => {
+                                        crate::util::ghost_stats::count("consult.baked_none");
+                                        if std::env::var("PERL_LSP_TRUST_ABSENT").is_ok() {
+                                            continue;
+                                        }
+                                    }
+                                    // Cross-file hop. Following it needs the
+                                    // ladder to re-enter at another file's
+                                    // map, which is the next slice; until
+                                    // then it degrades to the decode it would
+                                    // have done anyway — slower than it will
+                                    // be, never wrong.
+                                    super::Outcome::Follow { .. } => {
+                                        crate::util::ghost_stats::count("consult.baked_follow_unhandled");
+                                    }
+                                    super::Outcome::Decode => {
+                                        crate::util::ghost_stats::count("consult.baked_open");
+                                    }
+                                }
+                            } else {
+                                crate::util::ghost_stats::count("consult.not_baked");
+                            }
+                        }
                         crate::util::ghost_stats::count("moc.provider_fetched");
                         // The three costs of one cross-file consult, split
                         // because a conclusion layer would remove the first

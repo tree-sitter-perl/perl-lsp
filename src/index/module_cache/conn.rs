@@ -34,7 +34,7 @@ pub fn cache_dir_for_workspace(workspace_root: Option<&str>) -> Option<PathBuf> 
 /// pack language gets its own `modules-{lang}.db` so names never comingle on
 /// disk (a Perl `Box` and a C++ class `Box` live in different files). The
 /// ONE spelling both openers share.
-pub(super) fn db_path_for(dir: &std::path::Path, lang: &str) -> PathBuf {
+pub fn db_path_for(dir: &std::path::Path, lang: &str) -> PathBuf {
     if lang == "perl" {
         dir.join("modules.db")
     } else {

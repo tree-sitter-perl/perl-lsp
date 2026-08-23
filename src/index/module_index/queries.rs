@@ -67,6 +67,7 @@ impl ModuleIndex {
         // evicted once persisted; queries that need the whole analysis
         // rehydrate through this, same as the pack sub-indexes. Fixed
         // 128 MiB cap (Perl analyses are 10-100x smaller than cpp ones).
+        let ckey = key.clone();
         let loader = move |path: &std::path::Path, want_bag: bool| {
             // Raw walk path first (preserves the pre-diag behavior), canonical
             // as a fallback spelling; the discriminated helper survives the
@@ -101,6 +102,29 @@ impl ModuleIndex {
             "perl-hub",
             loader,
         )));
+
+        // Conclusions ride the same cache-key. 16 MiB rather than the bag
+        // cache's 128: the whole substrate's maps measured 15.4 MB, so this
+        // holds a realistic workspace outright and eviction is the exception.
+
+        let concl_cap = std::env::var("PERL_LSP_CONCL_CACHE_MB")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .map(|mb| mb * 1024 * 1024)
+            .unwrap_or(16 * 1024 * 1024);
+        self.set_conclusion_cache(Arc::new(
+            crate::index::conclusion_cache::ConclusionCache::new(concl_cap, move |path| {
+                let dir = crate::index::module_cache::cache_dir_for_workspace(ckey.as_deref())?;
+                let db = crate::index::module_cache::db_path_for(&dir, "perl");
+                let conn = crate::index::module_cache::open_reader_retrying(&db).ok()?;
+                let at = crate::index::module_cache::current_generation(&conn);
+                crate::index::module_cache::load_conclusions(
+                    &conn,
+                    &path.to_string_lossy(),
+                    at,
+                )
+            }),
+        ));
     }
 
     /// Get the workspace root URI if set.
