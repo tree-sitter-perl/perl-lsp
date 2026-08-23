@@ -350,6 +350,27 @@ independent motivation for building it, joining the fingerprint-clear
 re-bake defect, the enrichment-recursion replacement, and the
 generational flush itself.
 
+**The gate, specified (push, not pull).** Do NOT compute `providers(F)`
+at check time — that resurrects the transitive-closure walk the
+enrichment-key memo existed to contain. Invert it: the FLUSH marks.
+When the worklist enqueues consumer F (a provider's evaluated surface
+diffed), it also bumps a store-side `last_provider_diff_gen[F]`. The
+file carries `stamp_generation` (one u64, set when
+`stamp_method_call_targets` last ran with the index). The gate is O(1):
+`stamp_generation >= last_provider_diff_gen[F]` ⇒ skip the re-stamp;
+anything else — never stamped, no recorded mark, post-clear wipe —
+**fails open to today's behavior**. Three consequences: no sequencing
+dependency (before the flush is the standing path the mark is never
+written and the gate fails open everywhere, so it lands WITH the
+store-wiring slice, not after it); new-file and deleted-file
+candidate-set changes are covered because registration and removal
+already route through `record_and_dirty` → `dirty_consumers` → the
+enqueue that writes the mark — the gate is exactly as sound as the
+freshness edge coverage, no more; and it is EQUIV-scored from the first
+commit, because the protected population is the 0.43%
+freeze-divergence class whose silent drift is why the unconditional
+skip was rejected.
+
 One verb-scoped carve-out to the 94% figure, established by ablation
 after this section was written: for `--check` specifically the entire
 re-stamp is **dead computation** — diagnostics never read
