@@ -643,6 +643,28 @@ linkable / self-rung) are keys PRESENT as `OpenNone` — a chase that had
 local material it couldn't bake — and stay decodes; they are not
 absence's business.
 
+**Outcome, and one correction the build found.** Landed as specified —
+three verdicts, continue-the-loop, reopened-package test mutation-
+verified — for a 74% chase cut (`consult.attempt` 1,715 → 454 ms,
+provider fetches 105,670 → 33,986; decodes barely move because the
+resident tier was absorbing repeats — the chase was what paid).
+Coverage matched the stated expectation. The correction: the rule above
+stated soundness per KEY ("absent from this file's map ⇒ this file
+doesn't answer it locally"), and the chase composes per CLASS — a file's
+bag can carry witnesses on a PARENT's key
+(`PackageSymbol{Mojo::Server, app}` answering
+`{Mojo::Server::Daemon, app}` from the same map), so key-absence alone
+misjudged 40 consults per check. The fix: the map walks the enumerated
+class's declared parents WITHIN ITSELF before judging an absence
+(depth-capped, not cycle-guarded — a same-file declared-parent chain is
+short, and a truncation degrades to the verdict the absence gave
+anyway). Also from the build, two instrument rules worth keeping: an
+equivalence check for a bake-time verdict must compare against an
+INDEX-LESS chase (the context the bake ran under), or it fires on
+correct behavior at scale; and a verdict about a key cannot be validated
+against a chase about a class — when a checker disagrees at scale,
+suspect the question before the mechanism.
+
 ## The follow-on that empties the guard's decode arm (later, not now)
 
 The bridge declaration is **local to the bridging file** — its plugin
