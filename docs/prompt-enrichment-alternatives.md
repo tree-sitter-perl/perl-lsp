@@ -350,6 +350,28 @@ independent motivation for building it, joining the fingerprint-clear
 re-bake defect, the enrichment-recursion replacement, and the
 generational flush itself.
 
+**The flush's two products, disentangled** (a build-time sharpening of
+this section's original phrasing, which conflated them). Because the
+bake is index-free, a downstream change moves a consumer's *answers*
+without moving its *map* — so the write set of a flush is exactly the
+SEEDS' rows, and the wave costs one map decode per reached file, never
+a blob decode or re-bake. Two distinct products follow: the **refresh
+set** (`changed` — files whose evaluated answers moved; what
+enrichment, diagnostics, and the re-stamp gate consume) and the
+**generation** (the storage-consistency clock over the seeds' rows).
+The generation is not "the thing consumers read" as a driver product;
+it earns its keep three ways: torn-read prevention when a multi-seed
+flush writes several rows (a chase following Links across two seeds
+mid-write would otherwise compose an answer belonging to neither N nor
+N+1), the monotone counter the re-stamp gate compares
+`stamp_generation` against, and the deterministic degraded signal
+("answers as of gen N, k pending"). The invariant that makes seeds-only
+writing sound — an index-free bake can never produce a value that
+depended on another file — is silent in its violation (a bake that
+learned to consult an index would quietly stop refreshing consumers),
+so the driver ships with its own equivalence switch re-baking reached
+files and comparing, the same discipline one tier down.
+
 **The gate, specified (push, not pull).** Do NOT compute `providers(F)`
 at check time — that resurrects the transitive-closure walk the
 enrichment-key memo existed to contain. Invert it: the FLUSH marks.
