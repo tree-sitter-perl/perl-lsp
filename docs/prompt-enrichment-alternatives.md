@@ -403,6 +403,24 @@ commit, because the protected population is the 0.43%
 freeze-divergence class whose silent drift is why the unconditional
 skip was rejected.
 
+Three sharpenings from the build (all of the silent-failure class the
+spec's EQUIV requirement exists to catch). The mark covers the
+**enqueued** set, not the changed set: a consumer whose own conclusion
+answers did not move can still *dispatch* differently once its provider
+changed, because a `MethodTarget` resolves through the index rather
+than off a surface — marking only movers would leave exactly those
+frozen stamps answering forever, so `FlushOutcome` carries both sets
+distinctly. The stamp is an `Option`, never a 0-sentinel: generation 0
+is a real clock reading (every stamp taken before the first flush), and
+mapping "never stamped" onto it makes a pre-flush stamp compare equal
+to the first wave's mark — postdating it — and skip a re-stamp it was
+owed. And the two halves are sessional TOGETHER (`serde(skip)` stamp,
+in-RAM marks): persisting either half without the other compares a real
+value against a lost one and skips owed work, so neither may outlive
+the other. The clock bumps before the marks land, which is sound
+because the caller registers the changed files' fresh analyses before
+it marks — a stamp reading the new clock also sees the new provider.
+
 One verb-scoped carve-out to the 94% figure, established by ablation
 after this section was written: for `--check` specifically the entire
 re-stamp is **dead computation** — diagnostics never read
