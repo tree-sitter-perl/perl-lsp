@@ -212,12 +212,22 @@ pub fn encode_analysis(fa: &FileAnalysis) -> Option<EncodedAnalysis> {
             .keys()
             .map(|c| (c.clone(), fa.declared_parents(c).to_vec()))
             .collect();
-        let map = crate::model::witnesses::bake_full(
+        // The file's OWN context, index deliberately withheld. Without this
+        // the bake could not walk even a local parent chain.
+        let local_ctx = crate::model::witnesses::BagContext {
+            scopes: &fa.scopes,
+            package_framework: &fa.packages,
+            module_index: None,
+            package_parents: &fa.packages,
+            app_surface_consumers: &fa.plugin.app_surface_consumers,
+        };
+        let map = crate::model::witnesses::bake_in_context(
             &bag,
             crate::model::witnesses::shared_registry(),
             &fa.packages.keys().cloned().collect(),
             &syms,
             &parents,
+            Some(&local_ctx),
         );
         bincode::serialize(&map)
             .ok()
@@ -918,11 +928,25 @@ mod bake_probe {
                     )
                 })
                 .collect();
-            let map = crate::model::witnesses::bake_with_symbols(
+            let parents: Vec<(String, Vec<String>)> = fa
+                .packages
+                .keys()
+                .map(|c| (c.clone(), fa.declared_parents(c).to_vec()))
+                .collect();
+            let local_ctx = crate::model::witnesses::BagContext {
+                scopes: &fa.scopes,
+                package_framework: &fa.packages,
+                module_index: None,
+                package_parents: &fa.packages,
+                app_surface_consumers: &fa.plugin.app_surface_consumers,
+            };
+            let map = crate::model::witnesses::bake_in_context(
                 &fa.witnesses,
                 &registry,
                 &fa.packages.keys().cloned().collect(),
                 &syms,
+                &parents,
+                Some(&local_ctx),
             );
             bake_nanos += t0.elapsed().as_nanos() as u64;
             let _ = before_demoted;

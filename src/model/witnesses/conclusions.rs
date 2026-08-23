@@ -327,6 +327,29 @@ pub fn bake_full(
     symbols: &[(Option<String>, String, bool)],
     parents: &[(String, Vec<String>)],
 ) -> ConclusionMap {
+    bake_in_context(bag, registry, local_packages, symbols, parents, None)
+}
+
+/// `bake_full` with the file's OWN context — scopes, frameworks, parents.
+///
+/// Withholding the module index is the design (a materialized cross-file value
+/// would freeze a world that can change without this file changing). Withholding
+/// everything else was an accident: passing `context: None` also denies the bake
+/// the file's scopes, per-package frameworks and LOCAL parent edges, so it could
+/// not walk a parent chain that lives entirely in this file. Some of
+/// `bake.no_bare_answer` was that rather than genuine cross-file dependence.
+///
+/// A local-only context is also what makes "where would the chase have gone"
+/// well-posed: with no context at all, the chase stops before it reaches the
+/// point where it would have asked the index.
+pub fn bake_in_context(
+    bag: &WitnessBag,
+    registry: &ReducerRegistry,
+    local_packages: &std::collections::HashSet<String>,
+    symbols: &[(Option<String>, String, bool)],
+    parents: &[(String, Vec<String>)],
+    ctx: Option<&super::reducers::BagContext<'_>>,
+) -> ConclusionMap {
     let mut map = HashMap::new();
     let mut enumerate = |att: WitnessAttachment, map: &mut HashMap<_, _>| {
         let Some(key) = ConclusionKey::from_attachment(&att) else {
@@ -335,7 +358,7 @@ pub fn bake_full(
         if map.contains_key(&key) {
             return;
         }
-        let c = bake_one(bag, registry, &att, local_packages);
+        let c = bake_one(bag, registry, &att, local_packages, ctx);
         map.insert(key, c);
     };
     // Declared subs and methods first, so the attachment-index pass below
@@ -358,7 +381,7 @@ pub fn bake_full(
         let Some(key) = ConclusionKey::from_attachment(att) else {
             continue;
         };
-        let conclusion = bake_one(bag, registry, att, local_packages);
+        let conclusion = bake_one(bag, registry, att, local_packages, ctx);
         match map.entry(key) {
             std::collections::hash_map::Entry::Vacant(v) => {
                 v.insert(conclusion);
@@ -426,6 +449,7 @@ fn bake_one(
     registry: &ReducerRegistry,
     att: &WitnessAttachment,
     local_packages: &std::collections::HashSet<String>,
+    ctx: Option<&super::reducers::BagContext<'_>>,
 ) -> Conclusion {
     // A sole edge to a class this file does not declare is the cross-file
     // hop, and it residualizes rather than resolving. The bake runs with no
@@ -465,9 +489,10 @@ fn bake_one(
                 arity_hint: arity,
                 receiver,
                 args: Vec::new(),
-                // No context: the bake CANNOT reach another file, so every
-                // cross-file fallback residualizes instead of materializing.
-                context: None,
+                // The file's own context, with `module_index: None` — see
+                // `bake_in_context`. The index stays withheld by design; the
+                // rest is what lets a local parent chain resolve at all.
+                context: ctx,
             },
         )
     };
