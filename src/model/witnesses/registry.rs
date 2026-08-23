@@ -522,6 +522,7 @@ impl ReducerRegistry {
                         //   Decode  — `OpenNone`: unbakeable here, so pay the
                         //             full price for this key alone.
                         // A `Follow` is not yet honoured — see below.
+                        let mut baked_said_absent = false;
                         if let Some(key) =
                             super::ConclusionKey::from_attachment(q.attachment)
                         {
@@ -534,7 +535,14 @@ impl ReducerRegistry {
                                 ) {
                                     super::Outcome::Answer(t) => {
                                         crate::util::ghost_stats::count("consult.baked_answer");
-                                        return ReducedValue::Type(t);
+                                        let v = ReducedValue::Type(t);
+                                        // The memo still gets the answer. A
+                                        // baked hit is cheap but not free, and
+                                        // the memo is the tier above it.
+                                        super::session::remember_candidate_answer(
+                                            idx, &cached.path, q, &v,
+                                        );
+                                        return v;
                                     }
                                     // ABSENT. The spec lets this mean a proven
                                     // `None` and skip the candidate outright —
@@ -564,7 +572,30 @@ impl ReducerRegistry {
                                     // as it lands.
                                     super::Outcome::None => {
                                         crate::util::ghost_stats::count("consult.baked_none");
-                                        if std::env::var("PERL_LSP_TRUST_ABSENT").is_ok() {
+                                        baked_said_absent = true;
+                                        // Under the equivalence flag, do NOT
+                                        // trust it — fall through, run the
+                                        // real chase, and let the arm below
+                                        // report any answer that absence
+                                        // claimed did not exist.
+                                        if super::trust_absent_conclusions()
+                                            && !super::verify_absent_conclusions()
+                                        {
+                                            // Remember the None BEFORE
+                                            // continuing. Skipping the memo
+                                            // was the actual cost of trusting
+                                            // absence: this candidate is asked
+                                            // hundreds of times per run, and
+                                            // each repeat re-walked its
+                                            // ancestors instead of hitting the
+                                            // tier that exists to stop exactly
+                                            // that.
+                                            super::session::remember_candidate_answer(
+                                                idx,
+                                                &cached.path,
+                                                q,
+                                                &ReducedValue::None,
+                                            );
                                             continue;
                                         }
                                     }
@@ -633,6 +664,23 @@ impl ReducerRegistry {
                             }
                             }
                         };
+                        if super::verify_absent_conclusions()
+                            && baked_said_absent
+                            && v != ReducedValue::None
+                        {
+                            crate::util::ghost_stats::count("concl.equiv_break");
+                            log::error!(
+                                "conclusion equivalence break: the map reported {:?} ABSENT for \
+                                 {:?} (which is read as a proven None) but the chase answered \
+                                 {v:?} — the bake's key enumeration is incomplete",
+                                q.attachment,
+                                cached.path
+                            );
+                            debug_assert!(
+                                false,
+                                "conclusion absence disagreed with the chase; see log"
+                            );
+                        }
                         super::session::remember_candidate_answer(idx, &cached.path, q, &v);
                         if v != ReducedValue::None {
                             return v;

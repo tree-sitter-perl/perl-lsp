@@ -204,6 +204,51 @@ fn fresh_receiver(incoming: Option<&InferredType>, class: &str) -> InferredType 
     }
 }
 
+/// Whether an absent key may be trusted as a proven `None`.
+///
+/// OFF, because it is measurably unsound today — and the prize for fixing it
+/// is large enough to say exactly how large.
+///
+/// Trusting absence takes the consult chase from 2,435 ms to 402 ms on a warm
+/// substrate check: an 83% cut in the compute half this whole design targets.
+/// Absence fires 126,767 times there against 1,304 served answers, so without
+/// it the layer is worth under 1% of consults. It is the win.
+///
+/// It is also wrong 633 times out of those 126,767 — 0.5%. `PERL_LSP_CONCL_EQUIV`
+/// runs the chase anyway and compares: the map reports
+/// `MethodOnClass{Mojo::EventEmitter, new}` absent while the chase answers
+/// `ClassName("Mojo::Server")`. Receiver-polymorphic constructors inherited
+/// from a parent have no attachment in the child's bag, so the bake never
+/// enumerates a key for them, and absence is read as a proof it never was.
+///
+/// WHAT MAKES THIS WORTH A COMMENT rather than a TODO: gold passes 502/0 with
+/// absence trusted, and `--dump-package` is byte-identical across Catalyst
+/// (145 KB), Type::Tiny (109 KB), Mojolicious (50 KB) and Moose (7 KB). Every
+/// end-to-end check we own says it is fine. They pass because the ladder
+/// routes around the missing answer — the parent walk finds it further up — so
+/// the output agrees and only the cost differs. End-to-end equality does not
+/// validate an intermediate claim when the system can route around the error.
+///
+/// Turn this on once the enumeration covers inherited and reducer-synthesized
+/// keys, and keep `PERL_LSP_CONCL_EQUIV` green over a real corpus as the proof.
+pub fn trust_absent_conclusions() -> bool {
+    static TRUST: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *TRUST.get_or_init(|| std::env::var("PERL_LSP_TRUST_ABSENT").is_ok())
+}
+
+/// Verify each trusted absence against the path it replaces.
+///
+/// Same shape as `PERL_LSP_PD_EQUIV` for pattern dispatch: a fast path whose
+/// justification is empirical ships WITH the means to re-check it, rather than
+/// with a note asking the reader to believe the measurement. Under this flag
+/// an absent key still runs the decode and the chase, and a disagreement is
+/// reported — so the gold harness can assert the equivalence over a real
+/// corpus instead of the four packages a person happened to dump.
+pub fn verify_absent_conclusions() -> bool {
+    static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *V.get_or_init(|| std::env::var("PERL_LSP_CONCL_EQUIV").is_ok())
+}
+
 /// The process-wide default registry.
 ///
 /// The bake runs per file on the persist path, and `with_defaults()` allocates
@@ -227,7 +272,54 @@ pub fn bake(
     registry: &ReducerRegistry,
     local_packages: &std::collections::HashSet<String>,
 ) -> ConclusionMap {
+    bake_with_symbols(bag, registry, local_packages, &[])
+}
+
+/// `bake`, plus the keys the file's SYMBOLS imply.
+///
+/// The attachment index alone is not the set of keys the bag can answer, and
+/// the difference is the whole soundness of "absent means None". A method the
+/// live chase resolves through an inheritance edge or a reducer's synthesis
+/// may carry no witnesses of its own, so it never appears in the index — and a
+/// key missing from the map is read as a proven `None`.
+///
+/// The declared symbols close most of that gap: `bake_one` runs the REGISTRY
+/// on the attachment, so a witness-less `MethodOnClass` still gets whatever
+/// answer the live path would give it, including one composed entirely from
+/// edges.
+pub fn bake_with_symbols(
+    bag: &WitnessBag,
+    registry: &ReducerRegistry,
+    local_packages: &std::collections::HashSet<String>,
+    symbols: &[(Option<String>, String, bool)],
+) -> ConclusionMap {
     let mut map = HashMap::new();
+    let mut enumerate = |att: WitnessAttachment, map: &mut HashMap<_, _>| {
+        let Some(key) = ConclusionKey::from_attachment(&att) else {
+            return;
+        };
+        if map.contains_key(&key) {
+            return;
+        }
+        let c = bake_one(bag, registry, &att, local_packages);
+        map.insert(key, c);
+    };
+    // Declared subs and methods first, so the attachment-index pass below
+    // sees them already present and does not re-derive.
+    for (package, name, is_callable) in symbols {
+        if !*is_callable {
+            continue;
+        }
+        if let Some(pkg) = package {
+            enumerate(
+                WitnessAttachment::MethodOnClass {
+                    class: pkg.clone(),
+                    name: name.clone(),
+                },
+                &mut map,
+            );
+        }
+    }
     for att in bag.attachments() {
         let Some(key) = ConclusionKey::from_attachment(att) else {
             continue;

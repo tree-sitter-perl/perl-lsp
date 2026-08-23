@@ -188,10 +188,30 @@ pub fn encode_analysis(fa: &FileAnalysis) -> Option<EncodedAnalysis> {
         Vec::new()
     } else {
     crate::util::ghost_stats::timed("persist.bake", || {
-        let map = crate::model::witnesses::bake(
+        // Every declared sub/method becomes a key, not just those the bag
+        // indexed — see `bake_with_symbols`. Without this, a method resolved
+        // purely through edges is absent from the map, and absence is read as
+        // a proven `None`.
+        let syms: Vec<(Option<String>, String, bool)> = fa
+            .symbols()
+            .iter()
+            .map(|s| {
+                (
+                    s.package.clone(),
+                    s.name.clone(),
+                    matches!(
+                        s.kind,
+                        crate::model::file_analysis::SymKind::Sub
+                            | crate::model::file_analysis::SymKind::Method
+                    ),
+                )
+            })
+            .collect();
+        let map = crate::model::witnesses::bake_with_symbols(
             &bag,
             crate::model::witnesses::shared_registry(),
             &fa.packages.keys().cloned().collect(),
+            &syms,
         );
         bincode::serialize(&map)
             .ok()
@@ -877,10 +897,26 @@ mod bake_probe {
             build_nanos += tb.elapsed().as_nanos() as u64;
             let before_demoted = demoted;
             let t0 = std::time::Instant::now();
-            let map = crate::model::witnesses::bake(
+            let syms: Vec<(Option<String>, String, bool)> = fa
+                .symbols()
+                .iter()
+                .map(|s| {
+                    (
+                        s.package.clone(),
+                        s.name.clone(),
+                        matches!(
+                            s.kind,
+                            crate::model::file_analysis::SymKind::Sub
+                                | crate::model::file_analysis::SymKind::Method
+                        ),
+                    )
+                })
+                .collect();
+            let map = crate::model::witnesses::bake_with_symbols(
                 &fa.witnesses,
                 &registry,
                 &fa.packages.keys().cloned().collect(),
+                &syms,
             );
             bake_nanos += t0.elapsed().as_nanos() as u64;
             let _ = before_demoted;
