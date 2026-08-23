@@ -464,6 +464,9 @@ impl ReducerRegistry {
                 // (1) Cross-file primary lookup — every candidate file
                 // declaring `class` (a reopened package's method lives in
                 // whichever file defines it, not the name-slot winner).
+                if ctx.module_index.is_none() {
+                    super::note_bake_exit("moc_primary", true);
+                }
                 if let Some(idx) = ctx.module_index {
                     for cached in super::session::visible_def_candidates(idx, class).iter() {
                         // Rehydrate the target file's bag if its resident copy
@@ -722,6 +725,12 @@ impl ReducerRegistry {
                 // cross-file ∪ synthetic app-surface edge — `parents_of`
                 // is the single edge-injection site shared with the
                 // FA-side ancestor walks).
+                if ctx.module_index.is_none() {
+                    // The parent NAME is local (`PackageFacts.parents`), so a
+                    // parent hop is nameable even though the parent's FILE is
+                    // not reachable from here.
+                    super::note_bake_exit("parent_walk", true);
+                }
                 let parents = crate::model::file_analysis::parents_of(
                     class,
                     ctx.package_parents,
@@ -754,7 +763,26 @@ impl ReducerRegistry {
                 // file, not the bridging-plugin file). Ask each matching
                 // cached entity for `Symbol(sym.id)` at arity=None —
                 // bridged Methods aren't arity-discriminated.
+                if ctx.module_index.is_none() {
+                    // A bridge target is a per-file `SymbolId`, which no
+                    // portable key can name — this exit poisons.
+                    super::note_bake_exit("bridge", false);
+                }
                 if let Some(idx) = ctx.module_index {
+                    // LIVE-mode denominator for the bake's `residual.site.bridge`
+                    // count: how often would that consult have yielded anything
+                    // at all? A would-be consult that returns nothing is not a
+                    // dependence, and counting it as one makes the poison rate
+                    // look total when it may be negligible.
+                    let mut bridge_seen = false;
+                    idx.for_each_entity_bridged_to(class, &mut |_m, _c, _s| {
+                        bridge_seen = true;
+                    });
+                    crate::util::ghost_stats::count(if bridge_seen {
+                        "bridge.live_yields"
+                    } else {
+                        "bridge.live_empty"
+                    });
                     let mut found: Option<InferredType> = None;
                     idx.for_each_entity_bridged_to(class, &mut |_mod, cached, sym| {
                         if found.is_some() {
@@ -810,6 +838,9 @@ impl ReducerRegistry {
         // slot writes are real code, not plugin entities.
         if let WitnessAttachment::SlotType { class, key } = q.attachment {
             if let Some(ctx) = q.context {
+                if ctx.module_index.is_none() {
+                    super::note_bake_exit("slot_type", true);
+                }
                 if let Some(idx) = ctx.module_index {
                     for cached in idx.visible_def_candidates(class) {
                         let attempt =
@@ -906,6 +937,9 @@ impl ReducerRegistry {
         // tag / unknown class / primitive spelling resolves to itself.
         if let WitnessAttachment::TypeName(name) = q.attachment {
             if let Some(ctx) = q.context {
+                if ctx.module_index.is_none() {
+                    super::note_bake_exit("type_name", true);
+                }
                 if let Some(idx) = ctx.module_index {
                     for cached in idx.visible_def_candidates(name) {
                         crate::util::ghost_stats::count("moc.provider_fetched");

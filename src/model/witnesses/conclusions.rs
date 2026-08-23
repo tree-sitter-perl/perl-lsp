@@ -269,6 +269,49 @@ pub fn verify_absent_conclusions() -> bool {
     *V.get_or_init(|| std::env::var("PERL_LSP_CONCL_EQUIV").is_ok())
 }
 
+/// Marks the calling thread as running a BAKE rather than a live query.
+///
+/// The exit sites below cannot tell the difference on their own — both see
+/// `module_index: None` — and only a bake's misses are candidates for
+/// residualization. A live query with no index is an ordinary degraded lookup
+/// and must not be counted.
+pub struct BakeScope;
+
+thread_local! {
+    static IN_BAKE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+impl BakeScope {
+    pub fn enter() -> Self {
+        IN_BAKE.with(|f| f.set(true));
+        BakeScope
+    }
+}
+
+impl Drop for BakeScope {
+    fn drop(&mut self) {
+        IN_BAKE.with(|f| f.set(false));
+    }
+}
+
+/// Record that a bake reached a point where it would have consulted the index.
+///
+/// `nameable` says whether the would-be target has a portable `ConclusionKey`.
+/// The split is the whole decision: only a nameable exit can become a `Link`,
+/// so the ratio says how much of the `OpenNone` population this line of work
+/// can actually reach, and whether it is worth building the machinery for.
+pub fn note_bake_exit(site: &'static str, nameable: bool) {
+    if !IN_BAKE.with(|f| f.get()) {
+        return;
+    }
+    crate::util::ghost_stats::count(if nameable {
+        "residual.nameable"
+    } else {
+        "residual.poisoned"
+    });
+    crate::util::ghost_stats::count(&format!("residual.site.{site}"));
+}
+
 /// The process-wide default registry.
 ///
 /// The bake runs per file on the persist path, and `with_defaults()` allocates
@@ -350,6 +393,7 @@ pub fn bake_in_context(
     parents: &[(String, Vec<String>)],
     ctx: Option<&super::reducers::BagContext<'_>>,
 ) -> ConclusionMap {
+    let _bake = BakeScope::enter();
     let mut map = HashMap::new();
     let mut enumerate = |att: WitnessAttachment, map: &mut HashMap<_, _>| {
         let Some(key) = ConclusionKey::from_attachment(&att) else {
