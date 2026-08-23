@@ -353,24 +353,34 @@ generational flush itself.
 **The flush's two products, disentangled** (a build-time sharpening of
 this section's original phrasing, which conflated them). Because the
 bake is index-free, a downstream change moves a consumer's *answers*
-without moving its *map* — so the write set of a flush is exactly the
-SEEDS' rows, and the wave costs one map decode per reached file, never
-a blob decode or re-bake. Two distinct products follow: the **refresh
-set** (`changed` — files whose evaluated answers moved; what
+without moving its *map* — so the wave costs one map decode per reached
+file, never a blob decode or re-bake, and the seeds' fresh maps are
+SUPPLIED BY THE CALLER (who just built the analyses; making the flush
+decode a blob to re-derive a map already in RAM is this layer's own
+antipattern — and at the save seam that blob was invalidated a moment
+earlier, so there is nothing to decode). A deleted file seeds as its
+direct consumers, not as itself: it has no map and nothing to evaluate,
+while its consumers, resolving through a file the store has forgotten,
+are a real move with real evidence. Two distinct products: the
+**refresh set** (`changed` — files whose evaluated answers moved; what
 enrichment, diagnostics, and the re-stamp gate consume) and the
-**generation** (the storage-consistency clock over the seeds' rows).
-The generation is not "the thing consumers read" as a driver product;
-it earns its keep three ways: torn-read prevention when a multi-seed
-flush writes several rows (a chase following Links across two seeds
-mid-write would otherwise compose an answer belonging to neither N nor
-N+1), the monotone counter the re-stamp gate compares
-`stamp_generation` against, and the deterministic degraded signal
-("answers as of gen N, k pending"). The invariant that makes seeds-only
-writing sound — an index-free bake can never produce a value that
-depended on another file — is silent in its violation (a bake that
-learned to consult an index would quietly stop refreshing consumers),
-so the driver ships with its own equivalence switch re-baking reached
-files and comparing, the same discipline one tier down.
+**generation** (the consistency clock). At the save seam the wave's
+persistent write set is **empty** — publishing even the seeds' rows is
+deferred, because their `modules` rows were just invalidated and a
+conclusion row with no `modules` row behind it can never be caught by
+the stamp check (the stamp lives on the `modules` row): writing one
+re-opens the bake-outlived-blob hole by a different door. Publication
+resumes when the conclusions table carries its OWN freshness stamp —
+and that stamp is the generation clock's natural next customer, joining
+torn-read prevention over multi-seed row writes, the monotone counter
+the re-stamp gate compares `stamp_generation` against, and the
+deterministic degraded signal ("answers as of gen N, k pending"). The
+invariant that makes caller-supplied, index-free maps sound — a bake
+can never produce a value that depended on another file — is silent in
+its violation (a bake that learned to consult an index would quietly
+stop refreshing consumers), so the driver ships with its own
+equivalence switch re-baking reached files and comparing, the same
+discipline one tier down.
 
 **The gate, specified (push, not pull).** Do NOT compute `providers(F)`
 at check time — that resurrects the transitive-closure walk the
