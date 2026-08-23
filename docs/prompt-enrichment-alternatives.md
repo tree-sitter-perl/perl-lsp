@@ -224,6 +224,61 @@ Consequences worth naming:
   must be stored per-file (not per-package) so visibility can filter at
   read time.
 
+#### 3c′. Generational scheduling — the queue-and-flush discipline
+
+How the worklist should run. Instead of draining per-item as edits land,
+the conclusion store carries a **generation number**: edits push dirty
+files into a queue; a **flush** processes the queued frontier as one
+round — derive each dirty file's conclusions against the **frozen gen-N
+store**, diff, and the non-empty diffs seed the next round's frontier;
+rounds repeat until one diffs empty; then gen N+1 publishes atomically.
+Generations are levels *in time*, populated only by what changed —
+level-indexing's correctness property (a file's form at a stratum is
+independent of who asked) recovered without the K× price, because a
+round's cost is the frontier, never the corpus.
+
+What the batching buys, concretely:
+
+- **Round-level determinism.** A per-item queue interleaves reads with
+  writes, so intermediate states depend on drain order (same fixpoint,
+  different trajectory). Reading a round against a frozen snapshot makes
+  every round a pure function of gen N — order-independent per round,
+  not merely at quiescence.
+- **Structural dedup.** Ten edits to a hub module before a flush are one
+  queue entry, and its consumers enqueue once per round, not once per
+  keystroke. Today's `on_refresh` storm fix (33 fires → 1) does this by
+  time-debounce; generations do it by data. A round can also share one
+  `ResolutionSession`/memo and one SQLite pass, which per-item cannot.
+- **The epoch retires correctly.** Memos and caches keyed by generation
+  stay valid until the next flush *lands* — coarse but accurate,
+  versus the additive epoch where any registration mid-cascade
+  invalidates every memo (the ~75%-wasted-overlay-builds measurement).
+- **An honest, deterministic degraded signal.** "Answers as of gen N,
+  k files pending" — where the wall-clock budget fires ~8,000× at
+  cpan5k and is reproducible only in practice. Gold and the one-shot
+  CLI verbs get their barrier for free: flush until the queue is empty,
+  then answer.
+
+Two tiers, matching machinery that already exists: the edited open doc
+itself keeps its **eager local** publish (the 150 ms debounce — the
+user's own diagnostics can't wait for a cadence), while the consumer
+cone rides the **lazy global** flush (settle-triggered via the
+`DebouncedLatest` shape, or on idle, or on queue depth). This is the
+generational-GC split the store already half-has: open docs are the
+young generation (hot, enriched in place), the settled corpus is the
+old (conclusions on disk, repaired by flushes), close/settle is
+promotion.
+
+One real design choice: **drain-to-quiescence per flush, or
+one-round-per-flush.** Draining publishes a fully settled generation
+each flush; one-round is lazier and bounded but lets a depth-d chain
+take d flushes to settle (staleness ≈ chain depth × flush period — a
+few seconds at Koha's depth-12 tail). Default to draining with the
+diff-cutoff as the bound (rounds after the first are near-empty), keep
+one-round as the degraded mode under sustained load. And one rule: a
+consult mid-flush — open doc included — reads gen N like everyone
+else, never a half-built N+1.
+
 ### 3d. Durable demand-driven query memoization (salsa / red-green)
 
 Make each consult a tracked query: memoize
@@ -258,7 +313,9 @@ Compose 3a + 3c, staged so each slice is independently gated:
    Surface experience, is that the overwhelming majority of edits diff
    empty and the chain cuts at depth 1.
 3. **Swap the driver** — replace recursive `enriched_snapshot` descent
-   with the worklist: dirty → derive → diff → enqueue consumers. The
+   with the worklist, scheduled generationally (§3c′): dirty files queue,
+   a settle-triggered flush runs rounds against the frozen gen-N store
+   and publishes gen N+1 atomically. The
    depth cap and the taint rule become assertions ("never hit"), then
    delete. `enriched_snapshot` and its transitive fingerprint memo
    retire with them.
