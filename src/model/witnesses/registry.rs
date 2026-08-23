@@ -526,6 +526,10 @@ impl ReducerRegistry {
                         //             full price for this key alone.
                         // A `Follow` is not yet honoured — see below.
                         let mut baked_said_absent = false;
+                        // Under the equivalence flag a followed answer is held
+                        // rather than returned, so the chase below runs and can
+                        // contradict it.
+                        let mut followed_answer: Option<InferredType> = None;
                         if let Some(key) =
                             super::ConclusionKey::from_attachment(q.attachment)
                         {
@@ -633,14 +637,43 @@ impl ReducerRegistry {
                                             continue;
                                         }
                                     }
-                                    // Cross-file hop. Following it needs the
-                                    // ladder to re-enter at another file's
-                                    // map, which is the next slice; until
-                                    // then it degrades to the decode it would
-                                    // have done anyway — slower than it will
-                                    // be, never wrong.
-                                    super::Outcome::Follow { .. } => {
-                                        crate::util::ghost_stats::count("consult.baked_follow_unhandled");
+                                    // Cross-file hop: re-enter the ladder at
+                                    // the target file's map, no decode.
+                                    //
+                                    // This is the first conclusion form whose
+                                    // failure is UNSOUND rather than merely
+                                    // slow — a wrong absence costs a decode, a
+                                    // wrong `Link` serves a wrong answer — so
+                                    // it is scored by `PERL_LSP_CONCL_EQUIV`
+                                    // against the chase it replaces, and it
+                                    // degrades to that chase whenever the walk
+                                    // cannot complete.
+                                    super::Outcome::Follow {
+                                        target,
+                                        arity,
+                                        receiver,
+                                    } => {
+                                        match follow_link(idx, &target, &receiver, arity, &q.args) {
+                                            Some(t) => {
+                                                crate::util::ghost_stats::count(
+                                                    "consult.baked_follow",
+                                                );
+                                                if super::verify_absent_conclusions() {
+                                                    followed_answer = Some(t);
+                                                } else {
+                                                    let v = ReducedValue::Type(t);
+                                                    super::session::remember_candidate_answer(
+                                                        idx, &cached.path, q, &v,
+                                                    );
+                                                    return v;
+                                                }
+                                            }
+                                            None => {
+                                                crate::util::ghost_stats::count(
+                                                    "consult.baked_follow_incomplete",
+                                                );
+                                            }
+                                        }
                                     }
                                     super::Outcome::Decode => {
                                         crate::util::ghost_stats::count("consult.baked_open");
@@ -698,6 +731,28 @@ impl ReducerRegistry {
                             }
                             }
                         };
+                        if let Some(followed) = &followed_answer {
+                            // Scored against the chase, not against the output.
+                            // A wrong `Link` is the layer's only failure mode
+                            // that serves a wrong ANSWER rather than costing a
+                            // decode, so it is the one that must be compared
+                            // where the claim is made.
+                            let agrees = matches!(&v, ReducedValue::Type(t) if t == followed);
+                            if !agrees {
+                                crate::util::ghost_stats::count("concl.follow_break");
+                                log::error!(
+                                    "conclusion follow break: a Link for {:?} in {:?} \
+                                     resolved to {followed:?} but the chase answered {v:?} \
+                                     — a baked cross-file hop disagrees with the hop it \
+                                     replaces",
+                                    q.attachment,
+                                    cached.path
+                                );
+                                debug_assert!(false, "Link disagreed with the chase; see log");
+                            } else {
+                                crate::util::ghost_stats::count("concl.follow_ok");
+                            }
+                        }
                         if super::verify_absent_conclusions()
                             && baked_said_absent
                             && v != ReducedValue::None
@@ -1323,4 +1378,100 @@ fn scope_point(scopes: &[Scope], scope: ScopeId) -> tree_sitter::Point {
         .get(scope.0 as usize)
         .map(|s| s.span.end)
         .unwrap_or(tree_sitter::Point { row: 0, column: 0 })
+}
+
+/// Walk a `Link` chain through the conclusion maps, without decoding a bag.
+///
+/// `None` means the walk could not complete — a cycle, the hop cap, a file with
+/// no map, or a key that resolves to `OpenNone`. Every one of those degrades to
+/// the decode the caller would have done anyway, so an incomplete walk is slow
+/// rather than wrong. Only a completed walk returns an answer.
+///
+/// The visited set is `(path, key, receiver, arity)` — the same identity
+/// `VisitedKey` uses for the live chase, because a `Link` chain can revisit a
+/// file under a DIFFERENT receiver and that is a distinct question, not a cycle.
+fn follow_link(
+    idx: &dyn crate::model::file_analysis::CrossFileLookup,
+    target: &super::ConclusionKey,
+    receiver: &Option<InferredType>,
+    arity: Option<u32>,
+    args: &[InferredType],
+) -> Option<InferredType> {
+    follow_link_with(
+        &|class: &str| {
+            super::session::visible_def_candidates(idx, class)
+                .iter()
+                .map(|c| {
+                    (
+                        c.path.to_string_lossy().into_owned(),
+                        idx.conclusions_for(&c.path),
+                    )
+                })
+                .collect()
+        },
+        target,
+        receiver,
+        arity,
+        args,
+    )
+}
+
+/// The walk itself, over a resolver rather than the index.
+///
+/// Split so the traversal — visited set, ladder semantics, hop cap — can be
+/// tested against hand-built maps. Testing it through `CrossFileLookup` would
+/// mean standing up a whole index, which is how a walk this delicate ends up
+/// exercised only by whatever the corpus happens to contain.
+pub(super) fn follow_link_with(
+    resolve: &dyn Fn(&str) -> Vec<(String, Option<std::sync::Arc<super::ConclusionMap>>)>,
+    target: &super::ConclusionKey,
+    receiver: &Option<InferredType>,
+    arity: Option<u32>,
+    args: &[InferredType],
+) -> Option<InferredType> {
+    let mut key = target.clone();
+    let mut recv = receiver.clone();
+    let mut ar = arity;
+    let mut seen: std::collections::HashSet<(String, super::ConclusionKey, String, Option<u32>)> =
+        std::collections::HashSet::new();
+
+    for _ in 0..super::MAX_FOLLOW_HOPS {
+        let super::ConclusionKey::MethodOnClass { class, .. } = &key else {
+            // Only class-keyed hops can be resolved to a candidate FILE; the
+            // other key shapes have no such relation to walk.
+            return None;
+        };
+        let candidates = resolve(class);
+        let mut next: Option<(super::ConclusionKey, Option<InferredType>, Option<u32>)> = None;
+        for (path, map) in candidates.into_iter() {
+            let ident = (path, key.clone(), format!("{recv:?}"), ar);
+            if !seen.insert(ident) {
+                continue;
+            }
+            let map = map?;
+            match map.evaluate(&key, recv.as_ref(), ar, args) {
+                super::Outcome::Answer(t) => return Some(t),
+                // This candidate proves nothing; the ladder moves on, exactly
+                // as the live chase's candidate loop does.
+                super::Outcome::None => continue,
+                // Unbakeable here, so the walk cannot answer without the bag.
+                super::Outcome::Decode => return None,
+                super::Outcome::Follow {
+                    target,
+                    arity,
+                    receiver,
+                } => {
+                    next = Some((target, receiver, arity));
+                    break;
+                }
+            }
+        }
+        let (t, r, a) = next?;
+        key = t;
+        recv = r;
+        ar = a;
+    }
+    // Hop cap. Continuing costs more than the decode this is replacing.
+    crate::util::ghost_stats::count("follow.hop_cap");
+    None
 }

@@ -269,6 +269,14 @@ pub fn verify_absent_conclusions() -> bool {
     *V.get_or_init(|| std::env::var("PERL_LSP_CONCL_EQUIV").is_ok())
 }
 
+/// How many map-to-map hops a `Follow` may take before giving up.
+///
+/// A `Link` chain is a graph walk over files, so it needs a bound of its own —
+/// the live chase's `VisitedKey` guards the live chase, not this projection. A
+/// cycle is caught by the visited set; the cap catches a long-but-acyclic
+/// chain, where continuing costs more than the decode it is replacing.
+pub const MAX_FOLLOW_HOPS: usize = 8;
+
 /// Marks the calling thread as running a BAKE rather than a live query.
 ///
 /// The exit sites below cannot tell the difference on their own — both see
