@@ -330,6 +330,22 @@ impl CrossFileLookup for ModuleIndex {
         self.enriched_snapshot(cached)
             .unwrap_or_else(|| self.bag_present(cached))
     }
+    fn conclusions_for(
+        &self,
+        path: &std::path::Path,
+    ) -> Option<std::sync::Arc<crate::model::witnesses::ConclusionMap>> {
+        use crate::index::conclusion_cache::Cached;
+        match self.conclusion_cache_ref()?.get(path) {
+            // The Arc, not a clone of what it holds. Handing back an owned map
+            // deep-copies a ~72-entry HashMap per consult, and the consult path
+            // runs this tens of thousands of times per check — measured at a
+            // 6.7% REGRESSION against no conclusions at all, which is the whole
+            // saving spent on copying the thing that produced it.
+            Cached::Map(m) => Some(m),
+            Cached::NotBaked => None,
+        }
+    }
+
     fn bag_present(&self, cached: &Arc<CachedModule>) -> Arc<FileAnalysis> {
         // Never-evicted copy (open docs, degraded files kept whole): a cheap
         // Arc bump, no I/O.

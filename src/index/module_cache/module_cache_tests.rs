@@ -1597,3 +1597,242 @@ fn pre_split_rows_are_filtered_not_guessed() {
     );
     let _ = std::fs::remove_file(&pm);
 }
+
+
+/// The conclusion fingerprint must describe the tree as it is RIGHT NOW.
+///
+/// The failure this catches is a stale constant: if `build.rs` ever stops
+/// re-running when a source file changes — a directory-level
+/// `rerun-if-changed`, a path it hashes but forgets to declare — the compiled
+/// constant keeps describing an older tree. Every baked conclusion then
+/// validates against a fingerprint that no longer means anything, which is
+/// exactly the hand-maintained version the derived one exists to replace, only
+/// now with nobody watching it.
+///
+/// The hash is recomputed here rather than shared with `build.rs`. A shared
+/// helper would agree with itself whatever it computed; two independent
+/// spellings that must agree is the only arrangement that can fail.
+#[test]
+fn the_conclusion_fingerprint_is_not_stale() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut files: Vec<std::path::PathBuf> = Vec::new();
+    fn walk(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+        let Ok(entries) = std::fs::read_dir(dir) else { return };
+        for e in entries.flatten() {
+            let p = e.path();
+            match e.file_type() {
+                Ok(t) if t.is_dir() => walk(&p, out),
+                Ok(t) if t.is_file() => out.push(p),
+                _ => {}
+            }
+        }
+    }
+    walk(&root.join("src"), &mut files);
+    if root.join("Cargo.lock").is_file() {
+        files.push(root.join("Cargo.lock"));
+    }
+    files.sort();
+    assert!(
+        files.len() > 100,
+        "walked only {} files — this test would pass vacuously",
+        files.len()
+    );
+
+    let mut acc: u64 = 0xcbf2_9ce4_8422_2325;
+    let mut fnv = |acc: &mut u64, bytes: &[u8]| {
+        for b in bytes {
+            *acc ^= *b as u64;
+            *acc = acc.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+    };
+    for path in &files {
+        let Ok(bytes) = std::fs::read(path) else { continue };
+        // Paths are hashed relative to the manifest, so the fingerprint does
+        // not change when the same tree is checked out somewhere else — a
+        // worktree and its origin must agree or every worktree re-bakes.
+        let rel = path.strip_prefix(root).unwrap_or(path);
+        fnv(&mut acc, rel.to_string_lossy().as_bytes());
+        fnv(&mut acc, b"\0");
+        fnv(&mut acc, &bytes);
+        fnv(&mut acc, b"\0");
+    }
+    assert_eq!(
+        format!("{acc:016x}"),
+        CONCLUSION_FINGERPRINT,
+        "the compiled-in conclusion fingerprint does not match the current \
+         source tree — build.rs did not re-run for some file it hashes, so \
+         the guard is describing a tree that no longer exists"
+    );
+}
+
+/// A reader pinned to a generation must keep seeing it while a later one is
+/// published.
+///
+/// This is the failure the `(path, generation)` key exists to prevent. Keyed
+/// on `path` alone, publishing N+1 REPLACES the gen-N row, and a reader still
+/// pinned to N finds nothing — which the evaluator reads as a definite `None`.
+/// The pin would then be a way to GET wrong answers rather than avoid them,
+/// and nothing downstream could tell, because "this file concludes nothing"
+/// is a perfectly ordinary thing for the store to say.
+#[test]
+fn a_pinned_reader_does_not_see_a_later_generation() {
+    use crate::model::witnesses::{Conclusion, ConclusionKey, ConclusionMap};
+    let conn = test_db();
+    let mk = |t: &str| {
+        let mut m = std::collections::HashMap::new();
+        m.insert(
+            ConclusionKey::SubByName("f".into()),
+            Conclusion::Value(crate::model::file_analysis::InferredType::ClassName(t.into())),
+        );
+        ConclusionMap(m, Default::default())
+    };
+
+    let g1 = Generation(1);
+    publish_generation(&conn, g1, &[("/a.pm".to_string(), mk("One"))]).expect("publish 1");
+    assert_eq!(current_generation(&conn), g1);
+
+    let pinned = load_conclusions(&conn, "/a.pm", g1).expect("gen 1 visible at gen 1");
+
+    let g2 = Generation(2);
+    publish_generation(&conn, g2, &[("/a.pm".to_string(), mk("Two"))]).expect("publish 2");
+
+    // The pin still resolves, and to the OLD content.
+    let after = load_conclusions(&conn, "/a.pm", g1).expect(
+        "a reader pinned to gen 1 lost its row when gen 2 published — it would \
+         read absence as a definite None",
+    );
+    assert_eq!(after, pinned, "the pin resolved to a different generation");
+
+    // And a fresh reader sees the new one.
+    let fresh = load_conclusions(&conn, "/a.pm", current_generation(&conn)).expect("gen 2");
+    assert_ne!(fresh, pinned, "gen 2 served gen 1's content");
+}
+
+/// Pruning must not delete the row a live pin resolves to.
+#[test]
+fn pruning_keeps_what_the_pin_still_needs() {
+    use crate::model::witnesses::{Conclusion, ConclusionKey, ConclusionMap};
+    let conn = test_db();
+    let mk = |t: &str| {
+        let mut m = std::collections::HashMap::new();
+        m.insert(
+            ConclusionKey::SubByName("f".into()),
+            Conclusion::Value(crate::model::file_analysis::InferredType::ClassName(t.into())),
+        );
+        ConclusionMap(m, Default::default())
+    };
+    for g in 1..=4i64 {
+        publish_generation(&conn, Generation(g), &[("/a.pm".to_string(), mk(&format!("G{g}")))])
+            .expect("publish");
+    }
+    // A reader is pinned at 3; everything strictly older than what gen 3
+    // resolves to is unreachable, and gen 3's own row is not.
+    prune_generations_below(&conn, Generation(3));
+    assert!(
+        load_conclusions(&conn, "/a.pm", Generation(3)).is_some(),
+        "pruning deleted the row a pin at gen 3 resolves to"
+    );
+    assert!(
+        load_conclusions(&conn, "/a.pm", Generation(4)).is_some(),
+        "pruning deleted a generation newer than the prune floor"
+    );
+}
+
+/// A failed round must not advance the generation.
+///
+/// Half a round published under a complete-looking generation is the same
+/// absence-as-answer failure: the files that did land are read as current, the
+/// ones that did not are read as concluding nothing.
+#[test]
+fn a_failed_round_leaves_the_previous_generation_intact() {
+    use crate::model::witnesses::ConclusionMap;
+    let conn = test_db();
+    publish_generation(&conn, Generation(1), &[("/a.pm".to_string(), ConclusionMap::default())])
+        .expect("publish 1");
+    // Force a failure mid-round by dropping the table the second write needs.
+    conn.execute_batch("DROP TABLE conclusions").unwrap();
+    let r = publish_generation(
+        &conn,
+        Generation(2),
+        &[("/b.pm".to_string(), ConclusionMap::default())],
+    );
+    assert!(r.is_err(), "a round that could not write reported success");
+    assert_eq!(
+        current_generation(&conn),
+        Generation(1),
+        "a failed round advanced the generation, so its partial writes would \
+         be served as complete"
+    );
+}
+
+/// Persisting an analysis persists its conclusions, and they come back.
+///
+/// The bake rides inside `encode_analysis` precisely so a writer cannot
+/// persist the blob and forget the map. This is the test that says so: it
+/// exercises the real writer, not the bake in isolation.
+#[test]
+fn persisting_an_analysis_persists_its_conclusions() {
+    let conn = test_db();
+    let dir = std::env::temp_dir();
+    let pm = dir.join("concl_roundtrip.pm");
+    std::fs::write(
+        &pm,
+        "package CR;\nsub build { return LWP::UserAgent->new }\nsub s { return 'x' }\n1;\n",
+    )
+    .unwrap();
+    let cached = parse_source_to_cached(&std::fs::read_to_string(&pm).unwrap(), &pm);
+    let pm_str = pm.to_string_lossy().into_owned();
+    save_to_db(&conn, &pm_str, &Some(cached), "workspace");
+
+    let map = load_conclusions(&conn, &pm_str, current_generation(&conn)).expect(
+        "the writer persisted a blob but no conclusions — the store answers \
+         'not baked' for a file that was just baked",
+    );
+    assert!(!map.is_empty(), "an empty map round-tripped as success");
+
+    use crate::model::witnesses::{ConclusionKey, Outcome};
+    let key = ConclusionKey::MethodOnClass {
+        class: "CR".into(),
+        name: "build".into(),
+    };
+    match map.evaluate(&key, None, None, &[]) {
+        Outcome::Answer(t) => assert_eq!(
+            t.class_name().as_deref(),
+            Some("LWP::UserAgent"),
+            "the round-tripped conclusion changed meaning"
+        ),
+        other => panic!("expected a baked answer for {key:?}, got {other:?}"),
+    }
+    let _ = std::fs::remove_file(&pm);
+}
+
+/// A derivation change clears conclusions and KEEPS blobs.
+///
+/// The repair for a stale conclusion is one re-bake, which needs the blob.
+/// Dropping blobs here would turn it into a corpus re-parse for nothing — and
+/// the failure would be invisible, since everything still works, just slowly.
+#[test]
+fn a_derivation_change_clears_conclusions_but_keeps_blobs() {
+    let conn = test_db();
+    let dir = std::env::temp_dir();
+    let pm = dir.join("concl_fingerprint.pm");
+    std::fs::write(&pm, "package CF;\nsub f { return 'x' }\n1;\n").unwrap();
+    let cached = parse_source_to_cached(&std::fs::read_to_string(&pm).unwrap(), &pm);
+    let pm_str = pm.to_string_lossy().into_owned();
+    save_to_db(&conn, &pm_str, &Some(cached), "workspace");
+    assert!(load_conclusions(&conn, &pm_str, current_generation(&conn)).is_some());
+
+    validate_conclusion_fingerprint(&conn, "a-different-derivation").unwrap();
+
+    assert!(
+        load_conclusions(&conn, &pm_str, current_generation(&conn)).is_none(),
+        "conclusions survived a derivation change — they now describe a \
+         derivation that no longer exists, and nothing downstream can tell"
+    );
+    assert!(
+        load_one_diag(&conn, &pm_str, true).is_ok(),
+        "the blob was dropped along with the conclusions — the re-bake it \
+         exists to feed now costs a re-parse instead of a decode"
+    );
+    let _ = std::fs::remove_file(&pm);
+}

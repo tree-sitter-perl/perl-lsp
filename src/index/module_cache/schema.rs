@@ -18,6 +18,17 @@ pub const EXTRACT_VERSION: i64 = 184;
 /// next warm re-shreds rows from the already-decoded analyses for free.
 pub(super) const REF_ROWS_VERSION: &str = "6";
 
+/// Fingerprint over everything that can change what a derivation CONCLUDES,
+/// computed by `build.rs` at compile time.
+///
+/// Deliberately not a hand-maintained integer like its neighbours above. Those
+/// guard SHAPE: a stale one is caught the moment a decode fails loudly. This
+/// guards MEANING — a reducer edit leaves bytes that decode perfectly and
+/// answer wrongly — and there is nothing downstream to notice. A version
+/// someone has to remember to bump is the wrong instrument for a failure
+/// nothing else can see (`docs/prompt-conclusion-layer.md`).
+pub const CONCLUSION_FINGERPRINT: &str = env!("PERL_LSP_CONCLUSION_FINGERPRINT");
+
 pub fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS meta (
@@ -70,6 +81,12 @@ pub fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
         CREATE INDEX IF NOT EXISTS idx_syms_name ON syms(name_id);
         CREATE INDEX IF NOT EXISTS idx_syms_key ON syms(key_id);
         CREATE INDEX IF NOT EXISTS idx_syms_file ON syms(file_id);
+        CREATE TABLE IF NOT EXISTS conclusions (
+            path       TEXT NOT NULL,
+            generation INTEGER NOT NULL,
+            map        BLOB NOT NULL,
+            PRIMARY KEY (path, generation)
+        ) WITHOUT ROWID;
         CREATE TABLE IF NOT EXISTS stubs (
             path TEXT PRIMARY KEY,
             stub BLOB NOT NULL
@@ -166,6 +183,17 @@ pub fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
     // `EXTRACT_VERSION` and every reader filters on it. So they age out by
     // re-resolution rather than needing a migration or a format probe.
     let _ = conn.execute_batch("ALTER TABLE modules ADD COLUMN bag BLOB;");
+    // Pre-existing DBs predate the conclusion store; create it rather than
+    // bumping SCHEMA_VERSION, which drops every blob row. An empty store is
+    // correct on arrival — absent means "not baked", never "no answer".
+    let _ = conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS conclusions (
+            path       TEXT NOT NULL,
+            generation INTEGER NOT NULL,
+            map        BLOB NOT NULL,
+            PRIMARY KEY (path, generation)
+        ) WITHOUT ROWID;",
+    );
     // Stub generation gate — stamped here so every fresh DB is writable by
     // the persist writers (their per-chunk `stub_version_current` check
     // would otherwise fail-closed until the first warm scan stamped it).
@@ -360,6 +388,59 @@ pub fn hydrate_builtins(conn: &Connection) -> rusqlite::Result<DashMap<String, S
         }
     }
     Ok(map)
+}
+
+/// Drop the conclusion store when the derivation that produced it changed.
+///
+/// Deliberately NOT a `modules` wipe. A source change invalidates what the
+/// conclusions MEAN while leaving every blob perfectly valid, so the right
+/// cost is one re-bake per file — a decode of a blob we already have, which
+/// is precisely the decode stage 1 made cheaper. Dropping blobs here would
+/// turn a re-bake into a re-parse of the whole corpus for no reason.
+///
+/// Same meta-row shape as `validate_plugin_fingerprint`, including the
+/// IMMEDIATE transaction: two validators racing on a missing stamp would both
+/// clear, and the second would delete rows the first had just written.
+pub fn validate_conclusion_fingerprint(
+    conn: &Connection,
+    fingerprint: &str,
+) -> rusqlite::Result<()> {
+    conn.execute_batch("BEGIN IMMEDIATE")?;
+    let result = validate_conclusion_fingerprint_inner(conn, fingerprint);
+    match &result {
+        Ok(()) => conn.execute_batch("COMMIT")?,
+        Err(_) => {
+            let _ = conn.execute_batch("ROLLBACK");
+        }
+    }
+    result
+}
+
+fn validate_conclusion_fingerprint_inner(
+    conn: &Connection,
+    fingerprint: &str,
+) -> rusqlite::Result<()> {
+    let stored: Option<String> = conn
+        .query_row(
+            "SELECT value FROM meta WHERE key = 'conclusion_fingerprint'",
+            [],
+            |row| row.get(0),
+        )
+        .ok();
+    if stored.as_deref() != Some(fingerprint) {
+        log::info!(
+            "Conclusion derivation changed (was {:?}, now {}), clearing conclusions \
+             (blobs kept — each file re-bakes from the blob it already has)",
+            stored,
+            fingerprint
+        );
+        conn.execute("DELETE FROM conclusions", [])?;
+        conn.execute(
+            "INSERT OR REPLACE INTO meta (key, value) VALUES ('conclusion_fingerprint', ?1)",
+            params![fingerprint],
+        )?;
+    }
+    Ok(())
 }
 
 /// Drop the module cache when the plugin set has changed since the last

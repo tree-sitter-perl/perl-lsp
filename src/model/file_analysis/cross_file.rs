@@ -430,6 +430,22 @@ pub trait CrossFileLookup {
     fn resolution_epoch(&self) -> u64 {
         0
     }
+    /// This file's baked conclusions, if the store has them at the reader's
+    /// pinned generation.
+    ///
+    /// `None` means NOT BAKED — the caller decodes, exactly as before this
+    /// layer existed. It emphatically does not mean "no answer": that is what
+    /// a key being absent from a returned map means, and conflating the two
+    /// turns an unbaked file into a file that concludes nothing.
+    ///
+    /// Defaulted so an index with no store (tests, pack sub-indexes) is
+    /// unaffected and simply keeps decoding.
+    fn conclusions_for(
+        &self,
+        _path: &std::path::Path,
+    ) -> Option<std::sync::Arc<crate::model::witnesses::ConclusionMap>> {
+        None
+    }
     fn get_cached(&self, module_name: &str) -> Option<std::sync::Arc<CachedModule>>;
     /// `get_cached` scoped to a querying file's VISIBILITY set (its own path +
     /// its `#include` closure) — see `ModuleIndex::get_cached_scoped`. Default:

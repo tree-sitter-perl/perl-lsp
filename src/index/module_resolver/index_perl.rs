@@ -132,6 +132,13 @@ pub fn index_workspace_with_index(
             conn,
             &crate::build::plugin::rhai_host::plugin_fingerprint(),
         );
+        // Beside the plugin gate, and for the same reason: a cached artifact
+        // that describes a derivation we no longer run. This one clears
+        // conclusions only — the blobs stay, because the repair is a re-bake.
+        let _ = module_cache::validate_conclusion_fingerprint(
+            conn,
+            module_cache::CONCLUSION_FINGERPRINT,
+        );
     }
     // Persistence and eviction are independent: blobs + rows are written
     // whenever a DB exists (the parity harness runs under PERL_LSP_NO_EVICT

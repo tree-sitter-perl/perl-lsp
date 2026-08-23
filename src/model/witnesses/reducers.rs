@@ -884,7 +884,7 @@ impl WitnessReducer for ReturnExprReducer {
 ///   - No `UnionOnArgs` branch matches `q.arity_hint`.
 ///   - An operator's sub-expression evaluates to `None`, or to a type
 ///     the operator can't project (`RowOf(NotAResultSet)` → `None`).
-fn eval_return_expr(re: &ReturnExpr, q: &ReducerQuery) -> Option<InferredType> {
+pub(super) fn eval_return_expr(re: &ReturnExpr, q: &ReducerQuery) -> Option<InferredType> {
     match re {
         ReturnExpr::Concrete(t) => Some(t.clone()),
         ReturnExpr::Receiver => q.receiver.clone(),

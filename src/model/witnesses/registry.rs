@@ -506,6 +506,147 @@ impl ReducerRegistry {
                         if !super::session::spend_consult(idx) {
                             break;
                         }
+                        // THE CONCLUSION LOOKUP, ahead of the decode.
+                        //
+                        // This is the whole point of the layer: 78% of a
+                        // consult is the chase, not the fetch, and a baked
+                        // answer skips both. Placed after the session memo
+                        // (a hit there is cheaper still) and before
+                        // `bag_present` (which decodes).
+                        //
+                        // The three outcomes are NOT interchangeable:
+                        //   Answer  — serve it, no decode.
+                        //   None    — the map PROVES no answer; fall through
+                        //             to the next candidate exactly as a
+                        //             decoded miss would, still no decode.
+                        //   Decode  — `OpenNone`: unbakeable here, so pay the
+                        //             full price for this key alone.
+                        // A `Follow` is not yet honoured — see below.
+                        let mut baked_said_absent = false;
+                        if let Some(key) =
+                            super::ConclusionKey::from_attachment(q.attachment)
+                        {
+                            if let Some(map) = idx.conclusions_for(&cached.path) {
+                                match map.evaluate(
+                                    &key,
+                                    q.receiver.as_ref(),
+                                    q.arity_hint,
+                                    &q.args,
+                                ) {
+                                    super::Outcome::Answer(t) => {
+                                        crate::util::ghost_stats::count("consult.baked_answer");
+                                        let v = ReducedValue::Type(t);
+                                        // The memo still gets the answer. A
+                                        // baked hit is cheap but not free, and
+                                        // the memo is the tier above it.
+                                        super::session::remember_candidate_answer(
+                                            idx, &cached.path, q, &v,
+                                        );
+                                        return v;
+                                    }
+                                    // ABSENT. The spec lets this mean a proven
+                                    // `None` and skip the candidate outright —
+                                    // "the sharpest knife in the design" — but
+                                    // that is sound only if the bake enumerated
+                                    // every key the bag could answer, and today
+                                    // it does not: it walks the bag's
+                                    // attachment index, while the live chase
+                                    // also answers keys that carry no witnesses
+                                    // (inheritance edges, reducer synthesis).
+                                    //
+                                    // A wrongly-absent key makes the ladder
+                                    // skip a candidate that would have
+                                    // answered; the answer is then found
+                                    // further up the parent walk, so the OUTPUT
+                                    // agrees and only the cost betrays it.
+                                    // Measured on `--dump-package Catalyst`:
+                                    // trusting absence took 892 decodes to
+                                    // 2,721 and 2.76s to 4.20s, byte-identical
+                                    // output throughout. A silent 3x, invisible
+                                    // to every correctness check we have.
+                                    //
+                                    // So absence falls through to the decode
+                                    // until the enumeration is provably
+                                    // complete. `PERL_LSP_TRUST_ABSENT` turns
+                                    // the knife back on for measuring that work
+                                    // as it lands.
+                                    super::Outcome::None => {
+                                        crate::util::ghost_stats::count("consult.baked_none");
+                                        baked_said_absent = true;
+                                        // Absence is conclusive only for a
+                                        // class with NO ancestors at all. The
+                                        // per-file bake cannot establish that:
+                                        // Perl packages are open, and a file
+                                        // that REOPENS a package without
+                                        // repeating its `@ISA` sees a
+                                        // parentless class. `PPI::XSAccessor`
+                                        // does exactly that to `PPI::Token`,
+                                        // and it accounted for 75 of the
+                                        // equivalence breaks left after the
+                                        // per-file check.
+                                        //
+                                        // So the question is asked where the
+                                        // cross-file union lives, through the
+                                        // same `parents_of` every other
+                                        // ancestor walk uses.
+                                        let has_ancestors =
+                                            !crate::model::file_analysis::parents_of(
+                                                class,
+                                                ctx.package_parents,
+                                                ctx.module_index,
+                                                ctx.app_surface_consumers,
+                                            )
+                                            .is_empty();
+                                        if has_ancestors {
+                                            crate::util::ghost_stats::count(
+                                                "consult.absent_but_inherits",
+                                            );
+                                            baked_said_absent = false;
+                                        }
+                                        // Under the equivalence flag, do NOT
+                                        // trust it — fall through, run the
+                                        // real chase, and let the arm below
+                                        // report any answer that absence
+                                        // claimed did not exist.
+                                        if baked_said_absent
+                                            && super::trust_absent_conclusions()
+                                            && !super::verify_absent_conclusions()
+                                        {
+                                            // Remember the None BEFORE
+                                            // continuing. Skipping the memo
+                                            // was the actual cost of trusting
+                                            // absence: this candidate is asked
+                                            // hundreds of times per run, and
+                                            // each repeat re-walked its
+                                            // ancestors instead of hitting the
+                                            // tier that exists to stop exactly
+                                            // that.
+                                            super::session::remember_candidate_answer(
+                                                idx,
+                                                &cached.path,
+                                                q,
+                                                &ReducedValue::None,
+                                            );
+                                            continue;
+                                        }
+                                    }
+                                    // Cross-file hop. Following it needs the
+                                    // ladder to re-enter at another file's
+                                    // map, which is the next slice; until
+                                    // then it degrades to the decode it would
+                                    // have done anyway — slower than it will
+                                    // be, never wrong.
+                                    super::Outcome::Follow { .. } => {
+                                        crate::util::ghost_stats::count("consult.baked_follow_unhandled");
+                                    }
+                                    super::Outcome::Decode => {
+                                        crate::util::ghost_stats::count("consult.baked_open");
+                                    }
+                                }
+                            } else {
+                                crate::util::ghost_stats::count("consult.not_baked");
+                            }
+                        }
                         crate::util::ghost_stats::count("moc.provider_fetched");
                         // The three costs of one cross-file consult, split
                         // because a conclusion layer would remove the first
@@ -554,6 +695,23 @@ impl ReducerRegistry {
                             }
                             }
                         };
+                        if super::verify_absent_conclusions()
+                            && baked_said_absent
+                            && v != ReducedValue::None
+                        {
+                            crate::util::ghost_stats::count("concl.equiv_break");
+                            log::error!(
+                                "conclusion equivalence break: the map reported {:?} ABSENT for \
+                                 {:?} (which is read as a proven None) but the chase answered \
+                                 {v:?} — the bake's key enumeration is incomplete",
+                                q.attachment,
+                                cached.path
+                            );
+                            debug_assert!(
+                                false,
+                                "conclusion absence disagreed with the chase; see log"
+                            );
+                        }
                         super::session::remember_candidate_answer(idx, &cached.path, q, &v);
                         if v != ReducedValue::None {
                             return v;
