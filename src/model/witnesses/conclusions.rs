@@ -476,9 +476,24 @@ fn bake_one(
     crate::util::ghost_stats::count("bake.attempted");
     let ReducedValue::Type(t) = bare else {
         crate::util::ghost_stats::count("bake.no_bare_answer");
-        // No answer without binders. That is either a genuine None or a
-        // receiver-dependent shape this function failed to recognize as
-        // `ReturnExpr`; the two are indistinguishable here, so decode.
+        // No answer without binders, and `OpenNone` (decode) rather than
+        // absent (a proven None) — measured, not assumed.
+        //
+        // Treating these as absent looks free: the bake got None, so the live
+        // path surely gets None too. It does not. 56 equivalence breaks per
+        // substrate check, all the same shape — `Log::Log4perl::get_logger`
+        // answering `ClassName("Log::Log4perl::Logger")`, `URI::new` answering
+        // `ClassName("URI::_foreign")`. The bake runs with no module index, so
+        // a chase that EXITS cross-file returns None here and has a real
+        // answer at query time.
+        //
+        // These want to be `Link`, not `OpenNone`. The bake cannot mint one
+        // because the edge it holds is `Edge(Symbol(sid))` — a LOCAL symbol
+        // whose own chase leaves the file — so nothing local names the target.
+        // Widening `Link` past `sole_foreign_edge` needs the registry to
+        // report "I would have consulted the index here, for key K" instead of
+        // returning None: a residualizing mode, which is a design step rather
+        // than a fix. Until then these cost one decode each.
         return Conclusion::OpenNone;
     };
 
