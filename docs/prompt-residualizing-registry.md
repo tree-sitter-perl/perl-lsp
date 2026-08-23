@@ -472,6 +472,71 @@ it should land ahead of any `Link` widening, not with it.
    second call site appears, wrap it (`evaluate_guarded` taking the
    predicate) so the obligation is typed rather than remembered.
 
+## Round 3: the poison half, made concrete against the measured breaks
+
+Minting without the poison half produced a 40% wrong-answer rate (44
+follow breaks / 65 correct follows), and all four break shapes are the
+same violation: **the residual was recorded at a frame BELOW a combining
+frame, so the link serves the exit's answer while the chase's answer is
+the fold's.**
+
+The `chase=None` majority is the fold-disagreement case read through
+that lens: the live `SymbolReturnArmFold` sees the method's arms
+disagree (hashref arm, undef arm, `$self` arm) and correctly answers
+`None`; the minted link jumps past the fold to one arm's deep exit and
+serves that arm's answer alone. `Email::MIME::create`
+(link=parent's answer, chase=own answer) is the same violation on the
+candidate ladder: the LOCAL arm answers live, but its bake-time
+derivation was itself residual-bearing, so the bake saw local-`None` and
+minted the parent exit — a rung the live ladder never reaches.
+Receiver substitution was checked and cleared; no shape needs it.
+
+The rule, stated implementably. Per `query_rec` frame: snapshot
+`state.residual.len()` on entry; if it grew during the frame AND the
+frame is not a pure ladder position, set `poisoned`. Frame
+classification for this codebase:
+
+**Clean (ladder) frames — residual may pass through:**
+- the candidate loop (primary consult, first-answer-wins);
+- the DFS-MRO parent walk;
+- `materialize` of an attachment whose ONLY witness is the chased edge
+  (the sole-edge passthrough — the chain the 56-break population lives
+  on: `PackageSymbol → Edge(Symbol) → single return arm → Edge(Expr) →
+  foreign edge`);
+- `SymbolReturnArmFold` with exactly ONE arm (the implicit-return chain
+  is a passthrough).
+
+**Combining frames — residual inside them poisons:**
+- `SymbolReturnArmFold` with MORE than one arm, even when the resolved
+  arms agree: an unresolved residual arm can change the agreement
+  verdict, so no link can stand in for the fold;
+- `materialize` splicing a chased edge into a witness list with any
+  other member — the reducers fold the splice with its siblings;
+- `BranchArmFold` and `FrameworkAwareTypeFold` whenever a residual is
+  raised inside them (agreement and observation-folding respectively);
+- any frame with residuals recorded in MORE than one of its arms
+  (non-singleton per-arm is the candidate-ladder version of the
+  `Email::MIME` break: two rungs each needed the index, so no single
+  rung's answer is the chase's).
+
+The acceptance shape is two-sided, and both sides matter: with the
+poison on, EQUIV follow-breaks must go to 0 **and `Link` must stay far
+above 44**. If the poison also kills the sole-edge-chain population, the
+clean-frame set is drawn too coarse — the 56-break shapes are the
+canary in both directions. Each of the four measured break shapes should
+disappear for an identifiable reason (a specific combining frame on its
+path); a break that disappears without one is the checker being dodged,
+not the rule working.
+
+One induction worth writing down: even a clean singleton link asserts
+only "the chase's answer IS the exit's answer". The follow evaluates the
+exit against the TARGET's map, while the live chase evaluates it against
+the target's bag and index — those agree exactly when the target map is
+itself sound for that key. Link soundness is therefore inductive on map
+soundness, and `PERL_LSP_CONCL_EQUIV` is the induction check; there is
+no additional mechanism to build, but a follow-break must be triaged as
+"my frame rule" vs "the target's map" before either is blamed.
+
 ## The follow-on that empties the guard's decode arm (later, not now)
 
 The bridge declaration is **local to the bridging file** — its plugin
