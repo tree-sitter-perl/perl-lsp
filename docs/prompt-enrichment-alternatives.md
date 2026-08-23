@@ -372,9 +372,16 @@ the stamp check (the stamp lives on the `modules` row): writing one
 re-opens the bake-outlived-blob hole by a different door. Publication
 resumes when the conclusions table carries its OWN freshness stamp —
 and that stamp is the generation clock's natural next customer, joining
-torn-read prevention over multi-seed row writes, the monotone counter
-the re-stamp gate compares `stamp_generation` against, and the
-deterministic degraded signal ("answers as of gen N, k pending"). The
+torn-read prevention over multi-seed row writes and the deterministic
+degraded signal ("answers as of gen N, k pending"). The re-stamp gate
+is NOT a store-generation customer: with publication deferred the store
+generation never advances, so a gate keyed to it would be dead by
+construction, and the deeper rule is that a comparison clock must share
+its LIFETIME with the operands it orders — the gate's stamp and marks
+are both sessional, so its clock (`flush_epoch`, sessional, on
+`IndexCore`) is too. The gate migrates to the store generation only
+if the marks ever persist, which the coupled-halves invariant says
+happens for both halves together or not at all. The
 invariant that makes caller-supplied, index-free maps sound — a bake
 can never produce a value that depended on another file — is silent in
 its violation (a bake that learned to consult an index would quietly
