@@ -1664,3 +1664,103 @@ fn the_conclusion_fingerprint_is_not_stale() {
          the guard is describing a tree that no longer exists"
     );
 }
+
+/// A reader pinned to a generation must keep seeing it while a later one is
+/// published.
+///
+/// This is the failure the `(path, generation)` key exists to prevent. Keyed
+/// on `path` alone, publishing N+1 REPLACES the gen-N row, and a reader still
+/// pinned to N finds nothing — which the evaluator reads as a definite `None`.
+/// The pin would then be a way to GET wrong answers rather than avoid them,
+/// and nothing downstream could tell, because "this file concludes nothing"
+/// is a perfectly ordinary thing for the store to say.
+#[test]
+fn a_pinned_reader_does_not_see_a_later_generation() {
+    use crate::model::witnesses::{Conclusion, ConclusionKey, ConclusionMap};
+    let conn = test_db();
+    let mk = |t: &str| {
+        let mut m = std::collections::HashMap::new();
+        m.insert(
+            ConclusionKey::SubByName("f".into()),
+            Conclusion::Value(crate::model::file_analysis::InferredType::ClassName(t.into())),
+        );
+        ConclusionMap(m)
+    };
+
+    let g1 = Generation(1);
+    publish_generation(&conn, g1, &[("/a.pm".to_string(), mk("One"))]).expect("publish 1");
+    assert_eq!(current_generation(&conn), g1);
+
+    let pinned = load_conclusions(&conn, "/a.pm", g1).expect("gen 1 visible at gen 1");
+
+    let g2 = Generation(2);
+    publish_generation(&conn, g2, &[("/a.pm".to_string(), mk("Two"))]).expect("publish 2");
+
+    // The pin still resolves, and to the OLD content.
+    let after = load_conclusions(&conn, "/a.pm", g1).expect(
+        "a reader pinned to gen 1 lost its row when gen 2 published — it would \
+         read absence as a definite None",
+    );
+    assert_eq!(after, pinned, "the pin resolved to a different generation");
+
+    // And a fresh reader sees the new one.
+    let fresh = load_conclusions(&conn, "/a.pm", current_generation(&conn)).expect("gen 2");
+    assert_ne!(fresh, pinned, "gen 2 served gen 1's content");
+}
+
+/// Pruning must not delete the row a live pin resolves to.
+#[test]
+fn pruning_keeps_what_the_pin_still_needs() {
+    use crate::model::witnesses::{Conclusion, ConclusionKey, ConclusionMap};
+    let conn = test_db();
+    let mk = |t: &str| {
+        let mut m = std::collections::HashMap::new();
+        m.insert(
+            ConclusionKey::SubByName("f".into()),
+            Conclusion::Value(crate::model::file_analysis::InferredType::ClassName(t.into())),
+        );
+        ConclusionMap(m)
+    };
+    for g in 1..=4i64 {
+        publish_generation(&conn, Generation(g), &[("/a.pm".to_string(), mk(&format!("G{g}")))])
+            .expect("publish");
+    }
+    // A reader is pinned at 3; everything strictly older than what gen 3
+    // resolves to is unreachable, and gen 3's own row is not.
+    prune_generations_below(&conn, Generation(3));
+    assert!(
+        load_conclusions(&conn, "/a.pm", Generation(3)).is_some(),
+        "pruning deleted the row a pin at gen 3 resolves to"
+    );
+    assert!(
+        load_conclusions(&conn, "/a.pm", Generation(4)).is_some(),
+        "pruning deleted a generation newer than the prune floor"
+    );
+}
+
+/// A failed round must not advance the generation.
+///
+/// Half a round published under a complete-looking generation is the same
+/// absence-as-answer failure: the files that did land are read as current, the
+/// ones that did not are read as concluding nothing.
+#[test]
+fn a_failed_round_leaves_the_previous_generation_intact() {
+    use crate::model::witnesses::ConclusionMap;
+    let conn = test_db();
+    publish_generation(&conn, Generation(1), &[("/a.pm".to_string(), ConclusionMap::default())])
+        .expect("publish 1");
+    // Force a failure mid-round by dropping the table the second write needs.
+    conn.execute_batch("DROP TABLE conclusions").unwrap();
+    let r = publish_generation(
+        &conn,
+        Generation(2),
+        &[("/b.pm".to_string(), ConclusionMap::default())],
+    );
+    assert!(r.is_err(), "a round that could not write reported success");
+    assert_eq!(
+        current_generation(&conn),
+        Generation(1),
+        "a failed round advanced the generation, so its partial writes would \
+         be served as complete"
+    );
+}

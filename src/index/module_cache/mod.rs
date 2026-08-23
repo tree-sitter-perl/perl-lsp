@@ -32,6 +32,8 @@ mod schema;
 pub use schema::*;
 mod stubs;
 pub use stubs::*;
+mod conclusions_store;
+pub use conclusions_store::*;
 mod warm;
 pub use warm::*;
 
