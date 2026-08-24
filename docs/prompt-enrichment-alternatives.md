@@ -649,25 +649,88 @@ on it.
 Independent review on #161 established two things every future number on
 this arc must respect:
 
-- **`PERL_LSP_NO_BAKE` gates the WRITE, not the read.** The standard
-  prime-once-then-toggle protocol therefore primes the maps under ON
-  and lets every OFF arm read them anyway — both arms measure a baked
-  layer, which presents exactly as "no effect". **Correct protocol:
-  clear the cache and re-prime under EACH arm.** Every count in this
-  document measured under the old protocol (the NO_BAKE fetch/consult
-  reductions) is a LOWER bound — the true reduction is at least what
-  was reported. Any A/B flag added by §6 work (the EQUIV switches
-  included) needs its *semantics* verified — does it disable the fill,
-  the read, or both — not just its presence.
+- **A bake-steering flag must never be toggled against a shared
+  cache.** The full mechanism, established across two corrections:
+  `PERL_LSP_NO_BAKE` is a `BAKE_STEERING_FLAGS` member, so toggling it
+  changes the derivation fingerprint and WIPES the conclusions lane —
+  under interleaving, both arms measure an EMPTY layer, not a baked
+  one. And the flag originally gated only one of TWO producers: the
+  background `repair_conclusions_slice` re-baked the corpus after each
+  "disabled" run, so the row census read full-and-correct while the
+  control controlled nothing (fixed: one `bake_disabled()` speller,
+  layering-test-pinned to a single reader). **Protocol: batch all runs
+  of one arm in its OWN cache directory; per-arm clearing is necessary
+  but not sufficient while any producer ignores the flag. "Is the fill
+  disabled?" is a question about the SET OF WRITERS, not about the
+  flag.** Any A/B flag added by §6 work (the EQUIV switches included)
+  needs its semantics verified the same way. A correction to this
+  section's earlier claim: the consult-count reductions recorded in
+  this document were measured under `PERL_LSP_NO_NOT_LOCAL` — a
+  consult-side gate on maps both arms read identically — so they are
+  NOT affected by the fill-side flaw and are neither understated nor
+  lower bounds; the fill-side `MINT_LINKS` A/B self-discriminates via
+  `baked_follow_incomplete` and was re-primed per arm, so it stands.
 - **First wall-time validation, corrected protocol, real codebases:**
   8.4% (6,009-file app+plugins, complete separation across runs) and
   9.3% (3,554-file app, one overlapping pair — treat as the weaker
-  figure), diagnostics set-identical throughout. The gold substrate
-  (2,293 installed-CPAN files, shallow chains) showed ~10% work removed
-  with NO wall movement — it is the wrong corpus to judge this layer
-  on, and corpus SHAPE dominates file count (the 3.5k app is slower
-  than the 6k one). The 138k-scale run on the steep part of the
-  failed-lookup cost curve remains the open measurement.
+  figure), diagnostics set-identical throughout — and after the
+  second-producer fix these are a FLOOR (the OFF arms' later runs were
+  repair-baked, i.e. too fast). The honest substrate number under
+  per-arm caches: **−20.5% of the chase, +6% wall** — ON slower in 5
+  of 6 paired runs, because installed CPAN's chases are cheap and
+  removing a fifth of them does not repay the map loads. Nobody quotes
+  the substrate for this layer in either direction; corpus SHAPE
+  dominates file count (the 3.5k app is slower than the 6k one). The
+  138k-scale run on the steep part of the failed-lookup cost curve
+  remains the open measurement.
 - `ScopedNs` regions accumulate per-thread and nest (measured 31×
   over-report serially, worse under rayon): a region total is never a
   wall claim. Counts that cannot nest are the trustworthy headline.
+
+### 6e. Activation findings and rulings (the three blocks)
+
+The 6a activation report established that `restamp.skipped > 0` is
+currently unreachable, via three independent measured blocks. Rulings:
+
+- **Block 1 — bulk marks are structurally FirstSeen** (one bulk per
+  session, at startup, into an empty in-memory `FreshnessIndex`; a
+  one-shot CLI has no prior surface at all). Accepted as a fact of the
+  current lifecycle, not a bug: the routing fix (bind the verdict,
+  accumulate Changed paths, mark once at drain, mark-not-wave since a
+  bulk has no before-state) is correct and inert until the index
+  survives longer than one bulk — which is 6b's persistence story, not
+  6a's.
+- **Block 2 — the overlay lane can never skip, CORRECTLY.** Overlay
+  derivations clone the BASE analysis (`stamped_at: None`, refs
+  carrying build-time targets); a skip there would serve un-enriched
+  targets. The gate's premise does not hold for that population, and
+  the recorded WRONG-fix stands recorded: moving the stamp into the
+  index (a `stamped_gen` map) would satisfy the clock-lifetime rule
+  and still be wrong, because the index would claim "stamped" for a
+  copy whose refs never were. The stamp belongs on the copy.
+- **Block 3 — `dirty_consumers` empty for a saved provider with a
+  live open consumer is a BUG, not expected shape.** The engine was
+  built to carry Perl edges: `FreshnessIndex::record` maintains
+  name-keyed consumer edges from `dep_names` = uses ∪ parents ∪
+  plugin_bridges, and `dirty_consumers` walks them transitively. An
+  empty answer means one of two coverage holes, distinguishable by one
+  counter (did `surfaces.get(seed)` hit, and was the frontier
+  non-empty): (a) the CONSUMER's record never landed — the open-doc
+  record's single call site is the debounced diagnostics refresh,
+  which fires on change, so an opened-but-unedited consumer may never
+  record (didOpen must record, or the bulk record must cover it and
+  survive); or (b) PATH IDENTITY — `record` keys `surfaces`/
+  `consumers` by the caller's spelling while the
+  `registration.rs::dirty_consumers` wrapper canonicalizes the seed;
+  one canonicalization speller at the record boundary, or none
+  anywhere, never a mix. The fix belongs in the freshness engine's
+  record boundary, not in the wave.
+- **The gate stays.** Its addressable population, post-block-2, is
+  exactly what the eager stamp was built for: OPEN docs re-enriched
+  without their own rebuild — the blanket `republish_open_docs_in`
+  storm (every open doc re-enriches when any file's surface changes),
+  the resolver refresh callback, and the cold-open heal. With N open
+  docs, one provider change pays N re-enrichments today and the gate
+  skips the non-consumers' re-stamps once block 3 is fixed. 6b's
+  publication also grows the index-served share, raising the relative
+  value of each skipped re-stamp. Inert-and-honest until then.
