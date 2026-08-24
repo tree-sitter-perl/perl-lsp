@@ -840,6 +840,13 @@ them: stale rejections 47,967 → 0, `surface.reprojected` 0, stamp
 residue 8.6% over bypass (all of it `unrecorded` fail-open), one-run
 self-healing upgrade (~5.09 s vs ~4.7 s settled at 3,515 files). The
 cold-regression dispute on the integration tip is the coordinator's
-call; the design fact relevant to it is already in this doc — corpus
-SHAPE dominates file count, and a corpus that is half non-Perl engages
-the pack lane that Perl-only repros cannot see.
+call. The corpus question is answered by the maintainer: the non-`.pm`
+files are `.t` — ALL Perl, no pack lane (this section's earlier
+pack-lane speculation is retracted). Which sharpens the shape
+hypothesis instead: `.t` files are package-less `main` scripts with
+heavy `use` lists, so that corpus provides ONE package name (`main`)
+from ~6,748 files — the extreme point of the many-providers-per-name
+relation (root cause 3 in §1), far beyond the 1,300×10 duplication
+probe, plus thousands of consumer-heavy dep lists. The repro generator
+wants that second population: unique-package `.pm` providers plus
+thousands of `main`-package `.t` consumers using them.
