@@ -734,3 +734,66 @@ currently unreachable, via three independent measured blocks. Rulings:
   skips the non-consumers' re-stamps once block 3 is fixed. 6b's
   publication also grows the index-served share, raising the relative
   value of each skipped re-stamp. Inert-and-honest until then.
+
+### 6f. RULING — the conclusions-row stamp source: persist the Surface
+
+The contested call site fired (`docs/prompt-surface-projection-drift.md`):
+`Surface::project` reads the witness bag, the warm lane projects from
+bag-EVICTED copies, so one file fingerprints differently depending on
+which lane recorded it — 76.7% of conclusion rows rejected (correctly,
+given the compare), a 3.3× cost on the layer, and the real substrate
+bake-ON number is −75.9% of fetches (17,419 vs 72,305), superseding the
+crippled-layer −20.5%.
+
+**Ruling: option (1), persist the Surface.** The warm lane READS the
+persisted projection instead of re-projecting from a degraded copy.
+
+- The decisive argument is not the stamp — it is that (1) is the only
+  option that also fixes the **warm-start freshness verdict**: today an
+  edit changing only bag-derived content compares equal to a degraded
+  baseline, reads `Unchanged`, and no consumer re-enriches — the
+  loader-shapes failure arriving through the residency door. Option
+  (2) (stamp on bytes/mtime) answers the literal stamp question and
+  knowingly leaves that wrong-answer-shaped hole; rejected for that
+  reason, not for cost.
+- Structurally this is the one-speller rule applied to an artifact:
+  the drift exists because there are TWO producers of "this file's
+  Surface." (1) collapses them to one — the projection is computed
+  once, on the persist path, from the WHOLE analysis (which the
+  reads-whole-before-evict discipline already guarantees is in hand:
+  `prepare_*_parts` project pre-strip today). Precedent: the pack
+  `stubs` lane. Additive migration per the build-time finding: a
+  sibling `surfaces` table with its own version gate, no
+  `SCHEMA_VERSION` bump, no cache-wide rebuild.
+- Ownership follows the stubs discipline exactly: written by the
+  persist writer in the same chunk txn; any `modules`-row rewrite
+  deletes the path's surfaces row (inside the write helpers — writers
+  can't forget); hard-clears wipe it with the derived rows.
+- **Decline lane**: a missing/version-declined surfaces row on warm
+  falls back to a point whole-decode and projects from the whole copy
+  (backfilling the row, as the stub decline lane does). If even that
+  fails, record NOTHING — absence of a record is `FirstSeen`, which
+  fails open; recording a degraded projection is the bug and is never
+  the fallback.
+- **Enforcement instead of option (3)**: `Surface::project` gains a
+  debug assertion that the bag is present. That makes a future
+  degraded projection loud at the source, buying (3)'s guarantee
+  ("a degraded projection is impossible") without (3)'s rebuild of the
+  projection itself — and with the warm lane no longer projecting at
+  all, the assert has no legitimate trigger. The narrow
+  `index_perl.rs` loader-shapes rehydration workaround is subsumed and
+  deleted when this lands.
+- Pin the reduced unit property as a test: build→project→fingerprint
+  equals the persisted-surface fingerprint after evict+rehydrate; it
+  is the anti-drift tripwire for every future Surface field.
+
+Also ratified from the 6b/6c builds: the `FreshBake` one-value coupling
+(path+map+fingerprint describe one state; never read the fingerprint
+back from the index at write time), the generation pin making pruning
+safe (a lost generation degrades to a decode, never a wrong answer),
+and 6c's `ResolutionSession::declare_profile` resolution
+(session → process cell → `full()`; the process `OnceLock` stays
+CLI-only for exactly the reason its doc comment states). The server
+diagnostics profile stays unwired until the ablation over the server
+path produces the same evidence the `--check` ablation did — that
+measurement is green-lit.
