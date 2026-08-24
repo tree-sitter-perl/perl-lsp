@@ -82,6 +82,7 @@ pub fn warm_cache_streaming(
         // genuinely has no type facts, so every downstream reader takes the
         // empty bag at face value instead of rehydrating — silently, with no
         // error and no empty-vs-evicted question it could even ask.
+        let _g_dec = crate::util::ghost_stats::ScopedNs::start("warm.decode");
         let Some(fa) = decode_analysis_parts(&blob, None, false) else {
             log::warn!("Failed to decode cached analysis for '{}', skipping", module_name);
             continue;
@@ -89,7 +90,9 @@ pub fn warm_cache_streaming(
         if closure_stamp(&fa.pack.include_closure, &mut stat_memo) != row_deps_stamp {
             continue;
         }
+        drop(_g_dec);
         count += 1;
+        let _g_reg = crate::util::ghost_stats::ScopedNs::start("warm.register");
         each(module_name, path, fa);
     }
     (count, stale_names, missing)
