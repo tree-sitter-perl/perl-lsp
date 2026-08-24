@@ -967,3 +967,60 @@ pattern, and that dependency must be stated at the site.**
   `ResolutionSession` (once per session, feeding the pin) regardless —
   the retained connection makes the per-miss read cheaper, not free,
   and the pin wants one consistent generation per walk anyway.
+
+### 6i. RULINGS — the sequencing verdict, the pin, and the #162 carry-forwards
+
+**Sequencing (the §3a re-rule, on the real-code numbers):** follow
+completion 1.20% (koha) / 0.00% (6k app); `no_answer_linkable` is 1.5%
+of open reasons on real code (the dist pile's 49.7% was a property of
+that corpus); `self_only` — which minting cannot help — is 79.9%.
+Per the pre-stated criterion: **world-level closedness is the
+PREREQUISITE lever, not a sibling.** `Link` stays parked for real-code
+serving; if the still-running dist-pile arm shows completion there, it
+re-opens as a lever WITH A STATED DOMAIN (dependency trees), never as
+a general win. The flush stamping ancestry-closedness classes is the
+next Link-adjacent work, not more minting. Corollary accepted: the
+vendored `inc/Module/Install` hot spot cited for origin-scoped
+visibility is a dist-pile population (zero copies in either real
+codebase) — that framing's real-code justification is the CORRECTNESS
+bug (scripts bleeding into each other's answers), not the perf case,
+and must say so.
+
+**The generation pin: compare FINGERPRINTS, not generations.** The
+reviewer's fragmentation finding is real — seeds-only publication
+fragments the generation space, and a walk pinning its first row's
+generation goes dark for the rest of the corpus, nondeterministically
+by consult order. That is wall-clock-budget-shaped nondeterminism, the
+class this arc exists to delete. The fix is not republishing the
+reached cone (write amplification the index-free bake exists to
+avoid); it is recognizing that the pin's job is already done by the
+rows: given the register-before-mark ordering (the customer-2
+bump-first argument, already load-bearing), a row passes its
+content-fingerprint check only against the world the index currently
+believes, and the deterministic bake makes any passing row unique — so
+per-row fingerprint validity IS the torn-read protection, and the
+generation comparison at admission adds only false darkness.
+Generation demotes to bookkeeping: the degraded signal, audit, and
+per-path supersede-pruning. (The PR's warm numbers predate any flush;
+re-measure after this lands.)
+
+**Frontier detects absence, never mismatch** (finding 2): with
+fingerprint-at-consult, a mismatched row already reads absent at the
+consult — close the loop by having that consult-side rejection ENQUEUE
+the path for repair (push-shaped, one line at the rejection site),
+rather than teaching the frontier query a fingerprint join. Residual
+drift then self-heals through the same lane as absence.
+
+**No eraser deletes a `surfaces` row** (finding 3): fold `surfaces`
+into the derived-erasers set — `invalidate_generation`'s conditional
+drop, `clear_derived_rows`, both hard clears — the same one-eraser
+discipline as `invalidate_derived_copies`; the delete-on-modules-
+rewrite half already exists via the `delete_stub` pattern and the
+#162 delete-first fix.
+
+Also for the flag-semantics tally: `mint_links_enabled()` tests
+`is_ok()`, so `PERL_LSP_MINT_LINKS=0` turns minting ON — a baseline
+written the obvious way measures ON vs ON. Same family as the NO_BAKE
+half-gates (both now fixed: frontier seeding AND the executor's
+`blob.is_empty()` early return). Every boolean env gate wants a
+truthiness rule and a doc line saying which it is.
