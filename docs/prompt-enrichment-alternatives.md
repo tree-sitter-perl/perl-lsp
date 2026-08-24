@@ -932,3 +932,38 @@ shows `no_answer_linkable` at 49.7% of open reasons vs the substrate
 prior of nothing-to-convert; the A/B scores follow COMPLETION (not
 decode count) per-arm-cached, and its incomplete-rate decides whether
 world-level closedness is the prerequisite lever or the sibling one.
+
+**§6h addendum 2 — reconciling `41ead841` (inode recheck) with the
+wipe-generation key.** Ruling: **the inode recheck is sufficient for
+THIS seam, and on one axis it is stronger than the key I specified —
+but its sufficiency is a property of 6b's rows, not of the connection
+pattern, and that dependency must be stated at the site.**
+
+- The TOCTOU window is real (recheck passes, a concurrent hard-clear
+  unlinks+recreates, the query reads the old inode) but post-6b it can
+  serve only CORRECT answers: the bake is deterministic (the
+  seeded-map gate), and every row self-validates — content fingerprint
+  against the live `FreshnessIndex`, per-row derivation-version gate,
+  and the session generation pin. Any old-inode row that survives all
+  three is byte-equivalent to what a fresh re-bake would produce, so
+  the window degrades to "served the same answer from the old file",
+  and the very next miss rechecks and reopens. A happens-before
+  (generation bump) is not needed where the data proves itself.
+- The recheck is WIDER than my key on the axis that matters most: a
+  process-local wipe-generation counter is blind to an
+  OUT-of-process `--clear-cache` (a separate CLI process unlinking the
+  DB under a running server), which the stat sees immediately. My
+  spec missed that case; the engineer's mechanism covers it.
+- **The boundary that must be written at the site**: this sufficiency
+  argument belongs to the conclusions lane's self-validating rows. The
+  retained connection must NOT be reused for lanes whose reads do not
+  self-validate (the blob store, the refs/syms rows) — there the
+  TOCTOU window serves genuinely stale data with no gate to catch it,
+  and the wipe-generation key (or no retention at all) remains the
+  requirement. One comment stating "this recheck is sound because
+  every row read through it self-validates" turns a future
+  reuse-this-connection change into a tripwire instead of a hole.
+- Item 2 stands open and composes: the generation read moves onto
+  `ResolutionSession` (once per session, feeding the pin) regardless —
+  the retained connection makes the per-miss read cheaper, not free,
+  and the pin wants one consistent generation per walk anyway.
