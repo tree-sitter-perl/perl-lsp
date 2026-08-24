@@ -558,3 +558,88 @@ net that catches the conclusion column's absent-vs-empty confusions.
   one named hang (`Advanced-Config` 13-alt-get-tests.t, 4,000×
   in-corpus vs standalone) is unexplained and may be a different animal
   — attribute it before assuming this arc absorbs it.
+
+## 6. Follow-up specs (post-#161)
+
+Three items, in the order they should be built. The first turns the
+landed machinery into the measured win; the second resumes publication
+and closes the last declared coverage gap by construction; the third is
+optional perf with a one-rule design.
+
+### 6a. Activation — make the flush and the gate run where providers change
+
+The driver and the gate are wired to `did_save` and the watched-files
+seam (one shared body, `reindex_saved_perl`). What's left is coverage
+and evidence, not design:
+
+- **Every event that (re)registers a provider analysis marks and
+  flushes**: the rule is "anything routing `record_and_dirty` →
+  `dirty_consumers`" — that already includes new-file registration and
+  deletion. The one path needing care is **bulk/workspace re-index**:
+  never flush per-file during a bulk (the H9-2 defer/reconcile shape);
+  enqueue throughout, one flush at end-of-bulk drain.
+- **The win is read off counters, nothing else**: a real editing run
+  (edit-bench scenario over the substrate or Koha) must show
+  `restamp.skipped > 0` with `PERL_LSP_RESTAMP_EQUIV=1` reporting zero
+  disagreements, and `PERL_LSP_FLUSH_EQUIV` clean. Both switches have
+  had no corpus exercise; the first activated run is their first real
+  test and should say so when reporting numbers.
+
+### 6b. SPEC 3 — resume publication: the self-validating conclusions row
+
+The no-publish ruling exists because validity currently lives on the
+WRONG row: the stamp check is on `modules`, so a conclusion row with no
+`modules` row behind it is invisible to the eraser. The fix is to make
+each conclusions row carry its own validity, checked at consult:
+
+- **Row stamp = `(source_fingerprint, flush_generation)`.**
+  `source_fingerprint` is the content fingerprint of the analysis the
+  map was baked from — the same value `FreshnessIndex` records.
+  `flush_generation` is the store generation the row was written under
+  (the persistent clock's fourth customer, per the customer list).
+- **Validity is content-keyed, decided at consult.** `conclusions_for`
+  returns the map only when `row.source_fingerprint` equals the
+  fingerprint the index currently records for that path (never re-hash
+  at consult time — consults are hot; no freshness record → absent).
+  Anything else — an orphaned row whose `modules` row was erased, a
+  stale row for an edited file, a row from an interrupted write — fails
+  the SAME compare and reads as absent, and absent falls back to the
+  live chase. Correctness stops depending on any caller remembering an
+  eraser; `invalidate_derived_copies` stays for space and hygiene only.
+  **This closes the "unit evidence only" gap by construction**: the
+  wrong answer that could not be demonstrated becomes unreadable
+  rather than unprovoked.
+- **Torn-read prevention is a session pin, not a lock.** Each flush
+  publishes all its seeds' rows in ONE transaction. The remaining
+  hazard is a chase that consumed a pre-flush row and then reads a
+  post-flush row: the reader records the generation of the first row it
+  consumes in a `ResolutionSession` and treats any row with a DIFFERENT
+  generation as absent for the rest of that session (absent → live
+  chase; never a wrong answer, at worst a slower one).
+- **Exactly two writers, both single-txn**: the persist writer (blob +
+  map + stamps in the existing chunk txn) and the flush publish (seeds'
+  fresh maps, stamped with each seed's fingerprint + gen N+1). The
+  persist-mid-flush ownership rule stands as ruled: queue as next-flush
+  seed or admit as a late seed under the N+1 stamp discipline; never
+  write-in-place at the current generation.
+- **Schema/versioning**: bump the conclusions-lane version;
+  wipe+re-bake on mismatch (the `REF_ROWS_VERSION` policy — never a
+  blob drop), with a shape probe so a lying stamp still rebuilds. The
+  labelled dead code (`save_conclusions` / `publish_generation` /
+  `prune_generations_below`) revives here; prune keys on generation.
+- Keep `PERL_LSP_CONCL_EQUIV` on for the first corpus run with
+  publication live — same first-exercise honesty as 6a.
+
+### 6c. Profile lattice — SPEC 2's server-side rule
+
+`EnrichmentProfile` is a lattice (two points today: `Diagnostics <
+Full`). The `enriched_snapshot` overlay entry records the profile it
+was enriched UNDER; a lookup for profile P accepts an entry whose
+profile ≥ P; a request fuller than what's cached re-enriches and
+REPLACES the entry (profile is a field on the fingerprint-keyed entry,
+not part of the key — no double-caching, upgrade-in-place). The ≥ rule
+is the entire guarantee that a partial copy is never served to a
+fuller verb. Verbs declare their profile the way they declare
+`LanguageScope`; the enricher never asks what query it serves. Can
+land CLI-first exactly as the `--check` skip did; nothing else blocks
+on it.
