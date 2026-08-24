@@ -1024,3 +1024,31 @@ written the obvious way measures ON vs ON. Same family as the NO_BAKE
 half-gates (both now fixed: frontier seeding AND the executor's
 `blob.is_empty()` early return). Every boolean env gate wants a
 truthiness rule and a doc line saying which it is.
+
+**§6i addendum — the Link question is CLOSED; visibility gains a
+constraint.** The dist-pile arm answered the domain condition: the
+linkable distribution replicates (52.7%) but follow completion is
+**0%** — 1,260,943 minted follows, all abandoned, +77% wall, provider
+fetches byte-identical. So `Link` does not re-open in any domain.
+Final state: `PERL_LSP_MINT_LINKS` stays off ON EVIDENCE from both
+regimes; **closedness is not the lever that improves Link — it is the
+lever without which Link has no value at all**, and re-running this
+A/B after closedness lands is the gate: `baked_follow` still 0 ⇒
+minting is DEAD, not parked. Closedness's own justification is
+independent and sufficient: `absent_not_closed` is 27.6% of open
+reasons and 96.8% wasted (~640k no-answer decodes per n300 run that
+closed-form ancestry converts directly).
+
+The FHEM finding adds the constraint the origin-scoped-visibility
+design must carry: 534 of 614 `.pm` files legitimately share `package
+main` (do-loaded into one interpreter — they genuinely share one
+stash), so **whether cross-file `main` visibility is a bug is itself
+origin-relative**: a koha `.t` should not see another `.t`'s `main`;
+an FHEM module MUST see its siblings'. The axis therefore derives from
+actual load relations (`do`/`require` edges), never from file kind or
+path shape — which is one more reason it is a `VisibilityAxis`
+variant and could never have been an identity bit. Also adopted into
+the measurement rules: state whether a counter is ATTEMPTS or
+COMPLETIONS and reconcile against its sibling (`moc.provider_fetched`
+is attempts; 12.3M attempts reconciled to 7,200 loader completions
+three lines away in the same dump).
