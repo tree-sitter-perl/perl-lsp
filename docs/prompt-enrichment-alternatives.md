@@ -643,3 +643,31 @@ fuller verb. Verbs declare their profile the way they declare
 `LanguageScope`; the enricher never asks what query it serves. Can
 land CLI-first exactly as the `--check` skip did; nothing else blocks
 on it.
+
+### 6d. Measurement addendum: the corrected A/B protocol, and the first wall-time validation
+
+Independent review on #161 established two things every future number on
+this arc must respect:
+
+- **`PERL_LSP_NO_BAKE` gates the WRITE, not the read.** The standard
+  prime-once-then-toggle protocol therefore primes the maps under ON
+  and lets every OFF arm read them anyway — both arms measure a baked
+  layer, which presents exactly as "no effect". **Correct protocol:
+  clear the cache and re-prime under EACH arm.** Every count in this
+  document measured under the old protocol (the NO_BAKE fetch/consult
+  reductions) is a LOWER bound — the true reduction is at least what
+  was reported. Any A/B flag added by §6 work (the EQUIV switches
+  included) needs its *semantics* verified — does it disable the fill,
+  the read, or both — not just its presence.
+- **First wall-time validation, corrected protocol, real codebases:**
+  8.4% (6,009-file app+plugins, complete separation across runs) and
+  9.3% (3,554-file app, one overlapping pair — treat as the weaker
+  figure), diagnostics set-identical throughout. The gold substrate
+  (2,293 installed-CPAN files, shallow chains) showed ~10% work removed
+  with NO wall movement — it is the wrong corpus to judge this layer
+  on, and corpus SHAPE dominates file count (the 3.5k app is slower
+  than the 6k one). The 138k-scale run on the steep part of the
+  failed-lookup cost curve remains the open measurement.
+- `ScopedNs` regions accumulate per-thread and nest (measured 31×
+  over-report serially, worse under rayon): a region total is never a
+  wall claim. Counts that cannot nest are the trustworthy headline.
