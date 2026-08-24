@@ -910,3 +910,25 @@ constraints:
    building; the brief's validation gates (bucket distribution,
    consult density must not collapse, narrowing-only answer changes)
    are all correct as written.
+
+**§6h addendum — PackageHome DROPPED on measurement; endorsement
+superseded.** The sizing gate did its job: `main`-targeted fetches are
+0.157% of PackageSymbol-primary volume, and the premise was false in
+the running system — the walked `main` provider set averages ~49, not
+~6,631, because implicit-`main` scripts never enter
+`visible_def_candidates`. Five soundness holes beyond that, the fatal
+one being companion packages (1,431 declarations whose path does not
+spell them; loading a file makes ALL its packages addressable, so
+reachability is a property of the FILE, not the package — deeper than
+the fail-toward-Global constraint could patch). The replacement
+direction is the one this doc's constraint pointed at but the drop
+states correctly: not a second identity axis at all —
+**origin-scoped visibility over the provider set**, on
+`VisibilityAxis`, which also covers the measured real hot spot
+(vendored `inc/Module/Install` copies, 50 providers of one name, all
+Global under the dropped design). Separately: the parked `Link`
+verdict (§3a) is under re-measurement — a `.t`-heavy real-CPAN corpus
+shows `no_answer_linkable` at 49.7% of open reasons vs the substrate
+prior of nothing-to-convert; the A/B scores follow COMPLETION (not
+decode count) per-arm-cached, and its incomplete-rate decides whether
+world-level closedness is the prerequisite lever or the sibling one.
