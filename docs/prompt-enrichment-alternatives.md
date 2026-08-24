@@ -850,3 +850,63 @@ relation (root cause 3 in §1), far beyond the 1,300×10 duplication
 probe, plus thousands of consumer-heavy dep lists. The repro generator
 wants that second population: unique-package `.pm` providers plus
 thousands of `main`-package `.t` consumers using them.
+
+### 6h. The cold-regression attribution, the loader ruling, and PackageHome
+
+**Attribution (survived the SHA check the first mechanism failed):** the
+`ConclusionCache` miss loader (`module_index/queries.rs`) opens a FRESH
+SQLite reader via `open_reader_retrying` plus a `current_generation`
+read on EVERY cache miss — ~5.1 ms/miss × ~70k misses at n800 = the
+regression. Arrived with #161; the earlier "stale-rejection" mechanism
+was impossible on the tip (no stamp exists there) and is withdrawn on
+the record.
+
+**Ruling on the seam — it was never given a per-thread reader, and no
+design reason forbids one.** The fix has two independent halves:
+
+- **Reader reuse**: a thread-local `Connection` memo keyed by
+  `(db_path, wipe-generation)` — the exact discipline `rows.rs`'s
+  intern memo already uses (`meta.strings_generation`-keyed,
+  clear-on-bump), because a held connection must not survive a
+  hard-clear that unlinks the DB file (the open handle would keep
+  reading the old inode — a silent stale-reads hole, the same class as
+  the stale `str_id`). Bounded by thread count (rayon workers + the
+  resolver thread), read-only, WAL — safe by construction.
+- **The generation read moves to the session**: `ResolutionSession`
+  already IS the generation-pin carrier; read `current_generation`
+  once per session and pass it to the loader instead of asking SQLite
+  per miss. A stale session generation fails in the safe direction by
+  the pin's own semantics (newer-generation rows read absent → decode
+  fallback — slower, never wrong).
+
+The remaining open question (tip ≥1296 s vs branch-head 138 s, loader
+present in BOTH) is a `conclcache.miss` COUNT comparison at the two
+SHAs — the self-validating rows and the generation pin are the
+candidates for why the branch misses less; that measurement belongs to
+whoever holds the n800 corpus.
+
+**PackageHome (the "identity needs a home, not a name" brief) —
+endorsed with two constraints.** The shape is rule #10 done right: the
+property ("who can NAME this package") lives on the identity, and
+`main` stops being special because nothing asks about names. The
+constraints:
+
+1. **The home decision derives from `VisibilityAxis` — one speller,
+   both directions.** The forward map (name→paths, `resolve_module_
+   paths` + the asker's `use lib` roots) and the inverse (path→names a
+   root spells) must read the SAME root set or they drift into exactly
+   the two-producers bug this arc just paid for twice. And because
+   `use lib` roots are per-asker while `home` is decided at
+   registration, addressability is not absolute: decide against the
+   UNION of known roots, **fail toward `Global`** (a wrongly-Global
+   package keeps today's behavior; a wrongly-FileLocal one loses
+   answers, violating the brief's own gate), and make promotions
+   MONOTONE — a late-arriving `use lib` root promotes FileLocal →
+   Global and re-registers, never the reverse.
+2. **Sequencing**: the brief's own "sizing, stated as unknown" is now
+   answered in the large by the attribution above — the fan-out cost
+   is second-order against 5 ms/miss on the loader. Loader fix first,
+   then re-measure the FileLocal-attributable fetch share before
+   building; the brief's validation gates (bucket distribution,
+   consult density must not collapse, narrowing-only answer changes)
+   are all correct as written.
