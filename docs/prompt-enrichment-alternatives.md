@@ -1052,3 +1052,24 @@ the measurement rules: state whether a counter is ATTEMPTS or
 COMPLETIONS and reconcile against its sibling (`moc.provider_fetched`
 is attempts; 12.3M attempts reconciled to 7,200 loader completions
 three lines away in the same dump).
+
+**§6i addendum 2 — all rulings LANDED (`db79e452`); the arc's machinery
+is live end-to-end.** The pin is gone (fingerprint is the whole
+admission; generation demoted to audit skew-mark + supersede-pruning,
+whose safety argument now rests on the fingerprint — a reader losing an
+older row finds a same-content newer one or decodes, so retention buys
+speed alone: a strictly better argument than the pin's). `surfaces`
+joined the erasers as one eraser with the map (`forget_orphaned_
+derivations`; both hard clears via `clear_derived_rows`). Mismatch
+repair is push-shaped with a PATH-KEYED SET (tens of thousands of
+rejections per sweep collapse to one repair; adoption at the repair
+pass is latency-not-correctness, bounded at one entry per stale file).
+6a's (B)-then-(A) landed and the gate fires: `restamp.skipped` 2,
+`restamp.marked` 1, EQUIV clean — block 3 was the bug, blocks 1–2
+stand. One test changed verdict (`close_reconciles_the_disk_record`,
+FirstSeen→Changed) and its own comment proves it was pinning the
+suppression bug; assertion rewritten, not the code. Remaining: the
+warm re-measure (stale twice over — pre-flush AND pre-pin-removal),
+and the residual cold cost, which no corpus C holds can see — that
+ablation belongs on a box whose real corpora reach `conclusions_for`
+cold, not on a fourth synthetic corpus.
