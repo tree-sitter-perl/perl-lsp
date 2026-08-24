@@ -797,3 +797,49 @@ CLI-only for exactly the reason its doc comment states). The server
 diagnostics profile stays unwired until the ablation over the server
 path produces the same evidence the `--check` ablation did — that
 measurement is green-lit.
+
+### 6g. RULING — the open-path suppression predicate: (C), landing (B) first
+
+The 6a edge was an ordering race, not an empty graph: `record_surface_write`
+suppresses Background records keyed on "a doc is OPEN at this path" rather
+than "an open-doc RECORD exists for this path", and the open-doc lane's
+only write site fires 150 ms after a *change* — so between `didOpen` and
+the first debounce the path has no record at all, declares no deps, and
+the flush marks nobody. A Background write in that window also returns
+`Unchanged` for a file the index has never seen — a false verdict in its
+own right.
+
+**Ruling: (C) — both fixes, (B) first.**
+
+- **(B) is the invariant.** The suppression's purpose (protect the
+  open-doc baseline so a buffer edit reverting to disk state cannot read
+  `Unchanged` against a disk-derived record) only has meaning when an
+  open-doc record EXISTS to protect. Before one exists there is no
+  baseline to clobber, the disk state is the only truth available, and
+  the current rule yields to a writer that does not exist. Predicate
+  becomes "an OpenDoc-lane write has recorded this path"; suppression
+  resumes the moment the first open-doc record lands, so the protected
+  scenario is untouched. The false verdict fixes with it: a Background
+  write that actually lands on a never-recorded path returns its true
+  verdict (`FirstSeen`); `Unchanged` remains correct only for genuinely
+  suppressed writes, where a record exists and did not move.
+- **(A) is the latency.** Record `Document::baseline_surface` at
+  `didOpen` — it is the exact value the architecture already designates
+  as the open doc's freshness record (build-time, pre-enrichment, so
+  surface verdicts stay enrichment-invariant), and it exists at open
+  time. The consumer edge is then live from the moment the file opens
+  instead of from its first post-change debounce.
+- Neither subsumes the other, as the build report stated: (A) without
+  (B) leaves the verdict lie for any future not-yet-recorded lane; (B)
+  without (A) leaves the edge absent until a Background write happens
+  by. The isolated no-e2e probe (background verdict on a never-recorded
+  open path) becomes the pinned regression test.
+
+Option (1)'s landed results are recorded with the ruling that ordered
+them: stale rejections 47,967 → 0, `surface.reprojected` 0, stamp
+residue 8.6% over bypass (all of it `unrecorded` fail-open), one-run
+self-healing upgrade (~5.09 s vs ~4.7 s settled at 3,515 files). The
+cold-regression dispute on the integration tip is the coordinator's
+call; the design fact relevant to it is already in this doc — corpus
+SHAPE dominates file count, and a corpus that is half non-Perl engages
+the pack lane that Perl-only repros cannot see.
