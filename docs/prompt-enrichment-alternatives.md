@@ -1145,3 +1145,26 @@ shrinkage of `concl.open.absent_not_closed` and its `.wasted`
 sub-tag. Success = the 27.6% population converting to trusted Nones
 with zero EQUIV breaks; then C's Link A/B re-runs as the pre-agreed
 dead-or-parked gate (`baked_follow` still 0 ⇒ minting is dead).
+
+**§6 ledger closure — the assigned measurements landed.** The residual
+cold ablation (coordinator, apps corpora, per-arm caches): **no
+measurable cost** — −2.5% / +2.2% opposite-sign deltas inside the
+box's 7% identical-arm spread, diagnostics byte-identical, consults/
+misses/fetches matching to ~0.4%. Declared with its construction
+limit: the carry-forward counters are ABSENT on `--check` at any
+corpus size (no stale rows, no watcher, no gate), so cost is measured
+and correctness was already closed by the saved-dep e2e — the one
+non-null instrument, whose 7-consultation partition reconciles
+exactly (same population, different disposition: 2 of 7 skipped, the
+rest correctly classified instead of falling through fail-open).
+Adopted rules from this closure: **a corpus can only falsify a change
+on a verb that EXECUTES it — corpus size is orthogonal** (the fourth
+corpus/verb mismatch of the week, this time caught before the
+writeup); **the pin removal is a DETERMINISM fix, not a performance
+fix** (`generation_skew` fired zero times on every reachable path —
+its value is the unreproducible-bug class it deletes, and it must not
+ride 6a's numbers); and `repair.pushed` counts ADOPTIONS, not pushes
+(`conclrow.stale` 8 with `repair.pushed` 0 is the documented latency
+property, not a failure — the adoption half needs a long-lived
+session and remains unmeasured). Remaining open on the arc: C's warm
+re-measure, and SPEC 4 (§6j) now in build.
