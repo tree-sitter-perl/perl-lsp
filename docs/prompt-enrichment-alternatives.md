@@ -1274,3 +1274,81 @@ claim about evaluation, not about independence. The
 two instruments agreeing from opposite directions) becomes the
 regression tripwire: every `.paid` under residualization should be a
 map-served answer.
+
+### 6m. VERDICT — the census reads zero: `self_only` IS the floor; the lever is candidate-side
+
+C ran the §6l gate on the substrate (`e701c0cb`) and it answers at
+every level of weighting:
+
+- **Keys**: 0 of 8,643 self-only bakes carry a binder-dependent shape
+  directly. The floor is `Edge` witnesses, 99.8% `Edge(Symbol)` —
+  local symbols whose own chase leaves the file, exactly what the
+  `OpenNone` return site's comment already named.
+- **Folds**: a bounded edge-walk (seen-set, depth 8, truncation
+  counted AGAINST residualizability — the sound direction) finds
+  97.6% floor-confirmed, 1.34% reaching `Receiver` (116 keys), 1.06%
+  depth-capped. No `UnionOnArgs` anywhere.
+- **Decodes** — the number that matters: C stored the walk's verdict
+  on the row itself (`OpenReason::NoAnswerSelfOnlyResidualizable`),
+  so the existing per-decode tag counting weights the census with no
+  new instrument. **0 of 4,234 self-only decodes land on a
+  residualizable key.** The 116 keys that could residualize are never
+  consulted cross-file.
+
+**Ruling: option (3), accepted.** Residualization does not build — it
+would convert none of the 2,136 wasted decodes and none of the 4 paid
+ones. `OpenNone(self_only)` is the honest floor of the conclusion
+layer, and the lever on real code moves entirely to the candidate
+side.
+
+**A third prediction of mine dies with it, and this one carries a
+finding.** §6l claimed the 4 `.paid` breaks would become correct
+map-served answers. Measured: all 4 sit on floor-confirmed keys — no
+binder-dependent shape anywhere in their fold — so residualization
+would leave them as decodes. Whatever makes those four answer under
+decode is invisible to a bake-side walk of the baked bag, i.e. NOT
+expressible as any stored residual; they are intrinsically
+consult-bound. That is not a loose end to chase — it is the strongest
+single piece of evidence FOR the floor verdict: even the population's
+own paid members cannot be served from the map.
+
+For the tally, two items C's run adds:
+
+- **Store the census verdict on the row and let decodes weight it.**
+  A bake-side tally counts keys; keys have mis-sized every step of
+  this arc. C applied the §6l ruling to the census itself — the
+  variant split IS the instrument, `reason.tag()` does the weighting.
+  That is the census pattern to reuse.
+- **A truncated analysis answers toward the conservative verdict.**
+  The walk's depth cap counts as not-residualizable — the
+  under-approximating direction. Same family as fail-open.
+
+**The tripwire stays armed** (C's call, endorsed): the walk runs only
+on the self-only branch (31,524 attachment visits across 264,304
+bakes), the shape breakdown stays behind `PERL_LSP_GHOST_STATS`, and
+the row variant makes the one measurement that could overturn this —
+the apps corpora — free to read: the coordinator's next A/B at
+`e701c0cb` reads `concl.open.no_answer_self_only_residualizable`
+against `no_answer_self_only` with zero setup. ~0 there ⇒ the floor
+verdict is final and unconditional.
+
+**Arc consequence — the conclusion-layer lever ledger is now
+closed:**
+
+| lever | verdict | domain |
+|---|---|---|
+| `Link` minting | dead (0% follow completion) | both regimes |
+| world-level closedness (SPEC 4) | real, −95.4% wasted | dependency trees only; population 0 on apps |
+| `self_only` trusted-None (SPEC 5) | unsound; sound subset empty | — |
+| `self_only` residualization (§6l) | no population at decode weight | — |
+| `self_only` floor | **the honest answer** | 79.9% of open reasons on real code |
+
+On real applications, every remaining wasted decode traces to the
+same root: files consulted that could only ever answer about
+themselves — a candidate-set breadth problem, not a map-content
+problem. The next design is therefore **origin-scoped visibility**
+(root cause 3): denominator = fetch COUNT, constraint set = the FHEM
+finding (visibility derives from load relations, not file kind — koha
+`.t` files must not see each other's `main`; FHEM's 534 modules
+must). That is a relational-arc design, out of scope for this
+document; this arc ends here.
