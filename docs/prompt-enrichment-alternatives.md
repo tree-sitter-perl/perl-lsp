@@ -1168,3 +1168,57 @@ ride 6a's numbers); and `repair.pushed` counts ADOPTIONS, not pushes
 property, not a failure — the adoption half needs a long-lived
 session and remains unmeasured). Remaining open on the arc: C's warm
 re-measure, and SPEC 4 (§6j) now in build.
+
+### 6k. RULING — `no_answer_self_only`: split it on what the bake lacked
+
+Workload finding (coordinator, apps corpora, `PERL_LSP_NO_CLOSED`
+control, verified three ways): `absent_not_closed` is ZERO on both
+real applications — closedness (SPEC 4) is a dependency-tree lever
+with a stated domain, kept because it is lazily minted (zero certified
+population ⇒ zero work on apps) and its substrate result is real
+(507 entries, 95.4% of that corpus's wasted decodes). The dominant
+real-code row is `no_answer_self_only`: 79.9% of open reasons,
+73k wasted decodes on one app. The ruling on its two questions:
+
+**Q1 — it is TWO populations, split on the VALUE (what the bake
+lacked), and the split answers "convertible or floor" for each.** A
+`self_only` entry means the bake concluded OpenNone from file-local
+evidence. The bake is DETERMINISTIC over the bag (the seeded-map
+gate). Therefore, for a consult that supplies NO input the bake
+lacked — cross-file consults are point-free by construction, so the
+only query inputs to check are the arity hint and receiver
+substitution — **the decode re-derives the same OpenNone by
+determinism: it is provably redundant, and the entry can be answered
+as a final None WITHOUT decoding.** That is not trusting a new fact;
+it is cashing in the determinism gate at the consult. The OpenNone
+payload records what the bake lacked (`exhausted` vs
+`context_dependent{arity|receiver}`— the existing `binder_dependent`
+tag is this family's ancestor); `exhausted` + context-free query ⇒
+trusted final None, decode deleted; `context_dependent` + a query
+supplying that context ⇒ decode stays, and is the honest floor. The
+95.3% wasted rate predicts `exhausted` dominates.
+
+**The one sharp edge, named as the check-back:** redundancy holds
+only where the decoded bag ≡ the baked bag. The R4 enriched overlay
+can hold a provider copy whose bag has MORE witnesses than the build
+bag the map was baked from — so the shortcut applies to the base-bag
+decode fallback only: if `enriched_present(path)` (or the overlay is
+consulted on this path), keep decoding. Without this guard the
+shortcut would freeze answers below enrichment.
+
+**EQUIV**: decode-anyway switch, per-arm caches; expected zero breaks
+BY CONSTRUCTION — which makes any break a determinism bug worth
+finding independently. Counters: `selfonly.trusted` (completions) vs
+`selfonly.decoded_anyway`, reconciled against the `.wasted` shrink.
+
+**Q2 — both, and they are different denominators.** The map-side rule
+above makes each open consult CHEAPER (deletes the wasted decode).
+The coordinator's candidate-side hunch is also right and is a SECOND
+lever with a different product: a file that could only ever answer
+about itself being consulted at all means the candidate set was too
+broad — that is the name-keyed provider relation (root cause 3) and
+belongs to the origin-scoped-visibility arc (fewer consults), not the
+conclusion layer. Sequencing: map-side first — it is in-lane, cheap,
+and rides proven machinery; the visibility work then gets measured
+against the fetch COUNT, not the per-fetch cost, so the two levers'
+credits stay separable.
