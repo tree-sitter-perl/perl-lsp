@@ -1222,3 +1222,55 @@ conclusion layer. Sequencing: map-side first — it is in-lane, cheap,
 and rides proven machinery; the visibility work then gets measured
 against the fetch COUNT, not the per-fetch cost, so the two levers'
 credits stay separable.
+
+### 6l. RULING — SPEC 5 post-mortem: don't classify dependence, RESIDUALIZE it
+
+Two errors in §6k were mine, and the EQUIV discipline caught both:
+
+- **The prediction failed on my own reference material.** I reasoned
+  from "cross-file entry sites are point-free" to "context-free
+  queries dominate" — but `PackageSymbol` method-return consults carry
+  a receiver BY CONSTRUCTION (`ReturnExprReducer` substitutes
+  `q.receiver`; that is what fluent returns are). Measured:
+  `selfonly.query_context_free` = 0%. The trusted-None shortcut as
+  designed is DEAD — its sound subset is empty.
+- **The spec's "record what the bake lacked" read as probe-able, and a
+  probe is rule #10.** A probe samples ONE binder value; `exhausted`
+  is a claim over all of them. `_init` at arity 1 is None and at
+  arity 2 is the receiver. C's `.wasted`-vs-redundant distinction is
+  the keeper: a decode that answered nothing FOR THIS RECEIVER is not
+  redundant for the next one, so the 95.3% wasted rate measured the
+  wrong property for this purpose.
+
+**The ruling: option (2) taken to where it was always pointing —
+don't classify the dependence, STORE it.** The conclusion algebra
+already has the kind for this: `ReturnOf(ReturnExpr)`, the dependent
+conclusion. The bake, on a fold that terminates in a binder-dependent
+shape (`Receiver`, `UnionOnArgs{arity}` — the registry's finite
+binder vocabulary), emits the RESIDUAL — `ReturnOf(Receiver)` /
+`ReturnOf(UnionOnArgs{...})` — instead of collapsing to
+`OpenNone(self_only)`. The consult then EVALUATES the residual with
+its actual binders: same determinism argument, now sound, because
+nothing is assumed receiver-independent — the receiver is an input to
+the stored function. This subsumes both halves of the population:
+the wasted decodes become evaluated Nones (a map hop), and the
+`.paid` cases — the exact four that broke EQUIV — get their CORRECT
+answer from the map, faster. `OpenNone(self_only)` remains only where
+the fold is None for every expressible binder, which is then
+genuinely the floor and needs no trust rule at all. No new schema:
+`ReturnOf` already rides the map.
+
+**Gate before build, per the arc's own discipline**: one bake-side
+census counter, `selfonly.residualizable` — the share of self_only
+folds terminating in a binder-dependent shape vs genuinely nothing.
+Substrate AND apps (the coordinator's offer). If the share is small,
+option (3) is the verdict — the row is the honest floor and the
+lever moves entirely to the candidate side (origin-scoped
+visibility, fetch-count denominator), which C's read already
+suspects. If it is large, residualization is the map-side lever with
+`PERL_LSP_SELFONLY_EQUIV` re-armed — and this time zero-breaks is a
+claim about evaluation, not about independence. The
+`concl.open.no_answer_self_only.paid` counter (4 = the EQUIV breaks,
+two instruments agreeing from opposite directions) becomes the
+regression tripwire: every `.paid` under residualization should be a
+map-served answer.
