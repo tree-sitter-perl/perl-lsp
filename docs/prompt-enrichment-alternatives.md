@@ -1073,3 +1073,75 @@ warm re-measure (stale twice over — pre-flush AND pre-pin-removal),
 and the residual cold cost, which no corpus C holds can see — that
 ablation belongs on a box whose real corpora reach `conclusions_for`
 cold, not on a fourth synthetic corpus.
+
+### 6j. SPEC 4 — world-level closedness: the self-validating certificate
+
+**Blocker status, first**: closedness is NOT a consistency blocker for
+anything shipped — "absent means decode" fails open everywhere, so its
+absence costs decodes (96.8% wasted in the `absent_not_closed`
+population, 22.8–27.6% of open reasons), never answers. The stakes
+invert on landing: this is the arc's first fact whose STALENESS yields
+a wrong answer (trusted silence about a method that now exists), so
+the design's center is invalidation. The rule that discharges it:
+**the certificate self-validates, exactly as 6b's rows do —
+correctness never depends on an eraser; a stale certificate reads as
+not-closed and fails open to today's decode.**
+
+**What it is.** A per-CLASS certificate, minted where the index is in
+hand (the resolver thread), recording: the class K, its full ancestry
+enumeration [A1..An] (via the existing `for_each_ancestor_class` walk,
+`INHERITS | APP_SURFACE` edges), and a validity key with TWO parts per
+name in the closure:
+
+1. **Provider-set identity** — the exact provider file set for that
+   name as the index currently holds it (or a hash of it). This is
+   what catches the arrival of a NEW file providing an ancestor name —
+   the case per-provider fingerprints structurally cannot see.
+2. **Per-provider surface fingerprint** — the same value everything
+   else keys on. This catches edits to known providers (a parent list
+   change surfaces here because Surface carries parents).
+
+**Consult-side use**: the OpenNone/absent arm, before falling back to
+decode, asks for K's certificate and VALIDATES it — every name's
+current provider set matches, every recorded provider's fingerprint
+stands (O(closure) map lookups, the same shape as the enrichment
+overlay's own-plus-every-dep key). Valid ⇒ silence in the union of
+those ancestors' maps is a trusted None, no decode. Any mismatch ⇒
+not closed ⇒ decode, and re-mint lazily.
+
+**Hard exclusions, on the values not the names** (rule #10):
+- `has_dynamic_parents` anywhere in the closure ⇒ never certified.
+- A plugin bridge in the closure ⇒ not certified in v1 — the bridge
+  guard's asked-never-baked discipline stays consult-side; whether the
+  bridge-set identity can join the key is a measured follow-up, not an
+  assumption.
+- `main` needs no special case in either direction: 534 providers
+  (FHEM) is a big but enumerable set, and the provider-set identity
+  covers it or invalidates it like any other name.
+
+**Minting is LAZY, at the consult that would decode anyway**: that
+consult already pays the ancestry walk; it additionally records the
+certificate into a bounded, byte-accounted RAM store (residency
+discipline — a new derived-copy cache must be accounted). Eager
+whole-workspace enumeration would repeat level-indexing's mistake
+(pay for every class when queries touch a subset). Persistence of
+certificates is deliberately OUT of v1: validation needs the live
+index regardless, certificates are tiny and re-mint in one walk, and
+persisting them would demand a second freshness story for zero
+measured need — decide it later on numbers if re-mint cost shows up.
+
+**What closedness must NOT touch**: the bake. Maps stay index-free —
+the certificate is a separate lane consulted beside the map, never a
+new conclusion kind inside it, so the bake-determinism gate and both
+EQUIV disciplines stand unchanged.
+
+**Instrumentation, per the thread's rules**: `PERL_LSP_CLOSED_EQUIV`
+runs the decode anyway on every trusted absence and counts
+disagreements (per-arm caches; it must ablate the READ — the
+certificate lane has one consumer, so no second-producer hole).
+Counters: `closed.certified` / `closed.cert_invalid` (attempts) and
+`closed.trusted_absence` (completions), reconciled against the
+shrinkage of `concl.open.absent_not_closed` and its `.wasted`
+sub-tag. Success = the 27.6% population converting to trusted Nones
+with zero EQUIV breaks; then C's Link A/B re-runs as the pre-agreed
+dead-or-parked gate (`baked_follow` still 0 ⇒ minting is dead).
