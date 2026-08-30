@@ -132,3 +132,60 @@ fn a_whole_workspace_verb_still_sees_every_family() {
         "workspace-symbol lost the Perl family.\nstdout: {stdout}\nstderr: {stderr}"
     );
 }
+
+#[cfg(feature = "php")]
+fn php_workspace(tag: &str) -> std::path::PathBuf {
+    let dir =
+        std::env::temp_dir().join(format!("perl-lsp-scope-php-{}-{}", tag, std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::write(
+        dir.join("src/Greeter.php"),
+        "<?php\nclass Greeter\n{\n    public string $prefix;\n\n    public function greet(string $name): string\n    {\n        return $this->prefix . $name;\n    }\n}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("src/main.php"),
+        "<?php\n$g = new Greeter();\necho $g->greet(\"x\");\necho $g->greet(\"y\");\n",
+    )
+    .unwrap();
+    dir
+}
+
+/// The round-1 regression class, pinned through the REAL CLI (the unit net
+/// missed it because store-level tests pass no index, so no visibility
+/// axis ever gated them): a name-keyed pack's cross-file goto-def and
+/// references must cross the file boundary.
+#[cfg(feature = "php")]
+#[test]
+fn a_php_query_resolves_cross_file_through_the_ctor_typed_receiver() {
+    let dir = php_workspace("gd");
+    let main = dir.join("src/main.php");
+    // gd on `greet` in `$g->greet("x")` — the receiver types via the
+    // structural ctor edge, the method resolves in the OTHER file.
+    let (stdout, stderr) = run(
+        &dir,
+        &["--definition", dir.to_str().unwrap(), main.to_str().unwrap(), "2", "9"],
+    );
+    assert!(
+        stdout.contains("Greeter.php"),
+        "cross-file PHP goto-def went dark.\nstdout: {stdout}\nstderr: {stderr}"
+    );
+}
+
+#[cfg(feature = "php")]
+#[test]
+fn php_references_cross_the_file_boundary() {
+    let dir = php_workspace("refs");
+    let greeter = dir.join("src/Greeter.php");
+    // references on the `greet` DECLARATION (0-based row 5, col 20).
+    let (stdout, stderr) = run(
+        &dir,
+        &["--references", dir.to_str().unwrap(), greeter.to_str().unwrap(), "5", "20"],
+    );
+    let hits = stdout.matches("main.php").count();
+    assert!(
+        hits >= 2,
+        "expected both call sites in main.php, got {hits}.\nstdout: {stdout}\nstderr: {stderr}"
+    );
+}
