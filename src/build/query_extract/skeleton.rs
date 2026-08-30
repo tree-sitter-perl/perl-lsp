@@ -20,6 +20,11 @@ pub struct SkelSymbol {
     /// Declared return type (`@rettype`), for methods/functions — drives
     /// method-return resolution + chaining through PackageSymbol.
     pub return_type: Option<InferredType>,
+    /// The declared return names the RECEIVER (PHP `static`/`$this`/`self`)
+    /// rather than a concrete type — the writeback publishes
+    /// `ReturnExpr::Receiver` so the call site's receiver substitutes
+    /// (fluent builders chain). Set by the pack's `rettype_receiver`.
+    pub receiver_return: bool,
     /// Pointer/reference declarator stack, unravelled by `peel_nested` from
     /// a `@nested.target` capture (empty otherwise). Flows to `Symbol.deref_stack`.
     pub deref_stack: Vec<crate::model::file_analysis::DerefStep>,
@@ -662,6 +667,20 @@ impl SkeletonAnalysis {
             for (i, sym) in symbols.iter().enumerate() {
                 if !matches!(sym.kind, SymKind::Method | SymKind::Sub) {
                     continue;
+                }
+                // A receiver-shaped declared return (`: static`) publishes the
+                // deferred substituting shape: the member-chain arm threads the
+                // real receiver, and the class-keyed lookup's default receiver
+                // (`ClassName(class)`) covers the MCB path — both fluent.
+                // (`self` strictly means the DEFINING class, not the runtime
+                // receiver; substituting the receiver over-approximates only
+                // where a subclass inherits the method — accepted residual.)
+                if self.symbols[i].receiver_return {
+                    bag.push(mk(
+                        WA::Symbol(sym.id),
+                        WP::ReturnExpr(crate::model::witnesses::ReturnExpr::Receiver),
+                        sym.span,
+                    ));
                 }
                 if let Some(ret) = &self.symbols[i].return_type {
                     // A return that MENTIONS the owning class's template

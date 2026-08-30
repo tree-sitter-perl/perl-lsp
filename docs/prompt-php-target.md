@@ -137,3 +137,14 @@ receiver substitution; `require`/`include` path imports; class-constant
 access (`User::VERSION` as a scoped ref); heredoc/encapsed interpolation
 refs exist but interpolated member completion doesn't; `list()`/array
 destructuring; global functions are namespace-blind.
+
+**Engine residual (all packs, not PHP-specific): the registry has no
+member-chain lane.** `$x = $a->b()->c();` leaves `$x` untyped — the
+Variable's flow edge lands on `Expr(chain span)`, which carries no
+witness, and only `expr_type_at_span`'s ref-reading member arm (which
+the reducer registry cannot reach) can resolve it. Single hops type via
+the MCB bridge; C++ has the identical gap for `auto x = w.get().spin()`.
+Candidate shape: a method-hop `ProjectionStep` on the `Projected`
+payload (receiver attachment + member + arity, materialized through the
+receiver's dispatch class), minted per hop at extract time — that keeps
+the chase in the registry and the refs out of it.

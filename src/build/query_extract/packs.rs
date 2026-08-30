@@ -19,6 +19,11 @@ pub struct LangPack {
     /// Map a `@type.annot` token's text to a type — the pack predicate
     /// for languages whose ring 3 is partly in the tree (`x: int`).
     pub annot_type: fn(text: &str) -> Option<InferredType>,
+    /// Does a `@rettype` spelling name the RECEIVER rather than a concrete
+    /// type (PHP `static`/`$this`/`self`)? The writeback then publishes
+    /// `ReturnExpr::Receiver` so fluent builders chain — asked of the pack,
+    /// never a name branch in the engine (rule #10).
+    pub rettype_receiver: fn(text: &str) -> bool,
     /// Module-name → workspace-relative candidate paths — the entire
     /// per-language cross-file resolution strategy ("the one executable
     /// line"). Python: `pkg.mod` → pkg/mod.py | pkg/mod/__init__.py.
@@ -319,6 +324,7 @@ pub fn perl_pack() -> LangPack {
             _ => None,
         },
         annot_type: |_| None,
+        rettype_receiver: |_| false,
         module_paths: |m| vec![format!("{}.pm", m.replace("::", "/"))],
         shape_ctor: |_| false,
         import_call: |_, _| None,
@@ -364,6 +370,7 @@ pub fn python_pack() -> LangPack {
             }
             _ => None,
         },
+        rettype_receiver: |_| false,
         module_paths: |m| {
             let base = m.replace('.', "/");
             vec![format!("{base}.py"), format!("{base}/__init__.py")]
@@ -409,6 +416,7 @@ pub fn r_pack() -> LangPack {
         shape_name: |_, raw| raw.to_string(),
         default_name: |_| None,
         annot_type: |_| None,
+        rettype_receiver: |_| false,
         // No reliable lexical ctor convention in R (S4/R5 exist but
         // rare); class typing arrives via shapes and S3 later.
         // source("util.R") hands us the path verbatim; library(pkg)
@@ -453,6 +461,7 @@ pub fn cmake_pack() -> LangPack {
         shape_name: |_, raw| raw.to_string(),
         default_name: |_| None,
         annot_type: |_| None,
+        rettype_receiver: |_| false,
         // include(util.cmake) is a literal path; add_subdirectory(src)
         // means src/CMakeLists.txt. The whole resolution strategy.
         module_paths: |m| {
@@ -541,6 +550,13 @@ pub fn php_pack() -> LangPack {
                     .then(|| ClassName(leaf.to_string()))
                 }
             }
+        },
+        // `: static` / `: $this` are late-bound to the call's receiver —
+        // fluent builders chain through `ReturnExpr::Receiver`. `self`
+        // strictly means the defining class; substituting the receiver
+        // over-approximates only for inherited methods (accepted).
+        rettype_receiver: |text| {
+            matches!(text.trim().trim_start_matches('?'), "static" | "$this" | "self")
         },
         // PSR-4's real map lives in composer.json (autoload roots); the
         // one executable line is the namespace-mirrors-directories shape.
@@ -651,6 +667,7 @@ pub fn cpp_pack() -> LangPack {
                 }
             }
         },
+        rettype_receiver: |_| false,
         // #include "a/b.h" / <vector>: strip the delimiters; a quoted
         // path is workspace-relative verbatim, a system header resolves
         // through include dirs (library_roots, later). Tier 1: identity.

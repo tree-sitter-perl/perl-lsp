@@ -920,6 +920,7 @@ fn sksym(src: &str, kind: &str, name: &str, occ: usize, package: Option<&str>) -
         package: package.map(str::to_string),
         scope: crate::model::file_analysis::ScopeId(0),
         return_type: None,
+        receiver_return: false,
         deref_stack: Vec::new(),
         attributes: Vec::new(),
         arity: None,
@@ -2953,4 +2954,41 @@ enum Suit {
         .expect("enum case symbol");
     assert_eq!(case_sym.kind, crate::model::file_analysis::SymKind::Enumerator);
     assert_eq!(case_sym.package.as_deref(), Some("Suit"));
+}
+
+#[test]
+fn php_static_return_substitutes_the_receiver_fluently() {
+    // `: static` publishes ReturnExpr::Receiver — the member-chain arm
+    // threads the real receiver, and the MCB path's default receiver
+    // (ClassName of the declaring class) covers plain assignments.
+    let src = "\
+<?php
+class Query {
+    public function where(string $c): static {
+        return $this;
+    }
+    public function count(): int {
+        return 1;
+    }
+}
+$q = new Query();
+$r = $q->where('a');
+$n = $r->count();
+";
+    // (An inline multi-hop chain `$q->where('a')->count()` does NOT type
+    // the assigned variable yet — the registry has no member-chain lane,
+    // for any pack; ledgered in docs/prompt-php-target.md.)
+    let (fa, _) = php_fa(src);
+    let end = tree_sitter::Point { row: 12, column: 0 };
+    use crate::model::file_analysis::InferredType;
+    assert_eq!(
+        fa.inferred_type_via_bag("$r", end),
+        Some(InferredType::ClassName("Query".into())),
+        "a fluent assignment keeps the builder's class",
+    );
+    assert_eq!(
+        fa.inferred_type_via_bag("$n", end),
+        Some(InferredType::Numeric),
+        "the fluent result dispatches the next hop's concrete return",
+    );
 }
