@@ -287,7 +287,21 @@ pub fn member_completion_ctx_incremental(
     // Downstream projects `class_name()` without an index, so the
     // exact-spelling-vs-primary dispatch call (a spec class exists for
     // `formatter<int>`) is made HERE, while the index is in hand.
+    // A receiver spelled as the language's receiver keyword (`this`,
+    // `$this`) has no typeable value node — it IS the enclosing class,
+    // read off the cursor's scope chain: self-access member completion
+    // (privates included, inheritance-aware) instead of a scope dump.
     let receiver_type = resolve_node_type(receiver, cfg, &patched, analysis, module_index)
+        .or_else(|| {
+            let txt = receiver.utf8_text(patched.as_bytes()).ok()?;
+            if !cfg.receiver_names.contains(&txt) {
+                return None;
+            }
+            let sc = analysis.scope_at(byte_to_point(src, cursor))?;
+            analysis
+                .enclosing_class_for_scope(sc)
+                .map(crate::model::file_analysis::InferredType::ClassName)
+        })
         .map(|t| analysis.refine_instance_dispatch(t, module_index));
     let op_fix = operator_fix(member, receiver, &patched, analysis, cfg);
     let op = typed_member_op(member, &patched);

@@ -63,6 +63,18 @@ pub fn pack_completion(
                 return (items, false);
             }
         }
+        // An UNTYPEABLE receiver's member slot answers EMPTY, never the
+        // file-scope identifier universe: after `->`/`.` only the
+        // receiver's members are valid, and ~200 unrelated locals is noise
+        // wearing confidence (measured on guzzle/laravel, round 1).
+        // `isIncomplete` so the client re-asks as typing narrows the
+        // receiver. A TYPED receiver whose member gather declined falls
+        // through on purpose — the self-access-sees-private cpp path is
+        // served by the in-scope fallback (gold:
+        // cpp-completion-access-specifier-self-access-sees-private).
+        if receiver.receiver_type.is_none() {
+            return (Vec::new(), true);
+        }
     }
     // `fmtx::|` — a qualified path completes to the OWNER's members
     // (workspace + dependency roles), never the global pool: the qualifier
