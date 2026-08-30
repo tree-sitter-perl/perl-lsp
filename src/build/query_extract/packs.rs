@@ -549,8 +549,18 @@ pub fn php_pack() -> LangPack {
     LangPack {
         query_source: include_str!("../../../queries/php/skeleton.scm"),
         // variable_name captures carry the `$` (PHP spells it at every
-        // use, like Perl); names/classes pass through verbatim.
-        shape_name: |_, raw| raw.to_string(),
+        // use, like Perl); names/classes pass through verbatim. A
+        // `self::`/`static::` receiver IS the enclosing class — spelled as
+        // the model's current-package invocant token so relative static
+        // dispatch resolves like Perl's `__PACKAGE__->` (late static
+        // binding over-approximates to the writing class; accepted).
+        // `parent::` stays a residual (needs the SUPER method-token lane).
+        shape_name: |kind, raw| {
+            if kind == "member.recv" && matches!(raw, "self" | "static") {
+                return "__PACKAGE__".to_string();
+            }
+            raw.to_string()
+        },
         default_name: |kind| match kind {
             "anon" => Some("(anon)"),
             _ => None,

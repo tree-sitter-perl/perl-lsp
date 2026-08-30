@@ -3081,3 +3081,40 @@ function collect($v = null) {}
     let in_class = tree_sitter::Point { row: 4, column: 0 };
     assert_eq!(fa.inferred_type_via_bag("counts", in_class), Some(InferredType::HashRef));
 }
+
+#[test]
+fn php_self_and_static_calls_dispatch_as_the_enclosing_class() {
+    // `self::helper()` / `static::helper()` are current-package dispatch —
+    // the receiver canonicalizes to the model's `__PACKAGE__` token, so
+    // gd/hover/refs ride the same lane as Perl's `__PACKAGE__->helper`.
+    let src = "\
+<?php
+class Util {
+    public static function helper(): string {
+        return \"h\";
+    }
+    public function run(): string {
+        return self::helper() . static::helper();
+    }
+}
+";
+    let (fa, _) = php_fa(src);
+    use crate::model::file_analysis::RefKind;
+    let self_calls: Vec<_> = fa
+        .refs()
+        .iter()
+        .filter(|r| {
+            matches!(&r.kind, RefKind::MethodCall { invocant, .. }
+                if invocant.text() == "__PACKAGE__")
+        })
+        .collect();
+    assert_eq!(self_calls.len(), 2, "both relative static calls canonicalize");
+    // and the dispatch class resolves to the enclosing class
+    for r in self_calls {
+        assert_eq!(
+            fa.method_call_invocant_class(r, None).as_deref(),
+            Some("Util"),
+            "relative static dispatch lands on the enclosing class",
+        );
+    }
+}

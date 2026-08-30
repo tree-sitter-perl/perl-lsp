@@ -153,11 +153,20 @@ production engine, zero engine special-cases:
    format, corpus entries for a Laravel app + WordPress core in the
    `bench/` stack. Ship gate, budgeted as half the work.
 
-Known residuals (deliberate, v1): `self::`/`parent::`/`static::`
-receiver substitution; `require`/`include` path imports; class-constant
-access (`User::VERSION` as a scoped ref); heredoc/encapsed interpolation
-refs exist but interpolated member completion doesn't; `list()`/array
-destructuring; global functions are namespace-blind.
+Known residuals: `parent::` dispatch (needs the SUPER method-token
+lane; `self::`/`static::` landed round 2 — they canonicalize to the
+model's `__PACKAGE__` invocant token); `require`/`include` path imports;
+class-constant access (`User::VERSION` as a scoped ref);
+heredoc/encapsed interpolation refs exist but interpolated member
+completion doesn't; `list()`/array destructuring; global functions are
+namespace-blind. **Array-element flow through `foreach`** (round-2
+probe: `@var list<HandlerInterface>` on `$this->handlers` doesn't type
+`$handler` in `foreach ($this->handlers as $handler)`) is the engine's
+declared sequence-types residual — `Extraction::Rebind`'s own doc marks
+the foreach element as undetermined for Perl too; the lane is
+`docs/prompt-sequence-types.md`, and when it lands, `phpdoc_type` should
+map `X[]`/`list<X>` to the parametric array-of-X instead of bare
+`array`.
 
 **Engine residual (all packs, not PHP-specific): the registry has no
 member-chain lane.** `$x = $a->b()->c();` leaves `$x` untyped — the

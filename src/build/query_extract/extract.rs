@@ -743,9 +743,16 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                 ));
             }
             "member.recv" => {
+                // Shaped: a pack can canonicalize a receiver spelling to the
+                // model's invocant vocabulary (php `self::`/`static::` → the
+                // current-package token), so relative static dispatch rides
+                // the same lane as Perl's `__PACKAGE__->`.
                 member_recv.insert(
                     e.match_id,
-                    (crate::model::file_analysis::Span { start: e.start, end: e.end }, e.text.clone()),
+                    (
+                        crate::model::file_analysis::Span { start: e.start, end: e.end },
+                        (pack.shape_name)("member.recv", &e.text),
+                    ),
                 );
             }
             "member.op" => {
