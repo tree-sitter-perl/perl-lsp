@@ -46,6 +46,33 @@ See `docs/cpp-status.md`.
   completion (`ns::`, `Class::`) filters by owner; member-receiver chains
   (`this->`, `field_->`) narrow correctly.
 
+### PHP support — alpha (opt-in build feature `php`)
+
+A PHP language pack joins the alpha tier (`--features php`, included in
+`all-langs`), dogfooded in its first round against WordPress core,
+laravel/framework, monolog, and guzzle — zero crashes, zero parse
+failures across PHP 5-era legacy through 8.x syntax (enums, attributes,
+promoted constructor properties, first-class callables, HTML-interleaved
+templates). Market case and build-out plan in `docs/prompt-php-target.md`.
+
+- **Navigation.** Goto-definition, references, hover, outline, and
+  workspace-symbol — cross-file, through namespaces, `use` imports,
+  `extends`/`implements`/trait composition, static calls, and `$this`.
+  Measured on WordPress core: references on `esc_attr` finds all ~1300
+  call sites across 267 files in ~1.5s warm.
+- **Typing.** Declared types (params, properties, returns) drive
+  hover/completion; `new ClassName()` types the variable even when the
+  class lives in another file; `: static`/`$this` returns chain fluent
+  builders; `instanceof` guards narrow; PHP's `.`/`.=` concat operators
+  type untyped variables from use, Perl-style. Types display in PHP's
+  own vocabulary (`string`, `array`, `int|float`).
+- **Completion.** Member completion after `->` is receiver-typed and
+  inheritance/trait-aware, labeled with provenance
+  (`touch — Post (from HasTimestamps) → string`).
+- **Duplicate declarations** (WordPress's `noop.php` stubs) answer the
+  full ranked definition family — the real signature first by arity fit —
+  instead of one confidently-wrong winner.
+
 ### Storage engine — warm starts, bounded memory
 
 The on-disk cache (`~/.cache/perl-lsp`) now covers your whole workspace, not
