@@ -2,9 +2,11 @@
 
 **The `LanguageDriver`/`PackDriver`/`LanguageRegistry` seam this doc
 designed is landed** (`src/build/language_driver.rs`; file-map entry in
-CLAUDE.md). C++/Python/R/CMake ship as pack languages behind opt-in
+CLAUDE.md). C++/Python/R/CMake/PHP ship as pack languages behind opt-in
 Cargo features, each a `PackDriver` constructor plus a `.scm` skeleton
-and predicates — no new types per language. Per-language `ModuleIndex`
+and predicates — no new types per language. PHP is the designated
+next serve-in-anger target — market case, fit, and build-out sequencing
+in `docs/prompt-php-target.md`. Per-language `ModuleIndex`
 instances and the `FileAnalysis.language` tag (cross-language ref
 pollution guard) are both landed. This brief now carries only what
 hasn't shipped.

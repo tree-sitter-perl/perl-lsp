@@ -158,6 +158,9 @@ scale-free; query paths break. Findings, tiers, corpora and repros:
 - Multi-language engine — the go-live arc (cpp/python) is live on
   mainline (`build/language_driver.rs`, altitude map in
   `docs/cpp-golive-map.md`); design in `docs/prompt-multi-language.md`.
+- PHP — the designated next serve-in-anger language: pack skeleton
+  landed (`--features php`); market case + build-out sequencing in
+  `docs/prompt-php-target.md`.
 
 ## Out of scope
 
