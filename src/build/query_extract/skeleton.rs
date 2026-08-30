@@ -1096,6 +1096,39 @@ impl SkeletonAnalysis {
         for (child, parent) in &self.parents {
             packages.entry(child.clone()).or_default().parents.push(parent.clone());
         }
+        // `$var = $recv->method()` bindings: hand the assignment to the
+        // language-generic MCB→bag bridge (`emit_method_call_binding_edges`),
+        // which resolves the receiver and chases the method's return lazily —
+        // at finalize AND at every enrichment re-run, so a receiver whose
+        // class only types once imports land still resolves. Join: the flow
+        // edge's SOURCE opens at a member ref's invocant; the rightmost such
+        // token is the chain's last hop. A chained receiver's invocant text
+        // (`$u->a()`) names no variable and no-ops harmlessly — single-hop
+        // bindings are the ones that type here.
+        let method_call_bindings: Vec<crate::model::file_analysis::MethodCallBinding> = self
+            .flow_edges
+            .iter()
+            .filter_map(|fe| {
+                self.refs
+                    .iter()
+                    .filter_map(|r| {
+                        let (inv_span, inv_text) = r.invocant.as_ref()?;
+                        (r.kind == "member"
+                            && inv_span.start == fe.source.start
+                            && (r.end.row, r.end.column)
+                                <= (fe.source.end.row, fe.source.end.column))
+                            .then(|| (r, inv_text.clone()))
+                    })
+                    .max_by_key(|(r, _)| (r.start.row, r.start.column))
+                    .map(|(r, inv)| crate::model::file_analysis::MethodCallBinding {
+                        variable: fe.target_name.clone(),
+                        invocant_var: inv,
+                        method_name: r.name.clone(),
+                        scope: fe.target_scope,
+                        span: fe.source,
+                    })
+            })
+            .collect();
         let pack = crate::model::file_analysis::PackFacts {
             // Pack-declared receiver names ride the FA so core's member /
             // outline filters can exclude them generically (lang semantics in
@@ -1132,6 +1165,7 @@ impl SkeletonAnalysis {
             witnesses: bag,
             packages,
             pack,
+            method_call_bindings,
             flow_edges: std::mem::take(&mut self.flow_edges),
             ..Default::default()
         });
