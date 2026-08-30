@@ -132,9 +132,11 @@ production engine, zero engine special-cases:
    are `ReturnExpr::Receiver` (the reducer exists; the pack needs a
    rettype path that mints it) — Laravel's fluent everything depends on
    this.
-5. **Docblocks.** `@param`/`@return`/`@var` as witnesses (tree-sitter
-   comment reparse or a light scanner); then PHPStan array-shapes →
-   `HashWithKeys`, `@template` → the parametric seam.
+5. **Docblocks.** LANDED for `@param`/`@return`/`@var` (the `doc_types`
+   pack predicate + positional join; declared types win; generics
+   stripped, `X|null` collapsed). Still ahead: PHPStan array-shapes →
+   `HashWithKeys`, `@template` → the parametric seam, and rendering the
+   doc PROSE on hover.
 6. **Framework plugins.** Laravel first (Eloquent accessors/relations,
    facades — the DBIC playbook), WordPress hooks second. Needs the
    capture-event rhai hook design from `docs/prompt-multi-language.md`'s

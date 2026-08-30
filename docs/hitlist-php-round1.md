@@ -80,11 +80,16 @@ gd on `$this->touch()` lands in the trait's file, and completion shows
 
 The member slot should answer empty (or receiver-scoped nothing) when
 the receiver doesn't type; instead the identifier-soup fallback fires
-(agent 1 F4). Two fixes landed that shrink the blast radius: typed
-receivers now complete members (H2's ctor typing), and PHP's flat
-method-call nodes joined `member_kinds` so mid-token `->ma|p` climbs to
-the member slot at all. The honest-empty gate for a still-untypeable
-receiver is round-2 work with the cursor-slot taxonomy.
+(agent 1 F4).
+STATUS: LANDED in three parts — typed receivers complete members (H2's
+ctor typing + docblock lane); PHP's flat method-call nodes joined
+`member_kinds` so mid-token `->ma|p` reaches the member slot; and an
+UNTYPEABLE receiver's member slot now answers empty + isIncomplete
+instead of the scope dump. A typed receiver whose gather declines still
+falls through — that path is load-bearing (cpp's
+access-specifier/self-access gold rows). `this->`/`$this->` receivers
+type as the enclosing class off the scope chain, so self-access
+completion is inheritance- and trait-aware with provenance labels.
 
 ## H7 (TOP) — duplicate global functions: confidently wrong single answer
 
@@ -109,8 +114,9 @@ STATUS: LANDED — constants now outline as constants.
 
 ## H9 (LOW) — `--type-at` takes no root; passing one gives a raw OS error
 
-Every other cursor verb takes `<root>` first (agent 1 F7). Round-2 CLI
-polish: accept the root form or print the usage line.
+Every other cursor verb takes `<root>` first (agent 1 F7).
+STATUS: LANDED — `--type-at` mirrors `--hover`'s three forms (rooted
+positional, rooted `--at`, legacy single-file).
 
 ## Non-findings worth keeping
 
