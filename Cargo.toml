@@ -23,8 +23,9 @@ cpp = ["dep:tree-sitter-cpp"]
 python = ["dep:tree-sitter-python"]
 r = ["dep:tree-sitter-r"]
 cmake = ["dep:tree-sitter-cmake"]
+php = ["dep:tree-sitter-php"]
 # All pack languages — a maximal multi-language build.
-all-langs = ["cpp", "python", "r", "cmake"]
+all-langs = ["cpp", "python", "r", "cmake", "php"]
 # Compile the workspace-scale `refs_to` perf bench
 # (`bench_refs_to_invocant_resolution`). Off by default so the
 # regular `cargo test` doesn't carry a long-running synthetic
@@ -67,6 +68,7 @@ tree-sitter-cpp = { version = "0.23", optional = true }
 tree-sitter-python = { version = "0.25", optional = true }
 tree-sitter-r = { version = "1.2", optional = true }
 tree-sitter-cmake = { version = "0.7", optional = true }
+tree-sitter-php = { version = "0.24", optional = true }
 
 [dev-dependencies]
 tree-sitter-python = "0.25"
@@ -74,3 +76,4 @@ tree-sitter-r = "1.2"
 tree-sitter-cmake = "0.7"
 tree-sitter-cpp = "0.23"
 tree-sitter-c = "0.24"
+tree-sitter-php = "0.24"

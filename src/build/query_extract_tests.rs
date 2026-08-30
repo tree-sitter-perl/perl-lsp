@@ -2713,3 +2713,244 @@ void go() {
     assert_eq!(gd(11, 13), Some((1, 9)), "w.get().spin() resolves spin on Widget");
     assert_eq!(gd(12, 9), Some((1, 9)), "w.v_.spin() resolves through the field's type");
 }
+
+// ==== PHP pack: the fifth language on the same driver ====
+
+fn php_parser() -> tree_sitter::Parser {
+    let mut p = tree_sitter::Parser::new();
+    p.set_language(&tree_sitter_php::LANGUAGE_PHP.into()).unwrap();
+    p
+}
+
+fn php_fa(src: &str) -> (crate::model::file_analysis::FileAnalysis, Vec<String>) {
+    let mut parser = php_parser();
+    let tree = parser.parse(src, None).unwrap();
+    let skel = extract(&tree, src.as_bytes(), &php_pack()).unwrap();
+    let imports = skel.imports.clone();
+    (skel.into_file_analysis(), imports)
+}
+
+#[test]
+fn php_pack_same_driver_same_engine() {
+    // Same shape as `python_pack_same_driver_same_engine`: a different
+    // grammar, one query pack, the production engine end to end.
+    let src = "\
+<?php
+namespace App;
+
+use App\\Support\\Str;
+
+class Greeter {
+    public string $prefix;
+    public function greet(string $name): string {
+        $msg = \"hi\";
+        return $msg;
+    }
+}
+
+$x = \"hello\";
+$n = 42;
+$y = $x;
+";
+    let mut parser = php_parser();
+    let tree = parser.parse(src, None).unwrap();
+    let skel = extract(&tree, src.as_bytes(), &php_pack()).unwrap();
+
+    let names: Vec<(String, String)> = skel
+        .symbols
+        .iter()
+        .map(|s| (s.kind.clone(), s.name.clone()))
+        .collect();
+    assert!(names.contains(&("package".into(), "App".into())), "{names:?}");
+    assert!(names.contains(&("class".into(), "Greeter".into())), "{names:?}");
+    assert!(names.contains(&("method".into(), "greet".into())), "{names:?}");
+    assert!(names.contains(&("field".into(), "$prefix".into())), "{names:?}");
+    assert!(names.contains(&("var".into(), "$x".into())), "{names:?}");
+    assert!(skel.imports.contains(&"App\\Support\\Str".to_string()), "{:?}", skel.imports);
+    // the method tags with its class, not the namespace
+    let greet = skel.symbols.iter().find(|s| s.name == "greet").unwrap();
+    assert_eq!(greet.package.as_deref(), Some("Greeter"));
+
+    let fa = skel.into_file_analysis();
+    let end = tree_sitter::Point { row: 16, column: 0 };
+    use crate::model::file_analysis::InferredType;
+    assert_eq!(fa.inferred_type_via_bag("$x", end), Some(InferredType::String));
+    assert_eq!(fa.inferred_type_via_bag("$n", end), Some(InferredType::Numeric));
+    // edge chase across variables
+    assert_eq!(fa.inferred_type_via_bag("$y", end), Some(InferredType::String));
+    // typed parameter + string literal, inside the method body
+    let inside = tree_sitter::Point { row: 9, column: 8 };
+    assert_eq!(fa.inferred_type_via_bag("$name", inside), Some(InferredType::String));
+    assert_eq!(fa.inferred_type_via_bag("$msg", inside), Some(InferredType::String));
+}
+
+#[test]
+fn php_new_and_method_return_chain_through_package_symbol() {
+    // `$u = new User()` types via call-site→Class resolution; the
+    // declared return on name() then chains through PackageSymbol —
+    // the same chase Perl and C++ use, zero new engine code.
+    let src = "\
+<?php
+class User {
+    public function name(): string {
+        return \"n\";
+    }
+}
+$u = new User();
+$n = $u->name();
+";
+    let (fa, _) = php_fa(src);
+    let end = tree_sitter::Point { row: 8, column: 0 };
+    use crate::model::file_analysis::InferredType;
+    assert_eq!(
+        fa.inferred_type_via_bag("$u", end),
+        Some(InferredType::ClassName("User".into())),
+        "new User() should type the variable as the class",
+    );
+    assert_eq!(
+        fa.inferred_type_via_bag("$n", end),
+        Some(InferredType::String),
+        "$u->name() should flow the declared return type",
+    );
+}
+
+#[test]
+fn php_instanceof_narrows_within_the_guard() {
+    let src = "\
+<?php
+function f($x) {
+    if ($x instanceof User) {
+        $y = $x;
+    }
+    $z = $x;
+}
+";
+    let (fa, _) = php_fa(src);
+    use crate::model::file_analysis::InferredType;
+    // inside the guarded block: refined
+    let inside = tree_sitter::Point { row: 3, column: 8 };
+    assert_eq!(
+        fa.inferred_type_via_bag("$x", inside),
+        Some(InferredType::ClassName("User".into())),
+    );
+    // after the block: the refinement is gone
+    let after = tree_sitter::Point { row: 5, column: 4 };
+    assert_eq!(fa.inferred_type_via_bag("$x", after), None);
+}
+
+#[test]
+fn php_parent_edges_from_extends_implements_and_trait_use() {
+    let src = "\
+<?php
+trait T {}
+interface I {}
+class B {}
+class C extends B implements I {
+    use T;
+}
+";
+    let mut parser = php_parser();
+    let tree = parser.parse(src, None).unwrap();
+    let skel = extract(&tree, src.as_bytes(), &php_pack()).unwrap();
+    for parent in ["B", "I", "T"] {
+        assert!(
+            skel.parents.contains(&("C".to_string(), parent.to_string())),
+            "expected C -> {parent}, got {:?}",
+            skel.parents,
+        );
+    }
+}
+
+#[test]
+fn php_keyed_array_literal_types_as_hash_with_keys() {
+    let src = "\
+<?php
+$cfg = ['timeout' => 30, 'retries' => 3];
+";
+    let (fa, _) = php_fa(src);
+    let end = tree_sitter::Point { row: 2, column: 0 };
+    match fa.inferred_type_via_bag("$cfg", end) {
+        Some(crate::model::file_analysis::InferredType::HashWithKeys { keys, .. }) => {
+            let names: Vec<&str> = keys.iter().map(|(k, _)| k.as_str()).collect();
+            assert!(names.contains(&"timeout") && names.contains(&"retries"), "{names:?}");
+        }
+        other => panic!("expected HashWithKeys, got {other:?}"),
+    }
+}
+
+#[test]
+fn php_concat_observation_types_untyped_var() {
+    // The Perl edge alive in PHP: `.` is string-only, so an untyped
+    // parameter types from HOW IT'S USED — no initializer needed.
+    let src = "\
+<?php
+function g($s) {
+    $t = $s . \"!\";
+}
+";
+    let (fa, _) = php_fa(src);
+    let inside = tree_sitter::Point { row: 3, column: 0 };
+    assert_eq!(
+        fa.inferred_type_via_bag("$s", inside),
+        Some(crate::model::file_analysis::InferredType::String),
+    );
+}
+
+#[test]
+fn php_cross_file_function_refs_through_refs_to() {
+    // Declaration in a.php, call in b.php, the production refs_to
+    // walks both — Perl parity for the references verb.
+    let (fa_a, _) = php_fa("<?php\nfunction helper($x) {\n    return $x;\n}\n");
+    let (fa_b, _) = php_fa("<?php\n$z = helper(1);\n");
+
+    let store = crate::index::file_store::FileStore::new();
+    let pa = std::path::PathBuf::from("/fake/php/a.php");
+    let pb = std::path::PathBuf::from("/fake/php/b.php");
+    store.insert_workspace(pa.clone(), fa_a);
+    store.insert_workspace(pb.clone(), fa_b);
+
+    let target = crate::index::resolve::TargetRef::new(
+        "helper".into(),
+        crate::index::resolve::TargetKind::Sub { package: None },
+    );
+    let locs = crate::index::resolve::refs_to(&store, None, &target, crate::index::resolve::RoleMask::EDITABLE);
+    let by_file: Vec<(String, crate::model::file_analysis::AccessKind)> = locs
+        .iter()
+        .map(|l| {
+            let f = match &l.key {
+                crate::index::file_store::FileKey::Path(p) => {
+                    p.file_name().unwrap().to_string_lossy().to_string()
+                }
+                crate::index::file_store::FileKey::Url(u) => u.to_string(),
+            };
+            (f, l.access)
+        })
+        .collect();
+    assert!(
+        by_file.contains(&("a.php".into(), crate::model::file_analysis::AccessKind::Declaration)),
+        "expected the def in a.php, got {by_file:?}",
+    );
+    assert!(
+        by_file.contains(&("b.php".into(), crate::model::file_analysis::AccessKind::Read)),
+        "expected the call in b.php, got {by_file:?}",
+    );
+}
+
+#[test]
+fn php_enum_cases_are_enumerators_typed_by_their_enum() {
+    let src = "\
+<?php
+enum Suit {
+    case Hearts;
+    case Spades;
+}
+";
+    let (fa, _) = php_fa(src);
+    let case_sym = fa
+        .symbols()
+        .iter()
+        .find(|s| s.name == "Hearts")
+        .expect("enum case symbol");
+    assert_eq!(case_sym.kind, crate::model::file_analysis::SymKind::Enumerator);
+    assert_eq!(case_sym.package.as_deref(), Some("Suit"));
+}

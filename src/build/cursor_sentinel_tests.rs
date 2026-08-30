@@ -79,6 +79,18 @@ fn python_dot_receiver() {
 }
 
 #[test]
+fn php_arrow_receiver() {
+    // The `<?php` tag is load-bearing: without it the grammar reads the
+    // fragment as inert HTML text and no member node exists to splice into.
+    let mut p = Parser::new();
+    p.set_language(&tree_sitter_php::LANGUAGE_PHP.into()).unwrap();
+    let src = "<?php\n$u-> ";
+    let cursor = after(src, "$u->");
+    let r = receiver_at(&mut p, &crate::build::query_extract::php_pack(), src, cursor).unwrap();
+    assert_eq!(r.text, "$u");
+}
+
+#[test]
 fn cpp_chained_receiver_is_the_full_prefix() {
     // The receiver of `a.b.` is the whole `a.b`, not just `b` — the
     // sentinel completes the OUTER access, and step (c) types `a.b`.

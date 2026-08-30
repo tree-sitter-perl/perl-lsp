@@ -501,6 +501,100 @@ pub fn cmake_pack() -> LangPack {
     }
 }
 
+// Live only under `feature = "php"` (or the pack tests); see `python_pack`.
+#[allow(dead_code)]
+pub fn php_pack() -> LangPack {
+    LangPack {
+        query_source: include_str!("../../../queries/php/skeleton.scm"),
+        // variable_name captures carry the `$` (PHP spells it at every
+        // use, like Perl); names/classes pass through verbatim.
+        shape_name: |_, raw| raw.to_string(),
+        default_name: |kind| match kind {
+            "anon" => Some("(anon)"),
+            _ => None,
+        },
+        // Declared types (params, properties, returns) ARE the witness
+        // source — PHP's gradual typing seeds the bag, inference covers
+        // the untyped legacy tier. `?T` peels to T (nullability is not a
+        // navigation fact); unions/intersections defer (None → the flow
+        // edge carries); `self`/`static` receiver substitution is a
+        // documented residual (needs ReturnExpr::Receiver plumbing).
+        annot_type: |text| {
+            use InferredType::*;
+            let t = text.trim().trim_start_matches('?');
+            if t.contains('|') || t.contains('&') {
+                return None;
+            }
+            match t {
+                "string" => Some(String),
+                "int" | "float" => Some(Numeric),
+                "bool" | "false" | "true" => Some(Bool),
+                "array" | "iterable" => Some(HashRef),
+                "void" | "null" | "mixed" | "never" | "object" | "callable" | "self"
+                | "static" | "parent" => None,
+                t => {
+                    // `\App\Models\User` / `App\User` key by the unqualified
+                    // leaf — the same identity classes are filed under.
+                    let leaf = t.rsplit('\\').next().unwrap_or(t);
+                    (!leaf.is_empty()
+                        && leaf.chars().next().is_some_and(|c| c.is_alphabetic() || c == '_'))
+                    .then(|| ClassName(leaf.to_string()))
+                }
+            }
+        },
+        // PSR-4's real map lives in composer.json (autoload roots); the
+        // one executable line is the namespace-mirrors-directories shape.
+        module_paths: |m| {
+            let base = m.trim_start_matches('\\').replace('\\', "/");
+            vec![format!("{base}.php")]
+        },
+        // `['k' => v]` / `array('k', v)` construct keyed values; the
+        // shape query gates on a string-keyed element, so these tokens
+        // only ever arrive for genuinely keyed literals.
+        shape_ctor: |callee| matches!(callee, "[" | "array"),
+        import_call: |_, _| None,
+        cmd_effects: |_| vec![],
+        // `$x instanceof User` refines $x to User inside the guard.
+        narrow_guard: |guard, ty| {
+            (guard == Some("instanceof")).then(|| InferredType::ClassName(ty.to_string()))
+        },
+        rebind_method: |_| false,
+        // `$this->` is mandatory — no receiver elision (unlike C++).
+        implicit_this_members: false,
+        include_path_tokens: false,
+        preprocessor_macros: false,
+        entrypoint_symbols: &[],
+        // class/trait/interface bodies are brace-delimited, so a member
+        // orphaned by a misparse can re-anchor positionally.
+        brace_scoped_members: true,
+        trigger_chars: &["$", ">", ":"],
+        receiver_names: &["$this"],
+        nested_peel: PeelSpec { wrappers: &[], annot_kinds: &[], leaf_to_def: &[], record_stack: true },
+        recv_peel: PeelSpec {
+            wrappers: &[("parenthesized_expression", crate::model::file_analysis::DerefKind::Pointer)],
+            annot_kinds: &[],
+            leaf_to_def: &[],
+            record_stack: false,
+        },
+        // one meaningful member operator family (`->`/`?->`): no op-DX.
+        op_map: &[],
+        simple_var_kinds: &["variable_name"],
+        qualifier_peel: &[],
+        member_kinds: &["member_access_expression"],
+        skip_kinds: &["string", "string_content", "comment"],
+        call_kinds: &[
+            "function_call_expression",
+            "member_call_expression",
+            "scoped_call_expression",
+            "nullsafe_member_call_expression",
+            "object_creation_expression",
+        ],
+        domain_compare_kinds: &[],
+        domain_compare_ops: &[],
+        oolfn: OutOfLineSpec::OFF,
+    }
+}
+
 pub fn cpp_pack() -> LangPack {
     LangPack {
         query_source: include_str!("../../../queries/cpp/skeleton.scm"),
