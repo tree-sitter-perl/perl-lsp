@@ -28,6 +28,13 @@ pub struct LangPack {
     /// (php `"HashRef"` → `"array"`). Rides `PackFacts.type_display`;
     /// every human surface translates through it. Empty = engine tags.
     pub type_display: &'static [(&'static str, &'static str)],
+    /// Documentation-comment type facts (phpdoc `@return`/`@param`/`@var`):
+    /// the pack parses ITS OWN doc vocabulary out of a `@doc.comment`
+    /// capture's text, returning type spellings `annot_type` speaks.
+    /// The engine joins each comment to the def directly below it and
+    /// fills ONLY where the syntax declared nothing — declared types win
+    /// (docblocks drift). Empty = no doc lane.
+    pub doc_types: fn(text: &str) -> Vec<DocFact>,
     /// Module-name → workspace-relative candidate paths — the entire
     /// per-language cross-file resolution strategy ("the one executable
     /// line"). Python: `pkg.mod` → pkg/mod.py | pkg/mod/__init__.py.
@@ -290,6 +297,20 @@ pub(crate) const C_FIELD_DECL_PEEL: PeelSpec = PeelSpec {
     record_stack: true,
 };
 
+/// One type fact parsed from a documentation comment (`LangPack::doc_types`).
+/// The type is a raw spelling the pack has already normalized to what its
+/// `annot_type` accepts (generics stripped, `X|null` collapsed to `X`).
+#[derive(Debug, Clone)]
+pub enum DocFact {
+    /// `@return T` — the documented return of the def below the comment.
+    Return(String),
+    /// `@param T $name` — a documented parameter type; `name` carries the
+    /// language's own spelling (php keeps the `$`).
+    Param { name: String, ty: String },
+    /// `@var T` — the documented type of the property/variable below.
+    Var(String),
+}
+
 /// One effect of a command-dispatched statement.
 // Variants are constructed only by `cmake_pack` (command languages) and read by
 // the generic cmd-effect match; both absent in a build without that feature.
@@ -330,6 +351,7 @@ pub fn perl_pack() -> LangPack {
         annot_type: |_| None,
         rettype_receiver: |_| false,
         type_display: &[],
+        doc_types: |_| vec![],
         module_paths: |m| vec![format!("{}.pm", m.replace("::", "/"))],
         shape_ctor: |_| false,
         import_call: |_, _| None,
@@ -377,6 +399,7 @@ pub fn python_pack() -> LangPack {
         },
         rettype_receiver: |_| false,
         type_display: &[],
+        doc_types: |_| vec![],
         module_paths: |m| {
             let base = m.replace('.', "/");
             vec![format!("{base}.py"), format!("{base}/__init__.py")]
@@ -424,6 +447,7 @@ pub fn r_pack() -> LangPack {
         annot_type: |_| None,
         rettype_receiver: |_| false,
         type_display: &[],
+        doc_types: |_| vec![],
         // No reliable lexical ctor convention in R (S4/R5 exist but
         // rare); class typing arrives via shapes and S3 later.
         // source("util.R") hands us the path verbatim; library(pkg)
@@ -470,6 +494,7 @@ pub fn cmake_pack() -> LangPack {
         annot_type: |_| None,
         rettype_receiver: |_| false,
         type_display: &[],
+        doc_types: |_| vec![],
         // include(util.cmake) is a literal path; add_subdirectory(src)
         // means src/CMakeLists.txt. The whole resolution strategy.
         module_paths: |m| {
@@ -566,6 +591,9 @@ pub fn php_pack() -> LangPack {
         rettype_receiver: |text| {
             matches!(text.trim().trim_start_matches('?'), "static" | "$this" | "self")
         },
+        // phpdoc: the type vocabulary of REAL PHP — most of WordPress and
+        // half of Laravel's public API type only here.
+        doc_types: php_doc_types,
         // PHP's own spellings for the engine's value lattice; a PHP array
         // is one type whichever rep the engine inferred.
         type_display: &[
@@ -695,6 +723,7 @@ pub fn cpp_pack() -> LangPack {
         },
         rettype_receiver: |_| false,
         type_display: &[],
+        doc_types: |_| vec![],
         // #include "a/b.h" / <vector>: strip the delimiters; a quoted
         // path is workspace-relative verbatim, a system header resolves
         // through include dirs (library_roots, later). Tier 1: identity.
@@ -819,6 +848,67 @@ pub(super) fn param_return_expr(
         },
         _ => None,
     }
+}
+
+/// phpdoc `@return` / `@param` / `@var` facts out of one `/** */` comment.
+/// Only doc comments participate (a `//` or plain `/* */` never carries
+/// the vocabulary); each tag line yields at most one fact.
+fn php_doc_types(text: &str) -> Vec<DocFact> {
+    if !text.starts_with("/**") {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    for line in text.lines() {
+        // Normalize both spellings: a `* @param` continuation line and the
+        // single-line `/** @return X */` form.
+        let l = line
+            .trim()
+            .trim_start_matches('/')
+            .trim_start_matches('*')
+            .trim_end_matches('/')
+            .trim_end_matches('*')
+            .trim();
+        if let Some(rest) = l.strip_prefix("@return ") {
+            if let Some(t) = phpdoc_type(rest) {
+                out.push(DocFact::Return(t));
+            }
+        } else if let Some(rest) = l.strip_prefix("@param ") {
+            // `@param string $name description`; the typeless `@param $x`
+            // form and variadics (`...$args`) carry nothing typeable.
+            let mut it = rest.split_whitespace();
+            if let (Some(ty), Some(name)) = (it.next(), it.next()) {
+                if name.starts_with('$') {
+                    if let Some(t) = phpdoc_type(ty) {
+                        out.push(DocFact::Param {
+                            name: name.trim_end_matches(',').to_string(),
+                            ty: t,
+                        });
+                    }
+                }
+            }
+        } else if let Some(rest) = l.strip_prefix("@var ") {
+            if let Some(t) = rest.split_whitespace().next().and_then(phpdoc_type) {
+                out.push(DocFact::Var(t));
+            }
+        }
+    }
+    out
+}
+
+/// Normalize one phpdoc type expression to a spelling `annot_type` speaks:
+/// generics stripped (`Collection<int,User>` → `Collection`), `User[]` is
+/// an array, the `null` arm of a union dropped (`?T` too), a REAL union
+/// (`string|false`) rejected — a two-armed claim is not a type answer.
+fn phpdoc_type(raw: &str) -> Option<String> {
+    let raw = raw.split_whitespace().next()?.trim_start_matches('?');
+    let arms: Vec<&str> = raw
+        .split('|')
+        .filter(|a| !a.eq_ignore_ascii_case("null") && !a.is_empty())
+        .collect();
+    let [one] = arms.as_slice() else { return None };
+    let base = one.split('<').next().unwrap_or(one);
+    let base = if base.ends_with("[]") { "array" } else { base };
+    (!base.is_empty()).then(|| base.to_string())
 }
 
 /// Peel `T` out of a `std::optional<T>` declared-type text, unqualified

@@ -1397,8 +1397,121 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
             }
         }
     }
+    // ---- documentation-comment types: pack vocabulary, positional join ----
+    // A doc comment documents the def that STARTS on the line directly below
+    // its last line (an attribute/modifier line between them breaks the join —
+    // accepted v1). DECLARED types always win: a doc fact fills only where
+    // the syntax carried nothing, because docblocks drift and the tree
+    // doesn't. Perl/C++ packs return no facts, so the pass is a no-op there.
+    {
+        use crate::build::query_extract::DocFact;
+        let mut by_end_row: HashMap<usize, Vec<DocFact>> = HashMap::new();
+        for e in &events {
+            if e.cap == "doc.comment" {
+                let facts = (pack.doc_types)(&e.text);
+                if !facts.is_empty() {
+                    by_end_row.entry(e.end.row).or_default().extend(facts);
+                }
+            }
+        }
+        if !by_end_row.is_empty() {
+            let scope_spans: Vec<Span> = out.scopes.iter().map(|s| s.span).collect();
+            let param_syms: Vec<(String, crate::model::file_analysis::ScopeId, Point)> =
+                out.symbols
+                    .iter()
+                    .filter(|s| s.kind == "var")
+                    .map(|s| (s.name.clone(), s.scope, s.start))
+                    .collect();
+            let mut doc_witnesses: Vec<crate::model::witnesses::Witness> = Vec::new();
+            for sym in out.symbols.iter_mut() {
+                if !matches!(sym.kind.as_str(), "sub" | "method" | "field" | "anon") {
+                    continue;
+                }
+                let Some(facts) =
+                    sym.start.row.checked_sub(1).and_then(|r| by_end_row.get(&r))
+                else {
+                    continue;
+                };
+                for f in facts {
+                    match f {
+                        DocFact::Return(t) => {
+                            if sym.return_type.is_none() && !sym.receiver_return {
+                                if (pack.rettype_receiver)(t) {
+                                    sym.receiver_return = true;
+                                } else {
+                                    sym.return_type = (pack.annot_type)(t);
+                                }
+                            }
+                        }
+                        DocFact::Var(t) => {
+                            // A documented property types class-wide (member
+                            // lookup is not sequential), exactly like a
+                            // declared field type; syntax-typed fields skip.
+                            if sym.kind == "field"
+                                && !annot_text_by_var
+                                    .contains_key(&(sym.name.clone(), sym.scope))
+                            {
+                                if let Some(ty) = (pack.annot_type)(t) {
+                                    let span = scope_spans
+                                        .get(sym.scope.0 as usize)
+                                        .copied()
+                                        .unwrap_or(Span { start: sym.start, end: sym.start });
+                                    doc_witnesses.push(doc_witness(
+                                        &sym.name, sym.scope, ty, span,
+                                    ));
+                                }
+                            }
+                        }
+                        DocFact::Param { name, ty } => {
+                            // The def's own syntax-untyped parameter: the
+                            // first var of that name declared inside the def.
+                            let Some(ty) = (pack.annot_type)(ty) else { continue };
+                            let in_def = |p: Point| {
+                                (p.row, p.column) >= (sym.start.row, sym.start.column)
+                                    && (p.row, p.column) <= (sym.end.row, sym.end.column)
+                            };
+                            if let Some((n, sc, at)) = param_syms.iter().find(|(n, sc, at)| {
+                                n == name
+                                    && in_def(*at)
+                                    && !annot_text_by_var.contains_key(&(n.clone(), *sc))
+                            }) {
+                                doc_witnesses.push(doc_witness(
+                                    n,
+                                    *sc,
+                                    ty,
+                                    Span { start: *at, end: *at },
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+            out.witnesses.extend(doc_witnesses);
+        }
+    }
     out.param_sigs = param_sigs;
     Ok(out)
+}
+
+/// A documentation-sourced type witness on a Variable slot — its own source
+/// tag (not `ANNOT_SOURCE`): a doc type is real typing fuel, but the inlay
+/// suppression that hides hints for syntax-annotated declarations should
+/// still show one here (the docblock can sit far from the use).
+fn doc_witness(
+    name: &str,
+    scope: crate::model::file_analysis::ScopeId,
+    ty: InferredType,
+    span: Span,
+) -> crate::model::witnesses::Witness {
+    crate::model::witnesses::Witness {
+        attachment: crate::model::witnesses::WitnessAttachment::Variable {
+            name: name.to_string(),
+            scope,
+        },
+        source: crate::model::witnesses::WitnessSource::Builder("skeleton-doc".into()),
+        payload: crate::model::witnesses::WitnessPayload::InferredType(ty),
+        span,
+    }
 }
 
 /// The `TypeName(alias) → …` payload for an underlying type spelling, resolving

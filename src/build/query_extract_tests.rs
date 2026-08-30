@@ -3033,3 +3033,51 @@ fn php_type_display_speaks_php_not_perl() {
     // unmapped output passes through
     assert_eq!(fa.render_type(&InferredType::ClassName("User".into())), "User");
 }
+
+#[test]
+fn php_docblock_types_fill_what_the_syntax_left_untyped() {
+    // phpdoc is the type vocabulary of real PHP: `@return`/`@param`/`@var`
+    // facts fill syntax-untyped slots (declared types always win), with
+    // generics stripped and `X|null` collapsed.
+    let src = "\
+<?php
+class Repo {
+    /** @var array<string,int> */
+    public $counts;
+
+    /**
+     * @param string $name
+     * @return User|null
+     */
+    public function find($name) {
+        $x = $name;
+        return null;
+    }
+
+    /** @return static */
+    public function fresh(): static {
+        return $this;
+    }
+}
+/** @return Collection<int> */
+function collect($v = null) {}
+";
+    let (fa, _) = php_fa(src);
+    use crate::model::file_analysis::InferredType;
+    // @param on a syntax-untyped parameter
+    let inside = tree_sitter::Point { row: 10, column: 8 };
+    assert_eq!(fa.inferred_type_via_bag("$name", inside), Some(InferredType::String));
+    // @return with a null-collapsed union → the sub's return
+    assert_eq!(
+        fa.sub_return_type_at_arity("find", None),
+        Some(InferredType::ClassName("User".into())),
+    );
+    // generic-stripped @return on a free function
+    assert_eq!(
+        fa.sub_return_type_at_arity("collect", None),
+        Some(InferredType::ClassName("Collection".into())),
+    );
+    // @var on an untyped property — class-wide extent
+    let in_class = tree_sitter::Point { row: 4, column: 0 };
+    assert_eq!(fa.inferred_type_via_bag("counts", in_class), Some(InferredType::HashRef));
+}

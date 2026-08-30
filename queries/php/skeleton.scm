@@ -83,6 +83,11 @@
 ; arg count floats the fitting signature above a same-named stub).
 (formal_parameters) @arity.sig
 
+; docblocks: the pack's `doc_types` parses `@return`/`@param`/`@var` out of
+; the comment; the engine joins each to the def directly below. Declared
+; types win — the doc lane fills only what the syntax left untyped.
+(comment) @doc.comment
+
 ; ---- properties: class data members, typed ----
 ; The field keys SIGIL-LESS (the inner name token): declared `$name`,
 ; accessed `$this->name` — the access site drops the `$`, so a sigil-ful
