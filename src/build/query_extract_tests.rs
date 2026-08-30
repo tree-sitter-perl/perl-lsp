@@ -3118,3 +3118,55 @@ class Util {
         );
     }
 }
+
+#[test]
+fn php_foreach_loop_vars_are_declarations_but_the_source_is_not() {
+    // Round-2 finding: loop-bound vars minted no symbol, so refs/hover/
+    // highlight/rename were all dark on one of PHP's most common shapes.
+    // The `"as" .` anchor keeps the iterated SOURCE a plain read — a
+    // pseudo-def there would steal the real decl's later references.
+    let src = "\
+<?php
+function walk($items, $map) {
+    foreach ($items as $item) {
+        echo $item;
+    }
+    foreach ($map as $k => $v) {
+        echo $k . $v;
+    }
+    foreach ($items as &$ref) {
+        $ref = 1;
+    }
+    return $items;
+}
+";
+    let mut parser = php_parser();
+    let tree = parser.parse(src, None).unwrap();
+    let skel = extract(&tree, src.as_bytes(), &php_pack()).unwrap();
+    let var_defs: Vec<&str> = skel
+        .symbols
+        .iter()
+        .filter(|s| s.kind == "var")
+        .map(|s| s.name.as_str())
+        .collect();
+    for bound in ["$item", "$k", "$v", "$ref"] {
+        assert!(var_defs.contains(&bound), "{bound} must be declared; got {var_defs:?}");
+    }
+    // exactly one $items declaration — the parameter, not a foreach pseudo-def
+    assert_eq!(
+        var_defs.iter().filter(|n| **n == "$items").count(),
+        1,
+        "the iterated source must not re-declare: {var_defs:?}",
+    );
+    // and the loop var's use resolves to its binding (ref minted + bound)
+    let fa = skel.into_file_analysis();
+    use crate::model::file_analysis::RefKind;
+    assert!(
+        fa.refs().iter().any(|r| {
+            matches!(r.kind, RefKind::Variable)
+                && r.target_name == "$item"
+                && r.resolved_symbol().is_some()
+        }),
+        "the echo use of $item resolves to the loop binding",
+    );
+}

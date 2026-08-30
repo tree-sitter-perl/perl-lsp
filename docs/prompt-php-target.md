@@ -96,6 +96,26 @@ duplicate-def honest families with arity ranking, constants in outline.
 Measured on WordPress after: `esc_attr` references 7 → 1345,
 `have_posts` 0 → 23, `Logger::addRecord` grep-exact.
 
+## Dogfood round 2 (verification + the fresh-verb sweep)
+
+Two fresh agents re-probed every round-1 fix (all hold — several now
+grep-exact: `$handlers` 11/11, `addRecord` 16/16, `ClientInterface::
+request` 61 with all 52 test-side call sites) and probed the untested
+verbs. Rename passes all three shapes with exact blast radius (method
+rename excludes unrelated same-named interface methods; local rename
+respects closure shadowing; property rename 5/5). Semantic-tokens and
+call-hierarchy (187 incoming) serve PHP. Fixed same-round:
+`self::`/`static::` dispatch (canonicalizes to the current-package
+invocant token) and foreach loop-variable declarations (the `"as" .`
+anchor binds `$item`/`$k => $v`/`&$ref` without re-declaring the
+iterated source) — refs/hover/highlight/rename on loop vars all light
+up. Ledgered with evidence: `--implementations` misses the direct
+interface implementer and short-name collisions pollute
+type-hierarchy/references (`Repository` × 3 namespaces — the FQ-identity
+arc, build-out item 2); foreach ELEMENT typing is the sequence-types
+engine residual; `toArray()` decl-vs-trait-impl ranking; semantic-tokens
+wants absolute paths.
+
 ## What landed with this brief
 
 `--features php` (in `all-langs`): grammar dep, `queries/php/skeleton.scm`,

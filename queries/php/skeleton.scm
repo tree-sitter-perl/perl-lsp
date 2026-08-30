@@ -137,11 +137,21 @@
   left: (variable_name) @def.var.name @def.var @flow.target
   right: (_) @flow.source) @flow.assign
 
-; foreach rebinds its vars per element — conservative narrowing cutoff.
-; (`$k => $v` sits under a `pair`; the keyless form's vars are direct
-; children, which also catches the iterated source — a harmless over-cut.)
-(foreach_statement (variable_name) @flow.rebind)
-(foreach_statement (pair (variable_name) @flow.rebind))
+; foreach BINDS its loop vars — real declarations (refs/hover/highlight/
+; rename all hang off the def) that rebind per element (the narrowing
+; cutoff). The `"as" .` anchor keeps the ITERATED SOURCE out: `$items` in
+; `foreach ($items as $item)` is a read of an existing variable, and a
+; pseudo-def there would steal the real declaration's later references.
+(foreach_statement
+  "as"
+  .
+  (variable_name) @def.var.name @def.var @flow.rebind)
+(foreach_statement
+  "as"
+  .
+  (by_ref (variable_name) @def.var.name @def.var @flow.rebind))
+(foreach_statement
+  (pair (variable_name) @def.var.name @def.var @flow.rebind))
 
 ; ---- references ----
 (function_call_expression
