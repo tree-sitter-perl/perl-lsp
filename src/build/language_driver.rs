@@ -1231,6 +1231,8 @@ fn remap_spans(
         var_reads,
         label_refs,
         receiver_names: _,
+        // language-wide vocabulary, no spans to remap.
+        type_display: _,
         flow_edges,
         moved_from,
         control_regions,
@@ -1595,6 +1597,32 @@ impl LanguageRegistry {
             })
             .iter()
             .any(|l| *l == id)
+    }
+
+    /// The visibility routing fact for `id`'s language
+    /// (`VisibilityAxis::for_origin`): include-path packs scope by their
+    /// include closure, name-keyed packs have no closure to scope by, the
+    /// host derives its search path. Read from the pack's own
+    /// `include_path_tokens` declaration — never a language-name branch.
+    /// Memoized like `is_pack_language`.
+    pub fn pack_visibility(id: &str) -> crate::model::file_analysis::PackVisibility {
+        use crate::model::file_analysis::PackVisibility;
+        static LINKAGE: std::sync::OnceLock<Vec<(&'static str, bool)>> =
+            std::sync::OnceLock::new();
+        LINKAGE
+            .get_or_init(|| {
+                LanguageRegistry::with_enabled()
+                    .drivers
+                    .iter()
+                    .filter_map(|d| d.lang_pack().map(|p| (d.id(), p.include_path_tokens)))
+                    .collect()
+            })
+            .iter()
+            .find(|(l, _)| *l == id)
+            .map(|(_, inc)| {
+                if *inc { PackVisibility::IncludePaths } else { PackVisibility::NameKeyed }
+            })
+            .unwrap_or(PackVisibility::Host)
     }
 
     /// The declared capabilities of `id`'s driver — THE generic capability

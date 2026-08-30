@@ -24,6 +24,10 @@ pub struct LangPack {
     /// `ReturnExpr::Receiver` so fluent builders chain — asked of the pack,
     /// never a name branch in the engine (rule #10).
     pub rettype_receiver: fn(text: &str) -> bool,
+    /// Display vocabulary: engine type tag → this language's spelling
+    /// (php `"HashRef"` → `"array"`). Rides `PackFacts.type_display`;
+    /// every human surface translates through it. Empty = engine tags.
+    pub type_display: &'static [(&'static str, &'static str)],
     /// Module-name → workspace-relative candidate paths — the entire
     /// per-language cross-file resolution strategy ("the one executable
     /// line"). Python: `pkg.mod` → pkg/mod.py | pkg/mod/__init__.py.
@@ -325,6 +329,7 @@ pub fn perl_pack() -> LangPack {
         },
         annot_type: |_| None,
         rettype_receiver: |_| false,
+        type_display: &[],
         module_paths: |m| vec![format!("{}.pm", m.replace("::", "/"))],
         shape_ctor: |_| false,
         import_call: |_, _| None,
@@ -371,6 +376,7 @@ pub fn python_pack() -> LangPack {
             _ => None,
         },
         rettype_receiver: |_| false,
+        type_display: &[],
         module_paths: |m| {
             let base = m.replace('.', "/");
             vec![format!("{base}.py"), format!("{base}/__init__.py")]
@@ -417,6 +423,7 @@ pub fn r_pack() -> LangPack {
         default_name: |_| None,
         annot_type: |_| None,
         rettype_receiver: |_| false,
+        type_display: &[],
         // No reliable lexical ctor convention in R (S4/R5 exist but
         // rare); class typing arrives via shapes and S3 later.
         // source("util.R") hands us the path verbatim; library(pkg)
@@ -462,6 +469,7 @@ pub fn cmake_pack() -> LangPack {
         default_name: |_| None,
         annot_type: |_| None,
         rettype_receiver: |_| false,
+        type_display: &[],
         // include(util.cmake) is a literal path; add_subdirectory(src)
         // means src/CMakeLists.txt. The whole resolution strategy.
         module_paths: |m| {
@@ -558,6 +566,17 @@ pub fn php_pack() -> LangPack {
         rettype_receiver: |text| {
             matches!(text.trim().trim_start_matches('?'), "static" | "$this" | "self")
         },
+        // PHP's own spellings for the engine's value lattice; a PHP array
+        // is one type whichever rep the engine inferred.
+        type_display: &[
+            ("String", "string"),
+            ("Numeric", "int|float"),
+            ("Bool", "bool"),
+            ("HashRef", "array"),
+            ("ArrayRef", "array"),
+            ("Undef", "null"),
+            ("CodeRef", "callable"),
+        ],
         // PSR-4's real map lives in composer.json (autoload roots); the
         // one executable line is the namespace-mirrors-directories shape.
         module_paths: |m| {
@@ -596,7 +615,14 @@ pub fn php_pack() -> LangPack {
         op_map: &[],
         simple_var_kinds: &["variable_name"],
         qualifier_peel: &[],
-        member_kinds: &["member_access_expression"],
+        // calls included: PHP's method call is ONE flat node (unlike cpp,
+        // where the call wraps a field_expression), so mid-token member
+        // completion (`->ma|p`) must climb to the call node itself.
+        member_kinds: &[
+            "member_access_expression",
+            "member_call_expression",
+            "nullsafe_member_call_expression",
+        ],
         skip_kinds: &["string", "string_content", "comment"],
         call_kinds: &[
             "function_call_expression",
@@ -668,6 +694,7 @@ pub fn cpp_pack() -> LangPack {
             }
         },
         rettype_receiver: |_| false,
+        type_display: &[],
         // #include "a/b.h" / <vector>: strip the delimiters; a quoted
         // path is workspace-relative verbatim, a system header resolves
         // through include dirs (library_roots, later). Tier 1: identity.

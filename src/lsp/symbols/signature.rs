@@ -712,7 +712,7 @@ pub fn signature_help(
                 // route through the witness bag so framework + branch
                 // + arity rules refine the answer.
                 if let Some(ty) = analysis.inferred_type_via_bag(&p.name, sig_info.body_end) {
-                    format!("{}: {}", base, format_inferred_type(&ty))
+                    format!("{}: {}", base, analysis.render_type(&ty))
                 } else {
                     base
                 }

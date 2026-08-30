@@ -69,21 +69,29 @@
 (arrow_function) @def.anon @scope.sub
 
 ; ---- properties: class data members, typed ----
-; kind "field" → class-wide type extent (member lookup is not sequential).
+; The field keys SIGIL-LESS (the inner name token): declared `$name`,
+; accessed `$this->name` — the access site drops the `$`, so a sigil-ful
+; symbol would never join its own uses (and the class-content gate
+; rightly reads sigils as Perl shapes). kind "field" → class-wide type
+; extent (member lookup is not sequential).
 (property_declaration
   type: (_) @type.annot
-  (property_element name: (variable_name) @def.field.name @def.field @flow.target))
+  (property_element name: (variable_name (name) @def.field.name @def.field @flow.target)))
 (property_declaration
-  (property_element name: (variable_name) @def.field.name @def.field))
+  (property_element name: (variable_name (name) @def.field.name @def.field)))
 ; PHP 8 constructor promotion: `__construct(private string $name)` declares
-; the property in the signature.
+; BOTH the property (sigil-less member) and the ctor-body local (`$name`).
 (property_promotion_parameter
   type: (_) @type.annot
-  name: (variable_name) @def.field.name @def.field @flow.target)
+  name: (variable_name (name) @def.field.name @def.field @flow.target))
+(property_promotion_parameter
+  name: (variable_name) @def.var.name @def.var)
 
-; class constants: `const VERSION = '1.0';` — Perl's `use constant` shape.
+; class constants: `const VERSION = '1.0';` — compile-time constants,
+; outlined as enum members (not callables: Perl's `use constant` shape
+; would render them as methods inside a class).
 (const_declaration
-  (const_element (name) @def.constant.name) @def.constant)
+  (const_element (name) @def.const.name) @def.const)
 
 ; ---- parameters (typed → a direct annot witness) ----
 (simple_parameter
@@ -148,13 +156,15 @@
   name: (name) @ref.member
   arguments: (arguments) @arity.args)
 
-; `new User(...)`: the callee resolves like a functional cast — a Class
-; symbol answers ClassName, so `$u = new User()` types $u. The name is a
-; call ref so references-on-User count instantiation sites.
+; `new User(...)`: the value is an instance of User by SYNTAX — the ctor
+; edge rides the alias graph (TypeName → the defining file, or the bare
+; ClassName terminal), so a class declared in another file still types
+; the variable. The name stays a call ref so references-on-User count
+; instantiation sites.
 (object_creation_expression
-  (name) @ref.call) @expr.call
+  (name) @ref.call) @expr.ctor
 (object_creation_expression
-  (qualified_name (name) @ref.call)) @expr.call
+  (qualified_name (name) @ref.call)) @expr.ctor
 
 (variable_name) @expr.read.var
 

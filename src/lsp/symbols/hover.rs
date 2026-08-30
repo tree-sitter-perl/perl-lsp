@@ -57,7 +57,7 @@ pub fn pack_hover_markdown(
                         ) {
                             text.push_str(&format!(
                                 "\n\n*returns: {}*",
-                                crate::model::file_analysis::format_inferred_type(&rt)
+                                analysis.render_type(&rt)
                             ));
                         }
                         return Some(text);
@@ -73,7 +73,7 @@ pub fn pack_hover_markdown(
                         "```{}\n{}: {}\n```\n\n*member*",
                         language,
                         field,
-                        crate::model::file_analysis::format_inferred_type(&sub)
+                        analysis.render_type(&sub)
                     ));
                 }
                 // The member's declared type may be a config-variant macro whose
@@ -239,7 +239,7 @@ fn render_symbol_hover(
                         .type_name_edge_of(&sym.name, sym.scope)
                         .and_then(|sp| config_variant_leaf_display(analysis, &sp, midx))
                 })
-                .unwrap_or_else(|| sym.display_type(&ty));
+                .unwrap_or_else(|| analysis.display_type_of(sym, &ty));
             // A union member's def-site hover carries the storage overlay,
             // same as the member-access path (`FileAnalysis::member_hover`).
             let overlay = match analysis.union_overlay(sym) {

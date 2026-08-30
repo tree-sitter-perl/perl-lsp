@@ -114,6 +114,9 @@ pub struct SkeletonAnalysis {
     /// named is the method receiver, not a class member — its (wrongly
     /// sticky-tagged) class package is cleared in `into_file_analysis`.
     pub receiver_names: Vec<String>,
+    /// The pack's display vocabulary (engine tag → language spelling),
+    /// carried onto `PackFacts.type_display`.
+    pub type_display: Vec<(String, String)>,
     /// Value-flow edges minted from `@flow` captures (`source → target`,
     /// extraction). Lowered to type witnesses here; carried onto the FA as the
     /// provenance tier.
@@ -503,6 +506,11 @@ impl SkeletonAnalysis {
                     // a named enum value — distinct from both Variable and
                     // Field.
                     "enumerator" => SymKind::Enumerator,
+                    // a class-scoped compile-time constant (PHP `const`):
+                    // Enumerator's outline/completion shape WITHOUT the
+                    // parent-enum value typing (a const's value is its
+                    // initializer, not the owning class).
+                    "const" => SymKind::Enumerator,
                     // "unionfield" (an inline union member-field container)
                     // stays Variable — its "union" attribute drives the
                     // outline-nesting branch keyed on SymKind::Variable below.
@@ -1153,6 +1161,7 @@ impl SkeletonAnalysis {
             // outline filters can exclude them generically (lang semantics in
             // the pack, generic logic in core).
             receiver_names: std::mem::take(&mut self.receiver_names),
+            type_display: std::mem::take(&mut self.type_display),
             // Specialization family edges (spec → primary). NOT an inheritance
             // edge: a spec inherits nothing from its primary (it replaces
             // wholesale), so member resolution must never fall through this

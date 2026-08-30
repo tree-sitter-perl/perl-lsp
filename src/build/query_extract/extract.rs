@@ -389,6 +389,11 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     // ---- the state machine: scope stack + sticky contexts ----
     let mut out = SkeletonAnalysis::default();
     out.receiver_names = pack.receiver_names.iter().map(|s| s.to_string()).collect();
+    out.type_display = pack
+        .type_display
+        .iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
     // Template params joined to their owner class — the owner shaped like a
     // def name (a partial spec's spelling canonicalizes) so the key matches
     // the Class symbol's identity. Source order = the `ParamOf` index axis.
@@ -965,6 +970,33 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                         },
                         source: crate::model::witnesses::WitnessSource::Builder("skeleton-obs".into()),
                         payload: crate::model::witnesses::WitnessPayload::Observation(o),
+                        span,
+                    });
+                }
+            }
+            "expr.ctor" => {
+                // `new X(...)`: the value IS an instance of X — a structural
+                // fact (the ctor syntax names a class by definition), NOT the
+                // name-case guess the macro rule forbids for bare calls. Edge
+                // into the alias graph: `TypeName` recurses into the defining
+                // file when an index is in hand and terminates at
+                // `ClassName(X)` otherwise, so a cross-file `new WP_Query()`
+                // types the variable with zero local knowledge.
+                let callee = events
+                    .iter()
+                    .find(|x| x.match_id == e.match_id && x.cap == "ref.call")
+                    .map(|x| (pack.shape_name)("ref.call", &x.text));
+                if let Some(name) = callee {
+                    let span = Span { start: e.start, end: e.end };
+                    lit_spans.push((e.start_byte, e.end_byte, span));
+                    out.witnesses.push(crate::model::witnesses::Witness {
+                        attachment: crate::model::witnesses::WitnessAttachment::Expr(span),
+                        source: crate::model::witnesses::WitnessSource::Builder(
+                            "skeleton-ctor".into(),
+                        ),
+                        payload: crate::model::witnesses::WitnessPayload::Edge(
+                            crate::model::witnesses::WitnessAttachment::TypeName(name),
+                        ),
                         span,
                     });
                 }

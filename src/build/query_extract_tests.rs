@@ -2765,7 +2765,7 @@ $y = $x;
     assert!(names.contains(&("package".into(), "App".into())), "{names:?}");
     assert!(names.contains(&("class".into(), "Greeter".into())), "{names:?}");
     assert!(names.contains(&("method".into(), "greet".into())), "{names:?}");
-    assert!(names.contains(&("field".into(), "$prefix".into())), "{names:?}");
+    assert!(names.contains(&("field".into(), "prefix".into())), "{names:?}");
     assert!(names.contains(&("var".into(), "$x".into())), "{names:?}");
     assert!(skel.imports.contains(&"App\\Support\\Str".to_string()), "{:?}", skel.imports);
     // the method tags with its class, not the namespace
@@ -2991,4 +2991,45 @@ $n = $r->count();
         Some(InferredType::Numeric),
         "the fluent result dispatches the next hop's concrete return",
     );
+}
+
+#[test]
+fn php_property_field_is_sigil_less_and_joins_its_member_access() {
+    // Declared `$name`, accessed `$this->name` — the field keys on the
+    // inner name token so the access site's target joins the symbol
+    // (sigil-ful fields never matched their own uses; hitlist H3).
+    let src = "\
+<?php
+class User {
+    public string $name;
+    public function greet(): string {
+        return $this->name;
+    }
+}
+";
+    let (fa, _) = php_fa(src);
+    use crate::model::file_analysis::{RefKind, SymKind};
+    let field = fa
+        .symbols()
+        .iter()
+        .find(|s| s.name == "name" && matches!(s.kind, SymKind::Field))
+        .expect("sigil-less Field symbol");
+    assert_eq!(field.package.as_deref(), Some("User"));
+    assert!(
+        fa.refs().iter().any(|r| {
+            matches!(r.kind, RefKind::MethodCall { .. }) && r.target_name == "name"
+        }),
+        "the $this->name access mints a member ref targeting the field's name",
+    );
+}
+
+#[test]
+fn php_type_display_speaks_php_not_perl() {
+    let (fa, _) = php_fa("<?php\n$x = 1;\n");
+    use crate::model::file_analysis::InferredType;
+    assert_eq!(fa.render_type(&InferredType::HashRef), "array");
+    assert_eq!(fa.render_type(&InferredType::Numeric), "int|float");
+    assert_eq!(fa.render_type(&InferredType::String), "string");
+    // unmapped output passes through
+    assert_eq!(fa.render_type(&InferredType::ClassName("User".into())), "User");
 }

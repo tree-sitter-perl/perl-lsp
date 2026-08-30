@@ -38,7 +38,7 @@ pub fn pack_completion(
             analysis,
             path,
             base_idx,
-            crate::build::language_driver::LanguageRegistry::is_pack_language(language),
+            crate::build::language_driver::LanguageRegistry::pack_visibility(language),
         ),
     );
     let xidx: &dyn crate::model::file_analysis::CrossFileLookup = &scoped;

@@ -983,22 +983,42 @@ pub enum VisibilityAxis {
     SearchPath(std::sync::Arc<Vec<std::path::PathBuf>>),
 }
 
+/// How an origin's language scopes cross-file visibility — the routing
+/// fact `for_origin` consumes. Derived by the registry from the pack's
+/// own linkage declaration (`include_path_tokens`), never a
+/// language-name branch here or at a call site.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PackVisibility {
+    /// Not a pack: the host's search-path derivation (`use lib` ∪ @INC).
+    Host,
+    /// Include-path linkage (C/C++): a name is visible through the
+    /// asker's `#include` closure.
+    IncludePaths,
+    /// Name-keyed pack (PHP/Python/R/CMake): imports name modules, not
+    /// paths — there is no closure to scope by, and the host's @INC
+    /// roots would rank every candidate invisible. Transparent until the
+    /// language grows a real search path (composer PSR-4, PYTHONPATH).
+    NameKeyed,
+}
+
 impl VisibilityAxis {
     /// THE derivation of an origin's visibility rule. Call sites pass the
     /// origin and its index; none of them decides which model applies, so
     /// a new model reaches every projection by changing this one function.
     ///
-    /// `pack_language` is the routing fact the driver stamped on the
-    /// analysis — the caller reads it from the registry rather than this
-    /// layer importing the driver.
+    /// `visibility` is the routing fact for the origin's language — the
+    /// caller reads it from the registry (`pack_visibility`) rather than
+    /// this layer importing the driver.
     pub fn for_origin(
         origin: &FileAnalysis,
         self_path: Option<&std::path::Path>,
         index: &dyn CrossFileLookup,
-        pack_language: bool,
+        visibility: PackVisibility,
     ) -> Self {
-        if pack_language {
-            return VisibilityAxis::IncludeClosure;
+        match visibility {
+            PackVisibility::IncludePaths => return VisibilityAxis::IncludeClosure,
+            PackVisibility::NameKeyed => return VisibilityAxis::Transparent,
+            PackVisibility::Host => {}
         }
         let inc = index.inc_roots();
         // The overwhelmingly common origin declares no `use lib`, and this
@@ -1299,6 +1319,13 @@ impl<'a> CrossFileLookup for ScopedLookup<'a> {
     fn visibility_scope(
         &self,
     ) -> Option<(&std::path::Path, &std::collections::HashSet<String>)> {
+        // A Transparent axis IS "no scope": answering the path + closure
+        // set anyway would let the backward gate (`pack_def_paths`) narrow
+        // a name-keyed pack's references to its (empty) include closure —
+        // same-file-only answers, measured on WordPress/monolog.
+        if matches!(self.axis, VisibilityAxis::Transparent) {
+            return None;
+        }
         self.self_path.as_deref().map(|p| (p, &self.visible))
     }
     fn for_each_cached(&self, f: &mut dyn FnMut(&str, &std::sync::Arc<CachedModule>)) {

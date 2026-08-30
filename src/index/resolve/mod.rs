@@ -132,8 +132,9 @@ pub fn resolve<'a>(
         FileKey::Url(u) => u.to_file_path().ok(),
     };
     // The routing fact names the scope's AXIS, and `for_origin` owns the
-    // derivation — pack scopes by include closure, Perl by the asker's own
-    // search path (`use lib` roots ahead of the process @INC).
+    // derivation — include-path packs scope by include closure, name-keyed
+    // packs are transparent, Perl by the asker's own search path (`use lib`
+    // roots ahead of the process @INC).
     let pack =
         crate::build::language_driver::LanguageRegistry::is_pack_language(&origin.language);
     let scoped = module_index.map(|idx| {
@@ -141,7 +142,7 @@ pub fn resolve<'a>(
             origin,
             self_path.as_deref(),
             idx,
-            pack,
+            crate::build::language_driver::LanguageRegistry::pack_visibility(&origin.language),
         );
         crate::model::file_analysis::ScopedLookup::new(
             idx,
