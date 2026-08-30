@@ -672,3 +672,31 @@ fn a_bulk_index_marks_the_consumers_of_what_changed() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// The Flat axis contract (name-keyed packs): scope-less BY RULE — no
+/// `visibility_scope` (so `pack_def_paths` mints no closure gate and the
+/// backward walk stays unfiltered), `flat_scope()` set (so the cross-file
+/// return arm admits the full candidate table), full `visible_def_candidates`.
+/// Transparent keeps the host's pre-existing answers: scope present,
+/// `flat_scope` false — an unwarmed Perl origin never sweeps pack tables.
+#[test]
+fn flat_axis_is_scopeless_by_rule_transparent_is_not() {
+    use crate::model::file_analysis::{CrossFileLookup, ScopedLookup, VisibilityAxis};
+    let idx = crate::index::module_index::ModuleIndex::new_for_test();
+    let empty = Default::default();
+    let self_path = std::path::PathBuf::from("/w/a.php");
+
+    let flat = ScopedLookup::new(&idx, &empty, Some(self_path.as_path()), VisibilityAxis::Flat);
+    assert!(flat.visibility_scope().is_none(), "Flat mints no def_paths gate");
+    assert!(flat.flat_scope());
+
+    let transparent =
+        ScopedLookup::new(&idx, &empty, Some(self_path.as_path()), VisibilityAxis::Transparent);
+    assert!(transparent.visibility_scope().is_some(), "host behavior unchanged");
+    assert!(!transparent.flat_scope());
+
+    let closure =
+        ScopedLookup::new(&idx, &empty, Some(self_path.as_path()), VisibilityAxis::IncludeClosure);
+    assert!(closure.visibility_scope().is_some());
+    assert!(!closure.flat_scope());
+}

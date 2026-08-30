@@ -844,6 +844,14 @@ pub trait CrossFileLookup {
     ) -> Option<(&std::path::Path, &std::collections::HashSet<String>)> {
         None
     }
+    /// Scope-less BY RULE (`VisibilityAxis::Flat` — a name-keyed pack):
+    /// consumers that degrade a closure scope to agreement folds admit the
+    /// FULL candidate table under it. `false` everywhere else, including
+    /// `Transparent` ("no rule known yet") — an unwarmed host origin must
+    /// not suddenly sweep the pack candidate table.
+    fn flat_scope(&self) -> bool {
+        false
+    }
     fn for_each_cached(&self, f: &mut dyn FnMut(&str, &std::sync::Arc<CachedModule>));
     /// Visit every distinct cached FILE exactly once. `for_each_cached` is
     /// keyed by NAME with one winner per key, so a pack file that loses every
@@ -971,6 +979,15 @@ pub enum VisibilityAxis {
     /// known (an unwarmed on-open doc).
     #[default]
     Transparent,
+    /// Everything visible BY RULE — a name-keyed pack language (PHP,
+    /// Python) whose imports name modules, not paths: same-named
+    /// workspace candidates are genuine siblings, never closure-scoped.
+    /// Distinct from `Transparent` ("no rule known yet"): a Flat scope
+    /// deliberately mints NO `def_paths` gate and admits the full
+    /// candidate table where a closure scope degrades to agreement
+    /// folds. Placeholder until the language's real search path
+    /// (composer PSR-4) lands as a `SearchPath` flavor.
+    Flat,
     /// Flat linkage (C): a candidate is visible when the asker's `#include`
     /// closure reaches it, or when it includes the asker back.
     IncludeClosure,
@@ -1017,7 +1034,7 @@ impl VisibilityAxis {
     ) -> Self {
         match visibility {
             PackVisibility::IncludePaths => return VisibilityAxis::IncludeClosure,
-            PackVisibility::NameKeyed => return VisibilityAxis::Transparent,
+            PackVisibility::NameKeyed => return VisibilityAxis::Flat,
             PackVisibility::Host => {}
         }
         let inc = index.inc_roots();
@@ -1082,7 +1099,9 @@ impl VisibilityAxis {
     /// everything equally visible.
     fn rank(&self, path: &std::path::Path) -> Option<usize> {
         match self {
-            VisibilityAxis::Transparent | VisibilityAxis::IncludeClosure => Some(0),
+            VisibilityAxis::Transparent
+            | VisibilityAxis::Flat
+            | VisibilityAxis::IncludeClosure => Some(0),
             VisibilityAxis::SearchPath(roots) if roots.is_empty() => Some(0),
             VisibilityAxis::SearchPath(roots) => {
                 // Longest-prefix wins, THEN root order: a vendored
@@ -1158,7 +1177,9 @@ impl<'a> CrossFileLookup for ScopedLookup<'a> {
     }
     fn visible_def_candidates(&self, name: &str) -> Vec<std::sync::Arc<CachedModule>> {
         match &self.axis {
-            VisibilityAxis::Transparent => self.inner.def_candidates(name),
+            VisibilityAxis::Transparent | VisibilityAxis::Flat => {
+                self.inner.def_candidates(name)
+            }
             VisibilityAxis::IncludeClosure => {
                 // Flat linkage: keep candidates CONNECTED to the asker —
                 // visible in its include closure, or including the asker
@@ -1319,14 +1340,19 @@ impl<'a> CrossFileLookup for ScopedLookup<'a> {
     fn visibility_scope(
         &self,
     ) -> Option<(&std::path::Path, &std::collections::HashSet<String>)> {
-        // A Transparent axis IS "no scope": answering the path + closure
-        // set anyway would let the backward gate (`pack_def_paths`) narrow
-        // a name-keyed pack's references to its (empty) include closure —
+        // A Flat axis IS "no scope": answering the path + closure set
+        // would let the backward gate (`pack_def_paths`) narrow a
+        // name-keyed pack's references to its (empty) include closure —
         // same-file-only answers, measured on WordPress/monolog.
-        if matches!(self.axis, VisibilityAxis::Transparent) {
+        // (Transparent still answers: the host's "no rule known yet" case
+        // predates the axis and its consumers' closure tests no-op there.)
+        if matches!(self.axis, VisibilityAxis::Flat) {
             return None;
         }
         self.self_path.as_deref().map(|p| (p, &self.visible))
+    }
+    fn flat_scope(&self) -> bool {
+        matches!(self.axis, VisibilityAxis::Flat)
     }
     fn for_each_cached(&self, f: &mut dyn FnMut(&str, &std::sync::Arc<CachedModule>)) {
         self.inner.for_each_cached(f)

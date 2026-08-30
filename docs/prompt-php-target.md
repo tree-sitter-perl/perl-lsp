@@ -84,6 +84,18 @@ there is a long road; `docs/adr/parametric-types.md` is the seam.
 Blade/Twig embedded templating is real extra work (also paywalled in
 Intelephense — an opportunity, but not v1).
 
+## Dogfood round 1 (landed on top of the spike)
+
+Two probe agents over monolog/guzzle/WordPress/laravel-framework
+(`docs/hitlist-php-round1.md`): zero crashes, zero misparses; every
+finding was resolution-side and seven of nine rows landed same-round —
+cross-file visibility (the `PackVisibility` routing fact), structural
+ctor typing (`@expr.ctor` → TypeName edge), sigil-less property fields,
+the pack `type_display` vocabulary, trait/qualified parents,
+duplicate-def honest families with arity ranking, constants in outline.
+Measured on WordPress after: `esc_attr` references 7 → 1345,
+`have_posts` 0 → 23, `Logger::addRecord` grep-exact.
+
 ## What landed with this brief
 
 `--features php` (in `all-langs`): grammar dep, `queries/php/skeleton.scm`,
