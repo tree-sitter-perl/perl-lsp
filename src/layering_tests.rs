@@ -917,6 +917,7 @@ fn kind_comparisons_name_real_grammar_kinds() {
     let perl = grammar_kinds(&ts_parser_perl::LANGUAGE.into());
     let pod = grammar_kinds(&ts_parser_pod::LANGUAGE.into());
     let cpp = grammar_kinds(&tree_sitter_cpp::LANGUAGE.into());
+    let php = grammar_kinds(&tree_sitter_php::LANGUAGE_PHP.into());
     assert!(perl.len() > 100 && cpp.len() > 100, "grammars failed to enumerate");
 
     let builtin: std::collections::HashSet<&str> = TREE_SITTER_BUILTIN_KINDS.iter().copied().collect();
@@ -933,7 +934,7 @@ fn kind_comparisons_name_real_grammar_kinds() {
                 (pod.iter().map(String::as_str).collect(), "pod")
             } else if rel.contains("query_extract") {
                 // The generic extraction driver serves every pack language.
-                (perl.iter().chain(pod.iter()).chain(cpp.iter()).map(String::as_str).collect(), "any")
+                (perl.iter().chain(pod.iter()).chain(cpp.iter()).chain(php.iter()).map(String::as_str).collect(), "any")
             } else if name.starts_with("cpp_") || rel.contains("cpp_reparse") {
                 (cpp.iter().map(String::as_str).collect(), "cpp")
             } else {

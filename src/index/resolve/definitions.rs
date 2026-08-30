@@ -411,10 +411,17 @@ impl<'a> CandidateSet<'a> {
                 }
             }
         }
-        // Cross-file: the full def-candidates table, closure-connected to the
-        // origin (same connectivity gate as the decl→def ranking).
-        if let Some((self_path, visible)) = idx.visibility_scope() {
-            let self_str = self_path.to_string_lossy().into_owned();
+        // Cross-file: the full def-candidates table. Connectivity is
+        // closure-based under an include-path scope; a scope-less
+        // (Transparent) lookup admits every candidate — a name-keyed pack's
+        // same-named definitions are genuine siblings (WordPress's noop.php
+        // stubs vs the real implementations), and the ranked, never-pruned
+        // family is the honest answer where a single winner was confidently
+        // wrong. Arity fit then floats the real signature above a stub.
+        {
+            let scope = idx
+                .visibility_scope()
+                .map(|(p, v)| (p.to_string_lossy().into_owned(), v));
             let origin_path = key_for_sort(&self.origin_key);
             let mut cached_files = idx.def_candidates(&name);
             cached_files.sort_by(|a, b| a.path.cmp(&b.path));
@@ -422,9 +429,14 @@ impl<'a> CandidateSet<'a> {
                 if cached.path == origin_path {
                     continue;
                 }
-                let p = cached.path.to_string_lossy().into_owned();
-                let connected = visible.contains(&p)
-                    || cached.analysis.pack.include_closure.contains(&self_str);
+                let connected = match &scope {
+                    Some((self_str, visible)) => {
+                        let p = cached.path.to_string_lossy().into_owned();
+                        visible.contains(&p)
+                            || cached.analysis.pack.include_closure.contains(self_str)
+                    }
+                    None => true,
+                };
                 if !connected {
                     continue;
                 }

@@ -228,7 +228,17 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                     match ch.kind() {
                         "parameter_declaration" => { total += 1; required += 1; }
                         "optional_parameter_declaration" => { total += 1; }
-                        "variadic_parameter_declaration" | "..." => variadic = true,
+                        // PHP: a parameter with a default is optional; a
+                        // promoted ctor param still counts toward arity.
+                        "simple_parameter" | "property_promotion_parameter" => {
+                            total += 1;
+                            if ch.child_by_field_name("default_value").is_none() {
+                                required += 1;
+                            }
+                        }
+                        "variadic_parameter_declaration" | "variadic_parameter" | "..." => {
+                            variadic = true
+                        }
                         _ => {}
                     }
                 }

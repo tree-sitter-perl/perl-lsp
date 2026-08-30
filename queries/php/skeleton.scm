@@ -25,13 +25,21 @@
   name: (name) @def.class.name @context.package) @def.class @scope
 
 ; inheritance: `extends Base` — one @parent per base; the name is also a
-; live type use (goto-def on the base rides the PackageRef lane).
+; live type use (goto-def on the base rides the PackageRef lane). Every
+; clause has a qualified sibling (`extends \App\Base`, `use
+; Concerns\HasAttributes`) whose LEAF is the identity classes key by.
 (class_declaration
+  name: (name) @def.class.name
+  (base_clause (name) @parent @ref.type))
+(class_declaration
+  name: (name) @def.class.name
+  (base_clause (qualified_name (name) @parent @ref.type)))
+(interface_declaration
   name: (name) @def.class.name
   (base_clause (name) @parent @ref.type))
 (interface_declaration
   name: (name) @def.class.name
-  (base_clause (name) @parent @ref.type))
+  (base_clause (qualified_name (name) @parent @ref.type)))
 ; `implements Contract` — an interface is a parent for method-resolution
 ; purposes (the contract's declarations answer hover/completion).
 (class_declaration
@@ -45,6 +53,9 @@
 (class_declaration
   name: (name) @def.class.name
   body: (declaration_list (use_declaration (name) @parent @ref.type)))
+(class_declaration
+  name: (name) @def.class.name
+  body: (declaration_list (use_declaration (qualified_name (name) @parent @ref.type))))
 
 ; enum cases: real enumerators — parent-enum typing + container tagging
 ; come generically from the engine's enumerator lane.
@@ -67,6 +78,10 @@
 (method_declaration) @scope.sub
 (anonymous_function) @def.anon @scope.sub
 (arrow_function) @def.anon @scope.sub
+
+; declared-parameter arity: overload-family ranking fuel (a call's written
+; arg count floats the fitting signature above a same-named stub).
+(formal_parameters) @arity.sig
 
 ; ---- properties: class data members, typed ----
 ; The field keys SIGIL-LESS (the inner name token): declared `$name`,

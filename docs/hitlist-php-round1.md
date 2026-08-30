@@ -70,8 +70,11 @@ construction. EXTRACT_VERSION bumped for the PackFacts shape.
 `$this->` inside a subclass shows only same-file methods (agent 1 F4b).
 Parents are recorded (extends/implements/use all land as parent edges);
 the ancestor walk dies at the file boundary — same routing fact as H1.
-STATUS: partially rides H1 (cross-file ancestor lookup unblocks once
-the pack index answers); full verification deferred to round 2.
+STATUS: LANDED — H1's routing plus the qualified-parent patterns
+(`extends \\App\\Base`, `use Concerns\\HasAttributes` — the clauses'
+qualified spellings minted no @parent edge). Verified on the repro:
+gd on `$this->touch()` lands in the trait's file, and completion shows
+`touch — Post (from HasTimestamps) → string`.
 
 ## H6 (HIGH) — member completion on an untypeable receiver dumps ~200 globals
 
@@ -87,10 +90,15 @@ receiver is round-2 work with the cursor-slot taxonomy.
 
 WordPress `noop.php` re-declares 19 core functions as empty stubs;
 gd/hover on `esc_attr`/`is_admin` teleport to the stub with full
-confidence (agent 2 F6). The honest answer for a multi-provider name is
-ALL candidates (LSP definitions may be plural), or rank real-over-stub
-by reference mass. Round-2 slice: audit `definitions()`'s candidate
-collapse for pack languages.
+confidence (agent 2 F6).
+STATUS: LANDED for goto-def — the overload-family lane now admits every
+candidate under a Transparent (name-keyed) scope, and `@arity.sig`
+landed for PHP so the call's written arg count floats the real
+signature above the stub: gd on `esc_attr(...)` returns
+formatting.php's implementation FIRST, noop.php second, both visible.
+Residuals: hover still renders the single-winner (the stub for these
+names), and a zero-arg collision (`is_admin()`) can't be
+arity-separated — reference-mass or stub-body ranking is round-2.
 
 ## H8 (MEDIUM) — class constants outline as Method
 
