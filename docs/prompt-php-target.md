@@ -118,20 +118,27 @@ production engine, zero engine special-cases:
 
 ## The build-out (sequenced like cpp's arc)
 
-1. **Composer visibility.** Parse composer.json (`autoload.psr-4`,
-   `autoload.files`) into a `SearchPath`-flavored `VisibilityAxis`
-   variant; `vendor/` is the DEPENDENCY tier (role-masked, like `@INC`).
-   Until then `module_paths` carries the namespace-mirrors-directories
-   guess.
+1. **Composer visibility — the top real-world gap.** A composer project
+   gitignores `vendor/`, so the workspace walker never sees it: gd on a
+   library method (`$w->spin()` where Widget lives in vendor/) is dark
+   and the class is absent from workspace-symbol (reproduced round 1).
+   Parse the project map (`composer.json` `autoload.psr-4` +
+   `vendor/composer/installed.json`, which is plain JSON) into a
+   `SearchPath`-flavored axis; `vendor/` indexes as the DEPENDENCY tier
+   (role-masked, like `@INC`), resolved on demand through
+   `module_paths`' designed Index-layer consumer. Until then
+   `module_paths` carries the namespace-mirrors-directories guess.
 2. **FQ identity.** The pack keys classes by unqualified leaf (cpp
    parity). PHP namespaces + `use` aliasing need the qualified name on
    the symbol with leaf-keyed dispatch — decide when composer roots land.
 3. **Stdlib tier.** phpstorm-stubs (Apache-2.0) is the builtin surface —
    consumable the way `builtins.pod` feeds the Perl BUILTIN tier.
-4. **Receiver-substituting returns.** `static`/`self`/`$this` returns
-   are `ReturnExpr::Receiver` (the reducer exists; the pack needs a
-   rettype path that mints it) — Laravel's fluent everything depends on
-   this.
+4. **Receiver-substituting returns.** LANDED — the `rettype_receiver`
+   pack predicate publishes `ReturnExpr::Receiver` for
+   `static`/`$this`/`self` (declared AND docblock spellings); fluent
+   chains substitute through both the member arm and the MCB default
+   receiver. (`self` = defining-class nuance is an accepted
+   over-approximation for inherited methods.)
 5. **Docblocks.** LANDED for `@param`/`@return`/`@var` (the `doc_types`
    pack predicate + positional join; declared types win; generics
    stripped, `X|null` collapsed). Still ahead: PHPStan array-shapes →
