@@ -304,6 +304,10 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     // span; joined to `@ref.member` so op-DX rides the minted ref.
     let mut member_op_raw: HashMap<usize, (crate::model::file_analysis::MemberOp, crate::model::file_analysis::Span)> =
         HashMap::new();
+    // `@hop.call` → the WHOLE member-call expression's span, joined to its
+    // `@ref.member` so the chain-hop witness (`Projected{base, MethodHop}`)
+    // attaches where an OUTER call's receiver span will look for it.
+    let mut hop_call_by_match: HashMap<usize, crate::model::file_analysis::Span> = HashMap::new();
     for e in &events {
         if let Some(prefix) = e.cap.strip_suffix(".name") {
             names_by_match
@@ -317,6 +321,12 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
         }
         if e.cap == "sym.attr" {
             attrs_by_match.entry(e.match_id).or_default().push(e.text.clone());
+        }
+        if e.cap == "hop.call" {
+            hop_call_by_match.insert(
+                e.match_id,
+                crate::model::file_analysis::Span { start: e.start, end: e.end },
+            );
         }
     }
     // `@ns.inline` — an inline namespace's NAME token, fired by a name-only
@@ -896,6 +906,59 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                             .then(|| arg_counts_by_start.get(&(e.end.row, e.end.column)).copied())
                             .flatten(),
                     });
+                    // The chain-hop witness: the whole call's value is
+                    // "dispatch `member` on the receiver's class" — deferred
+                    // to query time via `MethodHop`, so a receiver that is
+                    // itself a call (`$a->b()->c()`) chains through its own
+                    // hop witness at exactly the receiver span. (cpp mints
+                    // via the dedicated `@hop.member` arm below — its ref
+                    // pattern is call-blind, so the called form re-matches.)
+                    if e.cap == "ref.member" {
+                        if let (Some(call_span), Some((recv_span, recv_text))) = (
+                            hop_call_by_match.get(&e.match_id),
+                            member_recv.get(&e.match_id),
+                        ) {
+                            push_hop_witness(
+                                &mut out.witnesses,
+                                pack,
+                                &e.text,
+                                *call_span,
+                                *recv_span,
+                                recv_text,
+                                member_simple.get(&e.match_id).copied().unwrap_or(false),
+                                cur_scope,
+                                arg_counts_by_start
+                                    .get(&(e.end.row, e.end.column))
+                                    .copied()
+                                    .unwrap_or(0) as u32,
+                                package.as_deref(),
+                            );
+                        }
+                    }
+                }
+            }
+            // cpp's called-member pattern: the ref was already minted by the
+            // call-blind field pattern, so this arm mints ONLY the hop.
+            "hop.member" => {
+                if let (Some(call_span), Some((recv_span, recv_text))) = (
+                    hop_call_by_match.get(&e.match_id),
+                    member_recv.get(&e.match_id),
+                ) {
+                    push_hop_witness(
+                        &mut out.witnesses,
+                        pack,
+                        &e.text,
+                        *call_span,
+                        *recv_span,
+                        recv_text,
+                        member_simple.get(&e.match_id).copied().unwrap_or(false),
+                        cur_scope,
+                        arg_counts_by_start
+                            .get(&(e.end.row, e.end.column))
+                            .copied()
+                            .unwrap_or(0) as u32,
+                        package.as_deref(),
+                    );
                 }
             }
             "import.name" => {
@@ -1644,6 +1707,64 @@ fn split_ns_leaf(fq: &str) -> (String, String) {
         Some((ns, leaf)) => (leaf.to_string(), ns.to_string()),
         None => (t.to_string(), String::new()),
     }
+}
+
+/// The chain-hop witness for one member-call site: the whole call's value
+/// is `Projected{base, MethodHop{member, arity}}` — dispatch deferred to
+/// query time, when the base's class and the index are in hand. A
+/// simple-var receiver bases on the `Variable` (its witnesses live on the
+/// scope chain, not on the read's span); a current-class receiver (php
+/// `$this->`/`self::` via the pack's `hop.recv` shaping) bases on the
+/// receiver span with a companion `ClassName(enclosing class)` witness —
+/// extraction is the only place that class is in hand; anything else
+/// bases on the receiver's `Expr` span, where a nested call carries its
+/// OWN hop.
+#[allow(clippy::too_many_arguments)]
+fn push_hop_witness(
+    witnesses: &mut Vec<crate::model::witnesses::Witness>,
+    pack: &super::packs::LangPack,
+    member_text: &str,
+    call_span: crate::model::file_analysis::Span,
+    recv_span: crate::model::file_analysis::Span,
+    recv_text: &str,
+    recv_simple: bool,
+    scope: crate::model::file_analysis::ScopeId,
+    arity: u32,
+    enclosing_class: Option<&str>,
+) {
+    use crate::model::witnesses as wit;
+    let hop_recv = (pack.shape_name)("hop.recv", recv_text);
+    let base = if crate::model::conventions::is_current_package_token(&hop_recv) {
+        let Some(cls) = enclosing_class else { return };
+        witnesses.push(wit::Witness {
+            attachment: wit::WitnessAttachment::Expr(recv_span),
+            source: wit::WitnessSource::Builder("skeleton".into()),
+            payload: wit::WitnessPayload::InferredType(
+                crate::model::file_analysis::InferredType::ClassName(cls.to_string()),
+            ),
+            span: recv_span,
+        });
+        wit::WitnessAttachment::Expr(recv_span)
+    } else if recv_simple {
+        wit::WitnessAttachment::Variable {
+            name: (pack.shape_name)("def.var", recv_text),
+            scope,
+        }
+    } else {
+        wit::WitnessAttachment::Expr(recv_span)
+    };
+    witnesses.push(wit::Witness {
+        attachment: wit::WitnessAttachment::Expr(call_span),
+        source: wit::WitnessSource::Builder("skeleton".into()),
+        payload: wit::WitnessPayload::Projected {
+            base,
+            step: wit::ProjectionStep::MethodHop {
+                member: (pack.shape_name)("ref.member", member_text),
+                arity,
+            },
+        },
+        span: call_span,
+    });
 }
 
 /// A bare identifier lexeme — the only shape that can name an enumerator.

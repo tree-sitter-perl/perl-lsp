@@ -206,13 +206,19 @@ the foreach element as undetermined for Perl too; the lane is
 map `X[]`/`list<X>` to the parametric array-of-X instead of bare
 `array`.
 
-**Engine residual (all packs, not PHP-specific): the registry has no
-member-chain lane.** `$x = $a->b()->c();` leaves `$x` untyped — the
-Variable's flow edge lands on `Expr(chain span)`, which carries no
-witness, and only `expr_type_at_span`'s ref-reading member arm (which
-the reducer registry cannot reach) can resolve it. Single hops type via
-the MCB bridge; C++ has the identical gap for `auto x = w.get().spin()`.
-Candidate shape: a method-hop `ProjectionStep` on the `Projected`
-payload (receiver attachment + member + arity, materialized through the
-receiver's dispatch class), minted per hop at extract time — that keeps
-the chase in the registry and the refs out of it.
+**The registry member-chain lane: LANDED** (was the top all-pack engine
+residual). `$x = $a->b()->c();` / `auto x = w.get().spin();` now type:
+each member-call site mints `Expr(whole call span) → Projected{base,
+MethodHop{member, arity}}` (`@hop.call` in the php patterns; a dedicated
+called-member pattern with `@hop.member` on the cpp side, whose field
+ref pattern is call-blind), where the base is the receiver's `Variable`
+(simple receiver), the enclosing class (`$this->`/`self::` via the
+pack's `hop.recv` shaping — a companion `ClassName` witness on the
+receiver span, minted where extraction has the class in hand), or its
+`Expr` span — which, for a nested call, is exactly the inner call's own
+hop witness. The registry materializes the
+hop lazily: resolve the base, dispatch `member` on its class via
+`PackageSymbol{class, member}` at the call's own arity, with the base
+type passed as the dynamic receiver so `: static` fluent chains keep the
+concrete class through every hop. The chase stays in the registry (refs
+never enter it); Perl keeps its own build-time fold lane untouched.

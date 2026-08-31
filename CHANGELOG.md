@@ -81,6 +81,11 @@ templates). Market case and build-out plan in `docs/prompt-php-target.md`.
   implementer), and same-leaf classes in different namespaces
   (Laravel's three `Repository`s) no longer pollute each other's
   implementations/type-hierarchy answers.
+- **Method-chain typing** (all pack languages, C/C++ included).
+  `$x = $a->b()->c()` and `auto x = w.get().spin()` now type without an
+  intermediate variable — each call hop resolves lazily off the
+  receiver's class, and `: static` fluent builders keep the concrete
+  class through every hop.
 
 ### Storage engine — warm starts, bounded memory
 

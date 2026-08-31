@@ -2063,6 +2063,34 @@ impl ReducerRegistry {
                                 })
                             }
                             ProjectionStep::ArrayIndex(i) => t.element_at(*i).cloned(),
+                            ProjectionStep::MethodHop { member, arity } => {
+                                // Fresh dispatch on the base's class at the
+                                // call site's own arity; the base type IS the
+                                // dynamic receiver, so a fluent `Receiver`
+                                // return substitutes it (`$q->where()->get()`).
+                                t.class_name().map(str::to_string).and_then(|class| {
+                                    let att = WitnessAttachment::PackageSymbol {
+                                        package: class,
+                                        name: member.clone(),
+                                    };
+                                    let sub_q = ReducerQuery {
+                                        attachment: &att,
+                                        point: q.point,
+                                        framework: q.framework,
+                                        arity_hint: Some(*arity),
+                                        receiver: Some(t.clone()),
+                                        args: q.args.clone(),
+                                        context: q.context,
+                                    };
+                                    state.in_opaque_frame(|state| {
+                                        match &*self.query_rec(bag, &sub_q, state) {
+                                            ReducedValue::Type(t) => Some(t.clone()),
+                                            ReducedValue::FactMap(_)
+                                            | ReducedValue::None => None,
+                                        }
+                                    })
+                                })
+                            }
                         };
                         if let Some(t) = projected {
                             out.push(Witness {

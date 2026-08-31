@@ -3403,3 +3403,117 @@ class Repository implements ConfigContract
         "a third same-leaf family must NOT be listed: {files:?}"
     );
 }
+
+#[test]
+fn php_member_chain_types_through_method_hops() {
+    // The registry member-chain lane: `$x = $a->b()->c()` has no variable
+    // for the outer hop's receiver, so no MethodCallBinding bridges it —
+    // the per-call `MethodHop` projection defers each dispatch to query
+    // time and chains through the receiver span's own hop witness.
+    let src = "\
+<?php
+class B {
+    public function c(): string { return \"s\"; }
+}
+class A {
+    public function b(): B { return new B(); }
+}
+function f(A $a) {
+    $x = $a->b()->c();
+    $y = $a->b();
+    echo $x;
+}
+";
+    let (fa, _) = php_fa(src);
+    use crate::model::file_analysis::InferredType;
+    // the single hop still types (was the MCB bridge's case)
+    let y = fa.inferred_type_via_bag("$y", tree_sitter::Point { row: 10, column: 8 });
+    assert_eq!(
+        y.as_ref().and_then(|t| t.class_name()),
+        Some("B"),
+        "single hop must type: {y:?}"
+    );
+    // the two-hop chain resolves through MethodHop → MethodHop → return
+    let x = fa.inferred_type_via_bag("$x", tree_sitter::Point { row: 10, column: 8 });
+    assert_eq!(x, Some(InferredType::String), "chain must type: {x:?}");
+}
+
+#[test]
+fn cpp_member_chain_types_through_method_hops() {
+    // The identical gap on the cpp side: `auto x = w.get().spin();` — the
+    // called-member pattern mints the hop witness alongside the call-blind
+    // field ref, so the chain types with no intermediate variable.
+    let src = "\
+struct Engine {
+    int spin() { return 7; }
+};
+struct Widget {
+    Engine get() { return Engine(); }
+};
+int f(Widget w) {
+    auto x = w.get().spin();
+    auto e = w.get();
+    return x;
+}
+";
+    let fa = cpp_fa(src);
+    use crate::model::file_analysis::InferredType;
+    let inside = tree_sitter::Point { row: 9, column: 4 };
+    assert_eq!(
+        fa.inferred_type_via_bag("e", inside),
+        Some(InferredType::ClassName("Engine".into())),
+        "single hop must type",
+    );
+    assert_eq!(
+        fa.inferred_type_via_bag("x", inside),
+        Some(InferredType::Numeric),
+        "two-hop chain must type",
+    );
+}
+
+#[test]
+fn php_this_receiver_chain_types_through_hops() {
+    // `$this->helper()->render()` — the first hop's receiver is the
+    // enclosing class instance (the pack's `hop.recv` shaping), whose
+    // class only extraction knows; the companion witness carries it.
+    let src = "\
+<?php
+class View {
+    public function render(): string { return \"html\"; }
+}
+class Controller {
+    public function helper(): View { return new View(); }
+    public function page(): void {
+        $out = $this->helper()->render();
+        echo $out;
+    }
+}
+";
+    let (fa, _) = php_fa(src);
+    use crate::model::file_analysis::InferredType;
+    let out = fa.inferred_type_via_bag("$out", tree_sitter::Point { row: 8, column: 12 });
+    assert_eq!(out, Some(InferredType::String), "$this chain must type: {out:?}");
+}
+
+#[test]
+fn php_fluent_chain_substitutes_receiver_through_hops() {
+    // `: static` returns are receiver-relative; the hop passes the base's
+    // type as the dispatch receiver, so a fluent builder chain keeps the
+    // concrete class through every hop.
+    let src = "\
+<?php
+class Query {
+    public function where(string $c): static { return $this; }
+    public function limit(int $n): static { return $this; }
+    public function first(): string { return \"row\"; }
+}
+function f(Query $q) {
+    $r = $q->where('a')->limit(3)->first();
+    echo $r;
+}
+";
+    let (fa, _) = php_fa(src);
+    use crate::model::file_analysis::InferredType;
+    let r = fa.inferred_type_via_bag("$r", tree_sitter::Point { row: 8, column: 8 });
+    assert_eq!(r, Some(InferredType::String), "fluent chain must type: {r:?}");
+}

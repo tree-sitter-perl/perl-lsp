@@ -572,6 +572,14 @@ pub fn php_pack() -> LangPack {
             if kind == "member.recv" && matches!(raw, "self" | "static") {
                 return "__PACKAGE__".to_string();
             }
+            // The chain-hop lane's receiver: `$this` is the enclosing class
+            // instance, so a `$this->a()->b()` chain bases its first hop on
+            // the class (`self`/`static` arrive already canonicalized by the
+            // member.recv arm above). Scoped to hop shaping — the minted
+            // ref's invocant keeps the written `$this` spelling.
+            if kind == "hop.recv" && matches!(raw, "$this" | "self" | "static") {
+                return "__PACKAGE__".to_string();
+            }
             raw.to_string()
         },
         default_name: |kind| match kind {

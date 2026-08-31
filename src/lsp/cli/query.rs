@@ -703,15 +703,29 @@ fn run_one(
                 .ok_or_else(|| format!("No hover info at {}:{}", req.line, req.col))
         }
         "type-at" => {
-            let (_s, _t, analysis) = parse_file(file);
+            let (source, _t, analysis) = parse_file(file);
             resolve_imports_blocking(idx, &analysis);
+            // The rooted form HAS an index — thread it (routed to the file's
+            // own language, `lookup_for` being the one speller), so a chain
+            // hop or return type declared in another file resolves. The
+            // no-root single-file form stays index-less by design.
+            let reg = language_driver::LanguageRegistry::with_enabled();
+            let lang_id = reg
+                .driver_or_fallback(std::path::Path::new(file), &source)
+                .id();
+            let routed = idx.lookup_for(lang_id);
+            let base_idx = routed.as_lookup();
             if let Some(r) = analysis.ref_at(point) {
-                if let Some(ty) = analysis.inferred_type_via_bag(&r.target_name, point) {
+                if let Some(ty) =
+                    analysis.inferred_type_via_bag_ctx(&r.target_name, point, Some(base_idx))
+                {
                     return Ok(analysis.render_type(&ty));
                 }
             }
             if let Some(sym) = analysis.symbol_at(point) {
-                if let Some(ty) = analysis.inferred_type_via_bag(&sym.name, point) {
+                if let Some(ty) =
+                    analysis.inferred_type_via_bag_ctx(&sym.name, point, Some(base_idx))
+                {
                     return Ok(analysis.render_type(&ty));
                 }
             }

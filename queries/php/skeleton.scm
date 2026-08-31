@@ -188,14 +188,17 @@
 ; `$obj->method()` / `$obj?->method()` / `$obj->prop` / `User::method()`:
 ; all one MethodCall lane — the receiver types query-time via its own Expr
 ; witness; a bareword receiver dispatches as the class (Perl `User->make`).
+; `@hop.call` = the WHOLE call expression: the chain-hop witness attaches
+; to its span, so an outer call's receiver (`object:` = this node) chains
+; through it — `$a->b()->c()` types with no intermediate variable.
 (member_call_expression
   object: (_) @member.recv
   name: (name) @ref.member
-  arguments: (arguments) @arity.args)
+  arguments: (arguments) @arity.args) @hop.call
 (nullsafe_member_call_expression
   object: (_) @member.recv
   name: (name) @ref.member
-  arguments: (arguments) @arity.args)
+  arguments: (arguments) @arity.args) @hop.call
 (member_access_expression
   object: (_) @member.recv
   name: (name) @ref.member)

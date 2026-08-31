@@ -160,7 +160,10 @@ assertion is "no diagnostic at this site."
 New gaps surfaced while mining gold from fresh CPAN modules. Each is pinned at
 xfail (expected-correct confirmed from source; tool genuinely wrong).
 
-### `hover-mojo-url-clone-via-new` / `ti-mojo-url-abs-clone-chain` — clone sub's stored *return type*
+### `hover-mojo-url-clone-via-new` — clone sub's stored *return type*
+(`ti-mojo-url-abs-clone-chain` — the `my $abs = $self->clone` VARIABLE case —
+is FIXED and promoted to gold: the rooted `--type-at` now threads the module
+index into the bag query, so the cross-file chase resolves at query time.)
 `Mojo::URL::clone` does `my $clone = $self->new; @$clone{…}=…; return $clone`.
 The **variable** `$clone` types `Mojo::URL` correctly. The fixture cursors the
 `sub clone` declaration, which reports the sub's *declared* return type — still
