@@ -935,6 +935,7 @@ fn inject_member_blocks(
                 scope: scope_id,
                 return_type: None,
                 receiver_return: false,
+            receiver_instance_of: None,
                 deref_stack: m.deref_stack.clone(),
                 attributes: Vec::new(),
                 arity: None,
@@ -1281,6 +1282,7 @@ fn remap_spans(
         let crate::build::query_extract::SkelSymbol {
             kind: _,
             name: _,
+            receiver_instance_of: _,
             start,
             end,
             name_start,

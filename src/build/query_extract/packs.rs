@@ -351,6 +351,19 @@ pub enum DocFact {
     /// the fact's own `@method` line (`line` = 0-based offset within the
     /// comment) so each row is a distinct, honest gd target.
     Method { name: String, ret: Option<String>, line: usize },
+    /// `@template T [of X]` on a CLASS docblock — a declared generic
+    /// parameter, in row order (`line` is the ordering key). Feeds the
+    /// SAME per-class `template_params` axis cpp templates use, so a
+    /// method whose `@return` names the param publishes `ParamOf(i)`
+    /// through the existing writeback (Eloquent's `Builder<TModel>`).
+    Template { name: String, line: usize },
+    /// `@return Base<static|self|$this>` — the return is an instance of
+    /// `base` PARAMETRIZED BY THE RECEIVER (`Model::query()` returns
+    /// `Builder<static>`): the join publishes
+    /// `Operator(InstanceOf{base, [Receiver]})`, so `Book::query()`
+    /// carries `Builder<Book>` and a later `->first()` (`@return
+    /// TModel`) projects `Book` back out.
+    ReturnRecvInstance { base: String },
 }
 
 /// One effect of a command-dispatched statement.
@@ -959,8 +972,32 @@ fn php_doc_types(text: &str) -> Vec<DocFact> {
             .trim_end_matches('*')
             .trim();
         if let Some(rest) = l.strip_prefix("@return ") {
-            if let Some(t) = phpdoc_type(rest) {
+            // `Base<static>` / `Base<self>` / `Base<$this>`: the value is
+            // an instance of Base parametrized by the RECEIVER — a
+            // deferred shape, not a strippable generic.
+            let head = rest.split_whitespace().next().unwrap_or("");
+            let recv_inst = head
+                .strip_suffix('>')
+                .and_then(|h| h.split_once('<'))
+                .filter(|(_, arg)| matches!(*arg, "static" | "self" | "$this"))
+                .and_then(|(base, _)| phpdoc_type(base))
+                // Leafed: dispatch is leaf-keyed, and an FQ base
+                // (`\Illuminate\...\Builder<static>`) would miss it.
+                .map(|b| b.rsplit('\\').next().unwrap_or(&b).to_string());
+            if let Some(base) = recv_inst {
+                out.push(DocFact::ReturnRecvInstance { base });
+            } else if let Some(t) = phpdoc_type(rest) {
                 out.push(DocFact::Return(t));
+            }
+        } else if let Some(rest) = l.strip_prefix("@template ")
+            .or_else(|| l.strip_prefix("@template-covariant "))
+        {
+            if let Some(name) = rest.split_whitespace().next() {
+                if !name.is_empty()
+                    && name.chars().all(|c| c == '_' || c.is_ascii_alphanumeric())
+                {
+                    out.push(DocFact::Template { name: name.to_string(), line: lineno });
+                }
             }
         } else if let Some(rest) = l.strip_prefix("@param ") {
             // `@param string $name description`; the typeless `@param $x`

@@ -102,6 +102,12 @@ templates). Market case and build-out plan in `docs/prompt-php-target.md`.
   rebinds instead of re-declaring, so references and rename see every
   site of a variable instead of per-assignment fragments (renaming
   from any site previously rewrote a fragment and broke the code).
+- **Eloquent Builder generics.** `@template` class docblocks and
+  `@return Builder<static>` / `@return TModel` rows now carry through
+  chains: `User::query()` types as `Builder<User>`, and
+  `->firstWhere(...)` gives back a `User` — hover, completion, and
+  goto-def all follow. Renaming an enum case no longer rewrites an
+  unrelated same-named class's import line.
 - **Laravel framework tier.** Facades work — `Cache::get(...)`
   navigates and types through the facade's `@method` docblock rows
   (any library documenting a `__call` surface with `@method` benefits,

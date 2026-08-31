@@ -140,10 +140,19 @@ From the framework-tier round on the real app + vendor corpus:
   `Model::query` at line 1839. (An earlier "still dark" reading was a
   probe on the `::` token — the round-1 coordinate trap, again: always
   hover first to confirm the landed token.)
-- **Builder-chain receivers**: `$firstDraft` from an Eloquent
-  query-builder chain doesn't type, so members on it are dark — the
-  Builder generics residual (same root as round-3's `TValue`), now the
-  biggest single typing gap on real Laravel app code.
+- **Builder-chain receivers** — LANDED for the clean-docblock tier:
+  `@template T` class rows feed the SAME per-class param axis cpp
+  templates use; `@return Base<static>` publishes
+  `Operator(InstanceOf{base, [Receiver]})` (base leafed — dispatch is
+  leaf-keyed); `@return TModel|null` methods project through the
+  existing `ParamOf` writeback. On real BookStack:
+  `User::query()` types `Builder<User>`, `->firstWhere(...)` types
+  `User`, and gd off the chain result lands in the app's base class.
+  Residuals: Laravel 12's CONDITIONAL generic returns
+  (`($id is ... ? Collection<...> : TModel|null)` on `find`) are
+  beyond the parser (correctly rejected, stays untyped); method-level
+  `@template TValue` on the BuildsQueries trait (`first()`) is a
+  separate binding the class-keyed axis doesn't model.
 - `new self()` receivers — LANDED: the ctor witness routes the
   current-class spellings through the pack's `hop.recv` shaping, so
   `new self()` carries the enclosing class. Fixing it surfaced (and

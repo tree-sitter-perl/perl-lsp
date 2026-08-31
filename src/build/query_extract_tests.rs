@@ -911,6 +911,7 @@ fn tok(src: &str, needle: &str, occ: usize) -> Point {
 fn sksym(src: &str, kind: &str, name: &str, occ: usize, package: Option<&str>) -> super::SkelSymbol {
     let ns = tok(src, name, occ);
     super::SkelSymbol {
+        receiver_instance_of: None,
         kind: kind.to_string(),
         name: name.to_string(),
         start: ns,
@@ -3527,6 +3528,165 @@ class Logger {
     assert_eq!(x, Some(InferredType::String), "property-receiver chain: {x:?}");
     let r = fa.inferred_type_via_bag("$r", at);
     assert_eq!(r, Some(InferredType::Numeric), "static factory chain: {r:?}");
+}
+
+#[test]
+fn php_builder_generics_project_the_model_back_out() {
+    // The Eloquent Builder lane: `@template TModel` on the class feeds
+    // the same per-class param axis cpp templates use; `@return
+    // Builder2<static>` publishes InstanceOf{Builder2, [Receiver]}; a
+    // `@return TModel|null` method projects the receiver's arg back
+    // out via the existing ParamOf writeback. Net: `Book2::query()
+    // ->first()` types as Book2 with zero engine special-cases.
+    let src = "\
+<?php
+/**
+ * @template TModel of Model
+ */
+class Builder2 {
+    /** @return $this */
+    public function whereX(string $c) { return $this; }
+    /** @return TModel|null */
+    public function first() { return null; }
+}
+class Book2 {
+    /** @return Builder2<static> */
+    public static function query() { return new Builder2(); }
+}
+function f(): string {
+    $b = Book2::query();
+    $x = Book2::query()->whereX('a')->first();
+    echo $x;
+    return 's';
+}
+";
+    let (fa, _) = php_fa(src);
+    use crate::model::file_analysis::InferredType;
+    let at = tree_sitter::Point { row: 17, column: 4 };
+    let b = fa.inferred_type_via_bag("$b", at);
+    assert_eq!(
+        b.as_ref().and_then(|t| t.class_name()),
+        Some("Builder2"),
+        "query() carries a Builder instance: {b:?}"
+    );
+    let x = fa.inferred_type_via_bag("$x", at);
+    assert_eq!(
+        x,
+        Some(InferredType::ClassName("Book2".into())),
+        "first() projects the receiver's model back out: {x:?}"
+    );
+}
+
+#[test]
+fn php_builder_generics_cross_file_through_self_leaf_parent() {
+    // The BookStack shape end-to-end ACROSS FILES: app User extends app
+    // Model, which extends the vendor Model under an ALIAS (self-leaf
+    // edge), whose query() returns Builder<static>; Builder's
+    // firstWhere() projects TModel. The all-local twin passes — this
+    // pins the cross-file walk.
+    let vendor_model = "\
+<?php
+namespace Acme\\Eloquent;
+class Model {
+    /** @return \\Acme\\Eloquent\\Builder5<static> */
+    public static function query() { return new Builder5(); }
+}
+";
+    let vendor_builder = "\
+<?php
+namespace Acme\\Eloquent;
+/**
+ * @template TModel of \\Acme\\Eloquent\\Model
+ */
+class Builder5 {
+    /** @return TModel|null */
+    public function firstWhere(string $c) { return null; }
+}
+";
+    let app_model = "\
+<?php
+namespace App5;
+use Acme\\Eloquent\\Model as EloquentModel;
+class Model extends EloquentModel {
+}
+";
+    let app_user = "\
+<?php
+namespace App5;
+class User5 extends Model {
+}
+";
+    let run = "\
+<?php
+use App5\\User5;
+$u = User5::query()->firstWhere('id');
+echo $u;
+";
+    let (fa_vm, _) = php_fa(vendor_model);
+    let (fa_vb, _) = php_fa(vendor_builder);
+    let (fa_am, _) = php_fa(app_model);
+    let (fa_au, _) = php_fa(app_user);
+    let (fa_run, _) = php_fa(run);
+
+    let idx = crate::index::module_index::ModuleIndex::new_for_test();
+    let mk = |path: &str, fa: crate::model::file_analysis::FileAnalysis| {
+        std::sync::Arc::new(crate::index::module_index::CachedModule::new(
+            std::path::PathBuf::from(path),
+            std::sync::Arc::new(fa),
+        ))
+    };
+    idx.insert_cache_providers(
+        "Model",
+        Some(vec![
+            mk("/gen/app/Model.php", fa_am),
+            mk("/gen/vendor/Model.php", fa_vm),
+        ]),
+    );
+    idx.insert_cache("Builder5", Some(mk("/gen/vendor/Builder5.php", fa_vb)));
+    idx.insert_cache("User5", Some(mk("/gen/app/User5.php", fa_au)));
+
+    use crate::model::file_analysis::InferredType;
+    let u = fa_run.inferred_type_via_bag_ctx(
+        "$u",
+        tree_sitter::Point { row: 3, column: 0 },
+        Some(&idx),
+    );
+    assert_eq!(
+        u,
+        Some(InferredType::ClassName("User5".into())),
+        "cross-file generics chain: {u:?}"
+    );
+}
+
+#[test]
+fn php_enum_cases_are_not_bare_constants() {
+    // Round-3 R4 residual: a php enum case is only ever
+    // `Level::Debug`-reachable — never a bare token — so it must not
+    // take cpp's unscoped-enum hoisting lane (bare_constant), which
+    // let ANY same-named PackageRef match: renaming a case rewrote an
+    // unrelated class's use-import leaf.
+    let src = "\
+<?php
+enum Level: int {
+    case Debug = 100;
+}
+class User {
+    const VERSION = \"1\";
+}
+";
+    let (fa, _) = php_fa(src);
+    use crate::model::file_analysis::SymKind;
+    for name in ["Debug", "VERSION"] {
+        let sym = fa
+            .symbols()
+            .iter()
+            .find(|s| matches!(s.kind, SymKind::Enumerator) && s.name == name)
+            .unwrap();
+        assert!(
+            !fa.class_content_is_bare_constant(sym),
+            "{name} must not be bare-reachable",
+        );
+    }
 }
 
 #[test]

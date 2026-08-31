@@ -25,6 +25,10 @@ pub struct SkelSymbol {
     /// `ReturnExpr::Receiver` so the call site's receiver substitutes
     /// (fluent builders chain). Set by the pack's `rettype_receiver`.
     pub receiver_return: bool,
+    /// The documented return is `Base<static>` — an instance of `base`
+    /// parametrized by the receiver (`DocFact::ReturnRecvInstance`); the
+    /// writeback publishes `Operator(InstanceOf{base, [Receiver]})`.
+    pub receiver_instance_of: Option<String>,
     /// Pointer/reference declarator stack, unravelled by `peel_nested` from
     /// a `@nested.target` capture (empty otherwise). Flows to `Symbol.deref_stack`.
     pub deref_stack: Vec<crate::model::file_analysis::DerefStep>,
@@ -749,6 +753,21 @@ impl SkeletonAnalysis {
                     bag.push(mk(
                         WA::Symbol(sym.id),
                         WP::ReturnExpr(crate::model::witnesses::ReturnExpr::Receiver),
+                        sym.span,
+                    ));
+                }
+                // `@return Base<static>`: an instance of `base` parametrized
+                // by the receiver — `Book::query()` carries `Builder<Book>`,
+                // and a later `@return TModel` hop projects `Book` out via
+                // the same `ParamOf` axis cpp instantiations use.
+                if let Some(base) = &self.symbols[i].receiver_instance_of {
+                    use crate::model::witnesses::{ParametricOp, ReturnExpr};
+                    bag.push(mk(
+                        WA::Symbol(sym.id),
+                        WP::ReturnExpr(ReturnExpr::Operator(ParametricOp::InstanceOf {
+                            base: base.clone(),
+                            args: vec![ReturnExpr::Receiver],
+                        })),
                         sym.span,
                     ));
                 }

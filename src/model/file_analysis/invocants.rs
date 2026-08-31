@@ -1455,7 +1455,16 @@ impl FileAnalysis {
             .any(|c| {
                 matches!(c.kind, SymKind::Class)
                     && contains(&c.span, &sym.span)
+                    // STRICTLY wider: hoisting means the member's declaring
+                    // scope reaches outside its container (C's unscoped
+                    // enum). A container that mints its own scope (php
+                    // enums — cases are only ever `Level::Debug`-reachable)
+                    // has scope == container span, and calling that bare
+                    // let any same-named PackageRef match a case — renaming
+                    // an enum case rewrote an unrelated class's use-import
+                    // leaf (round-3 R4's residual).
                     && contains(&sc.span, &c.span)
+                    && sc.span != c.span
             })
     }
 

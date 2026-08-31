@@ -822,6 +822,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                     return_type: rettype_by_match
                         .get(&e.match_id)
                         .and_then(|t| (pack.annot_type)(t)),
+                    receiver_instance_of: None,
                     receiver_return: rettype_by_match
                         .get(&e.match_id)
                         .is_some_and(|t| (pack.rettype_receiver)(t)),
@@ -1363,6 +1364,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                             scope: *scope,
                             return_type: None,
                             receiver_return: false,
+            receiver_instance_of: None,
                             deref_stack: Vec::new(),
                             attributes: Vec::new(),
                             arity: None,
@@ -1668,6 +1670,14 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                         continue;
                     };
                     for f in facts {
+                        // `@template T` rows: the class's generic params, in
+                        // row order — the same per-class axis cpp templates
+                        // feed, so `@return TModel` methods publish
+                        // `ParamOf(i)` through the existing writeback.
+                        if let DocFact::Template { name, line } = f {
+                            out.template_params.push((sym.name.clone(), name.clone(), *line));
+                            continue;
+                        }
                         if let DocFact::Method { name, ret, line } = f {
                             // Span = the fact's own `@method` line: a
                             // distinct gd target per row (and distinct
@@ -1689,6 +1699,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                                 receiver_return: ret
                                     .as_deref()
                                     .is_some_and(|t| (pack.rettype_receiver)(t)),
+                                receiver_instance_of: None,
                                 deref_stack: Vec::new(),
                                 attributes: Vec::new(),
                                 arity: None,
@@ -1708,7 +1719,16 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                 };
                 for f in facts {
                     match f {
-                        DocFact::Method { .. } => {} // class-docblock fact; no callable/field join
+                        // class-docblock facts; no callable/field join
+                        DocFact::Method { .. } | DocFact::Template { .. } => {}
+                        DocFact::ReturnRecvInstance { base } => {
+                            if sym.return_type.is_none()
+                                && !sym.receiver_return
+                                && sym.receiver_instance_of.is_none()
+                            {
+                                sym.receiver_instance_of = Some(base.clone());
+                            }
+                        }
                         DocFact::Return(t) => {
                             if sym.return_type.is_none() && !sym.receiver_return {
                                 if (pack.rettype_receiver)(t) {
