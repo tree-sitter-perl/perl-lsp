@@ -674,6 +674,16 @@ impl CrossFileLookup for ModuleIndex {
             .map(|g| Arc::clone(&g))
             .unwrap_or_default()
     }
+    fn is_dependency_path(&self, path: &std::path::Path) -> bool {
+        match self.core.dependency_roots.read() {
+            // Hub semantics: everything cached here came from `@INC`.
+            Ok(g) => match g.as_ref() {
+                None => true,
+                Some(roots) => roots.iter().any(|r| path.starts_with(r)),
+            },
+            Err(_) => true,
+        }
+    }
 
     fn workspace_root_path(&self) -> Option<std::path::PathBuf> {
         self.workspace_root()

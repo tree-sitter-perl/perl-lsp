@@ -189,3 +189,75 @@ fn php_references_cross_the_file_boundary() {
         "expected both call sites in main.php, got {hits}.\nstdout: {stdout}\nstderr: {stderr}"
     );
 }
+
+/// The composer vendor tier: a gitignored `vendor/` is invisible to the
+/// ignore-aware walk, so the php driver's dependency roots must carry it —
+/// visible to gd/references, read-only for rename.
+#[cfg(feature = "php")]
+fn composer_workspace(tag: &str) -> std::path::PathBuf {
+    let dir =
+        std::env::temp_dir().join(format!("perl-lsp-scope-vendor-{}-{}", tag, std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::create_dir_all(dir.join("vendor/acme/widgets/src")).unwrap();
+    std::fs::create_dir_all(dir.join("vendor/composer")).unwrap();
+    std::fs::write(dir.join(".gitignore"), "vendor/\n").unwrap();
+    // the walk honors .gitignore only inside a repo — make it one
+    let _ = std::process::Command::new("git").args(["init", "-q"]).current_dir(&dir).output();
+    std::fs::write(
+        dir.join("composer.json"),
+        r#"{"autoload":{"psr-4":{"App\\":"src/"}},"require":{"acme/widgets":"^1.0"}}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("vendor/composer/installed.json"),
+        r#"{"packages":[{"name":"acme/widgets","install-path":"../acme/widgets"}]}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("vendor/acme/widgets/src/Widget.php"),
+        "<?php\nnamespace Acme\\Widgets;\n\nclass Widget\n{\n    public function spin(): string\n    {\n        return \"spun\";\n    }\n}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("src/App.php"),
+        "<?php\nnamespace App;\n\nuse Acme\\Widgets\\Widget;\n\nclass App\n{\n    public function run(): string\n    {\n        $w = new Widget();\n        return $w->spin();\n    }\n}\n",
+    )
+    .unwrap();
+    dir
+}
+
+#[cfg(feature = "php")]
+#[test]
+fn composer_vendor_resolves_but_never_rewrites() {
+    let dir = composer_workspace("main");
+    let app = dir.join("src/App.php");
+    // gd on `spin` in `$w->spin()` (0-based row 10, col 21) lands in vendor.
+    let (stdout, stderr) = run(
+        &dir,
+        &["--definition", dir.to_str().unwrap(), app.to_str().unwrap(), "10", "21"],
+    );
+    assert!(
+        stdout.contains("Widget.php"),
+        "gd into the vendor tier went dark.\nstdout: {stdout}\nstderr: {stderr}"
+    );
+    // rename of the vendor-declared method edits ONLY editable space.
+    let (stdout, stderr) = run(
+        &dir,
+        &[
+            "--rename",
+            dir.to_str().unwrap(),
+            "--at",
+            "src/App.php:11:20",
+            "whirl",
+        ],
+    );
+    assert!(
+        stdout.contains("App.php"),
+        "the app call site must be in the edit set.\nstdout: {stdout}\nstderr: {stderr}"
+    );
+    assert!(
+        !stdout.contains("Widget.php"),
+        "a rename must NEVER rewrite the vendor tier.\nstdout: {stdout}\nstderr: {stderr}"
+    );
+}

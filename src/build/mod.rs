@@ -3,6 +3,8 @@
 //! sanctioned extraction seam (plugins, pod, query packs, reparse).
 
 pub mod builder;
+#[cfg_attr(not(feature = "php"), allow(dead_code))]
+pub mod composer;
 pub mod cpanfile;
 // config-variant macro model: guard trail + reachability + join
 pub mod cpp_macro_model;

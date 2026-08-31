@@ -822,6 +822,17 @@ pub trait CrossFileLookup {
     fn inc_roots(&self) -> std::sync::Arc<Vec<std::path::PathBuf>> {
         std::sync::Arc::new(Vec::new())
     }
+    /// Is `path` in this lookup's read-only DEPENDENCY tier? Tier
+    /// attribution for the masked backward walk: a dependency site is
+    /// visible to references but never rewritten by rename. The Perl hub's
+    /// whole cache is dependency BY CONSTRUCTION (workspace Perl files live
+    /// in the FileStore, so anything here came from `@INC`) — hence the
+    /// default. A pack sub-index holds the workspace's own files too, so it
+    /// overrides with membership in its registered dependency-root set
+    /// (composer's vendor packages).
+    fn is_dependency_path(&self, _path: &std::path::Path) -> bool {
+        true
+    }
     /// The workspace root, for resolving an origin's relative `use lib`
     /// entries — Perl resolves those against the process CWD, which for a
     /// language server is the project root.
@@ -1143,6 +1154,9 @@ impl<'a> ScopedLookup<'a> {
 impl<'a> CrossFileLookup for ScopedLookup<'a> {
     fn resolution_epoch(&self) -> u64 {
         self.inner.resolution_epoch()
+    }
+    fn is_dependency_path(&self, path: &std::path::Path) -> bool {
+        self.inner.is_dependency_path(path)
     }
     fn get_cached(&self, module_name: &str) -> Option<std::sync::Arc<CachedModule>> {
         // A search-path origin's winner is PER-ASKER: the same name means

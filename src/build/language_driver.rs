@@ -156,6 +156,15 @@ pub trait LanguageDriver: Send + Sync {
     fn sniff(&self, _prefix: &str) -> bool {
         false
     }
+    /// Extra DEPENDENCY-tier roots this language's projects declare outside
+    /// the ignore-aware workspace walk (php: composer's `vendor/` packages,
+    /// which the project's own .gitignore hides). The bulk indexer walks
+    /// these WITHOUT gitignore filtering and feeds them into the same
+    /// per-language sub-index — the pack tier is already dependency-masked
+    /// (read-only for rename) in the backward walk. Empty = none.
+    fn dependency_roots(&self, _workspace_root: &std::path::Path) -> Vec<std::path::PathBuf> {
+        Vec::new()
+    }
 }
 
 /// Perl — the reference driver. Wraps the production builder; behaviour
@@ -303,6 +312,10 @@ pub struct PackDriver {
     /// concept). Stamps a `non_public` attribute on member symbols so
     /// completion can filter by visibility.
     access_regions: Option<fn(&mut tree_sitter::Parser, &str) -> Vec<crate::build::cpp_reparse::AccessRegion>>,
+    /// Extra DEPENDENCY-tier roots a project of this language declares
+    /// outside the ignore-aware walk (php: composer's vendor packages).
+    /// `None` = the workspace walk is the whole story.
+    dependency_roots: Option<fn(&Path) -> Vec<std::path::PathBuf>>,
 }
 
 /// Pre-parse external state gathered in phase 1 (`gather_pack_context`) and
@@ -393,6 +406,9 @@ impl LanguageDriver for PackDriver {
     }
     fn lang_pack(&self) -> Option<crate::build::query_extract::LangPack> {
         Some((self.pack)())
+    }
+    fn dependency_roots(&self, workspace_root: &Path) -> Vec<std::path::PathBuf> {
+        self.dependency_roots.map(|f| f(workspace_root)).unwrap_or_default()
     }
     fn caps(&self) -> DriverCaps {
         let pack = (self.pack)();
@@ -678,6 +694,7 @@ fn cpp_driver() -> PackDriver {
         input_fingerprint: Some(crate::build::cpp_reparse::toolchain_fingerprint),
         sniff: Some(crate::build::cpp_reparse::looks_like_c_family),
         access_regions: Some(crate::build::cpp_reparse::access_regions),
+        dependency_roots: None,
     }
 }
 
@@ -702,6 +719,7 @@ fn python_driver() -> PackDriver {
         input_fingerprint: None,
         sniff: None,
         access_regions: None,
+        dependency_roots: None,
     }
 }
 
@@ -730,6 +748,9 @@ fn php_driver() -> PackDriver {
         input_fingerprint: None,
         sniff: None,
         access_regions: None,
+        // composer's vendor packages — the project gitignores them, so the
+        // workspace walk can't see the dependency tier without this.
+        dependency_roots: Some(crate::build::composer::composer_dependency_roots),
     }
 }
 
@@ -754,6 +775,7 @@ fn r_driver() -> PackDriver {
         input_fingerprint: None,
         sniff: None,
         access_regions: None,
+        dependency_roots: None,
     }
 }
 
@@ -779,6 +801,7 @@ fn cmake_driver() -> PackDriver {
         input_fingerprint: None,
         sniff: None,
         access_regions: None,
+        dependency_roots: None,
     }
 }
 
