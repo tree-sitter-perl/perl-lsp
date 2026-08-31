@@ -199,19 +199,34 @@
   object: (_) @member.recv
   name: (name) @ref.member
   arguments: (arguments) @arity.args) @hop.call
+; A plain property ACCESS is a value too (`$this->query->where(...)`
+; chains through it): the hop dispatches the field on the receiver's
+; class and answers its declared type — arity-less, same lane.
 (member_access_expression
   object: (_) @member.recv
-  name: (name) @ref.member)
+  name: (name) @ref.member) @hop.call
 (scoped_call_expression
   scope: (name) @member.recv
   name: (name) @ref.member
-  arguments: (arguments) @arity.args)
+  arguments: (arguments) @arity.args) @hop.call
 ; `self::` / `static::` / `parent::` — the call token still gets a ref
-; (rule #7); receiver substitution is a documented residual.
+; (rule #7); `parent::` receiver substitution is a documented residual.
 (scoped_call_expression
   scope: (relative_scope) @member.recv
   name: (name) @ref.member
-  arguments: (arguments) @arity.args)
+  arguments: (arguments) @arity.args) @hop.call
+
+; `User::VERSION` / `self::LIMIT` / `Level::Debug` — class-constant and
+; enum-case ACCESS rides the same member lane as a scoped call (the
+; receiver dispatches as the class), arg-less. Anchored on both ends so
+; the receiver `(name)` can never re-match as the constant of a second
+; combination (the use-map poison, same lesson).
+(class_constant_access_expression
+  . (name) @member.recv
+  (name) @ref.member .) @hop.call
+(class_constant_access_expression
+  . (relative_scope) @member.recv
+  (name) @ref.member .) @hop.call
 
 ; `new User(...)`: the value is an instance of User by SYNTAX — the ctor
 ; edge rides the alias graph (TypeName → the defining file, or the bare

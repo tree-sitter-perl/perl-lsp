@@ -86,6 +86,9 @@ templates). Market case and build-out plan in `docs/prompt-php-target.md`.
   intermediate variable — each call hop resolves lazily off the
   receiver's class, and `: static` fluent builders keep the concrete
   class through every hop.
+- **Class constants and enum cases.** `User::VERSION`, `self::LIMIT`,
+  and `Level::Debug` navigate (goto-def, references, hover), and an
+  enum case's value types as its enum.
 
 ### Storage engine — warm starts, bounded memory
 

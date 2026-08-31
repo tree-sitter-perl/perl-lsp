@@ -3496,6 +3496,78 @@ class Controller {
 }
 
 #[test]
+fn php_property_receiver_and_static_factory_chains() {
+    // Round-3 top finding: `$this->handler->close()` never dispatched —
+    // the property ACCESS carried no hop, and field types live as
+    // Variable witnesses the PackageSymbol chase couldn't reach. Both
+    // halves land here; the static-factory chain rides the scoped-call
+    // hop with a bareword class receiver.
+    let src = "\
+<?php
+class Handler {
+    public function close(): string { return \"ok\"; }
+}
+class Registry {
+    public static function instance(): Registry { return new Registry(); }
+    public function register(): int { return 1; }
+}
+class Logger {
+    private Handler $handler;
+    public function shutdown(): void {
+        $x = $this->handler->close();
+        $r = Registry::instance()->register();
+        echo $x . $r;
+    }
+}
+";
+    let (fa, _) = php_fa(src);
+    use crate::model::file_analysis::InferredType;
+    let at = tree_sitter::Point { row: 13, column: 12 };
+    let x = fa.inferred_type_via_bag("$x", at);
+    assert_eq!(x, Some(InferredType::String), "property-receiver chain: {x:?}");
+    let r = fa.inferred_type_via_bag("$r", at);
+    assert_eq!(r, Some(InferredType::Numeric), "static factory chain: {r:?}");
+}
+
+#[test]
+fn php_class_constant_and_enum_case_access() {
+    // `User::VERSION` / `Level::Debug` are class-keyed member accesses:
+    // the access site mints a member ref (gd/references connect), and a
+    // TRUE enum case's value types as its enum. A class const's VALUE
+    // stays untyped (typing it as the class would be wrong — residual).
+    let src = "\
+<?php
+class User {
+    const VERSION = \"1.0\";
+}
+enum Level: int {
+    case Debug = 100;
+}
+$v = User::VERSION;
+$d = Level::Debug;
+echo $v;
+";
+    let (fa, _) = php_fa(src);
+    use crate::model::file_analysis::{InferredType, RefKind};
+    let version_ref = fa.refs().iter().find(|r| {
+        matches!(r.kind, RefKind::MethodCall { .. }) && r.target_name == "VERSION"
+    });
+    assert!(version_ref.is_some(), "const access mints a member ref");
+    let d = fa.inferred_type_via_bag("$d", tree_sitter::Point { row: 9, column: 0 });
+    assert_eq!(
+        d,
+        Some(InferredType::ClassName("Level".into())),
+        "enum case types as its enum: {d:?}"
+    );
+    let v = fa.inferred_type_via_bag("$v", tree_sitter::Point { row: 9, column: 0 });
+    assert_ne!(
+        v,
+        Some(InferredType::ClassName("User".into())),
+        "a const's VALUE must never type as the owning class"
+    );
+}
+
+#[test]
 fn php_fluent_chain_substitutes_receiver_through_hops() {
     // `: static` returns are receiver-relative; the hop passes the base's
     // type as the dispatch receiver, so a fluent builder chain keeps the

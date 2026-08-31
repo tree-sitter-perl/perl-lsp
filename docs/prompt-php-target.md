@@ -194,7 +194,12 @@ production engine, zero engine special-cases:
 Known residuals: `parent::` dispatch (needs the SUPER method-token
 lane; `self::`/`static::` landed round 2 — they canonicalize to the
 model's `__PACKAGE__` invocant token); `require`/`include` path imports;
-class-constant access (`User::VERSION` as a scoped ref);
+~~class-constant access~~ LANDED — `User::VERSION` / `self::LIMIT` /
+`Level::Debug` mint member-lane refs (gd/references/hover connect,
+double-anchored patterns), a true enum case's value types as its enum
+through the same hop lane (Enumerators joined the PackageSymbol
+writeback-lite), while a class const's VALUE stays untyped (typing it
+as the class would be wrong — thread the value span to fix);
 heredoc/encapsed interpolation refs exist but interpolated member
 completion doesn't; `list()`/array destructuring; global functions are
 namespace-blind. **Array-element flow through `foreach`** (round-2

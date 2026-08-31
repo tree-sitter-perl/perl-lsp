@@ -37,6 +37,15 @@ pub struct LangPack {
     /// through verbatim with no namespace rows (Perl's package names are
     /// absolute; cpp identity is its own arc).
     pub namespace_relative_parents: bool,
+    /// Field types answer through the registry: each data-member decl mints
+    /// `PackageSymbol{class, field} → Edge(Variable)` so a property-access
+    /// hop (`$this->query->where(...)`) dispatches the field and chains.
+    /// True only where the registry IS the field-type authority (php).
+    /// False for cpp: its field answers go through the instantiation-aware
+    /// `member_value_type` lane (template-param substitution, typedef
+    /// display), and a registry edge answers the RAW declared type first —
+    /// `item_: T` instead of the substituted `int`.
+    pub field_registry_edges: bool,
     /// Documentation-comment type facts (phpdoc `@return`/`@param`/`@var`):
     /// the pack parses ITS OWN doc vocabulary out of a `@doc.comment`
     /// capture's text, returning type spellings `annot_type` speaks.
@@ -361,6 +370,7 @@ pub fn perl_pack() -> LangPack {
         rettype_receiver: |_| false,
         type_display: &[],
         namespace_relative_parents: false,
+        field_registry_edges: false,
         doc_types: |_| vec![],
         module_paths: |m| vec![format!("{}.pm", m.replace("::", "/"))],
         shape_ctor: |_| false,
@@ -410,6 +420,7 @@ pub fn python_pack() -> LangPack {
         rettype_receiver: |_| false,
         type_display: &[],
         namespace_relative_parents: false,
+        field_registry_edges: false,
         doc_types: |_| vec![],
         module_paths: |m| {
             let base = m.replace('.', "/");
@@ -459,6 +470,7 @@ pub fn r_pack() -> LangPack {
         rettype_receiver: |_| false,
         type_display: &[],
         namespace_relative_parents: false,
+        field_registry_edges: false,
         doc_types: |_| vec![],
         // No reliable lexical ctor convention in R (S4/R5 exist but
         // rare); class typing arrives via shapes and S3 later.
@@ -507,6 +519,7 @@ pub fn cmake_pack() -> LangPack {
         rettype_receiver: |_| false,
         type_display: &[],
         namespace_relative_parents: false,
+        field_registry_edges: false,
         doc_types: |_| vec![],
         // include(util.cmake) is a literal path; add_subdirectory(src)
         // means src/CMakeLists.txt. The whole resolution strategy.
@@ -623,6 +636,7 @@ pub fn php_pack() -> LangPack {
             matches!(text.trim().trim_start_matches('?'), "static" | "$this" | "self")
         },
         namespace_relative_parents: true,
+        field_registry_edges: true,
         // phpdoc: the type vocabulary of REAL PHP — most of WordPress and
         // half of Laravel's public API type only here.
         doc_types: php_doc_types,
@@ -756,6 +770,7 @@ pub fn cpp_pack() -> LangPack {
         rettype_receiver: |_| false,
         type_display: &[],
         namespace_relative_parents: false,
+        field_registry_edges: false,
         doc_types: |_| vec![],
         // #include "a/b.h" / <vector>: strip the delimiters; a quoted
         // path is workspace-relative verbatim, a system header resolves

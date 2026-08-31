@@ -787,6 +787,28 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                     out.specializations
                         .push((shaped.clone(), (pack.shape_name)("spec.primary", primary)));
                 }
+                // Registry field edge (pack-gated — see `field_registry_edges`
+                // on `LangPack`): a data member's type lives as a Variable
+                // witness in its declaring scope, and this edge lets a
+                // property-access hop dispatch the field through the same
+                // class-keyed chase methods use.
+                if kind == "field" && pack.field_registry_edges {
+                    if let Some(cls) = &pkg {
+                        use crate::model::witnesses as wit;
+                        out.witnesses.push(wit::Witness {
+                            attachment: wit::WitnessAttachment::PackageSymbol {
+                                package: cls.clone(),
+                                name: shaped.clone(),
+                            },
+                            source: wit::WitnessSource::Builder("skeleton".into()),
+                            payload: wit::WitnessPayload::Edge(wit::WitnessAttachment::Variable {
+                                name: shaped.clone(),
+                                scope: cur_scope,
+                            }),
+                            span: Span { start: e.start, end: e.end },
+                        });
+                    }
+                }
                 out.symbols.push(SkelSymbol {
                     name: shaped,
                     kind,
@@ -1750,6 +1772,19 @@ fn push_hop_witness(
             name: (pack.shape_name)("def.var", recv_text),
             scope,
         }
+    } else if is_identifier_text(recv_text) {
+        // A bareword receiver dispatches as the class (Perl's
+        // `User->make` rule; php `Level::Debug` / `Foo::create()`): the
+        // span carries no expression witness of its own, so seed it.
+        witnesses.push(wit::Witness {
+            attachment: wit::WitnessAttachment::Expr(recv_span),
+            source: wit::WitnessSource::Builder("skeleton".into()),
+            payload: wit::WitnessPayload::InferredType(
+                crate::model::file_analysis::InferredType::ClassName(recv_text.to_string()),
+            ),
+            span: recv_span,
+        });
+        wit::WitnessAttachment::Expr(recv_span)
     } else {
         wit::WitnessAttachment::Expr(recv_span)
     };

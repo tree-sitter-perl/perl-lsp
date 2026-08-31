@@ -678,7 +678,7 @@ impl SkeletonAnalysis {
                 span,
             };
             for (i, sym) in symbols.iter().enumerate() {
-                if !matches!(sym.kind, SymKind::Method | SymKind::Sub) {
+                if !matches!(sym.kind, SymKind::Method | SymKind::Sub | SymKind::Enumerator) {
                     continue;
                 }
                 // A receiver-shaped declared return (`: static`) publishes the
@@ -718,13 +718,30 @@ impl SkeletonAnalysis {
                     };
                     bag.push(mk(WA::Symbol(sym.id), pay, sym.span));
                 }
-                if matches!(sym.kind, SymKind::Method) {
+                if matches!(sym.kind, SymKind::Method | SymKind::Enumerator) {
+                    // Enumerators too: `Level::Debug` / a class const is a
+                    // class-keyed member access, and its hop witness chases
+                    // the same PackageSymbol edge a method return does.
                     if let Some(class) = &sym.package {
                         bag.push(mk(
                             WA::PackageSymbol { package: class.clone(), name: sym.name.clone() },
                             WP::Edge(WA::Symbol(sym.id)),
                             sym.span,
                         ));
+                        // A TRUE enum case's value is an instance of its
+                        // enum (php `Level::Debug`, cpp `Color::kRed`). A
+                        // class CONST (extraction kind "const", flattened
+                        // to the same SymKind) is its literal's value —
+                        // typing it as the class would be wrong, so it
+                        // stays untyped here (residual: thread the value
+                        // span).
+                        if self.symbols[i].kind == "enumerator" {
+                            bag.push(mk(
+                                WA::Symbol(sym.id),
+                                WP::InferredType(InferredType::ClassName(class.clone())),
+                                sym.span,
+                            ));
+                        }
                     }
                 }
             }
