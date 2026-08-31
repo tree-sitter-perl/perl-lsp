@@ -215,12 +215,13 @@ production engine, zero engine special-cases:
      residual). Verified on BookStack: gd on `$book->pages` lands on
      the `pages()` relation. The extract dedup now keys field-ness so
      the method+property pair at one name token survives.
-   The rhai capture-event hook (a DYNAMICALLY loaded overlay + host
-   predicates, `$PERL_LSP_PLUGIN_DIR`-style) remains the follow-on
-   seam; the overlay file is exactly the artifact it would load.
-   WordPress hooks (round-3 R8) are the second tenant and need emit
-   actions richer than captures (a ref into arg #2's string), i.e. the
-   real hook design.
+   The plugin seam is now DESIGNED — `docs/prompt-pack-plugins.md`:
+   tier 1 is the loadable query-overlay unit (this laravel.scm file is
+   its first tenant, verbatim) plus string-named reference captures
+   (`@ref.call.named`), which is ALL WordPress hooks (round-3 R8) need
+   — no callbacks; tier 2 (rhai over capture events, shared EmitAction
+   vocabulary) waits for a tenant needing name surgery (Laravel
+   scopes).
 7. **Calibration.** The gold-corpus sibling: a packagist-pinned substrate
    (top-N packages via composer), the same exact-assertion fixture
    format, corpus entries for a Laravel app + WordPress core in the

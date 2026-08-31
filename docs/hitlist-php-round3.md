@@ -111,7 +111,7 @@ analysis knows (cpp's self-access-sees-private gold case). Verified:
 the guzzle probe answers zero items; a resolvable chain
 (`User::query()->firstWhere(...)->`) completes real User members.
 
-## R8 — WP hook string callbacks (framework plugin, build-out item 6)
+## R8 — WP hook string callbacks — DESIGNED (docs/prompt-pack-plugins.md)
 
 `add_action('init', 'wp_cron')`: the string never refs the function,
 both directions dark. 993 string-callback sites + 161
