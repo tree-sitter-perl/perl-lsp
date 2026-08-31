@@ -4182,3 +4182,116 @@ class C {
         .find(|s| s.name == "zz_overlay_probe" && matches!(s.kind, crate::model::file_analysis::SymKind::Field));
     assert!(field.is_some(), "the probe overlay's pattern fired (base + survivors serve despite the broken sibling)");
 }
+
+#[test]
+fn php_promoted_property_navigation_and_rename_group() {
+    // Round-3 R3: `public readonly Level $level` in a ctor signature
+    // declares BOTH the class field and the ctor param with ONE token.
+    // The access token must navigate (the class-content gate exempts
+    // Fields from the method-scope refusal), and the identity is a GROUP:
+    // rename from any spelling rewrites the decl, the member accesses,
+    // AND the `$level` body uses — leaving any of them behind breaks code.
+    let src = "\
+<?php
+class Level {
+    public function name(): string { return 'x'; }
+}
+class Record {
+    public function __construct(public readonly Level $level) {
+        echo $level->name();
+    }
+}
+function use_it(Record $record): Level {
+    return $record->level;
+}
+";
+    let (fa, _) = php_fa(src);
+    // From the ACCESS token (`$record->level`, row 10 col 20):
+    let resolved = crate::index::resolve::resolve_symbol(
+        &fa,
+        tree_sitter::Point { row: 10, column: 20 },
+        None,
+    );
+    let Some(crate::index::resolve::ResolvedTarget::Group { local_spans, decl_spans, members, .. }) =
+        resolved
+    else {
+        panic!("promoted-property access must resolve to the param group: {resolved:?}");
+    };
+    assert_eq!(members.len(), 1, "one walked member (the field target)");
+    assert_eq!(members[0].target.name, "level");
+    // The decl axis is the field token (row 5, cols 55-60 — bare name).
+    assert_eq!(decl_spans.len(), 1);
+    assert_eq!(
+        (decl_spans[0].1.start.row, decl_spans[0].1.start.column),
+        (5, 55),
+        "decl span is the bare field token: {decl_spans:?}"
+    );
+    // The ctor-body use (`$level` row 6 col 13) rides sigil-narrowed.
+    assert!(
+        local_spans
+            .iter()
+            .any(|s| s.start.row == 6 && s.start.column == 14),
+        "the param body use joins the group sigil-narrowed: {local_spans:?}"
+    );
+    // From the DECL token: the same group (the Variable wins symbol_at;
+    // the field twin re-targets it).
+    let from_decl = crate::index::resolve::resolve_symbol(
+        &fa,
+        tree_sitter::Point { row: 5, column: 57 },
+        None,
+    );
+    assert!(
+        matches!(from_decl, Some(crate::index::resolve::ResolvedTarget::Group { .. })),
+        "decl-side cursor resolves to the same group: {from_decl:?}"
+    );
+}
+
+#[test]
+fn php_wp_hook_name_identity_connects_registration_and_firing() {
+    // Hook-NAME identity on the Handler rail: `add_action('init', …)`
+    // declares the hook (a Global-owned Handler named by the string) and
+    // `do_action('init')` fires it. References from either side list
+    // both; rename rewrites the name inside the quotes at every site.
+    let src = "\
+<?php
+function wp_cron(): int { return 1; }
+add_action('init', 'wp_cron');
+add_action('init', 'other_cb');
+do_action('init');
+do_action('shutdown');
+";
+    let (fa, _) = php_fa(src);
+    // cursor on the FIRING string ('init' at row 4, inside quotes)
+    let resolved = crate::index::resolve::resolve_symbol(
+        &fa,
+        tree_sitter::Point { row: 4, column: 12 },
+        None,
+    );
+    let target = match resolved {
+        Some(crate::index::resolve::ResolvedTarget::Target(t)) => t,
+        other => panic!("firing string must mint the Handler target: {other:?}"),
+    };
+    assert!(
+        matches!(
+            &target.kind,
+            crate::index::resolve::TargetKind::Handler {
+                owner: crate::model::file_analysis::HandlerOwner::Global,
+                name
+            } if name == "init"
+        ),
+        "Global handler identity: {target:?}"
+    );
+    let locs = crate::index::resolve::refs_to_in_file(
+        &crate::index::file_store::FileStore::new(),
+        None,
+        &target,
+        &crate::index::file_store::FileKey::Path(std::path::PathBuf::from("/wp/h.php")),
+        &fa,
+        crate::index::resolve::RoleMask::VISIBLE,
+    );
+    let rows: Vec<usize> = locs.iter().map(|l| l.span.start.row).collect();
+    assert!(rows.contains(&2) && rows.contains(&3), "both registrations: {locs:?}");
+    assert!(rows.contains(&4), "the firing site: {locs:?}");
+    assert!(!rows.contains(&5), "'shutdown' is a different hook: {locs:?}");
+    assert!(locs.iter().all(|l| l.rewritable), "rename rewrites inside quotes: {locs:?}");
+}

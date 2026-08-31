@@ -42,18 +42,24 @@ Re-verified on the agent's repro: gd on
 `@hop.call` on `scoped_call_expression` + the bareword-receiver rule
 (a bareword dispatches as the class).
 
-## R3 — constructor-promoted properties: navigation dark — PARTIAL
+## R3 — constructor-promoted properties: navigation dark — LANDED
 
-`public readonly Level $level` in a ctor signature. The Field symbol
-IS minted (workspace-symbol finds it) and this round's slices fixed
-typing (`$rec->channel` types string through the field hop) and the
-class-content completion gate (a Field is class content BY KIND — the
-sub-body/param-region locals gates now apply to Variables only). Still
-dark: gd/hover/references on the ACCESS token (`$record->level` — the
-member-lookup join that works for regular fields misses promoted ones;
-201 accesses in monolog). The differential fixture is
-`php_property_receiver_and_static_factory_chains`-adjacent: regular
-field gd works, promoted doesn't, same file.
+Was: `public readonly Level $level` minted the Field (workspace-symbol
+found it, typing worked) but gd/hover/references on the ACCESS token
+(`$record->level`) were dark — 201 accesses in monolog. Two fixes:
+the class-content gate now exempts FIELDS from the method-scope
+refusal (`symbol_is_class_content` — a Field inside its own class's
+method scope is a promoted ctor property, never a local; Variables
+keep the refusal, so sub-body locals stay out), and the identity is a
+GROUP: the one `$level` token declares BOTH the field and the ctor
+param, so `promoted_param_use_spans` folds the param's sigil-narrowed
+body uses into the member's group and rename rewrites every spelling
+(decl + accesses + `$level` body reads — leaving any behind breaks
+code). Both cursor sides resolve to the same group
+(`promoted_field_twin` re-targets the decl cursor off the Variable).
+Re-verified on monolog: gd on `$record->level`
+(AbstractHandler.php:47) lands on LogRecord's promoted decl, hover
+types it `Level`, references from the decl answer 48 sites.
 
 ## R4 — references on class consts / enum cases — LANDED (one residual)
 
@@ -128,9 +134,17 @@ rewrites exactly the 7 characters inside the quotes; the array form
 receiver. The loader shipped in the same slice: overlays load from
 `<plugin-dir>/<name>/queries/<lang>.scm` with per-overlay compile
 isolation, content-hash query caching, fingerprint invalidation, and
-a `--plugin-check` arm for `.scm` files. Hook-NAME identity
-(`do_action('init')` ↔ registrations) remains the Handler-rail
-follow-on.
+a `--plugin-check` arm for `.scm` files. Hook-NAME identity LANDED as
+its own slice: `@def.handler.named` (registration first-arg → a
+stacked `HandlerOwner::Global` Handler symbol) + `@ref.dispatch.named`
+/ `@dispatch.via` (firing first-arg → a DispatchCall labeled by the
+firing function) — the model's Handler rail, extended with the
+`Global` owner variant (flat program-wide hook namespace, no
+receiver; receiver-gated machinery skips it by construction).
+Re-verified on real WP core: references on `'init'` from the
+`do_action` site answer 190 sites across 127 files — exactly the grep
+count of hook-function first-arg spellings — and rename rewrites the
+name inside the quotes at every one.
 
 ## R9 — `new Foo()` ↔ `__construct` — LANDED
 
@@ -191,11 +205,20 @@ From the framework-tier round on the real app + vendor corpus:
 
 ## R11 — trust/cosmetic tail
 
-- **Warm flicker (trust):** self::FORMAT gd answered "nothing" early
-  in one cache's life, healed permanently ~30 runs later; fresh caches
-  fine. Suspect: warm pack stub / chunked-persist race registering a
-  const-less stub. Check: diff `stubs` rows vs full-blob symbols for a
-  PHP file with class consts.
+- **Warm flicker (trust) — INVESTIGATED, not reproducible.** self::FORMAT
+  gd answered "nothing" early in one cache's life, healed permanently
+  ~30 runs later; fresh caches fine. The diagnostic ran the suspected
+  race both ways: a 61-file php project (chunked persist) and real
+  monolog (`SyslogFormatter.php:34 self::FORMAT`), cold + repeated warm
+  probes on a fresh cache — 14/14 correct, no flicker. Leading
+  explanation: the observed cache was written by a MID-DEVELOPMENT
+  binary under the same EXTRACT_VERSION (dev iterations change
+  extraction without bumping it, so stale rows look valid), which fits
+  "healed permanently" (a later rewrite replaced the rows) and "fresh
+  caches fine". Watch-only: if it recurs on a cache whose whole life is
+  one binary, re-open with the stub-vs-blob diff (`stubs` rows are
+  symbols-evicted BY DESIGN — the check is that symbol-needing readers
+  rehydrate, not that stubs carry symbols).
 - `self::CONST` in CLASS-LEVEL initializers (property defaults)
   deterministically dark; the method-body form works (same file).
 - gd on exactly-typed `(new Collection)->contains` also returns the

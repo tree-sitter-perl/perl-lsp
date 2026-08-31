@@ -1277,8 +1277,10 @@ impl FileAnalysis {
         self.for_each_ancestor_class(class_name, module_index, |cls| {
             // (1) Local Handler symbols owned by this class.
             for sym in &self.symbols {
-                if let SymbolDetail::Handler { owner, dispatchers, .. } = &sym.detail {
-                    let HandlerOwner::Class(n) = owner;
+                if let SymbolDetail::Handler {
+                    owner: HandlerOwner::Class(n), dispatchers, ..
+                } = &sym.detail
+                {
                     if n == cls && disp_matches(dispatchers) {
                         visit(sym, "this file");
                     }
@@ -1410,15 +1412,22 @@ impl FileAnalysis {
         // container body — an inline union's members are still the class's);
         // crossing a Sub/Method scope first = a local inside a method (the
         // sticky class package tags those too, so the package alone would
-        // over-claim). A chain that ends inside (parentless synthetic
-        // scopes) was already handled by the role-member check above.
+        // over-claim). FIELDS are exempt from the Sub refusal: a Field
+        // inside its own class's method scope is a promoted constructor
+        // property (php `__construct(public readonly Level $level)`) — a
+        // genuine member the walker minted BY KIND, never a local (locals
+        // are Variables; a method-local enum's constants keep the refusal).
+        // A chain that ends inside (parentless synthetic scopes) was
+        // already handled by the role-member check above.
         let mut cur = Some(sym.scope);
         while let Some(id) = cur {
             let s = self.scope(id);
             if !contains(&class_span, &s.span) {
                 return true;
             }
-            if matches!(s.kind, ScopeKind::Sub { .. } | ScopeKind::Method { .. }) {
+            if !matches!(sym.kind, SymKind::Field)
+                && matches!(s.kind, ScopeKind::Sub { .. } | ScopeKind::Method { .. })
+            {
                 return false;
             }
             cur = s.parent;

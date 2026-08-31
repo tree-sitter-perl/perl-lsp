@@ -908,7 +908,8 @@ impl FileAnalysis {
             let SymbolDetail::Handler { owner, dispatchers: dd, .. } = &sym.detail else {
                 return false;
             };
-            let HandlerOwner::Class(c) = owner;
+            // Global handlers have no owner class — receiver-typed lookups skip them.
+            let HandlerOwner::Class(c) = owner else { return false };
             if c != owner_class { return false; }
             if !dispatchers.is_empty()
                 && !dd.iter().any(|d| dispatchers.iter().any(|n| n == d))

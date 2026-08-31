@@ -61,6 +61,10 @@ pub struct SkelRef {
     /// invocant types query-time via `expr_type_at_span(span)` (text → the
     /// `InvocantName`). `None` for plain calls / var refs.
     pub invocant: Option<(crate::model::file_analysis::Span, String)>,
+    /// For a `"dispatch"` ref (`@ref.dispatch.named`): the dispatching
+    /// function's name (`do_action`, `apply_filters`) — the `RefKind::
+    /// DispatchCall::dispatcher` label. `None` for every other kind.
+    pub via: Option<String>,
     /// The written member operator (`.`/`->`) + its span, mapped from the
     /// `@member.op` token's kind via the pack `op_map`, `Some` only when the
     /// IMMEDIATE receiver is a simple variable. Rides onto the MethodCall ref
@@ -579,6 +583,9 @@ impl SkeletonAnalysis {
                     // parent-enum value typing (a const's value is its
                     // initializer, not the owning class).
                     "const" => SymKind::Enumerator,
+                    // a string-named hook registration (`@def.handler.named`):
+                    // the model's Handler — same-named registrations stack.
+                    "handler" => SymKind::Handler,
                     // "unionfield" (an inline union member-field container)
                     // stays Variable — its "union" attribute drives the
                     // outline-nesting branch keyed on SymKind::Variable below.
@@ -588,7 +595,17 @@ impl SkeletonAnalysis {
                 selection_span: Span { start: s.name_start, end: s.name_end },
                 scope: s.scope,
                 package: s.package.clone(),
-                detail: SymbolDetail::None,
+                detail: if s.kind == "handler" {
+                    // Global owner: pack hook namespaces are flat (WP hooks) —
+                    // the string alone is the identity, no receiver class.
+                    SymbolDetail::Handler {
+                        owner: crate::model::file_analysis::HandlerOwner::Global,
+                        dispatchers: Vec::new(),
+                        params: Vec::new(),
+                    }
+                } else {
+                    SymbolDetail::None
+                },
                 namespace: crate::model::file_analysis::Namespace::Language,
                 presentation: crate::model::file_analysis::Presentation {
                     // An include-guard `#define` is compilation plumbing,
@@ -1071,6 +1088,19 @@ impl SkeletonAnalysis {
                             invocant_span: Some(inv_span),
                             method_name_span: Span { start: r.start, end: r.end },
                             member_op: r.member_op,
+                        }
+                    }
+                    // A hook-firing string (`do_action('init')` arg 1): the
+                    // model's DispatchCall, Global-owned (see the "handler"
+                    // symbol arm) — refs_to pairs it with the stacked Handler
+                    // registrations by name+owner equality.
+                    "dispatch" => {
+                        binding = Some(RefBinding::Handler {
+                            owner: crate::model::file_analysis::HandlerOwner::Global,
+                            sym: None,
+                        });
+                        RefKind::DispatchCall {
+                            dispatcher: r.via.clone().unwrap_or_default(),
                         }
                     }
                     // A type-position name (`Widget w;`, `struct op* o`, a

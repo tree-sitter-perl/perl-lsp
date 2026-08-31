@@ -308,6 +308,10 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     // `@ref.member` so the chain-hop witness (`Projected{base, MethodHop}`)
     // attaches where an OUTER call's receiver span will look for it.
     let mut hop_call_by_match: HashMap<usize, crate::model::file_analysis::Span> = HashMap::new();
+    // `@dispatch.via` — the dispatching function's name token (`do_action`),
+    // joined to the same match's `@ref.dispatch.named` string as the minted
+    // DispatchCall's `dispatcher` label.
+    let mut dispatch_via_by_match: HashMap<usize, String> = HashMap::new();
     for e in &events {
         if let Some(prefix) = e.cap.strip_suffix(".name") {
             names_by_match
@@ -327,6 +331,9 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                 e.match_id,
                 crate::model::file_analysis::Span { start: e.start, end: e.end },
             );
+        }
+        if e.cap == "dispatch.via" {
+            dispatch_via_by_match.insert(e.match_id, e.text.clone());
         }
     }
     // `@ns.inline` — an inline namespace's NAME token, fired by a name-only
@@ -763,6 +770,32 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                     }
                 }
             }
+            // Hook-NAME identity (the Handler rail): a registration string
+            // (`add_action('init', …)` arg 1) DECLARES the hook — a Handler
+            // symbol whose name and span are the string content, stacking
+            // like every same-named Handler. A firing string
+            // (`do_action('init')`) mints the DispatchCall ref that matches
+            // it. Both are Global-owned: the program shares one flat hook
+            // namespace, no receiver.
+            "def.handler.named" => {
+                out.symbols.push(SkelSymbol {
+                    name: e.text.clone(),
+                    kind: "handler".to_string(),
+                    start: e.start,
+                    end: e.end,
+                    name_start: e.start,
+                    name_end: e.end,
+                    package: None,
+                    scope: cur_scope,
+                    return_type: None,
+                    receiver_instance_of: None,
+                    receiver_return: false,
+                    deref_stack: Vec::new(),
+                    attributes: Vec::new(),
+                    arity: None,
+                    qualifier_owned: false,
+                });
+            }
             cap if cap.starts_with("def.") && !cap.ends_with(".name") => {
                 let kind = cap.strip_prefix("def.").unwrap().to_string();
                 let (name, name_start, name_end, defaulted) = names_by_match
@@ -887,6 +920,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
             // it — an arity hint here would misfeed arity discrimination.
             "ref.call.named" => {
                 out.refs.push(SkelRef {
+                    via: None,
                     kind: "call".to_string(),
                     name: e.text.clone(),
                     start: e.start,
@@ -897,9 +931,25 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                     arg_count: None,
                 });
             }
+            "ref.dispatch.named" => {
+                out.refs.push(SkelRef {
+                    via: dispatch_via_by_match.get(&e.match_id).cloned(),
+                    kind: "dispatch".to_string(),
+                    name: e.text.clone(),
+                    start: e.start,
+                    end: e.end,
+                    scope: cur_scope,
+                    invocant: None,
+                    member_op: None,
+                    arg_count: None,
+                });
+            }
+            // consumed by the prepass join above; nothing to mint here
+            "dispatch.via" => {}
             "ref.method.named" => {
                 if let Some(inv) = member_recv.get(&e.match_id).cloned() {
                     out.refs.push(SkelRef {
+                    via: None,
                         kind: "member".to_string(),
                         name: e.text.clone(),
                         start: e.start,
@@ -964,6 +1014,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                             .get(&e.match_id)
                             .is_some_and(|(_, t)| (pack.super_receiver)(t));
                     out.refs.push(SkelRef {
+                    via: None,
                         kind: e.cap.strip_prefix("ref.").unwrap().to_string(),
                         name: if super_recv {
                             format!("SUPER::{}", (pack.shape_name)(&e.cap, &e.text))
@@ -1377,6 +1428,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
         // every invocation identifier is a call ref (user functions
         // rename through it; builtin names match no defs, harmlessly)
         out.refs.push(SkelRef {
+                    via: None,
             kind: "call".into(),
             name: cmd.clone(),
             start: cmd_span.start,
@@ -1415,6 +1467,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                             !name.is_empty() && name.chars().all(|c| c.is_ascii_uppercase() || c == '_');
                         if !is_keyword && !name.contains("${") {
                             out.refs.push(SkelRef {
+                    via: None,
                                 kind: "call".into(),
                                 name: name.clone(),
                                 start: span.start,

@@ -1310,6 +1310,7 @@ fn remap_spans(
     }
     for rf in refs.iter_mut() {
         let crate::build::query_extract::SkelRef {
+            via: _,
             kind: _,
             name: _,
             start,

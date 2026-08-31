@@ -130,7 +130,18 @@ templates). Market case and build-out plan in `docs/prompt-php-target.md`.
   `array($this, 'method')` / `[$this, 'method']` callback forms are
   real references of the named function or method: references find
   every registration, rename rewrites the name inside the quotes, and
-  hook-driven functions leave the heatmap's dead-code queue.
+  hook-driven functions leave the heatmap's dead-code queue. Hook
+  NAMES connect too: `do_action('init')` / `apply_filters(...)` and
+  every `add_action('init', …)` registration are one identity —
+  references from either side list all of them (190 sites across 127
+  WordPress core files for `'init'`), and renaming a hook rewrites
+  the string at every site.
+- **Promoted constructor properties navigate.**
+  `public readonly Level $level` in a ctor signature: goto-def, hover,
+  and references now work from the `$record->level` access token, and
+  the property is ONE identity across its three spellings — renaming
+  it rewrites the declaration, every member access, and the `$level`
+  uses inside the constructor body.
 - **Pack query plugins.** Framework support for pack languages is now
   loadable: drop `<plugin-dir>/<name>/queries/<lang>.scm` (the same
   search path as `.rhai` plugins) and its patterns extend that

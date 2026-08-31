@@ -970,6 +970,70 @@ impl FileAnalysis {
         None
     }
 
+    /// The Field twin of a promoted-constructor-property PARAM token: php's
+    /// `__construct(public readonly Level $level)` declares BOTH the ctor
+    /// param (a `$level` Variable, body uses) and the class Field (`level`,
+    /// member accesses) with ONE source token. A cursor there lands on the
+    /// Variable (emitted first); resolution wants the member identity, so
+    /// re-target structurally: a Field one sigil-column to the right on the
+    /// same token. Perl analyses never exhibit the shape (fields there are
+    /// sigil-less symbols on their own tokens).
+    pub fn promoted_field_twin(&self, sym: &Symbol) -> Option<&Symbol> {
+        if !matches!(sym.kind, SymKind::Variable) || !sym.name.starts_with('$') {
+            return None;
+        }
+        let bare = &sym.name[1..];
+        self.symbols_named(bare)
+            .iter()
+            .map(|&sid| self.symbol(sid))
+            .find(|f| {
+                matches!(f.kind, SymKind::Field)
+                    && f.selection_span.start.row == sym.selection_span.start.row
+                    && f.selection_span.start.column == sym.selection_span.start.column + 1
+                    && f.selection_span.end == sym.selection_span.end
+            })
+    }
+
+    /// The promoted param's (field decl span, variable USE spans) —
+    /// sigil-narrowed to the bare name — `Some` only when `member` on
+    /// `class` is a promoted constructor property here. The member's
+    /// identity group folds the uses in so rename rewrites every spelling
+    /// of the one name: the decl token, the member accesses (the walked
+    /// member target), AND the `$level` body uses that would otherwise be
+    /// left referencing a parameter that no longer exists.
+    pub fn promoted_param_use_spans(&self, member: &str, class: &str) -> Option<(Span, Vec<Span>)> {
+        let field = self
+            .symbols_named(member)
+            .iter()
+            .map(|&sid| self.symbol(sid))
+            .find(|f| {
+                matches!(f.kind, SymKind::Field)
+                    && f.package.as_deref() == Some(class)
+                    && self.symbol_is_class_content(f)
+            })?;
+        let sigiled = format!("${member}");
+        let var_id = self
+            .symbols_named(&sigiled)
+            .iter()
+            .copied()
+            .find(|&sid| {
+                let v = self.symbol(sid);
+                matches!(v.kind, SymKind::Variable)
+                    && v.selection_span.start.row == field.selection_span.start.row
+                    && v.selection_span.start.column + 1 == field.selection_span.start.column
+                    && v.selection_span.end == field.selection_span.end
+            })?;
+        let uses = self
+            .collect_refs_for_target(var_id, false, None)
+            .into_iter()
+            .map(|(span, _)| Span {
+                start: Point::new(span.start.row, span.start.column + 1),
+                end: span.end,
+            })
+            .collect();
+        Some((field.selection_span, uses))
+    }
+
     /// The cross-file-facing view of the field group at `point`: the
     /// class + bare name + which projections exist, plus the origin-file
     /// variable spellings (fields are lexical to the class block, so the

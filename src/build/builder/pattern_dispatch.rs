@@ -772,19 +772,23 @@ impl<'a> Builder<'a> {
                             },
                         ) = (&gate, &a)
                         {
-                            let HandlerOwner::Class(owner_class) = owner;
-                            self.provisional_dispatches.push(ReceiverGated::new(
-                                g.target_class.clone(),
-                                DispatchCandidate {
-                                    name: name.clone(),
-                                    span: *span,
-                                    dispatcher: dispatcher.clone(),
-                                    owner_class: owner_class.clone(),
-                                    receiver_class: receiver_hint.clone(),
-                                    call_span: mspan,
-                                },
-                            ));
-                            continue;
+                            // Receiver-gated dispatch is class-owned by
+                            // definition; a Global handler has no receiver
+                            // gate, so it takes the ungated emit path below.
+                            if let HandlerOwner::Class(owner_class) = owner {
+                                self.provisional_dispatches.push(ReceiverGated::new(
+                                    g.target_class.clone(),
+                                    DispatchCandidate {
+                                        name: name.clone(),
+                                        span: *span,
+                                        dispatcher: dispatcher.clone(),
+                                        owner_class: owner_class.clone(),
+                                        receiver_class: receiver_hint.clone(),
+                                        call_span: mspan,
+                                    },
+                                ));
+                                continue;
+                            }
                         }
                         self.apply_emit_action(p.id().to_string(), a);
                     }
@@ -999,19 +1003,21 @@ impl<'a> Builder<'a> {
                     },
                 ) = (&gate, &a)
                 {
-                    let HandlerOwner::Class(owner_class) = owner;
-                    self.provisional_dispatches.push(ReceiverGated::new(
-                        g.target_class.clone(),
-                        DispatchCandidate {
-                            name: name.clone(),
-                            span: *span,
-                            dispatcher: dispatcher.clone(),
-                            owner_class: owner_class.clone(),
-                            receiver_class: receiver_hint.clone(),
-                            call_span: mspan,
-                        },
-                    ));
-                    continue;
+                    // Global handlers carry no receiver gate — ungated path.
+                    if let HandlerOwner::Class(owner_class) = owner {
+                        self.provisional_dispatches.push(ReceiverGated::new(
+                            g.target_class.clone(),
+                            DispatchCandidate {
+                                name: name.clone(),
+                                span: *span,
+                                dispatcher: dispatcher.clone(),
+                                owner_class: owner_class.clone(),
+                                receiver_class: receiver_hint.clone(),
+                                call_span: mspan,
+                            },
+                        ));
+                        continue;
+                    }
                 }
                 self.apply_emit_action(p.id().to_string(), a);
             }

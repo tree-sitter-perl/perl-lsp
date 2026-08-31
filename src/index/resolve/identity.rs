@@ -228,6 +228,10 @@ pub fn resolve_symbol_scoped(
         // class-content gate keeps a lexical local out — a pack local inside
         // an inline method carries the class as sticky `package` too, so the
         // package tag alone would over-claim.
+        // A promoted-ctor-param cursor lands on the `$level` Variable (emitted
+        // first); the member identity lives on its Field twin one sigil-column
+        // in — resolve THAT, so decl-side references/rename see the accesses.
+        let sym = analysis.promoted_field_twin(sym).unwrap_or(sym);
         if analysis.symbol_is_class_content(sym) {
             // The class tag normally rides class-content symbols by construction;
             // a malformed/adversarial FileAnalysis without it has no target to
@@ -242,7 +246,7 @@ pub fn resolve_symbol_scoped(
                 );
                 t.def_paths = pack_class_def_paths(&t, analysis, module_index);
                 t.bare_constant = analysis.class_content_is_bare_constant(sym);
-                return Some(ResolvedTarget::Target(t));
+                return Some(promoted_group_or_target(t, analysis, module_index));
             }
         }
         // A file-scope global / anonymous-enum constant: bare-name-keyed,
@@ -392,6 +396,7 @@ pub fn resolve_symbol_scoped(
                 if let Some(bare) = pack_member_of_class(&t.name, class, analysis, module_index) {
                     t.def_paths = pack_class_def_paths(&t, analysis, module_index);
                     t.bare_constant = bare;
+                    return Some(promoted_group_or_target(t, analysis, module_index));
                 }
             }
             ResolvedTarget::Target(t)
@@ -405,6 +410,49 @@ pub fn resolve_symbol_scoped(
 /// enum-constant verdict (`class_content_is_bare_constant`): whether bare
 /// unresolved reads of the name count as uses. `None` keeps the pack
 /// visibility gate off Perl Method targets minted from the same cursor kinds.
+/// Wrap a pack Method-kind member target in its promoted-param group when
+/// the declaring class spells the member as a php promoted constructor
+/// property (`__construct(public readonly Level $level)`): the one source
+/// token declares BOTH the field and the ctor param, so the member's
+/// identity must carry the param's body-use spans — a rename that rewrites
+/// the decl and the accesses but leaves `$level` body reads behind breaks
+/// the code. Origin-declared members fold as `local_spans`; a class living
+/// in another file pins them to that file. Not promoted → the plain target.
+pub(super) fn promoted_group_or_target(
+    t: TargetRef,
+    analysis: &FileAnalysis,
+    module_index: Option<&dyn CrossFileLookup>,
+) -> ResolvedTarget {
+    let TargetKind::Method { class } = &t.kind else {
+        return ResolvedTarget::Target(t);
+    };
+    if let Some((decl, spans)) = analysis.promoted_param_use_spans(&t.name, class) {
+        return ResolvedTarget::Group {
+            local_spans: spans,
+            pinned_spans: Vec::new(),
+            decl_spans: vec![(None, decl)],
+            members: vec![GroupMember { target: t, rename: MemberRename::Bare }],
+        };
+    }
+    if let Some(idx) = module_index {
+        for cached in idx.visible_def_candidates(class) {
+            let whole = idx.whole_present(&cached);
+            if let Some((decl, spans)) = whole.promoted_param_use_spans(&t.name, class) {
+                return ResolvedTarget::Group {
+                    local_spans: Vec::new(),
+                    pinned_spans: spans
+                        .into_iter()
+                        .map(|s| (cached.path.clone(), s))
+                        .collect(),
+                    decl_spans: vec![(Some(cached.path.clone()), decl)],
+                    members: vec![GroupMember { target: t, rename: MemberRename::Bare }],
+                };
+            }
+        }
+    }
+    ResolvedTarget::Target(t)
+}
+
 pub(super) fn pack_member_of_class(
     name: &str,
     class: &str,

@@ -190,18 +190,21 @@ laravel.scm precedent is the null hypothesis, and this arc falsified
 
 ## Migration and sequencing
 
-1. **Overlay loader** (dir discovery, per-language concat, isolation,
-   hash-keyed query cache, fingerprint fold, `--plugin-check` arm).
-   `queries/php/frameworks/laravel.scm` stays bundled as the default-on
-   tier (like bundled rhai plugins) AND becomes copyable into a plugin
-   dir unchanged — the test that the seam is real.
-2. **Named-reference captures** (`@ref.call.named`, `@ref.method.named`)
-   + the bundled WordPress overlay. Acceptance, from the round-3
-   evidence: refs on `wp_cron`'s decl go 1 → ~12 registrations;
-   `'wptexturize'` registration sites appear in refs (11 sites);
-   rename of a hooked function rewrites the string contents; heatmap
-   fan-in for hook-driven functions leaves the dead queue.
-3. **Hook-name identity** on the `Handler` rail (own slice).
+1. **Overlay loader** — LANDED (dir discovery, per-language concat,
+   isolation, hash-keyed query cache, fingerprint fold, `--plugin-check`
+   `.scm` arm; the loader test copies laravel.scm into a plugin dir
+   verbatim beside a broken sibling and both contracts hold).
+2. **Named-reference captures** — LANDED (`@ref.call.named`,
+   `@ref.method.named`) + the bundled WordPress overlay. Verified on
+   real WP core: every `'wp_cron'` registration is a reference,
+   `'wptexturize'` answers all 11 default-filters sites, rename
+   rewrites exactly the string contents, the `array($this, 'm')` form
+   dispatches through the receiver.
+3. **Hook-name identity** — LANDED on the `Handler` rail:
+   `@def.handler.named` (registration first-arg → stacked
+   `HandlerOwner::Global` Handler) + `@ref.dispatch.named` /
+   `@dispatch.via` (firing sites). `'init'` connects 190 sites across
+   127 WP files, references = the grep count exactly.
 4. **Tier 2** when its first real tenant lands, against the API above.
 
 ## Non-goals
