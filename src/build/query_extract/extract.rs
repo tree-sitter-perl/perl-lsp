@@ -454,6 +454,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     // ---- the state machine: scope stack + sticky contexts ----
     let mut out = SkeletonAnalysis::default();
     out.receiver_names = pack.receiver_names.iter().map(|s| s.to_string()).collect();
+    out.function_scoped_vars = pack.function_scoped_vars;
     out.type_display = pack
         .type_display
         .iter()

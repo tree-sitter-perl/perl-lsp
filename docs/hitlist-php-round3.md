@@ -67,16 +67,18 @@ miss every usage. Fix shape: the refs_to matcher needs to match
 MethodCall refs against Enumerator decls (it matches them for
 methods; the const access rides RefKind::MethodCall).
 
-## R5 — local variable refs fragment per assignment (rename hazard)
+## R5 — local variable refs fragmented per assignment — LANDED
 
-`$orderby` in WP `get_bookmarks` (10 occurrences, one function) comes
-back as three disjoint ref islands depending on the probe point —
-each reassignment starts a new binding. An LSP rename from any site
-renames a fragment and breaks the code. Single-assignment locals are
-correct. Root cause: PHP has no `my`; assignment-is-declaration mints
-a fresh decl per assignment and refs bind nearest-preceding. Fix
-shape: same-scope re-assignment should REBIND, not re-declare (the
-flow lane already has Rebind vocabulary).
+Was: `$orderby` in WP `get_bookmarks` (10 occurrences, one function)
+came back as three disjoint ref islands, and a rename from any island
+rewrote a fragment. Fix: the pack declares `function_scoped_vars`
+(php) — the FIRST assignment per (name, enclosing sub scope) is THE
+declaration, re-anchored to the sub scope so every block's uses bind
+it through the chain; later assignments demote to WRITE references.
+Typing stays per-witness (unchanged). Re-verified on the agent's
+repro: all three probe points now answer the identical full 10-line
+set. Python shares the semantics and can flip the same fact when its
+pack matures.
 
 ## R6 — phpdoc residuals: `@global` + generics + the factory arm
 

@@ -119,6 +119,9 @@ pub struct SkeletonAnalysis {
     /// named is the method receiver, not a class member — its (wrongly
     /// sticky-tagged) class package is cleared in `into_file_analysis`.
     pub receiver_names: Vec<String>,
+    /// The pack's `function_scoped_vars` fact (php) — drives the var
+    /// unification pass in `into_file_analysis`.
+    pub function_scoped_vars: bool,
     /// The pack's display vocabulary (engine tag → language spelling),
     /// carried onto `PackFacts.type_display`.
     pub type_display: Vec<(String, String)>,
@@ -389,6 +392,60 @@ impl SkeletonAnalysis {
         use crate::model::file_analysis::{
             FileAnalysis, FileAnalysisParts, SymKind, Symbol, SymbolDetail, SymbolId,
         };
+        // Function-scoped variable unification (pack fact — php): every
+        // assignment mints a var def, so one variable becomes an island
+        // per assignment and a rename from any island rewrites a
+        // fragment. Per (name, owning sub scope): the FIRST def is the
+        // declaration, re-anchored to the sub scope so every use in
+        // every block binds it through the chain; the rest demote to
+        // WRITE references. Runs before anything reads `self.symbols`,
+        // so the parallel-index passes below stay aligned.
+        let mut var_rebind_refs: Vec<(String, crate::model::file_analysis::ScopeId, Span)> =
+            Vec::new();
+        if self.function_scoped_vars {
+            use crate::model::file_analysis::ScopeKind;
+            let owning_sub = |mut s: crate::model::file_analysis::ScopeId| {
+                loop {
+                    let sc = &self.scopes[s.0 as usize];
+                    if matches!(sc.kind, ScopeKind::Sub { .. }) {
+                        return s;
+                    }
+                    match sc.parent {
+                        Some(p) => s = p,
+                        None => return s,
+                    }
+                }
+            };
+            let mut first: std::collections::HashMap<
+                (String, crate::model::file_analysis::ScopeId),
+                usize,
+            > = std::collections::HashMap::new();
+            let mut keep = vec![true; self.symbols.len()];
+            for (i, s) in self.symbols.iter().enumerate() {
+                if s.kind != "var" {
+                    continue;
+                }
+                let key = (s.name.clone(), owning_sub(s.scope));
+                match first.entry(key) {
+                    std::collections::hash_map::Entry::Vacant(e) => {
+                        e.insert(i);
+                    }
+                    std::collections::hash_map::Entry::Occupied(_) => {
+                        keep[i] = false;
+                        var_rebind_refs.push((
+                            s.name.clone(),
+                            s.scope,
+                            Span { start: s.name_start, end: s.name_end },
+                        ));
+                    }
+                }
+            }
+            for ((_, owner), i) in first {
+                self.symbols[i].scope = owner;
+            }
+            let mut it = keep.iter();
+            self.symbols.retain(|_| *it.next().unwrap());
+        }
         // A NAMED typedef `typedef struct N {...} N;` matches both the
         // struct_specifier and the type_definition → two `class N` AT THE
         // SAME SPAN (one node, two capture patterns — e.g. the bodied
@@ -1068,6 +1125,21 @@ impl SkeletonAnalysis {
             });
         }
         refs.extend(local_refs);
+        // Demoted re-assignments (function-scoped vars): the site is a
+        // WRITE of the one declaration, so references/rename see it and
+        // documentHighlight classifies it honestly.
+        for (name, scope, span) in var_rebind_refs {
+            refs.push(crate::model::file_analysis::Ref {
+                kind: crate::model::file_analysis::RefKind::Variable,
+                span,
+                scope,
+                target_name: name,
+                access: crate::model::file_analysis::AccessKind::Write,
+                binding: None,
+                folded_from: None,
+                arg_count: None,
+            });
+        }
         // Field/member uses recovered from `#define` bodies (`->op_next`): the
         // receiver is a macro parameter with no type, so resolve the field to
         // its declaring class from THIS file's own field symbols and freeze the

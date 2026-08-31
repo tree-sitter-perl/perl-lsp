@@ -54,6 +54,16 @@ pub struct LangPack {
     /// lane (`resolve_super_method`, refs_to's SUPER arm) — asked of the
     /// pack, never a name branch in the engine (rule #10).
     pub super_receiver: fn(text: &str) -> bool,
+    /// Are local variables FUNCTION-scoped (php: an assignment inside an
+    /// `if` block declares for the whole function, and re-assignment is a
+    /// REBIND of the same variable, not a fresh declaration)? Var defs
+    /// then anchor to the nearest enclosing sub scope and same-scope
+    /// re-assignments demote to write references — one identity per
+    /// function, so references/rename see every site instead of
+    /// per-assignment islands (round-3 R5: a rename from any island
+    /// rewrote a fragment and broke the code). False = block-scoped
+    /// (cpp) or handled natively (Perl's `my`).
+    pub function_scoped_vars: bool,
     /// Documentation-comment type facts (phpdoc `@return`/`@param`/`@var`):
     /// the pack parses ITS OWN doc vocabulary out of a `@doc.comment`
     /// capture's text, returning type spellings `annot_type` speaks.
@@ -386,6 +396,7 @@ pub fn perl_pack() -> LangPack {
         namespace_relative_parents: false,
         field_registry_edges: false,
         super_receiver: |_| false,
+        function_scoped_vars: false,
         doc_types: |_| vec![],
         module_paths: |m| vec![format!("{}.pm", m.replace("::", "/"))],
         shape_ctor: |_| false,
@@ -437,6 +448,7 @@ pub fn python_pack() -> LangPack {
         namespace_relative_parents: false,
         field_registry_edges: false,
         super_receiver: |_| false,
+        function_scoped_vars: false,
         doc_types: |_| vec![],
         module_paths: |m| {
             let base = m.replace('.', "/");
@@ -488,6 +500,7 @@ pub fn r_pack() -> LangPack {
         namespace_relative_parents: false,
         field_registry_edges: false,
         super_receiver: |_| false,
+        function_scoped_vars: false,
         doc_types: |_| vec![],
         // No reliable lexical ctor convention in R (S4/R5 exist but
         // rare); class typing arrives via shapes and S3 later.
@@ -538,6 +551,7 @@ pub fn cmake_pack() -> LangPack {
         namespace_relative_parents: false,
         field_registry_edges: false,
         super_receiver: |_| false,
+        function_scoped_vars: false,
         doc_types: |_| vec![],
         // include(util.cmake) is a literal path; add_subdirectory(src)
         // means src/CMakeLists.txt. The whole resolution strategy.
@@ -662,6 +676,7 @@ pub fn php_pack() -> LangPack {
         namespace_relative_parents: true,
         field_registry_edges: true,
         super_receiver: |t| t == "parent",
+        function_scoped_vars: true,
         // phpdoc: the type vocabulary of REAL PHP — most of WordPress and
         // half of Laravel's public API type only here.
         doc_types: php_doc_types,
@@ -797,6 +812,7 @@ pub fn cpp_pack() -> LangPack {
         namespace_relative_parents: false,
         field_registry_edges: false,
         super_receiver: |_| false,
+        function_scoped_vars: false,
         doc_types: |_| vec![],
         // #include "a/b.h" / <vector>: strip the delimiters; a quoted
         // path is workspace-relative verbatim, a system header resolves

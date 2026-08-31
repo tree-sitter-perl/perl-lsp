@@ -1256,7 +1256,8 @@ fn remap_spans(
         var_reads,
         label_refs,
         receiver_names: _,
-        // language-wide vocabulary, no spans to remap.
+        // language-wide facts, no spans to remap.
+        function_scoped_vars: _,
         type_display: _,
         flow_edges,
         moved_from,

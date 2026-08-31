@@ -97,6 +97,11 @@ templates). Market case and build-out plan in `docs/prompt-php-target.md`.
   dispatches through the property's declared type; static factory
   chains (`Registry::get_instance()->register(...)`) resolve the same
   way, including through a docblock-only `@return` on the factory.
+- **One identity per local variable.** PHP variables are
+  function-scoped, and the analyzer now models that: re-assignment
+  rebinds instead of re-declaring, so references and rename see every
+  site of a variable instead of per-assignment fragments (renaming
+  from any site previously rewrote a fragment and broke the code).
 - **Laravel framework tier.** Facades work — `Cache::get(...)`
   navigates and types through the facade's `@method` docblock rows
   (any library documenting a `__call` surface with `@method` benefits,
