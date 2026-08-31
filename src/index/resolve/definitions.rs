@@ -13,14 +13,14 @@ impl<'a> CandidateSet<'a> {
         // parent `absl`. The set is derived once per scanned fa (the inline
         // attribution rides the file that opened the namespace, so it is
         // recomputed per file, never shared).
-        let member_span_in = |fa: &crate::model::file_analysis::FileAnalysis| -> Option<Span> {
-            let owners = pack_inline_owner_set(fa, class);
+        let member_span_in = |fa: &crate::model::file_analysis::FileAnalysis, cls: &str| -> Option<Span> {
+            let owners = pack_inline_owner_set(fa, cls);
             fa.symbols()
                 .iter()
                 .find(|s| s.name == member && pack_member_of(fa, s, &owners))
                 .map(|s| s.selection_span)
         };
-        if let Some(span) = member_span_in(self.origin) {
+        if let Some(span) = member_span_in(self.origin, class) {
             return Some(self.origin_decl(span));
         }
         let idx = self.idx()?;
@@ -36,10 +36,34 @@ impl<'a> CandidateSet<'a> {
         };
         // Class-keyed cached module — the fast path when `class` names a
         // struct/class/enum that is itself a cache key. Every candidate
-        // file declaring the class may hold the member.
-        for cached in idx.visible_def_candidates(class) {
-            if let Some(span) = member_span_in(&idx.whole_present(&cached)) {
-                return loc_of(&cached, span);
+        // file declaring the class may hold the member — and an INHERITED
+        // member lives on an ancestor (`View::query()` finds Eloquent
+        // Model's `query`), so the lookup walks the leaf-keyed parent
+        // edges child-first (the instance-receiver path gets this from
+        // the invocant ladder's ancestor walk; a bareword-scoped call
+        // resolves here and needs its own).
+        {
+            let mut queue: std::collections::VecDeque<String> =
+                std::iter::once(class.to_string()).collect();
+            let mut seen: std::collections::HashSet<String> = Default::default();
+            let mut budget = 64usize;
+            while let Some(cls) = queue.pop_front() {
+                if !seen.insert(cls.clone()) || budget == 0 {
+                    continue;
+                }
+                budget -= 1;
+                for parent in self.origin.declared_parents(&cls) {
+                    queue.push_back(parent.clone());
+                }
+                for cached in idx.visible_def_candidates(&cls) {
+                    let a = idx.whole_present(&cached);
+                    if let Some(span) = member_span_in(&a, &cls) {
+                        return loc_of(&cached, span);
+                    }
+                    for parent in a.declared_parents(&cls) {
+                        queue.push_back(parent.clone());
+                    }
+                }
             }
         }
         let Some((self_path, visible)) = idx.visibility_scope() else {
@@ -60,7 +84,7 @@ impl<'a> CandidateSet<'a> {
                 if !connected(&cached) {
                     continue;
                 }
-                if let Some(span) = member_span_in(&idx.whole_present(&cached)) {
+                if let Some(span) = member_span_in(&idx.whole_present(&cached), class) {
                     return loc_of(&cached, span);
                 }
             }
@@ -79,7 +103,7 @@ impl<'a> CandidateSet<'a> {
             }
             // Broad scan, cold tail only (both keyed lookups missed) — the
             // rehydration LRU bounds the per-file cost for evicted copies.
-            if let Some(span) = member_span_in(&idx.whole_present(cached)) {
+            if let Some(span) = member_span_in(&idx.whole_present(cached), class) {
                 let p = cached.path.to_string_lossy().into_owned();
                 if hit.as_ref().is_none_or(|(hp, _)| p < *hp) {
                     hit = Some((p, span));

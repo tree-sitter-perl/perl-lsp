@@ -173,6 +173,37 @@ fn a_php_query_resolves_cross_file_through_the_ctor_typed_receiver() {
     );
 }
 
+/// An INHERITED static resolved through a bareword-scoped call
+/// (`Widget::query()` where `query` lives on the parent in another
+/// file) — the member lookup walks the leaf-keyed parent edges; the
+/// instance-receiver path never covered this lane (round-3 follow-on:
+/// Laravel's `Model::query()` shape).
+#[cfg(feature = "php")]
+#[test]
+fn php_inherited_static_resolves_through_parent_file() {
+    let dir = php_workspace("inhstatic");
+    std::fs::write(
+        dir.join("src/BaseModel.php"),
+        "<?php\nclass BaseModel\n{\n    public static function query(): string\n    {\n        return \"q\";\n    }\n}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("src/widget.php"),
+        "<?php\nclass Widget extends BaseModel\n{\n}\n$q = Widget::query();\n",
+    )
+    .unwrap();
+    let widget = dir.join("src/widget.php");
+    // 0-based positional coords: line 4, col 13 = the `query` token.
+    let (stdout, stderr) = run(
+        &dir,
+        &["--definition", dir.to_str().unwrap(), widget.to_str().unwrap(), "4", "13"],
+    );
+    assert!(
+        stdout.contains("BaseModel.php"),
+        "inherited-static goto-def went dark.\nstdout: {stdout}\nstderr: {stderr}"
+    );
+}
+
 #[cfg(feature = "php")]
 #[test]
 fn php_references_cross_the_file_boundary() {

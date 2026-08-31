@@ -121,6 +121,30 @@ Confirmed unchanged (`docs/prompt-sequence-types.md`): `$handler` in
 `@var list<HandlerInterface>` — needs both the generic peel
 (`list<X>` → element X) and the binder edge.
 
+## R10b — BookStack (Laravel-app) follow-on probes
+
+From the framework-tier round on the real app + vendor corpus:
+- **Inherited statics** (`Widget::query()` with `query` on a parent in
+  another file) — LANDED: `member_def_location` now walks the
+  leaf-keyed parent edges (the instance-receiver path always had this
+  via the invocant ladder; the bareword-scoped lane didn't). Pinned in
+  `language_scope.rs`. BUT the same shape on BookStack itself
+  (`View::query()` → vendor Eloquent `Model::query`) is STILL dark —
+  works in a minimal cross-file fixture, so the residual is
+  scale/candidate-shaped (same-leaf `View`/`Model` multiplicity in
+  vendor is the suspect), not the walk. Needs a targeted trace.
+- **Builder-chain receivers**: `$firstDraft` from an Eloquent
+  query-builder chain doesn't type, so members on it are dark — the
+  Builder generics residual (same root as round-3's `TValue`), now the
+  biggest single typing gap on real Laravel app code.
+- `new self()` receivers — LANDED: the ctor witness routes the
+  current-class spellings through the pack's `hop.recv` shaping, so
+  `new self()` carries the enclosing class. Fixing it surfaced (and
+  fixed) a broader pre-existing bug: `$x = (new W())->c()` typed as W,
+  because the flow edge's literal-narrowing grabbed the ctor inside
+  the rhs — it now stands down whenever the rhs span carries its own
+  witness (the chain hop).
+
 ## R11 — trust/cosmetic tail
 
 - **Warm flicker (trust):** self::FORMAT gd answered "nothing" early

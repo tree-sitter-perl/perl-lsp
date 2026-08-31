@@ -1186,16 +1186,35 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                 if let Some(name) = callee {
                     let span = Span { start: e.start, end: e.end };
                     lit_spans.push((e.start_byte, e.end_byte, span));
-                    out.witnesses.push(crate::model::witnesses::Witness {
-                        attachment: crate::model::witnesses::WitnessAttachment::Expr(span),
-                        source: crate::model::witnesses::WitnessSource::Builder(
-                            "skeleton-ctor".into(),
-                        ),
-                        payload: crate::model::witnesses::WitnessPayload::Edge(
+                    // `new self()` / `new static()`: the class is the
+                    // ENCLOSING one (the pack's `hop.recv` shaping names
+                    // the current-class spellings) — a bare `TypeName`
+                    // edge would chase a class literally named "self".
+                    let payload = if crate::model::conventions::is_current_package_token(
+                        &(pack.shape_name)("hop.recv", &name),
+                    ) {
+                        // `self` outside a class (invalid source) has no
+                        // enclosing class — mint nothing.
+                        package.as_ref().map(|cls| {
+                            crate::model::witnesses::WitnessPayload::InferredType(
+                                InferredType::ClassName(cls.clone()),
+                            )
+                        })
+                    } else {
+                        Some(crate::model::witnesses::WitnessPayload::Edge(
                             crate::model::witnesses::WitnessAttachment::TypeName(name),
-                        ),
-                        span,
-                    });
+                        ))
+                    };
+                    if let Some(payload) = payload {
+                        out.witnesses.push(crate::model::witnesses::Witness {
+                            attachment: crate::model::witnesses::WitnessAttachment::Expr(span),
+                            source: crate::model::witnesses::WitnessSource::Builder(
+                                "skeleton-ctor".into(),
+                            ),
+                            payload,
+                            span,
+                        });
+                    }
                 }
             }
             "expr.call" => {
@@ -1510,10 +1529,23 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
             // Narrow onto the outermost literal the rhs wraps, when the
             // rhs node itself carries no witness (paren wrappers) — but
             // never into a member expression's argument (see
-            // `member_anchored` above).
+            // `member_anchored` above), and never when the rhs span
+            // ALREADY carries its own witness: a chain off a ctor
+            // receiver (`$x = (new W())->c()`) has the ctor as its
+            // largest inner literal, and narrowing onto it would hand
+            // the variable the receiver's class instead of the call's
+            // value (the rhs's own hop witness).
             let src_bytes = byte_range_of(&events, *mid, "flow.source");
-            let target_span = if member_anchored
-                .contains(&(src_span.start.row, src_span.start.column))
+            let rhs_has_own_witness = out.witnesses.iter().any(|w| {
+                matches!(
+                    &w.attachment,
+                    crate::model::witnesses::WitnessAttachment::Expr(sp)
+                        if sp.start == src_span.start && sp.end == src_span.end
+                )
+            });
+            let target_span = if rhs_has_own_witness
+                || member_anchored
+                    .contains(&(src_span.start.row, src_span.start.column))
             {
                 *src_span
             } else {

@@ -3530,6 +3530,44 @@ class Logger {
 }
 
 #[test]
+fn php_new_self_types_as_enclosing_class() {
+    // `(new self())->forceFill(...)` — `new self()` is the ENCLOSING
+    // class, not a class named "self"; the ctor witness carries it so
+    // the chain dispatches (BookStack's createForEntity idiom).
+    let src = "\
+<?php
+class Deletion
+{
+    public function label(): string
+    {
+        return \"d\";
+    }
+
+    public static function make(): string
+    {
+        $record = new self();
+        $x = (new self())->label();
+        return $x;
+    }
+}
+";
+    let (fa, _) = php_fa(src);
+    use crate::model::file_analysis::InferredType;
+    let at = tree_sitter::Point { row: 12, column: 8 };
+    assert_eq!(
+        fa.inferred_type_via_bag("$record", at),
+        Some(InferredType::ClassName("Deletion".into())),
+        "new self() types as the enclosing class",
+    );
+    assert_eq!(
+        fa.inferred_type_via_bag("$x", at),
+        Some(InferredType::String),
+        "and the chained call off it dispatches (the flow edge must not
+         narrow onto the ctor literal when the rhs has its own hop)",
+    );
+}
+
+#[test]
 fn php_eloquent_relations_declare_accessor_properties() {
     // The Laravel overlay (queries/php/frameworks/laravel.scm): a
     // relation method declares the same-named PROPERTY Eloquent's
