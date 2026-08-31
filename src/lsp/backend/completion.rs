@@ -62,6 +62,18 @@ pub fn pack_completion(
             ) {
                 return (items, false);
             }
+            // Typed receiver, gather declined. The deliberate fall-through
+            // below serves a class the analysis KNOWS (cpp's
+            // self-access-sees-private gold case — the class is local).
+            // A class nothing declares anywhere (a vendor type with no
+            // vendor/ present — guzzle's PromiseInterface, round 3) has
+            // no honest members to offer, and the identifier universe
+            // after `->` is noise wearing confidence: answer EMPTY.
+            let class_known = !analysis.symbols_named(&class).is_empty()
+                || !xidx.def_candidates(&class).is_empty();
+            if !class_known {
+                return (Vec::new(), true);
+            }
         }
         // An UNTYPEABLE receiver's member slot answers EMPTY, never the
         // file-scope identifier universe: after `->`/`.` only the

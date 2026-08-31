@@ -98,12 +98,15 @@ now hovers the real signature and gd lands at
 class-wp-block-type-registry.php:48 — the hop composes with the
 doc-`@return` on `get_instance`).
 
-## R7 — member completion on an UNRESOLVABLE receiver dumps scope symbols
+## R7 — member completion on an UNRESOLVABLE receiver — LANDED
 
-`$p->` where `$p: PromiseInterface` (vendor absent) → 10 items, all
-garbage for a member slot (`$c2`, `GuzzleHttp`, `probeChain`...).
-Slot=Member is already detected — suppress the identifier fallback
-when the receiver is typed-but-unresolvable (empty list is honest).
+Was: `$p->` where `$p: PromiseInterface` (vendor absent) → 10 items,
+all garbage. The member slot now answers EMPTY when the receiver's
+class is known to NOTHING (no local decl, no index candidate) — the
+deliberate typed-receiver fall-through survives only for a class the
+analysis knows (cpp's self-access-sees-private gold case). Verified:
+the guzzle probe answers zero items; a resolvable chain
+(`User::query()->firstWhere(...)->`) completes real User members.
 
 ## R8 — WP hook string callbacks (framework plugin, build-out item 6)
 

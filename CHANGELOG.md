@@ -102,6 +102,9 @@ templates). Market case and build-out plan in `docs/prompt-php-target.md`.
   rebinds instead of re-declaring, so references and rename see every
   site of a variable instead of per-assignment fragments (renaming
   from any site previously rewrote a fragment and broke the code).
+- **Honest member completion.** `->` on a receiver whose class nothing
+  declares (a vendor type without `vendor/` installed) now answers
+  empty instead of dumping ~200 unrelated in-scope identifiers.
 - **Eloquent Builder generics.** `@template` class docblocks and
   `@return Builder<static>` / `@return TModel` rows now carry through
   chains: `User::query()` types as `Builder<User>`, and
