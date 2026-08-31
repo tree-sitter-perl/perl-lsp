@@ -999,7 +999,13 @@ fn php_doc_types(text: &str) -> Vec<DocFact> {
                     out.push(DocFact::Template { name: name.to_string(), line: lineno });
                 }
             }
-        } else if let Some(rest) = l.strip_prefix("@param ") {
+        } else if let Some(rest) = l
+            .strip_prefix("@param ")
+            .or_else(|| l.strip_prefix("@global "))
+        {
+            // `@global wpdb $wpdb` types the `global $wpdb;` binding the
+            // def below declares — same (type, $name) shape as @param,
+            // same join (the first var of that name declared in the def).
             // `@param string $name description`; the typeless `@param $x`
             // form and variadics (`...$args`) carry nothing typeable.
             let mut it = rest.split_whitespace();

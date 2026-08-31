@@ -3578,6 +3578,39 @@ function f(): string {
 }
 
 #[test]
+fn php_global_docblock_types_the_binding() {
+    // WordPress's typing convention: `@global wpdb $wpdb` above the
+    // function + `global $wpdb;` inside. The global statement is a real
+    // declaration (uses hang off it), and the doc row types it — so
+    // `$wpdb->query(...)` dispatches.
+    let src = "\
+<?php
+class wpdb {
+    public function query(string $sql): int { return 1; }
+}
+/**
+ * @global wpdb $wpdb
+ */
+function get_things(): int {
+    global $wpdb;
+    $n = $wpdb->query('SELECT 1');
+    return $n;
+}
+";
+    let (fa, _) = php_fa(src);
+    use crate::model::file_analysis::InferredType;
+    let at = tree_sitter::Point { row: 10, column: 4 };
+    let w = fa.inferred_type_via_bag("$wpdb", at);
+    assert_eq!(
+        w,
+        Some(InferredType::ClassName("wpdb".into())),
+        "the global binding types from the doc row: {w:?}"
+    );
+    let n = fa.inferred_type_via_bag("$n", at);
+    assert_eq!(n, Some(InferredType::Numeric), "and the call off it dispatches: {n:?}");
+}
+
+#[test]
 fn php_builder_generics_cross_file_through_self_leaf_parent() {
     // The BookStack shape end-to-end ACROSS FILES: app User extends app
     // Model, which extends the vendor Model under an ALIAS (self-leaf

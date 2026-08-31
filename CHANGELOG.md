@@ -102,6 +102,9 @@ templates). Market case and build-out plan in `docs/prompt-php-target.md`.
   rebinds instead of re-declaring, so references and rename see every
   site of a variable instead of per-assignment fragments (renaming
   from any site previously rewrote a fragment and broke the code).
+- **WordPress globals type.** `@global wpdb $wpdb` docblocks type the
+  `global $wpdb;` binding, so `$wpdb->get_results(...)` hovers,
+  navigates, and completes across WordPress core.
 - **Honest member completion.** `->` on a receiver whose class nothing
   declares (a vendor type without `vendor/` installed) now answers
   empty instead of dumping ~200 unrelated in-scope identifiers.

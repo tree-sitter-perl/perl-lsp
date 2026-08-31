@@ -84,13 +84,16 @@ repro: all three probe points now answer the identical full 10-line
 set. Python shares the semantics and can flip the same fact when its
 pack matures.
 
-## R6 — phpdoc residuals: `@global` + generics + the factory arm
+## R6 — phpdoc residuals — LANDED (@global + generics; conditionals remain)
 
-WP core is docblock-typed (858 `@return` docblocks vs ~249 native in
-wp-includes; 219 `@global wpdb $wpdb`). The doc lane reads
-`@return`/`@param`/`@var` — but `@global wpdb $wpdb` is unread, so
-`$wpdb->get_results` hover/completion is dark everywhere. Laravel's
-generics leak raw (`$this->where()->first()` answers `TValue`).
+`@global wpdb $wpdb` rows now type the `global $wpdb;` binding the
+def below declares (the global statement is a real declaration, and
+the doc row joins like a @param) — on real WP core,
+`$wpdb->get_results` hovers (`: array`, through wpdb's own doc
+returns) and `$wpdb->` completes real members; the widest WP gap.
+Generics landed as the Builder lane (above). Still unread: Laravel
+12's CONDITIONAL return types, PHPStan array-shapes, `@template` at
+METHOD level, and rendering doc PROSE on hover.
 The static-factory arm of the agent's evidence is FIXED by the
 scoped-call hop (landed after the agents ran; re-verified:
 `WP_Block_Type_Registry::get_instance()->register` at blocks.php:817

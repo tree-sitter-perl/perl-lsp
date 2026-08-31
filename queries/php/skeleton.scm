@@ -161,6 +161,12 @@
   left: (variable_name) @def.var.name @def.var @flow.target
   right: (_) @flow.source) @flow.assign
 
+; `global $wpdb;` BINDS the global into this function — a declaration
+; the uses hang off, and the anchor a `@global wpdb $wpdb` docblock row
+; types (the Param-style doc join): WordPress's whole `$wpdb->` surface.
+(global_declaration
+  (variable_name) @def.var.name @def.var @flow.target)
+
 ; foreach BINDS its loop vars — real declarations (refs/hover/highlight/
 ; rename all hang off the def) that rebind per element (the narrowing
 ; cutoff). The `"as" .` anchor keeps the ITERATED SOURCE out: `$items` in
