@@ -128,11 +128,12 @@ From the framework-tier round on the real app + vendor corpus:
   another file) — LANDED: `member_def_location` now walks the
   leaf-keyed parent edges (the instance-receiver path always had this
   via the invocant ladder; the bareword-scoped lane didn't). Pinned in
-  `language_scope.rs`. BUT the same shape on BookStack itself
-  (`View::query()` → vendor Eloquent `Model::query`) is STILL dark —
-  works in a minimal cross-file fixture, so the residual is
-  scale/candidate-shaped (same-leaf `View`/`Model` multiplicity in
-  vendor is the suspect), not the walk. Needs a targeted trace.
+  `language_scope.rs`. Verified on BookStack through the TWO-level
+  hierarchy: `View::query()` → app `BookStack\App\Model` (whose parent
+  is the ALIASED `Model as EloquentModel` import) → vendor Eloquent
+  `Model::query` at line 1839. (An earlier "still dark" reading was a
+  probe on the `::` token — the round-1 coordinate trap, again: always
+  hover first to confirm the landed token.)
 - **Builder-chain receivers**: `$firstDraft` from an Eloquent
   query-builder chain doesn't type, so members on it are dark — the
   Builder generics residual (same root as round-3's `TValue`), now the
@@ -143,7 +144,10 @@ From the framework-tier round on the real app + vendor corpus:
   fixed) a broader pre-existing bug: `$x = (new W())->c()` typed as W,
   because the flow edge's literal-narrowing grabbed the ctor inside
   the rhs — it now stands down whenever the rhs span carries its own
-  witness (the chain hop).
+  witness (the chain hop). End-to-end on BookStack: `$record =
+  (new self())->forceFill([...]); $record->save();` — gd on `save`
+  lands on vendor `Model::save` (self ctor → fluent `@return $this`
+  docblock → inherited vendor method).
 
 ## R11 — trust/cosmetic tail
 
