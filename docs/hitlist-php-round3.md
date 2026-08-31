@@ -55,17 +55,21 @@ member-lookup join that works for regular fields misses promoted ones;
 `php_property_receiver_and_static_factory_chains`-adjacent: regular
 field gd works, promoted doesn't, same file.
 
-## R4 — references on class consts / enum cases: decl-only + a wrong-identity hit
+## R4 — references on class consts / enum cases — LANDED (one residual)
 
-gd usage→decl works (landed this round: `User::VERSION` /
-`self::LIMIT` / `Level::Debug` mint member-lane refs; a true enum
-case's VALUE types as its enum). But the references PROJECTION never
-surfaces usage sites from the decl (Level::Debug: 55 real usages,
-refs answer 2), and the one extra hit is `use PhpConsole\Dispatcher\
-Debug` — an unrelated class, name-only fallback. Const rename would
-miss every usage. Fix shape: the refs_to matcher needs to match
-MethodCall refs against Enumerator decls (it matches them for
-methods; the const access rides RefKind::MethodCall).
+The const-access member refs closed the main gap: `Level::Debug` from
+the decl now answers 198 refs (59 in src — the agent's grep found 55
+real usages; the agents probed a binary predating the access
+patterns). ONE over-match remains, and it is a real (small) rename
+hazard: renaming an enum case named `Debug` also rewrites the leaf of
+`use PhpConsole\Dispatcher\Debug as ...` — an UNRELATED class's
+import line. The import-leaf `@ref.type` (deliberate, so CLASS
+renames rewrite use lines) is being accepted by the member target's
+bare-name matching; the matcher arm that admits a PackageRef row for
+a class-OWNED member (Enumerator/const) target should refuse it — a
+class member never appears as a php import leaf. Repro: constproj +
+a decoy `use Some\Other\Debug as DebugTool;` — rename of the case
+edits the decoy line.
 
 ## R5 — local variable refs fragmented per assignment — LANDED
 
