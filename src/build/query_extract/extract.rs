@@ -913,13 +913,34 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                             ));
                         }
                     }
+                    // A SUPER receiver (php `parent::`) spells the model's
+                    // SUPER method token: dispatch starts above the writing
+                    // class, and gd/references/rename ride the existing
+                    // SUPER lane. The invocant becomes the current-package
+                    // token (the receiver is still this object); the ref
+                    // span stays the bare name token, so rename rewrites
+                    // only the name.
+                    let super_recv = e.cap == "ref.member"
+                        && member_recv
+                            .get(&e.match_id)
+                            .is_some_and(|(_, t)| (pack.super_receiver)(t));
                     out.refs.push(SkelRef {
                         kind: e.cap.strip_prefix("ref.").unwrap().to_string(),
-                        name: (pack.shape_name)(&e.cap, &e.text),
+                        name: if super_recv {
+                            format!("SUPER::{}", (pack.shape_name)(&e.cap, &e.text))
+                        } else {
+                            (pack.shape_name)(&e.cap, &e.text)
+                        },
                         start: e.start,
                         end: e.end,
                         scope: cur_scope,
-                        invocant: member_recv.get(&e.match_id).cloned(),
+                        invocant: if super_recv {
+                            member_recv
+                                .get(&e.match_id)
+                                .map(|(sp, _)| (*sp, "__PACKAGE__".to_string()))
+                        } else {
+                            member_recv.get(&e.match_id).cloned()
+                        },
                         member_op,
                         // A call ref's arg list opens right where its callee /
                         // method token ends; plain (uncalled) member/type refs
@@ -935,7 +956,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                     // hop witness at exactly the receiver span. (cpp mints
                     // via the dedicated `@hop.member` arm below — its ref
                     // pattern is call-blind, so the called form re-matches.)
-                    if e.cap == "ref.member" {
+                    if e.cap == "ref.member" && !super_recv {
                         if let (Some(call_span), Some((recv_span, recv_text))) = (
                             hop_call_by_match.get(&e.match_id),
                             member_recv.get(&e.match_id),

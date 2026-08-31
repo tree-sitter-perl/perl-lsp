@@ -191,9 +191,13 @@ production engine, zero engine special-cases:
    format, corpus entries for a Laravel app + WordPress core in the
    `bench/` stack. Ship gate, budgeted as half the work.
 
-Known residuals: `parent::` dispatch (needs the SUPER method-token
-lane; `self::`/`static::` landed round 2 — they canonicalize to the
-model's `__PACKAGE__` invocant token); `require`/`include` path imports;
+Known residuals: ~~`parent::` dispatch~~ LANDED round 3 — the pack's
+`super_receiver` predicate mints `parent::m()` as the model's SUPER
+method token (`SUPER::m`, current-package invocant), so
+gd/references/rename ride the existing SUPER lane (return TYPING of a
+`parent::` call stays a residual — a hop would find the child
+override; `self::`/`static::` landed round 2, canonicalizing to the
+`__PACKAGE__` invocant token); `require`/`include` path imports;
 ~~class-constant access~~ LANDED — `User::VERSION` / `self::LIMIT` /
 `Level::Debug` mint member-lane refs (gd/references/hover connect,
 double-anchored patterns), a true enum case's value types as its enum

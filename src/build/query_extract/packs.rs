@@ -46,6 +46,14 @@ pub struct LangPack {
     /// display), and a registry edge answers the RAW declared type first —
     /// `item_: T` instead of the substituted `int`.
     pub field_registry_edges: bool,
+    /// Does this receiver spelling mean "dispatch from the parent of the
+    /// writing class, skipping it" (php `parent::`)? The ref is then
+    /// minted with the model's SUPER method token (`SUPER::name`, the
+    /// Perl `$self->SUPER::m` spelling) and a current-package invocant,
+    /// so goto-def, references, and rename all ride the existing SUPER
+    /// lane (`resolve_super_method`, refs_to's SUPER arm) — asked of the
+    /// pack, never a name branch in the engine (rule #10).
+    pub super_receiver: fn(text: &str) -> bool,
     /// Documentation-comment type facts (phpdoc `@return`/`@param`/`@var`):
     /// the pack parses ITS OWN doc vocabulary out of a `@doc.comment`
     /// capture's text, returning type spellings `annot_type` speaks.
@@ -371,6 +379,7 @@ pub fn perl_pack() -> LangPack {
         type_display: &[],
         namespace_relative_parents: false,
         field_registry_edges: false,
+        super_receiver: |_| false,
         doc_types: |_| vec![],
         module_paths: |m| vec![format!("{}.pm", m.replace("::", "/"))],
         shape_ctor: |_| false,
@@ -421,6 +430,7 @@ pub fn python_pack() -> LangPack {
         type_display: &[],
         namespace_relative_parents: false,
         field_registry_edges: false,
+        super_receiver: |_| false,
         doc_types: |_| vec![],
         module_paths: |m| {
             let base = m.replace('.', "/");
@@ -471,6 +481,7 @@ pub fn r_pack() -> LangPack {
         type_display: &[],
         namespace_relative_parents: false,
         field_registry_edges: false,
+        super_receiver: |_| false,
         doc_types: |_| vec![],
         // No reliable lexical ctor convention in R (S4/R5 exist but
         // rare); class typing arrives via shapes and S3 later.
@@ -520,6 +531,7 @@ pub fn cmake_pack() -> LangPack {
         type_display: &[],
         namespace_relative_parents: false,
         field_registry_edges: false,
+        super_receiver: |_| false,
         doc_types: |_| vec![],
         // include(util.cmake) is a literal path; add_subdirectory(src)
         // means src/CMakeLists.txt. The whole resolution strategy.
@@ -637,6 +649,7 @@ pub fn php_pack() -> LangPack {
         },
         namespace_relative_parents: true,
         field_registry_edges: true,
+        super_receiver: |t| t == "parent",
         // phpdoc: the type vocabulary of REAL PHP — most of WordPress and
         // half of Laravel's public API type only here.
         doc_types: php_doc_types,
@@ -771,6 +784,7 @@ pub fn cpp_pack() -> LangPack {
         type_display: &[],
         namespace_relative_parents: false,
         field_registry_edges: false,
+        super_receiver: |_| false,
         doc_types: |_| vec![],
         // #include "a/b.h" / <vector>: strip the delimiters; a quoted
         // path is workspace-relative verbatim, a system header resolves

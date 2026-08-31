@@ -89,6 +89,14 @@ templates). Market case and build-out plan in `docs/prompt-php-target.md`.
 - **Class constants and enum cases.** `User::VERSION`, `self::LIMIT`,
   and `Level::Debug` navigate (goto-def, references, hover), and an
   enum case's value types as its enum.
+- **`parent::` calls.** Goto-def lands on the parent's own method
+  (skipping the writing class's override), references include the
+  `parent::` call sites, and rename rewrites them — previously a
+  rename silently missed every `parent::` site and broke the code.
+- **Property receivers chain.** `$this->handler->handleBatch(...)`
+  dispatches through the property's declared type; static factory
+  chains (`Registry::get_instance()->register(...)`) resolve the same
+  way, including through a docblock-only `@return` on the factory.
 
 ### Storage engine — warm starts, bounded memory
 

@@ -10,18 +10,21 @@ garbage on resolvable receivers). No crashes; guzzle heatmap clean.
 Items marked LANDED were fixed same-round (the round-3 close slice);
 the rest are the current open ledger, ranked.
 
-## R1 (TOP) — `parent::method()` fully dark; rename CORRUPTS code
+## R1 (TOP) — `parent::method()` dark; rename CORRUPTED code — LANDED
 
-gd/hover on the method token: nothing. References from the decl side
-miss every `parent::` site, so **rename produces broken code**:
-renaming `JsonFormatter::normalizeRecord` edits 8 sites but not the 4
-`parent::normalizeRecord` calls (GoogleCloud:29, Loggly:40,
-Logmatic:57, JsonFormatter:108). 312 `parent::` sites in laravel src,
-92 in monolog. `self::`/`static::` method arms both work — only the
-`parent` arm is missing. Fix shape: the SUPER method-token lane
-(Perl's `$self->SUPER::m()` spelling — mint the ref's target as the
-SUPER-qualified form with a current-package invocant so dispatch
-starts above the writing class), which also carries rename transport.
+Was: gd/hover nothing, references from the decl side missed every
+`parent::` site (312 in laravel src, 92 in monolog), so renaming
+`JsonFormatter::normalizeRecord` produced broken code. Fix: the pack
+declares its SUPER receiver spelling (`super_receiver` — php
+`parent`), and the ref is minted as the model's SUPER method token
+(`SUPER::normalizeRecord`, current-package invocant, name-token span)
+so gd/references/rename all ride the existing SUPER lane. Re-verified
+on the agent's repro: gd on GoogleCloudLoggingFormatter.php:29 →
+JsonFormatter.php:106 (the immediate parent's override, not the
+grandparent's), and references on the decl now list all 4 previously
+missed `parent::` sites. The hop lane deliberately skips SUPER
+receivers (return typing of `parent::` calls is a residual — a hop
+would find the CHILD override).
 
 ## R2 — `$this->prop->method()` never dispatched — LANDED
 

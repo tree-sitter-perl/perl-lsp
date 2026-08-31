@@ -3530,6 +3530,45 @@ class Logger {
 }
 
 #[test]
+fn php_parent_call_mints_super_token() {
+    // `parent::normalize()` rides the model's SUPER lane: the ref's
+    // target is the SUPER-qualified token with a current-package
+    // invocant, dispatch starts ABOVE the writing class (round-3 R1:
+    // gd/refs missed every parent:: site and rename corrupted code).
+    let src = "\
+<?php
+class Base {
+    public function normalize(): string { return \"b\"; }
+}
+class Child extends Base {
+    public function normalize(): string {
+        return parent::normalize() . \"c\";
+    }
+}
+";
+    let (fa, _) = php_fa(src);
+    use crate::model::file_analysis::RefKind;
+    let sup = fa
+        .refs()
+        .iter()
+        .find(|r| r.target_name == "SUPER::normalize")
+        .expect("parent:: call carries the SUPER token");
+    assert!(matches!(sup.kind, RefKind::MethodCall { .. }));
+    // the ref span is the bare name token (rename rewrites only it)
+    assert_eq!(sup.span.end.column - sup.span.start.column, "normalize".len());
+    // and no ClassName(\"parent\") ghost witness leaked from the hop lane
+    use crate::model::witnesses::WitnessPayload;
+    use crate::model::file_analysis::InferredType;
+    assert!(
+        !fa.witnesses.all().iter().any(|w| matches!(
+            &w.payload,
+            WitnessPayload::InferredType(InferredType::ClassName(c)) if c == "parent"
+        )),
+        "no fake class 'parent'",
+    );
+}
+
+#[test]
 fn php_class_constant_and_enum_case_access() {
     // `User::VERSION` / `Level::Debug` are class-keyed member accesses:
     // the access site mints a member ref (gd/references connect), and a
