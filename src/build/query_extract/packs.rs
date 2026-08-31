@@ -10,6 +10,10 @@ use super::*;
 /// patterns alone go.
 pub struct LangPack {
     pub query_source: &'static str,
+    /// The registry's language id (`"php"`, `"cpp"`, ...) — keys pack-plugin
+    /// query overlays (`<plugin-dir>/<name>/queries/<lang_id>.scm`,
+    /// docs/prompt-pack-plugins.md) onto the language they extend.
+    pub lang_id: &'static str,
     /// Shape a captured name token's text (e.g. keep the sigil on a
     /// Perl variable). `capture_kind` is the vocabulary name
     /// (`def.var`, `ref.method`, ...) so one pack hook serves all.
@@ -397,6 +401,7 @@ pub enum CmdEffect {
 pub fn perl_pack() -> LangPack {
     LangPack {
         query_source: include_str!("../../../queries/perl/skeleton.scm"),
+        lang_id: "perl",
         shape_name: |kind, raw| match kind {
             // The builder stores variable symbols WITH sigil; varname
             // captures are sigil-less. Predicate re-attaches nothing —
@@ -450,6 +455,7 @@ pub fn perl_pack() -> LangPack {
 pub fn python_pack() -> LangPack {
     LangPack {
         query_source: include_str!("../../../queries/python/skeleton.scm"),
+        lang_id: "python",
         shape_name: |_, raw| raw.to_string(),
         default_name: |_| None,
         annot_type: |text| match text.trim() {
@@ -512,6 +518,7 @@ pub fn python_pack() -> LangPack {
 pub fn r_pack() -> LangPack {
     LangPack {
         query_source: include_str!("../../../queries/r/skeleton.scm"),
+        lang_id: "r",
         shape_name: |_, raw| raw.to_string(),
         default_name: |_| None,
         annot_type: |_| None,
@@ -564,6 +571,7 @@ pub fn r_pack() -> LangPack {
 pub fn cmake_pack() -> LangPack {
     LangPack {
         query_source: include_str!("../../../queries/cmake/skeleton.scm"),
+        lang_id: "cmake",
         shape_name: |_, raw| raw.to_string(),
         default_name: |_| None,
         annot_type: |_| None,
@@ -627,13 +635,16 @@ pub fn cmake_pack() -> LangPack {
 #[allow(dead_code)]
 pub fn php_pack() -> LangPack {
     LangPack {
-        // Base skeleton + the Laravel framework overlay (pure query
-        // vocabulary — see the overlay's header for the doctrine note).
+        // Base skeleton + the bundled framework overlays (pure query
+        // vocabulary — see each overlay's header for the doctrine note).
         query_source: concat!(
             include_str!("../../../queries/php/skeleton.scm"),
             "\n",
             include_str!("../../../queries/php/frameworks/laravel.scm"),
+            "\n",
+            include_str!("../../../queries/php/frameworks/wordpress.scm"),
         ),
+        lang_id: "php",
         // variable_name captures carry the `$` (PHP spells it at every
         // use, like Perl); names/classes pass through verbatim. A
         // `self::`/`static::` receiver IS the enclosing class — spelled as
@@ -777,6 +788,7 @@ pub fn php_pack() -> LangPack {
 pub fn cpp_pack() -> LangPack {
     LangPack {
         query_source: include_str!("../../../queries/cpp/skeleton.scm"),
+        lang_id: "cpp",
         // Template spellings get ONE canonical whitespace form so a
         // specialization's identity (`formatter<int, char>`) matches
         // however the source wrapped it. Identity for every non-template

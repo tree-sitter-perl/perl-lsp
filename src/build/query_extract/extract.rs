@@ -71,7 +71,7 @@ pub(crate) fn peel<'a>(
 
 pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAnalysis, String> {
     let language = tree.language();
-    let query = cached_query(&language, pack.query_source)?;
+    let query = cached_query(&language, effective_query_source(&language, pack))?;
     let cap_names: Vec<String> = query
         .capture_names()
         .iter()
@@ -873,6 +873,42 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                         e.match_id,
                         (*op, crate::model::file_analysis::Span { start: e.start, end: e.end }),
                     );
+                }
+            }
+            // String-named references (the tier-1 pack-plugin vocabulary,
+            // docs/prompt-pack-plugins.md): the captured string-content
+            // node's TEXT is the referenced name and its span IS the rename
+            // unit — the characters inside the quotes. `@ref.call.named`
+            // mints a FunctionCall ref (WP `add_action('init', 'wp_cron')`);
+            // `@ref.method.named` mints a MethodCall ref joined to the same
+            // match's `@member.recv` (`array($this, 'method')` callbacks),
+            // so dispatch types through the receiver like any member ref.
+            // No arg_count: the site registers the callee, it doesn't call
+            // it — an arity hint here would misfeed arity discrimination.
+            "ref.call.named" => {
+                out.refs.push(SkelRef {
+                    kind: "call".to_string(),
+                    name: e.text.clone(),
+                    start: e.start,
+                    end: e.end,
+                    scope: cur_scope,
+                    invocant: None,
+                    member_op: None,
+                    arg_count: None,
+                });
+            }
+            "ref.method.named" => {
+                if let Some(inv) = member_recv.get(&e.match_id).cloned() {
+                    out.refs.push(SkelRef {
+                        kind: "member".to_string(),
+                        name: e.text.clone(),
+                        start: e.start,
+                        end: e.end,
+                        scope: cur_scope,
+                        invocant: Some(inv),
+                        member_op: None,
+                        arg_count: None,
+                    });
                 }
             }
             cap if cap.starts_with("ref.") => {

@@ -111,14 +111,26 @@ analysis knows (cpp's self-access-sees-private gold case). Verified:
 the guzzle probe answers zero items; a resolvable chain
 (`User::query()->firstWhere(...)->`) completes real User members.
 
-## R8 — WP hook string callbacks — DESIGNED (docs/prompt-pack-plugins.md)
+## R8 — WP hook string callbacks — LANDED (tier-1 pack plugins)
 
-`add_action('init', 'wp_cron')`: the string never refs the function,
-both directions dark. 993 string-callback sites + 161
-`array($this,'m')` in WP. Poisons heatmap fan-in for every
-hook-driven function. Fix: WordPress plugin emitting a FunctionRef
-for arg#2 of add_action/add_filter/remove_*; same emit-hook shape as
-the Mojo plugin lane.
+Was: `add_action('init', 'wp_cron')` — the string never refs the
+function, both directions dark (993 string-callback + 161
+`array($this,'m')` sites in WP), poisoning heatmap fan-in for every
+hook-driven function. Fix (docs/prompt-pack-plugins.md tier 1): the
+string-named reference captures (`@ref.call.named` /
+`@ref.method.named` — span = the content between the quotes) + the
+bundled WordPress overlay (`queries/php/frameworks/wordpress.scm`,
+pure query). Re-verified on real WP core: refs on `wp_cron`'s decl
+now include both registration sites; `wptexturize` answers 22 refs
+including all 11 default-filters registrations; rename of `wp_cron`
+rewrites exactly the 7 characters inside the quotes; the array form
+(`array($this, 'wp_loaded')`) refs the method through the `$this`
+receiver. The loader shipped in the same slice: overlays load from
+`<plugin-dir>/<name>/queries/<lang>.scm` with per-overlay compile
+isolation, content-hash query caching, fingerprint invalidation, and
+a `--plugin-check` arm for `.scm` files. Hook-NAME identity
+(`do_action('init')` ↔ registrations) remains the Handler-rail
+follow-on.
 
 ## R9 — `new Foo()` ↔ `__construct` — LANDED
 

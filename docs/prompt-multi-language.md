@@ -61,12 +61,14 @@ perl-lsp doesn't die — it becomes the Perl-configured distribution of
 that binary, name and install base intact.
 
 The framework-tier design round is CLOSED — `docs/prompt-pack-plugins.md`
-owns it. The resolution: two tiers — loadable QUERY overlays in the
-standard capture vocabulary (proven by the bundled Laravel overlay;
-WordPress hooks need only string-named reference captures, not
-callbacks), and a deferred rhai capture-event hook (`on_match` over
-capture events, emitting the shared `EmitAction` vocabulary) that does
-not build until a tenant needs name surgery a query cannot express.
+owns it, and its tier 1 is LANDED: loadable QUERY overlays in the
+standard capture vocabulary (the bundled Laravel and WordPress overlays
+are the proof; the string-named reference captures closed the WP hooks
+tenant without callbacks), with the loader's isolation/caching/
+invalidation and a `--plugin-check` `.scm` arm. The deferred rhai
+capture-event hook (`on_match` over capture events, emitting the shared
+`EmitAction` vocabulary) does not build until a tenant needs name
+surgery a query cannot express.
 
 ## Sequencing
 

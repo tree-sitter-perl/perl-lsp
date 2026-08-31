@@ -126,6 +126,20 @@ templates). Market case and build-out plan in `docs/prompt-php-target.md`.
   `pages()` relation, and to-one relations (`$page->book->name`)
   chain through the related class. Dogfooded against BookStack with
   a real composer `vendor/` tree.
+- **WordPress hooks connect.** `add_action('init', 'wp_cron')` and the
+  `array($this, 'method')` / `[$this, 'method']` callback forms are
+  real references of the named function or method: references find
+  every registration, rename rewrites the name inside the quotes, and
+  hook-driven functions leave the heatmap's dead-code queue.
+- **Pack query plugins.** Framework support for pack languages is now
+  loadable: drop `<plugin-dir>/<name>/queries/<lang>.scm` (the same
+  search path as `.rhai` plugins) and its patterns extend that
+  language's extraction — the bundled Laravel and WordPress overlays
+  are written in exactly this form. A malformed overlay is dropped
+  alone with a diagnostic (the base language keeps serving), editing
+  an overlay invalidates the analysis cache, and
+  `perl-lsp --plugin-check <overlay.scm>` lints one: compile errors,
+  plus capture names outside the served vocabulary.
 
 ### Storage engine — warm starts, bounded memory
 

@@ -1,5 +1,12 @@
 # Pack plugins: the capture-event framework tier
 
+**Tier 1 is LANDED** — the named-reference captures, the bundled
+WordPress overlay, and the overlay loader (discovery, per-overlay
+compile isolation, content-hash query cache, fingerprint fold, the
+`--plugin-check` `.scm` arm) all shipped; acceptance verified on real
+WP core (see `docs/hitlist-php-round3.md` R8). Tier 2 still waits on
+its first tenant, per the gate below.
+
 The design carried as "the open round" in `docs/prompt-multi-language.md`
 — how pack languages (php, cpp, python, r, cmake) get a framework tier —
 resolved into a shape the Laravel arc already proved half of. This brief

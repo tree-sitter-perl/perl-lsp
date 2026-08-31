@@ -4037,3 +4037,148 @@ function f(Query $q) {
     let r = fa.inferred_type_via_bag("$r", tree_sitter::Point { row: 8, column: 8 });
     assert_eq!(r, Some(InferredType::String), "fluent chain must type: {r:?}");
 }
+
+#[test]
+fn php_wp_hook_string_callbacks_are_function_refs() {
+    // Round-3 R8 (docs/prompt-pack-plugins.md tier 1): the string in
+    // `add_action('init', 'wp_cron')` names the function. The WordPress
+    // overlay's `@ref.call.named` mints an ordinary FunctionCall ref whose
+    // span is the content between the quotes — references connect both
+    // directions and rename rewrites exactly those characters.
+    let src = "\
+<?php
+function wp_cron(): int { return 1; }
+add_action('init', 'wp_cron');
+add_filter('the_content', 'wp_cron', 10, 2);
+remove_action('init', 'wp_cron');
+";
+    let (fa, _) = php_fa(src);
+    // cursor on the wp_cron decl name
+    let resolved = crate::index::resolve::resolve_symbol(
+        &fa,
+        tree_sitter::Point { row: 1, column: 10 },
+        None,
+    );
+    let target = match resolved {
+        Some(crate::index::resolve::ResolvedTarget::Target(t)) => t,
+        other => panic!("wp_cron decl must mint a target: {other:?}"),
+    };
+    let locs = crate::index::resolve::refs_to_in_file(
+        &crate::index::file_store::FileStore::new(),
+        None,
+        &target,
+        &crate::index::file_store::FileKey::Path(std::path::PathBuf::from("/wp/t.php")),
+        &fa,
+        crate::index::resolve::RoleMask::VISIBLE,
+    );
+    let hook_sites: Vec<_> = locs.iter().filter(|l| l.span.start.row >= 2).collect();
+    assert_eq!(hook_sites.len(), 3, "all three registration strings are refs: {locs:?}");
+    assert!(
+        hook_sites.iter().all(|l| l.rewritable),
+        "rename rewrites the string content: {hook_sites:?}"
+    );
+    // the span is the content INSIDE the quotes: `add_action('init', 'wp_cron');`
+    let first = hook_sites.iter().find(|l| l.span.start.row == 2).expect("row-2 site");
+    assert_eq!((first.span.start.column, first.span.end.column), (20, 27), "span is the quoted content: {first:?}");
+}
+
+#[test]
+fn php_wp_hook_array_callbacks_are_method_refs() {
+    // The `array($this, 'on_save')` / `[$this, 'on_save']` callback forms:
+    // the overlay's `@ref.method.named` + same-match `@member.recv` mint the
+    // SAME MethodCall ref a written `$this->on_save()` carries, so the
+    // method's references include its hook registrations.
+    let src = "\
+<?php
+class Plugin {
+    public function register(): void {
+        add_action('save_post', array($this, 'on_save'));
+        add_filter('the_content', [$this, 'on_save']);
+    }
+    public function on_save(): int { return 1; }
+}
+";
+    let (fa, _) = php_fa(src);
+    let resolved = crate::index::resolve::resolve_symbol(
+        &fa,
+        tree_sitter::Point { row: 6, column: 21 },
+        None,
+    );
+    let target = match resolved {
+        Some(crate::index::resolve::ResolvedTarget::Target(t)) => t,
+        other => panic!("on_save decl must mint a target: {other:?}"),
+    };
+    let locs = crate::index::resolve::refs_to_in_file(
+        &crate::index::file_store::FileStore::new(),
+        None,
+        &target,
+        &crate::index::file_store::FileKey::Path(std::path::PathBuf::from("/wp/p.php")),
+        &fa,
+        crate::index::resolve::RoleMask::VISIBLE,
+    );
+    let hook_sites: Vec<_> =
+        locs.iter().filter(|l| l.span.start.row == 3 || l.span.start.row == 4).collect();
+    assert_eq!(hook_sites.len(), 2, "both array-callback strings are refs: {locs:?}");
+    assert!(hook_sites.iter().all(|l| l.rewritable), "rename reaches them: {hook_sites:?}");
+}
+
+#[test]
+fn php_pack_query_overlays_load_from_plugin_dir() {
+    // Tier-1 pack plugins (docs/prompt-pack-plugins.md): overlays at
+    // `<plugin-dir>/<name>/queries/<lang>.scm` concat onto the bundled
+    // query. One test (env var is process-global) covering the three
+    // loader contracts:
+    //   1. the bundled Laravel overlay copies into a plugin dir VERBATIM
+    //      and still compiles/loads — the seam is real;
+    //   2. an overlay's patterns actually fire (a probe pattern minting a
+    //      field only this overlay knows);
+    //   3. a malformed overlay is dropped ALONE — base + survivors serve.
+    let dir = std::env::temp_dir().join(format!(
+        "perl-lsp-overlay-test-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos(),
+    ));
+    let laravel = dir.join("laravel-copy/queries");
+    let probe = dir.join("probe/queries");
+    let broken = dir.join("broken/queries");
+    for d in [&laravel, &probe, &broken] {
+        std::fs::create_dir_all(d).unwrap();
+    }
+    std::fs::write(
+        laravel.join("php.scm"),
+        include_str!("../../queries/php/frameworks/laravel.scm"),
+    )
+    .unwrap();
+    std::fs::write(
+        probe.join("php.scm"),
+        "(method_declaration name: (name) @def.field.name @def.field\n  (#any-of? @def.field.name \"zz_overlay_probe\"))\n",
+    )
+    .unwrap();
+    std::fs::write(broken.join("php.scm"), "(this_kind_does_not_exist) @def.field\n").unwrap();
+
+    let saved = std::env::var("PERL_LSP_PLUGIN_DIR").ok();
+    std::env::set_var("PERL_LSP_PLUGIN_DIR", &dir);
+
+    let src = "\
+<?php
+class C {
+    public function zz_overlay_probe(): int { return 1; }
+}
+";
+    let (fa, _) = php_fa(src);
+
+    match saved {
+        Some(v) => std::env::set_var("PERL_LSP_PLUGIN_DIR", v),
+        None => std::env::remove_var("PERL_LSP_PLUGIN_DIR"),
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+
+    let field = fa
+        .symbols()
+        .iter()
+        .find(|s| s.name == "zz_overlay_probe" && matches!(s.kind, crate::model::file_analysis::SymKind::Field));
+    assert!(field.is_some(), "the probe overlay's pattern fired (base + survivors serve despite the broken sibling)");
+}
