@@ -335,6 +335,12 @@ pub enum DocFact {
     Param { name: String, ty: String },
     /// `@var T` — the documented type of the property/variable below.
     Var(String),
+    /// `@method [static] T name(...)` on a CLASS docblock — a documented
+    /// virtual method (Laravel facades, Eloquent's `__call` surface). The
+    /// join synthesizes a real method symbol on the class below, spanning
+    /// the fact's own `@method` line (`line` = 0-based offset within the
+    /// comment) so each row is a distinct, honest gd target.
+    Method { name: String, ret: Option<String>, line: usize },
 }
 
 /// One effect of a command-dispatched statement.
@@ -585,7 +591,13 @@ pub fn cmake_pack() -> LangPack {
 #[allow(dead_code)]
 pub fn php_pack() -> LangPack {
     LangPack {
-        query_source: include_str!("../../../queries/php/skeleton.scm"),
+        // Base skeleton + the Laravel framework overlay (pure query
+        // vocabulary — see the overlay's header for the doctrine note).
+        query_source: concat!(
+            include_str!("../../../queries/php/skeleton.scm"),
+            "\n",
+            include_str!("../../../queries/php/frameworks/laravel.scm"),
+        ),
         // variable_name captures carry the `$` (PHP spells it at every
         // use, like Perl); names/classes pass through verbatim. A
         // `self::`/`static::` receiver IS the enclosing class — spelled as
@@ -920,7 +932,7 @@ fn php_doc_types(text: &str) -> Vec<DocFact> {
         return Vec::new();
     }
     let mut out = Vec::new();
-    for line in text.lines() {
+    for (lineno, line) in text.lines().enumerate() {
         // Normalize both spellings: a `* @param` continuation line and the
         // single-line `/** @return X */` form.
         let l = line
@@ -951,6 +963,34 @@ fn php_doc_types(text: &str) -> Vec<DocFact> {
         } else if let Some(rest) = l.strip_prefix("@var ") {
             if let Some(t) = rest.split_whitespace().next().and_then(phpdoc_type) {
                 out.push(DocFact::Var(t));
+            }
+        } else if let Some(rest) = l.strip_prefix("@method ") {
+            // `@method [static] T name(args)`; the type is optional
+            // (`@method foo()`), the name token is whatever carries the
+            // `(`. `static` is dispatch surface, not a return spelling.
+            let rest = rest.strip_prefix("static ").unwrap_or(rest);
+            let mut it = rest.split_whitespace();
+            if let Some(t0) = it.next() {
+                let (ret, name_tok) = if t0.contains('(') {
+                    (None, t0)
+                } else {
+                    match it.next() {
+                        Some(t1) => (Some(t0), t1),
+                        None => (None, t0),
+                    }
+                };
+                let name = name_tok.split('(').next().unwrap_or("");
+                if !name.is_empty()
+                    && name
+                        .chars()
+                        .all(|c| c == '_' || c.is_ascii_alphanumeric())
+                {
+                    out.push(DocFact::Method {
+                        name: name.to_string(),
+                        ret: ret.and_then(phpdoc_type),
+                        line: lineno,
+                    });
+                }
             }
         }
     }

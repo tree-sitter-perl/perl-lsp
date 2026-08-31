@@ -1281,10 +1281,15 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     // a trailing-return function matches both its leading-`auto` pattern
     // and the trailing sibling (keep the rettype-bearing copy) ----
     {
-        let mut best: HashMap<(usize, usize), usize> = HashMap::new();
+        // Keyed per name site AND per field-ness: a framework overlay
+        // legitimately declares a PROPERTY at a method's own name token
+        // (Eloquent relations — `pages()` the method, `->pages` the
+        // accessor), and that pair must survive while the same-kind
+        // duplicates (var vs sub, rettype twins) still collapse.
+        let mut best: HashMap<(usize, usize, bool), usize> = HashMap::new();
         let mut keep = vec![true; out.symbols.len()];
         for (i, sym) in out.symbols.iter().enumerate() {
-            let key = (sym.name_start.row, sym.name_start.column);
+            let key = (sym.name_start.row, sym.name_start.column, sym.kind == "field");
             match best.get(&key) {
                 None => {
                     best.insert(key, i);
@@ -1592,12 +1597,18 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     // doesn't. Perl/C++ packs return no facts, so the pass is a no-op there.
     {
         use crate::build::query_extract::DocFact;
-        let mut by_end_row: HashMap<usize, Vec<DocFact>> = HashMap::new();
+        // Keyed by the comment's END row (the def sits on the next line);
+        // the start row rides along so a `@method` fact can span its own
+        // line inside the comment.
+        let mut by_end_row: HashMap<usize, (usize, Vec<DocFact>)> = HashMap::new();
         for e in &events {
             if e.cap == "doc.comment" {
                 let facts = (pack.doc_types)(&e.text);
                 if !facts.is_empty() {
-                    by_end_row.entry(e.end.row).or_default().extend(facts);
+                    let entry = by_end_row
+                        .entry(e.end.row)
+                        .or_insert_with(|| (e.start.row, Vec::new()));
+                    entry.1.extend(facts);
                 }
             }
         }
@@ -1610,17 +1621,61 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                     .map(|s| (s.name.clone(), s.scope, s.start))
                     .collect();
             let mut doc_witnesses: Vec<crate::model::witnesses::Witness> = Vec::new();
+            let mut doc_methods: Vec<SkelSymbol> = Vec::new();
             for sym in out.symbols.iter_mut() {
+                // `@method` rows join to the CLASS docblock (Laravel facades,
+                // Eloquent's `__call` surface): each synthesizes a real
+                // method symbol on the class, spanning the class name token
+                // so gd lands somewhere honest. The other fact kinds join to
+                // callables/fields as before.
+                if matches!(sym.kind.as_str(), "class" | "interface") {
+                    let Some((cstart, facts)) =
+                        sym.start.row.checked_sub(1).and_then(|r| by_end_row.get(&r))
+                    else {
+                        continue;
+                    };
+                    for f in facts {
+                        if let DocFact::Method { name, ret, line } = f {
+                            // Span = the fact's own `@method` line: a
+                            // distinct gd target per row (and distinct
+                            // dedup identity — every row on the class
+                            // name span collapsed to one symbol).
+                            let at = Point { row: cstart + line, column: 0 };
+                            doc_methods.push(SkelSymbol {
+                                kind: "method".to_string(),
+                                name: name.clone(),
+                                start: at,
+                                end: at,
+                                name_start: at,
+                                name_end: at,
+                                package: Some(sym.name.clone()),
+                                scope: sym.scope,
+                                return_type: ret
+                                    .as_deref()
+                                    .and_then(|t| (pack.annot_type)(t)),
+                                receiver_return: ret
+                                    .as_deref()
+                                    .is_some_and(|t| (pack.rettype_receiver)(t)),
+                                deref_stack: Vec::new(),
+                                attributes: Vec::new(),
+                                arity: None,
+                                qualifier_owned: false,
+                            });
+                        }
+                    }
+                    continue;
+                }
                 if !matches!(sym.kind.as_str(), "sub" | "method" | "field" | "anon") {
                     continue;
                 }
-                let Some(facts) =
+                let Some((_, facts)) =
                     sym.start.row.checked_sub(1).and_then(|r| by_end_row.get(&r))
                 else {
                     continue;
                 };
                 for f in facts {
                     match f {
+                        DocFact::Method { .. } => {} // class-docblock fact; no callable/field join
                         DocFact::Return(t) => {
                             if sym.return_type.is_none() && !sym.receiver_return {
                                 if (pack.rettype_receiver)(t) {
@@ -1674,6 +1729,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                 }
             }
             out.witnesses.extend(doc_witnesses);
+            out.symbols.extend(doc_methods);
         }
     }
     out.param_sigs = param_sigs;

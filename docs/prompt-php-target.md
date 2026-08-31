@@ -96,6 +96,19 @@ duplicate-def honest families with arity ranking, constants in outline.
 Measured on WordPress after: `esc_attr` references 7 → 1345,
 `have_posts` 0 → 23, `Logger::addRecord` grep-exact.
 
+## The Laravel app corpus
+
+BookStack (`github.com/BookStackApp/BookStack`, ~520 app files) is the
+real-app corpus entry: clone it beside the other php corpora, then
+materialize `vendor/` (gitignored, and packagist dists are
+proxy-blocked in the sandbox) by copying the laravel/framework clone's
+`src/` to `vendor/laravel/framework/src/` and writing
+`vendor/composer/installed.json` with one `{"name":
+"laravel/framework", "install-path": "../laravel/framework"}` package
+row — the dependency-roots tier reads exactly that. Cold index ~8s;
+verifies the vendor tier (gd on `$this->hasMany` lands inside
+vendor/), facades, and relation properties against real code.
+
 ## Dogfood round 2 (verification + the fresh-verb sweep)
 
 Two fresh agents re-probed every round-1 fix (all hold — several now
@@ -182,10 +195,32 @@ production engine, zero engine special-cases:
    stripped, `X|null` collapsed). Still ahead: PHPStan array-shapes →
    `HashWithKeys`, `@template` → the parametric seam, and rendering the
    doc PROSE on hover.
-6. **Framework plugins.** Laravel first (Eloquent accessors/relations,
-   facades — the DBIC playbook), WordPress hooks second. Needs the
-   capture-event rhai hook design from `docs/prompt-multi-language.md`'s
-   open round.
+6. **Framework plugins.** Laravel's first tier LANDED, in two pieces
+   that deliberately need NO new hook machinery:
+   - **Facades** ride a generic phpdoc lane: `@method [static] T
+     name(args)` rows on a CLASS docblock synthesize real method
+     symbols (each spanning its own `@method` line), so `Cache::get()`
+     dispatches/types/completes through the normal scoped-call hop —
+     verified on BookStack (gd on `Cache::get` lands on the vendor
+     facade's `@method get` row). This also covers every library using
+     `@method` (`__call` documentation) — not Laravel-specific.
+   - **Eloquent relations** are the first tenant of the framework
+     QUERY overlay: `queries/php/frameworks/laravel.scm`, concatenated
+     into the pack's query, expressed entirely in the standard capture
+     vocabulary + `#any-of?` text predicates (the engine carries no
+     Laravel names — the doctrine holds). A relation method mints the
+     same-named PROPERTY Eloquent's `__get` serves; to-one relations
+     carry the related class (`$page->book->name` chains), to-many
+     navigate untyped (Collection element typing = the generics
+     residual). Verified on BookStack: gd on `$book->pages` lands on
+     the `pages()` relation. The extract dedup now keys field-ness so
+     the method+property pair at one name token survives.
+   The rhai capture-event hook (a DYNAMICALLY loaded overlay + host
+   predicates, `$PERL_LSP_PLUGIN_DIR`-style) remains the follow-on
+   seam; the overlay file is exactly the artifact it would load.
+   WordPress hooks (round-3 R8) are the second tenant and need emit
+   actions richer than captures (a ref into arg #2's string), i.e. the
+   real hook design.
 7. **Calibration.** The gold-corpus sibling: a packagist-pinned substrate
    (top-N packages via composer), the same exact-assertion fixture
    format, corpus entries for a Laravel app + WordPress core in the
