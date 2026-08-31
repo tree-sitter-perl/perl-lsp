@@ -366,6 +366,7 @@ fn collect_from_analysis_still_finds_sub_refs_after_scope_hardening() {
         scope: OverrideScope::Dispatch,
         def_paths: Vec::new(),
         bare_constant: false,
+            ctor_of: None,
     };
     let store = FileStore::new();
     let path = PathBuf::from("/tmp/resolve_test_scope_hardening.pm");

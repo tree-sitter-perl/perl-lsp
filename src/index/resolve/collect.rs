@@ -1009,13 +1009,22 @@ pub(super) fn collect_from_analysis(
             && visible_aliases
                 .iter()
                 .any(|a| a.name == r.unqualified_target_name());
-        if !name_matches && !alias_matched {
+        // A construction site (`new Foo(...)`) IS a use of Foo's
+        // constructor: the ctor FunctionCall ref carries the CLASS name,
+        // so a `ctor_of` target admits it — non-rewritable below (the
+        // token spells the class; renaming __construct must not touch it).
+        let ctor_matched = !name_matches
+            && target.ctor_of.as_deref().is_some_and(|class| {
+                matches!(r.kind, RefKind::FunctionCall { .. })
+                    && r.unqualified_target_name() == class
+            });
+        if !name_matches && !alias_matched && !ctor_matched {
             continue;
         }
         // Sub + Method both match any call into that scope — function
         // or method shape — per the "same callable, two shapes"
         // invariant. Filter is a single scope comparison.
-        let matches_kind = alias_matched || match (&target.kind, &r.kind) {
+        let matches_kind = alias_matched || ctor_matched || match (&target.kind, &r.kind) {
             (TargetKind::Sub { .. } | TargetKind::Method { .. },
              RefKind::FunctionCall) => {
                 // callable_scope_for_refs is derived from the same target.kind
@@ -1292,7 +1301,7 @@ pub(super) fn collect_from_analysis(
                 key: key.clone(),
                 span,
                 access: r.access,
-                rewritable: !alias_matched && rewritable_at(span),
+                rewritable: !alias_matched && !ctor_matched && rewritable_at(span),
                 label: None
             });
             // A call folded from a variable (`my $m = 'process'; $self->$m()`)

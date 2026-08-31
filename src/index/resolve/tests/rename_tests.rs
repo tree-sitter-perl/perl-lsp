@@ -85,6 +85,7 @@ $d->ping;
         name: "ping".to_string(),
         kind: TargetKind::Method { class: "Base".to_string() },
         method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), bare_constant: false,
+            ctor_of: None,
     };
 
     // Rename uses EDITABLE — workspace-only, no dep scan.
@@ -153,6 +154,7 @@ $b->ping;
         name: "ping".to_string(),
         kind: TargetKind::Method { class: "Base".to_string() },
         method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), bare_constant: false,
+            ctor_of: None,
     };
 
     // EDITABLE mask — rename never scans deps.
@@ -224,6 +226,7 @@ $g->hello;
         name: "hello".to_string(),
         kind: TargetKind::Method { class: "Greeter".to_string() },
         method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), bare_constant: false,
+            ctor_of: None,
     };
 
     // references uses references_mask_for (EDITABLE when def in workspace).

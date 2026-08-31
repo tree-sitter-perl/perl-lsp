@@ -30,6 +30,14 @@ pub struct PackFacts {
     #[serde(default)]
     pub type_display: Vec<(String, String)>,
 
+    /// The language's constructor-method names (php `__construct`), from
+    /// the LangPack — the identity lane marks a Method target with one of
+    /// these names as `ctor_of` its class, admitting construction sites
+    /// into its references. Empty for Perl (`new` is a convention, not a
+    /// keyword — `is_constructor_name` serves the ranking lanes instead).
+    #[serde(default)]
+    pub constructor_names: Vec<String>,
+
     /// Template-specialization family edges: canonical spec spelling
     /// (`formatter<int, char>`) → primary base name (`formatter`). NOT an
     /// inheritance edge — a spec REPLACES the primary wholesale (its member
@@ -138,6 +146,7 @@ impl PackFacts {
         h.misc += map_str_vec(&self.template_params)
             + mcap(&self.specializes)
             + vcap(&self.receiver_names)
-            + vcap(&self.type_display);
+            + vcap(&self.type_display)
+            + vcap(&self.constructor_names);
     }
 }

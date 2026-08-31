@@ -67,6 +67,13 @@ pub struct TargetRef {
     /// (`class_content_is_bare_constant`); the matcher may also re-derive it
     /// per scanned file when the index is in hand.
     pub bare_constant: bool,
+    /// `Some(class)` when this Method target IS the class's constructor by
+    /// the pack's convention (php `__construct`): references then also
+    /// admit the class's construction sites (`new Foo(...)` — the ctor
+    /// FunctionCall ref carries the CLASS name), non-rewritable, since the
+    /// token spells the class. Set in the identity lane from
+    /// `PackFacts::constructor_names`; `None` everywhere else.
+    pub ctor_of: Option<String>,
     /// Pack-language visibility identity: the canonical paths of the files
     /// that define this target AS THE ORIGIN FILE SEES IT (the origin itself,
     /// candidates in its include closure, and candidates whose closure reaches
@@ -95,6 +102,16 @@ impl TargetRef {
         scope: OverrideScope,
     ) -> Self {
         let method_classes = method_classes_for(origin, &class, &name, module_index, scope);
+        // The pack's constructor convention (php `__construct`) is a fact of
+        // the METHOD TARGET itself: every builder of a Method target — the
+        // rename-kind mapping, the identity lanes, implementations — gets
+        // the ctor marker from this one speller.
+        let ctor_of = origin
+            .pack
+            .constructor_names
+            .iter()
+            .any(|c| c == &name)
+            .then(|| class.clone());
         TargetRef {
             name,
             kind: TargetKind::Method { class },
@@ -102,6 +119,7 @@ impl TargetRef {
             scope,
             def_paths: Vec::new(),
             bare_constant: false,
+            ctor_of,
         }
     }
 
@@ -128,6 +146,7 @@ impl TargetRef {
             scope: OverrideScope::Hierarchy,
             def_paths: Vec::new(),
             bare_constant: false,
+            ctor_of: None,
         }
     }
 
@@ -144,6 +163,7 @@ impl TargetRef {
             scope: OverrideScope::default(),
             def_paths: Vec::new(),
             bare_constant: false,
+            ctor_of: None,
         }
     }
 
@@ -206,6 +226,7 @@ impl TargetRef {
                     scope,
                     def_paths: Vec::new(),
                     bare_constant: false,
+            ctor_of: None,
                 }
             }
             RenameKind::Method { name, class } => {

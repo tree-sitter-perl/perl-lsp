@@ -64,6 +64,11 @@ pub struct LangPack {
     /// rewrote a fragment and broke the code). False = block-scoped
     /// (cpp) or handled natively (Perl's `my`).
     pub function_scoped_vars: bool,
+    /// The pack's constructor-method names (php `__construct`): a Method
+    /// target with one of these names is the class's constructor, and its
+    /// references include the class's `new Foo(...)` sites (non-rewritable
+    /// — the token spells the class). Rides `PackFacts::constructor_names`.
+    pub constructor_names: &'static [&'static str],
     /// Documentation-comment type facts (phpdoc `@return`/`@param`/`@var`):
     /// the pack parses ITS OWN doc vocabulary out of a `@doc.comment`
     /// capture's text, returning type spellings `annot_type` speaks.
@@ -410,6 +415,7 @@ pub fn perl_pack() -> LangPack {
         field_registry_edges: false,
         super_receiver: |_| false,
         function_scoped_vars: false,
+        constructor_names: &[],
         doc_types: |_| vec![],
         module_paths: |m| vec![format!("{}.pm", m.replace("::", "/"))],
         shape_ctor: |_| false,
@@ -462,6 +468,7 @@ pub fn python_pack() -> LangPack {
         field_registry_edges: false,
         super_receiver: |_| false,
         function_scoped_vars: false,
+        constructor_names: &[],
         doc_types: |_| vec![],
         module_paths: |m| {
             let base = m.replace('.', "/");
@@ -514,6 +521,7 @@ pub fn r_pack() -> LangPack {
         field_registry_edges: false,
         super_receiver: |_| false,
         function_scoped_vars: false,
+        constructor_names: &[],
         doc_types: |_| vec![],
         // No reliable lexical ctor convention in R (S4/R5 exist but
         // rare); class typing arrives via shapes and S3 later.
@@ -565,6 +573,7 @@ pub fn cmake_pack() -> LangPack {
         field_registry_edges: false,
         super_receiver: |_| false,
         function_scoped_vars: false,
+        constructor_names: &[],
         doc_types: |_| vec![],
         // include(util.cmake) is a literal path; add_subdirectory(src)
         // means src/CMakeLists.txt. The whole resolution strategy.
@@ -690,6 +699,7 @@ pub fn php_pack() -> LangPack {
         field_registry_edges: true,
         super_receiver: |t| t == "parent",
         function_scoped_vars: true,
+        constructor_names: &["__construct"],
         // phpdoc: the type vocabulary of REAL PHP — most of WordPress and
         // half of Laravel's public API type only here.
         doc_types: php_doc_types,
@@ -826,6 +836,7 @@ pub fn cpp_pack() -> LangPack {
         field_registry_edges: false,
         super_receiver: |_| false,
         function_scoped_vars: false,
+        constructor_names: &[],
         doc_types: |_| vec![],
         // #include "a/b.h" / <vector>: strip the delimiters; a quoted
         // path is workspace-relative verbatim, a system header resolves

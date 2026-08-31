@@ -1259,6 +1259,7 @@ fn remap_spans(
         receiver_names: _,
         // language-wide facts, no spans to remap.
         function_scoped_vars: _,
+        constructor_names: _,
         type_display: _,
         flow_edges,
         moved_from,

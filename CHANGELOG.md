@@ -102,6 +102,10 @@ templates). Market case and build-out plan in `docs/prompt-php-target.md`.
   rebinds instead of re-declaring, so references and rename see every
   site of a variable instead of per-assignment fragments (renaming
   from any site previously rewrote a fragment and broke the code).
+- **Constructors are referenced by their `new` sites.** References on
+  `__construct` include every `new Client(...)` (1 → 193 on guzzle),
+  the heatmap stops flagging constructed classes' ctors as dead code,
+  and renaming `__construct` never rewrites a `new` site.
 - **WordPress globals type.** `@global wpdb $wpdb` docblocks type the
   `global $wpdb;` binding, so `$wpdb->get_results(...)` hovers,
   navigates, and completes across WordPress core.

@@ -120,11 +120,18 @@ hook-driven function. Fix: WordPress plugin emitting a FunctionRef
 for arg#2 of add_action/add_filter/remove_*; same emit-hook shape as
 the Mojo plugin lane.
 
-## R9 — `new Foo()` ↔ `__construct` unlinked
+## R9 — `new Foo()` ↔ `__construct` — LANDED
 
-304 `new Client(` sites; references on `Client::__construct` → 1
-(itself); all 58 guzzle constructors land in the heatmap dead queue.
-The class-token ref exists — only the ctor edge is missing.
+The pack declares its constructor convention
+(`constructor_names`, php `__construct` — a `PackFacts` lane), and
+`TargetRef::method` — the ONE speller every Method-target builder
+routes through — marks such a target `ctor_of` its class. The
+backward matcher then admits the class's construction sites (the
+ctor `FunctionCall` refs, which carry the CLASS name) as
+NON-rewritable references: renaming `__construct` never touches
+`new Client(`. On guzzle: references on `Client::__construct` went
+1 → 193, and the heatmap dead-queue's `__construct` rows halved
+(58 → 29 — the rest are genuinely never constructed in-repo).
 
 ## R10 — foreach ELEMENT typing (known engine residual)
 

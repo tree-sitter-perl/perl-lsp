@@ -126,6 +126,8 @@ pub struct SkeletonAnalysis {
     /// The pack's `function_scoped_vars` fact (php) — drives the var
     /// unification pass in `into_file_analysis`.
     pub function_scoped_vars: bool,
+    /// The pack's constructor-method names, riding to `PackFacts`.
+    pub constructor_names: Vec<String>,
     /// The pack's display vocabulary (engine tag → language spelling),
     /// carried onto `PackFacts.type_display`.
     pub type_display: Vec<(String, String)>,
@@ -1275,6 +1277,7 @@ impl SkeletonAnalysis {
             // the pack, generic logic in core).
             receiver_names: std::mem::take(&mut self.receiver_names),
             type_display: std::mem::take(&mut self.type_display),
+            constructor_names: std::mem::take(&mut self.constructor_names),
             // Specialization family edges (spec → primary). NOT an inheritance
             // edge: a spec inherits nothing from its primary (it replaces
             // wholesale), so member resolution must never fall through this

@@ -68,6 +68,7 @@ impl FileAnalysis {
                     // provider's re-registered analysis per query.
                     receiver_names: _receiver_names, // LangPack-wide convention, identical across the pack's files
                     type_display: _type_display,     // LangPack-wide display vocabulary, same reasoning
+                    constructor_names: _constructor_names, // LangPack-wide convention, identical across the pack's files
                     specializes: _specializes,       // family edges; the file re-registers on its own rebuild even when Unchanged
                     parent_namespaces: _parent_namespaces, // rides the parents edges (already projected); read live per query like specializes
                     template_params: _template_params, // instantiation substitution reads the provider live

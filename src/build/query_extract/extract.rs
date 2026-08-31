@@ -455,6 +455,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     let mut out = SkeletonAnalysis::default();
     out.receiver_names = pack.receiver_names.iter().map(|s| s.to_string()).collect();
     out.function_scoped_vars = pack.function_scoped_vars;
+    out.constructor_names = pack.constructor_names.iter().map(|s| s.to_string()).collect();
     out.type_display = pack
         .type_display
         .iter()

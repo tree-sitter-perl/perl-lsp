@@ -3578,6 +3578,51 @@ function f(): string {
 }
 
 #[test]
+fn php_new_sites_are_constructor_references_but_never_rename_targets() {
+    // Round-3 R9: references on __construct answered 1 (itself) while
+    // 304 `new Client(` sites existed — every constructor landed in the
+    // heatmap dead queue. A construction site IS a use of the ctor
+    // (admitted via the pack's constructor_names → TargetRef::ctor_of),
+    // and it is NON-rewritable: the token spells the CLASS, so renaming
+    // __construct must never touch `new Client(`.
+    let src = "\
+<?php
+class Client {
+    public function __construct(string $base) {
+    }
+}
+$a = new Client('x');
+$b = new Client('y');
+";
+    let (fa, _) = php_fa(src);
+    // cursor on the __construct decl (row 2, col 20)
+    let resolved = crate::index::resolve::resolve_symbol(
+        &fa,
+        tree_sitter::Point { row: 2, column: 21 },
+        None,
+    );
+    let target = match resolved {
+        Some(crate::index::resolve::ResolvedTarget::Target(t)) => t,
+        other => panic!("__construct decl must mint a target: {other:?}"),
+    };
+    assert_eq!(target.ctor_of.as_deref(), Some("Client"), "ctor marker");
+    let locs = crate::index::resolve::refs_to_in_file(
+        &crate::index::file_store::FileStore::new(),
+        None,
+        &target,
+        &crate::index::file_store::FileKey::Path(std::path::PathBuf::from("/ctor/t.php")),
+        &fa,
+        crate::index::resolve::RoleMask::VISIBLE,
+    );
+    let new_sites: Vec<_> = locs.iter().filter(|l| l.span.start.row >= 5).collect();
+    assert_eq!(new_sites.len(), 2, "both new-sites are references: {locs:?}");
+    assert!(
+        new_sites.iter().all(|l| !l.rewritable),
+        "construction sites are never rename targets: {new_sites:?}"
+    );
+}
+
+#[test]
 fn php_global_docblock_types_the_binding() {
     // WordPress's typing convention: `@global wpdb $wpdb` above the
     // function + `global $wpdb;` inside. The global statement is a real
