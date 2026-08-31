@@ -633,6 +633,61 @@ pub fn cmake_pack() -> LangPack {
 
 // Live only under `feature = "php"` (or the pack tests); see `python_pack`.
 #[allow(dead_code)]
+/// php's type-spelling predicate — declared syntax types AND phpdoc rows
+/// both parse through here. A named fn (not a closure) because the
+/// sequence spellings recurse on their element.
+fn php_annot_type(text: &str) -> Option<InferredType> {
+    use InferredType::*;
+    let t = text.trim().trim_start_matches('?');
+    if t.contains('|') || t.contains('&') {
+        return None;
+    }
+    // Sequence spellings — `list<X>` / `array<X>` / `iterable<X>`,
+    // `array<K, V>` (the element is V), `Type[]`. A homogeneous sequence
+    // carries its element as a one-slot `Sequence` (`element_at(0)` and
+    // the foreach `Element` peel both read it). The element recurses
+    // through this same predicate, so `\App\User[]` leafs like any class
+    // spelling. Without these arms the whole spelling fell to the
+    // ClassName fallback and minted a bogus class `list<X>`.
+    if let Some(inner) = t.strip_suffix("[]") {
+        return php_annot_type(inner).map(|e| Sequence(vec![e]));
+    }
+    for prefix in ["list<", "array<", "iterable<"] {
+        if let Some(rest) = t.strip_prefix(prefix) {
+            let inner = rest.strip_suffix('>')?;
+            // `array<K, V>`: the element is the LAST top-level argument.
+            let mut depth = 0usize;
+            let mut last_start = 0usize;
+            for (i, c) in inner.char_indices() {
+                match c {
+                    '<' | '{' | '(' => depth += 1,
+                    '>' | '}' | ')' => depth = depth.saturating_sub(1),
+                    ',' if depth == 0 => last_start = i + 1,
+                    _ => {}
+                }
+            }
+            return php_annot_type(&inner[last_start..]).map(|e| Sequence(vec![e]));
+        }
+    }
+    match t {
+        "string" => Some(String),
+        "int" | "float" => Some(Numeric),
+        "bool" | "false" | "true" => Some(Bool),
+        "array" | "iterable" => Some(HashRef),
+        "void" | "null" | "mixed" | "never" | "object" | "callable" | "self"
+        | "static" | "parent" => None,
+        t => {
+            // `\App\Models\User` / `App\User` key by the unqualified
+            // leaf — the same identity classes are filed under.
+            let leaf = t.rsplit('\\').next().unwrap_or(t);
+            (!leaf.is_empty()
+                && leaf.chars().next().is_some_and(|c| c.is_alphabetic() || c == '_')
+                && !leaf.contains(['<', '>', '[', ']', '{', '}']))
+            .then(|| ClassName(leaf.to_string()))
+        }
+    }
+}
+
 pub fn php_pack() -> LangPack {
     LangPack {
         // Base skeleton + the bundled framework overlays (pure query
@@ -676,29 +731,7 @@ pub fn php_pack() -> LangPack {
         // navigation fact); unions/intersections defer (None → the flow
         // edge carries); `self`/`static` receiver substitution is a
         // documented residual (needs ReturnExpr::Receiver plumbing).
-        annot_type: |text| {
-            use InferredType::*;
-            let t = text.trim().trim_start_matches('?');
-            if t.contains('|') || t.contains('&') {
-                return None;
-            }
-            match t {
-                "string" => Some(String),
-                "int" | "float" => Some(Numeric),
-                "bool" | "false" | "true" => Some(Bool),
-                "array" | "iterable" => Some(HashRef),
-                "void" | "null" | "mixed" | "never" | "object" | "callable" | "self"
-                | "static" | "parent" => None,
-                t => {
-                    // `\App\Models\User` / `App\User` key by the unqualified
-                    // leaf — the same identity classes are filed under.
-                    let leaf = t.rsplit('\\').next().unwrap_or(t);
-                    (!leaf.is_empty()
-                        && leaf.chars().next().is_some_and(|c| c.is_alphabetic() || c == '_'))
-                    .then(|| ClassName(leaf.to_string()))
-                }
-            }
-        },
+        annot_type: php_annot_type,
         // `: static` / `: $this` are late-bound to the call's receiver —
         // fluent builders chain through `ReturnExpr::Receiver`. `self`
         // strictly means the defining class; substituting the receiver
@@ -1090,8 +1123,17 @@ fn phpdoc_type(raw: &str) -> Option<String> {
         .filter(|a| !a.eq_ignore_ascii_case("null") && !a.is_empty())
         .collect();
     let [one] = arms.as_slice() else { return None };
+    // Sequence spellings survive WHOLE — `annot_type` parses the element
+    // (`list<X>` / `array<K,V>` / `iterable<X>` / `X[]` → a one-slot
+    // `Sequence`); every other generic still strips to its base class
+    // (`Collection<int,User>` → `Collection`).
+    if one.ends_with("[]")
+        || (one.ends_with('>')
+            && ["list<", "array<", "iterable<"].iter().any(|p| one.starts_with(p)))
+    {
+        return Some(one.to_string());
+    }
     let base = one.split('<').next().unwrap_or(one);
-    let base = if base.ends_with("[]") { "array" } else { base };
     (!base.is_empty()).then(|| base.to_string())
 }
 

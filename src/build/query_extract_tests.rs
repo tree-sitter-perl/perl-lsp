@@ -3078,9 +3078,14 @@ function collect($v = null) {}
         fa.sub_return_type_at_arity("collect", None),
         Some(InferredType::ClassName("Collection".into())),
     );
-    // @var on an untyped property — class-wide extent
+    // @var on an untyped property — class-wide extent. The sequence
+    // spelling keeps its element (a one-slot Sequence), no longer
+    // collapsing to a bare array.
     let in_class = tree_sitter::Point { row: 4, column: 0 };
-    assert_eq!(fa.inferred_type_via_bag("counts", in_class), Some(InferredType::HashRef));
+    assert_eq!(
+        fa.inferred_type_via_bag("counts", in_class),
+        Some(InferredType::Sequence(vec![InferredType::Numeric]))
+    );
 }
 
 #[test]
@@ -4294,4 +4299,152 @@ do_action('shutdown');
     assert!(rows.contains(&4), "the firing site: {locs:?}");
     assert!(!rows.contains(&5), "'shutdown' is a different hook: {locs:?}");
     assert!(locs.iter().all(|l| l.rewritable), "rename rewrites inside quotes: {locs:?}");
+}
+
+#[test]
+fn php_member_rename_never_rewrites_import_leaves() {
+    // Round-3 R4 residual (now closed — this pins it): renaming a class-owned
+    // member (enum case / class const) named like an UNRELATED class's import
+    // leaf must not rewrite the `use` line — a class member never appears as
+    // a php import leaf.
+    let src = "\
+<?php
+namespace App;
+use PhpConsole\\Dispatcher\\Debug as DebugTool;
+enum Level {
+    case Debug;
+}
+class Cfg {
+    public const Debug = 1;
+}
+function pick(): int {
+    $x = Level::Debug;
+    return Cfg::Debug;
+}
+";
+    let (fa, _) = php_fa(src);
+    for (row, col, what) in [(4usize, 10usize, "enum case"), (7, 18, "class const")] {
+        let resolved = crate::index::resolve::resolve_symbol(
+            &fa,
+            tree_sitter::Point { row, column: col },
+            None,
+        );
+        let target = match resolved {
+            Some(crate::index::resolve::ResolvedTarget::Target(t)) => t,
+            other => panic!("{what} decl must mint a target: {other:?}"),
+        };
+        let locs = crate::index::resolve::refs_to_in_file(
+            &crate::index::file_store::FileStore::new(),
+            None,
+            &target,
+            &crate::index::file_store::FileKey::Path(std::path::PathBuf::from("/r4/t.php")),
+            &fa,
+            crate::index::resolve::RoleMask::VISIBLE,
+        );
+        assert!(
+            !locs.iter().any(|l| l.span.start.row == 2),
+            "{what}: the import line is not a reference of the member: {locs:?}"
+        );
+        assert!(
+            locs.iter().any(|l| l.span.start.row >= 9),
+            "{what}: the real access still answers: {locs:?}"
+        );
+    }
+}
+
+#[test]
+fn php_self_const_in_property_defaults_resolves() {
+    // R11: `self::CONST` in a class-LEVEL initializer (property default)
+    // was deterministically dark while the method-body form worked — the
+    // class-body scope opens under the OUTER package context, so the
+    // invocant ladder's scope-chain walk found no enclosing class.
+    // The structural fallback (narrowest containing Class symbol) fixes it.
+    let src = "\
+<?php
+class Fmt {
+    public const FORMAT = 'Y-m-d';
+    protected string $fmt = self::FORMAT;
+    public function render(): string {
+        return self::FORMAT;
+    }
+}
+";
+    let (fa, _) = php_fa(src);
+    let resolved = crate::index::resolve::resolve_symbol(
+        &fa,
+        tree_sitter::Point { row: 3, column: 35 },
+        None,
+    );
+    let target = match resolved {
+        Some(crate::index::resolve::ResolvedTarget::Target(t)) => t,
+        other => panic!("property-default self::FORMAT must resolve: {other:?}"),
+    };
+    assert!(
+        matches!(&target.kind, crate::index::resolve::TargetKind::Method { class } if class == "Fmt"),
+        "resolves to the class const: {target:?}"
+    );
+    let locs = crate::index::resolve::refs_to_in_file(
+        &crate::index::file_store::FileStore::new(),
+        None,
+        &target,
+        &crate::index::file_store::FileKey::Path(std::path::PathBuf::from("/r5/t.php")),
+        &fa,
+        crate::index::resolve::RoleMask::VISIBLE,
+    );
+    let rows: Vec<usize> = locs.iter().map(|l| l.span.start.row).collect();
+    assert!(rows.contains(&2), "the const decl: {locs:?}");
+    assert!(rows.contains(&3), "the property-default use: {locs:?}");
+    assert!(rows.contains(&5), "the method-body use: {locs:?}");
+}
+
+#[test]
+fn php_foreach_element_typing_peels_doc_sequences() {
+    // R10: `foreach ($this->handlers as $handler)` — the loop var types as
+    // the collection's ELEMENT: `@var list<X>` / `X[]` doc rows parse to a
+    // one-slot Sequence (REFINING a bare declared `array` — the spelling
+    // that cannot carry an element), and the foreach binder's
+    // `Projected{base, Element}` witness peels it, for member-access and
+    // simple-variable collections both.
+    let src = "\
+<?php
+class HandlerInterface {
+    public function handle(): string { return 'x'; }
+}
+class Stack {
+    /** @var list<HandlerInterface> */
+    protected array $handlers = [];
+    public function run(): void {
+        foreach ($this->handlers as $handler) {
+            $r = $handler->handle();
+        }
+    }
+    /** @param HandlerInterface[] $items */
+    public function drain(array $items): void {
+        foreach ($items as $h) {
+            $s = $h->handle();
+        }
+    }
+}
+";
+    let (fa, _) = php_fa(src);
+    use crate::model::file_analysis::InferredType;
+    let h = fa.inferred_type_via_bag("$handler", tree_sitter::Point { row: 9, column: 17 });
+    assert_eq!(
+        h,
+        Some(InferredType::ClassName("HandlerInterface".into())),
+        "member-access collection peels to the element: {h:?}"
+    );
+    let r = fa.inferred_type_via_bag("$r", tree_sitter::Point { row: 9, column: 13 });
+    assert_eq!(r, Some(InferredType::String), "and the element dispatches: {r:?}");
+    let h2 = fa.inferred_type_via_bag("$h", tree_sitter::Point { row: 15, column: 17 });
+    assert_eq!(
+        h2,
+        Some(InferredType::ClassName("HandlerInterface".into())),
+        "simple-variable collection (X[] param doc) peels too: {h2:?}"
+    );
+    // The sequence spellings never mint bogus classes.
+    assert_eq!((crate::build::query_extract::php_pack().annot_type)("list<A>"),
+        Some(InferredType::Sequence(vec![InferredType::ClassName("A".into())])));
+    assert_eq!((crate::build::query_extract::php_pack().annot_type)("array<int, \\App\\User>"),
+        Some(InferredType::Sequence(vec![InferredType::ClassName("User".into())])));
 }

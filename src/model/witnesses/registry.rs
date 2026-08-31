@@ -2063,6 +2063,13 @@ impl ReducerRegistry {
                                 })
                             }
                             ProjectionStep::ArrayIndex(i) => t.element_at(*i).cloned(),
+                            ProjectionStep::Element => match &t {
+                                crate::model::file_analysis::InferredType::Sequence(elems) => {
+                                    let mut it = elems.iter();
+                                    it.next().filter(|first| it.all(|e| e == *first)).cloned()
+                                }
+                                _ => None,
+                            },
                             ProjectionStep::MethodHop { member, arity } => {
                                 // Fresh dispatch on the base's class at the
                                 // call site's own arity; the base type IS the

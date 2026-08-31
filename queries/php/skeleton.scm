@@ -172,11 +172,17 @@
 ; cutoff). The `"as" .` anchor keeps the ITERATED SOURCE out: `$items` in
 ; `foreach ($items as $item)` is a read of an existing variable, and a
 ; pseudo-def there would steal the real declaration's later references.
+; The collection joins the same match (`@seq.source`) so the bound var
+; types as the collection's ELEMENT — the `Projected{base, Element}`
+; witness peels a doc-typed sequence (`@var list<Handler>`); the
+; key=>value pair form stays untyped (the key needs its own axis).
 (foreach_statement
+  . (_) @seq.source
   "as"
   .
   (variable_name) @def.var.name @def.var @flow.rebind)
 (foreach_statement
+  . (_) @seq.source
   "as"
   .
   (by_ref (variable_name) @def.var.name @def.var @flow.rebind))

@@ -287,6 +287,14 @@ pub enum ProjectionStep {
     /// nested call's span, carrying its own hop). Kept at the END for
     /// bincode variant-index stability (bump `EXTRACT_VERSION`).
     MethodHop { member: String, arity: u32 },
+    /// The UNIFORM element of a sequence — the foreach/iteration peel
+    /// (`foreach ($this->handlers as $handler)` types `$handler` as the
+    /// collection's element). Projects a `Sequence` all of whose elements
+    /// agree to that one type; a heterogeneous tuple or an untyped
+    /// `ArrayRef`/`HashRef` answers `None` (no index is in hand, so no
+    /// per-slot answer exists). Kept at the END for bincode variant-index
+    /// stability (bump `EXTRACT_VERSION`).
+    Element,
 }
 
 /// A sub's return type as a **deferred computation**, not a value:

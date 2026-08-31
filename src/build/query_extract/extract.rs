@@ -312,6 +312,10 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     // joined to the same match's `@ref.dispatch.named` string as the minted
     // DispatchCall's `dispatcher` label.
     let mut dispatch_via_by_match: HashMap<usize, String> = HashMap::new();
+    // `@seq.source` — a foreach's collection (span + text), joined to the
+    // same match's `@def.var` so the bound var carries the ELEMENT peel.
+    let mut seq_source_by_match: HashMap<usize, (crate::model::file_analysis::Span, String)> =
+        HashMap::new();
     for e in &events {
         if let Some(prefix) = e.cap.strip_suffix(".name") {
             names_by_match
@@ -334,6 +338,15 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
         }
         if e.cap == "dispatch.via" {
             dispatch_via_by_match.insert(e.match_id, e.text.clone());
+        }
+        if e.cap == "seq.source" {
+            seq_source_by_match.insert(
+                e.match_id,
+                (
+                    crate::model::file_analysis::Span { start: e.start, end: e.end },
+                    e.text.clone(),
+                ),
+            );
         }
     }
     // `@ns.inline` — an inline namespace's NAME token, fired by a name-only
@@ -827,6 +840,45 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                 // witness in its declaring scope, and this edge lets a
                 // property-access hop dispatch the field through the same
                 // class-keyed chase methods use.
+                // Foreach element peel: the loop var's value IS the
+                // collection's uniform element, deferred to query time via
+                // `Projected{base, Element}`. A simple-variable collection
+                // bases on the Variable (its witnesses live on the decl
+                // scope); anything else bases on the collection's own Expr
+                // span, where a member-access hop or call witness already
+                // answers (the same simple-vs-expression split the chain
+                // hop's receiver makes).
+                if kind == "var" {
+                    if let Some((src_span, src_text)) = seq_source_by_match.get(&e.match_id) {
+                        use crate::model::witnesses as wit;
+                        let simple_var = src_text.starts_with('$')
+                            && src_text[1..].chars().all(|c| c.is_alphanumeric() || c == '_');
+                        let base = if simple_var {
+                            wit::WitnessAttachment::Variable {
+                                name: (pack.shape_name)("ref.var", src_text),
+                                scope: cur_scope,
+                            }
+                        } else {
+                            wit::WitnessAttachment::Expr(*src_span)
+                        };
+                        out.witnesses.push(wit::Witness {
+                            attachment: wit::WitnessAttachment::Variable {
+                                name: (pack.shape_name)("def.var", &name),
+                                scope: cur_scope,
+                            },
+                            source: wit::WitnessSource::Builder("foreach_element".into()),
+                            payload: wit::WitnessPayload::Projected {
+                                base,
+                                step: wit::ProjectionStep::Element,
+                            },
+                            // Zero-width at the decl: the binding types the
+                            // var for its whole lifetime, so it must not be
+                            // skipped as a narrowing fact scoped to the
+                            // token (the same rule annot witnesses follow).
+                            span: Span { start: e.start, end: e.start },
+                        });
+                    }
+                }
                 if kind == "field" && pack.field_registry_edges {
                     if let Some(cls) = &pkg {
                         use crate::model::witnesses as wit;
@@ -1831,12 +1883,20 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                         DocFact::Var(t) => {
                             // A documented property types class-wide (member
                             // lookup is not sequential), exactly like a
-                            // declared field type; syntax-typed fields skip.
-                            if sym.kind == "field"
-                                && !annot_text_by_var
-                                    .contains_key(&(sym.name.clone(), sym.scope))
-                            {
-                                if let Some(ty) = (pack.annot_type)(t) {
+                            // declared field type. Syntax-typed fields skip
+                            // (declared wins — docblocks drift) EXCEPT when
+                            // the doc STRICTLY REFINES a bare container:
+                            // `protected array $h` + `@var list<X>` is the
+                            // canonical refinement — the syntax cannot spell
+                            // the element, the doc exists to add it.
+                            if sym.kind == "field" {
+                                let Some(ty) = (pack.annot_type)(t) else { continue };
+                                if doc_admits(
+                                    pack,
+                                    &annot_text_by_var,
+                                    (&sym.name, sym.scope),
+                                    &ty,
+                                ) {
                                     let span = scope_spans
                                         .get(sym.scope.0 as usize)
                                         .copied()
@@ -1848,8 +1908,8 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                             }
                         }
                         DocFact::Param { name, ty } => {
-                            // The def's own syntax-untyped parameter: the
-                            // first var of that name declared inside the def.
+                            // The def's own parameter — untyped, or a bare
+                            // container the doc refines (same rule as Var).
                             let Some(ty) = (pack.annot_type)(ty) else { continue };
                             let in_def = |p: Point| {
                                 (p.row, p.column) >= (sym.start.row, sym.start.column)
@@ -1858,7 +1918,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                             if let Some((n, sc, at)) = param_syms.iter().find(|(n, sc, at)| {
                                 n == name
                                     && in_def(*at)
-                                    && !annot_text_by_var.contains_key(&(n.clone(), *sc))
+                                    && doc_admits(pack, &annot_text_by_var, (n, *sc), &ty)
                             }) {
                                 doc_witnesses.push(doc_witness(
                                     n,
@@ -1871,12 +1931,79 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                     }
                 }
             }
+            // A refining doc row REPLACES the redundant bare-container annot
+            // witness on its slot (the fold is not latest-wins; leaving the
+            // `array` witness in place would keep beating the refinement).
+            let refined: std::collections::HashSet<(std::string::String, crate::model::file_analysis::ScopeId)> =
+                doc_witnesses
+                    .iter()
+                    .filter(|w| {
+                        matches!(
+                            &w.payload,
+                            crate::model::witnesses::WitnessPayload::InferredType(
+                                InferredType::Sequence(_)
+                            )
+                        )
+                    })
+                    .filter_map(|w| match &w.attachment {
+                        crate::model::witnesses::WitnessAttachment::Variable { name, scope } => {
+                            Some((name.clone(), *scope))
+                        }
+                        _ => None,
+                    })
+                    .collect();
+            if !refined.is_empty() {
+                out.witnesses.retain(|w| {
+                    let is_container_annot = matches!(
+                        &w.source,
+                        crate::model::witnesses::WitnessSource::Builder(s)
+                            if s == crate::model::witnesses::ANNOT_SOURCE
+                    ) && matches!(
+                        &w.payload,
+                        crate::model::witnesses::WitnessPayload::InferredType(
+                            InferredType::HashRef | InferredType::ArrayRef
+                        )
+                    );
+                    !(is_container_annot
+                        && matches!(
+                            &w.attachment,
+                            crate::model::witnesses::WitnessAttachment::Variable { name, scope }
+                                if refined.contains(&(name.clone(), *scope))
+                        ))
+                });
+            }
             out.witnesses.extend(doc_witnesses);
             out.symbols.extend(doc_methods);
         }
     }
     out.param_sigs = param_sigs;
     Ok(out)
+}
+
+/// Does a doc row get to type this (name, scope) slot? Yes when the syntax
+/// declared nothing (declared wins — docblocks drift), and ALSO when the doc
+/// is a `Sequence` refining a bare declared container (`array`/`iterable` —
+/// the spelling that cannot carry an element). The doc witness lands AFTER
+/// the declared one, so latest-wins reduction serves the refinement.
+fn doc_admits(
+    pack: &LangPack,
+    annot_text_by_var: &std::collections::HashMap<
+        (std::string::String, crate::model::file_analysis::ScopeId),
+        std::string::String,
+    >,
+    slot: (&str, crate::model::file_analysis::ScopeId),
+    doc_ty: &InferredType,
+) -> bool {
+    match annot_text_by_var.get(&(slot.0.to_string(), slot.1)) {
+        None => true,
+        Some(declared) => {
+            matches!(doc_ty, InferredType::Sequence(_))
+                && matches!(
+                    (pack.annot_type)(declared),
+                    Some(InferredType::HashRef | InferredType::ArrayRef)
+                )
+        }
+    }
 }
 
 /// A documentation-sourced type witness on a Variable slot — its own source

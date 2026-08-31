@@ -859,7 +859,26 @@ impl FileAnalysis {
                 return Some(pkg.clone());
             }
         }
-        None
+        // A pack class-BODY scope opens under the OUTER package context, so
+        // the chain carries no package for a ref sitting directly in the
+        // body (php `protected string $fmt = self::FORMAT;` — the property
+        // default). Structural fallback: the narrowest Class symbol whose
+        // span contains this scope IS the enclosing class.
+        let sc = self.scope(scope);
+        let contains = |o: &Span, i: &Span| {
+            (o.start.row, o.start.column) <= (i.start.row, i.start.column)
+                && (i.end.row, i.end.column) <= (o.end.row, o.end.column)
+        };
+        self.symbols
+            .iter()
+            .filter(|c| matches!(c.kind, SymKind::Class) && contains(&c.span, &sc.span))
+            .min_by_key(|c| {
+                (
+                    c.span.end.row - c.span.start.row,
+                    c.span.end.column,
+                )
+            })
+            .map(|c| c.name.clone())
     }
 
     /// The class of the method enclosing `point` — the implicit-`this` class

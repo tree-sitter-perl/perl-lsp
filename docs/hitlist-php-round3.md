@@ -66,16 +66,12 @@ types it `Level`, references from the decl answer 48 sites.
 The const-access member refs closed the main gap: `Level::Debug` from
 the decl now answers 198 refs (59 in src — the agent's grep found 55
 real usages; the agents probed a binary predating the access
-patterns). ONE over-match remains, and it is a real (small) rename
-hazard: renaming an enum case named `Debug` also rewrites the leaf of
-`use PhpConsole\Dispatcher\Debug as ...` — an UNRELATED class's
-import line. The import-leaf `@ref.type` (deliberate, so CLASS
-renames rewrite use lines) is being accepted by the member target's
-bare-name matching; the matcher arm that admits a PackageRef row for
-a class-OWNED member (Enumerator/const) target should refuse it — a
-class member never appears as a php import leaf. Repro: constproj +
-a decoy `use Some\Other\Debug as DebugTool;` — rename of the case
-edits the decoy line.
+patterns). The over-match residual is CLOSED: the decoy-import repro
+(`use PhpConsole\Dispatcher\Debug as DebugTool;` beside an enum case
+/ class const named `Debug`) no longer reproduces — an intervening
+slice (the FQ use-map work) fixed it — and
+`php_member_rename_never_rewrites_import_leaves` pins it for both
+member shapes.
 
 ## R5 — local variable refs fragmented per assignment — LANDED
 
@@ -159,12 +155,27 @@ NON-rewritable references: renaming `__construct` never touches
 1 → 193, and the heatmap dead-queue's `__construct` rows halved
 (58 → 29 — the rest are genuinely never constructed in-repo).
 
-## R10 — foreach ELEMENT typing (known engine residual)
+## R10 — foreach ELEMENT typing — LANDED
 
-Confirmed unchanged (`docs/prompt-sequence-types.md`): `$handler` in
-`foreach ($this->handlers as $handler)` untyped even with
-`@var list<HandlerInterface>` — needs both the generic peel
-(`list<X>` → element X) and the binder edge.
+Was: `$handler` in `foreach ($this->handlers as $handler)` untyped even
+with `@var list<HandlerInterface>`. Three pieces, all on the sequence
+rail the tuple spike built (`docs/adr/sequence-types.md`):
+- phpdoc sequence spellings (`list<X>` / `array<X>` / `array<K,V>` /
+  `iterable<X>` / `X[]`) parse to a one-slot `Sequence` carrying the
+  element (previously the ClassName fallback minted a BOGUS class
+  `list<X>` — the fix removes a wrong answer too).
+- A refining doc row now beats a bare declared container:
+  `protected array $h` + `@var list<X>` is the canonical php
+  refinement (the syntax cannot spell the element), so the doc witness
+  REPLACES the redundant `array` annot on that slot; unrelated
+  declared types still win.
+- The foreach binder mints `Variable → Projected{base, Element}` —
+  a new uniform-element `ProjectionStep` (all elements agree → that
+  type; heterogeneous/untyped → None) — base = the collection's
+  Variable (simple) or its Expr span (member access, riding the hop).
+Re-verified on monolog GroupHandler: `$handler` hovers
+`HandlerInterface`; gd on `->isHandling` / `->handle` off the loop var
+lands in HandlerInterface.php.
 
 ## R10b — BookStack (Laravel-app) follow-on probes
 
@@ -219,8 +230,12 @@ From the framework-tier round on the real app + vendor corpus:
   one binary, re-open with the stub-vs-blob diff (`stubs` rows are
   symbols-evicted BY DESIGN — the check is that symbol-needing readers
   rehydrate, not that stubs carry symbols).
-- `self::CONST` in CLASS-LEVEL initializers (property defaults)
-  deterministically dark; the method-body form works (same file).
+- `self::CONST` in CLASS-LEVEL initializers — LANDED: the class-body
+  scope opens under the OUTER package context, so the invocant
+  ladder's scope-chain walk found no enclosing class for a ref
+  sitting directly in the body; `enclosing_class_for_scope` now falls
+  back structurally (narrowest containing Class symbol). gd/refs on a
+  property-default `self::FORMAT` answer like the method-body form.
 - gd on exactly-typed `(new Collection)->contains` also returns the
   subclass override (belongs to implementations, not gd).
 - Completion ignores visibility (private members offered externally);

@@ -136,6 +136,18 @@ templates). Market case and build-out plan in `docs/prompt-php-target.md`.
   references from either side list all of them (190 sites across 127
   WordPress core files for `'init'`), and renaming a hook rewrites
   the string at every site.
+- **foreach loop variables type as the element.**
+  `foreach ($this->handlers as $handler)` with
+  `@var HandlerInterface[]` (or `list<X>` / `array<K, V>` /
+  `iterable<X>`) types `$handler` as `HandlerInterface` — hover,
+  member completion, and goto-def off the loop variable all follow.
+  A `@var`/`@param` sequence doc now refines a bare declared `array`
+  (previously it was discarded as conflicting), and sequence
+  spellings no longer mint bogus class names like `list<X>`.
+- **`self::CONST` in property defaults resolves.**
+  `protected string $fmt = self::FORMAT;` — goto-def and references
+  on the class-level initializer now answer like the method-body
+  form.
 - **Promoted constructor properties navigate.**
   `public readonly Level $level` in a ctor signature: goto-def, hover,
   and references now work from the `$record->level` access token, and
