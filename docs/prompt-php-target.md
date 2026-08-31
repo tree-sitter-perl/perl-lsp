@@ -111,8 +111,8 @@ anchor binds `$item`/`$k => $v`/`&$ref` without re-declaring the
 iterated source) — refs/hover/highlight/rename on loop vars all light
 up. Ledgered with evidence: `--implementations` misses the direct
 interface implementer and short-name collisions pollute
-type-hierarchy/references (`Repository` × 3 namespaces — the FQ-identity
-arc, build-out item 2); foreach ELEMENT typing is the sequence-types
+type-hierarchy/references (`Repository` × 3 namespaces — CLOSED by
+build-out item 2's FQ-identity slice); foreach ELEMENT typing is the sequence-types
 engine residual; `toArray()` decl-vs-trait-impl ranking; semantic-tokens
 wants absolute paths.
 
@@ -138,19 +138,37 @@ production engine, zero engine special-cases:
 
 ## The build-out (sequenced like cpp's arc)
 
-1. **Composer visibility — the top real-world gap.** A composer project
-   gitignores `vendor/`, so the workspace walker never sees it: gd on a
-   library method (`$w->spin()` where Widget lives in vendor/) is dark
-   and the class is absent from workspace-symbol (reproduced round 1).
-   Parse the project map (`composer.json` `autoload.psr-4` +
-   `vendor/composer/installed.json`, which is plain JSON) into a
-   `SearchPath`-flavored axis; `vendor/` indexes as the DEPENDENCY tier
-   (role-masked, like `@INC`), resolved on demand through
-   `module_paths`' designed Index-layer consumer. Until then
-   `module_paths` carries the namespace-mirrors-directories guess.
-2. **FQ identity.** The pack keys classes by unqualified leaf (cpp
-   parity). PHP namespaces + `use` aliasing need the qualified name on
-   the symbol with leaf-keyed dispatch — decide when composer roots land.
+1. **Composer visibility.** LANDED — `LanguageDriver::dependency_roots`
+   (the pack's analog of `@INC`): the php driver reads `composer.json`
+   (the gate) + `vendor/composer/installed.json` install paths, the
+   bulk indexer walks those roots ignore-rules-off (vendor/ is
+   gitignored by design), and `is_dependency_path` attributes each
+   candidate to the DEPENDENCY tier per path — so gd/references reach
+   vendor code while rename's EDITABLE mask (OPEN|WORKSPACE) refuses to
+   rewrite it. `autoload.psr-4` dirs remain unread — the name-keyed
+   candidate relation covers them via the workspace walk.
+2. **FQ identity.** LANDED for the inheritance-edge axis — symbols stay
+   leaf-keyed (cpp parity, the engine's identity), with namespace
+   claims layered on: the extract-time use-map (alias/group aware)
+   resolves a parent's WRITTEN spelling to its real leaf + namespace
+   (`use X\Y as Z` edges were dead under `Z`), each edge records
+   `(child, parent leaf, parent ns)` in the `parent_namespaces` pack
+   lane, and `implementations_of` validates leaf-keyed chain hops
+   against those rows (three-outcome BFS: agreeing/unrecorded ns →
+   keep, reached only through a recorded mismatch → prune, unreachable
+   → keep) so Laravel's three same-leaf `Repository`s stop conflating.
+   The aliased-contract idiom (`class Repository implements
+   CacheContract`) resolves to a SELF-LOOP in leaf space — the direct
+   implementer carries the contract's own leaf, which both arms'
+   contract-side exclusions used to eat; the namespace rows re-admit
+   it (a foreign-ns declaration recording the edge back to the
+   contract's ns), which is exactly the round-2 pull/put probe fix
+   (verified on laravel/framework: pull → Cache/Repository.php:228;
+   put → :367 + RedisTaggedCache.php:52; the interface name → those
+   plus TaggedCache, never the Config/Log strangers).
+   Residual: `refs_to`/rename still leaf-keyed (over-approximate, never
+   wrong-file for gd since goto-def ranks); full FQ symbol identity
+   waits for a real need.
 3. **Stdlib tier.** phpstorm-stubs (Apache-2.0) is the builtin surface —
    consumable the way `builtins.pod` feeds the Perl BUILTIN tier.
 4. **Receiver-substituting returns.** LANDED — the `rettype_receiver`

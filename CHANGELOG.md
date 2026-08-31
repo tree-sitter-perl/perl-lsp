@@ -72,6 +72,15 @@ templates). Market case and build-out plan in `docs/prompt-php-target.md`.
 - **Duplicate declarations** (WordPress's `noop.php` stubs) answer the
   full ranked definition family — the real signature first by arity fit —
   instead of one confidently-wrong winner.
+- **Composer vendor tier.** `vendor/` is indexed as the dependency tier
+  even though it's gitignored — install paths come from
+  `vendor/composer/installed.json`. Goto-def and references reach
+  library code; rename never rewrites it.
+- **Namespace identity.** `use X\Y as Z` aliases resolve on inheritance
+  edges (Laravel's `Repository as CacheContract` now reaches the
+  implementer), and same-leaf classes in different namespaces
+  (Laravel's three `Repository`s) no longer pollute each other's
+  implementations/type-hierarchy answers.
 
 ### Storage engine — warm starts, bounded memory
 

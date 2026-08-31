@@ -33,13 +33,13 @@
   (base_clause (name) @parent @ref.type))
 (class_declaration
   name: (name) @def.class.name
-  (base_clause (qualified_name (name) @parent @ref.type)))
+  (base_clause (qualified_name (name) @parent @ref.type) @parent.fq))
 (interface_declaration
   name: (name) @def.class.name
   (base_clause (name) @parent @ref.type))
 (interface_declaration
   name: (name) @def.class.name
-  (base_clause (qualified_name (name) @parent @ref.type)))
+  (base_clause (qualified_name (name) @parent @ref.type) @parent.fq))
 ; `implements Contract` — an interface is a parent for method-resolution
 ; purposes (the contract's declarations answer hover/completion).
 (class_declaration
@@ -47,7 +47,7 @@
   (class_interface_clause (name) @parent @ref.type))
 (class_declaration
   name: (name) @def.class.name
-  (class_interface_clause (qualified_name (name) @parent @ref.type)))
+  (class_interface_clause (qualified_name (name) @parent @ref.type) @parent.fq))
 ; `use SomeTrait;` inside a class body — trait methods resolve through the
 ; same ancestor walk (PHP flattening ≈ role composition ≈ parent edge).
 (class_declaration
@@ -55,7 +55,7 @@
   body: (declaration_list (use_declaration (name) @parent @ref.type)))
 (class_declaration
   name: (name) @def.class.name
-  body: (declaration_list (use_declaration (qualified_name (name) @parent @ref.type))))
+  body: (declaration_list (use_declaration (qualified_name (name) @parent @ref.type) @parent.fq)))
 
 ; enum cases: real enumerators — parent-enum typing + container tagging
 ; come generically from the engine's enumerator lane.
@@ -131,6 +131,30 @@
 ; the imported leaf is a live class reference — cross-file rename
 ; rewrites the use line too.
 (namespace_use_clause (qualified_name (name) @ref.type))
+
+; ---- the file's use-map (alias- and group-aware) ----
+; What each imported leaf/alias MEANS — parents resolve through it
+; before the namespace-relative default. Direct clauses anchor on the
+; declaration so the group form (whose clauses are bare names under a
+; shared prefix) never double-mints.
+; the leading `.` anchors pin the import name to the clause's FIRST child:
+; without them the un-fielded (name) alternative also matches the alias
+; node as its own combination, and that poison row races the real one for
+; the same use-map key (HashMap order decided the winner — flaky by build).
+(namespace_use_declaration
+  (namespace_use_clause
+    . (qualified_name) @use.fqn
+    alias: (name)? @use.alias))
+(namespace_use_declaration
+  (namespace_use_clause
+    . (name) @use.fqn
+    alias: (name)? @use.alias))
+(namespace_use_declaration
+  (namespace_name) @use.prefix
+  body: (namespace_use_group
+    (namespace_use_clause
+      . (name) @use.leaf
+      alias: (name)? @use.alias)))
 
 ; ---- assignment IS declaration (Perl-loose, Python-identical) ----
 (assignment_expression

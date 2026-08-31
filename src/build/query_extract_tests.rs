@@ -3170,3 +3170,236 @@ function walk($items, $map) {
         "the echo use of $item resolves to the loop binding",
     );
 }
+
+#[test]
+fn php_parent_edges_resolve_aliases_and_record_namespaces() {
+    // The FQ identity lane: `use X\Y as Z` parents recorded under Z were
+    // dead edges (Laravel's `Repository as CacheContract` hid the direct
+    // implementer from implementations); unqualified parents bind to the
+    // file's own namespace; written qualifiers carry their own.
+    let src = "\
+<?php
+namespace App\\Cache;
+
+use Illuminate\\Contracts\\Cache\\Repository as CacheContract;
+use Psr\\Log\\{LoggerInterface, NullLogger as Quiet};
+
+class Repo extends \\Vendor\\Base implements CacheContract
+{
+}
+class Local extends Helper
+{
+}
+class Logging extends Quiet
+{
+}
+";
+    let mut parser = php_parser();
+    let tree = parser.parse(src, None).unwrap();
+    let skel = extract(&tree, src.as_bytes(), &php_pack()).unwrap();
+    let rows: Vec<(&str, &str, &str)> = skel
+        .parent_namespaces
+        .iter()
+        .map(|(c, p, n)| (c.as_str(), p.as_str(), n.as_str()))
+        .collect();
+    // alias resolved to the REAL leaf, namespace from the import
+    assert!(
+        rows.contains(&("Repo", "Repository", "Illuminate\\Contracts\\Cache")),
+        "{rows:?}"
+    );
+    assert!(
+        skel.parents.contains(&("Repo".into(), "Repository".into())),
+        "the edge must key the real leaf, not the alias: {:?}",
+        skel.parents
+    );
+    // written qualifier is authoritative
+    assert!(rows.contains(&("Repo", "Base", "Vendor")), "{rows:?}");
+    // unqualified binds to the file's own namespace
+    assert!(rows.contains(&("Local", "Helper", "App\\Cache")), "{rows:?}");
+    // group-use alias resolves through the shared prefix
+    assert!(rows.contains(&("Logging", "NullLogger", "Psr\\Log")), "{rows:?}");
+}
+
+#[test]
+fn php_implementations_disambiguate_same_leaf_interfaces() {
+    // Two unrelated `Repository` interfaces in different namespaces, one
+    // implementer each. From a file that imports the CACHE one,
+    // implementations must list the cache implementer and NOT the log one
+    // (round-2: Laravel's three Repositories polluted the family walks).
+    let contract_cache =
+        "<?php\nnamespace Contracts\\Cache;\n\ninterface Repository\n{\n    public function pull(): string;\n}\n";
+    let contract_log =
+        "<?php\nnamespace Contracts\\Log;\n\ninterface Repository\n{\n    public function pull(): string;\n}\n";
+    let impl_cache = "\
+<?php
+namespace Cache;
+
+use Contracts\\Cache\\Repository;
+
+class CacheRepo implements Repository
+{
+    public function pull(): string { return \"c\"; }
+}
+";
+    let impl_log = "\
+<?php
+namespace Log;
+
+use Contracts\\Log\\Repository;
+
+class LogRepo implements Repository
+{
+    public function pull(): string { return \"l\"; }
+}
+";
+    let (fa_cc, _) = php_fa(contract_cache);
+    let (fa_cl, _) = php_fa(contract_log);
+    let (fa_ic, _) = php_fa(impl_cache);
+    let (fa_il, _) = php_fa(impl_log);
+
+    let idx = crate::index::module_index::ModuleIndex::new_for_test();
+    let mk = |path: &str, fa: crate::model::file_analysis::FileAnalysis| {
+        std::sync::Arc::new(crate::index::module_index::CachedModule::new(
+            std::path::PathBuf::from(path),
+            std::sync::Arc::new(fa),
+        ))
+    };
+    idx.insert_cache_providers(
+        "Repository",
+        Some(vec![
+            mk("/fq/contracts/cache/Repository.php", fa_cc.clone()),
+            mk("/fq/contracts/log/Repository.php", fa_cl),
+        ]),
+    );
+    idx.insert_cache("CacheRepo", Some(mk("/fq/cache/CacheRepo.php", fa_ic)));
+    idx.insert_cache("LogRepo", Some(mk("/fq/log/LogRepo.php", fa_il)));
+
+    // Origin = the cache contract's own file; cursor identity = the class.
+    let target = crate::index::resolve::TargetRef::new(
+        "Repository".into(),
+        crate::index::resolve::TargetKind::Package,
+    );
+    let locs = crate::index::resolve::implementations_of(&fa_cc, Some(&idx), &target);
+    let files: Vec<String> = locs
+        .iter()
+        .map(|l| match &l.key {
+            crate::index::file_store::FileKey::Path(p) => p.to_string_lossy().into_owned(),
+            crate::index::file_store::FileKey::Url(u) => u.to_string(),
+        })
+        .collect();
+    assert!(
+        files.iter().any(|f| f.contains("CacheRepo")),
+        "the agreeing family's implementer must be listed: {files:?}"
+    );
+    assert!(
+        !files.iter().any(|f| f.contains("LogRepo")),
+        "a same-leaf stranger's implementer must NOT be listed: {files:?}"
+    );
+}
+
+#[test]
+fn php_implementations_reach_same_leaf_direct_implementer() {
+    // Laravel's aliased-contract idiom: `class Repository implements
+    // CacheContract` where the alias resolves to `Contracts\Cache\
+    // Repository` — a SELF-LOOP in leaf space. The contract-line
+    // exclusion used to eat the direct implementer; the namespace rows
+    // re-admit it, and a third same-leaf family (config) stays out.
+    let contract_cache =
+        "<?php\nnamespace Contracts\\Cache;\n\ninterface Repository\n{\n    public function pull(): string;\n}\n";
+    let contract_config =
+        "<?php\nnamespace Contracts\\Config;\n\ninterface Repository\n{\n    public function pull(): string;\n}\n";
+    let impl_cache = "\
+<?php
+namespace Cache;
+
+use Contracts\\Cache\\Repository as CacheContract;
+
+class Repository implements CacheContract
+{
+    public function pull(): string { return \"c\"; }
+}
+";
+    let impl_config = "\
+<?php
+namespace Config;
+
+use Contracts\\Config\\Repository as ConfigContract;
+
+class Repository implements ConfigContract
+{
+    public function pull(): string { return \"k\"; }
+}
+";
+    let (fa_cc, _) = php_fa(contract_cache);
+    let (fa_kc, _) = php_fa(contract_config);
+    let (fa_ic, _) = php_fa(impl_cache);
+    let (fa_ik, _) = php_fa(impl_config);
+
+    let idx = crate::index::module_index::ModuleIndex::new_for_test();
+    let mk = |path: &str, fa: crate::model::file_analysis::FileAnalysis| {
+        std::sync::Arc::new(crate::index::module_index::CachedModule::new(
+            std::path::PathBuf::from(path),
+            std::sync::Arc::new(fa),
+        ))
+    };
+    idx.insert_cache_providers(
+        "Repository",
+        Some(vec![
+            mk("/fq2/contracts/cache/Repository.php", fa_cc.clone()),
+            mk("/fq2/contracts/config/Repository.php", fa_kc),
+            mk("/fq2/cache/Repository.php", fa_ic),
+            mk("/fq2/config/Repository.php", fa_ik),
+        ]),
+    );
+
+    // Cursor on `pull` in the CACHE contract.
+    let target = crate::index::resolve::TargetRef::method(
+        "pull".into(),
+        "Repository".into(),
+        &fa_cc,
+        Some(&idx),
+        crate::index::resolve::OverrideScope::Hierarchy,
+    );
+    let locs = crate::index::resolve::implementations_of(&fa_cc, Some(&idx), &target);
+    let files: Vec<String> = locs
+        .iter()
+        .map(|l| match &l.key {
+            crate::index::file_store::FileKey::Path(p) => p.to_string_lossy().into_owned(),
+            crate::index::file_store::FileKey::Url(u) => u.to_string(),
+        })
+        .collect();
+    assert!(
+        files.iter().any(|f| f.contains("/fq2/cache/")),
+        "the same-leaf direct implementer's pull must be listed: {files:?}"
+    );
+    assert!(
+        !files.iter().any(|f| f.contains("/fq2/config/")),
+        "a third same-leaf family must NOT be listed: {files:?}"
+    );
+    assert!(
+        !files.iter().any(|f| f.contains("/fq2/contracts/")),
+        "the contracts themselves are not implementations: {files:?}"
+    );
+
+    // Package arm (cursor on the interface NAME): same self-loop, same rows.
+    let target = crate::index::resolve::TargetRef::new(
+        "Repository".into(),
+        crate::index::resolve::TargetKind::Package,
+    );
+    let locs = crate::index::resolve::implementations_of(&fa_cc, Some(&idx), &target);
+    let files: Vec<String> = locs
+        .iter()
+        .map(|l| match &l.key {
+            crate::index::file_store::FileKey::Path(p) => p.to_string_lossy().into_owned(),
+            crate::index::file_store::FileKey::Url(u) => u.to_string(),
+        })
+        .collect();
+    assert!(
+        files.iter().any(|f| f.contains("/fq2/cache/")),
+        "the same-leaf direct implementer's class must be listed: {files:?}"
+    );
+    assert!(
+        !files.iter().any(|f| f.contains("/fq2/config/")),
+        "a third same-leaf family must NOT be listed: {files:?}"
+    );
+}

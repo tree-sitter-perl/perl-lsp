@@ -82,6 +82,11 @@ pub struct SkeletonAnalysis {
     pub witnesses: Vec<crate::model::witnesses::Witness>,
     /// (child class, parent class) inheritance edges — `@parent` captures.
     pub parents: Vec<(String, String)>,
+    /// FQ disambiguation rows for the edges above, minted only by
+    /// namespace-relative packs: `(child leaf, parent leaf, parent
+    /// namespace)` — empty namespace = the global one. Same-named classes
+    /// in different namespaces stop conflating in the family walks.
+    pub parent_namespaces: Vec<(String, String, String)>,
     /// (specialization, primary) family edges — a `@spec.primary` capture in
     /// a class-def match whose name is a template spelling. Rides onto
     /// `FileAnalysis.pack.specializes`; the graph's `Specializes` edge derives from
@@ -1180,6 +1185,7 @@ impl SkeletonAnalysis {
                 .drain(..)
                 .map(|(raw, span)| (span, raw))
                 .collect(),
+            parent_namespaces: std::mem::take(&mut self.parent_namespaces),
             domain_sites: std::mem::take(&mut self.domain_sites),
             moved_from: std::mem::take(&mut self.moved_from),
             control_regions: std::mem::take(&mut self.control_regions),

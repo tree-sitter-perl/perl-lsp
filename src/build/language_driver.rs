@@ -1251,6 +1251,8 @@ fn remap_spans(
         scopes,
         witnesses,
         parents: _,
+        // FQ rows — leaf/ns strings, no spans to remap.
+        parent_namespaces: _,
         var_reads,
         label_refs,
         receiver_names: _,

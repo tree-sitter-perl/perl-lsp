@@ -395,6 +395,51 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     }
     let mut annot_text_by_var: HashMap<(String, crate::model::file_analysis::ScopeId), String> =
         HashMap::new();
+    // ---- the file's use-map + written parent qualifiers ----
+    // `binding leaf (or alias) → (namespace, real leaf)`, from the `@use.*`
+    // captures; `@parent.fq` carries a parent's own written qualifier. Both
+    // feed the namespace-relative parent resolution in the `@parent` handler
+    // (packs with `namespace_relative_parents` only — empty otherwise).
+    let mut use_map: HashMap<String, (String, String)> = HashMap::new();
+    let mut parent_fq_by_match: HashMap<usize, String> = HashMap::new();
+    if pack.namespace_relative_parents {
+        let mut use_fqn: HashMap<usize, String> = HashMap::new();
+        let mut use_prefix: HashMap<usize, String> = HashMap::new();
+        let mut use_leaf: HashMap<usize, String> = HashMap::new();
+        let mut use_alias: HashMap<usize, String> = HashMap::new();
+        for e in &events {
+            match e.cap.as_str() {
+                "use.fqn" => {
+                    use_fqn.insert(e.match_id, e.text.clone());
+                }
+                "use.prefix" => {
+                    use_prefix.insert(e.match_id, e.text.clone());
+                }
+                "use.leaf" => {
+                    use_leaf.insert(e.match_id, e.text.clone());
+                }
+                "use.alias" => {
+                    use_alias.insert(e.match_id, e.text.clone());
+                }
+                "parent.fq" => {
+                    parent_fq_by_match.insert(e.match_id, e.text.clone());
+                }
+                _ => {}
+            }
+        }
+        for (mid, fqn) in &use_fqn {
+            let (leaf, ns) = split_ns_leaf(fqn);
+            let key = use_alias.get(mid).cloned().unwrap_or_else(|| leaf.clone());
+            use_map.insert(key, (ns, leaf));
+        }
+        // group form: `use A\B\{C, D as E}` — the prefix is the namespace,
+        // each clause's own name the leaf.
+        for (mid, leaf) in &use_leaf {
+            let Some(prefix) = use_prefix.get(mid) else { continue };
+            let key = use_alias.get(mid).cloned().unwrap_or_else(|| leaf.clone());
+            use_map.insert(key, (prefix.trim_start_matches('\\').to_string(), leaf.clone()));
+        }
+    }
 
     // ---- the state machine: scope stack + sticky contexts ----
     let mut out = SkeletonAnalysis::default();
@@ -673,8 +718,37 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                     // Shaped like the child's def name (cpp canonicalizes a
                     // template-spelled base) so the edge joins the identity
                     // the target class was filed under.
-                    out.parents
-                        .push((child.clone(), (pack.shape_name)("parent", &e.text)));
+                    let shaped = (pack.shape_name)("parent", &e.text);
+                    if !pack.namespace_relative_parents {
+                        out.parents.push((child.clone(), shaped));
+                    } else {
+                        // php name binding, most-specific first: a written
+                        // qualifier is authoritative; else the file's
+                        // use-map (an ALIAS resolves to the real leaf — the
+                        // `use X as Y` edge was dead under the alias
+                        // spelling); else the unqualified default IS the
+                        // child's own namespace (PHP class names never fall
+                        // through to global). Every edge records its
+                        // namespace for FQ chain validation.
+                        let (leaf, ns) = if let Some(fq) =
+                            parent_fq_by_match.get(&e.match_id)
+                        {
+                            split_ns_leaf(fq)
+                        } else if let Some((ns, real_leaf)) = use_map.get(shaped.as_str()) {
+                            (real_leaf.clone(), ns.clone())
+                        } else {
+                            let ns = out
+                                .symbols
+                                .iter()
+                                .rev()
+                                .find(|s| s.kind == "class" && &s.name == child)
+                                .and_then(|s| s.package.clone())
+                                .unwrap_or_default();
+                            (shaped, ns)
+                        };
+                        out.parents.push((child.clone(), leaf.clone()));
+                        out.parent_namespaces.push((child.clone(), leaf, ns));
+                    }
                 }
             }
             cap if cap.starts_with("def.") && !cap.ends_with(".name") => {
@@ -1559,6 +1633,17 @@ pub(crate) fn looks_like_type_spelling(body: &str) -> bool {
         return false;
     }
     b.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == ':' || c == ' ')
+}
+
+/// Split a written qualified name into `(leaf, namespace)` at its last
+/// separator, leading-`\` (a php global-anchored spelling) trimmed. A
+/// separator-less spelling is a bare leaf in the global namespace.
+fn split_ns_leaf(fq: &str) -> (String, String) {
+    let t = fq.trim_start_matches('\\');
+    match t.rsplit_once('\\') {
+        Some((ns, leaf)) => (leaf.to_string(), ns.to_string()),
+        None => (t.to_string(), String::new()),
+    }
 }
 
 /// A bare identifier lexeme — the only shape that can name an enumerator.

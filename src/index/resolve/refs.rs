@@ -720,6 +720,133 @@ fn sorted_deduped(mut out: Vec<RefLocation>) -> Vec<RefLocation> {
 /// A descendant role's own re-`requires` marker is a contract
 /// re-declaration, not an implementation — `role_requires` is the
 /// recorded fact that identifies (and excludes) it.
+/// The target class's namespace AS SEEN FROM the origin — the FQ anchor the
+/// family walks validate against. The origin either declares the class
+/// itself (its symbol's `package` IS the namespace; `None` package = the
+/// global one, spelled `""`) or imported it (the pack's import texts carry
+/// the full qualified spelling). `None` = the origin makes no claim, and
+/// the FQ filter stands down entirely.
+/// The namespace a file's own Class-symbol declaration of `leaf` carries
+/// (`None` package = the global namespace, spelled `""`).
+fn class_ns_of(a: &FileAnalysis, leaf: &str) -> Option<String> {
+    a.symbols()
+        .iter()
+        .find(|s| matches!(s.kind, SymKind::Class) && s.name == leaf)
+        .map(|s| s.package.clone().unwrap_or_default())
+}
+
+/// Does this file declare `leaf` in a namespace OTHER than `contract_ns`,
+/// with a recorded inheritance edge back onto `leaf` IN `contract_ns`?
+/// That is the same-leaf direct-implementer witness: Laravel's
+/// `class Repository implements CacheContract` (the alias resolving to
+/// `Contracts\Cache\Repository`) is a SELF-LOOP in leaf space, and only
+/// the namespace rows tell the implementer from the contract.
+fn declares_self_leaf_implementer(a: &FileAnalysis, leaf: &str, contract_ns: &str) -> bool {
+    class_ns_of(a, leaf).is_some_and(|ns| ns != contract_ns)
+        && a.pack
+            .parent_namespaces
+            .iter()
+            .any(|(c, p, ns)| c == leaf && p == leaf && ns == contract_ns)
+}
+
+fn origin_class_ns(origin: &FileAnalysis, class: &str) -> Option<String> {
+    if let Some(ns) = class_ns_of(origin, class) {
+        return Some(ns);
+    }
+    for (_, raw) in &origin.pack.include_directives {
+        let t = raw.trim_start_matches('\\');
+        if let Some(ns) = t.strip_suffix(class) {
+            if let Some(ns) = ns.strip_suffix('\\') {
+                return Some(ns.to_string());
+            }
+            if ns.is_empty() {
+                return Some(String::new());
+            }
+        }
+    }
+    None
+}
+
+/// FQ-validate one leaf-keyed family candidate: walk `from`'s parent
+/// chain upward and classify how it reaches `target`. Three outcomes per
+/// complete walk, and only a PROVEN wrong family prunes:
+/// - some chain reaches `target` with the recorded namespace agreeing (or
+///   no namespace recorded — Perl, cpp, pre-FQ analyses make no claim) →
+///   keep;
+/// - every chain that reaches `target` does so through a RECORDED,
+///   MISMATCHING namespace (Laravel's three same-leaf `Repository`s) →
+///   prune;
+/// - no chain reaches `target` at all (a co-ancestor sitting BESIDE the
+///   target in a shared descendant's MRO — DBIC's `Ordered`) → keep, the
+///   gather put it there for a reason this walk can't see.
+fn fq_family_member(
+    origin: &FileAnalysis,
+    idx: &dyn CrossFileLookup,
+    from: &str,
+    target: &str,
+    target_ns: &str,
+) -> bool {
+    use std::collections::VecDeque;
+    let ns_agrees = |candidate: &str| candidate == target_ns;
+    let mut queue: VecDeque<(String, Option<String>)> =
+        std::iter::once((from.to_string(), None)).collect();
+    let mut seen: std::collections::HashSet<(String, Option<String>)> = Default::default();
+    let mut reached_any = false;
+    let mut budget = 2048usize;
+    while let Some((leaf, want_ns)) = queue.pop_front() {
+        if !seen.insert((leaf.clone(), want_ns.clone())) {
+            continue;
+        }
+        if budget == 0 {
+            // Truncated walk proves nothing — keep (never prune on a budget).
+            return true;
+        }
+        budget -= 1;
+        // Every analysis declaring `leaf`: the origin's own plus the index's
+        // candidates (symbols view: the class row + the pinned parents lane).
+        let mut visit = |a: &FileAnalysis| -> bool {
+            if let Some(w) = &want_ns {
+                let cls_ns = a
+                    .symbols()
+                    .iter()
+                    .find(|s| matches!(s.kind, SymKind::Class) && s.name == leaf)
+                    .map(|s| s.package.clone().unwrap_or_default());
+                if cls_ns.as_deref() != Some(w.as_str()) {
+                    return false; // not the namespace this hop meant
+                }
+            }
+            for parent in a.declared_parents(&leaf) {
+                let rec = a
+                    .pack
+                    .parent_namespaces
+                    .iter()
+                    .find(|(c, p, _)| c == &leaf && p == parent)
+                    .map(|(_, _, ns)| ns.clone());
+                if parent == target {
+                    reached_any = true;
+                    match &rec {
+                        Some(ns) if ns_agrees(ns) => return true,
+                        Some(_) => {} // recorded, wrong family — keep looking
+                        None => return true, // no claim → agree (status quo)
+                    }
+                }
+                queue.push_back((parent.clone(), rec));
+            }
+            false
+        };
+        if visit(origin) {
+            return true;
+        }
+        for cached in idx.def_candidates(&leaf) {
+            let a = idx.symbols_present(&cached);
+            if visit(&a) {
+                return true;
+            }
+        }
+    }
+    !reached_any
+}
+
 pub fn implementations_of(
     origin: &FileAnalysis,
     module_index: Option<&dyn CrossFileLookup>,
@@ -750,10 +877,39 @@ pub fn implementations_of(
                     crate::model::graph::WalkControl::Continue
                 },
             );
+            // FQ family gate: with three same-leaf `Repository`s, INHERITS_INV
+            // from the leaf conflates the families — keep only descendants
+            // whose chain provably belongs (or makes no claim).
+            let mut same_leaf_contract_ns: Option<String> = None;
+            if let Some(tns) = origin_class_ns(origin, &target.name) {
+                descendants
+                    .retain(|d| fq_family_member(origin, idx, d, &target.name, &tns));
+                // The self-loop case (`class Repository implements` its
+                // same-leaf contract): the walk never re-visits its own seed,
+                // so the direct implementer is absent from `descendants`.
+                // Re-admit the leaf on namespace-row evidence; emission below
+                // serves only the witnessing declarations.
+                if idx
+                    .def_candidates(&target.name)
+                    .iter()
+                    .any(|c| {
+                        declares_self_leaf_implementer(&idx.symbols_present(c), &target.name, &tns)
+                    })
+                {
+                    descendants.push(target.name.clone());
+                    same_leaf_contract_ns = Some(tns);
+                }
+            }
             for pkg in &descendants {
+                let self_leaf_ns = same_leaf_contract_ns.as_ref().filter(|_| pkg == &target.name);
                 for cached in idx.def_candidates(pkg) {
                     // Declaration-site scan reads symbols only.
                     let whole = idx.symbols_present(&cached);
+                    if let Some(tns) = self_leaf_ns {
+                        if !declares_self_leaf_implementer(&whole, pkg, tns) {
+                            continue;
+                        }
+                    }
                     for s in whole.symbols() {
                         if &s.name == pkg && matches!(s.kind, SymKind::Class) {
                             out.push(RefLocation {
@@ -821,9 +977,31 @@ pub fn implementations_of(
         },
     );
     implementers.retain(|p| !contract_line.contains(p));
+    // Same FQ family gate as the Package arm: an implementer that reaches
+    // the contract only through a recorded, MISMATCHING namespace belongs
+    // to a same-leaf stranger's family.
+    let mut same_leaf_contract_ns: Option<String> = None;
+    if let Some(tns) = origin_class_ns(origin, class) {
+        implementers.retain(|p| fq_family_member(origin, idx, p, class, &tns));
+        // The self-loop case: a direct implementer CARRYING the contract's
+        // own leaf sits inside `contract_line`, so the exclusion above
+        // dropped it. Re-admit the leaf when a foreign-namespace
+        // declaration witnesses the edge, and remember the contract's
+        // namespace so emission below serves ONLY those declarations
+        // (never the contract's own file, never a third same-leaf family).
+        if idx
+            .def_candidates(class)
+            .iter()
+            .any(|c| declares_self_leaf_implementer(&idx.symbols_present(c), class, &tns))
+        {
+            implementers.insert(class.clone());
+            same_leaf_contract_ns = Some(tns);
+        }
+    }
 
     let mut out: Vec<RefLocation> = Vec::new();
     for pkg in &implementers {
+        let self_leaf_ns = same_leaf_contract_ns.as_ref().filter(|_| pkg == class);
         // class → home module(s): exact cache key for the common
         // single-package file; the names index covers cross-named and
         // multi-package homes.
@@ -845,6 +1023,11 @@ pub fn implementations_of(
             }
         }
         for cached in homes {
+            if let Some(tns) = self_leaf_ns {
+                if !declares_self_leaf_implementer(&idx.symbols_present(&cached), pkg, tns) {
+                    continue;
+                }
+            }
             let is_marker = cached
                 .analysis
                 .role_requires(pkg.as_str())
