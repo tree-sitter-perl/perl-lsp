@@ -160,6 +160,11 @@ pub const INHERIT_PARAM_SOURCE: &str = "inherit-param";
 /// Annot priority for the same reason as `INHERIT_PARAM_SOURCE`: the
 /// materialized `Sequence` must beat the `HashRef` annot, and at equal
 /// priority latest-wins does it (`HashRef` never subsumes `Sequence`).
+/// Source tag of a class-member VALUE edge (`PackageSymbol{cls, field} →
+/// Edge(Variable)`): the registry's member-shape preference partitions a
+/// class attachment's edges on it.
+pub const FIELD_EDGE_SOURCE: &str = "field_edge";
+
 pub const REFINE_SOURCE: &str = "refines-container";
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -323,6 +328,11 @@ pub enum ProjectionStep {
     /// per-slot answer exists). Kept at the END for bincode variant-index
     /// stability (bump `EXTRACT_VERSION`).
     Element,
+    /// A member READ (`$this->prop`, `obj->field`): dispatches `member` on
+    /// the base's class with no arity, preferring the class's value edge
+    /// (`FIELD_EDGE_SOURCE`) over a same-named callable's return. Kept at
+    /// the END for bincode variant-index stability (bump `EXTRACT_VERSION`).
+    ValueHop { member: String },
     /// The KEY axis of an iterated collection — the pair-form foreach's
     /// first binding (`foreach ($m as $k => $v)`). A `Sequence`'s keys ARE
     /// its positions (`Numeric`); a two-argument parametric instance

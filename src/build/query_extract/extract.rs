@@ -936,7 +936,12 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                                 package: cls.clone(),
                                 name: shaped.clone(),
                             },
-                            source: wit::WitnessSource::Builder("skeleton".into()),
+                            // The tag IS the member's value shape: a
+                            // `ValueHop` on this attachment prefers it, a
+                            // `MethodHop` prefers the callable edges.
+                            source: wit::WitnessSource::Builder(
+                                crate::model::witnesses::FIELD_EDGE_SOURCE.into(),
+                            ),
                             payload: wit::WitnessPayload::Edge(wit::WitnessAttachment::Variable {
                                 name: shaped.clone(),
                                 scope: cur_scope,
@@ -1030,6 +1035,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                     invocant: None,
                     member_op: None,
                     arg_count: None,
+                    shape: crate::model::file_analysis::MemberShape::Unknown,
                 });
             }
             "ref.dispatch.named" => {
@@ -1043,6 +1049,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                     invocant: None,
                     member_op: None,
                     arg_count: None,
+                    shape: crate::model::file_analysis::MemberShape::Unknown,
                 });
             }
             // consumed by the prepass join above; nothing to mint here
@@ -1065,6 +1072,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                     )),
                     member_op: None,
                     arg_count: None,
+                    shape: crate::model::file_analysis::MemberShape::Callable,
                 });
             }
             "ref.method.named" => {
@@ -1079,6 +1087,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                         invocant: Some(inv),
                         member_op: None,
                         arg_count: None,
+                        shape: crate::model::file_analysis::MemberShape::Callable,
                     });
                 }
             }
@@ -1159,6 +1168,19 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                         arg_count: matches!(e.cap.as_str(), "ref.call" | "ref.qcall" | "ref.member")
                             .then(|| arg_counts_by_start.get(&(e.end.row, e.end.column)).copied())
                             .flatten(),
+                        // A member token with an argument list right after it
+                        // names a callable; without one it reads a value. Only
+                        // member tokens carry the fact (a plain call is a
+                        // callable by construction, a type ref neither).
+                        shape: if e.cap == "ref.member" {
+                            if arg_counts_by_start.contains_key(&(e.end.row, e.end.column)) {
+                                crate::model::file_analysis::MemberShape::Callable
+                            } else {
+                                crate::model::file_analysis::MemberShape::Value
+                            }
+                        } else {
+                            crate::model::file_analysis::MemberShape::Unknown
+                        },
                     });
                     // The chain-hop witness: the whole call's value is
                     // "dispatch `member` on the receiver's class" — deferred
@@ -1183,8 +1205,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                                 cur_scope,
                                 arg_counts_by_start
                                     .get(&(e.end.row, e.end.column))
-                                    .copied()
-                                    .unwrap_or(0) as u32,
+                                    .map(|n| *n as u32),
                                 package.as_deref(),
                             );
                         }
@@ -1209,8 +1230,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                         cur_scope,
                         arg_counts_by_start
                             .get(&(e.end.row, e.end.column))
-                            .copied()
-                            .unwrap_or(0) as u32,
+                            .map(|n| *n as u32),
                         package.as_deref(),
                     );
                 }
@@ -1616,6 +1636,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
             invocant: None,
             member_op: None,
             arg_count: Some(args.len()),
+            shape: crate::model::file_analysis::MemberShape::Unknown,
         });
         for effect in (pack.cmd_effects)(cmd) {
             match effect {
@@ -1655,6 +1676,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                                 invocant: None,
                                 member_op: None,
                                 arg_count: None,
+                                shape: crate::model::file_analysis::MemberShape::Unknown,
                             });
                         }
                     }
@@ -2202,6 +2224,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                                     )),
                                     member_op: None,
                                     arg_count: None,
+                                    shape: crate::model::file_analysis::MemberShape::Callable,
                                 });
                             }
                         }
@@ -2652,7 +2675,7 @@ fn push_hop_witness(
     recv_text: &str,
     recv_simple: bool,
     scope: crate::model::file_analysis::ScopeId,
-    arity: u32,
+    arity: Option<u32>,
     enclosing_class: Option<&str>,
 ) {
     use crate::model::witnesses as wit;
@@ -2694,9 +2717,17 @@ fn push_hop_witness(
         source: wit::WitnessSource::Builder("skeleton".into()),
         payload: wit::WitnessPayload::Projected {
             base,
-            step: wit::ProjectionStep::MethodHop {
-                member: (pack.shape_name)("ref.member", member_text),
-                arity,
+            // Arity-less = a value read (`$this->prop`): the hop asks the
+            // class for the member's VALUE edge, so a same-named method's
+            // return can't answer for the property.
+            step: match arity {
+                Some(arity) => wit::ProjectionStep::MethodHop {
+                    member: (pack.shape_name)("ref.member", member_text),
+                    arity,
+                },
+                None => wit::ProjectionStep::ValueHop {
+                    member: (pack.shape_name)("ref.member", member_text),
+                },
             },
         },
         span: call_span,

@@ -74,6 +74,9 @@ pub struct SkelRef {
     /// structurally from the argument list. Flows to `Ref.arg_count`; `None`
     /// for non-call refs.
     pub arg_count: Option<usize>,
+    /// The written member shape (`Ref`'s `MemberShape`): callable vs value
+    /// read, as the extractor saw it.
+    pub shape: crate::model::file_analysis::MemberShape,
 }
 
 #[derive(Debug, Default)]
@@ -1088,6 +1091,7 @@ impl SkeletonAnalysis {
                             invocant_span: Some(inv_span),
                             method_name_span: Span { start: r.start, end: r.end },
                             member_op: r.member_op,
+                            shape: r.shape,
                         }
                     }
                     // A hook-firing string (`do_action('init')` arg 1): the
@@ -1240,6 +1244,7 @@ impl SkeletonAnalysis {
                             invocant_span: None,
                             method_name_span: *span,
                             member_op: None,
+                            shape: crate::model::file_analysis::MemberShape::Value,
                         },
                         span: *span,
                         scope: crate::model::file_analysis::ScopeId(0),

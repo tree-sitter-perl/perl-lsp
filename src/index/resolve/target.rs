@@ -82,6 +82,12 @@ pub struct TargetRef {
     /// a scanned file's `Factory` from the target's. `None` = no claim
     /// (Perl, cpp, an un-imported leaf), and the gate stands down.
     pub class_ns: Option<String>,
+    /// The written shape of the member this target names, set ONLY when
+    /// the declaring class overloads the name across kinds (a property AND
+    /// a method called `recorded` — `member_kinds_overloaded`). Declaration
+    /// and reference matching are then shape-strict; everywhere else it is
+    /// `Unknown` and the matchers stay name-keyed as before.
+    pub member_shape: crate::model::file_analysis::MemberShape,
     /// Pack-language visibility identity: the canonical paths of the files
     /// that define this target AS THE ORIGIN FILE SEES IT (the origin itself,
     /// candidates in its include closure, and candidates whose closure reaches
@@ -130,6 +136,7 @@ impl TargetRef {
             bare_constant: false,
             ctor_of,
             class_ns,
+            member_shape: Default::default(),
         }
     }
 
@@ -159,6 +166,7 @@ impl TargetRef {
             bare_constant: false,
             ctor_of: None,
             class_ns,
+            member_shape: Default::default(),
         }
     }
 
@@ -177,6 +185,7 @@ impl TargetRef {
             bare_constant: false,
             ctor_of: None,
             class_ns: None,
+            member_shape: Default::default(),
         }
     }
 
@@ -244,6 +253,14 @@ impl TargetRef {
                 let class_ns = package
                     .as_deref()
                     .and_then(|c| module_index.and_then(|idx| idx.pinned_namespace(c)));
+                // A Sub cursor names a callable; the shape matters only where
+                // the class also stores a value under the name.
+                let member_shape = match package.as_deref() {
+                    Some(cls) if origin.member_kinds_overloaded(cls, &name, module_index) => {
+                        crate::model::file_analysis::MemberShape::Callable
+                    }
+                    _ => Default::default(),
+                };
                 TargetRef {
                     name,
                     kind: TargetKind::Sub { package },
@@ -253,6 +270,7 @@ impl TargetRef {
                     bare_constant: false,
                     ctor_of,
                     class_ns,
+                    member_shape,
                 }
             }
             RenameKind::Method { name, class } => {

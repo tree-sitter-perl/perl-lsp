@@ -1045,6 +1045,7 @@ impl<'a> Builder<'a> {
                                         // (rule #7), mirroring FunctionCall.
                                         method_name_span: crate::cst::fq_tail_span(method, name),
                                         member_op: None,
+                                        shape: crate::model::file_analysis::MemberShape::Unknown,
                                     },
                                     span: node_to_span(n),
                                     scope,

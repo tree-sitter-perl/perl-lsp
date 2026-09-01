@@ -72,6 +72,18 @@ segments), heatmap counts on guzzle/demo byte-identical to round 4.
   that pins `Collection` elsewhere), files declaring several namespaces
   (no own-namespace default), a function or method named like a class
   leaf counting as a spelling.
+- R5-2 property and method sharing a name (`Factory::$recorded` +
+  `Factory::recorded()`): member resolution was name-keyed across kinds.
+  The written shape is now value-borne — `MemberShape` on the ref (an
+  argument list or a callable-string form = Callable, a bare member read
+  = Value; Perl's `$o->m` stays Unknown), `ProjectionStep::ValueHop` for
+  the arity-less hop (the registry prefers the class's `field_edge` over
+  the method's return chain when both exist), and `TargetRef::member_shape`
+  minted ONLY when the class overloads the name across kinds
+  (`member_kinds_overloaded`), gating declaration and reference matching.
+  `resolve_member_in_ancestors` prefers the agreeing kind on every class
+  of the walk with the other kind as fallback, so a class that does not
+  overload answers exactly as before (cpp callable fields keep working).
 
 ## OPEN — next slices
 
@@ -80,13 +92,6 @@ The ctor call's token is a FunctionCall ref carrying the class name (it
 serves `__construct`'s references via `ctor_of`), never a PackageRef, so
 `--references` on `class X` lists hints, parents and `use` rows but not
 the construction sites. One admission arm in the Package matcher.
-
-### R5-2 (CRITICAL) — property and method sharing a name on one class
-F: `Factory::$recorded` (property) + `Factory::recorded()` (method):
-hover on `$this->recorded` shows the METHOD's return; rename from the
-property decl also edits the method's decl + calls. The member
-resolution is name-keyed across kinds; a member ACCESS (no call args)
-must prefer Field/Variable symbols, a CALL the callable.
 
 ### R5-3 (MAJOR) — receiver shapes still dark for references
 F: trait-internal self-calls (`$this->unless()` inside the trait —

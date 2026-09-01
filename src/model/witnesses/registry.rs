@@ -1852,6 +1852,27 @@ impl ReducerRegistry {
         state: &mut QueryState,
     ) -> Vec<Witness> {
         let raw = bag.for_attachment(q.attachment);
+        // Member-shape preference on a class attachment: a class can carry
+        // BOTH a value edge (`FIELD_EDGE_SOURCE`, the property) and callable
+        // edges (the method's return chain) under one member name. An
+        // arity-less query is a value read and takes the value edge; a
+        // query with an arity is a call and takes the callable edges. With
+        // only one kind present nothing is dropped — the shape only decides
+        // when the class genuinely overloads the name across kinds.
+        let raw: Vec<&Witness> = if matches!(q.attachment, WitnessAttachment::PackageSymbol { .. }) {
+            let is_field = |w: &&Witness| {
+                matches!(&w.source, WitnessSource::Builder(t) if t == FIELD_EDGE_SOURCE)
+            };
+            let fields = raw.iter().filter(|w| is_field(w)).count();
+            if fields > 0 && fields < raw.len() {
+                let want_field = q.arity_hint.is_none();
+                raw.into_iter().filter(|w| is_field(w) == want_field).collect()
+            } else {
+                raw
+            }
+        } else {
+            raw
+        };
         // Is this attachment's value a pass-through of ONE sub-chase, or a fold
         // over several? With siblings present, whatever a sub-chase answers is
         // combined with them before this frame returns, so no single exit key
@@ -2093,7 +2114,12 @@ impl ReducerRegistry {
                                 ) if args.len() == 2 => args.first().cloned(),
                                 _ => None,
                             },
-                            ProjectionStep::MethodHop { member, arity } => {
+                            ProjectionStep::MethodHop { member, arity: _ }
+                            | ProjectionStep::ValueHop { member } => {
+                                let arity = match step {
+                                    ProjectionStep::MethodHop { arity, .. } => Some(*arity),
+                                    _ => None,
+                                };
                                 // Fresh dispatch on the base's class at the
                                 // call site's own arity; the base type IS the
                                 // dynamic receiver, so a fluent `Receiver`
@@ -2107,7 +2133,7 @@ impl ReducerRegistry {
                                         attachment: &att,
                                         point: q.point,
                                         framework: q.framework,
-                                        arity_hint: Some(*arity),
+                                        arity_hint: arity,
                                         receiver: Some(t.clone()),
                                         args: q.args.clone(),
                                         context: q.context,

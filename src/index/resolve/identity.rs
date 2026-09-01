@@ -244,6 +244,7 @@ pub fn resolve_symbol_scoped(
                     module_index,
                     scope,
                 );
+                t.member_shape = value_shape_if_overloaded(&t, analysis, module_index);
                 t.def_paths = pack_class_def_paths(&t, analysis, module_index);
                 t.bare_constant = analysis.class_content_is_bare_constant(sym);
                 return Some(promoted_group_or_target(t, analysis, module_index));
@@ -345,6 +346,7 @@ pub fn resolve_symbol_scoped(
                         module_index,
                         scope,
                     );
+                    t.member_shape = value_shape_if_overloaded(&t, analysis, module_index);
                     t.def_paths = pack_class_def_paths(&t, analysis, module_index);
                     t.bare_constant = bare;
                     return Some(ResolvedTarget::Target(t));
@@ -387,6 +389,26 @@ pub fn resolve_symbol_scoped(
             else {
                 return None;
             };
+            // A member-token cursor carries its written shape, and a method
+            // DECLARATION cursor names a callable; either binds the target
+            // only where the class overloads the name across kinds.
+            if let TargetKind::Method { class } = &t.kind {
+                use crate::model::file_analysis::MemberShape;
+                let written = match analysis.ref_at(point).map(|r| &r.kind) {
+                    Some(RefKind::MethodCall { shape, .. }) if *shape != MemberShape::Unknown => {
+                        Some(*shape)
+                    }
+                    _ => analysis
+                        .symbol_at(point)
+                        .filter(|s| matches!(s.kind, SymKind::Sub | SymKind::Method))
+                        .map(|_| MemberShape::Callable),
+                };
+                if let Some(shape) = written {
+                    if analysis.member_kinds_overloaded(class, &t.name, module_index) {
+                        t.member_shape = shape;
+                    }
+                }
+            }
             // A member-ACCESS cursor (`c->fd`) reaches here as a generic
             // Method kind; when the member is pack class content the target
             // is the same one its DEF site mints, so it carries the same
@@ -402,6 +424,24 @@ pub fn resolve_symbol_scoped(
             ResolvedTarget::Target(t)
         }
     })
+}
+
+/// A class-content DECLARATION names a stored value: `Value` when the class
+/// also carries a same-named callable (the only case the shape gates on),
+/// `Unknown` otherwise.
+fn value_shape_if_overloaded(
+    t: &TargetRef,
+    analysis: &FileAnalysis,
+    module_index: Option<&dyn CrossFileLookup>,
+) -> crate::model::file_analysis::MemberShape {
+    match &t.kind {
+        TargetKind::Method { class }
+            if analysis.member_kinds_overloaded(class, &t.name, module_index) =>
+        {
+            crate::model::file_analysis::MemberShape::Value
+        }
+        _ => Default::default(),
+    }
 }
 
 /// Is `name` a pack-language class-content member (struct field, member-block

@@ -384,6 +384,7 @@ impl<'a> Builder<'a> {
                         invocant_span,
                         method_name_span: span,
                         member_op: None,
+                        shape: crate::model::file_analysis::MemberShape::Unknown,
                     },
                     span,
                     scope: self.current_scope(),

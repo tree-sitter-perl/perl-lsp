@@ -1186,6 +1186,21 @@ pub enum RenameKind {
     Handler { owner: HandlerOwner, name: String },
 }
 
+/// The shape a member token was WRITTEN in — the value-borne fact that
+/// tells a property from a same-named method (rule #10: consumers ask the
+/// ref, never "is this php"). `Unknown` = the language does not
+/// distinguish (Perl's `$o->m` is a call with or without parens), and
+/// every shape gate stands down.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum MemberShape {
+    #[default]
+    Unknown,
+    /// Invoked, or named as a callable (`$o->m()`, `[$o, 'm']`).
+    Callable,
+    /// Read as a stored value (`$o->prop`, `obj->field`).
+    Value,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[allow(dead_code)]
 pub enum RefKind {
@@ -1221,6 +1236,12 @@ pub enum RefKind {
         /// — its `deref_stack` decides the expected operator). `None` for Perl
         /// (one operator) and wrapper/chain receivers.
         member_op: Option<(MemberOp, Span)>,
+        /// What the written token names: a callable (an argument list
+        /// follows, or a callable-string form) or a stored value (a bare
+        /// member read). A pack whose members can share a name across
+        /// kinds (php `$this->recorded` beside `recorded()`) mints it;
+        /// Perl, where `$o->m` IS a call, leaves it `Unknown`.
+        shape: MemberShape,
     },
     PackageRef,
     /// Key access `$h{k}` / `$obj->{k}`. Which hash owns the key (and the

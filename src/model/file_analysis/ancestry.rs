@@ -494,7 +494,32 @@ impl FileAnalysis {
         &self,
         cls: &str,
         method_name: &str,
+        shape: MemberShape,
         module_index: Option<&dyn CrossFileLookup>,
+    ) -> Option<MethodResolution> {
+        // A written shape asks for the agreeing kind FIRST (`$this->recorded`
+        // reads the property, `$this->recorded()` calls the method); the
+        // other kind stays the fallback so a class that does not overload
+        // the name answers exactly as a shape-less lookup would.
+        let agrees = |kind: SymKind| match shape {
+            MemberShape::Unknown => true,
+            MemberShape::Callable => matches!(kind, SymKind::Sub | SymKind::Method),
+            MemberShape::Value => !matches!(kind, SymKind::Sub | SymKind::Method),
+        };
+        if shape != MemberShape::Unknown {
+            if let Some(r) = self.member_resolution_on_class_pass(cls, method_name, module_index, &agrees) {
+                return Some(r);
+            }
+        }
+        self.member_resolution_on_class_pass(cls, method_name, module_index, &|_| true)
+    }
+
+    fn member_resolution_on_class_pass(
+        &self,
+        cls: &str,
+        method_name: &str,
+        module_index: Option<&dyn CrossFileLookup>,
+        agrees: &dyn Fn(SymKind) -> bool,
     ) -> Option<MethodResolution> {
         // (a) Local symbols in this file packaged under `cls`. Methods AND
         // data members: cpp `obj->field` mints the same `MethodCall` ref as a
@@ -514,7 +539,7 @@ impl FileAnalysis {
             };
             // A re-export (`using Base::m;`) is API surface, not a def —
             // fall through so the walk reaches the origin ancestor.
-            if member_kind && !sym.is_reexport() && self.symbol_in_class(sid, cls) {
+            if member_kind && agrees(sym.kind) && !sym.is_reexport() && self.symbol_in_class(sid, cls) {
                 return Some(MethodResolution::Local { class: cls.to_string(), sym_id: sid });
             }
         }
@@ -577,6 +602,7 @@ impl FileAnalysis {
                     s.name == method_name
                         && s.package.as_deref() == Some(cls)
                         && !s.is_reexport()
+                        && agrees(s.kind)
                         && (matches!(s.kind, SymKind::Sub | SymKind::Method)
                             || (matches!(
                                 s.kind,
@@ -656,10 +682,23 @@ impl FileAnalysis {
         method_name: &str,
         module_index: Option<&dyn CrossFileLookup>,
     ) -> Option<MethodResolution> {
+        self.resolve_member_in_ancestors(class_name, method_name, MemberShape::Unknown, module_index)
+    }
+
+    /// `resolve_method_in_ancestors` with the cursor token's written shape:
+    /// a value read prefers the class's property, a call its method, on
+    /// every class of the walk (the other kind stays the fallback).
+    pub fn resolve_member_in_ancestors(
+        &self,
+        class_name: &str,
+        method_name: &str,
+        shape: MemberShape,
+        module_index: Option<&dyn CrossFileLookup>,
+    ) -> Option<MethodResolution> {
         let mut result: Option<MethodResolution> = None;
         let mut iface_fallback: Option<MethodResolution> = None;
         self.for_each_ancestor_class(class_name, module_index, |cls| {
-            match self.method_resolution_on_class(cls, method_name, module_index) {
+            match self.method_resolution_on_class(cls, method_name, shape, module_index) {
                 // An INTERFACE hit is held as fallback, never the answer
                 // while a concrete definer exists: php's MRO interleaves
                 // `implements` (header) ahead of `use Trait` (body), so the
@@ -751,7 +790,7 @@ impl FileAnalysis {
                         .map(|s| s.package.clone().unwrap_or_default());
                     if cand_ns.as_deref() == Some(ns.as_str())
                         && whole
-                            .method_resolution_on_class(parent, method_name, module_index)
+                            .method_resolution_on_class(parent, method_name, MemberShape::Unknown, module_index)
                             .is_some()
                     {
                         return Some(MethodResolution::CrossFile {
@@ -780,7 +819,7 @@ impl FileAnalysis {
                 let crate::model::graph::Node::Class(cls) = n else {
                     return crate::model::graph::WalkControl::Continue;
                 };
-                match self.method_resolution_on_class(cls, method_name, module_index) {
+                match self.method_resolution_on_class(cls, method_name, MemberShape::Unknown, module_index) {
                     Some(r) => {
                         if self.hit_class_is_interface(cls, &r, module_index) {
                             iface_fallback.get_or_insert(r);

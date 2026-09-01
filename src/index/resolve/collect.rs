@@ -529,6 +529,18 @@ pub(super) fn span_is_folded_name(
 /// `mask_for_target` (to decide whether the def lives in editable space).
 /// `analysis` is the file the symbol lives in — the structural gates
 /// (class-content, macro spans) need its scopes/macro table.
+/// Shape-strict declaration match: a `Value` target is declared by a stored
+/// member, a `Callable` one by a sub/method; `Unknown` admits either. The
+/// target carries a shape only for a class that overloads the name.
+fn shape_admits(shape: crate::model::file_analysis::MemberShape, kind: SymKind) -> bool {
+    use crate::model::file_analysis::MemberShape;
+    match shape {
+        MemberShape::Unknown => true,
+        MemberShape::Callable => matches!(kind, SymKind::Sub | SymKind::Method),
+        MemberShape::Value => !matches!(kind, SymKind::Sub | SymKind::Method),
+    }
+}
+
 pub(super) fn symbol_defines_target(
     sym: &crate::model::file_analysis::Symbol,
     target: &TargetRef,
@@ -570,7 +582,9 @@ pub(super) fn symbol_defines_target(
                         .method_classes
                         .iter()
                         .any(|c| Some(c.as_str()) == sym_pkg));
-            matches!(sym.kind, SymKind::Sub | SymKind::Method) && in_scope
+            matches!(sym.kind, SymKind::Sub | SymKind::Method)
+                && in_scope
+                && shape_admits(target.member_shape, sym.kind)
         }
         TargetKind::Method { class } => {
             // A `sub NAME` declaration belongs to this target if it lives in
@@ -594,6 +608,7 @@ pub(super) fn symbol_defines_target(
             (matches!(sym.kind, SymKind::Sub | SymKind::Method)
                 || analysis.symbol_is_class_content(sym))
                 && on_chain
+                && shape_admits(target.member_shape, sym.kind)
         }
         TargetKind::Package => matches!(
             sym.kind,
@@ -1144,6 +1159,18 @@ pub(super) fn collect_from_analysis(
                 let Some(scope) = callable_scope_for_refs.as_ref() else {
                     continue;
                 };
+                // The written shape must agree with the target's (both known):
+                // `$this->recorded` never references the method `recorded()`
+                // of a class that also stores `$recorded`, nor vice versa.
+                if let RefKind::MethodCall { shape, .. } = &r.kind {
+                    use crate::model::file_analysis::MemberShape;
+                    if *shape != MemberShape::Unknown
+                        && target.member_shape != MemberShape::Unknown
+                        && *shape != target.member_shape
+                    {
+                        continue;
+                    }
+                }
                 let method = r.unqualified_target_name();
                 {
                     let resolved_class = match r.method_target() {

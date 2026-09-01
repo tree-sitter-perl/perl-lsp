@@ -87,6 +87,7 @@ $d->ping;
         method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), bare_constant: false,
             ctor_of: None,
             class_ns: None,
+            member_shape: Default::default(),
     };
 
     // Rename uses EDITABLE — workspace-only, no dep scan.
@@ -157,6 +158,7 @@ $b->ping;
         method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), bare_constant: false,
             ctor_of: None,
             class_ns: None,
+            member_shape: Default::default(),
     };
 
     // EDITABLE mask — rename never scans deps.
@@ -230,6 +232,7 @@ $g->hello;
         method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), bare_constant: false,
             ctor_of: None,
             class_ns: None,
+            member_shape: Default::default(),
     };
 
     // references uses references_mask_for (EDITABLE when def in workspace).

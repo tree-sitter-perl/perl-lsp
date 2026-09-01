@@ -551,6 +551,7 @@ fn test_renaming_import_remote_joins_source_alias_stays_local() {
         method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), bare_constant: false,
             ctor_of: None,
             class_ns: None,
+            member_shape: Default::default(),
     };
     let src_refs = refs_to(&store, Some(&idx), &src, RoleMask::EDITABLE);
     assert!(hit(&src_refs, &exp), "source def missing: {:?}", src_refs);
@@ -563,6 +564,7 @@ fn test_renaming_import_remote_joins_source_alias_stays_local() {
         method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), bare_constant: false,
             ctor_of: None,
             class_ns: None,
+            member_shape: Default::default(),
     };
     let alias_refs = refs_to(&store, Some(&idx), &alias, RoleMask::EDITABLE);
     assert!(hit(&alias_refs, &cons), "alias `-as` value + call missing: {:?}", alias_refs);
@@ -1206,6 +1208,7 @@ fn test_event_handler_refs_mark_folded_site_non_rewritable() {
         method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), bare_constant: false,
             ctor_of: None,
             class_ns: None,
+            member_shape: Default::default(),
     };
     assert!(target.supports_cross_file_rename(), "Handler renames cross-file now");
 
@@ -1440,6 +1443,7 @@ fn test_implementations_of_role_requires_fans_out_to_composers() {
         method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), bare_constant: false,
             ctor_of: None,
             class_ns: None,
+            member_shape: Default::default(),
     };
     let origin = parse("package Probe;\n1;\n");
     let results = implementations_of(&origin, Some(&idx), &target);
@@ -1495,6 +1499,7 @@ fn test_implementations_finds_mixin_sibling_override() {
         method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), bare_constant: false,
             ctor_of: None,
             class_ns: None,
+            member_shape: Default::default(),
     };
     let origin = parse("package Probe;\n1;\n");
     let files: Vec<String> = implementations_of(&origin, Some(&idx), &target)
@@ -1606,6 +1611,7 @@ fn test_implementations_on_sub_decl_target_finds_overrides() {
         method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), bare_constant: false,
             ctor_of: None,
             class_ns: None,
+            member_shape: Default::default(),
     };
     let origin = parse("package Probe;\n1;\n");
     let files: Vec<String> = implementations_of(&origin, Some(&idx), &target)

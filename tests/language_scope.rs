@@ -580,3 +580,65 @@ fn php_use_map_picks_the_imported_same_leaf_class() {
     assert!(!cls.contains("A/"), "the same-leaf stranger's files stay out: {cls}");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Round-5 R5-2: a property and a method sharing a name on one class keep
+/// their own identity. The written shape (`MemberShape`) rides the ref
+/// (`$this->recorded` reads a value, `$f->recorded()` calls), the hop
+/// (`ValueHop` prefers the class's value edge) and the target (shape-strict
+/// declaration/reference matching, minted only because the class overloads
+/// the name): hover/gd on the access land on the property, refs/rename from
+/// either declaration stay on their own side.
+#[cfg(feature = "php")]
+#[test]
+fn php_property_and_method_sharing_a_name_keep_their_own_identity() {
+    let dir = std::env::temp_dir().join(format!("perl-lsp-r5prop-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("Factory.php"),
+        "<?php\nnamespace App;\nclass Factory\n{\n    /** @var list<string> */\n    protected $recorded = [];\n\n    public function recorded(): Collection\n    {\n        return new Collection($this->recorded);\n    }\n\n    public function record(string $x): void\n    {\n        $this->recorded[] = $x;\n    }\n}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("Collection.php"),
+        "<?php\nnamespace App;\nclass Collection { public function __construct(array $a) {} public function count(): int { return 0; } }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("Use.php"),
+        "<?php\nnamespace App;\nfunction use_it(Factory $f): int\n{\n    return $f->recorded()->count();\n}\n",
+    )
+    .unwrap();
+    let run = |args: &[&str]| {
+        let out = std::process::Command::new(env!("CARGO_BIN_EXE_perl-lsp"))
+            .args(args)
+            .env("XDG_CACHE_HOME", dir.join(".cache"))
+            .output()
+            .expect("run");
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+    let root = dir.to_str().unwrap();
+    // 0-based rows: property decl (5,15), method decl (7,20), the access in
+    // the method body (9,37), the write (14,15), the call in Use.php (4,15).
+    let hover = run(&["--hover", root, "Factory.php", "9", "37"]);
+    assert!(hover.contains("list<string>") && !hover.contains("Collection"), "the access hovers the property: {hover}");
+    let hover = run(&["--hover", root, "Use.php", "4", "15"]);
+    assert!(hover.contains("Collection"), "the call hovers the method: {hover}");
+    let gd = run(&["--definition", root, "Factory.php", "9", "37"]);
+    assert!(gd.contains("Factory.php:5:"), "gd on the access lands on the property: {gd}");
+    let gd = run(&["--definition", root, "Use.php", "4", "15"]);
+    assert!(gd.contains("Factory.php:7:"), "gd on the call lands on the method: {gd}");
+    let lines = |out: &str| -> Vec<u64> {
+        let v: serde_json::Value = serde_json::from_str(out).expect("json");
+        v.as_array().unwrap().iter().map(|e| e["line"].as_u64().unwrap()).collect()
+    };
+    let prop = lines(&run(&["--references", root, "Factory.php", "5", "15"]));
+    assert_eq!(prop, vec![5, 9, 14], "property references: decl + the two accesses only");
+    let method = run(&["--references", root, "Factory.php", "7", "20"]);
+    assert!(method.contains("Use.php") && !method.contains("\"line\": 9"), "method references: decl + call site only: {method}");
+    let rename = run(&["--rename", root, "Factory.php", "5", "15", "pairs"]);
+    assert!(!rename.contains("Use.php") && !rename.contains("\"line\": 7"), "renaming the property leaves the method alone: {rename}");
+    let rename = run(&["--rename", root, "Factory.php", "7", "20", "pairs"]);
+    assert!(rename.contains("Use.php") && !rename.contains("\"line\": 5") && !rename.contains("\"line\": 14"), "renaming the method leaves the property alone: {rename}");
+    let _ = std::fs::remove_dir_all(&dir);
+}

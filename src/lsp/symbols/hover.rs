@@ -52,7 +52,11 @@ pub fn pack_hover_markdown(
                         text.push_str(&format!("\n\n*returns: {}*", analysis.render_type(&rt)));
                     }
                 };
-                match analysis.resolve_method_in_ancestors(&cn, field, Some(midx)) {
+                let shape = match &r.kind {
+                    RefKind::MethodCall { shape, .. } => *shape,
+                    _ => Default::default(),
+                };
+                match analysis.resolve_member_in_ancestors(&cn, field, shape, Some(midx)) {
                     Some(MethodResolution::Local { sym_id, .. }) => {
                         let sym = analysis.symbol(sym_id);
                         if matches!(sym.kind, FaSymKind::Method | FaSymKind::Sub) {
