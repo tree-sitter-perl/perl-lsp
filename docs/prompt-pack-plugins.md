@@ -4,8 +4,10 @@
 WordPress overlay, and the overlay loader (discovery, per-overlay
 compile isolation, content-hash query cache, fingerprint fold, the
 `--plugin-check` `.scm` arm) all shipped; acceptance verified on real
-WP core (see `docs/hitlist-php-round3.md` R8). Tier 2 still waits on
-its first tenant, per the gate below.
+WP core (993 `add_action`/`add_filter` string-callback sites + 161
+`array($this, 'm')` callbacks connected in both directions, hook-name
+identity linking 190 `'init'` sites across 127 files). Tier 2 still
+waits on its first tenant, per the gate below.
 
 The design carried as "the open round" in `docs/prompt-multi-language.md`
 — how pack languages (php, cpp, python, r, cmake) get a framework tier —

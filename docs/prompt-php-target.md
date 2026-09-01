@@ -2,8 +2,8 @@
 
 Market research (2026-08-30) + the architecture mapping that made PHP the
 pick over Ruby / Python / Lua / Elixir / R / Bash. The `--features php`
-pack skeleton landed with this brief; everything below "The build-out"
-is forward work.
+pack skeleton landed with this brief; "What's still open" under "The
+build-out" and "Known residuals" are the live forward work.
 
 ## The market gap, verified
 
@@ -84,17 +84,13 @@ there is a long road; `docs/adr/parametric-types.md` is the seam.
 Blade/Twig embedded templating is real extra work (also paywalled in
 Intelephense — an opportunity, but not v1).
 
-## Dogfood round 1 (landed on top of the spike)
+## Dogfood round 1
 
-Two probe agents over monolog/guzzle/WordPress/laravel-framework
-(`docs/hitlist-php-round1.md`): zero crashes, zero misparses; every
-finding was resolution-side and seven of nine rows landed same-round —
-cross-file visibility (the `PackVisibility` routing fact), structural
-ctor typing (`@expr.ctor` → TypeName edge), sigil-less property fields,
-the pack `type_display` vocabulary, trait/qualified parents,
-duplicate-def honest families with arity ranking, constants in outline.
-Measured on WordPress after: `esc_attr` references 7 → 1345,
-`have_posts` 0 → 23, `Logger::addRecord` grep-exact.
+Two probe agents over monolog/guzzle/WordPress/laravel-framework: zero
+crashes, zero misparses across ~90 probes (PHP 8.1 syntax included); every
+finding was resolution-side (cross-file visibility, `new X()` structural
+typing, sigil-less property fields, duplicate-def honest families) and
+landed same-round.
 
 ## The Laravel app corpus
 
@@ -111,23 +107,17 @@ vendor/), facades, and relation properties against real code.
 
 ## Dogfood round 2 (verification + the fresh-verb sweep)
 
-Two fresh agents re-probed every round-1 fix (all hold — several now
-grep-exact: `$handlers` 11/11, `addRecord` 16/16, `ClientInterface::
-request` 61 with all 52 test-side call sites) and probed the untested
-verbs. Rename passes all three shapes with exact blast radius (method
-rename excludes unrelated same-named interface methods; local rename
-respects closure shadowing; property rename 5/5). Semantic-tokens and
-call-hierarchy (187 incoming) serve PHP. Fixed same-round:
-`self::`/`static::` dispatch (canonicalizes to the current-package
-invocant token) and foreach loop-variable declarations (the `"as" .`
-anchor binds `$item`/`$k => $v`/`&$ref` without re-declaring the
-iterated source) — refs/hover/highlight/rename on loop vars all light
-up. Ledgered with evidence: `--implementations` misses the direct
-interface implementer and short-name collisions pollute
-type-hierarchy/references (`Repository` × 3 namespaces — CLOSED by
-build-out item 2's FQ-identity slice); foreach ELEMENT typing is the sequence-types
-engine residual; `toArray()` decl-vs-trait-impl ranking; semantic-tokens
-wants absolute paths.
+Two fresh agents re-probed every round-1 fix (all held) and probed the
+untested verbs (rename, semantic-tokens, call-hierarchy). Fixed
+same-round: `self::`/`static::` dispatch (canonicalizes to the
+current-package invocant token) and foreach loop-variable declarations
+(the `"as" .` anchor binds `$item`/`$k => $v`/`&$ref` without
+re-declaring the iterated source) — refs/hover/highlight/rename on loop
+vars all light up. Open residuals it ledgered: `toArray()`
+decl-vs-trait-impl ranking; semantic-tokens wants absolute paths. (The
+short-name-collision / interface-implementer finding closed under the
+build-out's FQ-identity slice, below; foreach ELEMENT typing is the
+sequence-types engine residual, tracked in `prompt-sequence-types.md`.)
 
 ## What landed with this brief
 
@@ -151,119 +141,52 @@ production engine, zero engine special-cases:
 
 ## The build-out (sequenced like cpp's arc)
 
-1. **Composer visibility.** LANDED — `LanguageDriver::dependency_roots`
-   (the pack's analog of `@INC`): the php driver reads `composer.json`
-   (the gate) + `vendor/composer/installed.json` install paths, the
-   bulk indexer walks those roots ignore-rules-off (vendor/ is
-   gitignored by design), and `is_dependency_path` attributes each
-   candidate to the DEPENDENCY tier per path — so gd/references reach
-   vendor code while rename's EDITABLE mask (OPEN|WORKSPACE) refuses to
-   rewrite it. `autoload.psr-4` dirs remain unread — the name-keyed
-   candidate relation covers them via the workspace walk.
-2. **FQ identity.** LANDED for the inheritance-edge axis — symbols stay
-   leaf-keyed (cpp parity, the engine's identity), with namespace
-   claims layered on: the extract-time use-map (alias/group aware)
-   resolves a parent's WRITTEN spelling to its real leaf + namespace
-   (`use X\Y as Z` edges were dead under `Z`), each edge records
-   `(child, parent leaf, parent ns)` in the `parent_namespaces` pack
-   lane, and `implementations_of` validates leaf-keyed chain hops
-   against those rows (three-outcome BFS: agreeing/unrecorded ns →
-   keep, reached only through a recorded mismatch → prune, unreachable
-   → keep) so Laravel's three same-leaf `Repository`s stop conflating.
-   The aliased-contract idiom (`class Repository implements
-   CacheContract`) resolves to a SELF-LOOP in leaf space — the direct
-   implementer carries the contract's own leaf, which both arms'
-   contract-side exclusions used to eat; the namespace rows re-admit
-   it (a foreign-ns declaration recording the edge back to the
-   contract's ns), which is exactly the round-2 pull/put probe fix
-   (verified on laravel/framework: pull → Cache/Repository.php:228;
-   put → :367 + RedisTaggedCache.php:52; the interface name → those
-   plus TaggedCache, never the Config/Log strangers).
-   Residual: `refs_to`/rename still leaf-keyed (over-approximate, never
-   wrong-file for gd since goto-def ranks); full FQ symbol identity
-   waits for a real need.
-3. **Stdlib tier.** phpstorm-stubs (Apache-2.0) is the builtin surface —
-   consumable the way `builtins.pod` feeds the Perl BUILTIN tier.
-4. **Receiver-substituting returns.** LANDED — the `rettype_receiver`
-   pack predicate publishes `ReturnExpr::Receiver` for
-   `static`/`$this`/`self` (declared AND docblock spellings); fluent
-   chains substitute through both the member arm and the MCB default
-   receiver. (`self` = defining-class nuance is an accepted
-   over-approximation for inherited methods.)
-5. **Docblocks.** LANDED for `@param`/`@return`/`@var` (the `doc_types`
-   pack predicate + positional join; declared types win; generics
-   stripped, `X|null` collapsed). Still ahead: PHPStan array-shapes →
-   `HashWithKeys`, `@template` → the parametric seam, and rendering the
-   doc PROSE on hover.
-6. **Framework plugins.** Laravel's first tier LANDED, in two pieces
-   that deliberately need NO new hook machinery:
-   - **Facades** ride a generic phpdoc lane: `@method [static] T
-     name(args)` rows on a CLASS docblock synthesize real method
-     symbols (each spanning its own `@method` line), so `Cache::get()`
-     dispatches/types/completes through the normal scoped-call hop —
-     verified on BookStack (gd on `Cache::get` lands on the vendor
-     facade's `@method get` row). This also covers every library using
-     `@method` (`__call` documentation) — not Laravel-specific.
-   - **Eloquent relations** are the first tenant of the framework
-     QUERY overlay: `queries/php/frameworks/laravel.scm`, concatenated
-     into the pack's query, expressed entirely in the standard capture
-     vocabulary + `#any-of?` text predicates (the engine carries no
-     Laravel names — the doctrine holds). A relation method mints the
-     same-named PROPERTY Eloquent's `__get` serves; to-one relations
-     carry the related class (`$page->book->name` chains), to-many
-     navigate untyped (Collection element typing = the generics
-     residual). Verified on BookStack: gd on `$book->pages` lands on
-     the `pages()` relation. The extract dedup now keys field-ness so
-     the method+property pair at one name token survives.
-   The plugin seam is now DESIGNED — `docs/prompt-pack-plugins.md`:
-   tier 1 is the loadable query-overlay unit (this laravel.scm file is
-   its first tenant, verbatim) plus string-named reference captures
-   (`@ref.call.named`), which is ALL WordPress hooks (round-3 R8) need
-   — no callbacks; tier 2 (rhai over capture events, shared EmitAction
-   vocabulary) waits for a tenant needing name surgery (Laravel
-   scopes).
-7. **Calibration.** The gold-corpus sibling: a packagist-pinned substrate
+Landed: composer visibility (`LanguageDriver::dependency_roots` reads
+`composer.json` + `vendor/composer/installed.json`, attributing vendor
+code to the DEPENDENCY tier so rename's EDITABLE mask refuses to rewrite
+it; `autoload.psr-4` dirs are covered via the name-keyed workspace walk
+instead); receiver-substituting returns (`static`/`$this`/`self` publish
+`ReturnExpr::Receiver`, declared and docblock spellings alike);
+`@param`/`@return`/`@var` docblocks (declared types win; generics
+stripped, `X|null` collapsed); Laravel's first framework-plugin tier
+(facades via the generic `@method` phpdoc lane — not Laravel-specific,
+any `__call`-documented library gets it; Eloquent relations as the first
+tenant of the query-overlay lane, `docs/prompt-pack-plugins.md`); and the
+registry member-chain lane (`$a->b()->c()` types across hops via
+`Expr(span) → Projected{base, MethodHop}`, shared with cpp).
+
+What's still open:
+
+1. **FQ identity residual.** Inheritance edges resolve through
+   namespace-validated leaf identity (`parent_namespaces`, the
+   `implementations_of` three-outcome BFS) — Laravel's three same-leaf
+   `Repository`s no longer conflate. `refs_to`/rename stay leaf-keyed
+   (over-approximate, never wrong-file for gd since goto-def ranks);
+   full FQ symbol identity waits for a real need.
+2. **Stdlib tier.** phpstorm-stubs (Apache-2.0) as the builtin surface —
+   consumable the way `builtins.pod` feeds the Perl BUILTIN tier. Not
+   started.
+3. **Docblock residuals.** PHPStan array-shapes → `HashWithKeys`,
+   `@template` → the parametric seam, and rendering the doc PROSE on
+   hover.
+4. **Framework-plugin tier 2** waits for a tenant needing name surgery
+   (Laravel scopes) — tracked in `docs/prompt-pack-plugins.md`.
+5. **Calibration.** The gold-corpus sibling: a packagist-pinned substrate
    (top-N packages via composer), the same exact-assertion fixture
    format, corpus entries for a Laravel app + WordPress core in the
-   `bench/` stack. Ship gate, budgeted as half the work.
+   `bench/` stack. Ship gate, budgeted as half the work. Not started —
+   no PHP fixtures exist in `gold-corpus/` yet.
 
-Known residuals: ~~`parent::` dispatch~~ LANDED round 3 — the pack's
-`super_receiver` predicate mints `parent::m()` as the model's SUPER
-method token (`SUPER::m`, current-package invocant), so
-gd/references/rename ride the existing SUPER lane (return TYPING of a
-`parent::` call stays a residual — a hop would find the child
-override; `self::`/`static::` landed round 2, canonicalizing to the
-`__PACKAGE__` invocant token); `require`/`include` path imports;
-~~class-constant access~~ LANDED — `User::VERSION` / `self::LIMIT` /
-`Level::Debug` mint member-lane refs (gd/references/hover connect,
-double-anchored patterns), a true enum case's value types as its enum
-through the same hop lane (Enumerators joined the PackageSymbol
-writeback-lite), while a class const's VALUE stays untyped (typing it
-as the class would be wrong — thread the value span to fix);
-heredoc/encapsed interpolation refs exist but interpolated member
-completion doesn't; `list()`/array destructuring; global functions are
-namespace-blind. **Array-element flow through `foreach`** (round-2
-probe: `@var list<HandlerInterface>` on `$this->handlers` doesn't type
-`$handler` in `foreach ($this->handlers as $handler)`) is the engine's
-declared sequence-types residual — `Extraction::Rebind`'s own doc marks
-the foreach element as undetermined for Perl too; the lane is
-`docs/prompt-sequence-types.md`, and when it lands, `phpdoc_type` should
-map `X[]`/`list<X>` to the parametric array-of-X instead of bare
+Known residuals: `require`/`include` path imports; a class const's VALUE
+stays untyped (typing it as the class would be wrong — thread the value
+span to fix; a true enum case's value already types as its enum through
+the same hop lane); heredoc/encapsed interpolation refs exist but
+interpolated member completion doesn't; `list()`/array destructuring;
+global functions are namespace-blind. **Array-element flow
+through `foreach`** (`@var list<HandlerInterface>` on `$this->handlers`
+doesn't type `$handler` in `foreach ($this->handlers as $handler)`) is
+the engine's declared sequence-types residual — `Extraction::Rebind`'s
+own doc marks the foreach element as undetermined for Perl too; the lane
+is `docs/prompt-sequence-types.md`, and when it lands, `phpdoc_type`
+should map `X[]`/`list<X>` to the parametric array-of-X instead of bare
 `array`.
-
-**The registry member-chain lane: LANDED** (was the top all-pack engine
-residual). `$x = $a->b()->c();` / `auto x = w.get().spin();` now type:
-each member-call site mints `Expr(whole call span) → Projected{base,
-MethodHop{member, arity}}` (`@hop.call` in the php patterns; a dedicated
-called-member pattern with `@hop.member` on the cpp side, whose field
-ref pattern is call-blind), where the base is the receiver's `Variable`
-(simple receiver), the enclosing class (`$this->`/`self::` via the
-pack's `hop.recv` shaping — a companion `ClassName` witness on the
-receiver span, minted where extraction has the class in hand), or its
-`Expr` span — which, for a nested call, is exactly the inner call's own
-hop witness. The registry materializes the
-hop lazily: resolve the base, dispatch `member` on its class via
-`PackageSymbol{class, member}` at the call's own arity, with the base
-type passed as the dynamic receiver so `: static` fluent chains keep the
-concrete class through every hop. The chase stays in the registry (refs
-never enter it); Perl keeps its own build-time fold lane untouched.

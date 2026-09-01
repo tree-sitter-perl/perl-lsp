@@ -455,6 +455,33 @@ marked otherwise; the drain re-derived each rationale against current code.
   same-named classes in other namespaces collide. The Perl owner-gate half
   landed (`62426fa`); the cpp half needs namespace-qualified class identity
   in the rename target. Destructive-if-applied.
+- **PHP method-level `@template`** (round-3 R6/R10b): a class-level
+  `@template T` row feeds the same per-class param axis cpp templates use,
+  but a METHOD-level `@template TValue` (e.g. Laravel's `BuildsQueries`
+  trait `first()`) is a separate binding the class-keyed axis doesn't
+  model. Laravel 12's CONDITIONAL generic returns (`($id is ... ?
+  Collection<...> : TModel|null)` on `find`) are beyond the parser and
+  correctly rejected — not a target, stays untyped. Rendering doc PROSE on
+  hover is also still unread.
+- **PHP completion: declared type loses to the bag in one lane** (round-3
+  R11 tail): a declared `: int` return annotates as `int|float` in
+  completion specifically (the bag beats the decl there; elsewhere the
+  decl wins). Multi-line signatures also truncate in completion detail.
+- **PHP `global $x` refs are always empty** (round-3 R11 tail): `global
+  $wpdb;`-style bindings never collect refs; hover on `$wpdb` answers the
+  CLASS by name coincidence, not the global binding.
+- **PHP string-callable overlay residuals** (round-4 H7): the
+  variadic-tail callback family (`array_udiff` & co — callback LAST
+  positional arg) and key-position forms (`'sanitize_callback' => 'fn'`)
+  aren't covered by the fixed-position `stdlib.scm` overlay; neither are
+  `'Class::method'` / `[$obj, 'm']` callable-array spellings. Two rename
+  residuals from the same family, root-caused but not fixed: LogglyHandler
+  (a closure param threaded through an `array_filter` callback) and
+  MailHandler's `$highestRecord` (assignment flow into a null-guarded
+  accumulator local).
+- **PHP vendor-resolved method hover drops the signature** (round-4 H12):
+  cross-file method hover through the vendor/dependency tier renders the
+  generic member arm instead of the method-signature arm.
 
 ## Cross-references
 - Gap shapes behind open xfails: `gold-corpus/KNOWN-GAPS.md`
