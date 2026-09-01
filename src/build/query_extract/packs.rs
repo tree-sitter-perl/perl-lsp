@@ -680,6 +680,54 @@ fn php_annot_type(text: &str) -> Option<InferredType> {
     if let Some(inner) = t.strip_suffix("[]") {
         return php_annot_type(inner).map(|e| Sequence(vec![e]));
     }
+    // Array shapes. Positional (`array{A, B}` / `list{A, B}` / `array{0: A,
+    // 1: B}`) → a per-slot `Sequence` tuple, the destructuring source;
+    // string-keyed (`array{name: string}` / `object{jobs: array}`) → the
+    // structural `HashWithKeys` shape. All-or-nothing on the slots — a
+    // holey tuple mis-projects (docs/adr/destructuring.md).
+    for prefix in ["array{", "list{", "object{", "non-empty-array{", "non-empty-list{"] {
+        if let Some(rest) = t.strip_prefix(prefix) {
+            let inner = rest.strip_suffix('}')?;
+            let mut parts: Vec<&str> = Vec::new();
+            let (mut depth, mut start) = (0usize, 0usize);
+            for (i, c) in inner.char_indices() {
+                match c {
+                    '<' | '{' | '(' => depth += 1,
+                    '>' | '}' | ')' => depth = depth.saturating_sub(1),
+                    ',' if depth == 0 => {
+                        parts.push(&inner[start..i]);
+                        start = i + 1;
+                    }
+                    _ => {}
+                }
+            }
+            parts.push(&inner[start..]);
+            let mut slots: Vec<InferredType> = Vec::new();
+            let mut keyed: Vec<(std::string::String, Option<Box<InferredType>>)> = Vec::new();
+            for part in parts.iter().map(|p| p.trim()).filter(|p| !p.is_empty()) {
+                // `key: T` — a key is an identifier/int token before a `:`
+                // that is NOT part of a nested generic.
+                let split = part
+                    .find(':')
+                    .filter(|&i| !part[..i].contains(['<', '{', '(']))
+                    .map(|i| (part[..i].trim().trim_end_matches('?'), part[i + 1..].trim()));
+                match split {
+                    Some((k, ty)) if k.parse::<usize>().is_err() => {
+                        keyed.push((k.to_string(), php_annot_type(ty).map(Box::new)));
+                    }
+                    Some((_, ty)) => slots.push(php_annot_type(ty)?),
+                    None => slots.push(php_annot_type(part)?),
+                }
+            }
+            if !keyed.is_empty() {
+                return Some(HashWithKeys {
+                    keys: crate::model::file_analysis::SharedKeys::new(keyed),
+                    open: false,
+                });
+            }
+            return (!slots.is_empty()).then_some(Sequence(slots));
+        }
+    }
     for prefix in [
         "list<",
         "array<",
@@ -1245,8 +1293,8 @@ fn phpdoc_type_token_end(s: &str) -> usize {
     let mut depth = 0usize;
     for (i, c) in s.char_indices() {
         match c {
-            '<' => depth += 1,
-            '>' => depth = depth.saturating_sub(1),
+            '<' | '{' | '(' => depth += 1,
+            '>' | '}' | ')' => depth = depth.saturating_sub(1),
             c if c.is_whitespace() && depth == 0 => return i,
             _ => {}
         }
@@ -1286,6 +1334,12 @@ fn phpdoc_type(raw: &str) -> Option<String> {
     if one.ends_with("[]")
         || (one.ends_with('>')
             && ["list<", "array<", "iterable<", "non-empty-list<", "non-empty-array<"]
+                .iter()
+                .any(|p| one.starts_with(p)))
+        // array-shape spellings (`array{A, B}` / `object{k: T}`) survive
+        // whole too — `annot_type` parses the tuple / keyed shape.
+        || (one.ends_with('}')
+            && ["array{", "list{", "object{", "non-empty-array{", "non-empty-list{"]
                 .iter()
                 .any(|p| one.starts_with(p)))
     {

@@ -994,3 +994,29 @@ fn exactly_one_fallback_driver() {
     assert_eq!(n, 1, "exactly one driver claims unclaimed files");
     assert!(reg.fallback().claims_unclaimed());
 }
+
+/// A key-less array literal returned from a php function is a positional
+/// TUPLE (docs/adr/destructuring.md): its `Tuple` witness of element edges
+/// materializes to `Sequence([Queue, Agent])` through the return-fuel
+/// chain — both for an undeclared return and for a bare `: array`, which
+/// the tuple REFINES (the chain rides at annot priority so it beats the
+/// `HashRef` annot). A keyed literal never becomes a tuple.
+#[cfg(feature = "php")]
+#[test]
+fn php_tuple_literal_returns_type_as_sequence() {
+    use crate::model::file_analysis::InferredType;
+    let src = "<?php\nnamespace App;\nclass Queue {}\nclass Agent {}\nclass T {\n    private function lit(): array { $q = new Queue(); $a = new Agent(); return [$q, $a]; }\n    private function undecl() { $q = new Queue(); $a = new Agent(); return [$q, $a]; }\n    private function keyed(): array { $q = new Queue(); return ['q' => $q]; }\n}\n";
+    let reg = LanguageRegistry::with_enabled();
+    let fa = reg.for_path(std::path::Path::new("T.php")).unwrap().analyze(src);
+    let tuple = Some(InferredType::Sequence(vec![
+        InferredType::ClassName("Queue".into()),
+        InferredType::ClassName("Agent".into()),
+    ]));
+    assert_eq!(fa.sub_return_type_at_arity("lit", Some(0)), tuple, "bare `: array` refined");
+    assert_eq!(fa.sub_return_type_at_arity("undecl", Some(0)), tuple, "undeclared return");
+    assert!(
+        !matches!(fa.sub_return_type_at_arity("keyed", Some(0)), Some(InferredType::Sequence(_))),
+        "a keyed literal is not a tuple"
+    );
+}
+

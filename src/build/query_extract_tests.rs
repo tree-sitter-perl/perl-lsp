@@ -4719,3 +4719,45 @@ fn php_stdlib_string_callables_mint_call_refs() {
     assert!(!calls.contains(&"notafn"), "data string minted: {calls:?}");
     assert!(!calls.contains(&"notafn2"), "array-slot string minted: {calls:?}");
 }
+
+#[test]
+fn php_destructuring_slots_bind_positionally() {
+    use crate::model::file_analysis::Extraction;
+    // `[$a, $b] = …` / `list(...)` / `[, $b]` bind each scalar slot to its
+    // POSITION (top-level commas before it); a keyed list declares its
+    // vars but binds none of them positionally; foreach list slots index
+    // off the collection's element (the list span carries the Element hop).
+    let src = "<?php\n[$a, $b] = f();\nlist($c, $d) = g();\n[, $e] = h();\n['k' => $v] = k();\nforeach ($rows as [$x, $y]) {}\n";
+    let mut parser = php_parser();
+    let tree = parser.parse(src, None).unwrap();
+    let skel = extract(&tree, src.as_bytes(), &php_pack()).unwrap();
+    let pos = |name: &str| -> Option<Extraction> {
+        skel.flow_edges
+            .iter()
+            .find(|f| f.target_name == name)
+            .map(|f| f.extraction.clone())
+    };
+    assert_eq!(pos("$a"), Some(Extraction::Positional(0)));
+    assert_eq!(pos("$b"), Some(Extraction::Positional(1)));
+    assert_eq!(pos("$c"), Some(Extraction::Positional(0)));
+    assert_eq!(pos("$d"), Some(Extraction::Positional(1)));
+    assert_eq!(pos("$e"), Some(Extraction::Positional(1)), "skipped slot counts");
+    assert_eq!(pos("$v"), None, "keyed list never binds positionally");
+    assert!(skel.symbols.iter().any(|s| s.kind == "var" && s.name == "$v"), "…but still declares");
+    assert_eq!(pos("$y"), Some(Extraction::Positional(1)), "foreach list slot");
+    let (_, y_src) = skel
+        .flow_edges
+        .iter()
+        .find(|f| f.target_name == "$y")
+        .map(|f| (f.target_name.clone(), f.source))
+        .unwrap();
+    assert!(
+        skel.witnesses.iter().any(|w| matches!(
+            (&w.attachment, &w.payload),
+            (crate::model::witnesses::WitnessAttachment::Expr(sp),
+             crate::model::witnesses::WitnessPayload::Projected { step: crate::model::witnesses::ProjectionStep::Element, .. })
+            if *sp == y_src
+        )),
+        "the list span peels the collection's Element"
+    );
+}

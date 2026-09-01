@@ -646,3 +646,27 @@ class Widget {
         .collect();
     assert!(!general.iter().any(|n| n == "hidden"), "bare-lane leak: {general:?}");
 }
+
+#[test]
+fn perl_list_return_destructures_positionally() {
+    // `return (A->new, B->new)` is a positional tuple (`list_expression` in
+    // value position types as `Sequence`), so `my ($q, $a) = mk()` binds
+    // each slot to its element (docs/adr/destructuring.md). The slurpy
+    // tail carries the whole source (the documented approximation).
+    let source = "\
+package Queue; sub new { bless {}, shift }
+package Agent; sub new { bless {}, shift }
+package main;
+sub mk { return (Queue->new, Agent->new); }
+my ($q, $a) = mk();
+my ($first, @rest) = mk();
+";
+    use crate::model::file_analysis::InferredType;
+    let analysis = parse_analysis(source);
+    let at = tree_sitter::Point { row: 5, column: 0 };
+    assert_eq!(analysis.inferred_type_via_bag("$q", at), Some(InferredType::ClassName("Queue".into())));
+    assert_eq!(analysis.inferred_type_via_bag("$a", at), Some(InferredType::ClassName("Agent".into())));
+    let at2 = tree_sitter::Point { row: 6, column: 0 };
+    assert_eq!(analysis.inferred_type_via_bag("$first", at2), Some(InferredType::ClassName("Queue".into())));
+    assert!(matches!(analysis.inferred_type_via_bag("@rest", at2), Some(InferredType::Sequence(_))), "slurpy tail: whole-source lattice");
+}

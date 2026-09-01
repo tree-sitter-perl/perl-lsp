@@ -245,6 +245,48 @@
   . (_) @seq.source
   (pair (variable_name) @def.var.name @def.var @flow.rebind .))
 
+; ---- return sites ----
+; The returned expression's own witness (literal / read / call / tuple
+; literal) types the enclosing function through the driver's return-fuel
+; phase when the signature declares nothing — or declares only a bare
+; container the value refines (`: array` over `return [$q, $a]`,
+; docs/adr/destructuring.md).
+(return_statement (_) @expr.return.value)
+
+; ---- destructuring (docs/adr/destructuring.md) ----
+; `[$a, $b] = f()` / `list($a, $b) = f()`: every slot is a declaration
+; bound POSITIONALLY off the RHS through the same FlowEdge lowering Perl's
+; `my ($a, $b) = f()` uses (Extraction::Positional → ArrayIndex(n)); the
+; position is counted over the list text's top-level commas (`[, $b]`).
+; A keyed list (`['k' => $v]`) declares but never binds positionally;
+; nested list slots are not direct children and stay out.
+(assignment_expression
+  left: (list_literal
+    (variable_name) @def.var.name @def.var @flow.slot) @flow.slot.list
+  right: (_) @flow.source)
+; `foreach ($pairs as [$k, $v])` / `foreach ($m as $i => [$a, $b])`: the
+; list IS the collection's element — slots peel Element, then index.
+(foreach_statement
+  . (_) @seq.source
+  "as"
+  . (list_literal
+      (variable_name) @def.var.name @def.var @flow.slot) @flow.slot.list)
+(foreach_statement
+  . (_) @seq.source
+  (pair
+    (variable_name)
+    (list_literal
+      (variable_name) @def.var.name @def.var @flow.slot) @flow.slot.list .))
+
+; A key-less array literal is a positional TUPLE of its elements' edges
+; (`return [$queue, $agent]`): one match per element, grouped by the
+; array span in extraction; a keyed element or a spread disqualifies the
+; literal (it is a map / open list, never a tuple).
+(array_creation_expression
+  (array_element_initializer . (_) @tuple.elem .) @tuple.init) @tuple.arr
+(array_creation_expression
+  (array_element_initializer (_) (_) @tuple.keyed)) @tuple.arr
+
 ; ---- references ----
 (function_call_expression
   function: (name) @ref.call

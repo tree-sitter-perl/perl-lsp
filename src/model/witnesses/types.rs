@@ -155,6 +155,13 @@ pub const ANNOT_SOURCE: &str = "skeleton-annot";
 /// dangling edge drops out and leaves the syntax annot standing.
 pub const INHERIT_PARAM_SOURCE: &str = "inherit-param";
 
+/// A return-arm chain that REFINES a bare declared container (`: array`
+/// over `return [$q, $a]` — the tuple literal is strictly more informative).
+/// Annot priority for the same reason as `INHERIT_PARAM_SOURCE`: the
+/// materialized `Sequence` must beat the `HashRef` annot, and at equal
+/// priority latest-wins does it (`HashRef` never subsumes `Sequence`).
+pub const REFINE_SOURCE: &str = "refines-container";
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum WitnessSource {
     /// Named builder pass — "signature_extraction", "narrowing", …
@@ -181,7 +188,11 @@ impl WitnessSource {
     pub fn priority(&self) -> u8 {
         match self {
             WitnessSource::Plugin(_) => 100,
-            WitnessSource::Builder(tag) if tag == ANNOT_SOURCE || tag == INHERIT_PARAM_SOURCE => 20,
+            WitnessSource::Builder(tag)
+                if tag == ANNOT_SOURCE || tag == INHERIT_PARAM_SOURCE || tag == REFINE_SOURCE =>
+            {
+                20
+            }
             WitnessSource::Builder(_)
             | WitnessSource::Enrichment(_)
             | WitnessSource::DerivedFrom(_) => 10,
@@ -277,6 +288,15 @@ pub enum WitnessPayload {
     /// mostly-agree → that domain, truly-mixed → none. Kept at the END for
     /// bincode variant-index stability (bump `EXTRACT_VERSION`).
     DomainCompare { enum_type: Option<String> },
+    /// Positional tuple of EDGES: "the value at my attachment is a
+    /// `Sequence` whose slot i is whatever resolves at `elems[i]`". The
+    /// pack spelling of a key-less array literal (`return [$queue,
+    /// $agent]`): element types are query-time values (reads, calls, hops),
+    /// so the tuple stays edges, never a baked `Sequence`; materialization
+    /// drops it WHOLE when any slot is unresolved — a holey tuple
+    /// mis-projects (docs/adr/destructuring.md). Kept at the END for
+    /// bincode variant-index stability (bump `EXTRACT_VERSION`).
+    Tuple(Vec<WitnessAttachment>),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

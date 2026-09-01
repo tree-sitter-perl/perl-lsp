@@ -22,7 +22,7 @@ freeform traces resolved end-to-end.
 
 The ledger, clustered by root cause, ranked:
 
-## H1 (CRITICAL) — method rename fans across the whole interface family
+## H1 (CRITICAL) — method rename fans across the whole interface family — DECIDED: no change (global `rename.overrideScope`; see docs/adr/destructuring.md)
 
 B5.1: dry-rename `Fluent::toArray()` → 217 edits / 72 files, editing
 MessageBag/Model/Enumerable/Request/Uri/Validator/… — their OWN
@@ -134,7 +134,7 @@ getSubscribedEvents — same shape as route arrays. Symfony overlay
 pattern gated on the enclosing method name, minting the self-flavored
 named-method ref (shares H5's new capture).
 
-## H11 — list-destructuring loses per-element return types
+## H11 — list-destructuring loses per-element return types — LANDED (safe subset, docs/adr/destructuring.md)
 
 B5.3 (MINOR-MAJOR): `[$q, $a] = $this->fakeQueue()` unbinds element
 types → 6/14 getJobId call sites dark. Needs array-shape returns
@@ -220,4 +220,24 @@ generic member arm instead of the method signature arm.
   references from the row collect typed call sites (findOneByEmail:
   decl + AddUserCommandTest:96 + UserControllerTest:77), gd lands on the
   token, rename rewrites doc row + calls.
+
+## H1 decision + H11 wave (round-4, fourth slice) — docs/adr/destructuring.md
+
+- H1: DECIDED, no code change. `rename.overrideScope` stays one global
+  setting (README); the cursor never picks the scope. Predictable beats
+  clever (smartmatch is the cautionary tale).
+- H11 safe subset landed on ONE binder (`Extraction::Positional` →
+  `Projected{Expr(rhs), ArrayIndex(n)}`): Perl `return (A, B)` now types
+  as a `Sequence` tuple (the `list_expression` value arm was missing), so
+  `my ($q, $a) = mk()` binds per slot; php gains the `list_literal` slot
+  binder (assignment + both foreach forms, position by top-level commas,
+  keyed lists declare-only), phpdoc `array{A, B}` tuples and string-keyed
+  shapes (`object{jobs: array}` → HashWithKeys), the `Tuple` payload for
+  key-less array literals, and — broader than H11 — php's first
+  `@expr.return.value` capture, so undeclared returns type from the body
+  and a bare `: array` is refined by a tuple literal (REFINE_SOURCE at
+  annot priority). laravel B5.3: `[$queue, $agent] = $this->fakeQueue()`
+  types `$queue: Queue`; `Job::getJobId` references 8 → 22 (all 6
+  QueueTest sites in). guzzle/demo heatmap unchanged in kind (demo dead
+  50 → 45: body-typed returns reach more callers). EXTRACT_VERSION 200.
 

@@ -179,6 +179,10 @@ impl<'a> Builder<'a> {
             "anonymous_array_expression" => {
                 Some(WitnessPayload::InferredType(self.array_literal_type(node)))
             }
+            // A paren list in value position (`return ($a, $b)`) is a
+            // positional tuple — the list-assignment binder projects
+            // `element_at(n)` off it (docs/adr/destructuring.md).
+            "list_expression" => self.list_literal_type(node).map(WitnessPayload::InferredType),
             "quoted_regexp" => Some(WitnessPayload::InferredType(InferredType::Regexp)),
             "anonymous_subroutine_expression" | "refgen_expression" => {
                 // Pre-create the (anon) Symbol so

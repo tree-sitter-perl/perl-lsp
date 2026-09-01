@@ -551,6 +551,15 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     // `for (auto x : …)`) — they mint a `Rebind` FlowEdge so the narrowing
     // cutoff sees them, exactly like Perl's `foreach` var.
     let mut flow_rebinds: Vec<(String, ScopeId, Point)> = Vec::new();
+    // Destructuring slots (`@flow.slot` in a `@flow.slot.list`) and
+    // key-less array-literal tuples (`@tuple.*`) — joined per match after
+    // the loop (docs/adr/destructuring.md).
+    let mut flow_slots: Vec<(usize, String, ScopeId, Point, usize)> = Vec::new();
+    let mut slot_lists: HashMap<usize, (Span, usize, String)> = HashMap::new();
+    let mut tuple_arr_by_match: HashMap<usize, Span> = HashMap::new();
+    let mut tuple_elem_by_match: HashMap<usize, Span> = HashMap::new();
+    let mut tuple_init_by_match: HashMap<usize, (usize, bool)> = HashMap::new();
+    let mut tuple_keyed: std::collections::HashSet<usize> = std::collections::HashSet::new();
     let mut annots: HashMap<usize, String> = HashMap::new();
     // keyed-shape collection: ctor + keys grouped per @expr.shape span
     let mut shape_spans: Vec<(usize, usize, Span)> = Vec::new();
@@ -1252,6 +1261,34 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                 out.return_sites
                     .push((cur_scope, Span { start: e.start, end: e.end }));
             }
+            "flow.slot" => {
+                flow_slots.push((
+                    e.match_id,
+                    (pack.shape_name)("def.var", &e.text),
+                    cur_scope,
+                    e.start,
+                    e.start_byte,
+                ));
+            }
+            "flow.slot.list" => {
+                slot_lists.insert(
+                    e.match_id,
+                    (Span { start: e.start, end: e.end }, e.start_byte, e.text.clone()),
+                );
+            }
+            "tuple.arr" => {
+                tuple_arr_by_match.insert(e.match_id, Span { start: e.start, end: e.end });
+            }
+            "tuple.elem" => {
+                tuple_elem_by_match.insert(e.match_id, Span { start: e.start, end: e.end });
+            }
+            "tuple.init" => {
+                tuple_init_by_match
+                    .insert(e.match_id, (e.start_byte, e.text.trim_start().starts_with("...")));
+            }
+            "tuple.keyed" => {
+                tuple_keyed.insert(e.match_id);
+            }
             "flow.target" => {
                 flow_targets.insert(
                     e.match_id,
@@ -1781,6 +1818,89 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
             extraction: crate::model::file_analysis::Extraction::Rebind,
         });
     }
+    // Destructuring slots bind POSITIONALLY off their source — the same
+    // FlowEdge lowering Perl's list assignment uses. A keyed list never
+    // binds (its positions are not positions); the defs still landed.
+    {
+        let mut element_hops: std::collections::HashSet<(Point, Point)> = Default::default();
+        for (mid, name, scope, at, byte) in &flow_slots {
+            let Some((list_span, list_byte, list_text)) = slot_lists.get(mid) else { continue };
+            let Some(pos) = slot_position(list_text, byte.saturating_sub(*list_byte)) else {
+                continue;
+            };
+            let source = if let Some(src) = flow_sources.get(mid) {
+                *src
+            } else if let Some((seq_src, _)) = seq_source_by_match.get(mid) {
+                // foreach: the list IS the collection's element; the slots
+                // index into it — two projections chained through the
+                // list's own Expr span.
+                if element_hops.insert((list_span.start, list_span.end)) {
+                    out.witnesses.push(crate::model::witnesses::Witness {
+                        attachment: crate::model::witnesses::WitnessAttachment::Expr(*list_span),
+                        source: crate::model::witnesses::WitnessSource::Builder("skeleton".into()),
+                        payload: crate::model::witnesses::WitnessPayload::Projected {
+                            base: crate::model::witnesses::WitnessAttachment::Expr(*seq_src),
+                            step: crate::model::witnesses::ProjectionStep::Element,
+                        },
+                        span: *list_span,
+                    });
+                }
+                *list_span
+            } else {
+                continue;
+            };
+            out.flow_edges.push(crate::model::file_analysis::FlowEdge {
+                target_name: name.clone(),
+                target_scope: *scope,
+                target_at: *at,
+                source,
+                extraction: crate::model::file_analysis::Extraction::Positional(pos),
+            });
+        }
+    }
+    // Key-less array literals are positional TUPLES of their elements'
+    // edges (`return [$queue, $agent]`); a keyed element or a spread makes
+    // the literal a map / open list — the tuple witness is withheld and the
+    // `expr.lit.hashref` / keyed-shape witnesses stand.
+    {
+        let mut by_arr: HashMap<(Point, Point), (Span, Vec<(usize, Span)>, bool)> = HashMap::new();
+        for (mid, arr_span) in &tuple_arr_by_match {
+            let entry = by_arr
+                .entry((arr_span.start, arr_span.end))
+                .or_insert((*arr_span, Vec::new(), false));
+            if tuple_keyed.contains(mid) {
+                entry.2 = true;
+                continue;
+            }
+            if let (Some(elem), Some((byte, spread))) =
+                (tuple_elem_by_match.get(mid), tuple_init_by_match.get(mid))
+            {
+                if *spread {
+                    entry.2 = true;
+                    continue;
+                }
+                entry.1.push((*byte, *elem));
+            }
+        }
+        const MAX_TUPLE: usize = 64;
+        for (_, (arr_span, mut elems, disqualified)) in by_arr {
+            if disqualified || elems.is_empty() || elems.len() > MAX_TUPLE {
+                continue;
+            }
+            elems.sort_by_key(|(b, _)| *b);
+            out.witnesses.push(crate::model::witnesses::Witness {
+                attachment: crate::model::witnesses::WitnessAttachment::Expr(arr_span),
+                source: crate::model::witnesses::WitnessSource::Builder("skeleton".into()),
+                payload: crate::model::witnesses::WitnessPayload::Tuple(
+                    elems
+                        .into_iter()
+                        .map(|(_, s)| crate::model::witnesses::WitnessAttachment::Expr(s))
+                        .collect(),
+                ),
+                span: arr_span,
+            });
+        }
+    }
     // Lower the value-flow edges to type-tier witnesses (the bag is canonical
     // for types; the edges are the provenance tier above it).
     for fe in &out.flow_edges {
@@ -1931,11 +2051,32 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                             }
                         }
                         DocFact::Return(t) => {
-                            if sym.return_type.is_none() && !sym.receiver_return {
+                            // A doc row fills an undeclared return, and REFINES
+                            // a bare declared container (`: array` +
+                            // `@return array{Queue, Agent}`) — the same rule
+                            // `doc_admits` applies to params.
+                            let bare_container = matches!(
+                                sym.return_type,
+                                Some(InferredType::HashRef | InferredType::ArrayRef)
+                            );
+                            if (sym.return_type.is_none() || bare_container)
+                                && !sym.receiver_return
+                            {
                                 if (pack.rettype_receiver)(t) {
-                                    sym.receiver_return = true;
-                                } else {
-                                    sym.return_type = (pack.annot_type)(t);
+                                    if sym.return_type.is_none() {
+                                        sym.receiver_return = true;
+                                    }
+                                } else if let Some(doc) = (pack.annot_type)(t) {
+                                    if !bare_container
+                                        || matches!(
+                                            doc,
+                                            InferredType::Sequence(_)
+                                                | InferredType::Parametric(_)
+                                                | InferredType::HashWithKeys { .. }
+                                        )
+                                    {
+                                        sym.return_type = Some(doc);
+                                    }
                                 }
                             }
                         }
@@ -2213,6 +2354,27 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
 /// is a `Sequence` refining a bare declared container (`array`/`iterable` —
 /// the spelling that cannot carry an element). The doc witness lands AFTER
 /// the declared one, so latest-wins reduction serves the refinement.
+/// The positional index of a destructuring slot: the number of TOP-LEVEL
+/// commas in the list text before the slot's byte offset (`[, $b]` → 1).
+/// `None` for a keyed list (a top-level `=>`): its positions are not
+/// positions, so the slot never binds positionally.
+fn slot_position(list_text: &str, slot_offset: usize) -> Option<usize> {
+    let bytes = list_text.as_bytes();
+    let (mut depth, mut commas) = (0i32, 0usize);
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'(' | b'[' | b'{' => depth += 1,
+            b')' | b']' | b'}' => depth -= 1,
+            b',' if depth == 1 && i < slot_offset => commas += 1,
+            b'=' if depth == 1 && bytes.get(i + 1) == Some(&b'>') => return None,
+            _ => {}
+        }
+        i += 1;
+    }
+    Some(commas)
+}
+
 fn doc_admits(
     pack: &LangPack,
     annot_text_by_var: &std::collections::HashMap<

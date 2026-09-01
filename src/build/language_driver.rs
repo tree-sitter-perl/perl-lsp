@@ -1093,9 +1093,29 @@ fn emit_return_fuel(
         })
         .find_map(|sc| scope_to_symbol.get(&sc).copied());
         let Some(sid) = owner else { continue };
-        if !fa.witnesses.for_attachment(&WA::Symbol(sid)).is_empty() {
-            continue; // a declared return already carries its own witness
+        // A declared return already carries its own witness — except a BARE
+        // container (`: array`), which the returned value may refine (a
+        // tuple literal / a keyed shape): the arm chain then rides at annot
+        // priority so the refinement beats the annot (docs/adr/destructuring.md).
+        let existing = fa.witnesses.for_attachment(&WA::Symbol(sid));
+        let refines_container = !existing.is_empty()
+            && existing.iter().all(|w| {
+                matches!(
+                    &w.payload,
+                    WP::InferredType(
+                        crate::model::file_analysis::InferredType::HashRef
+                            | crate::model::file_analysis::InferredType::ArrayRef
+                    )
+                )
+            });
+        if !existing.is_empty() && !refines_container {
+            continue;
         }
+        let chain_source = if refines_container {
+            crate::model::witnesses::REFINE_SOURCE
+        } else {
+            "cpp_return_arm_chain"
+        };
         fa.witnesses.push(Witness {
             attachment: WA::SymbolReturnArm(sid),
             source: WitnessSource::Builder("cpp_return_arm".into()),
@@ -1104,7 +1124,7 @@ fn emit_return_fuel(
         });
         fa.witnesses.push(Witness {
             attachment: WA::Symbol(sid),
-            source: WitnessSource::Builder("cpp_return_arm_chain".into()),
+            source: WitnessSource::Builder(chain_source.into()),
             payload: WP::Edge(WA::SymbolReturnArm(sid)),
             span: *ret_span,
         });
