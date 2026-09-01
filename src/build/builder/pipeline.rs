@@ -285,6 +285,7 @@ fn build_once(
         return_infos: Vec::new(),
         pending_array_pushes: Vec::new(),
         last_expr_span: std::collections::HashMap::new(),
+        last_stmt_exit: std::collections::HashMap::new(),
         slot_write_rhs_span: std::collections::HashMap::new(),
         call_bindings: Vec::new(),
         method_call_bindings: Vec::new(),
@@ -908,43 +909,40 @@ impl<'a> Builder<'a> {
             });
         }
 
-        // Implicit-last-statement return edges. For each user-defined
-        // sub/method scope with NO explicit `return` statements, push
-        // `Symbol(sid) → Edge(Expr(last_expr_span))` so registry
-        // queries on `Symbol(sid)` materialize the implicit return
-        // through the canonical edge-chase path. Subs with explicit
-        // returns route via the `Edge(SymbolReturnArm(sid))` chain
-        // `publish_return_arm_witnesses` pushes — those claim the
-        // same attachment shape first via `SymbolReturnArmFold`.
-        // Framework / plugin-synthesized syms have no Scope and thus
-        // no entry in `last_expr_span`; they're invisible to this
-        // loop, which is the right behavior (their answer comes from
-        // the synth-pushed Symbol witness directly).
+        // Every way OUT of a sub is an arm on `SymbolReturnArm(sid)`.
         //
-        // Invariant: `return_infos` is walk-final by the time
-        // `populate_witness_bag` runs — it's populated only by
-        // `visit_node`'s `return_expression` arm during the live walk
-        // and never mutated after. No clear-and-emit tag on the implicit-return
-        // edge is therefore needed; the gate `return_infos.is_empty()
-        // for this scope` is a one-shot decision.
-        let mut implicit_edges: Vec<(SymbolId, Span, Span)> = Vec::new();
+        // Explicit `return`s become arms during the walk
+        // (`publish_return_arm_witnesses`). The remaining way out is the
+        // FALLTHROUGH tail: Perl yields the last statement's value when
+        // control reaches the end. That is an arm like any other, so it is
+        // emitted as one here rather than through a second mechanism.
+        let mut tail_arms: Vec<(SymbolId, Span, TailExit)> = Vec::new();
         for scope in &self.scopes {
             if !matches!(scope.kind, ScopeKind::Sub { .. } | ScopeKind::Method { .. }) {
                 continue;
             }
-            if self.return_infos.iter().any(|ri| ri.scope == scope.id) {
+            // A `return` tail means control cannot fall off the end: no tail
+            // arm, and the return already contributed its own.
+            let exit = self.last_stmt_exit.get(&scope.id).copied().unwrap_or(TailExit::Value);
+            if exit == TailExit::Return {
                 continue;
             }
             let Some(span) = self.last_expr_span.get(&scope.id).copied() else { continue };
             let Some(sym_id) = self.find_sub_symbol_for_scope(scope.id) else { continue };
-            implicit_edges.push((sym_id, span, scope.span));
+            tail_arms.push((sym_id, span, exit));
         }
-        for (sym_id, expr_span, sym_span) in implicit_edges {
+        for (sym_id, span, exit) in tail_arms {
+            match exit {
+                TailExit::Undef(spelling) => {
+                    self.push_return_undef_arm(sym_id, span, spelling)
+                }
+                _ => self.push_return_value_arm(sym_id, span),
+            }
             self.bag.push(Witness {
                 attachment: WitnessAttachment::Symbol(sym_id),
-                source: WitnessSource::Builder("implicit_return".into()),
-                payload: WitnessPayload::Edge(WitnessAttachment::Expr(expr_span)),
-                span: sym_span,
+                source: WitnessSource::Builder("return_arm_chain".into()),
+                payload: WitnessPayload::Edge(WitnessAttachment::SymbolReturnArm(sym_id)),
+                span,
             });
         }
     }

@@ -404,6 +404,69 @@ impl<'a> Builder<'a> {
     /// nothing a consumer can use.
     pub(super) const MAX_EXPR_TYPE_DEPTH: usize = 64;
 
+    /// One `value_arm` counting Fact on the sub's return-arm attachment.
+    ///
+    /// Pushed for every value arm, typed or not: an Edge whose target never
+    /// materializes leaves nothing in the fold, so counting materialized
+    /// arms would read an untypeable arm as an absent one — and the
+    /// all-undef verdict must not fire while any way out yields a value.
+    /// Publish one UNDEF arm on the sub's return-arm attachment.
+    ///
+    /// Carries no rvalue type — `undef`, a bare `return;`, and the empty list
+    /// `()` (which coerces to undef in scalar context) have nothing to point
+    /// an edge at — so it is a Fact. Both ways out of a sub, the explicit
+    /// `return` and the fallthrough tail, spell it through here.
+    pub(super) fn push_return_undef_arm(
+        &mut self,
+        sym_id: SymbolId,
+        span: Span,
+        spelling: crate::model::witnesses::tags::UndefArm,
+    ) {
+        use crate::model::witnesses::{
+            tags, FactValue, Witness, WitnessAttachment, WitnessPayload, WitnessSource,
+        };
+        self.bag.push(Witness {
+            attachment: WitnessAttachment::SymbolReturnArm(sym_id),
+            source: WitnessSource::Builder(tags::FACT_UNDEF_ARM.into()),
+            payload: WitnessPayload::Fact {
+                family: tags::FACT_UNDEF_ARM.into(),
+                key: String::new(),
+                value: spelling.as_fact_value(),
+            },
+            span,
+        });
+    }
+
+    /// Publish one VALUE arm on the sub's return-arm attachment: the edge to
+    /// its type, and the census Fact that records the arm existed.
+    ///
+    /// Both, always, from one place. The edge is what types the arm; the Fact
+    /// is what proves it was there, because the registry resolves edges into
+    /// materialized witnesses BEFORE a reducer sees the list, so an arm whose
+    /// expression never types is indistinguishable from an arm that never
+    /// existed. The all-undef verdict turns on exactly that distinction.
+    pub(super) fn push_return_value_arm(&mut self, sym_id: SymbolId, span: Span) {
+        use crate::model::witnesses::{
+            tags, FactValue, Witness, WitnessAttachment, WitnessPayload, WitnessSource,
+        };
+        self.bag.push(Witness {
+            attachment: WitnessAttachment::SymbolReturnArm(sym_id),
+            source: WitnessSource::Builder("return_arm".into()),
+            payload: WitnessPayload::Edge(WitnessAttachment::Expr(span)),
+            span,
+        });
+        self.bag.push(Witness {
+            attachment: WitnessAttachment::SymbolReturnArm(sym_id),
+            source: WitnessSource::Builder(tags::FACT_VALUE_ARM.into()),
+            payload: WitnessPayload::Fact {
+                family: tags::FACT_VALUE_ARM.into(),
+                key: String::new(),
+                value: FactValue::Bool(true),
+            },
+            span,
+        });
+    }
+
     pub(super) fn emit_expr_witness(&mut self, node: Node<'a>) {
         
         if self.expr_type_depth >= Self::MAX_EXPR_TYPE_DEPTH {
@@ -416,7 +479,7 @@ impl<'a> Builder<'a> {
     }
 
     fn emit_expr_witness_inner(&mut self, node: Node<'a>) {
-        use crate::model::witnesses::{Witness, WitnessAttachment, WitnessPayload, WitnessSource};
+        use crate::model::witnesses::{tags, Witness, WitnessAttachment, WitnessPayload, WitnessSource};
         let span = node_to_span(node);
         if node.kind() == "conditional_expression" {
             let arm_att = WitnessAttachment::BranchArm(span);
@@ -429,14 +492,19 @@ impl<'a> Builder<'a> {
                 // which coerces to undef in scalar context) make the ternary
                 // optional; mark either like a `return undef` arm so
                 // `BranchArmFold` lifts `{T, undef}` to `Optional<T>`.
-                if matches!(arm.kind(), "undef_expression" | "stub_expression") {
+                let arm_undef = match arm.kind() {
+                    "undef_expression" => Some(tags::UndefArm::Scalar),
+                    "stub_expression" => Some(tags::UndefArm::EmptyList),
+                    _ => None,
+                };
+                if let Some(spelling) = arm_undef {
                     self.bag.push(Witness {
                         attachment: arm_att.clone(),
-                        source: WitnessSource::Builder("undef_arm".into()),
+                        source: WitnessSource::Builder(tags::FACT_UNDEF_ARM.into()),
                         payload: WitnessPayload::Fact {
-                            family: "undef_arm".into(),
+                            family: tags::FACT_UNDEF_ARM.into(),
                             key: String::new(),
-                            value: crate::model::witnesses::FactValue::Bool(true),
+                            value: spelling.as_fact_value(),
                         },
                         span: node_to_span(arm),
                     });
@@ -602,42 +670,38 @@ impl<'a> Builder<'a> {
     ///   walk through to the arm-fold. Pushed per arm — duplicates
     ///   are idempotent (same target, same materialized result).
     pub(super) fn publish_return_arm_witnesses(&mut self, return_node: Node<'a>, scope: ScopeId) {
-        use crate::model::witnesses::{
-            FactValue, Witness, WitnessAttachment, WitnessPayload, WitnessSource,
-        };
+        use crate::model::witnesses::{tags, Witness, WitnessAttachment, WitnessPayload, WitnessSource};
         let body = return_node.named_child(0);
         let arm_span = body.map(node_to_span).unwrap_or_else(|| node_to_span(return_node));
 
         let Some(sub_name) = self.enclosing_sub_name() else { return };
         let Some(sym_id) = self.find_sub_symbol_for(&sub_name, scope) else { return };
 
-        // A bare `return;` and `return undef` are undef arms — the sub's
-        // value is optional. Neither has an rvalue type to ride an `Expr`
-        // edge, so mark the arm with a Fact the fold counts; the arm join
-        // lifts `{T, undef}` to `Optional<T>`.
-        let is_undef_arm = match body {
-            None => true,
-            Some(b) => b.kind() == "undef_expression",
+        // A bare `return;`, `return undef`, and `return ()` are undef arms —
+        // the sub's value is optional. `()` is a `stub_expression` and
+        // coerces to undef in scalar context, which is the ternary side's
+        // rule too (`emit_expr_witness`); the two spellings of "this arm is
+        // undef" must not disagree about which syntax counts.
+        //
+        // None of the three has an rvalue type to ride an `Expr` edge, so
+        // mark the arm with a Fact the fold counts; the join lifts
+        // `{T, undef}` to `Optional<T>`, and all-undef to `Undef`.
+        // Which undef spelling — see `tags::UndefArm`. A bare `return;` is
+        // the EMPTY list in list context, so it groups with `()`, not with
+        // `return undef`.
+        let undef_arm = match body {
+            None => Some(tags::UndefArm::EmptyList),
+            Some(b) => match b.kind() {
+                "undef_expression" => Some(tags::UndefArm::Scalar),
+                "stub_expression" => Some(tags::UndefArm::EmptyList),
+                _ => None,
+            },
         };
-        if is_undef_arm {
-            self.bag.push(Witness {
-                attachment: WitnessAttachment::SymbolReturnArm(sym_id),
-                source: WitnessSource::Builder("undef_arm".into()),
-                payload: WitnessPayload::Fact {
-                    family: "undef_arm".into(),
-                    key: String::new(),
-                    value: FactValue::Bool(true),
-                },
-                span: arm_span,
-            });
+        if let Some(spelling) = undef_arm {
+            self.push_return_undef_arm(sym_id, arm_span, spelling);
         } else if let Some(body) = body {
             self.emit_expr_witness(body);
-            self.bag.push(Witness {
-                attachment: WitnessAttachment::SymbolReturnArm(sym_id),
-                source: WitnessSource::Builder("return_arm".into()),
-                payload: WitnessPayload::Edge(WitnessAttachment::Expr(arm_span)),
-                span: arm_span,
-            });
+            self.push_return_value_arm(sym_id, arm_span);
         }
         self.bag.push(Witness {
             attachment: WitnessAttachment::Symbol(sym_id),

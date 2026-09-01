@@ -75,6 +75,35 @@ assertion is "no diagnostic at this site."
 
 ---
 
+### Open-world dispatch — a base class's own `undef` method types its guard
+
+- **Site:** `Software/License.pm:171` (substrate) — `contradictory-guard`,
+  "`$meta1` is undef here; this guard can never pass". **Opt-in code**, so no
+  default-on user sees it.
+- **Construct:**
+  ```perl
+  sub meta_name { return undef; }          # the BASE class's answer
+  sub meta2_name {
+      my $meta1 = $self->meta_name;
+      return undef unless defined $meta1;  # <-- flagged
+  ```
+  Every subclass of `Software::License` overrides `meta_name` with a real
+  string, so at runtime the guard passes constantly.
+- **Root cause:** the belief is locally true and globally wrong. `$self` in a
+  base class is an OPEN receiver — its runtime value is usually a subclass —
+  but the type comes from the enclosing class's own method. Nothing in the
+  guard logic asks whether the method that produced the belief is overridden
+  below.
+- **Why it surfaced now:** an all-undef sub used to type as `None`
+  ("unknown"), which no verdict could act on. It now types as the definitive
+  `Undef`, which is the correct local fact and is what makes the pre-existing
+  open-world gap reachable. The gap is older than the change that exposed it.
+- **Fix:** the open-world gate — suppress a definitive verdict when the belief
+  came from a `$self`-receiver method call on a class that HAS descendants
+  overriding that method (`children_index` already answers this). Scheduled as
+  `docs/epics/03-openness.md` Phase D, which owns the precise-vs-coarse
+  provenance decision; do not hand-roll a narrower version here.
+
 ## 3. Completion harvest
 
 ### `completion-datetime-hashkey` — `$self->{` offers too few keys

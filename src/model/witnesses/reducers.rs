@@ -368,7 +368,7 @@ impl WitnessReducer for BranchArmFold {
         }
         match &w.payload {
             WitnessPayload::InferredType(_) => true,
-            WitnessPayload::Fact { family, .. } => family == "undef_arm",
+            WitnessPayload::Fact { family, .. } => family == tags::FACT_UNDEF_ARM,
             _ => false,
         }
     }
@@ -385,7 +385,7 @@ impl WitnessReducer for BranchArmFold {
             match &w.payload {
                 WitnessPayload::InferredType(t) if is_fallback => fallback.push(t.clone()),
                 WitnessPayload::InferredType(t) => typed.push(t.clone()),
-                WitnessPayload::Fact { family, .. } if family == "undef_arm" => undef_arms += 1,
+                WitnessPayload::Fact { family, .. } if family == tags::FACT_UNDEF_ARM => undef_arms += 1,
                 _ => {}
             }
         }
@@ -456,8 +456,14 @@ impl WitnessReducer for SymbolReturnArmFold {
         }
         match &w.payload {
             WitnessPayload::InferredType(_) => true,
-            // The `return undef` arm marker (no rvalue type to materialize).
-            WitnessPayload::Fact { family, .. } => family == "undef_arm",
+            // `undef_arm`: the provably-undef marker (no rvalue type to
+            // materialize). `value_arm`: the per-value-arm counter — an Edge
+            // whose target never materializes leaves no InferredType, so the
+            // all-undef gate below counts ways-out through these Facts, not
+            // through the arms it managed to type.
+            WitnessPayload::Fact { family, .. } => {
+                family == tags::FACT_UNDEF_ARM || family == tags::FACT_VALUE_ARM
+            }
             _ => false,
         }
     }
@@ -465,14 +471,26 @@ impl WitnessReducer for SymbolReturnArmFold {
     fn reduce(&self, ws: &[&Witness], _q: &ReducerQuery) -> ReducedValue {
         let mut arms: Vec<InferredType> = Vec::new();
         let mut has_undef_arm = false;
+        let mut value_arms = 0usize;
         for w in ws {
             match &w.payload {
                 WitnessPayload::InferredType(t) => arms.push(t.clone()),
-                WitnessPayload::Fact { family, .. } if family == "undef_arm" => {
+                WitnessPayload::Fact { family, .. } if family == tags::FACT_UNDEF_ARM => {
                     has_undef_arm = true
+                }
+                WitnessPayload::Fact { family, .. } if family == tags::FACT_VALUE_ARM => {
+                    value_arms += 1
                 }
                 _ => {}
             }
+        }
+        // Every way out is provably undef → the definitive bottom `Undef`,
+        // not the silent `None`. `arms.is_empty()` alone would NOT justify
+        // this: an untypeable value arm leaves no InferredType either, and
+        // reading that as "no value arm exists" is how a sub that returns
+        // something gets typed as returning nothing.
+        if arms.is_empty() && has_undef_arm && value_arms == 0 {
+            return ReducedValue::Type(InferredType::Undef);
         }
         match crate::model::file_analysis::join_return_arms(&arms, has_undef_arm) {
             Some(t) => ReducedValue::Type(t),

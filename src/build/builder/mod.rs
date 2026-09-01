@@ -234,6 +234,25 @@ struct DeferredNamedSubParamType {
     plugin_id: String,
 }
 
+/// What the last body-top-level statement of a sub does with control.
+///
+/// Perl yields the last statement's value when control reaches the end, so
+/// that statement is a way OUT of the sub — an arm, exactly like an explicit
+/// `return`. This says which kind, using the same classification the return
+/// side uses, so "is this way out undef" has one answer and not two.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum TailExit {
+    /// The statement is a `return`, so control cannot fall off the end.
+    /// It already contributed its own arm; there is no tail arm.
+    Return,
+    /// The tail evaluates to undef — an undef arm. Carries WHICH spelling,
+    /// because `undef` and `()` diverge in list context
+    /// (`crate::model::witnesses::tags::UndefArm`).
+    Undef(crate::model::witnesses::tags::UndefArm),
+    /// The tail yields a value — a value arm, whether or not it types.
+    Value,
+}
+
 struct Builder<'a> {
     source: &'a [u8],
 
@@ -269,6 +288,8 @@ struct Builder<'a> {
     /// Types ride the bag; this map only carries the structural
     /// pointer to the source span.
     last_expr_span: std::collections::HashMap<ScopeId, Span>,
+    /// How the sub's last body-top-level statement exits — see [`TailExit`].
+    last_stmt_exit: std::collections::HashMap<ScopeId, TailExit>,
     /// For each `$obj->{k} = <rhs>` hash-key WRITE, maps the key node's
     /// span (the span the matching `HashKeyAccess` Write ref carries) to
     /// the RHS expression's span. `populate_witness_bag`'s mutation loop
