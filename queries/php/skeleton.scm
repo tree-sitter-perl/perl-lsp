@@ -72,6 +72,13 @@
   name: (name) @def.class.name
   body: (declaration_list (use_declaration (qualified_name (name) @parent @ref.type) @parent.fq)))
 
+; container flavor marks (name-span post-join like @nonpublic.target):
+; interfaces and traits are SymKind::Class in the model, but SUPER
+; resolution must prefer a concrete parent over an interface's abstract
+; stub, and trait identity feeds the consumer-side reference walk.
+(interface_declaration name: (name) @classattr.interface)
+(trait_declaration name: (name) @classattr.trait)
+
 ; access modifiers -> the model's non_public attribute (the same gate
 ; cpp access regions stamp): a private/protected member completes only
 ; from inside its own class's body. Joined to the def by NAME-SPAN
@@ -310,6 +317,19 @@
         (name) @_cclsq .))
   . (array_element_initializer (string (string_content) @ref.method.named)) .
   (#eq? @_cclsq "class"))
+
+; `static::$records` / `self::$records` / `Foo::$prop` — scoped STATIC
+; property access rides the same member lane (round-4: `static::$prop`
+; lost the property's own @var doc because no hop existed here; the
+; `$this->prop` twin always had one). The field name is the inner
+; (name), sigil-stripped like instance access; relative scopes
+; canonicalize via member.recv shaping.
+(scoped_property_access_expression
+  scope: (relative_scope) @member.recv
+  name: (variable_name (name) @ref.member)) @hop.call
+(scoped_property_access_expression
+  scope: (name) @member.recv
+  name: (variable_name (name) @ref.member)) @hop.call
 
 ; `new User(...)`: the value is an instance of User by SYNTAX — the ctor
 ; edge rides the alias graph (TypeName → the defining file, or the bare

@@ -677,9 +677,63 @@ impl FileAnalysis {
         method_name: &str,
         module_index: Option<&dyn CrossFileLookup>,
     ) -> Option<MethodResolution> {
+        // A SAME-LEAF parent (php aliased import — `use Support\Collection
+        // as BaseCollection; class Collection extends BaseCollection`)
+        // collapses into the ORIGIN node of the leaf-keyed walk below and
+        // is skipped, so `parent::` fell through to a DEEPER ancestor
+        // (typically an interface's abstract stub). Resolve it explicitly
+        // first: the pack's parent-namespace row names the parent's
+        // namespace, and the candidate file whose Class symbol carries
+        // that namespace is the real parent.
+        if let Some(idx) = module_index {
+            for (child, parent, ns) in &self.pack.parent_namespaces {
+                if child != enclosing || parent != enclosing {
+                    continue;
+                }
+                for cached in idx.visible_def_candidates(parent) {
+                    let whole = idx.whole_present(&cached);
+                    let cand_ns = whole
+                        .symbols()
+                        .iter()
+                        .find(|s| matches!(s.kind, SymKind::Class) && &s.name == parent)
+                        .map(|s| s.package.clone().unwrap_or_default());
+                    if cand_ns.as_deref() == Some(ns.as_str())
+                        && whole
+                            .method_resolution_on_class(parent, method_name, module_index)
+                            .is_some()
+                    {
+                        return Some(MethodResolution::CrossFile {
+                            class: parent.clone(),
+                            def_module: None,
+                        });
+                    }
+                }
+            }
+        }
         // SUPER:: searches the PARENTS, never the enclosing class — so
-        // it is the bare `walk`, origin-excluded by construction.
+        // it is the bare `walk`, origin-excluded by construction. A hit on
+        // an INTERFACE-marked class (php: the same SymKind::Class, told
+        // apart by the "interface" flavor attribute) is kept only as a
+        // fallback: `parent::` runs the concrete class chain, and the
+        // abstract stub is the answer only when nothing concrete defines
+        // the method.
         let mut result: Option<MethodResolution> = None;
+        let mut iface_fallback: Option<MethodResolution> = None;
+        let class_is_interface = |cls: &str| -> bool {
+            let check = |a: &FileAnalysis| {
+                a.symbols().iter().any(|s| {
+                    matches!(s.kind, SymKind::Class)
+                        && s.name == cls
+                        && s.attributes.iter().any(|x| x == "interface")
+                })
+            };
+            check(self)
+                || module_index.is_some_and(|i| {
+                    i.visible_def_candidates(cls)
+                        .iter()
+                        .any(|c| check(&i.whole_present(c)))
+                })
+        };
         let graph = crate::model::graph::GraphView::new(self, module_index);
         graph.walk(
             crate::model::graph::Node::Class(enclosing.to_string()),
@@ -690,12 +744,20 @@ impl FileAnalysis {
                     return crate::model::graph::WalkControl::Continue;
                 };
                 match self.method_resolution_on_class(cls, method_name, module_index) {
-                    Some(r) => { result = Some(r); crate::model::graph::WalkControl::Stop }
+                    Some(r) => {
+                        if class_is_interface(cls) {
+                            iface_fallback.get_or_insert(r);
+                            crate::model::graph::WalkControl::Continue
+                        } else {
+                            result = Some(r);
+                            crate::model::graph::WalkControl::Stop
+                        }
+                    }
                     None => crate::model::graph::WalkControl::Continue,
                 }
             },
         );
-        result
+        result.or(iface_fallback)
     }
 
     /// Does `class` (or any ancestor we CAN reach) name a parent that
@@ -789,6 +851,11 @@ impl FileAnalysis {
         // class but not a name a method call can ever spell.
         let visible = |sym: &Symbol| {
             crate::model::conventions::is_callable_sub_name(&sym.name)
+                // A lexical sub/method (`my sub` / `my method`) is scoped to
+                // its block, not the class: it never dispatches by name on an
+                // MRO and is invisible cross-file. The point-aware `&name`
+                // lane (`complete_lexical_methods_at`) owns offering it.
+                && !matches!(&sym.detail, SymbolDetail::Sub { lexical: true, .. })
                 && (requesting_class == Some(class_name)
                     || !sym.attributes.iter().any(|a| a == "non_public"))
         };

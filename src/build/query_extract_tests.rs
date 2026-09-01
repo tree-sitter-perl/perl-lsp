@@ -4603,3 +4603,71 @@ class Reg {
     let u = fa.inferred_type_via_bag("$u", tree_sitter::Point { row: 14, column: 17 });
     assert_eq!(u, Some(InferredType::ClassName("User".into())), "value still peels: {u:?}");
 }
+
+#[test]
+fn php_inherit_doc_param_edges_and_publication() {
+    use crate::model::witnesses::{WitnessAttachment, WitnessPayload};
+    // Publication half: the interface's @param array<Rec> lands class-keyed
+    // as PackageSymbol{Iface, "handleBatch#p#$records"}.
+    let (iface, _) = php_fa(
+        "<?php\nnamespace App;\ninterface Iface\n{\n    /**\n     * @param array<Rec> $records\n     */\n    public function handleBatch(array $records): void;\n}\n",
+    );
+    let published: Vec<String> = iface
+        .witnesses
+        .all()
+        .iter()
+        .filter_map(|w| match (&w.attachment, &w.payload) {
+            (
+                WitnessAttachment::PackageSymbol { package, name },
+                WitnessPayload::InferredType(_),
+            ) if name.contains("#p#") => Some(format!("{package}::{name}")),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        published.iter().any(|p| p.contains("Iface") && p.contains("handleBatch#p#")),
+        "publication missing: {published:?}"
+    );
+
+    // Subscription half: the bare-`array` override param edges to its OWN
+    // class's row (the registry inheritance walk carries it to Iface).
+    let (impl_fa, _) = php_fa(
+        "<?php\nnamespace App;\nclass Impl implements Iface\n{\n    /**\n     * @inheritDoc\n     */\n    public function handleBatch(array $records): void\n    {\n        foreach ($records as $record) {\n            echo $record->level;\n        }\n    }\n}\n",
+    );
+    let edges: Vec<String> = impl_fa
+        .witnesses
+        .all()
+        .iter()
+        .filter_map(|w| match (&w.attachment, &w.payload) {
+            (
+                WitnessAttachment::Variable { name, .. },
+                WitnessPayload::Edge(WitnessAttachment::PackageSymbol { package, name: ps }),
+            ) => Some(format!("{name} -> {package}::{ps}")),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        edges.iter().any(|e| e.contains("records") && e.contains("Impl::handleBatch#p#")),
+        "subscription edge missing: {edges:?}"
+    );
+}
+#[test]
+fn php_data_provider_docblock_mints_member_ref_on_name_token() {
+    let src = "<?php\nnamespace App\\Tests;\nclass T\n{\n    /**\n     * @dataProvider algorithmProvider\n     */\n    public function testX(string $a): void {}\n\n    public static function algorithmProvider(): iterable\n    {\n        yield ['md5'];\n    }\n}\n";
+    let mut parser = php_parser();
+    let tree = parser.parse(src, None).unwrap();
+    let skel = extract(&tree, src.as_bytes(), &php_pack()).unwrap();
+    // The `@dataProvider` doc fact mints a member ref SPANNING the
+    // provider-name token (rename rewrites it in place). The invocant is
+    // the CLASS NAME (not `__PACKAGE__`): the doc row's scope is the
+    // class body, whose package is the NAMESPACE, so the current-package
+    // walk would resolve the wrong owner.
+    let r = skel
+        .refs
+        .iter()
+        .find(|r| r.name == "algorithmProvider" && r.kind == "member")
+        .expect("@dataProvider member ref missing");
+    assert_eq!((r.start.row, r.start.column), (5, 21), "name-token span");
+    assert_eq!(r.end.column, 21 + "algorithmProvider".len());
+    assert_eq!(r.invocant.as_ref().map(|(_, t)| t.as_str()), Some("T"));
+}

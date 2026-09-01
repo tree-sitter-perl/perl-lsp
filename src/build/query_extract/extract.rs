@@ -325,6 +325,11 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     // the same `non_public` attribute cpp access regions stamp.
     let mut nonpublic_name_spans: std::collections::HashSet<(Point, Point)> =
         std::collections::HashSet::new();
+    // `@classattr.<flavor>` — container-def name spans stamped with a
+    // flavor attribute ("interface"/"trait"): the model's SymKind::Class
+    // covers all three php container kinds, and SUPER/reference walks
+    // need to ask the value which one it is.
+    let mut classattr_by_name_span: HashMap<(Point, Point), String> = HashMap::new();
     for e in &events {
         if let Some(prefix) = e.cap.strip_suffix(".name") {
             names_by_match
@@ -359,6 +364,9 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
         }
         if e.cap == "nonpublic.target" {
             nonpublic_name_spans.insert((e.start, e.end));
+        }
+        if let Some(flavor) = e.cap.strip_prefix("classattr.") {
+            classattr_by_name_span.insert((e.start, e.end), flavor.to_string());
         }
         if e.cap == "seq.source" {
             seq_source_by_match.insert(
@@ -1024,6 +1032,26 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
             }
             // consumed by the prepass join above; nothing to mint here
             "dispatch.via" => {}
+            // `.self` flavor: the string names a method of the ENCLOSING
+            // class (a PHPUnit attribute argument) — no receiver node
+            // exists, so the invocant is the current-package token,
+            // resolved by the enclosing-class walk like `self::`.
+            "ref.method.named.self" => {
+                out.refs.push(SkelRef {
+                    via: None,
+                    kind: "member".to_string(),
+                    name: e.text.clone(),
+                    start: e.start,
+                    end: e.end,
+                    scope: cur_scope,
+                    invocant: Some((
+                        crate::model::file_analysis::Span { start: e.start, end: e.end },
+                        "__PACKAGE__".to_string(),
+                    )),
+                    member_op: None,
+                    arg_count: None,
+                });
+            }
             "ref.method.named" => {
                 if let Some(inv) = member_recv.get(&e.match_id).cloned() {
                     out.refs.push(SkelRef {
@@ -1824,6 +1852,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                     .map(|s| (s.name.clone(), s.scope, s.start))
                     .collect();
             let mut doc_witnesses: Vec<crate::model::witnesses::Witness> = Vec::new();
+            let mut doc_refs: Vec<SkelRef> = Vec::new();
             let mut doc_methods: Vec<SkelSymbol> = Vec::new();
             for sym in out.symbols.iter_mut() {
                 // `@method` rows join to the CLASS docblock (Laravel facades,
@@ -1877,14 +1906,15 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                     }
                     continue;
                 }
-                if !matches!(sym.kind.as_str(), "sub" | "method" | "field" | "anon") {
+                if !matches!(sym.kind.as_str(), "sub" | "method" | "field" | "anon" | "var") {
                     continue;
                 }
-                let Some((_, facts)) =
+                let Some((cstart, facts)) =
                     sym.start.row.checked_sub(1).and_then(|r| by_end_row.get(&r))
                 else {
                     continue;
                 };
+                let cstart = *cstart;
                 for f in facts {
                     match f {
                         // class-docblock facts; no callable/field join
@@ -1906,7 +1936,63 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                                 }
                             }
                         }
-                        DocFact::Var(t) => {
+                        DocFact::UsesMethod { name, line, col } => {
+                            // PHPUnit `@dataProvider name`: a method REF on
+                            // the enclosing class, spanning the provider
+                            // NAME TOKEN in the docblock — providers gain
+                            // real fan-in, and rename rewrites the token in
+                            // place. Only meaningful on class members (the
+                            // invocant is the class).
+                            if let (true, Some(cls)) = (
+                                matches!(sym.kind.as_str(), "sub" | "method"),
+                                sym.package.as_deref(),
+                            ) {
+                                let start = Point { row: cstart + line, column: *col };
+                                let end = Point {
+                                    row: start.row,
+                                    column: col + name.len(),
+                                };
+                                // Invocant is the CLASS NAME, not
+                                // `__PACKAGE__`: the doc row sits in the
+                                // class-body scope, whose package is the
+                                // NAMESPACE, so the current-package walk
+                                // would resolve the wrong owner — the join
+                                // already knows the class.
+                                doc_refs.push(SkelRef {
+                                    via: None,
+                                    kind: "member".to_string(),
+                                    name: name.clone(),
+                                    start,
+                                    end,
+                                    scope: sym.scope,
+                                    invocant: Some((
+                                        Span { start, end },
+                                        cls.to_string(),
+                                    )),
+                                    member_op: None,
+                                    arg_count: None,
+                                });
+                            }
+                        }
+                        DocFact::Var { ty: t, name: var_name } => {
+                            // The NAMED inline form (`/** @var Type[] $rows */`
+                            // above an assignment) types that specific local.
+                            if let Some(vn) = var_name {
+                                if sym.kind == "var" && &sym.name == vn {
+                                    if let Some(ty) = (pack.annot_type)(t) {
+                                        doc_witnesses.push(doc_witness(
+                                            &sym.name,
+                                            sym.scope,
+                                            ty,
+                                            Span { start: sym.start, end: sym.start },
+                                        ));
+                                    }
+                                }
+                                continue;
+                            }
+                            if sym.kind == "var" {
+                                continue;
+                            }
                             // A documented property types class-wide (member
                             // lookup is not sequential), exactly like a
                             // declared field type. Syntax-typed fields skip
@@ -1946,6 +2032,31 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                                     && in_def(*at)
                                     && doc_admits(pack, &annot_text_by_var, (n, *sc), &ty)
                             }) {
+                                // Publish the row CLASS-KEYED too
+                                // (`method#p#$name`): an @inheritDoc override
+                                // in another file reaches it through the
+                                // registry's PackageSymbol inheritance walk
+                                // (round-4 H6a — 13 monolog handleBatch
+                                // overrides were blind without this).
+                                if let Some(cls) = sym.package.as_deref() {
+                                    if matches!(sym.kind.as_str(), "sub" | "method") {
+                                        doc_witnesses.push(crate::model::witnesses::Witness {
+                                            attachment:
+                                                crate::model::witnesses::WitnessAttachment::PackageSymbol {
+                                                    package: cls.to_string(),
+                                                    name: format!("{}#p#{}", sym.name, n),
+                                                },
+                                            source: crate::model::witnesses::WitnessSource::Builder(
+                                                "skeleton-doc".into(),
+                                            ),
+                                            payload:
+                                                crate::model::witnesses::WitnessPayload::InferredType(
+                                                    ty.clone(),
+                                                ),
+                                            span: Span { start: *at, end: *at },
+                                        });
+                                    }
+                                }
                                 doc_witnesses.push(doc_witness(
                                     n,
                                     *sc,
@@ -2000,17 +2111,93 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
             }
             out.witnesses.extend(doc_witnesses);
             out.symbols.extend(doc_methods);
+            out.refs.extend(doc_refs);
         }
     }
+    // @inheritDoc param inheritance (round-4 H6a): every syntax-untyped,
+    // locally-undocumented PARAM edges to a class-keyed row
+    // (`PackageSymbol{class, "method#p#$name"}`); the doc-join above
+    // publishes the row where an ancestor's docblock declares the type,
+    // and the registry's inheritance walk carries it across files. A
+    // dangling edge (nothing ever publishes) resolves to None for free.
+    {
+        let method_rows: Vec<(String, String, Span)> = out
+            .symbols
+            .iter()
+            .filter(|s| matches!(s.kind.as_str(), "sub" | "method"))
+            .filter_map(|s| {
+                s.package
+                    .as_ref()
+                    .map(|p| (p.clone(), s.name.clone(), Span { start: s.start, end: s.end }))
+            })
+            .collect();
+        let in_span = |p: Point, sp: &Span| {
+            (p.row, p.column) >= (sp.start.row, sp.start.column)
+                && (p.row, p.column) <= (sp.end.row, sp.end.column)
+        };
+        let mut edges: Vec<crate::model::witnesses::Witness> = Vec::new();
+        // NB: the local `param_sigs` vec — it moves into `out` only at the
+        // end of this fn, so `out.param_sigs` is still empty here.
+        for (sig_span, _) in &param_sigs {
+            let Some((cls, method, _)) = method_rows
+                .iter()
+                .find(|(_, _, msp)| in_span(sig_span.start, msp))
+            else {
+                continue;
+            };
+            for v in out
+                .symbols
+                .iter()
+                .filter(|v| v.kind == "var" && in_span(v.start, sig_span))
+            {
+                // A specifically-typed param never subscribes; a BARE
+                // container annot (`array $records`) still does — the whole
+                // @inheritDoc idiom is "syntax says array, the ancestor's
+                // doc says which element type" (same refinement rule as
+                // `doc_admits`).
+                if let Some(annot) = annot_text_by_var.get(&(v.name.clone(), v.scope)) {
+                    if !matches!(
+                        (pack.annot_type)(annot),
+                        Some(InferredType::HashRef | InferredType::ArrayRef)
+                    ) {
+                        continue;
+                    }
+                }
+                edges.push(crate::model::witnesses::Witness {
+                    attachment: crate::model::witnesses::WitnessAttachment::Variable {
+                        name: v.name.clone(),
+                        scope: v.scope,
+                    },
+                    source: crate::model::witnesses::WitnessSource::Builder(
+                        crate::model::witnesses::INHERIT_PARAM_SOURCE.into(),
+                    ),
+                    payload: crate::model::witnesses::WitnessPayload::Edge(
+                        crate::model::witnesses::WitnessAttachment::PackageSymbol {
+                            package: cls.clone(),
+                            name: format!("{}#p#{}", method, v.name),
+                        },
+                    ),
+                    span: Span { start: v.start, end: v.start },
+                });
+            }
+        }
+        out.witnesses.extend(edges);
+    }
+
     // Access-modifier stamp: the `@nonpublic.target` name spans mark
     // members whose modifier means non-public — the same `non_public`
     // attribute cpp access regions stamp, read by the completion gates.
-    if !nonpublic_name_spans.is_empty() {
+    if !nonpublic_name_spans.is_empty() || !classattr_by_name_span.is_empty() {
         for sym in &mut out.symbols {
             if nonpublic_name_spans.contains(&(sym.name_start, sym.name_end))
                 && !sym.attributes.iter().any(|a| a == "non_public")
             {
                 sym.attributes.push("non_public".to_string());
+            }
+            if let Some(flavor) = classattr_by_name_span.get(&(sym.name_start, sym.name_end)) {
+                if sym.kind == "class" && !sym.attributes.iter().any(|a| a == flavor) {
+                    sym.attributes.push(flavor.clone());
+                }
             }
         }
     }

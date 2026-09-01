@@ -3,6 +3,119 @@
 use super::*;
 
 impl<'a> CandidateSet<'a> {
+    /// `parent::method` definition sites: a bounded BFS over the DECLARED
+    /// parent edges (never the enclosing class itself), namespace-routed
+    /// through the pack's `parent_namespaces` rows so a same-leaf aliased
+    /// parent resolves into the RIGHT file, and interface-marked classes
+    /// (the "interface" flavor attribute) defer to concrete ones —
+    /// `parent::` runs the class chain, and the abstract stub answers only
+    /// when nothing concrete defines the method. `None` = no parent
+    /// defines it; the caller falls through to the generic lanes.
+    fn super_def_locations(
+        &self,
+        r: &crate::model::file_analysis::Ref,
+        method: &str,
+        idx: &dyn crate::model::file_analysis::CrossFileLookup,
+    ) -> Option<Vec<RefLocation>> {
+        let analysis = self.origin;
+        let encl = analysis.enclosing_class_for_scope(r.scope)?;
+        let parent_ns = |a: &crate::model::file_analysis::FileAnalysis,
+                         child: &str,
+                         parent: &str|
+         -> Option<String> {
+            a.pack
+                .parent_namespaces
+                .iter()
+                .find(|(c, p, _)| c == child && p == parent)
+                .map(|(_, _, ns)| ns.clone())
+        };
+        let method_decl_in = |a: &crate::model::file_analysis::FileAnalysis,
+                              cls: &str|
+         -> Option<Span> {
+            a.symbols()
+                .iter()
+                .find(|s| {
+                    matches!(s.kind, SymKind::Sub | SymKind::Method)
+                        && s.name == method
+                        && s.package.as_deref() == Some(cls)
+                })
+                .map(|s| s.selection_span)
+        };
+        let is_interface = |a: &crate::model::file_analysis::FileAnalysis, cls: &str| {
+            a.symbols().iter().any(|s| {
+                matches!(s.kind, SymKind::Class)
+                    && s.name == cls
+                    && s.attributes.iter().any(|x| x == "interface")
+            })
+        };
+        // Queue entries: (parent leaf, required namespace when a row pins it).
+        let mut queue: Vec<(String, Option<String>)> = analysis
+            .declared_parents(&encl)
+            .iter()
+            .map(|p| (p.clone(), parent_ns(analysis, &encl, p)))
+            .collect();
+        let mut fallback: Option<RefLocation> = None;
+        let mut seen: std::collections::HashSet<(String, String)> = Default::default();
+        let mut budget = 32usize;
+        while let Some((parent, want_ns)) = queue.pop() {
+            if budget == 0 {
+                break;
+            }
+            budget -= 1;
+            for cached in idx.visible_def_candidates(&parent) {
+                // Origin-exclusion for the same-leaf parent: the child's
+                // own file also declares the leaf.
+                if crate::index::resolve::file_key_eq(
+                    &FileKey::Path(cached.path.clone()),
+                    &self.origin_key,
+                ) && parent == encl
+                {
+                    continue;
+                }
+                if !seen.insert((parent.clone(), cached.path.display().to_string())) {
+                    continue;
+                }
+                let whole = idx.whole_present(&cached);
+                let cand_ns = whole
+                    .symbols()
+                    .iter()
+                    .find(|s| matches!(s.kind, SymKind::Class) && s.name == parent)
+                    .map(|s| s.package.clone().unwrap_or_default());
+                if let (Some(want), Some(cand)) = (&want_ns, &cand_ns) {
+                    if want != cand {
+                        continue;
+                    }
+                }
+                if Url::from_file_path(&cached.path).is_err() {
+                    continue;
+                }
+                if let Some(span) = method_decl_in(&whole, &parent) {
+                    let loc = RefLocation {
+                        key: FileKey::Path(cached.path.clone()),
+                        span,
+                        access: AccessKind::Declaration,
+                        rewritable: true,
+                        label: None,
+                    };
+                    if is_interface(&whole, &parent) {
+                        fallback.get_or_insert(loc);
+                    } else {
+                        return Some(vec![loc]);
+                    }
+                } else {
+                    // This parent file doesn't define it — walk ITS parents.
+                    queue.extend(
+                        whole
+                            .declared_parents(&parent)
+                            .iter()
+                            .map(|p| (p.clone(), parent_ns(&whole, &parent, p))),
+                    );
+                }
+            }
+        }
+        fallback.map(|l| vec![l])
+    }
+
     /// The def site of `member` on `class` — origin symbols first, then the
     /// class's own cached file. Serves the template-family ranked goto-def
     /// (one location per ladder class that actually defines the member).
@@ -55,8 +168,23 @@ impl<'a> CandidateSet<'a> {
                 for parent in self.origin.declared_parents(&cls) {
                     queue.push_back(parent.clone());
                 }
+                // The origin's use-map pins the leaf to ONE namespace
+                // (`use Support\Facades\Cache;` — round-4 H3: without
+                // this, gd on `Cache::store` landed on an unrelated
+                // same-leaf class in a never-imported namespace). A
+                // candidate declaring the class under a DIFFERENT
+                // namespace is not the class this file means; candidates
+                // with no namespace claim stay admissible.
+                let want_ns = super::refs::origin_class_ns(self.origin, &cls);
                 for cached in idx.visible_def_candidates(&cls) {
                     let a = idx.whole_present(&cached);
+                    if let (Some(want), Some(cand)) =
+                        (&want_ns, super::refs::class_ns_of(&a, &cls))
+                    {
+                        if want != &cand {
+                            continue;
+                        }
+                    }
                     if let Some(span) = member_span_in(&a, &cls) {
                         return loc_of(&cached, span);
                     }
@@ -508,6 +636,26 @@ impl<'a> CandidateSet<'a> {
     pub fn definitions(&self) -> Vec<RefLocation> {
         let analysis = self.origin;
         let point = self.point;
+
+        // `parent::` gd first (pack languages): it EXCLUDES the origin
+        // class's own override by construction — every ranked-family lane
+        // below would self-answer when the aliased parent shares the
+        // enclosing leaf (`use Support\Collection as BaseCollection;
+        // class Collection extends BaseCollection`) — and it routes the
+        // same-leaf parent by its recorded namespace row.
+        if self.pack {
+            if let (Some(r), Some(idx)) = (analysis.ref_at(point), self.idx()) {
+                if matches!(r.kind, RefKind::MethodCall { .. }) {
+                    if let crate::model::conventions::MethodToken::Super(name) =
+                        crate::model::conventions::MethodToken::parse(&r.target_name)
+                    {
+                        if let Some(locs) = self.super_def_locations(r, name, idx) {
+                            return locs;
+                        }
+                    }
+                }
+            }
+        }
 
         // Owner-anchored forward resolution: a `::`-qualified value read
         // (`dynamic::STRING`, `absl::StatusCode::kNotFound`) names its OWNER

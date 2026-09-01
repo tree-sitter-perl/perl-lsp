@@ -266,6 +266,9 @@ impl FileAnalysis {
             // An anonymous sub (name `(anon)`) has no callable name — never a
             // method candidate. Gate on callability, not the `(anon)` spelling.
             .filter(|s| crate::model::conventions::is_callable_sub_name(&s.name))
+            // Lexicals never complete bare on a receiver; the `&name` lane
+            // (`complete_lexical_methods_at`) is their one member source.
+            .filter(|s| !matches!(&s.detail, SymbolDetail::Sub { lexical: true, .. }))
             .filter(|s| !s.namespace.is_framework())
             .filter(|s| seen.insert(s.name.clone()))
             .map(|s| CompletionCandidate {
@@ -508,6 +511,46 @@ impl FileAnalysis {
         out
     }
 
+    /// Lexical methods (`my method name`) callable at `point`, offered with
+    /// the `&` call-syntax prefix — `$invocant->&name(...)` is the only
+    /// spelling that dispatches one, so the inserted text must carry it.
+    /// Scope rule matches the bare lexical-sub gate: visible from the
+    /// declaration down, within the declaring block only. The class-keyed
+    /// MRO walk excludes these symbols entirely (they don't dispatch by
+    /// name and are invisible cross-file); this lane is their one source.
+    pub fn complete_lexical_methods_at(&self, point: Point) -> Vec<CompletionCandidate> {
+        let mut out = Vec::new();
+        for sym in &self.symbols {
+            if !matches!(sym.kind, SymKind::Method) {
+                continue;
+            }
+            if !matches!(&sym.detail, SymbolDetail::Sub { lexical: true, .. }) {
+                continue;
+            }
+            if !crate::model::conventions::is_callable_sub_name(&sym.name) {
+                continue;
+            }
+            let enclosing = &self.scope(sym.scope).span;
+            let visible = (point.row, point.column)
+                >= (sym.span.start.row, sym.span.start.column)
+                && (point.row, point.column) <= (enclosing.end.row, enclosing.end.column);
+            if !visible {
+                continue;
+            }
+            out.push(CompletionCandidate {
+                label: format!("&{}", sym.name),
+                kind: SymKind::Method,
+                detail: Some("my method".to_string()),
+                insert_text: Some(format!("&{}", sym.name)),
+                sort_priority: PRIORITY_LOCAL,
+                additional_edits: vec![],
+                import_fact: None,
+                display_override: None,
+            });
+        }
+        out
+    }
+
     /// General completion: all variables (all sigils) + subs + packages.
     pub fn complete_general(&self, point: Point) -> Vec<CompletionCandidate> {
         let mut candidates = Vec::new();
@@ -538,6 +581,12 @@ impl FileAnalysis {
                 // its declaring block, from its declaration down — offering
                 // it file-wide completes a name that would not compile.
                 if let SymbolDetail::Sub { lexical: true, .. } = &sym.detail {
+                    // A lexical METHOD has no bare-call spelling at all — it
+                    // dispatches only as `$invocant->&name`; the member lane
+                    // (`complete_lexical_methods_at`) owns it.
+                    if matches!(sym.kind, SymKind::Method) {
+                        continue;
+                    }
                     let enclosing = &self.scope(sym.scope).span;
                     let visible = (point.row, point.column)
                         >= (sym.span.start.row, sym.span.start.column)

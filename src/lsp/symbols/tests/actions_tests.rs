@@ -597,3 +597,52 @@ sub plain { return 1; }
     assert!(!outside.iter().any(|n| n == "helper"), "out-of-scope leak: {outside:?}");
     assert!(outside.iter().any(|n| n == "outer"), "file-wide subs stay: {outside:?}");
 }
+
+#[test]
+fn lexical_methods_complete_with_amp_prefix_in_scope_only() {
+    // `my method hidden` dispatches ONLY as `$invocant->&hidden` — the
+    // member lane must offer it with the `&` prefix, never bare, and only
+    // inside the declaring block from the decl down. The class-keyed MRO
+    // walk excludes it (no by-name dispatch, invisible cross-file), and
+    // the bare-identifier lane never offers a lexical method at all.
+    let source = "\
+use v5.40;
+use experimental 'class';
+class Widget {
+    my method hidden { return 42 }
+    method go { return $self->&hidden() }
+}
+";
+    let analysis = parse_analysis(source);
+    let at = tree_sitter::Point { row: 4, column: 31 };
+
+    let amp: Vec<String> = analysis
+        .complete_lexical_methods_at(at)
+        .into_iter()
+        .map(|c| {
+            assert_eq!(c.insert_text.as_deref(), Some(c.label.as_str()));
+            c.label
+        })
+        .collect();
+    assert!(amp.iter().any(|n| n == "&hidden"), "in-scope &-lane: {amp:?}");
+    // Outside the class block: nothing.
+    let outside = analysis.complete_lexical_methods_at(tree_sitter::Point { row: 6, column: 0 });
+    assert!(outside.is_empty(), "lexical method leaked out of scope: {outside:?}");
+
+    // The class-keyed walk never offers it (bare `hidden` would not dispatch).
+    let class_walk: Vec<String> = analysis
+        .complete_methods_for_class("Widget", None)
+        .into_iter()
+        .map(|c| c.label)
+        .collect();
+    assert!(!class_walk.iter().any(|n| n == "hidden"), "bare leak: {class_walk:?}");
+    assert!(class_walk.iter().any(|n| n == "go"), "real methods stay: {class_walk:?}");
+
+    // Bare-identifier lane: lexical METHODS have no bare-call spelling.
+    let general: Vec<String> = analysis
+        .complete_general(at)
+        .into_iter()
+        .map(|c| c.label)
+        .collect();
+    assert!(!general.iter().any(|n| n == "hidden"), "bare-lane leak: {general:?}");
+}

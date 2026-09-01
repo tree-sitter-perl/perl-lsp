@@ -45,7 +45,7 @@ B5.2: references/rename on `EnumeratesValues::eachSpread()` (trait) →
 matcher never admits a MethodCall whose invocant class reaches the
 trait via the use-edge (downward direction). Mirror image of H1.
 
-## H3 (CRITICAL) — gd picks a cross-namespace same-name class, ignoring the file's `use`
+## H3 (CRITICAL) — gd picks a cross-namespace same-name class, ignoring the file's `use` — LANDED
 
 B4.3: gd on `Cache::store('session')` in Session/Store.php (which
 imports `Support\Facades\Cache`) lands on
@@ -55,7 +55,7 @@ CORRECTLY (Repository), so the type side has the answer; gd's
 candidate ranking doesn't consult the use-map. references() merges the
 spurious decl in (201 = 199 calls + right decl + wrong decl).
 
-## H4 (CRITICAL, collapses into H6) — promoted-property refs/rename undercount
+## H4 (CRITICAL, collapses into H6) — promoted-property refs/rename undercount — LANDED (4/6 sites)
 
 B1.1/1.3: `LogRecord::$level` refs/rename miss 6 real sites in 4
 files. B root-caused every miss to the RECEIVER being untyped at the
@@ -63,7 +63,7 @@ site — each is one of H6's doc gaps (@inheritDoc, @phpstan-param,
 static::$prop @var). No new mechanism; fixing H6 closes these and the
 group machinery already handles the rest (49 sites correct).
 
-## H5 — PHPUnit provider/test wiring (3 findings, one cluster)
+## H5 — PHPUnit provider/test wiring (3 findings, one cluster) — LANDED
 
 - C1 (CRITICAL): `#[DataProvider('providerMethod')]` attribute ARG is
   dark everywhere — gd/hover/refs/rename; a real rename silently
@@ -80,7 +80,7 @@ group machinery already handles the rest (49 sites correct).
   data fix: add the common intermediate leaves (+ setUp lifecycle
   through them).
 
-## H6 — doc-type coverage cluster (highest type-leverage per B)
+## H6 — doc-type coverage cluster (highest type-leverage per B) — LANDED
 
 - B1.1b/1.1c/2.4 (MAJOR, systemic): `@inheritDoc` does not inherit the
   overridden method's `@param array<X>` element type — 13 monolog
@@ -109,7 +109,7 @@ usort, call_user_func[_array], is_callable, function_exists, …) minting
 `'sanitize_callback' => 'fn'` (arbitrary key positions) is harder —
 park the key-position form unless a bounded pattern emerges.
 
-## H8 — `parent::` resolves to an interface stub over the concrete parent
+## H8 — `parent::` resolves to an interface stub over the concrete parent — LANDED
 
 B4.4/4.5 (MAJOR, ×2 methods): `parent::map()` from Eloquent\Collection
 lands on `Enumerable.php` (interface abstract) instead of
@@ -152,3 +152,28 @@ generic member arm instead of the method signature arm.
   sampled ValidatorTest (extends TestCase DIRECTLY, claimed); C's
   misses all extend vendor-absent intermediates. Data gap, not code.
 - A's heatmap sample re-confirmed test*/magic guards on guzzle 10/10.
+
+## Fix-wave verification (round-4, post-hitlist)
+
+- H3/H8: laravel probes land on the concrete parent / the imported class;
+  pinned by `php_parent_call_through_same_leaf_aliased_parent`.
+- H6 all four lanes verified on monolog: 1.1a (`@phpstan-param
+  non-empty-array<LogRecord>`) types the foreach var; 1.1b/1.1c/2.4
+  (`@inheritDoc`) inherit the ancestor's `@param array<X>` element type
+  through multi-hop chains (publication `PackageSymbol{cls,"m#p#$v"}` +
+  bare-container subscription edge at annot priority); 1.1d
+  (`static::$prop`) picks up the prop's `@var Type[]`.
+- H4 rename recount: LogRecord::$level 49 → 53 edits; MailHandler,
+  ChromePHPHandler, BrowserConsoleHandler recovered. Residuals (2 sites,
+  NEW root causes, not doc gaps): LogglyHandler:128 — closure param
+  through `array_filter` callback (H7-adjacent, park with H11);
+  MailHandler:71 `$highestRecord` — assignment flow into a null-guarded
+  accumulator local.
+- H5 verified: `#[DataProvider('m')]` gd string→decl, refs both ways,
+  rename edits the string (symfony/demo); docblock `@dataProvider m`
+  refs/gd/rename all reach the doc token (span = the name token,
+  invocant = the class name — the class-body scope's package is the
+  NAMESPACE, so `__PACKAGE__` mis-resolved); guzzle dead queue 352 → 148,
+  provider-dead 196 → 2 (both grep-confirmed genuinely unused);
+  demo test*-dead 0, all five named providers carry real fan-in.
+

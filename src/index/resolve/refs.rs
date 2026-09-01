@@ -728,7 +728,7 @@ fn sorted_deduped(mut out: Vec<RefLocation>) -> Vec<RefLocation> {
 /// the FQ filter stands down entirely.
 /// The namespace a file's own Class-symbol declaration of `leaf` carries
 /// (`None` package = the global namespace, spelled `""`).
-fn class_ns_of(a: &FileAnalysis, leaf: &str) -> Option<String> {
+pub(super) fn class_ns_of(a: &FileAnalysis, leaf: &str) -> Option<String> {
     a.symbols()
         .iter()
         .find(|s| matches!(s.kind, SymKind::Class) && s.name == leaf)
@@ -749,7 +749,7 @@ fn declares_self_leaf_implementer(a: &FileAnalysis, leaf: &str, contract_ns: &st
             .any(|(c, p, ns)| c == leaf && p == leaf && ns == contract_ns)
 }
 
-fn origin_class_ns(origin: &FileAnalysis, class: &str) -> Option<String> {
+pub(super) fn origin_class_ns(origin: &FileAnalysis, class: &str) -> Option<String> {
     if let Some(ns) = class_ns_of(origin, class) {
         return Some(ns);
     }

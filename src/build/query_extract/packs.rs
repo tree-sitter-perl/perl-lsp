@@ -365,8 +365,15 @@ pub enum DocFact {
     /// `@param T $name` — a documented parameter type; `name` carries the
     /// language's own spelling (php keeps the `$`).
     Param { name: String, ty: String },
-    /// `@var T` — the documented type of the property/variable below.
-    Var(String),
+    /// `@var T [$name]` — the documented type of the property/variable
+    /// below (or, with a `$name`, of that specific local — the inline
+    /// `/** @var Type[] $rows */` idiom above an assignment).
+    Var { ty: String, name: Option<String> },
+    /// `@dataProvider name` — a PHPUnit docblock row naming a sibling
+    /// METHOD the runner will invoke. The join mints a real method
+    /// reference (invocant = the enclosing class) on the fact's own
+    /// line, so providers gain fan-in and rename reaches the row.
+    UsesMethod { name: String, line: usize, col: usize },
     /// `@method [static] T name(...)` on a CLASS docblock — a documented
     /// virtual method (Laravel facades, Eloquent's `__call` surface). The
     /// join synthesizes a real method symbol on the class below, spanning
@@ -673,7 +680,13 @@ fn php_annot_type(text: &str) -> Option<InferredType> {
     if let Some(inner) = t.strip_suffix("[]") {
         return php_annot_type(inner).map(|e| Sequence(vec![e]));
     }
-    for prefix in ["list<", "array<", "iterable<"] {
+    for prefix in [
+        "list<",
+        "array<",
+        "iterable<",
+        "non-empty-list<",
+        "non-empty-array<",
+    ] {
         if let Some(rest) = t.strip_prefix(prefix) {
             let inner = rest.strip_suffix('>')?;
             // `array<K, V>`: the element is the LAST top-level argument.
@@ -737,6 +750,8 @@ pub fn php_pack() -> LangPack {
             include_str!("../../../queries/php/frameworks/laravel.scm"),
             "\n",
             include_str!("../../../queries/php/frameworks/wordpress.scm"),
+            "\n",
+            include_str!("../../../queries/php/frameworks/phpunit.scm"),
         ),
         lang_id: "php",
         bundled_entry_markers: &[
@@ -1079,7 +1094,11 @@ fn php_doc_types(text: &str) -> Vec<DocFact> {
             .trim_end_matches('/')
             .trim_end_matches('*')
             .trim();
-        if let Some(rest) = l.strip_prefix("@return ") {
+        if let Some(rest) = l
+            .strip_prefix("@return ")
+            .or_else(|| l.strip_prefix("@phpstan-return "))
+            .or_else(|| l.strip_prefix("@psalm-return "))
+        {
             // `Base<static>` / `Base<self>` / `Base<$this>`: the value is
             // an instance of Base parametrized by the RECEIVER — a
             // deferred shape, not a strippable generic.
@@ -1109,6 +1128,8 @@ fn php_doc_types(text: &str) -> Vec<DocFact> {
             }
         } else if let Some(rest) = l
             .strip_prefix("@param ")
+            .or_else(|| l.strip_prefix("@phpstan-param "))
+            .or_else(|| l.strip_prefix("@psalm-param "))
             .or_else(|| l.strip_prefix("@global "))
         {
             // `@global wpdb $wpdb` types the `global $wpdb;` binding the
@@ -1129,9 +1150,39 @@ fn php_doc_types(text: &str) -> Vec<DocFact> {
                     }
                 }
             }
-        } else if let Some(rest) = l.strip_prefix("@var ") {
+        } else if let Some(rest) = l
+            .strip_prefix("@var ")
+            .or_else(|| l.strip_prefix("@phpstan-var "))
+            .or_else(|| l.strip_prefix("@psalm-var "))
+        {
             if let Some(t) = phpdoc_type(rest) {
-                out.push(DocFact::Var(t));
+                let rest = rest.trim_start();
+                let name = rest[phpdoc_type_token_end(rest)..]
+                    .split_whitespace()
+                    .next()
+                    .filter(|n| n.starts_with('$'))
+                    .map(|n| n.to_string());
+                out.push(DocFact::Var { ty: t, name });
+            }
+        } else if let Some(rest) = l.strip_prefix("@dataProvider ") {
+            if let Some(name) = rest.split_whitespace().next() {
+                if name.chars().all(|c| c == '_' || c.is_ascii_alphanumeric()) {
+                    // Byte column of the provider NAME in the RAW line, so
+                    // the ref spans the token (rename rewrites it in place;
+                    // anchored past the tag so a name that happens to be a
+                    // substring of "@dataProvider" can't mis-anchor).
+                    let col = line
+                        .find("@dataProvider")
+                        .and_then(|tag| {
+                            line[tag..].find(name).map(|o| tag + o)
+                        })
+                        .unwrap_or(0);
+                    out.push(DocFact::UsesMethod {
+                        name: name.to_string(),
+                        line: lineno,
+                        col,
+                    });
+                }
             }
         } else if let Some(rest) = l.strip_prefix("@method ") {
             // `@method [static] T name(args)`; the type is optional
@@ -1205,7 +1256,9 @@ fn phpdoc_type(raw: &str) -> Option<String> {
     // (`Collection<int,User>` → `Collection`).
     if one.ends_with("[]")
         || (one.ends_with('>')
-            && ["list<", "array<", "iterable<"].iter().any(|p| one.starts_with(p)))
+            && ["list<", "array<", "iterable<", "non-empty-list<", "non-empty-array<"]
+                .iter()
+                .any(|p| one.starts_with(p)))
     {
         return Some(one.to_string());
     }

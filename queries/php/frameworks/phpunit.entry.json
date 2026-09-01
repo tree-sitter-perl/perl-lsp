@@ -1,12 +1,111 @@
 {
   "language": "php",
   "entries": [
-    { "attributes": ["Test", "DataProvider", "Before", "After", "BeforeClass",
-                     "AfterClass", "PreCondition", "PostCondition", "TestWith",
-                     "TestDox", "DoesNotPerformAssertions", "Depends"] },
-    { "method_prefix": "test", "when_isa": "TestCase" },
-    { "methods": ["setUp", "tearDown", "setUpBeforeClass", "tearDownAfterClass",
-                  "assertPreConditions", "assertPostConditions"],
-      "when_isa": "TestCase" }
+    {
+      "attributes": [
+        "Test",
+        "DataProvider",
+        "Before",
+        "After",
+        "BeforeClass",
+        "AfterClass",
+        "PreCondition",
+        "PostCondition",
+        "TestWith",
+        "TestDox",
+        "DoesNotPerformAssertions",
+        "Depends"
+      ]
+    },
+    {
+      "method_prefix": "test",
+      "when_isa": "TestCase"
+    },
+    {
+      "methods": [
+        "setUp",
+        "tearDown",
+        "setUpBeforeClass",
+        "tearDownAfterClass",
+        "assertPreConditions",
+        "assertPostConditions"
+      ],
+      "when_isa": "TestCase"
+    },
+    {
+      "method_prefix": "test",
+      "when_isa": "WebTestCase"
+    },
+    {
+      "methods": [
+        "setUp",
+        "tearDown",
+        "setUpBeforeClass",
+        "tearDownAfterClass",
+        "assertPreConditions",
+        "assertPostConditions"
+      ],
+      "when_isa": "WebTestCase"
+    },
+    {
+      "method_prefix": "test",
+      "when_isa": "KernelTestCase"
+    },
+    {
+      "methods": [
+        "setUp",
+        "tearDown",
+        "setUpBeforeClass",
+        "tearDownAfterClass",
+        "assertPreConditions",
+        "assertPostConditions"
+      ],
+      "when_isa": "KernelTestCase"
+    },
+    {
+      "method_prefix": "test",
+      "when_isa": "PantherTestCase"
+    },
+    {
+      "methods": [
+        "setUp",
+        "tearDown",
+        "setUpBeforeClass",
+        "tearDownAfterClass",
+        "assertPreConditions",
+        "assertPostConditions"
+      ],
+      "when_isa": "PantherTestCase"
+    },
+    {
+      "method_prefix": "test",
+      "when_isa": "ApiTestCase"
+    },
+    {
+      "methods": [
+        "setUp",
+        "tearDown",
+        "setUpBeforeClass",
+        "tearDownAfterClass",
+        "assertPreConditions",
+        "assertPostConditions"
+      ],
+      "when_isa": "ApiTestCase"
+    },
+    {
+      "method_prefix": "test",
+      "when_isa": "BrowserTestCase"
+    },
+    {
+      "methods": [
+        "setUp",
+        "tearDown",
+        "setUpBeforeClass",
+        "tearDownAfterClass",
+        "assertPreConditions",
+        "assertPostConditions"
+      ],
+      "when_isa": "BrowserTestCase"
+    }
   ]
 }

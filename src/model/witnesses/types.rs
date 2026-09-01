@@ -147,6 +147,14 @@ pub struct RefIdx(pub u32);
 /// declaration needs no synthetic `: T`).
 pub const ANNOT_SOURCE: &str = "skeleton-annot";
 
+/// The @inheritDoc param-subscription edge (`Variable → Edge(PackageSymbol
+/// {class, "method#p#name"})`). Priority-tied with `ANNOT_SOURCE` so its
+/// materialized answer (an ancestor's `@param array<X>`) beats the bare
+/// container the local syntax annot (`array $records`) contributed — at
+/// equal priority latest-wins applies and the edge lands later, while a
+/// dangling edge drops out and leaves the syntax annot standing.
+pub const INHERIT_PARAM_SOURCE: &str = "inherit-param";
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum WitnessSource {
     /// Named builder pass — "signature_extraction", "narrowing", …
@@ -173,7 +181,7 @@ impl WitnessSource {
     pub fn priority(&self) -> u8 {
         match self {
             WitnessSource::Plugin(_) => 100,
-            WitnessSource::Builder(tag) if tag == ANNOT_SOURCE => 20,
+            WitnessSource::Builder(tag) if tag == ANNOT_SOURCE || tag == INHERIT_PARAM_SOURCE => 20,
             WitnessSource::Builder(_)
             | WitnessSource::Enrichment(_)
             | WitnessSource::DerivedFrom(_) => 10,

@@ -292,3 +292,46 @@ fn composer_vendor_resolves_but_never_rewrites() {
         "a rename must NEVER rewrite the vendor tier.\nstdout: {stdout}\nstderr: {stderr}"
     );
 }
+
+/// Round-4 H8: `parent::` through a same-leaf ALIASED parent
+/// (`use Support\Collection as BaseCollection; class Collection extends
+/// BaseCollection`) must land on the concrete parent's method — never the
+/// child's own override (the leaf-keyed walk collapsed the parent into
+/// the origin) and never a deeper interface's abstract stub.
+#[cfg(feature = "php")]
+#[test]
+fn php_parent_call_through_same_leaf_aliased_parent() {
+    let dir = std::env::temp_dir().join(format!("perl-lsp-h8-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("Enumerable.php"),
+        "<?php\nnamespace Illuminate\\Support;\ninterface Enumerable {\n    public function map(callable $cb);\n}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("BaseCollection.php"),
+        "<?php\nnamespace Illuminate\\Support;\nclass Collection implements Enumerable {\n    public function map(callable $cb) { return $this; }\n}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("EloquentCollection.php"),
+        "<?php\nnamespace Illuminate\\Database\\Eloquent;\nuse Illuminate\\Support\\Collection as BaseCollection;\nclass Collection extends BaseCollection {\n    public function map(callable $cb) {\n        return parent::map($cb);\n    }\n}\n",
+    )
+    .unwrap();
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_perl-lsp"))
+        .args(["--definition", dir.to_str().unwrap(), "EloquentCollection.php", "5", "24"])
+        .env("XDG_CACHE_HOME", dir.join(".cache"))
+        .output()
+        .expect("run gd");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("BaseCollection.php:3"),
+        "parent::map lands on the concrete parent: {stdout}"
+    );
+    assert!(
+        !stdout.contains("Enumerable.php") && !stdout.contains("EloquentCollection.php"),
+        "never the interface stub or the child's own override: {stdout}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
