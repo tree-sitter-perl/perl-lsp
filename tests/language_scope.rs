@@ -395,3 +395,55 @@ fn php_trait_method_refs_admit_chained_consumer_call_sites() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A Doctrine-style instance `@method` row is a real declaration: the
+/// synthesized symbol spans the NAME TOKEN in the doc line, so references
+/// from the token collect typed call sites, and rename rewrites the doc
+/// row together with the calls. (The facade `@method static` lane proved
+/// the dispatch half; the decl-token half was dark while the symbol sat
+/// zero-width at column 0.)
+#[cfg(feature = "php")]
+#[test]
+fn php_doc_method_decl_token_collects_typed_call_sites() {
+    let dir = std::env::temp_dir().join(format!("perl-lsp-h9-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("Post.php"),
+        "<?php\nnamespace App;\nclass Post {}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("PostRepository.php"),
+        "<?php\nnamespace App;\n/**\n * @method Post|null findOneByTitle(string $postTitle)\n */\nclass PostRepository\n{\n}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("Caller.php"),
+        "<?php\nnamespace App;\nfunction probe(PostRepository $repo): void\n{\n    $post = $repo->findOneByTitle('x');\n}\n",
+    )
+    .unwrap();
+    // refs from the @method name token (0-based 3:21).
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_perl-lsp"))
+        .args(["--references", dir.to_str().unwrap(), "PostRepository.php", "3", "21"])
+        .env("XDG_CACHE_HOME", dir.join(".cache"))
+        .output()
+        .expect("run refs");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("Caller.php") && stdout.contains("PostRepository.php"),
+        "doc-method decl + typed call site: {stdout}"
+    );
+    // gd from the call site lands on the doc name token.
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_perl-lsp"))
+        .args(["--definition", dir.to_str().unwrap(), "Caller.php", "4", "19"])
+        .env("XDG_CACHE_HOME", dir.join(".cache"))
+        .output()
+        .expect("run gd");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("PostRepository.php:3:21"),
+        "gd lands on the @method name token: {stdout}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

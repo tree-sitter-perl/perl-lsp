@@ -97,7 +97,7 @@ group machinery already handles the rest (49 sites correct).
   `@var Type[]` while `$this->prop` works — the static-receiver
   spelling misses the field-registry hop.
 
-## H7 — generic string-callables outside the hook idiom
+## H7 — generic string-callables outside the hook idiom — LANDED (fixed-position slots)
 
 A1 (MAJOR): `function_exists('name')` guard invisible → stale guard
 post-rename. A2 (MAJOR): `array_map('fn', …)`,
@@ -116,7 +116,7 @@ lands on `Enumerable.php` (interface abstract) instead of
 `Collections/Collection.php:829` (concrete parent override). The SUPER
 walk must prefer concrete class parents over implements-edges.
 
-## H9 — Doctrine `@method` magic finders disconnected both ends
+## H9 — Doctrine `@method` magic finders disconnected both ends — LANDED
 
 C3 (CRITICAL): `@method Post|null findOneByTitle(...)` — references on
 the tag token answer []; gd/hover from the real call site dark. Two
@@ -198,4 +198,26 @@ generic member arm instead of the method signature arm.
   strings (all three value shapes) mint `@ref.method.named.self`;
   refs/gd/rename round-trip on demo's subscribers
   (RedirectToPreferredLocaleSubscriber onKernelRequest 58:39 ✓).
+
+## H7 + H9 wave (round-4, third fix slice)
+
+- H7: bundled `queries/php/stdlib.scm` — callback-slot strings in the
+  fixed-position builtins (arg 0: array_map / call_user_func[_array] /
+  function_exists / is_callable / set_*_handler / spl_autoload_register /
+  …; arg 1: array_filter / array_walk[_recursive] / array_reduce /
+  usort / uasort / uksort / preg_replace_callback) mint `@ref.call.named`.
+  WP: gd from `array_map('sanitize_title', …)` → formatting.php:2228, the
+  site joins sanitize_title's 80-ref set; `function_exists(
+  'wp_install_defaults')` → upgrade.php:178. PARKED: the variadic-tail
+  family (array_udiff & co — callback LAST) and key-position forms
+  (`'sanitize_callback' => 'fn'`); `'Class::method'` / `[$obj, 'm']`
+  callable spellings.
+- H9: sub-cause (a) — the container-`get` receiver — was already healed
+  by the named inline `@var` join (wave 1): `$postRepository` types as
+  PostRepository, gd/hover/return-type flow from the call. Sub-cause (b)
+  was ours: the `@method` symbol sat zero-width at column 0, so the
+  cursor never resolved it. It now spans the NAME TOKEN in the doc row;
+  references from the row collect typed call sites (findOneByEmail:
+  decl + AddUserCommandTest:96 + UserControllerTest:77), gd lands on the
+  token, rename rewrites doc row + calls.
 

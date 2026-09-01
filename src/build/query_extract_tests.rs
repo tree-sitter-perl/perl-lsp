@@ -4695,3 +4695,27 @@ fn php_get_subscribed_events_map_strings_are_method_refs() {
         assert!(!members.contains(&key), "event key {key} must not be a method ref: {members:?}");
     }
 }
+
+#[test]
+fn php_stdlib_string_callables_mint_call_refs() {
+    // Callback-slot strings in the fixed-position stdlib builtins are
+    // function refs (`@ref.call.named`): arg-0 family (array_map,
+    // function_exists) and arg-1 family (array_filter, usort). Data
+    // strings in non-callback slots never mint.
+    let src = "<?php\n$a = array_map('fnA', $rows);\nif (function_exists('fnB')) {}\n$b = array_filter($rows, 'fnC');\nusort($rows, 'fnD');\nin_array('notafn', $rows);\narray_map('fnE');\narray_filter('notafn2');\n";
+    let mut parser = php_parser();
+    let tree = parser.parse(src, None).unwrap();
+    let skel = extract(&tree, src.as_bytes(), &php_pack()).unwrap();
+    let calls: Vec<&str> = skel
+        .refs
+        .iter()
+        .filter(|r| r.kind == "call")
+        .map(|r| r.name.as_str())
+        .collect();
+    for want in ["fnA", "fnB", "fnC", "fnD", "fnE"] {
+        assert!(calls.contains(&want), "{want} missing from {calls:?}");
+    }
+    // `in_array`'s needle is data; `array_filter`'s arg 0 is the ARRAY slot.
+    assert!(!calls.contains(&"notafn"), "data string minted: {calls:?}");
+    assert!(!calls.contains(&"notafn2"), "array-slot string minted: {calls:?}");
+}

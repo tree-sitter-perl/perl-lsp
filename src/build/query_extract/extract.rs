@@ -1875,19 +1875,22 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                             out.template_params.push((sym.name.clone(), name.clone(), *line));
                             continue;
                         }
-                        if let DocFact::Method { name, ret, line } = f {
-                            // Span = the fact's own `@method` line: a
-                            // distinct gd target per row (and distinct
-                            // dedup identity — every row on the class
-                            // name span collapsed to one symbol).
-                            let at = Point { row: cstart + line, column: 0 };
+                        if let DocFact::Method { name, ret, line, col } = f {
+                            // Span = the method NAME TOKEN in the fact's own
+                            // `@method` line: a distinct gd/cursor target per
+                            // row (every row on the class name span would
+                            // collapse to one symbol), and the row's ONE
+                            // declaration site — references from the token
+                            // resolve the Method target, rename rewrites it.
+                            let at = Point { row: cstart + line, column: *col };
+                            let at_end = Point { row: at.row, column: col + name.len() };
                             doc_methods.push(SkelSymbol {
                                 kind: "method".to_string(),
                                 name: name.clone(),
                                 start: at,
-                                end: at,
+                                end: at_end,
                                 name_start: at,
-                                name_end: at,
+                                name_end: at_end,
                                 package: Some(sym.name.clone()),
                                 scope: sym.scope,
                                 return_type: ret

@@ -379,7 +379,7 @@ pub enum DocFact {
     /// join synthesizes a real method symbol on the class below, spanning
     /// the fact's own `@method` line (`line` = 0-based offset within the
     /// comment) so each row is a distinct, honest gd target.
-    Method { name: String, ret: Option<String>, line: usize },
+    Method { name: String, ret: Option<String>, line: usize, col: usize },
     /// `@template T [of X]` on a CLASS docblock — a declared generic
     /// parameter, in row order (`line` is the ordering key). Feeds the
     /// SAME per-class `template_params` axis cpp templates use, so a
@@ -754,6 +754,8 @@ pub fn php_pack() -> LangPack {
             include_str!("../../../queries/php/frameworks/phpunit.scm"),
             "\n",
             include_str!("../../../queries/php/frameworks/symfony.scm"),
+            "\n",
+            include_str!("../../../queries/php/stdlib.scm"),
         ),
         lang_id: "php",
         bundled_entry_markers: &[
@@ -1207,10 +1209,21 @@ fn php_doc_types(text: &str) -> Vec<DocFact> {
                         .chars()
                         .all(|c| c == '_' || c.is_ascii_alphanumeric())
                 {
+                    // Byte column of the method NAME in the RAW line —
+                    // the synthesized symbol spans the token, so the
+                    // cursor lands on it and rename rewrites it in place.
+                    // Anchored on `name(` (the name always carries the
+                    // paren) so a name echoed in the return type can't
+                    // mis-anchor.
+                    let col = line
+                        .find(&format!("{name}("))
+                        .or_else(|| line.find(name))
+                        .unwrap_or(0);
                     out.push(DocFact::Method {
                         name: name.to_string(),
                         ret: ret.and_then(phpdoc_type),
                         line: lineno,
+                        col,
                     });
                 }
             }
