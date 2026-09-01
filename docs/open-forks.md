@@ -20,6 +20,8 @@ designs live in `docs/prompt-storage-residuals.md`.
 | [Cross-file gated-emission visibility](#cross-file-gated-emission-visibility--2026-07-17--open-claude) | 07-17 | how do cross-file readers see a DBIC result class's deferred accessors — index-time materialize (picked) vs a per-query enriched overlay? |
 | [DBIC source-moniker disambiguation without a typed `$schema`](#dbic-source-moniker-disambiguation-without-a-typed-schema--2026-07-17--open-claude) | 07-17 | is the largest-source-family heuristic acceptable as the interim, or should moniker resolution wait for schema-value provenance? |
 | [GraphView node identity is leaf-keyed](#graphview-node-identity-is-leaf-keyed--2026-09-01--open-claude) | 09-01 | should `Node::Class` carry the namespace so a same-leaf aliased parent stops needing a per-consumer bypass (two exist)? |
+| [Union types in the lattice](#union-types-in-the-lattice--2026-09-02--open-claude) | 09-02 | `list<A|B>` / `A|B` returns: add a `Union` variant, pick an arm, or stay dark? |
+| [Dead-code queue vs library public API](#dead-code-queue-vs-library-public-api--2026-09-02--open-claude) | 09-02 | should `--heatmap` learn a library mode that never flags public members whose callers live out of tree? |
 
 Format per entry:
 
@@ -266,4 +268,20 @@ Format per entry:
   (every leaf-keyed consumer re-examined) and a cache bump.
 - **Discussion needed:** is C worth a slice now, or does it wait until a
   third consumer appears? Perl is absolute-named and never hits this.
+
+---
+
+## Union types in the lattice — 2026-09-02 — OPEN (Claude)
+- **Context:** php round 5 (composer): `@return list<CompletePackage|CompleteAliasPackage>` — a union INSIDE a generic — leaves the foreach var dark on every verb (hover/gd/refs/rename/completion), isolated against a working `list<Single>` control. `InferredType` has no union; `phpdoc_type` rejects a two-armed spelling ("a two-armed claim is not a type answer") and `php_annot_type` returns `None` for `A|B`, so the whole element type drops.
+- **Options:** A — stay dark (status quo; honest, but composer's package-loading core path is exactly this shape). B — a `Union(Vec<InferredType>)` variant: dispatch = the INTERSECTION of the arms' member sets, hover renders `A|B`, `element_at`/projections map over the arms; a lattice change (bincode append, cache bump) touching every reducer that matches on `InferredType`. C — "first class arm wins" as a display-only heuristic: wrong for members the second arm lacks, cheap.
+- **Picked:** A for now (nothing changed).
+- **Undo cost:** B is a slice with its own gold rows; C is an afternoon and a documented lie.
+- **Discussion needed:** is B worth its blast radius? `?T` (`Optional`) already exists as a one-armed union; the general case is the question.
+
+## Dead-code queue vs library public API — 2026-09-02 — OPEN (Claude)
+- **Context:** composer/phpMyAdmin heatmap sampling: after the ctor fix the remaining false positives are public Plugin/Event-class API, PSR interface implementations and framework-invoked overrides (Symfony Console `getLongVersion`) — callers live OUT of the indexed tree. Framework overrides are `entry.json` data; the general "this is a library's public surface" fact is not.
+- **Options:** A — status quo (the queue is honest about "no caller found in this index", the doc says so). B — a `--library` heatmap mode: never flag `public` members of non-final classes / interface implementations. C — infer library-ness from `composer.json` (`"type": "library"` + PSR-4 autoload roots) and apply B automatically.
+- **Picked:** A (nothing changed); Symfony Console overrides can go into `symfony.entry.json` as data regardless.
+- **Undo cost:** B/C are small and reversible.
+- **Discussion needed:** which of B/C, and whether "public" should mean the PHP visibility keyword or the autoload roots.
 
