@@ -37,7 +37,7 @@ CONCRETE override should scope to that class's subtree (+ its own call
 sites), not lift to the contract root — lifting stays available from
 the interface's own decl.
 
-## H2 (CRITICAL) — trait-method call sites invisible through `use Trait`
+## H2 (CRITICAL) — trait-method call sites invisible through `use Trait` — LANDED (typed/chain receivers)
 
 B5.2: references/rename on `EnumeratesValues::eachSpread()` (trait) →
 2 decls only; 0 of 7 real `$collection->eachSpread(...)` sites through
@@ -127,7 +127,7 @@ empty is OURS — the doc-method symbol should at least self-reference
 and collect typed call sites (facades prove the machinery; find what
 differs for instance-dispatch @method rows).
 
-## H10 — `getSubscribedEvents()` string→method map
+## H10 — `getSubscribedEvents()` string→method map — LANDED
 
 C4 (MAJOR): `['event' => 'methodName']` returned from
 getSubscribedEvents — same shape as route arrays. Symfony overlay
@@ -176,4 +176,26 @@ generic member arm instead of the method signature arm.
   NAMESPACE, so `__PACKAGE__` mis-resolved); guzzle dead queue 352 → 148,
   provider-dead 196 → 2 (both grep-confirmed genuinely unused);
   demo test*-dead 0, all five named providers carry real fan-in.
+
+## H2 + H10 wave (round-4, second fix slice)
+
+- H2 root-cause split: the trait use-edge itself was SOUND (minimal case
+  and typed receivers matched all along). The real bugs: (a) `@return
+  static<int, static<...>>` — a union INSIDE generics — hit phpdoc_type's
+  naive `|` split and dropped the whole fluent doc surface (depth-aware
+  top-level split now); (b) `resolve_method_in_ancestors` answered the
+  interface stub ahead of the trait's concrete method (php MRO interleaves
+  `implements` before `use Trait`) — interface-deferral now shared with
+  `resolve_super_method` via `hit_class_is_interface`; (c) the invocant
+  ladder's bareword terminal minted a chain-receiver EXPRESSION text as a
+  ClassName, freezing a garbage edge that read as a baked verdict — the
+  matcher then never re-resolved with the index. Gated on
+  `is_bareword_class_name` (now `\`-aware); the chained Sleep.php:440
+  site is admitted and gd lands on EnumeratesValues.php:289. Laravel's
+  remaining eachSpread sites are `new $collection` class-strings and
+  closure params through test helpers — H7/H11 territory, recorded there.
+- H10: bundled `symfony.scm` overlay — `getSubscribedEvents()` map
+  strings (all three value shapes) mint `@ref.method.named.self`;
+  refs/gd/rename round-trip on demo's subscribers
+  (RedirectToPreferredLocaleSubscriber onKernelRequest 58:39 ✓).
 

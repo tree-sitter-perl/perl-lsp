@@ -49,12 +49,18 @@ pub fn is_constructor_name(name: &str) -> bool {
 /// A class here is `InferredType::ClassName(text)`; only accept text a
 /// package could actually be spelled as.
 pub fn is_bareword_class_name(text: &str) -> bool {
+    // `::` is Perl's separator, `\` php's (`App\Support\Str`) — either way
+    // every segment must be a plain identifier, so a receiver EXPRESSION
+    // (`(new Coll([1]))->wrapUp([2])`) never passes as a class token.
     !text.is_empty()
-        && text.split("::").all(|seg| {
-            let mut chars = seg.chars();
-            matches!(chars.next(), Some(c) if c.is_ascii_alphabetic() || c == '_')
-                && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
-        })
+        && text
+            .split("::")
+            .flat_map(|part| part.split('\\'))
+            .all(|seg| {
+                let mut chars = seg.chars();
+                matches!(chars.next(), Some(c) if c.is_ascii_alphabetic() || c == '_')
+                    && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+            })
 }
 
 /// `__PACKAGE__` — the compile-time token for the enclosing package.

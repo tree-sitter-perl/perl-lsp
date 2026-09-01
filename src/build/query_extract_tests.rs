@@ -4671,3 +4671,27 @@ fn php_data_provider_docblock_mints_member_ref_on_name_token() {
     assert_eq!(r.end.column, 21 + "algorithmProvider".len());
     assert_eq!(r.invocant.as_ref().map(|(_, t)| t.as_str()), Some("T"));
 }
+
+#[test]
+fn php_get_subscribed_events_map_strings_are_method_refs() {
+    // Every method-name string in a `getSubscribedEvents()` return map is
+    // a dispatch target: 'e' => 'm', 'e' => ['m', $prio], and
+    // 'e' => [['m1', $p], ['m2']] all mint self-flavored member refs
+    // (the symfony bundled overlay). Event-name keys never do.
+    let src = "<?php\nnamespace App;\nclass Sub\n{\n    public static function getSubscribedEvents(): array\n    {\n        return [\n            'kernel.request' => 'onRequest',\n            'kernel.exception' => ['onException', 10],\n            'kernel.view' => [['first', 10], ['second']],\n        ];\n    }\n}\n";
+    let mut parser = php_parser();
+    let tree = parser.parse(src, None).unwrap();
+    let skel = extract(&tree, src.as_bytes(), &php_pack()).unwrap();
+    let members: Vec<&str> = skel
+        .refs
+        .iter()
+        .filter(|r| r.kind == "member" && r.invocant.as_ref().is_some_and(|(_, t)| t == "__PACKAGE__"))
+        .map(|r| r.name.as_str())
+        .collect();
+    for want in ["onRequest", "onException", "first", "second"] {
+        assert!(members.contains(&want), "{want} missing from {members:?}");
+    }
+    for key in ["kernel.request", "kernel.exception", "kernel.view"] {
+        assert!(!members.contains(&key), "event key {key} must not be a method ref: {members:?}");
+    }
+}

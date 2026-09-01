@@ -335,3 +335,63 @@ fn php_parent_call_through_same_leaf_aliased_parent() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// References on a TRAIT method must admit call sites that reach the trait
+/// through a consumer's `use Trait` edge — including a site whose receiver
+/// is an inline CHAIN (`(new Coll(...))->wrapUp(...)->eachSpread(...)`).
+/// The chain case regressed silently: the invocant ladder's bareword
+/// terminal minted the receiver EXPRESSION text as a ClassName, the frozen
+/// garbage edge read as a baked verdict, and the matcher never re-resolved
+/// with the index. gd must also prefer the trait's concrete method over an
+/// interface's abstract stub declaring the same name.
+#[cfg(feature = "php")]
+#[test]
+fn php_trait_method_refs_admit_chained_consumer_call_sites() {
+    let dir = std::env::temp_dir().join(format!("perl-lsp-h2-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("Helper.php"),
+        "<?php\nnamespace App\\Traits;\ntrait Helper\n{\n    public function eachSpread(callable $cb): void {}\n\n    /**\n     * @return static\n     */\n    public function wrapUp(array $items)\n    {\n        return $this;\n    }\n}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("En.php"),
+        "<?php\nnamespace App;\ninterface En\n{\n    public function eachSpread(callable $cb);\n}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("Coll.php"),
+        "<?php\nnamespace App;\nuse App\\Traits\\Helper;\nclass Coll implements En\n{\n    use Helper;\n}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("Chain.php"),
+        "<?php\nnamespace App;\nfunction run(): void\n{\n    (new Coll([1]))\n        ->wrapUp([2])\n        ->eachSpread(fn ($x) => $x);\n}\n",
+    )
+    .unwrap();
+    // refs from the trait decl: the chained call site must be admitted.
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_perl-lsp"))
+        .args(["--references", dir.to_str().unwrap(), "Helper.php", "4", "20"])
+        .env("XDG_CACHE_HOME", dir.join(".cache"))
+        .output()
+        .expect("run refs");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("Chain.php"),
+        "chained consumer call site admitted: {stdout}"
+    );
+    // gd from the chained call site: the trait's concrete method, not the
+    // interface stub.
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_perl-lsp"))
+        .args(["--definition", dir.to_str().unwrap(), "Chain.php", "6", "11"])
+        .env("XDG_CACHE_HOME", dir.join(".cache"))
+        .output()
+        .expect("run gd");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("Helper.php:4") && !stdout.contains("En.php"),
+        "concrete trait method over interface stub: {stdout}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

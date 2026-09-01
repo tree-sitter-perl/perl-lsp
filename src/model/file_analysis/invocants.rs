@@ -840,7 +840,16 @@ impl FileAnalysis {
 
         // Bareword invocant. Could be a zero-arg sub returning ClassName
         // (`app->routes` where `app` is plugin-emitted); promote that.
-        // Otherwise the bareword text *is* the class (`Foo->method`).
+        // Otherwise the bareword text *is* the class (`Foo->method`) — but
+        // ONLY for text shaped like a class token. A pack chain receiver's
+        // recorded text is the whole receiver EXPRESSION; minting it as a
+        // ClassName poisons the build-time freeze (the garbage edge then
+        // reads as a baked verdict, so the references matcher never
+        // re-resolves with the index) — answer None and leave the site to
+        // the query-time rungs above.
+        if !crate::model::conventions::is_bareword_class_name(invocant) {
+            return None;
+        }
         let bare = split_qualified(invocant).1;
         if let Some(InferredType::ClassName(c)) = self.sub_return_type_at_arity(bare, Some(0)) {
             return Some(InferredType::ClassName(c));

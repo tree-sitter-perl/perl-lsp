@@ -752,6 +752,8 @@ pub fn php_pack() -> LangPack {
             include_str!("../../../queries/php/frameworks/wordpress.scm"),
             "\n",
             include_str!("../../../queries/php/frameworks/phpunit.scm"),
+            "\n",
+            include_str!("../../../queries/php/frameworks/symfony.scm"),
         ),
         lang_id: "php",
         bundled_entry_markers: &[
@@ -1245,10 +1247,24 @@ fn phpdoc_type(raw: &str) -> Option<String> {
     if raw.is_empty() {
         return None;
     }
-    let arms: Vec<&str> = raw
-        .split('|')
-        .filter(|a| !a.eq_ignore_ascii_case("null") && !a.is_empty())
-        .collect();
+    // Union split at TOP LEVEL only — a `|` inside generics is part of one
+    // arm (`static<int, static<int, TValue|TZipValue>>` is a single type;
+    // the naive split saw three and dropped laravel's whole fluent surface).
+    let mut arms: Vec<&str> = Vec::new();
+    let (mut depth, mut arm_start) = (0usize, 0usize);
+    for (i, c) in raw.char_indices() {
+        match c {
+            '<' | '{' | '(' => depth += 1,
+            '>' | '}' | ')' => depth = depth.saturating_sub(1),
+            '|' if depth == 0 => {
+                arms.push(&raw[arm_start..i]);
+                arm_start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    arms.push(&raw[arm_start..]);
+    arms.retain(|a| !a.eq_ignore_ascii_case("null") && !a.is_empty());
     let [one] = arms.as_slice() else { return None };
     // Sequence spellings survive WHOLE — `annot_type` parses the element
     // (`list<X>` / `array<K,V>` / `iterable<X>` / `X[]` → a one-slot

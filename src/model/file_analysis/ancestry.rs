@@ -657,13 +657,60 @@ impl FileAnalysis {
         module_index: Option<&dyn CrossFileLookup>,
     ) -> Option<MethodResolution> {
         let mut result: Option<MethodResolution> = None;
+        let mut iface_fallback: Option<MethodResolution> = None;
         self.for_each_ancestor_class(class_name, module_index, |cls| {
             match self.method_resolution_on_class(cls, method_name, module_index) {
-                Some(r) => { result = Some(r); std::ops::ControlFlow::Break(()) }
+                // An INTERFACE hit is held as fallback, never the answer
+                // while a concrete definer exists: php's MRO interleaves
+                // `implements` (header) ahead of `use Trait` (body), so the
+                // abstract stub otherwise shadows the trait method every
+                // consumer actually runs (laravel `Collection->eachSpread`).
+                Some(r) => {
+                    if self.hit_class_is_interface(cls, &r, module_index) {
+                        iface_fallback.get_or_insert(r);
+                        std::ops::ControlFlow::Continue(())
+                    } else {
+                        result = Some(r);
+                        std::ops::ControlFlow::Break(())
+                    }
+                }
                 None => std::ops::ControlFlow::Continue(()),
             }
         });
-        result
+        result.or(iface_fallback)
+    }
+
+    /// Is the class that answered a method resolution an INTERFACE (php:
+    /// a Class symbol carrying the "interface" flavor attribute)? Cost-
+    /// shaped by the hit kind: a Local hit consults only the local symbol
+    /// (for Perl that scan never matches — no symbol carries the flavor —
+    /// and no cross-file work happens); a CrossFile hit also sweeps the
+    /// class's candidate files, whose copies the resolution itself just
+    /// rehydrated (LRU-warm).
+    fn hit_class_is_interface(
+        &self,
+        cls: &str,
+        r: &MethodResolution,
+        module_index: Option<&dyn CrossFileLookup>,
+    ) -> bool {
+        let marked = |a: &FileAnalysis| {
+            a.symbols().iter().any(|s| {
+                matches!(s.kind, SymKind::Class)
+                    && s.name == cls
+                    && s.attributes.iter().any(|x| x == "interface")
+            })
+        };
+        match r {
+            MethodResolution::Local { .. } => marked(self),
+            MethodResolution::CrossFile { .. } => {
+                marked(self)
+                    || module_index.is_some_and(|i| {
+                        i.visible_def_candidates(cls)
+                            .iter()
+                            .any(|c| marked(&i.whole_present(c)))
+                    })
+            }
+        }
     }
 
     /// `$self->SUPER::m` dispatch: resolve `method_name` over `enclosing`'s
@@ -719,21 +766,6 @@ impl FileAnalysis {
         // the method.
         let mut result: Option<MethodResolution> = None;
         let mut iface_fallback: Option<MethodResolution> = None;
-        let class_is_interface = |cls: &str| -> bool {
-            let check = |a: &FileAnalysis| {
-                a.symbols().iter().any(|s| {
-                    matches!(s.kind, SymKind::Class)
-                        && s.name == cls
-                        && s.attributes.iter().any(|x| x == "interface")
-                })
-            };
-            check(self)
-                || module_index.is_some_and(|i| {
-                    i.visible_def_candidates(cls)
-                        .iter()
-                        .any(|c| check(&i.whole_present(c)))
-                })
-        };
         let graph = crate::model::graph::GraphView::new(self, module_index);
         graph.walk(
             crate::model::graph::Node::Class(enclosing.to_string()),
@@ -745,7 +777,7 @@ impl FileAnalysis {
                 };
                 match self.method_resolution_on_class(cls, method_name, module_index) {
                     Some(r) => {
-                        if class_is_interface(cls) {
+                        if self.hit_class_is_interface(cls, &r, module_index) {
                             iface_fallback.get_or_insert(r);
                             crate::model::graph::WalkControl::Continue
                         } else {
