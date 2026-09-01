@@ -4742,7 +4742,7 @@ fn php_destructuring_slots_bind_positionally() {
     assert_eq!(pos("$c"), Some(Extraction::Positional(0)));
     assert_eq!(pos("$d"), Some(Extraction::Positional(1)));
     assert_eq!(pos("$e"), Some(Extraction::Positional(1)), "skipped slot counts");
-    assert_eq!(pos("$v"), None, "keyed list never binds positionally");
+    assert_eq!(pos("$v"), Some(Extraction::KeyOf("k".into())), "keyed list binds by key, never by position");
     assert!(skel.symbols.iter().any(|s| s.kind == "var" && s.name == "$v"), "…but still declares");
     assert_eq!(pos("$y"), Some(Extraction::Positional(1)), "foreach list slot");
     let (_, y_src) = skel
@@ -4760,4 +4760,66 @@ fn php_destructuring_slots_bind_positionally() {
         )),
         "the list span peels the collection's Element"
     );
+}
+
+#[test]
+fn php_narrowing_guard_shapes() {
+    // instanceof narrows in every guard position a body can sit under: a
+    // namespace-qualified class token, an `elseif` arm, and either
+    // conjunct of `&&` — each mints a narrowing witness for the block.
+    use crate::model::witnesses::{WitnessAttachment, WitnessPayload};
+    let src = "<?php\nnamespace App;\nfunction f($a, $b, $c, $d): void {\n    if ($a instanceof Op\\Install) { $a->m(); }\n    if (is_null($b)) { return; } elseif ($b instanceof Install) { $b->m(); }\n    if ($c instanceof Install && $c->ok()) { $c->m(); }\n    if ($d->ok() && $d instanceof Install) { $d->m(); }\n}\n";
+    let mut parser = php_parser();
+    let tree = parser.parse(src, None).unwrap();
+    let skel = extract(&tree, src.as_bytes(), &php_pack()).unwrap();
+    let narrowed = |v: &str| {
+        skel.witnesses.iter().any(|w| matches!(
+            (&w.attachment, &w.payload),
+            (WitnessAttachment::Variable { name, .. }, WitnessPayload::InferredType(InferredType::ClassName(c)))
+            if name == v && c == "Install"
+        ))
+    };
+    for v in ["$a", "$b", "$c", "$d"] {
+        assert!(narrowed(v), "{v} narrowed to the leafed class");
+    }
+}
+
+#[test]
+fn php_keyed_destructuring_binds_through_hash_keys() {
+    use crate::model::file_analysis::Extraction;
+    let src = "<?php\n['advisories' => $adv, \"count\" => $n] = f();\nforeach ($rows as ['k' => $v]) {}\n";
+    let mut parser = php_parser();
+    let tree = parser.parse(src, None).unwrap();
+    let skel = extract(&tree, src.as_bytes(), &php_pack()).unwrap();
+    let ext = |name: &str| skel.flow_edges.iter().find(|f| f.target_name == name).map(|f| f.extraction.clone());
+    assert_eq!(ext("$adv"), Some(Extraction::KeyOf("advisories".into())));
+    assert_eq!(ext("$n"), Some(Extraction::KeyOf("count".into())));
+    assert_eq!(ext("$v"), Some(Extraction::KeyOf("k".into())), "foreach keyed list");
+}
+
+#[test]
+fn php_branch_arms_and_subscripts_project() {
+    use crate::model::witnesses::{ProjectionStep, WitnessAttachment, WitnessPayload};
+    let src = "<?php\n$t = match ($c) { 'a' => X::A, default => X::B };\n$u = $c ? f() : g();\n$m = f()[0];\n$r = $row['name'];\n";
+    let mut parser = php_parser();
+    let tree = parser.parse(src, None).unwrap();
+    let skel = extract(&tree, src.as_bytes(), &php_pack()).unwrap();
+    let arms = |row: usize| skel.witnesses.iter().filter(|w| matches!(&w.attachment, WitnessAttachment::BranchArm(sp) if sp.start.row == row)).count();
+    assert_eq!(arms(1), 2, "match: one arm witness per arm");
+    assert_eq!(arms(2), 2, "ternary: both arms");
+    assert!(skel.witnesses.iter().any(|w| matches!((&w.attachment, &w.payload), (WitnessAttachment::Expr(sp), WitnessPayload::Edge(WitnessAttachment::BranchArm(_))) if sp.start.row == 1)), "the match's own Expr edges to its arms");
+    let has_step = |row: usize, pred: &dyn Fn(&ProjectionStep) -> bool| skel.witnesses.iter().any(|w| matches!((&w.attachment, &w.payload), (WitnessAttachment::Expr(sp), WitnessPayload::Projected { step, .. }) if sp.start.row == row && pred(step)));
+    assert!(has_step(3, &|s| matches!(s, ProjectionStep::ArrayIndex(0))), "f()[0] peels slot 0");
+    assert!(has_step(4, &|s| matches!(s, ProjectionStep::HashKey(k) if k == "name")), "$row['name'] drills the key");
+}
+
+#[test]
+fn php_instance_array_callable_is_a_method_ref() {
+    let src = "<?php\nclass L { function on(): void {} function reg(): void { $d = [$this, 'on']; $e = [$obj, 'other']; } }\n";
+    let mut parser = php_parser();
+    let tree = parser.parse(src, None).unwrap();
+    let skel = extract(&tree, src.as_bytes(), &php_pack()).unwrap();
+    let names: Vec<(&str, Option<&str>)> = skel.refs.iter().filter(|r| r.kind == "member").map(|r| (r.name.as_str(), r.invocant.as_ref().map(|(_, t)| t.as_str()))).collect();
+    assert!(names.contains(&("on", Some("$this"))), "{names:?}");
+    assert!(names.contains(&("other", Some("$obj"))), "{names:?}");
 }

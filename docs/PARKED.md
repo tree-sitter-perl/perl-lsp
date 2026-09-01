@@ -473,8 +473,10 @@ marked otherwise; the drain re-derived each rationale against current code.
 - **PHP string-callable overlay residuals** (round-4 H7): the
   variadic-tail callback family (`array_udiff` & co — callback LAST
   positional arg) and key-position forms (`'sanitize_callback' => 'fn'`)
-  aren't covered by the fixed-position `stdlib.scm` overlay; neither are
-  `'Class::method'` / `[$obj, 'm']` callable-array spellings. Two rename
+  aren't covered by the fixed-position `stdlib.scm` overlay. (The
+  `'Class::method'` string spelling resolves on both segments, and
+  `[$obj, 'm']` / `[$this, 'm']` instance-array callables mint member refs
+  through the skeleton — neither is parked.) Two rename
   residuals from the same family, root-caused but not fixed: LogglyHandler
   (a closure param threaded through an `array_filter` callback) and
   MailHandler's `$highestRecord` (assignment flow into a null-guarded

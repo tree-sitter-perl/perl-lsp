@@ -360,6 +360,14 @@
   . (array_element_initializer (string (string_content) @ref.method.named)) .
   (#eq? @_cclsq "class"))
 
+; `[$this, 'method']` / `[$listener, 'method']` — the instance-array
+; callable: the variable is the receiver (typed like any member access),
+; the string names the method. Event listeners and PHPUnit callbacks live
+; here; a rename that misses them breaks the dispatch at runtime.
+(array_creation_expression
+  . (array_element_initializer (variable_name) @member.recv)
+  . (array_element_initializer (string (string_content) @ref.method.named)) .)
+
 ; `static::$records` / `self::$records` / `Foo::$prop` — scoped STATIC
 ; property access rides the same member lane (`static::$prop`
 ; lost the property's own @var doc because no hop existed here; the
@@ -405,13 +413,81 @@
   "array" @shape.ctor
   (array_element_initializer (string (string_content) @shape.key))) @expr.shape
 
+; ---- branch arms: `match` / ternary type as their ARMS' agreement ----
+; One match per arm, each carrying the whole expression's span
+; (`@branch.expr`) so extraction joins arm → expression: the expression's
+; `Expr` edges to `BranchArm(span)`, every arm edges its own `Expr` there,
+; and `BranchArmFold` answers only when the arms agree. Without this the
+; assignment's literal-narrowing picked the largest literal INSIDE the
+; match — a discriminant string — as the value's type.
+(match_expression
+  body: (match_block
+    (match_conditional_expression return_expression: (_) @branch.arm))) @branch.expr
+(match_expression
+  body: (match_block
+    (match_default_expression return_expression: (_) @branch.arm))) @branch.expr
+(conditional_expression
+  body: (_) @branch.arm) @branch.expr
+(conditional_expression
+  alternative: (_) @branch.arm) @branch.expr
+
+; ---- subscripts: `f()[0]` / `$row['name']` project off the base ----
+; An integer index peels a tuple/sequence slot (`list<T>` → T); a literal
+; string key drills a keyed shape (`array{name: string}` → string).
+(subscript_expression
+  . (_) @subscript.base
+  (integer) @subscript.int .) @subscript.expr
+(subscript_expression
+  . (_) @subscript.base
+  (string (string_content) @subscript.key) .) @subscript.expr
+
 ; ---- guard narrowing: `if ($x instanceof User) { ... }` ----
+; The class token may be bare or namespace-qualified (`Op\Install` —
+; `annot_type` leafs it). The guard may sit alone, be a conjunct of `&&`
+; (both operands hold inside the body, so either side narrows), or open
+; an `elseif` arm. A negated guard (`!$x instanceof T`) never narrows.
 (if_statement
   condition: (parenthesized_expression
     (binary_expression
       left: (variable_name) @narrow.var
       "instanceof" @narrow.guard
-      right: (name) @narrow.type))
+      right: [(name) (qualified_name)] @narrow.type))
+  body: (compound_statement) @scope)
+(else_if_clause
+  condition: (parenthesized_expression
+    (binary_expression
+      left: (variable_name) @narrow.var
+      "instanceof" @narrow.guard
+      right: [(name) (qualified_name)] @narrow.type))
+  body: (compound_statement) @scope)
+(if_statement
+  condition: (parenthesized_expression
+    (binary_expression
+      left: (binary_expression
+        left: (variable_name) @narrow.var
+        "instanceof" @narrow.guard
+        right: [(name) (qualified_name)] @narrow.type)
+      "&&"))
+  body: (compound_statement) @scope)
+(if_statement
+  condition: (parenthesized_expression
+    (binary_expression
+      "&&"
+      right: (binary_expression
+        left: (variable_name) @narrow.var
+        "instanceof" @narrow.guard
+        right: [(name) (qualified_name)] @narrow.type)))
+  body: (compound_statement) @scope)
+(if_statement
+  condition: (parenthesized_expression
+    (binary_expression
+      left: (binary_expression
+        left: (binary_expression
+          left: (variable_name) @narrow.var
+          "instanceof" @narrow.guard
+          right: [(name) (qualified_name)] @narrow.type)
+        "&&")
+      "&&"))
   body: (compound_statement) @scope)
 
 ; ---- operator evidence (the Perl edge, alive in PHP) ----

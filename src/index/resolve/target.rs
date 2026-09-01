@@ -219,6 +219,15 @@ impl TargetRef {
                 // routing fact. Macro-named cursors never reach this arm
                 // (the canonical FileScopeValue lanes claim them first,
                 // WITH def_paths).
+                // The pack's constructor convention is a fact of the target
+                // whichever cursor minted it: a decl-side cursor on
+                // `__construct` arrives here as a Sub, and its references
+                // must admit the class's `new Foo(...)` sites exactly as the
+                // call-side Method target does.
+                let ctor_of = package
+                    .as_ref()
+                    .filter(|_| origin.pack.constructor_names.iter().any(|c| c == &name))
+                    .cloned();
                 TargetRef {
                     name,
                     kind: TargetKind::Sub { package },
@@ -226,7 +235,7 @@ impl TargetRef {
                     scope,
                     def_paths: Vec::new(),
                     bare_constant: false,
-            ctor_of: None,
+                    ctor_of,
                 }
             }
             RenameKind::Method { name, class } => {

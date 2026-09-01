@@ -846,6 +846,7 @@ pub fn php_pack() -> LangPack {
             ("ArrayRef", "array"),
             ("Undef", "null"),
             ("CodeRef", "callable"),
+            ("Sequence", "list"),
         ],
         // PSR-4's real map lives in composer.json (autoload roots); the
         // one executable line is the namespace-mirrors-directories shape.
@@ -861,7 +862,12 @@ pub fn php_pack() -> LangPack {
         cmd_effects: |_| vec![],
         // `$x instanceof User` refines $x to User inside the guard.
         narrow_guard: |guard, ty| {
-            (guard == Some("instanceof")).then(|| InferredType::ClassName(ty.to_string()))
+            // The class token leafs like every other class spelling
+            // (`Op\Install` → `Install`; classes are filed by leaf).
+            (guard == Some("instanceof"))
+                .then(|| php_annot_type(ty))
+                .flatten()
+                .filter(|t| matches!(t, InferredType::ClassName(_)))
         },
         rebind_method: |_| false,
         // `$this->` is mandatory — no receiver elision (unlike C++).

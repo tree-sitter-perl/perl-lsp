@@ -138,6 +138,19 @@ pub fn pack_hover_markdown(
             }
         }
     }
+    // The current-object receiver (`$this` — the pack's declared receiver
+    // names) has no declaration to land on; its value IS the enclosing
+    // class, which is what a reader hovering it wants to know.
+    if let Some(tok) = sigiled_token_at(source, point) {
+        if analysis.pack.receiver_names.iter().any(|n| n == &tok) {
+            if let Some(cls) = analysis
+                .scope_at(point)
+                .and_then(|sc| analysis.enclosing_class_for_scope(sc))
+            {
+                return Some(format!("```{}\n{}: {}\n```\n\n*variable*", language, tok, cls));
+            }
+        }
+    }
     // The projection's answer: present the top-ranked definition candidate —
     // what goto-def would jump to — wherever it lives (macro variants,
     // template/spec ladders, locals, cross-file functions all arrive here).
@@ -154,6 +167,29 @@ pub fn pack_hover_markdown(
         ));
     }
     None
+}
+
+/// The identifier token under `point` INCLUDING a leading sigil (`$this`),
+/// the spelling the pack's receiver names use.
+fn sigiled_token_at(source: &str, point: Point) -> Option<String> {
+    let line = source.lines().nth(point.row)?;
+    let b = line.as_bytes();
+    let is_tok = |c: u8| c == b'_' || c == b'$' || c.is_ascii_alphanumeric();
+    let mut s = point.column.min(b.len());
+    if s == b.len() || !is_tok(b[s]) {
+        s = s.checked_sub(1)?;
+    }
+    if !is_tok(b[s]) {
+        return None;
+    }
+    while s > 0 && is_tok(b[s - 1]) {
+        s -= 1;
+    }
+    let mut e = s;
+    while e < b.len() && is_tok(b[e]) {
+        e += 1;
+    }
+    Some(line[s..e].to_string())
 }
 
 /// Render the hover projection's candidate: the symbol declared at the
@@ -288,6 +324,14 @@ fn render_symbol_hover(
     // span's first row — an attributed def (`#[Test]` above a php method,
     // `template<...>` above a cpp fn) starts rows earlier, and rendering
     // that row showed the annotation as the signature.
+    // A variable hovered at a REBIND (php's function-scoped locals: one
+    // def at the first assignment, every later `$x = …` a rebind) must not
+    // show the first assignment's line as if it were this site's — that
+    // attributes another branch's code to the cursor. Untyped there, the
+    // honest answer is the name alone.
+    if matches!(sym.kind, FaSymKind::Variable) && type_point.row != sym.selection_span.start.row {
+        return format!("```{}\n{}\n```\n\n*{}*", language, sym.name, hover_kind_label(sym));
+    }
     let line = source.lines().nth(sym.selection_span.start.row).unwrap_or("").trim();
     let sig = line.trim_end_matches([' ', '{', ';']).trim();
     let mut out = format!("```{}\n{}\n```\n\n*{}*", language, sig, hover_kind_label(sym));

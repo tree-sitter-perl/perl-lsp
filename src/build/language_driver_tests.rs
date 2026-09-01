@@ -1046,3 +1046,21 @@ fn php_every_return_site_contributes_an_arm() {
     assert_eq!(arms, 2, "every return site contributes an arm");
 }
 
+/// A named `/** @var Sub $p */` above a RE-assignment casts the local from
+/// that site on — the factory-narrowing idiom. The cast rides at annot
+/// priority: the call-binding edge the same assignment mints lands later
+/// in the bag and would otherwise override it with the declared base.
+#[cfg(feature = "php")]
+#[test]
+fn php_named_var_doc_casts_a_rebound_local() {
+    use crate::model::file_analysis::InferredType;
+    let src = "<?php\nnamespace App;\nclass Base { public static function make(string $n): Base { return new Base(); } }\nclass Sub extends Base {}\nfunction go(): void {\n    $p = Base::make('x');\n    /** @var Sub $p */\n    $p = Base::make('y');\n    $p->x();\n}\n";
+    let reg = LanguageRegistry::with_enabled();
+    let fa = reg.for_path(std::path::Path::new("T.php")).unwrap().analyze(src);
+    assert_eq!(
+        fa.inferred_type_via_bag("$p", tree_sitter::Point { row: 8, column: 4 }),
+        Some(InferredType::ClassName("Sub".into())),
+        "cast applies from the rebind on"
+    );
+}
+

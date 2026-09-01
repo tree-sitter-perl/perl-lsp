@@ -481,3 +481,33 @@ fn php_cross_file_method_hover_renders_the_signature() {
     assert!(!stdout.contains("*member*"), "never the member fallback: {stdout}");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A constructor's references are the class's `new Foo(...)` sites, in
+/// OTHER files too: the relational retrieval keys on the class name for a
+/// ctor target (its call sites never spell `__construct`), and the heatmap
+/// counts them as fan-in. `$this` hovers as the enclosing class.
+#[cfg(feature = "php")]
+#[test]
+fn php_constructor_references_reach_new_sites_across_files() {
+    let dir = std::env::temp_dir().join(format!("perl-lsp-r5ctor-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("Src.php"), "<?php\nnamespace App;\nclass Src { public function __construct(private string $p) {} public function go(): void { $this->p; } }\n").unwrap();
+    std::fs::write(dir.join("Mk.php"), "<?php\nnamespace App;\nfunction mk(): Src { return new Src(\"x\"); }\n").unwrap();
+    let run = |args: &[&str]| {
+        let out = std::process::Command::new(env!("CARGO_BIN_EXE_perl-lsp"))
+            .args(args).env("XDG_CACHE_HOME", dir.join(".cache")).output().expect("run");
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+    let refs = run(&["--references", dir.to_str().unwrap(), "Src.php", "2", "28"]);
+    assert!(refs.contains("Mk.php"), "cross-file `new Src(` admitted: {refs}");
+    let heat = run(&["--heatmap", dir.to_str().unwrap()]);
+    let v: serde_json::Value = serde_json::from_str(&heat).expect("heatmap json");
+    let ctor = v["symbols"].as_array().unwrap().iter().find(|s| s["name"] == "__construct").unwrap();
+    assert_eq!(ctor["dead_code_candidate"], false, "ctor with a `new` site is live: {ctor}");
+    let src_line = "class Src { public function __construct(private string $p) {} public function go(): void { $this->p; } }";
+    let col = (src_line.find("$this").unwrap() + 1).to_string();
+    let hover = run(&["--hover", dir.to_str().unwrap(), "Src.php", "2", &col]);
+    assert!(hover.contains("$this: Src"), "`$this` hovers as the enclosing class: {hover}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
