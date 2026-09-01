@@ -136,6 +136,21 @@ templates). Market case and build-out plan in `docs/prompt-php-target.md`.
   references from either side list all of them (190 sites across 127
   WordPress core files for `'init'`), and renaming a hook rewrites
   the string at every site.
+- **PHP attributes are modeled.** `#[Test]`, `#[Route(...)]`,
+  `#[AllowDynamicProperties]` land on their symbols; hover shows the
+  real signature line instead of the annotation (cpp's
+  `template<...>`-first-line hovers improved the same way).
+- **The dead-code report understands frameworks.** Runner-invoked
+  symbols no longer flood the heatmap's dead queue: `#[Test]` /
+  `test*` methods in TestCase descendants, queued-job and command
+  `handle()`s, service-provider `boot()`s (declared in `entry.json`
+  rule documents — bundled PHPUnit and Laravel sets included, plugin
+  dirs can add their own), and PHP's magic methods (`__toString`,
+  `__invoke`, …) are shielded with a labeled reason instead of
+  flagged. Route/event callables (`[UserController::class, 'index']`)
+  are real references now, so controller actions count as used.
+  Measured on guzzle: the dead queue dropped from 2,195 symbols to
+  352, and what remains is plausibly actually dead.
 - **foreach loop variables type as the element.**
   `foreach ($this->handlers as $handler)` with
   `@var HandlerInterface[]` (or `list<X>` / `array<K, V>` /

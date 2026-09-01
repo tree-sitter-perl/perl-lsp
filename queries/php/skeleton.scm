@@ -15,13 +15,28 @@
 ; ---- type containers: class / interface / trait / enum ----
 ; All four are @def.class + their own body context — members tag with the
 ; container's (unqualified) name, the identity the engine keys dispatch by.
+; `#[Attr]` annotations ride @sym.attr onto Symbol.attributes (the same
+; lane cpp storage-class specifiers use): hover renders them, and the
+; framework-entry machinery reads them as invocation evidence.
 (class_declaration
+  attributes: (attribute_list
+    (attribute_group
+      (attribute [(name) (qualified_name (name))] @sym.attr)+)+)?
   name: (name) @def.class.name @context.package) @def.class @scope
 (interface_declaration
+  attributes: (attribute_list
+    (attribute_group
+      (attribute [(name) (qualified_name (name))] @sym.attr)+)+)?
   name: (name) @def.class.name @context.package) @def.class @scope
 (trait_declaration
+  attributes: (attribute_list
+    (attribute_group
+      (attribute [(name) (qualified_name (name))] @sym.attr)+)+)?
   name: (name) @def.class.name @context.package) @def.class @scope
 (enum_declaration
+  attributes: (attribute_list
+    (attribute_group
+      (attribute [(name) (qualified_name (name))] @sym.attr)+)+)?
   name: (name) @def.class.name @context.package) @def.class @scope
 
 ; inheritance: `extends Base` — one @parent per base; the name is also a
@@ -66,9 +81,15 @@
 ; @rettype carries the declared return type → method-return chaining
 ; through PackageSymbol, same chase Perl and C++ use.
 (function_definition
+  attributes: (attribute_list
+    (attribute_group
+      (attribute [(name) (qualified_name (name))] @sym.attr)+)+)?
   name: (name) @def.sub.name
   return_type: (_)? @rettype) @def.sub
 (method_declaration
+  attributes: (attribute_list
+    (attribute_group
+      (attribute [(name) (qualified_name (name))] @sym.attr)+)+)?
   name: (name) @def.method.name
   return_type: (_)? @rettype) @def.method
 
@@ -239,6 +260,28 @@
 (class_constant_access_expression
   . (relative_scope) @member.recv
   (name) @ref.member .) @hop.call
+
+; `[UserController::class, 'index']` / `array(Listener::class, 'handle')`:
+; php's class-array callable — the exactly-two-element pair NAMES a
+; dispatchable method (Laravel routes, event maps, callable args). The
+; class token rides @member.recv (the bareword-dispatches-as-class rule)
+; and the string content mints the method ref — the array($this, 'm')
+; shape with a class receiver. Language convention, not framework
+; vocabulary, so it lives in the base skeleton.
+(array_creation_expression
+  . (array_element_initializer
+      (class_constant_access_expression
+        . (name) @member.recv
+        (name) @_ccls .))
+  . (array_element_initializer (string (string_content) @ref.method.named)) .
+  (#eq? @_ccls "class"))
+(array_creation_expression
+  . (array_element_initializer
+      (class_constant_access_expression
+        . (qualified_name (name) @member.recv)
+        (name) @_cclsq .))
+  . (array_element_initializer (string (string_content) @ref.method.named)) .
+  (#eq? @_cclsq "class"))
 
 ; `new User(...)`: the value is an instance of User by SYNTAX — the ctor
 ; edge rides the alias graph (TypeName → the defining file, or the bare

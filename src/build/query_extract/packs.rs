@@ -14,6 +14,12 @@ pub struct LangPack {
     /// query overlays (`<plugin-dir>/<name>/queries/<lang_id>.scm`,
     /// docs/prompt-pack-plugins.md) onto the language they extend.
     pub lang_id: &'static str,
+    /// Bundled framework-entry declarations (`entry.json` documents, see
+    /// `EntryMarker`): which attribute names / method conventions mean "a
+    /// runner invokes this" for the heatmap's framework-entry guard. The
+    /// framework vocabulary lives in these DATA files (like the bundled
+    /// `.scm` overlays), never in engine code; plugin dirs extend the set.
+    pub bundled_entry_markers: &'static [&'static str],
     /// Shape a captured name token's text (e.g. keep the sigil on a
     /// Perl variable). `capture_kind` is the vocabulary name
     /// (`def.var`, `ref.method`, ...) so one pack hook serves all.
@@ -145,6 +151,13 @@ pub struct LangPack {
     /// scripts). Consumed by the heatmap's reachability guard — asked of
     /// the pack, never a name/language branch (rule #10).
     pub entrypoint_symbols: &'static [&'static str],
+    /// Method names the RUNTIME invokes structurally (php magic methods —
+    /// `__toString`, `__invoke`, `__get`, ...): zero in-repo call sites is
+    /// the EXPECTED state, so the heatmap's dead-code flagging shields
+    /// them (the method-shaped sibling of `entrypoint_symbols`). The
+    /// constructor stays on its own lane (`constructor_names` — its call
+    /// sites are real `new` refs, so an unconstructed ctor honestly flags).
+    pub runtime_invoked_methods: &'static [&'static str],
     /// Container membership (class/struct/union/namespace) is delimited by
     /// literal `{`/`}` in the source, so a member that lost its enclosing
     /// container to a tree-sitter misparse can be re-anchored by matching the
@@ -402,6 +415,7 @@ pub fn perl_pack() -> LangPack {
     LangPack {
         query_source: include_str!("../../../queries/perl/skeleton.scm"),
         lang_id: "perl",
+        bundled_entry_markers: &[],
         shape_name: |kind, raw| match kind {
             // The builder stores variable symbols WITH sigil; varname
             // captures are sigil-less. Predicate re-attaches nothing —
@@ -432,6 +446,7 @@ pub fn perl_pack() -> LangPack {
         include_path_tokens: false,
         preprocessor_macros: false,
         entrypoint_symbols: &[],
+        runtime_invoked_methods: &[],
         brace_scoped_members: false,
         trigger_chars: &["$", "@", "%", ">", ":", "{"],
         receiver_names: &[],
@@ -456,6 +471,7 @@ pub fn python_pack() -> LangPack {
     LangPack {
         query_source: include_str!("../../../queries/python/skeleton.scm"),
         lang_id: "python",
+        bundled_entry_markers: &[],
         shape_name: |_, raw| raw.to_string(),
         default_name: |_| None,
         annot_type: |text| match text.trim() {
@@ -490,6 +506,7 @@ pub fn python_pack() -> LangPack {
         include_path_tokens: false,
         preprocessor_macros: false,
         entrypoint_symbols: &[],
+        runtime_invoked_methods: &[],
         brace_scoped_members: false,
         trigger_chars: &["."],
         receiver_names: &["self", "cls"],
@@ -519,6 +536,7 @@ pub fn r_pack() -> LangPack {
     LangPack {
         query_source: include_str!("../../../queries/r/skeleton.scm"),
         lang_id: "r",
+        bundled_entry_markers: &[],
         shape_name: |_, raw| raw.to_string(),
         default_name: |_| None,
         annot_type: |_| None,
@@ -548,6 +566,7 @@ pub fn r_pack() -> LangPack {
         include_path_tokens: false,
         preprocessor_macros: false,
         entrypoint_symbols: &[],
+        runtime_invoked_methods: &[],
         brace_scoped_members: false,
         trigger_chars: &["$", "@", ":"],
         receiver_names: &[],
@@ -572,6 +591,7 @@ pub fn cmake_pack() -> LangPack {
     LangPack {
         query_source: include_str!("../../../queries/cmake/skeleton.scm"),
         lang_id: "cmake",
+        bundled_entry_markers: &[],
         shape_name: |_, raw| raw.to_string(),
         default_name: |_| None,
         annot_type: |_| None,
@@ -614,6 +634,7 @@ pub fn cmake_pack() -> LangPack {
         include_path_tokens: false,
         preprocessor_macros: false,
         entrypoint_symbols: &[],
+        runtime_invoked_methods: &[],
         brace_scoped_members: false,
         trigger_chars: &["{", "("],
         receiver_names: &[],
@@ -700,6 +721,10 @@ pub fn php_pack() -> LangPack {
             include_str!("../../../queries/php/frameworks/wordpress.scm"),
         ),
         lang_id: "php",
+        bundled_entry_markers: &[
+            include_str!("../../../queries/php/frameworks/phpunit.entry.json"),
+            include_str!("../../../queries/php/frameworks/laravel.entry.json"),
+        ],
         // variable_name captures carry the `$` (PHP spells it at every
         // use, like Perl); names/classes pass through verbatim. A
         // `self::`/`static::` receiver IS the enclosing class — spelled as
@@ -780,6 +805,12 @@ pub fn php_pack() -> LangPack {
         include_path_tokens: false,
         preprocessor_macros: false,
         entrypoint_symbols: &[],
+        runtime_invoked_methods: &[
+            "__toString", "__invoke", "__get", "__set", "__isset", "__unset",
+            "__call", "__callStatic", "__clone", "__destruct", "__wakeup",
+            "__sleep", "__serialize", "__unserialize", "__debugInfo",
+            "__set_state", "__toBool",
+        ],
         // class/trait/interface bodies are brace-delimited, so a member
         // orphaned by a misparse can re-anchor positionally.
         brace_scoped_members: true,
@@ -822,6 +853,7 @@ pub fn cpp_pack() -> LangPack {
     LangPack {
         query_source: include_str!("../../../queries/cpp/skeleton.scm"),
         lang_id: "cpp",
+        bundled_entry_markers: &[],
         // Template spellings get ONE canonical whitespace form so a
         // specialization's identity (`formatter<int, char>`) matches
         // however the source wrapped it. Identity for every non-template
@@ -920,6 +952,7 @@ pub fn cpp_pack() -> LangPack {
         include_path_tokens: true,
         preprocessor_macros: true,
         entrypoint_symbols: &["main"],
+        runtime_invoked_methods: &[],
         brace_scoped_members: true,
         trigger_chars: &[".", ">", ":"],
         receiver_names: &["this"],

@@ -952,6 +952,7 @@ fn driver_caps_axes_are_reviewed_exhaustively() {
             pack_invalidation,
             cross_file_words,
             entrypoint_symbols,
+            runtime_invoked_methods,
             include_path_tokens,
             preprocessor_macros,
         } = d.caps();
@@ -969,7 +970,8 @@ fn driver_caps_axes_are_reviewed_exhaustively() {
             || cross_file_words
             || include_path_tokens
             || preprocessor_macros
-            || !entrypoint_symbols.is_empty();
+            || !entrypoint_symbols.is_empty()
+            || !runtime_invoked_methods.is_empty();
         assert!(
             !(hub_family && pack_family),
             "driver {} declares capabilities from both serving architectures",

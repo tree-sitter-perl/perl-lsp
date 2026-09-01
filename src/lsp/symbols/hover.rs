@@ -50,7 +50,7 @@ pub fn pack_hover_markdown(
                     let sym = analysis.symbol(sym_id);
                     if matches!(sym.kind, FaSymKind::Method | FaSymKind::Sub) {
                         let mut text = render_symbol_hover(
-                            sym, source, &sym.span.start, language, analysis, sym.span.start, Some(midx),
+                            sym, source, language, analysis, sym.span.start, Some(midx),
                         );
                         if let Some(rt) = substituted(
                             analysis.find_method_return_type(&cn, field, Some(midx), None),
@@ -119,7 +119,7 @@ pub fn pack_hover_markdown(
     // symbol under the cursor directly (its own type point + scope).
     if let Some(sym) = analysis.symbol_at(point) {
         return Some(render_symbol_hover(
-            sym, source, &sym.span.start, language, analysis, point, module_index,
+            sym, source, language, analysis, point, module_index,
         ));
     }
     None
@@ -154,7 +154,7 @@ fn render_candidate_hover(
         if let Some(i) = sym_at(analysis) {
             let sym = &analysis.symbols()[i];
             return Some(render_symbol_hover(
-                sym, source, &sym.span.start, language, analysis, cs.cursor(), module_index,
+                sym, source, language, analysis, cs.cursor(), module_index,
             ));
         }
         let line = source.lines().nth(loc.span.start.row)?.trim();
@@ -180,7 +180,7 @@ fn render_candidate_hover(
         if let Some(i) = sym_at(&whole) {
             let sym = &whole.symbols()[i];
             let mut out = render_symbol_hover(
-                sym, &text, &sym.span.start, language, &whole, sym.span.start,
+                sym, &text, language, &whole, sym.span.start,
                 module_index,
             );
             out.push_str(&format!("\n\n— `{}`", fname));
@@ -222,7 +222,6 @@ fn hover_kind_label(sym: &crate::model::file_analysis::Symbol) -> &'static str {
 fn render_symbol_hover(
     sym: &crate::model::file_analysis::Symbol,
     source: &str,
-    line_at: &Point,
     language: &str,
     analysis: &FileAnalysis,
     type_point: Point,
@@ -254,7 +253,11 @@ fn render_symbol_hover(
             );
         }
     }
-    let line = source.lines().nth(line_at.row).unwrap_or("").trim();
+    // The signature line is the line carrying the NAME token, not the def
+    // span's first row — an attributed def (`#[Test]` above a php method,
+    // `template<...>` above a cpp fn) starts rows earlier, and rendering
+    // that row showed the annotation as the signature.
+    let line = source.lines().nth(sym.selection_span.start.row).unwrap_or("").trim();
     let sig = line.trim_end_matches([' ', '{', ';']).trim();
     let mut out = format!("```{}\n{}\n```\n\n*{}*", language, sig, hover_kind_label(sym));
     if matches!(sym.kind, FaSymKind::Class) {

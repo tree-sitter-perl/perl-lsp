@@ -68,6 +68,10 @@ pub struct DriverCaps {
     /// See `LangPack::entrypoint_symbols` — symbols the runtime enters
     /// through the ABI, alive at zero fan-in by contract.
     pub entrypoint_symbols: &'static [&'static str],
+    /// See `LangPack::runtime_invoked_methods` — method names the runtime
+    /// invokes structurally (php magic methods); the heatmap's dead-code
+    /// flagging shields them.
+    pub runtime_invoked_methods: &'static [&'static str],
     /// See `LangPack::include_path_tokens`.
     pub include_path_tokens: bool,
     /// See `LangPack::preprocessor_macros`.
@@ -421,6 +425,7 @@ impl LanguageDriver for PackDriver {
             pack_invalidation: true,
             cross_file_words: true,
             entrypoint_symbols: pack.entrypoint_symbols,
+            runtime_invoked_methods: pack.runtime_invoked_methods,
             include_path_tokens: pack.include_path_tokens,
             preprocessor_macros: pack.preprocessor_macros,
             ..Default::default()

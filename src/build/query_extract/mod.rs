@@ -60,6 +60,84 @@ fn cached_query(language: &Language, source: &str) -> Result<&'static Query, Str
     Ok(leaked)
 }
 
+// ---- framework-entry declarations (the heatmap's "runner-invoked" data) ----
+
+/// One declared "a runner invokes this" rule, from an `entry.json`
+/// document (bundled per pack, or `<plugin-dir>/<name>/entry.json`).
+/// A rule matches a symbol when EVERY present condition holds:
+///   * `attributes` — the symbol carries one of these annotation names
+///     (php `#[Test]`, via the `@sym.attr` lane);
+///   * `method_prefix` / `methods` — the symbol's name matches;
+///   * `when_isa` — the symbol's class isa the (leaf-keyed) class.
+/// Rules OR across the set. The engine only EVALUATES these; every
+/// framework name lives in the data files (rule #10: the heatmap never
+/// compares names itself).
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct EntryMarker {
+    #[serde(default)]
+    pub attributes: Vec<String>,
+    #[serde(default)]
+    pub method_prefix: Option<String>,
+    #[serde(default)]
+    pub methods: Vec<String>,
+    #[serde(default)]
+    pub when_isa: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+struct EntryDoc {
+    language: String,
+    entries: Vec<EntryMarker>,
+}
+
+/// The framework-entry rules in force for a language: the pack's bundled
+/// documents plus every discovered `<plugin-dir>/<name>/entry.json`
+/// declaring this language. Cached per (lang, plugin-path set) like the
+/// overlay assembly — entry data never hot-reloads within a process. A
+/// malformed document is dropped with a stderr diagnostic (the bundled
+/// rules and surviving documents still serve — the overlay posture).
+pub fn entry_markers_for(pack: &LangPack) -> std::sync::Arc<Vec<EntryMarker>> {
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex, OnceLock};
+    static CACHE: OnceLock<Mutex<HashMap<String, Arc<Vec<EntryMarker>>>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut paths: Vec<std::path::PathBuf> = Vec::new();
+    for dir in crate::build::plugin::rhai_host::plugin_search_dirs() {
+        if let Ok(read) = std::fs::read_dir(&dir) {
+            for entry in read.flatten() {
+                let candidate = entry.path().join("entry.json");
+                if candidate.is_file() {
+                    paths.push(candidate);
+                }
+            }
+        }
+    }
+    paths.sort();
+    let key = format!("{}|{}", pack.lang_id, paths.len());
+    if let Some(v) = cache.lock().unwrap().get(&key) {
+        return Arc::clone(v);
+    }
+    let mut out: Vec<EntryMarker> = Vec::new();
+    let mut fold = |src: &str, origin: &dyn std::fmt::Display| {
+        match serde_json::from_str::<EntryDoc>(src) {
+            Ok(doc) if doc.language == pack.lang_id => out.extend(doc.entries),
+            Ok(_) => {}
+            Err(e) => eprintln!("perl-lsp: entry declarations {origin} dropped: {e}"),
+        }
+    };
+    for src in pack.bundled_entry_markers {
+        fold(src, &"(bundled)");
+    }
+    for p in &paths {
+        if let Ok(src) = std::fs::read_to_string(p) {
+            fold(&src, &p.display());
+        }
+    }
+    let arc = Arc::new(out);
+    cache.lock().unwrap().insert(key, Arc::clone(&arc));
+    arc
+}
+
 // ---- pack-plugin query overlays (tier 1, docs/prompt-pack-plugins.md) ----
 
 /// Discovered overlay files for a language: every

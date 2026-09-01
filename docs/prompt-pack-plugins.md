@@ -45,10 +45,21 @@ A pack plugin is a directory:
 <plugin-dir>/wordpress/
   pack.toml              # name, description, maturity tier
   queries/php.scm        # additive patterns, standard capture vocabulary
+  entry.json             # optional: framework-entry rules (see below)
 <plugin-dir>/laravel/
   pack.toml
   queries/php.scm        # today's queries/php/frameworks/laravel.scm, verbatim
 ```
+
+`entry.json` declares which annotation names / method conventions mean
+"a runner invokes this" for the heatmap's dead-code report — matched by
+attribute (`#[Test]`, via the `@sym.attr` symbol lane), method
+name/prefix, and a leaf-keyed isa gate evaluated through the ancestry
+walk at report time. Bundled documents (PHPUnit, Laravel) ship on
+`LangPack::bundled_entry_markers` the same way bundled `.scm` overlays
+ship; plugin-dir documents extend the set, and a malformed one is
+dropped alone with a diagnostic. The rules are DATA — the evaluator
+(`heatmap.rs::framework_entry_claims`) never compares framework names.
 
 Discovery reuses `plugin_search_dirs()` (`$PERL_LSP_PLUGIN_DIR` + the
 project-local dir) — one search path for both plugin worlds. A plugin

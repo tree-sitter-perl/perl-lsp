@@ -240,9 +240,25 @@ From the framework-tier round on the real app + vendor corpus:
   subclass override (belongs to implementations, not gd).
 - Completion ignores visibility (private members offered externally);
   completion annotates a declared `: int` as `int|float` (bag beats
-  decl in the completion lane only); class hover renders
-  `#[AllowDynamicProperties]` as the signature; multi-line sigs
-  truncate; heatmap dead queue needs a PHPUnit `test*` gate
-  (2105/2195 flagged symbols are runner-invoked test methods).
+  decl in the completion lane only); multi-line sigs truncate.
+- **Attribute hover + the heatmap dead queue — LANDED** (the
+  framework-entry arc): php `#[Attr]` annotations now ride the
+  `@sym.attr` lane onto `Symbol.attributes`, and the hover signature
+  is the line carrying the NAME token (no more
+  `#[AllowDynamicProperties]` rendered as the class signature; cpp's
+  `template<...>`-first-line hovers improved the same way). The dead
+  queue gained two value-declared guards: `framework-entry`
+  (`entry.json` rules — bundled PHPUnit + Laravel documents, plugin
+  dirs extend — matched by attribute names, method name/prefix, and a
+  leaf-keyed isa gate through the ancestry walk) and `runtime-invoked`
+  (`LangPack::runtime_invoked_methods`, php's magic methods — the
+  method-shaped sibling of `entrypoint_symbols`). Class-array
+  callables (`[UserController::class, 'index']` — Laravel routes /
+  event maps) mint REAL method refs (base skeleton — a language
+  convention, not framework vocabulary). Measured on guzzle (the
+  ledgered corpus): dead queue 2,195 → 352 (1,778 framework-entry +
+  40 runtime-invoked), remainder honest (unconstructed ctors, PSR
+  factory API unused in-repo). Monolog: 586 test methods shielded,
+  181 remain.
 - `global $x` refs are 0 everywhere; hover on `$wpdb` answers the
   CLASS by name coincidence.

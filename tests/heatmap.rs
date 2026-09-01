@@ -419,3 +419,45 @@ fn dynamic_dispatch_shields_unreferenced_methods() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Framework-entry guard: declared `entry.json` rules (PHPUnit bundled)
+/// shield runner-invoked symbols from the dead queue — by attribute
+/// (`#[Test]`), by convention (`test*` + isa TestCase, lifecycle methods)
+/// — while a genuinely unreferenced method still flags.
+#[cfg(feature = "php")]
+#[test]
+fn php_framework_entry_symbols_leave_the_dead_queue() {
+    let dir = std::env::temp_dir().join(format!("perl-lsp-heatmap-entry-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("TestCase.php"),
+        "<?php\nclass TestCase {\n    public function expect(): void {}\n}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("UserTest.php"),
+        "<?php\n\
+         class UserTest extends TestCase {\n\
+             protected function setUp(): void {}\n\
+             public function testAdd(): void {}\n\
+             #[Test]\n\
+             public function edgeCases(): void {}\n\
+             public function neverCalledHelper(): int { return 1; }\n\
+         }\n",
+    )
+    .unwrap();
+    let report = run_heatmap(&dir);
+    for name in ["setUp", "testAdd", "edgeCases"] {
+        let row = sym(&report, name);
+        assert_eq!(
+            row["reachable_guard"].as_str(),
+            Some("framework-entry"),
+            "{name}: {row}"
+        );
+        assert_eq!(row["dead_code_candidate"].as_bool(), Some(false), "{name}: {row}");
+    }
+    let helper = sym(&report, "neverCalledHelper");
+    assert_eq!(helper["dead_code_candidate"].as_bool(), Some(true), "{helper}");
+    let _ = std::fs::remove_dir_all(&dir);
+}

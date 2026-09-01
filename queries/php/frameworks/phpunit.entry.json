@@ -1,0 +1,12 @@
+{
+  "language": "php",
+  "entries": [
+    { "attributes": ["Test", "DataProvider", "Before", "After", "BeforeClass",
+                     "AfterClass", "PreCondition", "PostCondition", "TestWith",
+                     "TestDox", "DoesNotPerformAssertions", "Depends"] },
+    { "method_prefix": "test", "when_isa": "TestCase" },
+    { "methods": ["setUp", "tearDown", "setUpBeforeClass", "tearDownAfterClass",
+                  "assertPreConditions", "assertPostConditions"],
+      "when_isa": "TestCase" }
+  ]
+}

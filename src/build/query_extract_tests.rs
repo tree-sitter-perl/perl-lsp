@@ -4448,3 +4448,66 @@ class Stack {
     assert_eq!((crate::build::query_extract::php_pack().annot_type)("array<int, \\App\\User>"),
         Some(InferredType::Sequence(vec![InferredType::ClassName("User".into())])));
 }
+
+#[test]
+fn php_attributes_land_on_symbols() {
+    // `#[Attr]` annotations ride the @sym.attr lane onto Symbol.attributes
+    // — the substrate the framework-entry machinery and hover read.
+    let src = "\
+<?php
+#[AllowDynamicProperties]
+class Foo {
+    #[Test]
+    #[DataProvider('cases')]
+    public function testAdd(): void {}
+}
+#[AsCommand]
+function run_it(): void {}
+";
+    let (fa, _) = php_fa(src);
+    let cls = fa.symbols().iter().find(|s| s.name == "Foo").expect("class");
+    assert!(cls.attributes.iter().any(|a| a == "AllowDynamicProperties"), "{:?}", cls.attributes);
+    let m = fa.symbols().iter().find(|s| s.name == "testAdd").expect("method");
+    assert!(m.attributes.iter().any(|a| a == "Test"), "{:?}", m.attributes);
+    assert!(m.attributes.iter().any(|a| a == "DataProvider"), "{:?}", m.attributes);
+    let f = fa.symbols().iter().find(|s| s.name == "run_it").expect("fn");
+    assert!(f.attributes.iter().any(|a| a == "AsCommand"), "{:?}", f.attributes);
+}
+
+#[test]
+fn php_class_array_callables_are_method_refs() {
+    // `[UserController::class, 'index']` names a dispatchable method — the
+    // Laravel route / event-map convention. The pair mints the same
+    // MethodCall ref a written `UserController::index()` carries, so the
+    // controller action's references include its route registrations (and
+    // it leaves the heatmap dead queue as genuinely referenced).
+    let src = "\
+<?php
+class UserController {
+    public function index(): string { return 'ok'; }
+}
+route_get('/users', [UserController::class, 'index']);
+listen_on('ev', array(UserController::class, 'index'));
+";
+    let (fa, _) = php_fa(src);
+    let resolved = crate::index::resolve::resolve_symbol(
+        &fa,
+        tree_sitter::Point { row: 2, column: 21 },
+        None,
+    );
+    let target = match resolved {
+        Some(crate::index::resolve::ResolvedTarget::Target(t)) => t,
+        other => panic!("index decl must mint a target: {other:?}"),
+    };
+    let locs = crate::index::resolve::refs_to_in_file(
+        &crate::index::file_store::FileStore::new(),
+        None,
+        &target,
+        &crate::index::file_store::FileKey::Path(std::path::PathBuf::from("/cc/t.php")),
+        &fa,
+        crate::index::resolve::RoleMask::VISIBLE,
+    );
+    let sites: Vec<_> = locs.iter().filter(|l| l.span.start.row >= 4).collect();
+    assert_eq!(sites.len(), 2, "both callable-array strings are refs: {locs:?}");
+    assert!(sites.iter().all(|l| l.rewritable), "rename rewrites in-quotes: {sites:?}");
+}
