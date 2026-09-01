@@ -687,7 +687,25 @@ fn php_annot_type(text: &str) -> Option<InferredType> {
                     _ => {}
                 }
             }
-            return php_annot_type(&inner[last_start..]).map(|e| Sequence(vec![e]));
+            let elem = php_annot_type(&inner[last_start..])?;
+            // A NON-int-keyed `array<K, V>` keeps its key axis: the value
+            // rides as a two-argument parametric instance ([K, V] — the
+            // positional convention `ParamOf`/`Element`/`Key` project), so
+            // the pair-form foreach types BOTH bindings. Int-keyed (and
+            // key-less) spellings are sequences — their keys ARE positions.
+            if last_start > 0 {
+                let key_text = inner[..last_start - 1].trim();
+                if key_text != "int" {
+                    let key = php_annot_type(key_text)?;
+                    return Some(Parametric(
+                        crate::model::file_analysis::ParametricType::Instance {
+                            base: "array".to_string(),
+                            args: vec![key, elem],
+                        },
+                    ));
+                }
+            }
+            return Some(Sequence(vec![elem]));
         }
     }
     match t {
@@ -1098,8 +1116,10 @@ fn php_doc_types(text: &str) -> Vec<DocFact> {
             // same join (the first var of that name declared in the def).
             // `@param string $name description`; the typeless `@param $x`
             // form and variadics (`...$args`) carry nothing typeable.
-            let mut it = rest.split_whitespace();
-            if let (Some(ty), Some(name)) = (it.next(), it.next()) {
+            let rest = rest.trim_start();
+            let ty_end = phpdoc_type_token_end(rest);
+            let (ty, tail) = rest.split_at(ty_end);
+            if let Some(name) = tail.split_whitespace().next() {
                 if name.starts_with('$') {
                     if let Some(t) = phpdoc_type(ty) {
                         out.push(DocFact::Param {
@@ -1110,7 +1130,7 @@ fn php_doc_types(text: &str) -> Vec<DocFact> {
                 }
             }
         } else if let Some(rest) = l.strip_prefix("@var ") {
-            if let Some(t) = rest.split_whitespace().next().and_then(phpdoc_type) {
+            if let Some(t) = phpdoc_type(rest) {
                 out.push(DocFact::Var(t));
             }
         } else if let Some(rest) = l.strip_prefix("@method ") {
@@ -1150,8 +1170,30 @@ fn php_doc_types(text: &str) -> Vec<DocFact> {
 /// generics stripped (`Collection<int,User>` → `Collection`), `User[]` is
 /// an array, the `null` arm of a union dropped (`?T` too), a REAL union
 /// (`string|false`) rejected — a two-armed claim is not a type answer.
+/// Where the leading type token of a phpdoc tail ends: the first
+/// whitespace OUTSIDE angle brackets — `array<string, User> $map` keeps
+/// its generic arguments (a plain whitespace split truncated it to
+/// `array<string,`). Callers slice `[..end]` for the type and
+/// `[end..]` for what follows (the `$name` of a @param).
+fn phpdoc_type_token_end(s: &str) -> usize {
+    let mut depth = 0usize;
+    for (i, c) in s.char_indices() {
+        match c {
+            '<' => depth += 1,
+            '>' => depth = depth.saturating_sub(1),
+            c if c.is_whitespace() && depth == 0 => return i,
+            _ => {}
+        }
+    }
+    s.len()
+}
+
 fn phpdoc_type(raw: &str) -> Option<String> {
-    let raw = raw.split_whitespace().next()?.trim_start_matches('?');
+    let raw = raw.trim_start();
+    let raw = raw[..phpdoc_type_token_end(raw)].trim_start_matches('?');
+    if raw.is_empty() {
+        return None;
+    }
     let arms: Vec<&str> = raw
         .split('|')
         .filter(|a| !a.eq_ignore_ascii_case("null") && !a.is_empty())

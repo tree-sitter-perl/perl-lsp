@@ -155,6 +155,16 @@ templates). Market case and build-out plan in `docs/prompt-php-target.md`.
   Measured on guzzle: the dead queue dropped from 2,195 symbols to
   352; on symfony/demo, 67 runner-invoked symbols are shielded with
   labeled reasons — what remains is plausibly actually dead.
+- **Completion respects visibility.** `->` completion no longer
+  offers another class's private/protected members (methods,
+  properties, and promoted constructor params) — they complete only
+  from inside their own class, the same rule C++ access regions
+  already enforced. Perl's lexical subs (`my sub helper`) now
+  complete only inside their declaring block.
+- **foreach keys type too.** `foreach ($m as $k => $v)` with
+  `array<string, User>` docs gives `$k: string` and `$v: User`;
+  list-shaped docs give `$k: int`. (Spaced generics like
+  `array<string, User>` previously lost their arguments entirely.)
 - **foreach loop variables type as the element.**
   `foreach ($this->handlers as $handler)` with
   `@var HandlerInterface[]` (or `list<X>` / `array<K, V>` /

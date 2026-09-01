@@ -534,6 +534,18 @@ impl FileAnalysis {
             if matches!(sym.kind, SymKind::Sub | SymKind::Method)
                 && crate::model::conventions::is_callable_sub_name(&sym.name)
             {
+                // A lexical sub (`my sub helper`) is callable only inside
+                // its declaring block, from its declaration down — offering
+                // it file-wide completes a name that would not compile.
+                if let SymbolDetail::Sub { lexical: true, .. } = &sym.detail {
+                    let enclosing = &self.scope(sym.scope).span;
+                    let visible = (point.row, point.column)
+                        >= (sym.span.start.row, sym.span.start.column)
+                        && (point.row, point.column) <= (enclosing.end.row, enclosing.end.column);
+                    if !visible {
+                        continue;
+                    }
+                }
                 candidates.push(CompletionCandidate {
                     label: sym.name.clone(),
                     kind: sym.kind,

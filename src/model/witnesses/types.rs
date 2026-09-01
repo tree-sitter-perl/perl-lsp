@@ -295,6 +295,12 @@ pub enum ProjectionStep {
     /// per-slot answer exists). Kept at the END for bincode variant-index
     /// stability (bump `EXTRACT_VERSION`).
     Element,
+    /// The KEY axis of an iterated collection — the pair-form foreach's
+    /// first binding (`foreach ($m as $k => $v)`). A `Sequence`'s keys ARE
+    /// its positions (`Numeric`); a two-argument parametric instance
+    /// (`array<string, V>` docs) projects its first argument. Kept at the
+    /// END for bincode variant-index stability (bump `EXTRACT_VERSION`).
+    Key,
 }
 
 /// A sub's return type as a **deferred computation**, not a value:

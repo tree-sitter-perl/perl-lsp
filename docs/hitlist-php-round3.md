@@ -238,8 +238,27 @@ From the framework-tier round on the real app + vendor corpus:
   property-default `self::FORMAT` answer like the method-body form.
 - gd on exactly-typed `(new Collection)->contains` also returns the
   subclass override (belongs to implementations, not gd).
-- Completion ignores visibility (private members offered externally);
-  completion annotates a declared `: int` as `int|float` (bag beats
+- **Completion visibility — LANDED**: php private/protected members
+  (methods, properties, consts, promoted ctor params) stamp the same
+  `non_public` attribute cpp access regions stamp (the vocabulary
+  lives in the query's `#any-of?`, joined by name span), and the
+  existing requesting_class gate does the rest — non-public members
+  complete only from inside their own class's body. Perl's lexical
+  subs (`my sub` / `my method` — the grammar's `lexical` field, read
+  by the builder all along) now complete only inside their declaring
+  block, from the declaration down. Residual: protected-via-
+  inheritance is two-state (a subclass body doesn't see parent
+  protected members), matching cpp's stated posture.
+- **foreach pair-form keys — LANDED**: `foreach ($m as $k => $v)`
+  types BOTH bindings. Sequence-shaped docs (`list<X>`, `X[]`,
+  `array<int,X>`) key by position (`$k: int`); `array<string, X>`
+  docs keep their key axis as a two-argument parametric Instance
+  (the positional convention ParamOf already projects), so `$k`
+  types `string` and `$v` peels `X` — `ProjectionStep::Key` is the
+  uniform-element peel's key twin. The phpdoc tokenizer is now
+  depth-aware, so `array<string, User>` survives its inner space
+  (previously every spaced generic truncated at the comma).
+- Completion annotates a declared `: int` as `int|float` (bag beats
   decl in the completion lane only); multi-line sigs truncate.
 - **Attribute hover + the heatmap dead queue — LANDED** (the
   framework-entry arc): php `#[Attr]` annotations now ride the

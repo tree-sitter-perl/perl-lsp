@@ -2068,6 +2068,29 @@ impl ReducerRegistry {
                                     let mut it = elems.iter();
                                     it.next().filter(|first| it.all(|e| e == *first)).cloned()
                                 }
+                                // A parametric container's TRAILING argument is
+                                // its element by the same positional convention
+                                // `ParamOf` projects (`array<K, V>` → V,
+                                // `vector<T>` → T) — no base-name branch.
+                                crate::model::file_analysis::InferredType::Parametric(
+                                    crate::model::file_analysis::ParametricType::Instance {
+                                        args, ..
+                                    },
+                                ) => args.last().cloned(),
+                                _ => None,
+                            },
+                            ProjectionStep::Key => match &t {
+                                // A sequence's keys ARE its positions.
+                                crate::model::file_analysis::InferredType::Sequence(_) => {
+                                    Some(crate::model::file_analysis::InferredType::Numeric)
+                                }
+                                // A two-argument instance keys by its first
+                                // argument (`array<string, V>` → string).
+                                crate::model::file_analysis::InferredType::Parametric(
+                                    crate::model::file_analysis::ParametricType::Instance {
+                                        args, ..
+                                    },
+                                ) if args.len() == 2 => args.first().cloned(),
                                 _ => None,
                             },
                             ProjectionStep::MethodHop { member, arity } => {

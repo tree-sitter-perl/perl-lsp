@@ -3078,13 +3078,18 @@ function collect($v = null) {}
         fa.sub_return_type_at_arity("collect", None),
         Some(InferredType::ClassName("Collection".into())),
     );
-    // @var on an untyped property — class-wide extent. The sequence
-    // spelling keeps its element (a one-slot Sequence), no longer
-    // collapsing to a bare array.
+    // @var on an untyped property — class-wide extent. A string-keyed
+    // `array<K, V>` doc keeps BOTH axes as a two-argument parametric
+    // instance (the foreach Key/Element peels read them).
     let in_class = tree_sitter::Point { row: 4, column: 0 };
     assert_eq!(
         fa.inferred_type_via_bag("counts", in_class),
-        Some(InferredType::Sequence(vec![InferredType::Numeric]))
+        Some(InferredType::Parametric(
+            crate::model::file_analysis::ParametricType::Instance {
+                base: "array".into(),
+                args: vec![InferredType::String, InferredType::Numeric],
+            }
+        ))
     );
 }
 
@@ -4510,4 +4515,91 @@ listen_on('ev', array(UserController::class, 'index'));
     let sites: Vec<_> = locs.iter().filter(|l| l.span.start.row >= 4).collect();
     assert_eq!(sites.len(), 2, "both callable-array strings are refs: {locs:?}");
     assert!(sites.iter().all(|l| l.rewritable), "rename rewrites in-quotes: {sites:?}");
+}
+
+#[test]
+fn php_visibility_gates_member_completion() {
+    // private/protected members complete only from inside their own
+    // class's body: the `@nonpublic.mark` patterns stamp the same
+    // `non_public` attribute cpp access regions stamp, and the existing
+    // requesting_class gate does the rest. Covers methods, properties,
+    // consts, and promoted ctor params.
+    let src = "\
+<?php
+class Acct {
+    private string $secret;
+    private const SALT = 'x';
+    protected function guard(): bool { return true; }
+    private function inner(): int { return 1; }
+    public function api(): int { return $this->inner(); }
+    public function __construct(private string $key) {}
+}
+";
+    let (fa, _) = php_fa(src);
+    let labels = |requesting: Option<&str>| -> Vec<String> {
+        fa.complete_members_for_class("Acct", None, requesting)
+            .into_iter()
+            .map(|c| c.label)
+            .collect()
+    };
+    let external = labels(None);
+    for hidden in ["secret", "SALT", "guard", "inner", "key"] {
+        assert!(
+            !external.iter().any(|n| n == hidden),
+            "{hidden} must not complete externally: {external:?}"
+        );
+    }
+    assert!(external.iter().any(|n| n == "api"), "public stays: {external:?}");
+    let internal = labels(Some("Acct"));
+    // (consts complete via the qualified `Acct::` lane, not the member
+    // gather — SALT is asserted absent above and not expected here)
+    for own in ["secret", "guard", "inner", "key", "api"] {
+        assert!(
+            internal.iter().any(|n| n == own),
+            "{own} completes from inside the class: {internal:?}"
+        );
+    }
+}
+
+#[test]
+fn php_foreach_pair_form_types_key_and_value() {
+    // `foreach ($m as $k => $v)`: the value peels the collection's
+    // element (as before), and the KEY peels its key axis — Numeric for
+    // sequences (keys ARE positions: list<X>, X[], array<int,X>), and
+    // the declared key type for `array<string, X>` docs (carried as a
+    // two-argument parametric instance).
+    let src = "\
+<?php
+class User {
+    public function name(): string { return 'n'; }
+}
+class Reg {
+    /** @var array<string, User> */
+    protected array $byEmail = [];
+    /** @var list<User> */
+    protected array $ordered = [];
+    public function scan(): void {
+        foreach ($this->byEmail as $email => $user) {
+            $n = $user->name();
+        }
+        foreach ($this->ordered as $i => $u) {
+            $m = $u->name();
+        }
+    }
+}
+";
+    let (fa, _) = php_fa(src);
+    use crate::model::file_analysis::InferredType;
+    let email = fa.inferred_type_via_bag("$email", tree_sitter::Point { row: 11, column: 17 });
+    assert_eq!(email, Some(InferredType::String), "map key types from the doc: {email:?}");
+    let user = fa.inferred_type_via_bag("$user", tree_sitter::Point { row: 11, column: 17 });
+    assert_eq!(
+        user,
+        Some(InferredType::ClassName("User".into())),
+        "map value peels through the Instance carrier: {user:?}"
+    );
+    let i = fa.inferred_type_via_bag("$i", tree_sitter::Point { row: 14, column: 17 });
+    assert_eq!(i, Some(InferredType::Numeric), "sequence keys are positions: {i:?}");
+    let u = fa.inferred_type_via_bag("$u", tree_sitter::Point { row: 14, column: 17 });
+    assert_eq!(u, Some(InferredType::ClassName("User".into())), "value still peels: {u:?}");
 }

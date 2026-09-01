@@ -567,3 +567,33 @@ fn test_code_action_multiple_exporters_not_preferred() {
         }
     }
 }
+
+#[test]
+fn lexical_subs_complete_only_inside_their_block() {
+    // `my sub helper` is callable only inside its declaring block, from
+    // its declaration down — the grammar's `lexical` field marks it, the
+    // builder stamps `SymbolDetail::Sub{lexical}`, and `complete_general`
+    // gates on the declaring scope. File-wide subs stay file-wide.
+    let source = "\
+sub outer {
+    my sub helper { return 42; }
+    return helper();
+}
+sub plain { return 1; }
+";
+    let analysis = parse_analysis(source);
+    let names_at = |row: usize, col: usize| -> Vec<String> {
+        analysis
+            .complete_general(tree_sitter::Point { row, column: col })
+            .into_iter()
+            .map(|c| c.label)
+            .collect()
+    };
+    // Inside outer's block, after the decl: helper offered.
+    let inside = names_at(2, 4);
+    assert!(inside.iter().any(|n| n == "helper"), "in-scope: {inside:?}");
+    // At file level (inside `plain`'s body): helper is NOT offered.
+    let outside = names_at(4, 12);
+    assert!(!outside.iter().any(|n| n == "helper"), "out-of-scope leak: {outside:?}");
+    assert!(outside.iter().any(|n| n == "outer"), "file-wide subs stay: {outside:?}");
+}

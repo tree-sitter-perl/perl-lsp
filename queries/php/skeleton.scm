@@ -72,6 +72,28 @@
   name: (name) @def.class.name
   body: (declaration_list (use_declaration (qualified_name (name) @parent @ref.type) @parent.fq)))
 
+; access modifiers -> the model's non_public attribute (the same gate
+; cpp access regions stamp): a private/protected member completes only
+; from inside its own class's body. Joined to the def by NAME-SPAN
+; post-pass (the ns.inline precedent) so the def patterns stay
+; modifier-blind; the vocabulary lives in the #any-of?, not in engine code.
+(method_declaration
+  (visibility_modifier) @nonpublic.mark
+  name: (name) @nonpublic.target
+  (#any-of? @nonpublic.mark "private" "protected"))
+(property_declaration
+  (visibility_modifier) @nonpublic.mark
+  (property_element name: (variable_name (name) @nonpublic.target))
+  (#any-of? @nonpublic.mark "private" "protected"))
+(const_declaration
+  (visibility_modifier) @nonpublic.mark
+  (const_element (name) @nonpublic.target)
+  (#any-of? @nonpublic.mark "private" "protected"))
+(property_promotion_parameter
+  visibility: (visibility_modifier) @nonpublic.mark
+  name: (variable_name (name) @nonpublic.target)
+  (#any-of? @nonpublic.mark "private" "protected"))
+
 ; enum cases: real enumerators — parent-enum typing + container tagging
 ; come generically from the engine's enumerator lane.
 (enum_case
@@ -207,8 +229,14 @@
   "as"
   .
   (by_ref (variable_name) @def.var.name @def.var @flow.rebind))
+; pair form: the KEY (first child) peels the collection's key axis, the
+; VALUE (last child) its element — same source join, different step.
 (foreach_statement
-  (pair (variable_name) @def.var.name @def.var @flow.rebind))
+  . (_) @seq.source.key
+  (pair . (variable_name) @def.var.name @def.var @flow.rebind))
+(foreach_statement
+  . (_) @seq.source
+  (pair (variable_name) @def.var.name @def.var @flow.rebind .))
 
 ; ---- references ----
 (function_call_expression

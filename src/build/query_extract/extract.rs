@@ -313,9 +313,18 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     // DispatchCall's `dispatcher` label.
     let mut dispatch_via_by_match: HashMap<usize, String> = HashMap::new();
     // `@seq.source` — a foreach's collection (span + text), joined to the
-    // same match's `@def.var` so the bound var carries the ELEMENT peel.
+    // same match's `@def.var` so the bound var carries the ELEMENT peel;
+    // `@seq.source.key` is the pair form's KEY twin (the Key step).
     let mut seq_source_by_match: HashMap<usize, (crate::model::file_analysis::Span, String)> =
         HashMap::new();
+    let mut seq_key_by_match: HashMap<usize, (crate::model::file_analysis::Span, String)> =
+        HashMap::new();
+    // `@nonpublic.target` — def NAME spans whose member carries an access
+    // modifier meaning non-public (the vocabulary lives in the query's
+    // #any-of?). Joined to symbols by name span in a post-pass, stamping
+    // the same `non_public` attribute cpp access regions stamp.
+    let mut nonpublic_name_spans: std::collections::HashSet<(Point, Point)> =
+        std::collections::HashSet::new();
     for e in &events {
         if let Some(prefix) = e.cap.strip_suffix(".name") {
             names_by_match
@@ -338,6 +347,18 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
         }
         if e.cap == "dispatch.via" {
             dispatch_via_by_match.insert(e.match_id, e.text.clone());
+        }
+        if e.cap == "seq.source.key" {
+            seq_key_by_match.insert(
+                e.match_id,
+                (
+                    crate::model::file_analysis::Span { start: e.start, end: e.end },
+                    e.text.clone(),
+                ),
+            );
+        }
+        if e.cap == "nonpublic.target" {
+            nonpublic_name_spans.insert((e.start, e.end));
         }
         if e.cap == "seq.source" {
             seq_source_by_match.insert(
@@ -849,7 +870,15 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                 // answers (the same simple-vs-expression split the chain
                 // hop's receiver makes).
                 if kind == "var" {
-                    if let Some((src_span, src_text)) = seq_source_by_match.get(&e.match_id) {
+                    let seq_join = seq_source_by_match
+                        .get(&e.match_id)
+                        .map(|sv| (sv, crate::model::witnesses::ProjectionStep::Element))
+                        .or_else(|| {
+                            seq_key_by_match
+                                .get(&e.match_id)
+                                .map(|sv| (sv, crate::model::witnesses::ProjectionStep::Key))
+                        });
+                    if let Some(((src_span, src_text), step)) = seq_join {
                         use crate::model::witnesses as wit;
                         let simple_var = src_text.starts_with('$')
                             && src_text[1..].chars().all(|c| c.is_alphanumeric() || c == '_');
@@ -867,10 +896,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                                 scope: cur_scope,
                             },
                             source: wit::WitnessSource::Builder("foreach_element".into()),
-                            payload: wit::WitnessPayload::Projected {
-                                base,
-                                step: wit::ProjectionStep::Element,
-                            },
+                            payload: wit::WitnessPayload::Projected { base, step },
                             // Zero-width at the decl: the binding types the
                             // var for its whole lifetime, so it must not be
                             // skipped as a narrowing fact scoped to the
@@ -1941,7 +1967,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                         matches!(
                             &w.payload,
                             crate::model::witnesses::WitnessPayload::InferredType(
-                                InferredType::Sequence(_)
+                                InferredType::Sequence(_) | InferredType::Parametric(_)
                             )
                         )
                     })
@@ -1976,6 +2002,18 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
             out.symbols.extend(doc_methods);
         }
     }
+    // Access-modifier stamp: the `@nonpublic.target` name spans mark
+    // members whose modifier means non-public — the same `non_public`
+    // attribute cpp access regions stamp, read by the completion gates.
+    if !nonpublic_name_spans.is_empty() {
+        for sym in &mut out.symbols {
+            if nonpublic_name_spans.contains(&(sym.name_start, sym.name_end))
+                && !sym.attributes.iter().any(|a| a == "non_public")
+            {
+                sym.attributes.push("non_public".to_string());
+            }
+        }
+    }
     out.param_sigs = param_sigs;
     Ok(out)
 }
@@ -1997,11 +2035,13 @@ fn doc_admits(
     match annot_text_by_var.get(&(slot.0.to_string(), slot.1)) {
         None => true,
         Some(declared) => {
-            matches!(doc_ty, InferredType::Sequence(_))
-                && matches!(
-                    (pack.annot_type)(declared),
-                    Some(InferredType::HashRef | InferredType::ArrayRef)
-                )
+            matches!(
+                doc_ty,
+                InferredType::Sequence(_) | InferredType::Parametric(_)
+            ) && matches!(
+                (pack.annot_type)(declared),
+                Some(InferredType::HashRef | InferredType::ArrayRef)
+            )
         }
     }
 }
