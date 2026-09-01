@@ -177,6 +177,38 @@ pub fn make_engine() -> Engine {
     engine
 }
 
+/// Read an optional list-shaped manifest hook: a missing fn is empty, a
+/// failed call or a bad element logs and skips.
+///
+/// Every manifest family shares this contract because a broken plugin must
+/// not break the build — and because one transcription per family is how the
+/// families drift apart. `topic_route_dsl` is deliberately not here: it reads
+/// a single map, not an array.
+fn read_manifest_list<T: serde::de::DeserializeOwned>(
+    engine: &Engine,
+    ast: &AST,
+    signatures: &[String],
+    id: &str,
+    fn_name: &str,
+) -> Vec<T> {
+    let mut out = Vec::new();
+    if !signatures.iter().any(|n| n == fn_name) {
+        return out;
+    }
+    match engine.call_fn::<Array>(&mut rhai::Scope::new(), ast, fn_name, ()) {
+        Ok(arr) => {
+            for d in arr {
+                match from_dynamic::<T>(&d) {
+                    Ok(v) => out.push(v),
+                    Err(e) => log::error!("plugin `{}` {}() bad entry: {}", id, fn_name, e),
+                }
+            }
+        }
+        Err(e) => log::error!("plugin `{}` {}() failed: {}", id, fn_name, e),
+    }
+    out
+}
+
 pub struct RhaiPlugin {
     id: String,
     triggers: Vec<Trigger>,
@@ -192,6 +224,7 @@ pub struct RhaiPlugin {
     framework_mode_makers: Vec<FrameworkModeMaker>,
     column_keyed_verbs: Vec<String>,
     fluent_verbs: Vec<String>,
+    meta_methods: Vec<String>,
     topic_route_dsl: Option<crate::build::plugin::TopicRouteDsl>,
     patterns: Vec<crate::build::plugin::PatternSpec>,
     engine: Arc<Engine>,
@@ -233,257 +266,36 @@ impl RhaiPlugin {
             .iter_functions()
             .map(|f| f.name.to_string())
             .collect();
-
-        // `overrides()` is optional. Read once at compile time; missing
-        // function == no overrides. A bad return shape logs and treats
-        // as empty — same fail-safe as the emit hooks (a broken plugin
-        // shouldn't break the build).
-        let mut overrides: Vec<TypeOverride> = Vec::new();
-        if signatures.iter().any(|n| n == "overrides") {
-            match engine.call_fn::<Array>(&mut rhai::Scope::new(), &ast, "overrides", ()) {
-                Ok(arr) => {
-                    for d in arr {
-                        match from_dynamic::<TypeOverride>(&d) {
-                            Ok(o) => overrides.push(o),
-                            Err(e) => log::error!(
-                                "plugin `{}` overrides() bad entry: {}",
-                                id,
-                                e
-                            ),
-                        }
-                    }
-                }
-                Err(e) => log::error!("plugin `{}` overrides() failed: {}", id, e),
-            }
-        }
-
-        // `dispatch_verbs()` — same optional, fail-safe contract as overrides.
-        let mut dispatch_verbs: Vec<DispatchVerb> = Vec::new();
-        if signatures.iter().any(|n| n == "dispatch_verbs") {
-            match engine.call_fn::<Array>(&mut rhai::Scope::new(), &ast, "dispatch_verbs", ()) {
-                Ok(arr) => {
-                    for d in arr {
-                        match from_dynamic::<DispatchVerb>(&d) {
-                            Ok(v) => dispatch_verbs.push(v),
-                            Err(e) => log::error!(
-                                "plugin `{}` dispatch_verbs() bad entry: {}",
-                                id,
-                                e
-                            ),
-                        }
-                    }
-                }
-                Err(e) => log::error!("plugin `{}` dispatch_verbs() failed: {}", id, e),
-            }
-        }
-
-        // `attribute_macros()` — same optional, fail-safe contract as overrides.
-        let mut attribute_macros: Vec<AttributeMacro> = Vec::new();
-        if signatures.iter().any(|n| n == "attribute_macros") {
-            match engine.call_fn::<Array>(&mut rhai::Scope::new(), &ast, "attribute_macros", ()) {
-                Ok(arr) => {
-                    for d in arr {
-                        match from_dynamic::<AttributeMacro>(&d) {
-                            Ok(v) => attribute_macros.push(v),
-                            Err(e) => log::error!(
-                                "plugin `{}` attribute_macros() bad entry: {}",
-                                id,
-                                e
-                            ),
-                        }
-                    }
-                }
-                Err(e) => log::error!("plugin `{}` attribute_macros() failed: {}", id, e),
-            }
-        }
-
-        // `load_verbs()` — same optional, fail-safe contract.
-        let mut load_verbs: Vec<crate::build::plugin::LoadVerb> = Vec::new();
-        if signatures.iter().any(|n| n == "load_verbs") {
-            match engine.call_fn::<Array>(&mut rhai::Scope::new(), &ast, "load_verbs", ()) {
-                Ok(arr) => {
-                    for d in arr {
-                        match from_dynamic::<crate::build::plugin::LoadVerb>(&d) {
-                            Ok(v) => load_verbs.push(v),
-                            Err(e) => log::error!(
-                                "plugin `{}` load_verbs() bad entry: {}",
-                                id,
-                                e
-                            ),
-                        }
-                    }
-                }
-                Err(e) => log::error!("plugin `{}` load_verbs() failed: {}", id, e),
-            }
-        }
-
-        // `param_types()` — role-contract parameter typing.
-        let mut param_types: Vec<ParamType> = Vec::new();
-        if signatures.iter().any(|n| n == "param_types") {
-            match engine.call_fn::<Array>(&mut rhai::Scope::new(), &ast, "param_types", ()) {
-                Ok(arr) => {
-                    for d in arr {
-                        match from_dynamic::<ParamType>(&d) {
-                            Ok(v) => param_types.push(v),
-                            Err(e) => log::error!(
-                                "plugin `{}` param_types() bad entry: {}",
-                                id,
-                                e
-                            ),
-                        }
-                    }
-                }
-                Err(e) => log::error!("plugin `{}` param_types() failed: {}", id, e),
-            }
-        }
-
-        // `type_constraint_names()` — the constraint-constructor dispatch gate.
-        let mut type_constraint_names: Vec<String> = Vec::new();
-        if signatures.iter().any(|n| n == "type_constraint_names") {
-            match engine.call_fn::<Array>(&mut rhai::Scope::new(), &ast, "type_constraint_names", ()) {
-                Ok(arr) => {
-                    for d in arr {
-                        match from_dynamic::<String>(&d) {
-                            Ok(s) => type_constraint_names.push(s),
-                            Err(e) => log::error!(
-                                "plugin `{}` type_constraint_names() bad entry: {}",
-                                id,
-                                e
-                            ),
-                        }
-                    }
-                }
-                Err(e) => log::error!("plugin `{}` type_constraint_names() failed: {}", id, e),
-            }
-        }
-
-        // `app_surface_consumers()` — the declared receiver set for the
-        // app surface; same optional, fail-safe array-of-strings shape.
-        let mut app_surface_consumers: Vec<String> = Vec::new();
-        if signatures.iter().any(|n| n == "app_surface_consumers") {
-            match engine.call_fn::<Array>(&mut rhai::Scope::new(), &ast, "app_surface_consumers", ()) {
-                Ok(arr) => {
-                    for d in arr {
-                        match from_dynamic::<String>(&d) {
-                            Ok(s) => app_surface_consumers.push(s),
-                            Err(e) => log::error!(
-                                "plugin `{}` app_surface_consumers() bad entry: {}",
-                                id,
-                                e
-                            ),
-                        }
-                    }
-                }
-                Err(e) => log::error!("plugin `{}` app_surface_consumers() failed: {}", id, e),
-            }
-        }
-
-        // `role_makers()` — modules whose `use` makes the consuming
-        // package a role; same optional, fail-safe array-of-strings shape.
-        let mut role_makers: Vec<String> = Vec::new();
-        if signatures.iter().any(|n| n == "role_makers") {
-            match engine.call_fn::<Array>(&mut rhai::Scope::new(), &ast, "role_makers", ()) {
-                Ok(arr) => {
-                    for d in arr {
-                        match from_dynamic::<String>(&d) {
-                            Ok(s) => role_makers.push(s),
-                            Err(e) => log::error!(
-                                "plugin `{}` role_makers() bad entry: {}",
-                                id,
-                                e
-                            ),
-                        }
-                    }
-                }
-                Err(e) => log::error!("plugin `{}` role_makers() failed: {}", id, e),
-            }
-        }
-
-        // `framework_mode_makers()` — modules whose `use` grants Moo-family
-        // `has` semantics; same optional, fail-safe contract.
-        let mut framework_mode_makers: Vec<FrameworkModeMaker> = Vec::new();
-        if signatures.iter().any(|n| n == "framework_mode_makers") {
-            match engine.call_fn::<Array>(&mut rhai::Scope::new(), &ast, "framework_mode_makers", ())
-            {
-                Ok(arr) => {
-                    for d in arr {
-                        match from_dynamic::<FrameworkModeMaker>(&d) {
-                            Ok(m) => framework_mode_makers.push(m),
-                            Err(e) => log::error!(
-                                "plugin `{}` framework_mode_makers() bad entry: {}",
-                                id,
-                                e
-                            ),
-                        }
-                    }
-                }
-                Err(e) => log::error!("plugin `{}` framework_mode_makers() failed: {}", id, e),
-            }
-        }
-
-        // `column_keyed_verbs()` — verbs whose first hashref arg is keyed by the
-        // receiver class's columns; same optional, fail-safe array-of-strings.
-        let mut column_keyed_verbs: Vec<String> = Vec::new();
-        if signatures.iter().any(|n| n == "column_keyed_verbs") {
-            match engine.call_fn::<Array>(&mut rhai::Scope::new(), &ast, "column_keyed_verbs", ()) {
-                Ok(arr) => {
-                    for d in arr {
-                        match from_dynamic::<String>(&d) {
-                            Ok(s) => column_keyed_verbs.push(s),
-                            Err(e) => log::error!(
-                                "plugin `{}` column_keyed_verbs() bad entry: {}",
-                                id,
-                                e
-                            ),
-                        }
-                    }
-                }
-                Err(e) => log::error!("plugin `{}` column_keyed_verbs() failed: {}", id, e),
-            }
-        }
-
-        // `fluent_verbs()` — verbs whose call type follows the invocant; same
-        // optional, fail-safe array-of-strings shape.
-        let mut fluent_verbs: Vec<String> = Vec::new();
-        if signatures.iter().any(|n| n == "fluent_verbs") {
-            match engine.call_fn::<Array>(&mut rhai::Scope::new(), &ast, "fluent_verbs", ()) {
-                Ok(arr) => {
-                    for d in arr {
-                        match from_dynamic::<String>(&d) {
-                            Ok(s) => fluent_verbs.push(s),
-                            Err(e) => log::error!(
-                                "plugin `{}` fluent_verbs() bad entry: {}",
-                                id,
-                                e
-                            ),
-                        }
-                    }
-                }
-                Err(e) => log::error!("plugin `{}` fluent_verbs() failed: {}", id, e),
-            }
-        }
-
-        // `patterns()` — query-declared capture manifest; same
-        // optional, fail-safe contract as overrides (a bad entry is
-        // dropped, the rest of the plugin still loads).
-        let mut patterns: Vec<crate::build::plugin::PatternSpec> = Vec::new();
-        if signatures.iter().any(|n| n == "patterns") {
-            match engine.call_fn::<Array>(&mut rhai::Scope::new(), &ast, "patterns", ()) {
-                Ok(arr) => {
-                    for d in arr {
-                        match from_dynamic::<crate::build::plugin::PatternSpec>(&d) {
-                            Ok(p) => patterns.push(p),
-                            Err(e) => log::error!(
-                                "plugin `{}` patterns() bad entry: {}",
-                                id,
-                                e
-                            ),
-                        }
-                    }
-                }
-                Err(e) => log::error!("plugin `{}` patterns() failed: {}", id, e),
-            }
-        }
+        // Every list-shaped manifest hook shares ONE optional, fail-safe
+        // contract — see `read_manifest_list`. Adding a manifest family is a
+        // line here plus a field; the per-family transcription this replaced
+        // is how a family silently acquired a different failure mode.
+        let overrides: Vec<TypeOverride> =
+            read_manifest_list(&engine, &ast, &signatures, &id, "overrides");
+        let dispatch_verbs: Vec<DispatchVerb> =
+            read_manifest_list(&engine, &ast, &signatures, &id, "dispatch_verbs");
+        let attribute_macros: Vec<AttributeMacro> =
+            read_manifest_list(&engine, &ast, &signatures, &id, "attribute_macros");
+        let load_verbs: Vec<crate::build::plugin::LoadVerb> =
+            read_manifest_list(&engine, &ast, &signatures, &id, "load_verbs");
+        let param_types: Vec<ParamType> =
+            read_manifest_list(&engine, &ast, &signatures, &id, "param_types");
+        let type_constraint_names: Vec<String> =
+            read_manifest_list(&engine, &ast, &signatures, &id, "type_constraint_names");
+        let app_surface_consumers: Vec<String> =
+            read_manifest_list(&engine, &ast, &signatures, &id, "app_surface_consumers");
+        let role_makers: Vec<String> =
+            read_manifest_list(&engine, &ast, &signatures, &id, "role_makers");
+        let framework_mode_makers: Vec<FrameworkModeMaker> =
+            read_manifest_list(&engine, &ast, &signatures, &id, "framework_mode_makers");
+        let column_keyed_verbs: Vec<String> =
+            read_manifest_list(&engine, &ast, &signatures, &id, "column_keyed_verbs");
+        let fluent_verbs: Vec<String> =
+            read_manifest_list(&engine, &ast, &signatures, &id, "fluent_verbs");
+        let meta_methods: Vec<String> =
+            read_manifest_list(&engine, &ast, &signatures, &id, "meta_methods");
+        let patterns: Vec<crate::build::plugin::PatternSpec> =
+            read_manifest_list(&engine, &ast, &signatures, &id, "patterns");
 
         // `topic_route_dsl()` — optional manifest map; bad shapes log
         // and disable rather than fail the plugin.
@@ -517,6 +329,7 @@ impl RhaiPlugin {
             framework_mode_makers,
             column_keyed_verbs,
             fluent_verbs,
+            meta_methods,
             topic_route_dsl,
             patterns,
             engine,
@@ -637,6 +450,10 @@ impl FrameworkPlugin for RhaiPlugin {
 
     fn fluent_verbs(&self) -> &[String] {
         &self.fluent_verbs
+    }
+
+    fn meta_methods(&self) -> &[String] {
+        &self.meta_methods
     }
 
     fn topic_route_dsl(&self) -> Option<crate::build::plugin::TopicRouteDsl> {

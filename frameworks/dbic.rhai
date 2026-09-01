@@ -71,6 +71,17 @@ fn column_keyed_verbs() {
      "update", "update_or_create", "create", "new", "count", "single"]
 }
 
+// Methods every DBIC class answers by inheriting `DBIx::Class::Core` and
+// friends. Component loading grants them at runtime, so no static walk sees
+// a declaration — the unresolved-method diagnostic must stay silent on them.
+// Core keeps only the true UNIVERSAL:: surface; this list is DBIC's, so it
+// lives here.
+fn meta_methods() {
+    ["add_columns", "add_column", "set_primary_key", "table",
+     "resultset_class", "has_many", "has_one", "belongs_to",
+     "might_have", "many_to_many", "load_components", "load_own_components"]
+}
+
 // Fluent verbs — the call returns the invocant's type UNCHANGED, so they only
 // apply to an actual resultset (`$rs->search` → a same-row resultset). DBIC has
 // no `Class->search`: search/find live on the resultset, which only comes from

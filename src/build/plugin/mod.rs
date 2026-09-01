@@ -1107,6 +1107,16 @@ pub trait FrameworkPlugin: Send + Sync {
         &[]
     }
 
+    /// Methods a framework grants every class of its family — DBIC's
+    /// `DBIx::Class::Core` surface, Moose's `meta`/`does`. They resolve
+    /// through runtime machinery no static walk sees, so the
+    /// unresolved-method diagnostic must stay silent on them. Core owns only
+    /// the true `UNIVERSAL::` surface; a per-framework name list in a
+    /// consumer is the rule-#10 shape this replaces. Default empty.
+    fn meta_methods(&self) -> &[String] {
+        &[]
+    }
+
     /// Modules whose `use` turns the consuming package into a ROLE
     /// (the plugin-declared extension of core's base set: Moo::Role /
     /// Moose::Role / Mouse::Role / Role::Tiny). For role engines that
@@ -1570,6 +1580,12 @@ impl PluginRegistry {
         self.plugins
             .iter()
             .flat_map(|p| p.app_surface_consumers().iter().map(|s| s.as_str()))
+    }
+
+    pub fn meta_methods<'a>(&'a self) -> impl Iterator<Item = &'a str> + 'a {
+        self.plugins
+            .iter()
+            .flat_map(|p| p.meta_methods().iter().map(|s| s.as_str()))
     }
 
     /// Union of role-maker modules across the registry — the open

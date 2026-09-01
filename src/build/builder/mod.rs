@@ -443,6 +443,9 @@ struct Builder<'a> {
     /// (`InstanceOf`, …), flattened once. A call to one of these is typed as
     /// `TypeConstraintOf` via the plugin's fold rather than its callee return.
     type_constraint_names: std::collections::HashSet<String>,
+    /// Plugin `meta_methods()` manifest union, flattened once at build.
+    meta_methods: Vec<String>,
+
     /// Plugin `app_surface_consumers()` manifest union, flattened once.
     /// Threaded into `BagContext` so the build-time `PackageSymbol`
     /// inheritance walk injects the synthetic app-surface parent the same

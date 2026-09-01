@@ -46,6 +46,14 @@ pub struct PluginFacts {
     /// re-reading the registry.
     #[serde(default)]
     pub app_surface_consumers: Vec<String>,
+
+    /// Manifest-declared framework meta-methods
+    /// (`FrameworkPlugin::meta_methods`), baked from the registry at build.
+    /// The unresolved-method diagnostic consults this union so core keeps
+    /// only the true `UNIVERSAL::` surface — a per-framework name list in a
+    /// consumer is the rule-#10 shape this exists to prevent.
+    #[serde(default)]
+    pub meta_methods: Vec<String>,
 }
 
 impl PluginFacts {
@@ -55,6 +63,7 @@ impl PluginFacts {
         h.cpp_extras += vcap(&self.loads) + vcap(&self.gated_emissions);
         h.misc += vcap(&self.namespaces)
             + vcap(&self.diagnostics)
-            + vcap(&self.app_surface_consumers);
+            + vcap(&self.app_surface_consumers)
+            + vcap(&self.meta_methods);
     }
 }

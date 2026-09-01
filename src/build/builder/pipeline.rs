@@ -329,6 +329,7 @@ fn build_once(
         load_manifest: std::collections::HashMap::new(),
         type_constraint_names: std::collections::HashSet::new(),
         app_surface_consumers: Vec::new(),
+        meta_methods: Vec::new(),
         param_type_manifest: std::collections::HashMap::new(),
         param_type_wildcards: Vec::new(),
         plugin_loads: Vec::new(),
@@ -389,6 +390,7 @@ fn build_once(
         .app_surface_consumers()
         .map(|s| s.to_string())
         .collect();
+    b.meta_methods = b.plugins.meta_methods().map(|s| s.to_string()).collect();
     b.role_maker_modules
         .extend(b.plugins.role_makers().map(|s| s.to_string()));
     b.framework_mode_modules = b
@@ -652,6 +654,7 @@ fn build_once(
             diagnostics: b.plugin_diagnostics,
             gated_emissions: b.gated_emissions,
             app_surface_consumers: b.app_surface_consumers,
+            meta_methods: b.meta_methods,
         },
         // The pack lane is empty for Perl: no macros, no include graph,
         // no template params, no `std::move`.
