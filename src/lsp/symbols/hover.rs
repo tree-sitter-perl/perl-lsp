@@ -44,24 +44,55 @@ pub fn pack_hover_markdown(
                         .and_then(|t| analysis.member_value_type(t, field, Some(midx), None))?;
                     (raw.as_ref() != Some(&sub)).then_some(sub)
                 };
-                if let Some(crate::model::file_analysis::MethodResolution::Local { sym_id, .. }) =
-                    analysis.resolve_method_in_ancestors(&cn, field, Some(midx))
-                {
-                    let sym = analysis.symbol(sym_id);
-                    if matches!(sym.kind, FaSymKind::Method | FaSymKind::Sub) {
-                        let mut text = render_symbol_hover(
-                            sym, source, language, analysis, sym.span.start, Some(midx),
-                        );
-                        if let Some(rt) = substituted(
-                            analysis.find_method_return_type(&cn, field, Some(midx), None),
-                        ) {
-                            text.push_str(&format!(
-                                "\n\n*returns: {}*",
-                                analysis.render_type(&rt)
-                            ));
-                        }
-                        return Some(text);
+                use crate::model::file_analysis::MethodResolution;
+                let returns_line = |text: &mut String| {
+                    if let Some(rt) = substituted(
+                        analysis.find_method_return_type(&cn, field, Some(midx), None),
+                    ) {
+                        text.push_str(&format!("\n\n*returns: {}*", analysis.render_type(&rt)));
                     }
+                };
+                match analysis.resolve_method_in_ancestors(&cn, field, Some(midx)) {
+                    Some(MethodResolution::Local { sym_id, .. }) => {
+                        let sym = analysis.symbol(sym_id);
+                        if matches!(sym.kind, FaSymKind::Method | FaSymKind::Sub) {
+                            let mut text = render_symbol_hover(
+                                sym, source, language, analysis, sym.span.start, Some(midx),
+                            );
+                            returns_line(&mut text);
+                            return Some(text);
+                        }
+                    }
+                    // A cross-file method renders exactly like a local one —
+                    // its signature line read from the DEFINING file (a cached
+                    // analysis carries spans, not source), labeled by kind. The
+                    // kind-agnostic `member: type` fallback below is for data
+                    // members; a method routed there lost its signature and
+                    // read as a property.
+                    Some(MethodResolution::CrossFile { class, def_module }) => {
+                        let module = def_module.as_deref().unwrap_or(class.as_str());
+                        let cached = midx
+                            .candidate_defining_sub_in_package(module, &class, field)
+                            .or_else(|| midx.get_cached(module));
+                        if let Some(cached) = cached {
+                            let whole = midx.whole_present(&cached);
+                            let sym = whole.symbols().iter().find(|s| {
+                                matches!(s.kind, FaSymKind::Method | FaSymKind::Sub)
+                                    && s.name == field
+                                    && s.package.as_deref() == Some(class.as_str())
+                            });
+                            if let (Some(sym), Ok(text)) =
+                                (sym, std::fs::read_to_string(&cached.path))
+                            {
+                                let mut out = render_symbol_hover(
+                                    sym, &text, language, &whole, sym.span.start, Some(midx),
+                                );
+                                returns_line(&mut out);
+                                return Some(out);
+                            }
+                        }
+                    }
+                    None => {}
                 }
                 // A param-typed member substitutes the same way (`T v_;` on
                 // `Box<int>` reads `v_: int`; a cross-file method's return

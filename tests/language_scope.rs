@@ -447,3 +447,37 @@ fn php_doc_method_decl_token_collects_typed_call_sites() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Hover on a method resolved in ANOTHER file renders like a local one —
+/// the defining file's signature line, labeled `*method*` — never the
+/// kind-agnostic `name: type` member fallback (which dropped the
+/// signature and read a vendor method as a property).
+#[cfg(feature = "php")]
+#[test]
+fn php_cross_file_method_hover_renders_the_signature() {
+    let dir = std::env::temp_dir().join(format!("perl-lsp-h12-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("Model.php"),
+        "<?php\nnamespace App;\nclass Model\n{\n    public function save(array $options = []): bool\n    {\n        return true;\n    }\n}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("Repo.php"),
+        "<?php\nnamespace App;\nfunction store(Model $m): void\n{\n    $m->save();\n}\n",
+    )
+    .unwrap();
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_perl-lsp"))
+        .args(["--hover", dir.to_str().unwrap(), "Repo.php", "4", "8"])
+        .env("XDG_CACHE_HOME", dir.join(".cache"))
+        .output()
+        .expect("run hover");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("function save(array $options = [])") && stdout.contains("*method*"),
+        "cross-file method hover shows the signature: {stdout}"
+    );
+    assert!(!stdout.contains("*member*"), "never the member fallback: {stdout}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
