@@ -74,6 +74,14 @@ pub struct TargetRef {
     /// token spells the class. Set in the identity lane from
     /// `PackFacts::constructor_names`; `None` everywhere else.
     pub ctor_of: Option<String>,
+    /// The namespace the ORIGIN's scope pins for this target's class leaf
+    /// (`CrossFileLookup::pinned_namespace` — a use-map axis's `use` row,
+    /// own declaration, or own namespace). Class-keyed targets are leaf-keyed everywhere else (the
+    /// override family, the dispatch chain, the by-name index), and three
+    /// same-leaf `Factory`s share every one of those; the pin is what tells
+    /// a scanned file's `Factory` from the target's. `None` = no claim
+    /// (Perl, cpp, an un-imported leaf), and the gate stands down.
+    pub class_ns: Option<String>,
     /// Pack-language visibility identity: the canonical paths of the files
     /// that define this target AS THE ORIGIN FILE SEES IT (the origin itself,
     /// candidates in its include closure, and candidates whose closure reaches
@@ -112,6 +120,7 @@ impl TargetRef {
             .iter()
             .any(|c| c == &name)
             .then(|| class.clone());
+        let class_ns = module_index.and_then(|idx| idx.pinned_namespace(&class));
         TargetRef {
             name,
             kind: TargetKind::Method { class },
@@ -120,6 +129,7 @@ impl TargetRef {
             def_paths: Vec::new(),
             bare_constant: false,
             ctor_of,
+            class_ns,
         }
     }
 
@@ -139,6 +149,7 @@ impl TargetRef {
         module_index: Option<&dyn CrossFileLookup>,
     ) -> Self {
         let method_classes = origin.owned_accessor_family(&class, module_index);
+        let class_ns = module_index.and_then(|idx| idx.pinned_namespace(&class));
         TargetRef {
             name,
             kind: TargetKind::Method { class },
@@ -147,6 +158,7 @@ impl TargetRef {
             def_paths: Vec::new(),
             bare_constant: false,
             ctor_of: None,
+            class_ns,
         }
     }
 
@@ -164,6 +176,7 @@ impl TargetRef {
             def_paths: Vec::new(),
             bare_constant: false,
             ctor_of: None,
+            class_ns: None,
         }
     }
 
@@ -228,6 +241,9 @@ impl TargetRef {
                     .as_ref()
                     .filter(|_| origin.pack.constructor_names.iter().any(|c| c == &name))
                     .cloned();
+                let class_ns = package
+                    .as_deref()
+                    .and_then(|c| module_index.and_then(|idx| idx.pinned_namespace(c)));
                 TargetRef {
                     name,
                     kind: TargetKind::Sub { package },
@@ -236,12 +252,21 @@ impl TargetRef {
                     def_paths: Vec::new(),
                     bare_constant: false,
                     ctor_of,
+                    class_ns,
                 }
             }
             RenameKind::Method { name, class } => {
                 TargetRef::method(name, class, origin, module_index, scope)
             }
-            RenameKind::Package(name) => TargetRef::new(name, TargetKind::Package),
+            RenameKind::Package(name) => {
+                // A class-name cursor is leaf-keyed like a member's class:
+                // the origin's use-map pin tells its `Collection` from the
+                // two other files' `Collection`s in the references walk.
+                let class_ns = module_index.and_then(|idx| idx.pinned_namespace(&name));
+                let mut t = TargetRef::new(name, TargetKind::Package);
+                t.class_ns = class_ns;
+                t
+            }
             RenameKind::Handler { owner, name } => {
                 TargetRef::new(name.clone(), TargetKind::Handler { owner, name })
             }

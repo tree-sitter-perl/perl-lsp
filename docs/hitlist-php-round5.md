@@ -46,23 +46,40 @@ segments), heatmap counts on guzzle/demo byte-identical to round 4.
   token-wise type-label translation (`list<string>`).
 - E1-adjacent: `--references` on a ctor decl now includes cross-file `new`
   sites (pinned).
+- R5-1 same-leaf classes (three `Collection`s, three `Request`s, two
+  `Factory`s): php visibility was `VisibilityAxis::Flat` (a placeholder),
+  so every leaf-keyed lookup saw every same-leaf class and rename fanned
+  across unrelated ones. Now `VisibilityAxis::UseMap`: the origin's own
+  `use` rows + class decls + own namespace pin each leaf; a pinned leaf's
+  candidates are the declarations under that namespace only (an
+  un-indexed pinned class answers EMPTY, never a stranger), an unpinned
+  leaf ranks the own namespace first. The pin rides `TargetRef::class_ns`
+  and every scanned php file is matched under ITS OWN axis, so the
+  references/rename walk drops files whose same leaf means another class
+  (`Process\Factory` out of `Http\Client\Factory::$recorded`'s rename;
+  a no-`use` file in namespace `A` never joins `B\Collection`'s
+  references; the class NAME's own references walk is gated the same
+  way). The own-namespace default claims only leaves the file SPELLS as
+  class tokens (type positions now mint a class ref — `Collection $c`
+  joins the class's references and rename — plus parent clauses, `new X`,
+  `X::m()` receivers): a file reaching a class only through another
+  class's dispatch makes no claim about it. A leaf with conflicting
+  evidence (declared here AND imported: `use Support\Collection as
+  BaseCollection; class Collection extends BaseCollection`) pins to
+  nothing. Known lies, all "no claim" (never a wrong pin): `use X as
+  Alias` (the alias spelling has no pin — the raw import row carries
+  only the FQ name), inline FQ spellings (`new \B\Collection` in a file
+  that pins `Collection` elsewhere), files declaring several namespaces
+  (no own-namespace default), a function or method named like a class
+  leaf counting as a spelling.
 
 ## OPEN — next slices
 
-### R5-1 (CRITICAL) — same-leaf classes: rename/references fan across
-unrelated classes; gd picks the wrong class for `new`/type-hint shapes
-F: rename of `Http\Client\Factory::$recorded` also rewrote
-`Process\Factory::$recorded` (9 edits in an unrelated class); H3's use-map
-gate covered only `Class::static()`; `new Collection(...)`, `?Request $r`
-and `$request->getUser()` still land on the wrong same-leaf class,
-differently per shape. Root cause is one: php visibility is
-`VisibilityAxis::Flat` (a placeholder) — the origin's `use` map is not a
-visibility rule, so every leaf-keyed lookup sees every same-leaf class.
-Fix shape: a use-map visibility axis (`for_origin` for name-keyed packs →
-filter/rank `visible_def_candidates(leaf)` by the origin's resolved
-namespace for that leaf) + the same namespace agreement in the references
-matcher's MethodCall/member admission. `docs/open-forks.md` (GraphView
-leaf identity) is the same disease one layer down.
+### R5-8 (MINOR) — class-name references miss `new X(...)` sites
+The ctor call's token is a FunctionCall ref carrying the class name (it
+serves `__construct`'s references via `ctor_of`), never a PackageRef, so
+`--references` on `class X` lists hints, parents and `use` rows but not
+the construction sites. One admission arm in the Package matcher.
 
 ### R5-2 (CRITICAL) — property and method sharing a name on one class
 F: `Factory::$recorded` (property) + `Factory::recorded()` (method):

@@ -863,6 +863,13 @@ pub trait CrossFileLookup {
     fn flat_scope(&self) -> bool {
         false
     }
+    /// The namespace THIS scope's origin means by the unqualified class
+    /// `leaf` — its `use` row, its own declaration, or (a name-keyed pack's
+    /// rule) its own namespace. `None` = the scope makes no claim, and every
+    /// same-leaf gate built on it stands down. Only a use-map axis answers.
+    fn pinned_namespace(&self, _leaf: &str) -> Option<String> {
+        None
+    }
     fn for_each_cached(&self, f: &mut dyn FnMut(&str, &std::sync::Arc<CachedModule>));
     /// Visit every distinct cached FILE exactly once. `for_each_cached` is
     /// keyed by NAME with one winner per key, so a pack file that loses every
@@ -996,9 +1003,19 @@ pub enum VisibilityAxis {
     /// Distinct from `Transparent` ("no rule known yet"): a Flat scope
     /// deliberately mints NO `def_paths` gate and admits the full
     /// candidate table where a closure scope degrades to agreement
-    /// folds. Placeholder until the language's real search path
-    /// (composer PSR-4) lands as a `SearchPath` flavor.
+    /// folds. The scope-less base every name-keyed axis shares; an origin
+    /// that carries pins gets `UseMap` instead.
     Flat,
+    /// Flat linkage narrowed by the asker's OWN use-map: a name-keyed pack
+    /// whose file says what each leaf means (`use A\B\Collection;`, its own
+    /// `class Collection` under `namespace A\B`). A pinned leaf's candidates
+    /// are exactly the declarations under that namespace — a same-leaf
+    /// class in a namespace the file never named is NOT visible, however
+    /// common it is (three `Request`s, three `Collection`s in one Laravel
+    /// tree). An unpinned leaf admits the full table, the file's own
+    /// namespace ranked first. Scope-less like `Flat` for every closure
+    /// consumer (no `def_paths` gate, `flat_scope` set).
+    UseMap(std::sync::Arc<UseMapPins>),
     /// Flat linkage (C): a candidate is visible when the asker's `#include`
     /// closure reaches it, or when it includes the asker back.
     IncludeClosure,
@@ -1009,6 +1026,39 @@ pub enum VisibilityAxis {
     /// Empty ⇒ behaves as `Transparent`: an origin whose roots are unknown
     /// must not have its answers narrowed to nothing.
     SearchPath(std::sync::Arc<Vec<std::path::PathBuf>>),
+}
+
+/// A name-keyed origin's leaf→namespace table (`FileAnalysis::
+/// leaf_namespace_pins`): what each unqualified class spelling in that
+/// file means, and the file's own namespace as the default for a leaf it
+/// neither declares nor imports.
+#[derive(Debug, Default)]
+pub struct UseMapPins {
+    /// `leaf → Some(namespace)`; `None` = conflicting evidence, no claim.
+    pub pins: std::collections::HashMap<String, Option<String>>,
+    pub own_namespace: Option<String>,
+    /// The leaves this file writes as class tokens.
+    pub spelled: std::collections::HashSet<String>,
+}
+
+impl UseMapPins {
+    /// The namespace `leaf` means for this origin: its pin, else — for a
+    /// leaf the file itself spells — its own namespace (PHP resolves an
+    /// unqualified class name in the current namespace; there is no global
+    /// fallback for classes). A leaf the file never writes gets no claim:
+    /// its refs reach that class through some other class's dispatch, and
+    /// the namespace the file lives in says nothing about it.
+    fn namespace_of(&self, leaf: &str) -> Option<&str> {
+        match self.pins.get(leaf) {
+            Some(p) => p.as_deref(),
+            None if self.spelled.contains(leaf) => self.own_namespace.as_deref(),
+            None => None,
+        }
+    }
+    /// A leaf the file explicitly named (a `use` row or its own class).
+    fn pinned(&self, leaf: &str) -> bool {
+        matches!(self.pins.get(leaf), Some(Some(_)))
+    }
 }
 
 /// How an origin's language scopes cross-file visibility — the routing
@@ -1024,8 +1074,8 @@ pub enum PackVisibility {
     IncludePaths,
     /// Name-keyed pack (PHP/Python/R/CMake): imports name modules, not
     /// paths — there is no closure to scope by, and the host's @INC
-    /// roots would rank every candidate invisible. Transparent until the
-    /// language grows a real search path (composer PSR-4, PYTHONPATH).
+    /// roots would rank every candidate invisible. Visibility is the
+    /// origin's own use-map (`UseMap`), `Flat` when it carries none.
     NameKeyed,
 }
 
@@ -1045,7 +1095,13 @@ impl VisibilityAxis {
     ) -> Self {
         match visibility {
             PackVisibility::IncludePaths => return VisibilityAxis::IncludeClosure,
-            PackVisibility::NameKeyed => return VisibilityAxis::Flat,
+            PackVisibility::NameKeyed => {
+                let pins = origin.leaf_namespace_pins();
+                if pins.pins.is_empty() && pins.own_namespace.is_none() {
+                    return VisibilityAxis::Flat;
+                }
+                return VisibilityAxis::UseMap(std::sync::Arc::new(pins));
+            }
             PackVisibility::Host => {}
         }
         let inc = index.inc_roots();
@@ -1112,6 +1168,7 @@ impl VisibilityAxis {
         match self {
             VisibilityAxis::Transparent
             | VisibilityAxis::Flat
+            | VisibilityAxis::UseMap(_)
             | VisibilityAxis::IncludeClosure => Some(0),
             VisibilityAxis::SearchPath(roots) if roots.is_empty() => Some(0),
             VisibilityAxis::SearchPath(roots) => {
@@ -1127,6 +1184,15 @@ impl VisibilityAxis {
                     .map(|(i, _)| i)
             }
         }
+    }
+}
+
+impl VisibilityAxis {
+    /// Scope-less BY RULE: a name-keyed pack's axis (with or without
+    /// pins) mints no closure gate and admits the full candidate table
+    /// wherever a closure scope would degrade to agreement folds.
+    fn name_keyed(&self) -> bool {
+        matches!(self, VisibilityAxis::Flat | VisibilityAxis::UseMap(_))
     }
 }
 
@@ -1163,7 +1229,7 @@ impl<'a> CrossFileLookup for ScopedLookup<'a> {
         // whichever provider this file's own @INC reaches first. Falling
         // back to the global slot keeps a name with no ranked candidate
         // answering exactly as before.
-        if matches!(self.axis, VisibilityAxis::SearchPath(_)) {
+        if matches!(self.axis, VisibilityAxis::SearchPath(_) | VisibilityAxis::UseMap(_)) {
             if let Some(best) = self.visible_def_candidates(module_name).into_iter().next() {
                 return Some(best);
             }
@@ -1193,6 +1259,38 @@ impl<'a> CrossFileLookup for ScopedLookup<'a> {
         match &self.axis {
             VisibilityAxis::Transparent | VisibilityAxis::Flat => {
                 self.inner.def_candidates(name)
+            }
+            VisibilityAxis::UseMap(pins) => {
+                let cands = self.inner.def_candidates(name);
+                // One candidate has nothing to disambiguate; the table read
+                // below rehydrates symbols, so only a genuinely ambiguous
+                // leaf pays it.
+                if cands.len() < 2 {
+                    return cands;
+                }
+                let Some(want) = pins.namespace_of(name) else {
+                    return cands;
+                };
+                // A declaration under the pinned namespace is the class this
+                // file means; one under another namespace is a stranger
+                // sharing the leaf. A pinned leaf (the file NAMED it) keeps
+                // only agreeing declarations — an empty answer is the honest
+                // one when the named class isn't indexed. The own-namespace
+                // default is a RANK, not a filter: the file made no claim, so
+                // the table stays whole with its own namespace first.
+                let pinned = pins.pinned(name);
+                let mut agree: Vec<std::sync::Arc<CachedModule>> = Vec::new();
+                let mut rest: Vec<std::sync::Arc<CachedModule>> = Vec::new();
+                for c in cands {
+                    let declared = self.inner.symbols_present(&c).declared_class_namespace(name);
+                    match declared {
+                        Some(ns) if ns == want => agree.push(c),
+                        Some(_) if pinned => {}
+                        _ => rest.push(c),
+                    }
+                }
+                agree.extend(rest);
+                agree
             }
             VisibilityAxis::IncludeClosure => {
                 // Flat linkage: keep candidates CONNECTED to the asker —
@@ -1360,13 +1458,19 @@ impl<'a> CrossFileLookup for ScopedLookup<'a> {
         // same-file-only answers, measured on WordPress/monolog.
         // (Transparent still answers: the host's "no rule known yet" case
         // predates the axis and its consumers' closure tests no-op there.)
-        if matches!(self.axis, VisibilityAxis::Flat) {
+        if self.axis.name_keyed() {
             return None;
         }
         self.self_path.as_deref().map(|p| (p, &self.visible))
     }
     fn flat_scope(&self) -> bool {
-        matches!(self.axis, VisibilityAxis::Flat)
+        self.axis.name_keyed()
+    }
+    fn pinned_namespace(&self, leaf: &str) -> Option<String> {
+        match &self.axis {
+            VisibilityAxis::UseMap(pins) => pins.namespace_of(leaf).map(str::to_string),
+            _ => None,
+        }
     }
     fn for_each_cached(&self, f: &mut dyn FnMut(&str, &std::sync::Arc<CachedModule>)) {
         self.inner.for_each_cached(f)

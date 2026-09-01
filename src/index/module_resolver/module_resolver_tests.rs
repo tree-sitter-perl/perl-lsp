@@ -699,4 +699,32 @@ fn flat_axis_is_scopeless_by_rule_transparent_is_not() {
         ScopedLookup::new(&idx, &empty, Some(self_path.as_path()), VisibilityAxis::IncludeClosure);
     assert!(closure.visibility_scope().is_some());
     assert!(!closure.flat_scope());
+
+    // A use-map axis is Flat's scope-less contract PLUS the pins: the
+    // imported leaf answers its `use` row, an unpinned leaf the origin's
+    // own namespace, and every other axis makes no claim at all.
+    let pins = crate::model::file_analysis::UseMapPins {
+        pins: [
+            ("Collection".to_string(), Some("B".to_string())),
+            ("Factory".to_string(), None),
+        ]
+        .into_iter()
+        .collect(),
+        own_namespace: Some("App".to_string()),
+        spelled: ["Request".to_string()].into_iter().collect(),
+    };
+    let usemap = ScopedLookup::new(
+        &idx,
+        &empty,
+        Some(self_path.as_path()),
+        VisibilityAxis::UseMap(std::sync::Arc::new(pins)),
+    );
+    assert!(usemap.visibility_scope().is_none(), "UseMap mints no def_paths gate");
+    assert!(usemap.flat_scope());
+    assert_eq!(usemap.pinned_namespace("Collection").as_deref(), Some("B"));
+    assert_eq!(usemap.pinned_namespace("Request").as_deref(), Some("App"), "spelled leaf: own namespace");
+    assert!(usemap.pinned_namespace("Factory").is_none(), "conflicting evidence: no claim");
+    assert!(usemap.pinned_namespace("Helper").is_none(), "never spelled: no claim");
+    assert!(flat.pinned_namespace("Collection").is_none());
+    assert!(closure.pinned_namespace("Collection").is_none());
 }

@@ -891,16 +891,31 @@ pub(super) fn collect_from_analysis(
     // file's `o->op_type` types against a globally-arbitrary same-named
     // candidate and the site silently drops out. Transparent for Perl
     // (empty closure = the plain index).
+    // A name-keyed pack file (php) is scoped the same way, by its OWN
+    // use-map: `$c->pick()` in a file that `use`s `B\Collection` types
+    // against B's class, never the same-leaf stranger the plain index would
+    // hand back first. `for_origin` owns the derivation for both shapes.
     let scoped_storage: Option<crate::model::file_analysis::ScopedLookup>;
     let module_index: Option<&dyn CrossFileLookup> = match module_index {
-        Some(idx) if !analysis.pack.include_closure.is_empty() => {
+        Some(idx)
+            if crate::build::language_driver::LanguageRegistry::is_pack_language(
+                &analysis.language,
+            ) =>
+        {
             let path = key_for_sort(key);
-            // Guarded by a non-empty include closure — a pack-only shape.
+            let axis = crate::model::file_analysis::VisibilityAxis::for_origin(
+                analysis,
+                Some(path.as_path()),
+                idx,
+                crate::build::language_driver::LanguageRegistry::pack_visibility(
+                    &analysis.language,
+                ),
+            );
             scoped_storage = Some(crate::model::file_analysis::ScopedLookup::new(
                 idx,
                 &analysis.pack.include_closure,
                 Some(path.as_path()),
-                crate::model::file_analysis::VisibilityAxis::IncludeClosure,
+                axis,
             ));
             // SAFETY: scoped_storage was just set to Some(..) on the line above,
             // in this same match arm — a lifetime-extension idiom, not a fallible read.
@@ -908,6 +923,29 @@ pub(super) fn collect_from_analysis(
         }
         other => other,
     };
+
+    // The same-leaf gate: a class-keyed target whose origin pinned the
+    // class to a namespace is not referenced by a file whose SAME leaf
+    // means a class in another namespace — that file's `Factory` calls,
+    // decls and `new` sites belong to the stranger. Both claims come from
+    // the files' own scopes (`pinned_namespace`), so only a use-map axis
+    // ever gates: a closure-carrying (cpp) file's partial namespace
+    // attribution stays `pkg_agrees`'s business, and a scope that makes
+    // no claim keeps every ref matched on the receiver chain as before.
+    if let Some(want) = target.class_ns.as_deref() {
+        let leaf = match &target.kind {
+            TargetKind::Method { class } => Some(class.as_str()),
+            TargetKind::Sub { package } => package.as_deref(),
+            TargetKind::Package => Some(target.name.as_str()),
+            _ => None,
+        };
+        if let Some(leaf) = leaf {
+            let claim = module_index.and_then(|idx| idx.pinned_namespace(leaf));
+            if claim.is_some_and(|ns| ns != want) {
+                return;
+            }
+        }
+    }
 
     // Package globals match by package + (qualified) name, not the callable
     // scope machinery below — and their spans need sigil handling — so collect

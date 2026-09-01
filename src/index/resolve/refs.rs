@@ -730,21 +730,6 @@ fn sorted_deduped(mut out: Vec<RefLocation>) -> Vec<RefLocation> {
 /// A descendant role's own re-`requires` marker is a contract
 /// re-declaration, not an implementation — `role_requires` is the
 /// recorded fact that identifies (and excludes) it.
-/// The target class's namespace AS SEEN FROM the origin — the FQ anchor the
-/// family walks validate against. The origin either declares the class
-/// itself (its symbol's `package` IS the namespace; `None` package = the
-/// global one, spelled `""`) or imported it (the pack's import texts carry
-/// the full qualified spelling). `None` = the origin makes no claim, and
-/// the FQ filter stands down entirely.
-/// The namespace a file's own Class-symbol declaration of `leaf` carries
-/// (`None` package = the global namespace, spelled `""`).
-pub(super) fn class_ns_of(a: &FileAnalysis, leaf: &str) -> Option<String> {
-    a.symbols()
-        .iter()
-        .find(|s| matches!(s.kind, SymKind::Class) && s.name == leaf)
-        .map(|s| s.package.clone().unwrap_or_default())
-}
-
 /// Does this file declare `leaf` in a namespace OTHER than `contract_ns`,
 /// with a recorded inheritance edge back onto `leaf` IN `contract_ns`?
 /// That is the same-leaf direct-implementer witness: Laravel's
@@ -752,29 +737,11 @@ pub(super) fn class_ns_of(a: &FileAnalysis, leaf: &str) -> Option<String> {
 /// `Contracts\Cache\Repository`) is a SELF-LOOP in leaf space, and only
 /// the namespace rows tell the implementer from the contract.
 fn declares_self_leaf_implementer(a: &FileAnalysis, leaf: &str, contract_ns: &str) -> bool {
-    class_ns_of(a, leaf).is_some_and(|ns| ns != contract_ns)
+    a.declared_class_namespace(leaf).is_some_and(|ns| ns != contract_ns)
         && a.pack
             .parent_namespaces
             .iter()
             .any(|(c, p, ns)| c == leaf && p == leaf && ns == contract_ns)
-}
-
-pub(super) fn origin_class_ns(origin: &FileAnalysis, class: &str) -> Option<String> {
-    if let Some(ns) = class_ns_of(origin, class) {
-        return Some(ns);
-    }
-    for (_, raw) in &origin.pack.include_directives {
-        let t = raw.trim_start_matches('\\');
-        if let Some(ns) = t.strip_suffix(class) {
-            if let Some(ns) = ns.strip_suffix('\\') {
-                return Some(ns.to_string());
-            }
-            if ns.is_empty() {
-                return Some(String::new());
-            }
-        }
-    }
-    None
 }
 
 /// FQ-validate one leaf-keyed family candidate: walk `from`'s parent
@@ -891,7 +858,7 @@ pub fn implementations_of(
             // from the leaf conflates the families — keep only descendants
             // whose chain provably belongs (or makes no claim).
             let mut same_leaf_contract_ns: Option<String> = None;
-            if let Some(tns) = origin_class_ns(origin, &target.name) {
+            if let Some(tns) = origin.leaf_namespace(&target.name) {
                 descendants
                     .retain(|d| fq_family_member(origin, idx, d, &target.name, &tns));
                 // The self-loop case (`class Repository implements` its
@@ -991,7 +958,7 @@ pub fn implementations_of(
     // the contract only through a recorded, MISMATCHING namespace belongs
     // to a same-leaf stranger's family.
     let mut same_leaf_contract_ns: Option<String> = None;
-    if let Some(tns) = origin_class_ns(origin, class) {
+    if let Some(tns) = origin.leaf_namespace(class) {
         implementers.retain(|p| fq_family_member(origin, idx, p, class, &tns));
         // The self-loop case: a direct implementer CARRYING the contract's
         // own leaf sits inside `contract_line`, so the exclusion above

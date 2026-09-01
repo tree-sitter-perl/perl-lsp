@@ -36,6 +36,7 @@ fn test_refs_to_finds_sub_across_workspace_files() {
             },
             method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), bare_constant: false,
             ctor_of: None,
+            class_ns: None,
         },
         RoleMask::EDITABLE,
     );
@@ -84,6 +85,7 @@ fn test_refs_to_exporter_extensible_cross_file() {
             kind: TargetKind::Sub { package: Some("Ext".to_string()) },
             method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), bare_constant: false,
             ctor_of: None,
+            class_ns: None,
         },
         RoleMask::EDITABLE,
     );
@@ -124,6 +126,7 @@ fn test_refs_to_exporter_declare_cross_file() {
             kind: TargetKind::Sub { package: Some("Decl".to_string()) },
             method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), bare_constant: false,
             ctor_of: None,
+            class_ns: None,
         },
         RoleMask::EDITABLE,
     );
@@ -164,6 +167,7 @@ fn test_refs_to_importer_consumer_cross_file() {
             kind: TargetKind::Sub { package: Some("Src::Mod".to_string()) },
             method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), bare_constant: false,
             ctor_of: None,
+            class_ns: None,
         },
         RoleMask::EDITABLE,
     );
@@ -197,6 +201,7 @@ fn test_refs_to_export_not_registered_without_use() {
             kind: TargetKind::Sub { package: Some("Plain".to_string()) },
             method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), bare_constant: false,
             ctor_of: None,
+            class_ns: None,
         },
         RoleMask::EDITABLE,
     );
@@ -237,6 +242,7 @@ $app->routes->post('/users')->to(controller => 'Users', action => 'create');
             },
             method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), bare_constant: false,
             ctor_of: None,
+            class_ns: None,
         },
         RoleMask::EDITABLE,
     );
@@ -266,6 +272,7 @@ $app->routes->post('/users')->to(controller => 'Users', action => 'create');
             },
             method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), bare_constant: false,
             ctor_of: None,
+            class_ns: None,
         },
         RoleMask::EDITABLE,
     );
@@ -321,6 +328,7 @@ $b->run;
             },
             method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), bare_constant: false,
             ctor_of: None,
+            class_ns: None,
         },
         RoleMask::EDITABLE,
     );
@@ -358,6 +366,7 @@ $b->run;
             },
             method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), bare_constant: false,
             ctor_of: None,
+            class_ns: None,
         },
         RoleMask::EDITABLE,
     );
@@ -421,6 +430,7 @@ sub run {
             },
             method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), bare_constant: false,
             ctor_of: None,
+            class_ns: None,
         },
         RoleMask::EDITABLE,
     );
@@ -483,6 +493,7 @@ sub run {
             },
             method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), bare_constant: false,
             ctor_of: None,
+            class_ns: None,
         },
         RoleMask::EDITABLE,
     );
@@ -607,6 +618,7 @@ Bler->new->hi;
             },
             method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), bare_constant: false,
             ctor_of: None,
+            class_ns: None,
         },
         RoleMask::EDITABLE,
     );
@@ -654,6 +666,7 @@ Bler->new->hi;
             },
             method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), bare_constant: false,
             ctor_of: None,
+            class_ns: None,
         },
         RoleMask::EDITABLE,
     );
@@ -800,6 +813,7 @@ $b->run;
             kind: TargetKind::Method { class },
             method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), bare_constant: false,
             ctor_of: None,
+            class_ns: None,
         },
         other => panic!(
             "rename_kind_at($f->run) should be Method{{class=Foo}}, got {:?}",
@@ -957,6 +971,7 @@ hi();
             },
             method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), bare_constant: false,
             ctor_of: None,
+            class_ns: None,
         },
         Some(RenameKind::Method { name, class }) => TargetRef {
             name: name.clone(),
@@ -965,6 +980,7 @@ hi();
             },
             method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), bare_constant: false,
             ctor_of: None,
+            class_ns: None,
         },
         other => panic!("unexpected rename_kind_at = {:?}", other),
     };
@@ -1264,6 +1280,7 @@ $u->create(name => 'alice');
             kind: TargetKind::Method { class },
             method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), bare_constant: false,
             ctor_of: None,
+            class_ns: None,
         },
         other => panic!("expected Method, got {:?}", other),
     };
@@ -1336,6 +1353,7 @@ fn test_refs_to_empty_when_no_hits() {
             kind: TargetKind::Sub { package: None },
             method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), bare_constant: false,
             ctor_of: None,
+            class_ns: None,
         },
         RoleMask::EDITABLE,
     );
@@ -1372,6 +1390,7 @@ fn test_refs_to_finds_hash_key_def_and_access_same_file() {
             },
             method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), bare_constant: false,
             ctor_of: None,
+            class_ns: None,
         },
         RoleMask::EDITABLE,
     );
@@ -1408,6 +1427,7 @@ fn test_refs_to_finds_cross_file_hash_key_def() {
             },
             method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), bare_constant: false,
             ctor_of: None,
+            class_ns: None,
         },
         RoleMask::EDITABLE,
     );
@@ -1450,6 +1470,7 @@ fn test_refs_to_package_qualified_sub_owner_isolates_name_collisions() {
             },
             method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), bare_constant: false,
             ctor_of: None,
+            class_ns: None,
         },
         RoleMask::EDITABLE,
     );
@@ -1496,6 +1517,7 @@ fn test_refs_to_qualified_call_resolves_to_def() {
             },
             method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), bare_constant: false,
             ctor_of: None,
+            class_ns: None,
         },
         RoleMask::EDITABLE,
     );
@@ -1536,6 +1558,7 @@ fn test_refs_to_qualified_call_isolates_package() {
             },
             method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), bare_constant: false,
             ctor_of: None,
+            class_ns: None,
         },
         RoleMask::EDITABLE,
     );
@@ -1563,6 +1586,7 @@ fn test_refs_to_role_mask_excludes_workspace() {
             kind: TargetKind::Sub { package: None },
             method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), bare_constant: false,
             ctor_of: None,
+            class_ns: None,
         },
         RoleMask::OPEN,
     );
@@ -1661,6 +1685,7 @@ $b->touch();
         kind: TargetKind::Method { class: "B".to_string() },
         method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), bare_constant: false,
             ctor_of: None,
+            class_ns: None,
     };
     let refs = refs_to(&store, Some(&idx), &target, RoleMask::WORKSPACE);
     let consumer_hit = refs.iter().any(|r| {
@@ -1803,6 +1828,7 @@ $x->ping();
             kind: TargetKind::Method { class: "C".to_string() },
             method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), bare_constant: false,
             ctor_of: None,
+            class_ns: None,
         },
         RoleMask::WORKSPACE,
     );
@@ -1881,6 +1907,7 @@ sub touch  { 1 }
         kind: TargetKind::Method { class: "B".to_string() },
         method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), bare_constant: false,
             ctor_of: None,
+            class_ns: None,
     };
 
     // Warm-up — JIT'd registry caches, lazy index allocs.
@@ -1978,6 +2005,7 @@ $x->makeFoo()->ping();
             kind: TargetKind::Method { class: "P".to_string() },
             method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), bare_constant: false,
             ctor_of: None,
+            class_ns: None,
         },
         RoleMask::WORKSPACE,
     );
@@ -2091,6 +2119,7 @@ sub fire ($minion) {\n  $minion->enqueue('send_email' => ['a@b']);\n}\n1;\n",
             },
             method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), bare_constant: false,
             ctor_of: None,
+            class_ns: None,
         },
         RoleMask::EDITABLE,
     );
@@ -2170,6 +2199,7 @@ sub fire {\n  my $self = shift;\n  my $minion = My::Minion->new;\n  $minion->enq
             },
             method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), bare_constant: false,
             ctor_of: None,
+            class_ns: None,
         },
         RoleMask::EDITABLE,
     );
@@ -2221,6 +2251,7 @@ fn refs_to_fans_runtime_exported_sub_to_consumer() {
             kind: TargetKind::Sub { package: Some("Sugar::Sub".to_string()) },
             method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), bare_constant: false,
             ctor_of: None,
+            class_ns: None,
         },
         RoleMask::EDITABLE,
     );
@@ -2272,6 +2303,7 @@ fn refs_to_links_implicit_export_to_bare_use_consumer() {
         kind: TargetKind::Sub { package: Some("Bank".to_string()) },
         method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), bare_constant: false,
             ctor_of: None,
+            class_ns: None,
     };
     let refs = refs_to(&store, Some(&idx), &target, RoleMask::EDITABLE);
     let hit = |p: &PathBuf| refs.iter().any(|r| matches!(&r.key, FileKey::Path(x) if x == p));
@@ -2323,6 +2355,7 @@ fn refs_to_links_return_hash_key_cross_file() {
         },
         method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), bare_constant: false,
             ctor_of: None,
+            class_ns: None,
     };
     assert!(target.supports_cross_file_rename(), "HashKeyOfSub must rename cross-file now");
 
@@ -2382,6 +2415,7 @@ fn references_cross_file_sub_fans_out_and_stays_package_scoped() {
         kind: TargetKind::Sub { package: Some("TaskInfo".to_string()) },
         method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), bare_constant: false,
             ctor_of: None,
+            class_ns: None,
     };
     let refs = refs_to(&store, None, &target, RoleMask::EDITABLE);
     let hit = |p: &PathBuf| refs.iter().any(|r| matches!(&r.key, FileKey::Path(x) if x == p));
@@ -2437,6 +2471,7 @@ fn references_cross_file_method_matches_inheriting_invocant() {
         kind: TargetKind::Method { class: "Role::REST".to_string() },
         method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), bare_constant: false,
             ctor_of: None,
+            class_ns: None,
     };
     let refs = refs_to(&store, Some(&idx), &target, RoleMask::EDITABLE);
     let hit = |p: &PathBuf| refs.iter().any(|r| matches!(&r.key, FileKey::Path(x) if x == p));
@@ -2472,6 +2507,7 @@ fn references_mask_scopes_to_editable_for_project_symbols() {
         kind: TargetKind::Sub { package: Some("Proj".to_string()) },
         method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), bare_constant: false,
             ctor_of: None,
+            class_ns: None,
     };
     assert_eq!(
         references_mask_for(&store, None, &in_ws).bits(),
@@ -2486,6 +2522,7 @@ fn references_mask_scopes_to_editable_for_project_symbols() {
         kind: TargetKind::Sub { package: Some("CPAN::Thing".to_string()) },
         method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), bare_constant: false,
             ctor_of: None,
+            class_ns: None,
     };
     assert_eq!(
         references_mask_for(&store, None, &dep_only).bits(),

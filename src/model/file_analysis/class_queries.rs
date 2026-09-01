@@ -985,4 +985,103 @@ impl FileAnalysis {
         }
     }
 
+    /// The namespace this file's own `class LEAF` declaration carries
+    /// (`None` package = the global namespace, spelled `""`). `None` when
+    /// the file declares no such class.
+    pub fn declared_class_namespace(&self, leaf: &str) -> Option<String> {
+        self.symbols()
+            .iter()
+            .find(|s| matches!(s.kind, SymKind::Class) && s.name == leaf)
+            .map(|s| s.package.clone().unwrap_or_default())
+    }
+
+    /// The namespace `leaf` means AS SEEN FROM this file — the ONE speller
+    /// of a name-keyed pack's leaf→namespace pin. The file either declares
+    /// the class itself (its symbol's package IS the namespace) or imported
+    /// it (the pack's import texts carry the full qualified spelling —
+    /// `use Illuminate\Http\Client\Factory;` pins `Factory`). `None` =
+    /// the file makes no claim, and every consumer of the pin stands down.
+    /// An unqualified import row (`use Foo;`, or a group clause's bare
+    /// leaf) is deliberately NOT a global-namespace claim: the group form
+    /// records its leaf without the shared prefix, and a wrong pin is a
+    /// silent wrong answer where no pin is merely an unranked one.
+    pub fn leaf_namespace(&self, leaf: &str) -> Option<String> {
+        if let Some(ns) = self.declared_class_namespace(leaf) {
+            return Some(ns);
+        }
+        for (_, raw) in &self.pack.include_directives {
+            let t = raw.trim_start_matches('\\');
+            if let Some(ns) = t.strip_suffix(leaf).and_then(|ns| ns.strip_suffix('\\')) {
+                return Some(ns.to_string());
+            }
+        }
+        None
+    }
+
+    /// Every leaf→namespace pin this file carries — its own class
+    /// declarations plus its qualified imports — the table a use-map
+    /// visibility axis is built from (`UseMapPins`). A leaf with
+    /// CONFLICTING evidence (declared here AND imported from elsewhere:
+    /// `use Support\Collection as BaseCollection; class Collection extends
+    /// BaseCollection`) pins to nothing — both classes are live in this
+    /// file under one leaf, and a wrong pin is a silent wrong answer.
+    /// `spelled` is every leaf the file writes as a class token (type
+    /// positions, parent clauses, `new X`, `X::m()` receivers): the
+    /// own-namespace default applies to those alone, never to a leaf the
+    /// file only reaches through some other class's dispatch.
+    pub fn leaf_namespace_pins(&self) -> UseMapPins {
+        let mut pins: std::collections::HashMap<String, Option<String>> =
+            std::collections::HashMap::new();
+        for (_, raw) in &self.pack.include_directives {
+            let t = raw.trim_start_matches('\\');
+            if let Some((ns, leaf)) = t.rsplit_once('\\') {
+                pins.entry(leaf.to_string())
+                    .and_modify(|p| {
+                        if p.as_deref() != Some(ns) {
+                            *p = None;
+                        }
+                    })
+                    .or_insert_with(|| Some(ns.to_string()));
+            }
+        }
+        let mut own: Option<String> = None;
+        let mut several = false;
+        for s in self.symbols().iter() {
+            match s.kind {
+                SymKind::Class => {
+                    let ns = s.package.clone().unwrap_or_default();
+                    pins.entry(s.name.clone())
+                        .and_modify(|p| {
+                            if p.as_deref() != Some(ns.as_str()) {
+                                *p = None;
+                            }
+                        })
+                        .or_insert(Some(ns));
+                }
+                SymKind::Package => {
+                    if own.as_deref().is_some_and(|o| o != s.name) {
+                        several = true;
+                    }
+                    own.get_or_insert_with(|| s.name.clone());
+                }
+                _ => {}
+            }
+        }
+        let mut spelled: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for r in self.refs() {
+            match &r.kind {
+                RefKind::PackageRef | RefKind::FunctionCall => {
+                    spelled.insert(r.unqualified_target_name().to_string());
+                }
+                RefKind::MethodCall { invocant, .. } => {
+                    let t = invocant.text();
+                    if crate::model::conventions::is_bareword_class_name(t) {
+                        spelled.insert(t.rsplit(['\\', ':']).next().unwrap_or(t).to_string());
+                    }
+                }
+                _ => {}
+            }
+        }
+        UseMapPins { pins, own_namespace: if several { None } else { own }, spelled }
+    }
 }

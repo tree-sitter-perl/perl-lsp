@@ -168,11 +168,11 @@ impl<'a> CandidateSet<'a> {
                 // candidate declaring the class under a DIFFERENT
                 // namespace is not the class this file means; candidates
                 // with no namespace claim stay admissible.
-                let want_ns = super::refs::origin_class_ns(self.origin, &cls);
+                let want_ns = self.origin.leaf_namespace(&cls);
                 for cached in idx.visible_def_candidates(&cls) {
                     let a = idx.whole_present(&cached);
                     if let (Some(want), Some(cand)) =
-                        (&want_ns, super::refs::class_ns_of(&a, &cls))
+                        (&want_ns, a.declared_class_namespace(&cls))
                     {
                         if want != &cand {
                             continue;

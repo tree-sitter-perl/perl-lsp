@@ -511,3 +511,72 @@ fn php_constructor_references_reach_new_sites_across_files() {
     assert!(hover.contains("$this: Src"), "`$this` hovers as the enclosing class: {hover}");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Round-5 R5-1: three same-leaf classes, one `use` row. A name-keyed
+/// origin's visibility is its OWN use-map (`VisibilityAxis::UseMap`):
+/// every shape — the type hint, `new Collection`, the typed receivers —
+/// lands on the imported `B\Collection`, and the references/rename walk
+/// keeps the stranger `A\Collection`'s files out on BOTH sides (a file in
+/// namespace `A` with no `use` means `A\Collection` by the language's
+/// rule, so it never joins B's references).
+#[cfg(feature = "php")]
+#[test]
+fn php_use_map_picks_the_imported_same_leaf_class() {
+    let dir = std::env::temp_dir().join(format!("perl-lsp-r5usemap-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("A")).unwrap();
+    std::fs::create_dir_all(dir.join("B")).unwrap();
+    std::fs::write(
+        dir.join("A/Collection.php"),
+        "<?php\nnamespace A;\nclass Collection { public function pick(): int { return 1; } }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("B/Collection.php"),
+        "<?php\nnamespace B;\nclass Collection { public function pick(): string { return \"b\"; } }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("Use.php"),
+        "<?php\nnamespace App;\nuse B\\Collection;\nfunction f(Collection $c): void {\n    $x = new Collection();\n    $x->pick();\n    $c->pick();\n}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("A/Own.php"),
+        "<?php\nnamespace A;\nfunction g(Collection $c): void {\n    $c->pick();\n}\n",
+    )
+    .unwrap();
+    let run = |args: &[&str]| {
+        let out = std::process::Command::new(env!("CARGO_BIN_EXE_perl-lsp"))
+            .args(args)
+            .env("XDG_CACHE_HOME", dir.join(".cache"))
+            .output()
+            .expect("run");
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+    let root = dir.to_str().unwrap();
+    // `Collection` in `function f(Collection $c)` / `new Collection()` /
+    // `$x->pick()` / `$c->pick()` (0-based rows, byte columns).
+    for (row, col, what) in [(3, 11, "type hint"), (4, 13, "new"), (5, 8, "ctor-typed receiver"), (6, 8, "hinted receiver")] {
+        let gd = run(&["--definition", root, "Use.php", &row.to_string(), &col.to_string()]);
+        assert!(gd.contains("B/Collection.php"), "{what}: gd must follow the `use` row: {gd}");
+        assert!(!gd.contains("A/Collection.php"), "{what}: the same-leaf stranger leaked: {gd}");
+    }
+    let hover = run(&["--hover", root, "Use.php", "5", "8"]);
+    assert!(hover.contains("string"), "hover reads B's signature: {hover}");
+    let b_refs = run(&["--references", root, "B/Collection.php", "2", "35"]);
+    assert!(b_refs.contains("Use.php"), "B::pick's consumer file admitted: {b_refs}");
+    assert!(!b_refs.contains("Own.php"), "A's own-namespace caller is not a B::pick reference: {b_refs}");
+    let a_refs = run(&["--references", root, "A/Collection.php", "2", "35"]);
+    assert!(a_refs.contains("Own.php"), "A::pick's own-namespace caller admitted: {a_refs}");
+    assert!(!a_refs.contains("Use.php"), "the `use B\\Collection` file is not an A::pick reference: {a_refs}");
+    let rename = run(&["--rename", root, "A/Collection.php", "2", "35", "grab"]);
+    assert!(rename.contains("Own.php") && !rename.contains("Use.php"), "rename stays inside A's family: {rename}");
+    // The class NAME itself: references from B's declaration reach the
+    // `use` row and the type hint (a type position spells the class), and
+    // never A's declaration or A's own-namespace hint.
+    let cls = run(&["--references", root, "B/Collection.php", "2", "6"]);
+    assert!(cls.contains("Use.php"), "the importing file's rows are class references: {cls}");
+    assert!(!cls.contains("A/"), "the same-leaf stranger's files stay out: {cls}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
