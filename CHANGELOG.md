@@ -149,8 +149,12 @@ templates). Market case and build-out plan in `docs/prompt-php-target.md`.
   `__invoke`, …) are shielded with a labeled reason instead of
   flagged. Route/event callables (`[UserController::class, 'index']`)
   are real references now, so controller actions count as used.
+  Bundled rule sets cover PHPUnit, Laravel, and Symfony (#[Route]
+  actions, command lifecycle, form types, Twig extensions), and
+  `perl-lsp --plugin-check <entry.json>` lints a rule document.
   Measured on guzzle: the dead queue dropped from 2,195 symbols to
-  352, and what remains is plausibly actually dead.
+  352; on symfony/demo, 67 runner-invoked symbols are shielded with
+  labeled reasons — what remains is plausibly actually dead.
 - **foreach loop variables type as the element.**
   `foreach ($this->handlers as $handler)` with
   `@var HandlerInterface[]` (or `list<X>` / `array<K, V>` /

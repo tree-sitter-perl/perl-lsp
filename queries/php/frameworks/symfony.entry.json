@@ -1,0 +1,19 @@
+{
+  "language": "php",
+  "entries": [
+    { "attributes": ["Route", "AsController", "AsCommand", "AsEventListener",
+                     "AsMessageHandler", "AsPeriodicTask", "AsCronTask",
+                     "AsTwigFilter", "AsTwigFunction", "AsLiveComponent"] },
+    { "methods": ["configure", "execute", "interact", "initialize"],
+      "when_isa": "Command" },
+    { "methods": ["getSubscribedEvents"], "when_isa": "EventSubscriberInterface" },
+    { "methods": ["validate"], "when_isa": "ConstraintValidator" },
+    { "methods": ["getFilters", "getFunctions", "getTests"],
+      "when_isa": "AbstractExtension" },
+    { "methods": ["load", "getDependencies"], "when_isa": "Fixture" },
+    { "methods": ["buildForm", "configureOptions", "getParent"],
+      "when_isa": "AbstractType" },
+    { "methods": ["supports", "authenticate", "onAuthenticationSuccess",
+                  "onAuthenticationFailure"], "when_isa": "AbstractAuthenticator" }
+  ]
+}

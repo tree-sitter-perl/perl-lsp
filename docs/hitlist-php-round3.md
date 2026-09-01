@@ -259,6 +259,17 @@ From the framework-tier round on the real app + vendor corpus:
   ledgered corpus): dead queue 2,195 → 352 (1,778 framework-entry +
   40 runtime-invoked), remainder honest (unconstructed ctors, PSR
   factory API unused in-repo). Monolog: 586 test methods shielded,
-  181 remain.
+  181 remain. Symfony proved on a fresh symfony/demo corpus: 61
+  framework-entry symbols (#[Route] controller actions, Command
+  lifecycle via the vendor-less leaf-isa gate, form types, Twig
+  extensions, subscribers, fixtures) + 6 runtime-invoked; the
+  still-dead tail is honest (Twig-template-invoked controllers and
+  entity getters — template cross-references are their own arc;
+  DI-constructed service ctors are a noted follow-on).
+  `--plugin-check` validates `entry.json` documents too: parse
+  failures (the loader drops the document), unserved languages,
+  rules with no positive condition, and unknown fields — the lenient
+  loader ignores a typo'd `method_perfix` silently; the check is what
+  makes it diagnosable.
 - `global $x` refs are 0 everywhere; hover on `$wpdb` answers the
   CLASS by name coincidence.

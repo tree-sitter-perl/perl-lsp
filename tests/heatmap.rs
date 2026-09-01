@@ -447,8 +447,17 @@ fn php_framework_entry_symbols_leave_the_dead_queue() {
          }\n",
     )
     .unwrap();
+    std::fs::write(
+        dir.join("BlogController.php"),
+        "<?php\n\
+         class BlogController {\n\
+             #[Route('/blog', name: 'blog_index')]\n\
+             public function index(): string { return 'x'; }\n\
+         }\n",
+    )
+    .unwrap();
     let report = run_heatmap(&dir);
-    for name in ["setUp", "testAdd", "edgeCases"] {
+    for name in ["setUp", "testAdd", "edgeCases", "index"] {
         let row = sym(&report, name);
         assert_eq!(
             row["reachable_guard"].as_str(),

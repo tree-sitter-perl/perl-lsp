@@ -724,6 +724,7 @@ pub fn php_pack() -> LangPack {
         bundled_entry_markers: &[
             include_str!("../../../queries/php/frameworks/phpunit.entry.json"),
             include_str!("../../../queries/php/frameworks/laravel.entry.json"),
+            include_str!("../../../queries/php/frameworks/symfony.entry.json"),
         ],
         // variable_name captures carry the `$` (PHP spells it at every
         // use, like Perl); names/classes pass through verbatim. A
