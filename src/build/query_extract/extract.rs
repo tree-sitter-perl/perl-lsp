@@ -2180,8 +2180,8 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                                 // (`method#p#$name`): an @inheritDoc override
                                 // in another file reaches it through the
                                 // registry's PackageSymbol inheritance walk
-                                // (round-4 H6a — 13 monolog handleBatch
-                                // overrides were blind without this).
+                                // (every monolog `handleBatch` override was
+                                // blind without this).
                                 if let Some(cls) = sym.package.as_deref() {
                                     if matches!(sym.kind.as_str(), "sub" | "method") {
                                         doc_witnesses.push(crate::model::witnesses::Witness {
@@ -2258,7 +2258,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
             out.refs.extend(doc_refs);
         }
     }
-    // @inheritDoc param inheritance (round-4 H6a): every syntax-untyped,
+    // @inheritDoc param inheritance every syntax-untyped,
     // locally-undocumented PARAM edges to a class-keyed row
     // (`PackageSymbol{class, "method#p#$name"}`); the doc-join above
     // publishes the row where an ancestor's docblock declares the type,

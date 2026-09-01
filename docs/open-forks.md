@@ -19,6 +19,7 @@ designs live in `docs/prompt-storage-residuals.md`.
 | [Decl→def ranking on QUALIFIED / member goto-def](#decldef-ranking-on-qualified--member-goto-def--2026-07-15--open-claude) | 07-15 | should qualified goto-def rank def-over-decl, via the shared seam (B) or a local patch (A)? |
 | [Cross-file gated-emission visibility](#cross-file-gated-emission-visibility--2026-07-17--open-claude) | 07-17 | how do cross-file readers see a DBIC result class's deferred accessors — index-time materialize (picked) vs a per-query enriched overlay? |
 | [DBIC source-moniker disambiguation without a typed `$schema`](#dbic-source-moniker-disambiguation-without-a-typed-schema--2026-07-17--open-claude) | 07-17 | is the largest-source-family heuristic acceptable as the interim, or should moniker resolution wait for schema-value provenance? |
+| [GraphView node identity is leaf-keyed](#graphview-node-identity-is-leaf-keyed--2026-09-01--open-claude) | 09-01 | should `Node::Class` carry the namespace so a same-leaf aliased parent stops needing a per-consumer bypass (two exist)? |
 
 Format per entry:
 
@@ -237,3 +238,32 @@ Format per entry:
   schema's result namespaces) move from core (`resolve_dbic_source_moniker`,
   where it sits with `extract_resultset_parametric`) into the DBIC plugin
   manifest when the DBIC-as-plugin port lands?
+
+---
+
+## GraphView node identity is leaf-keyed — 2026-09-01 — OPEN (Claude)
+- **Context:** the php round-4 `parent::` fix (H8). `GraphView`'s ancestor
+  edges are keyed by LEAF class name (`docs/adr/graph-walking.md`), so a
+  same-leaf parent in another namespace (`use Support\Collection as
+  BaseCollection; class Collection extends BaseCollection`) collapses onto
+  the child's own node and `walk(Node::Class(child))` cannot tell them
+  apart. Two consumers now carry their own bypass: `resolve_super_method`
+  (ancestry.rs — a `parent_namespaces`-row pre-pass before the graph walk)
+  and `CandidateSet::super_def_locations` (definitions.rs — walks
+  `declared_parents` directly with per-row namespace routing, never
+  entering the graph). The round-close sweep flagged the duplication.
+- **Options:** A — keep the two bypasses (status quo; a third same-leaf
+  consumer will grow a third). B — one shared `same_leaf_parent` helper
+  both call (mechanical dedupe, identity stays leaf-keyed). C — give
+  `Node::Class` a namespace-qualified identity for pack languages (the
+  edge derivation reads `parent_namespaces` rows), so the graph itself
+  distinguishes the parent and every walker inherits it — the rule-#10
+  answer, but it touches every `Node::Class` constructor and the
+  descendant/family walks' dedup keys.
+- **Picked:** A for now (nothing further changed in the sweep; the two
+  interface predicates were deduped onto `FileAnalysis::declares_interface`).
+- **Undo cost:** B is an afternoon; C is a slice with its own gold rows
+  (every leaf-keyed consumer re-examined) and a cache bump.
+- **Discussion needed:** is C worth a slice now, or does it wait until a
+  third consumer appears? Perl is absolute-named and never hits this.
+

@@ -361,7 +361,7 @@
   (#eq? @_cclsq "class"))
 
 ; `static::$records` / `self::$records` / `Foo::$prop` — scoped STATIC
-; property access rides the same member lane (round-4: `static::$prop`
+; property access rides the same member lane (`static::$prop`
 ; lost the property's own @var doc because no hop existed here; the
 ; `$this->prop` twin always had one). The field name is the inner
 ; (name), sigil-stripped like instance access; relative scopes

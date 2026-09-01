@@ -561,7 +561,7 @@ fn completion_items_native(
             } else {
                 cs.complete_qualified_path(module_index, prefix)
             };
-            let mut items: Vec<CompletionItem> =
+            let items: Vec<CompletionItem> =
                 candidates.into_iter().map(candidate_to_completion_item).collect();
             // The candidate sources already narrowed by the qualifier
             // prefix, so the cap's own prefix pass has nothing to add.

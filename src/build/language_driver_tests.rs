@@ -1020,3 +1020,29 @@ fn php_tuple_literal_returns_type_as_sequence() {
     );
 }
 
+/// Every return site of a function contributes an arm — the gate that
+/// decides "declared vs. body-typed" is snapshotted per function, never
+/// re-read from the witnesses the loop itself just pushed (which typed a
+/// two-return function by its FIRST return only). Agreeing arms type the
+/// function; disagreeing arms honestly refuse.
+#[cfg(feature = "php")]
+#[test]
+fn php_every_return_site_contributes_an_arm() {
+    use crate::model::file_analysis::InferredType;
+    let src = "<?php\nnamespace App;\nclass Queue {}\nclass Agent {}\nfunction agree($c) { if ($c) { return new Queue(); } return new Queue(); }\nfunction disagree($c) { if ($c) { return new Queue(); } return new Agent(); }\n";
+    let reg = LanguageRegistry::with_enabled();
+    let fa = reg.for_path(std::path::Path::new("T.php")).unwrap().analyze(src);
+    assert_eq!(
+        fa.sub_return_type_at_arity("agree", Some(1)),
+        Some(InferredType::ClassName("Queue".into()))
+    );
+    // Both arms land (the fold's own agreement policy decides the answer;
+    // the pin is that the SECOND site is no longer dropped).
+    let sid = fa.symbols().iter().find(|s| s.name == "disagree").unwrap().id;
+    let arms = fa
+        .witnesses
+        .for_attachment(&crate::model::witnesses::WitnessAttachment::SymbolReturnArm(sid))
+        .len();
+    assert_eq!(arms, 2, "every return site contributes an arm");
+}
+

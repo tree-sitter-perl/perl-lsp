@@ -693,24 +693,29 @@ impl FileAnalysis {
         r: &MethodResolution,
         module_index: Option<&dyn CrossFileLookup>,
     ) -> bool {
-        let marked = |a: &FileAnalysis| {
-            a.symbols().iter().any(|s| {
-                matches!(s.kind, SymKind::Class)
-                    && s.name == cls
-                    && s.attributes.iter().any(|x| x == "interface")
-            })
-        };
         match r {
-            MethodResolution::Local { .. } => marked(self),
+            MethodResolution::Local { .. } => self.declares_interface(cls),
             MethodResolution::CrossFile { .. } => {
-                marked(self)
+                self.declares_interface(cls)
                     || module_index.is_some_and(|i| {
                         i.visible_def_candidates(cls)
                             .iter()
-                            .any(|c| marked(&i.whole_present(c)))
+                            .any(|c| i.whole_present(c).declares_interface(cls))
                     })
             }
         }
+    }
+
+    /// Does THIS file declare `class` as an interface? php's interfaces are
+    /// `SymKind::Class` symbols carrying the "interface" flavor attribute
+    /// (stamped from the `@classattr.interface` capture); Perl never marks
+    /// one. The one speller every interface-deferral walk asks.
+    pub fn declares_interface(&self, class: &str) -> bool {
+        self.symbols().iter().any(|s| {
+            matches!(s.kind, SymKind::Class)
+                && s.name == class
+                && s.attributes.iter().any(|x| x == "interface")
+        })
     }
 
     /// `$self->SUPER::m` dispatch: resolve `method_name` over `enclosing`'s

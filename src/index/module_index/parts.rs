@@ -331,10 +331,6 @@ impl ModuleEdgeIndexes {
     pub fn children_of(&self, parent: &str) -> Vec<String> {
         self.children.get(parent).map(|b| b.as_slice().to_vec()).unwrap_or_default()
     }
-    #[cfg(test)]
-    pub fn providers_of(&self, pkg: &str) -> Vec<String> {
-        self.providers.get(pkg).map(|b| b.as_slice().to_vec()).unwrap_or_default()
-    }
 
     /// Record `path`'s indexable-name list from a WHOLE analysis so a later
     /// `feed` of its stripped copy replays it — the pre-strip half of the

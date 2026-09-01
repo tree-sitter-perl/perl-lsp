@@ -659,6 +659,8 @@ struct Builder<'a> {
     walk_stack: Vec<WalkTask<'a>>,
     /// Restore the pre-worklist recursive descent (`PERL_LSP_RECURSIVE_WALK=1`).
     /// Read once per build so the walk primitives branch on a bool, not on env.
+    /// Test-only: the descent exists for the walk-equivalence net.
+    #[cfg(test)]
     recursive_walk: bool,
 }
 

@@ -613,7 +613,7 @@ fn run_one(
                 Some(routed.as_lookup()), resolve::OverrideScope::default(),
             );
             let mut sources = SourceCache::new(fmt);
-            let mut item_json = |sources: &mut SourceCache, it: &resolve::HierarchyItem| {
+            let item_json = |sources: &mut SourceCache, it: &resolve::HierarchyItem| {
                 let path = key_display(&it.location.key);
                 let (line, col) =
                     sources.display(&path, it.location.span.start.row, it.location.span.start.column);
@@ -633,7 +633,7 @@ fn run_one(
                     "subtypes": subtypes,
                 })
             } else {
-                let mut edge_json = |sources: &mut SourceCache,
+                let edge_json = |sources: &mut SourceCache,
                                      e: &resolve::CallEdge,
                                      sites_path: &str| {
                     let mut j = item_json(sources, &e.item);

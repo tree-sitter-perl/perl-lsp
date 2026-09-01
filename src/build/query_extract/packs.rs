@@ -688,20 +688,7 @@ fn php_annot_type(text: &str) -> Option<InferredType> {
     for prefix in ["array{", "list{", "object{", "non-empty-array{", "non-empty-list{"] {
         if let Some(rest) = t.strip_prefix(prefix) {
             let inner = rest.strip_suffix('}')?;
-            let mut parts: Vec<&str> = Vec::new();
-            let (mut depth, mut start) = (0usize, 0usize);
-            for (i, c) in inner.char_indices() {
-                match c {
-                    '<' | '{' | '(' => depth += 1,
-                    '>' | '}' | ')' => depth = depth.saturating_sub(1),
-                    ',' if depth == 0 => {
-                        parts.push(&inner[start..i]);
-                        start = i + 1;
-                    }
-                    _ => {}
-                }
-            }
-            parts.push(&inner[start..]);
+            let parts = phpdoc_split_top_level(inner, ',');
             let mut slots: Vec<InferredType> = Vec::new();
             let mut keyed: Vec<(std::string::String, Option<Box<InferredType>>)> = Vec::new();
             for part in parts.iter().map(|p| p.trim()).filter(|p| !p.is_empty()) {
@@ -738,24 +725,15 @@ fn php_annot_type(text: &str) -> Option<InferredType> {
         if let Some(rest) = t.strip_prefix(prefix) {
             let inner = rest.strip_suffix('>')?;
             // `array<K, V>`: the element is the LAST top-level argument.
-            let mut depth = 0usize;
-            let mut last_start = 0usize;
-            for (i, c) in inner.char_indices() {
-                match c {
-                    '<' | '{' | '(' => depth += 1,
-                    '>' | '}' | ')' => depth = depth.saturating_sub(1),
-                    ',' if depth == 0 => last_start = i + 1,
-                    _ => {}
-                }
-            }
-            let elem = php_annot_type(&inner[last_start..])?;
+            let args = phpdoc_split_top_level(inner, ',');
+            let elem = php_annot_type(args.last()?)?;
             // A NON-int-keyed `array<K, V>` keeps its key axis: the value
             // rides as a two-argument parametric instance ([K, V] — the
             // positional convention `ParamOf`/`Element`/`Key` project), so
             // the pair-form foreach types BOTH bindings. Int-keyed (and
             // key-less) spellings are sequences — their keys ARE positions.
-            if last_start > 0 {
-                let key_text = inner[..last_start - 1].trim();
+            if args.len() > 1 {
+                let key_text = args[0].trim();
                 if key_text != "int" {
                     let key = php_annot_type(key_text)?;
                     return Some(Parametric(
@@ -1292,14 +1270,40 @@ fn php_doc_types(text: &str) -> Vec<DocFact> {
 fn phpdoc_type_token_end(s: &str) -> usize {
     let mut depth = 0usize;
     for (i, c) in s.char_indices() {
-        match c {
-            '<' | '{' | '(' => depth += 1,
-            '>' | '}' | ')' => depth = depth.saturating_sub(1),
-            c if c.is_whitespace() && depth == 0 => return i,
-            _ => {}
+        if c.is_whitespace() && depth == 0 {
+            return i;
         }
+        phpdoc_depth_step(c, &mut depth);
     }
     s.len()
+}
+
+/// The ONE bracket alphabet of phpdoc type text (`<{(` / `>})`): every
+/// top-level split and the token boundary step depth through here, so a
+/// new bracket spelling is added once, never in lockstep across walkers.
+fn phpdoc_depth_step(c: char, depth: &mut usize) {
+    match c {
+        '<' | '{' | '(' => *depth += 1,
+        '>' | '}' | ')' => *depth = depth.saturating_sub(1),
+        _ => {}
+    }
+}
+
+/// Split phpdoc type text on `sep` at bracket depth 0 (a separator inside
+/// generics / an array shape belongs to the enclosing part).
+fn phpdoc_split_top_level(s: &str, sep: char) -> Vec<&str> {
+    let mut out = Vec::new();
+    let (mut depth, mut start) = (0usize, 0usize);
+    for (i, c) in s.char_indices() {
+        if c == sep && depth == 0 {
+            out.push(&s[start..i]);
+            start = i + 1;
+        } else {
+            phpdoc_depth_step(c, &mut depth);
+        }
+    }
+    out.push(&s[start..]);
+    out
 }
 
 fn phpdoc_type(raw: &str) -> Option<String> {
@@ -1311,20 +1315,7 @@ fn phpdoc_type(raw: &str) -> Option<String> {
     // Union split at TOP LEVEL only — a `|` inside generics is part of one
     // arm (`static<int, static<int, TValue|TZipValue>>` is a single type;
     // the naive split saw three and dropped laravel's whole fluent surface).
-    let mut arms: Vec<&str> = Vec::new();
-    let (mut depth, mut arm_start) = (0usize, 0usize);
-    for (i, c) in raw.char_indices() {
-        match c {
-            '<' | '{' | '(' => depth += 1,
-            '>' | '}' | ')' => depth = depth.saturating_sub(1),
-            '|' if depth == 0 => {
-                arms.push(&raw[arm_start..i]);
-                arm_start = i + 1;
-            }
-            _ => {}
-        }
-    }
-    arms.push(&raw[arm_start..]);
+    let mut arms = phpdoc_split_top_level(raw, '|');
     arms.retain(|a| !a.eq_ignore_ascii_case("null") && !a.is_empty());
     let [one] = arms.as_slice() else { return None };
     // Sequence spellings survive WHOLE — `annot_type` parses the element

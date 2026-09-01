@@ -183,6 +183,9 @@ pub trait LanguageDriver: Send + Sync {
 /// asserts the verb surface and regressions are caught; `Beta` = broad gold
 /// coverage, known gaps documented; `Alpha` = it parses and answers, with
 /// little or no net watching it — expect wrong answers.
+// The pack drivers that construct `Beta`/`Alpha` are feature-gated, so a
+// default (Perl-only) build sees only `Stable`.
+#[allow(dead_code)]
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Maturity {
     Stable,
@@ -1087,19 +1090,29 @@ fn emit_return_fuel(
                 .map(|sym| (s.id, sym.id))
         })
         .collect();
+    let mut gate: HashMap<SymbolId, Option<&'static str>> = HashMap::new();
+    let mut chained: std::collections::HashSet<SymbolId> = std::collections::HashSet::new();
     for (ret_scope, ret_span) in return_sites {
         let owner = std::iter::successors(Some(*ret_scope), |sc| {
             scope_parent.get(sc).copied().flatten()
         })
         .find_map(|sc| scope_to_symbol.get(&sc).copied());
         let Some(sid) = owner else { continue };
-        // A declared return already carries its own witness — except a BARE
-        // container (`: array`), which the returned value may refine (a
-        // tuple literal / a keyed shape): the arm chain then rides at annot
-        // priority so the refinement beats the annot (docs/adr/destructuring.md).
-        let existing = fa.witnesses.for_attachment(&WA::Symbol(sid));
-        let refines_container = !existing.is_empty()
-            && existing.iter().all(|w| {
+        // The per-function gate is decided ONCE, on the first return site
+        // seen for that function, from the bag as the walk left it — this
+        // loop writes the very `Symbol` witnesses the gate reads, so a live
+        // read would let the first arm block every later one (a two-return
+        // function typed by its first return only). `None` = declared,
+        // leave alone; `Some(tag)` = chain the arms under that source. A
+        // BARE declared container (`: array`) is the one declaration the
+        // returned value may refine (a tuple literal / a keyed shape): its
+        // chain rides at annot priority so the refinement beats the annot
+        // (docs/adr/destructuring.md).
+        let chain_source = *gate.entry(sid).or_insert_with(|| {
+            let existing = fa.witnesses.for_attachment(&WA::Symbol(sid));
+            if existing.is_empty() {
+                Some("cpp_return_arm_chain")
+            } else if existing.iter().all(|w| {
                 matches!(
                     &w.payload,
                     WP::InferredType(
@@ -1107,27 +1120,28 @@ fn emit_return_fuel(
                             | crate::model::file_analysis::InferredType::ArrayRef
                     )
                 )
-            });
-        if !existing.is_empty() && !refines_container {
-            continue;
-        }
-        let chain_source = if refines_container {
-            crate::model::witnesses::REFINE_SOURCE
-        } else {
-            "cpp_return_arm_chain"
-        };
+            }) {
+                Some(crate::model::witnesses::REFINE_SOURCE)
+            } else {
+                None
+            }
+        });
+        let Some(chain_source) = chain_source else { continue };
         fa.witnesses.push(Witness {
             attachment: WA::SymbolReturnArm(sid),
             source: WitnessSource::Builder("cpp_return_arm".into()),
             payload: WP::Edge(WA::Expr(*ret_span)),
             span: *ret_span,
         });
-        fa.witnesses.push(Witness {
-            attachment: WA::Symbol(sid),
-            source: WitnessSource::Builder(chain_source.into()),
-            payload: WP::Edge(WA::SymbolReturnArm(sid)),
-            span: *ret_span,
-        });
+        // One chain edge per function; the arms accumulate under it.
+        if chained.insert(sid) {
+            fa.witnesses.push(Witness {
+                attachment: WA::Symbol(sid),
+                source: WitnessSource::Builder(chain_source.into()),
+                payload: WP::Edge(WA::SymbolReturnArm(sid)),
+                span: *ret_span,
+            });
+        }
     }
 
     if !implicit_this_members {
@@ -1738,6 +1752,7 @@ impl LanguageRegistry {
 
     /// Every id this build can serve — the feature-dependent set, so a caller
     /// enumerating languages never carries its own list to drift.
+    #[cfg(test)]
     pub fn ids(&self) -> Vec<&'static str> {
         self.drivers.iter().map(|d| d.id()).collect()
     }

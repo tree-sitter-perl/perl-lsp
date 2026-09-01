@@ -491,16 +491,6 @@ pub fn open_and_load_diag(
     load_with_wal_fallback(&db_path_for(&dir, lang), paths, want_bag)
 }
 
-#[cfg(test)]
-pub fn open_and_load_diag(
-    _cache_key: Option<&str>,
-    _lang: &str,
-    _paths: &[String],
-    _want_bag: bool,
-) -> Result<FileAnalysis, RehydrateMiss> {
-    Err(RehydrateMiss::NoRow)
-}
-
 /// `open_and_load_diag` with the happy path on a RETAINED connection — the
 /// same per-call-open disease the conclusion loader had (`RetainedReader`):
 /// every bag-LRU miss paid a fresh open + WAL handshake before its decode.
@@ -880,7 +870,6 @@ pub(super) mod bag_share_probe {
     //! opposite of what the giants do.
     //!
     //! `cargo test --release bag_share -- --ignored --nocapture`
-    use crate::model::file_analysis::FileAnalysis;
 
     #[test]
     #[ignore]

@@ -41,15 +41,8 @@ impl<'a> CandidateSet<'a> {
                 })
                 .map(|s| s.selection_span)
         };
-        let is_interface = |a: &crate::model::file_analysis::FileAnalysis, cls: &str| {
-            a.symbols().iter().any(|s| {
-                matches!(s.kind, SymKind::Class)
-                    && s.name == cls
-                    && s.attributes.iter().any(|x| x == "interface")
-            })
-        };
         // Queue entries: (parent leaf, required namespace when a row pins it).
-        let mut queue: Vec<(String, Option<String>)> = analysis
+        let mut queue: std::collections::VecDeque<(String, Option<String>)> = analysis
             .declared_parents(&encl)
             .iter()
             .map(|p| (p.clone(), parent_ns(analysis, &encl, p)))
@@ -57,7 +50,7 @@ impl<'a> CandidateSet<'a> {
         let mut fallback: Option<RefLocation> = None;
         let mut seen: std::collections::HashSet<(String, String)> = Default::default();
         let mut budget = 32usize;
-        while let Some((parent, want_ns)) = queue.pop() {
+        while let Some((parent, want_ns)) = queue.pop_front() {
             if budget == 0 {
                 break;
             }
@@ -97,7 +90,7 @@ impl<'a> CandidateSet<'a> {
                         rewritable: true,
                         label: None,
                     };
-                    if is_interface(&whole, &parent) {
+                    if whole.declares_interface(&parent) {
                         fallback.get_or_insert(loc);
                     } else {
                         return Some(vec![loc]);
@@ -169,7 +162,7 @@ impl<'a> CandidateSet<'a> {
                     queue.push_back(parent.clone());
                 }
                 // The origin's use-map pins the leaf to ONE namespace
-                // (`use Support\Facades\Cache;` — round-4 H3: without
+                // (`use Support\Facades\Cache;` — without
                 // this, gd on `Cache::store` landed on an unrelated
                 // same-leaf class in a never-imported namespace). A
                 // candidate declaring the class under a DIFFERENT
