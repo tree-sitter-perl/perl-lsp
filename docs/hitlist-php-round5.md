@@ -127,10 +127,13 @@ Logged in `docs/open-forks.md`.
 
 ### R5-6 (design, open) — dead-code queue: out-of-tree callers
 D6b/d: public Plugin/Event API, PSR interface implementations, Symfony
-Console overrides (`getLongVersion`, `getDefaultCommands`) — callers live
-outside the indexed root. `entry.json` rows cover the Console overrides
-(data); the general "public API of a library" question needs a policy
-(e.g. a `--heatmap` `--library` mode that never flags public members).
+Console overrides — callers live outside the indexed root. LANDED (data):
+`symfony.entry.json` shields the Console `Application` overrides
+(`getDefaultCommands`, `getDefaultInputDefinition`, `getDefaultHelperSet`,
+`getLongVersion`, `doRun`, `doRunCommand`, `doRenderThrowable`). OPEN: the
+general "public API of a library" question needs a policy (e.g. a
+`--heatmap` `--library` mode that never flags public members) —
+`docs/open-forks.md`.
 
 ### R5-7 (MINOR) — `array<array<mixed>>` nested generics honestly dark (F).
 The `self::$prop` / `static::$prop` / `Foo::$prop` hover half (E7)

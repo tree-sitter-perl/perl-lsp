@@ -456,8 +456,18 @@ fn php_framework_entry_symbols_leave_the_dead_queue() {
          }\n",
     )
     .unwrap();
+    std::fs::write(
+        dir.join("Console.php"),
+        "<?php\n\
+         class Application {}\n\
+         class Console extends Application {\n\
+             protected function getDefaultCommands(): array { return []; }\n\
+             public function getLongVersion(): string { return 'v'; }\n\
+         }\n",
+    )
+    .unwrap();
     let report = run_heatmap(&dir);
-    for name in ["setUp", "testAdd", "edgeCases", "index"] {
+    for name in ["setUp", "testAdd", "edgeCases", "index", "getDefaultCommands", "getLongVersion"] {
         let row = sym(&report, name);
         assert_eq!(
             row["reachable_guard"].as_str(),
