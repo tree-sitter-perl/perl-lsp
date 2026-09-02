@@ -154,6 +154,8 @@ polymorphism (`FormatterInterface`, `ProcessorInterface::__invoke`).
   container as computable so the outer class cannot reclaim the
   members. `php_anonymous_class_is_its_own_identity` pins it; the
   synthetic spelling is the open question on `docs/open-forks.md`.
+  guzzle heatmap (2026-09-02): dead 122 → 108, dead constructors 5 → 1
+  (the survivor is a named test helper class, not anonymous).
 - R7-6 (MAJOR, open — found while pinning R7-4): goto-def / hover on
   the `n` of `$this->n` where `$n` is a class-level typed property with
   a default (`private int $n = 1;`) answer the `$this` variable
