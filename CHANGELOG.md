@@ -181,7 +181,11 @@ templates). Market case and build-out plan in `docs/prompt-php-target.md`.
   class's family — renaming `Http\Client\Factory::$recorded` no longer
   rewrites `Process\Factory`. A `use`d class that no indexed file
   declares answers empty rather than a stranger. Type hints count as
-  class references (rename rewrites them).
+  class references (rename rewrites them). Aliased imports
+  (`use Script\Event as ScriptEvent;`) no longer capture the bare leaf —
+  the file's own `Event` stays its own — and a namespace-relative
+  spelling (`new Downloader\DownloadManager()`) resolves to the class it
+  names, so its call sites stay in that class's references.
 - **A property and a method sharing a name keep their own identity.**
   `$this->recorded` hovers/goes to the property, `$this->recorded()` to
   the method; renaming either leaves the other untouched. Applies only

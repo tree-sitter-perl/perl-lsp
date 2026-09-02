@@ -250,8 +250,10 @@ marked otherwise; the drain re-derived each rationale against current code.
 ## Residual-bug tier (pinned, xfail'd where reducible)
 
 - **php `use X as Alias` spellings resolve nothing.** The use-map axis
-  pins the FQ row's real leaf, not the alias; a hint/`new`/receiver
-  spelled `Alias` finds no candidate (honest empty, never a stranger).
+  pins the alias spelling to its namespace (`use_aliases`) and leaves the
+  real leaf to the file's own class, but a hint/`new`/receiver spelled
+  `Alias` still finds no candidate — candidates are keyed by the real
+  leaf (honest empty, never a stranger).
   Translating the alias to the real leaf at extraction is wrong when the
   file also declares that leaf itself; the fix is namespace-qualified
   class identity — `docs/open-forks.md`, "GraphView node identity is
