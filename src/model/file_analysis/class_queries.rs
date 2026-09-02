@@ -1029,7 +1029,13 @@ impl FileAnalysis {
     /// positions, parent clauses, `new X`, `X::m()` receivers): the
     /// own-namespace default applies to those alone, never to a leaf the
     /// file only reaches through some other class's dispatch.
-    pub fn leaf_namespace_pins(&self) -> UseMapPins {
+    pub fn use_map_pins(&self) -> std::sync::Arc<UseMapPins> {
+        self.use_map_pins
+            .get_or_init(|| std::sync::Arc::new(self.leaf_namespace_pins()))
+            .clone()
+    }
+
+    fn leaf_namespace_pins(&self) -> UseMapPins {
         let mut pins: std::collections::HashMap<String, Option<String>> =
             std::collections::HashMap::new();
         for (_, raw) in &self.pack.include_directives {

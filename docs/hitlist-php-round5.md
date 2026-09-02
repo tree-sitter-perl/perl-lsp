@@ -109,6 +109,12 @@ store; the pack persist writer shreds them): walks 9,707 → 5,771, cold
 2m29s → 2m03s, warm 2m20s → 1m58s, every fan-in identical (7,282 rows, 0
 differing, resident-only walk vs pruned). A constructor counts its class
 key as a reference row (its references are the `new` sites).
+The pre-round-5 binary (before the use-map axis) measures 2m03s cold /
+1m57s warm on the same corpus — the prune paid for exactly what the
+per-walk axis construction and the member-shape gate added (~25 s), and
+438 of 7,282 fan-ins differ between the two binaries, all the same-leaf
+separations the axis exists for (`tests/unit/Stubs/ResponseRenderer.php
+::response` 520 → 12: the stub's own sites, no longer the real class's).
 OPEN: the remaining 5,771 walks are names with SOME reference row
 somewhere; each still costs ~20 ms (candidate retrieval + matcher on
 rehydrated files). Next levers, in order: per-query `ref_candidate_files`

@@ -1096,11 +1096,11 @@ impl VisibilityAxis {
         match visibility {
             PackVisibility::IncludePaths => return VisibilityAxis::IncludeClosure,
             PackVisibility::NameKeyed => {
-                let pins = origin.leaf_namespace_pins();
+                let pins = origin.use_map_pins();
                 if pins.pins.is_empty() && pins.own_namespace.is_none() {
                     return VisibilityAxis::Flat;
                 }
-                return VisibilityAxis::UseMap(std::sync::Arc::new(pins));
+                return VisibilityAxis::UseMap(pins);
             }
             PackVisibility::Host => {}
         }
