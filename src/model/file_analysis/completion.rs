@@ -1321,6 +1321,9 @@ pub fn inferred_type_to_tag(ty: &InferredType) -> String {
         InferredType::Optional(inner) => format!("Maybe:{}", inferred_type_to_tag(inner)),
         InferredType::Undef => "Undef".to_string(),
         InferredType::Bool => "Bool".to_string(),
+        // Never reaches a renderer: scrubbed to `None` at the registry
+        // boundary. Named so the match stays exhaustive.
+        InferredType::Unknown => "Unknown".to_string(),
     }
 }
 
@@ -1388,6 +1391,9 @@ pub(crate) fn format_inferred_type(ty: &InferredType) -> String {
         InferredType::Optional(inner) => format!("Maybe<{}>", format_inferred_type(inner)),
         InferredType::Undef => "Undef".to_string(),
         InferredType::Bool => "Bool".to_string(),
+        // Never reaches a renderer: scrubbed to `None` at the registry
+        // boundary. Named so the match stays exhaustive.
+        InferredType::Unknown => "Unknown".to_string(),
     }
 }
 

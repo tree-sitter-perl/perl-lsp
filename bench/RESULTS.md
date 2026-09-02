@@ -639,3 +639,33 @@ after `$user = wp_signon()` keeps an earlier branch's `WP_Error` — an
 untyped reassignment does not yet reset a variable's type. The first
 three are fixed in the next build; the recount follows.
 
+After the fixes (2026-09-03, 01:55, build eb320a4 — trait `$this`,
+by-reference captures, foreach key subscripts, nested-closure captures,
+`$this->load(...)` first-class callables):
+
+| corpus | unresolved-method | undefined-property | undefined-type | undefined-variable | unused-import | unused-variable | deprecated | arity |
+|---|---|---|---|---|---|---|---|---|
+| WordPress | 104 | 195 | 94 | 24 | 0 | 420 | 283 | 15 |
+| laravel/framework | 993 | 101 | 7,039 | 51 | 6 | 257 | 34 | 14 |
+| guzzle | 2 | 0 | 1,340 | 0 | 0 | 98 | 0 | 2 |
+| monolog | 11 | 9 | 263 | 0 | 2 | 24 | 4 | 0 |
+| symfony demo | 0 | 0 | 519 | 0 | 0 | 0 | 0 | 0 |
+
+`unused-variable` fell 563 → 98 on guzzle and 741 → 257 on laravel;
+`undefined-property` 518 → 101 on laravel (trait bodies) and
+`unresolved-method` 1,521 → 993 (trait `$this` calls). WordPress's
+`unused-variable` 611 → 420 and `undefined-property` 195 are the
+untyped-reassignment residual (`docs/hitlist-php-round8.md`), measured
+next. `undefined-type` is unchanged by construction: those rows are
+vendor classes with no `vendor/` tree installed.
+
+With the untyped-reassignment reset (2026-09-03, 02:20 — a reassignment
+whose value cannot be typed makes the variable unknown, and a return arm
+reading it makes the arm fold a disagreement instead of collapsing to the
+arms that resolved): WordPress `undefined-property` 195 → 132 and
+`unresolved-method` 104 → 89 with no new rows (`get_term()`'s
+`WP_Term|WP_Error` shape); laravel/framework 101 → 94 and 993 → 984.
+The remaining WordPress `undefined-property` rows are mostly `ID` /
+`term_id` / `post_status` / `object_id` reads (17 / 11 / 9 / 7 of 132),
+not yet sampled for their receivers.
+

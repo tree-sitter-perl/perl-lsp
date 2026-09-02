@@ -518,6 +518,14 @@ impl ReducerRegistry {
         // Sole boundary where an owned `ReducedValue` is required; the
         // internal recursion threads `Arc` to avoid deep clones per hop.
         let out = (*self.query_rec(bag, q, &mut state)).clone();
+        // THE boundary scrub: `Unknown` is a value inside the chase (a reset
+        // that must poison every arm and copy that reads it), never an
+        // answer — a consumer sees "no type", exactly as before the reset
+        // existed.
+        let out = match out {
+            ReducedValue::Type(InferredType::Unknown) => ReducedValue::None,
+            other => other,
+        };
         // Publish for the bake. Cleared-and-set on every query, so a later
         // query can never be minted from an earlier chase's exits.
         LAST_RESIDUAL.with(|r| {
@@ -1964,16 +1972,19 @@ impl ReducerRegistry {
                             }
                         }
                     };
-                    if let Some(t) = resolved {
-                        out.push(Witness {
+                    match resolved {
+                        Some(t) => out.push(Witness {
                             attachment: w.attachment.clone(),
                             source: w.source.clone(),
                             payload: WitnessPayload::InferredType(t),
                             span: w.span,
-                        });
+                        }),
+                        // An edge that didn't resolve drops out — same as a
+                        // witness no reducer claims — unless it was an
+                        // assignment, which still HAPPENED: the variable now
+                        // holds something untypable, not its earlier value.
+                        None => out.extend(opaque_rebind_of(w)),
                     }
-                    // An edge that didn't resolve drops out — same as a
-                    // witness no reducer claims.
                 }
                 WitnessPayload::CallReturn { target, arity } => {
                     // A fresh method dispatch at the call's own arity. The
@@ -2148,14 +2159,17 @@ impl ReducerRegistry {
                                 })
                             }
                         };
-                        if let Some(t) = projected {
-                            out.push(Witness {
+                        match projected {
+                            Some(t) => out.push(Witness {
                                 attachment: w.attachment.clone(),
                                 source: w.source.clone(),
                                 payload: WitnessPayload::InferredType(t),
                                 span: w.span,
-                            });
+                            }),
+                            None => out.extend(opaque_rebind_of(w)),
                         }
+                    } else {
+                        out.extend(opaque_rebind_of(w));
                     }
                 }
                 WitnessPayload::Tuple(elems) => {
@@ -2303,6 +2317,30 @@ impl ReducerRegistry {
         }
         weak
     }
+}
+
+/// The reset an unresolved REASSIGNMENT edge materializes to
+/// (`REASSIGN_FLOW_SOURCE`, zero-width at the assignment site). A
+/// declaration's edge never resets — its companions (a first-param
+/// constraint at the sub's start, a docblock cast) may sit anywhere
+/// before it — and a region-spanned edge is a narrowing fact whose
+/// failure stays a plain drop-out.
+fn is_reassign_edge(w: &Witness) -> bool {
+    matches!(w.attachment, WitnessAttachment::Variable { .. })
+        && w.span.start == w.span.end
+        && matches!(&w.source, WitnessSource::Builder(t) if t == REASSIGN_FLOW_SOURCE)
+}
+
+fn opaque_rebind_of(w: &Witness) -> Option<Witness> {
+    if !is_reassign_edge(w) {
+        return None;
+    }
+    Some(Witness {
+        attachment: w.attachment.clone(),
+        source: w.source.clone(),
+        payload: WitnessPayload::InferredType(InferredType::Unknown),
+        span: w.span,
+    })
 }
 
 /// Does this scope *bind* the variable — establish its value/identity via

@@ -167,6 +167,13 @@ pub const FIELD_EDGE_SOURCE: &str = "field_edge";
 
 pub const REFINE_SOURCE: &str = "refines-container";
 
+/// Source tag of a REASSIGNMENT's flow edge (`FlowEdge::reassigns`): the
+/// only witness whose failure to resolve `materialize` turns into an
+/// `OpaqueRebind` reset. Every other assignment lowering is a declaration
+/// (`"flow"`) or a companion (`mcb`, `chain_assignment`) and drops out
+/// silently when it cannot answer.
+pub const REASSIGN_FLOW_SOURCE: &str = "flow-reassign";
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum WitnessSource {
     /// Named builder pass — "signature_extraction", "narrowing", …

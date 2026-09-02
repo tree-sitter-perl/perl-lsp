@@ -212,6 +212,15 @@ pub enum InferredType {
     /// number. Kept at the END for bincode variant-index stability (bump
     /// `EXTRACT_VERSION`).
     Bool,
+    /// KNOWN to be untypable — the value a reassignment whose source this
+    /// tier cannot type leaves behind (`FlowEdge::reassigns`). Distinct from
+    /// "no evidence": it flows through every chase like a type (a return
+    /// arm that reads a reset variable makes the fold a disagreement, a
+    /// `$y = $x` copy carries it on) and is projected to `None` at the
+    /// registry's public boundary, so no consumer ever renders it. Never
+    /// pushed by a walker; `materialize` mints it. Kept at the END for
+    /// bincode variant-index stability.
+    Unknown,
 }
 
 /// Concrete parametric flavors + type-level operators. Each
@@ -975,9 +984,14 @@ pub fn resolve_return_type(return_types: &[InferredType]) -> Option<InferredType
     }
     // Object subsumes HashRef: if some returns are Object(X) and others are
     // hash-shaped, the Object wins (overloaded hash access is common in Perl).
-    let mut object = None;
+    let mut object: Option<InferredType> = None;
     for t in return_types {
         if t.is_object() {
+            // Two different classes are a disagreement, not a choice of the
+            // arm that came last (`WP_Term` vs `WP_Error`).
+            if object.as_ref().is_some_and(|o| o != t) {
+                return None;
+            }
             object = Some(t.clone());
         } else if !t.is_hash_shaped() {
             // Non-hash, non-Object disagreement → Unknown
@@ -998,6 +1012,9 @@ pub fn resolve_return_type(return_types: &[InferredType]) -> Option<InferredType
 pub fn join_return_arms(value_types: &[InferredType], has_undef_arm: bool) -> Option<InferredType> {
     let base = resolve_return_type(value_types);
     match base {
+        // An untypable value stays untypable; `Optional<Unknown>` would
+        // smuggle it past the boundary scrub.
+        Some(InferredType::Unknown) => Some(InferredType::Unknown),
         Some(t) if has_undef_arm && !matches!(t, InferredType::Optional(_)) => {
             Some(InferredType::Optional(Box::new(t)))
         }

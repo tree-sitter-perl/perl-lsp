@@ -313,6 +313,13 @@ templates). Market case and build-out plan in `docs/prompt-php-target.md`.
 - **Properties typed by assignment.** `$this->mailer = new Mailer()` in
   a constructor types `$this->mailer` for every reader in the class,
   with no declared type or docblock — chains through it resolve.
+- **A reassignment forgets the earlier type.** `$u = new WP_Error(...)`
+  then `$u = wp_signon(...)` (a union return the analyzer cannot hold)
+  no longer leaves `$u` typed as `WP_Error`, so `$u->ID` stops reporting
+  an undefined property — in Perl and PHP alike, a reassignment whose
+  value cannot be typed resets the variable instead of standing aside.
+  A function whose arms return two different classes no longer reports
+  whichever came last as its return type.
 - **A php value read never means a method.** `$this->session` on a
   class declaring only `session()` is an undeclared property for the
   lane, goto-def and hover alike (Perl's accessor calls keep their

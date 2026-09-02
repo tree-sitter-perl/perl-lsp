@@ -789,7 +789,7 @@
 ; narrowing cutoff end at the reassignment, via the same edge-driven cutoff.
 (assignment_expression
   left: (identifier) @flow.target
-  right: (_) @flow.source)
+  right: (_) @flow.source) @flow.assign
 
 ; `std::move(x)` leaves x in a moved-from (valid-but-unspecified) state: a
 ; subsequent READ of x before it is reassigned is a use-after-move bug.

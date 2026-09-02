@@ -1410,6 +1410,34 @@ fn php_global_namespace_builtins_and_escaped_string_callables_stay_quiet() {
 }
 
 
+#[cfg(feature = "php")]
+/// `$u = new Err()` then `$u = signon()` — a return the lattice cannot
+/// hold. The earlier class must not stand past the rebind, so `$u->ID` is
+/// not reported against `Err`; a same-scope rebind to a KNOWN class still
+/// types the read (`$k`), and its missing member still reports.
+#[test]
+fn php_untyped_reassignment_resets_the_receiver() {
+    let dir = std::env::temp_dir().join(format!("perl-lsp-d2reset-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    let w = |rel: &str, src: &str| std::fs::write(dir.join(rel), src).unwrap();
+    w("composer.json", "{\"autoload\": {\"psr-4\": {\"App\\\\\": \"src/\"}}}");
+    // `d()` returns `Err` on one arm and, on the other, a variable reset by
+    // an untyped call: the arms disagree, so `$w` is untyped and `$w->ID`
+    // stays silent (the WordPress `get_term()` shape).
+    w("src/A.php", "<?php\nnamespace App;\nclass Err { public function code(): int { return 1; } }\nclass User { public int $ID = 0; }\nfunction signon() { return $_SERVER['u']; }\nfunction d(int $t) { if ($t) { return new Err(); } $_t = new User(); $_t = signon(); return $_t; }\nfunction f(bool $b): int\n{\n    $u = new Err();\n    if ($b) { $u = new Err(); }\n    $u = signon();\n    $k = new Err();\n    $k = new User();\n    $w = d(1);\n    return $u->ID + $k->ID + $k->nope + $w->ID;\n}\n");
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_perl-lsp"))
+        .args(["--check", dir.to_str().unwrap()])
+        .env("XDG_CACHE_HOME", dir.join(".cache"))
+        .output()
+        .expect("run");
+    let err = String::from_utf8_lossy(&out.stderr);
+    let rows: Vec<&str> = err.lines().filter(|l| l.contains("A.php") && l.contains('[')).collect();
+    assert_eq!(rows.len(), 1, "{err}");
+    assert!(rows[0].contains("[undefined-property]") && rows[0].contains("'nope'"), "{rows:?}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// Silence rules the corpora demanded: a trait's `$this` is the composing
 /// class (no undefined members), a first-class callable member
 /// (`$this->load(...)`) is a call, a subscript's index is a read, and a

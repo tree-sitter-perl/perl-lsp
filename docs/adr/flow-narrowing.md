@@ -35,6 +35,29 @@ Conservative by construction — it under-narrows, never lies. The bias is
 load-bearing for the diagnostics built on top: they miss some real bugs
 but never invent a false `Undef`/`Optional`.
 
+The same discipline holds for the assignment axis itself. A REASSIGNMENT
+(`FlowEdge::reassigns` — a plain `$x = …` to a name the scope already
+binds; the pack's `@flow.assign`, Perl's non-`my` lhs) whose source
+resolves to nothing is not a no-op: the variable now holds a value this
+tier cannot type, and its earlier binding is dead. `materialize` mints an
+`InferredType::Unknown` witness in the failed edge's place (zero-width at
+the assignment); the framework fold drops every witness strictly before
+the latest reset at or before the query point (the class axis included,
+which otherwise wins in any order) and, with nothing after it, answers
+`Unknown` — a VALUE inside the chase, so a return arm that reads the
+variable makes the arm fold a disagreement and a `$y = $x` copy carries
+the reset on, instead of the arm or the copy quietly falling back to
+whatever else resolved. `ReducerRegistry::query` / `query_variable_type`
+project `Unknown` to `None` at the boundary; no consumer renders it. A
+declaration never resets: its companions (a first-param constraint at the
+sub's start, a docblock cast) may sit anywhere before it; a member write
+has no order at all. A union return the lattice cannot hold
+(`WP_User|WP_Error`) therefore answers unknown past the assignment, and
+the member lanes stay silent, rather than the one-arm class reporting the
+other arm's members as undefined. The return-arm fold keeps the same
+honesty: arms of two different classes are a disagreement (`None`), never
+the arm that happened to come last.
+
 ## Subjects: variables and places, one keying
 
 A guard subject is a variable (`$x`) or a **place** — a chain of stable

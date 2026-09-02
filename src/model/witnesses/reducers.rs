@@ -182,6 +182,21 @@ impl WitnessReducer for FrameworkAwareTypeFold {
         let mut plain_type: Option<InferredType> = None;
         let mut plain_type_priority: u8 = 0;
 
+        // A reassignment to an untypable value (`InferredType::Unknown`,
+        // minted by `materialize` for a failed reassign edge) is a temporal
+        // RESET: at the query point, every binding strictly before the
+        // latest such rebind is dead — the class axis included, which
+        // otherwise wins in any order. Companions minted at the same site
+        // survive, and observations after it accrue as usual; with nothing
+        // after it the answer IS `Unknown`, so a chase that reads the
+        // variable carries the reset on instead of falling back.
+        let reset_at = ws
+            .iter()
+            .filter(|w| matches!(w.payload, WitnessPayload::InferredType(InferredType::Unknown)))
+            .map(|w| w.span.start)
+            .filter(|s| narrow_point.map_or(true, |p| *s <= p))
+            .max();
+
         for w in ws {
             // Temporal ordering: only consider witnesses emitted at or
             // before the query point — a later reassignment shouldn't
@@ -190,6 +205,9 @@ impl WitnessReducer for FrameworkAwareTypeFold {
                 if w.span.start > point {
                     continue;
                 }
+            }
+            if reset_at.is_some_and(|r| w.span.start < r) {
+                continue;
             }
             // Skip scoped InferredType witnesses that don't contain the
             // query point — narrowing facts for a different slice of the
@@ -212,6 +230,8 @@ impl WitnessReducer for FrameworkAwareTypeFold {
                         first_param_class = Some(package.clone())
                     }
                     b @ InferredType::BrandedRoute { .. } => branded = Some(b.clone()),
+                    // The reset marker itself: handled by `reset_at`.
+                    InferredType::Unknown => {}
                     // Source priority breaks ties first (an EXPLICIT
                     // annotation — `ANNOT_SOURCE`, priority 20 — governs over
                     // an inferred flow type, priority 10, whatever the order
@@ -313,6 +333,9 @@ impl WitnessReducer for FrameworkAwareTypeFold {
             return ReducedValue::Type(InferredType::String);
         }
 
+        if reset_at.is_some() {
+            return ReducedValue::Type(InferredType::Unknown);
+        }
         ReducedValue::None
     }
 }

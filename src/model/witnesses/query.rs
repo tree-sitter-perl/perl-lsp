@@ -255,6 +255,8 @@ pub fn query_variable_type(
     let reg = ReducerRegistry::with_defaults();
     let mut state = QueryState::new();
     reg.query_variable_with_visited(bag, ctx, var, scope, point, None, &mut state)
+        // The same boundary scrub `ReducerRegistry::query` applies.
+        .filter(|t| !matches!(t, InferredType::Unknown))
 }
 
 /// Fold `KeyWrite`s into variable shape witnesses — the mutation-

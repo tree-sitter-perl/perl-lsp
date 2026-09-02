@@ -104,7 +104,11 @@ rule at the projection (`TargetRef::member_shape` minted whenever the
 pack is strict, `member_value_type` skipping the method arm for a value
 read on a strict pack).
 
-## Residual — an untyped reassignment keeps the earlier type (2026-09-03)
+## LANDED — an untyped reassignment keeps the earlier type (2026-09-03)
+
+Landed: a failed REASSIGNMENT edge materializes to `InferredType::Unknown`,
+a temporal reset in the framework fold that poisons the arms and copies
+reading it (`docs/adr/flow-narrowing.md`).
 
 `$user = new WP_Error(...)` in one branch, then `$user = wp_signon(...)`
 (a `WP_User|WP_Error` return the lattice cannot hold): the second
@@ -115,3 +119,16 @@ an assignment witness needs the same rule — a rebind whose value does
 not type should end the earlier value's region, not leave it standing.
 One with the union fork.
 
+
+## PARKED — `self::VOID` reads report an undefined property (2026-09-03)
+
+`class-wp-block-processor.php` declares `const VOID = 'void'` and reads it
+twice; both reads report `undefined-property 'VOID'`. `--parse` on a
+reduced file shows tree-sitter-php lexing the constant NAME `VOID` as the
+`void` type keyword: `const VOID = "v";` is an `ERROR` node, so the
+declaration never enters the tree and the lane honestly finds no member.
+Any keyword-spelled constant name (`VOID`, `STRING`, `ARRAY` — PHP keywords
+are case-insensitive) hits it. A grammar fix upstream; recovering the
+declaration out of the `ERROR` node would be a rule-#1 scan of error
+children for `const NAME =`, deferred until a corpus shows more than two
+rows.

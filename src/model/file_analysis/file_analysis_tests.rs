@@ -226,6 +226,18 @@ fn test_resolve_return_type_object_does_not_subsume_arrayref() {
 }
 
 #[test]
+fn test_resolve_return_type_two_classes_disagree() {
+    assert_eq!(
+        resolve_return_type(&[
+            InferredType::ClassName("Foo".into()),
+            InferredType::HashRef,
+            InferredType::ClassName("Bar".into()),
+        ]),
+        None,
+    );
+}
+
+#[test]
 fn test_resolve_return_type_single() {
     assert_eq!(
         resolve_return_type(&[InferredType::CodeRef { return_edge: None }]),

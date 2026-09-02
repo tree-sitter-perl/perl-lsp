@@ -644,6 +644,9 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     // flow.assign joins: match_id → (target name+scope, source span)
     let mut flow_targets: HashMap<usize, (String, ScopeId, Point)> = HashMap::new();
     let mut flow_sources: HashMap<usize, Span> = HashMap::new();
+    // `@flow.assign`: the match is a plain assignment to an existing local
+    // (`FlowEdge::reassigns`) — never a declaration or a member write.
+    let mut flow_assigns: std::collections::HashSet<usize> = Default::default();
     // Rebind shapes with no inflowing value (loop vars: `for x in …`,
     // `for (auto x : …)`) — they mint a `Rebind` FlowEdge so the narrowing
     // cutoff sees them, exactly like Perl's `foreach` var.
@@ -1685,6 +1688,9 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
             "flow.source" => {
                 flow_sources.insert(e.match_id, Span { start: e.start, end: e.end });
             }
+            "flow.assign" => {
+                flow_assigns.insert(e.match_id);
+            }
             "type.annot" => {
                 annots.insert(e.match_id, e.text.clone());
             }
@@ -2219,6 +2225,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                 target_at: *at,
                 source: target_span,
                 extraction: crate::model::file_analysis::Extraction::Whole,
+                reassigns: flow_assigns.contains(mid),
             });
         }
     }
@@ -2231,6 +2238,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
             target_at: at,
             source: Span { start: at, end: at },
             extraction: crate::model::file_analysis::Extraction::Rebind,
+            reassigns: false,
         });
     }
     // Destructuring slots bind POSITIONALLY off their source — the same
@@ -2275,6 +2283,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                 target_at: *at,
                 source,
                 extraction,
+                reassigns: false,
             });
         }
     }
