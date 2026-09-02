@@ -122,6 +122,26 @@ impl<'a> Builder<'a> {
         InferredType::Sequence(types)
     }
 
+    /// Is this constraint-constructor name actually imported here?
+    ///
+    /// The name gate itself is global: a plugin declares `Int` a constraint
+    /// constructor and core has no idea which packages pulled it in. Without
+    /// this, a user's own `sub Str` would type as a constraint anywhere —
+    /// and the gate fires BEFORE local symbol lookup, so the user's sub does
+    /// not even get to compete. Hand-curating a list of "names unlikely to
+    /// collide" is the partial enumeration rule #10 warns about: it is
+    /// always incomplete, and the failure is silent.
+    ///
+    /// Requiring the import costs nothing, because Type::Tiny constants MUST
+    /// be imported to compile. `-all` / `:all` / bare `use` expand to the
+    /// full vocabulary through the plugin's `on_use`, and house type
+    /// libraries reach the same place via `SyntheticUse`.
+    fn constraint_name_imported(&self, name: &str) -> bool {
+        self.imports
+            .iter()
+            .any(|i| i.imported_symbols.iter().any(|sym| sym.local_name == name))
+    }
+
     pub(super) fn expr_payload(&mut self, node: Node<'a>) -> Option<crate::model::witnesses::WitnessPayload> {
         use crate::model::witnesses::{RefIdx, WitnessAttachment, WitnessPayload};
         match node.kind() {
@@ -310,7 +330,9 @@ impl<'a> Builder<'a> {
                 // call is a *value* of type `TypeConstraintOf(inner)` — you
                 // call `->check` on it, not Foo's methods. The plugin folds the
                 // params (core extracts them, rule #1); we wrap.
-                if self.type_constraint_names.contains(&bare) {
+                if self.type_constraint_names.contains(&bare)
+                    && self.constraint_name_imported(&bare)
+                {
                     let params = self.extract_constraint_params(node);
                     if let Some(inner) = self.plugins.type_constraint_inner(&bare, &params) {
                         return Some(WitnessPayload::InferredType(
@@ -404,12 +426,6 @@ impl<'a> Builder<'a> {
     /// nothing a consumer can use.
     pub(super) const MAX_EXPR_TYPE_DEPTH: usize = 64;
 
-    /// One `value_arm` counting Fact on the sub's return-arm attachment.
-    ///
-    /// Pushed for every value arm, typed or not: an Edge whose target never
-    /// materializes leaves nothing in the fold, so counting materialized
-    /// arms would read an untypeable arm as an absent one — and the
-    /// all-undef verdict must not fire while any way out yields a value.
     /// Publish one UNDEF arm on the sub's return-arm attachment.
     ///
     /// Carries no rvalue type — `undef`, a bare `return;`, and the empty list

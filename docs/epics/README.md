@@ -62,7 +62,7 @@ any of those three.
 | 9 | [Mojo polish: routes, stash, hooks, chains](09-mojo-polish.md) | L | — |
 | 10 | [CLI analysis subcommands + `--migrate`](10-cli-analysis-and-migrate.md) | L | 7/8 for two lint aliases |
 | 11 | [Program boundaries + MAIN-1](11-program-boundaries.md) | M | brands-half waits on 4 |
-| 12 | [Type::Tiny completeness](12-type-tiny-completeness.md) | S–M | — |
+| 12 | [Type::Tiny check-guards](12-type-tiny-completeness.md) | S | — |
 | 13 | [Pack-language ceiling: diagnostics, framework tier, calibration](13-pack-language-ceiling.md) | L | — |
 | 14 | [The per-file stall — C++ beta → GA](14-per-file-stall.md) | M | — |
 | 15 | [Query paths at scale — Tier 1 residual](15-query-paths-at-scale.md) | L | 1 interlocks (candidate sets) |
@@ -102,7 +102,7 @@ residuals, or (d) explicitly out of scope. Nothing is unaccounted for.
 | `prompt-cli-tools.md` — analysis subcommands + `--migrate` | **Epic 10** |
 | `prompt-entrypoint-analysis.md` | **Epic 11** (brands-half stays parked) |
 | `open-problems.md` §"`main::` aggregation across `require`" | **Epic 11** (phase C) |
-| Type::Tiny check-guards, import-scoped vocabulary | **Epic 12**; `ArrayRef[T]` elements parked with sequence-types |
+| Type::Tiny check-guards | **Epic 12**. The import-scoped name gate and the `Maybe[T]` → `Optional<T>` fold are landed (`adr/type-constraints.md`); `ArrayRef[T]` elements are parked with sequence-types, which names the fold as its waiting caller |
 | `open-problems.md` §"Cross-file `ClassIsa`-trigger emissions" | **LANDED** — `plugin.gated_emissions` + `class_isa_prefix` + `enrichment::apply_gated_emissions`; the doc section is stale and Epic 3 Phase A retires it |
 | `prompt-enrichment-inheritance-residual.md` | Landed with the above; only the `ClassIsa`/`param_types` applicability matrix rows remain, verified in **Epic 3** |
 | `prompt-helper-consumption.md` | Phases 1–2 landed; phase 3 (per-app surfaces) **parked** with instance brands |

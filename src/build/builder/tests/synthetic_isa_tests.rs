@@ -570,14 +570,77 @@ fn moo_instanceof_isa_types_both_getter_and_writer() {
 /// into the param's `ty`; the `Maybe` passthrough fold projects its inner, so
 /// the accessor returns `Foo` (optionalness unmodeled — unwrap for resolution).
 #[test]
-fn moo_maybe_instanceof_isa_unwraps_to_inner_class() {
+fn moo_maybe_instanceof_isa_lifts_to_optional_class() {
+    // `Maybe[T]` is undef-or-T, so the accessor is honestly maybe-undef.
+    // It used to unwrap to a bare `My::Thing`, which threw the optionality
+    // away — a claim the declaration does not make. Optional receivers still
+    // dispatch leniently, so nothing downstream got harder; the deref lints
+    // just see the truth now.
     let fa = build_fa(
         "package T;\nuse Moo;\nuse Types::Standard qw/Maybe InstanceOf/;\nhas thing => (is=>'ro', isa=>Maybe[InstanceOf['My::Thing']]);\n1;\n",
     );
+    let t = fa.sub_return_type_at_arity("thing", Some(0));
+    assert!(
+        matches!(&t, Some(InferredType::Optional(inner)) if inner.class_name() == Some("My::Thing")),
+        "Maybe[InstanceOf['My::Thing']] must type the accessor Optional<My::Thing>, got {t:?}",
+    );
+}
+
+/// Bareword `isa => Int` — a 0-arity base constant is a constraint VALUE
+/// exactly like `InstanceOf['X']`, so it must type the accessor the same way
+/// the quoted `isa => 'Int'` spelling does.
+#[test]
+fn moo_bareword_base_constant_isa_types_accessor() {
+    let fa = build_fa(
+        "package T;\nuse Moo;\nuse Types::Standard qw/Int Str/;\nhas count => (is=>'ro', isa=>Int);\nhas label => (is=>'ro', isa=>Str);\n1;\n",
+    );
     assert_eq!(
-        fa.sub_return_type_at_arity("thing", Some(0)),
-        Some(InferredType::ClassName("My::Thing".to_string())),
-        "Maybe[InstanceOf['My::Thing']] must unwrap to a My::Thing accessor return",
+        fa.sub_return_type_at_arity("count", Some(0)),
+        Some(InferredType::Numeric)
+    );
+    assert_eq!(
+        fa.sub_return_type_at_arity("label", Some(0)),
+        Some(InferredType::String)
+    );
+}
+
+/// A package with its OWN `sub Str` and no Type::Tiny import gets its sub,
+/// not a constraint. The constraint-name gate fires before local symbol
+/// lookup, so without import scoping the user's sub would never compete —
+/// and `Str`/`Int`/`Num` are not rare sub names.
+#[test]
+fn bareword_constraint_name_without_import_is_the_users_sub() {
+    let fa = build_fa("package T;\nsub Str { return 42 }\nsub use_it { my $x = Str(); }\n1;\n");
+    let t = fa.sub_return_type_at_arity("use_it", Some(0));
+    assert!(
+        !matches!(t, Some(InferredType::TypeConstraintOf(_))),
+        "an unimported `Str` must not type as a constraint, got {t:?}",
+    );
+}
+
+/// …and the same name IS a constraint once the package imports it.
+#[test]
+fn bareword_constraint_name_with_import_is_a_constraint() {
+    let fa = build_fa(
+        "package T;\nuse Moo;\nuse Types::Standard qw/Str/;\nhas s => (is=>'ro', isa=>Str);\n1;\n",
+    );
+    assert_eq!(
+        fa.sub_return_type_at_arity("s", Some(0)),
+        Some(InferredType::String)
+    );
+}
+
+/// `Maybe[Int]` composes both halves: the base constant folds to its rep,
+/// then `Maybe` lifts it.
+#[test]
+fn moo_bareword_maybe_int_isa_types_optional_numeric() {
+    let fa = build_fa(
+        "package T;\nuse Moo;\nuse Types::Standard qw/Maybe Int/;\nhas count => (is=>'ro', isa=>Maybe[Int]);\n1;\n",
+    );
+    let t = fa.sub_return_type_at_arity("count", Some(0));
+    assert!(
+        matches!(&t, Some(InferredType::Optional(inner)) if matches!(&**inner, InferredType::Numeric)),
+        "Optional<Numeric>, got {t:?}",
     );
 }
 

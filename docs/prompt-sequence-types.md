@@ -17,6 +17,12 @@ history: `prompt-sequence-types.md` @ 9d34441).
    to one array (push in one sub, read in another).
 3. **Framework slot shapes** — `has` accessors returning typed
    sequences (`isa => ArrayRef[Str]` → element type on projection).
+   **Waiting caller:** `frameworks/type-tiny.rhai`'s `base_constant_type`
+   folds every parameterized container to its bare rep (`ArrayRef[Int]`
+   → `ArrayRef`) because the element type has no `InferredType` slot to
+   ride. When this phase lands, that fold should return the
+   parameterized type and the accessor projection follows — the
+   vocabulary is already there, only the destination is missing.
 4. **Pipeline reducers** — `SequenceTransform`/`SeqOp` for
    map/grep/sort/reverse chains. The likeliest first pull (crm is
    map-heavy).

@@ -43,6 +43,13 @@ useful). `delete $self->{k}` as a "drop" signal — ignore for now.
 
 ## Part 2 — Hash key unions
 
+**Waiting data:** an undef arm already records WHICH spelling produced it
+(`witnesses::tags::UndefArm`, on the Fact's `value`). It matters here and
+nowhere else yet: in `my %o = (%defaults, f());` an `EmptyList` (`return;`
+or `()`) splices nothing, while a `Scalar` (`return undef`) contributes a
+lone undef and leaves the list odd-length. The payload is dormant and
+pinned by a test; this is the consumer it is waiting for.
+
 Today each `HashKeyDef` has exactly one owner. Real code composes:
 
 ```perl

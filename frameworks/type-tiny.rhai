@@ -27,21 +27,52 @@ fn id() { "type-tiny" }
 // Manifest hooks are global (consulted by name), so triggers are irrelevant.
 fn triggers() { [] }
 
-// Cheap dispatch gate: which call names are constraint constructors.
-fn type_constraint_names() { ["InstanceOf", "ConsumerOf", "Maybe"] }
+// Which call names are constraint constructors. The 0-arity base constants
+// are constraint VALUES too — `isa => Int` is a Type::Tiny object exactly
+// like `InstanceOf['X']` — so they belong here, and core gates them on the
+// enclosing package having IMPORTED the name (a `use Types::Standard
+// qw/Str Int/`, or the full vocab from `-all`). Without that scoping a
+// user's own `sub Str` anywhere would type as a constraint; with it, only
+// packages that actually pulled the name in are affected.
+fn type_constraint_names() {
+    ["InstanceOf", "ConsumerOf", "Maybe",
+     "Str", "Int", "Num", "LaxNum", "StrictNum",
+     "ArrayRef", "HashRef", "CodeRef", "RegexpRef", "Undef"]
+}
+
+// The rep a 0-arity base constant constrains to; () for names we cannot
+// express. A parameterized container (`ArrayRef[Int]`) folds to its base
+// rep — the element type has no InferredType slot to ride until
+// sequence-types lands (docs/prompt-sequence-types.md).
+fn base_constant_type(name) {
+    if name == "Str" { return type_string(); }
+    if name == "Int" || name == "Num" || name == "LaxNum" || name == "StrictNum" {
+        return type_numeric();
+    }
+    if name == "ArrayRef" { return type_arrayref(); }
+    if name == "HashRef" { return type_hashref(); }
+    if name == "CodeRef" { return type_coderef(); }
+    if name == "RegexpRef" { return type_regexp(); }
+    if name == "Undef" { return type_undef(); }
+    ()
+}
 
 // Fold the constructor's params into the constrained INNER type, or () to
 // decline. `params` is a list of #{ string, ty }. Arity is ours to handle.
 fn type_constraint_inner(name, params) {
-    if params.is_empty() { return (); }
     if name == "Maybe" {
-        // `Maybe[T]` permits undef OR a T; for resolution purposes the
-        // constrained value (when present) is whatever T constrains to. The
-        // single param is a nested constructor the core typed
-        // `TypeConstraintOf(T)`; pass through to T's inner. (Optionalness
-        // itself isn't modeled — see docs/adr/type-constraints.md.)
-        return constrained_inner(params[0].ty);
+        // `Maybe[T]` permits undef OR a T — the honest `Optional<T>`, which
+        // the lattice now models. The single param is a nested constructor
+        // core typed `TypeConstraintOf(T)`; project T's inner and lift.
+        if params.is_empty() { return (); }
+        let inner = constrained_inner(params[0].ty);
+        if inner == () { return (); }
+        return type_optional(inner);
     }
+    // 0-arity base constants take no params, so this precedes the arity gate.
+    let base = base_constant_type(name);
+    if base != () { return base; }
+    if params.is_empty() { return (); }
     // InstanceOf['Foo'] / ConsumerOf['Role'] — first string param is the class.
     let cls = params[0].string;
     if cls == () { return (); }

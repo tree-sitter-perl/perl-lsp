@@ -92,6 +92,25 @@ pub fn make_engine() -> Engine {
         }
     });
 
+    // Lift a type to `Optional<T>` — `Maybe[T]` is undef-or-T, and a plugin
+    // that resolved T needs to say so without knowing the enum's shape.
+    // Idempotent: an already-Optional value passes through rather than
+    // nesting. Unit in, unit out, so a fold can pipe a declined inner
+    // straight through without re-checking it.
+    engine.register_fn("type_optional", |inner: Dynamic| -> Dynamic {
+        let Ok(t) = from_dynamic::<InferredType>(&inner) else { return Dynamic::UNIT; };
+        let lifted = match t {
+            InferredType::Optional(_) => t,
+            other => InferredType::Optional(Box::new(other)),
+        };
+        to_dynamic(lifted).unwrap_or(Dynamic::UNIT)
+    });
+
+    // The definitive bottom. `isa => Undef` is a real Type::Tiny constraint.
+    engine.register_fn("type_undef", || {
+        to_dynamic(InferredType::Undef).unwrap_or(Dynamic::UNIT)
+    });
+
     // Mark a param-list's first element as the implicit invocant.
     // Framework callbacks typically receive the receiver as their
     // first positional (`$c` for Mojolicious helpers, `$self_in`
