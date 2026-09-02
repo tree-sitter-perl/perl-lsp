@@ -1039,6 +1039,12 @@ pub struct UseMapPins {
     pub own_namespace: Option<String>,
     /// The leaves this file writes as class tokens.
     pub spelled: std::collections::HashSet<String>,
+    /// Every namespace the file can NAME a given real leaf in — its pin
+    /// first, then the namespaces of aliased imports of that leaf (`use
+    /// Support\Collection as BaseCollection` beside its own `Collection`).
+    /// Real-leaf lookups (a parent walk, a class-keyed candidate table)
+    /// admit all of them; `namespace_of` still answers the bare spelling.
+    pub visible: std::collections::HashMap<String, Vec<String>>,
 }
 
 impl UseMapPins {
@@ -1268,29 +1274,41 @@ impl<'a> CrossFileLookup for ScopedLookup<'a> {
                 if cands.len() < 2 {
                     return cands;
                 }
-                let Some(want) = pins.namespace_of(name) else {
+                let want = pins.namespace_of(name);
+                let visible = pins.visible.get(name);
+                if want.is_none() && visible.is_none() {
                     return cands;
-                };
-                // A declaration under the pinned namespace is the class this
-                // file means; one under another namespace is a stranger
-                // sharing the leaf. A pinned leaf (the file NAMED it) keeps
-                // only agreeing declarations — an empty answer is the honest
-                // one when the named class isn't indexed. The own-namespace
-                // default is a RANK, not a filter: the file made no claim, so
-                // the table stays whole with its own namespace first.
+                }
+                // A declaration under a namespace the file can NAME this leaf
+                // in (its pin, or an aliased import of the same leaf) is a
+                // class this file means; one under another namespace is a
+                // stranger sharing the leaf. A pinned leaf keeps only those —
+                // an empty answer is the honest one when the named class
+                // isn't indexed. The own-namespace default is a RANK, not a
+                // filter: the file made no claim, so the table stays whole
+                // with its own namespace first.
                 let pinned = pins.pinned(name);
-                let mut agree: Vec<std::sync::Arc<CachedModule>> = Vec::new();
+                let rank = |ns: &str| -> Option<usize> {
+                    if want == Some(ns) {
+                        return Some(0);
+                    }
+                    visible.and_then(|v| v.iter().position(|x| x == ns)).map(|i| i + 1)
+                };
+                let mut agree: Vec<(usize, std::sync::Arc<CachedModule>)> = Vec::new();
                 let mut rest: Vec<std::sync::Arc<CachedModule>> = Vec::new();
                 for c in cands {
                     let declared = self.inner.symbols_present(&c).declared_class_namespace(name);
-                    match declared {
-                        Some(ns) if ns == want => agree.push(c),
-                        Some(_) if pinned => {}
-                        _ => rest.push(c),
+                    match declared.as_deref().and_then(rank) {
+                        Some(r) => agree.push((r, c)),
+                        None if declared.is_some() && pinned => {}
+                        None => rest.push(c),
                     }
                 }
-                agree.extend(rest);
-                agree
+                agree.sort_by_key(|(r, _)| *r);
+                let mut out: Vec<std::sync::Arc<CachedModule>> =
+                    agree.into_iter().map(|(_, c)| c).collect();
+                out.extend(rest);
+                out
             }
             VisibilityAxis::IncludeClosure => {
                 // Flat linkage: keep candidates CONNECTED to the asker —

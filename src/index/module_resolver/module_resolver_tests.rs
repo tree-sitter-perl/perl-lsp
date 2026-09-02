@@ -712,6 +712,7 @@ fn flat_axis_is_scopeless_by_rule_transparent_is_not() {
         .collect(),
         own_namespace: Some("App".to_string()),
         spelled: ["Request".to_string()].into_iter().collect(),
+        visible: Default::default(),
     };
     let usemap = ScopedLookup::new(
         &idx,

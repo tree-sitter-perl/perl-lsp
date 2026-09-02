@@ -1057,8 +1057,14 @@ impl FileAnalysis {
                 pin(&mut pins, leaf, ns);
             }
         }
-        for (alias, ns, _) in &self.pack.use_aliases {
+        let mut visible: std::collections::HashMap<String, Vec<String>> =
+            std::collections::HashMap::new();
+        for (alias, ns, leaf) in &self.pack.use_aliases {
             pin(&mut pins, alias, ns);
+            let v = visible.entry(leaf.clone()).or_default();
+            if !v.contains(ns) {
+                v.push(ns.clone());
+            }
         }
         let mut own: Option<String> = None;
         let mut several = false;
@@ -1112,7 +1118,15 @@ impl FileAnalysis {
                 _ => {}
             }
         }
-        UseMapPins { pins, own_namespace: own_ns, spelled }
+        for (leaf, ns) in &pins {
+            if let Some(ns) = ns {
+                let v = visible.entry(leaf.clone()).or_default();
+                if !v.contains(ns) {
+                    v.insert(0, ns.clone());
+                }
+            }
+        }
+        UseMapPins { pins, own_namespace: own_ns, spelled, visible }
     }
 
     /// Does `class` carry BOTH a callable (`Sub`/`Method`) and a stored
