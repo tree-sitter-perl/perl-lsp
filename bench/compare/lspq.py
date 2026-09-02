@@ -12,7 +12,7 @@ class Lsp:
         self.err = open(errpath, "wb")
         self.proc = subprocess.Popen(shlex.split(cmd), stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=self.err, cwd=self.root)
         self.nid = 1; self.pending = {}; self.lock = threading.Lock()
-        self.notifs = []
+        self.notifs = []; self.diags = {}
         threading.Thread(target=self._read, daemon=True).start()
     def rss_mb(self):
         try:
@@ -48,6 +48,8 @@ class Lsp:
                 if ev: ev[1] = msg; ev[0].set()
             else:
                 self.notifs.append(msg)
+                if msg.get("method") == "textDocument/publishDiagnostics":
+                    prm = msg.get("params", {}); self.diags[prm.get("uri")] = prm.get("diagnostics", [])
     def request(self, method, params, timeout=120):
         i = self.nid; self.nid += 1
         ev = [threading.Event(), None]; self.pending[i] = ev
@@ -61,6 +63,8 @@ def main():
     ap = argparse.ArgumentParser(); ap.add_argument("--cmd", required=True); ap.add_argument("--root", required=True)
     ap.add_argument("--probes", required=True); ap.add_argument("--out", required=True); ap.add_argument("--ready-timeout", type=float, default=600)
     ap.add_argument("--label", default="tool"); ap.add_argument("--settle", type=float, default=0)
+    ap.add_argument("--diag-settle", type=float, default=3, help="seconds to wait for publishDiagnostics after the last probe")
+    ap.add_argument("--open", action="append", default=[], help="extra files to open (diagnostics capture)")
     a = ap.parse_args()
     spec = json.load(open(a.probes)); root = os.path.abspath(a.root)
     uri = lambda rel: pathlib.Path(os.path.join(root, rel)).as_uri()
@@ -76,6 +80,7 @@ def main():
         text = open(os.path.join(root, rel), encoding="utf8", errors="replace").read()
         lsp.notify("textDocument/didOpen", {"textDocument": {"uri": uri(rel), "languageId": "php", "version": 1, "text": text}}); opened.add(rel)
     r = spec["readiness"]; open_file(r["file"])
+    for rel in a.open + spec.get("open", []): open_file(rel)
     t0 = time.monotonic(); ready = None
     while time.monotonic() - t0 < a.ready_timeout:
         msg, _ = lsp.request("textDocument/definition", {"textDocument": {"uri": uri(r["file"])}, "position": {"line": r["line"], "character": r["character"]}}, timeout=60)
@@ -110,6 +115,23 @@ def main():
             elif verb == "completion":
                 m, ms = lsp.request("textDocument/completion", td); res = (m or {}).get("result"); items = res.get("items") if isinstance(res, dict) else (res or [])
                 rec["completion"] = sorted(i.get("label","") for i in items)[:400]; rec["completion_count"] = len(items); rec["completion_ms"] = ms
+            elif verb == "signatureHelp":
+                m, ms = lsp.request("textDocument/signatureHelp", td); res = (m or {}).get("result") or {}
+                sigs = res.get("signatures") or []
+                rec["signatureHelp"] = [{"label": x.get("label"), "doc": (x.get("documentation") if isinstance(x.get("documentation"), str) else (x.get("documentation") or {}).get("value")), "params": [(pp.get("label") if isinstance(pp.get("label"), str) else str(pp.get("label"))) for pp in (x.get("parameters") or [])]} for x in sigs]
+                rec["signatureHelp_active"] = res.get("activeParameter"); rec["signatureHelp_ms"] = ms
+            elif verb == "codeAction":
+                rng = {"start": td["position"], "end": td["position"]}
+                m, ms = lsp.request("textDocument/codeAction", {"textDocument": td["textDocument"], "range": rng, "context": {"diagnostics": [d for d in lsp.diags.get(uri(p["file"]), []) if d.get("range",{}).get("start",{}).get("line") == p["line"]]}})
+                res = (m or {}).get("result") or []
+                rec["codeAction"] = [{"title": x.get("title"), "kind": x.get("kind")} for x in res]; rec["codeAction_ms"] = ms
+            elif verb == "typeDefinition":
+                m, ms = lsp.request("textDocument/typeDefinition", td); rec["typeDefinition"] = norm_loc((m or {}).get("result")) if "result" in (m or {}) else {"error": str((m or {}).get("error"))[:80]}; rec["typeDefinition_ms"] = ms
+            elif verb == "documentSymbol":
+                m, ms = lsp.request("textDocument/documentSymbol", {"textDocument": td["textDocument"]}); res = (m or {}).get("result") or []
+                def count(items):
+                    return sum(1 + count(i.get("children") or []) for i in items)
+                rec["documentSymbol"] = count(res); rec["documentSymbol_ms"] = ms
             elif verb == "rename":
                 m, ms = lsp.request("textDocument/rename", dict(td, newName=p.get("new_name","zzRenamed"))); res = (m or {}).get("result"); edits = []
                 if res:
@@ -120,6 +142,11 @@ def main():
                         for e in dc.get("edits", []): edits.append({"file": os.path.relpath(pathlib.Path(u[7:]).as_posix(), root), "line": e["range"]["start"]["line"], "char": e["range"]["start"]["character"]})
                 rec["rename"] = sorted(edits, key=lambda d: (d["file"], d["line"], d["char"])); rec["rename_error"] = (m or {}).get("error"); rec["rename_ms"] = ms
         out["probes"].append(rec)
+    if a.diag_settle: time.sleep(a.diag_settle)
+    out["diagnostics"] = {}
+    for rel in sorted(opened):
+        ds = lsp.diags.get(uri(rel), [])
+        out["diagnostics"][rel] = [{"line": d.get("range",{}).get("start",{}).get("line"), "severity": d.get("severity"), "code": d.get("code"), "message": (d.get("message") or "")[:160]} for d in ds]
     out["rss_end"] = lsp.rss_mb()
     try: lsp.request("shutdown", None, timeout=10); lsp.notify("exit", None)
     except Exception: pass
