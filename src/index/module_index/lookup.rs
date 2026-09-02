@@ -370,6 +370,22 @@ impl CrossFileLookup for ModuleIndex {
         self.rehydrate_rows_or_resident(cached)
     }
 
+    fn prefetch_refs(&self, paths: &[std::path::PathBuf]) {
+        use rayon::prelude::*;
+        if paths.len() < 2 || std::env::var_os("PERL_LSP_REFS_NO_PREFETCH").is_some() {
+            return;
+        }
+        // Bounded so a giant candidate set cannot churn the byte-capped LRU
+        // past the entries the walk is about to read.
+        let take = paths.len().min(4096);
+        crate::util::ghost_stats::timed("refs.prefetch", || {
+            paths[..take].par_iter().for_each(|p| {
+                if let Some(cm) = self.cached_by_path(p) {
+                    let _ = self.refs_present(&cm);
+                }
+            });
+        });
+    }
     fn refs_present(&self, cached: &Arc<CachedModule>) -> Arc<FileAnalysis> {
         // Backward-walk view: refs AND symbols usable (the matcher reads
         // usage rows + declaration rows). The @INC strip is bag-only, so

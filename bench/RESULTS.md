@@ -536,3 +536,31 @@ the first cross-file probe raced it in the unsettled run):
 Parity with phpactor on every row; Intelephense's free tier answers no
 typeDefinition at all. Latency 2–6 ms per answer.
 
+### Deprecations and the cold references walk (2026-09-02, night)
+
+Deprecation fixture (`spec-depr.json`: a class, two methods — one
+`@deprecated`, one `#[Deprecated]` — and a function, all used from
+another file; published diagnostics captured):
+
+| tool | rows | attribute form (`#[Deprecated]`) | notice text |
+|---|---|---|---|
+| ours | 4 | yes | yes (`'Legacy' is deprecated: use Modern instead`) |
+| Intelephense (free) | 3 | no | no |
+| phpactor | 3 | no | yes |
+
+Cold references, editor path (guzzle `Client::__construct`, 304
+references, workspace persisted, server restarted; three runs each):
+
+| build | first answer (ms) | warm (ms) |
+|---|---|---|
+| decode under the connection lock, no prefetch | 224 / 245 / 271 | ~25 |
+| decode under the lock, rayon prefetch | 245 / 267 / 287 (flat) | ~25 |
+| decode outside the lock, rayon prefetch | 174 / 194 / 189 | ~25 |
+| decode outside the lock, no prefetch | 229 / 209 / 237 | ~25 |
+
+The lock split is what let the prefetch pay: the rehydration loader ran
+zstd + bincode inside the retained SQLite connection's mutex, so
+parallel decodes queued. Intelephense's first references answer on the
+same site was 110 ms in the round-1 ledger; the remaining gap is the
+rows→whole upgrades (10 double-decodes) and the matcher itself.
+

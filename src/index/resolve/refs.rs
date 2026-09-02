@@ -561,6 +561,9 @@ fn walk_refs(
                 rows_indexed = idx.ref_indexed_paths();
                 candidate_set = candidate_paths.iter().cloned().collect();
             }
+            // Decode the candidate set in parallel before the sequential
+            // match: cold, decode was ~60% of the first answer.
+            idx.prefetch_refs(&candidate_paths);
             for path in candidate_paths {
                 if covered_paths.contains(&path) {
                     continue;

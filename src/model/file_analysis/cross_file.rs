@@ -781,6 +781,12 @@ pub trait CrossFileLookup {
     fn ref_indexed_paths(&self) -> std::collections::HashSet<std::path::PathBuf> {
         std::collections::HashSet::new()
     }
+    /// Warm the rows views of `paths` before a walk reads them one by one:
+    /// decode is CPU-bound and the walk is sequential, so an index that
+    /// can decode in parallel does it here and the walk hits its LRU.
+    /// Default: nothing (a lookup without a decode cache has nothing to
+    /// warm).
+    fn prefetch_refs(&self, _paths: &[std::path::PathBuf]) {}
     /// Path-keyed cached-module lookup — the retrieval above hands back
     /// paths; this maps them onto the resident registration (for the
     /// visibility gate + whole-copy rehydration). Default `None`.
@@ -1405,6 +1411,9 @@ impl<'a> CrossFileLookup for ScopedLookup<'a> {
     ) -> std::sync::Arc<FileAnalysis> {
         // Same delegation rule as `symbols_present`.
         self.inner.refs_present(cached)
+    }
+    fn prefetch_refs(&self, paths: &[std::path::PathBuf]) {
+        self.inner.prefetch_refs(paths)
     }
     fn candidate_may_declare(
         &self,
