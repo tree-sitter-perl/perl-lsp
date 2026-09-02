@@ -197,6 +197,30 @@ templates). Market case and build-out plan in `docs/prompt-php-target.md`.
   `new Foo()` sites, `Foo::class`, and bareword static receivers.
 - **Nested generics over `mixed`.** `@var array<array<mixed>>` types the
   loop element as an array instead of collapsing the whole annotation.
+- **Goto-def on a call lands on the method, not a same-named property.**
+  A same-file `$this->hasAuth()` goes to `hasAuth()`, `$this->hasAuth`
+  to the property (the build-time call stamp now honors the written
+  shape). A keyed two-pair array (`['chapter' => $c, 'book' => $c->book]`)
+  is no longer mistaken for a `[$obj, 'method']` callable, so its key is
+  not a method reference a rename would rewrite.
+- **Eloquent relations behind a modifier.** `return
+  $this->belongsTo(Book::class)->withTrashed();` still types the magic
+  `->book` property, so `$chapter->book->getUrl()` resolves.
+- **String callables and `new self`.** `'A\B\X::method'` strings (in
+  `call_user_func`, `array_map`, …) are references to the method, and a
+  rename rewrites exactly the method tail inside the string. `new
+  self(...)` / `new static(...)` count for the constructor's references,
+  hover and goto-def; constructor names are not renameable.
+- **Import rows.** A middle segment of `use Illuminate\Http\Request;`
+  no longer jumps to a same-named class elsewhere; an aliased import
+  (`use Script\Event as ScriptEvent;`) leaves the bare leaf to the
+  file's own class.
+- **Dead-code queue honesty.** A constructor of a class that is named
+  anywhere (a type hint, `Foo::class`, a `use` row) is treated as
+  container-instantiated (`class-referenced`) rather than dead
+  (symfony/demo: 42 → 36 candidates). A broken bundled framework overlay
+  now drops with a diagnostic instead of silently disabling every PHP
+  verb.
 - **`--heatmap` on PHP: same answers, less work.** The PHP tier now
   pre-prunes its fan-in walk from its own reference rows, and a file's
   `use`-map is derived once per analysis instead of once per scanned
