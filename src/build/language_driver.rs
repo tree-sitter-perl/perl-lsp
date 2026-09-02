@@ -1317,6 +1317,7 @@ fn remap_spans(
         import_template: _,
         preamble_end: _,
         imports_bind_names: _,
+        member_shapes_are_strict: _,
         doc_mentions: _,
         // language-wide facts, no spans to remap.
         function_scoped_vars: _,
@@ -1707,6 +1708,25 @@ impl LanguageRegistry {
     /// host derives its search path. Read from the pack's own
     /// `include_path_tokens` declaration — never a language-name branch.
     /// Memoized like `is_pack_language`.
+    /// The classes a language provides in its global namespace — the
+    /// pack's `builtin_types`; empty for a language without a pack.
+    pub fn builtin_types(id: &str) -> &'static [&'static str] {
+        static TYPES: std::sync::OnceLock<Vec<(&'static str, &'static [&'static str])>> =
+            std::sync::OnceLock::new();
+        TYPES
+            .get_or_init(|| {
+                LanguageRegistry::with_enabled()
+                    .drivers
+                    .iter()
+                    .filter_map(|d| d.lang_pack().map(|p| (d.id(), p.builtin_types)))
+                    .collect()
+            })
+            .iter()
+            .find(|(l, _)| *l == id)
+            .map(|(_, t)| *t)
+            .unwrap_or(&[])
+    }
+
     pub fn pack_visibility(id: &str) -> crate::model::file_analysis::PackVisibility {
         use crate::model::file_analysis::PackVisibility;
         static LINKAGE: std::sync::OnceLock<Vec<(&'static str, bool)>> =

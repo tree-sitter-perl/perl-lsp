@@ -510,6 +510,11 @@ impl FileAnalysis {
             if let Some(r) = self.member_resolution_on_class_pass(cls, method_name, module_index, &agrees) {
                 return Some(r);
             }
+            // php: the syntax decided the kind; a value read of a name only
+            // a method carries is an undeclared property, not that method.
+            if self.pack.member_shapes_are_strict {
+                return None;
+            }
         }
         self.member_resolution_on_class_pass(cls, method_name, module_index, &|_| true)
     }

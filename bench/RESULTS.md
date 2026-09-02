@@ -607,3 +607,15 @@ Lanes the others carry that we do not (from the same runs): Intelephense's
 "declared but not used" variable hint and its documented-vs-declared
 type mismatch; both are the next diagnostics axis.
 
+### Lanes the others carry, judged (2026-09-03, 01:05)
+
+- **"Declared but not used" variables** (Intelephense): mirrored as
+  `unused-variable` (hint, unnecessary-tagged; parameters, captures and
+  dynamically-materialized scopes silent).
+- **"Documented type is not compatible with the declared type"**
+  (Intelephense, severity 3): every row it reported on monolog
+  (`Logger.php` 192/205/234, `LineFormatter.php` 55/69) is the
+  fluent-builder `@return $this` / `@return static` against `: self` —
+  an idiom, not a mismatch, and one the extractor already reduces to
+  the same receiver bucket. Not mirrored; noise.
+

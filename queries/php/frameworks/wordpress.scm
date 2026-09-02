@@ -17,7 +17,7 @@
   function: (name) @_wphook
   arguments: (arguments
     . (argument)
-    . (argument (string (string_content) @ref.call.named)))
+    . (argument (string . (string_content) @ref.call.named .)))
   (#any-of? @_wphook "add_action" "add_filter" "remove_action" "remove_filter"))
 
 ; Hook-NAME identity: `add_action('init', …)`'s FIRST argument declares

@@ -313,6 +313,15 @@ templates). Market case and build-out plan in `docs/prompt-php-target.md`.
 - **Properties typed by assignment.** `$this->mailer = new Mailer()` in
   a constructor types `$this->mailer` for every reader in the class,
   with no declared type or docblock — chains through it resolve.
+- **Lanes hardened on WordPress and laravel.** Trait and enum bodies
+  composing traits, aliases of global classes and `Str::$method()`
+  receivers count as uses of their imports; the global namespace knows
+  php's own classes, so `new Exception` never reads as a missing import;
+  an escaped string callable is no type reference; a php value read
+  never resolves to a method.
+- **Unused variables.** A local assigned and never read is an
+  unnecessary-tagged hint at its declaration; parameters, closure
+  captures and dynamically-materialized scopes stay quiet.
 - **Deprecations.** A use of a method, function or class whose
   declaration carries `@deprecated [text]` or `#[Deprecated]` — in this
   file, the workspace or a dependency — is a deprecated-tagged hint with

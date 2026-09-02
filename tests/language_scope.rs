@@ -1211,7 +1211,7 @@ fn php_unused_import_lane_counts_every_spelling() {
     std::fs::create_dir_all(dir.join("src")).unwrap();
     let w = |rel: &str, src: &str| std::fs::write(dir.join(rel), src).unwrap();
     w("composer.json", "{\"autoload\": {\"psr-4\": {\"App\\\\\": \"src/\"}}}");
-    w("src/Use1.php", "<?php\nnamespace App;\n\nuse App\\Guard;\nuse App\\Attr\\Route;\nuse App\\Psr7;\nuse App\\Doc\\Shape;\nuse App\\Never;\nuse App\\Aliased as Other;\nuse const App\\LIMIT;\n\nclass Use1\n{\n    /** @var Shape */\n    private $shape;\n\n    #[Route('/x')]\n    public function run($x): int\n    {\n        if ($x instanceof Guard) { return 1; }\n        $o = new Other();\n        return Psr7\\Utils::count($o);\n    }\n}\n");
+    w("src/Use1.php", "<?php\nnamespace App;\n\nuse App\\Guard;\nuse App\\Attr\\Route;\nuse App\\Psr7;\nuse App\\Doc\\Shape;\nuse App\\Never;\nuse App\\Aliased as Other;\nuse const App\\LIMIT;\nuse App\\Tr\\Mixin;\nuse Exception as NativeException;\nuse App\\Str;\n\ntrait Composed { use Mixin; }\nclass E extends NativeException {}\nclass Use1\n{\n    /** @var Shape */\n    private $shape;\n\n    #[Route('/x')]\n    public function run($x): int\n    {\n        if ($x instanceof Guard) { return 1; }\n        $o = new Other();\n        $m = 'x';\n        $anon = new class { public function go($m) { return Str::$m(); } };\n        return Psr7\\Utils::count($o);\n    }\n}\n");
     let out = std::process::Command::new(env!("CARGO_BIN_EXE_perl-lsp"))
         .args(["--check", dir.to_str().unwrap(), "--severity", "hint"])
         .env("XDG_CACHE_HOME", dir.join(".cache"))
@@ -1332,5 +1332,74 @@ fn php_properties_are_typed_by_assignment() {
     let col = lines[11].find("send()").unwrap();
     let def = run(&["--definition", root, "src/Service.php", "11", &col.to_string()]);
     assert!(def.contains("src/Mailer.php:4:"), "{def}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+
+/// The unused-variable lane: a local assigned and never read is an
+/// unnecessary-tagged hint at its declaration; parameters (promoted ones
+/// too), a closure's captured variable, a read through `++`, and a callable
+/// that materializes variables dynamically stay quiet.
+#[cfg(feature = "php")]
+#[test]
+fn php_unused_variable_lane_flags_locals_never_read() {
+    let dir = std::env::temp_dir().join(format!("perl-lsp-d2unusedvar-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    let w = |rel: &str, src: &str| std::fs::write(dir.join(rel), src).unwrap();
+    w("composer.json", "{\"autoload\": {\"psr-4\": {\"App\\\\\": \"src/\"}}}");
+    w("src/C.php", "<?php\nnamespace App;\nclass C\n{\n    public function __construct(private int $promoted) {}\n    public function run(int $param, array $rows): int\n    {\n        $unused = 1;\n        $used = 2;\n        $captured = 3;\n        $f = function () use ($captured) { return $captured; };\n        foreach ($rows as $k => $v) { echo $v; }\n        try { $x = 1; } catch (\\Throwable $e) { }\n        $cnt = 0;\n        $cnt++;\n        return $used + $f();\n    }\n    public function dyn(): array { $a = 1; return compact('a'); }\n}\n");
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_perl-lsp"))
+        .args(["--check", dir.to_str().unwrap(), "--severity", "hint"])
+        .env("XDG_CACHE_HOME", dir.join(".cache"))
+        .output()
+        .expect("run");
+    let err = String::from_utf8_lossy(&out.stderr);
+    let mut names: Vec<&str> = err
+        .lines()
+        .filter(|l| l.contains("[unused-variable]"))
+        .filter_map(|l| l.split('\'').nth(1))
+        .collect();
+    names.sort();
+    assert_eq!(names, vec!["$e", "$k", "$unused", "$x"], "{err}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+
+/// The global namespace knows the classes php itself provides: `new
+/// Exception` in a namespace-less file is not a type missing its import
+/// because a vendored `Vendor\Exception` exists; a string callable with
+/// escape sequences (`'\\Sodium\\bin2hex'`) is no type reference; a
+/// workspace class used without its import still reports.
+#[cfg(feature = "php")]
+#[test]
+fn php_global_namespace_builtins_and_escaped_string_callables_stay_quiet() {
+    let dir = std::env::temp_dir().join(format!("perl-lsp-d2globals-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("src/Util")).unwrap();
+    std::fs::create_dir_all(dir.join("vendor/x")).unwrap();
+    std::fs::create_dir_all(dir.join("bin")).unwrap();
+    let w = |rel: &str, src: &str| std::fs::write(dir.join(rel), src).unwrap();
+    w("composer.json", "{\"autoload\": {\"psr-4\": {\"App\\\\\": \"src/\"}}}");
+    w("vendor/x/Exception.php", "<?php\nnamespace Vendor;\nclass Exception extends \\Exception {}\n");
+    w("src/Util/Helper.php", "<?php\nnamespace App\\Util;\nclass Helper { public static function go(): int { return 1; } }\n");
+    w("bin/run.php", "<?php\ntry { throw new Exception('x'); } catch (Exception $e) { echo $e; }\n$d = new DateTime();\nHelper::go();\n");
+    w("src/Sodium.php", "<?php\nnamespace Sodium;\nif (!is_callable('\\\\Sodium\\\\bin2hex')) { echo 1; }\n");
+    w("src/Svc.php", "<?php\nnamespace App;\nclass Svc\n{\n    public function session(): int { return 1; }\n    public function store()\n    {\n        return $this->session->store;\n    }\n}\n");
+    let run = |args: &[&str]| {
+        let out = std::process::Command::new(env!("CARGO_BIN_EXE_perl-lsp"))
+            .args(args)
+            .env("XDG_CACHE_HOME", dir.join(".cache"))
+            .output()
+            .expect("run");
+        format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr))
+    };
+    let root = dir.to_str().unwrap();
+    let err = run(&["--check", root, "--severity", "hint"]);
+    let undefined: Vec<&str> = err.lines().filter(|l| l.contains("[undefined-type]")).collect();
+    assert_eq!(undefined.len(), 1, "{err}");
+    assert!(undefined[0].contains("bin/run.php") && undefined[0].contains("'Helper'"), "{undefined:?}");
+    // a value read of a name only a method carries is an undeclared property
+    assert!(err.lines().any(|l| l.contains("Svc.php") && l.contains("[undefined-property]") && l.contains("'session'")), "{err}");
     let _ = std::fs::remove_dir_all(&dir);
 }

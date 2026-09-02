@@ -93,6 +93,12 @@ Every lane names the case it cannot see and stays silent there:
   `#include` splices text. Constant imports (no lowercase letter) are
   silent — the walker records no spelling for them. The quick-fix deletes
   the row when it binds only that name.
+- **An unused variable** (`unused-variable`, a hint tagged unnecessary)
+  is a local the callable writes and never reads — reads are credited to
+  every enclosing callable, so a closure's `use ($x)` reads the outer
+  `$x` through its own copy. A parameter (the pack's `param_regions`) is
+  the caller's contract, never a local; a callable that materializes
+  variables dynamically is silent, as for the undefined-variable lane.
 - **A deprecated declaration** (`deprecated`, a hint tagged deprecated)
   flags each use: the declaration's `@deprecated [text]` or the pack's
   deprecation attribute (`LangPack::deprecated_attribute`, php
@@ -102,9 +108,11 @@ Every lane names the case it cannot see and stays silent there:
   read the resolved owner symbol; functions and classes look up the leaf
   locally, then across the visible candidates.
 - **The global namespace** (an absolute name, a namespace-less file) is
-  the builtins we carry no stubs for — silent, except a leaf the
-  workspace declares under a namespace and nowhere global: that is a
-  real type missing its import, and reports with its candidates.
+  silent for the classes php itself provides (`LangPack::builtin_types`:
+  core, SPL, the bundled extensions — names, not stubs) and for any leaf
+  the workspace declares globally; a leaf the workspace declares only
+  under a namespace is a real type missing its import, and reports with
+  its candidates.
 - **An undefined type is a quick-fix**: the diagnostic carries every
   namespace that declares the leaf (`data.candidates`, the same set the
   existence test reads), and `codeAction` offers one import per

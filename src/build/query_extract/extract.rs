@@ -592,6 +592,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     out.class_literal_member = pack.class_literal_member.to_string();
     out.import_template = pack.import_template.to_string();
     out.imports_bind_names = pack.imports_bind_names;
+    out.member_shapes_are_strict = pack.member_shapes_are_strict;
     out.enum_members = pack.enum_members.iter().map(|s| s.to_string()).collect();
     out.member_writes = std::mem::take(&mut member_writes);
     out.types_are_capitalized = pack.types_are_capitalized;

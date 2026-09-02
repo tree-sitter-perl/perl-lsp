@@ -18,7 +18,7 @@
 (function_call_expression
   function: (name) @_cb0
   arguments: (arguments
-    . (argument (string (string_content) @ref.call.named)))
+    . (argument (string . (string_content) @ref.call.named .)))
   (#any-of? @_cb0
     "array_map"
     "call_user_func"
@@ -40,7 +40,7 @@
   function: (name) @_cb1
   arguments: (arguments
     . (argument)
-    . (argument (string (string_content) @ref.call.named)))
+    . (argument (string . (string_content) @ref.call.named .)))
   (#any-of? @_cb1
     "array_filter"
     "array_reduce"

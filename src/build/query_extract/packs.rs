@@ -210,6 +210,14 @@ pub struct LangPack {
     /// `#[Deprecated]`); empty = none. Lands as the `deprecated` symbol
     /// attribute exactly like the docblock tag.
     pub deprecated_attribute: &'static str,
+    /// Class, interface and attribute names the language itself provides
+    /// in the global namespace (php's core + SPL): a global reference to
+    /// one is never a type missing its import.
+    pub builtin_types: &'static [&'static str],
+    /// A value read (`$x->m`) never resolves to a method and a call never
+    /// to a field — no other-kind fallback (Perl's accessor calls need it;
+    /// php's syntax decides the kind).
+    pub member_shapes_are_strict: bool,
     /// Type names start with a capital by convention, so an import row
     /// whose leaf starts lowercase names a function or constant, not a
     /// type (php's `use function A\b;` — the grammar parses it as a class
@@ -539,6 +547,8 @@ pub fn perl_pack() -> LangPack {
         import_template: "",
         imports_bind_names: false,
         deprecated_attribute: "",
+        builtin_types: &[],
+        member_shapes_are_strict: false,
         types_are_capitalized: false,
         enum_members: &[],
         trigger_chars: &["$", "@", "%", ">", ":", "{"],
@@ -612,6 +622,8 @@ pub fn python_pack() -> LangPack {
         import_template: "",
         imports_bind_names: false,
         deprecated_attribute: "",
+        builtin_types: &[],
+        member_shapes_are_strict: false,
         types_are_capitalized: false,
         enum_members: &[],
         trigger_chars: &["."],
@@ -685,6 +697,8 @@ pub fn r_pack() -> LangPack {
         import_template: "",
         imports_bind_names: false,
         deprecated_attribute: "",
+        builtin_types: &[],
+        member_shapes_are_strict: false,
         types_are_capitalized: false,
         enum_members: &[],
         trigger_chars: &["$", "@", ":"],
@@ -766,6 +780,8 @@ pub fn cmake_pack() -> LangPack {
         import_template: "",
         imports_bind_names: false,
         deprecated_attribute: "",
+        builtin_types: &[],
+        member_shapes_are_strict: false,
         types_are_capitalized: false,
         enum_members: &[],
         trigger_chars: &["{", "("],
@@ -1039,6 +1055,8 @@ pub fn php_pack() -> LangPack {
         import_template: "use {};\n",
         imports_bind_names: true,
         deprecated_attribute: "Deprecated",
+        builtin_types: PHP_BUILTIN_TYPES,
+        member_shapes_are_strict: true,
         types_are_capitalized: true,
         enum_members: &["value", "name", "cases", "from", "tryFrom"],
         trigger_chars: &["$", ">", ":"],
@@ -1192,6 +1210,8 @@ pub fn cpp_pack() -> LangPack {
         import_template: "",
         imports_bind_names: false,
         deprecated_attribute: "",
+        builtin_types: &[],
+        member_shapes_are_strict: false,
         types_are_capitalized: false,
         enum_members: &[],
         trigger_chars: &[".", ">", ":"],
@@ -1589,3 +1609,36 @@ pub(super) fn lit_type(suffix: &str) -> Option<InferredType> {
         _ => None,
     }
 }
+
+/// The classes, interfaces and attributes php provides in the global
+/// namespace (core + SPL + the bundled extensions a stock build carries).
+const PHP_BUILTIN_TYPES: &[&str] = &[
+    "AllowDynamicProperties", "AppendIterator", "ArgumentCountError", "ArithmeticError", "ArrayAccess",
+    "ArrayIterator", "ArrayObject", "AssertionError", "Attribute", "BackedEnum", "BadFunctionCallException",
+    "BadMethodCallException", "CachingIterator", "CallbackFilterIterator", "Closure", "Collator", "Countable",
+    "CurlHandle", "CurlMultiHandle", "CurlShareHandle", "DOMAttr", "DOMDocument", "DOMElement", "DOMNode",
+    "DOMNodeList", "DOMText", "DOMXPath", "DateInterval", "DatePeriod", "DateTime", "DateTimeImmutable",
+    "DateTimeInterface", "DateTimeZone", "Deprecated", "Directory", "DirectoryIterator", "DivisionByZeroError",
+    "DomainException", "EmptyIterator", "Error", "ErrorException", "Exception", "Fiber", "FilesystemIterator",
+    "FilterIterator", "GMP", "GdImage", "Generator", "GlobIterator", "HashContext", "InfiniteIterator",
+    "IntlCalendar", "IntlChar", "IntlDateFormatter", "IntlException", "IntlTimeZone", "InvalidArgumentException",
+    "Iterator", "IteratorAggregate", "IteratorIterator", "JsonException", "JsonSerializable", "LengthException",
+    "LimitIterator", "Locale", "LogicException", "Memcached", "MessageFormatter", "MultipleIterator",
+    "NoRewindIterator", "Normalizer", "NumberFormatter", "OpenSSLAsymmetricKey", "OpenSSLCertificate",
+    "OuterIterator", "OutOfBoundsException", "OutOfRangeException", "OverflowException", "Override",
+    "PDO", "PDOException", "PDOStatement", "ParentIterator", "ParseError", "Phar", "PharData", "RangeException",
+    "RecursiveArrayIterator", "RecursiveCallbackFilterIterator", "RecursiveDirectoryIterator",
+    "RecursiveIterator", "RecursiveIteratorIterator", "Redis", "RedisException", "ReflectionAttribute",
+    "ReflectionClass", "ReflectionClassConstant", "ReflectionEnum", "ReflectionException", "ReflectionFunction",
+    "ReflectionMethod", "ReflectionNamedType", "ReflectionObject", "ReflectionParameter", "ReflectionProperty",
+    "ReflectionType", "ReflectionUnionType", "RegexIterator", "ResourceBundle", "ReturnTypeWillChange",
+    "RuntimeException", "SeekableIterator", "SensitiveParameter", "Serializable", "SessionHandler",
+    "SessionHandlerInterface", "SimpleXMLElement", "SoapClient", "SoapFault", "SoapHeader", "SoapServer",
+    "SoapVar", "Socket", "SplDoublyLinkedList", "SplFileInfo", "SplFileObject", "SplFixedArray", "SplHeap",
+    "SplMaxHeap", "SplMinHeap", "SplObjectStorage", "SplObserver", "SplPriorityQueue", "SplQueue", "SplStack",
+    "SplSubject", "SplTempFileObject", "Stringable", "Throwable", "Transliterator", "Traversable", "TypeError",
+    "UConverter", "UnderflowException", "UnexpectedValueException", "UnhandledMatchError", "UnitEnum",
+    "ValueError", "WeakMap", "WeakReference", "XMLReader", "XMLWriter", "ZipArchive", "finfo", "mysqli",
+    "mysqli_result", "mysqli_stmt", "stdClass",
+];
+

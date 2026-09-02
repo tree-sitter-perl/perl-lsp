@@ -159,6 +159,8 @@ pub struct SkeletonAnalysis {
     pub preamble_end: Option<usize>,
     /// `imports_bind_names`, baked.
     pub imports_bind_names: bool,
+    /// `member_shapes_are_strict`, baked.
+    pub member_shapes_are_strict: bool,
     /// Imported names a doc comment mentions (`@var Foo`, `@throws Foo`,
     /// `@see Foo`): a use the tree never shows.
     pub doc_mentions: Vec<String>,
@@ -1365,6 +1367,7 @@ impl SkeletonAnalysis {
             import_template: std::mem::take(&mut self.import_template),
             preamble_end: self.preamble_end,
             imports_bind_names: self.imports_bind_names,
+            member_shapes_are_strict: self.member_shapes_are_strict,
             doc_mentions: std::mem::take(&mut self.doc_mentions),
             types_are_capitalized: self.types_are_capitalized,
             enum_members: std::mem::take(&mut self.enum_members),

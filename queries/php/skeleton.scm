@@ -98,6 +98,18 @@
 (class_declaration
   name: (name) @def.class.name
   body: (declaration_list (use_declaration (qualified_name (name) @parent @ref.type) @parent.fq @ref.qualified)))
+(trait_declaration
+  name: (name) @def.class.name
+  body: (declaration_list (use_declaration (name) @parent @ref.type)))
+(trait_declaration
+  name: (name) @def.class.name
+  body: (declaration_list (use_declaration (qualified_name (name) @parent @ref.type) @parent.fq @ref.qualified)))
+(enum_declaration
+  name: (name) @def.class.name
+  body: (enum_declaration_list (use_declaration (name) @parent @ref.type)))
+(enum_declaration
+  name: (name) @def.class.name
+  body: (enum_declaration_list (use_declaration (qualified_name (name) @parent @ref.type) @parent.fq @ref.qualified)))
 
 ; container flavor marks (name-span post-join like @nonpublic.target):
 ; interfaces and traits are SymKind::Class in the model, but SUPER
@@ -214,6 +226,10 @@
 ; `catch (E $e)` binds the exception variable.
 (catch_clause
   name: (variable_name) @def.var.name @def.var)
+
+; A parameter list is a region, not a body: a parameter is the caller's
+; contract, never an unused local.
+(formal_parameters) @param.region
 
 ; The file preamble an import may not precede: the open tag and
 ; `declare(...)` rows (php requires `declare(strict_types=1)` first).
@@ -397,6 +413,11 @@
   scope: (name) @member.recv @ref.type
   name: (name) @ref.member
   arguments: (arguments) @arity.args) @hop.call
+;; `Str::$method()` — a variable method name on a class receiver: the
+;; class is still spelled (no member to resolve).
+(scoped_call_expression
+  scope: (name) @member.recv @ref.type
+  name: (variable_name))
 ;; `Psr7\Utils::make()` — a namespace-qualified bareword receiver: the leaf
 ;; is the class, the prefix a qualified spelling (the use-map's prefix use).
 (scoped_call_expression

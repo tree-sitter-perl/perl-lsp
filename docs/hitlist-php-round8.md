@@ -91,3 +91,16 @@ decode (the 10 rows→whole upgrades, baked match verdicts) is the other
 half. `module_declaring_method_in_package` runs 382 times to
 conclude nothing each time — cheap here (0.2 ms), a memo candidate at
 scale.
+
+## Residual — a value read of a method-only name (2026-09-03)
+
+`$this->session->store` where the class declares only `session()`: the
+diagnostics lane now reports the undeclared property (php's syntax
+decides the kind — `member_shapes_are_strict`), but goto-def still
+surfaces the method (the name-keyed candidate set mints a shape-keyed
+target only when the class overloads the name across kinds) and hover
+types the read through the method's return. Both want the pack's strict
+rule at the projection (`TargetRef::member_shape` minted whenever the
+pack is strict, `member_value_type` skipping the method arm for a value
+read on a strict pack).
+

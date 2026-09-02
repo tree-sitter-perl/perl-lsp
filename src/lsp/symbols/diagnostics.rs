@@ -1081,6 +1081,51 @@ pub fn pack_symbol_diagnostics(
             push(&mut out, r.span, DiagnosticSeverity::ERROR, "undefined-variable",
                 format!("Undefined variable '{}'.", r.target_name));
         }
+
+        // ---- unused variable: a local written and never read ----
+        // Reads per (callable, name), credited to every enclosing callable:
+        // a closure's `use ($x)` reads the outer `$x` through its own copy.
+        let mut reads: HashMap<(u32, String), usize> = HashMap::new();
+        for r in analysis.refs() {
+            if !matches!(r.kind, RefKind::Variable)
+                || matches!(r.access, crate::model::file_analysis::AccessKind::Write)
+                || !r.target_name.starts_with('$')
+            {
+                continue;
+            }
+            for sc in analysis.scope_chain(r.scope) {
+                if matches!(analysis.scope(sc).kind, ScopeKind::Sub { .. } | ScopeKind::Method { .. }) {
+                    *reads.entry((sc.0, r.target_name.clone())).or_default() += 1;
+                }
+            }
+        }
+        for sym in analysis.symbols() {
+            if !matches!(sym.kind, FaSymKind::Variable) || !sym.name.starts_with('$') {
+                continue;
+            }
+            let Some(sc) = callable_of(sym.scope) else { continue };
+            if pack.implicit_variables.iter().any(|v| *v == sym.name)
+                || pack.param_regions.iter().any(|p| p.contains(&sym.span))
+            {
+                continue;
+            }
+            let body = analysis.scope(sc).span;
+            if dynamic_var_calls.iter().any(|c| span_within(*c, body)) {
+                continue;
+            }
+            if reads.get(&(sc.0, sym.name.clone())).copied().unwrap_or(0) > 0 {
+                continue;
+            }
+            out.push(Diagnostic {
+                range: span_to_range(sym.selection_span),
+                severity: Some(DiagnosticSeverity::HINT),
+                code: Some(NumberOrString::String("unused-variable".to_string())),
+                source: Some("perl-lsp".to_string()),
+                message: format!("'{}' is assigned but never used.", sym.name),
+                tags: Some(vec![DiagnosticTag::UNNECESSARY]),
+                ..Default::default()
+            });
+        }
     }
 
     // ---- unused import: a bound name the file never spells ----
@@ -1094,11 +1139,17 @@ pub fn pack_symbol_diagnostics(
             .collect();
         for (span, raw) in &pack.include_directives {
             let leaf = raw.rsplit('\\').next().unwrap_or(raw);
+            // the alias token has a row of its own; the import's row reports
+            if !raw.contains('\\') && pack.use_aliases.iter().any(|(alias, _, _)| alias == leaf) {
+                continue;
+            }
             // the name the row binds: its alias when it has one
             let bound = pack
                 .use_aliases
                 .iter()
-                .find(|(_, ns, real)| real == leaf && format!("{ns}\\{real}") == *raw)
+                .find(|(_, ns, real)| {
+                    real == leaf && (format!("{ns}\\{real}") == *raw || (ns.is_empty() && real == raw))
+                })
                 .map(|(alias, _, _)| alias.as_str())
                 .unwrap_or(leaf);
             // a constant import (`use const FOO`) has no spelling the
@@ -1201,7 +1252,11 @@ pub fn pack_symbol_diagnostics(
                     // real and missing its import
                     let declared = type_namespaces(analysis, idx, leaf);
                     if ns.is_empty() {
-                        if declared.is_empty() || declared.iter().any(|d| d.is_empty()) {
+                        if declared.is_empty()
+                            || declared.iter().any(|d| d.is_empty())
+                            || crate::build::language_driver::LanguageRegistry::builtin_types(&analysis.language)
+                                .contains(&leaf)
+                        {
                             continue;
                         }
                     } else if declared.iter().any(|d| *d == ns) {
