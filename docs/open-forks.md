@@ -269,6 +269,14 @@ Format per entry:
   (every leaf-keyed consumer re-examined) and a cache bump.
 - **Discussion needed:** is C worth a slice now, or does it wait until a
   third consumer appears? Perl is absolute-named and never hits this.
+- **Update 2026-09-02 (round-5 R5-1):** the use-map visibility axis is a
+  THIRD consumer of leaf identity, and it is where `use X as Alias`
+  stops: the alias spelling can't be resolved by translating it to the
+  real leaf at extraction (H8's file means two different classes by
+  `Collection` and `BaseCollection`), and can't be pinned without a
+  namespace-qualified class identity. So alias-spelled hints/`new`/
+  receivers resolve nothing today (never a wrong class). C is now the
+  only path to alias support — a concrete reason to schedule it.
 
 ---
 

@@ -173,6 +173,31 @@ templates). Market case and build-out plan in `docs/prompt-php-target.md`.
   A `@var`/`@param` sequence doc now refines a bare declared `array`
   (previously it was discarded as conflicting), and sequence
   spellings no longer mint bogus class names like `list<X>`.
+- **Same-leaf classes resolve through the file's own `use` map.** With
+  three `Collection`s and three `Request`s in one tree, goto-def on a
+  type hint, `new Collection(...)`, or a typed receiver now lands on
+  the class the file imported (or its own namespace's), never the most
+  common same-named class; references and rename stay inside that
+  class's family — renaming `Http\Client\Factory::$recorded` no longer
+  rewrites `Process\Factory`. A `use`d class that no indexed file
+  declares answers empty rather than a stranger. Type hints count as
+  class references (rename rewrites them).
+- **A property and a method sharing a name keep their own identity.**
+  `$this->recorded` hovers/goes to the property, `$this->recorded()` to
+  the method; renaming either leaves the other untouched. Applies only
+  where a class actually overloads the name — everything else is
+  unchanged.
+- **Static calls on expression receivers.** `$this->helper::make()` and
+  `$cls::make()` (with `$cls = Helper::class`) resolve; `Foo::class`
+  types as the class. Class-name references and rename now reach
+  `new Foo()` sites, `Foo::class`, and bareword static receivers.
+- **Nested generics over `mixed`.** `@var array<array<mixed>>` types the
+  loop element as an array instead of collapsing the whole annotation.
+- **`--heatmap` on PHP is faster and unchanged.** The PHP tier pre-prunes
+  its fan-in walk from its own reference rows (phpMyAdmin, 1,232 files:
+  warm 2m20s → 1m50s, every fan-in identical). Symfony Console
+  `Application` overrides (`getDefaultCommands`, `getLongVersion`, …)
+  count as framework entries.
 - **`self::CONST` in property defaults resolves.**
   `protected string $fmt = self::FORMAT;` — goto-def and references
   on the class-level initializer now answer like the method-body

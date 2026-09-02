@@ -249,6 +249,15 @@ marked otherwise; the drain re-derived each rationale against current code.
 
 ## Residual-bug tier (pinned, xfail'd where reducible)
 
+- **php `use X as Alias` spellings resolve nothing.** The use-map axis
+  pins the FQ row's real leaf, not the alias; a hint/`new`/receiver
+  spelled `Alias` finds no candidate (honest empty, never a stranger).
+  Translating the alias to the real leaf at extraction is wrong when the
+  file also declares that leaf itself; the fix is namespace-qualified
+  class identity — `docs/open-forks.md`, "GraphView node identity is
+  leaf-keyed", option C. `parent::` through an aliased parent already
+  works via `parent_namespaces` rows.
+
 - **Cross-file functional-cast / constructor typing** (callee is NOT a
   local symbol). The name-case ctor heuristic is DEAD: a call's value is now
   the callee's own resolution (`query_extract::into_file_analysis` call-site
