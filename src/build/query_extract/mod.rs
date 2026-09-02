@@ -177,7 +177,7 @@ fn effective_query_source(language: &Language, pack: &LangPack) -> &'static str 
     use std::hash::{Hash, Hasher};
     use std::sync::{Mutex, OnceLock};
     let paths = pack_overlay_paths(pack.lang_id);
-    if paths.is_empty() {
+    if paths.is_empty() && pack.bundled_overlays.is_empty() {
         return pack.query_source;
     }
     static ASSEMBLED: OnceLock<Mutex<HashMap<u64, &'static str>>> = OnceLock::new();
@@ -200,6 +200,20 @@ fn effective_query_source(language: &Language, pack: &LangPack) -> &'static str 
         return src;
     }
     let mut assembled = String::from(pack.query_source);
+    // Bundled overlays get the same isolation as plugin-dir ones: a syntax
+    // slip in one framework document must not take every verb of the
+    // language dark (it did — the documents used to be one `concat!`).
+    for (name, s) in pack.bundled_overlays {
+        match Query::new(language, s) {
+            Ok(_) => {
+                assembled.push('\n');
+                assembled.push_str(s);
+            }
+            Err(e) => {
+                eprintln!("perl-lsp: bundled {} overlay {name} dropped: {e}", pack.lang_id);
+            }
+        }
+    }
     for (p, s) in &sources {
         match Query::new(language, s) {
             Ok(_) => {

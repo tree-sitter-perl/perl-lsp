@@ -881,3 +881,39 @@ fn php_round6_shape_stamp_keyed_arrays_and_chained_relations() {
     assert!(hover.contains("getUrl(): string"), "chain through a chained-modifier relation: {hover}");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Round-6 R6-6 / R6-7 / R6-8: a `'A\\F::cb'` string callable is a Callable
+/// member reference on `F` (references from the method reach it); `new
+/// self(...)` names the enclosing class (its ctor's references and
+/// hover see it); a middle segment of a `use` row is a namespace and
+/// answers nothing rather than a same-named class elsewhere.
+#[cfg(feature = "php")]
+#[test]
+fn php_string_callables_new_self_and_import_row_segments() {
+    let dir = std::env::temp_dir().join(format!("perl-lsp-r6c-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("A/Sub")).unwrap();
+    let w = |rel: &str, src: &str| std::fs::write(dir.join(rel), src).unwrap();
+    w("A/F.php", "<?php\nnamespace A;\nclass F\n{\n    public static function mk(): self { return new self(1); }\n    public function __construct(int $n) {}\n    public static function cb(): void {}\n}\n");
+    w("A/Use.php", "<?php\nnamespace A;\nuse A\\Sub\\Thing;\ncall_user_func('A\\F::cb');\n$f = F::mk();\n");
+    w("A/Sub/Thing.php", "<?php\nnamespace A\\Sub;\nclass Thing {}\n");
+    w("A/Sub.php", "<?php\nnamespace A;\nclass Sub {}\n");
+    let run = |args: &[&str]| {
+        let out = std::process::Command::new(env!("CARGO_BIN_EXE_perl-lsp"))
+            .args(args)
+            .env("XDG_CACHE_HOME", dir.join(".cache"))
+            .output()
+            .expect("run");
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+    let root = dir.to_str().unwrap();
+    let ctor = run(&["--references", root, "A/F.php", "5", "20"]);
+    assert!(ctor.contains("\"line\": 4"), "`new self(1)` (row 4) is a construction site of F: {ctor}");
+    // (hover/goto-def ON the `self` token itself stay dark — round-6
+    // residual; the references/heatmap identity is what this pins.)
+    let cb = run(&["--references", root, "A/F.php", "6", "28"]);
+    assert!(cb.contains("Use.php"), "the string callable site references `cb`: {cb}");
+    let mid = run(&["--definition", root, "A/Use.php", "2", "8"]);
+    assert!(!mid.contains("Sub.php"), "a `use` row's middle segment is a namespace, not class `A\\Sub`: {mid}");
+    let _ = std::fs::remove_dir_all(&dir);
+}

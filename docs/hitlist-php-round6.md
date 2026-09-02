@@ -44,9 +44,25 @@ Doctrine `@method` rows, `use X as Alias` and union types dark-not-wrong.
   too is the override family (B's `Event` extends A's) — by policy, not
   a bug.
 
+- R6-6: `'A\\B\\X::method'` string callables are Callable member refs on
+  `X` (the class part a qualified spelling, pinned like any other), so
+  the method's references and rename reach them (composer's
+  `EventDispatcherTest::someMethod` site).
+- R6-7: `new self(...)` / `new static(...)` ctor refs carry the enclosing
+  class's name — the ctor's references and fan-in count them (composer
+  `ProxyManager::__construct` 1 → 2). RESIDUAL: hover/goto-def ON the
+  `self` token still answer nothing (`new Foo` answers the class; the
+  `self`-spelled site takes a lane that reads the token, not the ref).
+- R6-8: word-keyed goto-def fallbacks stand down inside an import row, so
+  `Http` in `use Illuminate\Http\Request;` no longer jumps to
+  `Support\Facades\Http`.
+- R6-11: bundled overlays are compiled ALONE and dropped with a stderr
+  diagnostic (the same posture as plugin-dir overlays); a unit test
+  compiles every bundled php document as a tripwire.
+
 ## CRITICAL
 
-### R6-11 — one broken bundled overlay takes the whole php query dark
+### R6-11 — one broken bundled overlay takes the whole php query dark (LANDED, see above)
 Found while editing `laravel.scm`: the pack's bundled `.scm` documents
 concatenate into ONE tree-sitter query, so a syntax error in any of them
 fails the compile and every php verb answers nothing (no error surfaced

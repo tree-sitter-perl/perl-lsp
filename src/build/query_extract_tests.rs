@@ -4823,3 +4823,20 @@ fn php_instance_array_callable_is_a_method_ref() {
     assert!(names.contains(&("on", Some("$this"))), "{names:?}");
     assert!(names.contains(&("other", Some("$obj"))), "{names:?}");
 }
+
+/// Every bundled php overlay compiles ALONE against the grammar — the
+/// assembly drops a broken one with a diagnostic, so this is the tripwire
+/// that a bundled document never ships broken (a dropped overlay is a
+/// silent feature loss, not an error a verb reports).
+#[cfg(feature = "php")]
+#[test]
+fn php_bundled_overlays_each_compile_alone() {
+    let pack = crate::build::query_extract::php_pack();
+    let language: tree_sitter::Language = tree_sitter_php::LANGUAGE_PHP.into();
+    tree_sitter::Query::new(&language, pack.query_source).expect("skeleton compiles");
+    for (name, src) in pack.bundled_overlays {
+        if let Err(e) = tree_sitter::Query::new(&language, src) {
+            panic!("bundled php overlay {name} does not compile: {e}");
+        }
+    }
+}

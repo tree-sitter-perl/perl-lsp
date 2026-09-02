@@ -9,7 +9,12 @@ use super::*;
 /// MINIMAL on purpose so the findings honestly measure how far
 /// patterns alone go.
 pub struct LangPack {
+    /// The base skeleton query. Bundled overlays (`bundled_overlays`) are
+    /// appended at assembly, each test-compiled alone first, so one broken
+    /// document drops with a diagnostic instead of taking the language out.
     pub query_source: &'static str,
+    /// Bundled framework/stdlib overlays: (document name, source).
+    pub bundled_overlays: &'static [(&'static str, &'static str)],
     /// The registry's language id (`"php"`, `"cpp"`, ...) — keys pack-plugin
     /// query overlays (`<plugin-dir>/<name>/queries/<lang_id>.scm`,
     /// docs/prompt-pack-plugins.md) onto the language they extend.
@@ -421,6 +426,7 @@ pub enum CmdEffect {
 pub fn perl_pack() -> LangPack {
     LangPack {
         query_source: include_str!("../../../queries/perl/skeleton.scm"),
+        bundled_overlays: &[],
         lang_id: "perl",
         bundled_entry_markers: &[],
         shape_name: |kind, raw| match kind {
@@ -477,6 +483,7 @@ pub fn perl_pack() -> LangPack {
 pub fn python_pack() -> LangPack {
     LangPack {
         query_source: include_str!("../../../queries/python/skeleton.scm"),
+        bundled_overlays: &[],
         lang_id: "python",
         bundled_entry_markers: &[],
         shape_name: |_, raw| raw.to_string(),
@@ -542,6 +549,7 @@ pub fn python_pack() -> LangPack {
 pub fn r_pack() -> LangPack {
     LangPack {
         query_source: include_str!("../../../queries/r/skeleton.scm"),
+        bundled_overlays: &[],
         lang_id: "r",
         bundled_entry_markers: &[],
         shape_name: |_, raw| raw.to_string(),
@@ -597,6 +605,7 @@ pub fn r_pack() -> LangPack {
 pub fn cmake_pack() -> LangPack {
     LangPack {
         query_source: include_str!("../../../queries/cmake/skeleton.scm"),
+        bundled_overlays: &[],
         lang_id: "cmake",
         bundled_entry_markers: &[],
         shape_name: |_, raw| raw.to_string(),
@@ -777,19 +786,14 @@ pub fn php_pack() -> LangPack {
     LangPack {
         // Base skeleton + the bundled framework overlays (pure query
         // vocabulary — see each overlay's header for the doctrine note).
-        query_source: concat!(
-            include_str!("../../../queries/php/skeleton.scm"),
-            "\n",
-            include_str!("../../../queries/php/frameworks/laravel.scm"),
-            "\n",
-            include_str!("../../../queries/php/frameworks/wordpress.scm"),
-            "\n",
-            include_str!("../../../queries/php/frameworks/phpunit.scm"),
-            "\n",
-            include_str!("../../../queries/php/frameworks/symfony.scm"),
-            "\n",
-            include_str!("../../../queries/php/stdlib.scm"),
-        ),
+        query_source: include_str!("../../../queries/php/skeleton.scm"),
+        bundled_overlays: &[
+            ("frameworks/laravel.scm", include_str!("../../../queries/php/frameworks/laravel.scm")),
+            ("frameworks/wordpress.scm", include_str!("../../../queries/php/frameworks/wordpress.scm")),
+            ("frameworks/phpunit.scm", include_str!("../../../queries/php/frameworks/phpunit.scm")),
+            ("frameworks/symfony.scm", include_str!("../../../queries/php/frameworks/symfony.scm")),
+            ("stdlib.scm", include_str!("../../../queries/php/stdlib.scm")),
+        ],
         lang_id: "php",
         bundled_entry_markers: &[
             include_str!("../../../queries/php/frameworks/phpunit.entry.json"),
@@ -929,6 +933,7 @@ pub fn php_pack() -> LangPack {
 pub fn cpp_pack() -> LangPack {
     LangPack {
         query_source: include_str!("../../../queries/cpp/skeleton.scm"),
+        bundled_overlays: &[],
         lang_id: "cpp",
         bundled_entry_markers: &[],
         // Template spellings get ONE canonical whitespace form so a

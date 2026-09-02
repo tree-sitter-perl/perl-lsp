@@ -465,6 +465,14 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     // `@ref.qualified`: the WRITTEN qualifier of a call/ctor/type/parent
     // spelling (`Downloader\DownloadManager`, `\A\B`) — the use-map pins
     // the leaf to that namespace instead of counting it as a bare spelling.
+    // `@expr.ctor` matches: a `new self(...)` / `new static(...)` names the
+    // ENCLOSING class, so its ctor ref carries that class's name (the
+    // references and heatmap key), not the literal token.
+    let ctor_matches: std::collections::HashSet<usize> = events
+        .iter()
+        .filter(|e| e.cap == "expr.ctor")
+        .map(|e| e.match_id)
+        .collect();
     let qualified_by_match: HashMap<usize, String> = events
         .iter()
         .filter(|e| e.cap == "ref.qualified")
@@ -1042,6 +1050,30 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
             // No arg_count: the site registers the callee, it doesn't call
             // it — an arity hint here would misfeed arity discrimination.
             "ref.call.named" => {
+                // `'A\\B\\X::method'`: a static-method callable string. The
+                // class part is a qualified spelling (pinned like any other),
+                // the ref a Callable member on that class — the same identity
+                // `[X::class, 'method']` carries, so the backward walk finds it.
+                if let Some((qual, method)) = e.text.split_once("::") {
+                    let (leaf, ns) = split_ns_leaf(qual);
+                    if !ns.is_empty() {
+                        out.qualified_spellings.push((leaf.clone(), format!("\\{ns}")));
+                    }
+                    let span = Span { start: e.start, end: e.end };
+                    out.refs.push(SkelRef {
+                        via: None,
+                        kind: "member".to_string(),
+                        name: method.to_string(),
+                        start: e.start,
+                        end: e.end,
+                        scope: cur_scope,
+                        invocant: Some((span, leaf)),
+                        member_op: None,
+                        arg_count: None,
+                        shape: crate::model::file_analysis::MemberShape::Callable,
+                    });
+                    continue;
+                }
                 out.refs.push(SkelRef {
                     via: None,
                     kind: "call".to_string(),
@@ -1165,6 +1197,13 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                         kind: e.cap.strip_prefix("ref.").unwrap().to_string(),
                         name: if super_recv {
                             format!("SUPER::{}", (pack.shape_name)(&e.cap, &e.text))
+                        } else if e.cap == "ref.call"
+                            && ctor_matches.contains(&e.match_id)
+                            && crate::model::conventions::is_current_package_token(
+                                &(pack.shape_name)("hop.recv", &e.text),
+                            )
+                        {
+                            package.clone().unwrap_or_else(|| (pack.shape_name)(&e.cap, &e.text))
                         } else {
                             (pack.shape_name)(&e.cap, &e.text)
                         },

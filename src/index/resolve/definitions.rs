@@ -112,6 +112,17 @@ impl<'a> CandidateSet<'a> {
     /// The def site of `member` on `class` — origin symbols first, then the
     /// class's own cached file. Serves the template-family ranked goto-def
     /// (one location per ladder class that actually defines the member).
+    /// Is the cursor inside one of the origin's import rows (a `use` /
+    /// `#include` path token)? Word-keyed fallbacks stand down there: the
+    /// row's leaf carries its own ref, and every other segment is a
+    /// namespace, which no by-name class lookup should answer for.
+    fn point_in_import_row(&self, point: tree_sitter::Point) -> bool {
+        self.origin.pack.include_directives.iter().any(|(sp, _)| {
+            (sp.start.row, sp.start.column) <= (point.row, point.column)
+                && (point.row, point.column) < (sp.end.row, sp.end.column)
+        })
+    }
+
     pub(super) fn member_def_location(&self, class: &str, member: &str) -> Option<RefLocation> {
         // The member's def span in `fa` under `class`'s owner set, expanded
         // through inline-namespace transparency so a symbol filed under an
@@ -1309,8 +1320,10 @@ impl<'a> CandidateSet<'a> {
         // Last resort (pack): a token no query captures — a namespace middle
         // segment (`StatusCode` in `absl::StatusCode::kNotFound` is a
         // namespace_identifier, ref-less) — resolves by word to a named
-        // type/namespace def.
-        if self.pack {
+        // type/namespace def. Never inside an import row: `Http` in
+        // `use Illuminate\Http\Request;` names a namespace segment, and a
+        // same-named class elsewhere is not it.
+        if self.pack && !self.point_in_import_row(point) {
             if let Some(source) = self.source {
                 if let Some(word) = word_at_point(source, point) {
                     if let Some(loc) = self.type_def_location(word, idx) {
