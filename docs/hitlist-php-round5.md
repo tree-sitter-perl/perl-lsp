@@ -155,6 +155,22 @@ land on the property. Rendering note: a php `array<string, int>` doc type
 hovers as `array<string, int|float>` — `Numeric` is one lattice value and
 the php display spells it as the union.
 
+## Round-5 close (2026-09-02)
+Every row LANDED, PARTIAL-with-attribution (R5-4), or a design question
+on `docs/open-forks.md` (R5-5 union types, R5-6 library public API, the
+use-map "pinned but un-indexed answers empty" choice); `use X as Alias`
+spellings parked on the leaf-identity fork (`docs/PARKED.md`). Zero
+XPASS; the full net (four feature sets, gold 504/0/0, e2e 121/121) green
+on every pushed slice; a read-only close sweep over the round's diff
+found no must-fix and its follow-ups landed. Corpus evidence: Laravel
+`new Collection` → Eloquent, `Http\Client\Factory::$recorded` rename =
+its 9 property sites (was 21 across two classes + the method),
+`Conditionable::unless` references = all 9 src call sites (was 0/2);
+phpMyAdmin heatmap warm 1m57s → 1m50s with 438/7,282 fan-ins changed,
+all same-leaf separations. Round-6 dogfood (composer/Slim, BookStack +
+symfony/demo) fired at close; findings in the scratchpad
+`round6-findings-{A,B}.md` for the next hitlist.
+
 ## Verification contradictions resolved
 - D2 "keyed foreach breaks narrowing": the minimal keyed case narrows;
   the composer site's guard was an `&&` CONJUNCT — the conjunct shape was
