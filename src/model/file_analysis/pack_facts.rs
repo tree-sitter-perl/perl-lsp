@@ -38,6 +38,13 @@ pub struct PackFacts {
     /// Members every enum carries by language rule.
     #[serde(default)]
     pub enum_members: Vec<String>,
+    /// Whole import-statement spans, in file order.
+    #[serde(default)]
+    pub import_rows: Vec<Span>,
+    /// The import statement template, `{}` standing for the qualified name;
+    /// empty when the language has no import quick-fix.
+    #[serde(default)]
+    pub import_template: String,
 
     /// The language's display vocabulary for the engine's value lattice:
     /// `format_inferred_type` tag → this language's spelling (php:
@@ -157,6 +164,16 @@ impl PackFacts {
     /// `span`, if any. The one speller for "is this token inside an import
     /// row": the row's leaf carries its own ref; every other segment is a
     /// namespace no by-name lookup should answer for.
+    /// The line an import quick-fix inserts at: right after the last import
+    /// row that starts above `row`.
+    pub fn import_insertion_line(&self, row: usize) -> Option<usize> {
+        self.import_rows
+            .iter()
+            .filter(|r| r.start.row < row)
+            .map(|r| r.end.row + 1)
+            .max()
+    }
+
     pub fn import_row_covering(&self, span: &Span) -> Option<&(Span, String)> {
         self.include_directives.iter().find(|(row, _)| {
             (row.start.row, row.start.column) <= (span.start.row, span.start.column)
@@ -194,6 +211,8 @@ impl PackFacts {
             + vcap(&self.catch_all_methods)
             + self.class_literal_member.capacity()
             + vcap(&self.enum_members)
+            + vcap(&self.import_rows)
+            + self.import_template.capacity()
             + vcap(&self.type_display)
             + vcap(&self.constructor_names);
     }

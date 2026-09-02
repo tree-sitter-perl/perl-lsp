@@ -70,6 +70,8 @@ impl FileAnalysis {
                     implicit_variables: _implicit_variables, // pack-wide convention
                     catch_all_methods: _catch_all_methods, // pack-wide convention
                     class_literal_member: _class_literal_member, // pack-wide convention
+                    import_rows: _import_rows, // editing aid, not cross-file-visible
+                    import_template: _import_template, // pack-wide convention
                     types_are_capitalized: _types_are_capitalized, // pack-wide convention
                     enum_members: _enum_members, // pack-wide convention
                     type_display: _type_display,     // LangPack-wide display vocabulary, same reasoning

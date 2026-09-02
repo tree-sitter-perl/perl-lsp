@@ -197,6 +197,12 @@ pub fn code_actions(
             continue;
         }
 
+        // An undefined type the workspace declares elsewhere: one import per
+        // declaring namespace, in the pack's own import syntax.
+        if matches!(&diag.code, Some(NumberOrString::String(s)) if s == "undefined-type") {
+            actions.extend(make_import_type_actions(analysis, uri, diag));
+            continue;
+        }
         let code_matches = matches!(
             &diag.code,
             Some(NumberOrString::String(s)) if s == "unresolved-function"
@@ -271,6 +277,54 @@ pub fn code_actions(
     }
 
     actions
+}
+
+/// `Add 'use Ns\Leaf;'` for each candidate the diagnostic carries, inserted
+/// after the last import row above the site, else after the namespace
+/// declaration above it (a blank line between), else after the first line.
+fn make_import_type_actions(analysis: &FileAnalysis, uri: &Url, diag: &Diagnostic) -> Vec<CodeActionOrCommand> {
+    let template = analysis.pack.import_template.as_str();
+    let Some(candidates) = diag.data.as_ref().and_then(|d| d.get("candidates")).and_then(|v| v.as_array()) else {
+        return Vec::new();
+    };
+    if template.is_empty() {
+        return Vec::new();
+    }
+    let point = position_to_point(diag.range.start);
+    let (line, lead) = match analysis.pack.import_insertion_line(point.row) {
+        Some(l) => (l, ""),
+        None => {
+            let after_package = analysis
+                .symbols()
+                .iter()
+                .filter(|s| matches!(s.kind, FaSymKind::Package) && s.selection_span.start.row < point.row)
+                .map(|s| s.selection_span.end.row + 1)
+                .max();
+            match after_package {
+                Some(l) => (l, "\n"),
+                None => (1, ""),
+            }
+        }
+    };
+    let pos = Position { line: line as u32, character: 0 };
+    candidates
+        .iter()
+        .filter_map(|c| c.as_str())
+        .enumerate()
+        .map(|(i, fq)| {
+            let stmt = template.replace("{}", fq);
+            let mut changes = HashMap::new();
+            changes.insert(uri.clone(), vec![TextEdit { range: Range { start: pos, end: pos }, new_text: format!("{lead}{stmt}") }]);
+            CodeActionOrCommand::CodeAction(CodeAction {
+                title: format!("Add '{}'", stmt.trim_end()),
+                kind: Some(CodeActionKind::QUICKFIX),
+                diagnostics: Some(vec![diag.clone()]),
+                edit: Some(WorkspaceEdit { changes: Some(changes), ..Default::default() }),
+                is_preferred: Some(i == 0 && candidates.len() == 1),
+                ..Default::default()
+            })
+        })
+        .collect()
 }
 
 /// D2 quick-fix: insert `return unless defined $r;` on its own line just

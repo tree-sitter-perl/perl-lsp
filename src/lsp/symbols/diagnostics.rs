@@ -1113,16 +1113,39 @@ pub fn pack_symbol_diagnostics(
                     if ns.is_empty() {
                         continue;
                     }
-                    let exists = analysis.declared_type_namespace(leaf).as_deref() == Some(ns.as_str())
-                        || idx.visible_def_candidates(leaf).iter().any(|c| {
-                            idx.symbols_present(c).declared_type_namespace(leaf).as_deref() == Some(ns.as_str())
-                        });
-                    if exists || !reported.insert((r.span.start.row, r.span.start.column)) {
+                    let declared = type_namespaces(analysis, idx, leaf);
+                    if declared.iter().any(|d| *d == ns) || !reported.insert((r.span.start.row, r.span.start.column)) {
                         continue;
                     }
-                    push(&mut out, r.span, DiagnosticSeverity::ERROR, "undefined-type",
-                        format!("Undefined type '{ns}\\{leaf}'."));
+                    // every namespace that DOES declare the leaf is an import
+                    // the quick-fix can offer
+                    let candidates: Vec<String> =
+                        declared.iter().filter(|d| !d.is_empty()).map(|d| format!("{d}\\{leaf}")).collect();
+                    out.push(Diagnostic {
+                        range: span_to_range(r.span),
+                        severity: Some(DiagnosticSeverity::ERROR),
+                        code: Some(NumberOrString::String("undefined-type".to_string())),
+                        source: Some("perl-lsp".to_string()),
+                        message: format!("Undefined type '{ns}\\{leaf}'."),
+                        data: (!candidates.is_empty()).then(|| serde_json::json!({ "candidates": candidates })),
+                        ..Default::default()
+                    });
                 }
+            }
+        }
+    }
+    out
+}
+
+/// Every namespace declaring a type named `leaf`: this file's own
+/// declaration plus every workspace/dependency candidate — the set the
+/// undefined-type lane tests membership in and the import quick-fix lists.
+fn type_namespaces(analysis: &FileAnalysis, idx: &dyn CrossFileLookup, leaf: &str) -> Vec<String> {
+    let mut out: Vec<String> = analysis.declared_type_namespace(leaf).into_iter().collect();
+    for c in idx.def_candidates(leaf) {
+        if let Some(ns) = idx.symbols_present(&c).declared_type_namespace(leaf) {
+            if !out.contains(&ns) {
+                out.push(ns);
             }
         }
     }

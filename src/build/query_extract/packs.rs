@@ -198,6 +198,10 @@ pub struct LangPack {
     /// A member name that is the CLASS-NAME LITERAL, never a member
     /// (php `Foo::class`). Empty = none.
     pub class_literal_member: &'static str,
+    /// The import statement that brings a fully-qualified name into scope,
+    /// `{}` standing for the name (php `use {};\n`). Empty = the language
+    /// has no import quick-fix.
+    pub import_template: &'static str,
     /// Type names start with a capital by convention, so an import row
     /// whose leaf starts lowercase names a function or constant, not a
     /// type (php's `use function A\b;` — the grammar parses it as a class
@@ -521,6 +525,7 @@ pub fn perl_pack() -> LangPack {
         catch_all_methods: &[],
         callable_placeholder_kind: "",
         class_literal_member: "",
+        import_template: "",
         types_are_capitalized: false,
         enum_members: &[],
         trigger_chars: &["$", "@", "%", ">", ":", "{"],
@@ -591,6 +596,7 @@ pub fn python_pack() -> LangPack {
         catch_all_methods: &[],
         callable_placeholder_kind: "",
         class_literal_member: "",
+        import_template: "",
         types_are_capitalized: false,
         enum_members: &[],
         trigger_chars: &["."],
@@ -661,6 +667,7 @@ pub fn r_pack() -> LangPack {
         catch_all_methods: &[],
         callable_placeholder_kind: "",
         class_literal_member: "",
+        import_template: "",
         types_are_capitalized: false,
         enum_members: &[],
         trigger_chars: &["$", "@", ":"],
@@ -739,6 +746,7 @@ pub fn cmake_pack() -> LangPack {
         catch_all_methods: &[],
         callable_placeholder_kind: "",
         class_literal_member: "",
+        import_template: "",
         types_are_capitalized: false,
         enum_members: &[],
         trigger_chars: &["{", "("],
@@ -1009,6 +1017,7 @@ pub fn php_pack() -> LangPack {
         catch_all_methods: &["__call", "__callStatic", "__get"],
         callable_placeholder_kind: "variadic_placeholder",
         class_literal_member: "class",
+        import_template: "use {};\n",
         types_are_capitalized: true,
         enum_members: &["value", "name", "cases", "from", "tryFrom"],
         trigger_chars: &["$", ">", ":"],
@@ -1159,6 +1168,7 @@ pub fn cpp_pack() -> LangPack {
         catch_all_methods: &[],
         callable_placeholder_kind: "",
         class_literal_member: "",
+        import_template: "",
         types_are_capitalized: false,
         enum_members: &[],
         trigger_chars: &[".", ">", ":"],

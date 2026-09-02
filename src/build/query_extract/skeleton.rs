@@ -146,6 +146,11 @@ pub struct SkeletonAnalysis {
     pub enum_members: Vec<String>,
     /// Member tokens on the left of an assignment (dynamic property sites).
     pub member_writes: Vec<Span>,
+    /// Whole import-statement spans (`use A\B;` rows), for the insertion
+    /// point of an import quick-fix.
+    pub import_rows: Vec<Span>,
+    /// The pack's import statement template (`import_template`).
+    pub import_template: String,
     /// The pack's `function_scoped_vars` fact (php) — drives the var
     /// unification pass in `into_file_analysis`.
     pub function_scoped_vars: bool,
@@ -1344,6 +1349,8 @@ impl SkeletonAnalysis {
             implicit_variables: std::mem::take(&mut self.implicit_variables),
             catch_all_methods: std::mem::take(&mut self.catch_all_methods),
             class_literal_member: std::mem::take(&mut self.class_literal_member),
+            import_rows: std::mem::take(&mut self.import_rows),
+            import_template: std::mem::take(&mut self.import_template),
             types_are_capitalized: self.types_are_capitalized,
             enum_members: std::mem::take(&mut self.enum_members),
             type_display: std::mem::take(&mut self.type_display),

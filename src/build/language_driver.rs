@@ -1312,6 +1312,8 @@ fn remap_spans(
         types_are_capitalized: _,
         enum_members: _,
         member_writes,
+        import_rows,
+        import_template: _,
         // language-wide facts, no spans to remap.
         function_scoped_vars: _,
         constructor_names: _,
@@ -1394,6 +1396,9 @@ fn remap_spans(
     // Member-write spans are matched against ref spans in
     // `into_file_analysis` — original coords, like everything it joins.
     for span in member_writes.iter_mut() {
+        *span = rspan(*span);
+    }
+    for span in import_rows.iter_mut() {
         *span = rspan(*span);
     }
     // Call-site spans feed the call-value edge (`into_file_analysis`, after

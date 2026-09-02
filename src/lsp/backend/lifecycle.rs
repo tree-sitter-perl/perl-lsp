@@ -134,7 +134,7 @@ impl PackHealCtx {
                 symbols::pack_diagnostics(
                     &doc.analysis,
                     Some(self.module_index.lookup_for(doc.language).as_lookup()),
-                    false,
+                    self.index_ready.pack.is_open(),
                     self.options,
                 )
             });
@@ -158,6 +158,7 @@ impl Backend {
             degraded_progress: Arc::clone(&self.degraded_progress),
             gather_reg: Arc::clone(&self.gather_reg),
             work_done: Arc::clone(&self.work_done_progress),
+            index_ready: Arc::clone(&self.index_ready),
         }
     }
 
@@ -172,11 +173,13 @@ impl Backend {
         let module_index_holder: Arc<std::sync::OnceLock<Arc<ModuleIndex>>> =
             Arc::new(std::sync::OnceLock::new());
 
+        let index_ready = Arc::new(IndexReady::default());
         let on_refresh = make_on_refresh(
             client.clone(),
             Arc::clone(&files),
             Arc::clone(&module_index_holder),
             Arc::clone(&diag_options),
+            Arc::clone(&index_ready),
         );
 
         let module_index = Arc::new(ModuleIndex::new(client.clone(), on_refresh));
@@ -195,7 +198,7 @@ impl Backend {
             pack_invalidator: Arc::new(crate::index::pack_invalidator::PackInvalidator::default()),
             diag_options,
             rename_options: Arc::new(std::sync::Mutex::new(crate::index::resolve::RenameOptions::default())),
-            index_ready: Arc::new(IndexReady::default()),
+            index_ready,
             cold_wait_ms: Arc::new(std::sync::atomic::AtomicU64::new(DEFAULT_COLD_WAIT_MS)),
             max_cache_mb: Arc::new(std::sync::atomic::AtomicU64::new(max_cache_mb_default())),
             opening: Arc::new(dashmap::DashMap::new()),
@@ -223,6 +226,7 @@ impl Backend {
         let options = self.diagnostic_options();
         let degraded_open = Arc::clone(&self.degraded_open);
         let heal_ctx = self.pack_heal_ctx();
+        let index_ready = Arc::clone(&self.index_ready);
         let handle = tokio::runtime::Handle::current();
         debounce.fire(&handle, std::time::Duration::from_millis(150), move |latest| async move {
             // One rebuild per URI at a time. The settle window collapses fires
@@ -282,7 +286,7 @@ impl Backend {
                 symbols::pack_diagnostics(
                     &doc.analysis,
                     Some(module_index.lookup_for(doc.language).as_lookup()),
-                    false,
+                    index_ready.pack.is_open(),
                     options,
                 )
             });
@@ -529,7 +533,7 @@ impl DiagCtx {
                     symbols::pack_diagnostics(
                         &doc.analysis,
                         Some(self.module_index.lookup_for(doc.language).as_lookup()),
-                        false,
+                        self.index_ready.pack.is_open(),
                         self.options,
                     )
                 })
@@ -562,6 +566,7 @@ fn make_on_refresh(
     files: Arc<FileStore>,
     holder: Arc<std::sync::OnceLock<Arc<ModuleIndex>>>,
     diag_options: Arc<std::sync::Mutex<symbols::DiagnosticOptions>>,
+    index_ready: Arc<IndexReady>,
 ) -> impl Fn() + Send + Sync + 'static {
     let debounce = Arc::new(DebouncedLatest::default());
     let run = Arc::new(tokio::sync::Mutex::new(()));
@@ -571,6 +576,7 @@ fn make_on_refresh(
         let files = Arc::clone(&files);
         let holder = Arc::clone(&holder);
         let diag_options = Arc::clone(&diag_options);
+        let index_ready = Arc::clone(&index_ready);
         let run = Arc::clone(&run);
         crate::util::ghost_stats::count("on_refresh.fired");
         log::debug!("diag-refresh fired");
@@ -593,11 +599,12 @@ fn make_on_refresh(
             // task, and a whole-open-set re-enrich is synchronous CPU that
             // must never pin a reactor worker.
             let options = *diag_options.lock().unwrap();
+            let pack_settled = index_ready.pack.is_open();
             let pending = {
                 let files = Arc::clone(&files);
                 let module_index = Arc::clone(module_index);
                 tokio::task::spawn_blocking(move || {
-                    refresh_open_diagnostics(&files, &module_index, options, OpenDocScope::All)
+                    refresh_open_diagnostics(&files, &module_index, options, OpenDocScope::All, pack_settled)
                 })
                 .await
                 .unwrap_or_default()
@@ -629,6 +636,7 @@ pub(super) fn refresh_open_diagnostics(
     module_index: &ModuleIndex,
     options: symbols::DiagnosticOptions,
     scope: OpenDocScope,
+    pack_settled: bool,
 ) -> Vec<(Url, Vec<Diagnostic>)> {
     crate::util::ghost_stats::count("refresh_open_diagnostics");
     let mut docs: Vec<(Url, &'static str)> = Vec::new();
@@ -653,9 +661,8 @@ pub(super) fn refresh_open_diagnostics(
                     &doc.analysis,
                     Some(module_index.lookup_for(language).as_lookup()),
                     // the undefined-type lane needs the workspace's pack
-                    // index settled; the post-resolution refresh is the
-                    // publish that runs with it
-                    false,
+                    // index settled — the family's ready gate
+                    pack_settled,
                     options,
                 ),
                 None => continue,

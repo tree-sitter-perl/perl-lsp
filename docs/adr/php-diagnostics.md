@@ -80,10 +80,17 @@ Every lane names the case it cannot see and stays silent there:
   namespace prefix in the file (`Psr7\Utils`) names a namespace, not a
   type; an import row with a lowercase leaf names a function or constant
   (`use function A\b;` parses as a class row).
-- **The undefined-type lane needs a settled index**: `--check` passes
-  `index_settled = true`; the editor's first publish after `didOpen`
-  passes `false` and the post-resolution refresh carries the lane, so an
-  unindexed workspace never flags every type.
+- **The undefined-type lane needs a settled index**: `--check` is
+  settled by construction; every editor publish passes the pack family's
+  ready gate (`index_ready.pack.is_open()`), so the lane publishes once
+  the workspace index has landed and never before — an unindexed
+  workspace would flag every type.
+- **An undefined type is a quick-fix**: the diagnostic carries every
+  namespace that declares the leaf (`data.candidates`, the same set the
+  existence test reads), and `codeAction` offers one import per
+  candidate in the pack's own statement (`LangPack::import_template`),
+  inserted after the last import row above the site, else after the
+  namespace declaration, else after the first line.
 
 ## What the walker had to stop minting
 

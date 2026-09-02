@@ -293,6 +293,11 @@ templates). Market case and build-out plan in `docs/prompt-php-target.md`.
   true arm and a `match` arm narrow within themselves. Hover, completion
   and goto-def on an interface-typed parameter answer with the concrete
   class after the guard.
+- **Import-class quick-fix.** An undefined type the workspace or a
+  composer dependency declares elsewhere offers `Add 'use Ns\Leaf;'`
+  (one per declaring namespace), inserted after the file's last `use`
+  row. The undefined-type diagnostic itself now publishes in the editor
+  once the workspace index has settled.
 
 ### Storage engine — warm starts, bounded memory
 

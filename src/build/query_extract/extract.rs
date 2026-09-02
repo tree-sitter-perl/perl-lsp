@@ -590,6 +590,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     out.implicit_variables = pack.implicit_variables.iter().map(|s| s.to_string()).collect();
     out.catch_all_methods = pack.catch_all_methods.iter().map(|s| s.to_string()).collect();
     out.class_literal_member = pack.class_literal_member.to_string();
+    out.import_template = pack.import_template.to_string();
     out.enum_members = pack.enum_members.iter().map(|s| s.to_string()).collect();
     out.member_writes = std::mem::take(&mut member_writes);
     out.types_are_capitalized = pack.types_are_capitalized;
@@ -1485,6 +1486,12 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                 out.import_sites
                     .push((e.text.clone(), Span { start: e.start, end: e.end }));
                 out.imports.push(e.text.clone());
+            }
+            "import" => {
+                let row = Span { start: e.start, end: e.end };
+                if out.import_rows.last() != Some(&row) {
+                    out.import_rows.push(row);
+                }
             }
             cap if cap.starts_with("expr.lit.") => {
                 let suffix = cap.strip_prefix("expr.lit.").unwrap();

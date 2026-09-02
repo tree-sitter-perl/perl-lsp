@@ -135,3 +135,50 @@ fn php_signature_help_outline_and_diagnostics_over_stdio() {
     let _ = c.child.wait();
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// The import quick-fix: an undefined type the workspace declares elsewhere
+/// publishes (once the pack index has settled) with its candidates, and
+/// `codeAction` offers `use App\Util\Helper;` after the last `use` row.
+#[test]
+fn php_import_class_code_action_over_stdio() {
+    let dir = std::env::temp_dir().join(format!("perl-lsp-d2import-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("src/Util")).unwrap();
+    let w = |rel: &str, src: &str| std::fs::write(dir.join(rel), src).unwrap();
+    w("composer.json", "{\"autoload\": {\"psr-4\": {\"App\\\\\": \"src/\"}}}");
+    w("src/Util/Helper.php", "<?php\nnamespace App\\Util;\n\nclass Helper\n{\n    public static function go(): int { return 1; }\n}\n");
+    w("src/Mailer.php", "<?php\nnamespace App;\n\nclass Mailer\n{\n    public function send(): bool { return true; }\n}\n");
+    let service = "<?php\nnamespace App;\n\nuse App\\Mailer;\n\nclass Service\n{\n    public function run(): int\n    {\n        return Helper::go();\n    }\n}\n";
+    w("src/Service.php", service);
+    let mut c = Client::spawn(&dir);
+    c.request("initialize", serde_json::json!({"processId": null, "rootUri": uri(&dir), "capabilities": {}}));
+    c.notify("initialized", serde_json::json!({}));
+    let svc = uri(&dir.join("src/Service.php"));
+    c.notify("textDocument/didOpen", serde_json::json!({"textDocument": {"uri": svc, "languageId": "php", "version": 1, "text": service}}));
+    // the undefined-type diagnostic publishes once the pack index settles
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    let mut diag: Option<serde_json::Value> = None;
+    while std::time::Instant::now() < deadline && diag.is_none() {
+        c.request("textDocument/documentSymbol", serde_json::json!({"textDocument": {"uri": svc}}));
+        diag = c.notes.iter().filter(|n| n["method"] == "textDocument/publishDiagnostics" && n["params"]["uri"] == svc)
+            .flat_map(|n| n["params"]["diagnostics"].as_array().cloned().unwrap_or_default())
+            .find(|d| d["code"] == "undefined-type");
+        if diag.is_none() {
+            std::thread::sleep(std::time::Duration::from_millis(250));
+        }
+    }
+    let diag = diag.expect("no undefined-type diagnostic published");
+    assert!(diag["message"].as_str().unwrap().contains("App\\Helper"), "{diag}");
+    let actions = c.request("textDocument/codeAction", serde_json::json!({"textDocument": {"uri": svc}, "range": diag["range"], "context": {"diagnostics": [diag]}}));
+    let actions = actions.as_array().cloned().unwrap_or_default();
+    let import = actions.iter().find(|a| a["title"] == "Add 'use App\\Util\\Helper;'").unwrap_or_else(|| panic!("{actions:?}"));
+    let edit = &import["edit"]["changes"][&svc][0];
+    assert_eq!(edit["newText"], "use App\\Util\\Helper;\n", "{edit}");
+    // after the `use App\Mailer;` row (line 3): line 4
+    assert_eq!(edit["range"]["start"]["line"], 4, "{edit}");
+    assert_eq!(edit["range"]["start"]["character"], 0, "{edit}");
+    c.request("shutdown", serde_json::Value::Null);
+    c.notify("exit", serde_json::Value::Null);
+    let _ = c.child.wait();
+    let _ = std::fs::remove_dir_all(&dir);
+}

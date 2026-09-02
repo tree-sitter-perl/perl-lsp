@@ -253,7 +253,7 @@
   body: (namespace_use_group
     (namespace_use_clause
       . (name) @use.leaf
-      alias: (name)? @use.alias)))
+      alias: (name)? @use.alias))) @import
 
 ; a member on the LEFT of an assignment: php declares a property by
 ; writing it (`$this->x = ...`) — the undefined-property lane treats the
