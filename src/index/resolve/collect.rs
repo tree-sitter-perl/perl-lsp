@@ -986,6 +986,14 @@ pub(super) fn collect_from_analysis(
         )
     };
 
+    // Package globals match by package + (qualified) name, not the callable
+    // scope machinery below — and their spans need sigil handling — so collect
+    // them on a dedicated path.
+    if let TargetKind::PackageVar { package } = &target.kind {
+        collect_package_var(key, analysis, package, &target.name, out);
+        return;
+    }
+
     // `name` is constant across all refs in this call (it is `target.name`), so
     // the only varying key is the invocant class. Cache chains keyed by class to
     // avoid an O(refs × ancestor_depth) DFS on large files with many same-method
