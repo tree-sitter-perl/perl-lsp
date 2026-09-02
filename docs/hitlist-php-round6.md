@@ -100,7 +100,10 @@ row anywhere (a type hint, `Foo::class`, a `use` row) carries the
 `class-referenced` guard — a container or factory instantiates it. Reads
 the row store (an over-approximation, the sound side); without rows the
 constructor is judged by its `new` sites alone, as before. A class named
-nowhere keeps its constructor in the queue.
+nowhere keeps its constructor in the queue. symfony/demo (2026-09-02):
+dead 42 → 36, dead constructors 15 → 9; the nine left are classes no
+indexed PHP names (wired by config/autowiring) — the out-of-tree-callers
+fork (`docs/open-forks.md`, dead-code queue vs library public API).
 
 ### R6-10 — union darkness → heatmap false positives
 A: `array<SecurityAdvisory|PartialSecurityAdvisory>` element access is
