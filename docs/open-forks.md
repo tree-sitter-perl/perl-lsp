@@ -286,6 +286,11 @@ Format per entry:
   make those sites resolve to BOTH `Parser`s the file can see (own and
   aliased), which is imprecise rather than wrong; only a
   namespace-qualified `Node::Class` answers with one.
+- **Update 2026-09-02 (round-7 close):** group-use rows now mint import
+  rows like the flat spelling, so `use A\{Foo, Bar as Baz};` pins `Baz`
+  exactly as `use A\Bar as Baz;` does — and its `new Baz()` sites are
+  dark for exactly the same reason. Same fork, fourth spelling; nothing
+  new to decide.
 
 ---
 
