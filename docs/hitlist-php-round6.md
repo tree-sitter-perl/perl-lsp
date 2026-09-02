@@ -145,7 +145,7 @@ polymorphism (`FormatterInterface`, `ProcessorInterface::__invoke`).
   its members registered under the enclosing container, so references
   on an outer class's `$n` / `n()` listed the anonymous class's own and
   a rename corrupted it; its `__construct` had no construction site (5
-  guzzle test fixtures dead). Now a name-less `@def.class.anon` anchors
+  guzzle test fixtures dead). Now a name-less `@def.class.anchor` anchors
   a position-keyed synthesized Class (`class_anonymous_<line>_<col>`,
   pack `default_name`), the body's members key by it, `$this` inside
   resolves to it, `extends`/`implements`/trait `use` inside it are

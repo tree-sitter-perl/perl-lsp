@@ -40,30 +40,30 @@
   name: (name) @def.class.name @context.package) @def.class @scope
 
 ; anonymous classes: `new class(...) extends Base implements I { ... }`.
-; No name node — the `class` keyword anchors a @def.class.anon: the pack
+; No name node — the `class` keyword anchors a @def.class.anchor: the pack
 ; synthesizes a position-keyed identity, the body's members key by it
 ; (never by the enclosing container), `$this` inside resolves to it, and
 ; the keyword is the constructor's call site.
 (anonymous_class
-  "class" @def.class.anon @context.package
+  "class" @def.class.anchor @context.package
   body: (declaration_list) @scope) @def.class
 (anonymous_class
-  "class" @def.class.anon
+  "class" @def.class.anchor
   (base_clause (name) @parent @ref.type))
 (anonymous_class
-  "class" @def.class.anon
+  "class" @def.class.anchor
   (base_clause (qualified_name (name) @parent @ref.type) @parent.fq @ref.qualified))
 (anonymous_class
-  "class" @def.class.anon
+  "class" @def.class.anchor
   (class_interface_clause (name) @parent @ref.type))
 (anonymous_class
-  "class" @def.class.anon
+  "class" @def.class.anchor
   (class_interface_clause (qualified_name (name) @parent @ref.type) @parent.fq @ref.qualified))
 (anonymous_class
-  "class" @def.class.anon
+  "class" @def.class.anchor
   body: (declaration_list (use_declaration (name) @parent @ref.type)))
 (anonymous_class
-  "class" @def.class.anon
+  "class" @def.class.anchor
   body: (declaration_list (use_declaration (qualified_name (name) @parent @ref.type) @parent.fq @ref.qualified)))
 
 ; inheritance: `extends Base` — one @parent per base; the name is also a

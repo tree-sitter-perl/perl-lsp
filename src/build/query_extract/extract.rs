@@ -288,7 +288,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     // ---- join def name-captures to their def event ----
     use std::collections::HashMap;
     let mut names_by_match: HashMap<(usize, String), (String, Point, Point)> = HashMap::new();
-    // `@def.<kind>.anon` — a name-less def's anchor token (php's `class`
+    // `@def.<kind>.anchor` — a name-less def's anchor token (php's `class`
     // keyword): the pack synthesizes the name from the position, and the
     // match joins it like a `.name` capture so the def, its `@context`
     // and its `@parent` edges all read ONE identity.
@@ -340,7 +340,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
             names_by_match
                 .insert((e.match_id, prefix.to_string()), (e.text.clone(), e.start, e.end));
         }
-        if let Some(prefix) = e.cap.strip_suffix(".anon") {
+        if let Some(prefix) = e.cap.strip_suffix(".anchor") {
             let kind = prefix.strip_prefix("def.").unwrap_or(prefix);
             if let Some(n) = (pack.default_name)(kind, e.start.row, e.start.column) {
                 names_by_match.insert((e.match_id, prefix.to_string()), (n.clone(), e.start, e.end));
@@ -909,7 +909,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                     qualifier_owned: false,
                 });
             }
-            cap if cap.ends_with(".anon") => {
+            cap if cap.ends_with(".anchor") => {
                 // The anchor of an anonymous class is its construction site:
                 // `new class(...)` invokes the synthesized identity's
                 // constructor, so the ctor gets the MethodCall a `new
@@ -935,7 +935,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                     }
                 }
             }
-            cap if cap.starts_with("def.") && !cap.ends_with(".name") => {
+            cap if cap.starts_with("def.") && !cap.ends_with(".name") && !cap.ends_with(".anchor") => {
                 let kind = cap.strip_prefix("def.").unwrap().to_string();
                 let (name, name_start, name_end, defaulted) = names_by_match
                     .get(&(e.match_id, e.cap.clone()))

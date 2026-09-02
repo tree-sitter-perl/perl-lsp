@@ -324,7 +324,7 @@ Format per entry:
   - C. Hoist to the base: key members under `Base` (the `extends`
     target) as overrides. Wrong the moment two anonymous subclasses of
     one base disagree; rejected.
-- **Picked:** A, landed 2026-09-02: `@def.class.anon` on the `class`
+- **Picked:** A, landed 2026-09-02: `@def.class.anchor` on the `class`
   keyword; the pack's `default_name(kind, row, col)` spells
   `class_anonymous_<line>_<col>` (identifier-shaped — the name rides the
   bareword-class lanes, so PHP's own `class@anonymous` spelling is out);
