@@ -156,14 +156,6 @@ polymorphism (`FormatterInterface`, `ProcessorInterface::__invoke`).
   synthetic spelling is the open question on `docs/open-forks.md`.
   guzzle heatmap (2026-09-02): dead 122 → 108, dead constructors 5 → 1
   (the survivor is a named test helper class, not anonymous).
-- R7-6 (MAJOR, open — found while pinning R7-4): goto-def / hover on
-  the `n` of `$this->n` where `$n` is a class-level typed property with
-  a default (`private int $n = 1;`) answer the `$this` variable
-  (`$this: Outer`) at every column of `n` — references on the property
-  DO list the read (the member ref exists), so the cursor lane is
-  picking the receiver's span over the member's. A promoted-property
-  `$n` in the same shape answers correctly. Held on the round-7 binary
-  too (`$S/r7/prop`, r67) — pre-existing, not from the identity slice.
 - R7-5 (MINOR → LANDED): group-use imports (`use A\{Foo, Bar as Baz};`)
   minted no import row and no leaf reference — only the parent-resolving
   use-map saw them, so the class's references missed the row and the
