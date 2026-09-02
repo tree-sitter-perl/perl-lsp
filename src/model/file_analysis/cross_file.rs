@@ -1048,7 +1048,7 @@ impl UseMapPins {
     /// fallback for classes). A leaf the file never writes gets no claim:
     /// its refs reach that class through some other class's dispatch, and
     /// the namespace the file lives in says nothing about it.
-    fn namespace_of(&self, leaf: &str) -> Option<&str> {
+    pub(crate) fn namespace_of(&self, leaf: &str) -> Option<&str> {
         match self.pins.get(leaf) {
             Some(p) => p.as_deref(),
             None if self.spelled.contains(leaf) => self.own_namespace.as_deref(),

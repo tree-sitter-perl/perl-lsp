@@ -459,8 +459,17 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     // captures; `@parent.fq` carries a parent's own written qualifier. Both
     // feed the namespace-relative parent resolution in the `@parent` handler
     // (packs with `namespace_relative_parents` only — empty otherwise).
+    let mut out_use_aliases: Vec<(String, String, String)> = Vec::new();
     let mut use_map: HashMap<String, (String, String)> = HashMap::new();
     let mut parent_fq_by_match: HashMap<usize, String> = HashMap::new();
+    // `@ref.qualified`: the WRITTEN qualifier of a call/ctor/type/parent
+    // spelling (`Downloader\DownloadManager`, `\A\B`) — the use-map pins
+    // the leaf to that namespace instead of counting it as a bare spelling.
+    let qualified_by_match: HashMap<usize, String> = events
+        .iter()
+        .filter(|e| e.cap == "ref.qualified")
+        .map(|e| (e.match_id, e.text.clone()))
+        .collect();
     if pack.namespace_relative_parents {
         let mut use_fqn: HashMap<usize, String> = HashMap::new();
         let mut use_prefix: HashMap<usize, String> = HashMap::new();
@@ -489,6 +498,9 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
         for (mid, fqn) in &use_fqn {
             let (leaf, ns) = split_ns_leaf(fqn);
             let key = use_alias.get(mid).cloned().unwrap_or_else(|| leaf.clone());
+            if use_alias.contains_key(mid) {
+                out_use_aliases.push((key.clone(), ns.clone(), leaf.clone()));
+            }
             use_map.insert(key, (ns, leaf));
         }
         // group form: `use A\B\{C, D as E}` — the prefix is the namespace,
@@ -496,12 +508,17 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
         for (mid, leaf) in &use_leaf {
             let Some(prefix) = use_prefix.get(mid) else { continue };
             let key = use_alias.get(mid).cloned().unwrap_or_else(|| leaf.clone());
-            use_map.insert(key, (prefix.trim_start_matches('\\').to_string(), leaf.clone()));
+            let ns = prefix.trim_start_matches('\\').to_string();
+            if use_alias.contains_key(mid) {
+                out_use_aliases.push((key.clone(), ns.clone(), leaf.clone()));
+            }
+            use_map.insert(key, (ns, leaf.clone()));
         }
     }
 
     // ---- the state machine: scope stack + sticky contexts ----
     let mut out = SkeletonAnalysis::default();
+    out.use_aliases = out_use_aliases;
     out.receiver_names = pack.receiver_names.iter().map(|s| s.to_string()).collect();
     out.function_scoped_vars = pack.function_scoped_vars;
     out.constructor_names = pack.constructor_names.iter().map(|s| s.to_string()).collect();
@@ -1182,6 +1199,16 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                             crate::model::file_analysis::MemberShape::Unknown
                         },
                     });
+                    if let Some(q) = qualified_by_match.get(&e.match_id) {
+                        let leaf = (pack.shape_name)(&e.cap, &e.text);
+                        let prefix = q
+                            .strip_suffix(leaf.as_str())
+                            .map(|p| p.trim_end_matches('\\').to_string())
+                            .unwrap_or_default();
+                        if !prefix.is_empty() {
+                            out.qualified_spellings.push((leaf, prefix));
+                        }
+                    }
                     // The chain-hop witness: the whole call's value is
                     // "dispatch `member` on the receiver's class" — deferred
                     // to query time via `MethodHop`, so a receiver that is

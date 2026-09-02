@@ -783,3 +783,56 @@ fn php_nested_generic_over_mixed_keeps_the_outer_shape() {
     assert!(bag.contains("bag: array") && !bag.contains("list"), "{bag}");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Round-6 R6-1/R6-2: an aliased import pins the ALIAS spelling, never the
+/// real leaf (`use B\Event as ScriptEvent;` in namespace `A` leaves the
+/// bare `Event` meaning `A\Event`), a `use` row references only the class
+/// its own namespace names, and a qualified spelling
+/// (`new Downloader\DownloadManager()` inside `Composer`) pins the leaf to
+/// `Composer\Downloader` instead of counting as a bare spelling.
+#[cfg(feature = "php")]
+#[test]
+fn php_aliased_imports_and_qualified_spellings_pin_the_right_class() {
+    let dir = std::env::temp_dir().join(format!("perl-lsp-r6pins-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    for d in ["A", "B", "Composer/Downloader", "Other"] {
+        std::fs::create_dir_all(dir.join(d)).unwrap();
+    }
+    let w = |rel: &str, src: &str| std::fs::write(dir.join(rel), src).unwrap();
+    w("A/Event.php", "<?php\nnamespace A;\nclass Event { public function name(): string { return \"a\"; } }\n");
+    w("B/Event.php", "<?php\nnamespace B;\nuse A\\Event as BaseEvent;\nclass Event extends BaseEvent { public function name(): string { return \"b\"; } }\n");
+    w("A/Dispatcher.php", "<?php\nnamespace A;\nuse B\\Event as ScriptEvent;\nfunction dispatch(): void\n{\n    $e = new Event();\n    $e->name();\n    $s = new ScriptEvent();\n    $s->name();\n}\n");
+    w("Composer/Factory.php", "<?php\nnamespace Composer;\nclass Factory\n{\n    public function make(): void\n    {\n        $dm = new Downloader\\DownloadManager();\n        $dm->go();\n    }\n}\n");
+    w("Composer/Abs.php", "<?php\nnamespace Composer;\nclass Abs\n{\n    public function make(): void\n    {\n        $o = new \\Other\\DownloadManager();\n        $o->go();\n    }\n}\n");
+    w("Composer/Downloader/DownloadManager.php", "<?php\nnamespace Composer\\Downloader;\nclass DownloadManager { public function go(): int { return 1; } }\n");
+    w("Other/DownloadManager.php", "<?php\nnamespace Other;\nclass DownloadManager { public function go(): string { return \"o\"; } }\n");
+    let run = |args: &[&str]| {
+        let out = std::process::Command::new(env!("CARGO_BIN_EXE_perl-lsp"))
+            .args(args)
+            .env("XDG_CACHE_HOME", dir.join(".cache"))
+            .output()
+            .expect("run");
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+    let root = dir.to_str().unwrap();
+    let sites = |out: &str| -> Vec<(String, u64)> {
+        let v: serde_json::Value = serde_json::from_str(out).expect("json");
+        let mut l: Vec<(String, u64)> = v.as_array().unwrap().iter().map(|e| {
+            let f = e["file"].as_str().unwrap();
+            (f[f.rfind('/').map(|i| i + 1).unwrap_or(0)..].to_string(), e["line"].as_u64().unwrap())
+        }).collect();
+        l.sort();
+        l
+    };
+    let gd = run(&["--definition", root, "A/Dispatcher.php", "5", "13"]);
+    assert!(gd.contains("A/Event.php") && !gd.contains("B/Event.php"), "bare `Event` in namespace A is A's: {gd}");
+    let a = sites(&run(&["--references", root, "A/Event.php", "2", "6"]));
+    assert_eq!(a, vec![("Dispatcher.php".into(), 5), ("Event.php".into(), 2), ("Event.php".into(), 2)], "A\\Event: the `new`, its decl, and B's `use A\\Event` row — never `use B\\Event`: {a:?}");
+    let b = sites(&run(&["--references", root, "B/Event.php", "3", "6"]));
+    assert_eq!(b, vec![("Dispatcher.php".into(), 2), ("Event.php".into(), 3)], "B\\Event: the aliased use row and its decl only: {b:?}");
+    let d = sites(&run(&["--references", root, "Composer/Downloader/DownloadManager.php", "2", "40"]));
+    assert_eq!(d, vec![("DownloadManager.php".into(), 2), ("Factory.php".into(), 7)], "relative-qualified `new` site admitted, absolute `\\Other` site not: {d:?}");
+    let o = sites(&run(&["--references", root, "Other/DownloadManager.php", "2", "40"]));
+    assert_eq!(o, vec![("Abs.php".into(), 7), ("DownloadManager.php".into(), 2)], "{o:?}");
+    let _ = std::fs::remove_dir_all(&dir);
+}

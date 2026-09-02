@@ -88,6 +88,12 @@ pub struct SkeletonAnalysis {
     /// span). Goto-def on the token resolves the header; the span is what the
     /// bare `imports` list drops. Carried onto `FileAnalysis.pack.include_directives`.
     pub import_sites: Vec<(String, crate::model::file_analysis::Span)>,
+    /// `use A\B as C` rows: (alias, namespace, real leaf). Carried onto
+    /// `FileAnalysis.pack.use_aliases`.
+    pub use_aliases: Vec<(String, String, String)>,
+    /// Class spellings written WITH a qualifier: (leaf, written prefix).
+    /// Carried onto `FileAnalysis.pack.qualified_spellings`.
+    pub qualified_spellings: Vec<(String, String)>,
     pub scope_count: usize,
     pub scopes: Vec<crate::model::file_analysis::Scope>,
     pub witnesses: Vec<crate::model::witnesses::Witness>,
@@ -1332,6 +1338,8 @@ impl SkeletonAnalysis {
                 .map(|(raw, span)| (span, raw))
                 .collect(),
             parent_namespaces: std::mem::take(&mut self.parent_namespaces),
+            use_aliases: std::mem::take(&mut self.use_aliases),
+            qualified_spellings: std::mem::take(&mut self.qualified_spellings),
             domain_sites: std::mem::take(&mut self.domain_sites),
             moved_from: std::mem::take(&mut self.moved_from),
             control_regions: std::mem::take(&mut self.control_regions),

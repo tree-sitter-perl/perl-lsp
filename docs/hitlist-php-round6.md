@@ -10,6 +10,22 @@ property-vs-method separation (`User::$permissions` / `permissions()`,
 `HtmlErrorRenderer`), `Book::query()` through vendor + inheritance,
 Doctrine `@method` rows, `use X as Alias` and union types dark-not-wrong.
 
+## LANDED at close (2026-09-02, one slice)
+- R6-1: `use_aliases` persisted; an aliased row pins the alias spelling,
+  never the real leaf; a `use` row's leaf references only the class its
+  namespace names (per-row verdict in the matcher, so a file whose own
+  `Event` is another class still contributes its `use A\Event as
+  BaseEvent` row to `A\Event`'s references/rename). RESIDUAL: gd on a
+  member of the bare-spelled class (`$e->name()` with `$e = new Event()`)
+  still lists the same-leaf stranger's method too — the decl→def fan-out
+  lane is leaf-keyed; references/rename are exact.
+- R6-2: `qualified_spellings` persisted (the written prefix of call /
+  ctor / type / parent spellings); the leaf pins to `own_ns\prefix`, or
+  to the absolute prefix after a leading `\`. The explicit speller
+  `leaf_namespace` now reads the same pins (own-namespace and qualified
+  claims included), so every class-keyed family filter agrees with the
+  axis.
+
 ## CRITICAL
 
 ### R6-1 — an aliased import's FQ row pins the real leaf

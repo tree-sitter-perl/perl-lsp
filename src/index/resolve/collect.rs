@@ -947,6 +947,11 @@ pub(super) fn collect_from_analysis(
     // ever gates: a closure-carrying (cpp) file's partial namespace
     // attribution stays `pkg_agrees`'s business, and a scope that makes
     // no claim keeps every ref matched on the receiver chain as before.
+    // When the file's claim disagrees, its `use` rows can still name the
+    // target's class by full namespace (`use A\Event as BaseEvent;` inside
+    // a file whose own bare `Event` is another class): those rows stay in,
+    // everything else in the file is the stranger's.
+    let mut import_rows_only = false;
     if let Some(want) = target.class_ns.as_deref() {
         let leaf = match &target.kind {
             TargetKind::Method { class } => Some(class.as_str()),
@@ -957,18 +962,29 @@ pub(super) fn collect_from_analysis(
         if let Some(leaf) = leaf {
             let claim = module_index.and_then(|idx| idx.pinned_namespace(leaf));
             if claim.is_some_and(|ns| ns != want) {
-                return;
+                if !matches!(target.kind, TargetKind::Package) {
+                    return;
+                }
+                import_rows_only = true;
             }
         }
     }
-
-    // Package globals match by package + (qualified) name, not the callable
-    // scope machinery below — and their spans need sigil handling — so collect
-    // them on a dedicated path.
-    if let TargetKind::PackageVar { package } = &target.kind {
-        collect_package_var(key, analysis, package, &target.name, out);
-        return;
-    }
+    // A `use` row names ONE class in full: its leaf token references the
+    // target only when the row's namespace is the target's (`use B\Event
+    // as ScriptEvent;` is never a reference to `A\Event`, whatever the
+    // file's own `Event` means).
+    let import_row_verdict = |span: &Span| -> Option<bool> {
+        let want = target.class_ns.as_deref()?;
+        let (_, raw) = analysis.pack.include_directives.iter().find(|(row, _)| {
+            (row.start.row, row.start.column) <= (span.start.row, span.start.column)
+                && (span.end.row, span.end.column) <= (row.end.row, row.end.column)
+        })?;
+        Some(
+            raw.trim_start_matches('\\')
+                .rsplit_once('\\')
+                .is_some_and(|(ns, leaf)| ns == want && leaf == target.name),
+        )
+    };
 
     // `name` is constant across all refs in this call (it is `target.name`), so
     // the only varying key is the invocant class. Cache chains keyed by class to
@@ -1019,6 +1035,9 @@ pub(super) fn collect_from_analysis(
 
     // Include declaration spans when this file defines the target.
     for sym in analysis.symbols() {
+        if import_rows_only {
+            break;
+        }
         if symbol_defines_target(sym, target, analysis) {
             out.push(RefLocation {
                 key: key.clone(),
@@ -1037,6 +1056,16 @@ pub(super) fn collect_from_analysis(
         _ => None,
     };
     for r in analysis.refs() {
+        if matches!(r.kind, RefKind::PackageRef) {
+            match import_row_verdict(&r.span) {
+                Some(false) => continue,
+                Some(true) => {}
+                None if import_rows_only => continue,
+                None => {}
+            }
+        } else if import_rows_only {
+            continue;
+        }
         // A qualified call (`Foo::baz()` / `$o->Foo::Bar::baz()`) keeps its
         // whole path in `target_name`; match it on the bare callable tail (the
         // dispatch-class checks in the call arms below still pin the right

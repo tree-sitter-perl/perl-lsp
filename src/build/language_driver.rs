@@ -1293,6 +1293,8 @@ fn remap_spans(
         parents: _,
         // FQ rows — leaf/ns strings, no spans to remap.
         parent_namespaces: _,
+        use_aliases: _,
+        qualified_spellings: _,
         var_reads,
         label_refs,
         receiver_names: _,

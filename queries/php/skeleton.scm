@@ -48,13 +48,13 @@
   (base_clause (name) @parent @ref.type))
 (class_declaration
   name: (name) @def.class.name
-  (base_clause (qualified_name (name) @parent @ref.type) @parent.fq))
+  (base_clause (qualified_name (name) @parent @ref.type) @parent.fq @ref.qualified))
 (interface_declaration
   name: (name) @def.class.name
   (base_clause (name) @parent @ref.type))
 (interface_declaration
   name: (name) @def.class.name
-  (base_clause (qualified_name (name) @parent @ref.type) @parent.fq))
+  (base_clause (qualified_name (name) @parent @ref.type) @parent.fq @ref.qualified))
 ; `implements Contract` — an interface is a parent for method-resolution
 ; purposes (the contract's declarations answer hover/completion).
 (class_declaration
@@ -62,7 +62,7 @@
   (class_interface_clause (name) @parent @ref.type))
 (class_declaration
   name: (name) @def.class.name
-  (class_interface_clause (qualified_name (name) @parent @ref.type) @parent.fq))
+  (class_interface_clause (qualified_name (name) @parent @ref.type) @parent.fq @ref.qualified))
 ; `use SomeTrait;` inside a class body — trait methods resolve through the
 ; same ancestor walk (PHP flattening ≈ role composition ≈ parent edge).
 (class_declaration
@@ -70,7 +70,7 @@
   body: (declaration_list (use_declaration (name) @parent @ref.type)))
 (class_declaration
   name: (name) @def.class.name
-  body: (declaration_list (use_declaration (qualified_name (name) @parent @ref.type) @parent.fq)))
+  body: (declaration_list (use_declaration (qualified_name (name) @parent @ref.type) @parent.fq @ref.qualified)))
 
 ; container flavor marks (name-span post-join like @nonpublic.target):
 ; interfaces and traits are SymKind::Class in the model, but SUPER
@@ -186,7 +186,7 @@
 ; hints, and the file's use-map counts the leaf as spelled here.
 ; Primitives (`int`, `array`) are `primitive_type`, never matched.
 (named_type (name) @ref.type)
-(named_type (qualified_name (name) @ref.type))
+(named_type (qualified_name (name) @ref.type) @ref.qualified)
 
 ; ---- the file's use-map (alias- and group-aware) ----
 ; What each imported leaf/alias MEANS — parents resolve through it
@@ -298,7 +298,7 @@
   function: (name) @ref.call
   arguments: (arguments) @arity.args) @expr.call
 (function_call_expression
-  function: (qualified_name (name) @ref.call)
+  function: (qualified_name (name) @ref.call) @ref.qualified
   arguments: (arguments) @arity.args) @expr.call
 
 ; `$obj->method()` / `$obj?->method()` / `$obj->prop` / `User::method()`:
@@ -416,7 +416,7 @@
 (object_creation_expression
   (name) @ref.call) @expr.ctor
 (object_creation_expression
-  (qualified_name (name) @ref.call)) @expr.ctor
+  (qualified_name (name) @ref.call) @ref.qualified) @expr.ctor
 
 (variable_name) @expr.read.var
 
