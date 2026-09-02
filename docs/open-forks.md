@@ -22,6 +22,7 @@ designs live in `docs/prompt-storage-residuals.md`.
 | [GraphView node identity is leaf-keyed](#graphview-node-identity-is-leaf-keyed--2026-09-01--open-claude) | 09-01 | should `Node::Class` carry the namespace so a same-leaf aliased parent stops needing a per-consumer bypass (two exist)? |
 | [Union types in the lattice](#union-types-in-the-lattice--2026-09-02--open-claude) | 09-02 | `list<A|B>` / `A|B` returns: add a `Union` variant, pick an arm, or stay dark? |
 | [Dead-code queue vs library public API](#dead-code-queue-vs-library-public-api--2026-09-02--open-claude) | 09-02 | should `--heatmap` learn a library mode that never flags public members whose callers live out of tree? |
+| [Use-map pin with no indexed declaration answers empty](#use-map-pin-with-no-indexed-declaration-answers-empty--2026-09-02--open-claude) | 09-02 | when a php file `use`s a class no indexed file declares (vendor not indexed), should gd/hover answer nothing, or fall back to a same-leaf candidate from another namespace? |
 
 Format per entry:
 
@@ -285,3 +286,28 @@ Format per entry:
 - **Undo cost:** B/C are small and reversible.
 - **Discussion needed:** which of B/C, and whether "public" should mean the PHP visibility keyword or the autoload roots.
 
+---
+
+## Use-map pin with no indexed declaration answers empty — 2026-09-02 — OPEN (Claude)
+- **Context:** round-5 R5-1 (`VisibilityAxis::UseMap`). A php origin's
+  `use Symfony\...\Request;` pins the leaf `Request` to that namespace.
+  When no indexed file declares it (the vendor tree is not in the
+  workspace, or composer's tier is off), `visible_def_candidates` answers
+  EMPTY — gd/hover/completion on that class go dark. Before the axis they
+  answered a same-leaf stranger (`Http\Client\Request`) — wrong, but
+  something. Laravel's `Auth/SessionGuard.php:150` is the live case.
+- **Options:** A — empty (picked): the file said what it means, a
+  stranger is a lie. B — degrade to the full same-leaf table, ranked by
+  the own namespace, when the pinned filter is empty (SearchPath's
+  degrade rule). C — empty for navigation, stranger for TYPE chases only
+  (member completion would at least show something).
+- **Picked:** A, per the smartmatch principle (predictable over clever)
+  and rename safety — B would re-admit the stranger's members into the
+  references walk through the dispatch chain. One arm in
+  `ScopedLookup::visible_def_candidates` (the `pinned` branch); B is a
+  three-line change there, C a shape flag on the query.
+- **Undo cost:** trivial (one match arm); the pin test would need its
+  "un-indexed pinned class answers empty" expectation flipped.
+- **Discussion needed:** is dark-but-honest the right default for an
+  editor surface, or should the composer vendor tier be the answer
+  (index what `use` names, then the question never arises)?
