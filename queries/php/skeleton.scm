@@ -222,7 +222,7 @@
 (static_variable_declaration
   name: (variable_name) @def.var.name @def.var)
 (assignment_expression
-  left: (subscript_expression (variable_name) @def.var.name @def.var))
+  left: (subscript_expression . (variable_name) @def.var.name @def.var))
 ; `catch (E $e)` binds the exception variable.
 (catch_clause
   name: (variable_name) @def.var.name @def.var)

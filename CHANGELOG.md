@@ -313,6 +313,10 @@ templates). Market case and build-out plan in `docs/prompt-php-target.md`.
 - **Properties typed by assignment.** `$this->mailer = new Mailer()` in
   a constructor types `$this->mailer` for every reader in the class,
   with no declared type or docblock — chains through it resolve.
+- **A php value read never means a method.** `$this->session` on a
+  class declaring only `session()` is an undeclared property for the
+  lane, goto-def and hover alike (Perl's accessor calls keep their
+  either-kind resolution).
 - **Lanes hardened on WordPress and laravel.** Trait and enum bodies
   composing traits, aliases of global classes and `Str::$method()`
   receivers count as uses of their imports; the global namespace knows

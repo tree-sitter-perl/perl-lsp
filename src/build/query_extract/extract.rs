@@ -94,6 +94,8 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     // `@arity.args`.
     let mut arg_counts_by_start: std::collections::HashMap<(usize, usize), usize> =
         std::collections::HashMap::new();
+    // `f(...)` sites: a call with no countable arguments — still a call.
+    let mut placeholder_call_at: std::collections::HashSet<(usize, usize)> = std::collections::HashSet::new();
     // A callable's declared parameter arity, keyed by the parameter_list span.
     // Associated to its def symbol by span containment in `into_file_analysis`
     // (`@arity.sig` fires a separate match from the def name).
@@ -218,6 +220,8 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                     arg_counts_by_start
                         .insert((node.start_position().row, node.start_position().column),
                                 node.named_child_count());
+                } else {
+                    placeholder_call_at.insert((node.start_position().row, node.start_position().column));
                 }
                 continue;
             }
@@ -1423,7 +1427,9 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                         // member tokens carry the fact (a plain call is a
                         // callable by construction, a type ref neither).
                         shape: if e.cap == "ref.member" {
-                            if arg_counts_by_start.contains_key(&(e.end.row, e.end.column)) {
+                            if arg_counts_by_start.contains_key(&(e.end.row, e.end.column))
+                                || placeholder_call_at.contains(&(e.end.row, e.end.column))
+                            {
                                 crate::model::file_analysis::MemberShape::Callable
                             } else {
                                 crate::model::file_analysis::MemberShape::Value

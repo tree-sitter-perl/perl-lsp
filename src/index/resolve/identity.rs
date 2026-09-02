@@ -404,7 +404,15 @@ pub fn resolve_symbol_scoped(
                         .map(|_| MemberShape::Callable),
                 };
                 if let Some(shape) = written {
-                    if analysis.member_kinds_overloaded(class, &t.name, module_index) {
+                    // A strict pack's syntax decided the kind at the cursor:
+                    // the shape binds the target regardless of overloading. A
+                    // DECLARATION cursor keeps the overload-only gate — a
+                    // framework's magic property may legitimately read a
+                    // method's name (an Eloquent relation).
+                    if analysis.member_kinds_overloaded(class, &t.name, module_index)
+                        || (analysis.pack.member_shapes_are_strict
+                            && analysis.ref_at(point).is_some_and(|r| matches!(r.kind, RefKind::MethodCall { .. })))
+                    {
                         t.member_shape = shape;
                     }
                 }

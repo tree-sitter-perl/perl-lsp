@@ -2586,7 +2586,7 @@ public:
     let recv = InferredType::Parametric(
         ParametricType::instance_from_spelling("Box<int>").unwrap(),
     );
-    let mvt = |m: &str| fa.member_value_type(&recv, m, None, None);
+    let mvt = |m: &str| fa.member_value_type(&recv, m, None, None, Default::default());
     assert_eq!(mvt("get"), Some(InferredType::ClassName("int".into())), "bare param return");
     assert_eq!(mvt("v_"), Some(InferredType::ClassName("int".into())), "bare param field");
     assert_eq!(
@@ -2604,8 +2604,8 @@ public:
     assert_eq!(mvt("size"), Some(InferredType::Numeric), "concrete member unchanged");
     // No receiver args → no invented answer for param-shaped members.
     let bare = InferredType::ClassName("Box".into());
-    assert_eq!(fa.member_value_type(&bare, "get", None, None), None);
-    assert_eq!(fa.member_value_type(&bare, "size", None, None), Some(InferredType::Numeric));
+    assert_eq!(fa.member_value_type(&bare, "get", None, None, Default::default()), None);
+    assert_eq!(fa.member_value_type(&bare, "size", None, None, Default::default()), Some(InferredType::Numeric));
 }
 
 #[test]
@@ -2655,16 +2655,16 @@ template <> struct codec<int, char> {
     );
     // pattern bindings feed member substitution: T bound THROUGH the shape
     assert_eq!(
-        fa.member_value_type(&inst("codec<Widget*, char>"), "deref", None, None),
+        fa.member_value_type(&inst("codec<Widget*, char>"), "deref", None, None, Default::default()),
         Some(InferredType::ClassName("Widget".into()))
     );
     assert_eq!(
-        fa.member_value_type(&inst("codec<vector<Widget>, char>"), "front", None, None),
+        fa.member_value_type(&inst("codec<vector<Widget>, char>"), "front", None, None, Default::default()),
         Some(InferredType::ClassName("Widget".into()))
     );
     // a member the spec doesn't define falls through the ladder to the primary
     assert_eq!(
-        fa.member_value_type(&inst("codec<Widget*, char>"), "parse", None, None),
+        fa.member_value_type(&inst("codec<Widget*, char>"), "parse", None, None, Default::default()),
         Some(InferredType::Numeric)
     );
     // the ladder itself is ranked and never pruned

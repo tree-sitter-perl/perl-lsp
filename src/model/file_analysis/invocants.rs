@@ -313,29 +313,64 @@ impl FileAnalysis {
         member: &str,
         module_index: Option<&dyn CrossFileLookup>,
         arg_count: Option<usize>,
+        shape: MemberShape,
     ) -> Option<InferredType> {
+        // On a strict pack the written shape picks the rung: a value read
+        // never means the method, a call never the field.
+        let strict = self.pack.member_shapes_are_strict;
         // The whole ladder, most-specific first: a member the winning spec
         // doesn't define falls through to the next rung (ultimately the
         // primary) — same never-pruned order goto-def presents.
         for (class, recv) in self.dispatch_ladder_of(receiver, module_index) {
+            // The registry publication is name-keyed (a field's assignment
+            // rides it too), so a value read on a strict pack takes the
+            // declared field first and consults the registry only when no
+            // method carries the name.
+            let value_read = strict && shape == MemberShape::Value;
+            if value_read {
+                if let Some(raw) = self.field_type_on_class(&class, member, module_index) {
+                    return Some(self.substitute_member_type(raw, &class, &recv, module_index));
+                }
+                if self
+                    .resolve_member_in_ancestors(&class, member, MemberShape::Callable, module_index)
+                    .is_some()
+                {
+                    continue;
+                }
+            }
             if let Some(t) =
                 self.method_return_type_on(&class, &recv, member, module_index, arg_count)
             {
                 return Some(t);
             }
+            if strict && shape == MemberShape::Callable {
+                continue;
+            }
             let Some(raw) = self.field_type_on_class(&class, member, module_index) else {
                 continue;
             };
-            let params = self.class_template_params(&class, module_index);
-            if params.is_empty() {
-                return Some(raw);
-            }
-            let InferredType::Parametric(ParametricType::Instance { args, .. }) = &recv else {
-                return Some(raw);
-            };
-            return Some(substitute_type_params(&raw, &params, args));
+            return Some(self.substitute_member_type(raw, &class, &recv, module_index));
         }
         None
+    }
+
+    /// A field's declared type with the class's template params substituted
+    /// against the receiver's instance args.
+    fn substitute_member_type(
+        &self,
+        raw: InferredType,
+        class: &str,
+        recv: &InferredType,
+        module_index: Option<&dyn CrossFileLookup>,
+    ) -> InferredType {
+        let params = self.class_template_params(class, module_index);
+        if params.is_empty() {
+            return raw;
+        }
+        let InferredType::Parametric(ParametricType::Instance { args, .. }) = recv else {
+            return raw;
+        };
+        substitute_type_params(&raw, &params, args)
     }
 
     /// `dispatch_class_of`'s type-to-type twin for consumers that hand a

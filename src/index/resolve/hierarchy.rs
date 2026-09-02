@@ -103,11 +103,11 @@ impl<'a> CandidateSet<'a> {
                 // value on it — a method's return first, a field's declared
                 // type as the fallback (the ladder hover reads); the bare
                 // span's own witnesses when the receiver does not type.
-                RefKind::MethodCall { invocant_span: Some(inv), .. } => self
+                RefKind::MethodCall { invocant_span: Some(inv), shape, .. } => self
                     .origin
                     .expr_type_at_span(*inv, self.idx())
                     .and_then(|t| {
-                        self.origin.member_value_type(&t, r.unqualified_target_name(), self.idx(), r.arg_count)
+                        self.origin.member_value_type(&t, r.unqualified_target_name(), self.idx(), r.arg_count, *shape)
                     })
                     .or_else(|| self.origin.expr_type_at_span(r.span, self.idx())),
                 _ => self.origin.expr_type_at_span(r.span, self.idx()),

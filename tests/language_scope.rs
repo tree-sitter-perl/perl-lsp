@@ -1399,7 +1399,39 @@ fn php_global_namespace_builtins_and_escaped_string_callables_stay_quiet() {
     let undefined: Vec<&str> = err.lines().filter(|l| l.contains("[undefined-type]")).collect();
     assert_eq!(undefined.len(), 1, "{err}");
     assert!(undefined[0].contains("bin/run.php") && undefined[0].contains("'Helper'"), "{undefined:?}");
-    // a value read of a name only a method carries is an undeclared property
+    // a value read of a name only a method carries is an undeclared property —
+    // for the lane, goto-def and hover alike
     assert!(err.lines().any(|l| l.contains("Svc.php") && l.contains("[undefined-property]") && l.contains("'session'")), "{err}");
+    let def = run(&["--definition", root, "src/Svc.php", "7", "22"]);
+    assert!(!def.contains("Svc.php:4:"), "a value read must not answer the method: {def}");
+    let hover = run(&["--hover", root, "src/Svc.php", "7", "22"]);
+    assert!(!hover.contains("session: "), "a value read must not type through the method: {hover}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+
+/// Silence rules the corpora demanded: a trait's `$this` is the composing
+/// class (no undefined members), a first-class callable member
+/// (`$this->load(...)`) is a call, a subscript's index is a read, and a
+/// by-reference capture written inside the closure and read outside — or
+/// captured by a nested closure — is used.
+#[cfg(feature = "php")]
+#[test]
+fn php_lanes_stay_quiet_on_traits_captures_and_first_class_callables() {
+    let dir = std::env::temp_dir().join(format!("perl-lsp-d2fp2-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    let w = |rel: &str, src: &str| std::fs::write(dir.join(rel), src).unwrap();
+    w("composer.json", "{\"autoload\": {\"psr-4\": {\"App\\\\\": \"src/\"}}}");
+    w("src/A.php", "<?php\nnamespace App;\ntrait T\n{\n    public function go(): int\n    {\n        $this->startSession();\n        return $this->app['x'];\n    }\n}\nclass K\n{\n    public function load(string $c): void {}\n    public function reg(): void\n    {\n        spl_autoload_register($this->load(...), true, true);\n    }\n    public function keys(array $promises): array\n    {\n        $results = [];\n        foreach ($promises as $key => $promise) {\n            $results[$key] = $promise;\n        }\n        $called = [];\n        $p = function ($size) use (&$called) { $called[] = $size; return 1; };\n        $p(1);\n        $result = null;\n        $f = function ($v) use (&$result): void { $result = ['v' => $v]; };\n        $f(2);\n        $dead = 3;\n        return [$results, $called, $result];\n    }\n}\n");
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_perl-lsp"))
+        .args(["--check", dir.to_str().unwrap(), "--severity", "hint"])
+        .env("XDG_CACHE_HOME", dir.join(".cache"))
+        .output()
+        .expect("run");
+    let err = String::from_utf8_lossy(&out.stderr);
+    let rows: Vec<&str> = err.lines().filter(|l| l.contains("A.php") && l.contains('[')).collect();
+    assert_eq!(rows.len(), 1, "{err}");
+    assert!(rows[0].contains("[unused-variable]") && rows[0].contains("'$dead'"), "{rows:?}");
     let _ = std::fs::remove_dir_all(&dir);
 }

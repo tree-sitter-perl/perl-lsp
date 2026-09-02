@@ -619,3 +619,23 @@ type mismatch; both are the next diagnostics axis.
   an idiom, not a mismatch, and one the extractor already reduces to
   the same receiver bucket. Not mirrored; noise.
 
+### Lane counts on the corpora, hint severity (2026-09-03, 01:15, build 17977ec)
+
+| corpus | unresolved-method | undefined-property | undefined-type | undefined-variable | unused-import | unused-variable | deprecated | arity |
+|---|---|---|---|---|---|---|---|---|
+| WordPress | 111 | 198 | 94 | 24 | 0 | 611 | 283 | 15 |
+| laravel/framework | 1,521 | 518 | 7,039 | 51 | 6 | 741 | 34 | 14 |
+| guzzle | 2 | 0 | 1,340 | 0 | 0 | 563 | 0 | 2 |
+| monolog | 11 | 13 | 263 | 0 | 2 | 36 | 4 | 0 |
+| symfony demo | 0 | 5 | 519 | 0 | 0 | 0 | 0 | 0 |
+
+Sampled: the `unused-variable` rows on guzzle were by-reference closure
+captures written inside the closure and read outside, a foreach key
+read only as a subscript index, and a variable captured by a nested
+closure; the `undefined-property` rows on laravel were a trait's
+`$this->app` (the composing class provides it) and `$this->load(...)`
+(a first-class callable read as a property); WordPress's `$user->ID`
+after `$user = wp_signon()` keeps an earlier branch's `WP_Error` — an
+untyped reassignment does not yet reset a variable's type. The first
+three are fixed in the next build; the recount follows.
+

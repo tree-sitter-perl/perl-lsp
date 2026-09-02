@@ -810,6 +810,9 @@ pub fn pack_symbol_diagnostics(
         owner: Option<std::sync::Arc<FileAnalysis>>,
         is_interface: bool,
         is_enum: bool,
+        /// A trait's `$this` is whatever class composes it: every member
+        /// it does not declare may live there.
+        is_trait: bool,
         dynamic_arg_calls: Vec<Span>,
     }
     let mut owner_memo: HashMap<String, Option<OwnerFacts>> = HashMap::new();
@@ -883,6 +886,7 @@ pub fn pack_symbol_diagnostics(
                 // (resolved ones still check arity).
                 is_interface: class_attr("interface"),
                 is_enum: class_attr("enum"),
+                is_trait: class_attr("trait"),
                 dynamic_arg_calls: if owner_arc.is_some() {
                     dynamic_call_spans(owner, &["func_get_args", "func_num_args", "func_get_arg"])
                 } else {
@@ -902,7 +906,7 @@ pub fn pack_symbol_diagnostics(
             continue;
         }
         match owner.resolve_member_in_ancestors(&class, name, want, idx) {
-            None if facts.is_interface => {}
+            None if facts.is_interface || facts.is_trait => {}
             // a class with no declared constructor has the default one
             None if pack.constructor_names.iter().any(|c| c == name) => {}
             None => {
@@ -1083,9 +1087,20 @@ pub fn pack_symbol_diagnostics(
         }
 
         // ---- unused variable: a local written and never read ----
-        // Reads per (callable, name), credited to every enclosing callable:
-        // a closure's `use ($x)` reads the outer `$x` through its own copy.
-        let mut reads: HashMap<(u32, String), usize> = HashMap::new();
+        // A read counts for the callable it sits in, every enclosing callable
+        // (a closure's `use ($x)` reads the outer `$x` through its own copy)
+        // and every callable nested inside it (a by-reference capture is
+        // written inside the closure and read by the scope around it); a
+        // same-named declaration in a nested callable is the capture itself.
+        let callables_up = |scope: crate::model::file_analysis::ScopeId| -> Vec<u32> {
+            analysis
+                .scope_chain(scope)
+                .into_iter()
+                .filter(|&sc| matches!(analysis.scope(sc).kind, ScopeKind::Sub { .. } | ScopeKind::Method { .. }))
+                .map(|sc| sc.0)
+                .collect()
+        };
+        let mut read_chains: HashMap<String, Vec<Vec<u32>>> = HashMap::new();
         for r in analysis.refs() {
             if !matches!(r.kind, RefKind::Variable)
                 || matches!(r.access, crate::model::file_analysis::AccessKind::Write)
@@ -1093,9 +1108,13 @@ pub fn pack_symbol_diagnostics(
             {
                 continue;
             }
-            for sc in analysis.scope_chain(r.scope) {
-                if matches!(analysis.scope(sc).kind, ScopeKind::Sub { .. } | ScopeKind::Method { .. }) {
-                    *reads.entry((sc.0, r.target_name.clone())).or_default() += 1;
+            read_chains.entry(r.target_name.clone()).or_default().push(callables_up(r.scope));
+        }
+        let mut decl_chains: HashMap<String, Vec<(u32, Vec<u32>)>> = HashMap::new();
+        for sym in analysis.symbols() {
+            if matches!(sym.kind, FaSymKind::Variable) && sym.name.starts_with('$') {
+                if let Some(sc) = callable_of(sym.scope) {
+                    decl_chains.entry(sym.name.clone()).or_default().push((sc.0, callables_up(sym.scope)));
                 }
             }
         }
@@ -1113,7 +1132,12 @@ pub fn pack_symbol_diagnostics(
             if dynamic_var_calls.iter().any(|c| span_within(*c, body)) {
                 continue;
             }
-            if reads.get(&(sc.0, sym.name.clone())).copied().unwrap_or(0) > 0 {
+            let related = |chain: &Vec<u32>| chain.contains(&sc.0) || callables_up(sym.scope).iter().any(|c| chain.first() == Some(c));
+            let read = read_chains.get(&sym.name).is_some_and(|chains| chains.iter().any(|c| related(c)));
+            let captured = decl_chains
+                .get(&sym.name)
+                .is_some_and(|ds| ds.iter().any(|(owner, chain)| *owner != sc.0 && chain.contains(&sc.0)));
+            if read || captured {
                 continue;
             }
             out.push(Diagnostic {

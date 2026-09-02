@@ -40,6 +40,9 @@ Every lane names the case it cannot see and stays silent there:
   the CHILD file's own namespace pins (a same-leaf stranger is not the
   parent) — may declare the member: silent. This is what keeps every
   PHPUnit-derived test quiet without vendored PHPUnit.
+- **A trait's `$this`** is whatever class composes it — every member the
+  trait does not declare may live there — so a trait body's undefined
+  members stay silent.
 - **A catch-all class** (php `__call`/`__callStatic`/`__get` anywhere in
   the ancestry) answers any member name — Perl's `AUTOLOAD` rule.
 - **An interface-typed receiver** names any implementation; php code
@@ -94,9 +97,12 @@ Every lane names the case it cannot see and stays silent there:
   silent — the walker records no spelling for them. The quick-fix deletes
   the row when it binds only that name.
 - **An unused variable** (`unused-variable`, a hint tagged unnecessary)
-  is a local the callable writes and never reads — reads are credited to
-  every enclosing callable, so a closure's `use ($x)` reads the outer
-  `$x` through its own copy. A parameter (the pack's `param_regions`) is
+  is a local the callable writes and never reads — a read counts for its
+  callable, every enclosing one (a closure's `use ($x)` reads the outer
+  `$x` through its own copy) and every nested one (a by-reference capture
+  is written inside the closure and read around it), and a same-named
+  declaration in a nested callable is the capture itself. A parameter
+  (the pack's `param_regions`) is
   the caller's contract, never a local; a callable that materializes
   variables dynamically is silent, as for the undefined-variable lane.
 - **A deprecated declaration** (`deprecated`, a hint tagged deprecated)

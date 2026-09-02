@@ -104,3 +104,14 @@ rule at the projection (`TargetRef::member_shape` minted whenever the
 pack is strict, `member_value_type` skipping the method arm for a value
 read on a strict pack).
 
+## Residual — an untyped reassignment keeps the earlier type (2026-09-03)
+
+`$user = new WP_Error(...)` in one branch, then `$user = wp_signon(...)`
+(a `WP_User|WP_Error` return the lattice cannot hold): the second
+assignment pushes no witness, so the `WP_Error` witness stands and
+`$user->ID` reports an undefined property (WordPress, ~150 rows). The
+narrowing cutoff (`earliest_rebind_in`) ends a GUARD region at a rebind;
+an assignment witness needs the same rule — a rebind whose value does
+not type should end the earlier value's region, not leave it standing.
+One with the union fork.
+

@@ -32,16 +32,16 @@ pub fn pack_hover_markdown(
                 // type (`T get()` on a `Box<int>` receiver → `int`) — shown
                 // only when the substitution actually changed the answer,
                 // so non-template hovers stay byte-identical.
-                let recv_ty = match &r.kind {
-                    RefKind::MethodCall { invocant_span: Some(sp), .. } => {
-                        analysis.expr_type_at_span(*sp, Some(midx))
+                let (recv_ty, shape) = match &r.kind {
+                    RefKind::MethodCall { invocant_span: Some(sp), shape, .. } => {
+                        (analysis.expr_type_at_span(*sp, Some(midx)), *shape)
                     }
-                    _ => None,
+                    _ => (None, Default::default()),
                 };
                 let substituted = |raw: Option<InferredType>| -> Option<InferredType> {
                     let sub = recv_ty
                         .as_ref()
-                        .and_then(|t| analysis.member_value_type(t, field, Some(midx), None))?;
+                        .and_then(|t| analysis.member_value_type(t, field, Some(midx), None, shape))?;
                     (raw.as_ref() != Some(&sub)).then_some(sub)
                 };
                 use crate::model::file_analysis::MethodResolution;
