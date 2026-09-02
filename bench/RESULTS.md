@@ -564,3 +564,46 @@ parallel decodes queued. Intelephense's first references answer on the
 same site was 110 ms in the round-1 ledger; the remaining gap is the
 rows→whole upgrades (10 double-decodes) and the matcher itself.
 
+### Scoreboard refresh with the day-2 final build (2026-09-03, 00:30)
+
+The day-2 battery (`spec2-*.json`) replayed against the final build
+(a289243); the other tools' rows are the day-2 runs. Answered / probed,
+with the median latency per verb.
+
+| corpus · verb | ours | Intelephense (free) | phpactor |
+|---|---|---|---|
+| guzzle · definition | 1/1 · 1 ms | 1/1 · 1 ms | 1/1 · 141 ms |
+| guzzle · hover | 2/2 · 2 ms | 2/2 · 13 ms | 2/2 · 96 ms |
+| guzzle · signatureHelp | 1/1 · 1 ms | 1/1 · 10 ms | 1/1 · 2,040 ms |
+| guzzle · typeDefinition | 1/1 · 1 ms | 0/1 | 1/1 · 15 ms |
+| guzzle · implementation | 1/1 · 6 ms | 0/1 | 1/1 · 75 ms |
+| guzzle · documentSymbol | 1/1 · 1 ms | 1/1 · 12 ms | 1/1 · 107 ms |
+| monolog · definition | 2/2 · 1 ms | 2/2 · 1 ms | 2/2 · 2 ms |
+| monolog · signatureHelp | 1/1 · 1 ms | 1/1 · 8 ms | 1/1 · 24 ms |
+| monolog · implementation | 2/2 · 16 ms | 0/2 | 2/2 · 133 ms |
+| monolog · documentSymbol | 1/1 · 1 ms | 1/1 · 11 ms | 1/1 · 38 ms |
+| demo · completion | 1/1 · 1 ms | 1/1 · 5 ms | 1/1 · 40 ms |
+| demo · typeDefinition | 1/1 · 1 ms | 0/1 | 1/1 · 3 ms |
+| demo · documentSymbol | 1/1 · 1 ms | 1/1 · 4 ms | 1/1 · 5 ms |
+
+demo's definition (0/2 for all three) and hover probes target vendor
+symbols the hand-vendored tree lacks; the diagnostics rows on demo are
+the same undefined-vendor-type findings for ours and Intelephense
+(phpactor reports none).
+
+| corpus | ours ready · RSS | Intelephense | phpactor |
+|---|---|---|---|
+| guzzle | 1.9 s · 355 MB | 1.5 s · 232 MB | 0.7 s · 126 MB |
+| monolog | 1.8 s · 85 MB | 1.1 s · 195 MB | 0.5 s · 119 MB |
+| demo | 1.5 s · 69 MB | 1.1 s · 187 MB | 1.6 s · 117 MB |
+
+guzzle's RSS (213 MB in the round-1 ledger) re-measured under identical
+flags (a 6 s settle after open, so the workspace index has finished):
+pre-day-2 build 355 MB, final 361 MB, final without the prefetch 363 MB.
+The day-2 work did not move it; the round-1 number was taken before the
+index (guzzle's hand-vendored tree included) had landed.
+
+Lanes the others carry that we do not (from the same runs): Intelephense's
+"declared but not used" variable hint and its documented-vs-declared
+type mismatch; both are the next diagnostics axis.
+
