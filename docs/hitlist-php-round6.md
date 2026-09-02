@@ -123,10 +123,13 @@ strangers, property-vs-method, `class-referenced`, import-row middle
 segments, WordPress `add_action([$this, 'm'])` both ways, interface
 polymorphism (`FormatterInterface`, `ProcessorInterface::__invoke`).
 - R7-1 (CRITICAL → LANDED): goto-def/hover on the LEAF of an aliased
-  `use A\B\Parser as DeclarationParser;` row listed four `Parser`s (the
-  leaf is unpinned in that file, so the table came back ranked, not
-  filtered). A token inside an import row names its class in full: the
-  row's namespace is the only relevant candidate.
+  `use A\B\Parser as DeclarationParser;` row answered the file's own
+  `Parser` (the local lanes match by name first) and then every `Parser`
+  in the tree (the leaf is unpinned there, so the use-map ranked the
+  table instead of filtering it). A token inside an import row names its
+  class in full: the row's namespace is the only relevant candidate —
+  `FileAnalysis::import_row_namespace` is the one speller, applied in the
+  local goto-def/hover arms and the cross-file Package lane.
 - R7-2 (MAJOR, fork C): the alias token and every `Alias::method()` /
   `Alias::class` site are dark — the third concrete case for
   namespace-qualified class identity (`docs/open-forks.md`).
