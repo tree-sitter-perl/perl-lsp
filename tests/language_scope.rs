@@ -722,6 +722,11 @@ fn php_heatmap_pre_prune_preserves_every_fan_in() {
         "<?php\nnamespace App;\nclass Box\n{\n    public function go(): void\n    {\n        $h = new Helper(2);\n        $h->assist();\n        Helper::make();\n    }\n}\n",
     )
     .unwrap();
+    std::fs::write(
+        dir.join("Bag.php"),
+        "<?php\nnamespace App;\nclass Bag implements \\Countable\n{\n    public function count(): int { return 0; }\n}\n",
+    )
+    .unwrap();
     // A service nobody `new`s — a container does (the type hint names it).
     std::fs::write(
         dir.join("Svc.php"),
@@ -777,6 +782,10 @@ fn php_heatmap_pre_prune_preserves_every_fan_in() {
     assert_eq!(svc["dead_code_candidate"], false, "{svc}");
     let consumer = ctor_of("Consumer");
     assert_eq!(consumer["dead_code_candidate"], true, "{consumer}");
+    // An SPL contract method (`Countable::count`) is runtime-invoked, never dead.
+    let count = full["symbols"].as_array().unwrap().iter()
+        .find(|s| s["name"] == "count" && s["package"] == "Bag").cloned().expect("Bag::count");
+    assert_eq!(count["reachable_guard"].as_str(), Some("runtime-invoked"), "{count}");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -865,6 +874,10 @@ fn php_aliased_imports_and_qualified_spellings_pin_the_right_class() {
     assert_eq!(d, vec![("DownloadManager.php".into(), 2), ("Factory.php".into(), 7)], "relative-qualified `new` site admitted, absolute `\\Other` site not: {d:?}");
     let o = sites(&run(&["--references", root, "Other/DownloadManager.php", "2", "40"]));
     assert_eq!(o, vec![("Abs.php".into(), 7), ("DownloadManager.php".into(), 2)], "{o:?}");
+    // Goto-def on the `Event` leaf of B's `use A\Event as BaseEvent;` row
+    // (row 2) names A's class in full — never B's own same-leaf `Event`.
+    let row = run(&["--definition", root, "B/Event.php", "2", "8"]);
+    assert!(row.contains("A/Event.php") && !row.contains("B/Event.php"), "an import row's leaf resolves by the row's namespace: {row}");
     let _ = std::fs::remove_dir_all(&dir);
 }
 

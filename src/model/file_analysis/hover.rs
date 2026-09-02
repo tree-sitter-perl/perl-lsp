@@ -262,9 +262,15 @@ impl FileAnalysis {
                     }
                 }
                 RefKind::PackageRef => {
+                    let row_ns = self.import_row_namespace(&r.span);
                     for &sid in self.symbols_named(&r.target_name) {
                         let sym = self.symbol(sid);
                         if matches!(sym.kind, SymKind::Package | SymKind::Class) {
+                            if let Some(ns) = row_ns.as_deref() {
+                                if sym.package.as_deref().unwrap_or("") != ns {
+                                    continue;
+                                }
+                            }
                             return Some(self.format_symbol_hover(sym, source, module_index));
                         }
                     }

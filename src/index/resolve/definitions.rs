@@ -1032,9 +1032,26 @@ impl<'a> CandidateSet<'a> {
                 // the picker when a real type declaration exists.
                 let mut type_hits: Vec<RefLocation> = Vec::new();
                 let mut value_hits: Vec<RefLocation> = Vec::new();
+                // A token INSIDE an import row names its class in full: the
+                // row's namespace is the only relevant one (`use
+                // SimplePie\XML\Declaration\Parser as DeclarationParser;`
+                // means that `Parser`, not the file's own or a stranger's).
+                let row_ns: Option<String> = analysis
+                    .pack
+                    .import_row_covering(&r.span)
+                    .and_then(|(_, raw)| {
+                        raw.trim_start_matches('\\')
+                            .rsplit_once('\\')
+                            .map(|(ns, _)| ns.to_string())
+                    });
                 for cached in idx.visible_def_candidates(&r.target_name) {
                     if Url::from_file_path(&cached.path).is_ok() {
                         let whole = idx.whole_present(&cached);
+                        if let Some(ns) = row_ns.as_deref() {
+                            if whole.declared_class_namespace(&r.target_name).as_deref() != Some(ns) {
+                                continue;
+                            }
+                        }
                         let loc = |span| RefLocation {
                             key: FileKey::Path(cached.path.clone()),
                             span,

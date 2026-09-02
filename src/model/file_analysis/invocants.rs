@@ -1555,10 +1555,19 @@ impl FileAnalysis {
     }
 
     /// Find the definition span of a package or class by name.
-    pub(super) fn find_package_or_class(&self, name: &str) -> Option<Span> {
+    /// The file's own Package/Class declaration named `name`, narrowed to a
+    /// namespace claim when the token carries one: a token inside an import
+    /// row names its class in full, so this file's own same-leaf class is
+    /// not it unless the namespaces agree.
+    pub(super) fn find_package_or_class_in(&self, name: &str, ns: Option<&str>) -> Option<Span> {
         for &sid in self.symbols_named(name) {
             let sym = self.symbol(sid);
             if matches!(sym.kind, SymKind::Package | SymKind::Class) {
+                if let Some(ns) = ns {
+                    if sym.package.as_deref().unwrap_or("") != ns {
+                        continue;
+                    }
+                }
                 return Some(sym.selection_span);
             }
         }

@@ -1166,4 +1166,16 @@ impl FileAnalysis {
         }
         false
     }
+
+    /// The namespace an import row spells for the token at `span`, when
+    /// the token sits inside one of this file's `use` rows: `use
+    /// A\\B\\Parser as DeclarationParser;` names `A\\B`'s `Parser` and no other —
+    /// not this file's own `Parser`, not a stranger's. `None` outside rows
+    /// (or for an unqualified row, which makes no namespace claim).
+    pub fn import_row_namespace(&self, span: &Span) -> Option<String> {
+        let (_, raw) = self.pack.import_row_covering(span)?;
+        raw.trim_start_matches('\\')
+            .rsplit_once('\\')
+            .map(|(ns, _)| ns.to_string())
+    }
 }

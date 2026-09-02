@@ -278,6 +278,14 @@ Format per entry:
   namespace-qualified class identity. So alias-spelled hints/`new`/
   receivers resolve nothing today (never a wrong class). C is now the
   only path to alias support — a concrete reason to schedule it.
+- **Update 2026-09-02 (round-7 re-probe):** the third case, and the most
+  visible one — WordPress's SimplePie writes `use
+  SimplePie\XML\Declaration\Parser as DeclarationParser;` precisely to
+  disambiguate three `Parser`s, and every `DeclarationParser::...` site
+  is dark. Translating the alias to its real leaf at extraction would
+  make those sites resolve to BOTH `Parser`s the file can see (own and
+  aliased), which is imprecise rather than wrong; only a
+  namespace-qualified `Node::Class` answers with one.
 
 ---
 

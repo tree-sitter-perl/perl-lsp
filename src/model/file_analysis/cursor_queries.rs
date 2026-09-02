@@ -107,7 +107,8 @@ impl FileAnalysis {
                     // `Buffer<MAX>`) mints a PackageRef for a VALUE token —
                     // the structural gates are pack-only shapes, so Perl
                     // package refs never take the fallback.
-                    return self.find_package_or_class(&r.target_name).or_else(|| {
+                    let row_ns = self.import_row_namespace(&r.span);
+                    return self.find_package_or_class_in(&r.target_name, row_ns.as_deref()).or_else(|| {
                         self.symbols_named(&r.target_name)
                             .iter()
                             .map(|&sid| self.symbol(sid))

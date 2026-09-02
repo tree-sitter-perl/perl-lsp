@@ -891,6 +891,11 @@ pub fn php_pack() -> LangPack {
             "__call", "__callStatic", "__clone", "__destruct", "__wakeup",
             "__sleep", "__serialize", "__unserialize", "__debugInfo",
             "__set_state", "__toBool",
+            // SPL interface contracts the engine calls structurally
+            // (`count($x)`, `foreach`, `$x[$k]`, `json_encode`, `serialize`).
+            "count", "getIterator", "current", "key", "next", "rewind", "valid",
+            "offsetExists", "offsetGet", "offsetSet", "offsetUnset",
+            "jsonSerialize", "serialize", "unserialize",
         ],
         // class/trait/interface bodies are brace-delimited, so a member
         // orphaned by a misparse can re-anchor positionally.

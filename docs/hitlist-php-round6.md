@@ -114,3 +114,26 @@ method is flagged dead. Same fork as union types.
 6 tool false positives (R6-2, R6-6, R6-7, R6-10, the alias gap), 2 truly
 dead, 2 framework-invoked, 4 inconclusive library/plugin API surface, 1
 left unclassified in the agent's table.
+
+## Round-7 re-probe (2026-09-02, WordPress / monolog / guzzle, one agent)
+Everything from rounds 5–6 HELD under grep-verified probing: string
+callables (rename rewrites only the method tail), `new self`/`new static`
+(hover/gd/refs; ctor rename refused), class rename safety near same-leaf
+strangers, property-vs-method, `class-referenced`, import-row middle
+segments, WordPress `add_action([$this, 'm'])` both ways, interface
+polymorphism (`FormatterInterface`, `ProcessorInterface::__invoke`).
+- R7-1 (CRITICAL → LANDED): goto-def/hover on the LEAF of an aliased
+  `use A\B\Parser as DeclarationParser;` row listed four `Parser`s (the
+  leaf is unpinned in that file, so the table came back ranked, not
+  filtered). A token inside an import row names its class in full: the
+  row's namespace is the only relevant candidate.
+- R7-2 (MAJOR, fork C): the alias token and every `Alias::method()` /
+  `Alias::class` site are dark — the third concrete case for
+  namespace-qualified class identity (`docs/open-forks.md`).
+- R7-3 (MAJOR → LANDED): PHP's SPL contract methods (`count`,
+  `getIterator`, `offsetGet`, `jsonSerialize`, …) join the pack's
+  runtime-invoked set — guzzle's `CookieJar::count()` /
+  `MockHandler::count()` no longer flag dead.
+- R7-4 (MINOR): an anonymous class's own `__construct` has no class name
+  for `class-referenced` and its `new class(...)` is not counted as a
+  call (5 guzzle test fixtures).
