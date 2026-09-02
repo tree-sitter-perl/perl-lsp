@@ -155,7 +155,9 @@ polymorphism (`FormatterInterface`, `ProcessorInterface::__invoke`).
   members. `php_anonymous_class_is_its_own_identity` pins it; the
   synthetic spelling is the open question on `docs/open-forks.md`.
   guzzle heatmap (2026-09-02): dead 122 → 108, dead constructors 5 → 1
-  (the survivor is a named test helper class, not anonymous).
+  (the survivor is a named test helper class, not anonymous); monolog
+  dead 86 → 83 with six anonymous-class members re-keyed; symfony/demo
+  unchanged (no anonymous classes).
 - R7-5 (MINOR → LANDED): group-use imports (`use A\{Foo, Bar as Baz};`)
   minted no import row and no leaf reference — only the parent-resolving
   use-map saw them, so the class's references missed the row and the
