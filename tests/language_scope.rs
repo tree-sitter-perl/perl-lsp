@@ -697,3 +697,52 @@ fn php_expression_receivers_dispatch_statically_and_class_refs_reach_every_spell
     assert_eq!(n, 5, "class rename rewrites its declaration + four spellings: {rename}");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Round-5 R5-4: the php tier's heatmap fan-in is pre-pruned from its OWN
+/// row store (the pack persist writer shreds every analysis), and the
+/// prune is answer-preserving: the resident-only walk (`PERL_LSP_REF_ROWS=0`)
+/// and the pruned walk report identical fan-in per symbol — including the
+/// constructor, whose references are the class's `new` sites (the class
+/// key counts as a reference row for it).
+#[cfg(feature = "php")]
+#[test]
+fn php_heatmap_pre_prune_preserves_every_fan_in() {
+    let dir = std::env::temp_dir().join(format!("perl-lsp-r5heat-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("Helper.php"),
+        "<?php\nnamespace App;\nclass Helper\n{\n    public function __construct(private int $n) {}\n    public function assist(): void {}\n    public static function make(): static { return new static(1); }\n    public function unused(): void {}\n}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("Box.php"),
+        "<?php\nnamespace App;\nclass Box\n{\n    public function go(): void\n    {\n        $h = new Helper(2);\n        $h->assist();\n        Helper::make();\n    }\n}\n",
+    )
+    .unwrap();
+    let run = |rows: &str| -> std::collections::BTreeMap<String, u64> {
+        let out = std::process::Command::new(env!("CARGO_BIN_EXE_perl-lsp"))
+            .args(["--heatmap", dir.to_str().unwrap()])
+            .env("XDG_CACHE_HOME", dir.join(".cache"))
+            .env("PERL_LSP_REF_ROWS", rows)
+            .output()
+            .expect("run");
+        let v: serde_json::Value =
+            serde_json::from_str(&String::from_utf8_lossy(&out.stdout)).expect("heatmap json");
+        v["symbols"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|s| (s["name"].as_str().unwrap().to_string(), s["fan_in"].as_u64().unwrap()))
+            .collect()
+    };
+    // Cold (writes the rows), then the two warm projections.
+    let _ = run("1");
+    let pruned = run("1");
+    let walked = run("0");
+    assert_eq!(pruned, walked, "the pre-prune must not change any fan-in");
+    assert_eq!(pruned.get("__construct"), Some(&1), "ctor fan-in = its `new` site: {pruned:?}");
+    assert_eq!(pruned.get("unused"), Some(&0), "{pruned:?}");
+    assert_eq!(pruned.get("make"), Some(&1), "{pruned:?}");
+    let _ = std::fs::remove_dir_all(&dir);
+}

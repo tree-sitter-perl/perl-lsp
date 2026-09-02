@@ -577,6 +577,44 @@ pub(crate) fn cli_heatmap(root: &str, opts: &[String]) {
         None
     };
 
+    // The pack tiers carry the same row store in their own sub-index (the
+    // pack persist writer shreds every analysis it commits), so each gets
+    // the same pre-prune — computed once per distinct sub-index, gated on
+    // full coverage of that tier's entries exactly like the hub's.
+    let mut pack_prunes: Vec<(
+        *const module_index::ModuleIndex,
+        Option<(
+            std::collections::HashSet<String>,
+            std::collections::HashSet<(String, String, usize, usize)>,
+        )>,
+    )> = Vec::new();
+    if rows_env_on && !include_deps {
+        for (_, _, pack) in &pack_entries {
+            let key = std::sync::Arc::as_ptr(pack);
+            if pack_prunes.iter().any(|(k, _)| *k == key) {
+                continue;
+            }
+            let prune = match (pack.ref_prune_index(), pack.unused_exported_syms()) {
+                (Some((referenced_names, shredded)), Some(dead)) => {
+                    let covered = pack_entries
+                        .iter()
+                        .filter(|(_, _, p)| std::sync::Arc::as_ptr(p) == key)
+                        .all(|(p, _, _)| shredded.contains(p.to_string_lossy().as_ref()));
+                    covered.then(|| {
+                        (
+                            referenced_names,
+                            dead.into_iter()
+                                .map(|d| (d.path, d.name, d.start_row, d.start_col))
+                                .collect(),
+                        )
+                    })
+                }
+                _ => None,
+            };
+            pack_prunes.push((key, prune));
+        }
+    }
+
     // Gather rows for one file's symbols through `heatmap_symbol_row` — the
     // one place fan-in/fan-out/dead are computed, so Perl and pack share the
     // exact `references()` projection. `hidden_in_outline` folds arity-variant
@@ -603,7 +641,20 @@ pub(crate) fn cli_heatmap(root: &str, opts: &[String]) {
             let (forced_fan_in, dead_export_override) = match prune {
                 Some((referenced_names, dead_keys)) => {
                     let key = file_analysis::name_match_key(&sym.name);
-                    let forced = if referenced_names.contains(&key) {
+                    // A constructor's references are its class's construction
+                    // sites (`new Foo(...)` — the ctor FunctionCall carries the
+                    // CLASS name, `retrieval_keys`), so the class key is a
+                    // reference row for it too.
+                    let ctor_key = analysis
+                        .pack
+                        .constructor_names
+                        .iter()
+                        .any(|c| c == &sym.name)
+                        .then(|| sym.package.as_deref().map(file_analysis::name_match_key))
+                        .flatten();
+                    let forced = if referenced_names.contains(&key)
+                        || ctor_key.as_ref().is_some_and(|k| referenced_names.contains(k))
+                    {
                         None // has reference rows — the projection must run
                     } else {
                         Some(0usize) // no reference row anywhere → provably empty
@@ -676,16 +727,21 @@ pub(crate) fn cli_heatmap(root: &str, opts: &[String]) {
 
     // Pack languages route through their own sub-index (VISIBLE-wide — pack
     // workspace files ride the DEPENDENCY role); the set derives that from
-    // the origin's stamped language, so no visibility override — and no
-    // pre-prune: their refs aren't in the hub's row store.
+    // the origin's stamped language, so no visibility override. The
+    // pre-prune is the sub-index's own.
     for (path, analysis, pack) in &pack_entries {
         let routing: &dyn file_analysis::CrossFileLookup = pack.as_ref();
+        let key = std::sync::Arc::as_ptr(pack);
+        let prune = pack_prunes
+            .iter()
+            .find(|(k, _)| *k == key)
+            .and_then(|(_, p)| p.as_ref());
         gather(
             &ws,
             routing,
             path,
             analysis,
-            None,
+            prune,
             None,
             &mut symbol_rows,
             &mut dead_rows,
