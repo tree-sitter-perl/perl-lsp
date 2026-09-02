@@ -722,6 +722,21 @@ fn php_heatmap_pre_prune_preserves_every_fan_in() {
         "<?php\nnamespace App;\nclass Box\n{\n    public function go(): void\n    {\n        $h = new Helper(2);\n        $h->assist();\n        Helper::make();\n    }\n}\n",
     )
     .unwrap();
+    // A service nobody `new`s — a container does (the type hint names it).
+    std::fs::write(
+        dir.join("Svc.php"),
+        "<?php\nnamespace App;\nclass Svc\n{\n    public function __construct(private Helper $h) {}\n    public function run(): void { $this->h->assist(); }\n}\nclass Consumer\n{\n    public function __construct(private Svc $svc) {}\n}\n",
+    )
+    .unwrap();
+    let run_full = |rows: &str| -> serde_json::Value {
+        let out = std::process::Command::new(env!("CARGO_BIN_EXE_perl-lsp"))
+            .args(["--heatmap", dir.to_str().unwrap()])
+            .env("XDG_CACHE_HOME", dir.join(".cache"))
+            .env("PERL_LSP_REF_ROWS", rows)
+            .output()
+            .expect("run");
+        serde_json::from_str(&String::from_utf8_lossy(&out.stdout)).expect("heatmap json")
+    };
     let run = |rows: &str| -> std::collections::BTreeMap<String, u64> {
         let out = std::process::Command::new(env!("CARGO_BIN_EXE_perl-lsp"))
             .args(["--heatmap", dir.to_str().unwrap()])
@@ -735,7 +750,7 @@ fn php_heatmap_pre_prune_preserves_every_fan_in() {
             .as_array()
             .unwrap()
             .iter()
-            .map(|s| (s["name"].as_str().unwrap().to_string(), s["fan_in"].as_u64().unwrap()))
+            .map(|s| (format!("{}::{}", s["package"].as_str().unwrap_or(""), s["name"].as_str().unwrap()), s["fan_in"].as_u64().unwrap()))
             .collect()
     };
     // Cold (writes the rows), then the two warm projections.
@@ -744,9 +759,24 @@ fn php_heatmap_pre_prune_preserves_every_fan_in() {
     let walked = run("0");
     assert_eq!(pruned, walked, "the pre-prune must not change any fan-in");
     // `new Helper(2)` in Box.php plus `new static(1)` inside `make()`.
-    assert_eq!(pruned.get("__construct"), Some(&2), "ctor fan-in = its `new` sites: {pruned:?}");
-    assert_eq!(pruned.get("unused"), Some(&0), "{pruned:?}");
-    assert_eq!(pruned.get("make"), Some(&1), "{pruned:?}");
+    assert_eq!(pruned.get("Helper::__construct"), Some(&2), "ctor fan-in = its `new` sites: {pruned:?}");
+    assert_eq!(pruned.get("Helper::unused"), Some(&0), "{pruned:?}");
+    assert_eq!(pruned.get("Helper::make"), Some(&1), "{pruned:?}");
+    // R6-9: `Svc::__construct` has no `new` site, but `Svc` is named by a
+    // type hint — a container instantiates it, so the ctor is shielded
+    // (`class-referenced`) when the row store can answer; `Consumer`'s
+    // ctor (its class named nowhere) stays a candidate.
+    let full = run_full("1");
+    let ctor_of = |class: &str| -> serde_json::Value {
+        full["symbols"].as_array().unwrap().iter()
+            .find(|s| s["name"] == "__construct" && s["package"] == class)
+            .cloned().expect(class)
+    };
+    let svc = ctor_of("Svc");
+    assert_eq!(svc["reachable_guard"].as_str(), Some("class-referenced"), "{svc}");
+    assert_eq!(svc["dead_code_candidate"], false, "{svc}");
+    let consumer = ctor_of("Consumer");
+    assert_eq!(consumer["dead_code_candidate"], true, "{consumer}");
     let _ = std::fs::remove_dir_all(&dir);
 }
 

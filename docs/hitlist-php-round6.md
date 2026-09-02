@@ -93,11 +93,14 @@ cursor falls to a bare-word lookup. Rename correctly refuses.
 
 ## MINOR / design
 
-### R6-9 — DI constructors in the dead queue
-B: symfony/demo: 15/42 dead candidates are `__construct` with fan-in 0
-(container-injected). Framework-agnostic idiom; a "constructor of a class
-referenced anywhere (`Foo::class`, a hint, a config) is live" guard, or a
-library mode (`docs/open-forks.md`).
+### R6-9 — DI constructors in the dead queue (LANDED)
+B: symfony/demo: 15/42 dead candidates were `__construct` with fan-in 0
+(container-injected). Now a pack constructor whose CLASS has a reference
+row anywhere (a type hint, `Foo::class`, a `use` row) carries the
+`class-referenced` guard — a container or factory instantiates it. Reads
+the row store (an over-approximation, the sound side); without rows the
+constructor is judged by its `new` sites alone, as before. A class named
+nowhere keeps its constructor in the queue.
 
 ### R6-10 — union darkness → heatmap false positives
 A: `array<SecurityAdvisory|PartialSecurityAdvisory>` element access is

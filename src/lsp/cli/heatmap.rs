@@ -93,6 +93,7 @@ fn heatmap_symbol_row(
     has_dynamic_dispatch: bool,
     forced_fan_in: Option<usize>,
     dead_export_override: Option<bool>,
+    class_referenced: bool,
     sources: &mut SourceCache,
 ) -> (serde_json::Value, bool, bool, bool) {
     use file_analysis::{AccessKind, Namespace, RefKind, SymKind};
@@ -181,6 +182,12 @@ fn heatmap_symbol_row(
         Some("exported")
     } else if conventions::is_constructor_name(&sym.name) {
         Some("constructor")
+    } else if class_referenced {
+        // A pack constructor whose CLASS is referenced somewhere (a type
+        // hint, `Foo::class`, a `use` row) with no `new` site of its own: a
+        // container or factory instantiates it (DI). Over-approximates
+        // reachability on the sound side, like every guard here.
+        Some("class-referenced")
     } else if !native {
         Some("framework-synthesized")
     } else if is_callable
@@ -685,6 +692,17 @@ pub(crate) fn cli_heatmap(root: &str, opts: &[String]) {
                 }
                 _ => (None, None),
             };
+            // The row store is the cheap "is the class named anywhere" oracle
+            // (reference rows are candidate rows — an over-approximation, the
+            // sound direction for a guard); without rows the guard stays off
+            // and the constructor is judged by its `new` sites alone.
+            let class_referenced = analysis.pack.constructor_names.iter().any(|c| c == &sym.name)
+                && match (prune, sym.package.as_deref()) {
+                    (Some((referenced_names, _)), Some(class)) => {
+                        referenced_names.contains(&file_analysis::name_match_key(class))
+                    }
+                    _ => false,
+                };
             let (row, is_callable, dead, dead_export) = heatmap_symbol_row(
                 ws,
                 routing,
@@ -696,6 +714,7 @@ pub(crate) fn cli_heatmap(root: &str, opts: &[String]) {
                 has_dynamic_dispatch,
                 forced_fan_in,
                 dead_export_override,
+                class_referenced,
                 sources,
             );
             if dead {
