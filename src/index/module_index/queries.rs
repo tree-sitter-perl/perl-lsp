@@ -423,6 +423,7 @@ impl ModuleIndex {
         name: &str,
         class: &str,
     ) -> Option<String> {
+        let _t = crate::util::ghost_stats::ScopedNs::start("mdmp.total");
         use crate::model::file_analysis::CrossFileLookup;
         crate::util::ghost_stats::count("mdmp.call");
         let mods = self.modules_providing_package(class);

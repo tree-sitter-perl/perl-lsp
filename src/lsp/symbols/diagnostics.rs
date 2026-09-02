@@ -1046,6 +1046,53 @@ pub fn pack_symbol_diagnostics(
         }
     }
 
+    // ---- unused import: a bound name the file never spells ----
+    if pack.imports_bind_names {
+        let pins = analysis.use_map_pins();
+        let ns_heads: std::collections::HashSet<&str> = pack
+            .qualified_spellings
+            .iter()
+            .filter_map(|(_, prefix)| prefix.trim_start_matches('\\').split('\\').next())
+            .filter(|h| !h.is_empty())
+            .collect();
+        for (span, raw) in &pack.include_directives {
+            let leaf = raw.rsplit('\\').next().unwrap_or(raw);
+            // the name the row binds: its alias when it has one
+            let bound = pack
+                .use_aliases
+                .iter()
+                .find(|(_, ns, real)| real == leaf && format!("{ns}\\{real}") == *raw)
+                .map(|(alias, _, _)| alias.as_str())
+                .unwrap_or(leaf);
+            // a constant import (`use const FOO`) has no spelling the
+            // walker records — silent
+            if bound.is_empty() || !bound.chars().any(|c| c.is_lowercase()) {
+                continue;
+            }
+            let used = pins.spelled.contains(bound)
+                || ns_heads.contains(bound)
+                || pack.doc_mentions.iter().any(|m| m == bound);
+            if used {
+                continue;
+            }
+            out.push(Diagnostic {
+                range: span_to_range(*span),
+                severity: Some(DiagnosticSeverity::HINT),
+                code: Some(NumberOrString::String("unused-import".to_string())),
+                source: Some("perl-lsp".to_string()),
+                message: format!("'{bound}' is imported but never used."),
+                tags: Some(vec![DiagnosticTag::UNNECESSARY]),
+                data: pack
+                    .import_rows
+                    .iter()
+                    .find(|r| span_within(*span, **r))
+                    .filter(|r| pack.include_directives.iter().filter(|(s, _)| span_within(*s, **r)).count() == 1)
+                    .map(|r| serde_json::json!({ "row": [r.start.row, r.end.row] })),
+                ..Default::default()
+            });
+        }
+    }
+
     // ---- undefined type: a class name the namespace cannot supply ----
     if index_settled {
         if let Some(idx) = idx {

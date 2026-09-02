@@ -177,6 +177,19 @@ fn php_import_class_code_action_over_stdio() {
     // after the `use App\Mailer;` row (line 3): line 4
     assert_eq!(edit["range"]["start"]["line"], 4, "{edit}");
     assert_eq!(edit["range"]["start"]["character"], 0, "{edit}");
+    // the fixture's `use App\Mailer;` is never spelled: an unnecessary-tagged
+    // hint with a row-deleting quick-fix
+    let unused = c.notes.iter().filter(|n| n["method"] == "textDocument/publishDiagnostics" && n["params"]["uri"] == svc)
+        .flat_map(|n| n["params"]["diagnostics"].as_array().cloned().unwrap_or_default())
+        .find(|d| d["code"] == "unused-import")
+        .expect("no unused-import diagnostic");
+    assert_eq!(unused["tags"], serde_json::json!([1]), "{unused}");
+    assert_eq!(unused["range"]["start"]["line"], 3, "{unused}");
+    let actions = c.request("textDocument/codeAction", serde_json::json!({"textDocument": {"uri": svc}, "range": unused["range"], "context": {"diagnostics": [unused]}}));
+    let remove = actions.as_array().and_then(|a| a.iter().find(|x| x["title"] == "Remove unused import").cloned()).unwrap_or_else(|| panic!("{actions}"));
+    let edit = &remove["edit"]["changes"][&svc][0];
+    assert_eq!(edit["newText"], "", "{edit}");
+    assert_eq!((edit["range"]["start"]["line"].as_u64(), edit["range"]["end"]["line"].as_u64()), (Some(3), Some(4)), "{edit}");
     c.request("shutdown", serde_json::Value::Null);
     c.notify("exit", serde_json::Value::Null);
     let _ = c.child.wait();

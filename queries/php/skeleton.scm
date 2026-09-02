@@ -230,6 +230,13 @@
 ; Primitives (`int`, `array`) are `primitive_type`, never matched.
 (named_type (name) @ref.type)
 (named_type (qualified_name (name) @ref.type) @ref.qualified)
+;; `$x instanceof Foo` names the class; `#[Foo]` / `#[Ns\Foo(...)]` names an
+;; attribute class — both are class references (goto-def, rename, the
+;; use-map's spelled set).
+(binary_expression "instanceof" right: (name) @ref.type)
+(binary_expression "instanceof" right: (qualified_name (name) @ref.type) @ref.qualified)
+(attribute (name) @ref.type)
+(attribute (qualified_name (name) @ref.type) @ref.qualified)
 
 ; ---- the file's use-map (alias- and group-aware) ----
 ; What each imported leaf/alias MEANS — parents resolve through it
@@ -374,6 +381,12 @@
   name: (name) @ref.member) @hop.call
 (scoped_call_expression
   scope: (name) @member.recv @ref.type
+  name: (name) @ref.member
+  arguments: (arguments) @arity.args) @hop.call
+;; `Psr7\Utils::make()` — a namespace-qualified bareword receiver: the leaf
+;; is the class, the prefix a qualified spelling (the use-map's prefix use).
+(scoped_call_expression
+  scope: (qualified_name (name) @member.recv @ref.type) @ref.qualified
   name: (name) @ref.member
   arguments: (arguments) @arity.args) @hop.call
 ; `self::` / `static::` / `parent::` — the call token still gets a ref

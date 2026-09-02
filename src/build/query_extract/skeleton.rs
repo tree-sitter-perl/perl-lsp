@@ -151,6 +151,11 @@ pub struct SkeletonAnalysis {
     pub import_rows: Vec<Span>,
     /// The pack's import statement template (`import_template`).
     pub import_template: String,
+    /// `imports_bind_names`, baked.
+    pub imports_bind_names: bool,
+    /// Imported names a doc comment mentions (`@var Foo`, `@throws Foo`,
+    /// `@see Foo`): a use the tree never shows.
+    pub doc_mentions: Vec<String>,
     /// The pack's `function_scoped_vars` fact (php) — drives the var
     /// unification pass in `into_file_analysis`.
     pub function_scoped_vars: bool,
@@ -1351,6 +1356,8 @@ impl SkeletonAnalysis {
             class_literal_member: std::mem::take(&mut self.class_literal_member),
             import_rows: std::mem::take(&mut self.import_rows),
             import_template: std::mem::take(&mut self.import_template),
+            imports_bind_names: self.imports_bind_names,
+            doc_mentions: std::mem::take(&mut self.doc_mentions),
             types_are_capitalized: self.types_are_capitalized,
             enum_members: std::mem::take(&mut self.enum_members),
             type_display: std::mem::take(&mut self.type_display),

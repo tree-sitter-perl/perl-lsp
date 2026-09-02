@@ -469,3 +469,38 @@ Real sites (monolog, `spec-narrow-monolog.json`):
 Verdict: parity with Intelephense on every narrowing shape probed; ahead
 of phpactor on the loop `continue` form and the reassigning non-exit
 guard.
+
+### Import-class quick-fix (2026-09-02, evening)
+
+Fixture: `Service.php` under `namespace App` calling `Helper::go()` with
+`App\Util\Helper` declared in another file, one unused `use App\Mailer;`
+row. `bench/compare` codeAction probe on the `Helper` token with the
+published diagnostics in context (`spec-import.json`).
+
+| tool | diagnostics on the file | code actions on `Helper` | latency |
+|---|---|---|---|
+| ours | `undefined-type` App\Helper | `Add 'use App\Util\Helper;'` | 1 ms |
+| Intelephense (free) | P1009 undefined type; P1003 `Mailer` declared but not used | none | 2 ms |
+| phpactor | unresolved name; unused import | `Import class "App\Util\Helper"`; `Remove unused imports` | 348 ms |
+
+The undefined-type diagnostic now publishes in the editor once the pack
+index has settled (it was CLI-only).
+
+### Unused imports (2026-09-02, late evening)
+
+The `unused-import` lane on the corpora (`--check --severity hint`):
+
+| corpus | first cut | after minting the missing class refs | verified real |
+|---|---|---|---|
+| guzzle | 21 | 0 | — |
+| monolog | 43 | 2 | 2 (`Aws\Sdk`, `Monolog\Utils`, imported and never mentioned) |
+| symfony demo | 37 | 0 | — |
+
+Every first-cut row was a class the walker had not minted a reference
+for: `#[Attribute]` names, `instanceof` right operands, and namespace-
+qualified static receivers (`Psr7\Utils::x()`). Fixed at the source, so
+goto-def, references and rename now reach those tokens too — the price is
+more `undefined-type` rows on corpora without their vendor tree (monolog
+158 → 257, demo 358 → 512: `PHPUnit\Framework\Attributes\DataProvider`,
+`Symfony\Component\Routing\Attribute\Route`, …), which is the honest
+answer for an uninstalled attribute class, the same one Intelephense gives.

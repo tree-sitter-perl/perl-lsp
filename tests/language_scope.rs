@@ -1199,3 +1199,27 @@ fn php_instanceof_narrows_exits_assertions_and_expression_regions() {
     assert_eq!(receiver(33, "$s"), "$s: Shape", "a negated guard that does not exit narrows nothing");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// The unused-import lane's silence rules: a name spelled only as an
+/// `instanceof` operand, an attribute, a namespace prefix or a docblock
+/// word is used; the one row nothing spells is the finding.
+#[cfg(feature = "php")]
+#[test]
+fn php_unused_import_lane_counts_every_spelling() {
+    let dir = std::env::temp_dir().join(format!("perl-lsp-d2unused-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    let w = |rel: &str, src: &str| std::fs::write(dir.join(rel), src).unwrap();
+    w("composer.json", "{\"autoload\": {\"psr-4\": {\"App\\\\\": \"src/\"}}}");
+    w("src/Use1.php", "<?php\nnamespace App;\n\nuse App\\Guard;\nuse App\\Attr\\Route;\nuse App\\Psr7;\nuse App\\Doc\\Shape;\nuse App\\Never;\nuse App\\Aliased as Other;\nuse const App\\LIMIT;\n\nclass Use1\n{\n    /** @var Shape */\n    private $shape;\n\n    #[Route('/x')]\n    public function run($x): int\n    {\n        if ($x instanceof Guard) { return 1; }\n        $o = new Other();\n        return Psr7\\Utils::count($o);\n    }\n}\n");
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_perl-lsp"))
+        .args(["--check", dir.to_str().unwrap(), "--severity", "hint"])
+        .env("XDG_CACHE_HOME", dir.join(".cache"))
+        .output()
+        .expect("run");
+    let err = String::from_utf8_lossy(&out.stderr);
+    let unused: Vec<&str> = err.lines().filter(|l| l.contains("[unused-import]")).collect();
+    assert_eq!(unused.len(), 1, "{err}");
+    assert!(unused[0].contains("'Never'"), "{unused:?}");
+    let _ = std::fs::remove_dir_all(&dir);
+}

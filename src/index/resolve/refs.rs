@@ -612,10 +612,12 @@ fn walk_refs(
                 // The matcher reads refs (usage sites) AND symbols
                 // (declaration sites) — the rows-axes view, upgraded to
                 // whole only when a matching ref needs the bag.
-                let full = matcher_view(idx, &cached, target);
-                collect_from_analysis(
-                    &key, &full, target, &aliases, module_index, &file_str, &mut out,
-                );
+                let full = crate::util::ghost_stats::timed("refs.matcher_view", || matcher_view(idx, &cached, target));
+                crate::util::ghost_stats::timed("refs.collect", || {
+                    collect_from_analysis(
+                        &key, &full, target, &aliases, module_index, &file_str, &mut out,
+                    )
+                });
             }
         }
     }
@@ -692,8 +694,10 @@ fn walk_refs(
                 // Rows-off fallback sweep: copies here may still be
                 // row-axes-evicted (rows exist, retrieval switched off) —
                 // the matcher needs refs + symbols, so take the rows view.
-                let full = matcher_view(idx, cached, target);
-                collect_from_analysis(&key, &full, target, &aliases, module_index, &file_str, &mut out);
+                let full = crate::util::ghost_stats::timed("refs.matcher_view", || matcher_view(idx, cached, target));
+                crate::util::ghost_stats::timed("refs.collect", || {
+                    collect_from_analysis(&key, &full, target, &aliases, module_index, &file_str, &mut out)
+                });
             });
         }
     }

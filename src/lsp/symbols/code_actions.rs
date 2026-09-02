@@ -203,6 +203,13 @@ pub fn code_actions(
             actions.extend(make_import_type_actions(analysis, uri, diag));
             continue;
         }
+        // An unused import whose row binds only that name: delete the row.
+        if matches!(&diag.code, Some(NumberOrString::String(s)) if s == "unused-import") {
+            if let Some(action) = make_remove_import_action(uri, diag) {
+                actions.push(action);
+            }
+            continue;
+        }
         let code_matches = matches!(
             &diag.code,
             Some(NumberOrString::String(s)) if s == "unresolved-function"
@@ -277,6 +284,30 @@ pub fn code_actions(
     }
 
     actions
+}
+
+/// Delete the whole import row the diagnostic names (`data.row` = its
+/// first and last line), newline included.
+fn make_remove_import_action(uri: &Url, diag: &Diagnostic) -> Option<CodeActionOrCommand> {
+    let row = diag.data.as_ref()?.get("row")?.as_array()?;
+    let (first, last) = (row.first()?.as_u64()? as u32, row.get(1)?.as_u64()? as u32);
+    let edit = TextEdit {
+        range: Range {
+            start: Position { line: first, character: 0 },
+            end: Position { line: last + 1, character: 0 },
+        },
+        new_text: String::new(),
+    };
+    let mut changes = HashMap::new();
+    changes.insert(uri.clone(), vec![edit]);
+    Some(CodeActionOrCommand::CodeAction(CodeAction {
+        title: "Remove unused import".to_string(),
+        kind: Some(CodeActionKind::QUICKFIX),
+        diagnostics: Some(vec![diag.clone()]),
+        edit: Some(WorkspaceEdit { changes: Some(changes), ..Default::default() }),
+        is_preferred: Some(true),
+        ..Default::default()
+    }))
 }
 
 /// `Add 'use Ns\Leaf;'` for each candidate the diagnostic carries, inserted

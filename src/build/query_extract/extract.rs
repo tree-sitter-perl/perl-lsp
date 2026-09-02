@@ -591,6 +591,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     out.catch_all_methods = pack.catch_all_methods.iter().map(|s| s.to_string()).collect();
     out.class_literal_member = pack.class_literal_member.to_string();
     out.import_template = pack.import_template.to_string();
+    out.imports_bind_names = pack.imports_bind_names;
     out.enum_members = pack.enum_members.iter().map(|s| s.to_string()).collect();
     out.member_writes = std::mem::take(&mut member_writes);
     out.types_are_capitalized = pack.types_are_capitalized;
@@ -2367,8 +2368,23 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
         // the start row rides along so a `@method` fact can span its own
         // line inside the comment.
         let mut by_end_row: HashMap<usize, (usize, Vec<DocFact>)> = HashMap::new();
+        // The bound names imports bring in, for the doc-mention scan below:
+        // an import used only in a docblock (`@var Foo $x`) is used.
+        let bound: std::collections::HashSet<String> = out
+            .import_sites
+            .iter()
+            .map(|(raw, _)| raw.rsplit('\\').next().unwrap_or(raw).to_string())
+            .chain(out.use_aliases.iter().map(|(alias, _, _)| alias.clone()))
+            .collect();
         for e in &events {
             if e.cap == "doc.comment" {
+                if !bound.is_empty() {
+                    for word in e.text.split(|c: char| !(c.is_alphanumeric() || c == '_')) {
+                        if bound.contains(word) && !out.doc_mentions.iter().any(|m| m == word) {
+                            out.doc_mentions.push(word.to_string());
+                        }
+                    }
+                }
                 let facts = (pack.doc_types)(&e.text);
                 if !facts.is_empty() {
                     let entry = by_end_row

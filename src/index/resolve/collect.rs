@@ -918,14 +918,16 @@ pub(super) fn collect_from_analysis(
             ) =>
         {
             let path = key_for_sort(key);
-            let axis = crate::model::file_analysis::VisibilityAxis::for_origin(
-                analysis,
-                Some(path.as_path()),
-                idx,
-                crate::build::language_driver::LanguageRegistry::pack_visibility(
-                    &analysis.language,
-                ),
-            );
+            let axis = crate::util::ghost_stats::timed("refs.visibility_axis", || {
+                crate::model::file_analysis::VisibilityAxis::for_origin(
+                    analysis,
+                    Some(path.as_path()),
+                    idx,
+                    crate::build::language_driver::LanguageRegistry::pack_visibility(
+                        &analysis.language,
+                    ),
+                )
+            });
             scoped_storage = Some(crate::model::file_analysis::ScopedLookup::new(
                 idx,
                 &analysis.pack.include_closure,

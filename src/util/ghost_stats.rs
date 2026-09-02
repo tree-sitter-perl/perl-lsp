@@ -164,6 +164,10 @@ fn maybe_reemit_attribution() {
         return; // another thread is emitting this interval
     }
     emit_attribution("periodic");
+    // The machine-readable sinks too: a harness that kills the server
+    // instead of asking it to exit still gets the latest snapshot.
+    write_json();
+    super::timings::write_json();
 }
 
 /// Add `n` to a named counter in one call. For a per-FILE quantity (fold

@@ -85,6 +85,14 @@ Every lane names the case it cannot see and stays silent there:
   ready gate (`index_ready.pack.is_open()`), so the lane publishes once
   the workspace index has landed and never before — an unindexed
   workspace would flag every type.
+- **An unused import** (`unused-import`, a hint tagged unnecessary) is a
+  row whose bound name — the leaf, or the alias — the file never spells
+  as a class token, a function call, a namespace prefix, or a docblock
+  word (`PackFacts::doc_mentions`, gathered at extraction). Only packs
+  whose imports bind names (`LangPack::imports_bind_names`) run it: an
+  `#include` splices text. Constant imports (no lowercase letter) are
+  silent — the walker records no spelling for them. The quick-fix deletes
+  the row when it binds only that name.
 - **An undefined type is a quick-fix**: the diagnostic carries every
   namespace that declares the leaf (`data.candidates`, the same set the
   existence test reads), and `codeAction` offers one import per

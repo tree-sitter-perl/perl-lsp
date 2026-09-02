@@ -695,6 +695,7 @@ impl FileAnalysis {
         shape: MemberShape,
         module_index: Option<&dyn CrossFileLookup>,
     ) -> Option<MethodResolution> {
+        let _t = crate::util::ghost_stats::ScopedNs::start("mroc.total");
         let mut result: Option<MethodResolution> = None;
         let mut iface_fallback: Option<MethodResolution> = None;
         self.for_each_ancestor_class(class_name, module_index, |cls| {

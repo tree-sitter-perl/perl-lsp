@@ -45,6 +45,13 @@ pub struct PackFacts {
     /// empty when the language has no import quick-fix.
     #[serde(default)]
     pub import_template: String,
+    /// Import rows bind names the file spells (php), so a row nothing
+    /// spells is unused; false for text-splicing includes.
+    #[serde(default)]
+    pub imports_bind_names: bool,
+    /// Imported names a doc comment mentions.
+    #[serde(default)]
+    pub doc_mentions: Vec<String>,
 
     /// The language's display vocabulary for the engine's value lattice:
     /// `format_inferred_type` tag → this language's spelling (php:
@@ -213,6 +220,7 @@ impl PackFacts {
             + vcap(&self.enum_members)
             + vcap(&self.import_rows)
             + self.import_template.capacity()
+            + vcap(&self.doc_mentions)
             + vcap(&self.type_display)
             + vcap(&self.constructor_names);
     }

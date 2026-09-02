@@ -484,3 +484,32 @@ Format per entry:
   argument types a magic property") general enough to earn engine space
   (Doctrine collections, Django managers would use it too), or is it
   Laravel-specific enough to stay overlay-shaped?
+
+---
+
+## Intersection types (`MockObject&Foo`) — 2026-09-02 — OPEN (Claude)
+- **Context:** PHPUnit types a mock as `MockObject&Foo`, in its own
+  `@return` and in the `/** @var Foo&MockObject $m */` idiom tests write.
+  The lattice has no intersection: `php_annot_type` rejects any `&`/`|`
+  spelling outright, and the PHPUnit overlay now types the mock as the
+  doubled class alone (`createMock(Foo::class)` → `Foo`), which is what
+  navigation and the lanes need; `$m->expects()` / `->method()` (the
+  `MockObject` side) stay unresolved on a mock, and a docblock
+  intersection still types nothing.
+- **Options:** A — pick one arm by a rule that needs no names: the arm
+  that is not the callee's native declared return type is the refinement
+  (`MockObject` is what `createMock` declares; `Foo` is what the docblock
+  adds), and for a standalone `@var A&B` the first arm. B — an
+  `InferredType::Intersection(Vec<InferredType>)` variant: member
+  resolution tries each arm in order, completion unions the members, the
+  reducers treat it as a class name for dispatch of the first arm. C — A
+  now, B when a second consumer appears (Doctrine proxies, PHPStan's
+  `T&object` generics).
+- **Picked:** the overlay rule alone; no intersection parsing yet.
+- **Undo cost:** A is contained in `php_annot_type`; B touches the type
+  enum, `despan`, the reducers' class-name projections and every
+  `class_name()` consumer — a real slice.
+- **Discussion needed:** is B worth its footprint before unions
+  (`docs/open-forks.md`, "Union types in the lattice") land — the two
+  are the same lattice change with opposite member semantics, and doing
+  one without the other bakes an asymmetry into `InferredType`.

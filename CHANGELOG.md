@@ -298,6 +298,13 @@ templates). Market case and build-out plan in `docs/prompt-php-target.md`.
   (one per declaring namespace), inserted after the file's last `use`
   row. The undefined-type diagnostic itself now publishes in the editor
   once the workspace index has settled.
+- **Unused imports.** A `use` row whose bound name the file never spells
+  (tree or docblock) is an unnecessary-tagged hint with a "Remove unused
+  import" quick-fix.
+- **Attributes, `instanceof` operands and qualified static receivers are
+  class references.** `#[Route('/x')]`, `$x instanceof Foo` and
+  `Psr7\Utils::make()` now answer goto-def, references and rename on the
+  class token (and count as uses of its import).
 
 ### Storage engine — warm starts, bounded memory
 

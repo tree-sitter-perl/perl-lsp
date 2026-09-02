@@ -56,20 +56,29 @@ Counts after the silence rules landed; every remaining row was read:
   type reads `Expr(span)` at the member token; the member's own type
   lives on the class.
 
-## Cold references — reattributed (2026-09-02 evening)
+## Cold references — attributed on the editor path (2026-09-02, late evening)
 
-Editor-restart shape (workspace persisted, RAM caches empty), `__construct`
-in guzzle's `Client.php`, 126 candidate files, 3 fresh-cache runs: cold
-1,050 ms mean, warm 85 ms. Decode (SQLite + zstd + bincode, 151 ops,
-21 double-decodes on the rows→whole upgrade) is ~220 ms — 21% of cold.
-The remaining ~825 ms has no covering timer; `strace -c` puts syscalls
-at 3% of wall (CPU-bound, not I/O), and the SQL prefilters are not it
-(disabling them changes nothing). Candidates for the untimed share, in
-order: `VisibilityAxis::for_origin` per candidate (`collect.rs`), the
-post-decode index rebuild, `resolve_method_in_ancestors` per candidate
-(`ancestry.rs`); `module_declaring_method_in_package` recomputes the same
-`(name, class)` verdict 633 times per walk with no session memo. Next
-step is instrumentation on those three (`ghost_stats::timed`), then the
-fix the numbers name — a parallel decode prefetch of the candidate set is
-the one bounded win already sized (~150–190 ms).
+The batch CLI re-analyzes the origin per request, so it cannot stand in
+for the editor; measured over stdio instead (`bench/compare`,
+`spec-coldrefs.json`: `__construct` in guzzle's `Client.php`, 304
+references, workspace persisted, server restarted, box under a
+verification net's load):
 
+| | ms |
+|---|---|
+| first references | 286 |
+| second / third | 25 / 27 |
+| `rehydrate.loader` (871 lookups) | 172 |
+| `bagcache.decode` (104 decodes: SQL 8, zstd 42+23, bincode 48+44, post 19) | 168 |
+| `refs.matcher_view` (54 candidates, 45 rows-view + 10 whole upgrades) | 139 |
+| `mroc.total` (ancestor walk, 824 calls) | 25 |
+| `refs.collect` (the matcher itself) | 18 |
+| `refs.visibility_axis` | 7 |
+
+Decode is ~60% of the first answer and is serial: one `matcher_view` per
+candidate inside the walk loop. The lever is a parallel prefetch of the
+candidate set's rows views into the LRU before the sequential match
+(rayon over `ref_candidate_paths`), plus the 10 double-decodes on the
+rows→whole upgrade. `module_declaring_method_in_package` runs 382 times to
+conclude nothing each time — cheap here (0.2 ms), a memo candidate at
+scale.
