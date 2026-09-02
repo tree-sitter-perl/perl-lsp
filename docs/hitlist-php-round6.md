@@ -105,4 +105,5 @@ method is flagged dead. Same fork as union types.
 
 ### Heatmap sample (composer root, 243 candidates, 15 sampled)
 6 tool false positives (R6-2, R6-6, R6-7, R6-10, the alias gap), 2 truly
-dead, 2 framework-invoked, 4 inconclusive library/plugin API surface.
+dead, 2 framework-invoked, 4 inconclusive library/plugin API surface, 1
+left unclassified in the agent's table.

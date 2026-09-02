@@ -1017,10 +1017,14 @@ impl FileAnalysis {
     /// Every leaf→namespace pin this file carries — its own class
     /// declarations plus its qualified imports — the table a use-map
     /// visibility axis is built from (`UseMapPins`). A leaf with
-    /// CONFLICTING evidence (declared here AND imported from elsewhere:
-    /// `use Support\Collection as BaseCollection; class Collection extends
-    /// BaseCollection`) pins to nothing — both classes are live in this
-    /// file under one leaf, and a wrong pin is a silent wrong answer.
+    /// CONFLICTING evidence (declared here AND imported bare from
+    /// elsewhere, or imported bare from two namespaces) pins to nothing —
+    /// a wrong pin is a silent wrong answer. An ALIASED import never
+    /// conflicts: it pins the alias spelling and adds its namespace to
+    /// `visible` for the real leaf (`use Support\Collection as
+    /// BaseCollection; class Collection extends BaseCollection` pins
+    /// `Collection` to this file's own class and keeps `Support` reachable
+    /// for the parent walk).
     /// `spelled` is every leaf the file writes as a class token (type
     /// positions, parent clauses, `new X`, `X::m()` receivers): the
     /// own-namespace default applies to those alone, never to a leaf the
@@ -1072,13 +1076,7 @@ impl FileAnalysis {
             match s.kind {
                 SymKind::Class => {
                     let ns = s.package.clone().unwrap_or_default();
-                    pins.entry(s.name.clone())
-                        .and_modify(|p| {
-                            if p.as_deref() != Some(ns.as_str()) {
-                                *p = None;
-                            }
-                        })
-                        .or_insert(Some(ns));
+                    pin(&mut pins, &s.name, &ns);
                 }
                 SymKind::Package => {
                     if own.as_deref().is_some_and(|o| o != s.name) {

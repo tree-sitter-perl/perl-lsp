@@ -975,10 +975,7 @@ pub(super) fn collect_from_analysis(
     // file's own `Event` means).
     let import_row_verdict = |span: &Span| -> Option<bool> {
         let want = target.class_ns.as_deref()?;
-        let (_, raw) = analysis.pack.include_directives.iter().find(|(row, _)| {
-            (row.start.row, row.start.column) <= (span.start.row, span.start.column)
-                && (span.end.row, span.end.column) <= (row.end.row, row.end.column)
-        })?;
+        let (_, raw) = analysis.pack.import_row_covering(span)?;
         Some(
             raw.trim_start_matches('\\')
                 .rsplit_once('\\')

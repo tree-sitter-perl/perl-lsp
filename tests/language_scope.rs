@@ -743,7 +743,8 @@ fn php_heatmap_pre_prune_preserves_every_fan_in() {
     let pruned = run("1");
     let walked = run("0");
     assert_eq!(pruned, walked, "the pre-prune must not change any fan-in");
-    assert_eq!(pruned.get("__construct"), Some(&1), "ctor fan-in = its `new` site: {pruned:?}");
+    // `new Helper(2)` in Box.php plus `new static(1)` inside `make()`.
+    assert_eq!(pruned.get("__construct"), Some(&2), "ctor fan-in = its `new` sites: {pruned:?}");
     assert_eq!(pruned.get("unused"), Some(&0), "{pruned:?}");
     assert_eq!(pruned.get("make"), Some(&1), "{pruned:?}");
     let _ = std::fs::remove_dir_all(&dir);
@@ -907,12 +908,30 @@ fn php_string_callables_new_self_and_import_row_segments() {
         String::from_utf8_lossy(&out.stdout).into_owned()
     };
     let root = dir.to_str().unwrap();
-    let ctor = run(&["--references", root, "A/F.php", "5", "20"]);
-    assert!(ctor.contains("\"line\": 4"), "`new self(1)` (row 4) is a construction site of F: {ctor}");
-    // (hover/goto-def ON the `self` token itself stay dark — round-6
-    // residual; the references/heatmap identity is what this pins.)
+    let lines = |out: &str| -> Vec<u64> {
+        let v: serde_json::Value = serde_json::from_str(out).expect("json");
+        let mut l: Vec<u64> = v.as_array().unwrap().iter().map(|e| e["line"].as_u64().unwrap()).collect();
+        l.sort();
+        l
+    };
+    let ctor = lines(&run(&["--references", root, "A/F.php", "5", "20"]));
+    assert_eq!(ctor, vec![4, 5], "`new self(1)` (row 4) is a construction site of F");
+    let hover = run(&["--hover", root, "A/F.php", "4", "53"]);
+    assert!(hover.contains("__construct"), "`self` in `new self` is the constructor call: {hover}");
+    let gd = run(&["--definition", root, "A/F.php", "4", "53"]);
+    assert!(gd.contains("F.php:5:"), "goto-def on `self` lands on the constructor: {gd}");
+    let rename = run(&["--rename", root, "A/F.php", "5", "20", "build"]);
+    assert!(!rename.contains("\"line\": 4"), "a constructor-convention name is not renameable: {rename}");
     let cb = run(&["--references", root, "A/F.php", "6", "28"]);
     assert!(cb.contains("Use.php"), "the string callable site references `cb`: {cb}");
+    // Renaming `cb` rewrites exactly the method tail inside the string
+    // (`'A\\F::cb'` → `'A\\F::run'`), never the class qualifier.
+    let rename: serde_json::Value = serde_json::from_str(&run(&["--rename", root, "A/F.php", "6", "28", "run"])).expect("json");
+    let use_edits = rename.as_object().unwrap().iter().find(|(k, _)| k.ends_with("Use.php")).map(|(_, v)| v.clone()).expect("Use.php edited");
+    let e = &use_edits.as_array().unwrap()[0];
+    let src_line = "call_user_func('A\\F::cb');";
+    let cb_col = src_line.find("cb'").unwrap() as u64;
+    assert_eq!((e["line"].as_u64(), e["col"].as_u64(), e["end_col"].as_u64()), (Some(3), Some(cb_col), Some(cb_col + 2)), "{use_edits}");
     let mid = run(&["--definition", root, "A/Use.php", "2", "8"]);
     assert!(!mid.contains("Sub.php"), "a `use` row's middle segment is a namespace, not class `A\\Sub`: {mid}");
     let _ = std::fs::remove_dir_all(&dir);

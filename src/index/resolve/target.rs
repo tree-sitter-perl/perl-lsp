@@ -198,6 +198,12 @@ impl TargetRef {
     /// owner-less hash key can't be matched by name alone elsewhere and stays
     /// single-file. References ignores this — it walks every kind cross-file.
     pub fn supports_cross_file_rename(&self) -> bool {
+        // A pack's constructor-convention name (`__construct`) is the
+        // language's, not the author's: nothing renames it, and its `new
+        // self(...)` sites carry no token that spells it.
+        if self.ctor_of.is_some() {
+            return false;
+        }
         matches!(
             self.kind,
             TargetKind::Sub { .. }

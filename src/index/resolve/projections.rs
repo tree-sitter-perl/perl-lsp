@@ -321,6 +321,11 @@ impl<'a> CandidateSet<'a> {
             .map(|m| m & RoleMask::EDITABLE)
             .unwrap_or(RoleMask::EDITABLE);
         Ok(match self.resolution() {
+            // A pack's constructor-convention name (`__construct`) belongs to
+            // the language: its `new self(...)` sites carry no token spelling it,
+            // so a rename would rewrite `self`. Nothing renameable, cross-file
+            // or local.
+            Some(ResolvedTarget::Target(t)) if t.ctor_of.is_some() => Vec::new(),
             Some(ResolvedTarget::Target(t)) if t.supports_cross_file_rename() => {
                 let locations = refs_to(self.files, self.module_index, t, editable);
                 if self.pack && locations.iter().any(|l| !l.rewritable) {

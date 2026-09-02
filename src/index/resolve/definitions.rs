@@ -109,20 +109,16 @@ impl<'a> CandidateSet<'a> {
         fallback.map(|l| vec![l])
     }
 
+    /// Word-keyed fallbacks stand down inside an import row
+    /// (`PackFacts::import_row_covering`).
+    fn point_in_import_row(&self, point: tree_sitter::Point) -> bool {
+        let here = Span { start: point, end: point };
+        self.origin.pack.import_row_covering(&here).is_some()
+    }
+
     /// The def site of `member` on `class` — origin symbols first, then the
     /// class's own cached file. Serves the template-family ranked goto-def
     /// (one location per ladder class that actually defines the member).
-    /// Is the cursor inside one of the origin's import rows (a `use` /
-    /// `#include` path token)? Word-keyed fallbacks stand down there: the
-    /// row's leaf carries its own ref, and every other segment is a
-    /// namespace, which no by-name class lookup should answer for.
-    fn point_in_import_row(&self, point: tree_sitter::Point) -> bool {
-        self.origin.pack.include_directives.iter().any(|(sp, _)| {
-            (sp.start.row, sp.start.column) <= (point.row, point.column)
-                && (point.row, point.column) < (sp.end.row, sp.end.column)
-        })
-    }
-
     pub(super) fn member_def_location(&self, class: &str, member: &str) -> Option<RefLocation> {
         // The member's def span in `fa` under `class`'s owner set, expanded
         // through inline-namespace transparency so a symbol filed under an

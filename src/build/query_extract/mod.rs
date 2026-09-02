@@ -189,6 +189,8 @@ fn effective_query_source(language: &Language, pack: &LangPack) -> &'static str 
     let key = {
         let mut h = DefaultHasher::new();
         pack.lang_id.hash(&mut h);
+        // `bundled_overlays` is a per-`lang_id` compile-time constant, so the
+        // id covers it; a runtime-configurable bundle would have to hash in.
         pack.query_source.hash(&mut h);
         for (p, s) in &sources {
             p.hash(&mut h);

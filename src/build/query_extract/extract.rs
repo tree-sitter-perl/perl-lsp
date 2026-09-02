@@ -1059,15 +1059,25 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                     if !ns.is_empty() {
                         out.qualified_spellings.push((leaf.clone(), format!("\\{ns}")));
                     }
-                    let span = Span { start: e.start, end: e.end };
+                    // The ref's span is the METHOD tail only — rename rewrites
+                    // exactly those characters; the invocant span is the
+                    // qualifier ahead of the `::`.
+                    let method_start = Point {
+                        row: e.end.row,
+                        column: e.end.column.saturating_sub(method.len()),
+                    };
+                    let qual_span = Span {
+                        start: e.start,
+                        end: Point { row: e.start.row, column: e.start.column + qual.len() },
+                    };
                     out.refs.push(SkelRef {
                         via: None,
                         kind: "member".to_string(),
                         name: method.to_string(),
-                        start: e.start,
+                        start: method_start,
                         end: e.end,
                         scope: cur_scope,
-                        invocant: Some((span, leaf)),
+                        invocant: Some((qual_span, leaf)),
                         member_op: None,
                         arg_count: None,
                         shape: crate::model::file_analysis::MemberShape::Callable,
@@ -1155,6 +1165,38 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                             // (cheap heuristic: same start)
                             s == e.start_byte || en == e.end_byte
                         });
+                // `new self(...)` / `new static(...)`: the token spells no class
+                // name — it IS a call of the constructor on the current class.
+                // Minted as that member call (invocant = the current-package
+                // token, name = the pack's constructor), so the ctor's
+                // references, hover and goto-def see the site while a class
+                // rename never rewrites the `self` token.
+                if !inside_def
+                    && e.cap == "ref.call"
+                    && ctor_matches.contains(&e.match_id)
+                    // `hop.recv` is the pack's receiver-shaping kind — the one
+                    // place its `self`/`static` → current-package table lives.
+                    && crate::model::conventions::is_current_package_token(
+                        &(pack.shape_name)("hop.recv", &e.text),
+                    )
+                {
+                    if let Some(ctor) = pack.constructor_names.first() {
+                        let span = Span { start: e.start, end: e.end };
+                        out.refs.push(SkelRef {
+                            via: None,
+                            kind: "member".to_string(),
+                            name: ctor.to_string(),
+                            start: e.start,
+                            end: e.end,
+                            scope: cur_scope,
+                            invocant: Some((span, "__PACKAGE__".to_string())),
+                            member_op: None,
+                            arg_count: arg_counts_by_start.get(&(e.end.row, e.end.column)).copied(),
+                            shape: crate::model::file_analysis::MemberShape::Callable,
+                        });
+                        continue;
+                    }
+                }
                 if !inside_def {
                     let member_op = member_simple
                         .get(&e.match_id)
@@ -1197,13 +1239,6 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                         kind: e.cap.strip_prefix("ref.").unwrap().to_string(),
                         name: if super_recv {
                             format!("SUPER::{}", (pack.shape_name)(&e.cap, &e.text))
-                        } else if e.cap == "ref.call"
-                            && ctor_matches.contains(&e.match_id)
-                            && crate::model::conventions::is_current_package_token(
-                                &(pack.shape_name)("hop.recv", &e.text),
-                            )
-                        {
-                            package.clone().unwrap_or_else(|| (pack.shape_name)(&e.cap, &e.text))
                         } else {
                             (pack.shape_name)(&e.cap, &e.text)
                         },

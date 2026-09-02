@@ -135,6 +135,17 @@ pub struct PackFacts {
 }
 
 impl PackFacts {
+    /// The import row (`use` / `#include` path token) whose span covers
+    /// `span`, if any. The one speller for "is this token inside an import
+    /// row": the row's leaf carries its own ref; every other segment is a
+    /// namespace no by-name lookup should answer for.
+    pub fn import_row_covering(&self, span: &Span) -> Option<&(Span, String)> {
+        self.include_directives.iter().find(|(row, _)| {
+            (row.start.row, row.start.column) <= (span.start.row, span.start.column)
+                && (span.end.row, span.end.column) <= (row.end.row, row.end.column)
+        })
+    }
+
     /// Add this lane's footprint to a heap probe: the include bucket (the
     /// header-path duplication), the pack fact vectors, and the per-class
     /// template maps. See [`HeapBreakdown`].
