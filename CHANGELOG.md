@@ -286,6 +286,13 @@ templates). Market case and build-out plan in `docs/prompt-php-target.md`.
   an overlay invalidates the analysis cache, and
   `perl-lsp --plugin-check <overlay.scm>` lints one: compile errors,
   plus capture names outside the served vocabulary.
+- **`instanceof` narrows past the `if` block.** A negated guard whose
+  body exits (`if (!$x instanceof T) { return; }`, `throw`, `continue`,
+  `break`) types `$x` as `T` for the rest of the scope; `assert($x
+  instanceof T)` does the same; the right operand of `&&`, a ternary's
+  true arm and a `match` arm narrow within themselves. Hover, completion
+  and goto-def on an interface-typed parameter answer with the concrete
+  class after the guard.
 
 ### Storage engine — warm starts, bounded memory
 

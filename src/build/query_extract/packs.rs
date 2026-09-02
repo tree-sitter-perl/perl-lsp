@@ -124,6 +124,10 @@ pub struct LangPack {
     /// "which guard means which refinement" (rule #10); core just scopes
     /// the witness to the block.
     pub narrow_guard: fn(guard: Option<&str>, type_text: &str) -> Option<InferredType>,
+    /// Callees that ASSERT their argument (php `assert`): a guard passed to
+    /// one narrows the rest of the enclosing scope. The `@narrow.assert`
+    /// capture fires for any call around a guard; core honours only these.
+    pub narrow_assertions: &'static [&'static str],
     /// Does calling `method` on a variable REBIND it — putting a moved-from
     /// object back into a known state (`clear`/`reset`/`assign`/…)? Used to end
     /// a moved-from region (and any narrowing) at the reset call, so a use after
@@ -503,6 +507,7 @@ pub fn perl_pack() -> LangPack {
         import_call: |_, _| None,
         cmd_effects: |_| vec![],
         narrow_guard: |_, _| None,
+        narrow_assertions: &[],
         rebind_method: |_| false,
         implicit_this_members: false,
         include_path_tokens: false,
@@ -572,6 +577,7 @@ pub fn python_pack() -> LangPack {
         cmd_effects: |_| vec![],
         // `isinstance(x, Foo)` narrows x to Foo inside the guard.
         narrow_guard: |guard, ty| (guard == Some("isinstance")).then(|| InferredType::ClassName(ty.to_string())),
+        narrow_assertions: &[],
         rebind_method: |_| false,
         implicit_this_members: false,
         include_path_tokens: false,
@@ -641,6 +647,7 @@ pub fn r_pack() -> LangPack {
         },
         cmd_effects: |_| vec![],
         narrow_guard: |_, _| None,
+        narrow_assertions: &[],
         rebind_method: |_| false,
         implicit_this_members: false,
         include_path_tokens: false,
@@ -718,6 +725,7 @@ pub fn cmake_pack() -> LangPack {
             _ => vec![],
         },
         narrow_guard: |_, _| None,
+        narrow_assertions: &[],
         rebind_method: |_| false,
         implicit_this_members: false,
         include_path_tokens: false,
@@ -965,6 +973,7 @@ pub fn php_pack() -> LangPack {
                 .flatten()
                 .filter(|t| matches!(t, InferredType::ClassName(_)))
         },
+        narrow_assertions: &["assert"],
         rebind_method: |_| false,
         // `$this->` is mandatory — no receiver elision (unlike C++).
         implicit_this_members: false,
@@ -1129,6 +1138,7 @@ pub fn cpp_pack() -> LangPack {
             };
             Some(InferredType::ClassName(class))
         },
+        narrow_assertions: &[],
         // Rebinding methods: a moved-from object is put back into a known state
         // by these std container/optional/smart-ptr resets, so a use after one
         // is NOT a use-after-move. (An ordinary `x.use()` is not here, so the

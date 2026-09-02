@@ -875,11 +875,12 @@ pub fn pack_symbol_diagnostics(
                 })
             };
             Some(OwnerFacts {
-                // A receiver typed as an INTERFACE names any implementation,
-                // and php code narrows it with `instanceof` before calling
-                // what the interface lacks — no narrowing lane yet, so the
-                // interface stays silent on undefined members (resolved
-                // ones still check arity).
+                // A receiver typed as an INTERFACE names any implementation.
+                // `instanceof` narrowing retypes a VARIABLE receiver, but a
+                // member subject (`$this->x instanceof T`), a method guard
+                // (`->isT()`) or `is_a()` leave the interface type standing
+                // — so the interface stays silent on undefined members
+                // (resolved ones still check arity).
                 is_interface: class_attr("interface"),
                 is_enum: class_attr("enum"),
                 dynamic_arg_calls: if owner_arc.is_some() {

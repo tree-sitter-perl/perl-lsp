@@ -43,9 +43,12 @@ Every lane names the case it cannot see and stays silent there:
 - **A catch-all class** (php `__call`/`__callStatic`/`__get` anywhere in
   the ancestry) answers any member name — Perl's `AUTOLOAD` rule.
 - **An interface-typed receiver** names any implementation; php code
-  narrows with `instanceof` before calling what the interface lacks. No
-  narrowing lane exists for php yet, so an interface stays silent on
-  undefined members (resolved ones still check arity).
+  narrows with `instanceof` before calling what the interface lacks.
+  Narrowing retypes a VARIABLE receiver (the `if` block, a negated
+  guard that exits, `assert`, the `&&`/ternary/`match` regions), but a
+  member subject (`$this->x instanceof T`), a method guard (`->isT()`)
+  or `is_a()` leave the interface standing — so an interface stays
+  silent on undefined members (resolved ones still check arity).
 - **A closure's `$this`** may be rebound (`Closure::bind`, `->call($obj)`
   — the private-access idiom tests live on): the non-public lane is
   silent inside anonymous functions.

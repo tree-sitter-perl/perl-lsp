@@ -1157,3 +1157,45 @@ fn php_string_callables_new_self_and_import_row_segments() {
     assert!(!mid.contains("Sub.php"), "a `use` row's middle segment is a namespace, not class `A\\Sub`: {mid}");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// `instanceof` narrows beyond the `if` block: a negated guard whose body
+/// exits narrows the rest of the scope, `assert()` does too, and the
+/// expression regions (`&&` right operand, ternary true arm, `match` arm)
+/// narrow within themselves. A negated guard whose body does NOT exit
+/// narrows nothing.
+#[cfg(feature = "php")]
+#[test]
+fn php_instanceof_narrows_exits_assertions_and_expression_regions() {
+    let dir = std::env::temp_dir().join(format!("perl-lsp-narrow2-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let src = "<?php\nnamespace App;\ninterface Shape { public function area(): float; }\nclass Circle implements Shape { public function area(): float { return 1.0; } public function radius(): int { return 2; } }\nclass Square implements Shape { public function area(): float { return 1.0; } public function side(): int { return 3; } }\nclass Use1 {\n    public function a(Shape $s): int {\n        if (!$s instanceof Circle) { return 0; }\n        return $s->radius();\n    }\n    public function b(Shape $s): int {\n        if (!($s instanceof Circle)) throw new \\RuntimeException('x');\n        return $s->radius();\n    }\n    public function c(Shape $s): int {\n        assert($s instanceof Square);\n        return $s->side();\n    }\n    public function d(Shape $s): int {\n        return $s instanceof Circle && $s->radius() > 1 ? 1 : 0;\n    }\n    public function e(Shape $s): int {\n        return $s instanceof Square ? $s->side() : 0;\n    }\n    public function f(Shape $s): int {\n        return match (true) { $s instanceof Circle => $s->radius(), default => 0 };\n    }\n    public function h(Shape $s): float {\n        foreach ([$s] as $i) { if (!$i instanceof Square) continue; return $i->side(); }\n        return $s->area();\n    }\n    public function i(Shape $s): int {\n        if (!$s instanceof Circle) { error_log('not a circle'); }\n        return $s->radius();\n    }\n}\n";
+    std::fs::write(dir.join("Narrow.php"), src).unwrap();
+    let lines: Vec<&str> = src.lines().collect();
+    let run = |args: &[&str]| {
+        let out = std::process::Command::new(env!("CARGO_BIN_EXE_perl-lsp"))
+            .args(args)
+            .env("XDG_CACHE_HOME", dir.join(".cache"))
+            .output()
+            .expect("run");
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+    let root = dir.to_str().unwrap();
+    // the receiver's hover type at the member call on `row` — goto-def would
+    // find a uniquely-named member with no narrowing at all
+    let receiver = |row: usize, var: &str| -> String {
+        let col = lines[row].find(&format!("{var}->")).unwrap();
+        let out = run(&["--hover", root, "Narrow.php", &row.to_string(), &col.to_string()]);
+        out.lines().find(|l| l.starts_with(var)).unwrap_or("").to_string()
+    };
+    assert_eq!(receiver(8, "$s"), "$s: Circle", "negated block exit");
+    assert_eq!(receiver(12, "$s"), "$s: Circle", "negated brace-less throw");
+    assert_eq!(receiver(16, "$s"), "$s: Square", "assert()");
+    assert_eq!(receiver(19, "$s"), "$s: Circle", "`&&` right operand");
+    assert_eq!(receiver(22, "$s"), "$s: Square", "ternary true arm");
+    assert_eq!(receiver(25, "$s"), "$s: Circle", "match arm");
+    assert_eq!(receiver(28, "$i"), "$i: Square", "`continue` inside a loop body");
+    assert_eq!(receiver(29, "$s"), "$s: Shape", "the loop's narrowing stays inside the loop");
+    assert_eq!(receiver(33, "$s"), "$s: Shape", "a negated guard that does not exit narrows nothing");
+    let _ = std::fs::remove_dir_all(&dir);
+}

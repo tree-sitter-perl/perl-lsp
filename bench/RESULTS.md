@@ -432,3 +432,40 @@ reference (round 1), and its free tier answers neither implementations
 nor type definitions. Where they lead: the unused/deprecated/type-check
 lanes, and vendor stubs for the global namespace (we carry none, so
 `\Exception` and friends are simply silent).
+
+### `instanceof` narrowing, round 2 (2026-09-02, evening)
+
+Fixture: an interface-typed parameter (`Shape $s`) with the eight guard
+shapes, hover on the receiver at the member call (`bench/compare`,
+`spec-narrow.json`; `ours` = the round-2 build).
+
+| shape | ours | Intelephense | phpactor |
+|---|---|---|---|
+| `if (!$s instanceof Circle) { return; }` then `$s->` | Circle | Circle | Circle |
+| `if (!($s instanceof Circle)) throw …;` then `$s->` | Circle | Circle | Circle |
+| `assert($s instanceof Square);` then `$s->` | Square | Square | Square |
+| `$s instanceof Circle && $s->…` | Circle | Circle | Circle |
+| `$s instanceof Square ? $s->… : 0` | Square | Square | Square |
+| `match (true) { $s instanceof Circle => $s->… }` | Circle | Circle | Circle |
+| `foreach … { if (!$i instanceof Square) continue; $i->… }` | Square | Square | **Shape** |
+| after the loop, `$s->` | Shape | Shape | Shape |
+| negated guard whose body does NOT exit, then `$s->` | Shape | Shape | Shape |
+
+Before round 2 ours answered `Shape` on the first seven rows. The
+diagnostics counts on guzzle / monolog / demo are unchanged by design:
+the interface silence rule stays (member subjects, method guards and
+`is_a()` leave the interface standing), so narrowing pays off on hover,
+completion and goto-def over interface receivers, not on the linter
+surface.
+
+Real sites (monolog, `spec-narrow-monolog.json`):
+
+| site | ours | Intelephense | phpactor |
+|---|---|---|---|
+| `MandrillHandler::__construct`: `$message` (`callable\|Swift_Message` param) after `if (!$message instanceof Swift_Message) { throw … }` | Swift_Message | Swift_Message | Swift_Message |
+| same, before the guard | untyped | mixed | untyped |
+| `Logger::log`: `$level` after `if (!$level instanceof Level) { … $level = static::toMonologLevel($level); }` | Level | Level | mixed\|Level |
+
+Verdict: parity with Intelephense on every narrowing shape probed; ahead
+of phpactor on the loop `continue` form and the reassigning non-exit
+guard.

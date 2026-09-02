@@ -688,6 +688,13 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     // guarded-block region, block scope).
     let mut pending_narrow: Vec<(String, crate::model::file_analysis::InferredType, Span, ScopeId)> =
         Vec::new();
+    // Region-shaped narrowings, resolved after the loop (the guard's own
+    // captures may follow the region node in event order): `@narrow.after`
+    // holds from the node's END to the enclosing scope's end, `@narrow.within`
+    // over the node itself — each in the scope open at the node.
+    let mut narrow_after: Vec<(usize, Point, ScopeId)> = Vec::new();
+    let mut narrow_within: Vec<(usize, Span, ScopeId)> = Vec::new();
+    let mut narrow_assert: HashMap<usize, String> = HashMap::new();
     // `std::move(x)` halves, joined per match: the qualifier (`std`) + name
     // (`move`) verify the call IS std::move (no query predicates), the var is
     // the moved subject, the call span the region start + enclosing scope.
@@ -839,6 +846,19 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
             }
             "narrow.guard" => {
                 narrow_guard.insert(e.match_id, e.text.clone());
+            }
+            "narrow.after" => {
+                if let Some(&(_, sid)) = scope_stack.last() {
+                    narrow_after.push((e.match_id, e.end, sid));
+                }
+            }
+            "narrow.within" => {
+                if let Some(&(_, sid)) = scope_stack.last() {
+                    narrow_within.push((e.match_id, Span { start: e.start, end: e.end }, sid));
+                }
+            }
+            "narrow.assert" => {
+                narrow_assert.insert(e.match_id, e.text.clone());
             }
             "move.scope" => {
                 move_scope_txt.insert(e.match_id, e.text.clone());
@@ -2287,6 +2307,22 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     // point-containment ends the narrowing at the rebind — the soundness Perl
     // got from its cutoff, now generic. Every LangPack that narrows (python
     // isinstance, cpp dynamic_cast + optional engagement) gets it free.
+    // The region shapes join here, once every guard capture is in. An
+    // assertion form is honoured only for the pack's declared callees.
+    let regions = narrow_after
+        .into_iter()
+        .map(|(mid, at, sid)| (mid, Span { start: at, end: out.scopes[sid.0 as usize].span.end }, sid))
+        .chain(narrow_within);
+    for (mid, region, sid) in regions {
+        if narrow_assert.get(&mid).is_some_and(|c| !pack.narrow_assertions.contains(&c.as_str())) {
+            continue;
+        }
+        let (Some(var), Some(ty)) = (narrow_var.get(&mid), narrow_type.get(&mid)) else { continue };
+        let guard = narrow_guard.get(&mid).map(String::as_str);
+        if let Some(refined) = (pack.narrow_guard)(guard, ty) {
+            pending_narrow.push(((pack.shape_name)("ref.var", var), refined, region, sid));
+        }
+    }
     for (name, refined, region, scope) in pending_narrow {
         let end = crate::model::file_analysis::earliest_rebind_in(&out.flow_edges, &name, region)
             .unwrap_or(region.end);
