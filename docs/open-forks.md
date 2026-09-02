@@ -20,6 +20,7 @@ designs live in `docs/prompt-storage-residuals.md`.
 | [Cross-file gated-emission visibility](#cross-file-gated-emission-visibility--2026-07-17--open-claude) | 07-17 | how do cross-file readers see a DBIC result class's deferred accessors — index-time materialize (picked) vs a per-query enriched overlay? |
 | [DBIC source-moniker disambiguation without a typed `$schema`](#dbic-source-moniker-disambiguation-without-a-typed-schema--2026-07-17--open-claude) | 07-17 | is the largest-source-family heuristic acceptable as the interim, or should moniker resolution wait for schema-value provenance? |
 | [GraphView node identity is leaf-keyed](#graphview-node-identity-is-leaf-keyed--2026-09-01--open-claude) | 09-01 | should `Node::Class` carry the namespace so a same-leaf aliased parent stops needing a per-consumer bypass (two exist)? |
+| [Anonymous classes need an identity](#anonymous-classes-need-an-identity--2026-09-02--open-claude) | 09-02 | php `new class(...)` members register under the enclosing container — an outer member's rename corrupts the anonymous one; position-keyed synthetic identity (A) or scope-local members (B)? |
 | [Union types in the lattice](#union-types-in-the-lattice--2026-09-02--open-claude) | 09-02 | `list<A|B>` / `A|B` returns: add a `Union` variant, pick an arm, or stay dark? |
 | [Dead-code queue vs library public API](#dead-code-queue-vs-library-public-api--2026-09-02--open-claude) | 09-02 | should `--heatmap` learn a library mode that never flags public members whose callers live out of tree? |
 | [Use-map pin with no indexed declaration answers empty](#use-map-pin-with-no-indexed-declaration-answers-empty--2026-09-02--open-claude) | 09-02 | when a php file `use`s a class no indexed file declares (vendor not indexed), should gd/hover answer nothing, or fall back to a same-leaf candidate from another namespace? |
@@ -291,6 +292,47 @@ Format per entry:
   exactly as `use A\Bar as Baz;` does — and its `new Baz()` sites are
   dark for exactly the same reason. Same fork, fourth spelling; nothing
   new to decide.
+
+---
+
+## Anonymous classes need an identity — 2026-09-02 — OPEN (Claude)
+
+- **Where:** php `new class(...) extends Base { ... }` (guzzle/monolog
+  tests, Laravel service providers, PSR fixtures). The skeleton has no
+  `@def.class` for `anonymous_class` (no name node to capture), so its
+  members register under whatever container encloses the expression.
+- **Symptoms:** (1) references/rename on an outer class's member of the
+  same name reach into the anonymous class — a rename CORRUPTS it;
+  (2) `$this->m()` inside the anonymous body resolves against the outer
+  container; (3) its `__construct` has no construction site and flags
+  dead; (4) `extends Base` inside it records no parent edge, so the
+  override is invisible to `implementations`.
+- **Options:**
+  - A. Position-keyed synthesized name (`class@anonymous:<line>:<col>`,
+    close to PHP's own runtime spelling) minted by the extractor for a
+    name-less `@def.class`, with the `@context.package` join accepting
+    the defaulted name (today a context is the TEXT of a captured name
+    node — the join needs "the def this match minted" as a second
+    source). Members key by the synthetic name; `$this` inside resolves
+    to it; the `new class(...)` site mints the ctor call on it.
+    Hover/outline show the synthetic name (PHP users already read it in
+    stack traces).
+  - B. Treat the anonymous body as a lexical scope only (no class
+    symbol): members become scope-local, never package-keyed, so they
+    neither collide with the outer class nor answer `$this`. Fixes the
+    corruption, keeps the dead-queue miss and the dark `$this`.
+  - C. Hoist to the base: key members under `Base` (the `extends`
+    target) as overrides. Wrong the moment two anonymous subclasses of
+    one base disagree; rejected.
+- **Picked:** none yet; nothing shipped. A is the real fix; B is the
+  one-afternoon stopgap that removes the corruption.
+- **Undo cost:** A touches the extractor's def/context join generically
+  (cpp's `(union)` / php's `(anon)` closure defaults ride the same
+  `default_name` seam — a position suffix there changes visible names,
+  so the suffix must be opt-in per kind, on the pack). Cache bump.
+- **Discussion needed:** is the synthetic-name spelling user-facing
+  (outline, hover, workspace-symbol) acceptable, and should the
+  identity be file-local only (never a cross-file candidate)?
 
 ---
 

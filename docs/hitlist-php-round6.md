@@ -141,9 +141,18 @@ polymorphism (`FormatterInterface`, `ProcessorInterface::__invoke`).
   implements no `Countable` is shielded too. Over-approximates on the
   sound side like every guard; gating on the declared interface
   (`declares_interface`) is the tightening if the queue ever wants it.
-- R7-4 (MINOR): an anonymous class's own `__construct` has no class name
-  for `class-referenced` and its `new class(...)` is not counted as a
-  call (5 guzzle test fixtures).
+- R7-4 (MINOR → MAJOR, open): an anonymous class has NO identity — its
+  members register under the enclosing container (the namespace, or the
+  class whose method spells `new class(...)`). The dead-queue symptom
+  (its `__construct` has no construction site; 5 guzzle test fixtures)
+  is the small half: references on an outer class's `$n` / `n()` also
+  list the anonymous class's own `$n` / `n()`, so a rename of the outer
+  member rewrites the anonymous one (`$S/r7/anon2` probe, r67 binary).
+  Design shape in `docs/open-forks.md` ("Anonymous classes need an
+  identity"): a position-keyed synthesized class name, and the
+  `@context.package` join accepting a defaulted def name — the extractor
+  today keys a context by a captured NAME node, which an anonymous class
+  does not have.
 - R7-5 (MINOR → LANDED): group-use imports (`use A\{Foo, Bar as Baz};`)
   minted no import row and no leaf reference — only the parent-resolving
   use-map saw them, so the class's references missed the row and the
