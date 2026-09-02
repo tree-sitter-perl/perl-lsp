@@ -47,6 +47,9 @@ pub struct SkelSymbol {
     /// (a header), so `reanchor_truncated_containers` must not re-attribute it to
     /// the enclosing namespace. Not serialized — a driver-internal marker.
     pub qualifier_owned: bool,
+    /// Documentation text joined from the comment directly above the def
+    /// (`DocFact::Description`); flows to `Presentation.doc`.
+    pub doc: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -136,6 +139,13 @@ pub struct SkeletonAnalysis {
     /// named is the method receiver, not a class member — its (wrongly
     /// sticky-tagged) class package is cleared in `into_file_analysis`.
     pub receiver_names: Vec<String>,
+    pub implicit_variables: Vec<String>,
+    pub catch_all_methods: Vec<String>,
+    pub class_literal_member: String,
+    pub types_are_capitalized: bool,
+    pub enum_members: Vec<String>,
+    /// Member tokens on the left of an assignment (dynamic property sites).
+    pub member_writes: Vec<Span>,
     /// The pack's `function_scoped_vars` fact (php) — drives the var
     /// unification pass in `into_file_analysis`.
     pub function_scoped_vars: bool,
@@ -627,6 +637,7 @@ impl SkeletonAnalysis {
                     // the symbol for hover; the listing verdict is stamped
                     // here so warm stub rebuilds mint it identically.
                     hide_in_outline: s.attributes.iter().any(|a| a == "include_guard"),
+                    doc: s.doc.clone(),
                     display: None,
                     label: None,
                 },
@@ -1053,6 +1064,11 @@ impl SkeletonAnalysis {
         // A `@ref.type` on a def's OWN name token (class/enum/typedef
         // declaring itself) is the declaration, not a use — suppress by
         // exact selection-span match so the Symbol stays the only claimant.
+        let member_write_spans: std::collections::HashSet<(usize, usize, usize, usize)> = self
+            .member_writes
+            .iter()
+            .map(|sp| (sp.start.row, sp.start.column, sp.end.row, sp.end.column))
+            .collect();
         let decl_name_spans: std::collections::HashSet<(usize, usize, usize, usize)> = symbols
             .iter()
             .map(|s| {
@@ -1138,7 +1154,11 @@ impl SkeletonAnalysis {
                     span,
                     scope: r.scope,
                     target_name: r.name.clone(),
-                    access: crate::model::file_analysis::AccessKind::Read,
+                    access: if member_write_spans.contains(&(span.start.row, span.start.column, span.end.row, span.end.column)) {
+                        crate::model::file_analysis::AccessKind::Write
+                    } else {
+                        crate::model::file_analysis::AccessKind::Read
+                    },
                     binding,
                     folded_from: None,
                     arg_count: r.arg_count,
@@ -1321,6 +1341,11 @@ impl SkeletonAnalysis {
             // outline filters can exclude them generically (lang semantics in
             // the pack, generic logic in core).
             receiver_names: std::mem::take(&mut self.receiver_names),
+            implicit_variables: std::mem::take(&mut self.implicit_variables),
+            catch_all_methods: std::mem::take(&mut self.catch_all_methods),
+            class_literal_member: std::mem::take(&mut self.class_literal_member),
+            types_are_capitalized: self.types_are_capitalized,
+            enum_members: std::mem::take(&mut self.enum_members),
             type_display: std::mem::take(&mut self.type_display),
             constructor_names: std::mem::take(&mut self.constructor_names),
             // Specialization family edges (spec → primary). NOT an inheritance

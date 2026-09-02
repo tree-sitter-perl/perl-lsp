@@ -1062,15 +1062,20 @@ impl FileAnalysis {
         };
         for (_, raw) in &self.pack.include_directives {
             let t = raw.trim_start_matches('\\');
-            if let Some((ns, leaf)) = t.rsplit_once('\\') {
-                // An aliased row pins the alias spelling (below), never the
-                // real leaf: `use Script\Event as ScriptEvent` in a file
-                // whose bare `Event` is its own namespace's class.
-                if self.import_is_aliased(ns, leaf) {
-                    continue;
-                }
-                pin(&mut pins, leaf, ns);
+            // A bare row (`use Exception;`) names the GLOBAL namespace: the
+            // empty pin keeps a same-leaf class of the file's own namespace
+            // from claiming the name.
+            let (ns, leaf) = t.rsplit_once('\\').unwrap_or(("", t));
+            if leaf.is_empty() {
+                continue;
             }
+            // An aliased row pins the alias spelling (below), never the
+            // real leaf: `use Script\Event as ScriptEvent` in a file
+            // whose bare `Event` is its own namespace's class.
+            if self.import_is_aliased(ns, leaf) {
+                continue;
+            }
+            pin(&mut pins, leaf, ns);
         }
         let mut visible: std::collections::HashMap<String, Vec<String>> =
             std::collections::HashMap::new();
@@ -1105,15 +1110,45 @@ impl FileAnalysis {
         for (leaf, prefix) in &self.pack.qualified_spellings {
             let ns = match prefix.strip_prefix('\\') {
                 Some(abs) => abs.to_string(),
-                None => match &own_ns {
-                    Some(o) => format!("{o}\\{prefix}"),
-                    None => prefix.clone(),
-                },
+                None => {
+                    // `P\Promise` under `use GuzzleHttp\Promise as P;` and
+                    // `Psr7\Utils` under `use GuzzleHttp\Psr7;`: the head
+                    // segment is an alias or an imported namespace, and the
+                    // rest hangs off what it names.
+                    let (head, rest) = prefix
+                        .split_once('\\')
+                        .map(|(h, r)| (h, Some(r)))
+                        .unwrap_or((prefix.as_str(), None));
+                    let base = self
+                        .pack
+                        .use_aliases
+                        .iter()
+                        .find(|(alias, _, _)| alias == head)
+                        .map(|(_, ns, l)| format!("{ns}\\{l}"))
+                        .or_else(|| {
+                            self.pack.include_directives.iter().find_map(|(_, raw)| {
+                                let t = raw.trim_start_matches('\\');
+                                (t.rsplit('\\').next() == Some(head)).then(|| t.to_string())
+                            })
+                        });
+                    match (base, &own_ns) {
+                        (Some(b), _) => match rest {
+                            Some(r) => format!("{b}\\{r}"),
+                            None => b,
+                        },
+                        (None, Some(o)) => format!("{o}\\{prefix}"),
+                        (None, None) => prefix.clone(),
+                    }
+                }
             };
             pin(&mut pins, leaf, &ns);
         }
         let mut spelled: std::collections::HashSet<String> = std::collections::HashSet::new();
         for r in self.refs() {
+            // an import row's own leaf is not the file spelling the name
+            if self.pack.import_row_covering(&r.span).is_some() {
+                continue;
+            }
             match &r.kind {
                 RefKind::PackageRef | RefKind::FunctionCall => {
                     spelled.insert(r.unqualified_target_name().to_string());

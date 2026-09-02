@@ -130,7 +130,14 @@ impl PackHealCtx {
         let diags = self
             .files
             .get_open(uri)
-            .map(|doc| symbols::pack_diagnostics(&doc.analysis, self.options));
+            .map(|doc| {
+                symbols::pack_diagnostics(
+                    &doc.analysis,
+                    Some(self.module_index.lookup_for(doc.language).as_lookup()),
+                    false,
+                    self.options,
+                )
+            });
         if let Some(diags) = diags {
             self.client
                 .publish_diagnostics(uri.clone(), diags, None)
@@ -271,9 +278,14 @@ impl Backend {
             if let Some(mut doc) = files.get_open_mut(&uri) {
                 doc.apply_rebuilt(analysis);
             }
-            let diags = files
-                .get_open(&uri)
-                .map(|doc| symbols::pack_diagnostics(&doc.analysis, options));
+            let diags = files.get_open(&uri).map(|doc| {
+                symbols::pack_diagnostics(
+                    &doc.analysis,
+                    Some(module_index.lookup_for(doc.language).as_lookup()),
+                    false,
+                    options,
+                )
+            });
             if let Some(diags) = diags {
                 client.publish_diagnostics(uri.clone(), diags, None).await;
             }
@@ -513,7 +525,14 @@ impl DiagCtx {
             Some(_) => self
                 .files
                 .get_open(uri)
-                .map(|doc| symbols::pack_diagnostics(&doc.analysis, self.options))
+                .map(|doc| {
+                    symbols::pack_diagnostics(
+                        &doc.analysis,
+                        Some(self.module_index.lookup_for(doc.language).as_lookup()),
+                        false,
+                        self.options,
+                    )
+                })
                 .unwrap_or_default(),
             None => vec![],
         };
@@ -630,7 +649,15 @@ pub(super) fn refresh_open_diagnostics(
             }
         } else {
             match files.get_open(&uri) {
-                Some(doc) => symbols::pack_diagnostics(&doc.analysis, options),
+                Some(doc) => symbols::pack_diagnostics(
+                    &doc.analysis,
+                    Some(module_index.lookup_for(language).as_lookup()),
+                    // the undefined-type lane needs the workspace's pack
+                    // index settled; the post-resolution refresh is the
+                    // publish that runs with it
+                    false,
+                    options,
+                ),
                 None => continue,
             }
         };

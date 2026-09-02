@@ -45,6 +45,11 @@ pub struct DriverCaps {
     pub hover_info: bool,
     /// The signatureHelp verb is served (the cursor-context handler).
     pub signature_help: bool,
+    /// Pack-family signature help: the call site from the document's own
+    /// tree (`cursor_sentinel::call_at` on the pack's `call_shapes`), the
+    /// signature from the defining file's text. Disjoint from the hub's
+    /// `signature_help` (Perl's cursor-context path).
+    pub pack_signature_help: bool,
     /// The selectionRange verb is served (the tree-shape handler).
     pub selection_range: bool,
     /// A didChange rebuild is cheap enough to run synchronously on the
@@ -429,6 +434,8 @@ impl LanguageDriver for PackDriver {
             cross_file_words: true,
             entrypoint_symbols: pack.entrypoint_symbols,
             runtime_invoked_methods: pack.runtime_invoked_methods,
+            // declared by the pack's call shapes — no shapes, no verb
+            pack_signature_help: !pack.call_shapes.is_empty(),
             include_path_tokens: pack.include_path_tokens,
             preprocessor_macros: pack.preprocessor_macros,
             ..Default::default()
@@ -948,6 +955,7 @@ fn inject_member_blocks(
                 attributes: Vec::new(),
                 arity: None,
                 qualifier_owned: false,
+                doc: None,
             });
             // The role member emits the SAME `TypeName` edge an expanded field
             // does — the edge is canonical (the hover leaf + the type chase
@@ -1298,6 +1306,12 @@ fn remap_spans(
         var_reads,
         label_refs,
         receiver_names: _,
+        implicit_variables: _,
+        catch_all_methods: _,
+        class_literal_member: _,
+        types_are_capitalized: _,
+        enum_members: _,
+        member_writes,
         // language-wide facts, no spans to remap.
         function_scoped_vars: _,
         constructor_names: _,
@@ -1337,6 +1351,7 @@ fn remap_spans(
             attributes: _,
             arity: _,
             qualifier_owned: _,
+            doc: _,
         } = s;
         *start = r(*start);
         *end = r(*end);
@@ -1374,6 +1389,11 @@ fn remap_spans(
         }
     }
     for (_, _, span) in var_reads.iter_mut() {
+        *span = rspan(*span);
+    }
+    // Member-write spans are matched against ref spans in
+    // `into_file_analysis` — original coords, like everything it joins.
+    for span in member_writes.iter_mut() {
         *span = rspan(*span);
     }
     // Call-site spans feed the call-value edge (`into_file_analysis`, after

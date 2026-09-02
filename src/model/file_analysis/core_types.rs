@@ -213,6 +213,11 @@ pub struct Presentation {
     /// structure.
     #[serde(default)]
     pub hide_in_outline: bool,
+    /// The declaration's documentation text (a php docblock's summary
+    /// paragraph, rendered under the hover signature). Types parsed from
+    /// the same comment ride the witness bag, never this string.
+    #[serde(default)]
+    pub doc: Option<String>,
     /// Plugin's final word on the LSP kind this symbol renders as
     /// (helper/route/task/event/…). Framework-synthesized entities
     /// resolve/complete/goto-def like regular symbols; `None` leaves

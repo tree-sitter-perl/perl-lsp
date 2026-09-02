@@ -926,6 +926,7 @@ fn sksym(src: &str, kind: &str, name: &str, occ: usize, package: Option<&str>) -
         attributes: Vec::new(),
         arity: None,
         qualifier_owned: false,
+        doc: None,
     }
 }
 
@@ -1668,13 +1669,15 @@ void f() {
 }
 ";
     let fa = cpp_skel(src).into_file_analysis();
-    let off = crate::lsp::symbols::pack_diagnostics(&fa, crate::lsp::symbols::DiagnosticOptions::default());
+    let off = crate::lsp::symbols::pack_diagnostics(&fa, None, false, crate::lsp::symbols::DiagnosticOptions::default());
     assert!(
         !off.iter().any(|d| matches!(&d.code, Some(tower_lsp::lsp_types::NumberOrString::String(s)) if s == "use-after-move")),
         "off by default: {off:?}",
     );
     let on = crate::lsp::symbols::pack_diagnostics(
         &fa,
+        None,
+        false,
         crate::lsp::symbols::DiagnosticOptions { use_after_move: true, ..Default::default() },
     );
     assert!(

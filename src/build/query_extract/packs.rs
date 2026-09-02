@@ -176,6 +176,35 @@ pub struct LangPack {
     /// indentation-scoped (Python) or non-nesting packs.
     /// `docs/adr/config-superposition-declarations.md`.
     pub brace_scoped_members: bool,
+    /// The call expressions signature help can anchor on: node kind, the
+    /// field naming the callee token, the field holding the argument list.
+    /// Empty = the language declares no signature help.
+    pub call_shapes: &'static [CallShape],
+    /// Variables the runtime binds without a declaration (php's `$this`
+    /// and superglobals): never "undefined".
+    pub implicit_variables: &'static [&'static str],
+    /// Methods whose presence makes a class answer ANY member name
+    /// (php `__call`/`__callStatic`, `__get`) — the undefined-member lanes
+    /// stay silent on such a class, as Perl's do on `AUTOLOAD`.
+    pub catch_all_methods: &'static [&'static str],
+    /// The node kind of a first-class-callable placeholder in an argument
+    /// list (php `f(...)` → `variadic_placeholder`): such a call passes no
+    /// arguments, so it mints no count. Empty = none.
+    pub callable_placeholder_kind: &'static str,
+    /// A member name that is the CLASS-NAME LITERAL, never a member
+    /// (php `Foo::class`). Empty = none.
+    pub class_literal_member: &'static str,
+    /// Type names start with a capital by convention, so an import row
+    /// whose leaf starts lowercase names a function or constant, not a
+    /// type (php's `use function A\b;` — the grammar parses it as a class
+    /// row).
+    pub types_are_capitalized: bool,
+    /// Members every enum carries by language rule (php: `->value`,
+    /// `->name`, `::cases()`, `::from()`, `::tryFrom()`).
+    pub enum_members: &'static [&'static str],
+    /// The node kind of ONE argument inside a call's argument list (php
+    /// `argument`); empty = every named child of the list is an argument.
+    pub arg_kind: &'static str,
     /// Completion trigger characters for the LSP
     /// `completionProvider.triggerCharacters` slot — the client auto-fires
     /// completion (and reports the char in `CompletionContext`) when one is
@@ -365,6 +394,18 @@ pub(crate) const C_FIELD_DECL_PEEL: PeelSpec = PeelSpec {
     record_stack: true,
 };
 
+/// A call-expression shape signature help climbs to from the cursor
+/// (`cursor_sentinel::call_at`).
+#[derive(Debug, Clone, Copy)]
+pub struct CallShape {
+    pub kind: &'static str,
+    /// Field naming the callee token (a member call's `name`, a function
+    /// call's `function`); the LAST `name`-like descendant is the token.
+    pub callee_field: &'static str,
+    /// Field holding the argument list node.
+    pub args_field: &'static str,
+}
+
 /// One type fact parsed from a documentation comment (`LangPack::doc_types`).
 /// The type is a raw spelling the pack has already normalized to what its
 /// `annot_type` accepts (generics stripped, `X|null` collapsed to `X`).
@@ -403,6 +444,9 @@ pub enum DocFact {
     /// carries `Builder<Book>` and a later `->first()` (`@return
     /// TModel`) projects `Book` back out.
     ReturnRecvInstance { base: String },
+    /// The comment's summary paragraph — every line before the first
+    /// `@tag`, joined; the text hover shows under the signature.
+    Description(String),
 }
 
 /// One effect of a command-dispatched statement.
@@ -466,6 +510,14 @@ pub fn perl_pack() -> LangPack {
         entrypoint_symbols: &[],
         runtime_invoked_methods: &[],
         brace_scoped_members: false,
+        call_shapes: &[],
+        arg_kind: "",
+        implicit_variables: &[],
+        catch_all_methods: &[],
+        callable_placeholder_kind: "",
+        class_literal_member: "",
+        types_are_capitalized: false,
+        enum_members: &[],
         trigger_chars: &["$", "@", "%", ">", ":", "{"],
         receiver_names: &[],
         nested_peel: PeelSpec { wrappers: &[], annot_kinds: &[], leaf_to_def: &[], record_stack: true },
@@ -527,6 +579,14 @@ pub fn python_pack() -> LangPack {
         entrypoint_symbols: &[],
         runtime_invoked_methods: &[],
         brace_scoped_members: false,
+        call_shapes: &[],
+        arg_kind: "",
+        implicit_variables: &[],
+        catch_all_methods: &[],
+        callable_placeholder_kind: "",
+        class_literal_member: "",
+        types_are_capitalized: false,
+        enum_members: &[],
         trigger_chars: &["."],
         receiver_names: &["self", "cls"],
         nested_peel: PeelSpec { wrappers: &[], annot_kinds: &[], leaf_to_def: &[], record_stack: true },
@@ -588,6 +648,14 @@ pub fn r_pack() -> LangPack {
         entrypoint_symbols: &[],
         runtime_invoked_methods: &[],
         brace_scoped_members: false,
+        call_shapes: &[],
+        arg_kind: "",
+        implicit_variables: &[],
+        catch_all_methods: &[],
+        callable_placeholder_kind: "",
+        class_literal_member: "",
+        types_are_capitalized: false,
+        enum_members: &[],
         trigger_chars: &["$", "@", ":"],
         receiver_names: &[],
         nested_peel: PeelSpec { wrappers: &[], annot_kinds: &[], leaf_to_def: &[], record_stack: true },
@@ -657,6 +725,14 @@ pub fn cmake_pack() -> LangPack {
         entrypoint_symbols: &[],
         runtime_invoked_methods: &[],
         brace_scoped_members: false,
+        call_shapes: &[],
+        arg_kind: "",
+        implicit_variables: &[],
+        catch_all_methods: &[],
+        callable_placeholder_kind: "",
+        class_literal_member: "",
+        types_are_capitalized: false,
+        enum_members: &[],
         trigger_chars: &["{", "("],
         receiver_names: &[],
         nested_peel: PeelSpec { wrappers: &[], annot_kinds: &[], leaf_to_def: &[], record_stack: true },
@@ -909,6 +985,23 @@ pub fn php_pack() -> LangPack {
         // class/trait/interface bodies are brace-delimited, so a member
         // orphaned by a misparse can re-anchor positionally.
         brace_scoped_members: true,
+        call_shapes: &[
+            CallShape { kind: "member_call_expression", callee_field: "name", args_field: "arguments" },
+            CallShape { kind: "nullsafe_member_call_expression", callee_field: "name", args_field: "arguments" },
+            CallShape { kind: "scoped_call_expression", callee_field: "name", args_field: "arguments" },
+            CallShape { kind: "function_call_expression", callee_field: "function", args_field: "arguments" },
+            CallShape { kind: "object_creation_expression", callee_field: "", args_field: "arguments" },
+        ],
+        arg_kind: "argument",
+        implicit_variables: &[
+            "$this", "$GLOBALS", "$_SERVER", "$_GET", "$_POST", "$_FILES", "$_COOKIE",
+            "$_SESSION", "$_REQUEST", "$_ENV", "$argv", "$argc", "$http_response_header",
+        ],
+        catch_all_methods: &["__call", "__callStatic", "__get"],
+        callable_placeholder_kind: "variadic_placeholder",
+        class_literal_member: "class",
+        types_are_capitalized: true,
+        enum_members: &["value", "name", "cases", "from", "tryFrom"],
         trigger_chars: &["$", ">", ":"],
         receiver_names: &["$this"],
         nested_peel: PeelSpec { wrappers: &[], annot_kinds: &[], leaf_to_def: &[], record_stack: true },
@@ -1050,6 +1143,14 @@ pub fn cpp_pack() -> LangPack {
         entrypoint_symbols: &["main"],
         runtime_invoked_methods: &[],
         brace_scoped_members: true,
+        call_shapes: &[],
+        arg_kind: "",
+        implicit_variables: &[],
+        catch_all_methods: &[],
+        callable_placeholder_kind: "",
+        class_literal_member: "",
+        types_are_capitalized: false,
+        enum_members: &[],
         trigger_chars: &[".", ">", ":"],
         receiver_names: &["this"],
         // `field_identifier` only ever names a struct/class member (the
@@ -1146,6 +1247,45 @@ fn php_doc_types(text: &str) -> Vec<DocFact> {
         return Vec::new();
     }
     let mut out = Vec::new();
+    // Summary paragraph: the prose before the first tag line, one line per
+    // source line (a blank line keeps a paragraph break as a blank line).
+    let mut desc: Vec<String> = Vec::new();
+    for line in text.lines() {
+        let l = line.trim().trim_start_matches('/').trim_start_matches('*').trim_end_matches('/').trim_end_matches('*').trim();
+        if l.starts_with('@') {
+            break;
+        }
+        desc.push(l.to_string());
+    }
+    while desc.last().is_some_and(|l| l.is_empty()) {
+        desc.pop();
+    }
+    while desc.first().is_some_and(|l| l.is_empty()) {
+        desc.remove(0);
+    }
+    if desc.is_empty() {
+        // `/** @var array Default request options */`: a property's only
+        // prose is the tag's trailer — after the type and an optional
+        // `$name`.
+        for line in text.lines() {
+            let l = line.trim().trim_start_matches('/').trim_start_matches('*').trim_end_matches('/').trim_end_matches('*').trim();
+            if let Some(rest) = l.strip_prefix("@var ") {
+                let mut words = rest.split_whitespace();
+                let _ty = words.next();
+                let mut rest: Vec<&str> = words.collect();
+                if rest.first().is_some_and(|w| w.starts_with('$')) {
+                    rest.remove(0);
+                }
+                if !rest.is_empty() {
+                    desc.push(rest.join(" "));
+                }
+                break;
+            }
+        }
+    }
+    if !desc.is_empty() {
+        out.push(DocFact::Description(desc.join("\n")));
+    }
     for (lineno, line) in text.lines().enumerate() {
         // Normalize both spellings: a `* @param` continuation line and the
         // single-line `/** @return X */` form.

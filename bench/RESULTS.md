@@ -395,3 +395,40 @@ others render — the one visible gap in this battery. Latency: ours is
 single-digit to tens of ms warm like the others, except the first
 cross-file references walk on guzzle (1,057 ms vs Intelephense 110 ms) —
 the cold rehydration cost the R5-4 attribution names.
+
+## 2026-09-02 — the other tools' axes: signature help, docblocks, outline, diagnostics (sha pending net)
+
+Same three servers, same driver (`bench/compare/lspq.py` grew
+`signatureHelp`, `codeAction`, `implementation`, `typeDefinition`,
+`documentSymbol` and a `publishDiagnostics` capture). A two-file fixture
+(`Service` calling a `Mailer` with every mistake an editor should catch)
+plus the round-1 corpora, guzzle and monolog hand-vendored with their PSR
+dependencies (composer's dist downloads are refused by the sandbox proxy).
+
+| axis (fixture) | ours before | ours after | Intelephense free | phpactor |
+|---|---|---|---|---|
+| signature help in `$this->mailer->send($who, │)` | none | `send(string $to, string $subject, string $body = '') : bool`, active 1, docblock | 3 params, active 0/1 | 3 params |
+| hover on a method | signature + type | + docblock summary | docblock | docblock |
+| document outline of a class | 2 flat items | class with its members | 9 (params too) | 3 |
+| diagnostics on `Service.php` | 0 | 8: not enough / too many arguments, undefined method ×2, non-public access, undefined variable, undefined type ×2 | 8 real + 2 "declared but not used" | 0 (phpactor lints docblocks) |
+| type definition on `$this->mailer` | none | none (open) | none (licensed) | `Mailer` |
+| implementations of an interface method | (works) | (works) | none (licensed) | works |
+
+Diagnostics on the corpora (`--check`, every remaining row read —
+`docs/hitlist-php-round8.md`): guzzle `undefined-type` 1,331 of which
+1,091 are one missing test class and 208 the unvendored PHPUnit;
+`unresolved-method` 2; `undefined-variable` 0; `non-public-access` 0.
+monolog `undefined-type` 158 (PHPUnit attributes, optional transports),
+`unresolved-method` 9 (PHPUnit `createMock` receivers), everything else
+0. symfony/demo without vendor: 358 undefined types, the same storm
+Intelephense reports (35 on `BlogController.php` alone). On the
+battery's own opened files Intelephense's remaining rows are lanes we
+do not have yet: unused symbols, deprecations, documented-vs-declared
+type checks, argument type checks.
+
+Where the answers differ, ours read as the more honest one twice:
+Intelephense counts a same-named `count()` on another class as a
+reference (round 1), and its free tier answers neither implementations
+nor type definitions. Where they lead: the unused/deprecated/type-check
+lanes, and vendor stubs for the global namespace (we carry none, so
+`\Exception` and friends are simply silent).

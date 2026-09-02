@@ -20,6 +20,8 @@ designs live in `docs/prompt-storage-residuals.md`.
 | [Cross-file gated-emission visibility](#cross-file-gated-emission-visibility--2026-07-17--open-claude) | 07-17 | how do cross-file readers see a DBIC result class's deferred accessors — index-time materialize (picked) vs a per-query enriched overlay? |
 | [DBIC source-moniker disambiguation without a typed `$schema`](#dbic-source-moniker-disambiguation-without-a-typed-schema--2026-07-17--open-claude) | 07-17 | is the largest-source-family heuristic acceptable as the interim, or should moniker resolution wait for schema-value provenance? |
 | [GraphView node identity is leaf-keyed](#graphview-node-identity-is-leaf-keyed--2026-09-01--open-claude) | 09-01 | should `Node::Class` carry the namespace so a same-leaf aliased parent stops needing a per-consumer bypass (two exist)? |
+| [PHP builtin stubs for the global namespace](#php-builtin-stubs-for-the-global-namespace--2026-09-02--open-claude) | 09-02 | bundle phpstorm-stubs, a compiled subset, or stay silent on the global namespace? |
+| [Diagnostic severity without vendor](#diagnostic-severity-without-vendor--2026-09-02--open-claude) | 09-02 | keep ERROR for undefined types whose whole dependency is missing, or demote to WARNING? |
 | [Anonymous classes need an identity](#anonymous-classes-need-an-identity--2026-09-02--open-claude) | 09-02 | php `new class(...)` members register under the enclosing container — an outer member's rename corrupts the anonymous one; position-keyed synthetic identity (A) or scope-local members (B)? |
 | [Union types in the lattice](#union-types-in-the-lattice--2026-09-02--open-claude) | 09-02 | `list<A|B>` / `A|B` returns: add a `Union` variant, pick an arm, or stay dark? |
 | [Dead-code queue vs library public API](#dead-code-queue-vs-library-public-api--2026-09-02--open-claude) | 09-02 | should `--heatmap` learn a library mode that never flags public members whose callers live out of tree? |
@@ -292,6 +294,48 @@ Format per entry:
   exactly as `use A\Bar as Baz;` does — and its `new Baz()` sites are
   dark for exactly the same reason. Same fork, fourth spelling; nothing
   new to decide.
+
+---
+
+## PHP builtin stubs for the global namespace — 2026-09-02 — OPEN (Claude)
+
+- **Where:** the diagnostics lanes and completion. We carry no
+  description of PHP's global namespace (`\Exception`, `DateTime`,
+  `strlen`, `preg_match`'s by-reference out-parameter…), so every lane
+  is SILENT on it (`\Foo`, `use Foo;`, a file without a namespace), a
+  by-reference out-parameter is presumed from the read count, and
+  completion cannot offer builtins. Intelephense ships JetBrains'
+  `phpstorm-stubs` (Apache-2.0); phpactor reads the same stubs.
+- **Options:**
+  - A. Bundle a stub tier (phpstorm-stubs, ~30 MB of PHP; or a compiled
+    subset: names, arities, by-ref parameters, return types) indexed as
+    a dependency root like `vendor/`. Every lane gains the global
+    namespace; `undefined-function` becomes possible.
+  - B. Stay silent on the global namespace; ship a small hand-written
+    table (by-ref parameters + return types of the ~200 most-called
+    functions) as pack data.
+  - C. Read the user's own stubs if present (`PERL_LSP_PHP_STUBS`), else B.
+- **Picked:** none. Today = the silence rules.
+- **Undo cost:** A is a dependency-root registration + a fingerprint;
+  the licence question (Apache-2.0 notice) is real but standard.
+- **Discussion needed:** is a 30 MB stub tree acceptable in the
+  distribution, or is the compiled subset the shape you want?
+
+---
+
+## Diagnostic severity without vendor — 2026-09-02 — OPEN (Claude)
+
+- **Where:** `undefined-type` on a project whose `vendor/` is absent or
+  partial (symfony/demo: 358 errors, every one a Symfony/Doctrine class).
+  Intelephense reports the same storm as errors; PHPStan refuses to run.
+- **Options:** A. keep ERROR (PHP fatals at runtime on those lines);
+  B. WARNING when the name's namespace root has NO class anywhere in the
+  index (the whole dependency is missing, not one class); C. a
+  workspace-level notice ("composer install is missing") and INFORMATION
+  per site.
+- **Picked:** A (parity). Undo cost: one severity table.
+- **Discussion needed:** B is honest and cheap — a missing dependency is
+  a different fact from a typo — but hides a typo in a stray namespace.
 
 ---
 

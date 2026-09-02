@@ -67,6 +67,11 @@ impl FileAnalysis {
                     // File-internal pack lanes: read LIVE from the
                     // provider's re-registered analysis per query.
                     receiver_names: _receiver_names, // LangPack-wide convention, identical across the pack's files
+                    implicit_variables: _implicit_variables, // pack-wide convention
+                    catch_all_methods: _catch_all_methods, // pack-wide convention
+                    class_literal_member: _class_literal_member, // pack-wide convention
+                    types_are_capitalized: _types_are_capitalized, // pack-wide convention
+                    enum_members: _enum_members, // pack-wide convention
                     type_display: _type_display,     // LangPack-wide display vocabulary, same reasoning
                     constructor_names: _constructor_names, // LangPack-wide convention, identical across the pack's files
                     specializes: _specializes,       // family edges; the file re-registers on its own rebuild even when Unchanged

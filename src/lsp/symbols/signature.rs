@@ -744,3 +744,217 @@ pub fn signature_help(
 
     None
 }
+
+
+/// Signature help for a pack-language document: the cursor's call site
+/// (`cursor_sentinel::call_at`), the callee resolved through the same
+/// member ladder goto-def uses, and the signature rendered from the
+/// DEFINING file's own text — the parameter list between the declaration's
+/// parentheses, the return annotation after them, the docblock summary
+/// under it. One rule for local and cross-file callees.
+pub fn pack_signature_help(
+    analysis: &FileAnalysis,
+    tree: &Tree,
+    text: &str,
+    pos: Position,
+    language: &str,
+    module_index: &dyn CrossFileLookup,
+) -> Option<SignatureHelp> {
+    let reg = crate::build::language_driver::LanguageRegistry::with_enabled();
+    let driver = reg.for_id(language)?;
+    let pack = driver.lang_pack()?;
+    let point = position_to_point(pos);
+    let cursor = crate::build::cursor_sentinel::point_to_byte(text, point);
+    let site = crate::build::cursor_sentinel::call_at(tree, &pack, text, cursor)?;
+    let r = analysis.ref_at(site.callee.start)?;
+    let name = r.unqualified_target_name().to_string();
+    // (defining analysis, its source text, the callable symbol)
+    let mut found: Option<(String, Vec<String>, Option<String>, Option<String>)> = None;
+    let render = |src: &str, sym: &crate::model::file_analysis::Symbol| signature_from_source(src, sym);
+    match &r.kind {
+        RefKind::MethodCall { shape, .. } => {
+            let class = analysis.method_call_invocant_class(r, Some(module_index))?;
+            match analysis.resolve_member_in_ancestors(&class, &name, *shape, Some(module_index))? {
+                crate::model::file_analysis::MethodResolution::Local { sym_id, .. } => {
+                    found = render(text, analysis.symbol(sym_id));
+                }
+                crate::model::file_analysis::MethodResolution::CrossFile { class, def_module } => {
+                    let module = def_module.as_deref().unwrap_or(class.as_str());
+                    let cached = module_index.candidate_defining_sub_in_package(module, &class, &name)?;
+                    let whole = module_index.whole_present(&cached);
+                    let src = std::fs::read_to_string(&cached.path).ok()?;
+                    let sym = whole
+                        .symbols()
+                        .iter()
+                        .find(|s| matches!(s.kind, FaSymKind::Method | FaSymKind::Sub) && s.name == name && s.package.as_deref() == Some(class.as_str()))
+                        .or_else(|| whole.symbols().iter().find(|s| matches!(s.kind, FaSymKind::Method | FaSymKind::Sub) && s.name == name))?;
+                    found = render(&src, sym);
+                }
+            }
+        }
+        RefKind::FunctionCall => {
+            // a constructor call carries the CLASS name: render its ctor
+            let local = analysis
+                .symbols_named(&name)
+                .iter()
+                .map(|&sid| analysis.symbol(sid))
+                .find(|s| matches!(s.kind, FaSymKind::Sub | FaSymKind::Method))
+                .or_else(|| {
+                    let ctor = analysis.pack.constructor_names.first()?;
+                    analysis
+                        .symbols()
+                        .iter()
+                        .find(|s| matches!(s.kind, FaSymKind::Method) && &s.name == ctor && s.package.as_deref() == Some(name.as_str()))
+                });
+            if let Some(sym) = local {
+                found = render(text, sym);
+            } else if let Some(cached) = module_index.visible_def_candidates(&name).into_iter().next() {
+                let whole = module_index.whole_present(&cached);
+                let src = std::fs::read_to_string(&cached.path).ok()?;
+                let ctor = analysis.pack.constructor_names.first().cloned();
+                let sym = whole.symbols().iter().find(|s| {
+                    matches!(s.kind, FaSymKind::Sub | FaSymKind::Method)
+                        && (s.name == name || (ctor.as_deref() == Some(s.name.as_str()) && s.package.as_deref() == Some(name.as_str())))
+                })?;
+                found = render(&src, sym);
+            }
+        }
+        _ => {}
+    }
+    let (label, params, _ret, doc) = found?;
+    let parameters: Vec<ParameterInformation> = params
+        .iter()
+        .map(|p| ParameterInformation { label: ParameterLabel::Simple(p.clone()), documentation: None })
+        .collect();
+    let active = (site.active_param as u32).min(parameters.len().saturating_sub(1) as u32);
+    Some(SignatureHelp {
+        signatures: vec![SignatureInformation {
+            label,
+            documentation: doc.map(|d| Documentation::MarkupContent(MarkupContent { kind: MarkupKind::Markdown, value: d })),
+            parameters: Some(parameters),
+            active_parameter: Some(active),
+        }],
+        active_signature: Some(0),
+        active_parameter: Some(active),
+    })
+}
+
+/// `(label, params, return annotation, doc)` from the declaration's own
+/// text: the parenthesized parameter list after the name token, split at
+/// top-level commas; the return annotation is what follows the closing
+/// parenthesis up to the body or terminator.
+fn signature_from_source(
+    src: &str,
+    sym: &crate::model::file_analysis::Symbol,
+) -> Option<(String, Vec<String>, Option<String>, Option<String>)> {
+    let lines: Vec<&str> = src.lines().collect();
+    let row = sym.selection_span.start.row;
+    let first = lines.get(row)?;
+    let mut buf = String::new();
+    // from the name token onward, then whole lines until the list closes
+    buf.push_str(first.get(sym.selection_span.end.column..).unwrap_or(""));
+    let mut depth = 0i32;
+    let mut open_at: Option<usize> = None;
+    let mut close_at: Option<usize> = None;
+    let mut extra_row = row;
+    // Each appended line is scanned once from where the last scan
+    // stopped; quotes hide a `)` inside a default value.
+    let mut scanned = 0usize;
+    let mut quote: Option<char> = None;
+    let mut escaped = false;
+    loop {
+        for (off, ch) in buf[scanned..].char_indices() {
+            let i = scanned + off;
+            if let Some(q) = quote {
+                if escaped {
+                    escaped = false;
+                } else if ch == '\\' {
+                    escaped = true;
+                } else if ch == q {
+                    quote = None;
+                }
+                continue;
+            }
+            match ch {
+                '\'' | '"' => quote = Some(ch),
+                '(' => {
+                    if open_at.is_none() {
+                        open_at = Some(i);
+                    }
+                    depth += 1;
+                }
+                ')' => {
+                    depth -= 1;
+                    if depth == 0 && open_at.is_some() {
+                        close_at = Some(i);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        if close_at.is_some() || extra_row - row > 40 {
+            break;
+        }
+        scanned = buf.len();
+        extra_row += 1;
+        let Some(next) = lines.get(extra_row) else { break };
+        buf.push('\n');
+        buf.push_str(next);
+    }
+    let (o, c) = (open_at?, close_at?);
+    let inner = &buf[o + 1..c];
+    let params: Vec<String> = split_top_level(inner)
+        .into_iter()
+        .map(|p| p.split_whitespace().collect::<Vec<_>>().join(" "))
+        .filter(|p| !p.is_empty())
+        .collect();
+    let tail = buf[c + 1..].trim();
+    let ret = tail
+        .split(|ch| ch == '{' || ch == ';')
+        .next()
+        .map(|t| t.trim())
+        .filter(|t| !t.is_empty())
+        .map(|t| t.to_string());
+    let label = format!("{}({}){}", sym.name, params.join(", "), ret.as_deref().map(|r| format!(" {r}")).unwrap_or_default());
+    Some((label, params, ret, sym.presentation.doc.clone()))
+}
+
+/// Split at commas outside parentheses, brackets, braces and quotes.
+fn split_top_level(s: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    let mut depth = 0i32;
+    let mut quote: Option<char> = None;
+    for ch in s.chars() {
+        if let Some(q) = quote {
+            cur.push(ch);
+            if ch == q {
+                quote = None;
+            }
+            continue;
+        }
+        match ch {
+            '\'' | '"' => {
+                quote = Some(ch);
+                cur.push(ch);
+            }
+            '(' | '[' | '{' | '<' => {
+                depth += 1;
+                cur.push(ch);
+            }
+            ')' | ']' | '}' | '>' => {
+                depth -= 1;
+                cur.push(ch);
+            }
+            ',' if depth <= 0 => {
+                out.push(std::mem::take(&mut cur));
+            }
+            _ => cur.push(ch),
+        }
+    }
+    if !cur.trim().is_empty() {
+        out.push(cur);
+    }
+    out
+}

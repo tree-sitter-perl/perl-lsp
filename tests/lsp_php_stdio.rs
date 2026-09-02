@@ -1,0 +1,137 @@
+//! The php editor surface over stdio — the verbs no CLI mirror reaches:
+//! signature help (the pack call-site path), the nested document outline,
+//! and the diagnostics a didOpen publishes. A tiny real client: it answers
+//! the server→client requests an editor answers so the server cannot wedge.
+#![cfg(feature = "php")]
+
+use std::io::{BufRead, BufReader, Read, Write};
+use std::process::{Child, Command, Stdio};
+
+struct Client {
+    child: Child,
+    reader: BufReader<std::process::ChildStdout>,
+    next_id: i64,
+    notes: Vec<serde_json::Value>,
+}
+
+impl Client {
+    fn spawn(root: &std::path::Path) -> Client {
+        let mut child = Command::new(env!("CARGO_BIN_EXE_perl-lsp"))
+            .current_dir(root)
+            .env("XDG_CACHE_HOME", root.join(".cache"))
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn perl-lsp");
+        let reader = BufReader::new(child.stdout.take().unwrap());
+        Client { child, reader, next_id: 1, notes: Vec::new() }
+    }
+    fn send(&mut self, v: serde_json::Value) {
+        let body = v.to_string();
+        let stdin = self.child.stdin.as_mut().unwrap();
+        write!(stdin, "Content-Length: {}\r\n\r\n{}", body.len(), body).unwrap();
+        stdin.flush().unwrap();
+    }
+    fn read_message(&mut self) -> serde_json::Value {
+        let mut len = 0usize;
+        loop {
+            let mut line = String::new();
+            self.reader.read_line(&mut line).unwrap();
+            if line.trim().is_empty() {
+                break;
+            }
+            if let Some(v) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                len = v.trim().parse().unwrap();
+            }
+        }
+        let mut buf = vec![0u8; len];
+        self.reader.read_exact(&mut buf).unwrap();
+        serde_json::from_slice(&buf).unwrap()
+    }
+    fn request(&mut self, method: &str, params: serde_json::Value) -> serde_json::Value {
+        let id = self.next_id;
+        self.next_id += 1;
+        self.send(serde_json::json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params}));
+        loop {
+            let m = self.read_message();
+            if m.get("id") == Some(&serde_json::json!(id)) && m.get("method").is_none() {
+                return m["result"].clone();
+            }
+            if m.get("id").is_some() && m.get("method").is_some() {
+                // a server→client request: answer like an editor
+                self.send(serde_json::json!({"jsonrpc": "2.0", "id": m["id"], "result": serde_json::Value::Null}));
+                continue;
+            }
+            self.notes.push(m);
+        }
+    }
+    fn notify(&mut self, method: &str, params: serde_json::Value) {
+        self.send(serde_json::json!({"jsonrpc": "2.0", "method": method, "params": params}));
+    }
+}
+
+fn uri(p: &std::path::Path) -> String {
+    format!("file://{}", p.display())
+}
+
+#[test]
+fn php_signature_help_outline_and_diagnostics_over_stdio() {
+    let dir = std::env::temp_dir().join(format!("perl-lsp-d2stdio-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    let w = |rel: &str, src: &str| std::fs::write(dir.join(rel), src).unwrap();
+    w("composer.json", "{\"autoload\": {\"psr-4\": {\"App\\\\\": \"src/\"}}}");
+    w("src/Mailer.php", "<?php\nnamespace App;\n\nclass Mailer\n{\n    /**\n     * Send one message.\n     */\n    public function send(string $to, string $subject, string $body = ''): bool\n    {\n        return $to !== '' && $subject !== '';\n    }\n}\n");
+    let service = "<?php\nnamespace App;\n\nclass Service\n{\n    public function __construct(private Mailer $mailer) {}\n\n    public function run(string $who): void\n    {\n        $this->mailer->send($who, 'x');\n        $this->missingMethod();\n    }\n}\n";
+    w("src/Service.php", service);
+    let mut c = Client::spawn(&dir);
+    c.request("initialize", serde_json::json!({"processId": null, "rootUri": uri(&dir), "capabilities": {"textDocument": {"documentSymbol": {"hierarchicalDocumentSymbolSupport": true}}}}));
+    c.notify("initialized", serde_json::json!({}));
+    let svc = uri(&dir.join("src/Service.php"));
+    c.notify("textDocument/didOpen", serde_json::json!({"textDocument": {"uri": svc, "languageId": "php", "version": 1, "text": service}}));
+    // readiness: the workspace index answers a cross-file definition
+    let send_col = service.lines().nth(9).unwrap().find("send").unwrap();
+    let mut ready = false;
+    for _ in 0..120 {
+        let r = c.request("textDocument/definition", serde_json::json!({"textDocument": {"uri": svc}, "position": {"line": 9, "character": send_col}}));
+        if r.as_array().is_some_and(|a| !a.is_empty()) || r.is_object() {
+            ready = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(250));
+    }
+    assert!(ready, "definition never answered");
+    // signature help inside the second argument of `send(`
+    let arg2 = service.lines().nth(9).unwrap().find("'x'").unwrap() + 1;
+    let sig = c.request("textDocument/signatureHelp", serde_json::json!({"textDocument": {"uri": svc}, "position": {"line": 9, "character": arg2}}));
+    let label = sig["signatures"][0]["label"].as_str().unwrap_or("");
+    assert!(label.starts_with("send(string $to, string $subject, string $body = '')"), "{sig}");
+    assert_eq!(sig["activeParameter"], serde_json::json!(1), "{sig}");
+    assert_eq!(sig["signatures"][0]["parameters"].as_array().map(|a| a.len()), Some(3), "{sig}");
+    assert!(sig["signatures"][0]["documentation"].to_string().contains("Send one message"), "{sig}");
+    // the outline nests members under the class
+    let syms = c.request("textDocument/documentSymbol", serde_json::json!({"textDocument": {"uri": svc}}));
+    let class = syms.as_array().unwrap().iter().find(|s| s["name"] == "Service").expect("class");
+    let kids: Vec<&str> = class["children"].as_array().unwrap().iter().filter_map(|k| k["name"].as_str()).collect();
+    assert!(kids.contains(&"__construct") && kids.contains(&"run"), "{kids:?}");
+    // diagnostics: the didOpen publish carries the undefined method
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    let mut found = false;
+    while std::time::Instant::now() < deadline && !found {
+        // drain by issuing a cheap request; notifications queue in `notes`
+        c.request("textDocument/documentSymbol", serde_json::json!({"textDocument": {"uri": svc}}));
+        found = c.notes.iter().any(|n| {
+            n["method"] == "textDocument/publishDiagnostics"
+                && n["params"]["diagnostics"].as_array().is_some_and(|d| d.iter().any(|x| x["message"].as_str().unwrap_or("").contains("missingMethod")))
+        });
+        if !found {
+            std::thread::sleep(std::time::Duration::from_millis(250));
+        }
+    }
+    assert!(found, "no unresolved-method diagnostic published: {:?}", c.notes.iter().filter(|n| n["method"] == "textDocument/publishDiagnostics").collect::<Vec<_>>());
+    c.request("shutdown", serde_json::Value::Null);
+    c.notify("exit", serde_json::Value::Null);
+    let _ = c.child.wait();
+    let _ = std::fs::remove_dir_all(&dir);
+}

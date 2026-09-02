@@ -20,6 +20,24 @@ pub struct PackFacts {
     /// lives in `conventions.rs`, so this stays empty there.
     #[serde(default)]
     pub receiver_names: Vec<String>,
+    /// Variables the runtime binds without a declaration (php `$this`,
+    /// superglobals) — the undefined-variable lane's silence list.
+    #[serde(default)]
+    pub implicit_variables: Vec<String>,
+    /// Methods whose presence makes a class answer any member name (php
+    /// `__call`/`__get`) — the undefined-member lanes stay silent on it.
+    #[serde(default)]
+    pub catch_all_methods: Vec<String>,
+    /// The member name that is the class-name literal (php `Foo::class`).
+    #[serde(default)]
+    pub class_literal_member: String,
+    /// Type names are capitalized by convention (an import row with a
+    /// lowercase leaf names a function or constant).
+    #[serde(default)]
+    pub types_are_capitalized: bool,
+    /// Members every enum carries by language rule.
+    #[serde(default)]
+    pub enum_members: Vec<String>,
 
     /// The language's display vocabulary for the engine's value lattice:
     /// `format_inferred_type` tag → this language's spelling (php:
@@ -172,6 +190,10 @@ impl PackFacts {
         h.misc += map_str_vec(&self.template_params)
             + mcap(&self.specializes)
             + vcap(&self.receiver_names)
+            + vcap(&self.implicit_variables)
+            + vcap(&self.catch_all_methods)
+            + self.class_literal_member.capacity()
+            + vcap(&self.enum_members)
             + vcap(&self.type_display)
             + vcap(&self.constructor_names);
     }

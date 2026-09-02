@@ -105,6 +105,7 @@
 ; stub, and trait identity feeds the consumer-side reference walk.
 (interface_declaration name: (name) @classattr.interface)
 (trait_declaration name: (name) @classattr.trait)
+(enum_declaration name: (name) @classattr.enum)
 
 ; access modifiers -> the model's non_public attribute (the same gate
 ; cpp access regions stamp): a private/protected member completes only
@@ -196,9 +197,23 @@
   name: (variable_name) @def.var.name @def.var @flow.target)
 (simple_parameter
   name: (variable_name) @def.var.name @def.var)
-; closure captures: `function () use ($y)` re-declares $y in the closure.
+; closure captures: `function () use ($y)` re-declares $y in the closure;
+; `use (&$y)` binds by reference — the same declaration.
 (anonymous_function_use_clause
   (variable_name) @def.var.name @def.var)
+; by reference, php creates the variable in the ENCLOSING scope when it
+; does not exist — the declaration hoists there (`@hoist`).
+(anonymous_function_use_clause
+  (by_ref (variable_name) @def.var.name @def.var @hoist))
+; `static $map = [...]` declares a function-static local; `$rows[] = $x`
+; auto-vivifies `$rows` — both declare.
+(static_variable_declaration
+  name: (variable_name) @def.var.name @def.var)
+(assignment_expression
+  left: (subscript_expression (variable_name) @def.var.name @def.var))
+; `catch (E $e)` binds the exception variable.
+(catch_clause
+  name: (variable_name) @def.var.name @def.var)
 
 ; ---- imports ----
 (namespace_use_declaration
@@ -239,6 +254,14 @@
     (namespace_use_clause
       . (name) @use.leaf
       alias: (name)? @use.alias)))
+
+; a member on the LEFT of an assignment: php declares a property by
+; writing it (`$this->x = ...`) — the undefined-property lane treats the
+; write as its declaration.
+(assignment_expression
+  left: (member_access_expression name: (name) @member.write))
+(assignment_expression
+  left: (scoped_property_access_expression name: (variable_name (name) @member.write)))
 
 ; ---- assignment IS declaration (Perl-loose, Python-identical) ----
 (assignment_expression
@@ -435,10 +458,10 @@
 ; canonicalize via member.recv shaping.
 (scoped_property_access_expression
   scope: (relative_scope) @member.recv
-  name: (variable_name (name) @ref.member)) @hop.call
+  name: (variable_name (name) @ref.member) @var.member) @hop.call
 (scoped_property_access_expression
   scope: (name) @member.recv @ref.type
-  name: (variable_name (name) @ref.member)) @hop.call
+  name: (variable_name (name) @ref.member) @var.member) @hop.call
 
 ; `new User(...)`: the value is an instance of User by SYNTAX — the ctor
 ; edge rides the alias graph (TypeName → the defining file, or the bare

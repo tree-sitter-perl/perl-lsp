@@ -982,6 +982,83 @@ fn php_anonymous_class_is_its_own_identity() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Day-2 diagnostics axis: the php lanes `--check` reports on a project —
+/// undefined method / property (through a typed `$this->prop` chain, with
+/// non-public access told apart), argument-count mismatch both ways,
+/// undefined variable, undefined type — and the shapes every lane must
+/// stay SILENT on: `catch ($e)`, `use (&$x)`, `Foo::$static`, property
+/// declarations, `Foo::class`, `f(...)`, `\Throwable`, `use function`,
+/// enum members, a property declared by writing it, a class whose parent
+/// the workspace cannot see.
+#[cfg(feature = "php")]
+#[test]
+fn php_diagnostic_lanes_report_the_real_findings_and_nothing_else() {
+    let dir = std::env::temp_dir().join(format!("perl-lsp-d2diag-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    let w = |rel: &str, src: &str| std::fs::write(dir.join(rel), src).unwrap();
+    w("composer.json", "{\"autoload\": {\"psr-4\": {\"App\\\\\": \"src/\"}}}");
+    w("src/Mailer.php", "<?php\nnamespace App;\n\nclass Mailer\n{\n    private string $from = 'noreply@example.com';\n\n    public function send(string $to, string $subject, string $body = ''): bool\n    {\n        return $to !== '' && $subject !== '';\n    }\n}\n");
+    w("src/Service.php", "<?php\nnamespace App;\n\nclass Service\n{\n    public function __construct(private Mailer $mailer) {}\n\n    public function run(string $who): void\n    {\n        $this->mailer->send($who);\n        $this->mailer->sendLater($who, 'x');\n        $this->mailer->from;\n        $this->missingMethod();\n        $count = strlen($who) + $undefinedVar;\n        $req = new Request('GET', '/');\n        Helper::go();\n        $this->mailer->send($who, 'subject', 'body', 'extra');\n    }\n}\n");
+    w("src/Quiet.php", "<?php\nnamespace App;\nuse function Other\\helper;\nuse Exception;\nenum Level: int { case Low = 1; public function label(): string { return $this->name . $this->value; } }\nclass Quiet extends Unseen\n{\n    public static $count = 0;\n    private $dyn;\n    public function go(array $rows): int\n    {\n        try { $x = 1; } catch (\\Throwable $e) { return $e->getCode(); }\n        $seen = 0;\n        $cb = function () use (&$seen) { $seen++; };\n        $cb();\n        self::$count++;\n        Quiet::$count = 2;\n        $this->created = true;\n        $this->created;\n        $name = Quiet::class;\n        $f = strlen(...);\n        $this->inherited();\n        $lvl = Level::from(1);\n        return $seen + \\count($rows) + $lvl->value;\n    }\n}\n");
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_perl-lsp"))
+        .args(["--check", dir.to_str().unwrap()])
+        .env("XDG_CACHE_HOME", dir.join(".cache"))
+        .output()
+        .expect("run");
+    let err = String::from_utf8_lossy(&out.stderr);
+    let rows: Vec<&str> = err.lines().filter(|l| l.contains("[")).collect();
+    let has = |file: &str, code: &str, needle: &str| rows.iter().any(|l| l.contains(file) && l.contains(&format!("[{code}]")) && l.contains(needle));
+    assert!(has("Service.php", "arity-mismatch", "Expected 2. Found 1"), "{err}");
+    assert!(has("Service.php", "arity-mismatch", "Expected 3. Found 4"), "{err}");
+    assert!(has("Service.php", "unresolved-method", "sendLater"), "{err}");
+    assert!(has("Service.php", "unresolved-method", "missingMethod"), "{err}");
+    assert!(has("Service.php", "non-public-access", "'from'"), "{err}");
+    assert!(has("Service.php", "undefined-variable", "$undefinedVar"), "{err}");
+    assert!(has("Service.php", "undefined-type", "App\\Helper"), "{err}");
+    assert!(has("Service.php", "undefined-type", "App\\Request"), "{err}");
+    // and nothing beyond those eight — a duplicated row is a regression
+    let service = rows.iter().filter(|l| l.contains("Service.php")).count();
+    assert_eq!(service, 8, "{err}");
+    // the ONE real finding in Quiet.php is its unseen parent; every other
+    // shape there is a silence rule
+    let quiet: Vec<&&str> = rows.iter().filter(|l| l.contains("Quiet.php")).collect();
+    assert_eq!(quiet.len(), 1, "the silence rules: {quiet:?}");
+    assert!(quiet[0].contains("[undefined-type]") && quiet[0].contains("App\\Unseen"), "{quiet:?}");
+    let mailer: Vec<&&str> = rows.iter().filter(|l| l.contains("Mailer.php")).collect();
+    assert!(mailer.is_empty(), "{mailer:?}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Day-2: a call through a callable VARIABLE (`$r = $handler(new Foo(), [])`)
+/// has no known value — it must not take an argument's constructor type
+/// (the assignment narrowing only descends into a literal the right-hand
+/// side merely wraps in parentheses).
+#[cfg(feature = "php")]
+#[test]
+fn php_callable_variable_call_does_not_take_its_arguments_type() {
+    let dir = std::env::temp_dir().join(format!("perl-lsp-d2callvar-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("T.php"), "<?php\nnamespace T;\nclass Foo { public function go(): int { return 1; } }\nclass Bar { public function run(): int { return 2; } }\nfunction mk(): Bar { return new Bar(); }\nfunction test(callable $a): void {\n    $r = $a(new Foo(), []);\n    $s = mk(new Foo());\n    $t = (new Foo());\n}\n").unwrap();
+    let run = |line: &str, col: &str| {
+        let out = std::process::Command::new(env!("CARGO_BIN_EXE_perl-lsp"))
+            .args(["--hover", dir.to_str().unwrap(), "--at", &format!("{}:{}:{}", dir.join("T.php").display(), line, col)])
+            .env("XDG_CACHE_HOME", dir.join(".cache"))
+            .output()
+            .expect("run");
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+    let r = run("7", "6");
+    // untyped: the hover shows the source line, never a `$r: Foo` type line
+    assert!(!r.contains("$r: "), "`$r` took the argument's type: {r}");
+    let s = run("8", "6");
+    assert!(s.contains("Bar"), "a named function's declared return: {s}");
+    let t = run("9", "6");
+    assert!(t.contains("Foo"), "a parenthesized literal is the value: {t}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// Round-6 R6-3 / R6-4 / R6-5 (BookStack, composer): the build-time
 /// method-call stamp honors the written shape, so goto-def on a same-file
 /// `$this->hasAuth()` lands on the method while `$this->hasAuth` reads the

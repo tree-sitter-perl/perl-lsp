@@ -318,10 +318,15 @@ fn render_symbol_hover(
                 }
                 _ => String::new(),
             };
-            return format!(
+            let mut out = format!(
                 "```{}\n{}: {}{}\n```\n\n*{}*",
                 language, sym.name, display, overlay, hover_kind_label(sym)
             );
+            if let Some(doc) = sym.presentation.doc.as_deref() {
+                out.push_str("\n\n");
+                out.push_str(doc);
+            }
+            return out;
         }
     }
     // The signature line is the line carrying the NAME token, not the def
@@ -343,6 +348,10 @@ fn render_symbol_hover(
         for attr in &sym.attributes {
             out.push_str(&format!("\n\n*{}*", attr));
         }
+    }
+    if let Some(doc) = sym.presentation.doc.as_deref() {
+        out.push_str("\n\n");
+        out.push_str(doc);
     }
     out
 }

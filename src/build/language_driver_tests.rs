@@ -946,6 +946,7 @@ fn driver_caps_axes_are_reviewed_exhaustively() {
             cursor_context,
             hover_info,
             signature_help,
+            pack_signature_help,
             selection_range,
             synchronous_rebuild,
             context_gather,
@@ -966,6 +967,7 @@ fn driver_caps_axes_are_reviewed_exhaustively() {
             || selection_range
             || synchronous_rebuild;
         let pack_family = pack_invalidation
+            || pack_signature_help
             || context_gather
             || cross_file_words
             || include_path_tokens

@@ -209,9 +209,16 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
             // named children; the C `...` at a CALL site never appears here).
             // Keyed by the list's start so the callee ref finds it by adjacency.
             if cap == "arity.args" {
-                arg_counts_by_start
-                    .insert((node.start_position().row, node.start_position().column),
-                            node.named_child_count());
+                // `f(...)` passes nothing — a first-class callable, not a call
+                let placeholder = !pack.callable_placeholder_kind.is_empty()
+                    && (0..node.named_child_count())
+                        .filter_map(|i| node.named_child(i))
+                        .any(|c| c.kind() == pack.callable_placeholder_kind);
+                if !placeholder {
+                    arg_counts_by_start
+                        .insert((node.start_position().row, node.start_position().column),
+                                node.named_child_count());
+                }
                 continue;
             }
             // `@arity.sig`: a callable's parameter_list — count declared params
@@ -293,6 +300,18 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     // match joins it like a `.name` capture so the def, its `@context`
     // and its `@parent` edges all read ONE identity.
     let mut defaulted_matches: HashMap<usize, String> = HashMap::new();
+    // Spans a `variable_name` read pattern must NOT mint as reads: a
+    // static property's `$name` (`Foo::$bar` — a member, `@var.member`) and
+    // any declaration's own name token (a property `$chunks`, a parameter).
+    let mut not_a_read: std::collections::HashSet<(usize, usize)> = std::collections::HashSet::new();
+    let mut def_name_ends: std::collections::HashSet<usize> = std::collections::HashSet::new();
+    // `@hoist` — the same match's def belongs to the PARENT of the scope
+    // the capture sits in (php's by-reference closure capture creates
+    // the variable in the enclosing scope).
+    let mut hoisted: std::collections::HashSet<usize> = std::collections::HashSet::new();
+    // `@member.write` — a member on the LEFT of an assignment (php's
+    // dynamic property declaration site).
+    let mut member_writes: Vec<Span> = Vec::new();
     // `@qualifier` (a `Class::` on an out-of-line def) and `@rettype` (a
     // method's declared return type) — pre-collected like names because the
     // `@def` event fires before these inner captures.
@@ -339,6 +358,18 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
         if let Some(prefix) = e.cap.strip_suffix(".name") {
             names_by_match
                 .insert((e.match_id, prefix.to_string()), (e.text.clone(), e.start, e.end));
+        }
+        if e.cap == "var.member" || e.cap.ends_with(".name") {
+            not_a_read.insert((e.start_byte, e.end_byte));
+            // a declaration's name token is nested in the `$name` a read
+            // pattern also matches: same END byte, never a read
+            def_name_ends.insert(e.end_byte);
+        }
+        if e.cap == "member.write" {
+            member_writes.push(Span { start: e.start, end: e.end });
+        }
+        if e.cap == "hoist" {
+            hoisted.insert(e.match_id);
         }
         if let Some(prefix) = e.cap.strip_suffix(".anchor") {
             let kind = prefix.strip_prefix("def.").unwrap_or(prefix);
@@ -556,6 +587,12 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
         out.import_sites.push((raw, span));
     }
     out.receiver_names = pack.receiver_names.iter().map(|s| s.to_string()).collect();
+    out.implicit_variables = pack.implicit_variables.iter().map(|s| s.to_string()).collect();
+    out.catch_all_methods = pack.catch_all_methods.iter().map(|s| s.to_string()).collect();
+    out.class_literal_member = pack.class_literal_member.to_string();
+    out.enum_members = pack.enum_members.iter().map(|s| s.to_string()).collect();
+    out.member_writes = std::mem::take(&mut member_writes);
+    out.types_are_capitalized = pack.types_are_capitalized;
     out.function_scoped_vars = pack.function_scoped_vars;
     out.constructor_names = pack.constructor_names.iter().map(|s| s.to_string()).collect();
     out.type_display = pack
@@ -741,6 +778,14 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                     while context_stack.last().is_some_and(|&(d, _)| d >= scope_stack.len()) {
                         context_stack.pop();
                     }
+                    // The receiver name (`$this`) IS this class inside its
+                    // body — a witness at the body scope, so a chain based on
+                    // it (`$this->mailer->send()`) resolves through the same
+                    // registry chase as any typed variable. Class bodies
+                    // only: a namespace body carries a context too.
+                    if names_by_match.contains_key(&(e.match_id, "def.class".to_string())) {
+                        register_class_body(&mut out, pack, id, &text, e.start);
+                    }
                     context_stack.push((scope_stack.len(), text));
                 }
                 // a guard narrowing whose block is THIS scope → the refined type
@@ -841,6 +886,13 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                     {
                         context_stack.pop();
                     }
+                    // php puts the class scope on the whole declaration, so
+                    // the body scope is ALREADY open here: it carries the
+                    // class as its package and the receiver witness.
+                    if names_by_match.contains_key(&(e.match_id, "def.class".to_string())) {
+                        let id = scope_stack.last().unwrap().1;
+                        register_class_body(&mut out, pack, id, &raw, e.start);
+                    }
                     context_stack.push((scope_stack.len(), raw));
                 }
             }
@@ -910,6 +962,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                     attributes: Vec::new(),
                     arity: None,
                     qualifier_owned: false,
+                    doc: None,
                 });
             }
             cap if cap.ends_with(".anchor") => {
@@ -961,6 +1014,11 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                     .map(|q| q.rsplit("::").next().unwrap_or(q).to_string())
                     .or_else(|| package.clone());
                 let shaped = (pack.shape_name)(&format!("def.{kind}"), &name);
+                let def_scope = if hoisted.contains(&e.match_id) {
+                    out.scopes.get(cur_scope.0 as usize).and_then(|s| s.parent).unwrap_or(cur_scope)
+                } else {
+                    cur_scope
+                };
                 // A class-spec def carries its primary's name — the
                 // (spec, primary) family edge `Specializes` derives from.
                 if let Some(primary) = spec_primary_by_match.get(&e.match_id) {
@@ -1046,7 +1104,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                     name_start,
                     name_end,
                     package: pkg,
-                    scope: cur_scope,
+                    scope: def_scope,
                     return_type: rettype_by_match
                         .get(&e.match_id)
                         .and_then(|t| (pack.annot_type)(t)),
@@ -1068,6 +1126,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                     // Filled by span association in `into_file_analysis` — the
                     // `@arity.sig` match fires separately from this def name.
                     arity: None,
+                    doc: None,
                     qualifier_owned: qualifier_by_match.contains_key(&e.match_id),
                 });
             }
@@ -1338,10 +1397,13 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                     });
                     if let Some(q) = qualified_by_match.get(&e.match_id) {
                         let leaf = (pack.shape_name)(&e.cap, &e.text);
-                        let prefix = q
-                            .strip_suffix(leaf.as_str())
-                            .map(|p| p.trim_end_matches('\\').to_string())
-                            .unwrap_or_default();
+                        let raw = q.strip_suffix(leaf.as_str()).unwrap_or_default();
+                        let mut prefix = raw.trim_end_matches('\\').to_string();
+                        // `\Throwable`: no segments, but ABSOLUTE — the
+                        // leading separator is the whole spelling
+                        if prefix.is_empty() && raw.starts_with('\\') {
+                            prefix = "\\".to_string();
+                        }
                         if !prefix.is_empty() {
                             out.qualified_spellings.push((leaf, prefix));
                         }
@@ -1417,6 +1479,9 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                     });
                 }
             }
+            "expr.read.var"
+                if not_a_read.contains(&(e.start_byte, e.end_byte))
+                    || def_name_ends.contains(&e.end_byte) => {}
             "expr.read.var" => {
                 // a variable READ is an edge: Expr(span) resolves to
                 // whatever the Variable resolves to — same shape the
@@ -1845,6 +1910,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                             attributes: Vec::new(),
                             arity: None,
                             qualifier_owned: false,
+                            doc: None,
                         });
                     }
                 }
@@ -2056,11 +2122,21 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
             {
                 *src_span
             } else {
+                // Only a literal the rhs merely WRAPS (parentheses,
+                // whitespace) is the rhs's value — a literal that is an
+                // ARGUMENT of the rhs (`$r = $handler(new Request(), [])`)
+                // is not, and narrowing onto it handed the variable the
+                // argument's class.
+                let wraps = |s: usize, en: usize| {
+                    src_bytes.is_some_and(|(ss, se)| {
+                        s >= ss
+                            && en <= se
+                            && source[ss..s].iter().chain(source[en..se].iter()).all(|b| matches!(b, b'(' | b')' | b' ' | b'\t' | b'\r' | b'\n'))
+                    })
+                };
                 lit_spans
                     .iter()
-                    .filter(|&&(s, en, _)| {
-                        src_bytes.is_some_and(|(ss, se)| s >= ss && en <= se)
-                    })
+                    .filter(|&&(s, en, _)| wraps(s, en))
                     .max_by_key(|&&(s, en, _)| en - s)
                     .map(|&(_, _, sp)| sp)
                     .filter(|sp| sp != src_span)
@@ -2291,6 +2367,10 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                             out.template_params.push((sym.name.clone(), name.clone(), *line));
                             continue;
                         }
+                        if let DocFact::Description(d) = f {
+                            sym.doc = Some(d.clone());
+                            continue;
+                        }
                         if let DocFact::Method { name, ret, line, col } = f {
                             // Span = the method NAME TOKEN in the fact's own
                             // `@method` line: a distinct gd/cursor target per
@@ -2320,6 +2400,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                                 attributes: Vec::new(),
                                 arity: None,
                                 qualifier_owned: false,
+                                doc: None,
                             });
                         }
                     }
@@ -2338,6 +2419,11 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                     match f {
                         // class-docblock facts; no callable/field join
                         DocFact::Method { .. } | DocFact::Template { .. } => {}
+                        DocFact::Description(d) => {
+                            if !matches!(sym.kind.as_str(), "var" | "anon") {
+                                sym.doc = Some(d.clone());
+                            }
+                        }
                         DocFact::ReturnRecvInstance { base } => {
                             if sym.return_type.is_none()
                                 && !sym.receiver_return
@@ -2935,4 +3021,34 @@ fn byte_range_of(events: &[Event], match_id: usize, cap: &str) -> Option<(usize,
         .iter()
         .find(|e| e.match_id == match_id && e.cap == cap)
         .map(|e| (e.start_byte, e.end_byte))
+}
+
+/// A class body scope: its package is the class (a member declared
+/// directly in the body — a constant, a property default — resolves its
+/// enclosing class as this, not the namespace), and the receiver name
+/// (`$this`) is witnessed as an instance of it, so every chain based on
+/// the receiver resolves through the registry like any typed variable.
+fn register_class_body(
+    out: &mut SkeletonAnalysis,
+    pack: &crate::build::query_extract::LangPack,
+    scope: crate::model::file_analysis::ScopeId,
+    class: &str,
+    at: Point,
+) {
+    if let Some(sc) = out.scopes.iter_mut().find(|s| s.id == scope) {
+        sc.package = Some(class.to_string());
+    }
+    for recv in pack.receiver_names {
+        out.witnesses.push(crate::model::witnesses::Witness {
+            attachment: crate::model::witnesses::WitnessAttachment::Variable {
+                name: recv.to_string(),
+                scope,
+            },
+            source: crate::model::witnesses::WitnessSource::Builder("skeleton-receiver".into()),
+            payload: crate::model::witnesses::WitnessPayload::InferredType(
+                crate::model::file_analysis::InferredType::ClassName(class.to_string()),
+            ),
+            span: Span { start: at, end: at },
+        });
+    }
 }

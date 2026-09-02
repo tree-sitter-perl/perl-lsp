@@ -229,6 +229,25 @@ templates). Market case and build-out plan in `docs/prompt-php-target.md`.
   identical to the unpruned walk. Symfony Console `Application`
   overrides (`getDefaultCommands`, `getLongVersion`, …) count as
   framework entries.
+- **Diagnostics.** PHP documents now report what a typed-language editor
+  expects: undefined methods and properties (through typed `$this->prop`
+  chains, cross-file once the workspace index is settled), non-public
+  access from outside the class, argument-count mismatches both ways,
+  undefined variables, and undefined types resolved through the file's
+  `use` rows and namespace. Every lane carries a named silence rule for
+  what it cannot see — an unreadable ancestor, a `__call` class, an
+  interface-typed receiver, a closure's rebound `$this`, a dynamically
+  declared property, a by-reference out-parameter — so a PHPUnit test
+  suite without vendored PHPUnit stays quiet. `docs/adr/php-diagnostics.md`.
+- **Signature help.** `$obj->method(` and `Foo::method(` on PHP now show
+  the declaration's parameter list with the active parameter, the return
+  annotation, and the docblock summary, for local and cross-file
+  callees alike.
+- **Hover shows the docblock.** A method's, property's or class's
+  docblock summary (or a property's `@var` trailer) renders under the
+  signature.
+- **The outline nests.** A PHP class's methods and properties are its
+  children in the document outline (breadcrumbs, sticky scroll).
 - **An import row's leaf resolves by its row.** Goto-def and hover on
   the `Parser` of `use SimplePie\XML\Declaration\Parser as
   DeclarationParser;` land on that class — never the file's own or a

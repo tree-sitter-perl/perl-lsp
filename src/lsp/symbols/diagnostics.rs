@@ -334,15 +334,16 @@ pub fn collect_diagnostics(
     ];
     let _g_meth = crate::util::ghost_stats::ScopedNs::start("diag.3_unresolved_method_loop");
     for r in analysis.refs() {
-        let (invocant, _invocant_span) = match &r.kind {
+        let invocant = match &r.kind {
             // A plugin-bridged token is plugin-resolved, not a receiver we
             // can flag as an unresolved method — skip it.
-            RefKind::MethodCall { invocant, invocant_span, .. } => match invocant.as_name() {
-                Some(n) => (n, invocant_span),
+            RefKind::MethodCall { invocant, .. } => match invocant.as_name() {
+                Some(n) => n,
                 None => continue,
             },
             _ => continue,
         };
+        let _ = invocant;
         let method_name = &r.target_name;
 
         // Skip universal methods
@@ -355,7 +356,7 @@ pub fn collect_diagnostics(
         // to find a method literally named "SUPER::foo" in the MRO always
         // fails. Caller-side package dispatch (`Class::method`) is intentional
         // and not our job to validate here.
-        use crate::model::conventions::{InvocantText, MethodToken};
+        use crate::model::conventions::MethodToken;
         if !matches!(MethodToken::parse(method_name), MethodToken::Bare(_)) {
             continue;
         }
@@ -363,12 +364,7 @@ pub fn collect_diagnostics(
         // Resolve invocant to class name. Diagnostics stays bag-only for
         // scalars — no enclosing-class fallback, which would manufacture
         // warnings on untyped invocants — and skips everything else.
-        let class_name = match invocant.classify() {
-            InvocantText::Bareword(b) => Some(b.to_string()),
-            InvocantText::Scalar(_) => analysis.inferred_type_via_bag(invocant, r.span.start)
-                .and_then(|ty| ty.class_name().map(|s| s.to_string())),
-            _ => None,
-        };
+        let class_name = receiver_class(analysis, r);
         let class_name = match class_name {
             Some(cn) => cn,
             None => continue,
@@ -726,4 +722,490 @@ fn render_guard_message(g: &crate::model::file_analysis::GuardRedundancy) -> Str
             format!("'{subject}' is not {} here; this guard can never pass", format_inferred_type(t))
         }
     }
+}
+
+
+/// The class a method-call receiver names, by the evidence every verb
+/// reads: the bag's type for a scalar, a pack-declared receiver name
+/// (php's `$this`) for the enclosing class, the expression's own `Expr`
+/// witnesses for anything else (`$this->mailer->m()`). Bag-derived or
+/// language-ruled — never manufactured from an untyped scalar, which is
+/// why Perl's `$self` (no declared receiver name) stays silent.
+fn receiver_class(analysis: &FileAnalysis, r: &crate::model::file_analysis::Ref) -> Option<String> {
+    use crate::model::conventions::InvocantText;
+    let RefKind::MethodCall { invocant, .. } = &r.kind else {
+        return None;
+    };
+    let invocant = invocant.as_name()?;
+    match invocant.classify() {
+        InvocantText::Bareword(b) => Some(b.to_string()),
+        InvocantText::Scalar(_) => analysis
+            .inferred_type_via_bag(invocant, r.span.start)
+            .and_then(|ty| ty.class_name().map(|s| s.to_string())),
+        _ => None,
+    }
+}
+
+/// The pack-language symbol lanes — the facts only packs mint (`arg_count`
+/// on calls, `ParamArity` on callables, the use-map's namespace pins,
+/// `Ref::binding` on every variable read) turned into the diagnostics an
+/// editor expects of a typed language. Precision first: every lane has a
+/// silence rule for the case it cannot see, named at the rule.
+pub fn pack_symbol_diagnostics(
+    analysis: &FileAnalysis,
+    idx: Option<&dyn CrossFileLookup>,
+    index_settled: bool,
+) -> Vec<Diagnostic> {
+    use crate::model::file_analysis::{MemberShape, MethodResolution, ScopeKind};
+    let mut out = Vec::new();
+    let pack = &analysis.pack;
+    // Every per-class fact is derived ONCE per class, never per ref: a
+    // 10k-line class file has thousands of member calls on a handful of
+    // classes, and a symbol scan per call is quadratic.
+    let local_classes: std::collections::HashSet<&str> = analysis
+        .symbols()
+        .iter()
+        .filter(|s| matches!(s.kind, FaSymKind::Class | FaSymKind::Package))
+        .map(|s| s.name.as_str())
+        .collect();
+    let local_class = |class: &str| local_classes.contains(class);
+    // A class answering any member name (php `__call`/`__get`) is silent
+    // for every undefined-member lane — Perl's AUTOLOAD rule.
+    let catch_all = |class: &str| {
+        pack.catch_all_methods.iter().any(|m| {
+            analysis.resolve_member_in_ancestors(class, m, MemberShape::Callable, idx).is_some()
+        })
+    };
+    // Callables reading their arguments dynamically (php `func_get_args`)
+    // and scopes materializing variables dynamically (`extract`): the
+    // call sites, collected once, matched by containment.
+    let dynamic_arg_calls = dynamic_call_spans(analysis, &["func_get_args", "func_num_args", "func_get_arg"]);
+    let dynamic_var_calls =
+        dynamic_call_spans(analysis, &["extract", "get_defined_vars", "eval", "parse_str", "compact"]);
+    // closures, for the rebound-`$this` silence
+    let closures: Vec<Span> = analysis
+        .symbols()
+        .iter()
+        .filter(|s| s.attributes.iter().any(|a| a == "anonymous"))
+        .map(|s| s.span)
+        .collect();
+    // php declares a property by writing it: (class, member) of every
+    // member write in the file
+    let written: std::collections::HashSet<(String, String)> = analysis
+        .refs()
+        .iter()
+        .filter(|w| {
+            matches!(w.kind, RefKind::MethodCall { .. })
+                && matches!(w.access, crate::model::file_analysis::AccessKind::Write)
+        })
+        .filter_map(|w| {
+            analysis
+                .method_call_invocant_class(w, idx)
+                .map(|c| (c, w.unqualified_target_name().to_string()))
+        })
+        .collect();
+    // The class's DEFINING analysis plus the facts every lane asks of it,
+    // memoized per class. `None` = a class the lanes stay silent on.
+    struct OwnerFacts {
+        owner: Option<std::sync::Arc<FileAnalysis>>,
+        is_interface: bool,
+        is_enum: bool,
+        dynamic_arg_calls: Vec<Span>,
+    }
+    let mut owner_memo: HashMap<String, Option<OwnerFacts>> = HashMap::new();
+    // An ancestor we cannot see — at ANY depth — may declare the member:
+    // silent.
+    let ancestry_complete = |class: &str| ancestry_visible(analysis, idx, class);
+    let push = |out: &mut Vec<Diagnostic>, span: Span, sev: DiagnosticSeverity, code: &str, msg: String| {
+        out.push(Diagnostic {
+            range: span_to_range(span),
+            severity: Some(sev),
+            code: Some(NumberOrString::String(code.to_string())),
+            source: Some("perl-lsp".to_string()),
+            message: msg,
+            ..Default::default()
+        });
+    };
+
+    // ---- undefined member / arity, per member call ----
+    for r in analysis.refs() {
+        let RefKind::MethodCall { shape, .. } = &r.kind else { continue };
+        let name = r.unqualified_target_name();
+        if name.is_empty() || name.starts_with('$') {
+            continue; // `$obj->$dyn()` — dynamic member name
+        }
+        if !pack.class_literal_member.is_empty() && name == pack.class_literal_member {
+            continue; // `Foo::class` is the class-name literal
+        }
+        // The dispatch projection every verb reads (`$this` is a typed
+        // receiver here — the extractor witnesses it at the class body).
+        let Some(class) = analysis.method_call_invocant_class(r, idx) else { continue };
+        let facts = owner_memo.entry(class.clone()).or_insert_with(|| {
+            // The class's DEFINING analysis: this file, or — once the
+            // workspace index is settled — the candidate its namespace
+            // names. An unsettled index would flag every cross-file member.
+            let owner_arc: Option<std::sync::Arc<FileAnalysis>> = if local_class(&class) {
+                None
+            } else if index_settled {
+                let i = idx?;
+                let want_ns =
+                    analysis.leaf_namespace(&class).or_else(|| analysis.use_map_pins().own_namespace.clone());
+                Some(i.visible_def_candidates(&class).into_iter().find_map(|c| {
+                    let a = i.symbols_present(&c);
+                    let declared = a.declared_type_namespace(&class);
+                    (declared.is_some() && (want_ns.is_none() || declared == want_ns)).then_some(a)
+                })?)
+            } else {
+                return None;
+            };
+            let owner: &FileAnalysis = owner_arc.as_deref().unwrap_or(analysis);
+            let owner_has_members = owner.symbols().iter().any(|s| {
+                matches!(s.kind, FaSymKind::Sub | FaSymKind::Method | FaSymKind::Field)
+                    && s.package.as_deref() == Some(class.as_str())
+            });
+            let owner_catch_all = pack.catch_all_methods.iter().any(|m| {
+                owner.resolve_member_in_ancestors(&class, m, MemberShape::Callable, idx).is_some()
+            });
+            if !owner_has_members || owner_catch_all || !ancestry_visible(owner, idx, &class) {
+                return None;
+            }
+            let class_attr = |attr: &str| {
+                owner.symbols().iter().any(|s| {
+                    matches!(s.kind, FaSymKind::Class) && s.name == class && s.attributes.iter().any(|a| a == attr)
+                })
+            };
+            Some(OwnerFacts {
+                // A receiver typed as an INTERFACE names any implementation,
+                // and php code narrows it with `instanceof` before calling
+                // what the interface lacks — no narrowing lane yet, so the
+                // interface stays silent on undefined members (resolved
+                // ones still check arity).
+                is_interface: class_attr("interface"),
+                is_enum: class_attr("enum"),
+                dynamic_arg_calls: if owner_arc.is_some() {
+                    dynamic_call_spans(owner, &["func_get_args", "func_num_args", "func_get_arg"])
+                } else {
+                    dynamic_arg_calls.clone()
+                },
+                owner: owner_arc,
+            })
+        });
+        let Some(facts) = facts.as_ref() else { continue };
+        let owner: &FileAnalysis = facts.owner.as_deref().unwrap_or(analysis);
+        let want = match shape {
+            MemberShape::Value => MemberShape::Value,
+            _ => MemberShape::Callable,
+        };
+        // an enum's language-given members
+        if facts.is_enum && pack.enum_members.iter().any(|m| m == name) {
+            continue;
+        }
+        match owner.resolve_member_in_ancestors(&class, name, want, idx) {
+            None if facts.is_interface => {}
+            // a class with no declared constructor has the default one
+            None if pack.constructor_names.iter().any(|c| c == name) => {}
+            None => {
+                // php declares a property by writing it: a write of this
+                // member on the same class anywhere in the file is its
+                // declaration
+                if matches!(want, MemberShape::Value) && written.contains(&(class.clone(), name.to_string())) {
+                    continue;
+                }
+                // a same-named member of the OTHER shape is a different
+                // finding (a method read as a property) — still undefined
+                let (code, what) = match want {
+                    MemberShape::Value => ("undefined-property", "property"),
+                    _ => ("unresolved-method", "method"),
+                };
+                push(&mut out, r.span, DiagnosticSeverity::ERROR, code, format!("Undefined {what} '{name}'."));
+            }
+            Some(MethodResolution::Local { sym_id, .. }) => {
+                let sym = owner.symbol(sym_id);
+                // non-public member reached from outside its class — unless
+                // from inside a closure, whose `$this` may be rebound to the
+                // owner (`Closure::bind`, `->call($obj)`: the private-access
+                // idiom tests live on)
+                let in_closure = analysis
+                    .scope_chain(r.scope)
+                    .into_iter()
+                    .any(|sc| closures.iter().any(|c| span_within(analysis.scope(sc).span, *c)));
+                // a property READ that resolved only to a same-named METHOD
+                // (or the reverse) is not an access violation
+                let shape_agrees = match want {
+                    MemberShape::Value => matches!(sym.kind, FaSymKind::Field | FaSymKind::Variable),
+                    _ => matches!(sym.kind, FaSymKind::Method | FaSymKind::Sub),
+                };
+                if shape_agrees && !in_closure && sym.attributes.iter().any(|a| a == "non_public") {
+                    let from = analysis.enclosing_class_for_scope(r.scope);
+                    let owner = sym.package.clone().unwrap_or_default();
+                    if from.as_deref() != Some(owner.as_str())
+                        && !from.as_deref().is_some_and(|f| analysis.class_isa(f, &owner, idx))
+                    {
+                        push(&mut out, r.span, DiagnosticSeverity::ERROR, "non-public-access",
+                            format!("Cannot access non-public member '{name}' of {owner} from {} scope.", from.as_deref().unwrap_or("global")));
+                    }
+                }
+                // arity: the written argument count against the declared list
+                if let (Some(n), Some(a)) = (r.arg_count, sym.arity) {
+                    if !callee_takes_any(&facts.dynamic_arg_calls, sym) {
+                        if n < a.required {
+                            push(&mut out, r.span, DiagnosticSeverity::ERROR, "arity-mismatch",
+                                format!("Not enough arguments. Expected {}. Found {n}.", a.required));
+                        } else if !a.variadic && n > a.total {
+                            push(&mut out, r.span, DiagnosticSeverity::WARNING, "arity-mismatch",
+                                format!("Too many arguments. Expected {}. Found {n}.", a.total));
+                        }
+                    }
+                }
+            }
+            Some(MethodResolution::CrossFile { .. }) => {}
+        }
+    }
+
+    // ---- arity on plain calls and constructors (local callees only) ----
+    for r in analysis.refs() {
+        if !matches!(r.kind, RefKind::FunctionCall) {
+            continue;
+        }
+        let Some(n) = r.arg_count else { continue };
+        let name = r.unqualified_target_name();
+        let callee = analysis
+            .symbols_named(name)
+            .iter()
+            .map(|&sid| analysis.symbol(sid))
+            .find(|s| matches!(s.kind, FaSymKind::Sub))
+            .or_else(|| {
+                // `new Foo(...)`: the class's own constructor; a class with
+                // none accepts any argument list
+                let ctor = pack.constructor_names.first()?;
+                if !local_class(name) || catch_all(name) || !ancestry_complete(name) {
+                    return None;
+                }
+                match analysis.resolve_member_in_ancestors(name, ctor, MemberShape::Callable, idx)? {
+                    MethodResolution::Local { sym_id, .. } => Some(analysis.symbol(sym_id)),
+                    _ => None,
+                }
+            });
+        let Some(sym) = callee else { continue };
+        let Some(a) = sym.arity else { continue };
+        if callee_takes_any(&dynamic_arg_calls, sym) {
+            continue;
+        }
+        if n < a.required {
+            push(&mut out, r.span, DiagnosticSeverity::ERROR, "arity-mismatch",
+                format!("Not enough arguments. Expected {}. Found {n}.", a.required));
+        } else if !a.variadic && n > a.total {
+            push(&mut out, r.span, DiagnosticSeverity::WARNING, "arity-mismatch",
+                format!("Too many arguments. Expected {}. Found {n}.", a.total));
+        }
+    }
+
+    // ---- undefined variable: an unbound read inside a callable ----
+    if !pack.implicit_variables.is_empty() {
+        // occurrences per (callable scope, name) — a by-reference out
+        // parameter (`preg_match($re, $s, $m)`) is bound by the call, which
+        // the walker cannot see: a name read MORE than once is presumed
+        // bound that way; the single stray read is the typo this lane names.
+        let callable_of = |scope: crate::model::file_analysis::ScopeId| {
+            analysis.scope_chain(scope).into_iter().find(|&sc| {
+                matches!(analysis.scope(sc).kind, ScopeKind::Sub { .. } | ScopeKind::Method { .. })
+            })
+        };
+        let mut seen: HashMap<(u32, String), usize> = HashMap::new();
+        for r in analysis.refs() {
+            if matches!(r.kind, RefKind::Variable) && r.target_name.starts_with('$') {
+                if let Some(sc) = callable_of(r.scope) {
+                    *seen.entry((sc.0, r.target_name.clone())).or_default() += 1;
+                }
+            }
+        }
+        for r in analysis.refs() {
+            // a WRITE binds (php declares a variable by assigning it)
+            if !matches!(r.kind, RefKind::Variable)
+                || r.binding.is_some()
+                || matches!(r.access, crate::model::file_analysis::AccessKind::Write)
+                || !r.target_name.starts_with('$')
+            {
+                continue;
+            }
+            if pack.implicit_variables.iter().any(|v| *v == r.target_name) {
+                continue;
+            }
+            let Some(sc) = callable_of(r.scope) else { continue };
+            if seen.get(&(sc.0, r.target_name.clone())).copied().unwrap_or(0) != 1 {
+                continue;
+            }
+            // a callable that materializes variables dynamically is silent
+            let body = analysis.scope(sc).span;
+            if dynamic_var_calls.iter().any(|c| span_within(*c, body)) {
+                continue;
+            }
+            push(&mut out, r.span, DiagnosticSeverity::ERROR, "undefined-variable",
+                format!("Undefined variable '{}'.", r.target_name));
+        }
+    }
+
+    // ---- undefined type: a class name the namespace cannot supply ----
+    if index_settled {
+        if let Some(idx) = idx {
+            let pins = analysis.use_map_pins();
+            if let Some(own) = pins.own_namespace.as_deref() {
+                let ns_heads: std::collections::HashSet<&str> = pack
+                    .qualified_spellings
+                    .iter()
+                    .filter_map(|(_, prefix)| prefix.trim_start_matches('\\').split('\\').next())
+                    .filter(|h| !h.is_empty())
+                    .collect();
+                let mut reported: std::collections::HashSet<(usize, usize)> = std::collections::HashSet::new();
+                for r in analysis.refs() {
+                    // a class reference, or a constructor call (`new Foo()`
+                    // carries the class name) that no function answers
+                    let is_type_ref = match r.kind {
+                        RefKind::PackageRef => true,
+                        RefKind::FunctionCall => {
+                            pack.types_are_capitalized
+                                && r.target_name.rsplit('\\').next().unwrap_or("").chars().next().is_some_and(|c| c.is_uppercase())
+                                && !analysis.symbols_named(r.unqualified_target_name()).iter().any(|&sid| matches!(analysis.symbol(sid).kind, FaSymKind::Sub))
+                        }
+                        _ => false,
+                    };
+                    if !is_type_ref {
+                        continue;
+                    }
+                    let written = r.target_name.as_str();
+                    // absolute names reach the global namespace (builtins we
+                    // carry no stubs for) — silent
+                    if written.starts_with('\\') || written.contains("::") {
+                        continue;
+                    }
+                    let leaf = written.rsplit('\\').next().unwrap_or(written);
+                    if leaf.is_empty() || matches!(leaf, "self" | "static" | "parent") {
+                        continue;
+                    }
+                    // a segment used as a NAMESPACE prefix in this file
+                    // (`Psr7\Utils`) names a namespace, not a type
+                    if ns_heads.contains(leaf) {
+                        continue;
+                    }
+                    if analysis.pack.import_row_covering(&r.span).is_some() {
+                        // an import row naming a function/constant, not a type
+                        if pack.types_are_capitalized && leaf.chars().next().is_some_and(|c| c.is_lowercase()) {
+                            continue;
+                        }
+                        // a row whose leaf the file never spells bare imports
+                        // a NAMESPACE (`use GuzzleHttp\Psr7;` then
+                        // `Psr7\Utils`) or nothing — no type to assert
+                        if !pins.spelled.contains(leaf) {
+                            continue;
+                        }
+                    }
+                    let ns = match pins.pins.get(leaf) {
+                        Some(Some(ns)) => ns.clone(),
+                        Some(None) => continue, // conflicting evidence
+                        None => match written.rsplit_once('\\') {
+                            Some((prefix, _)) => format!("{own}\\{prefix}"),
+                            None => own.to_string(),
+                        },
+                    };
+                    // the global namespace is the builtins we carry no stubs
+                    // for — silent
+                    if ns.is_empty() {
+                        continue;
+                    }
+                    let exists = analysis.declared_type_namespace(leaf).as_deref() == Some(ns.as_str())
+                        || idx.visible_def_candidates(leaf).iter().any(|c| {
+                            idx.symbols_present(c).declared_type_namespace(leaf).as_deref() == Some(ns.as_str())
+                        });
+                    if exists || !reported.insert((r.span.start.row, r.span.start.column)) {
+                        continue;
+                    }
+                    push(&mut out, r.span, DiagnosticSeverity::ERROR, "undefined-type",
+                        format!("Undefined type '{ns}\\{leaf}'."));
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Call sites of the named functions — the dynamic-behaviour markers a
+/// containing scope is silenced by.
+fn dynamic_call_spans(analysis: &FileAnalysis, names: &[&str]) -> Vec<Span> {
+    analysis
+        .refs()
+        .iter()
+        .filter(|c| matches!(c.kind, RefKind::FunctionCall) && names.contains(&c.unqualified_target_name()))
+        .map(|c| c.span)
+        .collect()
+}
+
+/// A callable that reads its arguments dynamically (php `func_get_args`)
+/// accepts any count.
+fn callee_takes_any(dynamic_arg_calls: &[Span], sym: &crate::model::file_analysis::Symbol) -> bool {
+    dynamic_arg_calls.iter().any(|c| span_within(*c, sym.span))
+}
+
+fn span_within(inner: Span, outer: Span) -> bool {
+    (inner.start.row, inner.start.column) >= (outer.start.row, outer.start.column)
+        && (inner.end.row, inner.end.column) <= (outer.end.row, outer.end.column)
+}
+
+
+/// Every ancestor of `class`, transitively, is declared somewhere we can
+/// read (this file, or a candidate the lookup reaches). One unreadable
+/// parent anywhere in the chain means a member may live there.
+fn ancestry_visible(analysis: &FileAnalysis, idx: Option<&dyn CrossFileLookup>, class: &str) -> bool {
+    fn walk(
+        a: &FileAnalysis,
+        idx: Option<&dyn CrossFileLookup>,
+        class: &str,
+        seen: &mut std::collections::HashSet<(String, String)>,
+        depth: usize,
+    ) -> bool {
+        if depth > 20 {
+            return true;
+        }
+        for p in a.declared_parents(class) {
+            let leaf = p.rsplit(['\\', ':']).next().unwrap_or(p);
+            // The parent's namespace as THIS file sees it (its `use` rows,
+            // else its own namespace) — a same-leaf stranger elsewhere in
+            // the workspace is not this parent.
+            let want_ns = a.leaf_namespace(leaf).or_else(|| a.use_map_pins().own_namespace.clone());
+            let local = a
+                .symbols()
+                .iter()
+                .any(|s| matches!(s.kind, FaSymKind::Class | FaSymKind::Package) && s.name == leaf)
+                && a.declared_type_namespace(leaf) == want_ns;
+            if local {
+                if !seen.insert((want_ns.clone().unwrap_or_default(), leaf.to_string())) {
+                    continue;
+                }
+                if !walk(a, idx, leaf, seen, depth + 1) {
+                    return false;
+                }
+                continue;
+            }
+            let Some(i) = idx else { return false };
+            let mut any = false;
+            for c in &i.visible_def_candidates(leaf) {
+                let whole = i.symbols_present(c);
+                let declared = whole.declared_type_namespace(leaf);
+                if declared.is_none() || (want_ns.is_some() && declared != want_ns) {
+                    continue;
+                }
+                any = true;
+                if !seen.insert((declared.unwrap_or_default(), leaf.to_string())) {
+                    continue;
+                }
+                if !walk(&whole, idx, leaf, seen, depth + 1) {
+                    return false;
+                }
+            }
+            if !any {
+                return false;
+            }
+        }
+        true
+    }
+    walk(analysis, idx, class, &mut std::collections::HashSet::new(), 0)
 }
