@@ -330,6 +330,34 @@ Format per entry:
   (cpp's `(union)` / php's `(anon)` closure defaults ride the same
   `default_name` seam — a position suffix there changes visible names,
   so the suffix must be opt-in per kind, on the pack). Cache bump.
+- **Spike (read-only, 2026-09-02) — what A actually costs:**
+  - The context join is the one generic seam. A member's `package` is
+    the top of `context_stack`, pushed from the TEXT of a captured name
+    node (`extract.rs` context arm); a name-less def has no such node.
+    `names_by_match` is populated only from `.name` captures — the
+    `default_name` fallback runs inside the def arm and is never written
+    back — so BOTH the context arm and the `@parent` arm would need the
+    def arm's fallback (factored once, or the class identity and its
+    parent edge drift apart). Event order is deterministic (`start asc,
+    end desc`: the whole-node def sorts before a same-start keyword
+    capture) and a class-body context is deferred to its `@scope`
+    anyway, so ordering is not the risk; the duplicated fallback is.
+  - A position suffix on the defaulted name is safe: every production
+    consumer of a defaulted symbol gates on the `anonymous` ATTRIBUTE
+    (`complete_pack_qualified`, the member-completion filter), never on
+    the string; one cpp test looks `(union)` up by literal. But
+    `default_name` returns `&'static str` and cannot see the position —
+    a per-kind opt-in on the pack (or the caller suffixing only for
+    opted-in kinds) keeps `(anon)`/`(union)` untouched.
+  - `$this` follows by construction: `enclosing_class_for_scope` takes
+    the innermost scope carrying a package, so once the anonymous body
+    is a `@scope` whose context is the synthetic name, nothing in
+    `invocants.rs` / `cursor_sentinel.rs` changes.
+  - cpp's anonymous aggregate is the REVERSE choice (members flatten
+    onto the enclosing struct — correct C semantics) and is not
+    reusable here. Files: `queries/php/skeleton.scm`, `packs.rs` (php
+    `default_name` "class" arm + the opt-in), `extract.rs` (the shared
+    fallback). Cache bump.
 - **Discussion needed:** is the synthetic-name spelling user-facing
   (outline, hover, workspace-symbol) acceptable, and should the
   identity be file-local only (never a cross-file candidate)?
