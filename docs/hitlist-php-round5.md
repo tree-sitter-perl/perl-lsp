@@ -143,7 +143,12 @@ general "public API of a library" question needs a policy (e.g. a
 `--heatmap` `--library` mode that never flags public members) —
 `docs/open-forks.md`.
 
-### R5-7 (MINOR) — `array<array<mixed>>` nested generics honestly dark (F).
+### R5-7 (MINOR, LANDED) — `array<array<mixed>>` nested generics were dark
+The inner `array<mixed>` parsed to nothing (`mixed` has no lattice value)
+and the `?` collapsed the whole annotation; a generic whose element is
+`mixed` now IS the bare `array` shape, so the outer types as `list<array>`
+and the foreach element as `array`. `list<array<string,int>>` and
+`array<string, list<Cell>>` already resolved on re-probe.
 The `self::$prop` / `static::$prop` / `Foo::$prop` hover half (E7)
 resolved on re-probe: all three render the declared `@var` type and gd/refs
 land on the property. Rendering note: a php `array<string, int>` doc type

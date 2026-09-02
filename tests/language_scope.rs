@@ -746,3 +746,34 @@ fn php_heatmap_pre_prune_preserves_every_fan_in() {
     assert_eq!(pruned.get("make"), Some(&1), "{pruned:?}");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Round-5 R5-7: a nested generic whose innermost element is `mixed`
+/// (`array<array<mixed>>`) types as a sequence of arrays instead of
+/// collapsing the whole annotation — the inner `array<mixed>` is the bare
+/// `array` shape.
+#[cfg(feature = "php")]
+#[test]
+fn php_nested_generic_over_mixed_keeps_the_outer_shape() {
+    let dir = std::env::temp_dir().join(format!("perl-lsp-r5nested-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("Grid.php"),
+        "<?php\nnamespace App;\nclass Grid\n{\n    /** @var array<array<mixed>> */\n    private array $rows = [];\n    public function go(): void\n    {\n        foreach ($this->rows as $row) { $row; }\n    }\n}\n",
+    )
+    .unwrap();
+    let run = |args: &[&str]| {
+        let out = std::process::Command::new(env!("CARGO_BIN_EXE_perl-lsp"))
+            .args(args)
+            .env("XDG_CACHE_HOME", dir.join(".cache"))
+            .output()
+            .expect("run");
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+    let root = dir.to_str().unwrap();
+    let prop = run(&["--hover", root, "Grid.php", "5", "19"]);
+    assert!(prop.contains("list<array>"), "the outer generic survives: {prop}");
+    let row = run(&["--hover", root, "Grid.php", "8", "40"]);
+    assert!(row.contains("$row: array"), "the element is an array: {row}");
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -726,7 +726,14 @@ fn php_annot_type(text: &str) -> Option<InferredType> {
             let inner = rest.strip_suffix('>')?;
             // `array<K, V>`: the element is the LAST top-level argument.
             let args = phpdoc_split_top_level(inner, ',');
-            let elem = php_annot_type(args.last()?)?;
+            let elem_text = args.last()?.trim();
+            // `array<mixed>` / `array<string, mixed>` is a container of
+            // unknowns — the bare `array` keyword's shape, so the OUTER
+            // generic of `array<array<mixed>>` still types its element as
+            // an array instead of the whole annotation collapsing.
+            let Some(elem) = php_annot_type(elem_text) else {
+                return (elem_text == "mixed").then_some(HashRef);
+            };
             // A NON-int-keyed `array<K, V>` keeps its key axis: the value
             // rides as a two-argument parametric instance ([K, V] — the
             // positional convention `ParamOf`/`Element`/`Key` project), so
