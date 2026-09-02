@@ -166,3 +166,15 @@ polymorphism (`FormatterInterface`, `ProcessorInterface::__invoke`).
   row (spelled in full at the leaf span) and `@ref.type` the flat form
   does; `php_group_use_rows_answer_like_flat_rows` pins it. The alias
   usage sites (`new Baz()`) stay fork C, same as the flat spelling.
+
+## Round-7 close (2026-09-02)
+
+Every round-7 row is LANDED (R7-1, R7-3, R7-4, R7-5) or a named fork
+(R7-2 → fork C, `docs/open-forks.md`). Nets r67–r70 green on every slice
+(4 suites, gold 504/0/0/0/0/0, e2e 121/121). Corpus effect: guzzle dead
+122 → 108 (dead constructors 5 → 1), monolog 86 → 83, symfony/demo
+unchanged. Open on the board: fork C (alias usage sites, now four
+spellings), the anonymous-class display spelling, R5-4's memo lever,
+union types, dead-code queue vs library API, the relation return
+generic, the pinned-but-unindexed empty answer.
+
