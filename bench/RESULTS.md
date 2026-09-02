@@ -349,3 +349,49 @@ Known residual, named: Glyphs standalone still spends 7.9 s (build) +
 N queries × W witnesses, clone-free but not fold-free, temporal semantics
 make naive memoization wrong. Separate design question; the checked-in
 baselines will hold the line meanwhile.
+
+## 2026-09-02 — PHP answers vs Intelephense (free) and phpactor (sha ee285f2)
+
+Three servers over stdio (`bench/compare/`), same probe battery, same
+checkouts, no `vendor/` in any root (so vendor-defined symbols are dark for
+all three equally): guzzle (10 probes), monolog (8), symfony/demo (3).
+Intelephense 1.x free tier via npm, phpactor 2026.06.23.0 phar with
+`index:build` run first, ours = the r69 binary (`--features cpp,php`),
+cold cache. One run each; latencies are first-call numbers on a shared box.
+
+| | ready (guzzle / monolog / demo) | RSS at end (guzzle / monolog / demo) |
+|---|---|---|
+| ours | 3.5 s / 1.3 s / 1.1 s | 213 / 73 / 63 MB |
+| intelephense | 0.8 / 0.7 / 1.7 s | 316 / 203 / 197 MB |
+| phpactor | 7.2 / 0.8 / 0.3 s (+ index:build 14 / 9 / 10 s) | 133 / 96 / 80 MB |
+
+Answers. Every goto-definition probe (13: `$this->method()`, `Class::static()`,
+`new Foo()`, trait method, property, `parent::__construct`, a `use` leaf, a
+typed parameter) lands on the same symbol in all three tools (Intelephense
+anchors the range at the docblock, the others at the declaration). Reference
+counts against grep truth:
+
+| probe | grep | ours | intelephense | phpactor |
+|---|---|---|---|---|
+| guzzle `Client::sendAsync` | 10 sites + decl | 12 (incl. interface decl) | 12 | 10 (misses `ClientInterface` decl, `Pool.php` site) |
+| guzzle trait `request` | 6 trait sites | 61 | 60 (no interface decl) | 59 (no `Client::request` impl) |
+| guzzle `new Client(` | 304 | 304 | 304 | 304 |
+| guzzle `CookieJar::count` | decl | 1 | 2 — the second is `MockHandler::count()`, another class's same-named method | 1 |
+| monolog `Logger::$handlers` | 10 + decl | 11 | 11 | 11 |
+| monolog `pushHandler` | 50 sites + decl | 42 | 42 | 42 |
+| monolog `addRecord` | 15 + decl | 16 | 16 | 16 |
+| demo `Post::getTitle` | 4 + decl | 5 | 5 | 5 |
+
+(`pushHandler`: all three agree at 42; the grep's extra 8 are `->pushHandler(`
+on receivers no tool types — the count is the tools' shared ceiling, not a
+gap of ours.) Rename: ours = phpactor on both probes (a private method: 3
+edits; a protected property read by a subclass: 16 edits across
+`StreamHandler` + `RotatingFileHandler`); Intelephense free returns none.
+Completion after `$this->`: identical member sets (64 / 43 items) in all
+three. Hover: ours shows the signature and the inferred type
+(`handlers: list<HandlerInterface>` where phpactor shows the docblock's
+`array<int,HandlerInterface>`), but NOT the docblock description text both
+others render — the one visible gap in this battery. Latency: ours is
+single-digit to tens of ms warm like the others, except the first
+cross-file references walk on guzzle (1,057 ms vs Intelephense 110 ms) —
+the cold rehydration cost the R5-4 attribution names.
