@@ -548,6 +548,9 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     let mut anon_ctor_sites: std::collections::HashSet<(usize, usize)> =
         std::collections::HashSet::new();
     out.use_aliases = out_use_aliases;
+    // Group rows land ahead of the flat rows the main loop pushes in
+    // document order; every reader of these lanes is span- or map-keyed,
+    // so the order carries no meaning — do not make a consumer assume it.
     for (raw, span) in group_import_sites {
         out.imports.push(raw.clone());
         out.import_sites.push((raw, span));

@@ -81,8 +81,6 @@ pub(crate) fn framework_entry_claims(
     })
 }
 
-#[allow(clippy::too_many_arguments)]
-
 /// The row-store key under which a pack constructor's references live: its
 /// CLASS name (`new Foo(...)` carries the class, `retrieval_keys`), bare —
 /// so two same-leaf classes in different namespaces share one key, and a
@@ -97,6 +95,7 @@ fn ctor_class_key(analysis: &file_analysis::FileAnalysis, sym: &file_analysis::S
         .then(|| sym.package.as_deref().map(file_analysis::name_match_key))
         .flatten()
 }
+#[allow(clippy::too_many_arguments)]
 fn heatmap_symbol_row(
     ws: &file_store::FileStore,
     routing_idx: &dyn file_analysis::CrossFileLookup,

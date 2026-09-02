@@ -124,6 +124,21 @@ is already row-narrowed; the cost is rehydration + the per-ref match on
 each candidate). Next lever: attribute one walk with `ghost_stats`
 (`refs.matcher_upgrade` vs rows-view counts, `mroc.candidate_fetched`)
 before touching the matcher.
+ATTRIBUTED 2026-09-02 (r69 binary, warm, `PERL_LSP_GHOST_STATS`, quiet box
+right after a net; ONE run — wall 74–78 s, well under the 1m50s recorded
+above, so the earlier numbers were taken on a loaded box and the three-run
+protocol still owes a baseline): the walk's cost is rehydration, and BOTH
+per-walk memos are defeated on the heatmap path — `sweep.lookup` 1,536,053
+with `sweep.memo_miss` 1,536,053 (the thread-local `SWEEP_MEMO` is never
+open on the heatmap's walks, or its stamp never matches), and
+`session.foreign_index` 1,586,824 (the session memo sees an index id other
+than the walk's). Accumulated: `rehydrate.loader` 19.1 s over 1.54 M calls
+(most are `bagcache.hit`, 1.50 M — ~12 µs each, it is the call count that
+hurts), `bagcache.decode` 12.3 s over 35,564 decodes, `bagcache.evict_to_cap`
+4.7 s, `bag.rebuild_index_witnesses` 4.09 M. Next lever is not the matcher:
+open the sweep memo (or the shared `SWEEP_PROVIDERS`) for the heatmap's
+walk loop so a file rehydrates once per walk, and give the heatmap's
+session the walk's index id.
 
 ### R5-5 (design, open for the user) — union types
 D4: `list<A|B>` (a union INSIDE a generic) kills element typing for the
