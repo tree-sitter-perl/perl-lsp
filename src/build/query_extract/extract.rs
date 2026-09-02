@@ -461,6 +461,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     // (packs with `namespace_relative_parents` only — empty otherwise).
     let mut out_use_aliases: Vec<(String, String, String)> = Vec::new();
     let mut use_map: HashMap<String, (String, String)> = HashMap::new();
+    let mut group_import_sites: Vec<(String, Span)> = Vec::new();
     let mut parent_fq_by_match: HashMap<usize, String> = HashMap::new();
     // `@ref.qualified`: the WRITTEN qualifier of a call/ctor/type/parent
     // spelling (`Downloader\DownloadManager`, `\A\B`) — the use-map pins
@@ -481,7 +482,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     if pack.namespace_relative_parents {
         let mut use_fqn: HashMap<usize, String> = HashMap::new();
         let mut use_prefix: HashMap<usize, String> = HashMap::new();
-        let mut use_leaf: HashMap<usize, String> = HashMap::new();
+        let mut use_leaf: HashMap<usize, (String, Span)> = HashMap::new();
         let mut use_alias: HashMap<usize, String> = HashMap::new();
         for e in &events {
             match e.cap.as_str() {
@@ -492,7 +493,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                     use_prefix.insert(e.match_id, e.text.clone());
                 }
                 "use.leaf" => {
-                    use_leaf.insert(e.match_id, e.text.clone());
+                    use_leaf.insert(e.match_id, (e.text.clone(), Span { start: e.start, end: e.end }));
                 }
                 "use.alias" => {
                     use_alias.insert(e.match_id, e.text.clone());
@@ -513,13 +514,17 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
         }
         // group form: `use A\B\{C, D as E}` — the prefix is the namespace,
         // each clause's own name the leaf.
-        for (mid, leaf) in &use_leaf {
+        for (mid, (leaf, span)) in &use_leaf {
             let Some(prefix) = use_prefix.get(mid) else { continue };
             let key = use_alias.get(mid).cloned().unwrap_or_else(|| leaf.clone());
             let ns = prefix.trim_start_matches('\\').to_string();
             if use_alias.contains_key(mid) {
                 out_use_aliases.push((key.clone(), ns.clone(), leaf.clone()));
             }
+            // A group clause is an import row like any flat one: the same
+            // `include_directives` row (spelled in full, spanning the leaf
+            // token) feeds the use-map pin and the row-namespace lanes.
+            group_import_sites.push((format!("{ns}\\{leaf}"), *span));
             use_map.insert(key, (ns, leaf.clone()));
         }
     }
@@ -527,6 +532,10 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     // ---- the state machine: scope stack + sticky contexts ----
     let mut out = SkeletonAnalysis::default();
     out.use_aliases = out_use_aliases;
+    for (raw, span) in group_import_sites {
+        out.imports.push(raw.clone());
+        out.import_sites.push((raw, span));
+    }
     out.receiver_names = pack.receiver_names.iter().map(|s| s.to_string()).collect();
     out.function_scoped_vars = pack.function_scoped_vars;
     out.constructor_names = pack.constructor_names.iter().map(|s| s.to_string()).collect();

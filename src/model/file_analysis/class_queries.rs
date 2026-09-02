@@ -995,6 +995,17 @@ impl FileAnalysis {
             .map(|s| s.package.clone().unwrap_or_default())
     }
 
+    /// Like `declared_class_namespace`, for the type-space kinds a goto-def
+    /// landing admits (Package | Class) — the same predicate the local
+    /// lanes' `find_package_or_class_in` applies, so the cross-file Package
+    /// lane and the in-file lane agree on what an import row can name.
+    pub fn declared_type_namespace(&self, leaf: &str) -> Option<String> {
+        self.symbols()
+            .iter()
+            .find(|s| matches!(s.kind, SymKind::Package | SymKind::Class) && s.name == leaf)
+            .map(|s| s.package.clone().unwrap_or_default())
+    }
+
     /// The namespace `leaf` means AS SEEN FROM this file — the use-map
     /// pins' answer (`UseMapPins::namespace_of`: the file's own declaration,
     /// its `use` rows with aliases honored, its qualified spellings, and its

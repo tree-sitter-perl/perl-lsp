@@ -181,6 +181,7 @@
 ; the imported leaf is a live class reference — cross-file rename
 ; rewrites the use line too.
 (namespace_use_clause (qualified_name (name) @ref.type))
+(namespace_use_group (namespace_use_clause . (name) @ref.type))
 ; A type position (`Collection $c`, `?Request $r`, `: static`, a union's
 ; class arms) spells the class: references/rename on the class reach the
 ; hints, and the file's use-map counts the leaf as spelled here.

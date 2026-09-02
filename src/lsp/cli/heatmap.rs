@@ -82,6 +82,21 @@ pub(crate) fn framework_entry_claims(
 }
 
 #[allow(clippy::too_many_arguments)]
+
+/// The row-store key under which a pack constructor's references live: its
+/// CLASS name (`new Foo(...)` carries the class, `retrieval_keys`), bare —
+/// so two same-leaf classes in different namespaces share one key, and a
+/// reference to either keeps both constructors off the dead list (the
+/// over-approximation is the sound direction for a guard).
+fn ctor_class_key(analysis: &file_analysis::FileAnalysis, sym: &file_analysis::Symbol) -> Option<String> {
+    analysis
+        .pack
+        .constructor_names
+        .iter()
+        .any(|c| c == &sym.name)
+        .then(|| sym.package.as_deref().map(file_analysis::name_match_key))
+        .flatten()
+}
 fn heatmap_symbol_row(
     ws: &file_store::FileStore,
     routing_idx: &dyn file_analysis::CrossFileLookup,
@@ -652,13 +667,7 @@ pub(crate) fn cli_heatmap(root: &str, opts: &[String]) {
                     // sites (`new Foo(...)` — the ctor FunctionCall carries the
                     // CLASS name, `retrieval_keys`), so the class key is a
                     // reference row for it too.
-                    let ctor_key = analysis
-                        .pack
-                        .constructor_names
-                        .iter()
-                        .any(|c| c == &sym.name)
-                        .then(|| sym.package.as_deref().map(file_analysis::name_match_key))
-                        .flatten();
+                    let ctor_key = ctor_class_key(analysis, sym);
                     let forced = if referenced_names.contains(&key)
                         || ctor_key.as_ref().is_some_and(|k| referenced_names.contains(k))
                     {
@@ -696,13 +705,10 @@ pub(crate) fn cli_heatmap(root: &str, opts: &[String]) {
             // (reference rows are candidate rows — an over-approximation, the
             // sound direction for a guard); without rows the guard stays off
             // and the constructor is judged by its `new` sites alone.
-            let class_referenced = analysis.pack.constructor_names.iter().any(|c| c == &sym.name)
-                && match (prune, sym.package.as_deref()) {
-                    (Some((referenced_names, _)), Some(class)) => {
-                        referenced_names.contains(&file_analysis::name_match_key(class))
-                    }
-                    _ => false,
-                };
+            let class_referenced = match (prune, ctor_class_key(analysis, sym)) {
+                (Some((referenced_names, _)), Some(key)) => referenced_names.contains(&key),
+                _ => false,
+            };
             let (row, is_callable, dead, dead_export) = heatmap_symbol_row(
                 ws,
                 routing,

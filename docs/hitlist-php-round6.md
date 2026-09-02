@@ -137,6 +137,18 @@ polymorphism (`FormatterInterface`, `ProcessorInterface::__invoke`).
   `getIterator`, `offsetGet`, `jsonSerialize`, …) join the pack's
   runtime-invoked set — guzzle's `CookieJar::count()` /
   `MockHandler::count()` no longer flag dead.
+  The set is NAME-keyed, not contract-keyed: a `count()` on a class that
+  implements no `Countable` is shielded too. Over-approximates on the
+  sound side like every guard; gating on the declared interface
+  (`declares_interface`) is the tightening if the queue ever wants it.
 - R7-4 (MINOR): an anonymous class's own `__construct` has no class name
   for `class-referenced` and its `new class(...)` is not counted as a
   call (5 guzzle test fixtures).
+- R7-5 (MINOR → LANDED): group-use imports (`use A\{Foo, Bar as Baz};`)
+  minted no import row and no leaf reference — only the parent-resolving
+  use-map saw them, so the class's references missed the row and the
+  `new Foo()` sites it enables (the leaf read as the file's own
+  namespace). A group clause now mints the same `include_directives`
+  row (spelled in full at the leaf span) and `@ref.type` the flat form
+  does; `php_group_use_rows_answer_like_flat_rows` pins it. The alias
+  usage sites (`new Baz()`) stay fork C, same as the flat spelling.

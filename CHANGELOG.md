@@ -229,6 +229,15 @@ templates). Market case and build-out plan in `docs/prompt-php-target.md`.
   identical to the unpruned walk. Symfony Console `Application`
   overrides (`getDefaultCommands`, `getLongVersion`, …) count as
   framework entries.
+- **An import row's leaf resolves by its row.** Goto-def and hover on
+  the `Parser` of `use SimplePie\XML\Declaration\Parser as
+  DeclarationParser;` land on that class — never the file's own or a
+  stranger's same-leaf `Parser`. Group-use rows (`use A\{Foo, Bar as
+  Baz};`) are import rows like the flat spelling: references and rename
+  on the class reach the row and the `new` sites it enables. SPL contract methods (`count`,
+  `getIterator`, `offsetGet`, `jsonSerialize`, …) count as
+  runtime-invoked, so a `Countable` implementation's `count()` no
+  longer flags dead.
 - **`self::CONST` in property defaults resolves.**
   `protected string $fmt = self::FORMAT;` — goto-def and references
   on the class-level initializer now answer like the method-body
