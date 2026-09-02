@@ -1502,6 +1502,9 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                     .push((e.text.clone(), Span { start: e.start, end: e.end }));
                 out.imports.push(e.text.clone());
             }
+            "preamble" => {
+                out.preamble_end = Some(out.preamble_end.map_or(e.end.row, |r| r.max(e.end.row)));
+            }
             "import" => {
                 let row = Span { start: e.start, end: e.end };
                 if out.import_rows.last() != Some(&row) {

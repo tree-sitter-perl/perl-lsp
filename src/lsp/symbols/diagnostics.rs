@@ -980,11 +980,19 @@ pub fn pack_symbol_diagnostics(
             if want_class { matches!(s.kind, FaSymKind::Class) } else { matches!(s.kind, FaSymKind::Sub) }
         };
         let local = analysis.symbols_named(leaf).iter().map(|&sid| analysis.symbol(sid)).find(|s| is_kind(s)).and_then(deprecation_of);
+        // Cross-file: only a declaration in the namespace THIS file means by
+        // the leaf (its pin, else its own namespace) — a same-leaf stranger
+        // elsewhere in the workspace is a different declaration.
         let found = local.or_else(|| {
             let i = idx?;
+            let want_ns = analysis.leaf_namespace(leaf).or_else(|| analysis.use_map_pins().own_namespace.clone());
             i.visible_def_candidates(leaf).into_iter().find_map(|c| {
                 let a = i.symbols_present(&c);
-                a.symbols_named(leaf).iter().map(|&sid| a.symbol(sid)).find(|s| is_kind(s)).and_then(deprecation_of)
+                a.symbols_named(leaf)
+                    .iter()
+                    .map(|&sid| a.symbol(sid))
+                    .find(|s| is_kind(s) && (want_ns.is_none() || s.package == want_ns))
+                    .and_then(deprecation_of)
             })
         });
         if let Some(text) = found {
@@ -1126,7 +1134,10 @@ pub fn pack_symbol_diagnostics(
     if index_settled {
         if let Some(idx) = idx {
             let pins = analysis.use_map_pins();
-            if let Some(own) = pins.own_namespace.as_deref() {
+            // a namespace-less file lives in the global namespace
+            let own_ns = pins.own_namespace.clone().unwrap_or_default();
+            {
+                let own = own_ns.as_str();
                 let ns_heads: std::collections::HashSet<&str> = pack
                     .qualified_spellings
                     .iter()
@@ -1185,12 +1196,18 @@ pub fn pack_symbol_diagnostics(
                         },
                     };
                     // the global namespace is the builtins we carry no stubs
-                    // for — silent
+                    // for — silent, unless the workspace declares the leaf
+                    // under a namespace and nowhere global: then the type is
+                    // real and missing its import
+                    let declared = type_namespaces(analysis, idx, leaf);
                     if ns.is_empty() {
+                        if declared.is_empty() || declared.iter().any(|d| d.is_empty()) {
+                            continue;
+                        }
+                    } else if declared.iter().any(|d| *d == ns) {
                         continue;
                     }
-                    let declared = type_namespaces(analysis, idx, leaf);
-                    if declared.iter().any(|d| *d == ns) || !reported.insert((r.span.start.row, r.span.start.column)) {
+                    if !reported.insert((r.span.start.row, r.span.start.column)) {
                         continue;
                     }
                     // every namespace that DOES declare the leaf is an import
@@ -1202,7 +1219,11 @@ pub fn pack_symbol_diagnostics(
                         severity: Some(DiagnosticSeverity::ERROR),
                         code: Some(NumberOrString::String("undefined-type".to_string())),
                         source: Some("perl-lsp".to_string()),
-                        message: format!("Undefined type '{ns}\\{leaf}'."),
+                        message: if ns.is_empty() {
+                            format!("Undefined type '{leaf}'.")
+                        } else {
+                            format!("Undefined type '{ns}\\{leaf}'.")
+                        },
                         data: (!candidates.is_empty()).then(|| serde_json::json!({ "candidates": candidates })),
                         ..Default::default()
                     });
@@ -1271,8 +1292,7 @@ fn callee_takes_any(dynamic_arg_calls: &[Span], sym: &crate::model::file_analysi
 }
 
 fn span_within(inner: Span, outer: Span) -> bool {
-    (inner.start.row, inner.start.column) >= (outer.start.row, outer.start.column)
-        && (inner.end.row, inner.end.column) <= (outer.end.row, outer.end.column)
+    outer.contains(&inner)
 }
 
 

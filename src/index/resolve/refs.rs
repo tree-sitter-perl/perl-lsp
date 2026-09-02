@@ -562,8 +562,16 @@ fn walk_refs(
                 candidate_set = candidate_paths.iter().cloned().collect();
             }
             // Decode the candidate set in parallel before the sequential
-            // match: cold, decode was ~60% of the first answer.
-            idx.prefetch_refs(&candidate_paths);
+            // match: cold, decode was ~60% of the first answer. Workspace
+            // FileStore entries answer resident and are skipped; the
+            // prefetch's own cap means a candidate set past it decodes its
+            // tail serially, as before.
+            let to_warm: Vec<std::path::PathBuf> = candidate_paths
+                .iter()
+                .filter(|p| !covered_paths.contains(*p) && !files.workspace_raw().contains_key(*p))
+                .cloned()
+                .collect();
+            idx.prefetch_refs(&to_warm);
             for path in candidate_paths {
                 if covered_paths.contains(&path) {
                     continue;

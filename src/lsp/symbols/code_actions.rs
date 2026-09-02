@@ -333,7 +333,8 @@ fn make_import_type_actions(analysis: &FileAnalysis, uri: &Url, diag: &Diagnosti
                 .max();
             match after_package {
                 Some(l) => (l, "\n"),
-                None => (1, ""),
+                // after the open tag and any `declare(...)` row
+                None => (analysis.pack.preamble_end.map_or(1, |r| r + 1), "\n"),
             }
         }
     };

@@ -202,6 +202,14 @@ impl Namespace {
 /// it and never re-derives presentation from the detail. Kind-semantic
 /// facts (`is_constant`, `opaque_return`, `lexical`) stay on
 /// `SymbolDetail` — they change behavior, not rendering.
+impl Span {
+    /// `other` lies within this span (inclusive at both ends).
+    pub fn contains(&self, other: &Span) -> bool {
+        (self.start.row, self.start.column) <= (other.start.row, other.start.column)
+            && (other.end.row, other.end.column) <= (self.end.row, self.end.column)
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Presentation {
     /// Suppress this symbol in listing views. Set for presentation

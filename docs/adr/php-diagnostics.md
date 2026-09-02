@@ -101,6 +101,10 @@ Every lane names the case it cannot see and stays silent there:
   dependency's declaration answers through `symbols_present`. Members
   read the resolved owner symbol; functions and classes look up the leaf
   locally, then across the visible candidates.
+- **The global namespace** (an absolute name, a namespace-less file) is
+  the builtins we carry no stubs for — silent, except a leaf the
+  workspace declares under a namespace and nowhere global: that is a
+  real type missing its import, and reports with its candidates.
 - **An undefined type is a quick-fix**: the diagnostic carries every
   namespace that declares the leaf (`data.candidates`, the same set the
   existence test reads), and `codeAction` offers one import per

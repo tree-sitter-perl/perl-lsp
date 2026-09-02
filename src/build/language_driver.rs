@@ -1315,6 +1315,7 @@ fn remap_spans(
         member_writes,
         import_rows,
         import_template: _,
+        preamble_end: _,
         imports_bind_names: _,
         doc_mentions: _,
         // language-wide facts, no spans to remap.

@@ -521,7 +521,10 @@ pub fn open_and_load_diag(
 /// back to the full per-call policy, whose RW recovery genuinely needs fresh
 /// opens and whose failure discrimination the residency tripwire reads.
 /// The fallback re-runs the readonly probe (a genuine miss pays ~one extra
-/// open); hits are the overwhelming population and hits pay zero.
+/// open); hits are the overwhelming population and hits pay zero. A row
+/// that fetches but fails to decode takes the same fallback (the decode
+/// runs outside the lock, so the retained connection cannot try the next
+/// spelling for it) — a corrupt blob, never the hot path.
 ///
 /// WHY the blob lane may ride a retained connection even though
 /// `load_one_diag`'s single-row path skips stamp validation (its caller

@@ -72,6 +72,7 @@ impl FileAnalysis {
                     class_literal_member: _class_literal_member, // pack-wide convention
                     import_rows: _import_rows, // editing aid, not cross-file-visible
                     import_template: _import_template, // pack-wide convention
+                    preamble_end: _preamble_end, // an editing aid
                     imports_bind_names: _imports_bind_names, // pack-wide convention
                     doc_mentions: _doc_mentions, // a file-local lint fact
                     types_are_capitalized: _types_are_capitalized, // pack-wide convention

@@ -45,6 +45,9 @@ pub struct PackFacts {
     /// empty when the language has no import quick-fix.
     #[serde(default)]
     pub import_template: String,
+    /// The last row of the file preamble (open tag, `declare` rows).
+    #[serde(default)]
+    pub preamble_end: Option<usize>,
     /// Import rows bind names the file spells (php), so a row nothing
     /// spells is unused; false for text-splicing includes.
     #[serde(default)]

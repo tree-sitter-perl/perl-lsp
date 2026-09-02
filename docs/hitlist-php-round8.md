@@ -85,7 +85,8 @@ SELECT and the zstd + bincode decode — inside `RetainedReader::with`,
 i.e. under the one retained connection's mutex (`blob.rs`,
 `open_and_load_diag_retained`), so every concurrent decode queues on it.
 The lever is to hold the lock for the byte fetch only and decode outside
-it; the prefetch is worth re-measuring after that. Fewer bytes per
+it — done, and the prefetch then measured 174 / 194 / 189 ms cold against
+229 / 209 / 237 without it (`bench/RESULTS.md`). Fewer bytes per
 decode (the 10 rows→whole upgrades, baked match verdicts) is the other
 half. `module_declaring_method_in_package` runs 382 times to
 conclude nothing each time — cheap here (0.2 ms), a memo candidate at

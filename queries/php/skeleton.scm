@@ -215,6 +215,11 @@
 (catch_clause
   name: (variable_name) @def.var.name @def.var)
 
+; The file preamble an import may not precede: the open tag and
+; `declare(...)` rows (php requires `declare(strict_types=1)` first).
+(php_tag) @preamble
+(declare_statement) @preamble
+
 ; ---- imports ----
 (namespace_use_declaration
   (namespace_use_clause (qualified_name) @import.name)) @import

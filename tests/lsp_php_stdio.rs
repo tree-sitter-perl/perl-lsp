@@ -152,6 +152,7 @@ fn php_import_class_code_action_over_stdio() {
     let dir = std::env::temp_dir().join(format!("perl-lsp-d2import-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(dir.join("src/Util")).unwrap();
+    std::fs::create_dir_all(dir.join("bin")).unwrap();
     let w = |rel: &str, src: &str| std::fs::write(dir.join(rel), src).unwrap();
     w("composer.json", "{\"autoload\": {\"psr-4\": {\"App\\\\\": \"src/\"}}}");
     w("src/Util/Helper.php", "<?php\nnamespace App\\Util;\n\nclass Helper\n{\n    public static function go(): int { return 1; }\n}\n");
@@ -185,6 +186,29 @@ fn php_import_class_code_action_over_stdio() {
     // after the `use App\Mailer;` row (line 3): line 4
     assert_eq!(edit["range"]["start"]["line"], 4, "{edit}");
     assert_eq!(edit["range"]["start"]["character"], 0, "{edit}");
+    // a namespace-less script with `declare(strict_types=1)`: the import goes
+    // after the preamble, never before the declare
+    let script = "<?php\ndeclare(strict_types=1);\n\nHelper::go();\n";
+    w("bin/run.php", script);
+    let run_uri = uri(&dir.join("bin/run.php"));
+    c.notify("textDocument/didOpen", serde_json::json!({"textDocument": {"uri": run_uri, "languageId": "php", "version": 1, "text": script}}));
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    let mut sdiag: Option<serde_json::Value> = None;
+    while std::time::Instant::now() < deadline && sdiag.is_none() {
+        c.request("textDocument/documentSymbol", serde_json::json!({"textDocument": {"uri": run_uri}}));
+        sdiag = c.notes.iter().filter(|n| n["method"] == "textDocument/publishDiagnostics" && n["params"]["uri"] == run_uri)
+            .flat_map(|n| n["params"]["diagnostics"].as_array().cloned().unwrap_or_default())
+            .find(|d| d["code"] == "undefined-type");
+        if sdiag.is_none() {
+            std::thread::sleep(std::time::Duration::from_millis(250));
+        }
+    }
+    let sdiag = sdiag.expect("no undefined-type diagnostic on the script");
+    let actions = c.request("textDocument/codeAction", serde_json::json!({"textDocument": {"uri": run_uri}, "range": sdiag["range"], "context": {"diagnostics": [sdiag]}}));
+    let import = actions.as_array().and_then(|a| a.iter().find(|x| x["title"] == "Add 'use App\\Util\\Helper;'").cloned()).unwrap_or_else(|| panic!("{actions}"));
+    let edit = &import["edit"]["changes"][&run_uri][0];
+    assert_eq!(edit["range"]["start"]["line"], 2, "after the declare row: {edit}");
+    assert_eq!(edit["newText"], "\nuse App\\Util\\Helper;\n", "{edit}");
     // the fixture's `use App\Mailer;` is never spelled: an unnecessary-tagged
     // hint with a row-deleting quick-fix
     let unused = c.notes.iter().filter(|n| n["method"] == "textDocument/publishDiagnostics" && n["params"]["uri"] == svc)
