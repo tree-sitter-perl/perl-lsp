@@ -51,6 +51,6 @@
   arguments: (arguments
     . (argument)
     . (argument (array_creation_expression
-        . (array_element_initializer (variable_name) @member.recv)
-        . (array_element_initializer (string (string_content) @ref.method.named)))))
+        . (array_element_initializer . (variable_name) @member.recv .)
+        . (array_element_initializer . (string (string_content) @ref.method.named) .))))
   (#any-of? @_wphook_m "add_action" "add_filter" "remove_action" "remove_filter"))

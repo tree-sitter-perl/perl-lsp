@@ -372,19 +372,23 @@
 ; and the string content mints the method ref — the array($this, 'm')
 ; shape with a class receiver. Language convention, not framework
 ; vocabulary, so it lives in the base skeleton.
+; Each element must be BARE (`. (x) .` inside the initializer): a keyed
+; pair `'book' => $chapter->book` also contains a string and a receiver,
+; and a two-pair view-data array read as a callable — its key token
+; became a method reference a rename would rewrite.
 (array_creation_expression
   . (array_element_initializer
-      (class_constant_access_expression
+      . (class_constant_access_expression
         . (name) @member.recv
-        (name) @_ccls .))
-  . (array_element_initializer (string (string_content) @ref.method.named)) .
+        (name) @_ccls .) .)
+  . (array_element_initializer . (string (string_content) @ref.method.named) .) .
   (#eq? @_ccls "class"))
 (array_creation_expression
   . (array_element_initializer
-      (class_constant_access_expression
+      . (class_constant_access_expression
         . (qualified_name (name) @member.recv)
-        (name) @_cclsq .))
-  . (array_element_initializer (string (string_content) @ref.method.named)) .
+        (name) @_cclsq .) .)
+  . (array_element_initializer . (string (string_content) @ref.method.named) .) .
   (#eq? @_cclsq "class"))
 
 ; `[$this, 'method']` / `[$listener, 'method']` — the instance-array
@@ -392,8 +396,8 @@
 ; the string names the method. Event listeners and PHPUnit callbacks live
 ; here; a rename that misses them breaks the dispatch at runtime.
 (array_creation_expression
-  . (array_element_initializer (variable_name) @member.recv)
-  . (array_element_initializer (string (string_content) @ref.method.named)) .)
+  . (array_element_initializer . (variable_name) @member.recv .)
+  . (array_element_initializer . (string (string_content) @ref.method.named) .) .)
 
 ; `static::$records` / `self::$records` / `Foo::$prop` — scoped STATIC
 ; property access rides the same member lane (`static::$prop`
