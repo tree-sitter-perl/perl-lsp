@@ -98,11 +98,24 @@ segments), heatmap counts on guzzle/demo byte-identical to round 4.
 
 ## OPEN — next slices
 
-### R5-4 (MAJOR) — `--heatmap` on 1232 files: ~2 min cold AND warm
-E: `Modules: 0 cached` both runs — the sweep never reads the warm blob
-cache. Attribute with `PERL_LSP_PHASE_TIMING` before touching anything —
-on a QUIET box: an attribution run alongside a test net exceeded 10 min
-and measured the contention, not the verb.
+### R5-4 (MAJOR, PARTIAL) — `--heatmap` on 1232 files: ~2 min cold AND warm
+Attributed 2026-09-02 (phpMyAdmin, 1232 php files, quiet box, one run each):
+indexing is 3.0 s cold / 0.2 s warm; the rest is the per-symbol
+`references()` walk — 9,707 walks for 7,282 listed symbols, ~14 ms each.
+`Modules: 0 cached` is the Perl @INC line and is irrelevant here.
+LANDED: the pack tier now pre-prunes from its own row store (it never had
+the hub's prune — the comment believed pack refs were absent from the row
+store; the pack persist writer shreds them): walks 9,707 → 5,771, cold
+2m29s → 2m03s, warm 2m20s → 1m58s, every fan-in identical (7,282 rows, 0
+differing, resident-only walk vs pruned). A constructor counts its class
+key as a reference row (its references are the `new` sites).
+OPEN: the remaining 5,771 walks are names with SOME reference row
+somewhere; each still costs ~20 ms (candidate retrieval + matcher on
+rehydrated files). Next levers, in order: per-query `ref_candidate_files`
+narrowing for the pack tier (rows are `(name, file)` pairs, so a walk can
+skip files holding no row for the name), then the matcher's per-file
+`ScopedLookup` construction (`leaf_namespace_pins` scans refs + symbols
+per scanned file per walk — memoize per file across one heatmap run).
 
 ### R5-5 (design, open for the user) — union types
 D4: `list<A|B>` (a union INSIDE a generic) kills element typing for the
