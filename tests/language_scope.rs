@@ -1425,7 +1425,10 @@ fn php_untyped_reassignment_resets_the_receiver() {
     // `d()` returns `Err` on one arm and, on the other, a variable reset by
     // an untyped call: the arms disagree, so `$w` is untyped and `$w->ID`
     // stays silent (the WordPress `get_term()` shape).
-    w("src/A.php", "<?php\nnamespace App;\nclass Err { public function code(): int { return 1; } }\nclass User { public int $ID = 0; }\nfunction signon() { return $_SERVER['u']; }\nfunction d(int $t) { if ($t) { return new Err(); } $_t = new User(); $_t = signon(); return $_t; }\nfunction f(bool $b): int\n{\n    $u = new Err();\n    if ($b) { $u = new Err(); }\n    $u = signon();\n    $k = new Err();\n    $k = new User();\n    $w = d(1);\n    return $u->ID + $k->ID + $k->nope + $w->ID;\n}\n");
+    // `u()` documents a union and returns one arm: the doc is the
+    // answer (known untypable), so `$p->nope` stays silent; a typed
+    // reassignment to an array ends the class (`$q->nope` silent too).
+    w("src/A.php", "<?php\nnamespace App;\nclass Err { public function code(): int { return 1; } }\nclass User { public int $ID = 0; }\nfunction signon() { return $_SERVER['u']; }\nfunction d(int $t) { if ($t) { return new Err(); } $_t = new User(); $_t = signon(); return $_t; }\n/** @return User|Err */\nfunction u() { return new User(); }\nfunction f(bool $b): int\n{\n    $u = new Err();\n    if ($b) { $u = new Err(); }\n    $u = signon();\n    $k = new Err();\n    $k = new User();\n    $w = d(1);\n    $p = u();\n    $q = new Err();\n    $q = ['a' => 1];\n    return $u->ID + $k->ID + $k->nope + $w->ID + $p->nope + $q->nope;\n}\n");
     let out = std::process::Command::new(env!("CARGO_BIN_EXE_perl-lsp"))
         .args(["--check", dir.to_str().unwrap()])
         .env("XDG_CACHE_HOME", dir.join(".cache"))

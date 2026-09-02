@@ -2546,6 +2546,15 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                                 sym.receiver_instance_of = Some(base.clone());
                             }
                         }
+                        DocFact::ReturnUntypable => {
+                            // The author documented a union: the value is
+                            // known untypable, and a call, a copy or a return
+                            // arm reading it carries that on (the boundary
+                            // scrub hides it from every renderer).
+                            if sym.return_type.is_none() && !sym.receiver_return {
+                                sym.return_type = Some(InferredType::Unknown);
+                            }
+                        }
                         DocFact::Return(t) => {
                             // A doc row fills an undeclared return, and REFINES
                             // a bare declared container (`: array` +

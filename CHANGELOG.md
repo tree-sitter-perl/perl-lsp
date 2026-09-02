@@ -319,7 +319,11 @@ templates). Market case and build-out plan in `docs/prompt-php-target.md`.
   an undefined property — in Perl and PHP alike, a reassignment whose
   value cannot be typed resets the variable instead of standing aside.
   A function whose arms return two different classes no longer reports
-  whichever came last as its return type.
+  whichever came last as its return type, a documented union return
+  (`@return WP_Term|WP_Error`) is honoured as "cannot be typed" instead
+  of letting the body's arms elect one member, and a reassignment to a
+  typed value (`$r = json_decode(...)` after `$r = new WP_Error(...)`)
+  ends the earlier class rather than the class outranking it.
 - **A php value read never means a method.** `$this->session` on a
   class declaring only `session()` is an undeclared property for the
   lane, goto-def and hover alike (Perl's accessor calls keep their

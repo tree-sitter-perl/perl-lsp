@@ -216,6 +216,9 @@ $y = Foo->new;
 $y->m;
 sub g { my $o = Foo->new; $o = compute($o); return $o }
 sub h { my $o = Foo->new; return $o }
+my $z = Foo->new;
+$z = {};
+$z->{k};
 "#;
     let fa = build_fa(src);
     let class_at = |var: &str, row: usize| {
@@ -234,6 +237,13 @@ sub h { my $o = Foo->new; return $o }
     };
     assert_eq!(ret("h"), Some("Foo".into()));
     assert_eq!(ret("g"), None, "a reset arm is unknown, not the earlier class");
+    // A TYPED reassignment resets too: the class axis does not outlive
+    // `$z = {}` just because a class beats a rep in any order.
+    assert_eq!(class_at("$z", 16), None, "a hash reassignment ends the class");
+    assert_eq!(
+        fa.inferred_type_via_bag("$z", Point::new(16, 0)),
+        Some(InferredType::HashRef)
+    );
 }
 
 /// The honest boundary: a helper name that is NOT statically decidable —

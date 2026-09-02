@@ -883,24 +883,13 @@ impl<'a> Builder<'a> {
         reassigns: bool,
     ) {
         let scope = self.scope_at_point(at);
-        // For a REASSIGNMENT "already typed" means by this statement: a
-        // witness within its extent (the eager TC at the assignment). A
-        // type from an earlier statement is no reason to skip — the edge is
-        // what records that the assignment happened, and an untypable source
-        // then resets the variable (`FlowEdge::reassigns`). A declaration
-        // keeps the wider gate: its companions land anywhere in the scope.
-        let already_typed = if reassigns {
-            let att = crate::model::witnesses::WitnessAttachment::Variable {
-                name: name.clone(),
-                scope,
-            };
-            self.bag
-                .for_attachment(&att)
-                .iter()
-                .any(|w| at <= w.span.start && w.span.start <= source.end)
-        } else {
-            self.bag_query_variable(&name, scope, at).is_some()
-        };
+        // A REASSIGNMENT always lowers: its edge is the reset point the
+        // fold keys on (`FlowEdge::reassigns`), whatever the walk's eager TC
+        // for the same statement said — the two agree, or the refined TC
+        // subsumes the edge's re-derived shape. A declaration keeps the
+        // gate: its companions land anywhere in the scope, and a typed
+        // declaration needs no fallback edge.
+        let already_typed = !reassigns && self.bag_query_variable(&name, scope, at).is_some();
         let fe = crate::model::file_analysis::FlowEdge {
             target_name: name,
             target_scope: scope,

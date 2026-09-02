@@ -437,6 +437,11 @@ pub struct CallShape {
 pub enum DocFact {
     /// `@return T` — the documented return of the def below the comment.
     Return(String),
+    /// `@return A|B` — a documented return this lattice cannot hold. The
+    /// author DID say what comes back; the answer is "known untypable"
+    /// (`InferredType::Unknown`), not "no evidence" — otherwise the body's
+    /// resolvable arms would elect one member of the union.
+    ReturnUntypable,
     /// `@param T $name` — a documented parameter type; `name` carries the
     /// language's own spelling (php keeps the `$`).
     Param { name: String, ty: String },
@@ -1380,6 +1385,8 @@ fn php_doc_types(text: &str) -> Vec<DocFact> {
                 out.push(DocFact::ReturnRecvInstance { base });
             } else if let Some(t) = phpdoc_type(rest) {
                 out.push(DocFact::Return(t));
+            } else if phpdoc_is_union(rest) {
+                out.push(DocFact::ReturnUntypable);
             }
         } else if let Some(rest) = l.strip_prefix("@template ")
             .or_else(|| l.strip_prefix("@template-covariant "))
@@ -1542,6 +1549,17 @@ fn phpdoc_split_top_level(s: &str, sep: char) -> Vec<&str> {
     }
     out.push(&s[start..]);
     out
+}
+
+/// Two or more non-null arms at the top level (`WP_Term|WP_Error`,
+/// `int|string`): a union `phpdoc_type` declines. `A|null` is ONE arm and
+/// never a union here.
+fn phpdoc_is_union(raw: &str) -> bool {
+    let raw = raw.trim_start();
+    let raw = raw[..phpdoc_type_token_end(raw)].trim_start_matches('?');
+    let mut arms = phpdoc_split_top_level(raw, '|');
+    arms.retain(|a| !a.eq_ignore_ascii_case("null") && !a.is_empty());
+    arms.len() > 1
 }
 
 fn phpdoc_type(raw: &str) -> Option<String> {

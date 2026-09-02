@@ -182,17 +182,22 @@ impl WitnessReducer for FrameworkAwareTypeFold {
         let mut plain_type: Option<InferredType> = None;
         let mut plain_type_priority: u8 = 0;
 
-        // A reassignment to an untypable value (`InferredType::Unknown`,
-        // minted by `materialize` for a failed reassign edge) is a temporal
-        // RESET: at the query point, every binding strictly before the
-        // latest such rebind is dead — the class axis included, which
-        // otherwise wins in any order. Companions minted at the same site
-        // survive, and observations after it accrue as usual; with nothing
-        // after it the answer IS `Unknown`, so a chase that reads the
-        // variable carries the reset on instead of falling back.
+        // A REASSIGNMENT (`REASSIGN_FLOW_SOURCE`, zero-width at its site —
+        // materialized to what it produced, or to `InferredType::Unknown`
+        // when its source could not be typed) is a temporal RESET: at the
+        // query point, every binding strictly before the latest one is dead
+        // — the class axis included, which otherwise wins in any order, so
+        // `$r = new WP_Error; $r = json_decode(..)` reads as the array.
+        // Companions minted at the same site survive, and observations
+        // after it accrue as usual; with nothing typed after it the answer
+        // IS `Unknown`, so a chase that reads the variable carries the
+        // reset on instead of falling back.
         let reset_at = ws
             .iter()
-            .filter(|w| matches!(w.payload, WitnessPayload::InferredType(InferredType::Unknown)))
+            .filter(|w| {
+                w.span.start == w.span.end
+                    && matches!(&w.source, WitnessSource::Builder(t) if t == REASSIGN_FLOW_SOURCE)
+            })
             .map(|w| w.span.start)
             .filter(|s| narrow_point.map_or(true, |p| *s <= p))
             .max();
