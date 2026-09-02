@@ -115,13 +115,15 @@ per-walk axis construction and the member-shape gate added (~25 s), and
 438 of 7,282 fan-ins differ between the two binaries, all the same-leaf
 separations the axis exists for (`tests/unit/Stubs/ResponseRenderer.php
 ::response` 520 → 12: the stub's own sites, no longer the real class's).
+Memoizing each file's use-map pins per analysis (the walk built an axis
+per scanned file per query) takes warm to 1m50s, fan-ins identical.
 OPEN: the remaining 5,771 walks are names with SOME reference row
-somewhere; each still costs ~20 ms (candidate retrieval + matcher on
-rehydrated files). Next levers, in order: per-query `ref_candidate_files`
-narrowing for the pack tier (rows are `(name, file)` pairs, so a walk can
-skip files holding no row for the name), then the matcher's per-file
-`ScopedLookup` construction (`leaf_namespace_pins` scans refs + symbols
-per scanned file per walk — memoize per file across one heatmap run).
+somewhere; each still costs ~19 ms — the same per-walk cost the
+pre-round-5 binary paid, i.e. the baseline matcher (candidate retrieval
+is already row-narrowed; the cost is rehydration + the per-ref match on
+each candidate). Next lever: attribute one walk with `ghost_stats`
+(`refs.matcher_upgrade` vs rows-view counts, `mroc.candidate_fetched`)
+before touching the matcher.
 
 ### R5-5 (design, open for the user) — union types
 D4: `list<A|B>` (a union INSIDE a generic) kills element typing for the
