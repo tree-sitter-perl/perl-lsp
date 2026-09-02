@@ -23,6 +23,7 @@ designs live in `docs/prompt-storage-residuals.md`.
 | [Union types in the lattice](#union-types-in-the-lattice--2026-09-02--open-claude) | 09-02 | `list<A|B>` / `A|B` returns: add a `Union` variant, pick an arm, or stay dark? |
 | [Dead-code queue vs library public API](#dead-code-queue-vs-library-public-api--2026-09-02--open-claude) | 09-02 | should `--heatmap` learn a library mode that never flags public members whose callers live out of tree? |
 | [Use-map pin with no indexed declaration answers empty](#use-map-pin-with-no-indexed-declaration-answers-empty--2026-09-02--open-claude) | 09-02 | when a php file `use`s a class no indexed file declares (vendor not indexed), should gd/hover answer nothing, or fall back to a same-leaf candidate from another namespace? |
+| [Relation properties typed from the relation's return generic](#relation-properties-typed-from-the-relations-return-generic--2026-09-02--open-claude) | 09-02 | should `@return BelongsTo<Book, $this>` type the magic property `->book` as `Book` by an engine rule ("to-one relation type's first argument"), or stay overlay-shaped (bare/one-modifier `belongsTo(X::class)` only)? |
 
 Format per entry:
 
@@ -319,3 +320,30 @@ Format per entry:
 - **Discussion needed:** is dark-but-honest the right default for an
   editor surface, or should the composer vendor tier be the answer
   (index what `use` names, then the question never arises)?
+
+---
+
+## Relation properties typed from the relation's return generic — 2026-09-02 — OPEN (Claude)
+- **Context:** round-6 R6-5. Eloquent's `__get` turns `book()` into a
+  property `->book` of the RELATED model. The laravel overlay mints that
+  property from the method body's shape (`return $this->belongsTo(Book::class)`,
+  now also behind one chained modifier). BookStack's declaration also
+  carries `@return BelongsTo<Book, $this>` — the related class is right
+  there in the docblock, independent of the body's shape (deeper chains,
+  `belongsTo` behind a helper, a relation defined by a trait).
+- **Options:** A — overlay-only, extend the body patterns as shapes turn
+  up (status quo; each new shape is a query edit). B — an engine rule
+  expressed as overlay DATA: the overlay declares "this class is a to-one
+  relation type; its first type argument is the property's type"
+  (`relation_types = { BelongsTo: 0, HasOne: 0, ... }`), and the property
+  witness reads the method's parametric return — shape-independent, but
+  the engine grows a "type argument N of a return type becomes a field
+  type" mechanism. C — both: the body shape when no docblock exists, the
+  generic when it does.
+- **Picked:** A for now (the chained-modifier pattern landed as data).
+- **Undo cost:** B is a small reducer-side change plus an overlay data
+  table; nothing persisted changes shape.
+- **Discussion needed:** is B's mechanism ("a declared relation type's
+  argument types a magic property") general enough to earn engine space
+  (Doctrine collections, Django managers would use it too), or is it
+  Laravel-specific enough to stay overlay-shaped?
