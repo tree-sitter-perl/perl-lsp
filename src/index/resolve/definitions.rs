@@ -1135,7 +1135,7 @@ impl<'a> CandidateSet<'a> {
                             let whole = idx.whole_present(&cached);
                             // A value read lands on the stored member first;
                             // the callable arm below stays its fallback.
-                            let field_sym = |whole: &FileAnalysis| {
+                            let field_sym = || {
                                 whole.symbols().iter().find(|s| {
                                     matches!(
                                         s.kind,
@@ -1146,7 +1146,7 @@ impl<'a> CandidateSet<'a> {
                                 }).map(|s| s.selection_span)
                             };
                             if shape == crate::model::file_analysis::MemberShape::Value {
-                                if let Some(span) = field_sym(&whole) {
+                                if let Some(span) = field_sym() {
                                     if Url::from_file_path(&cached.path).is_ok() {
                                         return vec![RefLocation {
                                             key: FileKey::Path(cached.path.clone()),

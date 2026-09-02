@@ -685,6 +685,8 @@ fn php_expression_receivers_dispatch_statically_and_class_refs_reach_every_spell
         let gd = run(&["--definition", root, "Box.php", &row.to_string(), &col.to_string()]);
         assert!(gd.contains("Helper.php:5:"), "static call on an expression receiver at {row}:{col}: {gd}");
     }
+    // `$cls` at its USE site (`$cls::make();`, row 10): the value assigned
+    // from `Helper::class` on row 9 reaches the read.
     let hover = run(&["--hover", root, "Box.php", "10", "9"]);
     assert!(hover.contains("Helper"), "`Helper::class` types the variable: {hover}");
     let make = lines(&run(&["--references", root, "Helper.php", "5", "28"]));
@@ -759,7 +761,7 @@ fn php_nested_generic_over_mixed_keeps_the_outer_shape() {
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(
         dir.join("Grid.php"),
-        "<?php\nnamespace App;\nclass Grid\n{\n    /** @var array<array<mixed>> */\n    private array $rows = [];\n    public function go(): void\n    {\n        foreach ($this->rows as $row) { $row; }\n    }\n}\n",
+        "<?php\nnamespace App;\nclass Grid\n{\n    /** @var array<array<mixed>> */\n    private array $rows = [];\n    /** @var array<mixed> */\n    private array $bag = [];\n    public function go(): void\n    {\n        foreach ($this->rows as $row) { $row; }\n    }\n}\n",
     )
     .unwrap();
     let run = |args: &[&str]| {
@@ -773,7 +775,11 @@ fn php_nested_generic_over_mixed_keeps_the_outer_shape() {
     let root = dir.to_str().unwrap();
     let prop = run(&["--hover", root, "Grid.php", "5", "19"]);
     assert!(prop.contains("list<array>"), "the outer generic survives: {prop}");
-    let row = run(&["--hover", root, "Grid.php", "8", "40"]);
+    let row = run(&["--hover", root, "Grid.php", "10", "40"]);
     assert!(row.contains("$row: array"), "the element is an array: {row}");
+    // A top-level `array<mixed>` IS the bare `array` shape (it used to type
+    // nothing); the display says so and nothing invents element keys.
+    let bag = run(&["--hover", root, "Grid.php", "7", "19"]);
+    assert!(bag.contains("bag: array") && !bag.contains("list"), "{bag}");
     let _ = std::fs::remove_dir_all(&dir);
 }

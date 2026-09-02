@@ -193,11 +193,14 @@ templates). Market case and build-out plan in `docs/prompt-php-target.md`.
   `new Foo()` sites, `Foo::class`, and bareword static receivers.
 - **Nested generics over `mixed`.** `@var array<array<mixed>>` types the
   loop element as an array instead of collapsing the whole annotation.
-- **`--heatmap` on PHP is faster and unchanged.** The PHP tier pre-prunes
-  its fan-in walk from its own reference rows (phpMyAdmin, 1,232 files:
-  warm 2m20s → 1m50s, every fan-in identical). Symfony Console
-  `Application` overrides (`getDefaultCommands`, `getLongVersion`, …)
-  count as framework entries.
+- **`--heatmap` on PHP: same answers, less work.** The PHP tier now
+  pre-prunes its fan-in walk from its own reference rows, and a file's
+  `use`-map is derived once per analysis instead of once per scanned
+  file per query. Net on phpMyAdmin (1,232 files): warm 1m57s before
+  this round's visibility work → 1m50s after it, every fan-in
+  identical to the unpruned walk. Symfony Console `Application`
+  overrides (`getDefaultCommands`, `getLongVersion`, …) count as
+  framework entries.
 - **`self::CONST` in property defaults resolves.**
   `protected string $fmt = self::FORMAT;` — goto-def and references
   on the class-level initializer now answer like the method-body
