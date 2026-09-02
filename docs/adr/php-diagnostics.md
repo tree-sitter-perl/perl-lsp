@@ -93,6 +93,14 @@ Every lane names the case it cannot see and stays silent there:
   `#include` splices text. Constant imports (no lowercase letter) are
   silent — the walker records no spelling for them. The quick-fix deletes
   the row when it binds only that name.
+- **A deprecated declaration** (`deprecated`, a hint tagged deprecated)
+  flags each use: the declaration's `@deprecated [text]` or the pack's
+  deprecation attribute (`LangPack::deprecated_attribute`, php
+  `#[Deprecated]`) lands as the `deprecated` symbol attribute with the
+  notice in `Presentation::deprecation`; both ride the symbols axis, so a
+  dependency's declaration answers through `symbols_present`. Members
+  read the resolved owner symbol; functions and classes look up the leaf
+  locally, then across the visible candidates.
 - **An undefined type is a quick-fix**: the diagnostic carries every
   namespace that declares the leaf (`data.candidates`, the same set the
   existence test reads), and `codeAction` offers one import per

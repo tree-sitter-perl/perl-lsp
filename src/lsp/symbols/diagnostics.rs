@@ -922,6 +922,9 @@ pub fn pack_symbol_diagnostics(
             }
             Some(MethodResolution::Local { sym_id, .. }) => {
                 let sym = owner.symbol(sym_id);
+                if let Some(text) = deprecation_of(sym) {
+                    out.push(deprecated_diag(r.span, name, &text));
+                }
                 // non-public member reached from outside its class — unless
                 // from inside a closure, whose `$this` may be rebound to the
                 // owner (`Closure::bind`, `->call($obj)`: the private-access
@@ -960,6 +963,32 @@ pub fn pack_symbol_diagnostics(
                 }
             }
             Some(MethodResolution::CrossFile { .. }) => {}
+        }
+    }
+
+    // ---- deprecated functions and classes, local or cross-file ----
+    for r in analysis.refs() {
+        let (leaf, want_class) = match r.kind {
+            RefKind::FunctionCall => (r.unqualified_target_name(), false),
+            RefKind::PackageRef => (r.unqualified_target_name(), true),
+            _ => continue,
+        };
+        if leaf.is_empty() || analysis.pack.import_row_covering(&r.span).is_some() {
+            continue;
+        }
+        let is_kind = |s: &crate::model::file_analysis::Symbol| {
+            if want_class { matches!(s.kind, FaSymKind::Class) } else { matches!(s.kind, FaSymKind::Sub) }
+        };
+        let local = analysis.symbols_named(leaf).iter().map(|&sid| analysis.symbol(sid)).find(|s| is_kind(s)).and_then(deprecation_of);
+        let found = local.or_else(|| {
+            let i = idx?;
+            i.visible_def_candidates(leaf).into_iter().find_map(|c| {
+                let a = i.symbols_present(&c);
+                a.symbols_named(leaf).iter().map(|&sid| a.symbol(sid)).find(|s| is_kind(s)).and_then(deprecation_of)
+            })
+        });
+        if let Some(text) = found {
+            out.push(deprecated_diag(r.span, leaf, &text));
         }
     }
 
@@ -1182,6 +1211,31 @@ pub fn pack_symbol_diagnostics(
         }
     }
     out
+}
+
+/// A deprecated declaration's notice: `Some(text)` when the `deprecated`
+/// attribute is set (the text may be absent), `None` otherwise.
+fn deprecation_of(sym: &crate::model::file_analysis::Symbol) -> Option<Option<String>> {
+    sym.attributes
+        .iter()
+        .any(|a| a == "deprecated")
+        .then(|| sym.presentation.deprecation.clone())
+}
+
+/// The deprecated-tagged hint at a use site.
+fn deprecated_diag(span: Span, name: &str, text: &Option<String>) -> Diagnostic {
+    Diagnostic {
+        range: span_to_range(span),
+        severity: Some(DiagnosticSeverity::HINT),
+        code: Some(NumberOrString::String("deprecated".to_string())),
+        source: Some("perl-lsp".to_string()),
+        message: match text {
+            Some(t) => format!("'{name}' is deprecated: {t}"),
+            None => format!("'{name}' is deprecated."),
+        },
+        tags: Some(vec![DiagnosticTag::DEPRECATED]),
+        ..Default::default()
+    }
 }
 
 /// Every namespace declaring a type named `leaf`: this file's own

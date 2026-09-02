@@ -238,6 +238,7 @@ impl<'a> Builder<'a> {
                 *self.presentation_mut(sid) = crate::model::file_analysis::Presentation {
                     hide_in_outline,
                     doc: None,
+                    deprecation: None,
                     display,
                     label: outline_label,
                 };
@@ -332,6 +333,7 @@ impl<'a> Builder<'a> {
                 *self.presentation_mut(sid) = crate::model::file_analysis::Presentation {
                     hide_in_outline,
                     doc: None,
+                    deprecation: None,
                     display: Some(display),
                     label: outline_label,
                 };
@@ -443,6 +445,7 @@ impl<'a> Builder<'a> {
                 *self.presentation_mut(sid) = crate::model::file_analysis::Presentation {
                     hide_in_outline,
                     doc: None,
+                    deprecation: None,
                     display,
                     label: None,
                 };

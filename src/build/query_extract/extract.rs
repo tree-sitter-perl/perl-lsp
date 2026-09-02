@@ -990,6 +990,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                     arity: None,
                     qualifier_owned: false,
                     doc: None,
+                    deprecation: None,
                 });
             }
             cap if cap.ends_with(".anchor") => {
@@ -1143,6 +1144,13 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                     attributes: {
                         let mut a =
                             attrs_by_match.get(&e.match_id).cloned().unwrap_or_default();
+                        // `#[Deprecated]` is the attribute spelling of `@deprecated`
+                        if !pack.deprecated_attribute.is_empty()
+                            && a.iter().any(|x| x == pack.deprecated_attribute)
+                            && !a.iter().any(|x| x == "deprecated")
+                        {
+                            a.push("deprecated".to_string());
+                        }
                         // a default-named symbol is structure, not an
                         // addressable name — completion skips it.
                         if defaulted {
@@ -1154,6 +1162,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                     // `@arity.sig` match fires separately from this def name.
                     arity: None,
                     doc: None,
+                    deprecation: None,
                     qualifier_owned: qualifier_by_match.contains_key(&e.match_id),
                 });
             }
@@ -1959,6 +1968,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                             arity: None,
                             qualifier_owned: false,
                             doc: None,
+                            deprecation: None,
                         });
                     }
                 }
@@ -2450,6 +2460,10 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                             sym.doc = Some(d.clone());
                             continue;
                         }
+                        if let DocFact::Deprecated(t) = f {
+                            mark_deprecated(sym, t.clone());
+                            continue;
+                        }
                         if let DocFact::Method { name, ret, line, col } = f {
                             // Span = the method NAME TOKEN in the fact's own
                             // `@method` line: a distinct gd/cursor target per
@@ -2480,6 +2494,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                                 arity: None,
                                 qualifier_owned: false,
                                 doc: None,
+                                deprecation: None,
                             });
                         }
                     }
@@ -2503,6 +2518,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                                 sym.doc = Some(d.clone());
                             }
                         }
+                        DocFact::Deprecated(t) => mark_deprecated(sym, t.clone()),
                         DocFact::ReturnRecvInstance { base } => {
                             if sym.return_type.is_none()
                                 && !sym.receiver_return
@@ -3107,6 +3123,17 @@ fn byte_range_of(events: &[Event], match_id: usize, cap: &str) -> Option<(usize,
 /// enclosing class as this, not the namespace), and the receiver name
 /// (`$this`) is witnessed as an instance of it, so every chain based on
 /// the receiver resolves through the registry like any typed variable.
+/// The one spelling of "this declaration is deprecated": the attribute the
+/// lane reads, plus the notice hover and the diagnostic show.
+fn mark_deprecated(sym: &mut crate::build::query_extract::SkelSymbol, text: Option<String>) {
+    if !sym.attributes.iter().any(|a| a == "deprecated") {
+        sym.attributes.push("deprecated".to_string());
+    }
+    if text.is_some() || sym.deprecation.is_none() {
+        sym.deprecation = text;
+    }
+}
+
 fn register_class_body(
     out: &mut SkeletonAnalysis,
     pack: &crate::build::query_extract::LangPack,

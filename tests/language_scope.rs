@@ -1269,3 +1269,68 @@ fn php_phpunit_mocks_type_as_the_doubled_class() {
     assert!(def.contains("src/Foo.php:4:"), "{def}");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+
+/// The deprecation lane: `@deprecated` (with and without text) and the
+/// `#[Deprecated]` attribute on a method, a function and a class, used from
+/// another file — each use is a deprecated-tagged hint; nothing else is.
+#[cfg(feature = "php")]
+#[test]
+fn php_deprecation_lane_flags_every_use_of_a_deprecated_declaration() {
+    let dir = std::env::temp_dir().join(format!("perl-lsp-d2depr-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    let w = |rel: &str, src: &str| std::fs::write(dir.join(rel), src).unwrap();
+    w("composer.json", "{\"autoload\": {\"psr-4\": {\"App\\\\\": \"src/\"}}}");
+    w("src/Legacy.php", "<?php\nnamespace App;\n\n/** @deprecated use Modern instead */\nclass Legacy\n{\n    /** @deprecated */\n    public function old(): int { return 1; }\n    #[Deprecated]\n    public function older(): int { return 2; }\n    public function fine(): int { return 3; }\n}\n\n/** @deprecated since 2.0 */\nfunction legacy_helper(): int { return 4; }\nfunction fine_helper(): int { return 5; }\n");
+    w("src/Caller.php", "<?php\nnamespace App;\n\nclass Caller\n{\n    public function run(Legacy $l): int\n    {\n        return $l->old() + $l->older() + $l->fine() + legacy_helper() + fine_helper();\n    }\n}\n");
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_perl-lsp"))
+        .args(["--check", dir.to_str().unwrap(), "--severity", "hint"])
+        .env("XDG_CACHE_HOME", dir.join(".cache"))
+        .output()
+        .expect("run");
+    let err = String::from_utf8_lossy(&out.stderr);
+    let rows: Vec<&str> = err.lines().filter(|l| l.contains("[deprecated]") && l.contains("Caller.php")).collect();
+    let has = |needle: &str| rows.iter().any(|l| l.contains(needle));
+    assert!(has("'old' is deprecated."), "{err}");
+    assert!(has("'older' is deprecated."), "{err}");
+    assert!(has("'legacy_helper' is deprecated: since 2.0"), "{err}");
+    assert!(has("'Legacy' is deprecated: use Modern instead"), "{err}");
+    assert!(!has("fine"), "{rows:?}");
+    assert_eq!(rows.len(), 4, "{rows:?}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+
+/// A property typed by what the constructor writes to it — no declared
+/// type, no docblock: `$this->mailer = new Mailer()` types `$this->mailer`
+/// for every reader in the class.
+#[cfg(feature = "php")]
+#[test]
+fn php_properties_are_typed_by_assignment() {
+    let dir = std::env::temp_dir().join(format!("perl-lsp-d2assign-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    let w = |rel: &str, src: &str| std::fs::write(dir.join(rel), src).unwrap();
+    w("composer.json", "{\"autoload\": {\"psr-4\": {\"App\\\\\": \"src/\"}}}");
+    w("src/Mailer.php", "<?php\nnamespace App;\nclass Mailer\n{\n    public function send(): bool { return true; }\n}\n");
+    let svc = "<?php\nnamespace App;\nclass Service\n{\n    private $mailer;\n    public function __construct()\n    {\n        $this->mailer = new Mailer();\n    }\n    public function run(): bool\n    {\n        return $this->mailer->send();\n    }\n}\n";
+    w("src/Service.php", svc);
+    let lines: Vec<&str> = svc.lines().collect();
+    let run = |args: &[&str]| {
+        let out = std::process::Command::new(env!("CARGO_BIN_EXE_perl-lsp"))
+            .args(args)
+            .env("XDG_CACHE_HOME", dir.join(".cache"))
+            .output()
+            .expect("run");
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+    let root = dir.to_str().unwrap();
+    let col = lines[11].find("mailer->").unwrap();
+    let hover = run(&["--hover", root, "src/Service.php", "11", &col.to_string()]);
+    assert!(hover.contains("mailer: Mailer"), "{hover}");
+    let col = lines[11].find("send()").unwrap();
+    let def = run(&["--definition", root, "src/Service.php", "11", &col.to_string()]);
+    assert!(def.contains("src/Mailer.php:4:"), "{def}");
+    let _ = std::fs::remove_dir_all(&dir);
+}

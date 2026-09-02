@@ -50,6 +50,9 @@ pub struct SkelSymbol {
     /// Documentation text joined from the comment directly above the def
     /// (`DocFact::Description`); flows to `Presentation.doc`.
     pub doc: Option<String>,
+    /// `@deprecated` text (or `Some(None)`-less: the attribute form has
+    /// no text) — present iff the symbol carries the `deprecated` attribute.
+    pub deprecation: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -648,6 +651,7 @@ impl SkeletonAnalysis {
                     // here so warm stub rebuilds mint it identically.
                     hide_in_outline: s.attributes.iter().any(|a| a == "include_guard"),
                     doc: s.doc.clone(),
+                    deprecation: s.deprecation.clone(),
                     display: None,
                     label: None,
                 },

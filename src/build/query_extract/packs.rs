@@ -206,6 +206,10 @@ pub struct LangPack {
     /// as opposed to splicing text (`#include`). Only bound names can be
     /// unused.
     pub imports_bind_names: bool,
+    /// The attribute that marks a declaration deprecated (php
+    /// `#[Deprecated]`); empty = none. Lands as the `deprecated` symbol
+    /// attribute exactly like the docblock tag.
+    pub deprecated_attribute: &'static str,
     /// Type names start with a capital by convention, so an import row
     /// whose leaf starts lowercase names a function or constant, not a
     /// type (php's `use function A\b;` — the grammar parses it as a class
@@ -443,6 +447,9 @@ pub enum DocFact {
     /// the fact's own `@method` line (`line` = 0-based offset within the
     /// comment) so each row is a distinct, honest gd target.
     Method { name: String, ret: Option<String>, line: usize, col: usize },
+    /// `@deprecated [text]` — the declaration is deprecated; the text is
+    /// what the diagnostic shows.
+    Deprecated(Option<String>),
     /// `@template T [of X]` on a CLASS docblock — a declared generic
     /// parameter, in row order (`line` is the ordering key). Feeds the
     /// SAME per-class `template_params` axis cpp templates use, so a
@@ -531,6 +538,7 @@ pub fn perl_pack() -> LangPack {
         class_literal_member: "",
         import_template: "",
         imports_bind_names: false,
+        deprecated_attribute: "",
         types_are_capitalized: false,
         enum_members: &[],
         trigger_chars: &["$", "@", "%", ">", ":", "{"],
@@ -603,6 +611,7 @@ pub fn python_pack() -> LangPack {
         class_literal_member: "",
         import_template: "",
         imports_bind_names: false,
+        deprecated_attribute: "",
         types_are_capitalized: false,
         enum_members: &[],
         trigger_chars: &["."],
@@ -675,6 +684,7 @@ pub fn r_pack() -> LangPack {
         class_literal_member: "",
         import_template: "",
         imports_bind_names: false,
+        deprecated_attribute: "",
         types_are_capitalized: false,
         enum_members: &[],
         trigger_chars: &["$", "@", ":"],
@@ -755,6 +765,7 @@ pub fn cmake_pack() -> LangPack {
         class_literal_member: "",
         import_template: "",
         imports_bind_names: false,
+        deprecated_attribute: "",
         types_are_capitalized: false,
         enum_members: &[],
         trigger_chars: &["{", "("],
@@ -1027,6 +1038,7 @@ pub fn php_pack() -> LangPack {
         class_literal_member: "class",
         import_template: "use {};\n",
         imports_bind_names: true,
+        deprecated_attribute: "Deprecated",
         types_are_capitalized: true,
         enum_members: &["value", "name", "cases", "from", "tryFrom"],
         trigger_chars: &["$", ">", ":"],
@@ -1179,6 +1191,7 @@ pub fn cpp_pack() -> LangPack {
         class_literal_member: "",
         import_template: "",
         imports_bind_names: false,
+        deprecated_attribute: "",
         types_are_capitalized: false,
         enum_members: &[],
         trigger_chars: &[".", ">", ":"],
@@ -1416,6 +1429,9 @@ fn php_doc_types(text: &str) -> Vec<DocFact> {
                     });
                 }
             }
+        } else if l == "@deprecated" || l.starts_with("@deprecated ") {
+            let text = l["@deprecated".len()..].trim();
+            out.push(DocFact::Deprecated((!text.is_empty()).then(|| text.to_string())));
         } else if let Some(rest) = l.strip_prefix("@method ") {
             // `@method [static] T name(args)`; the type is optional
             // (`@method foo()`), the name token is whatever carries the

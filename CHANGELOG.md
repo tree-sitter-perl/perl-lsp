@@ -310,6 +310,13 @@ templates). Market case and build-out plan in `docs/prompt-php-target.md`.
   `getMockForAbstractClass`, a `getMockBuilder(Foo::class)->…->getMock()`
   chain, the `$this->foo = …` property form) types the target as `Foo`,
   so completion, goto-def, hover and the lanes reach the doubled class.
+- **Properties typed by assignment.** `$this->mailer = new Mailer()` in
+  a constructor types `$this->mailer` for every reader in the class,
+  with no declared type or docblock — chains through it resolve.
+- **Deprecations.** A use of a method, function or class whose
+  declaration carries `@deprecated [text]` or `#[Deprecated]` — in this
+  file, the workspace or a dependency — is a deprecated-tagged hint with
+  the notice.
 - **typeDefinition on member tokens.** `$this->mailer` and
   `$svc->getMailer()` jump to the member's type: a method's return, a
   field's declared type.

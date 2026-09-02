@@ -218,6 +218,10 @@ pub struct Presentation {
     /// the same comment ride the witness bag, never this string.
     #[serde(default)]
     pub doc: Option<String>,
+    /// The deprecation notice (`@deprecated text`), shown by the lane that
+    /// flags uses; the `deprecated` symbol attribute is the flag itself.
+    #[serde(default)]
+    pub deprecation: Option<String>,
     /// Plugin's final word on the LSP kind this symbol renders as
     /// (helper/route/task/event/…). Framework-synthesized entities
     /// resolve/complete/goto-def like regular symbols; `None` leaves
