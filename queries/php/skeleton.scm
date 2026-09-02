@@ -322,7 +322,7 @@
   object: (_) @member.recv
   name: (name) @ref.member) @hop.call
 (scoped_call_expression
-  scope: (name) @member.recv
+  scope: (name) @member.recv @ref.type
   name: (name) @ref.member
   arguments: (arguments) @arity.args) @hop.call
 ; `self::` / `static::` / `parent::` — the call token still gets a ref
@@ -331,6 +331,27 @@
   scope: (relative_scope) @member.recv
   name: (name) @ref.member
   arguments: (arguments) @arity.args) @hop.call
+; `$this->helper::make()` / `$cls::make()` / `static::$inst::run()` — a
+; scoped call on an EXPRESSION receiver: the receiver types like any member
+; access (its property type, its class-string value) and the call
+; dispatches on that class.
+(scoped_call_expression
+  scope: [(variable_name) (member_access_expression) (scoped_property_access_expression)] @member.recv
+  name: (name) @ref.member
+  arguments: (arguments) @arity.args) @hop.call
+; `Helper::class` — the class-string literal IS the class: the value a
+; later `$cls::make()` dispatches on. Bareword class receivers
+; (`Helper::make()`, `Helper::VERSION`, `Helper::$inst`, `Helper::class`)
+; also spell the class (@ref.type) — the class's references and rename
+; reach them, and the use-map counts the leaf as spelled.
+((class_constant_access_expression
+  . (name) @classref.name
+  (name) @_clsk .) @expr.classref
+  (#eq? @_clsk "class"))
+((class_constant_access_expression
+  . (qualified_name (name) @classref.name)
+  (name) @_clskq .) @expr.classref
+  (#eq? @_clskq "class"))
 
 ; `User::VERSION` / `self::LIMIT` / `Level::Debug` — class-constant and
 ; enum-case ACCESS rides the same member lane as a scoped call (the
@@ -338,7 +359,7 @@
 ; the receiver `(name)` can never re-match as the constant of a second
 ; combination (the use-map poison, same lesson).
 (class_constant_access_expression
-  . (name) @member.recv
+  . (name) @member.recv @ref.type
   (name) @ref.member .) @hop.call
 (class_constant_access_expression
   . (relative_scope) @member.recv
@@ -384,7 +405,7 @@
   scope: (relative_scope) @member.recv
   name: (variable_name (name) @ref.member)) @hop.call
 (scoped_property_access_expression
-  scope: (name) @member.recv
+  scope: (name) @member.recv @ref.type
   name: (variable_name (name) @ref.member)) @hop.call
 
 ; `new User(...)`: the value is an instance of User by SYNTAX — the ctor

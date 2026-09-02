@@ -84,24 +84,25 @@ segments), heatmap counts on guzzle/demo byte-identical to round 4.
   `resolve_member_in_ancestors` prefers the agreeing kind on every class
   of the walk with the other kind as fallback, so a class that does not
   overload answers exactly as before (cpp callable fields keep working).
+- R5-3 receiver shapes: `$this->prop::m()`, `$cls::m()` (with `$cls =
+  Foo::class`) — the scoped-call lane had only bareword and relative
+  scopes; expression scopes now ride the same member lane (the receiver
+  types like any member access) and `Foo::class` types as the class
+  (`expr.classref`, the ctor's alias-graph edge). Trait-internal
+  self-calls and `$this->prop->m()` already resolved on re-probe.
+- R5-8 class-name references: `new Foo(...)` sites are admitted for a
+  Package target in a pack with a constructor convention (the ctor
+  FunctionCall spells the class), and bareword static receivers
+  (`Foo::m()`, `Foo::CONST`, `Foo::$p`, `Foo::class`) mint a class ref —
+  the class's references and rename reach every spelling.
 
 ## OPEN — next slices
 
-### R5-8 (MINOR) — class-name references miss `new X(...)` sites
-The ctor call's token is a FunctionCall ref carrying the class name (it
-serves `__construct`'s references via `ctor_of`), never a PackageRef, so
-`--references` on `class X` lists hints, parents and `use` rows but not
-the construction sites. One admission arm in the Package matcher.
-
-### R5-3 (MAJOR) — receiver shapes still dark for references
-F: trait-internal self-calls (`$this->unless()` inside the trait —
-`Conditionable::unless` 0/2), dynamic class-string `$cls::method()`,
-typed-property chain `$this->prop->method()` (!), property-then-static
-`$this->prop::method()`. D: closure-param receivers (documented park).
-
 ### R5-4 (MAJOR) — `--heatmap` on 1232 files: ~2 min cold AND warm
 E: `Modules: 0 cached` both runs — the sweep never reads the warm blob
-cache. Attribute with `PERL_LSP_PHASE_TIMING` before touching anything.
+cache. Attribute with `PERL_LSP_PHASE_TIMING` before touching anything —
+on a QUIET box: an attribution run alongside a test net exceeded 10 min
+and measured the contention, not the verb.
 
 ### R5-5 (design, open for the user) — union types
 D4: `list<A|B>` (a union INSIDE a generic) kills element typing for the
@@ -118,8 +119,12 @@ outside the indexed root. `entry.json` rows cover the Console overrides
 (data); the general "public API of a library" question needs a policy
 (e.g. a `--heatmap` `--library` mode that never flags public members).
 
-### R5-7 (MINOR) — `self::$prop` hover omits the declared type (E7);
-`array<array<mixed>>` nested generics honestly dark (F).
+### R5-7 (MINOR) — `array<array<mixed>>` nested generics honestly dark (F).
+The `self::$prop` / `static::$prop` / `Foo::$prop` hover half (E7)
+resolved on re-probe: all three render the declared `@var` type and gd/refs
+land on the property. Rendering note: a php `array<string, int>` doc type
+hovers as `array<string, int|float>` — `Numeric` is one lattice value and
+the php display spells it as the union.
 
 ## Verification contradictions resolved
 - D2 "keyed foreach breaks narrowing": the minimal keyed case narrows;

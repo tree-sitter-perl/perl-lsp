@@ -642,3 +642,58 @@ fn php_property_and_method_sharing_a_name_keep_their_own_identity() {
     assert!(rename.contains("Use.php") && !rename.contains("\"line\": 5") && !rename.contains("\"line\": 14"), "renaming the method leaves the property alone: {rename}");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Round-5 R5-3/R5-8: static calls on EXPRESSION receivers (`$this->prop::m()`,
+/// `$cls::m()` with `$cls = Helper::class`) dispatch on the receiver's class,
+/// and the class NAME's references/rename reach every spelling: the type
+/// hint, `new Helper()`, `Helper::class`, and the bareword static receiver.
+#[cfg(feature = "php")]
+#[test]
+fn php_expression_receivers_dispatch_statically_and_class_refs_reach_every_spelling() {
+    let dir = std::env::temp_dir().join(format!("perl-lsp-r5recv-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("Helper.php"),
+        "<?php\nnamespace App;\nclass Helper\n{\n    public function assist(): void {}\n    public static function make(): static { return new static(); }\n}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("Box.php"),
+        "<?php\nnamespace App;\nclass Box\n{\n    public Helper $helper;\n    public function go(): void\n    {\n        $this->helper->assist();\n        $this->helper::make();\n        $cls = Helper::class;\n        $cls::make();\n        $h = new Helper();\n        Helper::make();\n    }\n}\n",
+    )
+    .unwrap();
+    let run = |args: &[&str]| {
+        let out = std::process::Command::new(env!("CARGO_BIN_EXE_perl-lsp"))
+            .args(args)
+            .env("XDG_CACHE_HOME", dir.join(".cache"))
+            .output()
+            .expect("run");
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+    let root = dir.to_str().unwrap();
+    let lines = |out: &str| -> Vec<u64> {
+        let v: serde_json::Value = serde_json::from_str(out).expect("json");
+        let mut l: Vec<u64> = v.as_array().unwrap().iter()
+            .filter(|e| e["file"].as_str().unwrap().ends_with("Box.php"))
+            .map(|e| e["line"].as_u64().unwrap()).collect();
+        l.sort();
+        l
+    };
+    // `$this->helper::make()` (8,23) and `$cls::make()` (10,14) land on `make`.
+    for (row, col) in [(8, 23), (10, 14)] {
+        let gd = run(&["--definition", root, "Box.php", &row.to_string(), &col.to_string()]);
+        assert!(gd.contains("Helper.php:5:"), "static call on an expression receiver at {row}:{col}: {gd}");
+    }
+    let hover = run(&["--hover", root, "Box.php", "10", "9"]);
+    assert!(hover.contains("Helper"), "`Helper::class` types the variable: {hover}");
+    let make = lines(&run(&["--references", root, "Helper.php", "5", "28"]));
+    assert_eq!(make, vec![8, 10, 12], "every static-call spelling references `make`");
+    let cls = lines(&run(&["--references", root, "Helper.php", "2", "6"]));
+    assert_eq!(cls, vec![4, 9, 11, 12], "hint, `::class`, `new`, bareword receiver all spell the class");
+    let rename = run(&["--rename", root, "Helper.php", "2", "6", "Aide"]);
+    let edits: serde_json::Value = serde_json::from_str(&rename).expect("json");
+    let n = edits.as_object().unwrap().values().map(|v| v.as_array().unwrap().len()).sum::<usize>();
+    assert_eq!(n, 5, "class rename rewrites its declaration + four spellings: {rename}");
+    let _ = std::fs::remove_dir_all(&dir);
+}

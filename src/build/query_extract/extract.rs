@@ -1506,6 +1506,29 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                     }
                 }
             }
+            "expr.classref" => {
+                // `Foo::class` names the class by syntax, exactly as `new Foo`
+                // does — the same alias-graph edge, so `$cls = Foo::class;
+                // $cls::make()` dispatches on Foo.
+                let name = events
+                    .iter()
+                    .find(|x| x.match_id == e.match_id && x.cap == "classref.name")
+                    .map(|x| (pack.shape_name)("ref.call", &x.text));
+                if let Some(name) = name {
+                    let span = Span { start: e.start, end: e.end };
+                    lit_spans.push((e.start_byte, e.end_byte, span));
+                    out.witnesses.push(crate::model::witnesses::Witness {
+                        attachment: crate::model::witnesses::WitnessAttachment::Expr(span),
+                        source: crate::model::witnesses::WitnessSource::Builder(
+                            "skeleton-classref".into(),
+                        ),
+                        payload: crate::model::witnesses::WitnessPayload::Edge(
+                            crate::model::witnesses::WitnessAttachment::TypeName(name),
+                        ),
+                        span,
+                    });
+                }
+            }
             "expr.call" => {
                 // A call's VALUE is the callee's own resolution — deferred to
                 // `into_file_analysis`, where the symbol table is known: a

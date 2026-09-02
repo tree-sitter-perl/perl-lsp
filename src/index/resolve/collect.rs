@@ -1231,6 +1231,14 @@ pub(super) fn collect_from_analysis(
                 }
             }
             (TargetKind::Package, RefKind::PackageRef) => true,
+            // A construction site spells the class as a call (`new Foo(...)`
+            // mints a FunctionCall named `Foo`) in a pack that declares a
+            // constructor convention; the token IS the class name, so the
+            // class's references and rename reach it. A pack with no such
+            // convention (Perl's `Foo->new`) never mints the shape.
+            (TargetKind::Package, RefKind::FunctionCall) => {
+                !analysis.pack.constructor_names.is_empty()
+            }
             // A pack-language enum constant read by BARE name (`x = OP_SCOPE`,
             // `case OP_SCOPE:`) — a `Variable` ref the generic goto-def
             // resolves to this def by name (the value-read half of the shared
