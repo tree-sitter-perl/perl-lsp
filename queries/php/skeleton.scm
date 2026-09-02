@@ -274,6 +274,15 @@
 (assignment_expression
   left: (variable_name) @def.var.name @def.var @flow.target
   right: (_) @flow.source) @flow.assign
+; `$this->x = <value>`: a property typed by what is written to it. The
+; flow edge lands at the CLASS-BODY scope (`@flow.target.member`), where
+; the field's readers look; `$this` is the receiver spelling.
+(assignment_expression
+  left: (member_access_expression
+    object: (variable_name) @_prop_recv
+    name: (name) @flow.target.member)
+  right: (_) @flow.source
+  (#eq? @_prop_recv "$this"))
 
 ; `global $wpdb;` BINDS the global into this function — a declaration
 ; the uses hang off, and the anchor a `@global wpdb $wpdb` docblock row
