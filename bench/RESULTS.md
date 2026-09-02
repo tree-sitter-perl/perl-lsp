@@ -504,3 +504,35 @@ more `undefined-type` rows on corpora without their vendor tree (monolog
 158 → 257, demo 358 → 512: `PHPUnit\Framework\Attributes\DataProvider`,
 `Symfony\Component\Routing\Attribute\Route`, …), which is the honest
 answer for an uninstalled attribute class, the same one Intelephense gives.
+
+### PHPUnit mocks and typeDefinition (2026-09-02, night)
+
+Mock fixture (`spec-mock.json`: a `TestCase` stub declaring
+`createMock(string $c): MockObject`, `Foo` with `bar()`, a test doing
+`$m = $this->createMock(Foo::class); $m->bar();`):
+
+| tool | hover `$m` | typeDefinition `$m` | goto-def `bar` | completion after `$m->` |
+|---|---|---|---|---|
+| ours | `$m: Foo` | Foo.php | Foo.php:4 | 3 |
+| Intelephense (free) | `mixed $m` | none | none | 0 |
+| phpactor | `MockObject&Foo` | none | Foo.php:4 | 2 |
+
+Ours reads the doubled class from the overlay rule alone; phpactor
+reads PHPUnit's `@template` docblock (with the real PHPUnit installed
+Intelephense would too). Neither of the others answers typeDefinition
+on the mock.
+
+typeDefinition on monolog (`spec-typedef-monolog.json`; ours measured
+with an 8 s settle after open — the harness's readiness probe was a
+same-file definition, which answers before the pack index attaches, and
+the first cross-file probe raced it in the unsettled run):
+
+| token | ours | Intelephense (free) | phpactor |
+|---|---|---|---|
+| `$handler` (param typed `HandlerInterface`) | HandlerInterface.php:20 | none | HandlerInterface.php:20 |
+| `->getFormatter()` (returns `FormatterInterface`) | FormatterInterface.php:20 | none | FormatterInterface.php:20 |
+| `$record->level` (promoted property `Level`) | Level.php:31 | none | Level.php:31 |
+
+Parity with phpactor on every row; Intelephense's free tier answers no
+typeDefinition at all. Latency 2–6 ms per answer.
+

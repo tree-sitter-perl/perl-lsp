@@ -690,6 +690,9 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     // guarded-block region, block scope).
     let mut pending_narrow: Vec<(String, crate::model::file_analysis::InferredType, Span, ScopeId)> =
         Vec::new();
+    // Class-body scopes (`register_class_body`), for the member-targeted
+    // flow (`@flow.target.member`): the witness lands where field readers look.
+    let mut class_body_scopes: std::collections::HashSet<ScopeId> = std::collections::HashSet::new();
     // Region-shaped narrowings, resolved after the loop (the guard's own
     // captures may follow the region node in event order): `@narrow.after`
     // holds from the node's END to the enclosing scope's end, `@narrow.within`
@@ -794,6 +797,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                     // only: a namespace body carries a context too.
                     if names_by_match.contains_key(&(e.match_id, "def.class".to_string())) {
                         register_class_body(&mut out, pack, id, &text, e.start);
+                        class_body_scopes.insert(id);
                     }
                     context_stack.push((scope_stack.len(), text));
                 }
@@ -914,6 +918,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                     if names_by_match.contains_key(&(e.match_id, "def.class".to_string())) {
                         let id = scope_stack.last().unwrap().1;
                         register_class_body(&mut out, pack, id, &raw, e.start);
+                        class_body_scopes.insert(id);
                     }
                     context_stack.push((scope_stack.len(), raw));
                 }
@@ -1617,6 +1622,21 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                         annot.clone(),
                     );
                 }
+            }
+            // A member of the enclosing class as the flow target
+            // (`$this->foo = …`): the witness belongs at the CLASS scope,
+            // where the field's readers look, not at the method's.
+            "flow.target.member" => {
+                let class_scope = scope_stack
+                    .iter()
+                    .rev()
+                    .map(|&(_, sid)| sid)
+                    .find(|sid| class_body_scopes.contains(sid))
+                    .unwrap_or(cur_scope);
+                flow_targets.insert(
+                    e.match_id,
+                    ((pack.shape_name)("def.var", &e.text), class_scope, e.start),
+                );
             }
             "flow.rebind" => {
                 flow_rebinds.push(((pack.shape_name)("def.var", &e.text), cur_scope, e.start));

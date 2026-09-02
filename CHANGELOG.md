@@ -305,6 +305,14 @@ templates). Market case and build-out plan in `docs/prompt-php-target.md`.
   class references.** `#[Route('/x')]`, `$x instanceof Foo` and
   `Psr7\Utils::make()` now answer goto-def, references and rename on the
   class token (and count as uses of its import).
+- **PHPUnit mocks are the class they double.** `$m = $this->createMock(Foo::class)`
+  (and `createStub`, `createConfiguredMock`, `createPartialMock`,
+  `getMockForAbstractClass`, a `getMockBuilder(Foo::class)->…->getMock()`
+  chain, the `$this->foo = …` property form) types the target as `Foo`,
+  so completion, goto-def, hover and the lanes reach the doubled class.
+- **typeDefinition on member tokens.** `$this->mailer` and
+  `$svc->getMailer()` jump to the member's type: a method's return, a
+  field's declared type.
 
 ### Storage engine — warm starts, bounded memory
 

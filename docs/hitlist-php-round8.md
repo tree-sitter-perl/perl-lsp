@@ -76,9 +76,17 @@ verification net's load):
 | `refs.visibility_axis` | 7 |
 
 Decode is ~60% of the first answer and is serial: one `matcher_view` per
-candidate inside the walk loop. The lever is a parallel prefetch of the
-candidate set's rows views into the LRU before the sequential match
-(rayon over `ref_candidate_paths`), plus the 10 double-decodes on the
-rows→whole upgrade. `module_declaring_method_in_package` runs 382 times to
+candidate inside the walk loop. A rayon prefetch of the candidate set's
+rows views into the LRU before the sequential match measured FLAT (three
+runs each, same box: prefetch on 245 / 267 / 287 ms cold, off 224 / 245 /
+271 ms; warm unchanged) and was not kept. So the decodes do not run in
+parallel as written: the rehydration loader runs `load_one_diag` — the
+SELECT and the zstd + bincode decode — inside `RetainedReader::with`,
+i.e. under the one retained connection's mutex (`blob.rs`,
+`open_and_load_diag_retained`), so every concurrent decode queues on it.
+The lever is to hold the lock for the byte fetch only and decode outside
+it; the prefetch is worth re-measuring after that. Fewer bytes per
+decode (the 10 rows→whole upgrades, baked match verdicts) is the other
+half. `module_declaring_method_in_package` runs 382 times to
 conclude nothing each time — cheap here (0.2 ms), a memo candidate at
 scale.

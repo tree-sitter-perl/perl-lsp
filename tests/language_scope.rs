@@ -1223,3 +1223,49 @@ fn php_unused_import_lane_counts_every_spelling() {
     assert!(unused[0].contains("'Never'"), "{unused:?}");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// PHPUnit mocks are the class they double: `createMock(Foo::class)`,
+/// `createStub`, a `getMockBuilder(...)->...->getMock()` chain, and the
+/// `$this->foo = $this->createMock(...)` property form all type the target
+/// as `Foo`, so member navigation reaches Foo's methods.
+#[cfg(feature = "php")]
+#[test]
+fn php_phpunit_mocks_type_as_the_doubled_class() {
+    let dir = std::env::temp_dir().join(format!("perl-lsp-d2mock-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("vendor/phpunit/PHPUnit/Framework/MockObject")).unwrap();
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::create_dir_all(dir.join("tests")).unwrap();
+    let w = |rel: &str, src: &str| std::fs::write(dir.join(rel), src).unwrap();
+    w("composer.json", "{\"autoload\": {\"psr-4\": {\"App\\\\\": \"src/\", \"App\\\\Tests\\\\\": \"tests/\"}}}");
+    w("vendor/phpunit/PHPUnit/Framework/MockObject/MockObject.php", "<?php\nnamespace PHPUnit\\Framework\\MockObject;\ninterface MockObject { public function expects($m); }\n");
+    w("vendor/phpunit/PHPUnit/Framework/TestCase.php", "<?php\nnamespace PHPUnit\\Framework;\nuse PHPUnit\\Framework\\MockObject\\MockObject;\nclass TestCase\n{\n    protected function createMock(string $c): MockObject { return null; }\n    protected function createStub(string $c): object { return null; }\n    protected function getMockBuilder(string $c): MockBuilder { return new MockBuilder(); }\n}\nclass MockBuilder { public function disableOriginalConstructor(): self { return $this; } public function onlyMethods(array $m): self { return $this; } public function getMock(): MockObject { return null; } }\n");
+    w("src/Foo.php", "<?php\nnamespace App;\nclass Foo\n{\n    public function bar(): int { return 1; }\n}\n");
+    let test = "<?php\nnamespace App\\Tests;\nuse App\\Foo;\nuse PHPUnit\\Framework\\TestCase;\nclass FooTest extends TestCase\n{\n    private $foo;\n    protected function setUp(): void\n    {\n        $this->foo = $this->createMock(Foo::class);\n    }\n    public function testIt(): void\n    {\n        $m = $this->createMock(Foo::class);\n        $m->bar();\n        $s = $this->createStub(Foo::class);\n        $s->bar();\n        $b = $this->getMockBuilder(Foo::class)->disableOriginalConstructor()->onlyMethods(['bar'])->getMock();\n        $b->bar();\n        $this->foo->bar();\n    }\n}\n";
+    w("tests/FooTest.php", test);
+    let lines: Vec<&str> = test.lines().collect();
+    let run = |args: &[&str]| {
+        let out = std::process::Command::new(env!("CARGO_BIN_EXE_perl-lsp"))
+            .args(args)
+            .env("XDG_CACHE_HOME", dir.join(".cache"))
+            .output()
+            .expect("run");
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+    let root = dir.to_str().unwrap();
+    let receiver = |row: usize, var: &str| -> String {
+        let col = lines[row].find(&format!("{var}->bar")).unwrap();
+        let out = run(&["--hover", root, "tests/FooTest.php", &row.to_string(), &col.to_string()]);
+        out.lines().find(|l| l.starts_with(var)).unwrap_or("").to_string()
+    };
+    assert_eq!(receiver(14, "$m"), "$m: Foo", "createMock");
+    assert_eq!(receiver(16, "$s"), "$s: Foo", "createStub");
+    assert_eq!(receiver(18, "$b"), "$b: Foo", "getMockBuilder chain");
+    let col = lines[19].find("bar()").unwrap();
+    let def = run(&["--definition", root, "tests/FooTest.php", "19", &col.to_string()]);
+    assert!(def.contains("src/Foo.php:4:"), "the property form reaches Foo::bar: {def}");
+    let col = lines[14].find("bar()").unwrap();
+    let def = run(&["--definition", root, "tests/FooTest.php", "14", &col.to_string()]);
+    assert!(def.contains("src/Foo.php:4:"), "{def}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
