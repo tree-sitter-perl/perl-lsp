@@ -110,6 +110,14 @@ fn php_signature_help_outline_and_diagnostics_over_stdio() {
     assert_eq!(sig["activeParameter"], serde_json::json!(1), "{sig}");
     assert_eq!(sig["signatures"][0]["parameters"].as_array().map(|a| a.len()), Some(3), "{sig}");
     assert!(sig["signatures"][0]["documentation"].to_string().contains("Send one message"), "{sig}");
+    // typeDefinition on the property token (`$this->mailer`) and on the
+    // call (`->send()` returns bool: no class, empty) — the member ladder
+    let mailer_col = service.lines().nth(9).unwrap().find("mailer").unwrap();
+    let td = c.request("textDocument/typeDefinition", serde_json::json!({"textDocument": {"uri": svc}, "position": {"line": 9, "character": mailer_col}}));
+    let td_uris: Vec<String> = td.as_array().map(|a| a.iter().filter_map(|l| l["uri"].as_str().map(str::to_string)).collect()).unwrap_or_default();
+    assert!(td_uris.iter().any(|u| u.ends_with("src/Mailer.php")), "typeDefinition on a property read: {td}");
+    let td = c.request("textDocument/typeDefinition", serde_json::json!({"textDocument": {"uri": svc}, "position": {"line": 9, "character": send_col}}));
+    assert!(td.as_array().map(|a| a.is_empty()).unwrap_or(true), "a bool-returning call has no class: {td}");
     // the outline nests members under the class
     let syms = c.request("textDocument/documentSymbol", serde_json::json!({"textDocument": {"uri": svc}}));
     let class = syms.as_array().unwrap().iter().find(|s| s["name"] == "Service").expect("class");

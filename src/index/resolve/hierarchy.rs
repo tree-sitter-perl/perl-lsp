@@ -99,6 +99,17 @@ impl<'a> CandidateSet<'a> {
                     self.origin
                         .inferred_type_via_bag_ctx(&r.target_name, self.point, self.idx())
                 }
+                // A member token: the receiver's type, then the member's
+                // value on it — a method's return first, a field's declared
+                // type as the fallback (the ladder hover reads); the bare
+                // span's own witnesses when the receiver does not type.
+                RefKind::MethodCall { invocant_span: Some(inv), .. } => self
+                    .origin
+                    .expr_type_at_span(*inv, self.idx())
+                    .and_then(|t| {
+                        self.origin.member_value_type(&t, r.unqualified_target_name(), self.idx(), r.arg_count)
+                    })
+                    .or_else(|| self.origin.expr_type_at_span(r.span, self.idx())),
                 _ => self.origin.expr_type_at_span(r.span, self.idx()),
             };
         }
