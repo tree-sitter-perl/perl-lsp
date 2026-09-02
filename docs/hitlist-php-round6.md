@@ -10,7 +10,7 @@ property-vs-method separation (`User::$permissions` / `permissions()`,
 `HtmlErrorRenderer`), `Book::query()` through vendor + inheritance,
 Doctrine `@method` rows, `use X as Alias` and union types dark-not-wrong.
 
-## LANDED at close (2026-09-02, one slice)
+## LANDED (2026-09-02)
 - R6-1: `use_aliases` persisted; an aliased row pins the alias spelling,
   never the real leaf; a `use` row's leaf references only the class its
   namespace names (per-row verdict in the matcher, so a file whose own
@@ -25,58 +25,35 @@ Doctrine `@method` rows, `use X as Alias` and union types dark-not-wrong.
   `leaf_namespace` now reads the same pins (own-namespace and qualified
   claims included), so every class-keyed family filter agrees with the
   axis.
+- R6-3: the build-time method-call stamp (`stamp_method_targets`) froze
+  the first same-named symbol; it now walks with the written shape, so
+  a same-file `$this->hasAuth()` goes to the method and `$this->hasAuth`
+  to the property.
+- R6-4: the `[$obj, 'method']` / `[Class::class, 'method']` callable
+  patterns matched a keyed two-pair array (`['chapter' => $c, 'book' =>
+  $c->book]` — each pair CONTAINS a variable / a string); the elements
+  must now be bare. WordPress's overlay carried the same shape.
+- R6-5: the Eloquent relation overlay matched only a bare
+  `return $this->belongsTo(X::class)`; BookStack's `->withTrashed()`
+  modifier dropped the property, so the chain typed as `BelongsTo`. One
+  chained modifier is accepted (to-one and to-many). Deeper chains and
+  the `@return BelongsTo<Book, $this>` generic (which would type the
+  property from the docblock alone) stay open.
+- R6-1 residual re-read under the goto-def policy (surface every relevant
+  candidate): `$e->name()` with `$e = new Event()` listing `B\Event::name`
+  too is the override family (B's `Event` extends A's) — by policy, not
+  a bug.
 
 ## CRITICAL
 
-### R6-1 — an aliased import's FQ row pins the real leaf
-A: `Composer\EventDispatcher\EventDispatcher.php` (namespace
-`Composer\EventDispatcher`, `use Composer\Script\Event as ScriptEvent;`)
-spells the bare `Event` 11 times meaning its OWN namespace's class. The
-use-map reads the FQ row `Composer\Script\Event` and pins leaf `Event` →
-`Composer\Script`, so gd/hover on `new Event(...)` land on `Script\Event`,
-the class's references miss all 11 sites (24 found / 33 real) and admit the
-stranger's declaration, and a rename would rewrite the wrong class. The
-alias spelling is not persisted (`include_directives` carries only the FQ
-text). Fix: persist `(alias, namespace, leaf)` from the `@use.alias`
-captures; an aliased row pins the ALIAS spelling, never the real leaf.
-Also: refs on a `use A\Event as BaseEvent;` row inside a file whose own
-`Event` is another class are legitimate references to `A\Event` — the
-per-file gate must admit import-row refs by their own FQ namespace.
-
-### R6-2 — a namespace-relative qualified spelling counts as a bare one
-A: `Factory.php` (namespace `Composer`): `new Downloader\DownloadManager(...)`
-— the ctor ref is named by its leaf, the use-map counts `DownloadManager`
-as spelled bare → own-namespace claim `Composer` ≠ `Composer\Downloader`
-→ the references walk skips the file (1/5 `setSourceFallback` sites),
-heatmap false positives follow. Fix: capture the written qualifier on
-call/ctor/type refs and pin the leaf to `own_ns\prefix` (or the absolute
-prefix when written with a leading `\`).
-
-### R6-3 — gd on a CALL lands on the sibling property (hover/refs/rename right)
-A: `Composer\Util\Svn`: `$this->hasAuth()` at 161/242 → gd lands on
-`$hasAuth` (35:16) not `hasAuth()` (283:31). The ancestor walk takes the
-shape (`resolve_member_in_ancestors`), so some earlier goto-def lane
-answers first name-keyed — find which (the frozen-edge arm, the
-`member_def_location` class-keyed BFS, or the parametric-receiver ladder)
-and thread `MemberShape` through it.
-
-### R6-4 — an array-literal string key reads as a method reference
-B: `ChapterController.php:186` `'book' => $chapter->book,` inside a
-`view(...)` array: hover/gd on the KEY `'book'` answer `BookChild::book()`
-and a rename of `book()` rewrites the literal key. Only one of seven
-same-shaped sites in the file; the difference is key ORDER (`'chapter'`
-before `'book'`). Suspect the two-element instance-array-callable pattern
-(`[$obj, 'm']`, anchored `.`) matching a sub-sequence of a longer
-`array_creation_expression` when the preceding element is a bare-variable
-pair — reproduce on a minimal fixture first.
-
-### R6-5 — a chain through an INHERITED relation property is dark
-B: `$chapter->book->getUrl()`, `$page->book->defaultTemplate()`,
-`$entity->book->getDirectVisibleChildren()` — hover AND gd dark, while
-`$entity->chapter->getVisiblePages()` (relation declared on the class
-itself) resolves. One-hop `$chapter->book` hovers fine; the return-type
-edge for the NEXT hop does not survive the inheritance walk when `book()`
-lives on the abstract parent (`BookChild`). Everyday Laravel idiom.
+### R6-11 — one broken bundled overlay takes the whole php query dark
+Found while editing `laravel.scm`: the pack's bundled `.scm` documents
+concatenate into ONE tree-sitter query, so a syntax error in any of them
+fails the compile and every php verb answers nothing (no error surfaced
+by the verb; `--plugin-check <file>` finds it). Plugin-dir overlays are
+dropped individually; bundled ones are not. Fix: compile each bundled
+document separately first (drop + stderr diagnostic, like plugin-dir
+overlays), or a build-time test that lints every bundled overlay.
 
 ## MAJOR
 
