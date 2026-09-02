@@ -238,6 +238,16 @@ templates). Market case and build-out plan in `docs/prompt-php-target.md`.
   `getIterator`, `offsetGet`, `jsonSerialize`, …) count as
   runtime-invoked, so a `Countable` implementation's `count()` no
   longer flags dead.
+- **Anonymous classes are their own identity.** `new class(...)
+  extends Base { ... }` used to register its members under the
+  enclosing class or namespace, so references on an outer class's
+  same-named property reached into the anonymous body and a rename
+  corrupted it. Each anonymous class is now a position-keyed class of
+  its own (`class_anonymous_<line>_<col>`): `$this` inside resolves to
+  its members, `extends`/`implements` inside it are inheritance edges
+  (its overrides answer `implementations`), and the `class` keyword is
+  its constructor's call site, so those constructors no longer flag
+  dead.
 - **`self::CONST` in property defaults resolves.**
   `protected string $fmt = self::FORMAT;` — goto-def and references
   on the class-level initializer now answer like the method-body

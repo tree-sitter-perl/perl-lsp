@@ -930,6 +930,58 @@ fn php_group_use_rows_answer_like_flat_rows() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Round-7 R7-4: an anonymous class (`new class(...) extends Base {...}`)
+/// is its own identity — a position-keyed synthesized Class symbol its
+/// members key by — never a member of the enclosing container: an outer
+/// class's same-named property/method has no references inside the
+/// anonymous body, `$this` inside it resolves to its own members, the
+/// `class` keyword is its constructor's call site, and `extends Base`
+/// makes its override an implementation of the base method.
+#[cfg(feature = "php")]
+#[test]
+fn php_anonymous_class_is_its_own_identity() {
+    let dir = std::env::temp_dir().join(format!("perl-lsp-r7anon-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let w = |rel: &str, src: &str| std::fs::write(dir.join(rel), src).unwrap();
+    w("Outer.php", "<?php\nnamespace T;\nclass Outer {\n    private int $n = 1;\n    public function get(): int { return $this->n; }\n    public function make(): object {\n        return new class(3) {\n            public function __construct(private int $n) {}\n            public function get(): int { return $this->n; }\n        };\n    }\n}\n");
+    w("Handler.php", "<?php\nnamespace T;\nclass Handler { public function handle(int $x): int { return $x; } }\nfunction make(): Handler {\n    return new class(3) extends Handler {\n        public function __construct(private int $n) {}\n        public function handle(int $x): int { return $x + $this->n; }\n    };\n}\n");
+    let run = |args: &[&str]| {
+        let out = std::process::Command::new(env!("CARGO_BIN_EXE_perl-lsp"))
+            .args(args)
+            .env("XDG_CACHE_HOME", dir.join(".cache"))
+            .output()
+            .expect("run");
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+    let root = dir.to_str().unwrap();
+    let lines = |out: &str| -> Vec<u64> {
+        let v: serde_json::Value = serde_json::from_str(out).expect("json");
+        let mut l: Vec<u64> = v.as_array().unwrap().iter().map(|e| e["line"].as_u64().unwrap()).collect();
+        l.sort();
+        l
+    };
+    // (positional CLI coordinates and answers are 0-based)
+    // Outer's `$n` (row 3) and `get()` (row 4): the anonymous body's
+    // same-named members are NOT references to them.
+    assert_eq!(lines(&run(&["--references", root, "Outer.php", "3", "17"])), vec![3, 4], "outer `$n` stays outside the anonymous class");
+    assert_eq!(lines(&run(&["--references", root, "Outer.php", "4", "20"])), vec![4], "outer `get()` stays outside the anonymous class");
+    // the anonymous class's own promoted `$n` (row 7) is read by ITS `get()`
+    assert_eq!(lines(&run(&["--references", root, "Outer.php", "7", "52"])), vec![7, 8], "anonymous `$n`: decl + its own `$this->n`");
+    let gd = run(&["--definition", root, "Outer.php", "8", "55"]);
+    assert!(gd.contains("Outer.php:7:"), "`$this->n` inside the anonymous body lands on its promoted property: {gd}");
+    // `extends Handler`: the anonymous override is an implementation of the base method
+    let impls = run(&["--implementations", root, "Handler.php", "2", "33"]);
+    assert!(impls.contains("\"line\": 6"), "anonymous override implements Handler::handle: {impls}");
+    // the `class` keyword is the constructor's call site: neither ctor is dead
+    let heat: serde_json::Value = serde_json::from_str(&run(&["--heatmap", root])).expect("heatmap json");
+    let rows = heat["symbols"].as_array().or_else(|| heat["rows"].as_array()).expect("rows");
+    let ctors: Vec<(String, u64)> = rows.iter().filter(|r| r["name"] == "__construct").map(|r| (r["package"].as_str().unwrap_or("").to_string(), r["fan_in"].as_u64().unwrap_or(0))).collect();
+    assert_eq!(ctors.len(), 2, "{ctors:?}");
+    assert!(ctors.iter().all(|(pkg, fan_in)| pkg.starts_with("class_anonymous_") && *fan_in == 1), "each anonymous ctor keyed by its synthesized class with its `new class(...)` site as fan-in: {ctors:?}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// Round-6 R6-3 / R6-4 / R6-5 (BookStack, composer): the build-time
 /// method-call stamp honors the written shape, so goto-def on a same-file
 /// `$this->hasAuth()` lands on the method while `$this->hasAuth` reads the

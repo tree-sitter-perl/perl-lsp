@@ -324,8 +324,14 @@ Format per entry:
   - C. Hoist to the base: key members under `Base` (the `extends`
     target) as overrides. Wrong the moment two anonymous subclasses of
     one base disagree; rejected.
-- **Picked:** none yet; nothing shipped. A is the real fix; B is the
-  one-afternoon stopgap that removes the corruption.
+- **Picked:** A, landed 2026-09-02: `@def.class.anon` on the `class`
+  keyword; the pack's `default_name(kind, row, col)` spells
+  `class_anonymous_<line>_<col>` (identifier-shaped — the name rides the
+  bareword-class lanes, so PHP's own `class@anonymous` spelling is out);
+  the pre-pass joins the synthesized name into `names_by_match` so the
+  def, the `@context.package` and the `@parent` arms read one identity;
+  the brace-scoped re-anchor pass admits an `anonymous`-attributed
+  container. Members never leak to the enclosing container again.
 - **Undo cost:** A touches the extractor's def/context join generically
   (cpp's `(union)` / php's `(anon)` closure defaults ride the same
   `default_name` seam — a position suffix there changes visible names,
@@ -358,9 +364,13 @@ Format per entry:
     reusable here. Files: `queries/php/skeleton.scm`, `packs.rs` (php
     `default_name` "class" arm + the opt-in), `extract.rs` (the shared
     fallback). Cache bump.
-- **Discussion needed:** is the synthetic-name spelling user-facing
-  (outline, hover, workspace-symbol) acceptable, and should the
-  identity be file-local only (never a cross-file candidate)?
+- **Discussion needed:** the spelling. `class_anonymous_7_20` shows in
+  outline / hover / workspace-symbol; PHP users read `class@anonymous`
+  in stack traces. Keeping it identifier-shaped is load-bearing (the
+  ctor call rides the bareword-class receiver lane); a display-only
+  rename (hover/outline label from the `anonymous` attribute) is the
+  cheap way to show `class@anonymous` without changing the identity.
+  Also: should it be excluded from workspace-symbol (nothing spells it)?
 
 ---
 

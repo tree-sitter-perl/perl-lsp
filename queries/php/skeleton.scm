@@ -39,6 +39,33 @@
       (attribute [(name) (qualified_name (name))] @sym.attr)+)+)?
   name: (name) @def.class.name @context.package) @def.class @scope
 
+; anonymous classes: `new class(...) extends Base implements I { ... }`.
+; No name node — the `class` keyword anchors a @def.class.anon: the pack
+; synthesizes a position-keyed identity, the body's members key by it
+; (never by the enclosing container), `$this` inside resolves to it, and
+; the keyword is the constructor's call site.
+(anonymous_class
+  "class" @def.class.anon @context.package
+  body: (declaration_list) @scope) @def.class
+(anonymous_class
+  "class" @def.class.anon
+  (base_clause (name) @parent @ref.type))
+(anonymous_class
+  "class" @def.class.anon
+  (base_clause (qualified_name (name) @parent @ref.type) @parent.fq @ref.qualified))
+(anonymous_class
+  "class" @def.class.anon
+  (class_interface_clause (name) @parent @ref.type))
+(anonymous_class
+  "class" @def.class.anon
+  (class_interface_clause (qualified_name (name) @parent @ref.type) @parent.fq @ref.qualified))
+(anonymous_class
+  "class" @def.class.anon
+  body: (declaration_list (use_declaration (name) @parent @ref.type)))
+(anonymous_class
+  "class" @def.class.anon
+  body: (declaration_list (use_declaration (qualified_name (name) @parent @ref.type) @parent.fq @ref.qualified)))
+
 ; inheritance: `extends Base` — one @parent per base; the name is also a
 ; live type use (goto-def on the base rides the PackageRef lane). Every
 ; clause has a qualified sibling (`extends \App\Base`, `use

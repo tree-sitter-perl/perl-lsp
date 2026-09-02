@@ -141,18 +141,27 @@ polymorphism (`FormatterInterface`, `ProcessorInterface::__invoke`).
   implements no `Countable` is shielded too. Over-approximates on the
   sound side like every guard; gating on the declared interface
   (`declares_interface`) is the tightening if the queue ever wants it.
-- R7-4 (MINOR → MAJOR, open): an anonymous class has NO identity — its
-  members register under the enclosing container (the namespace, or the
-  class whose method spells `new class(...)`). The dead-queue symptom
-  (its `__construct` has no construction site; 5 guzzle test fixtures)
-  is the small half: references on an outer class's `$n` / `n()` also
-  list the anonymous class's own `$n` / `n()`, so a rename of the outer
-  member rewrites the anonymous one (`$S/r7/anon2` probe, r67 binary).
-  Design shape in `docs/open-forks.md` ("Anonymous classes need an
-  identity"): a position-keyed synthesized class name, and the
-  `@context.package` join accepting a defaulted def name — the extractor
-  today keys a context by a captured NAME node, which an anonymous class
-  does not have.
+- R7-4 (MINOR → MAJOR → LANDED): an anonymous class had NO identity —
+  its members registered under the enclosing container, so references
+  on an outer class's `$n` / `n()` listed the anonymous class's own and
+  a rename corrupted it; its `__construct` had no construction site (5
+  guzzle test fixtures dead). Now a name-less `@def.class.anon` anchors
+  a position-keyed synthesized Class (`class_anonymous_<line>_<col>`,
+  pack `default_name`), the body's members key by it, `$this` inside
+  resolves to it, `extends`/`implements`/trait `use` inside it are
+  parent edges, and the `class` keyword mints the ctor call. The
+  brace-scoped re-anchor pass treats the anchored default-named
+  container as computable so the outer class cannot reclaim the
+  members. `php_anonymous_class_is_its_own_identity` pins it; the
+  synthetic spelling is the open question on `docs/open-forks.md`.
+- R7-6 (MAJOR, open — found while pinning R7-4): goto-def / hover on
+  the `n` of `$this->n` where `$n` is a class-level typed property with
+  a default (`private int $n = 1;`) answer the `$this` variable
+  (`$this: Outer`) at every column of `n` — references on the property
+  DO list the read (the member ref exists), so the cursor lane is
+  picking the receiver's span over the member's. A promoted-property
+  `$n` in the same shape answers correctly. Held on the round-7 binary
+  too (`$S/r7/prop`, r67) — pre-existing, not from the identity slice.
 - R7-5 (MINOR → LANDED): group-use imports (`use A\{Foo, Bar as Baz};`)
   minted no import row and no leaf reference — only the parent-resolving
   use-map saw them, so the class's references missed the row and the

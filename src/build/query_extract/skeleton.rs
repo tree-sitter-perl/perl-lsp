@@ -356,7 +356,11 @@ impl SkeletonAnalysis {
                 continue;
             }
             let (ns, ne) = (pt(s.name_start), pt(s.name_end));
-            if source.get(ns..ne) != Some(s.name.as_str()) {
+            // A default-named container (php's anonymous class) is spelled
+            // by its anchor token, not its name; the brace body follows
+            // the anchor the same way.
+            let anchored = s.attributes.iter().any(|a| a == "anonymous");
+            if !anchored && source.get(ns..ne) != Some(s.name.as_str()) {
                 continue; // macro-synthesized or shaped name: not textually locatable
             }
             if let Some((open, close)) = brace_body_extent(bytes, ne) {

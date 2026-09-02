@@ -29,8 +29,13 @@ pub struct LangPack {
     /// Perl variable). `capture_kind` is the vocabulary name
     /// (`def.var`, `ref.method`, ...) so one pack hook serves all.
     pub shape_name: fn(capture_kind: &str, raw: &str) -> String,
-    /// Name for defs with no name token (anonymous subs).
-    pub default_name: fn(kind: &str) -> Option<&'static str>,
+    /// Name for defs with no name token (anonymous subs, anonymous
+    /// classes), given the def's 0-based start position: a kind whose
+    /// instances must stay distinct (php's anonymous classes — two per test
+    /// file is normal) spells the position in; structure-only defaults
+    /// (`(anon)`, `(union)`) ignore it. The spelling must be
+    /// identifier-shaped: the name rides the bareword-class lanes.
+    pub default_name: fn(kind: &str, row: usize, col: usize) -> Option<String>,
     /// Map a `@type.annot` token's text to a type — the pack predicate
     /// for languages whose ring 3 is partly in the tree (`x: int`).
     pub annot_type: fn(text: &str) -> Option<InferredType>,
@@ -436,8 +441,8 @@ pub fn perl_pack() -> LangPack {
             // already carries the sigil.
             _ => raw.to_string(),
         },
-        default_name: |kind| match kind {
-            "anon" => Some("(anon)"),
+        default_name: |kind, _, _| match kind {
+            "anon" => Some("(anon)".to_string()),
             _ => None,
         },
         annot_type: |_| None,
@@ -487,7 +492,7 @@ pub fn python_pack() -> LangPack {
         lang_id: "python",
         bundled_entry_markers: &[],
         shape_name: |_, raw| raw.to_string(),
-        default_name: |_| None,
+        default_name: |_, _, _| None,
         annot_type: |text| match text.trim() {
             "str" => Some(InferredType::String),
             "int" | "float" => Some(InferredType::Numeric),
@@ -553,7 +558,7 @@ pub fn r_pack() -> LangPack {
         lang_id: "r",
         bundled_entry_markers: &[],
         shape_name: |_, raw| raw.to_string(),
-        default_name: |_| None,
+        default_name: |_, _, _| None,
         annot_type: |_| None,
         rettype_receiver: |_| false,
         type_display: &[],
@@ -609,7 +614,7 @@ pub fn cmake_pack() -> LangPack {
         lang_id: "cmake",
         bundled_entry_markers: &[],
         shape_name: |_, raw| raw.to_string(),
-        default_name: |_| None,
+        default_name: |_, _, _| None,
         annot_type: |_| None,
         rettype_receiver: |_| false,
         type_display: &[],
@@ -821,8 +826,12 @@ pub fn php_pack() -> LangPack {
             }
             raw.to_string()
         },
-        default_name: |kind| match kind {
-            "anon" => Some("(anon)"),
+        default_name: |kind, row, col| match kind {
+            "anon" => Some("(anon)".to_string()),
+            // `new class(...) {...}` — PHP's own runtime spelling is
+            // `class@anonymous<file>:<line>`; ours stays identifier-shaped
+            // and file-local by construction (nothing else spells it).
+            "class" => Some(format!("class_anonymous_{}_{}", row + 1, col + 1)),
             _ => None,
         },
         // Declared types (params, properties, returns) ARE the witness
@@ -949,8 +958,8 @@ pub fn cpp_pack() -> LangPack {
         // an anonymous inline union has no name token of its own; the
         // synthetic container is outline structure, not an addressable
         // member (the "anonymous" attribute keeps it out of completion).
-        default_name: |kind| match kind {
-            "unionfield" => Some("(union)"),
+        default_name: |kind, _, _| match kind {
+            "unionfield" => Some("(union)".to_string()),
             _ => None,
         },
         // C++ declared types ARE the witness source. Primitives → the

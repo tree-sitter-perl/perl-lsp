@@ -288,6 +288,11 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     // ---- join def name-captures to their def event ----
     use std::collections::HashMap;
     let mut names_by_match: HashMap<(usize, String), (String, Point, Point)> = HashMap::new();
+    // `@def.<kind>.anon` — a name-less def's anchor token (php's `class`
+    // keyword): the pack synthesizes the name from the position, and the
+    // match joins it like a `.name` capture so the def, its `@context`
+    // and its `@parent` edges all read ONE identity.
+    let mut defaulted_matches: HashMap<usize, String> = HashMap::new();
     // `@qualifier` (a `Class::` on an out-of-line def) and `@rettype` (a
     // method's declared return type) — pre-collected like names because the
     // `@def` event fires before these inner captures.
@@ -334,6 +339,13 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
         if let Some(prefix) = e.cap.strip_suffix(".name") {
             names_by_match
                 .insert((e.match_id, prefix.to_string()), (e.text.clone(), e.start, e.end));
+        }
+        if let Some(prefix) = e.cap.strip_suffix(".anon") {
+            let kind = prefix.strip_prefix("def.").unwrap_or(prefix);
+            if let Some(n) = (pack.default_name)(kind, e.start.row, e.start.column) {
+                names_by_match.insert((e.match_id, prefix.to_string()), (n.clone(), e.start, e.end));
+                defaulted_matches.insert(e.match_id, n);
+            }
         }
         if e.cap == "qualifier" {
             qualifier_by_match.insert(e.match_id, e.text.clone());
@@ -531,6 +543,10 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
 
     // ---- the state machine: scope stack + sticky contexts ----
     let mut out = SkeletonAnalysis::default();
+    // One constructor call per anonymous-class keyword: the def pattern
+    // and each parent pattern share the token.
+    let mut anon_ctor_sites: std::collections::HashSet<(usize, usize)> =
+        std::collections::HashSet::new();
     out.use_aliases = out_use_aliases;
     for (raw, span) in group_import_sites {
         out.imports.push(raw.clone());
@@ -801,7 +817,13 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                 // Shape the context like a def name (cpp canonicalizes a
                 // spec's template spelling) so members' `package` matches
                 // the container Symbol's identity exactly.
-                let text = (pack.shape_name)(&e.cap, &e.text);
+                // A name-less def's context is its synthesized identity,
+                // never the anchor token's text.
+                let raw = defaulted_matches
+                    .get(&e.match_id)
+                    .cloned()
+                    .unwrap_or_else(|| e.text.clone());
+                let text = (pack.shape_name)(&e.cap, &raw);
                 // If this match's `@scope` starts AFTER this context, the
                 // context belongs to that (not-yet-pushed) body — defer it
                 // so it registers at the body depth and pops with the block.
@@ -816,7 +838,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                     {
                         context_stack.pop();
                     }
-                    context_stack.push((scope_stack.len(), e.text.clone()));
+                    context_stack.push((scope_stack.len(), raw));
                 }
             }
             "parent" => {
@@ -887,15 +909,44 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                     qualifier_owned: false,
                 });
             }
+            cap if cap.ends_with(".anon") => {
+                // The anchor of an anonymous class is its construction site:
+                // `new class(...)` invokes the synthesized identity's
+                // constructor, so the ctor gets the MethodCall a `new
+                // self()` mints — fan-in, goto-def and references on
+                // `__construct` see it like any `new Foo()`.
+                if let (Some(ctor), Some(name)) =
+                    (pack.constructor_names.first(), defaulted_matches.get(&e.match_id))
+                {
+                    if anon_ctor_sites.insert((e.start_byte, e.end_byte)) {
+                        let span = Span { start: e.start, end: e.end };
+                        out.refs.push(SkelRef {
+                            via: None,
+                            kind: "member".to_string(),
+                            name: ctor.to_string(),
+                            start: e.start,
+                            end: e.end,
+                            scope: cur_scope,
+                            invocant: Some((span, name.clone())),
+                            member_op: None,
+                            arg_count: None,
+                            shape: crate::model::file_analysis::MemberShape::Callable,
+                        });
+                    }
+                }
+            }
             cap if cap.starts_with("def.") && !cap.ends_with(".name") => {
                 let kind = cap.strip_prefix("def.").unwrap().to_string();
                 let (name, name_start, name_end, defaulted) = names_by_match
                     .get(&(e.match_id, e.cap.clone()))
                     .cloned()
-                    .map(|(n, s, en)| (n, s, en, false))
+                    .map(|(n, s, en)| {
+                        let d = defaulted_matches.contains_key(&e.match_id);
+                        (n, s, en, d)
+                    })
                     .or_else(|| {
-                        (pack.default_name)(&kind)
-                            .map(|n| (n.to_string(), e.start, e.start, true))
+                        (pack.default_name)(&kind, e.start.row, e.start.column)
+                            .map(|n| (n, e.start, e.start, true))
                     })
                     .unwrap_or((e.text.clone(), e.start, e.end, false));
                 def_name_spans.push((e.start_byte, e.end_byte));
