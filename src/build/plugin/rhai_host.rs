@@ -576,6 +576,7 @@ const BUNDLED: &[(&str, &str)] = &[
     ("type-tiny", include_str!("../../../frameworks/type-tiny.rhai")),
     ("dancer", include_str!("../../../frameworks/dancer.rhai")),
     ("moo", include_str!("../../../frameworks/moo.rhai")),
+    ("monkey-patch", include_str!("../../../frameworks/monkey-patch.rhai")),
     ("catalyst", include_str!("../../../frameworks/catalyst.rhai")),
     ("cpp-attributes", include_str!("../../../frameworks/cpp-attributes.rhai")),
 ];

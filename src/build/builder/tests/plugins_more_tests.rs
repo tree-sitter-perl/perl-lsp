@@ -985,3 +985,91 @@ sub helper { return "fin"; }
         Some(InferredType::String),
     );
 }
+
+#[test]
+fn monkey_patch_installs_named_methods_on_the_target_class() {
+    // `monkey_patch $class => $name => sub {…}` leaves no static `sub NAME`,
+    // but the registration is right there in the source — synthesize the
+    // methods the way `has` synthesizes accessors. Mojo::UserAgent's HTTP
+    // verbs are the canonical case.
+    let fa = build_fa(
+        "package My::Class;\nuse Mojo::Util qw(monkey_patch);\nmonkey_patch 'My::Class', get => sub { my ($self) = @_; 1 };\nmonkey_patch __PACKAGE__, put => sub { 1 }, post => sub { 2 };\n1;\n",
+    );
+    for name in ["get", "put", "post"] {
+        assert!(
+            fa.symbols().iter().any(|s| s.name == name
+                && matches!(s.kind, SymKind::Method)
+                && s.package.as_deref() == Some("My::Class")),
+            "monkey_patch must install `{name}` on My::Class",
+        );
+    }
+}
+
+#[test]
+fn monkey_patch_declines_a_transformed_name() {
+    // `monkey_patch __PACKAGE__, lc $n, sub {…}` inside a `for my $n (qw(…))`.
+    // The candidate fold resolves the variables INSIDE the expression and not
+    // the transformation around them, so it offers the raw list — installing
+    // `LC_B`, a method that does not exist, while the real `lc_b` stays
+    // missing. A wrong name is worse than a miss: it makes goto-def and the
+    // unresolved-method lint both confidently incorrect.
+    let fa = build_fa(
+        "package My::Class;\nuse Mojo::Util qw(monkey_patch);\nfor my $n (qw(lc_a LC_B)) { monkey_patch __PACKAGE__, lc $n, sub { 1 }; }\n1;\n",
+    );
+    for bogus in ["LC_B", "lc_a", "lc_b"] {
+        assert!(
+            !fa.symbols().iter().any(|s| s.name == bogus),
+            "a transformed name must synthesize nothing, got `{bogus}`",
+        );
+    }
+}
+
+#[test]
+fn monkey_patch_declines_an_unfoldable_target() {
+    // A runtime `$class` is an honest miss — never a guess at the owner.
+    let fa = build_fa(
+        "package My::Class;\nuse Mojo::Util qw(monkey_patch);\nmy $c = shift;\nmonkey_patch $c, get => sub { 1 };\n1;\n",
+    );
+    assert!(
+        !fa.symbols().iter().any(|s| s.name == "get"),
+        "an unfoldable target class must synthesize nothing",
+    );
+}
+
+#[test]
+fn handles_hashref_pairs_survive_a_non_string_value() {
+    // Sub::HandlesVia's curried shape: `local => [remote, @args]`. Flattening
+    // the hash to a token list loses alignment the moment a value is not a
+    // string — the arrayref contributes nothing, the NEXT key slides into its
+    // slot, and every following pair is silently mis-paired. Here that lost
+    // `dec` entirely and bound `inc` to it.
+    let fa = build_fa(
+        "package HV;\nuse Moo;\nuse Sub::HandlesVia;\nhas 'items' => (is => 'ro', handles => { inc => ['add', 1], dec => 'remove' });\n1;\n",
+    );
+    for name in ["inc", "dec"] {
+        assert!(
+            fa.symbols().iter().any(|s| s.name == name),
+            "delegation `{name}` must survive the arrayref-valued pair",
+        );
+    }
+}
+
+#[test]
+fn mojo_base_has_undef_default_makes_no_getter_claim() {
+    // `has parent => undef` means "starts empty, set later". Undef is the
+    // initial value of a mutable slot, not a contract about the getter —
+    // claiming it would make every `$self->parent->…` a guaranteed die.
+    let fa = build_fa(
+        "package M;\nuse Mojo::Base -base;\nhas parent => undef;\nhas name => 'x';\n1;\n",
+    );
+    assert_eq!(
+        fa.sub_return_type_at_arity("parent", Some(0)),
+        None,
+        "an undef slot default must not become a getter return contract",
+    );
+    assert_eq!(
+        fa.sub_return_type_at_arity("name", Some(0)),
+        Some(InferredType::String),
+        "a real default still types the getter",
+    );
+}

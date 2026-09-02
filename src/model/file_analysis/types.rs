@@ -748,6 +748,14 @@ impl InferredType {
     /// non-constraint type. This is the rule-#10 "ask the value" entry
     /// point: `has`'s isa→accessor projection calls it without ever
     /// matching on the constraint's shape itself.
+    /// Is this the definitive bottom (`Undef`)?
+    ///
+    /// Consumers deciding whether a value can back a CONTRACT ask the value
+    /// rather than matching the variant (rule #10).
+    pub fn is_undef(&self) -> bool {
+        matches!(self, InferredType::Undef)
+    }
+
     pub fn constrained_inner(&self) -> Option<&InferredType> {
         match self {
             InferredType::TypeConstraintOf(inner) => Some(inner),

@@ -500,6 +500,13 @@ impl<'a> Builder<'a> {
                 } else {
                     None
                 };
+                // `has parent => undef` means "starts empty, set later" — the
+                // attribute is a mutable slot, and `Undef` as a return
+                // CONTRACT becomes a lie the moment anyone sets it (D1 would
+                // then flag every `$self->parent->…` as a guaranteed die).
+                // The initial value of a slot is not a claim about the
+                // getter; make no claim instead.
+                let getter_type = getter_type.filter(|t| !t.is_undef());
                 let fluent_type = self
                     .current_package
                     .as_ref()
@@ -720,13 +727,30 @@ impl<'a> Builder<'a> {
                 plugin::ValueShape::Str(node.utf8_text(self.source).unwrap_or("").to_string())
             }
             "anonymous_hash_expression" => {
-                let mut tokens: Vec<String> = Vec::new();
-                self.collect_hash_tokens(node, &mut tokens);
+                // Pair-walk by POSITION (`cst::pair_nodes` — separator-
+                // agnostic, per the fat-comma rule). Flattening to a token
+                // list first loses alignment the moment a value is not a
+                // string: the value contributes nothing, the next key slides
+                // into its slot, and every following pair is silently
+                // mis-paired. `handles => { inc => ['add', 1], dec =>
+                // 'remove' }` lost `dec` entirely AND bound `inc` to it.
+                //
+                // An arrayref VALUE contributes its first string element:
+                // that is Sub::HandlesVia's curried-delegation shape
+                // (`local => [remote, @curried_args]`), which names its
+                // remote method there.
                 let mut pairs = Vec::new();
-                let mut i = 0;
-                while i + 1 < tokens.len() {
-                    pairs.push((tokens[i].clone(), tokens[i + 1].clone()));
-                    i += 2;
+                for (k, v) in crate::cst::pair_nodes(node) {
+                    let Some(key) = self.extract_node_string(k) else { continue };
+                    let val = self.extract_node_string(v).or_else(|| {
+                        (v.kind() == "anonymous_array_expression")
+                            .then(|| self.extract_string_list(v).into_iter().next())
+                            .flatten()
+                            .map(|(s, _)| s)
+                    });
+                    if let Some(val) = val {
+                        pairs.push((key, val));
+                    }
                 }
                 plugin::ValueShape::HashPairs(pairs)
             }
@@ -748,54 +772,6 @@ impl<'a> Builder<'a> {
         }
     }
 
-    /// Flatten a fat-comma hash node into alternating key/value strings,
-    /// recursing into tree-sitter-perl's right-associative nested
-    /// `list_expression` wrappers.
-    pub(super) fn collect_hash_tokens(&self, node: Node<'a>, out: &mut Vec<String>) {
-        match node.kind() {
-            "anonymous_hash_expression" => {
-                for i in 0..node.child_count() {
-                    if let Some(child) = node.child(i) {
-                        if matches!(child.kind(), "list_expression" | "parenthesized_expression") {
-                            self.collect_hash_tokens(child, out);
-                            return;
-                        }
-                    }
-                }
-                self.collect_hash_tokens_flat(node, out);
-            }
-            "list_expression" | "parenthesized_expression" => {
-                self.collect_hash_tokens_flat(node, out);
-            }
-            _ => {
-                if let Some(s) = self.extract_node_string(node) {
-                    out.push(s);
-                }
-            }
-        }
-    }
-
-    pub(super) fn collect_hash_tokens_flat(&self, node: Node<'a>, out: &mut Vec<String>) {
-        let count = node.child_count();
-        let mut i = 0;
-        while i < count {
-            if let Some(child) = node.child(i) {
-                match child.kind() {
-                    "=>" | "," => {}
-                    "list_expression" | "parenthesized_expression" => {
-                        self.collect_hash_tokens_flat(child, out);
-                    }
-                    _ if child.is_named() => {
-                        if let Some(s) = self.extract_node_string(child) {
-                            out.push(s);
-                        }
-                    }
-                    _ => {}
-                }
-            }
-            i += 1;
-        }
-    }
 
     /// Extract arguments from `use Mojo::Base ...` including barewords like -strict, -base.
     /// Put `pkg` into Mojo::Base mode (accessor synthesis via `has`) and wire
