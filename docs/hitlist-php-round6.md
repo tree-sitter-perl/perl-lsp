@@ -48,11 +48,12 @@ Doctrine `@method` rows, `use X as Alias` and union types dark-not-wrong.
   `X` (the class part a qualified spelling, pinned like any other), so
   the method's references and rename reach them (composer's
   `EventDispatcherTest::someMethod` site).
-- R6-7: `new self(...)` / `new static(...)` ctor refs carry the enclosing
-  class's name — the ctor's references and fan-in count them (composer
-  `ProxyManager::__construct` 1 → 2). RESIDUAL: hover/goto-def ON the
-  `self` token still answer nothing (`new Foo` answers the class; the
-  `self`-spelled site takes a lane that reads the token, not the ref).
+- R6-7: `new self(...)` / `new static(...)` are Callable member refs of
+  the pack's constructor on the current-package token — the ctor's
+  references, fan-in, hover and goto-def all see the site (composer
+  `ProxyManager::__construct` 1 → 2), and a class rename never touches
+  the `self` token. A constructor-convention name (`__construct`) is not
+  renameable at all (its `new self` sites carry no token spelling it).
 - R6-8: word-keyed goto-def fallbacks stand down inside an import row, so
   `Http` in `use Illuminate\Http\Request;` no longer jumps to
   `Support\Facades\Http`.
