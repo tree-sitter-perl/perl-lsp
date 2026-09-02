@@ -145,16 +145,38 @@ nothing: a Type::Tiny constant must be imported to compile.
   everywhere else (Moo's `has`, DBIC's `add_columns`); Type::Tiny is the
   one place it adds a gate instead.
 
-  Minting dissolves the special case: the name resolves as an ordinary
-  imported sub, its type flows through `sub_return_type`, a local
-  `sub Str` competes by the normal local-beats-import rule, and both the
-  name check and the import scan disappear. Two of the three shapes are
-  expressible today — 0-arity constants are `ReturnExpr::Concrete`, and
-  `Maybe[T]` is `ReturnExpr::Arg(0)` (the positional mirror of
-  `Receiver`) plus a lift. `InstanceOf['Foo']` needs the return keyed on
-  arg 0's literal VALUE, which `Arg(n)` cannot express — it yields the
-  argument's type, `String`, not the class name. That wants the
-  first-arg-literal binder value-indexed returns introduce
-  (`prompt-type-inference-residual.md` Part 5a); sequence the two
-  together, and do not mint the 0-arity half alone — that leaves two
-  mechanisms where there is one.
+  Minting dissolves the special case for the names it can reach: the
+  name resolves as an ordinary imported sub, its type flows through
+  `sub_return_type`, and a local `sub Str` competes by the normal
+  local-beats-import rule rather than by a gate that runs before symbol
+  lookup at all.
+
+  **It reaches the 0-arity constants and stops.** `Str` / `Int` /
+  `HashRef` are `ReturnExpr::Concrete(TypeConstraintOf(rep))` — and they
+  are also the whole reason the import scoping is needed, since they are
+  the names that collide. The parameterized constructors do not follow,
+  because of what the syntax actually is: `Maybe[Int]` parses as a call
+  whose single argument is an `anonymous_array_expression` whose element
+  is a bareword, and `InstanceOf['Foo']` as one whose element is a
+  string literal. A return shape for those has to say "the type of
+  element 0 of my first argument" and "the literal VALUE of element 0 of
+  my first argument" — two projections deep, through an arrayref.
+  `ReturnExpr::Arg(n)` yields the argument's own type (`ArrayRef`), and
+  no operator composes the unwrap.
+
+  `extract_constraint_params` already does exactly that unwrap, handing
+  the plugin a flat `ConstraintParam { string, ty }` per element with
+  nesting resolved through the same `expr_payload` path. That extractor
+  is the real machinery here and survives either design; the gate around
+  it is the small part.
+
+  So the honest choice is not "mint or gate" but where to draw the line.
+  Minting the 0-arity half removes the collision class structurally and
+  lets the gate shrink to `InstanceOf` / `ConsumerOf` / `Maybe` — three
+  distinctive names for which a global gate carries no real risk. The
+  cost is two mechanisms instead of one, which is a real cost and should
+  not be waved away by observing that each covers the case it suits.
+  Deciding that is the open question; inventing an arrayref-projecting
+  `ReturnExpr` shape to serve one library's syntax is the alternative,
+  and it is a cross-language type-system change for a Perl-shaped
+  problem.
