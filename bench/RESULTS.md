@@ -717,3 +717,25 @@ are the day-2 runs. Startup and resident memory, this replay:
 One row the replay surfaced in our own diagnostics: guzzle's
 `foreach ($options['curl'] as $option => $_)` reports `$_` as assigned
 but never used — the conventional throwaway name, flagged twice.
+
+### Lane counts, the night's final build (2026-09-03, 04:55, build 8fdb042)
+
+The same five corpora, hint severity, fresh cache, against the build
+carrying every night slice. Read against the 01:15 table above (17977ec).
+
+| corpus | unresolved-method | undefined-property | undefined-type | undefined-variable | unused-import | unused-variable | deprecated | arity |
+|---|---|---|---|---|---|---|---|---|
+| WordPress | 13 | 26 | 94 | 24 | 0 | 420 | 283 | 11 |
+| laravel/framework | 160 | 91 | 7,039 | 51 | 6 | 257 | 34 | 14 |
+| guzzle | 1 | 0 | 1,340 | 0 | 0 | 89 | 0 | 2 |
+| monolog | 11 | 9 | 263 | 0 | 2 | 24 | 4 | 0 |
+| symfony demo | 0 | 0 | 519 | 0 | 0 | 0 | 0 | 0 |
+
+WordPress `unresolved-method` 111 → 13 and `undefined-property`
+198 → 26 over the night; laravel 1,521 → 160 and 518 → 91; guzzle's
+`unused-variable` 563 → 89. Every step was a diff against the previous
+build with zero new rows. What remains is named in the ADR's silence
+rules and the open forks: mock objects behind typed getters (122 of
+laravel's 160), `is_wp_error()` exit guards (nine WordPress rows), dynamic
+properties on legacy classes, and `undefined-type` rows that are vendor
+classes with no `vendor/` tree on disk.
