@@ -143,6 +143,7 @@ pub struct SkeletonAnalysis {
     /// sticky-tagged) class package is cleared in `into_file_analysis`.
     pub receiver_names: Vec<String>,
     pub implicit_variables: Vec<String>,
+    pub throwaway_names: Vec<String>,
     pub catch_all_methods: Vec<String>,
     pub class_literal_member: String,
     pub types_are_capitalized: bool,
@@ -1364,6 +1365,7 @@ impl SkeletonAnalysis {
             // the pack, generic logic in core).
             receiver_names: std::mem::take(&mut self.receiver_names),
             implicit_variables: std::mem::take(&mut self.implicit_variables),
+            throwaway_names: std::mem::take(&mut self.throwaway_names),
             catch_all_methods: std::mem::take(&mut self.catch_all_methods),
             class_literal_member: std::mem::take(&mut self.class_literal_member),
             import_rows: std::mem::take(&mut self.import_rows),

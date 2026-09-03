@@ -1308,6 +1308,7 @@ fn remap_spans(
         label_refs,
         receiver_names: _,
         implicit_variables: _,
+        throwaway_names: _,
         catch_all_methods: _,
         class_literal_member: _,
         types_are_capitalized: _,

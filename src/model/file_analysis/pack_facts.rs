@@ -24,6 +24,10 @@ pub struct PackFacts {
     /// superglobals) — the undefined-variable lane's silence list.
     #[serde(default)]
     pub implicit_variables: Vec<String>,
+    /// The language's throwaway binding names (php `$_`) — written to be
+    /// discarded, so the unused-variable lane never reports them.
+    #[serde(default)]
+    pub throwaway_names: Vec<String>,
     /// Methods whose presence makes a class answer any member name (php
     /// `__call`/`__get`) — the undefined-member lanes stay silent on it.
     #[serde(default)]
@@ -228,6 +232,7 @@ impl PackFacts {
             + mcap(&self.specializes)
             + vcap(&self.receiver_names)
             + vcap(&self.implicit_variables)
+            + vcap(&self.throwaway_names)
             + vcap(&self.catch_all_methods)
             + self.class_literal_member.capacity()
             + vcap(&self.enum_members)

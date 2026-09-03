@@ -1147,6 +1147,7 @@ pub fn pack_symbol_diagnostics(
             }
             let Some(sc) = callable_of(sym.scope) else { continue };
             if pack.implicit_variables.iter().any(|v| *v == sym.name)
+                || pack.throwaway_names.iter().any(|v| *v == sym.name)
                 || pack.param_regions.iter().any(|p| p.contains(&sym.span))
             {
                 continue;

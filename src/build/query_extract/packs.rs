@@ -187,6 +187,9 @@ pub struct LangPack {
     /// Variables the runtime binds without a declaration (php's `$this`
     /// and superglobals): never "undefined".
     pub implicit_variables: &'static [&'static str],
+    /// The language's THROWAWAY binding names (php `$_` in `foreach ($a
+    /// as $k => $_)`): written to be discarded, so never "unused".
+    pub throwaway_names: &'static [&'static str],
     /// Methods whose presence makes a class answer ANY member name
     /// (php `__call`/`__callStatic`, `__get`) — the undefined-member lanes
     /// stay silent on such a class, as Perl's do on `AUTOLOAD`.
@@ -541,6 +544,7 @@ pub fn perl_pack() -> LangPack {
         call_shapes: &[],
         arg_kind: "",
         implicit_variables: &[],
+        throwaway_names: &[],
         catch_all_methods: &[],
         callable_placeholder_kind: "",
         class_literal_member: "",
@@ -616,6 +620,7 @@ pub fn python_pack() -> LangPack {
         call_shapes: &[],
         arg_kind: "",
         implicit_variables: &[],
+        throwaway_names: &[],
         catch_all_methods: &[],
         callable_placeholder_kind: "",
         class_literal_member: "",
@@ -691,6 +696,7 @@ pub fn r_pack() -> LangPack {
         call_shapes: &[],
         arg_kind: "",
         implicit_variables: &[],
+        throwaway_names: &[],
         catch_all_methods: &[],
         callable_placeholder_kind: "",
         class_literal_member: "",
@@ -774,6 +780,7 @@ pub fn cmake_pack() -> LangPack {
         call_shapes: &[],
         arg_kind: "",
         implicit_variables: &[],
+        throwaway_names: &[],
         catch_all_methods: &[],
         callable_placeholder_kind: "",
         class_literal_member: "",
@@ -1080,6 +1087,7 @@ pub fn php_pack() -> LangPack {
             CallShape { kind: "object_creation_expression", callee_field: "", args_field: "arguments" },
         ],
         arg_kind: "argument",
+        throwaway_names: &["$_"],
         implicit_variables: &[
             "$this", "$GLOBALS", "$_SERVER", "$_GET", "$_POST", "$_FILES", "$_COOKIE",
             "$_SESSION", "$_REQUEST", "$_ENV", "$argv", "$argc", "$http_response_header",
@@ -1239,6 +1247,7 @@ pub fn cpp_pack() -> LangPack {
         call_shapes: &[],
         arg_kind: "",
         implicit_variables: &[],
+        throwaway_names: &[],
         catch_all_methods: &[],
         callable_placeholder_kind: "",
         class_literal_member: "",

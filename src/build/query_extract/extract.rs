@@ -600,6 +600,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     }
     out.receiver_names = pack.receiver_names.iter().map(|s| s.to_string()).collect();
     out.implicit_variables = pack.implicit_variables.iter().map(|s| s.to_string()).collect();
+    out.throwaway_names = pack.throwaway_names.iter().map(|s| s.to_string()).collect();
     out.catch_all_methods = pack.catch_all_methods.iter().map(|s| s.to_string()).collect();
     out.class_literal_member = pack.class_literal_member.to_string();
     out.import_template = pack.import_template.to_string();

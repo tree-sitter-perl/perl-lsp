@@ -331,7 +331,8 @@ templates). Market case and build-out plan in `docs/prompt-php-target.md`.
   unresolved method. A namespaced `class Exception extends \Exception`
   no longer resolves its parent to itself and report every inherited
   `getMessage()`, and a member read inside `isset(...)` / `empty(...)` is
-  the existence question, not an undefined property.
+  the existence question, not an undefined property; `$_` is the
+  throwaway name and never an unused variable.
 - **A php value read never means a method.** `$this->session` on a
   class declaring only `session()` is an undeclared property for the
   lane, goto-def and hover alike (Perl's accessor calls keep their
