@@ -1199,6 +1199,11 @@ pub fn pack_symbol_diagnostics(
             if argument_binding(r.span) != Some(false) {
                 continue;
             }
+            // `isset($x)` / `empty($x)` / `unset($x)`: the read IS the
+            // existence question, the member lanes' probe silence
+            if analysis.pack.probe_regions.iter().any(|p| p.contains(&r.span)) {
+                continue;
+            }
             // a callable that materializes variables dynamically is silent
             let body = analysis.scope(sc).span;
             if dynamic_var_calls.iter().any(|c| span_within(*c, body)) {

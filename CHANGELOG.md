@@ -245,7 +245,9 @@ templates). Market case and build-out plan in `docs/prompt-php-target.md`.
   or by name; the lane names the stray read into a by-value parameter and
   stays silent for a callee it cannot resolve (php's own `preg_match`).
   `$d = &$this->x` declares `$d`; `\Vendor\Init::$files` reads as a
-  member, never a local. composer: 35 undefined-variable rows → 0.
+  member, never a local; `...$args` declares its parameter; a variable
+  inside `isset` / `empty` / `unset` is the existence question. composer:
+  35 undefined-variable rows → 0; WordPress 24 → 2.
 - **Signature help.** `$obj->method(` and `Foo::method(` on PHP now show
   the declaration's parameter list with the active parameter, the return
   annotation, and the docblock summary, for local and cross-file

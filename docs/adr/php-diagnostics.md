@@ -21,7 +21,7 @@ variable read — and the pack's own declarations (`receiver_names`,
 | `undefined-property` | the same, for a member READ (`MemberShape::Value`) | error |
 | `non-public-access` | the member resolves to a `non_public` symbol and the enclosing class is neither the owner nor one of its descendants | error |
 | `arity-mismatch` | a resolved callable's `ParamArity` rejects the written count: fewer than `required` (error) or more than `total` on a non-variadic list (warning) | error / warning |
-| `undefined-variable` | a variable read with no binding, inside a callable, read exactly once there; a bare call argument only when the resolved callee's parameter there is by value (`ParamArity::binds_arg`, the php `reference_modifier`) — an argument of a callee the lane cannot resolve (php's own functions, a `__call` class) is silence, never a guess either way | error |
+| `undefined-variable` | a variable read with no binding, inside a callable, read exactly once there; a bare call argument only when the resolved callee's parameter there is by value (`ParamArity::binds_arg`, the php `reference_modifier`) — an argument of a callee the lane cannot resolve (php's own functions, a `__call` class) is silence, never a guess either way; a read inside `isset` / `empty` / `unset` is the existence question (`probe_regions`) | error |
 | `undefined-type` | a class reference (a type hint, a `use` row, `new Foo`, a static receiver) whose namespace — pinned by the file's `use` rows, else its own — declares no such class in this file or the settled workspace index | error |
 
 The receiver is THE dispatch projection (`method_call_invocant_class`):

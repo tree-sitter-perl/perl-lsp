@@ -1610,7 +1610,8 @@ fn php_lanes_stay_quiet_on_traits_captures_and_first_class_callables() {
 /// by-reference parameter — the callee resolved locally or across files,
 /// through a receiver or by name — stays silent for a callee it cannot
 /// resolve (php's own `preg_match`), still names the stray read into a
-/// by-value parameter, and reads `\Ns\Cls::$prop` as a member, never a local.
+/// by-value parameter, reads `\Ns\Cls::$prop` as a member, never a local,
+/// and treats `unset($x)` / `empty($x)` as the existence question.
 #[cfg(feature = "php")]
 #[test]
 fn php_undefined_variable_lane_reads_by_reference_parameters() {
@@ -1621,7 +1622,7 @@ fn php_undefined_variable_lane_reads_by_reference_parameters() {
     w("composer.json", "{\"autoload\": {\"psr-4\": {\"App\\\\\": \"src/\"}}}");
     w("src/Process.php", "<?php\nnamespace App;\nclass Process\n{\n    public function execute(array $cmd, &$output = null, ?string $cwd = null): int { return 0; }\n}\n");
     w("src/Init.php", "<?php\nnamespace App;\nclass Init\n{\n    public static $files = [];\n}\n");
-    w("src/Runner.php", "<?php\nnamespace App;\nfunction fill(array &$out): void { $out = [1]; }\nfunction helper(string $x): int { return strlen($x); }\nclass Runner\n{\n    public function run(Process $p): int\n    {\n        $p->execute(['ls'], $ignored, '/');\n        fill($local);\n        preg_match('/a/', 'abc', $m);\n        $n = \\App\\Init::$files;\n        helper($typo);\n        $dm = &$this->mode;\n        $dm = true;\n        return count($n);\n    }\n    private bool $mode = false;\n}\n");
+    w("src/Runner.php", "<?php\nnamespace App;\nfunction fill(array &$out): void { $out = [1]; }\nfunction helper(string $x): int { return strlen($x); }\nclass Runner\n{\n    public function run(Process $p): int\n    {\n        $p->execute(['ls'], $ignored, '/');\n        fill($local);\n        preg_match('/a/', 'abc', $m);\n        $n = \\App\\Init::$files;\n        helper($typo);\n        $dm = &$this->mode;\n        $dm = true;\n        unset($gone);\n        if (empty($maybe)) { return 0; }\n        return count($n);\n    }\n    private bool $mode = false;\n}\n");
     let out = std::process::Command::new(env!("CARGO_BIN_EXE_perl-lsp"))
         .args(["--check", dir.to_str().unwrap(), "--severity", "hint"])
         .env("XDG_CACHE_HOME", dir.join(".cache"))

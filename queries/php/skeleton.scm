@@ -253,6 +253,8 @@
    function: (name) @_probe
    arguments: (arguments) @probe.region)
  (#any-of? @_probe "isset" "empty"))
+; `unset($x)` asks the same question of a variable (and answers it).
+(unset_statement) @probe.region
 
 ; The file preamble an import may not precede: the open tag and
 ; `declare(...)` rows (php requires `declare(strict_types=1)` first).

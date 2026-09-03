@@ -1044,4 +1044,6 @@ one `$schema` read in `update_item` that the method never assigns — a
 real finding `empty()` hides at runtime. The alias rule keeps the
 unused-variable lane exactly where it was: without it, composer's
 `$headers = &$options['http']['header']; $headers[] = …` gained a false
-row.
+row. With `isset` / `empty` / `unset` reads treated as the existence
+question (the member lanes' probe silence, now on the variable lane too):
+WordPress 4 → 2, both `$wp_version`-family globals.
