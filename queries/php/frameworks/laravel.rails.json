@@ -4,18 +4,25 @@
     { "rail": "route", "calls": ["route", "to_route"], "files": [".blade.php"] },
     { "rail": "view", "calls": ["view", "@extends", "@include", "@includeIf", "@includeWhen", "@includeFirst", "@each", "@component"], "files": [".blade.php"] },
     { "rail": "config", "calls": ["config"], "files": [".blade.php"] },
-    { "rail": "lang", "calls": ["__", "trans", "trans_choice", "@lang", "@choice"], "files": [".blade.php"], "requires": "." }
+    { "rail": "lang", "calls": ["__", "trans", "trans_choice", "@lang", "@choice"], "files": [".blade.php"], "requires": "." },
+    { "rail": "ability", "calls": ["@can", "@cannot", "@elsecan", "@elsecannot"], "files": [".blade.php"] }
   ],
   "path_rails": [
     { "rail": "view", "under": "/resources/views/", "strip": ".blade.php", "sep": "." },
     { "rail": "config", "under": "/config/", "strip": ".php", "sep": ".", "keys": true },
     { "rail": "lang", "under": "/lang/", "skip": 1, "strip": ".php", "sep": ".", "keys": true },
-    { "rail": "lang", "under": "/resources/lang/", "skip": 1, "strip": ".php", "sep": ".", "keys": true }
+    { "rail": "lang", "under": "/resources/lang/", "skip": 1, "strip": ".php", "sep": ".", "keys": true },
+    { "rail": "ability", "under": "/app/Policies/", "methods": true }
   ],
   "labels": {
     "event": "No listener for event",
     "view": "Undefined view",
     "config": "Undefined config key",
-    "lang": "Undefined translation key"
-  }
+    "lang": "Undefined translation key",
+    "middleware": "Undefined middleware",
+    "ability": "Undefined ability",
+    "binding": "Undefined container binding"
+  },
+  "hints": ["middleware", "ability", "binding"],
+  "name_seps": { "middleware": ":" }
 }

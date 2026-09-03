@@ -79,8 +79,16 @@ pub(super) fn resolver_loop(core: Arc<IndexCore>, server: Option<ServerSession>)
             }
             core.queue.notify_new_work();
         }
-        // Build reverse index from warmed cache.
-        core.rebuild_reverse_index();
+        // Rebuild the reverse index from the warmed cache — only when the
+        // warm load brought entries in without feeding the edges. A core
+        // fed purely by registrations (a pack sub-index; a cold start) has
+        // nothing to re-derive, and a rebuild is not free to readers: its
+        // clear-then-refeed window empties every bucket, and this thread
+        // wakes lazily, so on a one-shot CLI the window lands under the
+        // diagnostics sweep.
+        if n > 0 {
+            core.rebuild_reverse_index();
+        }
     }
 
     // Track which extract version each module was resolved at.

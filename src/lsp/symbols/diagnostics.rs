@@ -1358,8 +1358,9 @@ pub fn pack_symbol_diagnostics(
                 // a package-namespaced rail (`errors::minimal`) whose
                 // provider file lives outside the path rails; a class-keyed
                 // emission with no dispatcher (`Theme::dispatch(X::CONST)`)
-                // is an event the overlay could not name.
-                if name.ends_with(['.', '_', '-']) || name.contains("::") {
+                // is an event the overlay could not name; a `*` is a
+                // wildcard (`->can('*')`), never one name.
+                if name.ends_with(['.', '_', '-']) || name.contains("::") || name.contains('*') {
                     continue;
                 }
                 if let (HandlerOwner::ClassRail(_), RefKind::DispatchCall { dispatcher }) = (owner, &r.kind) {
@@ -1376,6 +1377,7 @@ pub fn pack_symbol_diagnostics(
                 // a class-keyed rail's miss is a dead emission — a hint
                 let severity = match owner {
                     HandlerOwner::ClassRail(_) => DiagnosticSeverity::HINT,
+                    _ if pack.rail_hints.iter().any(|h| h == rail) => DiagnosticSeverity::HINT,
                     _ => DiagnosticSeverity::WARNING,
                 };
                 let label = pack

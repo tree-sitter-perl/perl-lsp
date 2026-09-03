@@ -535,7 +535,11 @@ marked otherwise; the drain re-derived each rationale against current code.
   runtime (`Facade::defaultAliases()` + `config/app.php`), no static
   source declares `class DB`. A Laravel overlay reading the framework's
   default alias map is the honest fix; the qualified spelling
-  (`use Illuminate\Support\Facades\DB;`) already resolves.
+  (`use Illuminate\Support\Facades\DB;`) already resolves. Evidence
+  against building it: across BookStack, panel and koel there are zero
+  bare-alias spellings (`use DB;`, `\DB::`) and zero `class_alias()`
+  calls — every facade use imports the FQ class. A global-alias class
+  declaration is a seam no corpus asks for.
 - **PHP `self::VOID`-style constant names read as undefined properties**
   (round-8): tree-sitter-php lexes a keyword-spelled constant NAME
   (`VOID`, `STRING`, `ARRAY` — PHP keywords are case-insensitive) as the

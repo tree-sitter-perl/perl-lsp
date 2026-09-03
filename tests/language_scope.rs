@@ -1721,6 +1721,65 @@ fn php_laravel_event_bus_across_files() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Policies, middleware aliases and container bindings across files: a
+/// policy method defines an ability through the `/app/Policies/` path
+/// rail (Blade `@can` and `->authorize` reach it), a kernel alias answers
+/// `->middleware('auth:web')`, a provider's `singleton('key')` answers
+/// `app('key')`, and `app(Repo::class)->find()` navigates to `find`;
+/// misses on the three rails are hints.
+#[cfg(feature = "php")]
+#[test]
+fn php_laravel_policies_middleware_bindings_across_files() {
+    let dir = std::env::temp_dir().join(format!("perl-lsp-lrgate-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    for d in ["app/Policies", "app/Http/Controllers", "app/Providers", "resources/views", "routes"] {
+        std::fs::create_dir_all(dir.join(d)).unwrap();
+    }
+    let w = |rel: &str, src: &str| std::fs::write(dir.join(rel), src).unwrap();
+    w("composer.json", "{\"autoload\": {\"psr-4\": {\"App\\\\\": \"app/\"}}}");
+    w("app/Policies/PostPolicy.php", "<?php\nnamespace App\\Policies;\nclass PostPolicy\n{\n    public function update($user, $post) { return true; }\n}\n");
+    w("app/Http/Kernel.php", "<?php\nnamespace App\\Http;\nclass Kernel\n{\n    protected $middlewareAliases = [\n        'auth' => \\App\\Http\\Middleware\\Authenticate::class,\n    ];\n}\n");
+    w("app/Providers/AppServiceProvider.php", "<?php\nnamespace App\\Providers;\nclass AppServiceProvider\n{\n    public function register() { $this->app->singleton('users.default', fn () => 1); }\n}\n");
+    w("app/Repo.php", "<?php\nnamespace App;\nclass Repo { public function find() { return 1; } }\n");
+    w("routes/web.php", "<?php\nuse Illuminate\\Support\\Facades\\Route;\nRoute::middleware(['auth', 'guest'])->group(function () {});\n");
+    w("resources/views/post.blade.php", "@can('update', $post)\n<p>ok</p>\n@endcan\n@can('nope')\n<p>no</p>\n@endcan\n");
+    let ctl = "<?php\nnamespace App\\Http\\Controllers;\nuse App\\Repo;\nclass PostController\n{\n    public function __construct() { $this->middleware('auth:web'); $this->middleware('nope'); }\n    public function edit($post) { $this->authorize('update', $post); $this->authorize('nope', $post); return app('users.default') . app('nope'); }\n    public function find() { return app(Repo::class)->find(); }\n}\n";
+    w("app/Http/Controllers/PostController.php", ctl);
+    let run = |args: &[&str]| {
+        let out = std::process::Command::new(env!("CARGO_BIN_EXE_perl-lsp"))
+            .args(args)
+            .env("XDG_CACHE_HOME", dir.join(".cache"))
+            .output()
+            .expect("run");
+        format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr))
+    };
+    let root = dir.to_str().unwrap();
+    let check = run(&["--check", root, "--severity", "hint"]);
+    let count = |code: &str| check.lines().filter(|l| l.contains(code)).count();
+    assert_eq!(count("hint[undefined-middleware]"), 2, "'nope' and 'guest': {check}");
+    assert_eq!(count("hint[undefined-ability]"), 2, "'nope' in the controller and the template: {check}");
+    assert_eq!(count("hint[undefined-binding]"), 1, "{check}");
+    assert!(check.contains("Undefined middleware 'nope'") && check.contains("Undefined ability 'nope'") && check.contains("Undefined container binding 'nope'"), "{check}");
+    assert!(!check.contains("'auth'") && !check.contains("'update'") && !check.contains("'users.default'"), "{check}");
+    let lines: Vec<&str> = ctl.lines().collect();
+    let ctl_path = dir.join("app/Http/Controllers/PostController.php");
+    let col = lines[6].find("'update'").unwrap() + 1;
+    let gd = run(&["--definition", root, ctl_path.to_str().unwrap(), "6", &col.to_string()]);
+    assert!(gd.contains("app/Policies/PostPolicy.php:4:"), "ability → the policy method: {gd}");
+    let refs = run(&["--references", root, ctl_path.to_str().unwrap(), "6", &col.to_string()]);
+    assert!(refs.contains("resources/views/post.blade.php") && refs.contains("app/Policies/PostPolicy.php"), "the template's @can and the policy method: {refs}");
+    let col = lines[5].find("'auth:web'").unwrap() + 1;
+    let gd = run(&["--definition", root, ctl_path.to_str().unwrap(), "5", &col.to_string()]);
+    assert!(gd.contains("app/Http/Kernel.php:5:"), "middleware → the alias row: {gd}");
+    let col = lines[6].find("'users.default'").unwrap() + 1;
+    let gd = run(&["--definition", root, ctl_path.to_str().unwrap(), "6", &col.to_string()]);
+    assert!(gd.contains("app/Providers/AppServiceProvider.php:4:"), "binding → the singleton: {gd}");
+    let col = lines[7].find("find();").unwrap();
+    let gd = run(&["--definition", root, ctl_path.to_str().unwrap(), "7", &col.to_string()]);
+    assert!(gd.contains("app/Repo.php:2:"), "app(Repo::class)->find() → Repo::find: {gd}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// Path-defined rails: a Blade file defines its view name, a config file's
 /// array keys define dotted config keys, a lang file's keys define
 /// translation keys — goto-def from `view('home')` lands on the template,

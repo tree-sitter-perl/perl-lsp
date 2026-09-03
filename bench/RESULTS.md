@@ -1143,3 +1143,40 @@ $kind)`); a name containing `::` is a package-namespaced view
 translation key without a dot is a JSON-file string (`__('to')`); an
 `X::dispatch(Consts::EVENT)` emission carries no dispatcher and the
 lane treats it as unnameable.
+
+### Round 4 — gates, middleware, container (2026-09-03, 19:00, build under net r122)
+
+`--check --severity hint`, cold, one run each (three on BookStack, identical):
+
+| app | middleware | ability | binding | what the misses are |
+|---|---|---|---|---|
+| koel (Laravel 11, no vendor tree) | 9 | 5 | 2 | `auth` / `throttle` / `web` / `api` are the framework's defaults, declared in the vendor tree koel does not carry; `*` was a wildcard (`->can('*')`, silenced since); `video` / `audio` / `invite-collaborators` are abilities a database grants; `cache` / `aws` are core container aliases from the same absent vendor tree |
+| panel (Laravel 10, no vendor tree) | 0 | 1 | 4 | `file.read` is a database permission; the bindings are core aliases (`hashids`, `view`, `blade.compiler`) |
+| BookStack (real vendor tree) | 0 | 0 | 5 | the five are vendor helpers reading config-shaped keys through the container (`app('app.debug')`) |
+
+All three rails are hints by declaration (`rails.json` `hints`): their
+definitions are partly runtime-only, so an unmatched name is a lead, not
+an error — the table is the evidence. `throttle:60,1` names `throttle`
+(the rail's `name_seps`), span included, so rename and references stay
+exact. `app(SongRepository::class)->countAccessibleByIds(…)` in koel
+navigates to the repository method (goto-def answered nothing before
+the `@expr.annot` witness). Rename at a policy method renames the method
+alone — the ability rail is reached from the strings, not from the
+declaration token. BookStack's `undefined-route` residual fell from 5 to
+3 (the `$this->route('id')` parameter reads no longer count as names; the
+three left are framework defaults in the vendor tree).
+
+The facade row stays parked: across the three apps, zero bare-alias
+spellings (`use DB;`, `\DB::`) and zero `class_alias()` calls — every
+facade use imports the FQ class, which `@method` already resolves. A
+global-alias class declaration is a seam the corpus does not ask for.
+
+The residual cross-file race is closed. Its window was the pack
+sub-index's own resolver thread: it wakes lazily, and its warm-start
+`rebuild_reverse_index` — a clear-then-refeed of every bucket — landed
+under the diagnostics sweep on a one-shot CLI, so a lookup in the window
+saw an empty rail (view 10–38, lang 12–33 across runs before; three
+identical runs after). Two changes: a core the warm load fed nothing
+into skips the rebuild (nothing to re-derive), and a rebuild's clear
+spares the path-keyed handler feeds, whose only source is the records
+that replay them anyway.

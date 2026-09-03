@@ -727,6 +727,16 @@ fn adopt_path_rails(
 
     for rail in rails.iter() {
         let Some(idx) = p.rfind(rail.under.as_str()) else { continue };
+        if rail.methods {
+            // the file's methods ARE the names (a policy's abilities); the
+            // Handler sits on the method's name token
+            for s in fa.symbols() {
+                if matches!(s.kind, crate::model::file_analysis::SymKind::Method) {
+                    minted.push((rail.rail.clone(), s.name.clone(), s.selection_span));
+                }
+            }
+            continue;
+        }
         let rest = &p[idx + rail.under.len()..];
         let mut segs: Vec<&str> = rest.split('/').filter(|s| !s.is_empty()).collect();
         if segs.len() <= rail.skip {
@@ -1503,6 +1513,9 @@ fn remap_spans(
         native_type_spellings: _,
         static_property_sigil: _,
         rail_labels: _,
+        rail_hints: _,
+        rail_name_seps: _,
+        annot_expr_spans: _,
         preamble_end: _,
         imports_bind_names: _,
         member_shapes_are_strict: _,

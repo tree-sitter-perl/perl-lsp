@@ -688,7 +688,12 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     out.native_type_spellings =
         pack.native_type_spellings.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
     out.static_property_sigil = pack.static_property_sigil.to_string();
-    out.rail_labels = crate::build::query_extract::rail_labels_for(pack).as_ref().clone();
+    {
+        let conv = crate::build::query_extract::rail_conventions_for(pack);
+        out.rail_labels = conv.labels.clone();
+        out.rail_hints = conv.hints.clone();
+        out.rail_name_seps = conv.name_seps.clone();
+    }
     out.imports_bind_names = pack.imports_bind_names;
     out.member_shapes_are_strict = pack.member_shapes_are_strict;
     out.members_are_package_bound = pack.members_are_package_bound;
@@ -2009,6 +2014,30 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                         ),
                         span,
                     });
+                }
+            }
+            // `@expr.annot`: an expression whose VALUE is the class the same
+            // match's `@type.annot` names (`app(Foo::class)` is a Foo — a
+            // container resolves what the argument spells). Declared by an
+            // overlay, so it rides the plugin priority: the expression's own
+            // evidence outranks the callee-return derivation.
+            "expr.annot" => {
+                if let Some(annot) = annot_by_match.get(&e.match_id) {
+                    if let Some(InferredType::ClassName(cn)) = (pack.annot_type)(annot) {
+                        let span = Span { start: e.start, end: e.end };
+                        lit_spans.push((e.start_byte, e.end_byte, span));
+                        out.annot_expr_spans.push(span);
+                        out.witnesses.push(crate::model::witnesses::Witness {
+                            attachment: crate::model::witnesses::WitnessAttachment::Expr(span),
+                            source: crate::model::witnesses::WitnessSource::Plugin(
+                                "overlay-annot".into(),
+                            ),
+                            payload: crate::model::witnesses::WitnessPayload::Edge(
+                                crate::model::witnesses::WitnessAttachment::TypeName(cn),
+                            ),
+                            span,
+                        });
+                    }
                 }
             }
             "expr.call" => {

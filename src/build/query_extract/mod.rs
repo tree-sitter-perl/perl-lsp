@@ -130,6 +130,10 @@ pub struct PathRail {
     pub sep: String,
     #[serde(default)]
     pub keys: bool,
+    /// The file's METHODS define names on the rail (a policy class: every
+    /// method is an ability); the path only selects the file.
+    #[serde(default)]
+    pub methods: bool,
 }
 fn default_sep() -> String {
     ".".to_string()
@@ -146,6 +150,24 @@ struct RailsDoc {
     /// listener for event"`); default `Undefined <rail>`.
     #[serde(default)]
     labels: std::collections::HashMap<String, String>,
+    /// Rails whose miss is a hint, not a warning: their definitions are
+    /// partly runtime-only (framework-default middleware aliases, database
+    /// permissions on the ability rail), so an unmatched name is a lead.
+    #[serde(default)]
+    hints: Vec<String>,
+    /// rail → the separator after which a use carries PARAMETERS
+    /// (`throttle:60,1` names `throttle`); the name and its span end there.
+    #[serde(default)]
+    name_seps: std::collections::HashMap<String, String>,
+}
+
+/// The lane-facing rail conventions of a language, merged over its rail
+/// documents.
+#[derive(Debug, Default, Clone)]
+pub struct RailConventions {
+    pub labels: Vec<(String, String)>,
+    pub hints: Vec<String>,
+    pub name_seps: Vec<(String, String)>,
 }
 
 /// The path rails in force for a language, from the bundled rail documents.
@@ -172,26 +194,31 @@ pub fn path_rails_for(pack: &LangPack) -> std::sync::Arc<Vec<PathRail>> {
     arc
 }
 
-/// rail → the lane phrasing for a miss, from the bundled rail documents.
-pub fn rail_labels_for(pack: &LangPack) -> std::sync::Arc<Vec<(String, String)>> {
+/// The rail conventions (lane labels, hint rails, name separators) from
+/// the bundled rail documents.
+pub fn rail_conventions_for(pack: &LangPack) -> std::sync::Arc<RailConventions> {
     use std::collections::HashMap;
     use std::sync::{Arc, Mutex, OnceLock};
-    static CACHE: OnceLock<Mutex<HashMap<String, Arc<Vec<(String, String)>>>>> = OnceLock::new();
+    static CACHE: OnceLock<Mutex<HashMap<String, Arc<RailConventions>>>> = OnceLock::new();
     let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
     let key = pack.lang_id.to_string();
     let mut guard = cache.lock().unwrap();
     if let Some(l) = guard.get(&key) {
         return Arc::clone(l);
     }
-    let mut out: Vec<(String, String)> = Vec::new();
+    let mut out = RailConventions::default();
     for src in pack.bundled_rail_docs {
         if let Ok(doc) = serde_json::from_str::<RailsDoc>(src) {
             if doc.language == pack.lang_id {
-                out.extend(doc.labels);
+                out.labels.extend(doc.labels);
+                out.hints.extend(doc.hints);
+                out.name_seps.extend(doc.name_seps);
             }
         }
     }
-    out.sort();
+    out.labels.sort();
+    out.hints.sort();
+    out.name_seps.sort();
     let arc = Arc::new(out);
     guard.insert(key, Arc::clone(&arc));
     arc

@@ -175,6 +175,13 @@ pub struct SkeletonAnalysis {
     pub static_property_sigil: String,
     /// rail → the undefined-name lane's phrasing (`rails.json` labels).
     pub rail_labels: Vec<(String, String)>,
+    /// Rails whose miss is a hint (`rails.json` hints).
+    pub rail_hints: Vec<String>,
+    /// rail → the parameter separator a use's name ends at (`rails.json`).
+    pub rail_name_seps: Vec<(String, String)>,
+    /// Expression spans whose value an overlay declared (`@expr.annot`) —
+    /// the callee-return edge is not minted for them.
+    pub annot_expr_spans: Vec<crate::model::file_analysis::Span>,
     /// The last row of the file preamble (open tag, `declare` rows): an
     /// inserted import goes after it when no import or namespace anchors.
     pub preamble_end: Option<usize>,
@@ -486,6 +493,7 @@ impl SkeletonAnalysis {
     pub fn into_file_analysis(mut self) -> crate::model::file_analysis::FileAnalysis {
         let rails = std::mem::take(&mut self.rails);
         let class_rails = std::mem::take(&mut self.class_rails);
+        let rail_name_seps = std::mem::take(&mut self.rail_name_seps);
         let rail_owner = |span: Span| -> crate::model::file_analysis::HandlerOwner {
             if let Some((_, rail)) = class_rails.iter().find(|(s, _)| *s == span) {
                 return crate::model::file_analysis::HandlerOwner::ClassRail(rail.clone());
@@ -1031,7 +1039,14 @@ impl SkeletonAnalysis {
             // call resolves to its n-th argument's value witness.
             let call_args: std::collections::HashMap<Span, &Vec<Span>> =
                 self.macro_call_arg_spans.iter().map(|(s, a)| (*s, a)).collect();
+            let annot_exprs: std::collections::HashSet<Span> =
+                self.annot_expr_spans.iter().copied().collect();
             for (span, name) in &self.call_sites {
+                // An overlay declared this call's value (`@expr.annot`) —
+                // the callee's return is not its type.
+                if annot_exprs.contains(span) {
+                    continue;
+                }
                 // Identity/projection macro: the call's value IS its n-th
                 // argument. Edge to the argument's own `Expr` witness rather
                 // than the param-agnostic Symbol return (edges-not-values).
@@ -1164,6 +1179,7 @@ impl SkeletonAnalysis {
                 use crate::model::file_analysis::{RefBinding, RefKind};
                 let mut span = Span { start: r.start, end: r.end };
                 let mut binding = None;
+                let mut name = r.name.clone();
                 let kind = match r.kind.as_str() {
                     "call" => RefKind::FunctionCall,
                     // Qualified call (`fmt::format_to(...)`): Perl parity —
@@ -1203,10 +1219,24 @@ impl SkeletonAnalysis {
                     // symbol arm) — refs_to pairs it with the stacked Handler
                     // registrations by name+owner equality.
                     "dispatch" => {
-                        binding = Some(RefBinding::Handler {
-                            owner: rail_owner(Span { start: r.start, end: r.end }),
-                            sym: None,
-                        });
+                        let owner = rail_owner(Span { start: r.start, end: r.end });
+                        // A rail with a parameter separator: the use names
+                        // the head (`throttle:60,1` → `throttle`), and the
+                        // span ends with it — a string never spans rows.
+                        if let crate::model::file_analysis::HandlerOwner::Rail(rail) = &owner {
+                            if let Some((_, sep)) = rail_name_seps.iter().find(|(rl, _)| rl == rail) {
+                                if let Some(cut) = name.find(sep.as_str()) {
+                                    if cut > 0 {
+                                        span.end = tree_sitter::Point {
+                                            row: span.start.row,
+                                            column: span.start.column + cut,
+                                        };
+                                        name.truncate(cut);
+                                    }
+                                }
+                            }
+                        }
+                        binding = Some(RefBinding::Handler { owner, sym: None });
                         RefKind::DispatchCall {
                             dispatcher: r.via.clone().unwrap_or_default(),
                         }
@@ -1231,7 +1261,7 @@ impl SkeletonAnalysis {
                     kind,
                     span,
                     scope: r.scope,
-                    target_name: r.name.clone(),
+                    target_name: name,
                     access: if member_write_spans.contains(&(span.start.row, span.start.column, span.end.row, span.end.column)) {
                         crate::model::file_analysis::AccessKind::Write
                     } else {
@@ -1458,6 +1488,7 @@ impl SkeletonAnalysis {
             native_type_spellings: std::mem::take(&mut self.native_type_spellings),
             static_property_sigil: std::mem::take(&mut self.static_property_sigil),
             rail_labels: std::mem::take(&mut self.rail_labels),
+            rail_hints: std::mem::take(&mut self.rail_hints),
             preamble_end: self.preamble_end,
             imports_bind_names: self.imports_bind_names,
             member_shapes_are_strict: self.member_shapes_are_strict,

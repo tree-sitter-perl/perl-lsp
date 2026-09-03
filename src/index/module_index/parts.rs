@@ -84,6 +84,15 @@ impl ModuleBucket {
         }
     }
 
+    /// Keep only the members `keep` accepts (a rebuild's clear, which
+    /// spares the path-keyed handler feeds).
+    pub fn retain_keys(&mut self, keep: impl Fn(&str) -> bool) {
+        self.modules.retain(|m| keep(m));
+        if let Some(seen) = &mut self.seen {
+            seen.retain(|m| keep(m));
+        }
+    }
+
     pub fn is_empty(&self) -> bool {
         self.modules.is_empty()
     }
@@ -425,9 +434,16 @@ impl ModuleEdgeIndexes {
 
     /// Wipe the edge maps for a rebuild. Deliberately KEEPS `name_records`
     /// — the rebuild re-feeds from cache copies that may be symbol-evicted,
-    /// and the records are their only complete name source.
+    /// and the records are their only complete name source. The PATH-keyed
+    /// handler feeds stay too: the name-keyed cache never held them, so a
+    /// rebuild has nothing to re-derive them from, and a reader in the
+    /// clear-to-replay window must not see a rail go blank.
     pub fn clear(&self) {
-        self.names.clear();
+        let is_path_key = |k: &str| std::path::Path::new(k).is_absolute();
+        self.names.retain(|_name, bucket| {
+            bucket.retain_keys(|k| is_path_key(k));
+            !bucket.is_empty()
+        });
         self.bridges.clear();
         self.children.clear();
         self.specs.clear();
@@ -435,7 +451,7 @@ impl ModuleEdgeIndexes {
         // The marks describe the maps just emptied; keeping them would let
         // a later purge take the sweep for a module with no edges left,
         // and — worse — a re-feed would find its mark already set.
-        self.fed_modules.clear();
+        self.fed_modules.retain(|k, _| is_path_key(k));
     }
 
     /// One walk of `symbols()` for both symbol-derived feed halves — the

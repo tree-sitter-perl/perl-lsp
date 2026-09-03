@@ -280,6 +280,18 @@ templates). Market case and build-out plan in `docs/prompt-php-target.md`.
   `undefined-view` / `undefined-config` / `undefined-lang` name what no
   file defines. A translation string with spaces is a JSON-file string,
   never a key path.
+- **Gates, middleware aliases and container bindings are rails.** A
+  kernel's `$middlewareAliases` / `$middlewareGroups`, `$middleware->alias([…])`,
+  `Route::aliasMiddleware` and the framework's defaults define middleware
+  names; `->middleware('throttle:60,1')` names `throttle` (the parameter
+  separator ends the name). `Gate::define('x')` and every policy method
+  under `app/Policies/` define abilities; `->authorize`, `->can`,
+  `Gate::allows` and Blade `@can` use them. `->singleton('key')` / `->bind`
+  / `->instance` define container bindings; `app('key')`, `resolve`,
+  `App::make` use them. `app(Foo::class)` / `resolve(Foo::class)` /
+  `->make(Foo::class)` IS a Foo, so a chain off it navigates. Misses on
+  these rails are hints (`undefined-middleware` / `-ability` / `-binding`)
+  — their definitions are partly runtime-only.
 - **Signature help.** `$obj->method(` and `Foo::method(` on PHP now show
   the declaration's parameter list with the active parameter, the return
   annotation, and the docblock summary, for local and cross-file
