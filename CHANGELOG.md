@@ -361,6 +361,9 @@ templates). Market case and build-out plan in `docs/prompt-php-target.md`.
   visible class) gets a hint and an "Add return type" quick-fix; a `null`
   arm, an ambiguous numeric, a fluent `return $this` and closures stay
   silent.
+- Hovering a php method or function that declares no return type shows
+  what it returns (`*returns: array*`), the same total inferred return the
+  quick-fix would write.
 - `--check`'s summary counts every file it swept (pack files included),
   not only the Perl workspace.
 - Parameter-name inlay hints on pack documents: every positional argument

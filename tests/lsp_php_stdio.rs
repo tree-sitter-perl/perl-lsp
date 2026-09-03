@@ -220,6 +220,9 @@ fn php_editor_axes_over_stdio() {
         if mrt.is_none() { std::thread::sleep(std::time::Duration::from_millis(250)); }
     }
     let mrt = mrt.expect("missing-return-type hint on all()");
+    // the declaration hover says what the bag infers for the untyped callable
+    let hv = c.request("textDocument/hover", serde_json::json!({"textDocument": {"uri": u}, "position": {"line": 22, "character": col(22, "all")}}));
+    assert!(hv.to_string().contains("returns: array"), "hover on all(): {hv}");
     assert_eq!(mrt["range"]["start"]["line"], 22, "{mrt}");
     assert!(mrt["message"].as_str().unwrap().contains("`array`"), "{mrt}");
     let acts = c.request("textDocument/codeAction", serde_json::json!({"textDocument": {"uri": u}, "range": mrt["range"], "context": {"diagnostics": [mrt]}}));

@@ -917,3 +917,35 @@ Eight sampled rows checked against the source: data providers returning
 literal arrays, `__toString` returning `''`, `Str::startsWith` returning
 `false`/`true`, a test stub returning `'foo'`, `initLogger` returning
 `new Logger(...)` — every one a return the annotation would state truly.
+
+### Lane counts, the day's final build (2026-09-03, 09:40, build 98dfe19)
+
+The five corpora at hint severity, fresh cache, against the build carrying
+every slice of the day. Read against the 04:55 table above (8fdb042).
+
+| corpus | unresolved-method | undefined-property | undefined-type | undefined-variable | unused-import | unused-variable | deprecated | arity | unimplemented-method | missing-return-type |
+|---|---|---|---|---|---|---|---|---|---|---|
+| WordPress | 12 | 26 | 94 | 24 | 0 | 420 | 283 | 7 | 0 | 156 |
+| laravel/framework | 152 | 11 | 7,039 | 14 | 6 | 257 | 34 | 11 | 0 | 723 |
+| guzzle | 1 | 0 | 1,340 | 0 | 0 | 89 | 0 | 2 | 0 | 0 |
+| monolog | 10 | 9 | 263 | 0 | 2 | 24 | 4 | 0 | 0 | 36 |
+| symfony demo | 0 | 0 | 519 | 0 | 0 | 0 | 0 | 0 | 0 | 0 |
+
+Since the night table: laravel `undefined-property` 91 → 11 and
+`undefined-variable` 51 → 14 (the promoted-property and expression-scope
+static property rules), `unresolved-method` 160 → 152 (the same-leaf
+parent pin), WordPress `arity-mismatch` 11 → 7 (spread arguments). The
+two new lanes: `unimplemented-method` is 0 everywhere — code that runs
+has no unimplemented contracts — and `missing-return-type` reports only
+where the file's own convention is native return types (guzzle and the
+demo are docblock-typed and stay silent).
+
+### Scoreboard replay with the day's final build (2026-09-03, 09:50, build 98dfe19)
+
+The day-2 battery (`spec2-*.json`) replayed against the final build: every
+answered cell of the 00:30 table is unchanged — the same definitions,
+hovers, signatures, implementations, typeDefinitions and outlines, at the
+same 1–22 ms; the other tools' rows are the day-2 runs. Startup and
+resident memory this replay: guzzle 1.5 s · 376 MB, monolog 1.3 s · 84 MB,
+demo 1.1 s · 68 MB (Intelephense 1.5 s · 232 MB, 1.1 s · 195 MB,
+1.1 s · 187 MB; phpactor 0.7 s · 126 MB, 0.5 s · 119 MB, 1.6 s · 117 MB).

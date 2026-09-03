@@ -349,6 +349,18 @@ fn render_symbol_hover(
             out.push_str(&format!("\n\n*{}*", attr));
         }
     }
+    // A callable the source leaves untyped, in a language that writes
+    // native return annotations: what the bag infers for it is the
+    // hover's business — only the TOTAL return (every arm witnessed, none
+    // null), the same value the quick-fix would write.
+    if matches!(sym.kind, FaSymKind::Sub | FaSymKind::Method)
+        && !analysis.pack.return_annotation_template.is_empty()
+        && !sym.attributes.iter().any(|a| a == "declared_return")
+    {
+        if let Some(rt) = analysis.total_inferred_return(sym.id) {
+            out.push_str(&format!("\n\n*returns: {}*", analysis.render_type(&rt)));
+        }
+    }
     if let Some(doc) = sym.presentation.doc.as_deref() {
         out.push_str("\n\n");
         out.push_str(doc);
