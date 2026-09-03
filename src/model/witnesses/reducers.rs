@@ -150,7 +150,7 @@ impl WitnessReducer for FrameworkAwareTypeFold {
                     if span_contains(&w.span, point) && !span_is_zero(&w.span) {
                         let area = span_area(&w.span);
                         let prio = w.source.priority();
-                        let better = narrow.map_or(true, |(nw, a)| {
+                        let better = narrow.is_none_or(|(nw, a)| {
                             let np = nw.source.priority();
                             prio > np || (prio == np && area < a)
                         });
@@ -211,7 +211,7 @@ impl WitnessReducer for FrameworkAwareTypeFold {
                     && matches!(&w.source, WitnessSource::Builder(t) if t == REASSIGN_FLOW_SOURCE)
             })
             .map(|w| w.span.start)
-            .filter(|s| narrow_point.map_or(true, |p| *s <= p))
+            .filter(|s| narrow_point.is_none_or(|p| *s <= p))
             .max();
 
         for w in ws {

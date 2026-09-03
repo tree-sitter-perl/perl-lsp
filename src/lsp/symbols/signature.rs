@@ -778,6 +778,10 @@ pub fn pack_signature_help(
     })
 }
 
+/// `(label, params, return annotation, doc)` — a declaration rendered from
+/// its own text.
+pub type RenderedSignature = (String, Vec<String>, Option<String>, Option<String>);
+
 /// The callee at a pack call site — the ref at its token, resolved
 /// through the member ladder goto-def uses — rendered from the DEFINING
 /// file's own text as `(label, params, return, doc)`. One rule for local
@@ -787,11 +791,11 @@ pub fn pack_callee_signature(
     text: &str,
     callee: Point,
     module_index: &dyn CrossFileLookup,
-) -> Option<(String, Vec<String>, Option<String>, Option<String>)> {
+) -> Option<RenderedSignature> {
     let r = analysis.ref_at(callee)?;
     let name = r.unqualified_target_name().to_string();
     // (defining analysis, its source text, the callable symbol)
-    let mut found: Option<(String, Vec<String>, Option<String>, Option<String>)> = None;
+    let mut found: Option<RenderedSignature> = None;
     let render = |src: &str, sym: &crate::model::file_analysis::Symbol| signature_from_source(src, sym);
     match &r.kind {
         RefKind::MethodCall { shape, .. } => {
@@ -853,7 +857,7 @@ pub fn pack_callee_signature(
 fn signature_from_source(
     src: &str,
     sym: &crate::model::file_analysis::Symbol,
-) -> Option<(String, Vec<String>, Option<String>, Option<String>)> {
+) -> Option<RenderedSignature> {
     let lines: Vec<&str> = src.lines().collect();
     let row = sym.selection_span.start.row;
     let first = lines.get(row)?;
@@ -918,7 +922,7 @@ fn signature_from_source(
         .collect();
     let tail = buf[c + 1..].trim();
     let ret = tail
-        .split(|ch| ch == '{' || ch == ';')
+        .split(['{', ';'])
         .next()
         .map(|t| t.trim())
         .filter(|t| !t.is_empty())

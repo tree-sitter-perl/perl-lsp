@@ -1125,7 +1125,7 @@ pub fn pack_symbol_diagnostics(
             {
                 continue;
             }
-            if pack.implicit_variables.iter().any(|v| *v == r.target_name) {
+            if pack.implicit_variables.contains(&r.target_name) {
                 continue;
             }
             let Some(sc) = callable_of(r.scope) else { continue };
@@ -1178,8 +1178,8 @@ pub fn pack_symbol_diagnostics(
                 continue;
             }
             let Some(sc) = callable_of(sym.scope) else { continue };
-            if pack.implicit_variables.iter().any(|v| *v == sym.name)
-                || pack.throwaway_names.iter().any(|v| *v == sym.name)
+            if pack.implicit_variables.contains(&sym.name)
+                || pack.throwaway_names.contains(&sym.name)
                 || pack.param_regions.iter().any(|p| p.contains(&sym.span))
             {
                 continue;
@@ -1189,7 +1189,7 @@ pub fn pack_symbol_diagnostics(
                 continue;
             }
             let related = |chain: &Vec<u32>| chain.contains(&sc.0) || callables_up(sym.scope).iter().any(|c| chain.first() == Some(c));
-            let read = read_chains.get(&sym.name).is_some_and(|chains| chains.iter().any(|c| related(c)));
+            let read = read_chains.get(&sym.name).is_some_and(|chains| chains.iter().any(related));
             let captured = decl_chains
                 .get(&sym.name)
                 .is_some_and(|ds| ds.iter().any(|(owner, chain)| *owner != sc.0 && chain.contains(&sc.0)));
@@ -1339,7 +1339,7 @@ pub fn pack_symbol_diagnostics(
                         {
                             continue;
                         }
-                    } else if declared.iter().any(|d| *d == ns) {
+                    } else if declared.contains(&ns) {
                         continue;
                     }
                     if !reported.insert((r.span.start.row, r.span.start.column)) {
