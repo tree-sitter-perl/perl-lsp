@@ -118,6 +118,16 @@ pub fn make_engine() -> Engine {
     // this, the core does not. Running the array through this
     // helper tells sig help / hover / outline to drop param 0 at
     // display time without the core matching on names.
+    // Is this a name a caller could actually invoke — a Perl identifier, or a
+    // `::`-qualified chain of them? A plugin minting a symbol from folded text
+    // must ask, because a fold can hand back an unresolved interpolation, a
+    // sigil, or an empty string, and a symbol named `$_` is not reachable by
+    // any call. Same predicate the native completion sources gate on
+    // (`conventions::is_callable_sub_name`), same name on both sides.
+    engine.register_fn("is_callable_sub_name", |name: &str| -> bool {
+        crate::model::conventions::is_callable_sub_name(name)
+    });
+
     engine.register_fn("as_invocant_params", |list: Array| -> Array {
         let mut out = list;
         if let Some(first) = out.get_mut(0) {

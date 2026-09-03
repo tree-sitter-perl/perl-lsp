@@ -97,9 +97,11 @@ fn on_match(pattern, m) {
         if params == () { params = []; }
 
         for name in names {
-            // An unfolded dynamic (an interpolation that did not resolve) is
-            // an honest miss, not a method literally named `$_`.
-            if name.contains("$") { continue; }
+            // The fold can hand back something no caller could invoke — an
+            // unresolved interpolation, a sigil, an empty string. Ask the
+            // shared name vocabulary rather than testing for one bad
+            // character: a symbol named `$_` is not reachable by any call.
+            if !is_callable_sub_name(name) { continue; }
             out += #{
                 Method: #{
                     name: name,

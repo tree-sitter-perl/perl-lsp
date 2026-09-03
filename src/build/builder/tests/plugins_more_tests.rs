@@ -1028,6 +1028,27 @@ fn monkey_patch_declines_a_transformed_name_for_now() {
 }
 
 #[test]
+fn monkey_patch_declines_names_no_caller_could_invoke() {
+    // A fold can hand back text that is not a name. Gating on the shared
+    // predicate rather than on one bad character covers the whole class:
+    // an unresolved interpolation, a sigil, punctuation, an empty string.
+    let fa = build_fa(
+        "package My::Class;\nuse Mojo::Util qw(monkey_patch);\nmonkey_patch 'My::Class', \"$undefined\" => sub { 1 }, 'has space' => sub { 2 }, '' => sub { 3 }, 'ok_name' => sub { 4 };\n1;\n",
+    );
+    let methods: Vec<&str> = fa
+        .symbols()
+        .iter()
+        .filter(|s| matches!(s.kind, SymKind::Method))
+        .map(|s| s.name.as_str())
+        .collect();
+    assert_eq!(
+        methods,
+        vec!["ok_name"],
+        "only an invocable identifier may be installed, got {methods:?}",
+    );
+}
+
+#[test]
 fn monkey_patch_declines_an_unfoldable_target() {
     // A runtime `$class` is an honest miss — never a guess at the owner.
     let fa = build_fa(
