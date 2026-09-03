@@ -550,3 +550,27 @@ Format per entry:
   php doc facts.
 - **Discussion needed:** whether the lattice grows a negative value at
   all, or narrowing stays positive-only and unions carry the residual.
+
+## Style lanes: default-on hints or opt-in — 2026-09-03 — OPEN (Claude)
+
+- **Context:** `missing-return-type` (and `unused-variable` before it) is a
+  STYLE finding, not a defect: the code runs. It publishes as a HINT under
+  a per-file convention gate (only where the file already writes native
+  return types), and still reports 723 rows on laravel/framework and 156
+  on WordPress. phpactor ships its equivalent (`worse.missing_return_type`)
+  as a lane the user enables; Intelephense has none. `--check` prints hints
+  only under `--severity hint`, so the CLI is unaffected; an editor shows
+  every hint faintly.
+- **Options:** A — default-on HINT with the convention gate (today). B —
+  opt-in through `DiagnosticOptions` (a workspace setting names the style
+  lanes it wants), silent otherwise. C — default-on, but only for the OPEN
+  document (never workspace-wide publishes), so it reads as an editor
+  affordance for the file being edited rather than a project-wide verdict.
+- **Picked:** A, because the quick-fix is the point and the gate keeps it
+  out of docblock-typed codebases; the count on laravel says an editor
+  user in that codebase would see it often.
+- **Undo cost:** one predicate at the publish site; the lane and the fix
+  are unchanged under any option.
+- **Discussion needed:** which style lanes exist by default, and whether
+  style findings need their own severity/config channel distinct from
+  defects.

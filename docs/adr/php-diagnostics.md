@@ -158,6 +158,25 @@ Every lane names the case it cannot see and stays silent there:
   pack's `contract_stub` per contract before the class body's closing
   brace, the declarator as written (types kept — a return type must stay
   covariant). Limit: a `static` contract's stub loses its `static`.
+- **A missing return type** (`missing-return-type`, a hint on the name)
+  is a bodied callable with no native return annotation (the structural
+  `declared_return` attribute — `: void` names no type, so a type witness
+  cannot carry the fact) whose return the pack can spell natively
+  (`native_type_spellings`: what goes INTO the source, not the display
+  vocabulary; `Numeric` has no native spelling, `int` or `float`?), in a
+  file that already writes native return types — its own convention; a
+  docblock-typed codebase is not asked to change style. The type is the
+  TOTAL inferred return (`total_inferred_return`): every return arm's
+  expression carries a witness and none is `null`, because the arm fold
+  drops an untyped or null arm and answers from the rest — right for a
+  hover, wrong for anything that would write the type. Skipped:
+  constructors, contracts, docblock `@method` rows, closures, and a return
+  of the enclosing class (`return $this` wants `static`, `new self()` wants
+  `self`; the fold cannot tell them apart). Limit: a bare `return;` or a
+  fall-through past the last statement is invisible, so a body that also
+  ends without a value is spelled non-nullable. The quick-fix inserts the
+  pack's `return_annotation_template` after the parameter list's closing
+  parenthesis (quote-aware scan from the name token).
 - **A deprecated declaration** (`deprecated`, a hint tagged deprecated)
   flags each use: the declaration's `@deprecated [text]` or the pack's
   deprecation attribute (`LangPack::deprecated_attribute`, php

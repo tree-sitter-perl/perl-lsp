@@ -155,7 +155,7 @@ fn php_editor_axes_over_stdio() {
     std::fs::create_dir_all(dir.join("src")).unwrap();
     let w = |rel: &str, src: &str| std::fs::write(dir.join(rel), src).unwrap();
     w("composer.json", "{\"autoload\": {\"psr-4\": {\"App\\\\\": \"src/\"}}}");
-    let src = "<?php\nnamespace App;\n\nclass Queue\n{\n    private array $items = [];\n    const LIMIT = 3;\n\n    public function push(string $x): void\n    {\n        if (\\count($this->items) < self::LIMIT) {\n            $this->items[] = $x;\n        }\n    }\n\n    public function fill(): void\n    {\n        $this->push('a');\n        $this->push('b');\n        $n = $this->items;\n    }\n}\n";
+    let src = "<?php\nnamespace App;\n\nclass Queue\n{\n    private array $items = [];\n    const LIMIT = 3;\n\n    public function push(string $x): void\n    {\n        if (\\count($this->items) < self::LIMIT) {\n            $this->items[] = $x;\n        }\n    }\n\n    public function fill(): void\n    {\n        $this->push('a');\n        $this->push('b');\n        $n = $this->items;\n    }\n\n    public function all()\n    {\n        return $this->items;\n    }\n}\n";
     w("src/Queue.php", src);
     let mut c = Client::spawn(&dir);
     c.request("initialize", serde_json::json!({"processId": null, "rootUri": uri(&dir), "capabilities": {}}));
@@ -177,7 +177,7 @@ fn php_editor_axes_over_stdio() {
     // folding: the class body, both method bodies and the `if` block
     let folds = c.request("textDocument/foldingRange", serde_json::json!({"textDocument": {"uri": u}}));
     let ranges: Vec<(u64, u64)> = folds.as_array().map(|a| a.iter().map(|f| (f["startLine"].as_u64().unwrap(), f["endLine"].as_u64().unwrap())).collect()).unwrap_or_default();
-    assert!(ranges.contains(&(3, 21)) || ranges.contains(&(4, 21)), "class body folds: {ranges:?}");
+    assert!(ranges.contains(&(3, 26)) || ranges.contains(&(4, 26)), "class body folds: {ranges:?}");
     assert!(ranges.iter().any(|r| r.0 >= 8 && r.1 == 13), "push body folds: {ranges:?}");
     assert!(ranges.iter().any(|r| r.0 == 10 && r.1 == 12), "the if block folds: {ranges:?}");
     // selectionRange: the token's ancestors up to the file
@@ -208,6 +208,25 @@ fn php_editor_axes_over_stdio() {
     let hints = c.request("textDocument/inlayHint", serde_json::json!({"textDocument": {"uri": u}, "range": {"start": {"line": 15, "character": 0}, "end": {"line": 21, "character": 0}}}));
     let got: Vec<(u64, u64, String)> = hints.as_array().map(|a| a.iter().map(|h| (h["position"]["line"].as_u64().unwrap(), h["position"]["character"].as_u64().unwrap(), h["label"].as_str().unwrap_or("").to_string())).collect()).unwrap_or_default();
     assert_eq!(got, vec![(19, col(19, " = $this") as u64, ": array".to_string()), (17, col(17, "'a'") as u64, "x:".to_string()), (18, col(18, "'b'") as u64, "x:".to_string())], "inlay hints: {hints}");
+    // missing return type: `all()` returns the array property in a file that
+    // declares return types; the quick-fix writes `: array` after `all()`
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    let mut mrt: Option<serde_json::Value> = None;
+    while std::time::Instant::now() < deadline && mrt.is_none() {
+        c.request("textDocument/documentSymbol", serde_json::json!({"textDocument": {"uri": u}}));
+        mrt = c.notes.iter().rev().filter(|n| n["method"] == "textDocument/publishDiagnostics" && n["params"]["uri"] == u)
+            .flat_map(|n| n["params"]["diagnostics"].as_array().cloned().unwrap_or_default())
+            .find(|d| d["code"] == "missing-return-type");
+        if mrt.is_none() { std::thread::sleep(std::time::Duration::from_millis(250)); }
+    }
+    let mrt = mrt.expect("missing-return-type hint on all()");
+    assert_eq!(mrt["range"]["start"]["line"], 22, "{mrt}");
+    assert!(mrt["message"].as_str().unwrap().contains("`array`"), "{mrt}");
+    let acts = c.request("textDocument/codeAction", serde_json::json!({"textDocument": {"uri": u}, "range": mrt["range"], "context": {"diagnostics": [mrt]}}));
+    let act = acts.as_array().and_then(|a| a.iter().find(|x| x["title"].as_str().unwrap_or("").starts_with("Add return type"))).cloned().unwrap_or_else(|| panic!("return type action: {acts}"));
+    let e = &act["edit"]["changes"][&u][0];
+    assert_eq!(e["newText"], ": array", "{act}");
+    assert_eq!((e["range"]["start"]["line"].as_u64(), e["range"]["start"]["character"].as_u64()), (Some(22), Some(col(22, "()") as u64 + 2)), "{act}");
     c.request("shutdown", serde_json::Value::Null);
     c.notify("exit", serde_json::Value::Null);
     let _ = c.child.wait();

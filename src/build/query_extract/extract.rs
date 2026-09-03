@@ -627,6 +627,9 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     out.class_literal_member = pack.class_literal_member.to_string();
     out.import_template = pack.import_template.to_string();
     out.contract_stub = pack.contract_stub.to_string();
+    out.return_annotation_template = pack.return_annotation_template.to_string();
+    out.native_type_spellings =
+        pack.native_type_spellings.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
     out.imports_bind_names = pack.imports_bind_names;
     out.member_shapes_are_strict = pack.member_shapes_are_strict;
     out.members_are_package_bound = pack.members_are_package_bound;
@@ -1207,6 +1210,12 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                             && !a.iter().any(|x| x == "deprecated")
                         {
                             a.push("deprecated".to_string());
+                        }
+                        // the declaration WRITES a return annotation — a
+                        // structural fact the type witness cannot carry
+                        // (`: void` names no type)
+                        if rettype_by_match.contains_key(&e.match_id) {
+                            a.push("declared_return".to_string());
                         }
                         // a default-named symbol is structure, not an
                         // addressable name — completion skips it.
@@ -2574,7 +2583,8 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                                     .is_some_and(|t| (pack.rettype_receiver)(t)),
                                 receiver_instance_of: None,
                                 deref_stack: Vec::new(),
-                                attributes: Vec::new(),
+                                // documentation, not a declaration: no body, no annotation to add
+                                attributes: vec!["documented".to_string()],
                                 arity: None,
                                 qualifier_owned: false,
                                 doc: None,

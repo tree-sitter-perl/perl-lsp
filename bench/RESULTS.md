@@ -888,3 +888,32 @@ candidate and provision is package-attributed for a pack whose members
 are package-bound. Rows on monolog, guzzle, BookStack, symfony/demo, Slim,
 laravel/framework and WordPress after the corrections: 0 — code that runs
 has no unimplemented contracts.
+
+### Missing return types, vs phpactor (2026-09-03, 09:40)
+
+phpactor's `worse.missing_return_type` names a method without a native
+return type and the type it infers; Intelephense has no such lane. On the
+axes fixture both name the same two methods with the same types
+(`all()` → `array`, `name()` → `string`); ours adds the "Add return type"
+quick-fix (phpactor's is a separate transform).
+
+The first cut over the corpora reported 5,085 rows on laravel/framework,
+3,680 on BookStack's vendor tree and 1,314 on WordPress — with the
+file-convention gate already in place. Three shapes made most of them and
+each was a guess: the fold drops a `null` arm and answers from the rest
+(`string` over `return "a"; … return null;`), a fluent `return $this`
+spelled the class where `static` is meant, and monolog's `@method`
+docblock rows were reported as bodied methods. The lane now reads the
+TOTAL return (every arm witnessed, none null), never spells the enclosing
+class, and skips documentation rows and closures:
+
+| corpus | first cut | now | spellings now |
+|---|---|---|---|
+| monolog | 92 | 36 | array 26, string 5, bool 2, `Logger` 1 |
+| laravel/framework | 5,085 | 723 | array 418, string 137, bool 56, `Envelope` 11 |
+| WordPress | 1,314 | 156 | array 149, `stdClass` 2, bool 2 |
+
+Eight sampled rows checked against the source: data providers returning
+literal arrays, `__toString` returning `''`, `Str::startsWith` returning
+`false`/`true`, a test stub returning `'foo'`, `initLogger` returning
+`new Logger(...)` — every one a return the annotation would state truly.

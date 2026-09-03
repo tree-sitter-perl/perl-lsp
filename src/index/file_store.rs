@@ -227,10 +227,6 @@ impl FileStore {
         &self.workspace
     }
 
-    /// Count of workspace entries.
-    pub fn workspace_len(&self) -> usize {
-        self.workspace.len()
-    }
 
     // ---- Iteration ----
 

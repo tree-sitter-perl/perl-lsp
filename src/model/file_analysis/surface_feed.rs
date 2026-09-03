@@ -74,6 +74,8 @@ impl FileAnalysis {
                     import_rows: _import_rows, // editing aid, not cross-file-visible
                     import_template: _import_template, // pack-wide convention
                     contract_stub: _contract_stub, // pack-wide convention
+                    return_annotation_template: _return_annotation_template, // pack-wide convention
+                    native_type_spellings: _native_type_spellings, // pack-wide convention
                     preamble_end: _preamble_end, // an editing aid
                     imports_bind_names: _imports_bind_names, // pack-wide convention
                     member_shapes_are_strict: _member_shapes_are_strict, // pack-wide convention

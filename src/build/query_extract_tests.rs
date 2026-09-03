@@ -4885,3 +4885,41 @@ fn php_bundled_overlays_each_compile_alone() {
         }
     }
 }
+
+/// The inputs the missing-return-type lane reads: a declared return
+/// annotation is a `cpp_method_return` witness on the symbol, and a bodied
+/// callable without one still types through its return arms.
+#[cfg(feature = "php")]
+#[test]
+fn php_declared_and_inferred_returns_reach_the_symbol() {
+    let src = "\
+<?php
+namespace App;
+class Queue {
+    private array $items = [];
+    public function push(string $x): void { $this->items[] = $x; }
+    public function all() { return $this->items; }
+    public function name() { return \"q\"; }
+    public function me() { return $this; }
+    public function maybe($x) { if ($x) { return \"a\"; } return null; }
+}
+";
+    let reg = crate::build::language_driver::LanguageRegistry::with_enabled();
+    let driver = reg.for_id("php").expect("php driver");
+    let fa = driver.analyze(src);
+    use crate::model::file_analysis::{InferredType, SymKind};
+    let sym = |n: &str| fa.symbols().iter().find(|s| matches!(s.kind, SymKind::Method | SymKind::Sub) && s.name == n).unwrap_or_else(|| panic!("no {n}")).id;
+    let declared = |n: &str| fa.symbol(sym(n)).attributes.iter().any(|a| a == "declared_return");
+    assert!(declared("push"), "`: void` is a declared return even though it names no type");
+    assert!(!declared("all"));
+    let all = fa.symbol_return_type_via_bag(sym("all"), None);
+    let name = fa.symbol_return_type_via_bag(sym("name"), None);
+    let me = fa.symbol_return_type_via_bag(sym("me"), None);
+    assert!(matches!(all, Some(InferredType::HashRef) | Some(InferredType::ArrayRef)), "all(): {all:?}");
+    assert_eq!(name, Some(InferredType::String), "name(): {name:?}");
+    assert_eq!(me, Some(InferredType::ClassName("Queue".into())), "me(): {me:?}");
+    // a null arm makes the return nullable: the fold answers `string` (right
+    // for a hover), the total view does not (right for writing the type)
+    assert_eq!(fa.total_inferred_return(sym("maybe")), None, "maybe(): a null arm");
+    assert_eq!(fa.total_inferred_return(sym("name")), Some(InferredType::String));
+}

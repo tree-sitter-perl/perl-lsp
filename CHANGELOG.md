@@ -355,6 +355,14 @@ templates). Market case and build-out plan in `docs/prompt-php-target.md`.
   undeclared is reported (an abstract composer and a class with `__call`
   are not), with an "Implement missing methods" quick-fix that declares
   the stubs from the contracts' own declarators.
+- `missing-return-type`: in a php file that writes native return types, a
+  bodied method or function without one whose every return arm types to
+  something the pack can spell (`string`, `bool`, `array`, `callable`, a
+  visible class) gets a hint and an "Add return type" quick-fix; a `null`
+  arm, an ambiguous numeric, a fluent `return $this` and closures stay
+  silent.
+- `--check`'s summary counts every file it swept (pack files included),
+  not only the Perl workspace.
 - Parameter-name inlay hints on pack documents: every positional argument
   of a call whose callee resolves shows `name:` (php `f(name: 1)` named
   arguments and spreads end the positional run; a variadic parameter

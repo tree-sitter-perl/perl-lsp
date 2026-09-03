@@ -23,6 +23,28 @@ impl FileAnalysis {
         self.translate_type_label(sym.display_type(ty))
     }
 
+    /// The NATIVE spelling a declaration would be written with for an
+    /// inferred type — `None` when the pack has no native spelling for it
+    /// (an ambiguous engine type, a class not visible by its leaf here, a
+    /// composite). What a quick-fix may write into the source; display
+    /// vocabulary (`type_display`) is a different question.
+    pub fn native_type_spelling(&self, ty: &InferredType) -> Option<String> {
+        if let InferredType::ClassName(n) = ty {
+            let leaf = n.rsplit(['\\', ':']).next().unwrap_or(n);
+            // the leaf must mean THIS class where it would be written
+            let ns = if n.len() > leaf.len() { Some(n[..n.len() - leaf.len() - 1].to_string()) } else { None };
+            let seen = self.leaf_namespace(leaf).or_else(|| self.use_map_pins().own_namespace.clone());
+            return (ns.is_none() || seen.is_none() || ns == seen).then(|| leaf.to_string());
+        }
+        let raw = format_inferred_type(ty);
+        let root = raw.split(['<', '(']).next().unwrap_or(&raw);
+        self.pack
+            .native_type_spellings
+            .iter()
+            .find(|(k, _)| k == root)
+            .map(|(_, v)| v.clone())
+    }
+
     fn translate_type_label(&self, raw: String) -> String {
         if self.pack.type_display.is_empty() {
             return raw;

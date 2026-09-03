@@ -53,6 +53,12 @@ pub struct PackFacts {
     /// declarator); empty = no quick-fix.
     #[serde(default)]
     pub contract_stub: String,
+    /// The pack's native return-annotation template (`": {}"`); empty = none.
+    #[serde(default)]
+    pub return_annotation_template: String,
+    /// Engine type name → native spelling a declaration is written with.
+    #[serde(default)]
+    pub native_type_spellings: Vec<(String, String)>,
     /// The last row of the file preamble (open tag, `declare` rows).
     #[serde(default)]
     pub preamble_end: Option<usize>,
@@ -247,6 +253,8 @@ impl PackFacts {
             + vcap(&self.import_rows)
             + self.import_template.capacity()
             + self.contract_stub.capacity()
+            + self.return_annotation_template.capacity()
+            + vcap(&self.native_type_spellings)
             + vcap(&self.doc_mentions)
             + vcap(&self.type_display)
             + vcap(&self.constructor_names);

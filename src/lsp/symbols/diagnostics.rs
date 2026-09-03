@@ -1392,6 +1392,55 @@ pub fn pack_symbol_diagnostics(
         }
     }
 
+    // ---- missing return type: a callable with a body, no native return
+    // annotation, and an inferred return the pack can spell natively — in a
+    // file that writes native return types already (its own convention;
+    // a docblock-typed codebase is not asked to change style). Skipped:
+    // constructors, contracts, and any return the spelling cannot name
+    // (ambiguous numerics, unions, a leaf that means another class here).
+    if !pack.return_annotation_template.is_empty() {
+        // `declared_return` is the structural fact (the declaration writes
+        // an annotation) — a type witness cannot carry it: `: void` names
+        // no type.
+        let declared = |s: &crate::model::file_analysis::Symbol| s.attributes.iter().any(|a| a == "declared_return");
+        let callables: Vec<&crate::model::file_analysis::Symbol> = analysis
+            .symbols()
+            .iter()
+            .filter(|s| matches!(s.kind, FaSymKind::Sub | FaSymKind::Method))
+            .collect();
+        if callables.iter().any(|s| declared(s)) {
+            for s in callables {
+                // no annotation to add: a constructor, a contract, a docblock
+                // `@method`, a closure; and none wanted for an already-declared one
+                if pack.constructor_names.iter().any(|c| c == &s.name)
+                    || s.attributes.iter().any(|a| a == "contract" || a == "documented" || a == "anonymous")
+                    || declared(s)
+                {
+                    continue;
+                }
+                let Some(ty) = analysis.total_inferred_return(s.id) else { continue };
+                // a fluent `return $this` wants `static`, `new self()` wants
+                // `self` — the fold cannot tell them apart, so the enclosing
+                // class is never spelled from inference
+                if matches!(&ty, crate::model::file_analysis::InferredType::ClassName(n)
+                    if s.package.as_deref().is_some_and(|p| p == n || p.rsplit(['\\', ':']).next() == Some(n.as_str())))
+                {
+                    continue;
+                }
+                let Some(spelling) = analysis.native_type_spelling(&ty) else { continue };
+                out.push(Diagnostic {
+                    range: span_to_range(s.selection_span),
+                    severity: Some(DiagnosticSeverity::HINT),
+                    code: Some(NumberOrString::String("missing-return-type".to_string())),
+                    source: Some("perl-lsp".to_string()),
+                    message: format!("'{}' has no declared return type; it returns `{spelling}`.", s.name),
+                    data: Some(serde_json::json!({"spelling": spelling})),
+                    ..Default::default()
+                });
+            }
+        }
+    }
+
     out
 }
 

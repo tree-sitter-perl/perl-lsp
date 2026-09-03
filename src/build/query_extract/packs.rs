@@ -220,6 +220,14 @@ pub struct LangPack {
     /// contract declarator (`{}` = the declarator as written after the name,
     /// `hi(string $n): string`). Empty = the pack offers no stub.
     pub contract_stub: &'static str,
+    /// How a native return annotation is spelled after the parameter list
+    /// (`{}` = the type). Empty = the pack has no return annotations to add.
+    pub return_annotation_template: &'static str,
+    /// Engine type name → the pack's NATIVE spelling for a declared type
+    /// (`"HashRef"` → `"array"`); an engine type absent here has no native
+    /// spelling the pack would write (`Numeric`: `int` or `float`?). Unlike
+    /// `type_display`, this is what goes INTO the source.
+    pub native_type_spellings: &'static [(&'static str, &'static str)],
     /// A member name that is the CLASS-NAME LITERAL, never a member
     /// (php `Foo::class`). Empty = none.
     pub class_literal_member: &'static str,
@@ -579,6 +587,8 @@ pub fn perl_pack() -> LangPack {
         spread_arg_kind: "",
         named_arg_field: "",
         contract_stub: "",
+        return_annotation_template: "",
+        native_type_spellings: &[],
         class_literal_member: "",
         import_template: "",
         imports_bind_names: false,
@@ -661,6 +671,8 @@ pub fn python_pack() -> LangPack {
         spread_arg_kind: "",
         named_arg_field: "",
         contract_stub: "",
+        return_annotation_template: "",
+        native_type_spellings: &[],
         class_literal_member: "",
         import_template: "",
         imports_bind_names: false,
@@ -743,6 +755,8 @@ pub fn r_pack() -> LangPack {
         spread_arg_kind: "",
         named_arg_field: "",
         contract_stub: "",
+        return_annotation_template: "",
+        native_type_spellings: &[],
         class_literal_member: "",
         import_template: "",
         imports_bind_names: false,
@@ -833,6 +847,8 @@ pub fn cmake_pack() -> LangPack {
         spread_arg_kind: "",
         named_arg_field: "",
         contract_stub: "",
+        return_annotation_template: "",
+        native_type_spellings: &[],
         class_literal_member: "",
         import_template: "",
         imports_bind_names: false,
@@ -1150,6 +1166,15 @@ pub fn php_pack() -> LangPack {
         spread_arg_kind: "variadic_unpacking",
         named_arg_field: "name",
         contract_stub: "public function {}\n{\n    // TODO: implement\n}",
+        return_annotation_template: ": {}",
+        native_type_spellings: &[
+            ("String", "string"),
+            ("Bool", "bool"),
+            ("HashRef", "array"),
+            ("ArrayRef", "array"),
+            ("Sequence", "array"),
+            ("CodeRef", "callable"),
+        ],
         class_literal_member: "class",
         import_template: "use {};\n",
         imports_bind_names: true,
@@ -1317,6 +1342,8 @@ pub fn cpp_pack() -> LangPack {
         spread_arg_kind: "",
         named_arg_field: "",
         contract_stub: "",
+        return_annotation_template: "",
+        native_type_spellings: &[],
         class_literal_member: "",
         import_template: "",
         imports_bind_names: false,

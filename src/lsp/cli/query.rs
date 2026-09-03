@@ -49,7 +49,7 @@ pub(crate) fn cli_check(args: &[String]) {
     if json_mode {
         println!("[");
     }
-    for_each_enriched_diagnostic(&ws, &module_index, options, &mut |file, d| {
+    let swept = for_each_enriched_diagnostic(&ws, &module_index, options, &mut |file, d| {
         let sev = match d.severity {
             Some(s) if s == tower_lsp::lsp_types::DiagnosticSeverity::ERROR => "error",
             Some(s) if s == tower_lsp::lsp_types::DiagnosticSeverity::WARNING => "warning",
@@ -98,7 +98,7 @@ pub(crate) fn cli_check(args: &[String]) {
         }
         println!("]");
     } else {
-        eprintln!("{} diagnostics in {} files", total, ws.workspace_len());
+        eprintln!("{} diagnostics in {} files", total, swept);
     }
 
     if total > 0 {
@@ -1156,7 +1156,7 @@ fn enriched_tree_diagnostics(
     options: symbols::DiagnosticOptions,
 ) -> Vec<(String, tower_lsp::lsp_types::Diagnostic)> {
     let mut all = Vec::new();
-    for_each_enriched_diagnostic(ws, idx, options, &mut |file, d| {
+    let _ = for_each_enriched_diagnostic(ws, idx, options, &mut |file, d| {
         all.push((file.to_string(), d));
     });
     all
@@ -1289,12 +1289,14 @@ fn sweep_one_file(
 /// print a timeout can discard whole (`docs/adr/instrument-blindness.md`
 /// — a 0-byte output file at hour two answers "has anything been
 /// PRINTED", not "has anything been found").
+/// Returns the number of files swept — the Perl workspace plus every
+/// registered pack file — which is what a summary line should count.
 fn for_each_enriched_diagnostic(
     ws: &file_store::FileStore,
     idx: &module_index::ModuleIndex,
     options: symbols::DiagnosticOptions,
     emit: &mut dyn FnMut(&str, tower_lsp::lsp_types::Diagnostic),
-) {
+) -> usize {
     // Snapshot before working: values are `Arc`s, so this is a pointer copy
     // per file, and it releases the DashMap shard guards an `iter()` would
     // otherwise hold closed to writers for the whole sweep.
@@ -1304,6 +1306,7 @@ fn for_each_enriched_diagnostic(
         .iter()
         .map(|e| (e.key().clone(), std::sync::Arc::clone(e.value())))
         .collect();
+    let perl_swept = entries.len();
     // Streaming survives the parallelism: workers send as each file finishes
     // and the calling thread drains, so `--check` still produces output
     // THROUGHOUT the run rather than buffering it into a final print a
@@ -1401,8 +1404,10 @@ fn for_each_enriched_diagnostic(
     // get `pack_diagnostics` (Mode B — member-op swap + peel), so `--batch
     // diagnostics` / `--check` / gold see the same Mode-B answers the LSP
     // publishes. No enrichment (pack files aren't cross-file-enriched).
+    let mut swept = perl_swept;
     idx.for_each_pack_index(|_lang, pack| {
         pack.for_each_registered_file(&mut |cm| {
+            swept += 1;
             let file = cm.path.display().to_string();
             // Same whole-view routing: pack index copies are evicted.
             let whole = file_analysis::CrossFileLookup::whole_present(pack.as_ref(), cm);
@@ -1411,6 +1416,7 @@ fn for_each_enriched_diagnostic(
             }
         });
     });
+    swept
 }
 
 /// Whole-tree diagnostics as the pretty-JSON array string (warning+; shared by

@@ -1319,6 +1319,8 @@ fn remap_spans(
         import_rows,
         import_template: _,
         contract_stub: _,
+        return_annotation_template: _,
+        native_type_spellings: _,
         preamble_end: _,
         imports_bind_names: _,
         member_shapes_are_strict: _,
