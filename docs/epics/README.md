@@ -67,6 +67,7 @@ any of those three.
 | 14 | [The per-file stall — C++ beta → GA](14-per-file-stall.md) | M | — |
 | 15 | [Query paths at scale — Tier 1 residual](15-query-paths-at-scale.md) | L | 1 interlocks (candidate sets) |
 | 16 | [The CFG tier — path sensitivity on the bag](16-cfg-tier.md) | L | **4, 7 and 12 owe it seams** — see below |
+| 17 | [Builder decomposition](17-builder-decomposition.md) | S–M | — |
 
 **Suggested order.** 1 first (it is a class of confidently-wrong
 answers, and Veesh named it next); then 14 and 15, because they are the
@@ -157,6 +158,7 @@ residuals, or (d) explicitly out of scope. Nothing is unaccounted for.
 | `prompt-incremental-build.md` | **Parked** with a named bar in-doc; Epic 15 Phase D's measurements are its forcing function |
 | `prompt-storage-residuals.md` | Known unbounded residuals, deliberately listed; not an epic until one is measured to hurt |
 | `prompt-enrichment-delta.md` (enrichment as a delta artifact) | **Design, not started.** Its three named pressures — level-indexed enrichment's rejection, the FHEM crest, the overlay retention story — are all Epic 15 territory; it is the candidate design if Phase B's dedup proves insufficient. Do not start it before Epic 15 Phase C measures the enrichment path fresh |
+| `build/builder/` grab-bag parts | **Epic 17** — behavior-frozen decomposition; the split rule is CLAUDE.md's own, applied per concern rather than per line count |
 | `bench/RESULTS.md` + `bench/baselines.jsonl` | The standing record. Every epic that moves a KPI updates it — see the house rules |
 
 ### Ledgers, not design docs
