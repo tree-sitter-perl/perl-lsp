@@ -257,7 +257,9 @@ templates). Market case and build-out plan in `docs/prompt-php-target.md`.
   route name and a same-spelled WordPress hook or view name never
   connect. Handler names — a hook, a route — now reach the reverse
   index from classless files (a routes file declares no class), which
-  also makes WordPress hook navigation work across files.
+  also makes WordPress hook navigation work across files. Blade
+  templates are text to the grammar, so their `route('x')` uses are
+  scanned as a text rail (`laravel.rails.json`) into the same refs.
 - **Signature help.** `$obj->method(` and `Foo::method(` on PHP now show
   the declaration's parameter list with the active parameter, the return
   annotation, and the docblock summary, for local and cross-file

@@ -1644,3 +1644,38 @@ fn php_undefined_variable_lane_reads_by_reference_parameters() {
     assert!(!unused.contains(&"$dm"), "{err}");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// The routes rail reaches Blade templates through the text lane: a
+/// `{{ route('home') }}` in a template is a use (references from the
+/// declaration list it; rename rewrites it), and a name no routes file
+/// declares warns there too.
+#[cfg(feature = "php")]
+#[test]
+fn php_laravel_route_rail_reaches_blade_templates() {
+    let dir = std::env::temp_dir().join(format!("perl-lsp-lrblade-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("routes")).unwrap();
+    std::fs::create_dir_all(dir.join("app")).unwrap();
+    std::fs::create_dir_all(dir.join("resources/views")).unwrap();
+    let w = |rel: &str, src: &str| std::fs::write(dir.join(rel), src).unwrap();
+    w("composer.json", "{\"autoload\": {\"psr-4\": {\"App\\\\\": \"app/\"}}}");
+    w("routes/web.php", "<?php\nuse Illuminate\\Support\\Facades\\Route;\nRoute::get('/', [App\\Home::class, 'index'])->name('home');\n");
+    w("app/Home.php", "<?php\nnamespace App;\nclass Home\n{\n    public function index() { return view('home'); }\n}\n");
+    w("resources/views/home.blade.php", "<div>\n  <a href=\"{{ route('home') }}\">home</a>\n  <a href=\"{{ route('nope') }}\">gone</a>\n</div>\n");
+    let run = |args: &[&str]| {
+        let out = std::process::Command::new(env!("CARGO_BIN_EXE_perl-lsp"))
+            .args(args)
+            .env("XDG_CACHE_HOME", dir.join(".cache"))
+            .output()
+            .expect("run");
+        format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr))
+    };
+    let check = run(&["--check", dir.to_str().unwrap(), "--severity", "hint"]);
+    let undefined: Vec<&str> = check.lines().filter(|l| l.contains("[undefined-route]")).collect();
+    assert_eq!(undefined.len(), 1, "{check}");
+    assert!(undefined[0].contains("home.blade.php") && undefined[0].contains("'nope'"), "{check}");
+    let refs = run(&["--references", dir.to_str().unwrap(), "--at", &format!("{}:3:53", dir.join("routes/web.php").display())]);
+    assert!(refs.contains("home.blade.php"), "the template use is a reference: {refs}");
+    assert!(refs.contains("routes/web.php"), "{refs}");
+    let _ = std::fs::remove_dir_all(&dir);
+}

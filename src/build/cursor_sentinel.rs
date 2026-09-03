@@ -554,7 +554,7 @@ fn resolve_node_type(
     analysis.expr_type_at_span(span, module_index)
 }
 
-fn byte_to_point(src: &str, byte: usize) -> Point {
+pub(crate) fn byte_to_point(src: &str, byte: usize) -> Point {
     let mut row = 0;
     let mut col = 0;
     for (i, ch) in src.char_indices() {

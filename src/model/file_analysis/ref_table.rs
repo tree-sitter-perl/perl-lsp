@@ -268,6 +268,21 @@ impl FileAnalysis {
     // the pack language features; a Perl-only build has no mutator outside
     // `model/`.
     #[allow(dead_code)]
+    /// Adopt build-time refs minted after assembly (the driver's text
+    /// rails): appended, indexed, and sealed into the enrichment baseline —
+    /// they are facts of the build, not enrichment, so a re-enrichment
+    /// truncating to the baseline keeps them.
+    pub fn adopt_text_refs(&mut self, refs: Vec<Ref>) {
+        if refs.is_empty() {
+            return;
+        }
+        for r in refs {
+            self.refs.push(r);
+        }
+        self.refs.rebuild_indices();
+        self.refs.seal_baseline();
+    }
+
     pub fn refs_mut(&mut self) -> &mut [Ref] {
         self.refs.as_mut_slice()
     }

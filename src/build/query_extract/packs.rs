@@ -25,6 +25,10 @@ pub struct LangPack {
     /// framework vocabulary lives in these DATA files (like the bundled
     /// `.scm` overlays), never in engine code; plugin dirs extend the set.
     pub bundled_entry_markers: &'static [&'static str],
+    /// Rail documents (`rails.json`): text rails — string-named uses a
+    /// grammar cannot see (a Blade template's `route('x')`), scanned as
+    /// text into `DispatchCall` refs on the named rail.
+    pub bundled_rail_docs: &'static [&'static str],
     /// Shape a captured name token's text (e.g. keep the sigil on a
     /// Perl variable). `capture_kind` is the vocabulary name
     /// (`def.var`, `ref.method`, ...) so one pack hook serves all.
@@ -547,6 +551,7 @@ pub fn perl_pack() -> LangPack {
         bundled_overlays: &[],
         lang_id: "perl",
         bundled_entry_markers: &[],
+        bundled_rail_docs: &[],
         shape_name: |kind, raw| match kind {
             // The builder stores variable symbols WITH sigil; varname
             // captures are sigil-less. Predicate re-attaches nothing —
@@ -628,6 +633,7 @@ pub fn python_pack() -> LangPack {
         bundled_overlays: &[],
         lang_id: "python",
         bundled_entry_markers: &[],
+        bundled_rail_docs: &[],
         shape_name: |_, raw| raw.to_string(),
         default_name: |_, _, _| None,
         annot_type: |text| match text.trim() {
@@ -718,6 +724,7 @@ pub fn r_pack() -> LangPack {
         bundled_overlays: &[],
         lang_id: "r",
         bundled_entry_markers: &[],
+        bundled_rail_docs: &[],
         shape_name: |_, raw| raw.to_string(),
         default_name: |_, _, _| None,
         annot_type: |_| None,
@@ -798,6 +805,7 @@ pub fn cmake_pack() -> LangPack {
         bundled_overlays: &[],
         lang_id: "cmake",
         bundled_entry_markers: &[],
+        bundled_rail_docs: &[],
         shape_name: |_, raw| raw.to_string(),
         default_name: |_, _, _| None,
         annot_type: |_| None,
@@ -1049,6 +1057,7 @@ pub fn php_pack() -> LangPack {
             include_str!("../../../queries/php/frameworks/laravel.entry.json"),
             include_str!("../../../queries/php/frameworks/symfony.entry.json"),
         ],
+        bundled_rail_docs: &[include_str!("../../../queries/php/frameworks/laravel.rails.json")],
         // variable_name captures carry the `$` (PHP spells it at every
         // use, like Perl); names/classes pass through verbatim. A
         // `self::`/`static::` receiver IS the enclosing class — spelled as
@@ -1239,6 +1248,7 @@ pub fn cpp_pack() -> LangPack {
         bundled_overlays: &[],
         lang_id: "cpp",
         bundled_entry_markers: &[],
+        bundled_rail_docs: &[],
         // Template spellings get ONE canonical whitespace form so a
         // specialization's identity (`formatter<int, char>`) matches
         // however the source wrapped it. Identity for every non-template

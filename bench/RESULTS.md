@@ -1091,5 +1091,8 @@ The 80 false rows were not the rail's: the pack tier never fed the
 reverse index, so a handler declared in a classless file (a routes
 file; a WordPress plugin's hook registrations) was unreachable by name
 across files — WordPress hook navigation across files was broken the
-same way. Blade templates (223 `route()` uses in panel's views) are
-text to the grammar and are round 1b's text lane.
+same way. Blade templates (223 `route()` uses in 51 of panel's views) are text
+to the grammar; the text lane (`laravel.rails.json`) mints their uses as
+the same refs: all 223 resolve (0 `undefined-route` in templates),
+references from `admin.mounts.view`'s declaration list 8 sites, 3 of
+them templates (grep: 4 files spell the name).

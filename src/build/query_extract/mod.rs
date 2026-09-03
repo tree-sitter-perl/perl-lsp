@@ -98,6 +98,68 @@ struct EntryDoc {
     entries: Vec<EntryMarker>,
 }
 
+/// One text rail: `calls` are the function names whose first single-quoted
+/// argument names an entity on `rail`, scanned as TEXT in files whose path
+/// ends with one of `files` (a Blade template is text to the grammar).
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct TextRail {
+    pub rail: String,
+    pub calls: Vec<String>,
+    pub files: Vec<String>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+struct RailsDoc {
+    language: String,
+    #[serde(default)]
+    text_rails: Vec<TextRail>,
+}
+
+/// The text rails in force for a language: bundled documents plus every
+/// discovered `<plugin-dir>/<name>/rails.json` — the `entry.json` posture
+/// (cached per process, a malformed document dropped with a diagnostic).
+pub fn text_rails_for(pack: &LangPack) -> std::sync::Arc<Vec<TextRail>> {
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex, OnceLock};
+    static CACHE: OnceLock<Mutex<HashMap<String, Arc<Vec<TextRail>>>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut paths: Vec<std::path::PathBuf> = Vec::new();
+    for dir in crate::build::plugin::rhai_host::plugin_search_dirs() {
+        if let Ok(read) = std::fs::read_dir(&dir) {
+            for entry in read.flatten() {
+                let candidate = entry.path().join("rails.json");
+                if candidate.is_file() {
+                    paths.push(candidate);
+                }
+            }
+        }
+    }
+    paths.sort();
+    let key = format!("{}|{}", pack.lang_id, paths.len());
+    if let Some(v) = cache.lock().unwrap().get(&key) {
+        return Arc::clone(v);
+    }
+    let mut out: Vec<TextRail> = Vec::new();
+    let mut fold = |src: &str, origin: &dyn std::fmt::Display| {
+        match serde_json::from_str::<RailsDoc>(src) {
+            Ok(doc) if doc.language == pack.lang_id => out.extend(doc.text_rails),
+            Ok(_) => {}
+            Err(e) => eprintln!("perl-lsp: rail declarations {origin} dropped: {e}"),
+        }
+    };
+    for src in pack.bundled_rail_docs {
+        fold(src, &"(bundled)");
+    }
+    for p in &paths {
+        if let Ok(src) = std::fs::read_to_string(p) {
+            fold(&src, &p.display());
+        }
+    }
+    let arc = Arc::new(out);
+    cache.lock().unwrap().insert(key, Arc::clone(&arc));
+    arc
+}
+
 /// The framework-entry rules in force for a language: the pack's bundled
 /// documents plus every discovered `<plugin-dir>/<name>/entry.json`
 /// declaring this language. Cached per (lang, plugin-path set) like the
