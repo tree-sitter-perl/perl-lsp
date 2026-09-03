@@ -630,6 +630,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     out.return_annotation_template = pack.return_annotation_template.to_string();
     out.native_type_spellings =
         pack.native_type_spellings.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+    out.static_property_sigil = pack.static_property_sigil.to_string();
     out.imports_bind_names = pack.imports_bind_names;
     out.member_shapes_are_strict = pack.member_shapes_are_strict;
     out.members_are_package_bound = pack.members_are_package_bound;

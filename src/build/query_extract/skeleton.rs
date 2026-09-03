@@ -163,6 +163,7 @@ pub struct SkeletonAnalysis {
     /// The pack's native return-annotation template and native type spellings.
     pub return_annotation_template: String,
     pub native_type_spellings: Vec<(String, String)>,
+    pub static_property_sigil: String,
     /// The last row of the file preamble (open tag, `declare` rows): an
     /// inserted import goes after it when no import or namespace anchors.
     pub preamble_end: Option<usize>,
@@ -1415,6 +1416,7 @@ impl SkeletonAnalysis {
             contract_stub: std::mem::take(&mut self.contract_stub),
             return_annotation_template: std::mem::take(&mut self.return_annotation_template),
             native_type_spellings: std::mem::take(&mut self.native_type_spellings),
+            static_property_sigil: std::mem::take(&mut self.static_property_sigil),
             preamble_end: self.preamble_end,
             imports_bind_names: self.imports_bind_names,
             member_shapes_are_strict: self.member_shapes_are_strict,

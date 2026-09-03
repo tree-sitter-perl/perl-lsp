@@ -361,6 +361,8 @@ templates). Market case and build-out plan in `docs/prompt-php-target.md`.
   visible class) gets a hint and an "Add return type" quick-fix; a `null`
   arm, an ambiguous numeric, a fluent `return $this` and closures stay
   silent.
+- After `self::` / `Foo::` a php static property completes as `$count`
+  (the spelling php requires); it no longer appears after `->`.
 - A php gold fixture (`gold-corpus/php-fixture`, 35 rows across
   definition, hover, completion, references, signature help,
   implementations, type-at, rename, highlights, outline, call hierarchy

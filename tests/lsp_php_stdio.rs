@@ -429,12 +429,14 @@ fn php_scoped_completion_over_stdio() {
     // cursor right after `self::` (on the `L` of LIMIT)
     let s = labels(&mut c, 11, col(11, "LIMIT"));
     assert!(s.iter().any(|l| l == "LIMIT") && s.iter().any(|l| l == "make"), "self:: members: {s:?}");
+    // a static property is spelled `self::$count`; it is not an instance member
+    assert!(s.iter().any(|l| l == "$count") && !s.iter().any(|l| l == "count"), "self:: static property: {s:?}");
     assert!(!s.iter().any(|l| l.contains("local") || l == "inst"), "self:: offers constants and statics only: {s:?}");
     let k = labels(&mut c, 12, col(12, "make"));
     assert!(k.iter().any(|l| l == "make") && !k.iter().any(|l| l.contains("local") || l == "inst"), "Cfg:: members: {k:?}");
     assert!(k.iter().any(|l| l == "class") && s.iter().any(|l| l == "class"), "Cfg::class is the pack's class literal: {k:?}");
     let t = labels(&mut c, 13, col(13, "inst"));
-    assert!(t.iter().any(|l| l == "inst") && !t.iter().any(|l| l.contains("local") || l == "LIMIT" || l == "class"), "$this-> members: {t:?}");
+    assert!(t.iter().any(|l| l == "inst") && !t.iter().any(|l| l.contains("local") || l == "LIMIT" || l == "class" || l == "count" || l == "$count"), "$this-> members: {t:?}");
     c.request("shutdown", serde_json::Value::Null);
     c.notify("exit", serde_json::Value::Null);
     let _ = c.child.wait();

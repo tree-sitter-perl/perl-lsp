@@ -228,6 +228,10 @@ pub struct LangPack {
     /// spelling the pack would write (`Numeric`: `int` or `float`?). Unlike
     /// `type_display`, this is what goes INTO the source.
     pub native_type_spellings: &'static [(&'static str, &'static str)],
+    /// The sigil a static property is spelled with after the scope
+    /// operator (php `self::$count`), while an instance read drops it
+    /// (`$o->count`). Empty = the spelling is the bare name in both.
+    pub static_property_sigil: &'static str,
     /// A member name that is the CLASS-NAME LITERAL, never a member
     /// (php `Foo::class`). Empty = none.
     pub class_literal_member: &'static str,
@@ -589,6 +593,7 @@ pub fn perl_pack() -> LangPack {
         contract_stub: "",
         return_annotation_template: "",
         native_type_spellings: &[],
+        static_property_sigil: "",
         class_literal_member: "",
         import_template: "",
         imports_bind_names: false,
@@ -673,6 +678,7 @@ pub fn python_pack() -> LangPack {
         contract_stub: "",
         return_annotation_template: "",
         native_type_spellings: &[],
+        static_property_sigil: "",
         class_literal_member: "",
         import_template: "",
         imports_bind_names: false,
@@ -757,6 +763,7 @@ pub fn r_pack() -> LangPack {
         contract_stub: "",
         return_annotation_template: "",
         native_type_spellings: &[],
+        static_property_sigil: "",
         class_literal_member: "",
         import_template: "",
         imports_bind_names: false,
@@ -849,6 +856,7 @@ pub fn cmake_pack() -> LangPack {
         contract_stub: "",
         return_annotation_template: "",
         native_type_spellings: &[],
+        static_property_sigil: "",
         class_literal_member: "",
         import_template: "",
         imports_bind_names: false,
@@ -1175,6 +1183,7 @@ pub fn php_pack() -> LangPack {
             ("Sequence", "array"),
             ("CodeRef", "callable"),
         ],
+        static_property_sigil: "$",
         class_literal_member: "class",
         import_template: "use {};\n",
         imports_bind_names: true,
@@ -1344,6 +1353,7 @@ pub fn cpp_pack() -> LangPack {
         contract_stub: "",
         return_annotation_template: "",
         native_type_spellings: &[],
+        static_property_sigil: "",
         class_literal_member: "",
         import_template: "",
         imports_bind_names: false,

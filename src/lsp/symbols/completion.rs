@@ -750,14 +750,25 @@ pub fn member_completion_for_class(
     // `$o->` the instance ones — an enumerator/constant is never reached
     // through an instance, a static member is (php allows it) but not what
     // the operator asks for.
+    let sigil = analysis.pack.static_property_sigil.clone();
     candidates.retain(|c| {
         let constant = matches!(c.kind, FaSymKind::Enumerator);
+        let static_field = c.is_static && matches!(c.kind, FaSymKind::Variable | FaSymKind::Field);
         if scoped {
             constant || c.is_static
         } else {
-            !constant
+            // a static property is not reachable through an instance
+            !constant && !static_field
         }
     });
+    if scoped && !sigil.is_empty() {
+        for c in candidates.iter_mut() {
+            if c.is_static && matches!(c.kind, FaSymKind::Variable | FaSymKind::Field) {
+                c.label = format!("{sigil}{}", c.label);
+                c.insert_text = None;
+            }
+        }
+    }
     // The class-name literal (`Foo::class`) is a member of every class the
     // pack declares it for — a convention on the pack, not a symbol.
     let literal = &analysis.pack.class_literal_member;

@@ -1321,6 +1321,7 @@ fn remap_spans(
         contract_stub: _,
         return_annotation_template: _,
         native_type_spellings: _,
+        static_property_sigil: _,
         preamble_end: _,
         imports_bind_names: _,
         member_shapes_are_strict: _,

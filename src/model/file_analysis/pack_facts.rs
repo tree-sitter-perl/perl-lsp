@@ -59,6 +59,9 @@ pub struct PackFacts {
     /// Engine type name → native spelling a declaration is written with.
     #[serde(default)]
     pub native_type_spellings: Vec<(String, String)>,
+    /// The sigil a static property is spelled with after the scope operator.
+    #[serde(default)]
+    pub static_property_sigil: String,
     /// The last row of the file preamble (open tag, `declare` rows).
     #[serde(default)]
     pub preamble_end: Option<usize>,
@@ -255,6 +258,7 @@ impl PackFacts {
             + self.contract_stub.capacity()
             + self.return_annotation_template.capacity()
             + vcap(&self.native_type_spellings)
+            + self.static_property_sigil.capacity()
             + vcap(&self.doc_mentions)
             + vcap(&self.type_display)
             + vcap(&self.constructor_names);
