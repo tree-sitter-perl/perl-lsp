@@ -9,9 +9,9 @@ cargo build --release
 cargo test                              # unit tests
 ./e2e/run.sh                            # e2e tests (needs nvim + release build)
 gold-corpus/run.pl                      # gold harness (needs release build + installed substrate)
-                                        # BUILD IT `--features cpp`: a plain release build
-                                        # lang-skips 253 rows (PASS 249 vs 498) — half the
-                                        # corpus silently unexercised, reported as skips,
+                                        # BUILD IT `--features cpp,php`: a plain release build
+                                        # lang-skips the cpp AND php rows (279 of 530) — half
+                                        # the corpus silently unexercised, reported as skips,
                                         # not failures. Check `lang-skip 0` in the summary.
 perl-lsp --dump-package <root> <pkg>    # debug type inference for a package
 ```

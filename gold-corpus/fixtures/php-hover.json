@@ -1,0 +1,115 @@
+{
+  "capability": "hover",
+  "rows": [
+    {
+      "id": "php-hover-method-call-signature-and-doc",
+      "difficulty": "simple",
+      "semantic_area": "php-multilang",
+      "lang": "php",
+      "root": "gold-corpus/php-fixture",
+      "file": "src/Web/Home.php",
+      "line": 16,
+      "col": 31,
+      "expect": {
+        "all": [
+          "public function hi(string $name, string $suffix = '!'): string",
+          "*method*",
+          "Say hello."
+        ],
+        "none": []
+      },
+      "status": "gold"
+    },
+    {
+      "id": "php-hover-untyped-declaration-shows-total-return",
+      "difficulty": "simple",
+      "semantic_area": "php-multilang",
+      "lang": "php",
+      "root": "gold-corpus/php-fixture",
+      "comment": "A declaration with no native return type carries the total inferred return.",
+      "file": "src/Util/Greeter.php",
+      "line": 21,
+      "col": 20,
+      "expect": {
+        "all": [
+          "public function seen()",
+          "*returns: array*"
+        ],
+        "none": []
+      },
+      "status": "gold"
+    },
+    {
+      "id": "php-hover-local-typed-by-untyped-callee",
+      "difficulty": "simple",
+      "semantic_area": "php-multilang",
+      "lang": "php",
+      "root": "gold-corpus/php-fixture",
+      "file": "src/Web/Home.php",
+      "line": 17,
+      "col": 8,
+      "expect": {
+        "all": [
+          "$rows: array",
+          "*variable*"
+        ],
+        "none": []
+      },
+      "status": "gold"
+    },
+    {
+      "id": "php-hover-narrowed-receiver-in-chain-body",
+      "difficulty": "simple",
+      "semantic_area": "php-multilang",
+      "lang": "php",
+      "root": "gold-corpus/php-fixture",
+      "file": "src/Narrow.php",
+      "line": 11,
+      "col": 19,
+      "expect": {
+        "all": [
+          "$p: Greeter"
+        ],
+        "none": []
+      },
+      "status": "gold"
+    },
+    {
+      "id": "php-hover-mock-variable-typed-as-class",
+      "difficulty": "simple",
+      "semantic_area": "php-multilang",
+      "lang": "php",
+      "root": "gold-corpus/php-fixture",
+      "file": "tests/GreeterTest.php",
+      "line": 11,
+      "col": 15,
+      "expect": {
+        "all": [
+          "$m: Greeter",
+          "*variable*"
+        ],
+        "none": []
+      },
+      "status": "gold"
+    },
+    {
+      "id": "php-hover-docblock-method-declaration",
+      "difficulty": "simple",
+      "semantic_area": "php-multilang",
+      "lang": "php",
+      "root": "gold-corpus/php-fixture",
+      "comment": "The `@method` row is the declaration a hover shows.",
+      "file": "src/Facade/Store.php",
+      "line": 14,
+      "col": 35,
+      "expect": {
+        "all": [
+          "@method static Greeter greeter()",
+          "*method*"
+        ],
+        "none": []
+      },
+      "status": "gold"
+    }
+  ]
+}

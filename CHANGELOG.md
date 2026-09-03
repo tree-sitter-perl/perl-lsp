@@ -361,6 +361,12 @@ templates). Market case and build-out plan in `docs/prompt-php-target.md`.
   visible class) gets a hint and an "Add return type" quick-fix; a `null`
   arm, an ambiguous numeric, a fluent `return $this` and closures stay
   silent.
+- A php gold fixture (`gold-corpus/php-fixture`, 35 rows across
+  definition, hover, completion, references, signature help,
+  implementations, type-at, rename, highlights, outline, call hierarchy
+  and the diagnostics lanes) runs cold and warm with the rest of the
+  harness; the CLI's `--signature-help` routes pack documents the way the
+  server does.
 - An `instanceof` guard narrows every later operand of its `&&` chain
   (`$p instanceof User && !$p instanceof Alias && $p->getFunding()`), not
   only the second; and `Sql\Column::class` counts as a use of the `Sql`

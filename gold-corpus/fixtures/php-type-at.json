@@ -1,0 +1,73 @@
+{
+  "capability": "type-at",
+  "rows": [
+    {
+      "id": "php-typeat-local-from-untyped-callee",
+      "difficulty": "simple",
+      "semantic_area": "php-multilang",
+      "lang": "php",
+      "root": "gold-corpus/php-fixture",
+      "file": "src/Web/Home.php",
+      "line": 17,
+      "col": 8,
+      "expect": {
+        "all": [
+          "array"
+        ],
+        "none": []
+      },
+      "status": "gold"
+    },
+    {
+      "id": "php-typeat-narrowed-chain-body",
+      "difficulty": "simple",
+      "semantic_area": "php-multilang",
+      "lang": "php",
+      "root": "gold-corpus/php-fixture",
+      "file": "src/Narrow.php",
+      "line": 11,
+      "col": 19,
+      "expect": {
+        "all": [
+          "Greeter"
+        ],
+        "none": []
+      },
+      "status": "gold"
+    },
+    {
+      "id": "php-typeat-mock-receiver",
+      "difficulty": "simple",
+      "semantic_area": "php-multilang",
+      "lang": "php",
+      "root": "gold-corpus/php-fixture",
+      "file": "tests/GreeterTest.php",
+      "line": 11,
+      "col": 15,
+      "expect": {
+        "all": [
+          "Greeter"
+        ],
+        "none": []
+      },
+      "status": "gold"
+    },
+    {
+      "id": "php-typeat-docblock-method-return",
+      "difficulty": "simple",
+      "semantic_area": "php-multilang",
+      "lang": "php",
+      "root": "gold-corpus/php-fixture",
+      "file": "src/Facade/Store.php",
+      "line": 14,
+      "col": 15,
+      "expect": {
+        "all": [
+          "Greeter"
+        ],
+        "none": []
+      },
+      "status": "gold"
+    }
+  ]
+}

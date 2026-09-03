@@ -1,0 +1,24 @@
+{
+  "capability": "document-highlight",
+  "rows": [
+    {
+      "id": "php-highlight-property-reads",
+      "difficulty": "simple",
+      "semantic_area": "php-multilang",
+      "lang": "php",
+      "root": "gold-corpus/php-fixture",
+      "file": "src/Util/Greeter.php",
+      "line": 17,
+      "col": 15,
+      "expect": {
+        "all": [
+          "Greeter.php:9:20",
+          "Greeter.php:18:16",
+          "Greeter.php:24:23"
+        ],
+        "none": []
+      },
+      "status": "gold"
+    }
+  ]
+}

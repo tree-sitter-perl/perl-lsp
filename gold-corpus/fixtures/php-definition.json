@@ -1,0 +1,186 @@
+{
+  "capability": "definition",
+  "rows": [
+    {
+      "id": "php-def-member-call-cross-file",
+      "difficulty": "simple",
+      "semantic_area": "php-multilang",
+      "lang": "php",
+      "root": "gold-corpus/php-fixture",
+      "comment": "`$g->cell(4)`: the receiver typed by `new Grid()` resolves the method in its own file.",
+      "file": "src/Web/Home.php",
+      "line": 15,
+      "col": 17,
+      "expect": {
+        "all": [
+          "Grid.php:9:21"
+        ],
+        "none": []
+      },
+      "status": "gold"
+    },
+    {
+      "id": "php-def-class-constant",
+      "difficulty": "simple",
+      "semantic_area": "php-multilang",
+      "lang": "php",
+      "root": "gold-corpus/php-fixture",
+      "comment": "`Grid::SIZE`: a class constant access on an imported class.",
+      "file": "src/Web/Home.php",
+      "line": 18,
+      "col": 33,
+      "expect": {
+        "all": [
+          "Grid.php:6:18"
+        ],
+        "none": []
+      },
+      "status": "gold"
+    },
+    {
+      "id": "php-def-promoted-property-receiver",
+      "difficulty": "simple",
+      "semantic_area": "php-multilang",
+      "lang": "php",
+      "root": "gold-corpus/php-fixture",
+      "comment": "`$this->greeter->hi()`: a promoted constructor property carries its declared class.",
+      "file": "src/Web/Home.php",
+      "line": 16,
+      "col": 31,
+      "expect": {
+        "all": [
+          "Greeter.php:16:21"
+        ],
+        "none": []
+      },
+      "status": "gold"
+    },
+    {
+      "id": "php-def-parent-ctor-under-same-leaf-alias",
+      "difficulty": "hard",
+      "semantic_area": "php-multilang",
+      "lang": "php",
+      "root": "gold-corpus/php-fixture",
+      "comment": "`parent::__construct()` where the parent is `use App\\Base\\Manager as BaseManager` and the child is also named Manager: the PARENT's constructor (Base/Manager.php:6), never the child's own (App/Manager.php:8).",
+      "file": "src/App/Manager.php",
+      "line": 9,
+      "col": 16,
+      "expect": {
+        "all": [
+          "Manager.php:6:21"
+        ],
+        "none": [
+          "Manager.php:8:"
+        ]
+      },
+      "status": "gold"
+    },
+    {
+      "id": "php-def-parent-method-under-same-leaf-alias",
+      "difficulty": "hard",
+      "semantic_area": "php-multilang",
+      "lang": "php",
+      "root": "gold-corpus/php-fixture",
+      "file": "src/App/Manager.php",
+      "line": 10,
+      "col": 16,
+      "expect": {
+        "all": [
+          "Manager.php:10:21"
+        ],
+        "none": []
+      },
+      "status": "gold"
+    },
+    {
+      "id": "php-def-narrowed-chain-operand",
+      "difficulty": "hard",
+      "semantic_area": "php-multilang",
+      "lang": "php",
+      "root": "gold-corpus/php-fixture",
+      "comment": "Inside the guarded block after a three-operand `&&` chain the receiver is the narrowed Greeter.",
+      "file": "src/Narrow.php",
+      "line": 11,
+      "col": 23,
+      "expect": {
+        "all": [
+          "Greeter.php:16:21"
+        ],
+        "none": []
+      },
+      "status": "gold"
+    },
+    {
+      "id": "php-def-mock-receiver-is-the-doubled-class",
+      "difficulty": "hard",
+      "semantic_area": "php-multilang",
+      "lang": "php",
+      "root": "gold-corpus/php-fixture",
+      "comment": "`$this->createMock(Greeter::class)` types `$m` as the doubled class (the PHPUnit overlay); `$m->hi()` resolves on Greeter.",
+      "file": "tests/GreeterTest.php",
+      "line": 11,
+      "col": 19,
+      "expect": {
+        "all": [
+          "Greeter.php:16:21"
+        ],
+        "none": []
+      },
+      "status": "gold"
+    },
+    {
+      "id": "php-def-hook-callable-string-names-the-method",
+      "difficulty": "simple",
+      "semantic_area": "php-multilang",
+      "lang": "php",
+      "root": "gold-corpus/php-fixture",
+      "comment": "`add_filter('the_title', [$this, 'filterTitle'])`: the string names the method (the WordPress overlay's class-array callable).",
+      "file": "src/Wp/Plugin.php",
+      "line": 8,
+      "col": 41,
+      "expect": {
+        "all": [
+          "Plugin.php:16:21"
+        ],
+        "none": []
+      },
+      "status": "gold"
+    },
+    {
+      "id": "php-def-docblock-method-return-chains",
+      "difficulty": "simple",
+      "semantic_area": "php-multilang",
+      "lang": "php",
+      "root": "gold-corpus/php-fixture",
+      "comment": "`@method Greeter make(string $name)` types `$g`; `$g->hi()` resolves on Greeter.",
+      "file": "src/Facade/Store.php",
+      "line": 14,
+      "col": 19,
+      "expect": {
+        "all": [
+          "Greeter.php:16:21"
+        ],
+        "none": []
+      },
+      "status": "gold"
+    },
+    {
+      "id": "php-def-static-docblock-method-chain",
+      "difficulty": "simple",
+      "semantic_area": "php-multilang",
+      "lang": "php",
+      "root": "gold-corpus/php-fixture",
+      "comment": "`self::greeter()->hi()`: a `@method static Greeter greeter()` return chained without a variable.",
+      "file": "src/Facade/Store.php",
+      "line": 14,
+      "col": 46,
+      "expect": {
+        "all": [
+          "Greeter.php:16:21"
+        ],
+        "none": []
+      },
+      "status": "gold"
+    }
+  ]
+}

@@ -774,7 +774,16 @@ fn run_one(
         }
         "signature-help" => {
             let doc = cli_open_document(file, idx);
-            match symbols::signature_help(&doc.analysis, &doc.tree, &doc.text, pos, idx) {
+            // the same routing the server does: a pack document's call
+            // shapes and member ladder, a hub document's cursor context
+            let caps = crate::build::language_driver::LanguageRegistry::caps(doc.language);
+            let sh = if caps.pack_signature_help {
+                let routed = idx.lookup_for(doc.language);
+                symbols::pack_signature_help(&doc.analysis, &doc.tree, &doc.text, pos, doc.language, routed.as_lookup())
+            } else {
+                symbols::signature_help(&doc.analysis, &doc.tree, &doc.text, pos, idx)
+            };
+            match sh {
                 Some(sh) => {
                     let active = sh.active_signature.unwrap_or(0) as usize;
                     let mut out = String::new();
