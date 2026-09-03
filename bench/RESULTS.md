@@ -789,3 +789,40 @@ stamps, `is_static` on every candidate) and the pack's class-name literal;
 `->` offers the instance members and hides the constants. The set is
 Intelephense's exactly; phpactor's extra item is a `level: ` named-argument
 snippet, not a member.
+
+### Editor-axes battery, monolog, three tools (2026-09-03, 07:20)
+
+The verbs an editor fires without asking — highlights, call hierarchy,
+workspace symbol search, outline, folding, selection ranges, semantic
+tokens, inlay hints, rename preparation — over `Logger.php` and
+`StreamHandler.php` (`$S/cmp/spec-axes2-monolog.json`, ten probes, the
+same harness and readiness gate as the completion battery).
+
+| probe | ours | Intelephense | phpactor |
+|---|---|---|---|
+| highlight `$this->handlers` (11 sites) | 11 · 4 ms, decl = Write | 11 · 6 ms | 11 · 17 ms, decl = Text |
+| highlight `$handler` param | 2 · 0.5 ms | 2 · 3 ms | 14 · 19 ms (every `$handler` in the file) |
+| prepareCallHierarchy `addRecord` | 1 · incoming 15 · outgoing 5 | unsupported | unsupported |
+| prepareCallHierarchy `pushHandler` | 1 · incoming 29 | unsupported | unsupported |
+| workspace/symbol `Logger` | 23 (substring) · 3 ms | 45 (fuzzy, variables too) · 7 ms | 10 (classes + constants) · 217 ms |
+| workspace/symbol `pushHandler` | 1 · 2 ms | 4 (fuzzy: `PushoverHandler`) · 5 ms | 0 |
+| documentSymbol `Logger.php` | 55 · 0.6 ms | 118 (params/locals nested) · 3 ms | 54 · 29 ms |
+| foldingRange `Logger.php` / `StreamHandler.php` | 162 / 73 (blocks + docblocks) | 0 | 0 |
+| selectionRange `$this->handlers` | 11 levels | none | 1 level |
+| semanticTokens/full `Logger.php` | 446 tokens · 0.5 ms | none | none |
+| inlayHint (lines 575–640) | none | licence required | unsupported |
+| prepareRename `handlers` | placeholder `handlers` | null (free tier) | range |
+
+Folding, selection range and the outgoing-calls list were the three gaps
+the battery found: pack documents answered no folds and no selection
+range (both verbs were Perl-only), and outgoing calls listed the
+method's property reads (`handlers`, `fiberLogDepth`, `RFC_5424_LEVELS`)
+beside its callees — 14 rows where the body makes 5 calls. Folding now
+follows the skeleton's scopes plus the pack's fold-only captures (php
+blocks that are not scopes, docblocks as comment folds), selection range
+walks the tree's ancestors for every pack, and a value-shaped member read
+is excluded by its own `MemberShape`. The `$handler` highlight is scope-exact (the
+parameter's two sites); phpactor's 14 is name-blind. Inlay hints stay
+the one axis nobody answers here: ours emits type hints only for
+inferred (unannotated) locals and none of the range's locals are
+unannotated; parameter-name hints at call sites are the open item.

@@ -732,3 +732,10 @@
 (binary_expression
   ["+" "-" "*" "/" "%" "**" "<=>"]
   right: (variable_name) @obs.numeric)
+
+; ---- folding ----
+; Blocks fold whether or not they are scopes (php has no block scoping, so
+; an `if` body is a fold, never a scope); a docblock folds as a comment.
+(compound_statement) @fold
+(declaration_list) @fold
+(comment) @fold.comment

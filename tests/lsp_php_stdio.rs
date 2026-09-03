@@ -144,6 +144,70 @@ fn php_signature_help_outline_and_diagnostics_over_stdio() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// The editor-shape verbs on a php document: folding follows the scopes
+/// the skeleton minted, selectionRange walks the tree's ancestors, and a
+/// method's outgoing calls are its callees — a property read is a value,
+/// not a call.
+#[test]
+fn php_editor_axes_over_stdio() {
+    let dir = std::env::temp_dir().join(format!("perl-lsp-d2axes-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    let w = |rel: &str, src: &str| std::fs::write(dir.join(rel), src).unwrap();
+    w("composer.json", "{\"autoload\": {\"psr-4\": {\"App\\\\\": \"src/\"}}}");
+    let src = "<?php\nnamespace App;\n\nclass Queue\n{\n    private array $items = [];\n    const LIMIT = 3;\n\n    public function push(string $x): void\n    {\n        if (\\count($this->items) < self::LIMIT) {\n            $this->items[] = $x;\n        }\n    }\n\n    public function fill(): void\n    {\n        $this->push('a');\n        $this->push('b');\n        $n = $this->items;\n    }\n}\n";
+    w("src/Queue.php", src);
+    let mut c = Client::spawn(&dir);
+    c.request("initialize", serde_json::json!({"processId": null, "rootUri": uri(&dir), "capabilities": {}}));
+    c.notify("initialized", serde_json::json!({}));
+    let u = uri(&dir.join("src/Queue.php"));
+    c.notify("textDocument/didOpen", serde_json::json!({"textDocument": {"uri": u, "languageId": "php", "version": 1, "text": src}}));
+    let col = |line: usize, needle: &str| src.lines().nth(line).unwrap().find(needle).unwrap();
+    // readiness: goto-def on the `push` call answers the declaration
+    let mut ready = false;
+    for _ in 0..120 {
+        let r = c.request("textDocument/definition", serde_json::json!({"textDocument": {"uri": u}, "position": {"line": 17, "character": col(17, "push")}}));
+        if r.as_array().is_some_and(|a| !a.is_empty()) || r.is_object() {
+            ready = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(250));
+    }
+    assert!(ready, "definition never answered");
+    // folding: the class body, both method bodies and the `if` block
+    let folds = c.request("textDocument/foldingRange", serde_json::json!({"textDocument": {"uri": u}}));
+    let ranges: Vec<(u64, u64)> = folds.as_array().map(|a| a.iter().map(|f| (f["startLine"].as_u64().unwrap(), f["endLine"].as_u64().unwrap())).collect()).unwrap_or_default();
+    assert!(ranges.contains(&(3, 21)) || ranges.contains(&(4, 21)), "class body folds: {ranges:?}");
+    assert!(ranges.iter().any(|r| r.0 >= 8 && r.1 == 13), "push body folds: {ranges:?}");
+    assert!(ranges.iter().any(|r| r.0 == 10 && r.1 == 12), "the if block folds: {ranges:?}");
+    // selectionRange: the token's ancestors up to the file
+    let sel = c.request("textDocument/selectionRange", serde_json::json!({"textDocument": {"uri": u}, "positions": [{"line": 17, "character": col(17, "push")}]}));
+    let mut depth = 0;
+    let mut node = sel.as_array().and_then(|a| a.first().cloned());
+    while let Some(n) = node {
+        depth += 1;
+        node = n.get("parent").filter(|p| !p.is_null()).cloned();
+    }
+    assert!(depth >= 4, "selection range ancestors: {sel}");
+    // call hierarchy from `fill`: outgoing is `push` (twice), never the
+    // `$this->items` read; incoming on `push` is `fill`
+    let items = c.request("textDocument/prepareCallHierarchy", serde_json::json!({"textDocument": {"uri": u}, "position": {"line": 15, "character": col(15, "fill")}}));
+    let item = items.as_array().and_then(|a| a.first().cloned()).expect("prepareCallHierarchy on fill");
+    let out = c.request("callHierarchy/outgoingCalls", serde_json::json!({"item": item}));
+    let to: Vec<String> = out.as_array().map(|a| a.iter().filter_map(|e| e["to"]["name"].as_str().map(str::to_string)).collect()).unwrap_or_default();
+    assert_eq!(to, vec!["push".to_string()], "outgoing calls of fill: {out}");
+    assert_eq!(out[0]["fromRanges"].as_array().map(|a| a.len()), Some(2), "{out}");
+    let items = c.request("textDocument/prepareCallHierarchy", serde_json::json!({"textDocument": {"uri": u}, "position": {"line": 8, "character": col(8, "push")}}));
+    let item = items.as_array().and_then(|a| a.first().cloned()).expect("prepareCallHierarchy on push");
+    let inc = c.request("callHierarchy/incomingCalls", serde_json::json!({"item": item}));
+    let from: Vec<String> = inc.as_array().map(|a| a.iter().filter_map(|e| e["from"]["name"].as_str().map(str::to_string)).collect()).unwrap_or_default();
+    assert_eq!(from, vec!["fill".to_string()], "incoming calls of push: {inc}");
+    c.request("shutdown", serde_json::Value::Null);
+    c.notify("exit", serde_json::Value::Null);
+    let _ = c.child.wait();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// A scoped access completes the class's members: `self::` and `Cfg::`
 /// answer constants and methods — never the function's locals — and
 /// `$this->` keeps answering the instance members.

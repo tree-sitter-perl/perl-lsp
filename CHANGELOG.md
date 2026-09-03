@@ -342,6 +342,10 @@ templates). Market case and build-out plan in `docs/prompt-php-target.md`.
   and completion after `self::` / `static::` / `Foo::` offers that
   class's constants, `static` members and `::class` instead of every name
   in scope (`->` keeps the instance members).
+- Pack documents (php, C/C++, python, R) now answer `foldingRange` (every
+  multi-line class/function/block scope) and `selectionRange` (the tree's
+  ancestors); a method's outgoing calls list its callees only — a member
+  read (`$this->items`, `self::LIMIT`) is a value, not a call.
 - **A php value read never means a method.** `$this->session` on a
   class declaring only `session()` is an undeclared property for the
   lane, goto-def and hover alike (Perl's accessor calls keep their

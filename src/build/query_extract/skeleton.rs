@@ -194,6 +194,9 @@ pub struct SkeletonAnalysis {
     /// Existence-probe argument spans (`@probe.region`); the member lanes
     /// stay silent inside them.
     pub probe_regions: Vec<crate::model::file_analysis::Span>,
+    /// Fold-only regions (`@fold` / `@fold.comment`, the bool = comment);
+    /// joined with the scopes into `fold_ranges`.
+    pub fold_regions: Vec<(crate::model::file_analysis::Span, bool)>,
     /// Domain-typing sites: a `@domain.slot` field access compared/assigned
     /// against a `@domain.value` token. Raw (value's enum resolves cross-file
     /// at query time); folds onto `Field{owner, name}` for the int-used-as-enum
@@ -1411,8 +1414,34 @@ impl SkeletonAnalysis {
             probe_regions: std::mem::take(&mut self.probe_regions),
             ..Default::default()
         };
+        // Folding follows the scopes the skeleton minted: a class body, a
+        // function body, a block — every multi-line one is a region.
+        let mut fold_ranges: Vec<crate::model::file_analysis::FoldRange> = Vec::new();
+        let scope_folds = self
+            .scopes
+            .iter()
+            .filter(|sc| !matches!(sc.kind, crate::model::file_analysis::ScopeKind::File))
+            .map(|sc| (sc.span, false));
+        for (span, comment) in scope_folds.chain(self.fold_regions.drain(..)) {
+            let (start_line, end_line) = (span.start.row, span.end.row);
+            if end_line > start_line
+                && !fold_ranges.iter().any(|f| f.start_line == start_line && f.end_line == end_line)
+            {
+                fold_ranges.push(crate::model::file_analysis::FoldRange {
+                    start_line,
+                    end_line,
+                    kind: if comment {
+                        crate::model::file_analysis::FoldKind::Comment
+                    } else {
+                        crate::model::file_analysis::FoldKind::Region
+                    },
+                });
+            }
+        }
+        fold_ranges.sort_by_key(|f| (f.start_line, f.end_line));
         let mut fa = FileAnalysis::new(FileAnalysisParts {
             scopes: self.scopes,
+            fold_ranges,
             symbols,
             refs,
             witnesses: bag,

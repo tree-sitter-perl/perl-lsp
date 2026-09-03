@@ -789,6 +789,14 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
         .filter(|e| e.cap == "probe.region")
         .map(|e| Span { start: e.start, end: e.end })
         .collect();
+    // Fold-only regions (`@fold` / `@fold.comment`): blocks and comment
+    // runs that fold in an editor without being scopes (php has no block
+    // scoping, so an `if` body must not mint one).
+    out.fold_regions = events
+        .iter()
+        .filter(|e| e.cap == "fold" || e.cap == "fold.comment")
+        .map(|e| (Span { start: e.start, end: e.end }, e.cap == "fold.comment"))
+        .collect();
 
     for e in &events {
         while scope_stack.len() > 1

@@ -960,11 +960,13 @@ fn driver_caps_axes_are_reviewed_exhaustively() {
         // The hub lanes (enrichment, native cursor/hover/rebuild verbs) and
         // the pack lanes (invalidator, gather, bare words) are disjoint
         // architectures today — one driver never straddles both.
+        // selectionRange is a tree-ancestor walk with no language in it —
+        // both architectures serve it, so it belongs to neither family.
+        let _ = selection_range;
         let hub_family = hub_enrichment
             || cursor_context
             || hover_info
             || signature_help
-            || selection_range
             || synchronous_rebuild;
         let pack_family = pack_invalidation
             || pack_signature_help

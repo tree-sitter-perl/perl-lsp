@@ -438,6 +438,8 @@ impl LanguageDriver for PackDriver {
             pack_signature_help: !pack.call_shapes.is_empty(),
             include_path_tokens: pack.include_path_tokens,
             preprocessor_macros: pack.preprocessor_macros,
+            // The verb walks tree ancestors — no language in it.
+            selection_range: true,
             ..Default::default()
         }
     }
@@ -1329,6 +1331,7 @@ fn remap_spans(
         control_regions,
         param_regions,
         probe_regions,
+        fold_regions,
         domain_sites,
         macro_returns: _,
         // Populated in enrich_skeleton (post-remap) already in original coords.
@@ -1477,6 +1480,9 @@ fn remap_spans(
         *span = rspan(*span);
     }
     for span in probe_regions.iter_mut() {
+        *span = rspan(*span);
+    }
+    for (span, _) in fold_regions.iter_mut() {
         *span = rspan(*span);
     }
     for ds in domain_sites.iter_mut() {

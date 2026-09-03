@@ -9,6 +9,7 @@
 //! disagree (docs/adr/resolution-candidate-set.md).
 
 use super::*;
+use crate::model::file_analysis::MemberShape;
 use std::sync::Arc;
 
 /// One node of a type/call hierarchy answer: a named declaration the
@@ -432,6 +433,9 @@ impl<'a> CandidateSet<'a> {
             // resolution anchors.
             let (token, site) = match &r.kind {
                 RefKind::FunctionCall => (r.span.start, r.span),
+                // A member read (`$this->handlers`, `self::LIMIT`) reaches a
+                // value, not a callee — the ref's own shape says so.
+                RefKind::MethodCall { shape: MemberShape::Value, .. } => continue,
                 RefKind::MethodCall { method_name_span, .. } => {
                     (method_name_span.start, *method_name_span)
                 }
