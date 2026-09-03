@@ -354,7 +354,28 @@ impl<'a> CandidateSet<'a> {
             std::collections::HashMap::new();
         let mut analyses: std::collections::HashMap<std::path::PathBuf, Option<Arc<FileAnalysis>>> =
             std::collections::HashMap::new();
-        for loc in self.references() {
+        // The event bus: a callable that is ALSO a class-rail handler (a
+        // listener's `handle(X $e)`, a job's `handle`) is called by every
+        // emission of `X` — the rail's references join the direct callers.
+        let mut sites = self.references();
+        for s in self.origin.symbols().iter().filter(|s| {
+            matches!(s.kind, SymKind::Handler)
+                && crate::model::file_analysis::contains_point(&s.selection_span, self.point)
+        }) {
+            if let crate::model::file_analysis::SymbolDetail::Handler { owner: owner @ crate::model::file_analysis::HandlerOwner::ClassRail(_), .. } = &s.detail {
+                let t = TargetRef::new(
+                    s.name.clone(),
+                    TargetKind::Handler { owner: owner.clone(), name: s.name.clone() },
+                );
+                let mask = self.target_visibility(&t);
+                for loc in refs_to(self.files, self.module_index, &t, mask) {
+                    if !sites.iter().any(|o| o.key == loc.key && o.span == loc.span) {
+                        sites.push(loc);
+                    }
+                }
+            }
+        }
+        for loc in sites {
             if loc.access == AccessKind::Declaration {
                 continue;
             }

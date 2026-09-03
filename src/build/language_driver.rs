@@ -1405,6 +1405,7 @@ fn remap_spans(
         return_annotation_template: _,
         native_type_spellings: _,
         static_property_sigil: _,
+        rail_labels: _,
         preamble_end: _,
         imports_bind_names: _,
         member_shapes_are_strict: _,
@@ -1422,6 +1423,7 @@ fn remap_spans(
         variable_arg_sites,
         fold_regions,
         rails,
+        class_rails,
         domain_sites,
         macro_returns: _,
         // Populated in enrich_skeleton (post-remap) already in original coords.
@@ -1580,6 +1582,9 @@ fn remap_spans(
         *span = rspan(*span);
     }
     for (span, _) in rails.iter_mut() {
+        *span = rspan(*span);
+    }
+    for (span, _) in class_rails.iter_mut() {
         *span = rspan(*span);
     }
     for ds in domain_sites.iter_mut() {

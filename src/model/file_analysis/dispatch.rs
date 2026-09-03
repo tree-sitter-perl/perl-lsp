@@ -88,6 +88,12 @@ pub enum HandlerOwner {
     /// name + owner equality is the match); the rail keeps a route name
     /// and a same-spelled view name apart.
     Rail(String),
+    /// A named rail whose NAMES are class names (Laravel's event bus: an
+    /// emission `event(new X)` and a listener's `handle(X $e)` meet on
+    /// `X`). Spans are the emission and handler TOKENS, never the name
+    /// itself, so the rail is navigable but never renameable — the class
+    /// rename owns the name.
+    ClassRail(String),
 }
 
 // ---- Plugin namespace ----

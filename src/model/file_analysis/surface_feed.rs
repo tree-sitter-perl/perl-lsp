@@ -77,6 +77,7 @@ impl FileAnalysis {
                     return_annotation_template: _return_annotation_template, // pack-wide convention
                     native_type_spellings: _native_type_spellings, // pack-wide convention
                     static_property_sigil: _static_property_sigil, // pack-wide convention
+                    rail_labels: _rail_labels,       // pack-wide convention
                     preamble_end: _preamble_end, // an editing aid
                     imports_bind_names: _imports_bind_names, // pack-wide convention
                     member_shapes_are_strict: _member_shapes_are_strict, // pack-wide convention

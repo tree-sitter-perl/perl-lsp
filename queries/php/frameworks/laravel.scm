@@ -103,3 +103,111 @@
     . (argument (string . (string_content) @ref.dispatch.named.route .)))
   (#any-of? @_lr_facade "URL" "Redirect" "Route")
   (#any-of? @dispatch.via "route" "has" "signedRoute" "temporarySignedRoute"))
+
+; ---- the event bus (a class-keyed rail, `docs/prompt-laravel-parity.md`) ----
+; Names are CLASS names: an emission `event(new X(…))` / `X::dispatch(…)`
+; / `dispatch(new Job)` / `broadcast(new X)` is a DispatchCall named X on
+; the `event` rail whose span is the class token (goto-def there lists
+; the class AND the handlers); a handler is a listener's `handle(X $e)`
+; (named by the parameter type, sitting on the method's name token, so
+; call hierarchy on `handle` walks the bus), a `$listen` map key, an
+; `Event::listen(X::class, …)` / `->listen(X::class, …)` registration, or
+; a job's own `handle` (named by its class). Rename never touches the
+; rail — the class rename owns the name.
+(function_call_expression
+  function: (name) @dispatch.via
+  arguments: (arguments
+    . (argument (object_creation_expression
+        . [(name) @ref.dispatch.class.event
+           (qualified_name (name) @ref.dispatch.class.event)])))
+  (#any-of? @dispatch.via "event" "dispatch" "dispatch_sync" "broadcast"))
+; `Anything::dispatch(new Y(…))` / `$bus->dispatch(new Y(…))` — a `new`
+; first argument names the event; the dispatcher is whoever dispatches.
+(scoped_call_expression
+  name: (name) @dispatch.via
+  arguments: (arguments
+    . (argument (object_creation_expression
+        . [(name) @ref.dispatch.class.event
+           (qualified_name (name) @ref.dispatch.class.event)])))
+  (#any-of? @dispatch.via "dispatch" "dispatchSync" "dispatchNow"))
+(member_call_expression
+  name: (name) @dispatch.via
+  arguments: (arguments
+    . (argument (object_creation_expression
+        . [(name) @ref.dispatch.class.event
+           (qualified_name (name) @ref.dispatch.class.event)])))
+  (#any-of? @dispatch.via "dispatch" "dispatchSync" "dispatchNow"))
+; `X::dispatch(…)` (the Dispatchable trait): the scope IS the event when
+; the first argument is not a `new …` — an empty list, or any other value.
+(scoped_call_expression
+  scope: [(name) @ref.dispatch.class.event
+          (qualified_name (name) @ref.dispatch.class.event)]
+  name: (name) @dispatch.via
+  arguments: (arguments) @_lev_args
+  (#any-of? @dispatch.via "dispatch" "dispatchIf" "dispatchUnless" "dispatchSync" "dispatchAfterResponse")
+  (#eq? @_lev_args "()"))
+(scoped_call_expression
+  scope: [(name) @ref.dispatch.class.event
+          (qualified_name (name) @ref.dispatch.class.event)]
+  name: (name) @dispatch.via
+  arguments: (arguments . (argument) @_lev_a1)
+  (#any-of? @dispatch.via "dispatch" "dispatchIf" "dispatchUnless" "dispatchSync" "dispatchAfterResponse")
+  (#not-match? @_lev_a1 "^new\\s"))
+
+; listeners: `public function handle(X $event)` — any class's `handle`
+; whose first parameter is typed; a job's `handle(Dependency $d)` mints a
+; handler named by an injected type, which no emission ever names.
+(method_declaration
+  name: (name) @def.handler.by.event
+  parameters: (formal_parameters
+    . (simple_parameter
+        type: [(named_type (name) @handler.name)
+               (named_type (qualified_name (name) @handler.name))]))
+  (#eq? @def.handler.by.event "handle"))
+; a job's own `handle()` is the handler of `dispatch(new Job)`
+(class_declaration
+  name: (name) @handler.name
+  body: (declaration_list
+    (method_declaration
+      name: (name) @def.handler.by.event
+      parameters: (formal_parameters)))
+  (#eq? @def.handler.by.event "handle"))
+(class_declaration
+  name: (name) @handler.name
+  body: (declaration_list
+    (method_declaration
+      name: (name) @def.handler.by.event
+      parameters: (formal_parameters . (simple_parameter type: (_)) .)))
+  (#eq? @def.handler.by.event "handle"))
+; `protected $listen = [ X::class => [ L::class ] ]`
+(property_element
+  name: (variable_name) @_lev_listen
+  default_value: (array_creation_expression
+    (array_element_initializer
+      . (class_constant_access_expression
+          . [(name) @def.handler.class.event
+             (qualified_name (name) @def.handler.class.event)]
+          (name) @_lev_k .)))
+  (#eq? @_lev_listen "$listen")
+  (#eq? @_lev_k "class"))
+; `Event::listen(X::class, …)` / `$events->listen(X::class, …)`
+(scoped_call_expression
+  scope: (name) @_lev_ev
+  name: (name) @_lev_listen_m
+  arguments: (arguments
+    . (argument (class_constant_access_expression
+        . [(name) @def.handler.class.event
+           (qualified_name (name) @def.handler.class.event)]
+        (name) @_lev_k2 .)))
+  (#eq? @_lev_ev "Event")
+  (#eq? @_lev_listen_m "listen")
+  (#eq? @_lev_k2 "class"))
+(member_call_expression
+  name: (name) @_lev_listen_mm
+  arguments: (arguments
+    . (argument (class_constant_access_expression
+        . [(name) @def.handler.class.event
+           (qualified_name (name) @def.handler.class.event)]
+        (name) @_lev_k3 .)))
+  (#eq? @_lev_listen_mm "listen")
+  (#eq? @_lev_k3 "class"))

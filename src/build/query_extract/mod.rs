@@ -113,6 +113,35 @@ struct RailsDoc {
     language: String,
     #[serde(default)]
     text_rails: Vec<TextRail>,
+    /// rail → how the undefined-name lane phrases a miss (`"event": "No
+    /// listener for event"`); default `Undefined <rail>`.
+    #[serde(default)]
+    labels: std::collections::HashMap<String, String>,
+}
+
+/// rail → the lane phrasing for a miss, from the bundled rail documents.
+pub fn rail_labels_for(pack: &LangPack) -> std::sync::Arc<Vec<(String, String)>> {
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex, OnceLock};
+    static CACHE: OnceLock<Mutex<HashMap<String, Arc<Vec<(String, String)>>>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let key = pack.lang_id.to_string();
+    let mut guard = cache.lock().unwrap();
+    if let Some(l) = guard.get(&key) {
+        return Arc::clone(l);
+    }
+    let mut out: Vec<(String, String)> = Vec::new();
+    for src in pack.bundled_rail_docs {
+        if let Ok(doc) = serde_json::from_str::<RailsDoc>(src) {
+            if doc.language == pack.lang_id {
+                out.extend(doc.labels);
+            }
+        }
+    }
+    out.sort();
+    let arc = Arc::new(out);
+    guard.insert(key, Arc::clone(&arc));
+    arc
 }
 
 /// The text rails in force for a language: bundled documents plus every

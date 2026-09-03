@@ -1096,3 +1096,20 @@ to the grammar; the text lane (`laravel.rails.json`) mints their uses as
 the same refs: all 223 resolve (0 `undefined-route` in templates),
 references from `admin.mounts.view`'s declaration list 8 sites, 3 of
 them templates (grep: 4 files spell the name).
+
+### Round 2 — the event bus (2026-09-03, 16:10, build under net r120)
+
+koel (9 events, 9 listeners, a `$listen` map, 16 emissions):
+
+| probe | result |
+|---|---|
+| `undefined-event` hints, cold | 8 before the structural emission rule (`Dispatcher::dispatch(new Job)` read the facade as the event) → 1 after: `event(new PasswordReset($user))`, a framework event no app listener answers |
+| goto-def on `event(new SongFavoriteToggled(…))`'s class token | the event class, `LoveTrackOnLastfm::handle`, the `$listen` row — three candidates, never a pick |
+| call hierarchy on `LoveTrackOnLastfm::handle` | incoming: `FavoriteService::toggleFavorite` (the emission) beside the two unit tests that call `handle` directly |
+| rename on the rail | refused by policy — the class rename owns the name |
+| unit + cross-file tests | `$listen` key, listener `handle(X $e)`, `Event::listen`, a job's own `handle`, both emission spellings connect; a typed injected dependency never becomes an emission target |
+
+Two defects the corpus found before the tests did: the def dedup kept
+one handler per token (a listener's `handle(Liked $e)` lost `Liked` to
+its own class's job handler), and the emission's companion ref won the
+cursor tie over the class token's own ref (goto-def lost the class).

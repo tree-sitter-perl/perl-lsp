@@ -260,6 +260,15 @@ templates). Market case and build-out plan in `docs/prompt-php-target.md`.
   also makes WordPress hook navigation work across files. Blade
   templates are text to the grammar, so their `route('x')` uses are
   scanned as a text rail (`laravel.rails.json`) into the same refs.
+- **The Laravel event bus is a graph.** `event(new X)`, `X::dispatch()`,
+  `Anything::dispatch(new Job)`, `broadcast(new X)` emit; a listener's
+  `handle(X $e)`, a `$listen` map row, `Event::listen(X::class, …)` and
+  a job's own `handle()` register — on a class-keyed rail whose names
+  are the event classes. Goto-definition on the emission's class token
+  lists the class and every handler; call hierarchy on a listener's
+  `handle` counts the emissions as incoming calls; `undefined-event`
+  hints "No listener for event 'X'" on an emission nothing answers.
+  The rail is never renamed — the class rename owns the name.
 - **Signature help.** `$obj->method(` and `Foo::method(` on PHP now show
   the declaration's parameter list with the active parameter, the return
   annotation, and the docblock summary, for local and cross-file

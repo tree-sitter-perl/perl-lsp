@@ -164,6 +164,8 @@ pub struct SkeletonAnalysis {
     pub return_annotation_template: String,
     pub native_type_spellings: Vec<(String, String)>,
     pub static_property_sigil: String,
+    /// rail → the undefined-name lane's phrasing (`rails.json` labels).
+    pub rail_labels: Vec<(String, String)>,
     /// The last row of the file preamble (open tag, `declare` rows): an
     /// inserted import goes after it when no import or namespace anchors.
     pub preamble_end: Option<usize>,
@@ -212,6 +214,10 @@ pub struct SkeletonAnalysis {
     /// `@ref.dispatch.named.<rail>`): the token span → the rail name. Read
     /// at mint time to give the Handler / DispatchCall a `HandlerOwner::Rail`.
     pub rails: Vec<(crate::model::file_analysis::Span, String)>,
+    /// Class-keyed rails (`@def.handler.class.<rail>` / `.by.<rail>`,
+    /// `@ref.dispatch.class.<rail>`): token span → rail name, minted as
+    /// `HandlerOwner::ClassRail`.
+    pub class_rails: Vec<(crate::model::file_analysis::Span, String)>,
     /// Domain-typing sites: a `@domain.slot` field access compared/assigned
     /// against a `@domain.value` token. Raw (value's enum resolves cross-file
     /// at query time); folds onto `Field{owner, name}` for the int-used-as-enum
@@ -466,7 +472,11 @@ impl SkeletonAnalysis {
     /// is language-agnostic above this seam.
     pub fn into_file_analysis(mut self) -> crate::model::file_analysis::FileAnalysis {
         let rails = std::mem::take(&mut self.rails);
+        let class_rails = std::mem::take(&mut self.class_rails);
         let rail_owner = |span: Span| -> crate::model::file_analysis::HandlerOwner {
+            if let Some((_, rail)) = class_rails.iter().find(|(s, _)| *s == span) {
+                return crate::model::file_analysis::HandlerOwner::ClassRail(rail.clone());
+            }
             rails
                 .iter()
                 .find(|(s, _)| *s == span)
@@ -687,7 +697,9 @@ impl SkeletonAnalysis {
                     // still resolvable (rule #7). The attribute stays on
                     // the symbol for hover; the listing verdict is stamped
                     // here so warm stub rebuilds mint it identically.
-                    hide_in_outline: s.attributes.iter().any(|a| a == "include_guard"),
+                    // a class-rail handler sits on another symbol's token
+                    // (a listener's `handle`); the outline shows that one
+                    hide_in_outline: s.attributes.iter().any(|a| a == "include_guard" || a == "class_rail"),
                     doc: s.doc.clone(),
                     deprecation: s.deprecation.clone(),
                     display: None,
@@ -1432,6 +1444,7 @@ impl SkeletonAnalysis {
             return_annotation_template: std::mem::take(&mut self.return_annotation_template),
             native_type_spellings: std::mem::take(&mut self.native_type_spellings),
             static_property_sigil: std::mem::take(&mut self.static_property_sigil),
+            rail_labels: std::mem::take(&mut self.rail_labels),
             preamble_end: self.preamble_end,
             imports_bind_names: self.imports_bind_names,
             member_shapes_are_strict: self.member_shapes_are_strict,

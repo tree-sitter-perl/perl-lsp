@@ -1350,7 +1350,7 @@ pub fn pack_symbol_diagnostics(
                 if !matches!(r.kind, RefKind::DispatchCall { .. }) {
                     continue;
                 }
-                let Some(owner @ HandlerOwner::Rail(rail)) = r.handler_owner() else { continue };
+                let Some(owner @ (HandlerOwner::Rail(rail) | HandlerOwner::ClassRail(rail))) = r.handler_owner() else { continue };
                 let name = r.target_name.as_str();
                 if defines(analysis.symbols(), owner, name) {
                     continue;
@@ -1358,8 +1358,18 @@ pub fn pack_symbol_diagnostics(
                 if !crate::index::resolve::handler_definitions(owner, name, idx).is_empty() {
                     continue;
                 }
-                push(&mut out, r.span, DiagnosticSeverity::WARNING, &format!("undefined-{rail}"),
-                    format!("Undefined {rail} '{name}'."));
+                // a class-keyed rail's miss is a dead emission — a hint
+                let severity = match owner {
+                    HandlerOwner::ClassRail(_) => DiagnosticSeverity::HINT,
+                    _ => DiagnosticSeverity::WARNING,
+                };
+                let label = pack
+                    .rail_labels
+                    .iter()
+                    .find(|(r, _)| r == rail)
+                    .map(|(_, l)| l.clone())
+                    .unwrap_or_else(|| format!("Undefined {rail}"));
+                push(&mut out, r.span, severity, &format!("undefined-{rail}"), format!("{label} '{name}'."));
             }
         }
     }

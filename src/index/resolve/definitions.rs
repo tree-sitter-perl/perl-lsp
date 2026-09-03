@@ -634,6 +634,46 @@ impl<'a> CandidateSet<'a> {
     /// the never-pruned ranked multi-def is the documented residual the
     /// spike's ranking axis fills in (see the ADR's merge plan).
     pub fn definitions(&self) -> Vec<RefLocation> {
+        let mut out = self.definitions_primary();
+        // The event bus: a class token that is ALSO an emission on a
+        // class-keyed rail (`event(new X)`) surfaces the handlers alongside
+        // the class — every relevant candidate, never a pick.
+        if self.pack {
+            for r in self.origin.refs().iter().filter(|r| {
+                matches!(r.kind, RefKind::DispatchCall { .. })
+                    && crate::model::file_analysis::contains_point(&r.span, self.point)
+            }) {
+                let Some(owner @ crate::model::file_analysis::HandlerOwner::ClassRail(_)) = r.handler_owner() else { continue };
+                let mut locs: Vec<RefLocation> = self
+                    .origin
+                    .symbols()
+                    .iter()
+                    .filter(|s| {
+                        s.name == r.target_name
+                            && matches!(&s.detail, crate::model::file_analysis::SymbolDetail::Handler { owner: o, .. } if o == owner)
+                    })
+                    .map(|s| RefLocation {
+                        key: self.origin_key.clone(),
+                        span: s.selection_span,
+                        access: AccessKind::Declaration,
+                        rewritable: false,
+                        label: None,
+                    })
+                    .collect();
+                if let Some(idx) = self.idx() {
+                    locs.extend(dispatch_handler_locations(owner, &r.target_name, idx));
+                }
+                for l in locs {
+                    if !out.iter().any(|o| o.key == l.key && o.span == l.span) {
+                        out.push(l);
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    fn definitions_primary(&self) -> Vec<RefLocation> {
         let analysis = self.origin;
         let point = self.point;
 
