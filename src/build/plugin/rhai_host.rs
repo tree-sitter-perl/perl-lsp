@@ -180,12 +180,29 @@ pub fn make_engine() -> Engine {
                 let mut m = rhai::Map::new();
                 m.insert("key".into(), key.into());
                 m.insert("key_span".into(), arg_map_field(&args[i], "span"));
+                // The key's CONTENT span (inside the quotes) is what a rename
+                // rewrites, and its candidate set is what a loop registration
+                // fans out over — a pair walk that drops them forces every
+                // caller to re-walk the raw args for what it already paired.
+                m.insert(
+                    "key_content_span".into(),
+                    arg_map_field(&args[i], "content_span"),
+                );
+                m.insert("key_values".into(), arg_map_field(&args[i], "string_values"));
                 m.insert("value".into(), arg_map_field(val_arg, "value_shape"));
                 m.insert(
                     "value_content_span".into(),
                     arg_map_field(val_arg, "content_span"),
                 );
                 m.insert("value_span".into(), arg_map_field(val_arg, "span"));
+                // A callback-valued pair is the common registration shape
+                // (`name => sub {…}`): the handler's signature and its return
+                // edge belong to the pair, not to a second lookup.
+                m.insert("value_sub_params".into(), arg_map_field(val_arg, "sub_params"));
+                m.insert(
+                    "value_return_edge".into(),
+                    arg_map_field(val_arg, "callable_return_edge"),
+                );
                 out.push(Dynamic::from_map(m));
             }
             i += 2;

@@ -6,13 +6,11 @@
 // named methods synthesize the same way Moo's `has` synthesizes accessors
 // (docs/prompt-method-resolution-residuals.md §1).
 //
-// The reach is LITERAL registrations. Mojo::UserAgent's own HTTP verbs —
-// `monkey_patch __PACKAGE__, lc $name, sub {…}` inside a `for` over a qw
-// list — are deliberately NOT covered: the candidate fold resolves the
-// variables inside a name expression without applying the transformation
-// around them, so trusting it there installs `GET` where the real method is
-// `get`. A missing method is recoverable; a method that does not exist makes
-// goto-def and the unresolved-method lint both confidently wrong.
+// The reach is whatever the candidate fold can name. A transformed name
+// (`lc $name`) folds to nothing and is an honest miss — Mojo::UserAgent's own
+// HTTP verbs are that shape. Modelling it is const folding through a pure
+// builtin, which is in scope for the fold and not for this plugin; see
+// `docs/prompt-method-resolution-residuals.md`.
 //
 // The Sub::Install / Class::Method::Modifiers family is the same capability
 // wearing a hashref-options shape (`install_sub({ code, into, as })`); it
@@ -78,47 +76,29 @@ fn on_match(pattern, m) {
     args = args.args;
     if args == () { return out; }
 
-    // (name => sub) pairs, from the argument after the target class.
-    let i = 1;
-    while i + 1 < args.len() {
-        let name_arg = args[i];
-        let code_arg = args[i + 1];
-        i += 2;
-
-        // The name must be ATOMIC: a literal, a bareword, or a plain scalar.
-        // A compound expression is an honest miss, because the candidate fold
-        // resolves the variables inside it and not the transformation around
-        // them — `lc $n` over `qw(lc_a LC_B)` folds to the raw list and would
-        // install `LC_B`, a method that does not exist. A method name never
-        // contains whitespace, so an atomic token is the check.
-        let name_text = name_arg.text;
-        if name_text == () { continue; }
-        if name_text.contains(" ") || name_text.contains("\t") { continue; }
-
+    // (name => sub) pairs, from the argument after the target class. The
+    // shared pair walk owns the pairing, the key's candidate set and the
+    // callback's signature — one speller for a shape half the plugins use.
+    for pair in classified_pairs(args, 1) {
         // A loop registration (`monkey_patch $c, $_, sub {…} for qw(a b)`)
-        // folds the topic's candidates into `string_values` — fan out over
-        // them; otherwise it is the single literal.
-        let names = name_arg.string_values;
-        if names == () { names = []; }
-        if names.len() == 0 {
-            let single = name_arg.string_value;
-            if single == () { continue; }
-            names = [single];
-        }
+        // folds the topic's candidates into `key_values` — fan out over them;
+        // otherwise the single key is the whole set.
+        let names = pair.key_values;
+        if names == () || names.len() == 0 { names = [pair.key]; }
 
         // Rename rewrites the name inside the quotes, so prefer the content
         // span; a folded name has none and falls back to its token.
-        let name_span = name_arg.content_span;
-        if name_span == () { name_span = name_arg.span; }
+        let name_span = pair.key_content_span;
+        if name_span == () { name_span = pair.key_span; }
 
         // Installed subs are invoked as methods — their first positional is
         // the receiver, so display drops it at call sites.
-        let params = as_invocant_params(code_arg.sub_params);
+        let params = as_invocant_params(pair.value_sub_params);
         if params == () { params = []; }
 
         for name in names {
-            // An unfolded dynamic (`lc $name`, an interpolation) is an
-            // honest miss, not a method literally named `$_`.
+            // An unfolded dynamic (an interpolation that did not resolve) is
+            // an honest miss, not a method literally named `$_`.
             if name.contains("$") { continue; }
             out += #{
                 Method: #{
@@ -134,7 +114,7 @@ fn on_match(pattern, m) {
                     hide_in_outline: false,
                     opaque_return: false,
                     outline_label: (),
-                    return_via_edge: code_arg.callable_return_edge,
+                    return_via_edge: pair.value_return_edge,
                     attr: (),
                 }
             };

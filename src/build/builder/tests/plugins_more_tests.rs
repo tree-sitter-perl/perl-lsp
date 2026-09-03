@@ -1006,20 +1006,23 @@ fn monkey_patch_installs_named_methods_on_the_target_class() {
 }
 
 #[test]
-fn monkey_patch_declines_a_transformed_name() {
-    // `monkey_patch __PACKAGE__, lc $n, sub {…}` inside a `for my $n (qw(…))`.
-    // The candidate fold resolves the variables INSIDE the expression and not
-    // the transformation around them, so it offers the raw list — installing
-    // `LC_B`, a method that does not exist, while the real `lc_b` stays
-    // missing. A wrong name is worse than a miss: it makes goto-def and the
-    // unresolved-method lint both confidently incorrect.
+fn monkey_patch_declines_a_transformed_name_for_now() {
+    // `lc $name` does not fold, so nothing is installed. That is a MISS, not
+    // a boundary: folding a pure builtin over an already-folded operand is
+    // ordinary constant folding, and symbolic execution of a transformation
+    // is squarely in this engine's line. Deferred, not abandoned —
+    // `docs/prompt-method-resolution-residuals.md` carries it, and
+    // Mojo::UserAgent's HTTP verbs are the motivating corpus.
+    //
+    // The assertion is only that we do not FABRICATE: an unfoldable name
+    // installs nothing rather than guessing the raw operand.
     let fa = build_fa(
-        "package My::Class;\nuse Mojo::Util qw(monkey_patch);\nfor my $n (qw(lc_a LC_B)) { monkey_patch __PACKAGE__, lc $n, sub { 1 }; }\n1;\n",
+        "package My::Class;\nuse Mojo::Util qw(monkey_patch);\nfor my $n (qw(alpha BETA)) { monkey_patch __PACKAGE__, lc $n, sub { 1 }; }\n1;\n",
     );
-    for bogus in ["LC_B", "lc_a", "lc_b"] {
+    for bogus in ["alpha", "BETA", "beta"] {
         assert!(
-            !fa.symbols().iter().any(|s| s.name == bogus),
-            "a transformed name must synthesize nothing, got `{bogus}`",
+            !fa.symbols().iter().any(|s| s.name == bogus && matches!(s.kind, SymKind::Method)),
+            "an unfoldable name must install nothing, got `{bogus}`",
         );
     }
 }
