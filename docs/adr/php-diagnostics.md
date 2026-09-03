@@ -43,6 +43,12 @@ Every lane names the case it cannot see and stays silent there:
 - **A trait's `$this`** is whatever class composes it — every member the
   trait does not declare may live there — so a trait body's undefined
   members stay silent.
+- **A `$this` call a descendant declares** is the template-method idiom
+  (WordPress's `ftp_base` calling `$this->_exec()` that only `ftp_pure` /
+  `ftp_sockets` implement): the runtime class may be that subclass, so
+  the call is silent when any dispatch participant below the class
+  resolves the member. A foreign receiver (`$ftp->_exec()`) still reports —
+  its declared type is the contract.
 - **A catch-all class** (php `__call`/`__callStatic`/`__get` anywhere in
   the ancestry) answers any member name — Perl's `AUTOLOAD` rule.
 - **An interface-typed receiver** names any implementation; php code

@@ -1441,6 +1441,33 @@ fn php_untyped_reassignment_resets_the_receiver() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// `$this->step()` in a base class that only a subclass implements is the
+/// template-method idiom: the runtime receiver is the subclass. A member
+/// no descendant declares still reports, and so does the same call on a
+/// foreign receiver typed as the base.
+#[cfg(feature = "php")]
+#[test]
+fn php_template_method_calls_on_this_stay_quiet() {
+    let dir = std::env::temp_dir().join(format!("perl-lsp-d2tmpl-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    let w = |rel: &str, src: &str| std::fs::write(dir.join(rel), src).unwrap();
+    w("composer.json", "{\"autoload\": {\"psr-4\": {\"App\\\\\": \"src/\"}}}");
+    w("src/Base.php", "<?php\nnamespace App;\nclass Base\n{\n    public function run(): int\n    {\n        return $this->step() + $this->nope();\n    }\n    public function drive(Base $b): int\n    {\n        return $b->step();\n    }\n}\n");
+    w("src/Impl.php", "<?php\nnamespace App;\nclass Impl extends Base\n{\n    public function step(): int\n    {\n        return 1;\n    }\n}\n");
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_perl-lsp"))
+        .args(["--check", dir.to_str().unwrap()])
+        .env("XDG_CACHE_HOME", dir.join(".cache"))
+        .output()
+        .expect("run");
+    let err = String::from_utf8_lossy(&out.stderr);
+    let rows: Vec<&str> = err.lines().filter(|l| l.contains(".php") && l.contains('[')).collect();
+    assert_eq!(rows.len(), 2, "{err}");
+    assert!(rows.iter().any(|l| l.contains("Base.php:7") && l.contains("'nope'")), "{rows:?}");
+    assert!(rows.iter().any(|l| l.contains("Base.php:11") && l.contains("'step'")), "{rows:?}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// Silence rules the corpora demanded: a trait's `$this` is the composing
 /// class (no undefined members), a first-class callable member
 /// (`$this->load(...)`) is a call, a subscript's index is a read, and a

@@ -188,6 +188,11 @@ impl WitnessReducer for FrameworkAwareTypeFold {
         let mut re = false;
         let mut plain_type: Option<InferredType> = None;
         let mut plain_type_priority: u8 = 0;
+        // An `Unknown` ANNOTATION (`@var A|B`, a declared union) is a
+        // known-untypable value at its source's priority: it beats a
+        // lower-priority guess on the same attachment (a flow default, a
+        // constructor write) the way a concrete annotation beats one.
+        let mut unknown_priority: u8 = 0;
 
         // A REASSIGNMENT (`REASSIGN_FLOW_SOURCE`, zero-width at its site —
         // materialized to what it produced, or to `InferredType::Unknown`
@@ -242,8 +247,15 @@ impl WitnessReducer for FrameworkAwareTypeFold {
                         first_param_class = Some(package.clone())
                     }
                     b @ InferredType::BrandedRoute { .. } => branded = Some(b.clone()),
-                    // The reset marker itself: handled by `reset_at`.
-                    InferredType::Unknown => {}
+                    // The reassignment reset is handled by `reset_at` (it
+                    // yields to the observations that follow it); an
+                    // annotated `Unknown` competes on priority.
+                    InferredType::Unknown => {
+                        let reset = matches!(&w.source, WitnessSource::Builder(t) if t == REASSIGN_FLOW_SOURCE);
+                        if !reset {
+                            unknown_priority = unknown_priority.max(prio);
+                        }
+                    }
                     // Source priority breaks ties first (an EXPLICIT
                     // annotation — `ANNOT_SOURCE`, priority 20 — governs over
                     // an inferred flow type, priority 10, whatever the order
@@ -293,6 +305,9 @@ impl WitnessReducer for FrameworkAwareTypeFold {
         // brand IS the class identity plus inherited defaults.
         if let Some(b) = branded {
             return ReducedValue::Type(b);
+        }
+        if unknown_priority > class_assertion_priority.max(plain_type_priority) {
+            return ReducedValue::Type(InferredType::Unknown);
         }
 
         // Class axis wins when consistent with the rep axis. On

@@ -334,16 +334,11 @@ pub fn collect_diagnostics(
     ];
     let _g_meth = crate::util::ghost_stats::ScopedNs::start("diag.3_unresolved_method_loop");
     for r in analysis.refs() {
-        let invocant = match &r.kind {
-            // A plugin-bridged token is plugin-resolved, not a receiver we
-            // can flag as an unresolved method — skip it.
-            RefKind::MethodCall { invocant, .. } => match invocant.as_name() {
-                Some(n) => n,
-                None => continue,
-            },
-            _ => continue,
-        };
-        let _ = invocant;
+        // A plugin-bridged token is plugin-resolved, not a receiver we can
+        // flag as an unresolved method — skip it.
+        if !matches!(&r.kind, RefKind::MethodCall { invocant, .. } if invocant.as_name().is_some()) {
+            continue;
+        }
         let method_name = &r.target_name;
 
         // Skip universal methods
@@ -831,8 +826,12 @@ pub fn pack_symbol_diagnostics(
     };
 
     // ---- undefined member / arity, per member call ----
+    // Template method: `$this->step()` in a base whose SUBCLASS declares
+    // `step` dispatches on the runtime class, which is that subclass. One
+    // graph walk per (class, member, shape).
+    let mut below_memo: HashMap<(String, String, bool), bool> = HashMap::new();
     for r in analysis.refs() {
-        let RefKind::MethodCall { shape, .. } = &r.kind else { continue };
+        let RefKind::MethodCall { shape, invocant, .. } = &r.kind else { continue };
         let name = r.unqualified_target_name();
         if name.is_empty() || name.starts_with('$') {
             continue; // `$obj->$dyn()` — dynamic member name
@@ -915,6 +914,23 @@ pub fn pack_symbol_diagnostics(
                 // declaration
                 if matches!(want, MemberShape::Value) && written.contains(&(class.clone(), name.to_string())) {
                     continue;
+                }
+                // the receiver is the pack's own (`$this`): the runtime class
+                // may be any descendant, and one of them declares the member
+                let own_receiver = pack.receiver_names.iter().any(|n| n == invocant.text());
+                if own_receiver {
+                    let declared_below = *below_memo
+                        .entry((class.clone(), name.to_string(), matches!(want, MemberShape::Value)))
+                        .or_insert_with(|| {
+                            owner
+                                .dispatch_participants(&class, idx)
+                                .iter()
+                                .filter(|p| **p != class)
+                                .any(|p| owner.resolve_member_in_ancestors(p, name, want, idx).is_some())
+                        });
+                    if declared_below {
+                        continue;
+                    }
                 }
                 // a same-named member of the OTHER shape is a different
                 // finding (a method read as a property) — still undefined

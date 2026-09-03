@@ -326,7 +326,9 @@ templates). Market case and build-out plan in `docs/prompt-php-target.md`.
   typed value (`$r = json_decode(...)` after `$r = new WP_Error(...)`)
   ends the earlier class rather than the class outranking it. A method
   call written with a space before its parentheses (`$this->m (1)`) is a
-  call, not a property read.
+  call, not a property read, and `$this->step()` in a base class whose
+  subclass declares `step` is the template-method idiom, not an
+  unresolved method.
 - **A php value read never means a method.** `$this->session` on a
   class declaring only `session()` is an undeclared property for the
   lane, goto-def and hover alike (Perl's accessor calls keep their

@@ -217,9 +217,11 @@ pub enum InferredType {
     /// "no evidence": it flows through every chase like a type (a return
     /// arm that reads a reset variable makes the fold a disagreement, a
     /// `$y = $x` copy carries it on) and is projected to `None` at the
-    /// registry's public boundary, so no consumer ever renders it. Never
-    /// pushed by a walker; `materialize` mints it. Kept at the END for
-    /// bincode variant-index stability.
+    /// registry's public boundary, so no consumer ever renders it. Two
+    /// sources: `materialize` mints it for a reassignment edge that cannot
+    /// resolve, and a documented or declared UNION (`A|B`) annotates it
+    /// directly (`php_annot_type`). Never a walk-time inference. Kept at the
+    /// END for bincode variant-index stability.
     Unknown,
 }
 

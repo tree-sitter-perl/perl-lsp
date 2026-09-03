@@ -114,7 +114,7 @@
 
 (assignment_expression
   left: (variable_declaration [(scalar) (array) (hash)] @flow.target)
-  right: (_) @flow.source) @flow.assign
+  right: (_) @flow.source)
 
 (assignment_expression
   left: (scalar) @flow.target
