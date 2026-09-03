@@ -1047,3 +1047,23 @@ unused-variable lane exactly where it was: without it, composer's
 row. With `isset` / `empty` / `unset` reads treated as the existence
 question (the member lanes' probe silence, now on the variable lane too):
 WordPress 4 → 2, both `$wp_version`-family globals.
+
+### Final lane table, every corpus, build 8fe1bc1 (2026-09-03, 12:40)
+
+Hint severity, fresh cache per corpus, one run each — the day's closing
+numbers:
+
+| corpus | unresolved-method | undefined-property | undefined-type | undefined-variable | unused-import | unused-variable | deprecated | arity | unimplemented-method | missing-return-type |
+|---|---|---|---|---|---|---|---|---|---|---|
+| WordPress | 11 | 26 | 94 | 2 | 0 | 420 | 283 | 7 | 0 | 156 |
+| laravel/framework | 152 | 11 | 7,039 | 0 | 5 | 257 | 34 | 10 | 0 | 723 |
+| guzzle | 1 | 0 | 1,340 | 0 | 0 | 89 | 0 | 2 | 0 | 0 |
+| monolog | 10 | 9 | 258 | 0 | 2 | 24 | 4 | 0 | 0 | 36 |
+| symfony demo | 0 | 0 | 519 | 0 | 0 | 0 | 0 | 0 | 0 | 0 |
+| phpmyadmin | 392 | 7 | 4,206 | 0 | 0 | 1 | 667 | 8 | 0 | 0 |
+| composer | 44 | 2 | 2,548 | 0 | 19 | 132 | 15 | 3 | 0 | 13 |
+
+Against the 11:30 table only the `undefined-variable` column moved
+(WordPress 24 → 2, laravel 14 → 0, phpmyadmin 2 → 0, composer 35 → 0):
+the by-reference binding, the reference-assignment and variadic
+declarations, and the probe silence. Every other cell is byte-identical.
