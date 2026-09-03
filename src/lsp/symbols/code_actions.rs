@@ -329,41 +329,21 @@ fn make_remove_import_action(uri: &Url, diag: &Diagnostic) -> Option<CodeActionO
 /// after the last import row above the site, else after the namespace
 /// declaration above it (a blank line between), else after the first line.
 fn make_import_type_actions(analysis: &FileAnalysis, uri: &Url, diag: &Diagnostic) -> Vec<CodeActionOrCommand> {
-    let template = analysis.pack.import_template.as_str();
     let Some(candidates) = diag.data.as_ref().and_then(|d| d.get("candidates")).and_then(|v| v.as_array()) else {
         return Vec::new();
     };
-    if template.is_empty() {
-        return Vec::new();
-    }
     let point = position_to_point(diag.range.start);
-    let (line, lead) = match analysis.pack.import_insertion_line(point.row) {
-        Some(l) => (l, ""),
-        None => {
-            let after_package = analysis
-                .symbols()
-                .iter()
-                .filter(|s| matches!(s.kind, FaSymKind::Package) && s.selection_span.start.row < point.row)
-                .map(|s| s.selection_span.end.row + 1)
-                .max();
-            match after_package {
-                Some(l) => (l, "\n"),
-                // after the open tag and any `declare(...)` row
-                None => (analysis.pack.preamble_end.map_or(1, |r| r + 1), "\n"),
-            }
-        }
-    };
-    let pos = Position { line: line as u32, character: 0 };
     candidates
         .iter()
         .filter_map(|c| c.as_str())
+        .filter_map(|fq| analysis.import_edit_for(fq, point.row).map(|e| (fq, e)))
         .enumerate()
-        .map(|(i, fq)| {
-            let stmt = template.replace("{}", fq);
+        .map(|(i, (_fq, (at, text)))| {
+            let pos = point_to_position(at);
             let mut changes = HashMap::new();
-            changes.insert(uri.clone(), vec![TextEdit { range: Range { start: pos, end: pos }, new_text: format!("{lead}{stmt}") }]);
+            changes.insert(uri.clone(), vec![TextEdit { range: Range { start: pos, end: pos }, new_text: text.clone() }]);
             CodeActionOrCommand::CodeAction(CodeAction {
-                title: format!("Add '{}'", stmt.trim_end()),
+                title: format!("Add '{}'", text.trim()),
                 kind: Some(CodeActionKind::QUICKFIX),
                 diagnostics: Some(vec![diag.clone()]),
                 edit: Some(WorkspaceEdit { changes: Some(changes), ..Default::default() }),

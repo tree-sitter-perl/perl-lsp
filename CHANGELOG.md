@@ -361,6 +361,11 @@ templates). Market case and build-out plan in `docs/prompt-php-target.md`.
   visible class) gets a hint and an "Add return type" quick-fix; a `null`
   arm, an ambiguous numeric, a fluent `return $this` and closures stay
   silent.
+- php completion offers every class the workspace or its dependencies
+  declare under the typed prefix; accepting one the file cannot spell yet
+  inserts its `use` row after the last import (an already-imported or
+  same-namespace class completes without an edit; a leaf that names
+  another class here is not offered).
 - Hovering a php method or function that declares no return type shows
   what it returns (`*returns: array*`), the same total inferred return the
   quick-fix would write.

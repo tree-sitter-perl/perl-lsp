@@ -19,6 +19,20 @@ code, no tree.
 
 It is the fallback whenever the cursor is not a member access.
 
+### The name-keyed pack's identifier universe
+
+A pack whose imports name classes rather than paths (`imports_bind_names`)
+has no include closure to gate on; its identifier universe is every class
+the index declares under the typed prefix (`defs_with_prefix`, all
+providers per leaf — each namespace declaring the leaf is a distinct
+offer). What the file can already spell decides the edit: a leaf pinned to
+that namespace (an import, the file's own declaration) or bare in the
+file's own namespace completes as is; a leaf pinned to ANOTHER namespace
+is not offered — it names a different class here; everything else carries
+the import row as an additional edit (`FileAnalysis::import_edit_for`, the
+one rule the undefined-type quick-fix inserts with too). The candidate
+carries the FQ name as its detail so two same-leaf offers read apart.
+
 ## Half 2: member access — the crux is the erased operator
 
 At the instant a user triggers completion the buffer reads `box.` /

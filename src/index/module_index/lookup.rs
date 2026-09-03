@@ -863,6 +863,9 @@ impl CrossFileLookup for ModuleIndex {
     ) -> Vec<(String, Arc<CachedModule>)> {
         self.visible_defs_with_prefix(prefix, visible)
     }
+    fn defs_with_prefix(&self, prefix: &str) -> Vec<(String, Vec<Arc<CachedModule>>)> {
+        self.defs_with_prefix(prefix)
+    }
 }
 
 /// The member pre-filter's verdict, separated from the store and the copy so

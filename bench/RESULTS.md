@@ -949,3 +949,17 @@ same 1–22 ms; the other tools' rows are the day-2 runs. Startup and
 resident memory this replay: guzzle 1.5 s · 376 MB, monolog 1.3 s · 84 MB,
 demo 1.1 s · 68 MB (Intelephense 1.5 s · 232 MB, 1.1 s · 195 MB,
 1.1 s · 187 MB; phpactor 0.7 s · 126 MB, 0.5 s · 119 MB, 1.6 s · 117 MB).
+
+### Auto-import completion, three tools (2026-09-03, 10:00)
+
+`$g = new Gre` in `App\Web\Home` with `App\Util\Greeter` declared in
+another file and not imported:
+
+| | ours | Intelephense | phpactor |
+|---|---|---|---|
+| items | 5, `Greeter` among them · 3 ms | 5, `Greeter` (+ `IntlGregorianCalendar`) | 1: `Greeter (App)` · 62 ms |
+| on accept | inserts `use App\Util\Greeter;` after the last import | inserts the `use` row | inserts the `use` row |
+
+Before the slice we offered four items and no `Greeter` at all: the
+identifier universe of a pack was gated on an include closure, which a
+name-keyed language never has.

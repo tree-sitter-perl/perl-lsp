@@ -214,6 +214,22 @@ impl ModuleIndex {
     /// symbols from headers it doesn't include. Deterministic: sorted by
     /// name; among reachable candidates the tie breaks exactly like
     /// `get_cached_scoped` (class-over-value, then smallest path).
+    /// Every definition candidate whose registered name starts with
+    /// `prefix`, each name with ALL its providers — the universe a
+    /// name-keyed pack completes from (its imports name classes, not paths,
+    /// so every namespace declaring the leaf is a distinct offer).
+    pub fn defs_with_prefix(&self, prefix: &str) -> Vec<(String, Vec<Arc<CachedModule>>)> {
+        let mut out: Vec<(String, Vec<Arc<CachedModule>>)> = self
+            .core
+            .all_defs
+            .iter()
+            .filter(|e| e.key().starts_with(prefix))
+            .map(|e| (e.key().clone(), e.value().clone()))
+            .collect();
+        out.sort_by(|a, b| a.0.cmp(&b.0));
+        out
+    }
+
     pub fn visible_defs_with_prefix(
         &self,
         prefix: &str,

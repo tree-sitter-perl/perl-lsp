@@ -197,7 +197,7 @@ fn closure_symbol_completion(
     module_index: &ModuleIndex,
     items: &mut Vec<CompletionItem>,
 ) -> bool {
-    if analysis.pack.include_closure.is_empty() {
+    if analysis.pack.include_closure.is_empty() && !analysis.pack.imports_bind_names {
         return false;
     }
     let cursor = crate::build::cursor_sentinel::point_to_byte(source, point);
@@ -224,6 +224,12 @@ fn closure_symbol_completion(
         crate::util::timings::phase("completion.closure_symbols", || cs.complete(prefix, false));
     for c in candidates {
         if seen.contains(&c.label) {
+            continue;
+        }
+        // an auto-import candidate carries its edit; the closure universe
+        // keeps its trailing sort
+        if !c.additional_edits.is_empty() {
+            items.push(symbols::candidate_to_completion_item(c));
             continue;
         }
         items.push(CompletionItem {
