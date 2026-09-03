@@ -1517,6 +1517,39 @@ fn php_existence_probes_stay_quiet() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Three shapes BookStack's vendor tree surfaced: an untyped or by-ref
+/// constructor-promoted property still declares the property (and the
+/// ctor local), a spread argument makes a call's count unknowable, and a
+/// `[$obj, 'name']` tuple names a method only when it resolves.
+#[cfg(feature = "php")]
+#[test]
+fn php_promotion_spread_and_string_named_tuples() {
+    let dir = std::env::temp_dir().join(format!("perl-lsp-d2prom-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    let w = |rel: &str, src: &str| std::fs::write(dir.join(rel), src).unwrap();
+    w("composer.json", "{\"autoload\": {\"psr-4\": {\"App\\\\\": \"src/\"}}}");
+    w("src/A.php", "<?php\nnamespace App;\nclass Hist\n{\n    public function __construct(protected $stream, protected &$container, public int $size) {}\n    public function count(): int\n    {\n        return count($this->container) + $this->size + $this->stream + $this->nope;\n    }\n}\nclass Fwd\n{\n    public function all(): array { return []; }\n    public function fwd(): array\n    {\n        return $this->all(...func_get_args());\n    }\n    public function tuples(Hist $h): array\n    {\n        return [[$h, 'not-a-method'], [$h, 'count']];\n    }\n}\n");
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_perl-lsp"))
+        .args(["--check", dir.to_str().unwrap()])
+        .env("XDG_CACHE_HOME", dir.join(".cache"))
+        .output()
+        .expect("run");
+    let err = String::from_utf8_lossy(&out.stderr);
+    let rows: Vec<&str> = err.lines().filter(|l| l.contains("A.php") && l.contains('[')).collect();
+    assert_eq!(rows.len(), 1, "{err}");
+    assert!(rows[0].contains("'nope'"), "{rows:?}");
+    // the resolving tuple still navigates: `count` on Hist is a reference
+    let def = std::process::Command::new(env!("CARGO_BIN_EXE_perl-lsp"))
+        .args(["--definition", dir.to_str().unwrap(), "src/A.php", "19", "44"])
+        .env("XDG_CACHE_HOME", dir.join(".cache"))
+        .output()
+        .expect("run");
+    let def = String::from_utf8_lossy(&def.stdout);
+    assert!(def.contains("A.php:5:"), "{def}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// Silence rules the corpora demanded: a trait's `$this` is the composing
 /// class (no undefined members), a first-class callable member
 /// (`$this->load(...)`) is a call, a subscript's index is a read, and a

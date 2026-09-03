@@ -198,6 +198,10 @@ pub struct LangPack {
     /// list (php `f(...)` → `variadic_placeholder`): such a call passes no
     /// arguments, so it mints no count. Empty = none.
     pub callable_placeholder_kind: &'static str,
+    /// The node kind of an argument SPREAD (php `f(...$args)` →
+    /// `variadic_unpacking`): the call's count is unknowable, so it mints
+    /// none and the arity lane stands down. Empty = none.
+    pub spread_arg_kind: &'static str,
     /// A member name that is the CLASS-NAME LITERAL, never a member
     /// (php `Foo::class`). Empty = none.
     pub class_literal_member: &'static str,
@@ -547,6 +551,7 @@ pub fn perl_pack() -> LangPack {
         throwaway_names: &[],
         catch_all_methods: &[],
         callable_placeholder_kind: "",
+        spread_arg_kind: "",
         class_literal_member: "",
         import_template: "",
         imports_bind_names: false,
@@ -623,6 +628,7 @@ pub fn python_pack() -> LangPack {
         throwaway_names: &[],
         catch_all_methods: &[],
         callable_placeholder_kind: "",
+        spread_arg_kind: "",
         class_literal_member: "",
         import_template: "",
         imports_bind_names: false,
@@ -699,6 +705,7 @@ pub fn r_pack() -> LangPack {
         throwaway_names: &[],
         catch_all_methods: &[],
         callable_placeholder_kind: "",
+        spread_arg_kind: "",
         class_literal_member: "",
         import_template: "",
         imports_bind_names: false,
@@ -783,6 +790,7 @@ pub fn cmake_pack() -> LangPack {
         throwaway_names: &[],
         catch_all_methods: &[],
         callable_placeholder_kind: "",
+        spread_arg_kind: "",
         class_literal_member: "",
         import_template: "",
         imports_bind_names: false,
@@ -1094,6 +1102,7 @@ pub fn php_pack() -> LangPack {
         ],
         catch_all_methods: &["__call", "__callStatic", "__get"],
         callable_placeholder_kind: "variadic_placeholder",
+        spread_arg_kind: "variadic_unpacking",
         class_literal_member: "class",
         import_template: "use {};\n",
         imports_bind_names: true,
@@ -1250,6 +1259,7 @@ pub fn cpp_pack() -> LangPack {
         throwaway_names: &[],
         catch_all_methods: &[],
         callable_placeholder_kind: "",
+        spread_arg_kind: "",
         class_literal_member: "",
         import_template: "",
         imports_bind_names: false,

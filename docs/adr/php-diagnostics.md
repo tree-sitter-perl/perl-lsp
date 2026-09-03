@@ -78,6 +78,12 @@ Every lane names the case it cannot see and stays silent there:
   — the private-access idiom tests live on): the non-public lane is
   silent inside anonymous functions.
 - **A class with no declared constructor** has the default one.
+- **A method named by a string** (`[$obj, 'name']`, the class-array
+  callable) is data until dispatch proves it a callable: a reference and
+  rename target when it resolves, never a finding when it does not
+  (`RefKind::MethodCall::named_by_string`).
+- **A spread argument** (`f(...$args)`, the pack's `spread_arg_kind`)
+  makes the call's count unknowable; the arity lane stands down.
 - **A read inside an existence probe** (`isset($tax->helps)`,
   `empty($this->x)`) is the question of whether the member exists, not a
   claim that it does — the undefined-property lane stays silent there

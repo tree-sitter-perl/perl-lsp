@@ -217,11 +217,20 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
             // named children; the C `...` at a CALL site never appears here).
             // Keyed by the list's start so the callee ref finds it by adjacency.
             if cap == "arity.args" {
-                // `f(...)` passes nothing — a first-class callable, not a call
-                let placeholder = !pack.callable_placeholder_kind.is_empty()
-                    && (0..node.named_child_count())
-                        .filter_map(|i| node.named_child(i))
-                        .any(|c| c.kind() == pack.callable_placeholder_kind);
+                // `f(...)` passes nothing — a first-class callable, not a call;
+                // `f(...$args)` passes an unknowable number. Neither mints a
+                // count: the callee still reads as callable, the arity lane
+                // stands down.
+                let placeholder = (0..node.named_child_count())
+                    .filter_map(|i| node.named_child(i))
+                    .any(|c| {
+                        (!pack.callable_placeholder_kind.is_empty()
+                            && c.kind() == pack.callable_placeholder_kind)
+                            // the spread sits inside an `argument` wrapper
+                            || (!pack.spread_arg_kind.is_empty()
+                                && (c.kind() == pack.spread_arg_kind
+                                    || c.named_child(0).is_some_and(|g| g.kind() == pack.spread_arg_kind)))
+                    });
                 if !placeholder {
                     arg_counts_by_start
                         .insert((node.start_position().row, node.start_position().column),
@@ -1039,6 +1048,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                             member_op: None,
                             arg_count: None,
                             shape: crate::model::file_analysis::MemberShape::Callable,
+                            named_by_string: false,
                         });
                     }
                 }
@@ -1263,6 +1273,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                         member_op: None,
                         arg_count: None,
                         shape: crate::model::file_analysis::MemberShape::Callable,
+                        named_by_string: false,
                     });
                     continue;
                 }
@@ -1277,6 +1288,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                     member_op: None,
                     arg_count: None,
                     shape: crate::model::file_analysis::MemberShape::Unknown,
+                    named_by_string: false,
                 });
             }
             "ref.dispatch.named" => {
@@ -1291,6 +1303,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                     member_op: None,
                     arg_count: None,
                     shape: crate::model::file_analysis::MemberShape::Unknown,
+                    named_by_string: false,
                 });
             }
             // consumed by the prepass join above; nothing to mint here
@@ -1314,6 +1327,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                     member_op: None,
                     arg_count: None,
                     shape: crate::model::file_analysis::MemberShape::Callable,
+                    named_by_string: true,
                 });
             }
             "ref.method.named" => {
@@ -1329,6 +1343,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                         member_op: None,
                         arg_count: None,
                         shape: crate::model::file_analysis::MemberShape::Callable,
+                        named_by_string: true,
                     });
                 }
             }
@@ -1375,6 +1390,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                             member_op: None,
                             arg_count: arg_counts_by_start.get(&(e.end.row, e.end.column)).copied(),
                             shape: crate::model::file_analysis::MemberShape::Callable,
+                            named_by_string: false,
                         });
                         continue;
                     }
@@ -1463,6 +1479,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                         } else {
                             crate::model::file_analysis::MemberShape::Unknown
                         },
+                        named_by_string: false,
                     });
                     if let Some(q) = qualified_by_match.get(&e.match_id) {
                         let leaf = (pack.shape_name)(&e.cap, &e.text);
@@ -1985,6 +2002,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
             member_op: None,
             arg_count: Some(args.len()),
             shape: crate::model::file_analysis::MemberShape::Unknown,
+            named_by_string: false,
         });
         for effect in (pack.cmd_effects)(cmd) {
             match effect {
@@ -2027,6 +2045,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                                 member_op: None,
                                 arg_count: None,
                                 shape: crate::model::file_analysis::MemberShape::Unknown,
+                                named_by_string: false,
                             });
                         }
                     }
@@ -2635,6 +2654,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                                     member_op: None,
                                     arg_count: None,
                                     shape: crate::model::file_analysis::MemberShape::Callable,
+                                    named_by_string: false,
                                 });
                             }
                         }

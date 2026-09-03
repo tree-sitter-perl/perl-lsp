@@ -831,7 +831,7 @@ pub fn pack_symbol_diagnostics(
     // graph walk per (class, member, shape).
     let mut below_memo: HashMap<(String, String, bool), bool> = HashMap::new();
     for r in analysis.refs() {
-        let RefKind::MethodCall { shape, invocant, .. } = &r.kind else { continue };
+        let RefKind::MethodCall { shape, invocant, named_by_string, .. } = &r.kind else { continue };
         let name = r.unqualified_target_name();
         if name.is_empty() || name.starts_with('$') {
             continue; // `$obj->$dyn()` — dynamic member name
@@ -908,6 +908,10 @@ pub fn pack_symbol_diagnostics(
             None if facts.is_interface || facts.is_trait => {}
             // a class with no declared constructor has the default one
             None if pack.constructor_names.iter().any(|c| c == name) => {}
+            None if *named_by_string => {
+                // `[$obj, 'name']` is data until dispatch proves it a
+                // callable: a claim only when it resolves
+            }
             None => {
                 // php declares a property by writing it: a write of this
                 // member on the same class anywhere in the file is its

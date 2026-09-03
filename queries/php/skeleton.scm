@@ -191,11 +191,16 @@
   (property_element name: (variable_name (name) @def.field.name @def.field)))
 ; PHP 8 constructor promotion: `__construct(private string $name)` declares
 ; BOTH the property (sigil-less member) and the ctor-body local (`$name`).
+; The type is optional (`protected $stream`) and the name may be
+; by-reference (`protected &$container`); both spellings declare the
+; property and the ctor-body local.
 (property_promotion_parameter
-  type: (_) @type.annot
-  name: (variable_name (name) @def.field.name @def.field @flow.target))
+  type: (_)? @type.annot
+  name: [(variable_name (name) @def.field.name @def.field @flow.target)
+         (by_ref (variable_name (name) @def.field.name @def.field @flow.target))])
 (property_promotion_parameter
-  name: (variable_name) @def.var.name @def.var)
+  name: [(variable_name) @def.var.name @def.var
+         (by_ref (variable_name) @def.var.name @def.var)])
 
 ; class constants: `const VERSION = '1.0';` — compile-time constants,
 ; outlined as enum members (not callables: Perl's `use constant` shape

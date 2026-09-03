@@ -83,6 +83,9 @@ pub struct SkelRef {
     /// The written member shape (`Ref`'s `MemberShape`): callable vs value
     /// read, as the extractor saw it.
     pub shape: crate::model::file_analysis::MemberShape,
+    /// Named by a string literal (`[$obj, 'method']`) — see
+    /// `RefKind::MethodCall::named_by_string`.
+    pub named_by_string: bool,
 }
 
 #[derive(Debug, Default)]
@@ -1141,6 +1144,7 @@ impl SkeletonAnalysis {
                             method_name_span: Span { start: r.start, end: r.end },
                             member_op: r.member_op,
                             shape: r.shape,
+                            named_by_string: r.named_by_string,
                         }
                     }
                     // A hook-firing string (`do_action('init')` arg 1): the
@@ -1298,6 +1302,7 @@ impl SkeletonAnalysis {
                             method_name_span: *span,
                             member_op: None,
                             shape: crate::model::file_analysis::MemberShape::Value,
+                            named_by_string: false,
                         },
                         span: *span,
                         scope: crate::model::file_analysis::ScopeId(0),

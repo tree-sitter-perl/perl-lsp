@@ -1046,6 +1046,7 @@ impl<'a> Builder<'a> {
                                         method_name_span: crate::cst::fq_tail_span(method, name),
                                         member_op: None,
                                         shape: crate::model::file_analysis::MemberShape::Unknown,
+                                        named_by_string: false,
                                     },
                                     span: node_to_span(n),
                                     scope,

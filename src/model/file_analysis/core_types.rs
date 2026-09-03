@@ -1272,6 +1272,13 @@ pub enum RefKind {
         /// kinds (php `$this->recorded` beside `recorded()`) mints it;
         /// Perl, where `$o->m` IS a call, leaves it `Unknown`.
         shape: MemberShape,
+        /// The member was NAMED BY A STRING (`[$obj, 'method']`, a class-array
+        /// callable): a rename/reference target when it resolves, never an
+        /// unresolved-member finding when it does not — a two-element array
+        /// holding an object and a string is data until dispatch proves it a
+        /// callable (PHPUnit providers, key/value pairs).
+        #[serde(default)]
+        named_by_string: bool,
     },
     PackageRef,
     /// Key access `$h{k}` / `$obj->{k}`. Which hash owns the key (and the
