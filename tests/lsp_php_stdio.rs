@@ -202,6 +202,12 @@ fn php_editor_axes_over_stdio() {
     let inc = c.request("callHierarchy/incomingCalls", serde_json::json!({"item": item}));
     let from: Vec<String> = inc.as_array().map(|a| a.iter().filter_map(|e| e["from"]["name"].as_str().map(str::to_string)).collect()).unwrap_or_default();
     assert_eq!(from, vec!["fill".to_string()], "incoming calls of push: {inc}");
+    // parameter-name hints: `push('a')` / `push('b')` show `x:`; the
+    // property read on the next line is not a call, and the untyped local
+    // it fills gets the type lane's `: array`
+    let hints = c.request("textDocument/inlayHint", serde_json::json!({"textDocument": {"uri": u}, "range": {"start": {"line": 15, "character": 0}, "end": {"line": 21, "character": 0}}}));
+    let got: Vec<(u64, u64, String)> = hints.as_array().map(|a| a.iter().map(|h| (h["position"]["line"].as_u64().unwrap(), h["position"]["character"].as_u64().unwrap(), h["label"].as_str().unwrap_or("").to_string())).collect()).unwrap_or_default();
+    assert_eq!(got, vec![(19, col(19, " = $this") as u64, ": array".to_string()), (17, col(17, "'a'") as u64, "x:".to_string()), (18, col(18, "'b'") as u64, "x:".to_string())], "inlay hints: {hints}");
     c.request("shutdown", serde_json::Value::Null);
     c.notify("exit", serde_json::Value::Null);
     let _ = c.child.wait();

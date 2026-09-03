@@ -760,7 +760,35 @@ pub fn pack_signature_help(
     let point = position_to_point(pos);
     let cursor = crate::build::cursor_sentinel::point_to_byte(text, point);
     let site = crate::build::cursor_sentinel::call_at(tree, &pack, text, cursor)?;
-    let r = analysis.ref_at(site.callee.start)?;
+    let (label, params, _ret, doc) = pack_callee_signature(analysis, text, site.callee.start, module_index)?;
+    let parameters: Vec<ParameterInformation> = params
+        .iter()
+        .map(|p| ParameterInformation { label: ParameterLabel::Simple(p.clone()), documentation: None })
+        .collect();
+    let active = (site.active_param as u32).min(parameters.len().saturating_sub(1) as u32);
+    Some(SignatureHelp {
+        signatures: vec![SignatureInformation {
+            label,
+            documentation: doc.map(|d| Documentation::MarkupContent(MarkupContent { kind: MarkupKind::Markdown, value: d })),
+            parameters: Some(parameters),
+            active_parameter: Some(active),
+        }],
+        active_signature: Some(0),
+        active_parameter: Some(active),
+    })
+}
+
+/// The callee at a pack call site — the ref at its token, resolved
+/// through the member ladder goto-def uses — rendered from the DEFINING
+/// file's own text as `(label, params, return, doc)`. One rule for local
+/// and cross-file callees; signature help and the parameter hints share it.
+pub fn pack_callee_signature(
+    analysis: &FileAnalysis,
+    text: &str,
+    callee: Point,
+    module_index: &dyn CrossFileLookup,
+) -> Option<(String, Vec<String>, Option<String>, Option<String>)> {
+    let r = analysis.ref_at(callee)?;
     let name = r.unqualified_target_name().to_string();
     // (defining analysis, its source text, the callable symbol)
     let mut found: Option<(String, Vec<String>, Option<String>, Option<String>)> = None;
@@ -815,22 +843,7 @@ pub fn pack_signature_help(
         }
         _ => {}
     }
-    let (label, params, _ret, doc) = found?;
-    let parameters: Vec<ParameterInformation> = params
-        .iter()
-        .map(|p| ParameterInformation { label: ParameterLabel::Simple(p.clone()), documentation: None })
-        .collect();
-    let active = (site.active_param as u32).min(parameters.len().saturating_sub(1) as u32);
-    Some(SignatureHelp {
-        signatures: vec![SignatureInformation {
-            label,
-            documentation: doc.map(|d| Documentation::MarkupContent(MarkupContent { kind: MarkupKind::Markdown, value: d })),
-            parameters: Some(parameters),
-            active_parameter: Some(active),
-        }],
-        active_signature: Some(0),
-        active_parameter: Some(active),
-    })
+    found
 }
 
 /// `(label, params, return annotation, doc)` from the declaration's own

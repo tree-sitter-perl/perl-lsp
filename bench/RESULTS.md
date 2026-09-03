@@ -810,7 +810,7 @@ same harness and readiness gate as the completion battery).
 | foldingRange `Logger.php` / `StreamHandler.php` | 162 / 73 (blocks + docblocks) | 0 | 0 |
 | selectionRange `$this->handlers` | 11 levels | none | 1 level |
 | semanticTokens/full `Logger.php` | 446 tokens · 0.5 ms | none | none |
-| inlayHint (lines 575–640) | none | licence required | unsupported |
+| inlayHint (lines 575–640) | 9 parameter hints (`level:`, `message:`) · 0.7 ms | licence required | unsupported |
 | prepareRename `handlers` | placeholder `handlers` | null (free tier) | range |
 
 Folding, selection range and the outgoing-calls list were the three gaps
@@ -822,7 +822,11 @@ follows the skeleton's scopes plus the pack's fold-only captures (php
 blocks that are not scopes, docblocks as comment folds), selection range
 walks the tree's ancestors for every pack, and a value-shaped member read
 is excluded by its own `MemberShape`. The `$handler` highlight is scope-exact (the
-parameter's two sites); phpactor's 14 is name-blind. Inlay hints stay
-the one axis nobody answers here: ours emits type hints only for
-inferred (unannotated) locals and none of the range's locals are
-unannotated; parameter-name hints at call sites are the open item.
+parameter's two sites); phpactor's 14 is name-blind. Inlay hints were
+the one axis nobody answered: ours emitted type hints only for
+inferred locals and none of the range's locals are untyped. Parameter
+names now ride the signature-help ladder — every positional argument of
+a call whose callee resolves gets `name:` (`addRecord(Level::Debug,
+(string) $message, $context)` shows `level:` and `message:`; `$context`
+is the parameter's own name and shows nothing) — 9 hints over the 65
+lines, 0.7 ms.

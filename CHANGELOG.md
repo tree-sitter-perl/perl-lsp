@@ -346,6 +346,11 @@ templates). Market case and build-out plan in `docs/prompt-php-target.md`.
   multi-line class/function/block scope) and `selectionRange` (the tree's
   ancestors); a method's outgoing calls list its callees only — a member
   read (`$this->items`, `self::LIMIT`) is a value, not a call.
+- Parameter-name inlay hints on pack documents: every positional argument
+  of a call whose callee resolves shows `name:` (php `f(name: 1)` named
+  arguments and spreads end the positional run; a variadic parameter
+  covers the rest; an argument that is the same-named variable shows
+  nothing), alongside the type hints untyped locals already get.
 - **A php value read never means a method.** `$this->session` on a
   class declaring only `session()` is an undeclared property for the
   lane, goto-def and hover alike (Perl's accessor calls keep their
