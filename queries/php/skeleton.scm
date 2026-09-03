@@ -222,6 +222,10 @@
   name: (variable_name) @def.var.name @def.var @flow.target)
 (simple_parameter
   name: (variable_name) @def.var.name @def.var)
+; `...$args` declares the variadic parameter (its type is the element's,
+; never the parameter's).
+(variadic_parameter
+  name: (variable_name) @def.var.name @def.var)
 ; closure captures: `function () use ($y)` re-declares $y in the closure;
 ; `use (&$y)` binds by reference — the same declaration.
 (anonymous_function_use_clause
@@ -313,6 +317,13 @@
 ; ---- assignment IS declaration (Perl-loose, Python-identical) ----
 (assignment_expression
   left: (variable_name) @def.var.name @def.var @flow.target
+  right: (_) @flow.source) @flow.assign
+; `$d = &$this->x` binds `$d` to the value's storage — the same
+; declaration, typed by the same flow; `@alias.target` (on the inner
+; name — a query step holds three captures) marks it, so a write through
+; it (`$d[] = 1`) counts as a use of the storage.
+(reference_assignment_expression
+  left: (variable_name (name) @alias.target) @def.var.name @def.var @flow.target
   right: (_) @flow.source) @flow.assign
 ; `$this->x = <value>`: a property typed by what is written to it. The
 ; flow edge lands at the CLASS-BODY scope (`@flow.target.member`), where
@@ -528,6 +539,10 @@
   name: (variable_name (name) @ref.member) @var.member) @hop.call
 (scoped_property_access_expression
   scope: (name) @member.recv @ref.type
+  name: (variable_name (name) @ref.member) @var.member) @hop.call
+;; `\Vendor\Init::$files` — the qualified spelling of the same access.
+(scoped_property_access_expression
+  scope: (qualified_name (name) @member.recv @ref.type) @ref.qualified
   name: (variable_name (name) @ref.member) @var.member) @hop.call
 ; `$cls::$prop` / `$this->resource::$wrap` / `getBuilder()::$precision` — the
 ; scope is an EXPRESSION whose value is the class (a `Foo::class` string, a

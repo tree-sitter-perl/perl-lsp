@@ -202,6 +202,9 @@ pub struct SkeletonAnalysis {
     /// Existence-probe argument spans (`@probe.region`); the member lanes
     /// stay silent inside them.
     pub probe_regions: Vec<crate::model::file_analysis::Span>,
+    /// Bare-variable call arguments with their positions (`PackFacts`'s
+    /// lane of the same name).
+    pub variable_arg_sites: Vec<crate::model::file_analysis::ArgSite>,
     /// Fold-only regions (`@fold` / `@fold.comment`, the bool = comment);
     /// joined with the scopes into `fold_ranges`.
     pub fold_regions: Vec<(crate::model::file_analysis::Span, bool)>,
@@ -1452,6 +1455,7 @@ impl SkeletonAnalysis {
             control_regions: std::mem::take(&mut self.control_regions),
             param_regions: std::mem::take(&mut self.param_regions),
             probe_regions: std::mem::take(&mut self.probe_regions),
+            variable_arg_sites: std::mem::take(&mut self.variable_arg_sites),
             ..Default::default()
         };
         // Folding follows the scopes the skeleton minted: a class body, a

@@ -97,6 +97,7 @@ impl FileAnalysis {
                     control_regions: _control_regions, // own-file straight-line gate spans
                     param_regions: _param_regions,   // own-file parameter-region spans
                     probe_regions: _probe_regions,   // own-file existence-probe spans
+                    variable_arg_sites: _variable_arg_sites, // own-file argument sites
                 },
             plugin:
                 PluginFacts {

@@ -303,8 +303,11 @@ Format per entry:
   description of PHP's global namespace (`\Exception`, `DateTime`,
   `strlen`, `preg_match`'s by-reference out-parameter…), so every lane
   is SILENT on it (`\Foo`, `use Foo;`, a file without a namespace), a
-  by-reference out-parameter is presumed from the read count, and
-  completion cannot offer builtins. Intelephense ships JetBrains'
+  bare variable argued to an unresolvable callee is silence (the
+  out-parameter it may be — `preg_match`'s `$m` — cannot be told from the
+  stray read it may be: WordPress's `strpos($wp_version, …)`, a global a
+  `require` sets, went silent with it), and completion cannot offer
+  builtins. Intelephense ships JetBrains'
   `phpstorm-stubs` (Apache-2.0); phpactor reads the same stubs.
 - **Options:**
   - A. Bundle a stub tier (phpstorm-stubs, ~30 MB of PHP; or a compiled

@@ -1336,6 +1336,7 @@ fn remap_spans(
         control_regions,
         param_regions,
         probe_regions,
+        variable_arg_sites,
         fold_regions,
         domain_sites,
         macro_returns: _,
@@ -1486,6 +1487,10 @@ fn remap_spans(
     }
     for span in probe_regions.iter_mut() {
         *span = rspan(*span);
+    }
+    for site in variable_arg_sites.iter_mut() {
+        site.var = rspan(site.var);
+        site.args = rspan(site.args);
     }
     for (span, _) in fold_regions.iter_mut() {
         *span = rspan(*span);

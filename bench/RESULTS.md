@@ -1011,3 +1011,37 @@ as a use of `X`, and its head resolves through the import). phpmyadmin's
 `unused-import` 32 → 0 is the same class-literal rule. Every other cell is
 byte-identical, so the day's completion, hint and quick-fix slices moved
 no diagnostic lane. Wall unchanged: phpmyadmin 9.5 s, composer 4.9 s.
+
+### By-reference out-parameters bind their argument (2026-09-03, 12:10, build under net r116)
+
+The undefined-variable lane, before and after the callee-resolved
+binding rule (`ParamArity::binds_arg` over the extractor's bare-variable
+argument sites), the `$d = &expr` declaration and the variadic parameter
+declaration; hint severity, fresh cache:
+
+| corpus | undefined-variable before | after | unused-variable before | after |
+|---|---|---|---|---|
+| composer | 35 | 0 | 132 | 132 |
+| WordPress | 24 | 4 | 420 | 420 |
+| laravel/framework | 14 | 14 | 257 | 257 |
+| monolog | 0 | 0 | 24 | 24 |
+
+composer's 35 were `$process->execute($cmd, $output, $cwd)` against
+`ProcessExecutor::execute($command, &$output = null, …)` (cross-file, a
+receiver typed by its parameter), `\Composer\Autoload\Init::$files` read
+as a local, and one `$degradedMode = &$this->degradedMode`. WordPress's
+twenty that went silent split three ways: `preg_match` / `preg_match_all`
+/ `fsockopen` / `socket_getsockname` out-parameters (`$matches`, `$out`,
+`$toks`, `$errno`, `$errstr`, `$port`) — php's own functions, which the
+lane cannot resolve and so no longer guesses about; `strpos($wp_version,
+'-src')` twice, a global a `require` sets, silent for the same reason
+(the honest cost of the rule, recorded on the builtin-stubs fork); and
+`function query( ...$args )`, a variadic parameter the query never
+declared. The four survivors: `$wp_version` / `$wp_local_package` read
+outside any call (globals a `require` sets — Intelephense reports them
+too), `unset($v_header_list)` (an `unset` of a never-assigned name), and
+one `$schema` read in `update_item` that the method never assigns — a
+real finding `empty()` hides at runtime. The alias rule keeps the
+unused-variable lane exactly where it was: without it, composer's
+`$headers = &$options['http']['header']; $headers[] = …` gained a false
+row.

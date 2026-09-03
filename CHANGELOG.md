@@ -239,6 +239,13 @@ templates). Market case and build-out plan in `docs/prompt-php-target.md`.
   interface-typed receiver, a closure's rebound `$this`, a dynamically
   declared property, a by-reference out-parameter — so a PHPUnit test
   suite without vendored PHPUnit stays quiet. `docs/adr/php-diagnostics.md`.
+- **A by-reference out-parameter binds its argument.**
+  `$process->execute($cmd, $output)` against `execute($command, &$output =
+  null)` declares `$output`, locally or across files, through a receiver
+  or by name; the lane names the stray read into a by-value parameter and
+  stays silent for a callee it cannot resolve (php's own `preg_match`).
+  `$d = &$this->x` declares `$d`; `\Vendor\Init::$files` reads as a
+  member, never a local. composer: 35 undefined-variable rows → 0.
 - **Signature help.** `$obj->method(` and `Foo::method(` on PHP now show
   the declaration's parameter list with the active parameter, the return
   annotation, and the docblock summary, for local and cross-file

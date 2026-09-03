@@ -107,6 +107,11 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     // (`@arity.sig` fires a separate match from the def name).
     let mut param_sigs: Vec<(crate::model::file_analysis::Span, crate::model::file_analysis::ParamArity)> =
         Vec::new();
+    // A bare variable written as a call argument, with its position: the
+    // undefined-variable lane asks the callee whether that position binds
+    // (`ParamArity::binds_arg`). Only a language that declares variables by
+    // assignment (`implicit_variables` declared) has a lane to feed.
+    let mut variable_arg_sites: Vec<crate::model::file_analysis::ArgSite> = Vec::new();
     let mut cursor = QueryCursor::new();
     let mut matches = cursor.matches(query, tree.root_node(), source);
     let mut match_counter = 0usize;
@@ -236,6 +241,32 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                         .insert((node.start_position().row, node.start_position().column),
                                 node.named_child_count());
                     arg_counts_by_match.insert(match_counter, node.named_child_count());
+                    if !pack.implicit_variables.is_empty() {
+                        let args_span = crate::model::file_analysis::Span {
+                            start: node.start_position(),
+                            end: node.end_position(),
+                        };
+                        for (position, arg) in
+                            (0..node.named_child_count()).filter_map(|i| node.named_child(i)).enumerate()
+                        {
+                            // a named argument (`f(out: $x)`) is matched by
+                            // name, not position — no site
+                            if arg.child_by_field_name("name").is_some() || arg.named_child_count() != 1 {
+                                continue;
+                            }
+                            let Some(inner) = arg.named_child(0) else { continue };
+                            if pack.simple_var_kinds.contains(&inner.kind()) {
+                                variable_arg_sites.push(crate::model::file_analysis::ArgSite {
+                                    var: crate::model::file_analysis::Span {
+                                        start: inner.start_position(),
+                                        end: inner.end_position(),
+                                    },
+                                    args: args_span,
+                                    position: position as u32,
+                                });
+                            }
+                        }
+                    }
                 } else {
                     placeholder_call_at.insert((node.start_position().row, node.start_position().column));
                     placeholder_by_match.insert(match_counter);
@@ -251,14 +282,20 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                 let mut total = 0usize;
                 let mut required = 0usize;
                 let mut variadic = false;
+                let mut by_ref = 0u64;
                 let mut c = node.walk();
                 for ch in node.children(&mut c) {
                     match ch.kind() {
                         "parameter_declaration" => { total += 1; required += 1; }
                         "optional_parameter_declaration" => { total += 1; }
                         // PHP: a parameter with a default is optional; a
-                        // promoted ctor param still counts toward arity.
+                        // promoted ctor param still counts toward arity; a
+                        // `reference_modifier` makes the position an
+                        // out-parameter the argument lane binds through.
                         "simple_parameter" | "property_promotion_parameter" => {
+                            if total < 64 && ch.child_by_field_name("reference_modifier").is_some() {
+                                by_ref |= 1u64 << total;
+                            }
                             total += 1;
                             if ch.child_by_field_name("default_value").is_none() {
                                 required += 1;
@@ -275,7 +312,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                         start: node.start_position(),
                         end: node.end_position(),
                     },
-                    crate::model::file_analysis::ParamArity { total, required, variadic },
+                    crate::model::file_analysis::ParamArity { total, required, variadic, by_ref },
                 ));
                 continue;
             }
@@ -371,6 +408,11 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     // `@static.target` — def NAME spans of `static` members (the "static"
     // attribute a scoped completion reads).
     let mut static_name_spans: std::collections::HashSet<(Point, Point)> = std::collections::HashSet::new();
+    // `@alias.target` — a variable declared by reference assignment
+    // (`$h = &$opts['h']`): the `alias` attribute, a write through which is
+    // a use of the storage it names. Keyed by the name token's END: the
+    // capture sits on the sigil-less inner name the def's `$name` wraps.
+    let mut alias_name_ends: std::collections::HashSet<Point> = std::collections::HashSet::new();
     // `@contract.target` — def NAME spans of contract callables (an
     // interface's methods, an abstract method): a `contract` attribute, the
     // requires of the role the declaring container is.
@@ -435,6 +477,9 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
         }
         if e.cap == "static.target" {
             static_name_spans.insert((e.start, e.end));
+        }
+        if e.cap == "alias.target" {
+            alias_name_ends.insert(e.end);
         }
         if e.cap == "contract.target" {
             contract_name_spans.insert((e.start, e.end));
@@ -802,6 +847,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
         .filter(|e| e.cap == "probe.region")
         .map(|e| Span { start: e.start, end: e.end })
         .collect();
+    out.variable_arg_sites = variable_arg_sites;
     // Fold-only regions (`@fold` / `@fold.comment`): blocks and comment
     // runs that fold in an editor without being scopes (php has no block
     // scoping, so an `if` body must not mint one).
@@ -2962,8 +3008,15 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
         || !classattr_by_name_span.is_empty()
         || !static_name_spans.is_empty()
         || !contract_name_spans.is_empty()
+        || !alias_name_ends.is_empty()
     {
         for sym in &mut out.symbols {
+            if sym.kind == "var"
+                && alias_name_ends.contains(&sym.name_end)
+                && !sym.attributes.iter().any(|a| a == "alias")
+            {
+                sym.attributes.push("alias".to_string());
+            }
             if contract_name_spans.contains(&(sym.name_start, sym.name_end))
                 && !sym.attributes.iter().any(|a| a == "contract")
             {

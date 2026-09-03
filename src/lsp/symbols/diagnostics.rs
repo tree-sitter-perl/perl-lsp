@@ -1099,10 +1099,9 @@ pub fn pack_symbol_diagnostics(
 
     // ---- undefined variable: an unbound read inside a callable ----
     if !pack.implicit_variables.is_empty() {
-        // occurrences per (callable scope, name) — a by-reference out
-        // parameter (`preg_match($re, $s, $m)`) is bound by the call, which
-        // the walker cannot see: a name read MORE than once is presumed
-        // bound that way; the single stray read is the typo this lane names.
+        // occurrences per (callable scope, name) — a name read MORE than
+        // once is presumed bound by a call the callee lane below cannot
+        // resolve; the single stray read is the typo this lane names.
         let callable_of = |scope: crate::model::file_analysis::ScopeId| {
             analysis.scope_chain(scope).into_iter().find(|&sc| {
                 matches!(analysis.scope(sc).kind, ScopeKind::Sub { .. } | ScopeKind::Method { .. })
@@ -1116,6 +1115,71 @@ pub fn pack_symbol_diagnostics(
                 }
             }
         }
+        // A bare variable written as a call argument is bound by the call
+        // when the callee declares that position by reference (`&$out`).
+        // The callee resolves as signature help resolves it: the receiver
+        // through the dispatch projection, a plain call by name, locally
+        // then across files. An UNRESOLVABLE callee is silence, not a
+        // guess: php's own functions carry no declaration here
+        // (`preg_match($re, $s, $m)` binds `$m`), and a `__call` class
+        // answers every name.
+        let calls_by_args_start: HashMap<(usize, usize), &crate::model::file_analysis::Ref> = analysis
+            .refs()
+            .iter()
+            .filter(|r| matches!(r.kind, RefKind::MethodCall { .. } | RefKind::FunctionCall))
+            .map(|r| ((r.span.end.row, r.span.end.column), r))
+            .collect();
+        let callee_arity = |call: &crate::model::file_analysis::Ref| -> Option<crate::model::file_analysis::ParamArity> {
+            let name = call.unqualified_target_name();
+            let callable = |s: &crate::model::file_analysis::Symbol| matches!(s.kind, FaSymKind::Sub | FaSymKind::Method);
+            match &call.kind {
+                RefKind::MethodCall { shape, .. } => {
+                    let class = analysis.method_call_invocant_class(call, idx)?;
+                    match analysis.resolve_member_in_ancestors(&class, name, *shape, idx)? {
+                        MethodResolution::Local { sym_id, .. } => analysis.symbol(sym_id).param_arity(),
+                        MethodResolution::CrossFile { class, def_module } => {
+                            let ix = idx?;
+                            let module = def_module.as_deref().unwrap_or(class.as_str());
+                            let cached = ix.candidate_defining_sub_in_package(module, &class, name)?;
+                            let view = ix.symbols_present(&cached);
+                            let syms = view.symbols();
+                            syms.iter()
+                                .find(|s| callable(s) && s.name == name && s.package.as_deref() == Some(class.as_str()))
+                                .or_else(|| syms.iter().find(|s| callable(s) && s.name == name))
+                                .and_then(|s| s.param_arity())
+                        }
+                    }
+                }
+                RefKind::FunctionCall => {
+                    if let Some(sym) = analysis
+                        .symbols_named(name)
+                        .iter()
+                        .map(|&sid| analysis.symbol(sid))
+                        .find(|s| matches!(s.kind, FaSymKind::Sub))
+                    {
+                        return sym.param_arity();
+                    }
+                    let ix = idx?;
+                    let cached = ix.visible_def_candidates(name).into_iter().next()?;
+                    let view = ix.symbols_present(&cached);
+                    view.symbols()
+                        .iter()
+                        .find(|s| matches!(s.kind, FaSymKind::Sub) && s.name == name)
+                        .and_then(|s| s.param_arity())
+                }
+                _ => None,
+            }
+        };
+        // `Some(true)` bound by the call, `Some(false)` a plain read,
+        // `None` an argument of a callee this lane cannot resolve
+        let argument_binding = |var: Span| -> Option<bool> {
+            let Some(site) = analysis.pack.variable_arg_sites.iter().find(|s| s.var == var) else {
+                return Some(false);
+            };
+            let call = calls_by_args_start.get(&(site.args.start.row, site.args.start.column))?;
+            let arity = callee_arity(call)?;
+            Some(arity.binds_arg(site.position as usize))
+        };
         for r in analysis.refs() {
             // a WRITE binds (php declares a variable by assigning it)
             if !matches!(r.kind, RefKind::Variable)
@@ -1130,6 +1194,9 @@ pub fn pack_symbol_diagnostics(
             }
             let Some(sc) = callable_of(r.scope) else { continue };
             if seen.get(&(sc.0, r.target_name.clone())).copied().unwrap_or(0) != 1 {
+                continue;
+            }
+            if argument_binding(r.span) != Some(false) {
                 continue;
             }
             // a callable that materializes variables dynamically is silent
@@ -1178,9 +1245,11 @@ pub fn pack_symbol_diagnostics(
                 continue;
             }
             let Some(sc) = callable_of(sym.scope) else { continue };
+            // an alias (`$h = &$opts['h']`) is written to reach its storage
             if pack.implicit_variables.contains(&sym.name)
                 || pack.throwaway_names.contains(&sym.name)
                 || pack.param_regions.iter().any(|p| p.contains(&sym.span))
+                || sym.attributes.iter().any(|a| a == "alias")
             {
                 continue;
             }
