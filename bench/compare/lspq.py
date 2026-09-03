@@ -127,6 +127,40 @@ def main():
                 rec["codeAction"] = [{"title": x.get("title"), "kind": x.get("kind")} for x in res]; rec["codeAction_ms"] = ms
             elif verb == "typeDefinition":
                 m, ms = lsp.request("textDocument/typeDefinition", td); rec["typeDefinition"] = norm_loc((m or {}).get("result")) if "result" in (m or {}) else {"error": str((m or {}).get("error"))[:80]}; rec["typeDefinition_ms"] = ms
+            elif verb == "documentHighlight":
+                m, ms = lsp.request("textDocument/documentHighlight", td); res = (m or {}).get("result") or []
+                rec["documentHighlight"] = sorted(((h.get("range") or {}).get("start",{}).get("line"), (h.get("range") or {}).get("start",{}).get("character"), h.get("kind")) for h in res); rec["documentHighlight_ms"] = ms
+            elif verb == "workspaceSymbol":
+                m, ms = lsp.request("workspace/symbol", {"query": p.get("query","")}); res = (m or {}).get("result") or []
+                rec["workspaceSymbol"] = sorted(set(x.get("name","") for x in res))[:200]; rec["workspaceSymbol_count"] = len(res); rec["workspaceSymbol_ms"] = ms
+            elif verb == "foldingRange":
+                m, ms = lsp.request("textDocument/foldingRange", {"textDocument": td["textDocument"]}); res = (m or {}).get("result") or []
+                rec["foldingRange"] = len(res); rec["foldingRange_kinds"] = sorted(set(str(x.get("kind")) for x in res)); rec["foldingRange_ms"] = ms
+            elif verb == "selectionRange":
+                m, ms = lsp.request("textDocument/selectionRange", {"textDocument": td["textDocument"], "positions": [td["position"]]}); res = (m or {}).get("result") or []
+                def depth(r):
+                    return 0 if not r else 1 + depth(r.get("parent"))
+                rec["selectionRange"] = depth(res[0]) if res else 0; rec["selectionRange_ms"] = ms
+            elif verb == "inlayHint":
+                rng = {"start": {"line": p.get("from_line", 0), "character": 0}, "end": {"line": p.get("to_line", p["line"] + 1), "character": 0}}
+                m, ms = lsp.request("textDocument/inlayHint", {"textDocument": td["textDocument"], "range": rng}); res = (m or {}).get("result")
+                if res is None: rec["inlayHint"] = {"error": str((m or {}).get("error"))[:80]}
+                else: rec["inlayHint"] = len(res); rec["inlayHint_labels"] = sorted(set((h.get("label") if isinstance(h.get("label"), str) else "".join(x.get("value","") for x in h.get("label") or [])) for h in res))[:60]
+                rec["inlayHint_ms"] = ms
+            elif verb == "semanticTokens":
+                m, ms = lsp.request("textDocument/semanticTokens/full", {"textDocument": td["textDocument"]}); res = (m or {}).get("result") or {}
+                rec["semanticTokens"] = len(res.get("data") or []) // 5; rec["semanticTokens_ms"] = ms
+            elif verb == "callHierarchy":
+                m, ms = lsp.request("textDocument/prepareCallHierarchy", td); items = (m or {}).get("result") or []
+                rec["callHierarchy_prepare"] = [x.get("name") for x in items]; rec["callHierarchy_prepare_ms"] = ms
+                if items:
+                    m2, ms2 = lsp.request("callHierarchy/incomingCalls", {"item": items[0]}); inc = (m2 or {}).get("result") or []
+                    rec["callHierarchy_incoming"] = len(inc); rec["callHierarchy_incoming_from"] = sorted(set((x.get("from") or {}).get("name","") for x in inc))[:60]; rec["callHierarchy_incoming_ms"] = ms2
+                    m3, ms3 = lsp.request("callHierarchy/outgoingCalls", {"item": items[0]}); outg = (m3 or {}).get("result") or []
+                    rec["callHierarchy_outgoing"] = len(outg); rec["callHierarchy_outgoing_to"] = sorted(set((x.get("to") or {}).get("name","") for x in outg))[:60]; rec["callHierarchy_outgoing_ms"] = ms3
+            elif verb == "prepareRename":
+                m, ms = lsp.request("textDocument/prepareRename", td); res = (m or {}).get("result")
+                rec["prepareRename"] = (res.get("placeholder") if isinstance(res, dict) and "placeholder" in res else (res if res is None else "range")); rec["prepareRename_error"] = str((m or {}).get("error"))[:80] if (m or {}).get("error") else None; rec["prepareRename_ms"] = ms
             elif verb == "documentSymbol":
                 m, ms = lsp.request("textDocument/documentSymbol", {"textDocument": td["textDocument"]}); res = (m or {}).get("result") or []
                 def count(items):

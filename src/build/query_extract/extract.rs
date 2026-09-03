@@ -368,6 +368,9 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     // modifier meaning non-public (the vocabulary lives in the query's
     // #any-of?). Joined to symbols by name span in a post-pass, stamping
     // the same `non_public` attribute cpp access regions stamp.
+    // `@static.target` — def NAME spans of `static` members (the "static"
+    // attribute a scoped completion reads).
+    let mut static_name_spans: std::collections::HashSet<(Point, Point)> = std::collections::HashSet::new();
     let mut nonpublic_name_spans: std::collections::HashSet<(Point, Point)> =
         std::collections::HashSet::new();
     // `@classattr.<flavor>` — container-def name spans stamped with a
@@ -425,6 +428,9 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                     e.text.clone(),
                 ),
             );
+        }
+        if e.cap == "static.target" {
+            static_name_spans.insert((e.start, e.end));
         }
         if e.cap == "nonpublic.target" {
             nonpublic_name_spans.insert((e.start, e.end));
@@ -2914,12 +2920,17 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     // Access-modifier stamp: the `@nonpublic.target` name spans mark
     // members whose modifier means non-public — the same `non_public`
     // attribute cpp access regions stamp, read by the completion gates.
-    if !nonpublic_name_spans.is_empty() || !classattr_by_name_span.is_empty() {
+    if !nonpublic_name_spans.is_empty() || !classattr_by_name_span.is_empty() || !static_name_spans.is_empty() {
         for sym in &mut out.symbols {
             if nonpublic_name_spans.contains(&(sym.name_start, sym.name_end))
                 && !sym.attributes.iter().any(|a| a == "non_public")
             {
                 sym.attributes.push("non_public".to_string());
+            }
+            if static_name_spans.contains(&(sym.name_start, sym.name_end))
+                && !sym.attributes.iter().any(|a| a == "static")
+            {
+                sym.attributes.push("static".to_string());
             }
             if let Some(flavor) = classattr_by_name_span.get(&(sym.name_start, sym.name_end)) {
                 if sym.kind == "class" && !sym.attributes.iter().any(|a| a == flavor) {

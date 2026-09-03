@@ -144,6 +144,54 @@ fn php_signature_help_outline_and_diagnostics_over_stdio() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A scoped access completes the class's members: `self::` and `Cfg::`
+/// answer constants and methods — never the function's locals — and
+/// `$this->` keeps answering the instance members.
+#[test]
+fn php_scoped_completion_over_stdio() {
+    let dir = std::env::temp_dir().join(format!("perl-lsp-d2scoped-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    let w = |rel: &str, src: &str| std::fs::write(dir.join(rel), src).unwrap();
+    w("composer.json", "{\"autoload\": {\"psr-4\": {\"App\\\\\": \"src/\"}}}");
+    let cfg = "<?php\nnamespace App;\n\nclass Cfg\n{\n    const LIMIT = 1;\n    public static int $count = 0;\n    public static function make(): Cfg { return new Cfg(); }\n    public function inst(): int\n    {\n        $local = 2;\n        $a = self::LIMIT;\n        $b = Cfg::make();\n        $c = $this->inst();\n        return $local + $a + $c;\n    }\n}\n";
+    w("src/Cfg.php", cfg);
+    let mut c = Client::spawn(&dir);
+    c.request("initialize", serde_json::json!({"processId": null, "rootUri": uri(&dir), "capabilities": {}}));
+    c.notify("initialized", serde_json::json!({}));
+    let u = uri(&dir.join("src/Cfg.php"));
+    c.notify("textDocument/didOpen", serde_json::json!({"textDocument": {"uri": u, "languageId": "php", "version": 1, "text": cfg}}));
+    let col = |line: usize, needle: &str| cfg.lines().nth(line).unwrap().find(needle).unwrap();
+    let mut ready = false;
+    for _ in 0..120 {
+        let r = c.request("textDocument/definition", serde_json::json!({"textDocument": {"uri": u}, "position": {"line": 12, "character": col(12, "make")}}));
+        if r.as_array().is_some_and(|a| !a.is_empty()) || r.is_object() {
+            ready = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(250));
+    }
+    assert!(ready, "definition never answered");
+    let labels = |c: &mut Client, line: usize, character: usize| -> Vec<String> {
+        let r = c.request("textDocument/completion", serde_json::json!({"textDocument": {"uri": u}, "position": {"line": line, "character": character}}));
+        let items = r.get("items").and_then(|i| i.as_array()).cloned().or_else(|| r.as_array().cloned()).unwrap_or_default();
+        items.iter().filter_map(|i| i["label"].as_str().map(str::to_string)).collect()
+    };
+    // cursor right after `self::` (on the `L` of LIMIT)
+    let s = labels(&mut c, 11, col(11, "LIMIT"));
+    assert!(s.iter().any(|l| l == "LIMIT") && s.iter().any(|l| l == "make"), "self:: members: {s:?}");
+    assert!(!s.iter().any(|l| l.contains("local") || l == "inst"), "self:: offers constants and statics only: {s:?}");
+    let k = labels(&mut c, 12, col(12, "make"));
+    assert!(k.iter().any(|l| l == "make") && !k.iter().any(|l| l.contains("local") || l == "inst"), "Cfg:: members: {k:?}");
+    assert!(k.iter().any(|l| l == "class") && s.iter().any(|l| l == "class"), "Cfg::class is the pack's class literal: {k:?}");
+    let t = labels(&mut c, 13, col(13, "inst"));
+    assert!(t.iter().any(|l| l == "inst") && !t.iter().any(|l| l.contains("local") || l == "LIMIT" || l == "class"), "$this-> members: {t:?}");
+    c.request("shutdown", serde_json::Value::Null);
+    c.notify("exit", serde_json::Value::Null);
+    let _ = c.child.wait();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// The import quick-fix: an undefined type the workspace declares elsewhere
 /// publishes (once the pack index has settled) with its candidates, and
 /// `codeAction` offers `use App\Util\Helper;` after the last `use` row.

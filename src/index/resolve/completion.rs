@@ -129,6 +129,7 @@ impl<'a> CandidateSet<'a> {
                         out.push(CompletionCandidate {
                             label: name.clone(),
                             kind: sym.kind.clone(),
+                            is_static: false,
                             detail: Some(detail),
                             insert_text: None,
                             sort_priority: crate::model::file_analysis::PRIORITY_CLOSURE,
@@ -155,6 +156,7 @@ impl<'a> CandidateSet<'a> {
                 CompletionCandidate {
                     label: name.to_string(),
                     kind: SymKind::Sub,
+                    is_static: false,
                     detail: Some("perl builtin".to_string()),
                     insert_text: None,
                     sort_priority: crate::model::file_analysis::PRIORITY_BUILTIN,
@@ -211,6 +213,7 @@ impl<'a> CandidateSet<'a> {
                 CompletionCandidate {
                     label: name,
                     kind: SymKind::Module,
+                    is_static: false,
                     detail,
                     insert_text: None,
                     sort_priority,
@@ -250,6 +253,7 @@ impl<'a> CandidateSet<'a> {
             out.push(CompletionCandidate {
                 label: c.label.clone(),
                 kind: SymKind::Sub,
+                is_static: false,
                 detail: c.detail.or_else(|| Some(format!("from {}", package))),
                 insert_text: Some(c.label),
                 sort_priority: 10,
@@ -281,6 +285,7 @@ impl<'a> CandidateSet<'a> {
             out.push(CompletionCandidate {
                 label: suffix.clone(),
                 kind: SymKind::Module,
+                is_static: false,
                 detail: Some(hint.to_string()),
                 insert_text: Some(suffix),
                 sort_priority: 20,
@@ -338,6 +343,7 @@ impl<'a> CandidateSet<'a> {
                 out.push(CompletionCandidate {
                     label: s.name.clone(),
                     kind: s.kind.clone(),
+                    is_static: false,
                     detail,
                     insert_text: None,
                     sort_priority: if nested_container { 20 } else { 10 },

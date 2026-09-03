@@ -735,6 +735,7 @@ pub fn member_completion_for_class(
     module_index: &dyn crate::model::file_analysis::CrossFileLookup,
     op_fix: Option<(crate::model::file_analysis::Span, String)>,
     point: Point,
+    scoped: bool,
 ) -> Option<Vec<CompletionItem>> {
     // The access-specifier gate needs to know whether the
     // CURSOR itself is lexically inside `class`'s own body — self-access
@@ -742,9 +743,37 @@ pub fn member_completion_for_class(
     let requesting_class = analysis
         .scope_at(point)
         .and_then(|sc| analysis.enclosing_class_for_scope(sc));
-    let candidates = analysis.complete_members_for_class(
+    let mut candidates = analysis.complete_members_for_class(
         class, Some(module_index), requesting_class.as_deref(),
     );
+    // `Foo::` completes the class's constants and static members;
+    // `$o->` the instance ones — an enumerator/constant is never reached
+    // through an instance, a static member is (php allows it) but not what
+    // the operator asks for.
+    candidates.retain(|c| {
+        let constant = matches!(c.kind, FaSymKind::Enumerator);
+        if scoped {
+            constant || c.is_static
+        } else {
+            !constant
+        }
+    });
+    // The class-name literal (`Foo::class`) is a member of every class the
+    // pack declares it for — a convention on the pack, not a symbol.
+    let literal = &analysis.pack.class_literal_member;
+    if scoped && !literal.is_empty() && !candidates.iter().any(|c| &c.label == literal) {
+        candidates.push(crate::model::file_analysis::CompletionCandidate {
+            label: literal.clone(),
+            kind: FaSymKind::Enumerator,
+            is_static: false,
+            detail: Some(format!("{class}::{literal}")),
+            insert_text: None,
+            sort_priority: crate::model::file_analysis::PRIORITY_LESS_RELEVANT,
+            additional_edits: vec![],
+            import_fact: None,
+            display_override: None,
+        });
+    }
     if candidates.is_empty() {
         return None;
     }

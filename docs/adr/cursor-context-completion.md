@@ -85,6 +85,20 @@ symbols, and no `new` is synthesized — member access lists real members.
 Members resolve to a class because the cpp pack's `@context.class` tags
 class-body symbols with the class name (`symbol_in_class` reads `package`).
 
+The operator is a filter on the candidate, not a second walk. A pack's
+`member_kinds` name every member-access form, scoped ones included
+(php's `scoped_call_expression` / `scoped_property_access_expression` /
+`class_constant_access_expression`); the receiver of a scoped access is
+a class token — the pack's `self_class_tokens` (`self` / `static`) name
+the enclosing class the way its receiver names do, a bare
+`class_token_kinds` node names the class it spells. `MemberCompletionCtx::scoped`
+is "the operator has no instance form", and `member_completion_for_class`
+keeps constants (Enumerator symbols), members carrying the `static`
+attribute (stamped from the skeleton's `@static.target` name spans, read
+as `CompletionCandidate::is_static`) and the pack's `class_literal_member`
+for a scoped access, and everything but the constants for an instance one.
+No consumer asks what the operator was spelled as.
+
 ## The protocol gate
 
 `completionProvider.triggerCharacters` is the union of every served

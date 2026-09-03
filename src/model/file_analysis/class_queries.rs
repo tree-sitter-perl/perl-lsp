@@ -258,6 +258,7 @@ impl FileAnalysis {
                 candidates.push(CompletionCandidate {
                     label: "new".to_string(),
                     kind: SymKind::Method,
+                    is_static: false,
                     detail: Some(self.method_detail(class_name, "new", None, module_index)),
                     insert_text: None,
                     sort_priority: PRIORITY_LOCAL,
@@ -348,6 +349,30 @@ impl FileAnalysis {
                 candidates.push(CompletionCandidate {
                     label: sym.name.clone(),
                     kind: sym.kind,
+                    is_static: sym.attributes.iter().any(|a| a == "static"),
+                    detail: None,
+                    insert_text: None,
+                    sort_priority: PRIORITY_LOCAL,
+                    additional_edits: vec![],
+                    import_fact: None,
+                    display_override: None,
+                });
+            }
+        }
+        // Class constants and enum cases (`SymKind::Enumerator`, the
+        // extraction's "const"/"enumerator" flattened): `self::LIMIT`,
+        // `Level::Debug` — members a scoped access completes, under the
+        // same access gate.
+        for sym in &self.symbols {
+            if matches!(sym.kind, SymKind::Enumerator)
+                && self.symbol_in_class(sym.id, cls)
+                && (requesting_class == Some(cls) || !sym.attributes.iter().any(|a| a == "non_public"))
+                && seen.insert(sym.name.clone())
+            {
+                candidates.push(CompletionCandidate {
+                    label: sym.name.clone(),
+                    kind: sym.kind,
+                    is_static: sym.attributes.iter().any(|a| a == "static"),
                     detail: None,
                     insert_text: None,
                     sort_priority: PRIORITY_LOCAL,

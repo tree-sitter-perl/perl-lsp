@@ -256,6 +256,9 @@ pub struct MemberCompletionCtx {
     /// `op_fix` corrects it. `Slot::Member.op`'s pack-side answer
     /// (`docs/adr/cursor-slots.md`).
     pub op: crate::model::file_analysis::MemberOp,
+    /// A SCOPED access (`::` — no `.`/`->` token on the member node): the
+    /// class's constants and static members are what completes there.
+    pub scoped: bool,
 }
 
 pub fn member_completion_ctx_incremental(
@@ -295,7 +298,9 @@ pub fn member_completion_ctx_incremental(
     let receiver_type = resolve_node_type(receiver, cfg, &patched, analysis, module_index)
         .or_else(|| {
             let txt = receiver.utf8_text(patched.as_bytes()).ok()?;
-            if !cfg.receiver_names.contains(&txt) {
+            // `self::` / `static::` name the enclosing class the same way
+            // `$this->` does.
+            if !cfg.receiver_names.contains(&txt) && !cfg.self_class_tokens.contains(&txt) {
                 return None;
             }
             let sc = analysis.scope_at(byte_to_point(src, cursor))?;
@@ -303,10 +308,21 @@ pub fn member_completion_ctx_incremental(
                 .enclosing_class_for_scope(sc)
                 .map(crate::model::file_analysis::InferredType::ClassName)
         })
+        .or_else(|| {
+            // A bare class token (`Foo::`, `App\Foo::`) IS the class it
+            // spells, leaf-keyed like every class identity.
+            if !cfg.class_token_kinds.contains(&receiver.kind()) {
+                return None;
+            }
+            let txt = receiver.utf8_text(patched.as_bytes()).ok()?;
+            let leaf = txt.rsplit('\\').next().unwrap_or(txt);
+            (!leaf.is_empty()).then(|| crate::model::file_analysis::InferredType::ClassName(leaf.to_string()))
+        })
         .map(|t| analysis.refine_instance_dispatch(t, module_index));
     let op_fix = operator_fix(member, receiver, &patched, analysis, cfg);
     let op = typed_member_op(member, &patched);
-    Some(MemberCompletionCtx { receiver_type, op_fix, op })
+    let scoped = operator_token(member, &patched).is_none();
+    Some(MemberCompletionCtx { receiver_type, op_fix, op, scoped })
 }
 
 /// The domain-comparison completion context: the cursor sits after an

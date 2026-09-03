@@ -132,6 +132,7 @@ impl FileAnalysis {
                 items.push(CompletionCandidate {
                     label: name.clone(),
                     kind: SymKind::Sub,
+                    is_static: false,
                     detail,
                     insert_text: None,
                     sort_priority: 10,
@@ -150,6 +151,7 @@ impl FileAnalysis {
                 items.push(CompletionCandidate {
                     label: name.clone(),
                     kind: SymKind::Sub,
+                    is_static: false,
                     detail,
                     insert_text: None,
                     sort_priority: 20,

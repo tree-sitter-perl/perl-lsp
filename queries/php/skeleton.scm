@@ -140,6 +140,14 @@
   visibility: (visibility_modifier) @nonpublic.mark
   name: (variable_name (name) @nonpublic.target)
   (#any-of? @nonpublic.mark "private" "protected"))
+; `static` members: the same post-pass stamp (`static` attribute) — what a
+; scoped access (`Foo::`) completes.
+(method_declaration
+  (static_modifier)
+  name: (name) @static.target)
+(property_declaration
+  (static_modifier)
+  (property_element name: (variable_name (name) @static.target)))
 
 ; enum cases: real enumerators — parent-enum typing + container tagging
 ; come generically from the engine's enumerator lane.

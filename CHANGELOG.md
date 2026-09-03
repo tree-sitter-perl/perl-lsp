@@ -338,7 +338,10 @@ templates). Market case and build-out plan in `docs/prompt-php-target.md`.
   (`...func_get_args()`) no longer reads as one argument, and a
   `[$obj, 'name']` tuple names a method only when it resolves. A static
   property read through an expression (`$cls::$fields`,
-  `$this->resource::$wrap`) is the class's member, not a local variable.
+  `$this->resource::$wrap`) is the class's member, not a local variable,
+  and completion after `self::` / `static::` / `Foo::` offers that
+  class's constants, `static` members and `::class` instead of every name
+  in scope (`->` keeps the instance members).
 - **A php value read never means a method.** `$this->session` on a
   class declaring only `session()` is an undeclared property for the
   lane, goto-def and hover alike (Perl's accessor calls keep their

@@ -201,6 +201,7 @@ pub(super) fn dispatch_target_completions(
             // Handler kind flows to CompletionItemKind::EVENT via
             // `fa_completion_kind` — consistent with outline and hover.
             kind: FaSymKind::Handler,
+            is_static: false,
             detail: Some(detail),
             // Bare inside quotes / autoquote, quoted otherwise — see
             // `needs_quotes` above. Accepting the suggestion lands

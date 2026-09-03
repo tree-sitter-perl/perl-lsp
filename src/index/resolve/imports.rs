@@ -48,6 +48,7 @@ pub(super) fn import_candidates(
             out.push(CompletionCandidate {
                 label: local.clone(),
                 kind: FaSymKind::Sub,
+                is_static: false,
                 detail: Some(detail),
                 insert_text: None,
                 sort_priority: PRIORITY_EXPLICIT_IMPORT,
@@ -114,6 +115,7 @@ pub(super) fn import_candidates(
                 out.push(CompletionCandidate {
                     label: name.clone(),
                     kind: FaSymKind::Sub,
+                    is_static: false,
                     detail: Some(detail),
                     insert_text: None,
                     sort_priority: priority,
@@ -160,6 +162,7 @@ pub(super) fn unimported_export_candidates(
             candidates.push(CompletionCandidate {
                 label: name.clone(),
                 kind: FaSymKind::Sub,
+                is_static: false,
                 detail: Some(format!("{} (auto-import)", module_name)),
                 insert_text: None,
                 sort_priority: PRIORITY_UNIMPORTED,

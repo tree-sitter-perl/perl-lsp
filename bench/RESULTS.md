@@ -764,3 +764,28 @@ site probed. Left parked with fixtures: `parent::` under a same-leaf
 alias, method-name case, Laravel facade aliases, an anonymous-class
 return typed by the declared class, an inline `$flags = 0` argument
 reported unused (`docs/PARKED.md`).
+### Member-completion battery, monolog, three tools (2026-09-03, 06:40)
+
+Four member-completion probes on monolog (`bench/compare/lspq.py`,
+readiness = goto-def at `Logger.php` 176:15, fresh cache each run):
+`$this->` inside `Logger`, `$handler->` over the `HandlerInterface`
+receiver, `$record->` in `AbstractProcessingHandler`, and `self::` at the
+level-lookup site.
+
+| probe | ours | Intelephense | phpactor |
+|---|---|---|---|
+| `$this->` in `Logger` | 43 · 6 ms | 43 · 7 ms | 42 · 96 ms |
+| `$handler->` (interface) | 4 · 1 ms | 4 · 2 ms | 4 · 115 ms |
+| `$record->` (LogRecord) | 14 · 3 ms | 14 · 2 ms | 13 · 45 ms |
+| `self::` in `Logger` | 13 · 3 ms | 13 · 2 ms | 14 · 49 ms |
+
+The three instance probes match Intelephense item for item; phpactor
+omits `__construct`. `self::` matched only after the scoped operator
+reached the member half: the php pack's member kinds named the `->` forms
+only, so `self::` fell to the identifier universe and answered 67 items
+(every local in the function plus the members). Now `::` offers the
+class's constants, its `static` members (a `static` attribute the skeleton
+stamps, `is_static` on every candidate) and the pack's class-name literal;
+`->` offers the instance members and hides the constants. The set is
+Intelephense's exactly; phpactor's extra item is a `level: ` named-argument
+snippet, not a member.

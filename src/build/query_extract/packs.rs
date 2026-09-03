@@ -74,6 +74,16 @@ pub struct LangPack {
     /// lane (`resolve_super_method`, refs_to's SUPER arm) — asked of the
     /// pack, never a name branch in the engine (rule #10).
     pub super_receiver: fn(text: &str) -> bool,
+    /// Receiver tokens that name the ENCLOSING class itself for member
+    /// access (php `self::` / `static::`): no typeable value node, the class
+    /// is read off the cursor's scope chain — the `receiver_names` rule for
+    /// a scoped access. Empty = none.
+    pub self_class_tokens: &'static [&'static str],
+    /// Node kinds of a bare CLASS TOKEN in receiver position (php `Foo::m(`,
+    /// `App\Foo::CONST` — `name` / `qualified_name`): the receiver's value
+    /// is the class it spells (leaf-keyed, like every class identity).
+    /// Empty = none.
+    pub class_token_kinds: &'static [&'static str],
     /// Are local variables FUNCTION-scoped (php: an assignment inside an
     /// `if` block declares for the whole function, and re-assignment is a
     /// REBIND of the same variable, not a fresh declaration)? Var defs
@@ -529,6 +539,8 @@ pub fn perl_pack() -> LangPack {
         namespace_relative_parents: false,
         field_registry_edges: false,
         super_receiver: |_| false,
+        self_class_tokens: &[],
+        class_token_kinds: &[],
         function_scoped_vars: false,
         constructor_names: &[],
         doc_types: |_| vec![],
@@ -602,6 +614,8 @@ pub fn python_pack() -> LangPack {
         namespace_relative_parents: false,
         field_registry_edges: false,
         super_receiver: |_| false,
+        self_class_tokens: &[],
+        class_token_kinds: &[],
         function_scoped_vars: false,
         constructor_names: &[],
         doc_types: |_| vec![],
@@ -675,6 +689,8 @@ pub fn r_pack() -> LangPack {
         namespace_relative_parents: false,
         field_registry_edges: false,
         super_receiver: |_| false,
+        self_class_tokens: &[],
+        class_token_kinds: &[],
         function_scoped_vars: false,
         constructor_names: &[],
         doc_types: |_| vec![],
@@ -747,6 +763,8 @@ pub fn cmake_pack() -> LangPack {
         namespace_relative_parents: false,
         field_registry_edges: false,
         super_receiver: |_| false,
+        self_class_tokens: &[],
+        class_token_kinds: &[],
         function_scoped_vars: false,
         constructor_names: &[],
         doc_types: |_| vec![],
@@ -1028,6 +1046,8 @@ pub fn php_pack() -> LangPack {
         namespace_relative_parents: true,
         field_registry_edges: true,
         super_receiver: |t| t == "parent",
+        self_class_tokens: &["self", "static"],
+        class_token_kinds: &["name", "qualified_name"],
         function_scoped_vars: true,
         constructor_names: &["__construct"],
         // phpdoc: the type vocabulary of REAL PHP — most of WordPress and
@@ -1131,6 +1151,11 @@ pub fn php_pack() -> LangPack {
             "member_access_expression",
             "member_call_expression",
             "nullsafe_member_call_expression",
+            // `Foo::m(`, `self::CONST`, `static::$prop`: a scoped access is
+            // a member access whose receiver is the class token.
+            "scoped_call_expression",
+            "scoped_property_access_expression",
+            "class_constant_access_expression",
         ],
         skip_kinds: &["string", "string_content", "comment"],
         call_kinds: &[
@@ -1210,6 +1235,8 @@ pub fn cpp_pack() -> LangPack {
         namespace_relative_parents: false,
         field_registry_edges: false,
         super_receiver: |_| false,
+        self_class_tokens: &[],
+        class_token_kinds: &[],
         function_scoped_vars: false,
         constructor_names: &[],
         doc_types: |_| vec![],
