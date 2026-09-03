@@ -90,6 +90,7 @@ impl FileAnalysis {
                     moved_from: _moved_from,         // own-file use-after-move input
                     control_regions: _control_regions, // own-file straight-line gate spans
                     param_regions: _param_regions,   // own-file parameter-region spans
+                    probe_regions: _probe_regions,   // own-file existence-probe spans
                 },
             plugin:
                 PluginFacts {

@@ -915,6 +915,13 @@ pub fn pack_symbol_diagnostics(
                 if matches!(want, MemberShape::Value) && written.contains(&(class.clone(), name.to_string())) {
                     continue;
                 }
+                // a read inside an existence probe (`isset($x->p)`) IS the
+                // question of whether the member exists
+                if matches!(want, MemberShape::Value)
+                    && analysis.pack.probe_regions.iter().any(|p| p.contains(&r.span))
+                {
+                    continue;
+                }
                 // the receiver is the pack's own (`$this`): the runtime class
                 // may be any descendant, and one of them declares the member
                 let own_receiver = pack.receiver_names.iter().any(|n| n == invocant.text());

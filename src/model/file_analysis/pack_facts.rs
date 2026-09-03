@@ -171,6 +171,11 @@ pub struct PackFacts {
     /// from a bug.
     #[serde(default)]
     pub param_regions: Vec<Span>,
+    /// Existence-probe argument spans (`@probe.region`: php `isset(…)` /
+    /// `empty(…)`). A member read inside one IS the question of whether
+    /// the member exists; the undefined-member lanes stay silent there.
+    #[serde(default)]
+    pub probe_regions: Vec<Span>,
 }
 
 impl PackFacts {
@@ -216,7 +221,8 @@ impl PackFacts {
             + vcap(&self.domain_sites)
             + vcap(&self.moved_from)
             + vcap(&self.control_regions)
-            + vcap(&self.param_regions);
+            + vcap(&self.param_regions)
+            + vcap(&self.probe_regions);
 
         h.misc += map_str_vec(&self.template_params)
             + mcap(&self.specializes)

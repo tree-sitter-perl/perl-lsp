@@ -66,6 +66,10 @@ Every lane names the case it cannot see and stays silent there:
   — the private-access idiom tests live on): the non-public lane is
   silent inside anonymous functions.
 - **A class with no declared constructor** has the default one.
+- **A read inside an existence probe** (`isset($tax->helps)`,
+  `empty($this->x)`) is the question of whether the member exists, not a
+  claim that it does — the undefined-property lane stays silent there
+  (`PackFacts::probe_regions`, the pack's `@probe.region` capture).
 - **A property declared by writing it** (`$this->x = …` anywhere in the
   file, on the same class) is declared.
 - **An enum's language-given members** (`->value`, `->name`,

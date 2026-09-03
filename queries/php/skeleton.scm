@@ -230,6 +230,12 @@
 ; A parameter list is a region, not a body: a parameter is the caller's
 ; contract, never an unused local.
 (formal_parameters) @param.region
+; `isset($x->p)` / `empty($x->p)`: the read IS the existence question, so
+; the undefined-member lanes stay silent inside the probe's argument list.
+((function_call_expression
+   function: (name) @_probe
+   arguments: (arguments) @probe.region)
+ (#any-of? @_probe "isset" "empty"))
 
 ; The file preamble an import may not precede: the open tag and
 ; `declare(...)` rows (php requires `declare(strict_types=1)` first).
