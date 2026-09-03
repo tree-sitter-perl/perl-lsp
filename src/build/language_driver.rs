@@ -1338,6 +1338,7 @@ fn remap_spans(
         probe_regions,
         variable_arg_sites,
         fold_regions,
+        rails,
         domain_sites,
         macro_returns: _,
         // Populated in enrich_skeleton (post-remap) already in original coords.
@@ -1493,6 +1494,9 @@ fn remap_spans(
         site.args = rspan(site.args);
     }
     for (span, _) in fold_regions.iter_mut() {
+        *span = rspan(*span);
+    }
+    for (span, _) in rails.iter_mut() {
         *span = rspan(*span);
     }
     for ds in domain_sites.iter_mut() {

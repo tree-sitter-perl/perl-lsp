@@ -1078,7 +1078,10 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
             // (`do_action('init')`) mints the DispatchCall ref that matches
             // it. Both are Global-owned: the program shares one flat hook
             // namespace, no receiver.
-            "def.handler.named" => {
+            c if c == "def.handler.named" || c.starts_with("def.handler.named.") => {
+                if let Some(rail) = c.strip_prefix("def.handler.named.") {
+                    out.rails.push((Span { start: e.start, end: e.end }, rail.to_string()));
+                }
                 out.symbols.push(SkelSymbol {
                     name: e.text.clone(),
                     kind: "handler".to_string(),
@@ -1370,7 +1373,10 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                     named_by_string: false,
                 });
             }
-            "ref.dispatch.named" => {
+            c if c == "ref.dispatch.named" || c.starts_with("ref.dispatch.named.") => {
+                if let Some(rail) = c.strip_prefix("ref.dispatch.named.") {
+                    out.rails.push((Span { start: e.start, end: e.end }, rail.to_string()));
+                }
                 out.refs.push(SkelRef {
                     via: dispatch_via_by_match.get(&e.match_id).cloned(),
                     kind: "dispatch".to_string(),

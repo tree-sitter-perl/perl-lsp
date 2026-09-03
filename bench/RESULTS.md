@@ -1067,3 +1067,29 @@ Against the 11:30 table only the `undefined-variable` column moved
 (WordPress 24 → 2, laravel 14 → 0, phpmyadmin 2 → 0, composer 35 → 0):
 the by-reference binding, the reference-assignment and variadic
 declarations, and the probe silence. Every other cell is byte-identical.
+
+## Laravel parity arc
+
+### Round 1 — the routes rail (2026-09-03, 15:30, build under net r118)
+
+pterodactyl panel (981 php files, 104 `->name(…)` declarations across
+six routes files, 59 `route()` / `redirect()->route()` uses in PHP):
+
+| probe | result |
+|---|---|
+| `undefined-route` rows, cold | 80 before the reverse-index feed → 0 after (every name declared in a routes file) |
+| `undefined-route` rows, warm (stub path) | 0 |
+| goto-def `redirect()->route('admin.mounts.view')` (MountController) | `routes/admin.php:183` (the `->name` string) |
+| two-file app: goto-def from `route('home')` | the declaration |
+| two-file app: references from the declaration | declaration + every use, cold and warm, and after an edit adds a use (3) |
+| two-file app: rename at the declaration | rewrites inside the quotes at every site |
+| two-file app: `route('nowhere')` | `warning[undefined-route]` |
+| a group prefix `->name('admin.')` | declares nothing (unit test) |
+| a WordPress hook spelled like a route name | does not connect (unit test — rails are namespaces) |
+
+The 80 false rows were not the rail's: the pack tier never fed the
+reverse index, so a handler declared in a classless file (a routes
+file; a WordPress plugin's hook registrations) was unreachable by name
+across files — WordPress hook navigation across files was broken the
+same way. Blade templates (223 `route()` uses in panel's views) are
+text to the grammar and are round 1b's text lane.

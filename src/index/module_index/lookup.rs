@@ -728,6 +728,11 @@ impl CrossFileLookup for ModuleIndex {
     }
 
     fn def_candidates(&self, name: &str) -> Vec<Arc<CachedModule>> {
+        // A PATH-shaped key is the pack tier's handler-feed module key
+        // (`feed_handlers`): the file itself, by its per-path registration.
+        if std::path::Path::new(name).is_absolute() {
+            return self.all_files.get(std::path::Path::new(name)).map(|e| vec![e.value().clone()]).unwrap_or_default();
+        }
         match self.core.all_defs.get(name) {
             Some(cands) if !cands.is_empty() => {
                 // Path-ordered HERE, the one speller of candidate order —

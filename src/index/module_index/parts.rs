@@ -257,6 +257,25 @@ impl ModuleEdgeIndexes {
         rec.merge(&fed);
     }
 
+    /// Feed handler names under a PATH-shaped module key (the pack tier's
+    /// registration has no name key for a classless file — a Laravel
+    /// routes file declares no class). `def_candidates` resolves the path
+    /// key through the per-path registry, so `modules_with_symbol(name)`
+    /// → `visible_def_candidates(key)` reaches the file like any module.
+    /// Marks the member fed, so `purge_module(key)` clears it.
+    pub fn feed_handlers(&self, module_key: &str, names: &[String]) {
+        if names.is_empty() {
+            return;
+        }
+        let mut fed = FedKeys::default();
+        for name in names {
+            fed.names.insert(name);
+            self.names.entry(name.clone()).or_default().insert(module_key);
+        }
+        let mut rec = self.fed_modules.entry(module_key.to_string()).or_default();
+        rec.merge(&fed);
+    }
+
     /// Publish ONE specialization edge (primary → spec). The pack path
     /// records these outside `feed`, and every publication must mark its
     /// member fed or `purge_module`'s guard will skip a module that does
@@ -479,6 +498,11 @@ pub(crate) struct PackRegistrationParts {
     pub(super) arc: Arc<FileAnalysis>,
     pub(super) feed: Vec<(String, bool)>,
     pub(super) specs: Vec<(String, String)>,
+    /// Handler names (rail / hook definitions) — fed to the reverse index
+    /// under the file's PATH key, never to the def-candidate tables: a
+    /// route name is reachable by name, never offered as an identifier
+    /// nor a class-slot winner.
+    pub(super) handlers: Vec<String>,
     pub(super) surface: Option<crate::model::surface::Surface>,
 }
 
@@ -493,6 +517,9 @@ impl PackRegistrationParts {
     }
     pub(crate) fn specs(&self) -> &[(String, String)] {
         &self.specs
+    }
+    pub(crate) fn handlers(&self) -> &[String] {
+        &self.handlers
     }
     /// The projected surface — valid only BEFORE `record_surface` takes it.
     /// Panics after, rather than handing back an empty one: the caller that
@@ -511,8 +538,9 @@ impl PackRegistrationParts {
     /// tripwire-counted at its call sites.
     pub(crate) fn whole(arc: Arc<FileAnalysis>) -> Self {
         let (feed, specs) = ModuleIndex::prepare_pack_feed(&arc);
+        let handlers = ModuleIndex::handler_names(&arc);
         let surface = crate::model::surface::Surface::project(&arc);
-        PackRegistrationParts { arc, feed, specs, surface: Some(surface) }
+        PackRegistrationParts { arc, feed, specs, handlers, surface: Some(surface) }
     }
 
     /// Rehydrate a token from a warm stub — the persisted form of a prior
@@ -524,6 +552,7 @@ impl PackRegistrationParts {
             arc: Arc::new(stub.skeleton),
             feed: stub.feed,
             specs: stub.specs,
+            handlers: stub.handlers,
             surface: Some(stub.surface),
         }
     }

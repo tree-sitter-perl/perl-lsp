@@ -751,7 +751,7 @@ pub fn pack_symbol_diagnostics(
     idx: Option<&dyn CrossFileLookup>,
     index_settled: bool,
 ) -> Vec<Diagnostic> {
-    use crate::model::file_analysis::{MemberShape, MethodResolution, ScopeKind};
+    use crate::model::file_analysis::{HandlerOwner, MemberShape, MethodResolution, ScopeKind, SymbolDetail};
     let mut out = Vec::new();
     let pack = &analysis.pack;
     // Every per-class fact is derived ONCE per class, never per ref: a
@@ -1332,6 +1332,35 @@ pub fn pack_symbol_diagnostics(
                     .map(|r| serde_json::json!({ "row": [r.start.row, r.end.row] })),
                 ..Default::default()
             });
+        }
+    }
+
+    // ---- undefined rail name: a use on a named rail (`route('home')`)
+    // that no definition on that rail answers, here or in the settled
+    // index. Names a framework synthesizes (`Route::resource`) have no
+    // definition token, so the lane warns rather than errors.
+    if index_settled {
+        if let Some(idx) = idx {
+            let defines = |syms: &[crate::model::file_analysis::Symbol], owner: &HandlerOwner, name: &str| {
+                syms.iter().any(|s| {
+                    s.name == name && matches!(&s.detail, SymbolDetail::Handler { owner: o, .. } if o == owner)
+                })
+            };
+            for r in analysis.refs() {
+                if !matches!(r.kind, RefKind::DispatchCall { .. }) {
+                    continue;
+                }
+                let Some(owner @ HandlerOwner::Rail(rail)) = r.handler_owner() else { continue };
+                let name = r.target_name.as_str();
+                if defines(analysis.symbols(), owner, name) {
+                    continue;
+                }
+                if !crate::index::resolve::handler_definitions(owner, name, idx).is_empty() {
+                    continue;
+                }
+                push(&mut out, r.span, DiagnosticSeverity::WARNING, &format!("undefined-{rail}"),
+                    format!("Undefined {rail} '{name}'."));
+            }
         }
     }
 

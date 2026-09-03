@@ -50,6 +50,15 @@ mod imports;
 mod refs;
 mod collect;
 pub use target::*;
+/// Every definition of handler `(owner, name)` across the index — the ONE
+/// speller goto-def, the rail diagnostics and the hierarchy share.
+pub fn handler_definitions(
+    owner: &crate::model::file_analysis::HandlerOwner,
+    name: &str,
+    module_index: &dyn crate::model::file_analysis::CrossFileLookup,
+) -> Vec<RefLocation> {
+    imports::dispatch_handler_locations(owner, name, module_index)
+}
 pub use identity::*;
 pub use hierarchy::*;
 pub(crate) use imports::*;

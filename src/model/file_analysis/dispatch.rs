@@ -81,6 +81,13 @@ pub enum HandlerOwner {
     /// manifests, invocant matching) skips these; name+owner equality is
     /// the entire match.
     Global,
+    /// A NAMED flat namespace — one rail per kind of string-named
+    /// framework entity (Laravel route names, view names, config keys …),
+    /// declared by the overlay capture's suffix (`@def.handler.named.route`
+    /// / `@ref.dispatch.named.route`). Same rules as `Global` (no receiver,
+    /// name + owner equality is the match); the rail keeps a route name
+    /// and a same-spelled view name apart.
+    Rail(String),
 }
 
 // ---- Plugin namespace ----

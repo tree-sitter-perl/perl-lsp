@@ -410,7 +410,7 @@ impl FileAnalysis {
             // A Global handler's namespace is the whole program — there is
             // no class to gather stacked registrations under; the header
             // renders and the class-keyed gathers below find nothing.
-            HandlerOwner::Global => "",
+            HandlerOwner::Global | HandlerOwner::Rail(_) => "",
         };
 
         // Gather stacked registrations from this file first, then any

@@ -1729,9 +1729,21 @@ impl ModuleIndex {
         level: crate::model::file_analysis::Residency,
     ) -> PackRegistrationParts {
         let (feed, specs) = Self::prepare_pack_feed(&fa);
+        let handlers = Self::handler_names(&fa);
         let surface = crate::model::surface::Surface::project(&fa);
         fa.evict_to(level);
-        PackRegistrationParts { arc: Arc::new(fa), feed, specs, surface: Some(surface) }
+        PackRegistrationParts { arc: Arc::new(fa), feed, specs, handlers, surface: Some(surface) }
+    }
+
+    /// Every Handler symbol's name (rail definitions, hook registrations),
+    /// deduped — read from the WHOLE analysis before the strip.
+    pub(crate) fn handler_names(fa: &FileAnalysis) -> Vec<String> {
+        let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        fa.symbols()
+            .iter()
+            .filter(|s| matches!(s.kind, SymKind::Handler) && seen.insert(s.name.as_str()))
+            .map(|s| s.name.clone())
+            .collect()
     }
 
     pub fn register_symbols_stripping(
@@ -1757,7 +1769,7 @@ impl ModuleIndex {
         path: std::path::PathBuf,
         parts: PackRegistrationParts,
     ) {
-        let PackRegistrationParts { arc: analysis, feed, specs: specializes, surface: _ } = parts;
+        let PackRegistrationParts { arc: analysis, feed, specs: specializes, handlers, surface: _ } = parts;
         let feed = &feed;
         let specializes = &specializes;
         let path = std::fs::canonicalize(&path).unwrap_or(path);
@@ -1772,6 +1784,13 @@ impl ModuleIndex {
         // Unconditional: even a file declaring nothing registrable (an
         // include-only shim) must be reachable by whole-project sweeps.
         self.all_files.insert(cached.path.clone(), cached.clone());
+        // Handler names ride the reverse index under the path key (a
+        // re-registration purges its own earlier bucket entries first).
+        {
+            let key = cached.path.to_string_lossy();
+            self.core.edges.purge_module(&key);
+            self.core.edges.feed_handlers(&key, &handlers);
+        }
         for (name, is_class) in feed {
             let sym_name = name;
             let incoming_is_class = *is_class;
@@ -1869,6 +1888,7 @@ impl ModuleIndex {
         if self.all_files.remove(&canon).is_none() {
             return;
         }
+        self.core.edges.purge_module(&canon.to_string_lossy());
         // Symbols may be evicted on the resident copy, and rehydration
         // would fetch the WRONG generation after an edit persists — so the
         // inverse runs on the name list registration recorded, not on

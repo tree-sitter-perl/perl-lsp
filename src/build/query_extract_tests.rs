@@ -4966,3 +4966,59 @@ $m = [Sql\\ColumnController::class => 1];
         fa.pack.qualified_spellings
     );
 }
+
+/// The routes rail: `Route::get(…)->name('home')` declares the name on
+/// `Rail("route")`; `route('home')` / `redirect()->route('home')` use it;
+/// a group prefix (`->name('admin.')`) declares nothing; and a WordPress
+/// hook spelled `home` (the Global rail) does not connect — rails are
+/// namespaces, not one flat hook space.
+#[cfg(feature = "php")]
+#[test]
+fn php_laravel_route_names_connect_on_their_own_rail() {
+    let src = "\
+<?php
+use Illuminate\\Support\\Facades\\Route;
+Route::get('/', [HomeController::class, 'index'])->name('home');
+Route::prefix('/admin')->name('admin.')->group(function () {});
+function go() { return redirect()->route('home'); }
+function url() { return route('home', ['x' => 1]); }
+add_action('home', 'cb');
+do_action('home');
+";
+    let (fa, _) = php_fa(src);
+    assert!(
+        !fa.symbols().iter().any(|s| s.name == "admin."),
+        "a group prefix is not a route name"
+    );
+    let resolved = crate::index::resolve::resolve_symbol(
+        &fa,
+        tree_sitter::Point { row: 5, column: 32 },
+        None,
+    );
+    let target = match resolved {
+        Some(crate::index::resolve::ResolvedTarget::Target(t)) => t,
+        other => panic!("route('home') must mint the rail target: {other:?}"),
+    };
+    assert!(
+        matches!(
+            &target.kind,
+            crate::index::resolve::TargetKind::Handler {
+                owner: crate::model::file_analysis::HandlerOwner::Rail(rail),
+                name
+            } if name == "home" && rail == "route"
+        ),
+        "route rail identity: {target:?}"
+    );
+    let locs = crate::index::resolve::refs_to_in_file(
+        &crate::index::file_store::FileStore::new(),
+        None,
+        &target,
+        &crate::index::file_store::FileKey::Path(std::path::PathBuf::from("/app/routes/web.php")),
+        &fa,
+        crate::index::resolve::RoleMask::VISIBLE,
+    );
+    let mut rows: Vec<usize> = locs.iter().map(|l| l.span.start.row).collect();
+    rows.sort();
+    assert_eq!(rows, vec![2, 4, 5], "declaration + both uses, never the hook: {locs:?}");
+    assert!(locs.iter().all(|l| l.rewritable), "rename rewrites inside quotes: {locs:?}");
+}

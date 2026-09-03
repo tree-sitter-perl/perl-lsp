@@ -208,6 +208,10 @@ pub struct SkeletonAnalysis {
     /// Fold-only regions (`@fold` / `@fold.comment`, the bool = comment);
     /// joined with the scopes into `fold_ranges`.
     pub fold_regions: Vec<(crate::model::file_analysis::Span, bool)>,
+    /// Rail-suffixed handler defs / dispatch refs (`@def.handler.named.<rail>`,
+    /// `@ref.dispatch.named.<rail>`): the token span → the rail name. Read
+    /// at mint time to give the Handler / DispatchCall a `HandlerOwner::Rail`.
+    pub rails: Vec<(crate::model::file_analysis::Span, String)>,
     /// Domain-typing sites: a `@domain.slot` field access compared/assigned
     /// against a `@domain.value` token. Raw (value's enum resolves cross-file
     /// at query time); folds onto `Field{owner, name}` for the int-used-as-enum
@@ -461,6 +465,14 @@ impl SkeletonAnalysis {
     /// nothing but capture events. The existence proof that the engine
     /// is language-agnostic above this seam.
     pub fn into_file_analysis(mut self) -> crate::model::file_analysis::FileAnalysis {
+        let rails = std::mem::take(&mut self.rails);
+        let rail_owner = |span: Span| -> crate::model::file_analysis::HandlerOwner {
+            rails
+                .iter()
+                .find(|(s, _)| *s == span)
+                .map(|(_, rail)| crate::model::file_analysis::HandlerOwner::Rail(rail.clone()))
+                .unwrap_or(crate::model::file_analysis::HandlerOwner::Global)
+        };
         use crate::model::file_analysis::{
             FileAnalysis, FileAnalysisParts, SymKind, Symbol, SymbolDetail, SymbolId,
         };
@@ -658,10 +670,10 @@ impl SkeletonAnalysis {
                 scope: s.scope,
                 package: s.package.clone(),
                 detail: if s.kind == "handler" {
-                    // Global owner: pack hook namespaces are flat (WP hooks) —
-                    // the string alone is the identity, no receiver class.
+                    // Flat namespaces (WP hooks: Global; a Laravel rail: its
+                    // name) — the string alone is the identity, no receiver.
                     SymbolDetail::Handler {
-                        owner: crate::model::file_analysis::HandlerOwner::Global,
+                        owner: rail_owner(Span { start: s.name_start, end: s.name_end }),
                         dispatchers: Vec::new(),
                         params: Vec::new(),
                     }
@@ -1167,7 +1179,7 @@ impl SkeletonAnalysis {
                     // registrations by name+owner equality.
                     "dispatch" => {
                         binding = Some(RefBinding::Handler {
-                            owner: crate::model::file_analysis::HandlerOwner::Global,
+                            owner: rail_owner(Span { start: r.start, end: r.end }),
                             sym: None,
                         });
                         RefKind::DispatchCall {

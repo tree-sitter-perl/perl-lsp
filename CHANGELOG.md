@@ -248,6 +248,16 @@ templates). Market case and build-out plan in `docs/prompt-php-target.md`.
   member, never a local; `...$args` declares its parameter; a variable
   inside `isset` / `empty` / `unset` is the existence question. composer:
   35 undefined-variable rows → 0; WordPress 24 → 2.
+- **Laravel route names are a rail.** `Route::get(…)->name('home')`
+  declares the name, `route('home')`, `to_route`, `redirect()->route`,
+  `URL::route` and `Route::has` use it: goto-definition, references and
+  rename connect them across files, and `undefined-route` warns on a
+  name no routes file declares. A rail is a named flat handler namespace
+  (`HandlerOwner::Rail`, declared by the overlay capture's suffix), so a
+  route name and a same-spelled WordPress hook or view name never
+  connect. Handler names — a hook, a route — now reach the reverse
+  index from classless files (a routes file declares no class), which
+  also makes WordPress hook navigation work across files.
 - **Signature help.** `$obj->method(` and `Foo::method(` on PHP now show
   the declaration's parameter list with the active parameter, the return
   annotation, and the docblock summary, for local and cross-file
