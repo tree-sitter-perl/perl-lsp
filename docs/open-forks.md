@@ -421,7 +421,14 @@ Format per entry:
 ## Union types in the lattice — 2026-09-02 — OPEN (Claude)
 - **Context:** php round 5 (composer): `@return list<CompletePackage|CompleteAliasPackage>` — a union INSIDE a generic — leaves the foreach var dark on every verb (hover/gd/refs/rename/completion), isolated against a working `list<Single>` control. `InferredType` has no union; `phpdoc_type` rejects a two-armed spelling ("a two-armed claim is not a type answer") and `php_annot_type` returns `None` for `A|B`, so the whole element type drops.
 - **Options:** A — stay dark (status quo; honest, but composer's package-loading core path is exactly this shape). B — a `Union(Vec<InferredType>)` variant: dispatch = the INTERSECTION of the arms' member sets, hover renders `A|B`, `element_at`/projections map over the arms; a lattice change (bincode append, cache bump) touching every reducer that matches on `InferredType`. C — "first class arm wins" as a display-only heuristic: wrong for members the second arm lacks, cheap.
-- **Picked:** A for now (nothing changed).
+- **Picked:** A, sharpened (2026-09-03): a union is KNOWN untypable —
+  `php_annot_type` answers `InferredType::Unknown` for two or more
+  non-null arms (a doc row, a declared `A|B`, a nested element), the
+  value rides every chase (a call, a copy, a return arm: the arm fold
+  reads it as a disagreement instead of electing the arms that resolved)
+  and the registry boundary projects it to `None`, so no renderer sees it
+  and the member lanes stay silent on it. Still dark on hover; B remains
+  the real answer.
 - **Undo cost:** B is a slice with its own gold rows; C is an afternoon and a documented lie.
 - **Discussion needed:** is B worth its blast radius? `?T` (`Optional`) already exists as a one-armed union; the general case is the question.
 
@@ -513,3 +520,33 @@ Format per entry:
   (`docs/open-forks.md`, "Union types in the lattice") land — the two
   are the same lattice change with opposite member semantics, and doing
   one without the other bakes an asymmetry into `InferredType`.
+
+## Negative narrowing: `is_wp_error()` exit guards — 2026-09-03 — OPEN (Claude)
+- **Context:** WordPress guards a `WP_Term|WP_Error` value with
+  `if ( is_wp_error( $term ) ) { return $term; }` and reads
+  `$term->term_id` after it. `is_wp_error` carries
+  `@phpstan-assert-if-true WP_Error $thing`. The narrowing tier handles
+  `instanceof` and the pack's `narrow_assertions` (`assert`), and a
+  negated exit for those shapes; it has no "not T" value, so a call guard
+  whose assertion lives on the CALLEE's docblock (another file) narrows
+  nothing. With a union now known-untypable (`InferredType::Unknown`)
+  the read stays silent in the lane when the value came from the union;
+  the rows that remain are the ones where a branch assigned `new
+  WP_Error(...)` and the exit guard should have taken that arm away
+  (taxonomy.php `get_term_link`, wp-login `$user->ID`: 9 rows).
+- **Options:** A — a negative lattice value (`InferredType::Not(Box<T>)`
+  or a region witness "everything but T") the fold applies to the after
+  region, plus reading `@phpstan-assert-if-true` / `@phpstan-assert-if-false`
+  / `@phpstan-assert` off the callee's doc facts through the registry at
+  query time (the callee is cross-file). B — an approximation at query
+  time only: when the after region opens on a value whose class IS the
+  asserted class, answer `Unknown` there; when it is anything else, leave
+  it. C — nothing: the rows are honest under "path-insensitive; branch
+  assignment stands".
+- **Picked:** C for now — nine rows, and A is the same lattice change as
+  unions/intersections (docs/open-forks.md, "Union types in the
+  lattice"), which should land as one design.
+- **Undo cost:** none; B is contained in the narrowing tier and the
+  php doc facts.
+- **Discussion needed:** whether the lattice grows a negative value at
+  all, or narrowing stays positive-only and unions carry the residual.

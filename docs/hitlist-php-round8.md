@@ -92,7 +92,12 @@ half. `module_declaring_method_in_package` runs 382 times to
 conclude nothing each time — cheap here (0.2 ms), a memo candidate at
 scale.
 
-## Residual — a value read of a method-only name (2026-09-03)
+## LANDED — a value read of a method-only name (2026-09-03)
+
+Landed in eb320a4: a strict pack's written member shape reaches goto-def
+and hover (`identity.rs` mints the shape on a cursor-side method-call
+ref; `member_value_type` skips the method arm for a value read).
+
 
 `$this->session->store` where the class declares only `session()`: the
 diagnostics lane now reports the undeclared property (php's syntax
