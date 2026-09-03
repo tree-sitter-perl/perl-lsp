@@ -694,6 +694,29 @@
     right: [(name) (qualified_name)] @narrow.type)
   "&&"
   right: (_) @narrow.within)
+; A longer `&&` chain nests left: `A instanceof X && B && C` is
+; `((A instanceof X) && B) && C`, so the guard sits one or two levels
+; down the left spine and every later operand holds under it.
+(binary_expression
+  left: (binary_expression
+    left: (binary_expression
+      left: (variable_name) @narrow.var
+      "instanceof" @narrow.guard
+      right: [(name) (qualified_name)] @narrow.type)
+    "&&")
+  "&&"
+  right: (_) @narrow.within)
+(binary_expression
+  left: (binary_expression
+    left: (binary_expression
+      left: (binary_expression
+        left: (variable_name) @narrow.var
+        "instanceof" @narrow.guard
+        right: [(name) (qualified_name)] @narrow.type)
+      "&&")
+    "&&")
+  "&&"
+  right: (_) @narrow.within)
 (conditional_expression
   condition: [
     (binary_expression

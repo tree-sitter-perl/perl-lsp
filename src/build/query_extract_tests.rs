@@ -4923,3 +4923,46 @@ class Queue {
     assert_eq!(fa.total_inferred_return(sym("maybe")), None, "maybe(): a null arm");
     assert_eq!(fa.total_inferred_return(sym("name")), Some(InferredType::String));
 }
+
+
+/// A three-operand `&&` chain: the guard narrows every later operand, not
+/// only the second (`(A instanceof X && B) && C` nests left).
+#[cfg(feature = "php")]
+#[test]
+fn php_instanceof_narrows_later_operands_of_a_longer_and_chain() {
+    let src = "\
+<?php
+function f($p) {
+    if ($p instanceof User && !$p instanceof Alias && $p->getFunding()) {
+        return 1;
+    }
+}
+";
+    let (fa, _) = php_fa(src);
+    use crate::model::file_analysis::InferredType;
+    let third = tree_sitter::Point { row: 2, column: 55 };
+    assert_eq!(
+        fa.inferred_type_via_bag("$p", third),
+        Some(InferredType::ClassName("User".into())),
+        "the third operand holds under the guard",
+    );
+}
+
+/// `Sql\Column::class` spells the `Sql` head: the import that head binds is
+/// used (the unused-import lane reads `qualified_spellings`).
+#[cfg(feature = "php")]
+#[test]
+fn php_class_literal_with_a_qualified_head_records_the_spelling() {
+    let src = "\
+<?php
+namespace App;
+use App\\Controllers\\Sql;
+$m = [Sql\\ColumnController::class => 1];
+";
+    let (fa, _) = php_fa(src);
+    assert!(
+        fa.pack.qualified_spellings.iter().any(|(leaf, prefix)| leaf == "ColumnController" && prefix == "Sql"),
+        "{:?}",
+        fa.pack.qualified_spellings
+    );
+}

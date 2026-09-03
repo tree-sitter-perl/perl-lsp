@@ -963,3 +963,28 @@ another file and not imported:
 Before the slice we offered four items and no `Greeter` at all: the
 identifier universe of a pack was gated on an include closure, which a
 name-keyed language never has.
+
+### phpmyadmin and composer, first sweep (2026-09-03, 10:30, build 053bf62)
+
+Two corpora the day had not swept, hint severity, fresh cache:
+
+| corpus | files · cold wall | unresolved-method | undefined-property | undefined-type | undefined-variable | unused-import | unused-variable | deprecated | arity | missing-return-type |
+|---|---|---|---|---|---|---|---|---|---|---|
+| phpmyadmin | 1,232 · 9.5 s | 393 → 392 | 7 | 4,210 | 2 | 32 → 0 | 1 | 667 | 8 | 0 |
+| composer | 622 · 4.9 s | 45 → 44 | 2 | 2,548 | 35 | 19 | 132 | 15 | 3 | 13 |
+| Slim | — | 0 | 0 | 1,285 | 0 | 5 | 4 | 0 | 0 | 5 |
+
+phpmyadmin's `deprecated` rows are true: 661 of them are its own
+`DatabaseInterface::getInstance()`, marked `@deprecated` in the source.
+Its `unresolved-method` rows are the mock residual (`expects` on a
+`MockObject`, the open intersection fork). The two fixes the sweep paid
+for: an import used only as a namespace head inside `Sql\Column::class`
+was flagged unused (the class-literal path did not record its qualified
+spelling), and an `instanceof` guard narrowed the second operand of an
+`&&` chain but not the third (`$package instanceof CompletePackageInterface
+&& !$package instanceof AliasPackage && $package->getFunding()` — the
+chain nests left, so the guard sits two levels down). Left parked with
+evidence: by-ref out-parameters read as undefined variables (2 of 4
+sampled composer rows). Slim's five `unused-import` rows are all true
+(`use function htmlentities` never called, an aliased `PHPUnitTestCase`
+never spelled, `dirname`, `RuntimeException`, `stdClass` unused).

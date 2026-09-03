@@ -1889,6 +1889,16 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                     .find(|x| x.match_id == e.match_id && x.cap == "classref.name")
                     .map(|x| (pack.shape_name)("ref.call", &x.text));
                 if let Some(name) = name {
+                    // A qualified spelling (`Sql\Column::class`) spells its
+                    // head — the import that head binds is USED here, the
+                    // same fact a qualified call records.
+                    if let Some(q) = e.text.split("::").next() {
+                        let raw = q.trim().strip_suffix(name.as_str()).unwrap_or_default();
+                        let prefix = raw.trim_end_matches('\\').to_string();
+                        if !prefix.is_empty() {
+                            out.qualified_spellings.push((name.clone(), prefix));
+                        }
+                    }
                     let span = Span { start: e.start, end: e.end };
                     lit_spans.push((e.start_byte, e.end_byte, span));
                     out.witnesses.push(crate::model::witnesses::Witness {

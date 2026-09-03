@@ -513,6 +513,14 @@ marked otherwise; the drain re-derived each rationale against current code.
   `SWEEP_PROVIDERS`) for the heatmap's walk loop, and give the heatmap's
   session the walk's index id — not the matcher, which is already
   row-narrowed (the pack tier's own-row-store pre-prune already landed).
+- **PHP by-ref out-parameters read as undefined variables** (composer, 2 of
+  4 sampled `undefined-variable` rows): `$process->execute($cmd, $output)`
+  defines `$output` through `execute($command, &$output = null)`, and
+  `preg_match($p, $s, $m)` defines `$m` through a builtin we carry no stub
+  for. The lane sees a first read. Unblock: by-ref positions on the
+  callee's declaration (`ParamArity`-adjacent, from the `by_ref` node) plus
+  the argument's position at the call (per-argument spans the skeleton
+  does not keep today), and honest silence for an unresolvable callee.
 - **PHP method names are case-insensitive; the lookup is exact** (monolog
   dogfood, one row): `$formatter->indentStackTraces()` on a method declared
   `indentStacktraces()` reports unresolved. `symbols_named` and the

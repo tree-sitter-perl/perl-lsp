@@ -361,6 +361,10 @@ templates). Market case and build-out plan in `docs/prompt-php-target.md`.
   visible class) gets a hint and an "Add return type" quick-fix; a `null`
   arm, an ambiguous numeric, a fluent `return $this` and closures stay
   silent.
+- An `instanceof` guard narrows every later operand of its `&&` chain
+  (`$p instanceof User && !$p instanceof Alias && $p->getFunding()`), not
+  only the second; and `Sql\Column::class` counts as a use of the `Sql`
+  import (phpmyadmin: 32 unused-import rows → 0).
 - A php `parent::` call under a same-leaf alias (`use App\Base\Manager as
   BaseManager; class Manager extends BaseManager`) is checked against the
   parent's declaration, not the child's own.
