@@ -1113,3 +1113,33 @@ Two defects the corpus found before the tests did: the def dedup kept
 one handler per token (a listener's `handle(Liked $e)` lost `Liked` to
 its own class's job handler), and the emission's companion ref won the
 cursor tie over the class token's own ref (goto-def lost the class).
+
+### Round 3 — path-defined rails (2026-09-03, 18:15, build under net r121)
+
+BookStack (3,530 files indexed, the real vendor tree; 1,088 `view()` /
+`config()` / `trans()` uses in PHP, 400 in templates), `--check` cold,
+two runs:
+
+| rail | misses | what they are |
+|---|---|---|
+| view | 0 | — |
+| event | 0 | — |
+| lang | 1 | `trans('entities.comment_deleted')` in `CommentController` — the key does not exist (`comment_deleted_success` does): a real BookStack defect the lane found |
+| route | 5 | four framework-default names the vendor tree uses and the app never declares (`login`, `password.reset`, `verification.verify`); two are `$this->route('id')` in a FormRequest — a route PARAMETER read, the member form's receiver unpinned (fixed in round 4's overlay) |
+| config | 213 | BookStack keeps its config under `app/Config/`, not `/config/`; the path rail is Laravel's layout, not a per-project setting yet (a workspace-config seam, parked) |
+
+Both runs agree row for row on the rails. Before the reverse-index
+replay fix the same probe gave view 13–35 and lang 39–96 across runs
+(single-threaded 11 / 39): `rebuild_reverse_index` cleared the edge maps
+and replayed only the module-keyed feeds, so a path-keyed handler feed
+(every classless routes / config / lang file) vanished whenever the
+rebuild raced the bulk index. The path feeds are now recorded and
+replayed with the rest.
+
+Silence rules the corpus wrote: a name ending in `.` / `_` / `-` is a
+prefix the caller concatenates onto (`view('auth.parts.login-form-' .
+$kind)`); a name containing `::` is a package-namespaced view
+(`errors::minimal`) whose provider is outside the path rails; a
+translation key without a dot is a JSON-file string (`__('to')`); an
+`X::dispatch(Consts::EVENT)` emission carries no dispatcher and the
+lane treats it as unnameable.

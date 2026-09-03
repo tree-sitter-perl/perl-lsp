@@ -269,6 +269,17 @@ templates). Market case and build-out plan in `docs/prompt-php-target.md`.
   `handle` counts the emissions as incoming calls; `undefined-event`
   hints "No listener for event 'X'" on an emission nothing answers.
   The rail is never renamed — the class rename owns the name.
+- **Views, config keys and translation keys are rails defined by
+  files.** A Blade template defines its view name from its path
+  (`resources/views/a/b.blade.php` → `a.b`), a config file's array keys
+  define dotted keys (`config/app.php` → `app.mail.from`), a lang file's
+  keys define translation keys per locale; `view('a.b')`, `@extends`,
+  `@include`, `config('app.name')`, `Config::get`, `__('auth.failed')`,
+  `trans`, `@lang` use them — goto-definition lands on the template or
+  the key row, references list every use (templates included), and
+  `undefined-view` / `undefined-config` / `undefined-lang` name what no
+  file defines. A translation string with spaces is a JSON-file string,
+  never a key path.
 - **Signature help.** `$obj->method(` and `Foo::method(` on PHP now show
   the declaration's parameter list with the active parameter, the return
   annotation, and the docblock summary, for local and cross-file

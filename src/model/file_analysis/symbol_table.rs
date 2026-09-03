@@ -212,6 +212,22 @@ impl<'a> IntoIterator for &'a SymbolTable {
 impl FileAnalysis {
     /// Every symbol this file declares. Empty on an evicted copy — see
     /// `symbols_are_evicted`.
+
+    /// Adopt build-time symbols minted after assembly (the driver's path
+    /// rails): ids assigned in order, indexed, and sealed into the
+    /// enrichment baseline — facts of the build, not enrichment.
+    pub fn adopt_path_symbols(&mut self, symbols: Vec<Symbol>) {
+        if symbols.is_empty() {
+            return;
+        }
+        for mut s in symbols {
+            s.id = SymbolId(self.symbols.len() as u32);
+            self.symbols.push(s);
+        }
+        self.symbols.rebuild_indices();
+        self.symbols.seal_baseline();
+    }
+
     pub fn symbols(&self) -> &[Symbol] {
         self.symbols.as_slice()
     }

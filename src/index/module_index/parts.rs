@@ -131,6 +131,9 @@ pub struct ModuleEdgeIndexes {
     /// (re-feeds are exactly when it's needed); `remove_path_record` drops
     /// it when the file itself goes.
     name_records: DashMap<std::path::PathBuf, FedNames>,
+    /// Path key → the handler names it fed (rail / hook definitions), kept
+    /// across `clear` like `name_records`, replayed by the rebuild.
+    handler_records: DashMap<String, Vec<String>>,
     /// Every module name `feed` has published edges under, and — the point
     /// — WHICH bucket keys it was published under in each map, so
     /// `purge_module` touches only its own edges.
@@ -199,6 +202,7 @@ impl ModuleEdgeIndexes {
             specs: DashMap::new(),
             providers: DashMap::new(),
             name_records: DashMap::new(),
+            handler_records: DashMap::new(),
             fed_modules: DashMap::new(),
         }
     }
@@ -264,9 +268,14 @@ impl ModuleEdgeIndexes {
     /// → `visible_def_candidates(key)` reaches the file like any module.
     /// Marks the member fed, so `purge_module(key)` clears it.
     pub fn feed_handlers(&self, module_key: &str, names: &[String]) {
+        // Recorded per path key so a rebuild (`clear` + re-feed from the
+        // name-keyed cache, which never holds a path key) replays it —
+        // the `name_records` rule for the handler axis.
         if names.is_empty() {
+            self.handler_records.remove(module_key);
             return;
         }
+        self.handler_records.insert(module_key.to_string(), names.to_vec());
         let mut fed = FedKeys::default();
         for name in names {
             fed.names.insert(name);
@@ -401,6 +410,17 @@ impl ModuleEdgeIndexes {
     /// Drop `path`'s recorded name list (the file itself is gone).
     pub fn remove_path_record(&self, path: &std::path::Path) {
         self.name_records.remove(path);
+        self.handler_records.remove(&*path.to_string_lossy());
+    }
+
+    /// Replay every recorded handler feed — the rebuild's second half,
+    /// after the name-keyed re-feed.
+    pub fn replay_handler_records(&self) {
+        let records: Vec<(String, Vec<String>)> =
+            self.handler_records.iter().map(|e| (e.key().clone(), e.value().clone())).collect();
+        for (key, names) in records {
+            self.feed_handlers(&key, &names);
+        }
     }
 
     /// Wipe the edge maps for a rebuild. Deliberately KEEPS `name_records`

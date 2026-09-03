@@ -1,7 +1,21 @@
 {
   "language": "php",
   "text_rails": [
-    { "rail": "route", "calls": ["route", "to_route"], "files": [".blade.php"] }
+    { "rail": "route", "calls": ["route", "to_route"], "files": [".blade.php"] },
+    { "rail": "view", "calls": ["view", "@extends", "@include", "@includeIf", "@includeWhen", "@includeFirst", "@each", "@component"], "files": [".blade.php"] },
+    { "rail": "config", "calls": ["config"], "files": [".blade.php"] },
+    { "rail": "lang", "calls": ["__", "trans", "trans_choice", "@lang", "@choice"], "files": [".blade.php"], "requires": "." }
   ],
-  "labels": { "event": "No listener for event" }
+  "path_rails": [
+    { "rail": "view", "under": "/resources/views/", "strip": ".blade.php", "sep": "." },
+    { "rail": "config", "under": "/config/", "strip": ".php", "sep": ".", "keys": true },
+    { "rail": "lang", "under": "/lang/", "skip": 1, "strip": ".php", "sep": ".", "keys": true },
+    { "rail": "lang", "under": "/resources/lang/", "skip": 1, "strip": ".php", "sep": ".", "keys": true }
+  ],
+  "labels": {
+    "event": "No listener for event",
+    "view": "Undefined view",
+    "config": "Undefined config key",
+    "lang": "Undefined translation key"
+  }
 }

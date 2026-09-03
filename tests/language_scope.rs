@@ -1720,3 +1720,44 @@ fn php_laravel_event_bus_across_files() {
     assert!(ch.contains("Likes.php") || ch.contains("like"), "the emission is an incoming call: {ch}");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Path-defined rails: a Blade file defines its view name, a config file's
+/// array keys define dotted config keys, a lang file's keys define
+/// translation keys — goto-def from `view('home')` lands on the template,
+/// from `config('app.name')` on the key, and a name no file defines is
+/// reported on its rail.
+#[cfg(feature = "php")]
+#[test]
+fn php_laravel_path_rails_views_config_lang() {
+    let dir = std::env::temp_dir().join(format!("perl-lsp-lrpath-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    for d in ["app", "resources/views/pages", "config", "lang/en"] {
+        std::fs::create_dir_all(dir.join(d)).unwrap();
+    }
+    let w = |rel: &str, src: &str| std::fs::write(dir.join(rel), src).unwrap();
+    w("composer.json", "{\"autoload\": {\"psr-4\": {\"App\\\\\": \"app/\"}}}");
+    w("resources/views/pages/home.blade.php", "<h1>{{ __('auth.failed') }}</h1>\n@include('pages.missing')\n");
+    w("config/app.php", "<?php\nreturn [\n    'name' => 'Koel',\n    'mail' => [\n        'from' => 'a@b',\n    ],\n];\n");
+    w("lang/en/auth.php", "<?php\nreturn [\n    'failed' => 'These credentials do not match.',\n];\n");
+    w("app/Home.php", "<?php\nnamespace App;\nclass Home\n{\n    public function index() { return view('pages.home', ['n' => config('app.mail.from')]); }\n    public function lost() { return view('pages.nope') . config('app.nope') . __('auth.nope') . __('Plain sentence here'); }\n}\n");
+    let run = |args: &[&str]| {
+        let out = std::process::Command::new(env!("CARGO_BIN_EXE_perl-lsp"))
+            .args(args)
+            .env("XDG_CACHE_HOME", dir.join(".cache"))
+            .output()
+            .expect("run");
+        format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr))
+    };
+    let check = run(&["--check", dir.to_str().unwrap(), "--severity", "hint"]);
+    let rows: Vec<&str> = check.lines().filter(|l| l.contains("[undefined-view]") || l.contains("[undefined-config]") || l.contains("[undefined-lang]")).collect();
+    assert_eq!(rows.len(), 4, "{check}");
+    assert!(check.contains("Undefined view 'pages.nope'") && check.contains("Undefined view 'pages.missing'"), "{check}");
+    assert!(check.contains("Undefined config key 'app.nope'") && check.contains("Undefined translation key 'auth.nope'"), "{check}");
+    assert!(!check.contains("Plain sentence"), "a JSON translation string is not a key: {check}");
+    let home = dir.join("app/Home.php");
+    let gd = run(&["--definition", dir.to_str().unwrap(), home.to_str().unwrap(), "4", "43"]);
+    assert!(gd.contains("resources/views/pages/home.blade.php"), "view → template: {gd}");
+    let gd = run(&["--definition", dir.to_str().unwrap(), home.to_str().unwrap(), "4", "75"]);
+    assert!(gd.contains("config/app.php:4:"), "config key → the nested key row: {gd}");
+    let _ = std::fs::remove_dir_all(&dir);
+}

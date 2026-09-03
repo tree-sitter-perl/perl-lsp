@@ -383,6 +383,9 @@ impl IndexCore {
                 self.edges.feed(entry.key(), &cached.path, &cached.analysis);
             }
         }
+        // Path-keyed handler feeds live outside the name-keyed cache; the
+        // records are their only source after the clear.
+        self.edges.replay_handler_records();
     }
 }
 

@@ -1786,7 +1786,12 @@ impl ModuleIndex {
         self.all_files.insert(cached.path.clone(), cached.clone());
         // Handler names ride the reverse index under the path key (a
         // re-registration purges its own earlier bucket entries first).
-        {
+        // A symbol-evicted copy registered WITHOUT handler evidence (the
+        // worker's stripped arc landing after the writer's parts) says
+        // nothing about the file's handlers: it must not erase the feed the
+        // whole copy made. Only evidence — names, or a copy whose symbols
+        // are present — re-derives the bucket.
+        if !handlers.is_empty() || !cached.analysis.symbols_are_evicted() {
             let key = cached.path.to_string_lossy();
             self.core.edges.purge_module(&key);
             self.core.edges.feed_handlers(&key, &handlers);
@@ -1889,6 +1894,7 @@ impl ModuleIndex {
             return;
         }
         self.core.edges.purge_module(&canon.to_string_lossy());
+        self.core.edges.remove_path_record(&canon);
         // Symbols may be evicted on the resident copy, and rehydration
         // would fetch the WRONG generation after an edit persists — so the
         // inverse runs on the name list registration recorded, not on

@@ -106,6 +106,33 @@ pub struct TextRail {
     pub rail: String,
     pub calls: Vec<String>,
     pub files: Vec<String>,
+    /// A substring every name must contain (`"."` for translation keys —
+    /// a bare word is a JSON translation STRING, not a key path).
+    #[serde(default)]
+    pub requires: Option<String>,
+}
+
+/// One path rail: a file whose path contains `under` DEFINES a name on
+/// `rail` — the rest of the path, `skip` leading segments dropped (a
+/// locale), `strip` removed from the end, separators joined by `sep`
+/// (`resources/views/a/b.blade.php` → `a.b`). With `keys`, the file's
+/// returned-array string keys extend that name (`config/app.php` →
+/// `app.name`, nested keys dotted) instead of the file naming itself.
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct PathRail {
+    pub rail: String,
+    pub under: String,
+    #[serde(default)]
+    pub skip: usize,
+    #[serde(default)]
+    pub strip: String,
+    #[serde(default = "default_sep")]
+    pub sep: String,
+    #[serde(default)]
+    pub keys: bool,
+}
+fn default_sep() -> String {
+    ".".to_string()
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -113,10 +140,36 @@ struct RailsDoc {
     language: String,
     #[serde(default)]
     text_rails: Vec<TextRail>,
+    #[serde(default)]
+    path_rails: Vec<PathRail>,
     /// rail → how the undefined-name lane phrases a miss (`"event": "No
     /// listener for event"`); default `Undefined <rail>`.
     #[serde(default)]
     labels: std::collections::HashMap<String, String>,
+}
+
+/// The path rails in force for a language, from the bundled rail documents.
+pub fn path_rails_for(pack: &LangPack) -> std::sync::Arc<Vec<PathRail>> {
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex, OnceLock};
+    static CACHE: OnceLock<Mutex<HashMap<String, Arc<Vec<PathRail>>>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let key = pack.lang_id.to_string();
+    let mut guard = cache.lock().unwrap();
+    if let Some(l) = guard.get(&key) {
+        return Arc::clone(l);
+    }
+    let mut out: Vec<PathRail> = Vec::new();
+    for src in pack.bundled_rail_docs {
+        if let Ok(doc) = serde_json::from_str::<RailsDoc>(src) {
+            if doc.language == pack.lang_id {
+                out.extend(doc.path_rails);
+            }
+        }
+    }
+    let arc = Arc::new(out);
+    guard.insert(key, Arc::clone(&arc));
+    arc
 }
 
 /// rail → the lane phrasing for a miss, from the bundled rail documents.

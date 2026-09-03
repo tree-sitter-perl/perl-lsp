@@ -398,6 +398,8 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     // handler in the same match (a listener's `handle(X $e)` is a handler
     // named `X` sitting on the method's name token).
     let mut handler_name_by_match: HashMap<usize, String> = HashMap::new();
+    // `@key.elem` — the array element a `@def.handler.key` string heads.
+    let mut key_elem_by_match: HashMap<usize, Span> = HashMap::new();
     // `@seq.source` — a foreach's collection (span + text), joined to the
     // same match's `@def.var` so the bound var carries the ELEMENT peel;
     // `@seq.source.key` is the pair form's KEY twin (the Key step).
@@ -472,6 +474,9 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
         }
         if e.cap == "handler.name" {
             handler_name_by_match.insert(e.match_id, e.text.clone());
+        }
+        if e.cap == "key.elem" {
+            key_elem_by_match.insert(e.match_id, Span { start: e.start, end: e.end });
         }
         if e.cap == "seq.source.key" {
             seq_key_by_match.insert(
@@ -1127,6 +1132,16 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                 });
             }
             "handler.name" => {}
+            "key.elem" => {}
+            "def.handler.key" => {
+                if let Some(elem) = key_elem_by_match.get(&e.match_id) {
+                    out.key_defs.push(crate::build::query_extract::KeyDef {
+                        key: e.text.clone(),
+                        key_span: Span { start: e.start, end: e.end },
+                        elem_span: *elem,
+                    });
+                }
+            }
             cap if cap.ends_with(".anchor") => {
                 // The anchor of an anonymous class is its construction site:
                 // `new class(...)` invokes the synthesized identity's

@@ -484,9 +484,13 @@ impl PackDriver {
                 // assembly consumes `skel` so phase 7 can interpret it against
                 // the FINAL FileAnalysis.
                 let return_sites = std::mem::take(&mut skel.return_sites);
+                let key_defs = std::mem::take(&mut skel.key_defs);
                 let mut fa = skel.into_file_analysis();
                 emit_return_fuel(&mut fa, &return_sites, pack.implicit_this_members);
                 self.register_post_build(&mut fa, &mut parser, source, path, &ctx, &recovered, macro_defs, &pack);
+                if let Some(p) = path {
+                    adopt_path_rails(&mut fa, p, &key_defs, &pack);
+                }
                 fa
             }
             Err(e) => {
@@ -701,6 +705,96 @@ impl PackDriver {
     }
 }
 
+/// Path rails: a file under a rail's directory DEFINES a name derived
+/// from its path (`resources/views/a/b.blade.php` → `a.b` on the view
+/// rail, a Handler at the file's first position so goto-def lands at the
+/// top), or — with `keys` — the prefix its returned array's string keys
+/// extend (`config/app.php` → `app.name`, nested keys dotted, each a
+/// Handler on the key token). Same Handler identity as every rail, so
+/// references, rename (string rails only) and the undefined-name lane
+/// come by construction.
+fn adopt_path_rails(
+    fa: &mut FileAnalysis,
+    path: &Path,
+    key_defs: &[crate::build::query_extract::KeyDef],
+    pack: &crate::build::query_extract::LangPack,
+) {
+    use crate::model::file_analysis::{HandlerOwner, Span};
+    use tree_sitter::Point;
+    let p = path.to_string_lossy().replace('\\', "/");
+    let rails = crate::build::query_extract::path_rails_for(pack);
+    let mut minted: Vec<(String, String, Span)> = Vec::new(); // (rail, name, span)
+
+    for rail in rails.iter() {
+        let Some(idx) = p.rfind(rail.under.as_str()) else { continue };
+        let rest = &p[idx + rail.under.len()..];
+        let mut segs: Vec<&str> = rest.split('/').filter(|s| !s.is_empty()).collect();
+        if segs.len() <= rail.skip {
+            continue;
+        }
+        segs.drain(..rail.skip);
+        let Some(last) = segs.last_mut() else { continue };
+        let Some(stem) = last.strip_suffix(rail.strip.as_str()) else { continue };
+        *last = stem;
+        let name = segs.join(rail.sep.as_str());
+        if name.is_empty() {
+            continue;
+        }
+        if !rail.keys {
+            let at = Span { start: Point { row: 0, column: 0 }, end: Point { row: 0, column: 0 } };
+            minted.push((rail.rail.clone(), name, at));
+            continue;
+        }
+        // keys: the dotted chain of enclosing elements' keys, then this key
+        for k in key_defs {
+            // outermost first: wider containers start earlier and end later
+            let mut ancestors: Vec<&crate::build::query_extract::KeyDef> = key_defs
+                .iter()
+                .filter(|o| o.elem_span != k.elem_span && o.elem_span.contains(&k.elem_span))
+                .collect();
+            ancestors.sort_by(|a, b| {
+                (a.elem_span.start.row, a.elem_span.start.column)
+                    .cmp(&(b.elem_span.start.row, b.elem_span.start.column))
+                    .then((b.elem_span.end.row, b.elem_span.end.column).cmp(&(a.elem_span.end.row, a.elem_span.end.column)))
+            });
+            let mut full = name.clone();
+            for a in ancestors {
+                full.push_str(rail.sep.as_str());
+                full.push_str(&a.key);
+            }
+            full.push_str(rail.sep.as_str());
+            full.push_str(&k.key);
+            minted.push((rail.rail.clone(), full, k.key_span));
+        }
+    }
+    if minted.is_empty() {
+        return;
+    }
+    let symbols: Vec<crate::model::file_analysis::Symbol> = minted
+        .into_iter()
+        .map(|(rail, name, span)| crate::model::file_analysis::Symbol {
+            id: crate::model::file_analysis::SymbolId(0),
+            name,
+            kind: crate::model::file_analysis::SymKind::Handler,
+            span,
+            selection_span: span,
+            scope: crate::model::file_analysis::ScopeId(0),
+            package: None,
+            detail: crate::model::file_analysis::SymbolDetail::Handler {
+                owner: HandlerOwner::Rail(rail),
+                dispatchers: Vec::new(),
+                params: Vec::new(),
+            },
+            namespace: crate::model::file_analysis::Namespace::Language,
+            presentation: crate::model::file_analysis::Presentation { hide_in_outline: true, ..Default::default() },
+            attributes: Vec::new(),
+            deref_stack: Vec::new(),
+            arity: None,
+        })
+        .collect();
+    fa.adopt_path_symbols(symbols);
+}
+
 /// `name('literal'` occurrences of a text rail's calls, as DispatchCall refs
 /// on the rail. A parsed region (`<?php echo route('x') ?>` inside a
 /// template) already minted its ref — a text hit at the same start yields
@@ -745,7 +839,10 @@ fn scan_text_rails(
                 let start = i + 1;
                 let Some(len) = source[start..].find('\'') else { continue };
                 let name = &source[start..start + len];
-                if name.is_empty() || name.contains('\\') || name.contains('\n') {
+                if name.is_empty() || name.contains('\\') || name.chars().any(char::is_whitespace) {
+                    continue;
+                }
+                if rail.requires.as_deref().is_some_and(|sub| !name.contains(sub)) {
                     continue;
                 }
                 let s = crate::build::cursor_sentinel::byte_to_point(source, start);
@@ -1424,6 +1521,7 @@ fn remap_spans(
         fold_regions,
         rails,
         class_rails,
+        key_defs,
         domain_sites,
         macro_returns: _,
         // Populated in enrich_skeleton (post-remap) already in original coords.
@@ -1586,6 +1684,10 @@ fn remap_spans(
     }
     for (span, _) in class_rails.iter_mut() {
         *span = rspan(*span);
+    }
+    for k in key_defs.iter_mut() {
+        k.key_span = rspan(k.key_span);
+        k.elem_span = rspan(k.elem_span);
     }
     for ds in domain_sites.iter_mut() {
         let crate::model::file_analysis::DomainSite { slot: _, value: _, slot_span } = ds;

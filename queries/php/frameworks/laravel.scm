@@ -152,7 +152,19 @@
   name: (name) @dispatch.via
   arguments: (arguments . (argument) @_lev_a1)
   (#any-of? @dispatch.via "dispatch" "dispatchIf" "dispatchUnless" "dispatchSync" "dispatchAfterResponse")
-  (#not-match? @_lev_a1 "^new\\s"))
+  (#not-match? @_lev_a1 "^new\\s")
+  (#not-match? @_lev_a1 "::"))
+; `Bus::dispatch(Events::X, …)` — a scope whose first argument is a class
+; CONSTANT names the event by a value the overlay cannot read; the
+; emission is minted with no dispatcher, which the diagnostics lane
+; reads as "unnameable" and stays silent on.
+(scoped_call_expression
+  scope: [(name) @ref.dispatch.class.event
+          (qualified_name (name) @ref.dispatch.class.event)]
+  name: (name) @_lev_via
+  arguments: (arguments . (argument) @_lev_a1)
+  (#any-of? @_lev_via "dispatch" "dispatchIf" "dispatchUnless" "dispatchSync" "dispatchAfterResponse")
+  (#match? @_lev_a1 "::"))
 
 ; listeners: `public function handle(X $event)` — any class's `handle`
 ; whose first parameter is typed; a job's `handle(Dependency $d)` mints a
@@ -211,3 +223,51 @@
         (name) @_lev_k3 .)))
   (#eq? @_lev_listen_mm "listen")
   (#eq? @_lev_k3 "class"))
+
+; ---- path-defined rails: views, config keys, translation keys ----
+; A string key heading an array element is a KEY CANDIDATE; the driver
+; promotes it to a rail name when the file's path rail says so
+; (`config/app.php` → `app.name`, `lang/en/auth.php` → `auth.failed`).
+(array_element_initializer
+  . (string . (string_content) @def.handler.key .)) @key.elem
+
+; `view('a.b')`, `View::make('a.b')`, `response()->view('a.b')`
+(function_call_expression
+  function: (name) @dispatch.via
+  arguments: (arguments . (argument (string . (string_content) @ref.dispatch.named.view .)))
+  (#eq? @dispatch.via "view"))
+(scoped_call_expression
+  scope: (name) @_lv_facade
+  name: (name) @dispatch.via
+  arguments: (arguments . (argument (string . (string_content) @ref.dispatch.named.view .)))
+  (#eq? @_lv_facade "View")
+  (#any-of? @dispatch.via "make" "exists" "first"))
+(member_call_expression
+  name: (name) @dispatch.via
+  arguments: (arguments . (argument (string . (string_content) @ref.dispatch.named.view .)))
+  (#eq? @dispatch.via "view"))
+; `config('app.name')` / `Config::get('app.name')`
+(function_call_expression
+  function: (name) @dispatch.via
+  arguments: (arguments . (argument (string . (string_content) @ref.dispatch.named.config .)))
+  (#eq? @dispatch.via "config"))
+(scoped_call_expression
+  scope: (name) @_lc_facade
+  name: (name) @dispatch.via
+  arguments: (arguments . (argument (string . (string_content) @ref.dispatch.named.config .)))
+  (#eq? @_lc_facade "Config")
+  (#any-of? @dispatch.via "get" "has" "set" "string" "integer" "boolean" "array"))
+; `__('auth.failed')`, `trans`, `trans_choice`, `Lang::get` — a key with
+; whitespace is a JSON translation STRING (`lang/en.json`), not a key path.
+((function_call_expression
+  function: (name) @dispatch.via
+  arguments: (arguments . (argument (string . (string_content) @ref.dispatch.named.lang .))))
+  (#any-of? @dispatch.via "__" "trans" "trans_choice")
+  (#match? @ref.dispatch.named.lang "^[A-Za-z0-9_/:-]+\\.[A-Za-z0-9_./:-]+$"))
+((scoped_call_expression
+  scope: (name) @_ll_facade
+  name: (name) @dispatch.via
+  arguments: (arguments . (argument (string . (string_content) @ref.dispatch.named.lang .))))
+  (#eq? @_ll_facade "Lang")
+  (#any-of? @dispatch.via "get" "has" "choice")
+  (#match? @ref.dispatch.named.lang "^[A-Za-z0-9_/:-]+\\.[A-Za-z0-9_./:-]+$"))

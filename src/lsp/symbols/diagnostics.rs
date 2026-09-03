@@ -1352,6 +1352,21 @@ pub fn pack_symbol_diagnostics(
                 }
                 let Some(owner @ (HandlerOwner::Rail(rail) | HandlerOwner::ClassRail(rail))) = r.handler_owner() else { continue };
                 let name = r.target_name.as_str();
+                // Silence: a name the lane cannot answer for. A trailing
+                // separator is a PREFIX the caller concatenates onto
+                // (`view('auth.parts.login-form-' . $kind)`); a `::` names
+                // a package-namespaced rail (`errors::minimal`) whose
+                // provider file lives outside the path rails; a class-keyed
+                // emission with no dispatcher (`Theme::dispatch(X::CONST)`)
+                // is an event the overlay could not name.
+                if name.ends_with(['.', '_', '-']) || name.contains("::") {
+                    continue;
+                }
+                if let (HandlerOwner::ClassRail(_), RefKind::DispatchCall { dispatcher }) = (owner, &r.kind) {
+                    if dispatcher.is_empty() {
+                        continue;
+                    }
+                }
                 if defines(analysis.symbols(), owner, name) {
                     continue;
                 }
