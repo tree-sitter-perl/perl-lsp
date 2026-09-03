@@ -521,6 +521,14 @@
 (scoped_property_access_expression
   scope: (name) @member.recv @ref.type
   name: (variable_name (name) @ref.member) @var.member) @hop.call
+; `$cls::$prop` / `$this->resource::$wrap` / `getBuilder()::$precision` — the
+; scope is an EXPRESSION whose value is the class (a `Foo::class` string, a
+; typed receiver): the same member lane; `@var.member` keeps the property
+; token from reading as a local variable.
+(scoped_property_access_expression
+  scope: [(variable_name) (member_access_expression) (scoped_property_access_expression)
+          (function_call_expression) (member_call_expression) (scoped_call_expression)] @member.recv
+  name: (variable_name (name) @ref.member) @var.member) @hop.call
 
 ; `new User(...)`: the value is an instance of User by SYNTAX — the ctor
 ; edge rides the alias graph (TypeName → the defining file, or the bare

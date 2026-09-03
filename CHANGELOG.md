@@ -336,7 +336,9 @@ templates). Market case and build-out plan in `docs/prompt-php-target.md`.
   constructor-promoted property (`__construct(protected $stream,
   protected &$container)`) declares the property, a spread argument
   (`...func_get_args()`) no longer reads as one argument, and a
-  `[$obj, 'name']` tuple names a method only when it resolves.
+  `[$obj, 'name']` tuple names a method only when it resolves. A static
+  property read through an expression (`$cls::$fields`,
+  `$this->resource::$wrap`) is the class's member, not a local variable.
 - **A php value read never means a method.** `$this->session` on a
   class declaring only `session()` is an undeclared property for the
   lane, goto-def and hover alike (Perl's accessor calls keep their

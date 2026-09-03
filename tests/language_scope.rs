@@ -1550,6 +1550,36 @@ fn php_promotion_spread_and_string_named_tuples() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// `$cls::$fields` — a static property through an expression scope — is a
+/// member read of the class the expression names, never a local variable.
+#[cfg(feature = "php")]
+#[test]
+fn php_static_property_through_an_expression_scope() {
+    let dir = std::env::temp_dir().join(format!("perl-lsp-d2sprop-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    let w = |rel: &str, src: &str| std::fs::write(dir.join(rel), src).unwrap();
+    w("composer.json", "{\"autoload\": {\"psr-4\": {\"App\\\\\": \"src/\"}}}");
+    w("src/Entity.php", "<?php\nnamespace App;\nclass Entity\n{\n    public static $fields = ['a'];\n    public static function make(): Entity { return new Entity(); }\n}\n");
+    w("src/Use.php", "<?php\nnamespace App;\nclass Use_\n{\n    public function f(Entity $e): array\n    {\n        $cls = Entity::class;\n        return [$cls::$fields, Entity::make()::$fields, $e::$fields];\n    }\n}\n");
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_perl-lsp"))
+        .args(["--check", dir.to_str().unwrap()])
+        .env("XDG_CACHE_HOME", dir.join(".cache"))
+        .output()
+        .expect("run");
+    let err = String::from_utf8_lossy(&out.stderr);
+    let rows: Vec<&str> = err.lines().filter(|l| l.contains(".php") && l.contains('[')).collect();
+    assert!(rows.is_empty(), "{err}");
+    let def = std::process::Command::new(env!("CARGO_BIN_EXE_perl-lsp"))
+        .args(["--definition", dir.to_str().unwrap(), "src/Use.php", "7", "24"])
+        .env("XDG_CACHE_HOME", dir.join(".cache"))
+        .output()
+        .expect("run");
+    let def = String::from_utf8_lossy(&def.stdout);
+    assert!(def.contains("Entity.php:4:"), "{def}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// Silence rules the corpora demanded: a trait's `$this` is the composing
 /// class (no undefined members), a first-class callable member
 /// (`$this->load(...)`) is a call, a subscript's index is a read, and a
