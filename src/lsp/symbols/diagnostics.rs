@@ -1407,10 +1407,20 @@ fn ancestry_visible(analysis: &FileAnalysis, idx: Option<&dyn CrossFileLookup>, 
         }
         for p in a.declared_parents(class) {
             let leaf = p.rsplit(['\\', ':']).next().unwrap_or(p);
-            // The parent's namespace as THIS file sees it (its `use` rows,
-            // else its own namespace) — a same-leaf stranger elsewhere in
-            // the workspace is not this parent.
-            let want_ns = a.leaf_namespace(leaf).or_else(|| a.use_map_pins().own_namespace.clone());
+            // The parent's namespace as THIS edge wrote it (`extends
+            // \Exception` is the global one, whatever leaf the child
+            // carries — `class Exception extends \Exception` must not find
+            // itself), else as this file sees the leaf (its `use` rows, its
+            // own namespace) — a same-leaf stranger elsewhere in the
+            // workspace is not this parent.
+            let want_ns = a
+                .pack
+                .parent_namespaces
+                .iter()
+                .find(|(c, pl, _)| c == class && pl == leaf)
+                .map(|(_, _, ns)| ns.clone())
+                .or_else(|| a.leaf_namespace(leaf))
+                .or_else(|| a.use_map_pins().own_namespace.clone());
             let local = a
                 .symbols()
                 .iter()

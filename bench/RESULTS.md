@@ -683,3 +683,18 @@ classes (`$cache->ERROR` with the declaration commented out), and
 `is_wp_error()` exit guards whose `@phpstan-assert-if-true` the analyzer
 does not read.
 
+Two silence rules the rows then named (2026-09-03, 04:10): a `$this` call a
+DESCENDANT declares is the template-method idiom (WordPress `ftp_base`
+calling `$this->_exec()` that only `ftp_pure` / `ftp_sockets` implement),
+and a parent's namespace is what the `extends` clause wrote — a namespaced
+`class Exception extends \Exception`, or laravel's `use Carbon\Carbon as
+BaseCarbon; class Carbon extends BaseCarbon`, resolved its parent to
+ITSELF, so the vendor ancestor's members read as missing. WordPress
+`unresolved-method` 77 → 13; laravel 981 → 160 (457 `Carbon::now()`
+rows alone); no new rows anywhere.
+
+| corpus | unresolved-method | undefined-property | undefined-type | undefined-variable | unused-import | unused-variable | deprecated | arity |
+|---|---|---|---|---|---|---|---|---|
+| WordPress | 13 | 32 | 94 | 24 | 0 | 420 | 283 | 11 |
+| laravel/framework | 160 | 91 | 7,039 | 51 | 6 | 257 | 34 | 14 |
+

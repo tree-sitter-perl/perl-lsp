@@ -328,7 +328,9 @@ templates). Market case and build-out plan in `docs/prompt-php-target.md`.
   call written with a space before its parentheses (`$this->m (1)`) is a
   call, not a property read, and `$this->step()` in a base class whose
   subclass declares `step` is the template-method idiom, not an
-  unresolved method.
+  unresolved method. A namespaced `class Exception extends \Exception`
+  no longer resolves its parent to itself and report every inherited
+  `getMessage()`.
 - **A php value read never means a method.** `$this->session` on a
   class declaring only `session()` is an undeclared property for the
   lane, goto-def and hover alike (Perl's accessor calls keep their

@@ -1468,6 +1468,32 @@ fn php_template_method_calls_on_this_stay_quiet() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// `class Exception extends \Exception` in a namespace: the parent is the
+/// GLOBAL one (no stubs carry it), never the child itself, so the builtin
+/// ancestor's members are unreadable and the lane stays silent. A parent
+/// the workspace does declare still checks its members.
+#[cfg(feature = "php")]
+#[test]
+fn php_same_leaf_global_parent_is_not_the_child() {
+    let dir = std::env::temp_dir().join(format!("perl-lsp-d2selfp-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    let w = |rel: &str, src: &str| std::fs::write(dir.join(rel), src).unwrap();
+    w("composer.json", "{\"autoload\": {\"psr-4\": {\"App\\\\\": \"src/\"}}}");
+    w("src/Exception.php", "<?php\nnamespace App;\nclass Exception extends \\Exception\n{\n    public function errorMessage(): string\n    {\n        return htmlspecialchars($this->getMessage());\n    }\n}\n");
+    w("src/Sub.php", "<?php\nnamespace App;\nclass Base { public function ok(): int { return 1; } }\nclass Sub extends Base\n{\n    public function go(): int\n    {\n        return $this->ok() + $this->nope();\n    }\n}\n");
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_perl-lsp"))
+        .args(["--check", dir.to_str().unwrap()])
+        .env("XDG_CACHE_HOME", dir.join(".cache"))
+        .output()
+        .expect("run");
+    let err = String::from_utf8_lossy(&out.stderr);
+    let rows: Vec<&str> = err.lines().filter(|l| l.contains(".php") && l.contains('[')).collect();
+    assert_eq!(rows.len(), 1, "{err}");
+    assert!(rows[0].contains("Sub.php:8") && rows[0].contains("'nope'"), "{rows:?}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// Silence rules the corpora demanded: a trait's `$this` is the composing
 /// class (no undefined members), a first-class callable member
 /// (`$this->load(...)`) is a call, a subscript's index is a read, and a

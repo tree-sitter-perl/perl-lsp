@@ -36,6 +36,10 @@ manufactured from an untyped receiver.
 
 Every lane names the case it cannot see and stays silent there:
 
+- **A parent's namespace is what the `extends` clause wrote** (`extends
+  \Exception` is the global one even from a class itself named
+  `Exception`), so a same-leaf child never stands in for a builtin parent
+  the workspace carries no stubs for — that parent is unreadable, below.
 - **An ancestor the workspace cannot read** — at any depth, resolved by
   the CHILD file's own namespace pins (a same-leaf stranger is not the
   parent) — may declare the member: silent. This is what keeps every
