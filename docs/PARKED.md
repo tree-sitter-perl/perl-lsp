@@ -514,12 +514,22 @@ marked otherwise; the drain re-derived each rationale against current code.
   session the walk's index id — not the matcher, which is already
   row-narrowed (the pack tier's own-row-store pre-prune already landed).
 - **PHP method names are case-insensitive; the lookup is exact** (monolog
-  dogfood, one row): `$formatter->indentStackTraces()` on a method declared
-  `indentStacktraces()` reports unresolved. `symbols_named` and the
+  dogfood, one row; WordPress `sodium_compat` a second — `::substR()` on a
+  method declared `substr()`): `$formatter->indentStackTraces()` on a
+  method declared `indentStacktraces()` reports unresolved. `symbols_named` and the
   cross-file by-name index are exact-case; a pack convention
   (`methods_case_insensitive`) would need a folded name index on both the
   local and the module tiers, for the Callable shape only (properties and
-  constants stay exact). Deferred until a corpus shows more than one row.
+  constants stay exact). Two corpora now show a row each — the next
+  diagnostics slice.
+- **Two WordPress `unresolved-method` rows resolve to the wrong receiver
+  class** (build 8fe1bc1): `$user->has_cap()` in `wp-login.php` (the
+  receiver comes out of `wp_signon()`'s `WP_User|WP_Error` and an
+  `is_wp_error()` function guard the narrowing lane does not read) and
+  `$class::test()` in `Requests::get_transport()` (`$class` iterates
+  `self::$transports`, an array of class-strings; `test` is the
+  `Transport` interface's static method). Both need the receiver dumped
+  before a fix; neither is a lane rule.
 - **Laravel facade aliases (`use DB;`, bare `DB::` in a namespace-less
   migration)** report an undefined type: the alias is registered at
   runtime (`Facade::defaultAliases()` + `config/app.php`), no static
