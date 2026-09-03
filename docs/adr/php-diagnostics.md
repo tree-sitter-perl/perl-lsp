@@ -139,6 +139,25 @@ Every lane names the case it cannot see and stays silent there:
   (the pack's `param_regions`) is
   the caller's contract, never a local; a callable that materializes
   variables dynamically is silent, as for the undefined-variable lane.
+- **An unimplemented contract** (`unimplemented-method`, an error on the
+  class name) is the role-requires lane (`docs/adr/role-contracts.md`) in
+  the pack's vocabulary: an interface, a trait or an abstract class is a
+  role, its interface methods and `abstract` methods are contract symbols
+  (the skeleton's `@contract.target`), and a concrete composer must
+  provide every name through a non-contract declaration attributed to
+  its own MRO (`members_are_package_bound`: a sibling class in the same
+  file provides nothing — Perl's typeglob rule does not transfer). For a
+  name-keyed pack (`imports_bind_names`) the parent is the candidate
+  carrying the namespace the edge wrote (else the composer's use map /
+  own namespace); a same-leaf stranger is not it, and a pin nothing
+  visible satisfies is silence, not a guess. Silent for an ancestor we cannot see and for a composer that
+  defers; NOT for a `__call` catch-all — php checks the contract at
+  declaration, before any call could be caught. One diagnostic per class
+  carries every missing contract's declarator (`data.contracts`, read
+  from the declaring file), and "Implement missing methods" inserts the
+  pack's `contract_stub` per contract before the class body's closing
+  brace, the declarator as written (types kept — a return type must stay
+  covariant). Limit: a `static` contract's stub loses its `static`.
 - **A deprecated declaration** (`deprecated`, a hint tagged deprecated)
   flags each use: the declaration's `@deprecated [text]` or the pack's
   deprecation attribute (`LangPack::deprecated_attribute`, php

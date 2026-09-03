@@ -216,6 +216,10 @@ pub struct LangPack {
     /// positional parameter hints stop at the first one. Empty = the pack
     /// has no named-argument form.
     pub named_arg_field: &'static str,
+    /// How the implement-missing-methods quick-fix spells a stub for one
+    /// contract declarator (`{}` = the declarator as written after the name,
+    /// `hi(string $n): string`). Empty = the pack offers no stub.
+    pub contract_stub: &'static str,
     /// A member name that is the CLASS-NAME LITERAL, never a member
     /// (php `Foo::class`). Empty = none.
     pub class_literal_member: &'static str,
@@ -239,6 +243,11 @@ pub struct LangPack {
     /// to a field — no other-kind fallback (Perl's accessor calls need it;
     /// php's syntax decides the kind).
     pub member_shapes_are_strict: bool,
+    /// A member declaration belongs to the container that encloses it and
+    /// nothing else — no cross-package installs (Perl's typeglobs): a
+    /// contract is provided only by a declaration attributed to the
+    /// composer's own MRO, never by a sibling class in the same file.
+    pub members_are_package_bound: bool,
     /// Type names start with a capital by convention, so an import row
     /// whose leaf starts lowercase names a function or constant, not a
     /// type (php's `use function A\b;` — the grammar parses it as a class
@@ -569,12 +578,14 @@ pub fn perl_pack() -> LangPack {
         callable_placeholder_kind: "",
         spread_arg_kind: "",
         named_arg_field: "",
+        contract_stub: "",
         class_literal_member: "",
         import_template: "",
         imports_bind_names: false,
         deprecated_attribute: "",
         builtin_types: &[],
         member_shapes_are_strict: false,
+        members_are_package_bound: true,
         types_are_capitalized: false,
         enum_members: &[],
         trigger_chars: &["$", "@", "%", ">", ":", "{"],
@@ -649,12 +660,14 @@ pub fn python_pack() -> LangPack {
         callable_placeholder_kind: "",
         spread_arg_kind: "",
         named_arg_field: "",
+        contract_stub: "",
         class_literal_member: "",
         import_template: "",
         imports_bind_names: false,
         deprecated_attribute: "",
         builtin_types: &[],
         member_shapes_are_strict: false,
+        members_are_package_bound: true,
         types_are_capitalized: false,
         enum_members: &[],
         trigger_chars: &["."],
@@ -729,12 +742,14 @@ pub fn r_pack() -> LangPack {
         callable_placeholder_kind: "",
         spread_arg_kind: "",
         named_arg_field: "",
+        contract_stub: "",
         class_literal_member: "",
         import_template: "",
         imports_bind_names: false,
         deprecated_attribute: "",
         builtin_types: &[],
         member_shapes_are_strict: false,
+        members_are_package_bound: true,
         types_are_capitalized: false,
         enum_members: &[],
         trigger_chars: &["$", "@", ":"],
@@ -817,12 +832,14 @@ pub fn cmake_pack() -> LangPack {
         callable_placeholder_kind: "",
         spread_arg_kind: "",
         named_arg_field: "",
+        contract_stub: "",
         class_literal_member: "",
         import_template: "",
         imports_bind_names: false,
         deprecated_attribute: "",
         builtin_types: &[],
         member_shapes_are_strict: false,
+        members_are_package_bound: true,
         types_are_capitalized: false,
         enum_members: &[],
         trigger_chars: &["{", "("],
@@ -1132,12 +1149,14 @@ pub fn php_pack() -> LangPack {
         callable_placeholder_kind: "variadic_placeholder",
         spread_arg_kind: "variadic_unpacking",
         named_arg_field: "name",
+        contract_stub: "public function {}\n{\n    // TODO: implement\n}",
         class_literal_member: "class",
         import_template: "use {};\n",
         imports_bind_names: true,
         deprecated_attribute: "Deprecated",
         builtin_types: PHP_BUILTIN_TYPES,
         member_shapes_are_strict: true,
+        members_are_package_bound: true,
         types_are_capitalized: true,
         enum_members: &["value", "name", "cases", "from", "tryFrom"],
         trigger_chars: &["$", ">", ":"],
@@ -1297,12 +1316,14 @@ pub fn cpp_pack() -> LangPack {
         callable_placeholder_kind: "",
         spread_arg_kind: "",
         named_arg_field: "",
+        contract_stub: "",
         class_literal_member: "",
         import_template: "",
         imports_bind_names: false,
         deprecated_attribute: "",
         builtin_types: &[],
         member_shapes_are_strict: false,
+        members_are_package_bound: true,
         types_are_capitalized: false,
         enum_members: &[],
         trigger_chars: &[".", ">", ":"],

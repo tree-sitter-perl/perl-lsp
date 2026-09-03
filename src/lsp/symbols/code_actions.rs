@@ -167,11 +167,19 @@ pub fn pack_diagnostics(
 pub fn code_actions(
     diagnostics: &[Diagnostic],
     analysis: &FileAnalysis,
+    text: &str,
     uri: &Url,
 ) -> Vec<CodeActionOrCommand> {
     let mut actions = Vec::new();
 
     for diag in diagnostics {
+        // Unimplemented contracts: one edit declaring every missing method.
+        if matches!(&diag.code, Some(NumberOrString::String(s)) if s == "unimplemented-method") {
+            if let Some(action) = make_implement_contracts_action(analysis, text, uri, diag) {
+                actions.push(action);
+            }
+            continue;
+        }
         // Member-access operator swap: replace the operator token (the
         // diagnostic's range) with the correct one (`data.operator`).
         if matches!(&diag.code, Some(NumberOrString::String(s)) if s == MEMBER_OP_CODE) {
@@ -421,4 +429,84 @@ fn make_add_to_qw_action(
         is_preferred: Some(true),
         ..Default::default()
     }))
+}
+
+/// "Implement missing methods": one stub per unfulfilled contract, the
+/// declarator copied from the contract's own declaration (its types kept —
+/// a return type must stay covariant, so it is never dropped) under the
+/// pack's `contract_stub` template, inserted before the class body's
+/// closing brace.
+fn make_implement_contracts_action(
+    analysis: &FileAnalysis,
+    text: &str,
+    uri: &Url,
+    diag: &Diagnostic,
+) -> Option<CodeActionOrCommand> {
+    let template = analysis.pack.contract_stub.as_str();
+    if template.is_empty() {
+        return None;
+    }
+    let data = diag.data.as_ref()?;
+    let class = data.get("class")?.as_str()?;
+    let contracts = data.get("contracts")?.as_array()?;
+    // The class symbol's span ends just past the body's closing brace.
+    let end = analysis
+        .symbols()
+        .iter()
+        .find(|s| s.kind == FaSymKind::Class && s.name == class)?
+        .span
+        .end;
+    let brace = Position { line: end.row as u32, character: end.column.saturating_sub(1) as u32 };
+    let mut stubs = Vec::new();
+    for c in contracts {
+        let role = c.get("role").and_then(|v| v.as_str()).unwrap_or("");
+        let name = c.get("name").and_then(|v| v.as_str())?;
+        let sig = match c.get("sig").and_then(|v| v.as_str()) {
+            Some(s) => s.to_string(),
+            None => {
+                let sym = analysis.symbols().iter().find(|s| {
+                    matches!(s.kind, FaSymKind::Sub | FaSymKind::Method)
+                        && s.name == name
+                        && s.package.as_deref() == Some(role)
+                })?;
+                declarator_text(text, sym)?
+            }
+        };
+        let body = template.replace("{}", &sig);
+        stubs.push(
+            body.lines()
+                .map(|l| if l.is_empty() { String::new() } else { format!("    {l}") })
+                .collect::<Vec<_>>()
+                .join("\n"),
+        );
+    }
+    let lead = if brace.character > 0 { "\n" } else { "" };
+    let new_text = format!("{lead}{}\n", stubs.join("\n\n"));
+    let mut changes = HashMap::new();
+    changes.insert(uri.clone(), vec![TextEdit { range: Range { start: brace, end: brace }, new_text }]);
+    Some(CodeActionOrCommand::CodeAction(CodeAction {
+        title: if contracts.len() == 1 {
+            "Implement missing method".to_string()
+        } else {
+            format!("Implement {} missing methods", contracts.len())
+        },
+        kind: Some(CodeActionKind::QUICKFIX),
+        diagnostics: Some(vec![diag.clone()]),
+        edit: Some(WorkspaceEdit { changes: Some(changes), ..Default::default() }),
+        is_preferred: Some(true),
+        ..Default::default()
+    }))
+}
+
+/// A callable's declarator as written — from its name token to the end of
+/// its declaration, minus the terminator, whitespace collapsed.
+pub fn declarator_text(src: &str, sym: &crate::model::file_analysis::Symbol) -> Option<String> {
+    let start = crate::build::cursor_sentinel::point_to_byte(src, sym.selection_span.start);
+    let end = crate::build::cursor_sentinel::point_to_byte(src, sym.span.end);
+    let raw = src.get(start..end)?;
+    let t = raw.trim_end().trim_end_matches(';').trim_end();
+    if t.is_empty() {
+        return None;
+    }
+    Some(t.split_whitespace().collect::<Vec<_>>().join(" "))
 }

@@ -49,6 +49,10 @@ pub struct PackFacts {
     /// empty when the language has no import quick-fix.
     #[serde(default)]
     pub import_template: String,
+    /// The pack's stub template for an unimplemented contract (`{}` = the
+    /// declarator); empty = no quick-fix.
+    #[serde(default)]
+    pub contract_stub: String,
     /// The last row of the file preamble (open tag, `declare` rows).
     #[serde(default)]
     pub preamble_end: Option<usize>,
@@ -60,6 +64,10 @@ pub struct PackFacts {
     /// (php); false lets Perl's accessor calls answer either kind.
     #[serde(default)]
     pub member_shapes_are_strict: bool,
+    /// A member declaration belongs only to its enclosing container (no
+    /// cross-package installs): contract provision is package-attributed.
+    #[serde(default)]
+    pub members_are_package_bound: bool,
     /// Imported names a doc comment mentions.
     #[serde(default)]
     pub doc_mentions: Vec<String>,
@@ -238,6 +246,7 @@ impl PackFacts {
             + vcap(&self.enum_members)
             + vcap(&self.import_rows)
             + self.import_template.capacity()
+            + self.contract_stub.capacity()
             + vcap(&self.doc_mentions)
             + vcap(&self.type_display)
             + vcap(&self.constructor_names);

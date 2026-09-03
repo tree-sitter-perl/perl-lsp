@@ -158,6 +158,8 @@ pub struct SkeletonAnalysis {
     pub import_rows: Vec<Span>,
     /// The pack's import statement template (`import_template`).
     pub import_template: String,
+    /// The pack's contract stub template (`contract_stub`).
+    pub contract_stub: String,
     /// The last row of the file preamble (open tag, `declare` rows): an
     /// inserted import goes after it when no import or namespace anchors.
     pub preamble_end: Option<usize>,
@@ -165,6 +167,8 @@ pub struct SkeletonAnalysis {
     pub imports_bind_names: bool,
     /// `member_shapes_are_strict`, baked.
     pub member_shapes_are_strict: bool,
+    /// `members_are_package_bound`, baked.
+    pub members_are_package_bound: bool,
     /// Imported names a doc comment mentions (`@var Foo`, `@throws Foo`,
     /// `@see Foo`): a use the tree never shows.
     pub doc_mentions: Vec<String>,
@@ -1334,6 +1338,33 @@ impl SkeletonAnalysis {
         for (child, parent) in &self.parents {
             packages.entry(child.clone()).or_default().parents.push(parent.clone());
         }
+        // Contracts: an interface, a trait or an abstract class is a role —
+        // it defers its obligations to a concrete composer — and each of
+        // its contract callables is a require that composer must provide
+        // (`unfulfilled_role_requires`, docs/adr/role-contracts.md). The
+        // contract symbols are excluded from provision the way Perl's
+        // `requires` markers are.
+        let mut contract_symbols: std::collections::HashSet<SymbolId> = Default::default();
+        for (i, sym) in symbols.iter().enumerate() {
+            let defers = sym
+                .attributes
+                .iter()
+                .any(|a| a == "interface" || a == "trait" || a == "abstract");
+            if sym.kind == SymKind::Class && defers {
+                packages.entry(sym.name.clone()).or_default().is_role = true;
+            }
+            if matches!(sym.kind, SymKind::Sub | SymKind::Method)
+                && sym.attributes.iter().any(|a| a == "contract")
+            {
+                contract_symbols.insert(SymbolId(i as u32));
+                if let Some(pkg) = &sym.package {
+                    let facts = packages.entry(pkg.clone()).or_default();
+                    if !facts.requires.contains(&sym.name) {
+                        facts.requires.push(sym.name.clone());
+                    }
+                }
+            }
+        }
         // `$var = $recv->method()` bindings: hand the assignment to the
         // language-generic MCB→bag bridge (`emit_method_call_binding_edges`),
         // which resolves the receiver and chases the method's return lazily —
@@ -1378,9 +1409,11 @@ impl SkeletonAnalysis {
             class_literal_member: std::mem::take(&mut self.class_literal_member),
             import_rows: std::mem::take(&mut self.import_rows),
             import_template: std::mem::take(&mut self.import_template),
+            contract_stub: std::mem::take(&mut self.contract_stub),
             preamble_end: self.preamble_end,
             imports_bind_names: self.imports_bind_names,
             member_shapes_are_strict: self.member_shapes_are_strict,
+            members_are_package_bound: self.members_are_package_bound,
             doc_mentions: std::mem::take(&mut self.doc_mentions),
             types_are_capitalized: self.types_are_capitalized,
             enum_members: std::mem::take(&mut self.enum_members),
@@ -1442,6 +1475,7 @@ impl SkeletonAnalysis {
         let mut fa = FileAnalysis::new(FileAnalysisParts {
             scopes: self.scopes,
             fold_ranges,
+            contract_symbols,
             symbols,
             refs,
             witnesses: bag,

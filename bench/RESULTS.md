@@ -858,3 +858,33 @@ the tree-sitter compile of the 1,000-line assembled php query itself
 (~540 ms, `pack.query_compile`) — the floor a pack-only cold start pays
 once per process; it cannot be persisted (a `Query` is not serializable)
 and splitting the query does not reduce the pattern analysis it pays for.
+
+### Unimplemented contracts, three tools (2026-09-03, 08:00)
+
+A three-file fixture: `interface Greeter { hi(string $n): string; bye(): void }`,
+`abstract class Base implements Greeter` (declares `hi`, adds
+`abstract protected function tag(): string`), then `class En implements
+Greeter` (declares `hi` only), `class Sub extends Base {}` and `class Dyn
+implements Greeter { __call(...) }`.
+
+| | ours | Intelephense | phpactor |
+|---|---|---|---|
+| `En` | `unimplemented-method`: `Greeter::bye()` | P1037 `does not implement method 'bye'` | `Missing methods "bye"` |
+| `Sub` | `Base::tag()`, `Greeter::bye()` | `'tag', 'bye'` | `"bye", "tag"` |
+| `Dyn` (`__call`) | `Greeter::hi()`, `Greeter::bye()` | `'hi', 'bye'` | `"hi", "bye"` |
+| quick-fix | "Implement missing methods" (stubs from the contracts' declarators) | none (free tier) | "Implement contracts" |
+| `abstract class Base` | silent | silent | silent |
+
+Three tools, one verdict per class. The first cut silenced `Dyn` under
+Perl's AUTOLOAD rule; both other tools report it and they are right —
+php checks the contract when the class is declared. Two more corrections
+came from the corpora before the lane shipped: the role lookup took the
+first same-leaf candidate (laravel's `MySqlConnector extends Connector`
+found the Redis `Connector` interface's `connectToCluster()`, 6 rows on
+BookStack's vendor tree and 10 on laravel/framework), and provision was
+Perl's "a def anywhere in the candidate file" (a sibling class in the same
+file provided `hi` for `Dyn`). The parent is now the namespace-pinned
+candidate and provision is package-attributed for a pack whose members
+are package-bound. Rows on monolog, guzzle, BookStack, symfony/demo, Slim,
+laravel/framework and WordPress after the corrections: 0 — code that runs
+has no unimplemented contracts.

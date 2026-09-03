@@ -29,7 +29,7 @@ fn test_code_action_from_diagnostic() {
         ..Default::default()
     };
 
-    let actions = code_actions(&[diag], &analysis, &uri);
+    let actions = code_actions(&[diag], &analysis, "", &uri);
     assert_eq!(actions.len(), 1);
     if let CodeActionOrCommand::CodeAction(action) = &actions[0] {
         assert_eq!(action.title, "Import 'carp' from Carp");
@@ -75,7 +75,7 @@ fn test_code_action_new_use_statement() {
         ..Default::default()
     };
 
-    let actions = code_actions(&[diag], &analysis, &uri);
+    let actions = code_actions(&[diag], &analysis, "", &uri);
     assert_eq!(actions.len(), 1);
     if let CodeActionOrCommand::CodeAction(action) = &actions[0] {
         assert_eq!(action.title, "Add 'use Some::Module qw(frobnicate)'");
@@ -558,7 +558,7 @@ fn test_code_action_multiple_exporters_not_preferred() {
         ..Default::default()
     };
 
-    let actions = code_actions(&[diag], &analysis, &uri);
+    let actions = code_actions(&[diag], &analysis, "", &uri);
     assert_eq!(actions.len(), 2);
     // Neither should be preferred (ambiguous)
     for action in &actions {

@@ -545,7 +545,7 @@ fn d2_quick_fix_inserts_defined_guard() {
     let on = DiagnosticOptions { optional_deref: true, ..Default::default() };
     let diags = collect_diagnostics(&analysis, &idx, on);
     let uri = Url::parse("file:///t.pl").unwrap();
-    let actions = code_actions(&diags, &analysis, &uri);
+    let actions = code_actions(&diags, &analysis, "", &uri);
     let action = actions.iter().find_map(|a| match a {
         CodeActionOrCommand::CodeAction(ca) if ca.title.contains("return unless defined") => Some(ca),
         _ => None,

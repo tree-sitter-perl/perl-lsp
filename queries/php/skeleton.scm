@@ -739,3 +739,16 @@
 (compound_statement) @fold
 (declaration_list) @fold
 (comment) @fold.comment
+
+; ---- contracts ----
+; An interface's methods and an abstract method are contracts a concrete
+; composer must fulfil (the role-requires lane, docs/adr/role-contracts.md);
+; an abstract class defers them the way an interface or a trait does.
+(interface_declaration
+  body: (declaration_list (method_declaration name: (name) @contract.target)))
+(method_declaration
+  (abstract_modifier)
+  name: (name) @contract.target)
+(class_declaration
+  (abstract_modifier)
+  name: (name) @classattr.abstract)

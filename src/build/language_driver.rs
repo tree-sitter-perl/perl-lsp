@@ -1318,9 +1318,11 @@ fn remap_spans(
         member_writes,
         import_rows,
         import_template: _,
+        contract_stub: _,
         preamble_end: _,
         imports_bind_names: _,
         member_shapes_are_strict: _,
+        members_are_package_bound: _,
         doc_mentions: _,
         // language-wide facts, no spans to remap.
         function_scoped_vars: _,

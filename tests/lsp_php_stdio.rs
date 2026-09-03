@@ -214,6 +214,66 @@ fn php_editor_axes_over_stdio() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Contracts: a class implementing an interface (or extending an abstract
+/// class) that leaves a method undeclared is reported — a `__call` catch-all
+/// does not excuse it — an abstract composer is not, and the quick-fix
+/// declares the missing methods from the contract's own declarator.
+#[test]
+fn php_unimplemented_method_over_stdio() {
+    let dir = std::env::temp_dir().join(format!("perl-lsp-d2contract-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    let w = |rel: &str, src: &str| std::fs::write(dir.join(rel), src).unwrap();
+    w("composer.json", "{\"autoload\": {\"psr-4\": {\"App\\\\\": \"src/\"}}}");
+    w("src/Greeter.php", "<?php\nnamespace App;\n\ninterface Greeter\n{\n    public function hi(string $n): string;\n    public function bye(): void;\n}\n");
+    w("src/Base.php", "<?php\nnamespace App;\n\nabstract class Base implements Greeter\n{\n    public function hi(string $n): string\n    {\n        return $n;\n    }\n\n    abstract protected function tag(): string;\n}\n");
+    let en = "<?php\nnamespace App;\n\nclass En implements Greeter\n{\n    public function hi(string $n): string\n    {\n        return $n;\n    }\n}\n\nclass Sub extends Base\n{\n}\n\nclass Dyn implements Greeter\n{\n    public function __call($m, $a) {}\n}\n";
+    w("src/En.php", en);
+    let mut c = Client::spawn(&dir);
+    c.request("initialize", serde_json::json!({"processId": null, "rootUri": uri(&dir), "capabilities": {}}));
+    c.notify("initialized", serde_json::json!({}));
+    let u = uri(&dir.join("src/En.php"));
+    c.notify("textDocument/didOpen", serde_json::json!({"textDocument": {"uri": u, "languageId": "php", "version": 1, "text": en}}));
+    // the lane publishes once the pack index has settled: wait for it
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    let mut diags: Vec<serde_json::Value> = Vec::new();
+    while std::time::Instant::now() < deadline {
+        c.request("textDocument/documentSymbol", serde_json::json!({"textDocument": {"uri": u}}));
+        if let Some(n) = c.notes.iter().rev().find(|n| n["method"] == "textDocument/publishDiagnostics" && n["params"]["uri"] == u) {
+            let ds: Vec<serde_json::Value> = n["params"]["diagnostics"].as_array().cloned().unwrap_or_default();
+            if ds.iter().any(|d| d["code"] == "unimplemented-method") {
+                diags = ds;
+                break;
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(250));
+    }
+    let contract: Vec<&serde_json::Value> = diags.iter().filter(|d| d["code"] == "unimplemented-method").collect();
+    let msgs: Vec<String> = contract.iter().map(|d| d["message"].as_str().unwrap_or("").to_string()).collect();
+    assert_eq!(contract.len(), 3, "one diagnostic per concrete composer: {msgs:?}");
+    let en_diag = contract.iter().find(|d| d["range"]["start"]["line"] == 3).expect("En is reported");
+    assert!(en_diag["message"].as_str().unwrap().contains("`Greeter::bye()`") && !en_diag["message"].as_str().unwrap().contains("hi()"), "{msgs:?}");
+    let sub_diag = contract.iter().find(|d| d["range"]["start"]["line"] == 11).expect("Sub is reported");
+    let sub_msg = sub_diag["message"].as_str().unwrap();
+    assert!(sub_msg.contains("`Greeter::bye()`") && sub_msg.contains("`Base::tag()`") && !sub_msg.contains("hi()"), "{sub_msg}");
+    // `__call` catches calls at runtime; the contract is checked at declaration
+    let dyn_diag = contract.iter().find(|d| d["range"]["start"]["line"] == 15).expect("Dyn is reported");
+    assert!(dyn_diag["message"].as_str().unwrap().contains("`Greeter::hi()`"), "{msgs:?}");
+    // the quick-fix on Sub: both stubs before the closing brace
+    let acts = c.request("textDocument/codeAction", serde_json::json!({"textDocument": {"uri": u}, "range": sub_diag["range"], "context": {"diagnostics": [sub_diag]}}));
+    let act = acts.as_array().and_then(|a| a.iter().find(|x| x["title"].as_str().unwrap_or("").starts_with("Implement"))).cloned().unwrap_or_else(|| panic!("implement action; diag data {} actions {acts}", sub_diag["data"]));
+    assert_eq!(act["title"], "Implement 2 missing methods", "{act}");
+    let edits = act["edit"]["changes"][&u].as_array().cloned().unwrap_or_default();
+    assert_eq!(edits.len(), 1, "{act}");
+    let new_text = edits[0]["newText"].as_str().unwrap();
+    assert!(new_text.contains("public function bye(): void\n    {\n") && new_text.contains("public function tag(): string"), "{new_text}");
+    assert_eq!(edits[0]["range"]["start"]["line"], 13, "{act}");
+    c.request("shutdown", serde_json::Value::Null);
+    c.notify("exit", serde_json::Value::Null);
+    let _ = c.child.wait();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// A scoped access completes the class's members: `self::` and `Cfg::`
 /// answer constants and methods — never the function's locals — and
 /// `$this->` keeps answering the instance members.

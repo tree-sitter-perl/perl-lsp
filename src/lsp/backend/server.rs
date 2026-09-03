@@ -1511,7 +1511,7 @@ impl LanguageServer for Backend {
             Some(doc) => doc,
             None => return self.not_ready_or_null(uri),
         };
-        let actions = symbols::code_actions(&params.context.diagnostics, &doc.analysis, uri);
+        let actions = symbols::code_actions(&params.context.diagnostics, &doc.analysis, &doc.text, uri);
         if actions.is_empty() {
             Ok(None)
         } else {

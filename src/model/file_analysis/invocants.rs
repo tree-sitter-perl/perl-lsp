@@ -1130,11 +1130,29 @@ impl FileAnalysis {
         // there (a base CLASS's composed roles were checked at its own
         // composition site), preserving the role-only edge semantics of
         // docs/adr/role-contracts.md.
-        let role_requires_of = |c: &str| -> Option<Vec<String>> {
+        let role_requires_of = |composer: &str, c: &str| -> Option<Vec<String>> {
+            // A name-keyed pack pins the parent's namespace: the edge's own
+            // row (`extends \Exception`), else the composer's use map / own
+            // namespace. The candidate carrying that namespace IS the
+            // parent — a same-leaf stranger (a `Connector` interface in
+            // another namespace beside the `Connector` base class next
+            // door) is not, whatever it requires.
+            let want_ns = if self.pack.imports_bind_names {
+                self.pack
+                    .parent_namespaces
+                    .iter()
+                    .find(|(child, parent, _)| child == composer && parent == c)
+                    .map(|(_, _, ns)| ns.clone())
+                    .or_else(|| self.leaf_namespace(c))
+                    .or_else(|| self.use_map_pins().own_namespace.clone())
+            } else {
+                None // a path-keyed language (Perl) has no namespace pins
+            };
             let is_local = self
                 .symbols
                 .iter()
-                .any(|s| matches!(s.kind, SymKind::Package | SymKind::Class) && s.name == c);
+                .any(|s| matches!(s.kind, SymKind::Package | SymKind::Class) && s.name == c)
+                && (want_ns.is_none() || self.declared_type_namespace(c) == want_ns);
             if is_local {
                 if !self.is_role_package(c) {
                     return None;
@@ -1143,11 +1161,29 @@ impl FileAnalysis {
             }
             // Role-ness and requires live in the packages lane (never
             // evicted) of whichever candidate file declares the role.
-            module_index?
-                .visible_def_candidates(c)
-                .iter()
-                .find(|cached| cached.analysis.is_role_package(c))
-                .map(|cached| cached.analysis.role_requires(c).to_vec())
+            let idx = module_index?;
+            let candidates = idx.visible_def_candidates(c);
+            // The namespace rides the symbols axis (a resident copy is
+            // stripped); role-ness and requires ride the packages lane.
+            let pinned = match &want_ns {
+                Some(ns) => candidates.iter().find(|cached| {
+                    idx.symbols_present(cached).declared_type_namespace(c).as_deref() == Some(ns.as_str())
+                }),
+                None => None,
+            };
+            match (pinned, want_ns) {
+                // the pinned declaration decides, role or not
+                (Some(cached), _) => cached
+                    .analysis
+                    .is_role_package(c)
+                    .then(|| cached.analysis.role_requires(c).to_vec()),
+                // a pin nothing visible satisfies: not a guess
+                (None, Some(_)) => None,
+                (None, None) => candidates
+                    .iter()
+                    .find(|cached| cached.analysis.is_role_package(c))
+                    .map(|cached| cached.analysis.role_requires(c).to_vec()),
+            }
         };
 
         let mut out: Vec<UnfulfilledRequire> = Vec::new();
@@ -1176,7 +1212,7 @@ impl FileAnalysis {
             let graph = crate::model::graph::GraphView::new(self, module_index);
             let mut required: Vec<(String, String, String)> = Vec::new();
             for direct in self.declared_parents(pkg) {
-                let Some(requires) = role_requires_of(direct) else { continue };
+                let Some(requires) = role_requires_of(pkg, direct) else { continue };
                 for n in requires {
                     required.push((n, direct.clone(), direct.clone()));
                 }
@@ -1187,7 +1223,7 @@ impl FileAnalysis {
                         let crate::model::graph::Node::Class(c) = n else {
                             return crate::model::graph::WalkControl::PruneChildren;
                         };
-                        match role_requires_of(c) {
+                        match role_requires_of(pkg, c) {
                             Some(requires) => {
                                 for name in requires {
                                     required.push((name, c.clone(), direct.clone()));
@@ -1206,11 +1242,20 @@ impl FileAnalysis {
                     continue;
                 }
                 let mut provided = false;
+                // Perl's typeglob installs put a def ANYWHERE in the
+                // candidate file; a pack whose members are package-bound
+                // reads only the declarations attributed to the ancestor.
+                let package_bound = self.pack.members_are_package_bound;
                 self.for_each_ancestor_class(pkg, module_index, |a| {
                     let here = self.class_provides_method(a, &name)
                         || module_index.is_some_and(|idx| {
                             idx.visible_def_candidates(a).iter().any(|c| {
-                                idx.whole_present(c).provides_method_anywhere(&name)
+                                let whole = idx.whole_present(c);
+                                if package_bound {
+                                    whole.provides_method_in_package(&name, a)
+                                } else {
+                                    whole.provides_method_anywhere(&name)
+                                }
                             })
                         })
                         || module_index.is_some_and(|idx| {

@@ -371,6 +371,10 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     // `@static.target` — def NAME spans of `static` members (the "static"
     // attribute a scoped completion reads).
     let mut static_name_spans: std::collections::HashSet<(Point, Point)> = std::collections::HashSet::new();
+    // `@contract.target` — def NAME spans of contract callables (an
+    // interface's methods, an abstract method): a `contract` attribute, the
+    // requires of the role the declaring container is.
+    let mut contract_name_spans: std::collections::HashSet<(Point, Point)> = std::collections::HashSet::new();
     let mut nonpublic_name_spans: std::collections::HashSet<(Point, Point)> =
         std::collections::HashSet::new();
     // `@classattr.<flavor>` — container-def name spans stamped with a
@@ -431,6 +435,9 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
         }
         if e.cap == "static.target" {
             static_name_spans.insert((e.start, e.end));
+        }
+        if e.cap == "contract.target" {
+            contract_name_spans.insert((e.start, e.end));
         }
         if e.cap == "nonpublic.target" {
             nonpublic_name_spans.insert((e.start, e.end));
@@ -619,8 +626,10 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     out.catch_all_methods = pack.catch_all_methods.iter().map(|s| s.to_string()).collect();
     out.class_literal_member = pack.class_literal_member.to_string();
     out.import_template = pack.import_template.to_string();
+    out.contract_stub = pack.contract_stub.to_string();
     out.imports_bind_names = pack.imports_bind_names;
     out.member_shapes_are_strict = pack.member_shapes_are_strict;
+    out.members_are_package_bound = pack.members_are_package_bound;
     out.enum_members = pack.enum_members.iter().map(|s| s.to_string()).collect();
     out.member_writes = std::mem::take(&mut member_writes);
     out.types_are_capitalized = pack.types_are_capitalized;
@@ -2928,8 +2937,17 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     // Access-modifier stamp: the `@nonpublic.target` name spans mark
     // members whose modifier means non-public — the same `non_public`
     // attribute cpp access regions stamp, read by the completion gates.
-    if !nonpublic_name_spans.is_empty() || !classattr_by_name_span.is_empty() || !static_name_spans.is_empty() {
+    if !nonpublic_name_spans.is_empty()
+        || !classattr_by_name_span.is_empty()
+        || !static_name_spans.is_empty()
+        || !contract_name_spans.is_empty()
+    {
         for sym in &mut out.symbols {
+            if contract_name_spans.contains(&(sym.name_start, sym.name_end))
+                && !sym.attributes.iter().any(|a| a == "contract")
+            {
+                sym.attributes.push("contract".to_string());
+            }
             if nonpublic_name_spans.contains(&(sym.name_start, sym.name_end))
                 && !sym.attributes.iter().any(|a| a == "non_public")
             {

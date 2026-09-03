@@ -1338,7 +1338,91 @@ pub fn pack_symbol_diagnostics(
             }
         }
     }
+    // ---- unimplemented contracts: the role-requires lane in the pack's
+    // vocabulary. An interface / trait / abstract class is a role whose
+    // contract callables a concrete composer must declare or inherit from
+    // a concrete ancestor. Silent for an ancestor we cannot see and for a
+    // composer that defers (abstract). A catch-all method (`__call`) does
+    // NOT silence it: the contract is checked when the class is declared,
+    // before any call could be caught.
+    if let Some(idx) = idx {
+        let mut by_class: std::collections::BTreeMap<
+            String,
+            Vec<crate::model::file_analysis::UnfulfilledRequire>,
+        > = Default::default();
+        for u in analysis.unfulfilled_role_requires(Some(idx)) {
+            by_class.entry(u.package.clone()).or_default().push(u);
+        }
+        for (class, missing) in by_class {
+            let Some(sym) = analysis
+                .symbols()
+                .iter()
+                .find(|s| s.kind == FaSymKind::Class && s.name == class)
+            else {
+                continue;
+            };
+            // The contract's own declarator rides the diagnostic so the
+            // quick-fix needs no resolution: a closed declaring file reads
+            // from disk here; the open document's is rendered from its
+            // buffer by the action (`sig` = null).
+            let contracts: Vec<serde_json::Value> = missing
+                .iter()
+                .map(|u| {
+                    let sig = contract_declarator(analysis, idx, &u.role, &u.name);
+                    serde_json::json!({"role": u.role, "name": u.name, "sig": sig})
+                })
+                .collect();
+            let list = missing
+                .iter()
+                .map(|u| format!("`{}::{}()`", u.role, u.name))
+                .collect::<Vec<_>>()
+                .join(", ");
+            out.push(Diagnostic {
+                range: span_to_range(sym.selection_span),
+                severity: Some(DiagnosticSeverity::ERROR),
+                code: Some(NumberOrString::String("unimplemented-method".to_string())),
+                source: Some("perl-lsp".to_string()),
+                message: format!(
+                    "'{class}' does not implement {list}; declare {} or make the class abstract.",
+                    if missing.len() == 1 { "it" } else { "them" }
+                ),
+                data: Some(serde_json::json!({"class": class, "contracts": contracts})),
+                ..Default::default()
+            });
+        }
+    }
+
     out
+}
+
+
+/// The declarator text of a contract callable declared by a CLOSED file —
+/// `None` when the role is declared in this document (the quick-fix reads
+/// the open buffer) or nothing on disk declares it.
+fn contract_declarator(
+    analysis: &FileAnalysis,
+    idx: &dyn CrossFileLookup,
+    role: &str,
+    name: &str,
+) -> Option<String> {
+    if analysis.symbols().iter().any(|s| s.kind == FaSymKind::Class && s.name == role) {
+        return None;
+    }
+    for cached in idx.visible_def_candidates(role) {
+        let whole = idx.whole_present(&cached);
+        let Some(sym) = whole.symbols().iter().find(|s| {
+            matches!(s.kind, FaSymKind::Sub | FaSymKind::Method)
+                && s.name == name
+                && s.package.as_deref() == Some(role)
+        }) else {
+            continue;
+        };
+        let Ok(src) = std::fs::read_to_string(&cached.path) else { continue };
+        if let Some(t) = declarator_text(&src, sym) {
+            return Some(t);
+        }
+    }
+    None
 }
 
 /// A deprecated declaration's notice: `Some(text)` when the `deprecated`

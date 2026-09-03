@@ -350,6 +350,11 @@ templates). Market case and build-out plan in `docs/prompt-php-target.md`.
   registry's ~500 ms pattern warm, and a pack's assembled query compiles
   once per process instead of once per indexing worker (a two-file php
   `--check`: 2.6 s → 0.7 s; the same floor sat under every CLI test).
+- `unimplemented-method`: a php class that implements an interface, uses a
+  trait or extends an abstract class and leaves a contract method
+  undeclared is reported (an abstract composer and a class with `__call`
+  are not), with an "Implement missing methods" quick-fix that declares
+  the stubs from the contracts' own declarators.
 - Parameter-name inlay hints on pack documents: every positional argument
   of a call whose callee resolves shows `name:` (php `f(name: 1)` named
   arguments and spreads end the positional run; a variadic parameter
