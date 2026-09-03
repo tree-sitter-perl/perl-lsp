@@ -1818,5 +1818,25 @@ fn php_laravel_path_rails_views_config_lang() {
     assert!(gd.contains("resources/views/pages/home.blade.php"), "view → template: {gd}");
     let gd = run(&["--definition", dir.to_str().unwrap(), home.to_str().unwrap(), "4", "75"]);
     assert!(gd.contains("config/app.php:4:"), "config key → the nested key row: {gd}");
+    // rail-name completion in the string slot: a partial name answers from
+    // the document's own use, an empty string through the sentinel; a
+    // template's `@include('` through the text rails.
+    let lost = "    public function lost() { return view('pages.nope') . config('app.nope') . __('auth.nope') . __('Plain sentence here'); }";
+    let complete = |row: usize, col: usize, file: &std::path::Path| {
+        run(&["--completion", dir.to_str().unwrap(), file.to_str().unwrap(), &row.to_string(), &col.to_string()])
+    };
+    let col = lost.find("'pages.nope'").unwrap() + 1 + "pages.".len();
+    let c = complete(5, col, &home);
+    assert!(c.lines().any(|l| l.starts_with("pages.home\t")), "view names after `pages.`: {c}");
+    assert!(!c.contains("app.name"), "only the view rail: {c}");
+    let col = lost.find("'app.nope'").unwrap() + 1 + "app.".len();
+    let c = complete(5, col, &home);
+    assert!(c.contains("app.name") && c.contains("app.mail.from"), "config keys after `app.`: {c}");
+    let col = lost.find("'auth.nope'").unwrap() + 1;
+    let c = complete(5, col, &home);
+    assert!(c.contains("auth.failed"), "translation keys at the string start: {c}");
+    let blade = dir.join("resources/views/pages/home.blade.php");
+    let c = complete(1, "@include('".len(), &blade);
+    assert!(c.contains("pages.home"), "a template's @include completes view names: {c}");
     let _ = std::fs::remove_dir_all(&dir);
 }

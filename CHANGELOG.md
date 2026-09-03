@@ -292,6 +292,12 @@ templates). Market case and build-out plan in `docs/prompt-php-target.md`.
   `->make(Foo::class)` IS a Foo, so a chain off it navigates. Misses on
   these rails are hints (`undefined-middleware` / `-ability` / `-binding`)
   — their definitions are partly runtime-only.
+- **Rail names complete inside the string.** `route('|')`, `view('pa|')`,
+  `config('app.|')`, `__('auth.|')`, `->middleware('|')`, `->authorize('|')`,
+  `app('|')` and a template's `@extends('|')` / `@include('|')` offer the
+  rail's declared names across the project, each edit replacing the whole
+  string content. The contract for every Laravel rail is
+  `docs/adr/laravel-rails.md`.
 - **Signature help.** `$obj->method(` and `Foo::method(` on PHP now show
   the declaration's parameter list with the active parameter, the return
   annotation, and the docblock summary, for local and cross-file

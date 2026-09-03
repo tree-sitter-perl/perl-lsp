@@ -41,6 +41,70 @@
         ]
       },
       "status": "gold"
+    },
+    {
+      "id": "php-lar-compl-view-names",
+      "difficulty": "simple",
+      "semantic_area": "php-laravel",
+      "lang": "php",
+      "root": "gold-corpus/laravel-fixture",
+      "comment": "`view('posts.|')` offers the view rail's names under the prefix, never another rail's.",
+      "file": "app/Http/Controllers/PostController.php",
+      "line": 16,
+      "col": 27,
+      "expect": {
+        "all": [
+          "posts.index",
+          "posts.show"
+        ],
+        "none": [
+          "home",
+          "app.name"
+        ]
+      },
+      "status": "gold"
+    },
+    {
+      "id": "php-lar-compl-route-names-empty-string",
+      "difficulty": "simple",
+      "semantic_area": "php-laravel",
+      "lang": "php",
+      "root": "gold-corpus/laravel-fixture",
+      "comment": "`route('|')` (an empty string, the sentinel path) offers every route name.",
+      "file": "app/Http/Controllers/PostController.php",
+      "line": 30,
+      "col": 22,
+      "expect": {
+        "all": [
+          "home",
+          "posts.show",
+          "posts.update"
+        ],
+        "none": [
+          "posts.index"
+        ]
+      },
+      "status": "gold"
+    },
+    {
+      "id": "php-lar-compl-template-extends",
+      "difficulty": "simple",
+      "semantic_area": "php-laravel",
+      "lang": "php",
+      "root": "gold-corpus/laravel-fixture",
+      "comment": "a template's `@extends('layouts.|')` offers view names through the text rails.",
+      "file": "resources/views/posts/show.blade.php",
+      "line": 0,
+      "col": 18,
+      "expect": {
+        "all": [
+          "layouts.app"
+        ],
+        "none": [
+          "posts.show"
+        ]
+      },
+      "status": "gold"
     }
   ]
 }

@@ -103,7 +103,7 @@ pub(super) fn string_content_span_at(tree: &Tree, point: Point) -> Option<Span> 
 /// replacing, the replacement is the identifier text, no decoration.
 /// `insert_text` is also cleared — textEdit takes precedence in the
 /// LSP spec, and leaving both set confuses some clients.
-pub(super) fn retarget_items_to_span(items: &mut [CompletionItem], span: Span) {
+pub(crate) fn retarget_items_to_span(items: &mut [CompletionItem], span: Span) {
     let range = span_to_range(span);
     for item in items {
         item.text_edit = Some(tower_lsp::lsp_types::CompletionTextEdit::Edit(

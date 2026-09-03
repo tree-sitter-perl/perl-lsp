@@ -1180,3 +1180,49 @@ identical runs after). Two changes: a core the warm load fed nothing
 into skips the rebuild (nothing to re-derive), and a rebuild's clear
 spares the path-keyed handler feeds, whose only source is the records
 that replay them anyway.
+
+### Round 5 — completion, the battery, gold (2026-09-03, 19:30, build under net r123)
+
+Rail-name completion in the string slot, on panel (104 named routes, 42
+views) cold:
+
+| probe | result |
+|---|---|
+| `view('admin.|` in `LocationController` | every `admin.*` view, nothing from another rail |
+| `route('admin.|` in a Blade partial | every `admin.*` route name through the text rails |
+| `route('|` (empty string) in the gold fixture | every route name (the sentinel path) |
+| `__('auth.|` | the locale file's keys; a first segment without a dot completes nothing (the overlay's regex is the lane's honesty gate) |
+
+The battery against Laravel Idea's feature list, as the arc leaves it:
+
+| Laravel Idea | ours |
+|---|---|
+| route names: completion, goto, usages, rename | all four, plus templates and `undefined-route` |
+| controller actions | class-array callables: goto + references |
+| route URIs / parameters, `Route::resource` names | parked (no identity to connect; name synthesis) |
+| views: goto file, usages, completion, undefined view | all, templates included (`@extends` / `@include` / `@each` / `@component`) |
+| config keys, translation keys | goto the key row, references, rename, completion, undefined-key; the locale segment skipped |
+| `env('KEY')` | parked (`.env` is not a php file) |
+| events ↔ listeners, jobs | emissions and handlers connect across files, call hierarchy walks the bus, `No listener for event` hints; Laravel Idea shows a list, we show a graph |
+| gates / policies | `Gate::define` and every policy method define; `authorize` / `can` / `@can` navigate; a miss is a hint |
+| middleware aliases | kernel maps, `->alias`, the framework defaults; `throttle:60,1` names `throttle`; a miss is a hint |
+| container bindings, `app(Foo::class)` typed | both |
+| facades → real class | the FQ spelling through `@method`; the bare alias parked with corpus evidence (zero uses in three apps) |
+| Eloquent fields from migrations, scopes, validation rules, Livewire, Inertia, generation | out of the box |
+
+Gold: `gold-corpus/laravel-fixture` (15 files) carries one row per rail
+axis — 9 definition, 2 references, 1 rename, 1 call hierarchy, 3
+completion, 1 diagnostics — all gold, cold and warm.
+
+### Arc close (2026-09-03, 19:45)
+
+Every row of the parity matrix is landed or parked with evidence
+(`docs/adr/laravel-rails.md`, "What is deliberately not here"). Seven
+rails (route, event, view, config, lang, middleware, ability, binding),
+one text lane for templates, one path lane for file-defined names,
+rail-name completion, 17 gold rows, three corpora characterized. Two
+defects outside the arc's scope found and fixed on the way: the pack
+tier never fed the reverse index for classless files (WordPress hook
+navigation across files was broken the same way), and a pack sub-index's
+lazily-woken resolver rebuilt the reverse index under the diagnostics
+sweep (nondeterministic cross-file misses on every one-shot CLI run).

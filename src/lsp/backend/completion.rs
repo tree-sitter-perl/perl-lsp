@@ -49,6 +49,44 @@ pub fn pack_completion(
     // projects it onto LSP items.
     let crate::lsp::cursor_slot::DetectedSlot { slot, .. } =
         crate::lsp::cursor_slot::detect_slot(analysis, tree, source, point, language, Some(xidx));
+    // A string on a rail: the rail's declared names — this file's own and
+    // every registered file's (the owner-tagged handler records) — filtered
+    // by the typed prefix, each item's edit replacing the whole string
+    // content (a client's word boundary never spans `.` / `-` / `/`).
+    if let crate::lsp::cursor_slot::Slot::RailName { rail, prefix, content } = &slot {
+        use crate::model::file_analysis::{HandlerOwner, SymbolDetail};
+        let mut names: Vec<String> = analysis
+            .symbols()
+            .iter()
+            .filter(|s| matches!(&s.detail, SymbolDetail::Handler { owner: HandlerOwner::Rail(r), .. } if r == rail))
+            .map(|s| s.name.clone())
+            .collect();
+        names.extend(match &routed {
+            crate::index::module_index::RoutedIndex::Hub(h) => h.rail_names(rail),
+            crate::index::module_index::RoutedIndex::Pack(p) => p.rail_names(rail),
+        });
+        names.sort();
+        names.dedup();
+        let mut items: Vec<CompletionItem> = names
+            .into_iter()
+            .filter(|n| n.starts_with(prefix.as_str()))
+            .map(|n| {
+                symbols::candidate_to_completion_item(crate::model::file_analysis::CompletionCandidate {
+                    label: n,
+                    kind: crate::model::file_analysis::SymKind::Handler,
+                    is_static: false,
+                    detail: Some(rail.clone()),
+                    insert_text: None,
+                    sort_priority: crate::model::file_analysis::PRIORITY_LOCAL,
+                    additional_edits: vec![],
+                    import_fact: None,
+                    display_override: None,
+                })
+            })
+            .collect();
+        symbols::retarget_items_to_span(&mut items, *content);
+        return (items, false);
+    }
     if let crate::lsp::cursor_slot::Slot::Member { receiver, .. } = &slot {
         if let Some(class) =
             receiver.receiver_type.as_ref().and_then(|ty| ty.class_name().map(|s| s.to_string()))

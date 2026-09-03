@@ -142,7 +142,7 @@ pub struct ModuleEdgeIndexes {
     name_records: DashMap<std::path::PathBuf, FedNames>,
     /// Path key → the handler names it fed (rail / hook definitions), kept
     /// across `clear` like `name_records`, replayed by the rebuild.
-    handler_records: DashMap<String, Vec<String>>,
+    handler_records: DashMap<String, Vec<(String, crate::model::file_analysis::HandlerOwner)>>,
     /// Every module name `feed` has published edges under, and — the point
     /// — WHICH bucket keys it was published under in each map, so
     /// `purge_module` touches only its own edges.
@@ -276,7 +276,7 @@ impl ModuleEdgeIndexes {
     /// key through the per-path registry, so `modules_with_symbol(name)`
     /// → `visible_def_candidates(key)` reaches the file like any module.
     /// Marks the member fed, so `purge_module(key)` clears it.
-    pub fn feed_handlers(&self, module_key: &str, names: &[String]) {
+    pub fn feed_handlers(&self, module_key: &str, names: &[(String, crate::model::file_analysis::HandlerOwner)]) {
         // Recorded per path key so a rebuild (`clear` + re-feed from the
         // name-keyed cache, which never holds a path key) replays it —
         // the `name_records` rule for the handler axis.
@@ -286,12 +286,32 @@ impl ModuleEdgeIndexes {
         }
         self.handler_records.insert(module_key.to_string(), names.to_vec());
         let mut fed = FedKeys::default();
-        for name in names {
+        for (name, _owner) in names {
             fed.names.insert(name);
             self.names.entry(name.clone()).or_default().insert(module_key);
         }
         let mut rec = self.fed_modules.entry(module_key.to_string()).or_default();
         rec.merge(&fed);
+    }
+
+    /// Every handler name declared on the string rail `rail` across the
+    /// recorded feeds — the rail-name completion source. Owners ride the
+    /// records, so this never rehydrates a file.
+    pub fn rail_names(&self, rail: &str) -> Vec<String> {
+        let mut out: Vec<String> = self
+            .handler_records
+            .iter()
+            .flat_map(|e| {
+                e.value()
+                    .iter()
+                    .filter(|(_, o)| matches!(o, crate::model::file_analysis::HandlerOwner::Rail(r) if r == rail))
+                    .map(|(n, _)| n.clone())
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        out.sort();
+        out.dedup();
+        out
     }
 
     /// Publish ONE specialization edge (primary → spec). The pack path
@@ -425,7 +445,7 @@ impl ModuleEdgeIndexes {
     /// Replay every recorded handler feed — the rebuild's second half,
     /// after the name-keyed re-feed.
     pub fn replay_handler_records(&self) {
-        let records: Vec<(String, Vec<String>)> =
+        let records: Vec<(String, Vec<(String, crate::model::file_analysis::HandlerOwner)>)> =
             self.handler_records.iter().map(|e| (e.key().clone(), e.value().clone())).collect();
         for (key, names) in records {
             self.feed_handlers(&key, &names);
@@ -538,7 +558,7 @@ pub(crate) struct PackRegistrationParts {
     /// under the file's PATH key, never to the def-candidate tables: a
     /// route name is reachable by name, never offered as an identifier
     /// nor a class-slot winner.
-    pub(super) handlers: Vec<String>,
+    pub(super) handlers: Vec<(String, crate::model::file_analysis::HandlerOwner)>,
     pub(super) surface: Option<crate::model::surface::Surface>,
 }
 
@@ -554,7 +574,7 @@ impl PackRegistrationParts {
     pub(crate) fn specs(&self) -> &[(String, String)] {
         &self.specs
     }
-    pub(crate) fn handlers(&self) -> &[String] {
+    pub(crate) fn handlers(&self) -> &[(String, crate::model::file_analysis::HandlerOwner)] {
         &self.handlers
     }
     /// The projected surface — valid only BEFORE `record_surface` takes it.

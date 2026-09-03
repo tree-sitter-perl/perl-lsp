@@ -809,7 +809,7 @@ fn adopt_path_rails(
 /// on the rail. A parsed region (`<?php echo route('x') ?>` inside a
 /// template) already minted its ref — a text hit at the same start yields
 /// to it. Only the single-quoted, escape-free literal spelling is a name.
-fn scan_text_rails(
+pub(crate) fn scan_text_rails(
     fa: &FileAnalysis,
     source: &str,
     rails: &[&crate::build::query_extract::TextRail],

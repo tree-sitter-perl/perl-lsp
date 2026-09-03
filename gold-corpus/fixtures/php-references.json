@@ -59,6 +59,44 @@
         "none": []
       },
       "status": "gold"
+    },
+    {
+      "id": "php-lar-refs-route-from-declaration",
+      "difficulty": "simple",
+      "semantic_area": "php-laravel",
+      "lang": "php",
+      "root": "gold-corpus/laravel-fixture",
+      "comment": "references from `->name('posts.update')` list the template's `route('posts.update')` and the declaration.",
+      "file": "routes/web.php",
+      "line": 8,
+      "col": 75,
+      "expect": {
+        "all": [
+          "\"file\":\"show.blade.php\",\"line\":\"5\"",
+          "\"file\":\"web.php\",\"line\":\"9\""
+        ],
+        "none": []
+      },
+      "status": "gold"
+    },
+    {
+      "id": "php-lar-refs-route-from-template",
+      "difficulty": "simple",
+      "semantic_area": "php-laravel",
+      "lang": "php",
+      "root": "gold-corpus/laravel-fixture",
+      "comment": "references from a template's `route('home')` reach the declaration in routes/web.php (the text lane mints the same ref).",
+      "file": "resources/views/posts/show.blade.php",
+      "line": 2,
+      "col": 19,
+      "expect": {
+        "all": [
+          "\"file\":\"show.blade.php\",\"line\":\"3\"",
+          "\"file\":\"web.php\",\"line\":\"6\""
+        ],
+        "none": []
+      },
+      "status": "gold"
     }
   ]
 }

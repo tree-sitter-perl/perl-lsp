@@ -65,7 +65,7 @@
             . (argument (class_constant_access_expression)))))))
   (#any-of? @_lrel2c "hasMany" "belongsToMany" "morphMany" "morphToMany" "hasManyThrough"))
 
-; ---- the routes rail (docs/prompt-laravel-parity.md) ----
+; ---- the routes rail (docs/adr/laravel-rails.md) ----
 ; `Route::get('/x', …)->name('home')` DECLARES the route name on the
 ; `route` rail (a Handler named by the string content, owner
 ; `Rail("route")`); `route('home')`, `to_route`, `redirect()->route`,
@@ -114,7 +114,7 @@
   (#any-of? @_lr_facade "URL" "Redirect" "Route")
   (#any-of? @dispatch.via "route" "has" "signedRoute" "temporarySignedRoute"))
 
-; ---- the event bus (a class-keyed rail, `docs/prompt-laravel-parity.md`) ----
+; ---- the event bus (a class-keyed rail, `docs/adr/laravel-rails.md`) ----
 ; Names are CLASS names: an emission `event(new X(…))` / `X::dispatch(…)`
 ; / `dispatch(new Job)` / `broadcast(new X)` is a DispatchCall named X on
 ; the `event` rail whose span is the class token (goto-def there lists

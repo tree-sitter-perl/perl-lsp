@@ -407,6 +407,12 @@ impl ModuleIndex {
     /// `for_each_cached` over the whole store). Callers apply their
     /// own kind/detail filter + override/stacking semantics after
     /// picking which specific symbols matter to them.
+    /// Every handler name on the string rail `rail` this index holds
+    /// (rail-name completion's cross-file source).
+    pub fn rail_names(&self, rail: &str) -> Vec<String> {
+        self.core.edges.rail_names(rail)
+    }
+
     pub fn modules_with_symbol(&self, name: &str) -> Vec<String> {
         match self.core.edges.names.get(name) {
             Some(bucket) => {

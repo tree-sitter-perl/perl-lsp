@@ -1737,13 +1737,18 @@ impl ModuleIndex {
 
     /// Every Handler symbol's name (rail definitions, hook registrations),
     /// deduped — read from the WHOLE analysis before the strip.
-    pub(crate) fn handler_names(fa: &FileAnalysis) -> Vec<String> {
-        let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
-        fa.symbols()
-            .iter()
-            .filter(|s| matches!(s.kind, SymKind::Handler) && seen.insert(s.name.as_str()))
-            .map(|s| s.name.clone())
-            .collect()
+    pub(crate) fn handler_names(fa: &FileAnalysis) -> Vec<(String, crate::model::file_analysis::HandlerOwner)> {
+        let mut out: Vec<(String, crate::model::file_analysis::HandlerOwner)> = Vec::new();
+        for s in fa.symbols() {
+            let crate::model::file_analysis::SymbolDetail::Handler { owner, .. } = &s.detail else { continue };
+            if !matches!(s.kind, SymKind::Handler) {
+                continue;
+            }
+            if !out.iter().any(|(n, o)| n == &s.name && o == owner) {
+                out.push((s.name.clone(), owner.clone()));
+            }
+        }
+        out
     }
 
     pub fn register_symbols_stripping(
