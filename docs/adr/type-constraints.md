@@ -31,7 +31,7 @@ consumers ask the value, they never destructure the serde shape.
 Pairs with `Sequence(Vec<_>)` / `Parametric(_)` (inner-carrying) — the
 `…Of` reads as "constraint of `<inner>`".
 
-### Core extracts the params; the plugin folds them to the inner
+### Core extracts the params; the plugin folds them to the constraint
 
 A type library exports a vocabulary of constructors of varying arity
 (`ArrayRef` at 0, `InstanceOf['Foo']` at 1, `Enum['a','b']` at N).
@@ -87,16 +87,22 @@ projection carries the optionalness through, so `has thing => (isa =>
 Maybe[InstanceOf['My::Thing']])` types the getter `Optional<My::Thing>`.
 
 The declaration says the value may be undef, and every consumer that
-matters can now hear it. `InferredType::Optional` is first class
+matters can hear it. `InferredType::Optional` is first class
 (`optional-types.md`), flow-sensitive guard narrowing strips it at a
 guard (`flow-narrowing.md`), and D2 `optional-deref`
 (`narrowing-diagnostics.md`) reports an unguarded access. Dispatch is
 unaffected — optional receivers resolve leniently — so the lift costs
 resolution nothing and buys the diagnostic the truth.
 
-Both `isa` spellings agree: the quoted `isa => 'Maybe[T]'` string form
-and the bareword constructor fold reach the same type, which is the
-property that keeps the two paths from drifting.
+Both spellings reach the same type through the SAME vocabulary, fold and
+parameter walk. Moose's type string is Perl-parsable, so it is re-parsed
+and walked exactly like a constructor written in the file; the two differ
+only in how a leaf name resolves — a node in the file asks the bag, a
+re-parsed leaf asks the plugin vocabulary directly, because a re-parsed
+tree's spans live in the string's own coordinate space and emitting
+witnesses from them would collide with the file's attachments. That is
+the honest limit on "one implementation": one walk, one fold, two
+resolvers. Agreement is structural, not two tables kept in step.
 
 The boundary is the parameter, not the wrapper. A parameterized
 container folds to its base rep (`ArrayRef[Int]` → `ArrayRef`) because
@@ -136,47 +142,11 @@ nothing: a Type::Tiny constant must be imported to compile.
 - **Richer vocabulary** (`ArrayRef[InstanceOf[X]]`, `Enum`, `Dict`).
   The `ty`-filling plumbing exists; each is one fold entry.
 - **Retiring the name gate entirely.** A constraint constructor is a sub
-  that returns a constraint value, so the honest model is a SYMBOL with
-  a return type, not a name gate in `expr_payload`. Core has a gate only
-  because `Types::Standard` generates its exports at runtime through
-  `Type::Library`, leaving no static `sub Str` for an import to bind to
-  — the runtime-export-generator boundary (`open-problems.md`). Repairing
-  that invisibility by minting symbols is what the plugin layer does
-  everywhere else (Moo's `has`, DBIC's `add_columns`); Type::Tiny is the
-  one place it adds a gate instead.
-
-  Minting dissolves the special case for the names it can reach: the
-  name resolves as an ordinary imported sub, its type flows through
-  `sub_return_type`, and a local `sub Str` competes by the normal
-  local-beats-import rule rather than by a gate that runs before symbol
-  lookup at all.
-
-  **It reaches the 0-arity constants and stops.** `Str` / `Int` /
-  `HashRef` are `ReturnExpr::Concrete(TypeConstraintOf(rep))` — and they
-  are also the whole reason the import scoping is needed, since they are
-  the names that collide. The parameterized constructors do not follow,
-  because of what the syntax actually is: `Maybe[Int]` parses as a call
-  whose single argument is an `anonymous_array_expression` whose element
-  is a bareword, and `InstanceOf['Foo']` as one whose element is a
-  string literal. A return shape for those has to say "the type of
-  element 0 of my first argument" and "the literal VALUE of element 0 of
-  my first argument" — two projections deep, through an arrayref.
-  `ReturnExpr::Arg(n)` yields the argument's own type (`ArrayRef`), and
-  no operator composes the unwrap.
-
-  `extract_constraint_params` already does exactly that unwrap, handing
-  the plugin a flat `ConstraintParam { string, ty }` per element with
-  nesting resolved through the same `expr_payload` path. That extractor
-  is the real machinery here and survives either design; the gate around
-  it is the small part.
-
-  So the honest choice is not "mint or gate" but where to draw the line.
-  Minting the 0-arity half removes the collision class structurally and
-  lets the gate shrink to `InstanceOf` / `ConsumerOf` / `Maybe` — three
-  distinctive names for which a global gate carries no real risk. The
-  cost is two mechanisms instead of one, which is a real cost and should
-  not be waved away by observing that each covers the case it suits.
-  Deciding that is the open question; inventing an arrayref-projecting
-  `ReturnExpr` shape to serve one library's syntax is the alternative,
-  and it is a cross-language type-system change for a Perl-shaped
-  problem.
+  that returns a constraint value; the honest model is a minted symbol,
+  not a name gate ahead of symbol lookup. The design is
+  `prompt-type-constraint-flow.md`: the plugin's `on_use` mints the sub
+  the runtime installs, and `Name[...]` parameterization is asked of the
+  callee's owner. No `ReturnExpr` shape carries it — `Arg(n)` is inert for
+  Perl (no call site threads argument types into a query), and
+  `InstanceOf['Foo']`'s operand is a literal *value*, which no type-level
+  operator reads.
