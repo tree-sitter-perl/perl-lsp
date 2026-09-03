@@ -415,7 +415,7 @@ dependencies (composer's dist downloads are refused by the sandbox proxy).
 | implementations of an interface method | (works) | (works) | none (licensed) | works |
 
 Diagnostics on the corpora (`--check`, every remaining row read —
-`docs/hitlist-php-round8.md`): guzzle `undefined-type` 1,331 of which
+`docs/adr/php-diagnostics.md`): guzzle `undefined-type` 1,331 of which
 1,091 are one missing test class and 208 the unvendored PHPUnit;
 `unresolved-method` 2; `undefined-variable` 0; `non-public-access` 0.
 monolog `undefined-type` 158 (PHPUnit attributes, optional transports),
@@ -655,7 +655,7 @@ by-reference captures, foreach key subscripts, nested-closure captures,
 `undefined-property` 518 → 101 on laravel (trait bodies) and
 `unresolved-method` 1,521 → 993 (trait `$this` calls). WordPress's
 `unused-variable` 611 → 420 and `undefined-property` 195 are the
-untyped-reassignment residual (`docs/hitlist-php-round8.md`), measured
+untyped-reassignment residual (`docs/adr/flow-narrowing.md`), measured
 next. `undefined-type` is unchanged by construction: those rows are
 vendor classes with no `vendor/` tree installed.
 
@@ -698,3 +698,22 @@ rows alone); no new rows anywhere.
 | WordPress | 13 | 32 | 94 | 24 | 0 | 420 | 283 | 11 |
 | laravel/framework | 160 | 91 | 7,039 | 51 | 6 | 257 | 34 | 14 |
 
+### Scoreboard replay with the night's final build (2026-09-03, 04:35, build 11334c6)
+
+The day-2 battery (`spec2-*.json`) replayed once more against the build
+carrying the night's slices (the reassignment reset, unions as
+known-untypable, the template-method and self-parent rules, existence
+probes). Every answered/probed cell of the 00:30 table above is
+unchanged: the same definitions, hovers, signatures, implementations,
+typeDefinitions and outlines, at the same 0–16 ms; the other tools' rows
+are the day-2 runs. Startup and resident memory, this replay:
+
+| corpus | ours ready · RSS | Intelephense | phpactor |
+|---|---|---|---|
+| guzzle | 1.4 s · 365 MB | 1.5 s · 232 MB | 0.7 s · 126 MB |
+| monolog | 1.2 s · 84 MB | 1.1 s · 195 MB | 0.5 s · 119 MB |
+| demo | 1.1 s · 69 MB | 1.1 s · 187 MB | 1.6 s · 117 MB |
+
+One row the replay surfaced in our own diagnostics: guzzle's
+`foreach ($options['curl'] as $option => $_)` reports `$_` as assigned
+but never used — the conventional throwaway name, flagged twice.

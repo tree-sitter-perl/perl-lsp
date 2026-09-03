@@ -495,6 +495,33 @@ marked otherwise; the drain re-derived each rationale against current code.
 - **PHP vendor-resolved method hover drops the signature** (round-4 H12):
   cross-file method hover through the vendor/dependency tier renders the
   generic member arm instead of the method-signature arm.
+- **PHP `--heatmap` fan-in walk cost on large corpora** (round-5 R5-4): a
+  1,232-file phpMyAdmin heatmap costs ~2 minutes cold and warm. Indexing
+  is 3.0s cold / 0.2s warm; the rest is the per-symbol `references()`
+  walk. Attributed 2026-09-02 (warm, `PERL_LSP_GHOST_STATS`, quiet box,
+  one run — wall 74-78s, well under the 1m50s recorded from an earlier,
+  possibly loaded-box run, so the three-run protocol still owes a
+  baseline): both per-walk rehydration memos are defeated on the heatmap
+  path — `sweep.lookup`/`sweep.memo_miss` both 1,536,053 (the
+  thread-local `SWEEP_MEMO` is never open on the heatmap's walk loop) and
+  `session.foreign_index` 1,586,824 (the session memo sees an index id
+  other than the walk's) — so a file rehydrates once PER WALK instead of
+  once per run: `rehydrate.loader` 19.1s over 1.54M calls (mostly
+  `bagcache.hit`, ~12µs each — it is the call count that hurts),
+  `bagcache.decode` 12.3s over 35,564 decodes, `bag.rebuild_index_witnesses`
+  4.09M calls. Unblock: open the sweep memo (or the shared
+  `SWEEP_PROVIDERS`) for the heatmap's walk loop, and give the heatmap's
+  session the walk's index id — not the matcher, which is already
+  row-narrowed (the pack tier's own-row-store pre-prune already landed).
+- **PHP `self::VOID`-style constant names read as undefined properties**
+  (round-8): tree-sitter-php lexes a keyword-spelled constant NAME
+  (`VOID`, `STRING`, `ARRAY` — PHP keywords are case-insensitive) as the
+  `void` type keyword, so `const VOID = 'void';` is an ERROR node the
+  extractor never sees; both reads of `self::VOID` in WordPress's
+  `class-wp-block-processor.php` report `undefined-property`. A grammar
+  fix upstream; recovering the declaration out of the ERROR node (rule
+  #1: scan ERROR children for `const NAME =`) is deferred until a corpus
+  shows more than the two known rows.
 
 ## Cross-references
 - Gap shapes behind open xfails: `gold-corpus/KNOWN-GAPS.md`

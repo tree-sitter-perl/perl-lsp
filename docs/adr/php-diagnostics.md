@@ -1,7 +1,7 @@
 # PHP diagnostics: the pack symbol lanes
 
-Status: landed 2026-09-02 (day-2 arc). Scope: `--features php`; the lanes
-run for any pack language whose `LangPack` declares the facts they read.
+Scope: `--features php`; the lanes run for any pack language whose
+`LangPack` declares the facts they read.
 
 Pack documents publish through `symbols::pack_diagnostics`, which now
 carries the **pack symbol lanes** (`diagnostics::pack_symbol_diagnostics`)
@@ -31,6 +31,18 @@ scope's package and a `Variable("$this") = ClassName` witness, so a chain
 based on the receiver resolves through the registry like any typed
 variable), the expression's own witnesses for `$a->b->c()`. Nothing is
 manufactured from an untyped receiver.
+
+A pack can declare its member shapes STRICT (`LangPack::
+member_shapes_are_strict`, php): the syntax itself decides call vs read,
+so `unresolved-method`/`undefined-property` fire independently even
+when the class overloads the name across kinds — the diagnostics lanes
+need no `TargetRef::member_shape` gate. Goto-def and hover read the
+same declaration: a cursor on a strict pack's method-call ref mints
+`TargetRef::member_shape` from the written shape (`identity.rs`), and
+`member_value_type` skips the method arm for a value read, so a value
+read of a method-only name is an undeclared property on every verb.
+Declaration cursors keep the overload-only gate (an Eloquent
+`$chapter->book` still references `book()`).
 
 ## Silence rules (precision first)
 
@@ -110,6 +122,8 @@ Every lane names the case it cannot see and stays silent there:
   `#include` splices text. Constant imports (no lowercase letter) are
   silent — the walker records no spelling for them. The quick-fix deletes
   the row when it binds only that name.
+- **The throwaway name** (`$_` in `foreach ($a as $k => $_)`, the pack's
+  `throwaway_names`) is written to be discarded and is never unused.
 - **An unused variable** (`unused-variable`, a hint tagged unnecessary)
   is a local the callable writes and never reads — a read counts for its
   callable, every enclosing one (a closure's `use ($x)` reads the outer
