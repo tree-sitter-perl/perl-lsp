@@ -368,58 +368,6 @@ pub(super) fn code_deref_operand<'a>(code_deref: Node<'a>) -> Option<Node<'a>> {
     }
 }
 
-/// Re-parse an `isa` value as Perl and extract the class name from
-/// `InstanceOf['Foo::Bar']` / `InstanceOf["Foo::Bar"]`. Tree-sitter-perl
-/// parses this as `ambiguous_function_call_expression` with function
-/// `InstanceOf` and an `anonymous_array_expression` argument containing
-/// a single string literal — we walk that shape and ignore everything
-/// else (if the tree doesn't match, this isn't an InstanceOf).
-pub(super) fn parse_instance_of(isa: &str) -> Option<String> {
-    let mut parser = tree_sitter::Parser::new();
-    parser.set_language(&ts_parser_perl::LANGUAGE.into()).ok()?;
-    let tree = parser.parse(isa, None)?;
-    let source = isa.as_bytes();
-
-    // Walk to the first ambiguous_function_call_expression.
-    fn find_call<'a>(node: Node<'a>) -> Option<Node<'a>> {
-        if node.kind() == "ambiguous_function_call_expression"
-            || node.kind() == "function_call_expression"
-        {
-            return Some(node);
-        }
-        for i in 0..node.named_child_count() {
-            if let Some(c) = node.named_child(i) {
-                if let Some(found) = find_call(c) {
-                    return Some(found);
-                }
-            }
-        }
-        None
-    }
-    let call = find_call(tree.root_node())?;
-    let func = call.child_by_field_name("function")?;
-    if func.utf8_text(source).ok()? != "InstanceOf" {
-        return None;
-    }
-    let args = call.child_by_field_name("arguments")?;
-    if args.kind() != "anonymous_array_expression" {
-        return None;
-    }
-    for i in 0..args.named_child_count() {
-        let child = args.named_child(i)?;
-        if matches!(child.kind(), "string_literal" | "interpolated_string_literal") {
-            for j in 0..child.named_child_count() {
-                if let Some(content) = child.named_child(j) {
-                    if content.kind() == "string_content" {
-                        return content.utf8_text(source).ok().map(|s| s.to_string());
-                    }
-                }
-            }
-        }
-    }
-    None
-}
-
 /// Find the `data_section` node (the region after `__END__` / `__DATA__`)
 /// among a `source_file`'s direct children, if any.
 pub(super) fn find_data_section<'a>(root: Node<'a>) -> Option<Node<'a>> {

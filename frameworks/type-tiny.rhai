@@ -54,29 +54,57 @@ fn base_constant_type(name) {
     if name == "CodeRef" { return type_coderef(); }
     if name == "RegexpRef" { return type_regexp(); }
     if name == "Undef" { return type_undef(); }
+    if name == "Bool" { return type_bool(); }
     ()
+}
+
+// Names this vocabulary OWNS whose inner no `InferredType` describes:
+// `Object` is "a blessed reference", `Any`/`Item` constrain nothing. They are
+// constraints — typing them as user classes named `Object` is the bug this
+// list exists to prevent — but they project no accessor type.
+fn opaque_constraint_names() {
+    ["Any", "Item", "Object", "Defined", "Ref", "Value",
+     "ClassName", "RoleName", "GlobRef", "FileHandle", "ScalarRef",
+     "Enum", "Dict", "Tuple", "Map", "Overload", "InstanceOf",
+     "ConsumerOf", "HasMethods", "StrMatch", "Optional", "Maybe"]
 }
 
 // Fold the constructor's params into the constrained INNER type, or () to
 // decline. `params` is a list of #{ string, ty }. Arity is ours to handle.
+// Fold a constructor to the constraint VALUE it produces, or () when the
+// name is not ours. `type_constraint(())` says "a constraint of mine, inner
+// not expressible" — distinct from declining, which lets Moose read the name
+// as a class.
 fn type_constraint_inner(name, params) {
-    if name == "Maybe" {
+    if name == "Maybe" || name == "Optional" {
         // `Maybe[T]` permits undef OR a T — the honest `Optional<T>`, which
         // the lattice now models. The single param is a nested constructor
         // core typed `TypeConstraintOf(T)`; project T's inner and lift.
-        if params.is_empty() { return (); }
+        // A bare `Maybe` with no parameter is still a constraint.
+        if params.is_empty() { return type_constraint(()); }
         let inner = constrained_inner(params[0].ty);
-        if inner == () { return (); }
-        return type_optional(inner);
+        if inner == () { return type_constraint(()); }
+        return type_constraint(type_optional(inner));
     }
     // 0-arity base constants take no params, so this precedes the arity gate.
     let base = base_constant_type(name);
-    if base != () { return base; }
-    if params.is_empty() { return (); }
+    if base != () { return type_constraint(base); }
+
     // InstanceOf['Foo'] / ConsumerOf['Role'] — first string param is the class.
-    let cls = params[0].string;
-    if cls == () { return (); }
-    type_class(cls)
+    if name == "InstanceOf" || name == "ConsumerOf" {
+        if params.is_empty() { return type_constraint(()); }
+        let cls = params[0].string;
+        if cls == () { return type_constraint(()); }
+        return type_constraint(type_class(cls));
+    }
+
+    // A name we own but cannot express an inner for. NOT a decline: reading
+    // `Object` as a class named Object is exactly the miscarriage this
+    // separation prevents.
+    if opaque_constraint_names().contains(name) { return type_constraint(()); }
+
+    // Not our vocabulary — the caller may legitimately read it as a class.
+    ()
 }
 
 // ---- Import-scoped vocabulary ----

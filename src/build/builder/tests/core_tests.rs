@@ -334,31 +334,6 @@ fn braced_var_declaration_names_match_bare_form() {
     );
 }
 
-// ---- parse_instance_of ----
-
-#[test]
-fn parse_instance_of_single_quoted() {
-    assert_eq!(
-        parse_instance_of("InstanceOf['Foo::Bar']").as_deref(),
-        Some("Foo::Bar")
-    );
-}
-
-#[test]
-fn parse_instance_of_double_quoted() {
-    assert_eq!(
-        parse_instance_of("InstanceOf[\"Foo::Bar\"]").as_deref(),
-        Some("Foo::Bar")
-    );
-}
-
-#[test]
-fn parse_instance_of_rejects_non_instance_of() {
-    assert_eq!(parse_instance_of("Str"), None);
-    assert_eq!(parse_instance_of("ArrayRef[Int]"), None);
-    assert_eq!(parse_instance_of("My::Class"), None);
-}
-
 // ---- Scope tests ----
 
 #[test]

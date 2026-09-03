@@ -739,6 +739,20 @@ impl FrameworkMode {
             _ => None,
         }
     }
+
+    /// Does an unrecognised `isa` STRING name a class in this flavor?
+    ///
+    /// Moose's type registry accepts a class name where a type is expected,
+    /// so a string it does not know is a class. Moo rejects a plain-string
+    /// `isa` at class-definition time — it wants a coderef or a Type::Tiny
+    /// object — so an unknown string there names nothing, and guessing a
+    /// class would be inventing one. Mouse rides the Moose flavor through
+    /// the `framework_mode_makers` manifest.
+    ///
+    /// A property of the mode value, asked by the isa reader (rule #10).
+    fn unknown_isa_string_names_class(self) -> bool {
+        matches!(self, Self::Moose)
+    }
 }
 
 // ---- Tests ----

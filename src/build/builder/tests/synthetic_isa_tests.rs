@@ -512,7 +512,7 @@ fn instanceof_expression_is_a_type_constraint_not_the_class() {
         .inferred_type_via_bag("$t", Point::new(3, 20))
         .expect("$t should carry a type");
     assert!(
-        matches!(&ty, InferredType::TypeConstraintOf(inner)
+        matches!(&ty, InferredType::TypeConstraintOf(Some(inner))
             if matches!(inner.as_ref(), InferredType::ClassName(c) if c == "My::Thing")),
         "InstanceOf['My::Thing'] is a TypeConstraintOf(ClassName(My::Thing)), got {:?}",
         ty,
@@ -1349,4 +1349,89 @@ mod param_types_manifest {
              implicit_action_names must not exempt it from the attribute gate",
         );
     }
+}
+
+// ---- Moose isa STRINGS: one vocabulary, one fold ----
+
+#[test]
+fn moose_isa_string_registered_types_are_not_classes() {
+    // `Object`, `Item`, `Defined` and `Value` are Moose's OWN registered
+    // types. Reading them as user classes invented a `ClassName("Object")`
+    // that nothing declares, so goto-def went nowhere and the
+    // unresolved-method lint reasoned from a fiction. They are constraints
+    // whose inner no `InferredType` describes: a constraint, not a class,
+    // and no accessor type.
+    let fa = build_fa(
+        "package M;\nuse Moose;\nhas a => (is=>'ro', isa=>'Object');\nhas b => (is=>'ro', isa=>'Item');\nhas c => (is=>'ro', isa=>'Defined');\nhas d => (is=>'ro', isa=>'Value');\n1;\n",
+    );
+    for attr in ["a", "b", "c", "d"] {
+        assert_eq!(
+            fa.sub_return_type_at_arity(attr, Some(0)),
+            None,
+            "a registered Moose type must not type the accessor at all",
+        );
+    }
+}
+
+#[test]
+fn moose_isa_string_still_names_a_real_class() {
+    // The fallback that matters: a name the vocabulary declines, which
+    // parses as a bare identifier, IS a class under Moose.
+    let fa = build_fa(
+        "package M;\nuse Moose;\nhas r => (is=>'ro', isa=>'My::Real::Class');\n1;\n",
+    );
+    assert_eq!(
+        fa.sub_return_type_at_arity("r", Some(0)),
+        Some(InferredType::ClassName("My::Real::Class".to_string())),
+    );
+}
+
+#[test]
+fn moose_isa_string_union_is_not_a_class() {
+    // `Str|Undef` parses as a binary expression, not an identifier, so it
+    // declines rather than becoming a class with a pipe in its name.
+    let fa = build_fa("package M;\nuse Moose;\nhas u => (is=>'ro', isa=>'Str|Undef');\n1;\n");
+    assert_eq!(fa.sub_return_type_at_arity("u", Some(0)), None);
+}
+
+#[test]
+fn moose_isa_string_shares_the_bareword_vocabulary() {
+    // The quoted spelling is re-parsed and folded through the SAME
+    // vocabulary and the same parameter walk as the bareword constructor,
+    // so the two spellings agree by construction rather than by two tables
+    // being kept in step.
+    let fa = build_fa(
+        "package M;\nuse Moose;\nhas s => (is=>'ro', isa=>'Str');\nhas i => (is=>'ro', isa=>'Int');\nhas b => (is=>'ro', isa=>'Bool');\nhas ar => (is=>'ro', isa=>'ArrayRef[Str]');\nhas m => (is=>'ro', isa=>'Maybe[Int]');\nhas o => (is=>'ro', isa=>'Optional[Int]');\n1;\n",
+    );
+    assert_eq!(fa.sub_return_type_at_arity("s", Some(0)), Some(InferredType::String));
+    assert_eq!(fa.sub_return_type_at_arity("i", Some(0)), Some(InferredType::Numeric));
+    assert_eq!(fa.sub_return_type_at_arity("b", Some(0)), Some(InferredType::Bool));
+    // A parameterized container folds to its base rep — the element type has
+    // no slot to ride until sequence-types lands.
+    assert_eq!(fa.sub_return_type_at_arity("ar", Some(0)), Some(InferredType::ArrayRef));
+    for attr in ["m", "o"] {
+        let t = fa.sub_return_type_at_arity(attr, Some(0));
+        assert!(
+            matches!(&t, Some(InferredType::Optional(i)) if matches!(&**i, InferredType::Numeric)),
+            "{attr}: Optional<Numeric>, got {t:?}",
+        );
+    }
+}
+
+#[test]
+fn moose_isa_string_instance_of_reaches_the_class() {
+    // The nested case exercises the shared parameter walk through a
+    // re-parsed tree: the string literal is a leaf, the constructor recurses.
+    let fa = build_fa(
+        "package M;\nuse Moose;\nhas x => (is=>'ro', isa=>\"InstanceOf['Foo']\");\nhas y => (is=>'ro', isa=>\"Maybe[InstanceOf['Foo']]\");\n1;\n",
+    );
+    assert_eq!(
+        fa.sub_return_type_at_arity("x", Some(0)),
+        Some(InferredType::ClassName("Foo".to_string())),
+    );
+    let y = fa.sub_return_type_at_arity("y", Some(0));
+    assert!(
+        matches!(&y, Some(InferredType::Optional(i)) if i.class_name() == Some("Foo")),
+        "Optional<Foo>, got {y:?}",
+    );
 }

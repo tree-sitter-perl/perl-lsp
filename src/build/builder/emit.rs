@@ -334,10 +334,12 @@ impl<'a> Builder<'a> {
                     && self.constraint_name_imported(&bare)
                 {
                     let params = self.extract_constraint_params(node);
-                    if let Some(inner) = self.plugins.type_constraint_inner(&bare, &params) {
-                        return Some(WitnessPayload::InferredType(
-                            InferredType::TypeConstraintOf(Box::new(inner)),
-                        ));
+                    // The plugin returns the whole constraint value, not the
+                    // inner — it is the half that knows whether a name it
+                    // owns has an expressible inner at all. Core wrapping it
+                    // again would nest a constraint inside a constraint.
+                    if let Some(c) = self.plugins.type_constraint_inner(&bare, &params) {
+                        return Some(WitnessPayload::InferredType(c));
                     }
                 }
                 let sid = self.find_callee_symbol(&called)?;

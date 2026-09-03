@@ -138,11 +138,20 @@ pub enum InferredType {
     /// method dispatch on it routes to `Type::Tiny` (deferred), NOT the
     /// inner type. Its one job here is projection: an `isa => <constraint>`
     /// gives its accessor the *constrained* (inner) type via
-    /// `constrained_inner()`. A plugin's `type_constraint_inner` fold
-    /// produces the inner; the core wraps it. See
-    /// `docs/adr/type-constraints.md`. Kept at the END for
-    /// bincode variant-index stability (bump `EXTRACT_VERSION`).
-    TypeConstraintOf(Box<InferredType>),
+    /// `constrained_inner()`.
+    ///
+    /// The inner is OPTIONAL because a name can be known to be a
+    /// constraint while its inner is not expressible: `Object`, `Any` and
+    /// `Defined` are registered Type::Tiny / Moose types that no
+    /// `InferredType` describes, and a bare `InstanceOf` carries no class
+    /// yet. Those are constraints with an unknown inner — distinct from a
+    /// name the vocabulary does not recognise at all, which is not a
+    /// constraint and types as nothing. Collapsing the two is what makes a
+    /// registered type look like a user class.
+    ///
+    /// See `docs/adr/type-constraints.md`. Kept at the END for bincode
+    /// variant-index stability (bump `EXTRACT_VERSION`).
+    TypeConstraintOf(Option<Box<InferredType>>),
     /// A Mojolicious route-builder value carrying the **accumulated
     /// route defaults** in force at this point in the builder chain.
     /// `base` is the class for method dispatch
@@ -750,9 +759,19 @@ impl InferredType {
     /// matching on the constraint's shape itself.
     pub fn constrained_inner(&self) -> Option<&InferredType> {
         match self {
-            InferredType::TypeConstraintOf(inner) => Some(inner),
+            InferredType::TypeConstraintOf(inner) => inner.as_deref(),
             _ => None,
         }
+    }
+
+    /// Is this a constraint VALUE, whatever it constrains?
+    ///
+    /// Distinct from `constrained_inner().is_some()`: a constraint whose
+    /// inner is unknown is still a constraint, and a consumer asking
+    /// "should I treat this as a Type::Tiny object" wants this, not the
+    /// projection.
+    pub fn is_type_constraint(&self) -> bool {
+        matches!(self, InferredType::TypeConstraintOf(_))
     }
 
     /// Is this the definitive bottom (`Undef`)?

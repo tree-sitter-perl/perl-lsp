@@ -106,6 +106,23 @@ pub fn make_engine() -> Engine {
         to_dynamic(lifted).unwrap_or(Dynamic::UNIT)
     });
 
+    // Boolean rep, for `isa => Bool`.
+    engine.register_fn("type_bool", || {
+        to_dynamic(InferredType::Bool).unwrap_or(Dynamic::UNIT)
+    });
+
+    // Wrap a resolved inner as the constraint VALUE, or — passed unit — as a
+    // constraint whose inner is not expressible (`Object`, `Any`, a bare
+    // `InstanceOf`). The distinction is the point: a plugin returning unit
+    // from its fold means "not my vocabulary" and the name may be a class,
+    // while a constraint with no inner means "mine, and it constrains
+    // nothing I can name". Collapsing them is what makes a registered type
+    // look like a user class.
+    engine.register_fn("type_constraint", |inner: Dynamic| -> Dynamic {
+        let boxed = from_dynamic::<InferredType>(&inner).ok().map(Box::new);
+        to_dynamic(InferredType::TypeConstraintOf(boxed)).unwrap_or(Dynamic::UNIT)
+    });
+
     // The definitive bottom. `isa => Undef` is a real Type::Tiny constraint.
     engine.register_fn("type_undef", || {
         to_dynamic(InferredType::Undef).unwrap_or(Dynamic::UNIT)

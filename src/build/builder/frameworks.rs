@@ -319,16 +319,7 @@ impl<'a> Builder<'a> {
                 // so resolve its expression type and ask the *constraint* what
                 // it constrains to (rule #10 — the type answers). Same path
                 // covers `isa => $t` where `$t` is a constraint-typed variable.
-                isa_value
-                    .as_deref()
-                    .and_then(|isa| self.map_isa_to_type(isa, mode))
-                    .or_else(|| {
-                        let n = isa_value_node?;
-                        self.emit_expr_witness(n);
-                        self.bag_query_expr_span(node_to_span(n))?
-                            .constrained_inner()
-                            .cloned()
-                    })
+                isa_value_node.and_then(|n| self.isa_type_of(n, mode))
             }
             FrameworkMode::MojoBase => {
                 // Fluent return: ClassName(current_package)
@@ -684,16 +675,7 @@ impl<'a> Builder<'a> {
             if key != "isa" {
                 continue;
             }
-            return self
-                .extract_node_string(v_node)
-                .as_deref()
-                .and_then(|s| self.map_isa_to_type(s, mode))
-                .or_else(|| {
-                    self.emit_expr_witness(v_node);
-                    self.bag_query_expr_span(node_to_span(v_node))?
-                        .constrained_inner()
-                        .cloned()
-                });
+            return self.isa_type_of(v_node, mode);
         }
         None
     }
@@ -830,28 +812,8 @@ impl<'a> Builder<'a> {
     /// (string → `string`, nested constructor → `ty`). Rule #1: only the
     /// builder walks these nodes — the plugin gets the structured params.
     pub(super) fn extract_constraint_params(&mut self, call_node: Node<'a>) -> Vec<plugin::ConstraintParam> {
-        let mut params = Vec::new();
-        let Some(args) = call_node.child_by_field_name("arguments") else {
-            return params;
-        };
-        // The `arguments` field is the `[...]` arrayref itself (`Name[p, ...]`),
-        // or a paren list for the `Name(p, ...)` form. Each named child is one
-        // param — a string literal, or a nested constructor (`Maybe[InstanceOf
-        // ['Foo']]`). A nested arrayref (`Tuple[[...]]`) flattens one level.
-        for i in 0..args.named_child_count() {
-            let Some(child) = args.named_child(i) else { continue };
-            match child.kind() {
-                "anonymous_array_expression" => {
-                    for j in 0..child.named_child_count() {
-                        if let Some(el) = child.named_child(j) {
-                            params.push(self.constraint_param_for(el));
-                        }
-                    }
-                }
-                _ => params.push(self.constraint_param_for(child)),
-            }
-        }
-        params
+        let mut leaf = |el: Node<'a>| self.constraint_param_for(el);
+        walk_constraint_params(call_node, &mut leaf)
     }
 
     /// One arrayref element of a constraint constructor → a `ConstraintParam`.
@@ -1199,44 +1161,144 @@ impl<'a> Builder<'a> {
         }
     }
 
-    /// Map a Moo/Moose `isa` type constraint string to an InferredType.
-    pub(super) fn map_isa_to_type(&self, isa: &str, mode: FrameworkMode) -> Option<InferredType> {
-        match isa {
-            "Str" => Some(InferredType::String),
-            "Int" | "Num" => Some(InferredType::Numeric),
-            "Bool" => Some(InferredType::Bool),
-            "HashRef" => Some(InferredType::HashRef),
-            "ArrayRef" => Some(InferredType::ArrayRef),
-            "CodeRef" => Some(InferredType::CodeRef { return_edge: None }),
-            "RegexpRef" => Some(InferredType::Regexp),
-            _ => {
-                // `Maybe[T]` / `Optional[T]` (Type::Tiny / Types::Standard)
-                // → `Optional<inner>`, recursing on the wrapped constraint.
-                // Checked before the InstanceOf/Moose-class fallbacks so
-                // `Maybe[Int]` doesn't read as a class named "Maybe[Int]".
-                for prefix in ["Maybe[", "Optional["] {
-                    if let Some(inner) = isa.strip_prefix(prefix).and_then(|r| r.strip_suffix(']')) {
-                        return self
-                            .map_isa_to_type(inner.trim(), mode)
-                            .map(|t| InferredType::Optional(Box::new(t)));
-                    }
+}
+
+/// Walk a constraint constructor's parameters, flattening the `[...]`
+/// arrayref, building one `ConstraintParam` per element through `leaf`.
+///
+/// Generic over the leaf resolver because the same shape arrives two ways. A
+/// constructor written in the file is a node whose type the bag knows; one
+/// written as a STRING (`isa => 'Maybe[Int]'`) is re-parsed, and a re-parsed
+/// tree's spans live in the string's own coordinate space — emitting
+/// `Expr(span)` witnesses from it would collide with this file's own
+/// attachments. One walk, one fold, two resolvers.
+pub(super) fn walk_constraint_params<'a>(
+    call_node: Node<'a>,
+    leaf: &mut dyn FnMut(Node<'a>) -> plugin::ConstraintParam,
+) -> Vec<plugin::ConstraintParam> {
+    constraint_param_nodes(call_node).into_iter().map(leaf).collect()
+}
+
+/// The parameter nodes of a constraint constructor, arrayref flattened.
+fn constraint_param_nodes<'a>(call_node: Node<'a>) -> Vec<Node<'a>> {
+    let mut out = Vec::new();
+    let Some(args) = call_node.child_by_field_name("arguments") else { return out };
+    for i in 0..args.named_child_count() {
+        let Some(child) = args.named_child(i) else { continue };
+        if child.kind() == "anonymous_array_expression" {
+            for j in 0..child.named_child_count() {
+                if let Some(el) = child.named_child(j) {
+                    out.push(el);
                 }
-                // InstanceOf['Foo::Bar'] (Moo style) — the isa value is
-                // valid-ish Perl syntax, so re-parse it with tree-sitter
-                // and pull the class name out of the tree rather than
-                // hand-stripping brackets and quotes.
-                if let Some(class) = parse_instance_of(isa) {
-                    return Some(InferredType::ClassName(class));
-                }
-                // Moose allows class names as types (contains :: or starts uppercase)
-                if mode == FrameworkMode::Moose && (isa.contains("::") || isa.starts_with(|c: char| c.is_uppercase())) {
-                    // Avoid matching Moose type names like "Str", "Int" etc. already handled above
-                    if isa.contains("::") || isa.len() > 3 {
-                        return Some(InferredType::ClassName(isa.to_string()));
-                    }
-                }
-                None
             }
+        } else {
+            out.push(child);
         }
+    }
+    out
+}
+
+/// First constructor call in a re-parsed constraint tree.
+fn find_constraint_call<'a>(node: Node<'a>) -> Option<Node<'a>> {
+    if matches!(node.kind(), "ambiguous_function_call_expression" | "function_call_expression") {
+        return Some(node);
+    }
+    for i in 0..node.named_child_count() {
+        if let Some(found) = node.named_child(i).and_then(find_constraint_call) {
+            return Some(found);
+        }
+    }
+    None
+}
+
+/// The text of a tree that is exactly one bare identifier, else `None`.
+fn bare_identifier_text(root: Node<'_>, src: &[u8]) -> Option<String> {
+    let mut n = root;
+    loop {
+        match n.kind() {
+            // A qualified name (`My::Class`) is a plain `bareword` in this
+            // grammar; `function` is the callee position of a constructor.
+            // A union (`Str|Undef`) parses as a `binary_expression` and
+            // therefore declines, which is the point.
+            "bareword" | "function" => return n.utf8_text(src).ok().map(|t| t.to_string()),
+            _ if n.named_child_count() == 1 => n = n.named_child(0)?,
+            _ => return None,
+        }
+    }
+}
+
+impl<'a> Builder<'a> {
+    /// The type an `isa` value constrains its attribute to, whichever
+    /// spelling was used.
+    ///
+    /// Both spellings share the vocabulary, the fold and the parameter walk,
+    /// and differ only in how a leaf name resolves: a node in this file asks
+    /// the bag, a re-parsed string asks the plugin vocabulary directly.
+    pub(super) fn isa_type_of(
+        &mut self,
+        node: Node<'a>,
+        mode: FrameworkMode,
+    ) -> Option<InferredType> {
+        // A string is Moose's type grammar, which is Perl-parsable — so parse
+        // it rather than pattern-matching brackets. `Maybe[Int]`,
+        // `InstanceOf['Foo']` and `ArrayRef[Str]` all yield the shapes the
+        // source path already walks.
+        if let Some(text) = self.extract_node_string(node) {
+            return self.isa_type_of_string(&text, mode);
+        }
+        // Written in the file: type the expression and ask the constraint
+        // what it constrains (rule #10 — the value answers). Also covers
+        // `isa => $t` where `$t` holds a constraint.
+        self.emit_expr_witness(node);
+        self.bag_query_expr_span(node_to_span(node))?.constrained_inner().cloned()
+    }
+
+    fn isa_type_of_string(&mut self, text: &str, mode: FrameworkMode) -> Option<InferredType> {
+        let mut parser = tree_sitter::Parser::new();
+        parser.set_language(&ts_parser_perl::LANGUAGE.into()).ok()?;
+        let tree = parser.parse(text, None)?;
+        let src = text.as_bytes();
+        let root = tree.root_node();
+
+        if let Some(c) = self.fold_constraint_tree(root, src) {
+            return c.constrained_inner().cloned();
+        }
+
+        // The vocabulary declined. Moose reads an unknown type string as a
+        // class name — but only a name that could BE one. Requiring the tree
+        // to be a bare identifier is what a length heuristic used to stand
+        // in for: it kept `Str`/`Int` out by being short, and let `Object`,
+        // `Item` and `Defined` through as classes that do not exist. A union
+        // or a parameterized spelling now declines instead of becoming a
+        // class called `Str|Undef`.
+        if mode.unknown_isa_string_names_class() && bare_identifier_text(root, src).is_some() {
+            return Some(InferredType::ClassName(text.to_string()));
+        }
+        None
+    }
+
+    /// Fold a re-parsed constraint tree to its constraint VALUE. `None` means
+    /// the vocabulary does not own the name — which is what lets Moose read
+    /// it as a class.
+    fn fold_constraint_tree(&mut self, root: Node<'_>, src: &[u8]) -> Option<InferredType> {
+        if let Some(name) = bare_identifier_text(root, src) {
+            return self.plugins.type_constraint_inner(&name, &[]);
+        }
+        let call = find_constraint_call(root)?;
+        let name = call.child_by_field_name("function")?.utf8_text(src).ok()?.to_string();
+        // The leaf resolver for a re-parsed tree: no symbols and no witnesses
+        // exist here, so a string literal contributes its content and a
+        // nested constructor recurses through the vocabulary.
+        let params: Vec<plugin::ConstraintParam> = constraint_param_nodes(call)
+            .into_iter()
+            .map(|el| match crate::cst::string_content_text(el, src) {
+                Some(string) => plugin::ConstraintParam { string: Some(string), ty: None },
+                None => plugin::ConstraintParam {
+                    string: None,
+                    ty: self.fold_constraint_tree(el, src),
+                },
+            })
+            .collect();
+        self.plugins.type_constraint_inner(&name, &params)
     }
 }

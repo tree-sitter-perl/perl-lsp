@@ -1171,6 +1171,14 @@ pub trait FrameworkPlugin: Send + Sync {
     /// decline (`name` not ours, or unfoldable params). Arity lives here,
     /// not in the core — see `ConstraintParam`.
     #[allow(unused_variables)]
+    /// Fold a constraint constructor to the constraint VALUE it produces —
+    /// `TypeConstraintOf(inner)`, or `TypeConstraintOf(None)` for a name this
+    /// plugin owns whose inner is not expressible. `None` means only "not my
+    /// vocabulary", which is what lets a caller treat the name as something
+    /// else (Moose reads an unknown type string as a class name).
+    ///
+    /// The registry asks every plugin and takes the first answer, so the fold
+    /// itself is the gate: a plugin that does not recognise the name declines.
     fn type_constraint_inner(
         &self,
         name: &str,
@@ -1629,13 +1637,7 @@ impl PluginRegistry {
         name: &str,
         params: &[ConstraintParam],
     ) -> Option<InferredType> {
-        self.plugins.iter().find_map(|p| {
-            if p.type_constraint_names().iter().any(|n| n == name) {
-                p.type_constraint_inner(name, params)
-            } else {
-                None
-            }
-        })
+        self.plugins.iter().find_map(|p| p.type_constraint_inner(name, params))
     }
 
     /// Return plugins whose triggers match the current package context.
