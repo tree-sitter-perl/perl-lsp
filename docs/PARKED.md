@@ -513,17 +513,6 @@ marked otherwise; the drain re-derived each rationale against current code.
   `SWEEP_PROVIDERS`) for the heatmap's walk loop, and give the heatmap's
   session the walk's index id — not the matcher, which is already
   row-narrowed (the pack tier's own-row-store pre-prune already landed).
-- **PHP `parent::` under a same-leaf alias resolves to the child** (BookStack
-  dogfood, one vendor row): `use App\Base\Manager as BaseManager; class
-  Manager extends BaseManager { public function __construct(array $x) {
-  parent::__construct(); } }` reports an arity mismatch against the
-  CHILD's constructor. `resolve_super_method` finds the aliased parent
-  (its same-leaf branch reads the parent-namespace row), but the dispatch
-  projection hands the lane only the class LEAF (`res.class()`), and the
-  lane's local-class shortcut then reads `Manager` as this file's own.
-  Unblock: an owner-aware class projection for the SUPER arm (the
-  resolving file rides the `MethodResolution`), and the lane's owner memo
-  keyed by (leaf, namespace) rather than the leaf alone.
 - **PHP method names are case-insensitive; the lookup is exact** (monolog
   dogfood, one row): `$formatter->indentStackTraces()` on a method declared
   `indentStacktraces()` reports unresolved. `symbols_named` and the

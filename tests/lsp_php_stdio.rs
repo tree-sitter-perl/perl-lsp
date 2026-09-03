@@ -349,6 +349,50 @@ fn php_auto_import_completion_over_stdio() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// `parent::__construct()` under a same-leaf alias (`use App\Base\Manager as
+/// BaseManager; class Manager extends BaseManager`) is the PARENT's
+/// constructor: no arity report for a call the parent accepts, one for a
+/// call it does not.
+#[test]
+fn php_parent_call_under_same_leaf_alias_over_stdio() {
+    let dir = std::env::temp_dir().join(format!("perl-lsp-d2palias-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("src/Base")).unwrap();
+    std::fs::create_dir_all(dir.join("src/App")).unwrap();
+    let w = |rel: &str, src: &str| std::fs::write(dir.join(rel), src).unwrap();
+    w("composer.json", "{\"autoload\": {\"psr-4\": {\"App\\\\\": \"src/\"}}}");
+    w("src/Base/Manager.php", "<?php\nnamespace App\\Base;\n\nclass Manager\n{\n    public function __construct()\n    {\n    }\n\n    public function boot(string $env): void\n    {\n    }\n}\n");
+    let child = "<?php\nnamespace App\\App;\n\nuse App\\Base\\Manager as BaseManager;\n\nclass Manager extends BaseManager\n{\n    public function __construct(array $x)\n    {\n        parent::__construct();\n        parent::boot('dev', 'extra');\n    }\n}\n";
+    w("src/App/Manager.php", child);
+    let mut c = Client::spawn(&dir);
+    c.request("initialize", serde_json::json!({"processId": null, "rootUri": uri(&dir), "capabilities": {}}));
+    c.notify("initialized", serde_json::json!({}));
+    let u = uri(&dir.join("src/App/Manager.php"));
+    c.notify("textDocument/didOpen", serde_json::json!({"textDocument": {"uri": u, "languageId": "php", "version": 1, "text": child}}));
+    // the arity lane runs once the pack index settles: wait for the one true report
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    let mut diags: Vec<serde_json::Value> = Vec::new();
+    while std::time::Instant::now() < deadline {
+        c.request("textDocument/documentSymbol", serde_json::json!({"textDocument": {"uri": u}}));
+        if let Some(n) = c.notes.iter().rev().find(|n| n["method"] == "textDocument/publishDiagnostics" && n["params"]["uri"] == u) {
+            let ds: Vec<serde_json::Value> = n["params"]["diagnostics"].as_array().cloned().unwrap_or_default();
+            if ds.iter().any(|d| d["code"] == "arity-mismatch") {
+                diags = ds;
+                break;
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(250));
+    }
+    let arity: Vec<(u64, String)> = diags.iter().filter(|d| d["code"] == "arity-mismatch").map(|d| (d["range"]["start"]["line"].as_u64().unwrap(), d["message"].as_str().unwrap_or("").to_string())).collect();
+    assert_eq!(arity.len(), 1, "only the call the parent rejects: {arity:?}");
+    assert_eq!(arity[0].0, 10, "{arity:?}");
+    assert!(arity[0].1.contains("Expected 1"), "the PARENT's boot(string $env): {arity:?}");
+    c.request("shutdown", serde_json::Value::Null);
+    c.notify("exit", serde_json::Value::Null);
+    let _ = c.child.wait();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// A scoped access completes the class's members: `self::` and `Cfg::`
 /// answer constants and methods — never the function's locals — and
 /// `$this->` keeps answering the instance members.

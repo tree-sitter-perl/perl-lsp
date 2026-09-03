@@ -361,6 +361,9 @@ templates). Market case and build-out plan in `docs/prompt-php-target.md`.
   visible class) gets a hint and an "Add return type" quick-fix; a `null`
   arm, an ambiguous numeric, a fluent `return $this` and closures stay
   silent.
+- A php `parent::` call under a same-leaf alias (`use App\Base\Manager as
+  BaseManager; class Manager extends BaseManager`) is checked against the
+  parent's declaration, not the child's own.
 - php completion offers every class the workspace or its dependencies
   declare under the typed prefix; accepting one the file cannot spell yet
   inserts its `use` row after the last import (an already-imported or

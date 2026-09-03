@@ -810,7 +810,10 @@ pub fn pack_symbol_diagnostics(
         is_trait: bool,
         dynamic_arg_calls: Vec<Span>,
     }
-    let mut owner_memo: HashMap<String, Option<OwnerFacts>> = HashMap::new();
+    // keyed by (leaf, the namespace the CALL means): a `parent::` call's
+    // parent is the parent-namespace row of the class it is written in — an
+    // aliased parent carrying the child's own leaf is not the child
+    let mut owner_memo: HashMap<(String, Option<String>), Option<OwnerFacts>> = HashMap::new();
     // An ancestor we cannot see — at ANY depth — may declare the member:
     // silent.
     let ancestry_complete = |class: &str| ancestry_visible(analysis, idx, class);
@@ -842,16 +845,41 @@ pub fn pack_symbol_diagnostics(
         // The dispatch projection every verb reads (`$this` is a typed
         // receiver here — the extractor witnesses it at the class body).
         let Some(class) = analysis.method_call_invocant_class(r, idx) else { continue };
-        let facts = owner_memo.entry(class.clone()).or_insert_with(|| {
+        // What namespace the CALL means by the leaf: a `parent::` call's
+        // parent is the parent-namespace row of the class it is written in
+        // (an aliased parent carrying the child's own leaf is not the
+        // child); any other call, the file's pin or its own namespace.
+        let super_call = matches!(
+            crate::model::conventions::MethodToken::parse(&r.target_name),
+            crate::model::conventions::MethodToken::Super(_)
+        );
+        let want_ns = if super_call {
+            analysis
+                .scope_at(r.span.start)
+                .and_then(|sc| analysis.enclosing_class_for_scope(sc))
+                .and_then(|c| {
+                    analysis
+                        .pack
+                        .parent_namespaces
+                        .iter()
+                        .find(|(child, parent, _)| *child == c && *parent == class)
+                        .map(|(_, _, ns)| ns.clone())
+                })
+                .or_else(|| analysis.leaf_namespace(&class))
+                .or_else(|| analysis.use_map_pins().own_namespace.clone())
+        } else {
+            analysis.leaf_namespace(&class).or_else(|| analysis.use_map_pins().own_namespace.clone())
+        };
+        let facts = owner_memo.entry((class.clone(), want_ns.clone())).or_insert_with(|| {
             // The class's DEFINING analysis: this file, or — once the
             // workspace index is settled — the candidate its namespace
             // names. An unsettled index would flag every cross-file member.
-            let owner_arc: Option<std::sync::Arc<FileAnalysis>> = if local_class(&class) {
+            let is_local = local_class(&class)
+                && (want_ns.is_none() || analysis.declared_type_namespace(&class) == want_ns);
+            let owner_arc: Option<std::sync::Arc<FileAnalysis>> = if is_local {
                 None
             } else if index_settled {
                 let i = idx?;
-                let want_ns =
-                    analysis.leaf_namespace(&class).or_else(|| analysis.use_map_pins().own_namespace.clone());
                 Some(i.visible_def_candidates(&class).into_iter().find_map(|c| {
                     let a = i.symbols_present(&c);
                     let declared = a.declared_type_namespace(&class);
