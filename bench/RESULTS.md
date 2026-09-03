@@ -988,3 +988,26 @@ evidence: by-ref out-parameters read as undefined variables (2 of 4
 sampled composer rows). Slim's five `unused-import` rows are all true
 (`use function htmlentities` never called, an aliased `PHPUnitTestCase`
 never spelled, `dirname`, `RuntimeException`, `stdClass` unused).
+
+### Closing lane sweep, every corpus, final build (2026-09-03, 11:30, build eb310e0)
+
+Hint severity, fresh cache per corpus, one run each:
+
+| corpus | unresolved-method | undefined-property | undefined-type | undefined-variable | unused-import | unused-variable | deprecated | arity | unimplemented-method | missing-return-type |
+|---|---|---|---|---|---|---|---|---|---|---|
+| WordPress | 11 | 26 | 94 | 24 | 0 | 420 | 283 | 7 | 0 | 156 |
+| laravel/framework | 152 | 11 | 7,039 | 14 | 5 | 257 | 34 | 10 | 0 | 723 |
+| guzzle | 1 | 0 | 1,340 | 0 | 0 | 89 | 0 | 2 | 0 | 0 |
+| monolog | 10 | 9 | 258 | 0 | 2 | 24 | 4 | 0 | 0 | 36 |
+| symfony demo | 0 | 0 | 519 | 0 | 0 | 0 | 0 | 0 | 0 | 0 |
+| phpmyadmin | 392 | 7 | 4,206 | 2 | 0 | 1 | 667 | 8 | 0 | 0 |
+| composer | 44 | 2 | 2,548 | 35 | 19 | 132 | 15 | 3 | 0 | 13 |
+
+Against the 09:50 table the four cells that moved are the day's last three
+slices: WordPress `unresolved-method` 12 → 11 and laravel `arity-mismatch`
+11 → 10 (the `parent::` alias reads the parent), laravel `unused-import`
+6 → 5 and monolog `undefined-type` 263 → 258 (a `X\Y::class` literal counts
+as a use of `X`, and its head resolves through the import). phpmyadmin's
+`unused-import` 32 → 0 is the same class-literal rule. Every other cell is
+byte-identical, so the day's completion, hint and quick-fix slices moved
+no diagnostic lane. Wall unchanged: phpmyadmin 9.5 s, composer 4.9 s.
