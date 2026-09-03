@@ -983,7 +983,7 @@ pub struct ConstraintParam {
 /// that does `in_role`, the sub `method`'s parameter at index `param` has type
 /// `ClassName(type_class)`." The motivating case is a framework role whose
 /// required method has a typed argument the source can't express — e.g.
-/// `Clove::Upgrade::OneTime`'s `sub run_upgrade ($self, $app)`, where `$app`
+/// `GenericCo::Upgrade::OneTime`'s `sub run_upgrade ($self, $app)`, where `$app`
 /// is the `Mojolicious` app. The builder applies this at the sub-declaration
 /// walk (the one place that sees a sub's params, rule #1), pushing a Variable
 /// type constraint for the param — the same mechanism `detect_first_param_type`

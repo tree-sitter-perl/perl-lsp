@@ -83,7 +83,7 @@ into the generator as plain string lists.
 - **Import::Into kits** (hand-rolled `sub import { Pkg->import::into(...) }`).
   Imperative bodies have no `@IMPORT_MODULES`/`%IMPORT_BUNDLES` tables to
   read, so there's nothing for the generator to walk — hand-author these
-  (see the `Clove::Common` plugin for a worked example).
+  (see the `GenericCo::Common` plugin for a worked example).
 - **Conditional coderefs** — see the best-effort warning above; a single
   probe run can't see branches it didn't take.
 - **Unimport** — `no MOD args` has no SyntheticUse counterpart. Add a

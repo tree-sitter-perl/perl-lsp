@@ -191,7 +191,7 @@ fn patterns() {
         // workspace modules, with ownership of the action (`register` —
         // every Mojolicious plugin has one) as the disambiguator.
         // Namespace-agnostic, so app-specific plugin namespaces
-        // (Clove::App::Plugin::*) resolve the same as Mojolicious::Plugin::*.
+        // (GenericCo::App::Plugin::*) resolve the same as Mojolicious::Plugin::*.
         #{
             name: "plugin_load",
             query: `
@@ -312,7 +312,7 @@ fn plugin_load_emissions(m) {
     };
     // "You loaded it" — make the resolver pull the plugin in
     // so its helpers register. Default namespace guess only;
-    // app-custom namespaces (Clove::App::Plugin::*) are
+    // app-custom namespaces (GenericCo::App::Plugin::*) are
     // workspace modules and already indexed.
     if !name.contains("::") {
         out += #{ "SyntheticUse": #{ "module": "Mojolicious::Plugin::" + name, "args": [], "imports": [], "span": span }};

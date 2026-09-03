@@ -56,7 +56,7 @@ constants) at *runtime*, by executing the exporter. The analyzer sees
 the `use X 'name'` import line but can't follow it to the exporting sub,
 so cross-file references / goto-def for dynamically-exported names break
 and the names show as unresolved-function. This is the same root as the
-crm `Clove::Types` constant residual (`Str` / `Int` / `Maybe` /
+crm `GenericCo::Types` constant residual (`Str` / `Int` / `Maybe` /
 `InstanceOf`).
 
 Static analysis fundamentally can't evaluate the generator. The

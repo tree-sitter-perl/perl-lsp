@@ -897,10 +897,10 @@ sub action {
 /// **CROSS-FILE fluent accessor inherited from a CPAN parent.** This
 /// is the real crm gap, not reproducible single-file: the fluent
 /// `app` accessor lives on CPAN `Minion` (a *workspace/dependency*
-/// module here), `Clove::Minion` inherits it, and the open file does
-/// `my $minion = Clove::Minion->new->app($app)`. The `->app(...)` hop
+/// module here), `GenericCo::Minion` inherits it, and the open file does
+/// `my $minion = GenericCo::Minion->new->app($app)`. The `->app(...)` hop
 /// must resolve the inherited fluent-writer return THROUGH the
-/// cross-file parent so the chain keeps ClassName(Clove::Minion).
+/// cross-file parent so the chain keeps ClassName(GenericCo::Minion).
 /// When this fails, `$minion` is untyped and the helper closure that
 /// returns it produces no type, so `$c->minion->enqueue` never
 /// dispatches.
@@ -915,7 +915,7 @@ sub enqueue { my $self = shift; return 1; }
 1;
 ";
     let child_src = "
-package Clove::Minion;
+package GenericCo::Minion;
 use Mojo::Base 'Minion';
 sub class_for_task { my $self = shift; return 'X'; }
 1;
@@ -935,7 +935,7 @@ package MyApp::Plugin;
 use Mojo::Base 'Mojolicious::Plugin';
 sub register {
     my ($self, $app) = @_;
-    my $minion = Clove::Minion->new(Pg => 1)->app($app);
+    my $minion = GenericCo::Minion->new(Pg => 1)->app($app);
     my $after = 1;
 }
 1;
@@ -946,9 +946,9 @@ sub register {
     let minion_t = fa.inferred_type_via_bag_ctx("$minion", pt, Some(&idx));
     assert_eq!(
         minion_t,
-        Some(InferredType::ClassName("Clove::Minion".to_string())),
-        "`my $$minion = Clove::Minion->new->app($$app)` must type $$minion as \
-         Clove::Minion — the inherited fluent `app` writer (on the cross-file \
+        Some(InferredType::ClassName("GenericCo::Minion".to_string())),
+        "`my $$minion = GenericCo::Minion->new->app($$app)` must type $$minion as \
+         GenericCo::Minion — the inherited fluent `app` writer (on the cross-file \
          parent Minion) returns the invocant class. got: {:?}",
         minion_t,
     );

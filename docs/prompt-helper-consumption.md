@@ -13,7 +13,7 @@ from that round:
 ## Phase 2 — entrypoint-scan diagnostic
 
 At the USAGE site: "`$c->was_loaded` is provided by
-Clove::App::Plugin::WasLoaded, which no entrypoint loads
+GenericCo::App::Plugin::WasLoaded, which no entrypoint loads
 (`plugin 'WasLoaded'`)". HINT severity; fires only for WORKSPACE
 plugin modules (installed CPAN plugins keep the generous policy).
 Loaded = imported (literally or via SyntheticUse) by any workspace

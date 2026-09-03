@@ -572,7 +572,7 @@ fn map_callback_template<'a>(cb: Node<'a>, src: &[u8]) -> Option<Node<'a>> {
 /// land on the word that produced them. Exactly one `$_` in the
 /// template and `map` only (`grep` filters, it doesn't transform);
 /// anything fancier is an honest miss. The crm idiom that motivated
-/// it: `with map "Clove::Sheets::Roles::$_", qw/CSV DB/;`.
+/// it: `with map "GenericCo::Sheets::Roles::$_", qw/CSV DB/;`.
 fn map_built_strings(
     node: Node,
     src: &[u8],

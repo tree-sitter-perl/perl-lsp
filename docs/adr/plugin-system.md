@@ -140,7 +140,7 @@ Members today:
   receiver isa-check runs at **query time** in
   `FileAnalysis::applicable_dispatches` (which has the module index) — resolved
   by *receiver type*, cross-file, not by the file's `use`s. That's why a
-  `Minion` subclass (`Clove::Minion`) or a helper-returned receiver
+  `Minion` subclass (`GenericCo::Minion`) or a helper-returned receiver
   (`$c->minion->enqueue`) lights up where a file-level trigger never would, and
   why a call site in a non-open workspace/dependency file surfaces the same as
   an open one. The `ReceiverGated` type makes the inner handler payload
@@ -157,7 +157,7 @@ Members today:
 - **`param_types()` → `[ParamType]`** — type a sub's parameter by selector. The
   callback-arg case (`$job` in a Minion task, `$c` in a helper) and the
   role-contract case (`$app` in `sub run_upgrade ($self, $app)` for a doer of
-  `Clove::Upgrade::OneTime`) are the same statement — *parameter N of a sub has
+  `GenericCo::Upgrade::OneTime`) are the same statement — *parameter N of a sub has
   type T, determined by the sub's context* — differing only in the selector that
   identifies the sub. A manifest (not an `on_sub` hook) because a plugin can't
   walk nodes (rule #1) and the selector is pure data; the core does the single

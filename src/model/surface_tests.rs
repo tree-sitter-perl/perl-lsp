@@ -129,7 +129,7 @@ fn surface_changing_edits_are_unequal() {
 #[test]
 fn a_config_shape_edit_flips_the_verdict() {
     let base = "package My::App;\nuse Mojolicious::Lite;\n\
-                plugin 'CloveApp', { alpha => 1, beta => 2 };\n1;\n";
+                plugin 'GenericCoApp', { alpha => 1, beta => 2 };\n1;\n";
     let s0 = surface(base);
     assert!(
         !s0.loader_shapes.is_empty(),

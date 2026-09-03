@@ -829,7 +829,7 @@ impl<'a> Builder<'a> {
         self.detect_first_param_type(&params, node);
 
         // Role-contract param typing: a plugin `param_types()` rule may type
-        // a named param (e.g. `$app` in a `Clove::Upgrade::OneTime` doer's
+        // a named param (e.g. `$app` in a `GenericCo::Upgrade::OneTime` doer's
         // `run_upgrade`). Same mechanism as `detect_first_param_type`.
         self.apply_param_type_manifest(&name, &params, node);
 

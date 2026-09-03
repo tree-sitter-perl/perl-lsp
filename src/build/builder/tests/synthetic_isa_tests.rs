@@ -795,7 +795,7 @@ fn provisional_dispatch_resolves_helper_returned_receiver() {
 
 /// Role-contract parameter typing: a plugin's `param_types()` manifest types a
 /// named param of a sub declared in a class that does the rule's role. The
-/// motivating case is `Clove::Upgrade::OneTime`'s `run_upgrade ($self, $app)`,
+/// motivating case is `GenericCo::Upgrade::OneTime`'s `run_upgrade ($self, $app)`,
 /// where `$app` is the Mojolicious app — a type the source can't express and
 /// no callback-arg hook can reach (it's a plain sub declaration).
 mod param_types_manifest {

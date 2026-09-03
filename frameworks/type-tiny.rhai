@@ -1,5 +1,5 @@
 // type-tiny: the Type::Tiny / Types::Standard constraint vocabulary used in
-// `isa` (`has minion => (isa => InstanceOf['Clove::Minion'])`).
+// `isa` (`has minion => (isa => InstanceOf['GenericCo::Minion'])`).
 //
 // A constraint constructor (`InstanceOf[...]`) is a *value* — a Type::Tiny
 // object — not a class. The core types its call expression as
@@ -18,7 +18,7 @@
 // moves to the injection level"): when a package does `use Types::Standard
 // qw/Str Int/`, those names become known via an Import action — suppressing
 // unresolved-function diagnostics for explicitly imported type constants.
-// `-all` / `:all` / bare use → full vocab emitted.  `Clove::Types` and
+// `-all` / `:all` / bare use → full vocab emitted.  `GenericCo::Types` and
 // other Type::Library re-exporters ride the same seam via their own plugin's
 // `on_use` emitting `SyntheticUse "Types::Standard"`.
 
@@ -144,7 +144,7 @@ fn types_common_numeric_exports() {
 // Import entry for the literal qw-list, but that entry only covers what the
 // user typed; this hook also handles `-all` / `:all` / bare use (where the
 // qw-list is empty or contains a meta-import flag) by expanding to the full
-// vocabulary. The same Import action is the hook that `Clove::Types` and other
+// vocabulary. The same Import action is the hook that `GenericCo::Types` and other
 // Type::Library re-exporters ride via `SyntheticUse "Types::Standard"` in
 // their own plugin.
 fn on_use(ctx) {

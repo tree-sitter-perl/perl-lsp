@@ -1910,7 +1910,7 @@ fn test_partial_route_brand_composes_with_camelize_cross_file() {
 
     let app = build_fa_from_source(
         r#"
-        package Clove::App;
+        package GenericCo::App;
         use Mojo::Base 'Mojolicious';
         sub startup {
             my $self = shift;
@@ -1928,7 +1928,7 @@ fn test_partial_route_brand_composes_with_camelize_cross_file() {
 
     let alerts = build_fa_from_source(
         r#"
-        package Clove::Controller::Alerts;
+        package GenericCo::Controller::Alerts;
         use Mojo::Base 'Mojolicious::Controller';
         sub list { my $c = shift; }
         sub get_alert { my $c = shift; }
@@ -1938,7 +1938,7 @@ fn test_partial_route_brand_composes_with_camelize_cross_file() {
     );
     let billing = build_fa_from_source(
         r#"
-        package Clove::Controller::Billing;
+        package GenericCo::Controller::Billing;
         use Mojo::Base 'Mojolicious::Controller';
         sub index { my $c = shift; }
         1;
@@ -1947,11 +1947,11 @@ fn test_partial_route_brand_composes_with_camelize_cross_file() {
 
     let idx = ModuleIndex::new_for_test();
     idx.register_workspace_module(
-        std::path::PathBuf::from("/tmp/Clove_Controller_Alerts.pm"),
+        std::path::PathBuf::from("/tmp/GenericCo_Controller_Alerts.pm"),
         Arc::new(alerts),
     );
     idx.register_workspace_module(
-        std::path::PathBuf::from("/tmp/Clove_Controller_Billing.pm"),
+        std::path::PathBuf::from("/tmp/GenericCo_Controller_Billing.pm"),
         Arc::new(billing),
     );
 
@@ -1973,7 +1973,7 @@ fn test_partial_route_brand_composes_with_camelize_cross_file() {
         let class = app.method_call_invocant_class(to_ref, Some(&idx));
         assert_eq!(
             class.as_deref(),
-            Some("Clove::Controller::Alerts"),
+            Some("GenericCo::Controller::Alerts"),
             "partial ->to('#{action}') should inherit controller `alerts`, camelize, and resolve cross-file",
         );
     }
@@ -1990,7 +1990,7 @@ fn test_partial_route_brand_composes_with_camelize_cross_file() {
         .expect("sibling group partial ->to('#index') should inherit `billing` (camelized)");
     assert_eq!(
         app.method_call_invocant_class(index_ref, Some(&idx)).as_deref(),
-        Some("Clove::Controller::Billing"),
+        Some("GenericCo::Controller::Billing"),
         "sibling group must re-brand to `billing`, not leak `alerts`",
     );
 }
@@ -2236,18 +2236,18 @@ fn cross_file_slot_write_types_the_read() {
 
 #[test]
 fn loader_config_types_register_conf_cross_file() {
-    // #25, framework-mediated: `plugin 'CloveApp', {...}` in the app
+    // #25, framework-mediated: `plugin 'GenericCoApp', {...}` in the app
     // types `$conf` inside the plugin's register — callers enumerable
     // by construction (the PluginLoad facts name this module).
     use std::sync::Arc;
     let idx = crate::index::module_index::ModuleIndex::new_for_test();
-    let app_src = "use Mojolicious::Lite;\nplugin 'CloveApp', { minion => 1, redis => 'r' };\napp->start;\n";
+    let app_src = "use Mojolicious::Lite;\nplugin 'GenericCoApp', { minion => 1, redis => 'r' };\napp->start;\n";
     {
         let mut parser = crate::build::builder::create_parser();
         let tree = parser.parse(app_src, None).unwrap();
         let fa = crate::build::builder::build(&tree, app_src.as_bytes());
         assert!(
-            fa.plugin.loads.iter().any(|f| f.name == "CloveApp" && f.config_span.is_some()),
+            fa.plugin.loads.iter().any(|f| f.name == "GenericCoApp" && f.config_span.is_some()),
             "the lite plugin arm should record the loader fact: {:?}",
             fa.plugin.loads,
         );
@@ -2257,7 +2257,7 @@ fn loader_config_types_register_conf_cross_file() {
         );
     }
     // packageless shim doesn't register; use insert_cache instead
-    let app_src2 = "package MyApp::Boot;\nuse Mojolicious::Lite;\nplugin 'CloveApp', { minion => 1, redis => 'r' };\n1;\n";
+    let app_src2 = "package MyApp::Boot;\nuse Mojolicious::Lite;\nplugin 'GenericCoApp', { minion => 1, redis => 'r' };\n1;\n";
     {
         let mut parser = crate::build::builder::create_parser();
         let tree = parser.parse(app_src2, None).unwrap();
@@ -2271,7 +2271,7 @@ fn loader_config_types_register_conf_cross_file() {
         );
     }
 
-    let plugin_src = "package Mojolicious::Plugin::CloveApp;\nuse Mojo::Base 'Mojolicious::Plugin';\n\nsub register {\n    my ($self, $app, $conf) = @_;\n}\n1;\n";
+    let plugin_src = "package Mojolicious::Plugin::GenericCoApp;\nuse Mojo::Base 'Mojolicious::Plugin';\n\nsub register {\n    my ($self, $app, $conf) = @_;\n}\n1;\n";
     let mut parser = crate::build::builder::create_parser();
     let tree = parser.parse(plugin_src, None).unwrap();
     let mut fa = crate::build::builder::build(&tree, plugin_src.as_bytes());

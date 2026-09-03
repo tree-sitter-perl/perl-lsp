@@ -309,7 +309,7 @@ impl FileAnalysis {
                 // servers (rust-analyzer, pyright, tsserver, gopls, clangd)
                 // all keep imports out of the document outline. The synthetic
                 // expansions a kit plugin emits would be even worse (a dozen
-                // per `use Clove::Base 'Controller'`), but real ones are noise
+                // per `use GenericCo::Base 'Controller'`), but real ones are noise
                 // too. Modules still drive resolution; they're just not
                 // navigation targets.
                 SymKind::Module => continue,

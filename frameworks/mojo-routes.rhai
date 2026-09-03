@@ -461,7 +461,7 @@ fn on_match(pattern, m) {
         // entrypoint-scan lint sees the load fact. Default
         // namespace guess for short names; the lint
         // tail-matches, so app-custom namespaces
-        // (Clove::App::Plugin::*) count as loaded too.
+        // (GenericCo::App::Plugin::*) count as loaded too.
         if !name.contains("::") {
             out += #{ "SyntheticUse": #{ "module": "Mojolicious::Plugin::" + name, "args": [], "imports": [], "span": span }};
         } else {
