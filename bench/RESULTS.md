@@ -830,3 +830,31 @@ a call whose callee resolves gets `name:` (`addRecord(Level::Debug,
 (string) $message, $context)` shows `level:` and `message:`; `$context`
 is the parameter's own name and shows nothing) — 9 hints over the 65
 lines, 0.7 ms.
+
+### CLI cold-start floor (2026-09-03, 07:40)
+
+Prompted by the question whether the day's rounds had slowed the tests:
+the unit target went 11.2 s → 8.5 s over the day, but `tests/language_scope.rs`
+sat at ~1 s per CLI test (24 tests / 24.9 s → 38 / 36 s), and the r89
+binary from the night before paid the same, so it was a standing floor,
+not a regression. `PERL_LSP_PHASE_TIMING` on a two-file php fixture
+(cold cache, `--check`):
+
+| phase | before | after |
+|---|---|---|
+| `registry::queries` (Perl plugin pattern warm) | 502 ms | not run (no Perl file) |
+| `cli::index_workspace` (0 Perl files) | 544 ms | 9 ms |
+| `pack.query_compile` (assembled php query) | 2 × 540 ms, one per worker | 1 × 541 ms |
+| `cli::index_pack` (2 php files) | 888 ms | 726 ms |
+| wall | 2.6 s | 0.75 s |
+| `tests/language_scope.rs` (38 tests) | 36.0 s | 26.2 s |
+
+The registry warm compiled Perl-only patterns inside the workspace
+indexer whether or not the walk found a Perl file; it now runs only when a
+Perl build follows. The pack query cache was check-then-compile outside
+its lock, so every Rayon worker that reached the php query first compiled
+its own copy (one wall, N CPUs); it is single-flight now. What remains is
+the tree-sitter compile of the 1,000-line assembled php query itself
+(~540 ms, `pack.query_compile`) — the floor a pack-only cold start pays
+once per process; it cannot be persisted (a `Query` is not serializable)
+and splitting the query does not reduce the pattern analysis it pays for.

@@ -43,21 +43,29 @@ fn cached_query(language: &Language, source: &str) -> Result<&'static Query, Str
     use std::collections::hash_map::DefaultHasher;
     use std::collections::HashMap;
     use std::hash::{Hash, Hasher};
-    use std::sync::{Mutex, OnceLock};
-    static CACHE: OnceLock<Mutex<HashMap<u64, &'static Query>>> = OnceLock::new();
+    use std::sync::{Arc, Mutex, OnceLock};
+    // Single-flight per source: the slot is claimed under the map lock and
+    // compiled OUTSIDE it, so a second worker asking for the same query
+    // waits on the slot instead of compiling a duplicate (every Rayon worker
+    // started on a 1,000-line pack query at once — one wall, N CPUs).
+    type Slot = Arc<OnceLock<Result<&'static Query, String>>>;
+    static CACHE: OnceLock<Mutex<HashMap<u64, Slot>>> = OnceLock::new();
     let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
     let key = {
         let mut h = DefaultHasher::new();
         source.hash(&mut h);
         h.finish()
     };
-    if let Some(q) = cache.lock().unwrap().get(&key) {
-        return Ok(q);
-    }
-    let query = Query::new(language, source).map_err(|e| format!("query: {e}"))?;
-    let leaked: &'static Query = Box::leak(Box::new(query));
-    cache.lock().unwrap().insert(key, leaked);
-    Ok(leaked)
+    let slot = cache.lock().unwrap().entry(key).or_default().clone();
+    slot.get_or_init(|| {
+        // One compile per distinct source per process, so a printed phase
+        // line stays bounded; this IS the pack cold-start floor.
+        let query = crate::util::timings::phase("pack.query_compile", || {
+            Query::new(language, source).map_err(|e| format!("query: {e}"))
+        })?;
+        Ok(Box::leak(Box::new(query)))
+    })
+    .clone()
 }
 
 // ---- framework-entry declarations (the heatmap's "runner-invoked" data) ----
