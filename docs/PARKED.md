@@ -513,6 +513,30 @@ marked otherwise; the drain re-derived each rationale against current code.
   `SWEEP_PROVIDERS`) for the heatmap's walk loop, and give the heatmap's
   session the walk's index id — not the matcher, which is already
   row-narrowed (the pack tier's own-row-store pre-prune already landed).
+- **PHP `parent::` under a same-leaf alias resolves to the child** (BookStack
+  dogfood, one vendor row): `use App\Base\Manager as BaseManager; class
+  Manager extends BaseManager { public function __construct(array $x) {
+  parent::__construct(); } }` reports an arity mismatch against the
+  CHILD's constructor. `resolve_super_method` finds the aliased parent
+  (its same-leaf branch reads the parent-namespace row), but the dispatch
+  projection hands the lane only the class LEAF (`res.class()`), and the
+  lane's local-class shortcut then reads `Manager` as this file's own.
+  Unblock: an owner-aware class projection for the SUPER arm (the
+  resolving file rides the `MethodResolution`), and the lane's owner memo
+  keyed by (leaf, namespace) rather than the leaf alone.
+- **PHP method names are case-insensitive; the lookup is exact** (monolog
+  dogfood, one row): `$formatter->indentStackTraces()` on a method declared
+  `indentStacktraces()` reports unresolved. `symbols_named` and the
+  cross-file by-name index are exact-case; a pack convention
+  (`methods_case_insensitive`) would need a folded name index on both the
+  local and the module tiers, for the Callable shape only (properties and
+  constants stay exact). Deferred until a corpus shows more than one row.
+- **Laravel facade aliases (`use DB;`, bare `DB::` in a namespace-less
+  migration)** report an undefined type: the alias is registered at
+  runtime (`Facade::defaultAliases()` + `config/app.php`), no static
+  source declares `class DB`. A Laravel overlay reading the framework's
+  default alias map is the honest fix; the qualified spelling
+  (`use Illuminate\Support\Facades\DB;`) already resolves.
 - **PHP `self::VOID`-style constant names read as undefined properties**
   (round-8): tree-sitter-php lexes a keyword-spelled constant NAME
   (`VOID`, `STRING`, `ARRAY` — PHP keywords are case-insensitive) as the

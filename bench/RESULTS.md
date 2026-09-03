@@ -739,3 +739,28 @@ rules and the open forks: mock objects behind typed getters (122 of
 laravel's 160), `is_wp_error()` exit guards (nine WordPress rows), dynamic
 properties on legacy classes, and `undefined-type` rows that are vendor
 classes with no `vendor/` tree on disk.
+
+### BookStack, vendor present (2026-09-03, 05:40)
+
+A findings-only dogfood on BookStack — the one corpus here with a real
+`vendor/` tree (laravel/framework installed; the other ~150 packages
+absent, which is what its 2,520 `undefined-type` rows are) — judged the
+lanes for false positives and named ten shapes. Three slices later, the
+member and arity lanes on it:
+
+| build | undefined-property | unresolved-method | arity-mismatch | undefined-variable | unused-import | unused-variable | deprecated |
+|---|---|---|---|---|---|---|---|
+| 8fdb042 (before) | 60 | 24 | 4 | 14 | 77 | 128 | 17 |
+| after promotion / spread / tuples | 4 | 23 | 1 | 13 | 77 | 128 | 17 |
+| after expression-scope static properties | 4 | 23 | 1 | 9 | 77 | 128 | 17 |
+
+The dogfood's sample tallies: `unused-import` 8/8 true, `unused-variable`
+8/8 true, `deprecated` 8/8 true; `undefined-property` 8/8 false before
+the promotion fix (one root cause: untyped promoted properties, which
+Laravel's own event classes use); `undefined-variable` 13/14 false before
+the static-property fix; `arity-mismatch` 4/4 false before the spread
+fix. Hover tracks a variable's type through reassignment at every read
+site probed. Left parked with fixtures: `parent::` under a same-leaf
+alias, method-name case, Laravel facade aliases, an anonymous-class
+return typed by the declared class, an inline `$flags = 0` argument
+reported unused (`docs/PARKED.md`).
