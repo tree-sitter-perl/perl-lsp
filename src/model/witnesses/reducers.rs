@@ -142,12 +142,19 @@ impl WitnessReducer for FrameworkAwareTypeFold {
         // InferredType witness containing it (already post-narrowing).
         // Falls through to the full fold otherwise.
         if let Some(point) = narrow_point {
+            // Source priority first (an annotation outranks a flow guess
+            // sharing the same class-wide extent), narrowest span second.
             let mut narrow: Option<(&Witness, u64)> = None;
             for w in ws {
                 if let WitnessPayload::InferredType(_) = w.payload {
                     if span_contains(&w.span, point) && !span_is_zero(&w.span) {
                         let area = span_area(&w.span);
-                        if narrow.map(|(_, a)| area < a).unwrap_or(true) {
+                        let prio = w.source.priority();
+                        let better = narrow.map_or(true, |(nw, a)| {
+                            let np = nw.source.priority();
+                            prio > np || (prio == np && area < a)
+                        });
+                        if better {
                             narrow = Some((*w, area));
                         }
                     }

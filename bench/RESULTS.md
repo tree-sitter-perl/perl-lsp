@@ -669,3 +669,17 @@ The remaining WordPress `undefined-property` rows are mostly `ID` /
 `term_id` / `post_status` / `object_id` reads (17 / 11 / 9 / 7 of 132),
 not yet sampled for their receivers.
 
+Two more slices on the same rows (2026-09-03, 03:30): a documented union
+(`@return WP_Term|WP_Error`, `@var A|B $skin`, `@param A|B $x`, a declared
+`A|B`) is honoured as "cannot be typed" instead of letting the body's arms
+or one member speak for it, every reassignment (typed or not) ends the
+earlier class, a documented property outranks the constructor's write
+to it, and a method call spelled with a space before its parentheses is a
+call. WordPress `undefined-property` 132 → 40 → 32, `unresolved-method`
+89 → 77, `arity-mismatch` 15 → 11, no new rows; laravel 94 / 981.
+What remains on WordPress is `isset($tax->helps)`-style existence probes
+(the read IS the question), dynamic properties on `stdClass`/legacy
+classes (`$cache->ERROR` with the declaration commented out), and
+`is_wp_error()` exit guards whose `@phpstan-assert-if-true` the analyzer
+does not read.
+

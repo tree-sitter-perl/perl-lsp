@@ -96,6 +96,12 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
         std::collections::HashMap::new();
     // `f(...)` sites: a call with no countable arguments — still a call.
     let mut placeholder_call_at: std::collections::HashSet<(usize, usize)> = std::collections::HashSet::new();
+    // The same facts keyed by the MATCH that captured the callee alongside
+    // its list: the call pattern joins the two, so `$this->m (1)` — a space
+    // before the parentheses — is still a call. Adjacency stays the fallback
+    // for shapes whose list lands in another match.
+    let mut arg_counts_by_match: HashMap<usize, usize> = HashMap::new();
+    let mut placeholder_by_match: std::collections::HashSet<usize> = Default::default();
     // A callable's declared parameter arity, keyed by the parameter_list span.
     // Associated to its def symbol by span containment in `into_file_analysis`
     // (`@arity.sig` fires a separate match from the def name).
@@ -220,8 +226,10 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                     arg_counts_by_start
                         .insert((node.start_position().row, node.start_position().column),
                                 node.named_child_count());
+                    arg_counts_by_match.insert(match_counter, node.named_child_count());
                 } else {
                     placeholder_call_at.insert((node.start_position().row, node.start_position().column));
+                    placeholder_by_match.insert(match_counter);
                 }
                 continue;
             }
@@ -1423,14 +1431,21 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                         // method token ends; plain (uncalled) member/type refs
                         // have no adjacent arg list and stay `None`.
                         arg_count: matches!(e.cap.as_str(), "ref.call" | "ref.qcall" | "ref.member")
-                            .then(|| arg_counts_by_start.get(&(e.end.row, e.end.column)).copied())
+                            .then(|| {
+                                arg_counts_by_match
+                                    .get(&e.match_id)
+                                    .or_else(|| arg_counts_by_start.get(&(e.end.row, e.end.column)))
+                                    .copied()
+                            })
                             .flatten(),
-                        // A member token with an argument list right after it
+                        // A member token whose match carries an argument list
                         // names a callable; without one it reads a value. Only
                         // member tokens carry the fact (a plain call is a
                         // callable by construction, a type ref neither).
                         shape: if e.cap == "ref.member" {
-                            if arg_counts_by_start.contains_key(&(e.end.row, e.end.column))
+                            if arg_counts_by_match.contains_key(&e.match_id)
+                                || placeholder_by_match.contains(&e.match_id)
+                                || arg_counts_by_start.contains_key(&(e.end.row, e.end.column))
                                 || placeholder_call_at.contains(&(e.end.row, e.end.column))
                             {
                                 crate::model::file_analysis::MemberShape::Callable
@@ -2546,15 +2561,6 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                                 sym.receiver_instance_of = Some(base.clone());
                             }
                         }
-                        DocFact::ReturnUntypable => {
-                            // The author documented a union: the value is
-                            // known untypable, and a call, a copy or a return
-                            // arm reading it carries that on (the boundary
-                            // scrub hides it from every renderer).
-                            if sym.return_type.is_none() && !sym.receiver_return {
-                                sym.return_type = Some(InferredType::Unknown);
-                            }
-                        }
                         DocFact::Return(t) => {
                             // A doc row fills an undeclared return, and REFINES
                             // a bare declared container (`: array` +
@@ -2637,8 +2643,14 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                                             Span { start: sym.start, end: sym.start },
                                         ));
                                     }
+                                    continue;
                                 }
-                                continue;
+                                // `@var T $prop` above a PROPERTY (WordPress
+                                // spells every field doc with its name) is
+                                // that field's doc, not a local cast.
+                                if !(sym.kind == "field" && vn.trim_start_matches('$') == sym.name) {
+                                    continue;
+                                }
                             }
                             if sym.kind == "var" {
                                 continue;
@@ -2663,9 +2675,16 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                                         .get(sym.scope.0 as usize)
                                         .copied()
                                         .unwrap_or(Span { start: sym.start, end: sym.start });
-                                    doc_witnesses.push(doc_witness(
-                                        &sym.name, sym.scope, ty, span,
-                                    ));
+                                    // An ANNOTATION, like the declared field
+                                    // type it stands in for: it outranks what
+                                    // a constructor happens to write to the
+                                    // field (`@var A|B $skin` + `$this->skin =
+                                    // new B` reads as the documented union).
+                                    let mut w = doc_witness(&sym.name, sym.scope, ty, span);
+                                    w.source = crate::model::witnesses::WitnessSource::Builder(
+                                        crate::model::witnesses::ANNOT_SOURCE.into(),
+                                    );
+                                    doc_witnesses.push(w);
                                 }
                             }
                         }

@@ -4817,6 +4817,47 @@ fn php_branch_arms_and_subscripts_project() {
     assert!(has_step(4, &|s| matches!(s, ProjectionStep::HashKey(k) if k == "name")), "$row['name'] drills the key");
 }
 
+/// A union spelling is `Unknown` — the value this lattice cannot hold — at
+/// the top level only: `A|null` is its one arm, a `|` nested inside a
+/// generic is the element's business (and must not re-read the same
+/// text forever), and a container with an untypable element is untypable
+/// as a whole, so `Unknown` never nests past the boundary scrub.
+#[test]
+fn php_union_spellings_are_unknown_and_never_nest() {
+    let at = php_pack().annot_type;
+    assert_eq!(at("Err|User"), Some(InferredType::Unknown));
+    assert_eq!(at("int|string"), Some(InferredType::Unknown));
+    assert_eq!(at("Err|null"), Some(InferredType::ClassName("Err".into())));
+    assert_eq!(at("?Err"), Some(InferredType::ClassName("Err".into())));
+    // a `|` inside a generic is the element's: an untypable element makes
+    // the container untypable, a nullable one is its arm
+    assert_eq!(at("array<int|string>"), Some(InferredType::Unknown));
+    assert_eq!(at("list<Err|User>"), Some(InferredType::Unknown));
+    assert_eq!(at("(Err|User)[]"), None);
+    assert_eq!(at("array{a: int|string}"), Some(InferredType::Unknown));
+    assert_eq!(at("array{int|string, int}"), Some(InferredType::Unknown));
+    assert_eq!(at("array<int, string|null>"), Some(InferredType::Sequence(vec![InferredType::String])));
+}
+
+/// `$this->m (1)` — whitespace before the argument list — is the call its
+/// tree says it is: the callee joins its list through the match, not the
+/// byte after the name.
+#[test]
+fn php_spaced_call_keeps_its_callable_shape() {
+    use crate::model::file_analysis::MemberShape;
+    let src = "<?php\nclass D { function m($a) { return 1; } function f() { return $this->m (1) + $this->m(2); } }\n";
+    let mut parser = php_parser();
+    let tree = parser.parse(src, None).unwrap();
+    let skel = extract(&tree, src.as_bytes(), &php_pack()).unwrap();
+    let calls: Vec<(Option<usize>, MemberShape)> = skel
+        .refs
+        .iter()
+        .filter(|r| r.kind == "member" && r.name == "m")
+        .map(|r| (r.arg_count, r.shape))
+        .collect();
+    assert_eq!(calls, vec![(Some(1), MemberShape::Callable), (Some(1), MemberShape::Callable)], "{calls:?}");
+}
+
 #[test]
 fn php_instance_array_callable_is_a_method_ref() {
     let src = "<?php\nclass L { function on(): void {} function reg(): void { $d = [$this, 'on']; $e = [$obj, 'other']; } }\n";

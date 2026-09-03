@@ -437,11 +437,6 @@ pub struct CallShape {
 pub enum DocFact {
     /// `@return T` — the documented return of the def below the comment.
     Return(String),
-    /// `@return A|B` — a documented return this lattice cannot hold. The
-    /// author DID say what comes back; the answer is "known untypable"
-    /// (`InferredType::Unknown`), not "no evidence" — otherwise the body's
-    /// resolvable arms would elect one member of the union.
-    ReturnUntypable,
     /// `@param T $name` — a documented parameter type; `name` carries the
     /// language's own spelling (php keeps the `$`).
     Param { name: String, ty: String },
@@ -813,7 +808,26 @@ pub fn cmake_pack() -> LangPack {
 fn php_annot_type(text: &str) -> Option<InferredType> {
     use InferredType::*;
     let t = text.trim().trim_start_matches('?');
-    if t.contains('|') || t.contains('&') {
+    if t.contains('|') {
+        // A union of two or more non-null arms (`WP_Term|WP_Error`,
+        // `int|string`) is KNOWN untypable: the author said what the value
+        // is and this lattice cannot hold it. `Unknown` rides every chase
+        // (a call, a copy, a return arm) instead of letting whatever else
+        // resolved elect one arm; `A|null` is one arm, an optional.
+        let mut arms = phpdoc_split_top_level(t, '|');
+        arms.retain(|a| !a.eq_ignore_ascii_case("null") && !a.is_empty());
+        match arms.as_slice() {
+            // `A|null`: the one arm, re-read without the null.
+            [one] if *one != t => return php_annot_type(one),
+            // The `|` sits INSIDE a generic (`array<int|string>`): not a
+            // union at the top, and re-reading the same text would recurse
+            // forever — the element spellings below decide the shape.
+            [_] => {}
+            [] => return None,
+            _ => return Some(Unknown),
+        }
+    }
+    if t.contains('&') {
         return None;
     }
     // Sequence spellings — `list<X>` / `array<X>` / `iterable<X>`,
@@ -824,7 +838,10 @@ fn php_annot_type(text: &str) -> Option<InferredType> {
     // spelling. Without these arms the whole spelling fell to the
     // ClassName fallback and minted a bogus class `list<X>`.
     if let Some(inner) = t.strip_suffix("[]") {
-        return php_annot_type(inner).map(|e| Sequence(vec![e]));
+        return php_annot_type(inner).map(|e| match e {
+            Unknown => Unknown,
+            e => Sequence(vec![e]),
+        });
     }
     // Array shapes. Positional (`array{A, B}` / `list{A, B}` / `array{0: A,
     // 1: B}`) → a per-slot `Sequence` tuple, the destructuring source;
@@ -846,10 +863,20 @@ fn php_annot_type(text: &str) -> Option<InferredType> {
                     .map(|i| (part[..i].trim().trim_end_matches('?'), part[i + 1..].trim()));
                 match split {
                     Some((k, ty)) if k.parse::<usize>().is_err() => {
-                        keyed.push((k.to_string(), php_annot_type(ty).map(Box::new)));
+                        let v = php_annot_type(ty);
+                        if matches!(v, Some(Unknown)) {
+                            return Some(Unknown);
+                        }
+                        keyed.push((k.to_string(), v.map(Box::new)));
                     }
-                    Some((_, ty)) => slots.push(php_annot_type(ty)?),
-                    None => slots.push(php_annot_type(part)?),
+                    Some((_, ty)) => match php_annot_type(ty)? {
+                        Unknown => return Some(Unknown),
+                        v => slots.push(v),
+                    },
+                    None => match php_annot_type(part)? {
+                        Unknown => return Some(Unknown),
+                        v => slots.push(v),
+                    },
                 }
             }
             if !keyed.is_empty() {
@@ -897,7 +924,10 @@ fn php_annot_type(text: &str) -> Option<InferredType> {
                     ));
                 }
             }
-            return Some(Sequence(vec![elem]));
+            return Some(match elem {
+                Unknown => Unknown,
+                elem => Sequence(vec![elem]),
+            });
         }
     }
     match t {
@@ -1385,8 +1415,6 @@ fn php_doc_types(text: &str) -> Vec<DocFact> {
                 out.push(DocFact::ReturnRecvInstance { base });
             } else if let Some(t) = phpdoc_type(rest) {
                 out.push(DocFact::Return(t));
-            } else if phpdoc_is_union(rest) {
-                out.push(DocFact::ReturnUntypable);
             }
         } else if let Some(rest) = l.strip_prefix("@template ")
             .or_else(|| l.strip_prefix("@template-covariant "))
@@ -1551,17 +1579,6 @@ fn phpdoc_split_top_level(s: &str, sep: char) -> Vec<&str> {
     out
 }
 
-/// Two or more non-null arms at the top level (`WP_Term|WP_Error`,
-/// `int|string`): a union `phpdoc_type` declines. `A|null` is ONE arm and
-/// never a union here.
-fn phpdoc_is_union(raw: &str) -> bool {
-    let raw = raw.trim_start();
-    let raw = raw[..phpdoc_type_token_end(raw)].trim_start_matches('?');
-    let mut arms = phpdoc_split_top_level(raw, '|');
-    arms.retain(|a| !a.eq_ignore_ascii_case("null") && !a.is_empty());
-    arms.len() > 1
-}
-
 fn phpdoc_type(raw: &str) -> Option<String> {
     let raw = raw.trim_start();
     let raw = raw[..phpdoc_type_token_end(raw)].trim_start_matches('?');
@@ -1573,6 +1590,11 @@ fn phpdoc_type(raw: &str) -> Option<String> {
     // the naive split saw three and dropped laravel's whole fluent surface).
     let mut arms = phpdoc_split_top_level(raw, '|');
     arms.retain(|a| !a.eq_ignore_ascii_case("null") && !a.is_empty());
+    // A union survives WHOLE: `annot_type` answers `Unknown` for it, the
+    // fact every doc row (return, param, var, @method) carries the same way.
+    if arms.len() > 1 {
+        return Some(arms.join("|"));
+    }
     let [one] = arms.as_slice() else { return None };
     // Sequence spellings survive WHOLE — `annot_type` parses the element
     // (`list<X>` / `array<K,V>` / `iterable<X>` / `X[]` → a one-slot
