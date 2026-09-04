@@ -1718,8 +1718,13 @@ impl<'a> Builder<'a> {
             // two edges on `PackageSymbol(child, m)` and the
             // materializer's latest-wins reducer would silently pick
             // the second-emitted parent.
+            // Seeded with the child's OWN method names: an override must
+            // never receive a parent edge, because Perl dispatch goes to the
+            // local sub and the parent's answer would silently stand in for
+            // it (a base's `sub file { undef }` typing an overriding
+            // subclass's `file` as undef is the canonical miscarriage).
             let mut emitted_for_child: std::collections::HashSet<String> =
-                std::collections::HashSet::new();
+                crate::model::file_analysis::own_method_names(&self.symbols, child).collect();
             for parent in parents {
                 if parent == child {
                     continue;

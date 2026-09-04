@@ -949,3 +949,25 @@ impl FileAnalysis {
     }
 
 }
+
+/// The names of the Sub/Method symbols `class` DEFINES ITSELF — its override
+/// set.
+///
+/// Wherever a parent walk enumerates methods for a child, this set must be
+/// excluded: Perl dispatches to the local sub, so a parent's answer must
+/// never stand in for a name the child overrides. The canonical miscarriage
+/// is a base whose `sub file { undef }` typed every subclass's overriding
+/// `file` as returning undef.
+///
+/// Shared by the writeback's local inheritance edges and enrichment's
+/// cross-file projection, because the rule going out of step between them is
+/// exactly how a child gets one answer locally and another after enrichment.
+pub fn own_method_names<'a>(
+    symbols: &'a [Symbol],
+    class: &'a str,
+) -> impl Iterator<Item = String> + 'a {
+    symbols.iter().filter_map(move |s| {
+        (matches!(s.kind, SymKind::Sub | SymKind::Method) && s.package.as_deref() == Some(class))
+            .then(|| s.name.clone())
+    })
+}
