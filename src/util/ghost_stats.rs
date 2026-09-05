@@ -164,6 +164,10 @@ fn maybe_reemit_attribution() {
         return; // another thread is emitting this interval
     }
     emit_attribution("periodic");
+    // The machine-readable sinks too: a harness that kills the server
+    // instead of asking it to exit still gets the latest snapshot.
+    write_json();
+    super::timings::write_json();
 }
 
 /// Add `n` to a named counter in one call. For a per-FILE quantity (fold
@@ -286,9 +290,9 @@ impl Drop for BuildScope {
     }
 }
 
-/// tag -> (total nanos, call count). A per-call `[PHASE]` line is useless for
-/// a region entered once per file across a corpus; what a hot region needs is
-/// the SUM and the call count, so an average and a share are derivable.
+// tag -> (total nanos, call count). A per-call `[PHASE]` line is useless for
+// a region entered once per file across a corpus; what a hot region needs is
+// the SUM and the call count, so an average and a share are derivable.
 thread_local! {
     /// Child-time accumulators for the exclusive-time stack. One frame per
     /// live `ScopedNs` on THIS thread: a region pushes 0 on entry; on drop it
@@ -503,7 +507,7 @@ fn distincts() -> &'static Mutex<HashMap<String, std::collections::HashSet<Strin
     D.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-/// Record that `key` was seen under `tag`. No-op when the gate is off.
+// Record that `key` was seen under `tag`. No-op when the gate is off.
 thread_local! {
     /// Keys looked up during the CURRENT per-file sweep, when one is open.
     /// Repeats are counted per sweep rather than globally on purpose: a memo
@@ -1073,12 +1077,6 @@ impl GhostStats {
     pub fn set_usage(&self, bytes: u64, entries: u64) {
         self.peak_bytes.fetch_max(bytes, Ordering::Relaxed);
         self.peak_entries.fetch_max(entries, Ordering::Relaxed);
-    }
-
-    /// The full report: hit rate, ghost hits, the refetch histogram, and the
-    /// top refetched keys by name (the culprits).
-    pub fn report(&self, moment: &str) -> String {
-        self.report_with(moment, Detail::Full)
     }
 
     /// `Summary` drops the per-key culprit lists and keeps the two aggregate

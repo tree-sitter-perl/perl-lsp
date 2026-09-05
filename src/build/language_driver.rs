@@ -1321,6 +1321,7 @@ fn remap_spans(
             target_at,
             source,
             extraction: _,
+            reassigns: _,
         } = fe;
         *target_at = r(*target_at);
         *source = rspan(*source);

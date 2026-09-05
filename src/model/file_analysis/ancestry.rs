@@ -494,7 +494,37 @@ impl FileAnalysis {
         &self,
         cls: &str,
         method_name: &str,
+        shape: MemberShape,
         module_index: Option<&dyn CrossFileLookup>,
+    ) -> Option<MethodResolution> {
+        // A written shape asks for the agreeing kind FIRST (`$this->recorded`
+        // reads the property, `$this->recorded()` calls the method); the
+        // other kind stays the fallback so a class that does not overload
+        // the name answers exactly as a shape-less lookup would.
+        let agrees = |kind: SymKind| match shape {
+            MemberShape::Unknown => true,
+            MemberShape::Callable => matches!(kind, SymKind::Sub | SymKind::Method),
+            MemberShape::Value => !matches!(kind, SymKind::Sub | SymKind::Method),
+        };
+        if shape != MemberShape::Unknown {
+            if let Some(r) = self.member_resolution_on_class_pass(cls, method_name, module_index, &agrees) {
+                return Some(r);
+            }
+            // php: the syntax decided the kind; a value read of a name only
+            // a method carries is an undeclared property, not that method.
+            if self.pack.member_shapes_are_strict {
+                return None;
+            }
+        }
+        self.member_resolution_on_class_pass(cls, method_name, module_index, &|_| true)
+    }
+
+    fn member_resolution_on_class_pass(
+        &self,
+        cls: &str,
+        method_name: &str,
+        module_index: Option<&dyn CrossFileLookup>,
+        agrees: &dyn Fn(SymKind) -> bool,
     ) -> Option<MethodResolution> {
         // (a) Local symbols in this file packaged under `cls`. Methods AND
         // data members: cpp `obj->field` mints the same `MethodCall` ref as a
@@ -514,7 +544,7 @@ impl FileAnalysis {
             };
             // A re-export (`using Base::m;`) is API surface, not a def —
             // fall through so the walk reaches the origin ancestor.
-            if member_kind && !sym.is_reexport() && self.symbol_in_class(sid, cls) {
+            if member_kind && agrees(sym.kind) && !sym.is_reexport() && self.symbol_in_class(sid, cls) {
                 return Some(MethodResolution::Local { class: cls.to_string(), sym_id: sid });
             }
         }
@@ -577,6 +607,7 @@ impl FileAnalysis {
                     s.name == method_name
                         && s.package.as_deref() == Some(cls)
                         && !s.is_reexport()
+                        && agrees(s.kind)
                         && (matches!(s.kind, SymKind::Sub | SymKind::Method)
                             || (matches!(
                                 s.kind,
@@ -656,14 +687,80 @@ impl FileAnalysis {
         method_name: &str,
         module_index: Option<&dyn CrossFileLookup>,
     ) -> Option<MethodResolution> {
+        self.resolve_member_in_ancestors(class_name, method_name, MemberShape::Unknown, module_index)
+    }
+
+    /// `resolve_method_in_ancestors` with the cursor token's written shape:
+    /// a value read prefers the class's property, a call its method, on
+    /// every class of the walk (the other kind stays the fallback).
+    pub fn resolve_member_in_ancestors(
+        &self,
+        class_name: &str,
+        method_name: &str,
+        shape: MemberShape,
+        module_index: Option<&dyn CrossFileLookup>,
+    ) -> Option<MethodResolution> {
+        let _t = crate::util::ghost_stats::ScopedNs::start("mroc.total");
         let mut result: Option<MethodResolution> = None;
+        let mut iface_fallback: Option<MethodResolution> = None;
         self.for_each_ancestor_class(class_name, module_index, |cls| {
-            match self.method_resolution_on_class(cls, method_name, module_index) {
-                Some(r) => { result = Some(r); std::ops::ControlFlow::Break(()) }
+            match self.method_resolution_on_class(cls, method_name, shape, module_index) {
+                // An INTERFACE hit is held as fallback, never the answer
+                // while a concrete definer exists: php's MRO interleaves
+                // `implements` (header) ahead of `use Trait` (body), so the
+                // abstract stub otherwise shadows the trait method every
+                // consumer actually runs (laravel `Collection->eachSpread`).
+                Some(r) => {
+                    if self.hit_class_is_interface(cls, &r, module_index) {
+                        iface_fallback.get_or_insert(r);
+                        std::ops::ControlFlow::Continue(())
+                    } else {
+                        result = Some(r);
+                        std::ops::ControlFlow::Break(())
+                    }
+                }
                 None => std::ops::ControlFlow::Continue(()),
             }
         });
-        result
+        result.or(iface_fallback)
+    }
+
+    /// Is the class that answered a method resolution an INTERFACE (php:
+    /// a Class symbol carrying the "interface" flavor attribute)? Cost-
+    /// shaped by the hit kind: a Local hit consults only the local symbol
+    /// (for Perl that scan never matches — no symbol carries the flavor —
+    /// and no cross-file work happens); a CrossFile hit also sweeps the
+    /// class's candidate files, whose copies the resolution itself just
+    /// rehydrated (LRU-warm).
+    fn hit_class_is_interface(
+        &self,
+        cls: &str,
+        r: &MethodResolution,
+        module_index: Option<&dyn CrossFileLookup>,
+    ) -> bool {
+        match r {
+            MethodResolution::Local { .. } => self.declares_interface(cls),
+            MethodResolution::CrossFile { .. } => {
+                self.declares_interface(cls)
+                    || module_index.is_some_and(|i| {
+                        i.visible_def_candidates(cls)
+                            .iter()
+                            .any(|c| i.whole_present(c).declares_interface(cls))
+                    })
+            }
+        }
+    }
+
+    /// Does THIS file declare `class` as an interface? php's interfaces are
+    /// `SymKind::Class` symbols carrying the "interface" flavor attribute
+    /// (stamped from the `@classattr.interface` capture); Perl never marks
+    /// one. The one speller every interface-deferral walk asks.
+    pub fn declares_interface(&self, class: &str) -> bool {
+        self.symbols().iter().any(|s| {
+            matches!(s.kind, SymKind::Class)
+                && s.name == class
+                && s.attributes.iter().any(|x| x == "interface")
+        })
     }
 
     /// `$self->SUPER::m` dispatch: resolve `method_name` over `enclosing`'s
@@ -677,9 +774,48 @@ impl FileAnalysis {
         method_name: &str,
         module_index: Option<&dyn CrossFileLookup>,
     ) -> Option<MethodResolution> {
+        // A SAME-LEAF parent (php aliased import — `use Support\Collection
+        // as BaseCollection; class Collection extends BaseCollection`)
+        // collapses into the ORIGIN node of the leaf-keyed walk below and
+        // is skipped, so `parent::` fell through to a DEEPER ancestor
+        // (typically an interface's abstract stub). Resolve it explicitly
+        // first: the pack's parent-namespace row names the parent's
+        // namespace, and the candidate file whose Class symbol carries
+        // that namespace is the real parent.
+        if let Some(idx) = module_index {
+            for (child, parent, ns) in &self.pack.parent_namespaces {
+                if child != enclosing || parent != enclosing {
+                    continue;
+                }
+                for cached in idx.visible_def_candidates(parent) {
+                    let whole = idx.whole_present(&cached);
+                    let cand_ns = whole
+                        .symbols()
+                        .iter()
+                        .find(|s| matches!(s.kind, SymKind::Class) && &s.name == parent)
+                        .map(|s| s.package.clone().unwrap_or_default());
+                    if cand_ns.as_deref() == Some(ns.as_str())
+                        && whole
+                            .method_resolution_on_class(parent, method_name, MemberShape::Unknown, module_index)
+                            .is_some()
+                    {
+                        return Some(MethodResolution::CrossFile {
+                            class: parent.clone(),
+                            def_module: None,
+                        });
+                    }
+                }
+            }
+        }
         // SUPER:: searches the PARENTS, never the enclosing class — so
-        // it is the bare `walk`, origin-excluded by construction.
+        // it is the bare `walk`, origin-excluded by construction. A hit on
+        // an INTERFACE-marked class (php: the same SymKind::Class, told
+        // apart by the "interface" flavor attribute) is kept only as a
+        // fallback: `parent::` runs the concrete class chain, and the
+        // abstract stub is the answer only when nothing concrete defines
+        // the method.
         let mut result: Option<MethodResolution> = None;
+        let mut iface_fallback: Option<MethodResolution> = None;
         let graph = crate::model::graph::GraphView::new(self, module_index);
         graph.walk(
             crate::model::graph::Node::Class(enclosing.to_string()),
@@ -689,13 +825,21 @@ impl FileAnalysis {
                 let crate::model::graph::Node::Class(cls) = n else {
                     return crate::model::graph::WalkControl::Continue;
                 };
-                match self.method_resolution_on_class(cls, method_name, module_index) {
-                    Some(r) => { result = Some(r); crate::model::graph::WalkControl::Stop }
+                match self.method_resolution_on_class(cls, method_name, MemberShape::Unknown, module_index) {
+                    Some(r) => {
+                        if self.hit_class_is_interface(cls, &r, module_index) {
+                            iface_fallback.get_or_insert(r);
+                            crate::model::graph::WalkControl::Continue
+                        } else {
+                            result = Some(r);
+                            crate::model::graph::WalkControl::Stop
+                        }
+                    }
                     None => crate::model::graph::WalkControl::Continue,
                 }
             },
         );
-        result
+        result.or(iface_fallback)
     }
 
     /// Does `class` (or any ancestor we CAN reach) name a parent that
@@ -789,6 +933,11 @@ impl FileAnalysis {
         // class but not a name a method call can ever spell.
         let visible = |sym: &Symbol| {
             crate::model::conventions::is_callable_sub_name(&sym.name)
+                // A lexical sub/method (`my sub` / `my method`) is scoped to
+                // its block, not the class: it never dispatches by name on an
+                // MRO and is invisible cross-file. The point-aware `&name`
+                // lane (`complete_lexical_methods_at`) owns offering it.
+                && !matches!(&sym.detail, SymbolDetail::Sub { lexical: true, .. })
                 && (requesting_class == Some(class_name)
                     || !sym.attributes.iter().any(|a| a == "non_public"))
         };
@@ -806,6 +955,7 @@ impl FileAnalysis {
                     candidates.push(CompletionCandidate {
                         label: sym.name.clone(),
                         kind: sym.kind,
+                        is_static: sym.attributes.iter().any(|a| a == "static"),
                         detail: Some(self.method_detail(original_class, &sym.name, defining, module_index)),
                         insert_text: None,
                         sort_priority: PRIORITY_LOCAL,
@@ -840,6 +990,7 @@ impl FileAnalysis {
                 candidates.push(CompletionCandidate {
                     label: sym.name.clone(),
                     kind: sym.kind,
+                    is_static: sym.attributes.iter().any(|a| a == "static"),
                     detail: Some(self.method_detail(original_class, &sym.name, defining, module_index)),
                     insert_text: None,
                     sort_priority: PRIORITY_LOCAL,
@@ -864,7 +1015,9 @@ impl FileAnalysis {
             //       class itself).
             // Collect into a temporary list to avoid borrow-checker
             // issues with the closure capturing &mut seen_names/candidates.
-            let mut bridged: Vec<(String, SymKind, Option<SymbolDetail>, Option<HandlerDisplay>)> = Vec::new();
+            // (name, kind, detail, display, is_static)
+            type Bridged = (String, SymKind, Option<SymbolDetail>, Option<HandlerDisplay>, bool);
+            let mut bridged: Vec<Bridged> = Vec::new();
             idx.for_each_entity_bridged_to(class_name, &mut |_mod, _cached, sym| {
                 use std::ops::ControlFlow;
                 if !matches!(sym.kind, SymKind::Sub | SymKind::Method) {
@@ -878,10 +1031,11 @@ impl FileAnalysis {
                     sym.kind,
                     Some(sym.detail.clone()),
                     sym.presentation.display,
+                    sym.attributes.iter().any(|a| a == "static"),
                 ));
                 ControlFlow::Continue(())
             });
-            for (name, kind, detail, display_override) in bridged {
+            for (name, kind, detail, display_override, is_static) in bridged {
                 if seen_names.contains(&name) { continue; }
                 seen_names.insert(name.clone());
                 let is_method = kind == SymKind::Method
@@ -892,6 +1046,7 @@ impl FileAnalysis {
                 candidates.push(CompletionCandidate {
                     label: name,
                     kind,
+                    is_static,
                     detail: Some(method_detail_str),
                     insert_text: None,
                     sort_priority: PRIORITY_LOCAL,
@@ -920,6 +1075,7 @@ impl FileAnalysis {
                     candidates.push(CompletionCandidate {
                         label: sym.name.clone(),
                         kind,
+                        is_static: sym.attributes.iter().any(|a| a == "static"),
                         detail: Some(detail),
                         insert_text: None,
                         sort_priority: PRIORITY_LOCAL,

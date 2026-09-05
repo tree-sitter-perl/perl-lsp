@@ -142,12 +142,19 @@ impl WitnessReducer for FrameworkAwareTypeFold {
         // InferredType witness containing it (already post-narrowing).
         // Falls through to the full fold otherwise.
         if let Some(point) = narrow_point {
+            // Source priority first (an annotation outranks a flow guess
+            // sharing the same class-wide extent), narrowest span second.
             let mut narrow: Option<(&Witness, u64)> = None;
             for w in ws {
                 if let WitnessPayload::InferredType(_) = w.payload {
                     if span_contains(&w.span, point) && !span_is_zero(&w.span) {
                         let area = span_area(&w.span);
-                        if narrow.map(|(_, a)| area < a).unwrap_or(true) {
+                        let prio = w.source.priority();
+                        let better = narrow.is_none_or(|(nw, a)| {
+                            let np = nw.source.priority();
+                            prio > np || (prio == np && area < a)
+                        });
+                        if better {
                             narrow = Some((*w, area));
                         }
                     }
@@ -181,6 +188,31 @@ impl WitnessReducer for FrameworkAwareTypeFold {
         let mut re = false;
         let mut plain_type: Option<InferredType> = None;
         let mut plain_type_priority: u8 = 0;
+        // An `Unknown` ANNOTATION (`@var A|B`, a declared union) is a
+        // known-untypable value at its source's priority: it beats a
+        // lower-priority guess on the same attachment (a flow default, a
+        // constructor write) the way a concrete annotation beats one.
+        let mut unknown_priority: u8 = 0;
+
+        // A REASSIGNMENT (`REASSIGN_FLOW_SOURCE`, zero-width at its site —
+        // materialized to what it produced, or to `InferredType::Unknown`
+        // when its source could not be typed) is a temporal RESET: at the
+        // query point, every binding strictly before the latest one is dead
+        // — the class axis included, which otherwise wins in any order, so
+        // `$r = new WP_Error; $r = json_decode(..)` reads as the array.
+        // Companions minted at the same site survive, and observations
+        // after it accrue as usual; with nothing typed after it the answer
+        // IS `Unknown`, so a chase that reads the variable carries the
+        // reset on instead of falling back.
+        let reset_at = ws
+            .iter()
+            .filter(|w| {
+                w.span.start == w.span.end
+                    && matches!(&w.source, WitnessSource::Builder(t) if t == REASSIGN_FLOW_SOURCE)
+            })
+            .map(|w| w.span.start)
+            .filter(|s| narrow_point.is_none_or(|p| *s <= p))
+            .max();
 
         for w in ws {
             // Temporal ordering: only consider witnesses emitted at or
@@ -190,6 +222,9 @@ impl WitnessReducer for FrameworkAwareTypeFold {
                 if w.span.start > point {
                     continue;
                 }
+            }
+            if reset_at.is_some_and(|r| w.span.start < r) {
+                continue;
             }
             // Skip scoped InferredType witnesses that don't contain the
             // query point — narrowing facts for a different slice of the
@@ -212,6 +247,15 @@ impl WitnessReducer for FrameworkAwareTypeFold {
                         first_param_class = Some(package.clone())
                     }
                     b @ InferredType::BrandedRoute { .. } => branded = Some(b.clone()),
+                    // The reassignment reset is handled by `reset_at` (it
+                    // yields to the observations that follow it); an
+                    // annotated `Unknown` competes on priority.
+                    InferredType::Unknown => {
+                        let reset = matches!(&w.source, WitnessSource::Builder(t) if t == REASSIGN_FLOW_SOURCE);
+                        if !reset {
+                            unknown_priority = unknown_priority.max(prio);
+                        }
+                    }
                     // Source priority breaks ties first (an EXPLICIT
                     // annotation — `ANNOT_SOURCE`, priority 20 — governs over
                     // an inferred flow type, priority 10, whatever the order
@@ -261,6 +305,9 @@ impl WitnessReducer for FrameworkAwareTypeFold {
         // brand IS the class identity plus inherited defaults.
         if let Some(b) = branded {
             return ReducedValue::Type(b);
+        }
+        if unknown_priority > class_assertion_priority.max(plain_type_priority) {
+            return ReducedValue::Type(InferredType::Unknown);
         }
 
         // Class axis wins when consistent with the rep axis. On
@@ -313,6 +360,9 @@ impl WitnessReducer for FrameworkAwareTypeFold {
             return ReducedValue::Type(InferredType::String);
         }
 
+        if reset_at.is_some() {
+            return ReducedValue::Type(InferredType::Unknown);
+        }
         ReducedValue::None
     }
 }

@@ -313,29 +313,64 @@ impl FileAnalysis {
         member: &str,
         module_index: Option<&dyn CrossFileLookup>,
         arg_count: Option<usize>,
+        shape: MemberShape,
     ) -> Option<InferredType> {
+        // On a strict pack the written shape picks the rung: a value read
+        // never means the method, a call never the field.
+        let strict = self.pack.member_shapes_are_strict;
         // The whole ladder, most-specific first: a member the winning spec
         // doesn't define falls through to the next rung (ultimately the
         // primary) — same never-pruned order goto-def presents.
         for (class, recv) in self.dispatch_ladder_of(receiver, module_index) {
+            // The registry publication is name-keyed (a field's assignment
+            // rides it too), so a value read on a strict pack takes the
+            // declared field first and consults the registry only when no
+            // method carries the name.
+            let value_read = strict && shape == MemberShape::Value;
+            if value_read {
+                if let Some(raw) = self.field_type_on_class(&class, member, module_index) {
+                    return Some(self.substitute_member_type(raw, &class, &recv, module_index));
+                }
+                if self
+                    .resolve_member_in_ancestors(&class, member, MemberShape::Callable, module_index)
+                    .is_some()
+                {
+                    continue;
+                }
+            }
             if let Some(t) =
                 self.method_return_type_on(&class, &recv, member, module_index, arg_count)
             {
                 return Some(t);
             }
+            if strict && shape == MemberShape::Callable {
+                continue;
+            }
             let Some(raw) = self.field_type_on_class(&class, member, module_index) else {
                 continue;
             };
-            let params = self.class_template_params(&class, module_index);
-            if params.is_empty() {
-                return Some(raw);
-            }
-            let InferredType::Parametric(ParametricType::Instance { args, .. }) = &recv else {
-                return Some(raw);
-            };
-            return Some(substitute_type_params(&raw, &params, args));
+            return Some(self.substitute_member_type(raw, &class, &recv, module_index));
         }
         None
+    }
+
+    /// A field's declared type with the class's template params substituted
+    /// against the receiver's instance args.
+    fn substitute_member_type(
+        &self,
+        raw: InferredType,
+        class: &str,
+        recv: &InferredType,
+        module_index: Option<&dyn CrossFileLookup>,
+    ) -> InferredType {
+        let params = self.class_template_params(class, module_index);
+        if params.is_empty() {
+            return raw;
+        }
+        let InferredType::Parametric(ParametricType::Instance { args, .. }) = recv else {
+            return raw;
+        };
+        substitute_type_params(&raw, &params, args)
     }
 
     /// `dispatch_class_of`'s type-to-type twin for consumers that hand a
@@ -840,7 +875,16 @@ impl FileAnalysis {
 
         // Bareword invocant. Could be a zero-arg sub returning ClassName
         // (`app->routes` where `app` is plugin-emitted); promote that.
-        // Otherwise the bareword text *is* the class (`Foo->method`).
+        // Otherwise the bareword text *is* the class (`Foo->method`) — but
+        // ONLY for text shaped like a class token. A pack chain receiver's
+        // recorded text is the whole receiver EXPRESSION; minting it as a
+        // ClassName poisons the build-time freeze (the garbage edge then
+        // reads as a baked verdict, so the references matcher never
+        // re-resolves with the index) — answer None and leave the site to
+        // the query-time rungs above.
+        if !crate::model::conventions::is_bareword_class_name(invocant) {
+            return None;
+        }
         let bare = split_qualified(invocant).1;
         if let Some(InferredType::ClassName(c)) = self.sub_return_type_at_arity(bare, Some(0)) {
             return Some(InferredType::ClassName(c));
@@ -859,7 +903,26 @@ impl FileAnalysis {
                 return Some(pkg.clone());
             }
         }
-        None
+        // A pack class-BODY scope opens under the OUTER package context, so
+        // the chain carries no package for a ref sitting directly in the
+        // body (php `protected string $fmt = self::FORMAT;` — the property
+        // default). Structural fallback: the narrowest Class symbol whose
+        // span contains this scope IS the enclosing class.
+        let sc = self.scope(scope);
+        let contains = |o: &Span, i: &Span| {
+            (o.start.row, o.start.column) <= (i.start.row, i.start.column)
+                && (i.end.row, i.end.column) <= (o.end.row, o.end.column)
+        };
+        self.symbols
+            .iter()
+            .filter(|c| matches!(c.kind, SymKind::Class) && contains(&c.span, &sc.span))
+            .min_by_key(|c| {
+                (
+                    c.span.end.row - c.span.start.row,
+                    c.span.end.column,
+                )
+            })
+            .map(|c| c.name.clone())
     }
 
     /// The class of the method enclosing `point` — the implicit-`this` class
@@ -1067,11 +1130,29 @@ impl FileAnalysis {
         // there (a base CLASS's composed roles were checked at its own
         // composition site), preserving the role-only edge semantics of
         // docs/adr/role-contracts.md.
-        let role_requires_of = |c: &str| -> Option<Vec<String>> {
+        let role_requires_of = |composer: &str, c: &str| -> Option<Vec<String>> {
+            // A name-keyed pack pins the parent's namespace: the edge's own
+            // row (`extends \Exception`), else the composer's use map / own
+            // namespace. The candidate carrying that namespace IS the
+            // parent — a same-leaf stranger (a `Connector` interface in
+            // another namespace beside the `Connector` base class next
+            // door) is not, whatever it requires.
+            let want_ns = if self.pack.imports_bind_names {
+                self.pack
+                    .parent_namespaces
+                    .iter()
+                    .find(|(child, parent, _)| child == composer && parent == c)
+                    .map(|(_, _, ns)| ns.clone())
+                    .or_else(|| self.leaf_namespace(c))
+                    .or_else(|| self.use_map_pins().own_namespace.clone())
+            } else {
+                None // a path-keyed language (Perl) has no namespace pins
+            };
             let is_local = self
                 .symbols
                 .iter()
-                .any(|s| matches!(s.kind, SymKind::Package | SymKind::Class) && s.name == c);
+                .any(|s| matches!(s.kind, SymKind::Package | SymKind::Class) && s.name == c)
+                && (want_ns.is_none() || self.declared_type_namespace(c) == want_ns);
             if is_local {
                 if !self.is_role_package(c) {
                     return None;
@@ -1080,11 +1161,29 @@ impl FileAnalysis {
             }
             // Role-ness and requires live in the packages lane (never
             // evicted) of whichever candidate file declares the role.
-            module_index?
-                .visible_def_candidates(c)
-                .iter()
-                .find(|cached| cached.analysis.is_role_package(c))
-                .map(|cached| cached.analysis.role_requires(c).to_vec())
+            let idx = module_index?;
+            let candidates = idx.visible_def_candidates(c);
+            // The namespace rides the symbols axis (a resident copy is
+            // stripped); role-ness and requires ride the packages lane.
+            let pinned = match &want_ns {
+                Some(ns) => candidates.iter().find(|cached| {
+                    idx.symbols_present(cached).declared_type_namespace(c).as_deref() == Some(ns.as_str())
+                }),
+                None => None,
+            };
+            match (pinned, want_ns) {
+                // the pinned declaration decides, role or not
+                (Some(cached), _) => cached
+                    .analysis
+                    .is_role_package(c)
+                    .then(|| cached.analysis.role_requires(c).to_vec()),
+                // a pin nothing visible satisfies: not a guess
+                (None, Some(_)) => None,
+                (None, None) => candidates
+                    .iter()
+                    .find(|cached| cached.analysis.is_role_package(c))
+                    .map(|cached| cached.analysis.role_requires(c).to_vec()),
+            }
         };
 
         let mut out: Vec<UnfulfilledRequire> = Vec::new();
@@ -1113,7 +1212,7 @@ impl FileAnalysis {
             let graph = crate::model::graph::GraphView::new(self, module_index);
             let mut required: Vec<(String, String, String)> = Vec::new();
             for direct in self.declared_parents(pkg) {
-                let Some(requires) = role_requires_of(direct) else { continue };
+                let Some(requires) = role_requires_of(pkg, direct) else { continue };
                 for n in requires {
                     required.push((n, direct.clone(), direct.clone()));
                 }
@@ -1124,7 +1223,7 @@ impl FileAnalysis {
                         let crate::model::graph::Node::Class(c) = n else {
                             return crate::model::graph::WalkControl::PruneChildren;
                         };
-                        match role_requires_of(c) {
+                        match role_requires_of(pkg, c) {
                             Some(requires) => {
                                 for name in requires {
                                     required.push((name, c.clone(), direct.clone()));
@@ -1143,11 +1242,20 @@ impl FileAnalysis {
                     continue;
                 }
                 let mut provided = false;
+                // Perl's typeglob installs put a def ANYWHERE in the
+                // candidate file; a pack whose members are package-bound
+                // reads only the declarations attributed to the ancestor.
+                let package_bound = self.pack.members_are_package_bound;
                 self.for_each_ancestor_class(pkg, module_index, |a| {
                     let here = self.class_provides_method(a, &name)
                         || module_index.is_some_and(|idx| {
                             idx.visible_def_candidates(a).iter().any(|c| {
-                                idx.whole_present(c).provides_method_anywhere(&name)
+                                let whole = idx.whole_present(c);
+                                if package_bound {
+                                    whole.provides_method_in_package(&name, a)
+                                } else {
+                                    whole.provides_method_anywhere(&name)
+                                }
                             })
                         })
                         || module_index.is_some_and(|idx| {
@@ -1277,8 +1385,10 @@ impl FileAnalysis {
         self.for_each_ancestor_class(class_name, module_index, |cls| {
             // (1) Local Handler symbols owned by this class.
             for sym in &self.symbols {
-                if let SymbolDetail::Handler { owner, dispatchers, .. } = &sym.detail {
-                    let HandlerOwner::Class(n) = owner;
+                if let SymbolDetail::Handler {
+                    owner: HandlerOwner::Class(n), dispatchers, ..
+                } = &sym.detail
+                {
                     if n == cls && disp_matches(dispatchers) {
                         visit(sym, "this file");
                     }
@@ -1410,15 +1520,22 @@ impl FileAnalysis {
         // container body — an inline union's members are still the class's);
         // crossing a Sub/Method scope first = a local inside a method (the
         // sticky class package tags those too, so the package alone would
-        // over-claim). A chain that ends inside (parentless synthetic
-        // scopes) was already handled by the role-member check above.
+        // over-claim). FIELDS are exempt from the Sub refusal: a Field
+        // inside its own class's method scope is a promoted constructor
+        // property (php `__construct(public readonly Level $level)`) — a
+        // genuine member the walker minted BY KIND, never a local (locals
+        // are Variables; a method-local enum's constants keep the refusal).
+        // A chain that ends inside (parentless synthetic scopes) was
+        // already handled by the role-member check above.
         let mut cur = Some(sym.scope);
         while let Some(id) = cur {
             let s = self.scope(id);
             if !contains(&class_span, &s.span) {
                 return true;
             }
-            if matches!(s.kind, ScopeKind::Sub { .. } | ScopeKind::Method { .. }) {
+            if !matches!(sym.kind, SymKind::Field)
+                && matches!(s.kind, ScopeKind::Sub { .. } | ScopeKind::Method { .. })
+            {
                 return false;
             }
             cur = s.parent;
@@ -1455,7 +1572,16 @@ impl FileAnalysis {
             .any(|c| {
                 matches!(c.kind, SymKind::Class)
                     && contains(&c.span, &sym.span)
+                    // STRICTLY wider: hoisting means the member's declaring
+                    // scope reaches outside its container (C's unscoped
+                    // enum). A container that mints its own scope (php
+                    // enums — cases are only ever `Level::Debug`-reachable)
+                    // has scope == container span, and calling that bare
+                    // let any same-named PackageRef match a case — renaming
+                    // an enum case rewrote an unrelated class's use-import
+                    // leaf (round-3 R4's residual).
                     && contains(&sc.span, &c.span)
+                    && sc.span != c.span
             })
     }
 
@@ -1509,10 +1635,19 @@ impl FileAnalysis {
     }
 
     /// Find the definition span of a package or class by name.
-    pub(super) fn find_package_or_class(&self, name: &str) -> Option<Span> {
+    /// The file's own Package/Class declaration named `name`, narrowed to a
+    /// namespace claim when the token carries one: a token inside an import
+    /// row names its class in full, so this file's own same-leaf class is
+    /// not it unless the namespaces agree.
+    pub(super) fn find_package_or_class_in(&self, name: &str, ns: Option<&str>) -> Option<Span> {
         for &sid in self.symbols_named(name) {
             let sym = self.symbol(sid);
             if matches!(sym.kind, SymKind::Package | SymKind::Class) {
+                if let Some(ns) = ns {
+                    if sym.package.as_deref().unwrap_or("") != ns {
+                        continue;
+                    }
+                }
                 return Some(sym.selection_span);
             }
         }

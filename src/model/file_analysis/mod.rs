@@ -306,6 +306,15 @@ pub struct FileAnalysis {
     #[serde(skip, default)]
     pub degraded: bool,
 
+    /// This file's use-map pins (`leaf_namespace_pins`), derived once per
+    /// analysis: the backward walk builds a `VisibilityAxis` for EVERY
+    /// scanned file of EVERY query, and the derivation scans the symbol
+    /// and ref tables. Sessional (serde-skipped) and immutable — the pins
+    /// read tables the builder sealed; enrichment appends type/key refs,
+    /// never a class spelling.
+    #[serde(skip, default)]
+    pub(crate) use_map_pins: std::sync::OnceLock<std::sync::Arc<UseMapPins>>,
+
     /// The id of the language driver that built this analysis — the origin
     /// identity `resolve()` derives pack routing from at CandidateSet
     /// construction (`is_pack_language`), so no verb handler carries the

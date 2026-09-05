@@ -366,6 +366,7 @@ fn build_once(
         modifier_invocant_pos: None,
         expr_type_depth: 0,
         walk_stack: Vec::new(),
+        #[cfg(test)]
         recursive_walk: super::walk::recursive_walk_forced()
             .unwrap_or_else(super::walk::recursive_walk_requested),
     };

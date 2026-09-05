@@ -202,6 +202,14 @@ impl Namespace {
 /// it and never re-derives presentation from the detail. Kind-semantic
 /// facts (`is_constant`, `opaque_return`, `lexical`) stay on
 /// `SymbolDetail` — they change behavior, not rendering.
+impl Span {
+    /// `other` lies within this span (inclusive at both ends).
+    pub fn contains(&self, other: &Span) -> bool {
+        (self.start.row, self.start.column) <= (other.start.row, other.start.column)
+            && (other.end.row, other.end.column) <= (self.end.row, self.end.column)
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Presentation {
     /// Suppress this symbol in listing views. Set for presentation
@@ -213,6 +221,15 @@ pub struct Presentation {
     /// structure.
     #[serde(default)]
     pub hide_in_outline: bool,
+    /// The declaration's documentation text (a php docblock's summary
+    /// paragraph, rendered under the hover signature). Types parsed from
+    /// the same comment ride the witness bag, never this string.
+    #[serde(default)]
+    pub doc: Option<String>,
+    /// The deprecation notice (`@deprecated text`), shown by the lane that
+    /// flags uses; the `deprecated` symbol attribute is the flag itself.
+    #[serde(default)]
+    pub deprecation: Option<String>,
     /// Plugin's final word on the LSP kind this symbol renders as
     /// (helper/route/task/event/…). Framework-synthesized entities
     /// resolve/complete/goto-def like regular symbols; `None` leaves
@@ -287,6 +304,11 @@ pub struct ParamArity {
     /// A trailing `...` (C variadic / template pack): any arg count ≥
     /// `required` is accepted.
     pub variadic: bool,
+    /// Positions declared by reference (bit `k` = parameter `k`, php's
+    /// `&$out`): a bare variable written there is BOUND by the call, not
+    /// read. Perl and C++ mint none.
+    #[serde(default)]
+    pub by_ref: u64,
 }
 
 impl ParamArity {
@@ -295,6 +317,12 @@ impl ParamArity {
     /// visible unpruned. `2` = exact (`argc == total`, no variadic); `1` =
     /// compatible (defaults fill the gap, or a variadic tail absorbs the
     /// extra); `0` = mismatch (too few required, or too many for a fixed arity).
+    /// Whether an argument written at `position` is bound by the call
+    /// (the parameter there is declared by reference).
+    pub fn binds_arg(&self, position: usize) -> bool {
+        position < 64 && self.by_ref & (1u64 << position) != 0
+    }
+
     pub fn fit(&self, argc: usize) -> u8 {
         let compatible = argc >= self.required && (self.variadic || argc <= self.total);
         if !compatible {
@@ -479,6 +507,14 @@ pub struct FlowEdge {
     /// `expr_type_at_span`, and the value-provenance anchor.
     pub source: Span,
     pub extraction: Extraction,
+    /// A plain assignment to a name the scope ALREADY binds (`$x = …`, never
+    /// `my $x = …` / a parameter / a class member): the one shape whose
+    /// untypable source RESETS the variable (`REASSIGN_FLOW_SOURCE`). A
+    /// declaration's companions (a first-param constraint at the sub's
+    /// start, a docblock cast) may sit anywhere before it, so a declaration
+    /// never resets; a member's writers have no order at all.
+    #[serde(default)]
+    pub reassigns: bool,
 }
 
 impl FlowEdge {
@@ -503,20 +539,30 @@ impl FlowEdge {
             // A slurpy tail (`@rest`) carries the source's element type — the
             // whole-source edge approximates it (same element lattice).
             Extraction::Slurpy(_) => WitnessPayload::Edge(WitnessAttachment::Expr(self.source)),
-            // KeyOf awaits its HashKey-projection lowering (a later stage).
-            Extraction::KeyOf(_) => return None,
+            // The value at a literal key of the source — a keyed
+            // destructure (`['k' => $v] = f()`) projecting through the
+            // source's keyed shape (`HashWithKeys`) at query time.
+            Extraction::KeyOf(k) => WitnessPayload::Projected {
+                base: WitnessAttachment::Expr(self.source),
+                step: ProjectionStep::HashKey(k.clone()),
+            },
             // A bare bind clears to undef — a value the bind uniquely knows
             // (like a literal), so a direct `InferredType`, not an edge.
             Extraction::Cleared => WitnessPayload::InferredType(InferredType::Undef),
             // Rebind-only: recorded in `flow_edges` for the cutoff, no type.
             Extraction::Rebind => return None,
         };
+        let tag = if self.reassigns {
+            crate::model::witnesses::REASSIGN_FLOW_SOURCE
+        } else {
+            "flow"
+        };
         Some(Witness {
             attachment: WitnessAttachment::Variable {
                 name: self.target_name.clone(),
                 scope: self.target_scope,
             },
-            source: WitnessSource::Builder("flow".into()),
+            source: WitnessSource::Builder(tag.into()),
             payload,
             span: Span { start: self.target_at, end: self.target_at },
         })
@@ -597,7 +643,7 @@ impl Symbol {
                 .filter(|p| !p.is_slurpy && !p.is_invocant && p.default.is_none())
                 .count();
             let variadic = params.iter().any(|p| p.is_slurpy);
-            return Some(ParamArity { total, required, variadic });
+            return Some(ParamArity { total, required, variadic, by_ref: 0 });
         }
         None
     }
@@ -1181,6 +1227,21 @@ pub enum RenameKind {
     Handler { owner: HandlerOwner, name: String },
 }
 
+/// The shape a member token was WRITTEN in — the value-borne fact that
+/// tells a property from a same-named method (rule #10: consumers ask the
+/// ref, never "is this php"). `Unknown` = the language does not
+/// distinguish (Perl's `$o->m` is a call with or without parens), and
+/// every shape gate stands down.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum MemberShape {
+    #[default]
+    Unknown,
+    /// Invoked, or named as a callable (`$o->m()`, `[$o, 'm']`).
+    Callable,
+    /// Read as a stored value (`$o->prop`, `obj->field`).
+    Value,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[allow(dead_code)]
 pub enum RefKind {
@@ -1216,6 +1277,19 @@ pub enum RefKind {
         /// — its `deref_stack` decides the expected operator). `None` for Perl
         /// (one operator) and wrapper/chain receivers.
         member_op: Option<(MemberOp, Span)>,
+        /// What the written token names: a callable (an argument list
+        /// follows, or a callable-string form) or a stored value (a bare
+        /// member read). A pack whose members can share a name across
+        /// kinds (php `$this->recorded` beside `recorded()`) mints it;
+        /// Perl, where `$o->m` IS a call, leaves it `Unknown`.
+        shape: MemberShape,
+        /// The member was NAMED BY A STRING (`[$obj, 'method']`, a class-array
+        /// callable): a rename/reference target when it resolves, never an
+        /// unresolved-member finding when it does not — a two-element array
+        /// holding an object and a string is data until dispatch proves it a
+        /// callable (PHPUnit providers, key/value pairs).
+        #[serde(default)]
+        named_by_string: bool,
     },
     PackageRef,
     /// Key access `$h{k}` / `$obj->{k}`. Which hash owns the key (and the

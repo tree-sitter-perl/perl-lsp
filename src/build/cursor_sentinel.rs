@@ -458,7 +458,7 @@ fn resolve_node_type(
         let field = node.named_child(node.named_child_count() - 1)?;
         let base_ty = resolve_node_type(base, cfg, src, analysis, module_index)?;
         let field_name = field.utf8_text(src.as_bytes()).ok()?;
-        return analysis.member_value_type(&base_ty, field_name, module_index, None);
+        return analysis.member_value_type(&base_ty, field_name, module_index, None, crate::model::file_analysis::MemberShape::Unknown);
     }
     // a method CALL `recv.method(...)` — the method's return on the
     // receiver's class, resolved through PackageSymbol (inheritance +
@@ -472,7 +472,7 @@ fn resolve_node_type(
             let method = func.named_child(func.named_child_count() - 1)?;
             let recv_ty = resolve_node_type(recv, cfg, src, analysis, module_index)?;
             let method_name = method.utf8_text(src.as_bytes()).ok()?;
-            return analysis.member_value_type(&recv_ty, method_name, module_index, None);
+            return analysis.member_value_type(&recv_ty, method_name, module_index, None, crate::model::file_analysis::MemberShape::Unknown);
         }
         // A plain call (`make_widget()`, a ctor-on-temporary `Box()`) —
         // `function` isn't member-shaped, so there's no receiver to recurse
@@ -508,6 +508,7 @@ fn resolve_node_type(
                             name,
                             module_index,
                             None,
+                            crate::model::file_analysis::MemberShape::Unknown,
                         )
                     })
                 {

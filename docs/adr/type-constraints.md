@@ -90,7 +90,7 @@ Erasure is the right call because it satisfies every *resolution* need
 A first-class `InferredType::Maybe(_)` would buy exactly one capability
 erasure can't: the unguarded-optional-access diagnostic (`$t->process`
 on a `Maybe` with no intervening `if ($t)` / `//` guard). That
-diagnostic has since landed — flow-sensitive guard narrowing
+diagnostic exists: flow-sensitive guard narrowing
 (`docs/adr/flow-narrowing.md`) feeds a first-class
 `InferredType::Optional(Box<_>)` (`docs/adr/optional-types.md`) into D2
 `optional-deref` (`docs/adr/narrowing-diagnostics.md`) — but its
@@ -110,7 +110,7 @@ projection, the plugin fold flips passthrough → wrap. Additive, not a
 refactor — which is *why* deferring is safe.
 
 **Revisit this fold when the bareword `Maybe[...]` path needs to feed
-the landed `Optional` lattice** (`docs/prompt-optional-types.md`) — the
+the `Optional` lattice** (`docs/prompt-optional-types.md`) — the
 diagnostic and its flow-narrowing are already budgeted and built; what
 remains is wiring this constructor's fold into them.
 

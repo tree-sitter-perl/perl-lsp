@@ -147,6 +147,33 @@ pub struct RefIdx(pub u32);
 /// declaration needs no synthetic `: T`).
 pub const ANNOT_SOURCE: &str = "skeleton-annot";
 
+/// The @inheritDoc param-subscription edge (`Variable → Edge(PackageSymbol
+/// {class, "method#p#name"})`). Priority-tied with `ANNOT_SOURCE` so its
+/// materialized answer (an ancestor's `@param array<X>`) beats the bare
+/// container the local syntax annot (`array $records`) contributed — at
+/// equal priority latest-wins applies and the edge lands later, while a
+/// dangling edge drops out and leaves the syntax annot standing.
+pub const INHERIT_PARAM_SOURCE: &str = "inherit-param";
+
+/// A return-arm chain that REFINES a bare declared container (`: array`
+/// over `return [$q, $a]` — the tuple literal is strictly more informative).
+/// Annot priority for the same reason as `INHERIT_PARAM_SOURCE`: the
+/// materialized `Sequence` must beat the `HashRef` annot, and at equal
+/// priority latest-wins does it (`HashRef` never subsumes `Sequence`).
+/// Source tag of a class-member VALUE edge (`PackageSymbol{cls, field} →
+/// Edge(Variable)`): the registry's member-shape preference partitions a
+/// class attachment's edges on it.
+pub const FIELD_EDGE_SOURCE: &str = "field_edge";
+
+pub const REFINE_SOURCE: &str = "refines-container";
+
+/// Source tag of a REASSIGNMENT's flow edge (`FlowEdge::reassigns`): the
+/// only witness whose failure to resolve `materialize` turns into an
+/// `OpaqueRebind` reset. Every other assignment lowering is a declaration
+/// (`"flow"`) or a companion (`mcb`, `chain_assignment`) and drops out
+/// silently when it cannot answer.
+pub const REASSIGN_FLOW_SOURCE: &str = "flow-reassign";
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum WitnessSource {
     /// Named builder pass — "signature_extraction", "narrowing", …
@@ -173,7 +200,11 @@ impl WitnessSource {
     pub fn priority(&self) -> u8 {
         match self {
             WitnessSource::Plugin(_) => 100,
-            WitnessSource::Builder(tag) if tag == ANNOT_SOURCE => 20,
+            WitnessSource::Builder(tag)
+                if tag == ANNOT_SOURCE || tag == INHERIT_PARAM_SOURCE || tag == REFINE_SOURCE =>
+            {
+                20
+            }
             WitnessSource::Builder(_)
             | WitnessSource::Enrichment(_)
             | WitnessSource::DerivedFrom(_) => 10,
@@ -269,12 +300,52 @@ pub enum WitnessPayload {
     /// mostly-agree → that domain, truly-mixed → none. Kept at the END for
     /// bincode variant-index stability (bump `EXTRACT_VERSION`).
     DomainCompare { enum_type: Option<String> },
+    /// Positional tuple of EDGES: "the value at my attachment is a
+    /// `Sequence` whose slot i is whatever resolves at `elems[i]`". The
+    /// pack spelling of a key-less array literal (`return [$queue,
+    /// $agent]`): element types are query-time values (reads, calls, hops),
+    /// so the tuple stays edges, never a baked `Sequence`; materialization
+    /// drops it WHOLE when any slot is unresolved — a holey tuple
+    /// mis-projects (docs/adr/destructuring.md). Kept at the END for
+    /// bincode variant-index stability (bump `EXTRACT_VERSION`).
+    Tuple(Vec<WitnessAttachment>),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ProjectionStep {
     HashKey(String),
     ArrayIndex(i32),
+    /// A method-call hop off the base value: "dispatch `member` on
+    /// whatever class the base resolves to, at the call's own arity."
+    /// The registry's spelling of a receiver-EXPRESSION method call —
+    /// `$a->b()->c()` has no variable for the outer hop's receiver, so
+    /// no `MethodCallBinding` can bridge it; the hop defers the
+    /// dispatch to query time, when the base's class (and the index)
+    /// are in hand, then chases `PackageSymbol{class, member}` like any
+    /// edge. Minted per member-call site by pack extraction; the base
+    /// is the receiver's `Variable` (simple receiver) or `Expr` (a
+    /// nested call's span, carrying its own hop). Kept at the END for
+    /// bincode variant-index stability (bump `EXTRACT_VERSION`).
+    MethodHop { member: String, arity: u32 },
+    /// The UNIFORM element of a sequence — the foreach/iteration peel
+    /// (`foreach ($this->handlers as $handler)` types `$handler` as the
+    /// collection's element). Projects a `Sequence` all of whose elements
+    /// agree to that one type; a heterogeneous tuple or an untyped
+    /// `ArrayRef`/`HashRef` answers `None` (no index is in hand, so no
+    /// per-slot answer exists). Kept at the END for bincode variant-index
+    /// stability (bump `EXTRACT_VERSION`).
+    Element,
+    /// A member READ (`$this->prop`, `obj->field`): dispatches `member` on
+    /// the base's class with no arity, preferring the class's value edge
+    /// (`FIELD_EDGE_SOURCE`) over a same-named callable's return. Kept at
+    /// the END for bincode variant-index stability (bump `EXTRACT_VERSION`).
+    ValueHop { member: String },
+    /// The KEY axis of an iterated collection — the pair-form foreach's
+    /// first binding (`foreach ($m as $k => $v)`). A `Sequence`'s keys ARE
+    /// its positions (`Numeric`); a two-argument parametric instance
+    /// (`array<string, V>` docs) projects its first argument. Kept at the
+    /// END for bincode variant-index stability (bump `EXTRACT_VERSION`).
+    Key,
 }
 
 /// A sub's return type as a **deferred computation**, not a value:

@@ -132,6 +132,7 @@ impl FileAnalysis {
                 items.push(CompletionCandidate {
                     label: name.clone(),
                     kind: SymKind::Sub,
+                    is_static: false,
                     detail,
                     insert_text: None,
                     sort_priority: 10,
@@ -150,6 +151,7 @@ impl FileAnalysis {
                 items.push(CompletionCandidate {
                     label: name.clone(),
                     kind: SymKind::Sub,
+                    is_static: false,
                     detail,
                     insert_text: None,
                     sort_priority: 20,
@@ -781,6 +783,12 @@ pub trait CrossFileLookup {
     fn ref_indexed_paths(&self) -> std::collections::HashSet<std::path::PathBuf> {
         std::collections::HashSet::new()
     }
+    /// Warm the rows views of `paths` before a walk reads them one by one:
+    /// decode is CPU-bound and the walk is sequential, so an index that
+    /// can decode in parallel does it here and the walk hits its LRU.
+    /// Default: nothing (a lookup without a decode cache has nothing to
+    /// warm).
+    fn prefetch_refs(&self, _paths: &[std::path::PathBuf]) {}
     /// Path-keyed cached-module lookup — the retrieval above hands back
     /// paths; this maps them onto the resident registration (for the
     /// visibility gate + whole-copy rehydration). Default `None`.
@@ -822,6 +830,17 @@ pub trait CrossFileLookup {
     fn inc_roots(&self) -> std::sync::Arc<Vec<std::path::PathBuf>> {
         std::sync::Arc::new(Vec::new())
     }
+    /// Is `path` in this lookup's read-only DEPENDENCY tier? Tier
+    /// attribution for the masked backward walk: a dependency site is
+    /// visible to references but never rewritten by rename. The Perl hub's
+    /// whole cache is dependency BY CONSTRUCTION (workspace Perl files live
+    /// in the FileStore, so anything here came from `@INC`) — hence the
+    /// default. A pack sub-index holds the workspace's own files too, so it
+    /// overrides with membership in its registered dependency-root set
+    /// (composer's vendor packages).
+    fn is_dependency_path(&self, _path: &std::path::Path) -> bool {
+        true
+    }
     /// The workspace root, for resolving an origin's relative `use lib`
     /// entries — Perl resolves those against the process CWD, which for a
     /// language server is the project root.
@@ -842,6 +861,21 @@ pub trait CrossFileLookup {
     fn visibility_scope(
         &self,
     ) -> Option<(&std::path::Path, &std::collections::HashSet<String>)> {
+        None
+    }
+    /// Scope-less BY RULE (`VisibilityAxis::Flat` — a name-keyed pack):
+    /// consumers that degrade a closure scope to agreement folds admit the
+    /// FULL candidate table under it. `false` everywhere else, including
+    /// `Transparent` ("no rule known yet") — an unwarmed host origin must
+    /// not suddenly sweep the pack candidate table.
+    fn flat_scope(&self) -> bool {
+        false
+    }
+    /// The namespace THIS scope's origin means by the unqualified class
+    /// `leaf` — its `use` row, its own declaration, or (a name-keyed pack's
+    /// rule) its own namespace. `None` = the scope makes no claim, and every
+    /// same-leaf gate built on it stands down. Only a use-map axis answers.
+    fn pinned_namespace(&self, _leaf: &str) -> Option<String> {
         None
     }
     fn for_each_cached(&self, f: &mut dyn FnMut(&str, &std::sync::Arc<CachedModule>));
@@ -937,6 +971,11 @@ pub trait CrossFileLookup {
     ) -> Vec<(String, std::sync::Arc<CachedModule>)> {
         Vec::new()
     }
+    /// Every provider of every registered name under `prefix` — the
+    /// name-keyed pack's completion universe. Defaults empty.
+    fn defs_with_prefix(&self, _prefix: &str) -> Vec<(String, Vec<std::sync::Arc<CachedModule>>)> {
+        Vec::new()
+    }
 }
 
 /// A `CrossFileLookup` decorator scoped to ONE querying file's include-closure
@@ -971,6 +1010,25 @@ pub enum VisibilityAxis {
     /// known (an unwarmed on-open doc).
     #[default]
     Transparent,
+    /// Everything visible BY RULE — a name-keyed pack language (PHP,
+    /// Python) whose imports name modules, not paths: same-named
+    /// workspace candidates are genuine siblings, never closure-scoped.
+    /// Distinct from `Transparent` ("no rule known yet"): a Flat scope
+    /// deliberately mints NO `def_paths` gate and admits the full
+    /// candidate table where a closure scope degrades to agreement
+    /// folds. The scope-less base every name-keyed axis shares; an origin
+    /// that carries pins gets `UseMap` instead.
+    Flat,
+    /// Flat linkage narrowed by the asker's OWN use-map: a name-keyed pack
+    /// whose file says what each leaf means (`use A\B\Collection;`, its own
+    /// `class Collection` under `namespace A\B`). A pinned leaf's candidates
+    /// are exactly the declarations under that namespace — a same-leaf
+    /// class in a namespace the file never named is NOT visible, however
+    /// common it is (three `Request`s, three `Collection`s in one Laravel
+    /// tree). An unpinned leaf admits the full table, the file's own
+    /// namespace ranked first. Scope-less like `Flat` for every closure
+    /// consumer (no `def_paths` gate, `flat_scope` set).
+    UseMap(std::sync::Arc<UseMapPins>),
     /// Flat linkage (C): a candidate is visible when the asker's `#include`
     /// closure reaches it, or when it includes the asker back.
     IncludeClosure,
@@ -983,22 +1041,87 @@ pub enum VisibilityAxis {
     SearchPath(std::sync::Arc<Vec<std::path::PathBuf>>),
 }
 
+/// A name-keyed origin's leaf→namespace table (`FileAnalysis::
+/// leaf_namespace_pins`): what each unqualified class spelling in that
+/// file means, and the file's own namespace as the default for a leaf it
+/// neither declares nor imports.
+#[derive(Debug, Default)]
+pub struct UseMapPins {
+    /// `leaf → Some(namespace)`; `None` = conflicting evidence, no claim.
+    pub pins: std::collections::HashMap<String, Option<String>>,
+    pub own_namespace: Option<String>,
+    /// The leaves this file writes as class tokens.
+    pub spelled: std::collections::HashSet<String>,
+    /// Every namespace the file can NAME a given real leaf in — its pin
+    /// first, then the namespaces of aliased imports of that leaf (`use
+    /// Support\Collection as BaseCollection` beside its own `Collection`).
+    /// Real-leaf lookups (a parent walk, a class-keyed candidate table)
+    /// admit all of them; `namespace_of` still answers the bare spelling.
+    pub visible: std::collections::HashMap<String, Vec<String>>,
+}
+
+impl UseMapPins {
+    /// The namespace `leaf` means for this origin: its pin, else — for a
+    /// leaf the file itself spells — its own namespace (PHP resolves an
+    /// unqualified class name in the current namespace; there is no global
+    /// fallback for classes). A leaf the file never writes gets no claim:
+    /// its refs reach that class through some other class's dispatch, and
+    /// the namespace the file lives in says nothing about it.
+    pub(crate) fn namespace_of(&self, leaf: &str) -> Option<&str> {
+        match self.pins.get(leaf) {
+            Some(p) => p.as_deref(),
+            None if self.spelled.contains(leaf) => self.own_namespace.as_deref(),
+            None => None,
+        }
+    }
+    /// A leaf the file explicitly named (a `use` row or its own class).
+    fn pinned(&self, leaf: &str) -> bool {
+        matches!(self.pins.get(leaf), Some(Some(_)))
+    }
+}
+
+/// How an origin's language scopes cross-file visibility — the routing
+/// fact `for_origin` consumes. Derived by the registry from the pack's
+/// own linkage declaration (`include_path_tokens`), never a
+/// language-name branch here or at a call site.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PackVisibility {
+    /// Not a pack: the host's search-path derivation (`use lib` ∪ @INC).
+    Host,
+    /// Include-path linkage (C/C++): a name is visible through the
+    /// asker's `#include` closure.
+    IncludePaths,
+    /// Name-keyed pack (PHP/Python/R/CMake): imports name modules, not
+    /// paths — there is no closure to scope by, and the host's @INC
+    /// roots would rank every candidate invisible. Visibility is the
+    /// origin's own use-map (`UseMap`), `Flat` when it carries none.
+    NameKeyed,
+}
+
 impl VisibilityAxis {
     /// THE derivation of an origin's visibility rule. Call sites pass the
     /// origin and its index; none of them decides which model applies, so
     /// a new model reaches every projection by changing this one function.
     ///
-    /// `pack_language` is the routing fact the driver stamped on the
-    /// analysis — the caller reads it from the registry rather than this
-    /// layer importing the driver.
+    /// `visibility` is the routing fact for the origin's language — the
+    /// caller reads it from the registry (`pack_visibility`) rather than
+    /// this layer importing the driver.
     pub fn for_origin(
         origin: &FileAnalysis,
         self_path: Option<&std::path::Path>,
         index: &dyn CrossFileLookup,
-        pack_language: bool,
+        visibility: PackVisibility,
     ) -> Self {
-        if pack_language {
-            return VisibilityAxis::IncludeClosure;
+        match visibility {
+            PackVisibility::IncludePaths => return VisibilityAxis::IncludeClosure,
+            PackVisibility::NameKeyed => {
+                let pins = origin.use_map_pins();
+                if pins.pins.is_empty() && pins.own_namespace.is_none() {
+                    return VisibilityAxis::Flat;
+                }
+                return VisibilityAxis::UseMap(pins);
+            }
+            PackVisibility::Host => {}
         }
         let inc = index.inc_roots();
         // The overwhelmingly common origin declares no `use lib`, and this
@@ -1062,7 +1185,10 @@ impl VisibilityAxis {
     /// everything equally visible.
     fn rank(&self, path: &std::path::Path) -> Option<usize> {
         match self {
-            VisibilityAxis::Transparent | VisibilityAxis::IncludeClosure => Some(0),
+            VisibilityAxis::Transparent
+            | VisibilityAxis::Flat
+            | VisibilityAxis::UseMap(_)
+            | VisibilityAxis::IncludeClosure => Some(0),
             VisibilityAxis::SearchPath(roots) if roots.is_empty() => Some(0),
             VisibilityAxis::SearchPath(roots) => {
                 // Longest-prefix wins, THEN root order: a vendored
@@ -1077,6 +1203,15 @@ impl VisibilityAxis {
                     .map(|(i, _)| i)
             }
         }
+    }
+}
+
+impl VisibilityAxis {
+    /// Scope-less BY RULE: a name-keyed pack's axis (with or without
+    /// pins) mints no closure gate and admits the full candidate table
+    /// wherever a closure scope would degrade to agreement folds.
+    fn name_keyed(&self) -> bool {
+        matches!(self, VisibilityAxis::Flat | VisibilityAxis::UseMap(_))
     }
 }
 
@@ -1105,12 +1240,15 @@ impl<'a> CrossFileLookup for ScopedLookup<'a> {
     fn resolution_epoch(&self) -> u64 {
         self.inner.resolution_epoch()
     }
+    fn is_dependency_path(&self, path: &std::path::Path) -> bool {
+        self.inner.is_dependency_path(path)
+    }
     fn get_cached(&self, module_name: &str) -> Option<std::sync::Arc<CachedModule>> {
         // A search-path origin's winner is PER-ASKER: the same name means
         // whichever provider this file's own @INC reaches first. Falling
         // back to the global slot keeps a name with no ranked candidate
         // answering exactly as before.
-        if matches!(self.axis, VisibilityAxis::SearchPath(_)) {
+        if matches!(self.axis, VisibilityAxis::SearchPath(_) | VisibilityAxis::UseMap(_)) {
             if let Some(best) = self.visible_def_candidates(module_name).into_iter().next() {
                 return Some(best);
             }
@@ -1138,7 +1276,53 @@ impl<'a> CrossFileLookup for ScopedLookup<'a> {
     }
     fn visible_def_candidates(&self, name: &str) -> Vec<std::sync::Arc<CachedModule>> {
         match &self.axis {
-            VisibilityAxis::Transparent => self.inner.def_candidates(name),
+            VisibilityAxis::Transparent | VisibilityAxis::Flat => {
+                self.inner.def_candidates(name)
+            }
+            VisibilityAxis::UseMap(pins) => {
+                let cands = self.inner.def_candidates(name);
+                // One candidate has nothing to disambiguate; the table read
+                // below rehydrates symbols, so only a genuinely ambiguous
+                // leaf pays it.
+                if cands.len() < 2 {
+                    return cands;
+                }
+                let want = pins.namespace_of(name);
+                let visible = pins.visible.get(name);
+                if want.is_none() && visible.is_none() {
+                    return cands;
+                }
+                // A declaration under a namespace the file can NAME this leaf
+                // in (its pin, or an aliased import of the same leaf) is a
+                // class this file means; one under another namespace is a
+                // stranger sharing the leaf. A pinned leaf keeps only those —
+                // an empty answer is the honest one when the named class
+                // isn't indexed. The own-namespace default is a RANK, not a
+                // filter: the file made no claim, so the table stays whole
+                // with its own namespace first.
+                let pinned = pins.pinned(name);
+                let rank = |ns: &str| -> Option<usize> {
+                    if want == Some(ns) {
+                        return Some(0);
+                    }
+                    visible.and_then(|v| v.iter().position(|x| x == ns)).map(|i| i + 1)
+                };
+                let mut agree: Vec<(usize, std::sync::Arc<CachedModule>)> = Vec::new();
+                let mut rest: Vec<std::sync::Arc<CachedModule>> = Vec::new();
+                for c in cands {
+                    let declared = self.inner.symbols_present(&c).declared_class_namespace(name);
+                    match declared.as_deref().and_then(rank) {
+                        Some(r) => agree.push((r, c)),
+                        None if declared.is_some() && pinned => {}
+                        None => rest.push(c),
+                    }
+                }
+                agree.sort_by_key(|(r, _)| *r);
+                let mut out: Vec<std::sync::Arc<CachedModule>> =
+                    agree.into_iter().map(|(_, c)| c).collect();
+                out.extend(rest);
+                out
+            }
             VisibilityAxis::IncludeClosure => {
                 // Flat linkage: keep candidates CONNECTED to the asker —
                 // visible in its include closure, or including the asker
@@ -1235,6 +1419,9 @@ impl<'a> CrossFileLookup for ScopedLookup<'a> {
         // Same delegation rule as `symbols_present`.
         self.inner.refs_present(cached)
     }
+    fn prefetch_refs(&self, paths: &[std::path::PathBuf]) {
+        self.inner.prefetch_refs(paths)
+    }
     fn candidate_may_declare(
         &self,
         cached: &std::sync::Arc<CachedModule>,
@@ -1299,7 +1486,25 @@ impl<'a> CrossFileLookup for ScopedLookup<'a> {
     fn visibility_scope(
         &self,
     ) -> Option<(&std::path::Path, &std::collections::HashSet<String>)> {
+        // A Flat axis IS "no scope": answering the path + closure set
+        // would let the backward gate (`pack_def_paths`) narrow a
+        // name-keyed pack's references to its (empty) include closure —
+        // same-file-only answers, measured on WordPress/monolog.
+        // (Transparent still answers: the host's "no rule known yet" case
+        // predates the axis and its consumers' closure tests no-op there.)
+        if self.axis.name_keyed() {
+            return None;
+        }
         self.self_path.as_deref().map(|p| (p, &self.visible))
+    }
+    fn flat_scope(&self) -> bool {
+        self.axis.name_keyed()
+    }
+    fn pinned_namespace(&self, leaf: &str) -> Option<String> {
+        match &self.axis {
+            VisibilityAxis::UseMap(pins) => pins.namespace_of(leaf).map(str::to_string),
+            _ => None,
+        }
     }
     fn for_each_cached(&self, f: &mut dyn FnMut(&str, &std::sync::Arc<CachedModule>)) {
         self.inner.for_each_cached(f)
@@ -1354,6 +1559,9 @@ impl<'a> CrossFileLookup for ScopedLookup<'a> {
         visible: &std::collections::HashSet<String>,
     ) -> Vec<(String, std::sync::Arc<CachedModule>)> {
         self.inner.visible_defs_with_prefix(prefix, visible)
+    }
+    fn defs_with_prefix(&self, prefix: &str) -> Vec<(String, Vec<std::sync::Arc<CachedModule>>)> {
+        self.inner.defs_with_prefix(prefix)
     }
 }
 

@@ -567,6 +567,19 @@ impl FileAnalysis {
         span: Span,
         module_index: Option<&dyn CrossFileLookup>,
     ) -> Option<InferredType> {
+        // A value declared ON the expression by a plugin (`app(Foo::class)`
+        // IS a Foo) outranks the callee-return derivation below — the
+        // witness priority axis, never a source-name branch.
+        if self
+            .witnesses
+            .for_attachment(&crate::model::witnesses::WitnessAttachment::Expr(span))
+            .iter()
+            .any(|w| w.source.priority() >= 100)
+        {
+            if let Some(t) = self.bag_query_expr_span(span, module_index) {
+                return Some(t);
+            }
+        }
         // A call whose span IS this expression — its return type. The
         // exact-span match is what distinguishes "the value of
         // `$f->get_bar()->get_name()`" (the outer call's return) from
@@ -613,7 +626,7 @@ impl FileAnalysis {
         // value on it — methods through `PackageSymbol` with the receiver
         // threaded (`ParamOf` substitutes), fields through the declared
         // type with params substituted.
-        if let Some((inv, member, arity)) = self
+        if let Some((inv, member, arity, shape)) = self
             .refs
             .iter()
             .filter_map(|r| {
@@ -635,10 +648,16 @@ impl FileAnalysis {
                 Some((*inv, r, method_name_span.start))
             })
             .max_by_key(|(_, _, mstart)| (mstart.row, mstart.column))
-            .map(|(inv, r, _)| (inv, r.unqualified_target_name().to_string(), None::<usize>))
+            .map(|(inv, r, _)| {
+                let shape = match &r.kind {
+                    RefKind::MethodCall { shape, .. } => *shape,
+                    _ => Default::default(),
+                };
+                (inv, r.unqualified_target_name().to_string(), None::<usize>, shape)
+            })
         {
             if let Some(recv_ty) = self.expr_type_at_span(inv, module_index) {
-                if let Some(t) = self.member_value_type(&recv_ty, &member, module_index, arity) {
+                if let Some(t) = self.member_value_type(&recv_ty, &member, module_index, arity, shape) {
                     return Some(t);
                 }
             }

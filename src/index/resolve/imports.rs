@@ -47,6 +47,7 @@ pub(super) fn import_candidates(
                 completion_detail_for_import(is.remote(), whole.as_deref(), &import.module_name);
             out.push(CompletionCandidate {
                 label: local.clone(),
+                is_static: false,
                 kind: FaSymKind::Sub,
                 detail: Some(detail),
                 insert_text: None,
@@ -113,6 +114,7 @@ pub(super) fn import_candidates(
 
                 out.push(CompletionCandidate {
                     label: name.clone(),
+                    is_static: false,
                     kind: FaSymKind::Sub,
                     detail: Some(detail),
                     insert_text: None,
@@ -159,6 +161,7 @@ pub(super) fn unimported_export_candidates(
             }
             candidates.push(CompletionCandidate {
                 label: name.clone(),
+                is_static: false,
                 kind: FaSymKind::Sub,
                 detail: Some(format!("{} (auto-import)", module_name)),
                 insert_text: None,

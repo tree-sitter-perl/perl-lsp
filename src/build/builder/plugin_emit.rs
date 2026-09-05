@@ -237,6 +237,8 @@ impl<'a> Builder<'a> {
                 // builder-native paths, plugin policy only here).
                 *self.presentation_mut(sid) = crate::model::file_analysis::Presentation {
                     hide_in_outline,
+                    doc: None,
+                    deprecation: None,
                     display,
                     label: outline_label,
                 };
@@ -330,6 +332,8 @@ impl<'a> Builder<'a> {
                 let sid = self.add_symbol_ns(name, SymKind::Handler, span, selection_span, detail, ns);
                 *self.presentation_mut(sid) = crate::model::file_analysis::Presentation {
                     hide_in_outline,
+                    doc: None,
+                    deprecation: None,
                     display: Some(display),
                     label: outline_label,
                 };
@@ -384,6 +388,8 @@ impl<'a> Builder<'a> {
                         invocant_span,
                         method_name_span: span,
                         member_op: None,
+                        shape: crate::model::file_analysis::MemberShape::Unknown,
+                        named_by_string: false,
                     },
                     span,
                     scope: self.current_scope(),
@@ -439,6 +445,8 @@ impl<'a> Builder<'a> {
                 let sid = self.add_symbol_ns(name, kind, span, selection_span, detail, ns);
                 *self.presentation_mut(sid) = crate::model::file_analysis::Presentation {
                     hide_in_outline,
+                    doc: None,
+                    deprecation: None,
                     display,
                     label: None,
                 };

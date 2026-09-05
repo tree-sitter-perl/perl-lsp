@@ -428,10 +428,12 @@ impl FileAnalysis {
         {
             let start = (sym.span.start.row, sym.span.start.column);
             let end = (sym.span.end.row, sym.span.end.column);
+            // The body may be the container's own span (php puts the class
+            // scope on the whole declaration): a Block child of the
+            // container's scope inside its span is its body either way.
             return self.scopes.iter().find(|s| {
                 matches!(s.kind, ScopeKind::Block)
                     && s.parent == Some(sym.scope)
-                    && s.span != sym.span
                     && (s.span.start.row, s.span.start.column) >= start
                     && (s.span.end.row, s.span.end.column) <= end
             }).map(|s| s.id);

@@ -129,6 +129,7 @@ impl FileAnalysis {
             flow_edges,
             unrowed_attachment_names: Vec::new(),
             degraded: false,
+            use_map_pins: Default::default(),
             // Pack drivers re-stamp their id post-construction.
             language: super::default_language(),
             scope_starts: Vec::new(),
@@ -457,7 +458,11 @@ impl FileAnalysis {
             let target = (|| self
                 .method_call_invocant_class(r, module_index)
                 .map(|cn| {
-                    match self.resolve_method_in_ancestors(&cn, r.unqualified_target_name(), module_index) {
+                    let shape = match &r.kind {
+                        RefKind::MethodCall { shape, .. } => *shape,
+                        _ => Default::default(),
+                    };
+                    match self.resolve_member_in_ancestors(&cn, r.unqualified_target_name(), shape, module_index) {
                         Some(MethodResolution::Local { sym_id, .. }) => MethodTarget::Local {
                             sym_id,
                             invocant_class: cn,

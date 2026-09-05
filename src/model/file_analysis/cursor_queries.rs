@@ -8,9 +8,19 @@ impl FileAnalysis {
 
     /// Find the ref at a given point (cursor position).
     pub fn ref_at(&self, point: Point) -> Option<&Ref> {
+        // A class-rail emission (`event(new X)`) is a COMPANION of the
+        // class token's own ref at the same span: it never wins the cursor,
+        // so the token keeps resolving as the class; the bus surfaces
+        // through goto-def's union and the handler side's hierarchy.
         self.refs.iter()
             .filter(|r| contains_point(&r.span, point))
-            .min_by_key(|r| span_size(&r.span))
+            .min_by_key(|r| {
+                let companion = matches!(
+                    r.binding,
+                    Some(RefBinding::Handler { owner: HandlerOwner::ClassRail(_), .. })
+                );
+                (span_size(&r.span), companion as u8)
+            })
     }
 
     /// Find the symbol whose selection_span contains the point.
@@ -107,7 +117,8 @@ impl FileAnalysis {
                     // `Buffer<MAX>`) mints a PackageRef for a VALUE token —
                     // the structural gates are pack-only shapes, so Perl
                     // package refs never take the fallback.
-                    return self.find_package_or_class(&r.target_name).or_else(|| {
+                    let row_ns = self.import_row_namespace(&r.span);
+                    return self.find_package_or_class_in(&r.target_name, row_ns.as_deref()).or_else(|| {
                         self.symbols_named(&r.target_name)
                             .iter()
                             .map(|&sid| self.symbol(sid))
@@ -968,6 +979,70 @@ impl FileAnalysis {
             }
         }
         None
+    }
+
+    /// The Field twin of a promoted-constructor-property PARAM token: php's
+    /// `__construct(public readonly Level $level)` declares BOTH the ctor
+    /// param (a `$level` Variable, body uses) and the class Field (`level`,
+    /// member accesses) with ONE source token. A cursor there lands on the
+    /// Variable (emitted first); resolution wants the member identity, so
+    /// re-target structurally: a Field one sigil-column to the right on the
+    /// same token. Perl analyses never exhibit the shape (fields there are
+    /// sigil-less symbols on their own tokens).
+    pub fn promoted_field_twin(&self, sym: &Symbol) -> Option<&Symbol> {
+        if !matches!(sym.kind, SymKind::Variable) || !sym.name.starts_with('$') {
+            return None;
+        }
+        let bare = &sym.name[1..];
+        self.symbols_named(bare)
+            .iter()
+            .map(|&sid| self.symbol(sid))
+            .find(|f| {
+                matches!(f.kind, SymKind::Field)
+                    && f.selection_span.start.row == sym.selection_span.start.row
+                    && f.selection_span.start.column == sym.selection_span.start.column + 1
+                    && f.selection_span.end == sym.selection_span.end
+            })
+    }
+
+    /// The promoted param's (field decl span, variable USE spans) —
+    /// sigil-narrowed to the bare name — `Some` only when `member` on
+    /// `class` is a promoted constructor property here. The member's
+    /// identity group folds the uses in so rename rewrites every spelling
+    /// of the one name: the decl token, the member accesses (the walked
+    /// member target), AND the `$level` body uses that would otherwise be
+    /// left referencing a parameter that no longer exists.
+    pub fn promoted_param_use_spans(&self, member: &str, class: &str) -> Option<(Span, Vec<Span>)> {
+        let field = self
+            .symbols_named(member)
+            .iter()
+            .map(|&sid| self.symbol(sid))
+            .find(|f| {
+                matches!(f.kind, SymKind::Field)
+                    && f.package.as_deref() == Some(class)
+                    && self.symbol_is_class_content(f)
+            })?;
+        let sigiled = format!("${member}");
+        let var_id = self
+            .symbols_named(&sigiled)
+            .iter()
+            .copied()
+            .find(|&sid| {
+                let v = self.symbol(sid);
+                matches!(v.kind, SymKind::Variable)
+                    && v.selection_span.start.row == field.selection_span.start.row
+                    && v.selection_span.start.column + 1 == field.selection_span.start.column
+                    && v.selection_span.end == field.selection_span.end
+            })?;
+        let uses = self
+            .collect_refs_for_target(var_id, false, None)
+            .into_iter()
+            .map(|(span, _)| Span {
+                start: Point::new(span.start.row, span.start.column + 1),
+                end: span.end,
+            })
+            .collect();
+        Some((field.selection_span, uses))
     }
 
     /// The cross-file-facing view of the field group at `point`: the

@@ -518,6 +518,14 @@ impl ReducerRegistry {
         // Sole boundary where an owned `ReducedValue` is required; the
         // internal recursion threads `Arc` to avoid deep clones per hop.
         let out = (*self.query_rec(bag, q, &mut state)).clone();
+        // THE boundary scrub: `Unknown` is a value inside the chase (a reset
+        // that must poison every arm and copy that reads it), never an
+        // answer — a consumer sees "no type", exactly as before the reset
+        // existed.
+        let out = match out {
+            ReducedValue::Type(InferredType::Unknown) => ReducedValue::None,
+            other => other,
+        };
         // Publish for the bake. Cleared-and-set on every query, so a later
         // query can never be minted from an earlier chase's exits.
         LAST_RESIDUAL.with(|r| {
@@ -1852,6 +1860,27 @@ impl ReducerRegistry {
         state: &mut QueryState,
     ) -> Vec<Witness> {
         let raw = bag.for_attachment(q.attachment);
+        // Member-shape preference on a class attachment: a class can carry
+        // BOTH a value edge (`FIELD_EDGE_SOURCE`, the property) and callable
+        // edges (the method's return chain) under one member name. An
+        // arity-less query is a value read and takes the value edge; a
+        // query with an arity is a call and takes the callable edges. With
+        // only one kind present nothing is dropped — the shape only decides
+        // when the class genuinely overloads the name across kinds.
+        let raw: Vec<&Witness> = if matches!(q.attachment, WitnessAttachment::PackageSymbol { .. }) {
+            let is_field = |w: &&Witness| {
+                matches!(&w.source, WitnessSource::Builder(t) if t == FIELD_EDGE_SOURCE)
+            };
+            let fields = raw.iter().filter(|w| is_field(w)).count();
+            if fields > 0 && fields < raw.len() {
+                let want_field = q.arity_hint.is_none();
+                raw.into_iter().filter(|w| is_field(w) == want_field).collect()
+            } else {
+                raw
+            }
+        } else {
+            raw
+        };
         // Is this attachment's value a pass-through of ONE sub-chase, or a fold
         // over several? With siblings present, whatever a sub-chase answers is
         // combined with them before this frame returns, so no single exit key
@@ -1943,16 +1972,19 @@ impl ReducerRegistry {
                             }
                         }
                     };
-                    if let Some(t) = resolved {
-                        out.push(Witness {
+                    match resolved {
+                        Some(t) => out.push(Witness {
                             attachment: w.attachment.clone(),
                             source: w.source.clone(),
                             payload: WitnessPayload::InferredType(t),
                             span: w.span,
-                        });
+                        }),
+                        // An edge that didn't resolve drops out — same as a
+                        // witness no reducer claims — unless it was an
+                        // assignment, which still HAPPENED: the variable now
+                        // holds something untypable, not its earlier value.
+                        None => out.extend(opaque_rebind_of(w)),
                     }
-                    // An edge that didn't resolve drops out — same as a
-                    // witness no reducer claims.
                 }
                 WitnessPayload::CallReturn { target, arity } => {
                     // A fresh method dispatch at the call's own arity. The
@@ -2063,15 +2095,121 @@ impl ReducerRegistry {
                                 })
                             }
                             ProjectionStep::ArrayIndex(i) => t.element_at(*i).cloned(),
+                            ProjectionStep::Element => match &t {
+                                crate::model::file_analysis::InferredType::Sequence(elems) => {
+                                    let mut it = elems.iter();
+                                    it.next().filter(|first| it.all(|e| e == *first)).cloned()
+                                }
+                                // A parametric container's TRAILING argument is
+                                // its element by the same positional convention
+                                // `ParamOf` projects (`array<K, V>` → V,
+                                // `vector<T>` → T) — no base-name branch.
+                                crate::model::file_analysis::InferredType::Parametric(
+                                    crate::model::file_analysis::ParametricType::Instance {
+                                        args, ..
+                                    },
+                                ) => args.last().cloned(),
+                                _ => None,
+                            },
+                            ProjectionStep::Key => match &t {
+                                // A sequence's keys ARE its positions.
+                                crate::model::file_analysis::InferredType::Sequence(_) => {
+                                    Some(crate::model::file_analysis::InferredType::Numeric)
+                                }
+                                // A two-argument instance keys by its first
+                                // argument (`array<string, V>` → string).
+                                crate::model::file_analysis::InferredType::Parametric(
+                                    crate::model::file_analysis::ParametricType::Instance {
+                                        args, ..
+                                    },
+                                ) if args.len() == 2 => args.first().cloned(),
+                                _ => None,
+                            },
+                            ProjectionStep::MethodHop { member, arity: _ }
+                            | ProjectionStep::ValueHop { member } => {
+                                let arity = match step {
+                                    ProjectionStep::MethodHop { arity, .. } => Some(*arity),
+                                    _ => None,
+                                };
+                                // Fresh dispatch on the base's class at the
+                                // call site's own arity; the base type IS the
+                                // dynamic receiver, so a fluent `Receiver`
+                                // return substitutes it (`$q->where()->get()`).
+                                t.class_name().map(str::to_string).and_then(|class| {
+                                    let att = WitnessAttachment::PackageSymbol {
+                                        package: class,
+                                        name: member.clone(),
+                                    };
+                                    let sub_q = ReducerQuery {
+                                        attachment: &att,
+                                        point: q.point,
+                                        framework: q.framework,
+                                        arity_hint: arity,
+                                        receiver: Some(t.clone()),
+                                        args: q.args.clone(),
+                                        context: q.context,
+                                    };
+                                    state.in_opaque_frame(|state| {
+                                        match &*self.query_rec(bag, &sub_q, state) {
+                                            ReducedValue::Type(t) => Some(t.clone()),
+                                            ReducedValue::FactMap(_)
+                                            | ReducedValue::None => None,
+                                        }
+                                    })
+                                })
+                            }
                         };
-                        if let Some(t) = projected {
-                            out.push(Witness {
+                        match projected {
+                            Some(t) => out.push(Witness {
                                 attachment: w.attachment.clone(),
                                 source: w.source.clone(),
                                 payload: WitnessPayload::InferredType(t),
                                 span: w.span,
-                            });
+                            }),
+                            None => out.extend(opaque_rebind_of(w)),
                         }
+                    } else {
+                        out.extend(opaque_rebind_of(w));
+                    }
+                }
+                WitnessPayload::Tuple(elems) => {
+                    // Every slot must answer: a partial tuple would put the
+                    // wrong type at an index. Opaque frames throughout — the
+                    // value is assembled here, no sub-chase names it.
+                    let mut types = Vec::with_capacity(elems.len());
+                    for el in elems {
+                        let sub_q = ReducerQuery {
+                            attachment: el,
+                            point: q.point,
+                            framework: q.framework,
+                            arity_hint: None,
+                            receiver: q.receiver.clone(),
+                            args: q.args.clone(),
+                            context: q.context,
+                        };
+                        let t = state.in_opaque_frame(|state| {
+                            match &*self.query_rec(bag, &sub_q, state) {
+                                ReducedValue::Type(t) => Some(t.clone()),
+                                ReducedValue::FactMap(_) | ReducedValue::None => None,
+                            }
+                        });
+                        match t {
+                            Some(t) => types.push(t),
+                            None => {
+                                types.clear();
+                                break;
+                            }
+                        }
+                    }
+                    if !types.is_empty() {
+                        out.push(Witness {
+                            attachment: w.attachment.clone(),
+                            source: w.source.clone(),
+                            payload: WitnessPayload::InferredType(
+                                crate::model::file_analysis::InferredType::Sequence(types),
+                            ),
+                            span: w.span,
+                        });
                     }
                 }
                 WitnessPayload::QualifiedCallReturn { method_lookup, receiver_class, arity } => {
@@ -2179,6 +2317,30 @@ impl ReducerRegistry {
         }
         weak
     }
+}
+
+/// The reset an unresolved REASSIGNMENT edge materializes to
+/// (`REASSIGN_FLOW_SOURCE`, zero-width at the assignment site). A
+/// declaration's edge never resets — its companions (a first-param
+/// constraint at the sub's start, a docblock cast) may sit anywhere
+/// before it — and a region-spanned edge is a narrowing fact whose
+/// failure stays a plain drop-out.
+fn is_reassign_edge(w: &Witness) -> bool {
+    matches!(w.attachment, WitnessAttachment::Variable { .. })
+        && w.span.start == w.span.end
+        && matches!(&w.source, WitnessSource::Builder(t) if t == REASSIGN_FLOW_SOURCE)
+}
+
+fn opaque_rebind_of(w: &Witness) -> Option<Witness> {
+    if !is_reassign_edge(w) {
+        return None;
+    }
+    Some(Witness {
+        attachment: w.attachment.clone(),
+        source: w.source.clone(),
+        payload: WitnessPayload::InferredType(InferredType::Unknown),
+        span: w.span,
+    })
 }
 
 /// Does this scope *bind* the variable — establish its value/identity via

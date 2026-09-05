@@ -38,7 +38,11 @@ pub fn pack_completion(
             analysis,
             path,
             base_idx,
-            crate::build::language_driver::LanguageRegistry::is_pack_language(language),
+            if crate::build::language_driver::LanguageRegistry::is_pack_language(language) {
+                crate::model::file_analysis::PackVisibility::IncludePaths
+            } else {
+                crate::model::file_analysis::PackVisibility::Host
+            },
         ),
     );
     let xidx: &dyn crate::model::file_analysis::CrossFileLookup = &scoped;

@@ -74,6 +74,26 @@ pub enum HandlerOwner {
     /// Handler is registered on a specific class (typical for Mojo
     /// events, Moose roles, DBIC relationships, etc.).
     Class(String),
+    /// A flat, receiver-less handler namespace: the whole program shares
+    /// one name space of hooks (WordPress `add_action('init', …)` /
+    /// `do_action('init')`). No receiver types the dispatch — the string
+    /// alone is the identity — so receiver-gated machinery (dispatch-verb
+    /// manifests, invocant matching) skips these; name+owner equality is
+    /// the entire match.
+    Global,
+    /// A NAMED flat namespace — one rail per kind of string-named
+    /// framework entity (Laravel route names, view names, config keys …),
+    /// declared by the overlay capture's suffix (`@def.handler.named.route`
+    /// / `@ref.dispatch.named.route`). Same rules as `Global` (no receiver,
+    /// name + owner equality is the match); the rail keeps a route name
+    /// and a same-spelled view name apart.
+    Rail(String),
+    /// A named rail whose NAMES are class names (Laravel's event bus: an
+    /// emission `event(new X)` and a listener's `handle(X $e)` meet on
+    /// `X`). Spans are the emission and handler TOKENS, never the name
+    /// itself, so the rail is navigable but never renameable — the class
+    /// rename owns the name.
+    ClassRail(String),
 }
 
 // ---- Plugin namespace ----

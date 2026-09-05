@@ -67,13 +67,39 @@ impl FileAnalysis {
                     // File-internal pack lanes: read LIVE from the
                     // provider's re-registered analysis per query.
                     receiver_names: _receiver_names, // LangPack-wide convention, identical across the pack's files
+                    implicit_variables: _implicit_variables, // pack-wide convention
+                    throwaway_names: _throwaway_names,       // pack-wide convention
+                    catch_all_methods: _catch_all_methods, // pack-wide convention
+                    class_literal_member: _class_literal_member, // pack-wide convention
+                    import_rows: _import_rows, // editing aid, not cross-file-visible
+                    import_template: _import_template, // pack-wide convention
+                    contract_stub: _contract_stub, // pack-wide convention
+                    return_annotation_template: _return_annotation_template, // pack-wide convention
+                    native_type_spellings: _native_type_spellings, // pack-wide convention
+                    static_property_sigil: _static_property_sigil, // pack-wide convention
+                    rail_labels: _rail_labels,       // pack-wide convention
+                    rail_hints: _rail_hints,         // pack-wide convention
+                    preamble_end: _preamble_end, // an editing aid
+                    imports_bind_names: _imports_bind_names, // pack-wide convention
+                    member_shapes_are_strict: _member_shapes_are_strict, // pack-wide convention
+                    members_are_package_bound: _members_are_package_bound, // pack-wide convention
+                    doc_mentions: _doc_mentions, // a file-local lint fact
+                    types_are_capitalized: _types_are_capitalized, // pack-wide convention
+                    enum_members: _enum_members, // pack-wide convention
+                    type_display: _type_display,     // LangPack-wide display vocabulary, same reasoning
+                    constructor_names: _constructor_names, // LangPack-wide convention, identical across the pack's files
                     specializes: _specializes,       // family edges; the file re-registers on its own rebuild even when Unchanged
+                    parent_namespaces: _parent_namespaces, // rides the parents edges (already projected); read live per query like specializes
+                    use_aliases: _use_aliases,             // this file's OWN spelling table; a consumer never sees an alias
+                    qualified_spellings: _qualified_spellings, // same: how THIS file spells classes
                     template_params: _template_params, // instantiation substitution reads the provider live
                     include_closure: _include_closure, // this file's OWN visibility ranking key; its freshness lane is the closure dep-stamp (`closure_stamp`)
                     domain_sites: _domain_sites,     // raw sites; domains resolve live at query time
                     moved_from: _moved_from,         // own-file use-after-move input
                     control_regions: _control_regions, // own-file straight-line gate spans
                     param_regions: _param_regions,   // own-file parameter-region spans
+                    probe_regions: _probe_regions,   // own-file existence-probe spans
+                    variable_arg_sites: _variable_arg_sites, // own-file argument sites
                 },
             plugin:
                 PluginFacts {
@@ -126,6 +152,7 @@ impl FileAnalysis {
             // ---- Residency / lifecycle bookkeeping — no semantics.
             bag_evicted: _bag_evicted,
             degraded: _degraded,
+            use_map_pins: _use_map_pins, // sessional memo of a projection over the tables above
             base_witness_count: _base_witness_count,
             stamped_at: _stamped_at, // sessional re-stamp bookkeeping; a consumer's view of this file does not change when we last stamped it
 

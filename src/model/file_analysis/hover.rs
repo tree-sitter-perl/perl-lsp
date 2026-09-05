@@ -5,6 +5,81 @@
 use super::*;
 
 impl FileAnalysis {
+    /// `format_inferred_type` through this file's language vocabulary
+    /// (`PackFacts.type_display`): a mapped tag renders as the language's
+    /// own spelling (php `array`, not `HashRef`); unmapped output (class
+    /// names, parametrics) and every Perl analysis (empty map) pass
+    /// through. THE type-label projection for human surfaces — hover,
+    /// inlay hints, signatures, completion detail all route here so a
+    /// language's vocabulary can't leak on one surface and not another.
+    pub fn render_type(&self, ty: &InferredType) -> String {
+        let raw = format_inferred_type(ty);
+        self.translate_type_label(raw)
+    }
+
+    /// `Symbol::display_type` (class/deref-aware) through the same
+    /// vocabulary.
+    pub fn display_type_of(&self, sym: &Symbol, ty: &InferredType) -> String {
+        self.translate_type_label(sym.display_type(ty))
+    }
+
+    /// The NATIVE spelling a declaration would be written with for an
+    /// inferred type — `None` when the pack has no native spelling for it
+    /// (an ambiguous engine type, a class not visible by its leaf here, a
+    /// composite). What a quick-fix may write into the source; display
+    /// vocabulary (`type_display`) is a different question.
+    pub fn native_type_spelling(&self, ty: &InferredType) -> Option<String> {
+        if let InferredType::ClassName(n) = ty {
+            let leaf = n.rsplit(['\\', ':']).next().unwrap_or(n);
+            // the leaf must mean THIS class where it would be written
+            let ns = if n.len() > leaf.len() { Some(n[..n.len() - leaf.len() - 1].to_string()) } else { None };
+            let seen = self.leaf_namespace(leaf).or_else(|| self.use_map_pins().own_namespace.clone());
+            return (ns.is_none() || seen.is_none() || ns == seen).then(|| leaf.to_string());
+        }
+        let raw = format_inferred_type(ty);
+        let root = raw.split(['<', '(']).next().unwrap_or(&raw);
+        self.pack
+            .native_type_spellings
+            .iter()
+            .find(|(k, _)| k == root)
+            .map(|(_, v)| v.clone())
+    }
+
+    fn translate_type_label(&self, raw: String) -> String {
+        if self.pack.type_display.is_empty() {
+            return raw;
+        }
+        // Token-wise: a composite label (`Sequence<String>`,
+        // `array<String, String>`) is translated per identifier so the
+        // engine's spellings never leak inside a generic argument either.
+        let mut out = String::with_capacity(raw.len());
+        let mut tok = String::new();
+        let flush = |tok: &mut String, out: &mut String| {
+            if tok.is_empty() {
+                return;
+            }
+            let mapped = self
+                .pack
+                .type_display
+                .iter()
+                .find(|(k, _)| k == tok)
+                .map(|(_, v)| v.clone())
+                .unwrap_or_else(|| tok.clone());
+            out.push_str(&mapped);
+            tok.clear();
+        };
+        for c in raw.chars() {
+            if c.is_alphanumeric() || c == '_' {
+                tok.push(c);
+            } else {
+                flush(&mut tok, &mut out);
+                out.push(c);
+            }
+        }
+        flush(&mut tok, &mut out);
+        out
+    }
+
     /// Hover info: return display text for the symbol at cursor.
     pub fn hover_info(&self, point: Point, source: &str, module_index: Option<&dyn CrossFileLookup>) -> Option<String> {
         // Check refs first
@@ -40,7 +115,7 @@ impl FileAnalysis {
                                         };
                                         let mut text = format!("```perl\n{}\n```\n\n*class {} — resolved from `{}`*", line.trim(), class_label, r.target_name);
                                         if let Some(ref rt) = self.find_method_return_type(cn, mname, module_index, None) {
-                                            text.push_str(&format!("\n\n*returns: {}*", format_inferred_type(&rt)));
+                                            text.push_str(&format!("\n\n*returns: {}*", self.render_type(&rt)));
                                         }
                                         if let SymbolDetail::Sub { ref doc, .. } = sym.detail {
                                             if let Some(ref d) = doc {
@@ -64,7 +139,7 @@ impl FileAnalysis {
                                                     let sig = format_cross_file_signature(mname, &sub_info);
                                                     let mut text = format!("```perl\n{}\n```\n\n*class {} — resolved from `{}`*", sig, class, r.target_name);
                                                     if let Some(rt) = sub_info.return_type(Some(idx)) {
-                                                        text.push_str(&format!("\n\n*returns: {}*", format_inferred_type(&rt)));
+                                                        text.push_str(&format!("\n\n*returns: {}*", self.render_type(&rt)));
                                                     }
                                                     if let Some(doc) = sub_info.doc() {
                                                         text.push_str(&format!("\n\n{}", doc));
@@ -123,7 +198,7 @@ impl FileAnalysis {
                                 .join(", ");
                             let mut sig = format!("sub {}({})", r.target_name, sig_params);
                             if let Some(rt) = sub_info.return_type(Some(idx)) {
-                                sig.push_str(&format!(" → {}", format_inferred_type(&rt)));
+                                sig.push_str(&format!(" → {}", self.render_type(&rt)));
                             }
                             let mut text = format!("```perl\n{}\n```", sig);
                             if let Some(doc) = sub_info.doc() {
@@ -163,7 +238,7 @@ impl FileAnalysis {
                                 };
                                 let mut text = format!("```perl\n{}\n```\n\n*class {}*", line.trim(), class_label);
                                 if let Some(ref rt) = self.find_method_return_type(cn, method, module_index, None) {
-                                    text.push_str(&format!("\n\n*returns: {}*", format_inferred_type(&rt)));
+                                    text.push_str(&format!("\n\n*returns: {}*", self.render_type(&rt)));
                                 }
                                 return Some(text);
                             }
@@ -187,7 +262,7 @@ impl FileAnalysis {
                                             let sig = format_cross_file_signature(method, &sub_info);
                                             let mut text = format!("```perl\n{}\n```\n\n*class {}*", sig, class_label);
                                             if let Some(rt) = sub_info.return_type(Some(idx)) {
-                                                text.push_str(&format!("\n\n*returns: {}*", format_inferred_type(&rt)));
+                                                text.push_str(&format!("\n\n*returns: {}*", self.render_type(&rt)));
                                             }
                                             if let Some(doc) = sub_info.doc() {
                                                 text.push_str(&format!("\n\n{}", doc));
@@ -209,9 +284,15 @@ impl FileAnalysis {
                     }
                 }
                 RefKind::PackageRef => {
+                    let row_ns = self.import_row_namespace(&r.span);
                     for &sid in self.symbols_named(&r.target_name) {
                         let sym = self.symbol(sid);
                         if matches!(sym.kind, SymKind::Package | SymKind::Class) {
+                            if let Some(ns) = row_ns.as_deref() {
+                                if sym.package.as_deref().unwrap_or("") != ns {
+                                    continue;
+                                }
+                            }
                             return Some(self.format_symbol_hover(sym, source, module_index));
                         }
                     }
@@ -277,7 +358,7 @@ impl FileAnalysis {
         let render = |analysis: &FileAnalysis, sym: &Symbol| {
             let base = match analysis.inferred_type_via_bag_ctx(field, sym.span.end, module_index)
             {
-                Some(ty) => format!("{}: {}", field, sym.display_type(&ty)),
+                Some(ty) => format!("{}: {}", field, self.display_type_of(sym, &ty)),
                 None => field.to_string(),
             };
             // A union member shares storage with its siblings — surface the
@@ -326,6 +407,10 @@ impl FileAnalysis {
     ) -> String {
         let class = match owner {
             HandlerOwner::Class(n) => n.as_str(),
+            // A Global handler's namespace is the whole program — there is
+            // no class to gather stacked registrations under; the header
+            // renders and the class-keyed gathers below find nothing.
+            HandlerOwner::Global | HandlerOwner::Rail(_) | HandlerOwner::ClassRail(_) => "",
         };
 
         // Gather stacked registrations from this file first, then any
@@ -477,7 +562,7 @@ impl FileAnalysis {
         // through cross-file ancestry via the `ReceiverGated` gate.
         if matches!(sym.kind, SymKind::Variable | SymKind::Field) {
             if let Some(it) = self.inferred_type_via_bag_ctx(&sym.name, at, module_index) {
-                text.push_str(&format!("\n\n*type: {}*", format_inferred_type(&it)));
+                text.push_str(&format!("\n\n*type: {}*", self.render_type(&it)));
             }
         }
 
@@ -492,7 +577,7 @@ impl FileAnalysis {
             }
             if let SymbolDetail::Sub { ref doc, .. } = sym.detail {
                 if let Some(rt) = self.symbol_return_type_via_bag(sym.id, None) {
-                    text.push_str(&format!("\n\n*returns: {}*", format_inferred_type(&rt)));
+                    text.push_str(&format!("\n\n*returns: {}*", self.render_type(&rt)));
                 }
                 if let Some(d) = doc {
                     text.push_str(&format!("\n\n{}", d));
