@@ -67,6 +67,27 @@ pub struct TargetRef {
     /// (`class_content_is_bare_constant`); the matcher may also re-derive it
     /// per scanned file when the index is in hand.
     pub bare_constant: bool,
+    /// `Some(class)` when this Method target IS the class's constructor by
+    /// the pack's convention (php `__construct`): references then also
+    /// admit the class's construction sites (`new Foo(...)` — the ctor
+    /// FunctionCall ref carries the CLASS name), non-rewritable, since the
+    /// token spells the class. Set in the identity lane from
+    /// `PackFacts::constructor_names`; `None` everywhere else.
+    pub ctor_of: Option<String>,
+    /// The namespace the ORIGIN's scope pins for this target's class leaf
+    /// (`CrossFileLookup::pinned_namespace` — a use-map axis's `use` row,
+    /// own declaration, or own namespace). Class-keyed targets are leaf-keyed everywhere else (the
+    /// override family, the dispatch chain, the by-name index), and three
+    /// same-leaf `Factory`s share every one of those; the pin is what tells
+    /// a scanned file's `Factory` from the target's. `None` = no claim
+    /// (Perl, cpp, an un-imported leaf), and the gate stands down.
+    pub class_ns: Option<String>,
+    /// The written shape of the member this target names, set ONLY when
+    /// the declaring class overloads the name across kinds (a property AND
+    /// a method called `recorded` — `member_kinds_overloaded`). Declaration
+    /// and reference matching are then shape-strict; everywhere else it is
+    /// `Unknown` and the matchers stay name-keyed as before.
+    pub member_shape: crate::model::file_analysis::MemberShape,
     /// Pack-language visibility identity: the canonical paths of the files
     /// that define this target AS THE ORIGIN FILE SEES IT (the origin itself,
     /// candidates in its include closure, and candidates whose closure reaches
@@ -95,6 +116,17 @@ impl TargetRef {
         scope: OverrideScope,
     ) -> Self {
         let method_classes = method_classes_for(origin, &class, &name, module_index, scope);
+        // The pack's constructor convention (php `__construct`) is a fact of
+        // the METHOD TARGET itself: every builder of a Method target — the
+        // rename-kind mapping, the identity lanes, implementations — gets
+        // the ctor marker from this one speller.
+        let ctor_of = origin
+            .pack
+            .constructor_names
+            .iter()
+            .any(|c| c == &name)
+            .then(|| class.clone());
+        let class_ns = module_index.and_then(|idx| idx.pinned_namespace(&class));
         TargetRef {
             name,
             kind: TargetKind::Method { class },
@@ -102,6 +134,9 @@ impl TargetRef {
             scope,
             def_paths: Vec::new(),
             bare_constant: false,
+            ctor_of,
+            class_ns,
+            member_shape: Default::default(),
         }
     }
 
@@ -121,6 +156,7 @@ impl TargetRef {
         module_index: Option<&dyn CrossFileLookup>,
     ) -> Self {
         let method_classes = origin.owned_accessor_family(&class, module_index);
+        let class_ns = module_index.and_then(|idx| idx.pinned_namespace(&class));
         TargetRef {
             name,
             kind: TargetKind::Method { class },
@@ -128,6 +164,9 @@ impl TargetRef {
             scope: OverrideScope::Hierarchy,
             def_paths: Vec::new(),
             bare_constant: false,
+            ctor_of: None,
+            class_ns,
+            member_shape: Default::default(),
         }
     }
 
@@ -144,6 +183,9 @@ impl TargetRef {
             scope: OverrideScope::default(),
             def_paths: Vec::new(),
             bare_constant: false,
+            ctor_of: None,
+            class_ns: None,
+            member_shape: Default::default(),
         }
     }
 
@@ -156,6 +198,17 @@ impl TargetRef {
     /// owner-less hash key can't be matched by name alone elsewhere and stays
     /// single-file. References ignores this — it walks every kind cross-file.
     pub fn supports_cross_file_rename(&self) -> bool {
+        // A pack's constructor-convention name (`__construct`) is the
+        // language's, not the author's: nothing renames it, and its `new
+        // self(...)` sites carry no token that spells it.
+        if self.ctor_of.is_some() {
+            return false;
+        }
+        // A class-keyed rail's spans are emission/handler tokens; its
+        // names belong to the class rename.
+        if matches!(&self.kind, TargetKind::Handler { owner: crate::model::file_analysis::HandlerOwner::ClassRail(_), .. }) {
+            return false;
+        }
         matches!(
             self.kind,
             TargetKind::Sub { .. }
@@ -199,6 +252,26 @@ impl TargetRef {
                 // routing fact. Macro-named cursors never reach this arm
                 // (the canonical FileScopeValue lanes claim them first,
                 // WITH def_paths).
+                // The pack's constructor convention is a fact of the target
+                // whichever cursor minted it: a decl-side cursor on
+                // `__construct` arrives here as a Sub, and its references
+                // must admit the class's `new Foo(...)` sites exactly as the
+                // call-side Method target does.
+                let ctor_of = package
+                    .as_ref()
+                    .filter(|_| origin.pack.constructor_names.iter().any(|c| c == &name))
+                    .cloned();
+                let class_ns = package
+                    .as_deref()
+                    .and_then(|c| module_index.and_then(|idx| idx.pinned_namespace(c)));
+                // A Sub cursor names a callable; the shape matters only where
+                // the class also stores a value under the name.
+                let member_shape = match package.as_deref() {
+                    Some(cls) if origin.member_kinds_overloaded(cls, &name, module_index) => {
+                        crate::model::file_analysis::MemberShape::Callable
+                    }
+                    _ => Default::default(),
+                };
                 TargetRef {
                     name,
                     kind: TargetKind::Sub { package },
@@ -206,12 +279,23 @@ impl TargetRef {
                     scope,
                     def_paths: Vec::new(),
                     bare_constant: false,
+                    ctor_of,
+                    class_ns,
+                    member_shape,
                 }
             }
             RenameKind::Method { name, class } => {
                 TargetRef::method(name, class, origin, module_index, scope)
             }
-            RenameKind::Package(name) => TargetRef::new(name, TargetKind::Package),
+            RenameKind::Package(name) => {
+                // A class-name cursor is leaf-keyed like a member's class:
+                // the origin's use-map pin tells its `Collection` from the
+                // two other files' `Collection`s in the references walk.
+                let class_ns = module_index.and_then(|idx| idx.pinned_namespace(&name));
+                let mut t = TargetRef::new(name, TargetKind::Package);
+                t.class_ns = class_ns;
+                t
+            }
             RenameKind::Handler { owner, name } => {
                 TargetRef::new(name.clone(), TargetKind::Handler { owner, name })
             }

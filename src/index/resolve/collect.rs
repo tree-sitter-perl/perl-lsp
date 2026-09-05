@@ -529,6 +529,18 @@ pub(super) fn span_is_folded_name(
 /// `mask_for_target` (to decide whether the def lives in editable space).
 /// `analysis` is the file the symbol lives in — the structural gates
 /// (class-content, macro spans) need its scopes/macro table.
+/// Shape-strict declaration match: a `Value` target is declared by a stored
+/// member, a `Callable` one by a sub/method; `Unknown` admits either. The
+/// target carries a shape only for a class that overloads the name.
+fn shape_admits(shape: crate::model::file_analysis::MemberShape, kind: SymKind) -> bool {
+    use crate::model::file_analysis::MemberShape;
+    match shape {
+        MemberShape::Unknown => true,
+        MemberShape::Callable => matches!(kind, SymKind::Sub | SymKind::Method),
+        MemberShape::Value => !matches!(kind, SymKind::Sub | SymKind::Method),
+    }
+}
+
 pub(super) fn symbol_defines_target(
     sym: &crate::model::file_analysis::Symbol,
     target: &TargetRef,
@@ -570,7 +582,9 @@ pub(super) fn symbol_defines_target(
                         .method_classes
                         .iter()
                         .any(|c| Some(c.as_str()) == sym_pkg));
-            matches!(sym.kind, SymKind::Sub | SymKind::Method) && in_scope
+            matches!(sym.kind, SymKind::Sub | SymKind::Method)
+                && in_scope
+                && shape_admits(target.member_shape, sym.kind)
         }
         TargetKind::Method { class } => {
             // A `sub NAME` declaration belongs to this target if it lives in
@@ -594,6 +608,7 @@ pub(super) fn symbol_defines_target(
             (matches!(sym.kind, SymKind::Sub | SymKind::Method)
                 || analysis.symbol_is_class_content(sym))
                 && on_chain
+                && shape_admits(target.member_shape, sym.kind)
         }
         TargetKind::Package => matches!(
             sym.kind,
@@ -891,22 +906,83 @@ pub(super) fn collect_from_analysis(
     // file's `o->op_type` types against a globally-arbitrary same-named
     // candidate and the site silently drops out. Transparent for Perl
     // (empty closure = the plain index).
+    // A name-keyed pack file (php) is scoped the same way, by its OWN
+    // use-map: `$c->pick()` in a file that `use`s `B\Collection` types
+    // against B's class, never the same-leaf stranger the plain index would
+    // hand back first. `for_origin` owns the derivation for both shapes.
     let scoped_storage: Option<crate::model::file_analysis::ScopedLookup>;
     let module_index: Option<&dyn CrossFileLookup> = match module_index {
-        Some(idx) if !analysis.pack.include_closure.is_empty() => {
+        Some(idx)
+            if crate::build::language_driver::LanguageRegistry::is_pack_language(
+                &analysis.language,
+            ) =>
+        {
             let path = key_for_sort(key);
-            // Guarded by a non-empty include closure — a pack-only shape.
+            let axis = crate::util::ghost_stats::timed("refs.visibility_axis", || {
+                crate::model::file_analysis::VisibilityAxis::for_origin(
+                    analysis,
+                    Some(path.as_path()),
+                    idx,
+                    crate::build::language_driver::LanguageRegistry::pack_visibility(
+                        &analysis.language,
+                    ),
+                )
+            });
             scoped_storage = Some(crate::model::file_analysis::ScopedLookup::new(
                 idx,
                 &analysis.pack.include_closure,
                 Some(path.as_path()),
-                crate::model::file_analysis::VisibilityAxis::IncludeClosure,
+                axis,
             ));
             // SAFETY: scoped_storage was just set to Some(..) on the line above,
             // in this same match arm — a lifetime-extension idiom, not a fallible read.
             Some(scoped_storage.as_ref().unwrap() as &dyn CrossFileLookup)
         }
         other => other,
+    };
+
+    // The same-leaf gate: a class-keyed target whose origin pinned the
+    // class to a namespace is not referenced by a file whose SAME leaf
+    // means a class in another namespace — that file's `Factory` calls,
+    // decls and `new` sites belong to the stranger. Both claims come from
+    // the files' own scopes (`pinned_namespace`), so only a use-map axis
+    // ever gates: a closure-carrying (cpp) file's partial namespace
+    // attribution stays `pkg_agrees`'s business, and a scope that makes
+    // no claim keeps every ref matched on the receiver chain as before.
+    // When the file's claim disagrees, its `use` rows can still name the
+    // target's class by full namespace (`use A\Event as BaseEvent;` inside
+    // a file whose own bare `Event` is another class): those rows stay in,
+    // everything else in the file is the stranger's.
+    let mut import_rows_only = false;
+    if let Some(want) = target.class_ns.as_deref() {
+        let leaf = match &target.kind {
+            TargetKind::Method { class } => Some(class.as_str()),
+            TargetKind::Sub { package } => package.as_deref(),
+            TargetKind::Package => Some(target.name.as_str()),
+            _ => None,
+        };
+        if let Some(leaf) = leaf {
+            let claim = module_index.and_then(|idx| idx.pinned_namespace(leaf));
+            if claim.is_some_and(|ns| ns != want) {
+                if !matches!(target.kind, TargetKind::Package) {
+                    return;
+                }
+                import_rows_only = true;
+            }
+        }
+    }
+    // A `use` row names ONE class in full: its leaf token references the
+    // target only when the row's namespace is the target's (`use B\Event
+    // as ScriptEvent;` is never a reference to `A\Event`, whatever the
+    // file's own `Event` means).
+    let import_row_verdict = |span: &Span| -> Option<bool> {
+        let want = target.class_ns.as_deref()?;
+        let (_, raw) = analysis.pack.import_row_covering(span)?;
+        Some(
+            raw.trim_start_matches('\\')
+                .rsplit_once('\\')
+                .is_some_and(|(ns, leaf)| ns == want && leaf == target.name),
+        )
     };
 
     // Package globals match by package + (qualified) name, not the callable
@@ -960,12 +1036,20 @@ pub(super) fn collect_from_analysis(
         TargetKind::Sub { .. } | TargetKind::Method { .. } => (true, false),
         _ => (false, false),
     };
+    // a class-keyed rail's sites are tokens of other names — never rewritten
+    let class_rail = matches!(
+        &target.kind,
+        TargetKind::Handler { owner: crate::model::file_analysis::HandlerOwner::ClassRail(_), .. }
+    );
     let rewritable_at = |span: Span| {
-        !(foldable && span_is_folded_name(analysis, span, folds_through_calls, &target.name))
+        !class_rail && !(foldable && span_is_folded_name(analysis, span, folds_through_calls, &target.name))
     };
 
     // Include declaration spans when this file defines the target.
     for sym in analysis.symbols() {
+        if import_rows_only {
+            break;
+        }
         if symbol_defines_target(sym, target, analysis) {
             out.push(RefLocation {
                 key: key.clone(),
@@ -984,6 +1068,16 @@ pub(super) fn collect_from_analysis(
         _ => None,
     };
     for r in analysis.refs() {
+        if matches!(r.kind, RefKind::PackageRef) {
+            match import_row_verdict(&r.span) {
+                Some(false) => continue,
+                Some(true) => {}
+                None if import_rows_only => continue,
+                None => {}
+            }
+        } else if import_rows_only {
+            continue;
+        }
         // A qualified call (`Foo::baz()` / `$o->Foo::Bar::baz()`) keeps its
         // whole path in `target_name`; match it on the bare callable tail (the
         // dispatch-class checks in the call arms below still pin the right
@@ -1009,13 +1103,22 @@ pub(super) fn collect_from_analysis(
             && visible_aliases
                 .iter()
                 .any(|a| a.name == r.unqualified_target_name());
-        if !name_matches && !alias_matched {
+        // A construction site (`new Foo(...)`) IS a use of Foo's
+        // constructor: the ctor FunctionCall ref carries the CLASS name,
+        // so a `ctor_of` target admits it — non-rewritable below (the
+        // token spells the class; renaming __construct must not touch it).
+        let ctor_matched = !name_matches
+            && target.ctor_of.as_deref().is_some_and(|class| {
+                matches!(r.kind, RefKind::FunctionCall { .. })
+                    && r.unqualified_target_name() == class
+            });
+        if !name_matches && !alias_matched && !ctor_matched {
             continue;
         }
         // Sub + Method both match any call into that scope — function
         // or method shape — per the "same callable, two shapes"
         // invariant. Filter is a single scope comparison.
-        let matches_kind = alias_matched || match (&target.kind, &r.kind) {
+        let matches_kind = alias_matched || ctor_matched || match (&target.kind, &r.kind) {
             (TargetKind::Sub { .. } | TargetKind::Method { .. },
              RefKind::FunctionCall) => {
                 // callable_scope_for_refs is derived from the same target.kind
@@ -1097,6 +1200,18 @@ pub(super) fn collect_from_analysis(
                 let Some(scope) = callable_scope_for_refs.as_ref() else {
                     continue;
                 };
+                // The written shape must agree with the target's (both known):
+                // `$this->recorded` never references the method `recorded()`
+                // of a class that also stores `$recorded`, nor vice versa.
+                if let RefKind::MethodCall { shape, .. } = &r.kind {
+                    use crate::model::file_analysis::MemberShape;
+                    if *shape != MemberShape::Unknown
+                        && target.member_shape != MemberShape::Unknown
+                        && *shape != target.member_shape
+                    {
+                        continue;
+                    }
+                }
                 let method = r.unqualified_target_name();
                 {
                     let resolved_class = match r.method_target() {
@@ -1157,6 +1272,14 @@ pub(super) fn collect_from_analysis(
                 }
             }
             (TargetKind::Package, RefKind::PackageRef) => true,
+            // A construction site spells the class as a call (`new Foo(...)`
+            // mints a FunctionCall named `Foo`) in a pack that declares a
+            // constructor convention; the token IS the class name, so the
+            // class's references and rename reach it. A pack with no such
+            // convention (Perl's `Foo->new`) never mints the shape.
+            (TargetKind::Package, RefKind::FunctionCall) => {
+                !analysis.pack.constructor_names.is_empty()
+            }
             // A pack-language enum constant read by BARE name (`x = OP_SCOPE`,
             // `case OP_SCOPE:`) — a `Variable` ref the generic goto-def
             // resolves to this def by name (the value-read half of the shared
@@ -1292,7 +1415,7 @@ pub(super) fn collect_from_analysis(
                 key: key.clone(),
                 span,
                 access: r.access,
-                rewritable: !alias_matched && rewritable_at(span),
+                rewritable: !alias_matched && !ctor_matched && rewritable_at(span),
                 label: None
             });
             // A call folded from a variable (`my $m = 'process'; $self->$m()`)

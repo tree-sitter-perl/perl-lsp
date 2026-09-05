@@ -440,6 +440,9 @@ fn sub_exporter_member_goto_def_and_references() {
                 package: Some("My::Exp".to_string()),
             },
             method_classes: Vec::new(), scope: crate::index::resolve::OverrideScope::Dispatch, def_paths: Vec::new(), bare_constant: false,
+            ctor_of: None,
+            class_ns: None,
+            member_shape: Default::default(),
         },
         RoleMask::EDITABLE,
     );
@@ -1088,6 +1091,9 @@ sub go {
                 name: name.to_string(),
                 kind: TargetKind::Sub { package: Some("Foo".to_string()) },
                 method_classes: Vec::new(), scope: crate::index::resolve::OverrideScope::Dispatch, def_paths: Vec::new(), bare_constant: false,
+            ctor_of: None,
+            class_ns: None,
+            member_shape: Default::default(),
             },
             RoleMask::EDITABLE,
         );
@@ -1204,6 +1210,9 @@ sub go {
                 name: name.to_string(),
                 kind: TargetKind::Sub { package: Some("Foo".to_string()) },
                 method_classes: Vec::new(), scope: crate::index::resolve::OverrideScope::Dispatch, def_paths: Vec::new(), bare_constant: false,
+            ctor_of: None,
+            class_ns: None,
+            member_shape: Default::default(),
             },
             RoleMask::EDITABLE,
         );

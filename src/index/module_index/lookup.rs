@@ -370,6 +370,22 @@ impl CrossFileLookup for ModuleIndex {
         self.rehydrate_rows_or_resident(cached)
     }
 
+    fn prefetch_refs(&self, paths: &[std::path::PathBuf]) {
+        use rayon::prelude::*;
+        if paths.len() < 2 || std::env::var_os("PERL_LSP_REFS_NO_PREFETCH").is_some() {
+            return;
+        }
+        // Bounded so a giant candidate set cannot churn the byte-capped LRU
+        // past the entries the walk is about to read.
+        let take = paths.len().min(4096);
+        crate::util::ghost_stats::timed("refs.prefetch", || {
+            paths[..take].par_iter().for_each(|p| {
+                if let Some(cm) = self.cached_by_path(p) {
+                    let _ = self.refs_present(&cm);
+                }
+            });
+        });
+    }
     fn refs_present(&self, cached: &Arc<CachedModule>) -> Arc<FileAnalysis> {
         // Backward-walk view: refs AND symbols usable (the matcher reads
         // usage rows + declaration rows). The @INC strip is bag-only, so
@@ -674,6 +690,16 @@ impl CrossFileLookup for ModuleIndex {
             .map(|g| Arc::clone(&g))
             .unwrap_or_default()
     }
+    fn is_dependency_path(&self, path: &std::path::Path) -> bool {
+        match self.core.dependency_roots.read() {
+            // Hub semantics: everything cached here came from `@INC`.
+            Ok(g) => match g.as_ref() {
+                None => true,
+                Some(roots) => roots.iter().any(|r| path.starts_with(r)),
+            },
+            Err(_) => true,
+        }
+    }
 
     fn workspace_root_path(&self) -> Option<std::path::PathBuf> {
         self.workspace_root()
@@ -702,6 +728,11 @@ impl CrossFileLookup for ModuleIndex {
     }
 
     fn def_candidates(&self, name: &str) -> Vec<Arc<CachedModule>> {
+        // A PATH-shaped key is the pack tier's handler-feed module key
+        // (`feed_handlers`): the file itself, by its per-path registration.
+        if std::path::Path::new(name).is_absolute() {
+            return self.all_files.get(std::path::Path::new(name)).map(|e| vec![e.value().clone()]).unwrap_or_default();
+        }
         match self.core.all_defs.get(name) {
             Some(cands) if !cands.is_empty() => {
                 // Path-ordered HERE, the one speller of candidate order —
@@ -836,6 +867,9 @@ impl CrossFileLookup for ModuleIndex {
         visible: &std::collections::HashSet<String>,
     ) -> Vec<(String, Arc<CachedModule>)> {
         self.visible_defs_with_prefix(prefix, visible)
+    }
+    fn defs_with_prefix(&self, prefix: &str) -> Vec<(String, Vec<Arc<CachedModule>>)> {
+        self.defs_with_prefix(prefix)
     }
 }
 

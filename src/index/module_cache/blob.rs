@@ -413,6 +413,22 @@ pub fn load_one_diag(
     path: &str,
     want_bag: bool,
 ) -> Result<FileAnalysis, RehydrateMiss> {
+    let rows = fetch_one_rows(conn, path, want_bag)?;
+    decode_one_rows(&rows, path, want_bag)
+}
+
+/// A fetched row: (analysis blob, mtime, size, bag blob).
+pub type BlobRow = (Option<Vec<u8>>, i64, i64, Option<Vec<u8>>);
+
+/// The SQL half of `load_one_diag` — the only part that needs the
+/// connection. Callers sharing one retained connection hold its lock for
+/// this alone and decode outside it, so concurrent rehydrates decode in
+/// parallel instead of queueing on the mutex.
+pub fn fetch_one_rows(
+    conn: &Connection,
+    path: &str,
+    want_bag: bool,
+) -> Result<Vec<BlobRow>, RehydrateMiss> {
     // A dual-homed project-lib file has TWO rows for one path (name-keyed
     // import + path-keyed workspace). Prefer a row whose stamp matches the
     // disk (one tier's persist may have failed or lagged, leaving a stale
@@ -439,7 +455,7 @@ pub fn load_one_diag(
     // Stage 1 of the rehydrate: the SQL roundtrip that fetches the bytes.
     // Timed separately from the decode because batching the fetch is only
     // worth doing if THIS is the dominant term.
-    let rows: Vec<(Option<Vec<u8>>, i64, i64, Option<Vec<u8>>)> =
+    let rows: Vec<BlobRow> =
         crate::util::ghost_stats::timed("decode.1_sql_fetch", || {
             stmt.query_map(params![path, EXTRACT_VERSION], |row| {
                 Ok((
@@ -455,6 +471,12 @@ pub fn load_one_diag(
     if rows.is_empty() {
         return Err(RehydrateMiss::NoRow);
     }
+    Ok(rows)
+}
+
+/// The decode half of `load_one_diag`: pick the row and decode it. Needs no
+/// connection.
+pub fn decode_one_rows(rows: &[BlobRow], path: &str, want_bag: bool) -> Result<FileAnalysis, RehydrateMiss> {
     // The bag rides with the blob it was split from: picking them separately
     // could pair a workspace row's analysis with an import row's bag.
     let pick = |require_stamp: bool| -> Option<(&Vec<u8>, Option<&Vec<u8>>)> {
@@ -491,16 +513,6 @@ pub fn open_and_load_diag(
     load_with_wal_fallback(&db_path_for(&dir, lang), paths, want_bag)
 }
 
-#[cfg(test)]
-pub fn open_and_load_diag(
-    _cache_key: Option<&str>,
-    _lang: &str,
-    _paths: &[String],
-    _want_bag: bool,
-) -> Result<FileAnalysis, RehydrateMiss> {
-    Err(RehydrateMiss::NoRow)
-}
-
 /// `open_and_load_diag` with the happy path on a RETAINED connection — the
 /// same per-call-open disease the conclusion loader had (`RetainedReader`):
 /// every bag-LRU miss paid a fresh open + WAL handshake before its decode.
@@ -509,7 +521,10 @@ pub fn open_and_load_diag(
 /// back to the full per-call policy, whose RW recovery genuinely needs fresh
 /// opens and whose failure discrimination the residency tripwire reads.
 /// The fallback re-runs the readonly probe (a genuine miss pays ~one extra
-/// open); hits are the overwhelming population and hits pay zero.
+/// open); hits are the overwhelming population and hits pay zero. A row
+/// that fetches but fails to decode takes the same fallback (the decode
+/// runs outside the lock, so the retained connection cannot try the next
+/// spelling for it) — a corrupt blob, never the hot path.
 ///
 /// WHY the blob lane may ride a retained connection even though
 /// `load_one_diag`'s single-row path skips stamp validation (its caller
@@ -546,18 +561,23 @@ pub fn open_and_load_diag_retained(
 ) -> Result<FileAnalysis, RehydrateMiss> {
     if let Some(dir) = cache_dir_for_workspace(cache_key) {
         let db = db_path_for(&dir, lang);
-        let hit = retained
+        // Under the retained connection's lock: the fetch only. The decode
+        // runs below, unlocked, so parallel rehydrates do not serialize on
+        // the one connection.
+        let fetched = retained
             .with(
                 || open_reader_retrying(&db).ok(),
                 |conn| {
                     paths
                         .iter()
-                        .find_map(|p| load_one_diag(conn, p, want_bag).ok())
+                        .find_map(|p| fetch_one_rows(conn, p, want_bag).ok().map(|rows| (p.clone(), rows)))
                 },
             )
             .flatten();
-        if let Some(fa) = hit {
-            return Ok(fa);
+        if let Some((p, rows)) = fetched {
+            if let Ok(fa) = decode_one_rows(&rows, &p, want_bag) {
+                return Ok(fa);
+            }
         }
     }
     crate::util::ghost_stats::count("bagload.retained_fallback");
@@ -880,7 +900,6 @@ pub(super) mod bag_share_probe {
     //! opposite of what the giants do.
     //!
     //! `cargo test --release bag_share -- --ignored --nocapture`
-    use crate::model::file_analysis::FileAnalysis;
 
     #[test]
     #[ignore]

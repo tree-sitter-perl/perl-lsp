@@ -47,8 +47,8 @@ pub(super) fn import_candidates(
                 completion_detail_for_import(is.remote(), whole.as_deref(), &import.module_name);
             out.push(CompletionCandidate {
                 label: local.clone(),
-                is_static: false,
                 kind: FaSymKind::Sub,
+                is_static: false,
                 detail: Some(detail),
                 insert_text: None,
                 sort_priority: PRIORITY_EXPLICIT_IMPORT,
@@ -114,8 +114,8 @@ pub(super) fn import_candidates(
 
                 out.push(CompletionCandidate {
                     label: name.clone(),
-                    is_static: false,
                     kind: FaSymKind::Sub,
+                    is_static: false,
                     detail: Some(detail),
                     insert_text: None,
                     sort_priority: priority,
@@ -161,8 +161,8 @@ pub(super) fn unimported_export_candidates(
             }
             candidates.push(CompletionCandidate {
                 label: name.clone(),
-                is_static: false,
                 kind: FaSymKind::Sub,
+                is_static: false,
                 detail: Some(format!("{} (auto-import)", module_name)),
                 insert_text: None,
                 sort_priority: PRIORITY_UNIMPORTED,
@@ -226,7 +226,7 @@ pub(super) fn dispatch_handler_locations(
                             key: FileKey::Path(cached.path.clone()),
                             span: sym.selection_span,
                             access: AccessKind::Declaration,
-                            rewritable: true,
+                            rewritable: !matches!(owner, HandlerOwner::ClassRail(_)),
                             label: None
                         });
                     }

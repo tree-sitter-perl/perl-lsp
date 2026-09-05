@@ -214,6 +214,22 @@ impl ModuleIndex {
     /// symbols from headers it doesn't include. Deterministic: sorted by
     /// name; among reachable candidates the tie breaks exactly like
     /// `get_cached_scoped` (class-over-value, then smallest path).
+    /// Every definition candidate whose registered name starts with
+    /// `prefix`, each name with ALL its providers — the universe a
+    /// name-keyed pack completes from (its imports name classes, not paths,
+    /// so every namespace declaring the leaf is a distinct offer).
+    pub fn defs_with_prefix(&self, prefix: &str) -> Vec<(String, Vec<Arc<CachedModule>>)> {
+        let mut out: Vec<(String, Vec<Arc<CachedModule>>)> = self
+            .core
+            .all_defs
+            .iter()
+            .filter(|e| e.key().starts_with(prefix))
+            .map(|e| (e.key().clone(), e.value().clone()))
+            .collect();
+        out.sort_by(|a, b| a.0.cmp(&b.0));
+        out
+    }
+
     pub fn visible_defs_with_prefix(
         &self,
         prefix: &str,
@@ -391,6 +407,12 @@ impl ModuleIndex {
     /// `for_each_cached` over the whole store). Callers apply their
     /// own kind/detail filter + override/stacking semantics after
     /// picking which specific symbols matter to them.
+    /// Every handler name on the string rail `rail` this index holds
+    /// (rail-name completion's cross-file source).
+    pub fn rail_names(&self, rail: &str) -> Vec<String> {
+        self.core.edges.rail_names(rail)
+    }
+
     pub fn modules_with_symbol(&self, name: &str) -> Vec<String> {
         match self.core.edges.names.get(name) {
             Some(bucket) => {
@@ -423,6 +445,7 @@ impl ModuleIndex {
         name: &str,
         class: &str,
     ) -> Option<String> {
+        let _t = crate::util::ghost_stats::ScopedNs::start("mdmp.total");
         use crate::model::file_analysis::CrossFileLookup;
         crate::util::ghost_stats::count("mdmp.call");
         let mods = self.modules_providing_package(class);

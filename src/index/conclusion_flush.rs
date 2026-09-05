@@ -15,7 +15,6 @@
 //! `conclusions_tests::a_chain_needs_the_evaluated_surface_not_the_map`.
 
 use crate::index::module_cache;
-use crate::index::module_cache::Generation;
 use crate::model::witnesses::{ConclusionMap, EvaluatedSurface};
 use rusqlite::Connection;
 use std::cell::RefCell;

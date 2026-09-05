@@ -195,7 +195,7 @@ pub(super) enum WalkScope<'a> {
 /// `refs_to` narrowed to ONE file — the origin scope of the same driver,
 /// so the highlights image is the in-file slice of `references()` without
 /// paying the workspace walk per cursor move.
-pub(super) fn refs_to_in_file(
+pub(crate) fn refs_to_in_file(
     files: &FileStore,
     module_index: Option<&dyn CrossFileLookup>,
     target: &TargetRef,
@@ -313,6 +313,16 @@ fn ref_rows_enabled() -> bool {
 /// as generous as the matcher's name checks.
 pub(super) fn retrieval_keys(target: &TargetRef, aliases: &[DelegationAlias]) -> Vec<String> {
     let mut keys = vec![crate::model::file_analysis::name_match_key(&target.name)];
+    // A constructor's call sites spell the CLASS (`new Foo(...)`), never the
+    // ctor name — without the class key the row filter never hands the
+    // matcher the files that hold them (every cross-file `new` dropped, and
+    // the heatmap called the ctor dead).
+    if let Some(class) = target.ctor_of.as_deref() {
+        let k = crate::model::file_analysis::name_match_key(class);
+        if !keys.contains(&k) {
+            keys.push(k);
+        }
+    }
     for a in aliases {
         let k = crate::model::file_analysis::name_match_key(&a.name);
         if !keys.contains(&k) {
@@ -551,16 +561,30 @@ fn walk_refs(
                 rows_indexed = idx.ref_indexed_paths();
                 candidate_set = candidate_paths.iter().cloned().collect();
             }
+            // Decode the candidate set in parallel before the sequential
+            // match: cold, decode was ~60% of the first answer. Workspace
+            // FileStore entries answer resident and are skipped; the
+            // prefetch's own cap means a candidate set past it decodes its
+            // tail serially, as before.
+            let to_warm: Vec<std::path::PathBuf> = candidate_paths
+                .iter()
+                .filter(|p| !covered_paths.contains(*p) && !files.workspace_raw().contains_key(*p))
+                .cloned()
+                .collect();
+            idx.prefetch_refs(&to_warm);
             for path in candidate_paths {
                 if covered_paths.contains(&path) {
                     continue;
                 }
                 // Tier attribution: a FileStore workspace entry rides the
                 // WORKSPACE role (Perl project files); everything else the
-                // rows name lives in a module-index tier (DEPENDENCY —
-                // @INC and the pack caches). The mask must admit the
-                // candidate's OWN tier, or an EDITABLE rename would walk
-                // read-only deps (and vice versa).
+                // rows name lives in a module-index tier, whose role the
+                // INDEX answers per path (`is_dependency_path`): the hub is
+                // all-`@INC` (DEPENDENCY), a pack sub-index holds the
+                // workspace's own files (WORKSPACE) plus declared dependency
+                // roots — composer's vendor (DEPENDENCY). The mask must
+                // admit the candidate's OWN tier, or an EDITABLE rename
+                // would walk read-only deps (and vice versa).
                 let ws_arc = files
                     .workspace_raw()
                     .get(&path)
@@ -576,7 +600,12 @@ fn walk_refs(
                         ))
                     }
                     None => {
-                        if !mask.contains(RoleMask::DEPENDENCY) {
+                        let role = if idx.is_dependency_path(&path) {
+                            RoleMask::DEPENDENCY
+                        } else {
+                            RoleMask::WORKSPACE
+                        };
+                        if !mask.contains(role) {
                             continue;
                         }
                         match idx.cached_by_path(&path) {
@@ -594,10 +623,12 @@ fn walk_refs(
                 // The matcher reads refs (usage sites) AND symbols
                 // (declaration sites) — the rows-axes view, upgraded to
                 // whole only when a matching ref needs the bag.
-                let full = matcher_view(idx, &cached, target);
-                collect_from_analysis(
-                    &key, &full, target, &aliases, module_index, &file_str, &mut out,
-                );
+                let full = crate::util::ghost_stats::timed("refs.matcher_view", || matcher_view(idx, &cached, target));
+                crate::util::ghost_stats::timed("refs.collect", || {
+                    collect_from_analysis(
+                        &key, &full, target, &aliases, module_index, &file_str, &mut out,
+                    )
+                });
             }
         }
     }
@@ -639,13 +670,24 @@ fn walk_refs(
         }
     }
 
-    // Dependencies (read-only modules from @INC / the pack-language cache).
-    // Per-FILE sweep (`for_each_cached_file`): the name-keyed view both
-    // repeats files and HIDES a file that lost every name tie. Skip paths an
-    // open/workspace copy already covered — those are fresher.
-    if mask.contains(RoleMask::DEPENDENCY) {
+    // The module-index tiers: `@INC` dependencies AND — in a pack
+    // sub-index — the workspace's own files, attributed per path
+    // (`is_dependency_path`; declared dependency roots like composer's
+    // vendor are the read-only part). Per-FILE sweep
+    // (`for_each_cached_file`): the name-keyed view both repeats files and
+    // HIDES a file that lost every name tie. Skip paths an open/workspace
+    // copy already covered — those are fresher.
+    if mask.intersects(RoleMask::DEPENDENCY | RoleMask::WORKSPACE) {
         if let Some(idx) = module_index {
             idx.for_each_cached_file(&mut |cached| {
+                let role = if idx.is_dependency_path(&cached.path) {
+                    RoleMask::DEPENDENCY
+                } else {
+                    RoleMask::WORKSPACE
+                };
+                if !mask.contains(role) {
+                    return;
+                }
                 if !covered_paths.insert(cached.path.clone()) {
                     return;
                 }
@@ -663,8 +705,10 @@ fn walk_refs(
                 // Rows-off fallback sweep: copies here may still be
                 // row-axes-evicted (rows exist, retrieval switched off) —
                 // the matcher needs refs + symbols, so take the rows view.
-                let full = matcher_view(idx, cached, target);
-                collect_from_analysis(&key, &full, target, &aliases, module_index, &file_str, &mut out);
+                let full = crate::util::ghost_stats::timed("refs.matcher_view", || matcher_view(idx, cached, target));
+                crate::util::ghost_stats::timed("refs.collect", || {
+                    collect_from_analysis(&key, &full, target, &aliases, module_index, &file_str, &mut out)
+                });
             });
         }
     }
@@ -701,6 +745,100 @@ fn sorted_deduped(mut out: Vec<RefLocation>) -> Vec<RefLocation> {
 /// A descendant role's own re-`requires` marker is a contract
 /// re-declaration, not an implementation — `role_requires` is the
 /// recorded fact that identifies (and excludes) it.
+/// Does this file declare `leaf` in a namespace OTHER than `contract_ns`,
+/// with a recorded inheritance edge back onto `leaf` IN `contract_ns`?
+/// That is the same-leaf direct-implementer witness: Laravel's
+/// `class Repository implements CacheContract` (the alias resolving to
+/// `Contracts\Cache\Repository`) is a SELF-LOOP in leaf space, and only
+/// the namespace rows tell the implementer from the contract.
+fn declares_self_leaf_implementer(a: &FileAnalysis, leaf: &str, contract_ns: &str) -> bool {
+    a.declared_class_namespace(leaf).is_some_and(|ns| ns != contract_ns)
+        && a.pack
+            .parent_namespaces
+            .iter()
+            .any(|(c, p, ns)| c == leaf && p == leaf && ns == contract_ns)
+}
+
+/// FQ-validate one leaf-keyed family candidate: walk `from`'s parent
+/// chain upward and classify how it reaches `target`. Three outcomes per
+/// complete walk, and only a PROVEN wrong family prunes:
+/// - some chain reaches `target` with the recorded namespace agreeing (or
+///   no namespace recorded — Perl, cpp, pre-FQ analyses make no claim) →
+///   keep;
+/// - every chain that reaches `target` does so through a RECORDED,
+///   MISMATCHING namespace (Laravel's three same-leaf `Repository`s) →
+///   prune;
+/// - no chain reaches `target` at all (a co-ancestor sitting BESIDE the
+///   target in a shared descendant's MRO — DBIC's `Ordered`) → keep, the
+///   gather put it there for a reason this walk can't see.
+fn fq_family_member(
+    origin: &FileAnalysis,
+    idx: &dyn CrossFileLookup,
+    from: &str,
+    target: &str,
+    target_ns: &str,
+) -> bool {
+    use std::collections::VecDeque;
+    let ns_agrees = |candidate: &str| candidate == target_ns;
+    let mut queue: VecDeque<(String, Option<String>)> =
+        std::iter::once((from.to_string(), None)).collect();
+    let mut seen: std::collections::HashSet<(String, Option<String>)> = Default::default();
+    let mut reached_any = false;
+    let mut budget = 2048usize;
+    while let Some((leaf, want_ns)) = queue.pop_front() {
+        if !seen.insert((leaf.clone(), want_ns.clone())) {
+            continue;
+        }
+        if budget == 0 {
+            // Truncated walk proves nothing — keep (never prune on a budget).
+            return true;
+        }
+        budget -= 1;
+        // Every analysis declaring `leaf`: the origin's own plus the index's
+        // candidates (symbols view: the class row + the pinned parents lane).
+        let mut visit = |a: &FileAnalysis| -> bool {
+            if let Some(w) = &want_ns {
+                let cls_ns = a
+                    .symbols()
+                    .iter()
+                    .find(|s| matches!(s.kind, SymKind::Class) && s.name == leaf)
+                    .map(|s| s.package.clone().unwrap_or_default());
+                if cls_ns.as_deref() != Some(w.as_str()) {
+                    return false; // not the namespace this hop meant
+                }
+            }
+            for parent in a.declared_parents(&leaf) {
+                let rec = a
+                    .pack
+                    .parent_namespaces
+                    .iter()
+                    .find(|(c, p, _)| c == &leaf && p == parent)
+                    .map(|(_, _, ns)| ns.clone());
+                if parent == target {
+                    reached_any = true;
+                    match &rec {
+                        Some(ns) if ns_agrees(ns) => return true,
+                        Some(_) => {} // recorded, wrong family — keep looking
+                        None => return true, // no claim → agree (status quo)
+                    }
+                }
+                queue.push_back((parent.clone(), rec));
+            }
+            false
+        };
+        if visit(origin) {
+            return true;
+        }
+        for cached in idx.def_candidates(&leaf) {
+            let a = idx.symbols_present(&cached);
+            if visit(&a) {
+                return true;
+            }
+        }
+    }
+    !reached_any
+}
+
 pub fn implementations_of(
     origin: &FileAnalysis,
     module_index: Option<&dyn CrossFileLookup>,
@@ -731,10 +869,39 @@ pub fn implementations_of(
                     crate::model::graph::WalkControl::Continue
                 },
             );
+            // FQ family gate: with three same-leaf `Repository`s, INHERITS_INV
+            // from the leaf conflates the families — keep only descendants
+            // whose chain provably belongs (or makes no claim).
+            let mut same_leaf_contract_ns: Option<String> = None;
+            if let Some(tns) = origin.leaf_namespace(&target.name) {
+                descendants
+                    .retain(|d| fq_family_member(origin, idx, d, &target.name, &tns));
+                // The self-loop case (`class Repository implements` its
+                // same-leaf contract): the walk never re-visits its own seed,
+                // so the direct implementer is absent from `descendants`.
+                // Re-admit the leaf on namespace-row evidence; emission below
+                // serves only the witnessing declarations.
+                if idx
+                    .def_candidates(&target.name)
+                    .iter()
+                    .any(|c| {
+                        declares_self_leaf_implementer(&idx.symbols_present(c), &target.name, &tns)
+                    })
+                {
+                    descendants.push(target.name.clone());
+                    same_leaf_contract_ns = Some(tns);
+                }
+            }
             for pkg in &descendants {
+                let self_leaf_ns = same_leaf_contract_ns.as_ref().filter(|_| pkg == &target.name);
                 for cached in idx.def_candidates(pkg) {
                     // Declaration-site scan reads symbols only.
                     let whole = idx.symbols_present(&cached);
+                    if let Some(tns) = self_leaf_ns {
+                        if !declares_self_leaf_implementer(&whole, pkg, tns) {
+                            continue;
+                        }
+                    }
                     for s in whole.symbols() {
                         if &s.name == pkg && matches!(s.kind, SymKind::Class) {
                             out.push(RefLocation {
@@ -802,9 +969,31 @@ pub fn implementations_of(
         },
     );
     implementers.retain(|p| !contract_line.contains(p));
+    // Same FQ family gate as the Package arm: an implementer that reaches
+    // the contract only through a recorded, MISMATCHING namespace belongs
+    // to a same-leaf stranger's family.
+    let mut same_leaf_contract_ns: Option<String> = None;
+    if let Some(tns) = origin.leaf_namespace(class) {
+        implementers.retain(|p| fq_family_member(origin, idx, p, class, &tns));
+        // The self-loop case: a direct implementer CARRYING the contract's
+        // own leaf sits inside `contract_line`, so the exclusion above
+        // dropped it. Re-admit the leaf when a foreign-namespace
+        // declaration witnesses the edge, and remember the contract's
+        // namespace so emission below serves ONLY those declarations
+        // (never the contract's own file, never a third same-leaf family).
+        if idx
+            .def_candidates(class)
+            .iter()
+            .any(|c| declares_self_leaf_implementer(&idx.symbols_present(c), class, &tns))
+        {
+            implementers.insert(class.clone());
+            same_leaf_contract_ns = Some(tns);
+        }
+    }
 
     let mut out: Vec<RefLocation> = Vec::new();
     for pkg in &implementers {
+        let self_leaf_ns = same_leaf_contract_ns.as_ref().filter(|_| pkg == class);
         // class → home module(s): exact cache key for the common
         // single-package file; the names index covers cross-named and
         // multi-package homes.
@@ -826,6 +1015,11 @@ pub fn implementations_of(
             }
         }
         for cached in homes {
+            if let Some(tns) = self_leaf_ns {
+                if !declares_self_leaf_implementer(&idx.symbols_present(&cached), pkg, tns) {
+                    continue;
+                }
+            }
             let is_marker = cached
                 .analysis
                 .role_requires(pkg.as_str())

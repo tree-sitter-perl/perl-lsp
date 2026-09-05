@@ -9,6 +9,7 @@
 //! disagree (docs/adr/resolution-candidate-set.md).
 
 use super::*;
+use crate::model::file_analysis::MemberShape;
 use std::sync::Arc;
 
 /// One node of a type/call hierarchy answer: a named declaration the
@@ -99,6 +100,17 @@ impl<'a> CandidateSet<'a> {
                     self.origin
                         .inferred_type_via_bag_ctx(&r.target_name, self.point, self.idx())
                 }
+                // A member token: the receiver's type, then the member's
+                // value on it — a method's return first, a field's declared
+                // type as the fallback (the ladder hover reads); the bare
+                // span's own witnesses when the receiver does not type.
+                RefKind::MethodCall { invocant_span: Some(inv), shape, .. } => self
+                    .origin
+                    .expr_type_at_span(*inv, self.idx())
+                    .and_then(|t| {
+                        self.origin.member_value_type(&t, r.unqualified_target_name(), self.idx(), r.arg_count, *shape)
+                    })
+                    .or_else(|| self.origin.expr_type_at_span(r.span, self.idx())),
                 _ => self.origin.expr_type_at_span(r.span, self.idx()),
             };
         }
@@ -342,7 +354,28 @@ impl<'a> CandidateSet<'a> {
             std::collections::HashMap::new();
         let mut analyses: std::collections::HashMap<std::path::PathBuf, Option<Arc<FileAnalysis>>> =
             std::collections::HashMap::new();
-        for loc in self.references() {
+        // The event bus: a callable that is ALSO a class-rail handler (a
+        // listener's `handle(X $e)`, a job's `handle`) is called by every
+        // emission of `X` — the rail's references join the direct callers.
+        let mut sites = self.references();
+        for s in self.origin.symbols().iter().filter(|s| {
+            matches!(s.kind, SymKind::Handler)
+                && crate::model::file_analysis::contains_point(&s.selection_span, self.point)
+        }) {
+            if let crate::model::file_analysis::SymbolDetail::Handler { owner: owner @ crate::model::file_analysis::HandlerOwner::ClassRail(_), .. } = &s.detail {
+                let t = TargetRef::new(
+                    s.name.clone(),
+                    TargetKind::Handler { owner: owner.clone(), name: s.name.clone() },
+                );
+                let mask = self.target_visibility(&t);
+                for loc in refs_to(self.files, self.module_index, &t, mask) {
+                    if !sites.iter().any(|o| o.key == loc.key && o.span == loc.span) {
+                        sites.push(loc);
+                    }
+                }
+            }
+        }
+        for loc in sites {
             if loc.access == AccessKind::Declaration {
                 continue;
             }
@@ -421,6 +454,9 @@ impl<'a> CandidateSet<'a> {
             // resolution anchors.
             let (token, site) = match &r.kind {
                 RefKind::FunctionCall => (r.span.start, r.span),
+                // A member read (`$this->handlers`, `self::LIMIT`) reaches a
+                // value, not a callee — the ref's own shape says so.
+                RefKind::MethodCall { shape: MemberShape::Value, .. } => continue,
                 RefKind::MethodCall { method_name_span, .. } => {
                     (method_name_span.start, *method_name_span)
                 }
