@@ -45,6 +45,11 @@ pub struct DriverCaps {
     pub hover_info: bool,
     /// The signatureHelp verb is served (the cursor-context handler).
     pub signature_help: bool,
+    /// Pack-family signature help: the call site from the document's own
+    /// tree (`cursor_sentinel::call_at` on the pack's `call_shapes`), the
+    /// signature from the defining file's text. Disjoint from the hub's
+    /// `signature_help` (Perl's cursor-context path).
+    pub pack_signature_help: bool,
     /// The selectionRange verb is served (the tree-shape handler).
     pub selection_range: bool,
     /// A didChange rebuild is cheap enough to run synchronously on the
@@ -68,6 +73,10 @@ pub struct DriverCaps {
     /// See `LangPack::entrypoint_symbols` — symbols the runtime enters
     /// through the ABI, alive at zero fan-in by contract.
     pub entrypoint_symbols: &'static [&'static str],
+    /// See `LangPack::runtime_invoked_methods` — method names the runtime
+    /// invokes structurally (php magic methods); the heatmap's dead-code
+    /// flagging shields them.
+    pub runtime_invoked_methods: &'static [&'static str],
     /// See `LangPack::include_path_tokens`.
     pub include_path_tokens: bool,
     /// See `LangPack::preprocessor_macros`.
@@ -156,6 +165,15 @@ pub trait LanguageDriver: Send + Sync {
     fn sniff(&self, _prefix: &str) -> bool {
         false
     }
+    /// Extra DEPENDENCY-tier roots this language's projects declare outside
+    /// the ignore-aware workspace walk (php: composer's `vendor/` packages,
+    /// which the project's own .gitignore hides). The bulk indexer walks
+    /// these WITHOUT gitignore filtering and feeds them into the same
+    /// per-language sub-index — the pack tier is already dependency-masked
+    /// (read-only for rename) in the backward walk. Empty = none.
+    fn dependency_roots(&self, _workspace_root: &std::path::Path) -> Vec<std::path::PathBuf> {
+        Vec::new()
+    }
 }
 
 /// Perl — the reference driver. Wraps the production builder; behaviour
@@ -170,6 +188,9 @@ pub trait LanguageDriver: Send + Sync {
 /// asserts the verb surface and regressions are caught; `Beta` = broad gold
 /// coverage, known gaps documented; `Alpha` = it parses and answers, with
 /// little or no net watching it — expect wrong answers.
+// The pack drivers that construct `Beta`/`Alpha` are feature-gated, so a
+// default (Perl-only) build sees only `Stable`.
+#[allow(dead_code)]
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Maturity {
     Stable,
@@ -303,6 +324,10 @@ pub struct PackDriver {
     /// concept). Stamps a `non_public` attribute on member symbols so
     /// completion can filter by visibility.
     access_regions: Option<fn(&mut tree_sitter::Parser, &str) -> Vec<crate::build::cpp_reparse::AccessRegion>>,
+    /// Extra DEPENDENCY-tier roots a project of this language declares
+    /// outside the ignore-aware walk (php: composer's vendor packages).
+    /// `None` = the workspace walk is the whole story.
+    dependency_roots: Option<fn(&Path) -> Vec<std::path::PathBuf>>,
 }
 
 /// Pre-parse external state gathered in phase 1 (`gather_pack_context`) and
@@ -394,6 +419,9 @@ impl LanguageDriver for PackDriver {
     fn lang_pack(&self) -> Option<crate::build::query_extract::LangPack> {
         Some((self.pack)())
     }
+    fn dependency_roots(&self, workspace_root: &Path) -> Vec<std::path::PathBuf> {
+        self.dependency_roots.map(|f| f(workspace_root)).unwrap_or_default()
+    }
     fn caps(&self) -> DriverCaps {
         let pack = (self.pack)();
         DriverCaps {
@@ -405,8 +433,13 @@ impl LanguageDriver for PackDriver {
             pack_invalidation: true,
             cross_file_words: true,
             entrypoint_symbols: pack.entrypoint_symbols,
+            runtime_invoked_methods: pack.runtime_invoked_methods,
+            // declared by the pack's call shapes — no shapes, no verb
+            pack_signature_help: !pack.call_shapes.is_empty(),
             include_path_tokens: pack.include_path_tokens,
             preprocessor_macros: pack.preprocessor_macros,
+            // The verb walks tree ancestors — no language in it.
+            selection_range: true,
             ..Default::default()
         }
     }
@@ -451,9 +484,13 @@ impl PackDriver {
                 // assembly consumes `skel` so phase 7 can interpret it against
                 // the FINAL FileAnalysis.
                 let return_sites = std::mem::take(&mut skel.return_sites);
+                let key_defs = std::mem::take(&mut skel.key_defs);
                 let mut fa = skel.into_file_analysis();
                 emit_return_fuel(&mut fa, &return_sites, pack.implicit_this_members);
-                self.register_post_build(&mut fa, &mut parser, source, path, &ctx, &recovered, macro_defs);
+                self.register_post_build(&mut fa, &mut parser, source, path, &ctx, &recovered, macro_defs, &pack);
+                if let Some(p) = path {
+                    adopt_path_rails(&mut fa, p, &key_defs, &pack);
+                }
                 fa
             }
             Err(e) => {
@@ -620,9 +657,24 @@ impl PackDriver {
         ctx: &PackContext,
         recovered: &[(String, String)],
         macro_defs: Vec<crate::model::file_analysis::MacroDef>,
+        pack: &crate::build::query_extract::LangPack,
     ) {
         fa.pack.macro_defs = macro_defs;
         apply_attribute_macros(fa, recovered);
+        // Text rails: a file the grammar reads as text (a Blade template)
+        // still USES rail names — scanned as text, minted as the same
+        // DispatchCall refs a parsed `route('x')` gets, so references,
+        // rename and the undefined-name lane reach templates.
+        if let Some(p) = path {
+            let rails = crate::build::query_extract::text_rails_for(pack);
+            let p_str = p.to_string_lossy();
+            let applicable: Vec<&crate::build::query_extract::TextRail> =
+                rails.iter().filter(|r| r.files.iter().any(|suffix| p_str.ends_with(suffix.as_str()))).collect();
+            if !applicable.is_empty() {
+                let refs = scan_text_rails(fa, source, &applicable);
+                fa.adopt_text_refs(refs);
+            }
+        }
         // Access-specifier regions: a fresh parse of the ORIGINAL source
         // (spans already in original coords, no remap needed) tags each
         // member symbol non-public when its declaration falls under
@@ -653,6 +705,177 @@ impl PackDriver {
     }
 }
 
+/// Path rails: a file under a rail's directory DEFINES a name derived
+/// from its path (`resources/views/a/b.blade.php` → `a.b` on the view
+/// rail, a Handler at the file's first position so goto-def lands at the
+/// top), or — with `keys` — the prefix its returned array's string keys
+/// extend (`config/app.php` → `app.name`, nested keys dotted, each a
+/// Handler on the key token). Same Handler identity as every rail, so
+/// references, rename (string rails only) and the undefined-name lane
+/// come by construction.
+fn adopt_path_rails(
+    fa: &mut FileAnalysis,
+    path: &Path,
+    key_defs: &[crate::build::query_extract::KeyDef],
+    pack: &crate::build::query_extract::LangPack,
+) {
+    use crate::model::file_analysis::{HandlerOwner, Span};
+    use tree_sitter::Point;
+    let p = path.to_string_lossy().replace('\\', "/");
+    let rails = crate::build::query_extract::path_rails_for(pack);
+    let mut minted: Vec<(String, String, Span)> = Vec::new(); // (rail, name, span)
+
+    for rail in rails.iter() {
+        let Some(idx) = p.rfind(rail.under.as_str()) else { continue };
+        if rail.methods {
+            // the file's methods ARE the names (a policy's abilities); the
+            // Handler sits on the method's name token
+            for s in fa.symbols() {
+                if matches!(s.kind, crate::model::file_analysis::SymKind::Method) {
+                    minted.push((rail.rail.clone(), s.name.clone(), s.selection_span));
+                }
+            }
+            continue;
+        }
+        let rest = &p[idx + rail.under.len()..];
+        let mut segs: Vec<&str> = rest.split('/').filter(|s| !s.is_empty()).collect();
+        if segs.len() <= rail.skip {
+            continue;
+        }
+        segs.drain(..rail.skip);
+        let Some(last) = segs.last_mut() else { continue };
+        let Some(stem) = last.strip_suffix(rail.strip.as_str()) else { continue };
+        *last = stem;
+        let name = segs.join(rail.sep.as_str());
+        if name.is_empty() {
+            continue;
+        }
+        if !rail.keys {
+            let at = Span { start: Point { row: 0, column: 0 }, end: Point { row: 0, column: 0 } };
+            minted.push((rail.rail.clone(), name, at));
+            continue;
+        }
+        // keys: the dotted chain of enclosing elements' keys, then this key
+        for k in key_defs {
+            // outermost first: wider containers start earlier and end later
+            let mut ancestors: Vec<&crate::build::query_extract::KeyDef> = key_defs
+                .iter()
+                .filter(|o| o.elem_span != k.elem_span && o.elem_span.contains(&k.elem_span))
+                .collect();
+            ancestors.sort_by(|a, b| {
+                (a.elem_span.start.row, a.elem_span.start.column)
+                    .cmp(&(b.elem_span.start.row, b.elem_span.start.column))
+                    .then((b.elem_span.end.row, b.elem_span.end.column).cmp(&(a.elem_span.end.row, a.elem_span.end.column)))
+            });
+            let mut full = name.clone();
+            for a in ancestors {
+                full.push_str(rail.sep.as_str());
+                full.push_str(&a.key);
+            }
+            full.push_str(rail.sep.as_str());
+            full.push_str(&k.key);
+            minted.push((rail.rail.clone(), full, k.key_span));
+        }
+    }
+    if minted.is_empty() {
+        return;
+    }
+    let symbols: Vec<crate::model::file_analysis::Symbol> = minted
+        .into_iter()
+        .map(|(rail, name, span)| crate::model::file_analysis::Symbol {
+            id: crate::model::file_analysis::SymbolId(0),
+            name,
+            kind: crate::model::file_analysis::SymKind::Handler,
+            span,
+            selection_span: span,
+            scope: crate::model::file_analysis::ScopeId(0),
+            package: None,
+            detail: crate::model::file_analysis::SymbolDetail::Handler {
+                owner: HandlerOwner::Rail(rail),
+                dispatchers: Vec::new(),
+                params: Vec::new(),
+            },
+            namespace: crate::model::file_analysis::Namespace::Language,
+            presentation: crate::model::file_analysis::Presentation { hide_in_outline: true, ..Default::default() },
+            attributes: Vec::new(),
+            deref_stack: Vec::new(),
+            arity: None,
+        })
+        .collect();
+    fa.adopt_path_symbols(symbols);
+}
+
+/// `name('literal'` occurrences of a text rail's calls, as DispatchCall refs
+/// on the rail. A parsed region (`<?php echo route('x') ?>` inside a
+/// template) already minted its ref — a text hit at the same start yields
+/// to it. Only the single-quoted, escape-free literal spelling is a name.
+pub(crate) fn scan_text_rails(
+    fa: &FileAnalysis,
+    source: &str,
+    rails: &[&crate::build::query_extract::TextRail],
+) -> Vec<crate::model::file_analysis::Ref> {
+    use crate::model::file_analysis::{AccessKind, HandlerOwner, Ref, RefBinding, RefKind, ScopeId, Span};
+    let taken: std::collections::HashSet<(usize, usize)> = fa
+        .refs()
+        .iter()
+        .filter(|r| matches!(r.kind, RefKind::DispatchCall { .. }))
+        .map(|r| (r.span.start.row, r.span.start.column))
+        .collect();
+    let bytes = source.as_bytes();
+    let ident = |b: u8| b.is_ascii_alphanumeric() || b == b'_' || b == b'$' || b == b'\\';
+    let mut out = Vec::new();
+    for rail in rails {
+        for call in &rail.calls {
+            let mut from = 0;
+            while let Some(pos) = source[from..].find(call.as_str()).map(|i| i + from) {
+                from = pos + call.len();
+                if pos > 0 && ident(bytes[pos - 1]) {
+                    continue;
+                }
+                let mut i = pos + call.len();
+                while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+                    i += 1;
+                }
+                if i >= bytes.len() || bytes[i] != b'(' {
+                    continue;
+                }
+                i += 1;
+                while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+                    i += 1;
+                }
+                if i >= bytes.len() || bytes[i] != b'\'' {
+                    continue;
+                }
+                let start = i + 1;
+                let Some(len) = source[start..].find('\'') else { continue };
+                let name = &source[start..start + len];
+                if name.is_empty() || name.contains('\\') || name.chars().any(char::is_whitespace) {
+                    continue;
+                }
+                if rail.requires.as_deref().is_some_and(|sub| !name.contains(sub)) {
+                    continue;
+                }
+                let s = crate::build::cursor_sentinel::byte_to_point(source, start);
+                if taken.contains(&(s.row, s.column)) {
+                    continue;
+                }
+                let e = crate::build::cursor_sentinel::byte_to_point(source, start + len);
+                out.push(Ref {
+                    kind: RefKind::DispatchCall { dispatcher: call.clone() },
+                    span: Span { start: s, end: e },
+                    scope: ScopeId(0),
+                    target_name: name.to_string(),
+                    access: AccessKind::Read,
+                    binding: Some(RefBinding::Handler { owner: HandlerOwner::Rail(rail.rail.clone()), sym: None }),
+                    folded_from: None,
+                    arg_count: None,
+                });
+            }
+        }
+    }
+    out
+}
+
 #[cfg(feature = "cpp")]
 fn cpp_driver() -> PackDriver {
     PackDriver {
@@ -678,6 +901,7 @@ fn cpp_driver() -> PackDriver {
         input_fingerprint: Some(crate::build::cpp_reparse::toolchain_fingerprint),
         sniff: Some(crate::build::cpp_reparse::looks_like_c_family),
         access_regions: Some(crate::build::cpp_reparse::access_regions),
+        dependency_roots: None,
     }
 }
 
@@ -702,6 +926,7 @@ fn python_driver() -> PackDriver {
         input_fingerprint: None,
         sniff: None,
         access_regions: None,
+        dependency_roots: None,
     }
 }
 
@@ -726,6 +951,7 @@ fn r_driver() -> PackDriver {
         input_fingerprint: None,
         sniff: None,
         access_regions: None,
+        dependency_roots: None,
     }
 }
 
@@ -751,6 +977,7 @@ fn cmake_driver() -> PackDriver {
         input_fingerprint: None,
         sniff: None,
         access_regions: None,
+        dependency_roots: None,
     }
 }
 
@@ -883,10 +1110,14 @@ fn inject_member_blocks(
                 package: Some(base.macro_name.clone()),
                 scope: scope_id,
                 return_type: None,
+                receiver_return: false,
+            receiver_instance_of: None,
                 deref_stack: m.deref_stack.clone(),
                 attributes: Vec::new(),
                 arity: None,
                 qualifier_owned: false,
+                doc: None,
+                deprecation: None,
             });
             // The role member emits the SAME `TypeName` edge an expanded field
             // does — the edge is canonical (the hover leaf + the type chase
@@ -1029,27 +1260,58 @@ fn emit_return_fuel(
                 .map(|sym| (s.id, sym.id))
         })
         .collect();
+    let mut gate: HashMap<SymbolId, Option<&'static str>> = HashMap::new();
+    let mut chained: std::collections::HashSet<SymbolId> = std::collections::HashSet::new();
     for (ret_scope, ret_span) in return_sites {
         let owner = std::iter::successors(Some(*ret_scope), |sc| {
             scope_parent.get(sc).copied().flatten()
         })
         .find_map(|sc| scope_to_symbol.get(&sc).copied());
         let Some(sid) = owner else { continue };
-        if !fa.witnesses.for_attachment(&WA::Symbol(sid)).is_empty() {
-            continue; // a declared return already carries its own witness
-        }
+        // The per-function gate is decided ONCE, on the first return site
+        // seen for that function, from the bag as the walk left it — this
+        // loop writes the very `Symbol` witnesses the gate reads, so a live
+        // read would let the first arm block every later one (a two-return
+        // function typed by its first return only). `None` = declared,
+        // leave alone; `Some(tag)` = chain the arms under that source. A
+        // BARE declared container (`: array`) is the one declaration the
+        // returned value may refine (a tuple literal / a keyed shape): its
+        // chain rides at annot priority so the refinement beats the annot
+        // (docs/adr/destructuring.md).
+        let chain_source = *gate.entry(sid).or_insert_with(|| {
+            let existing = fa.witnesses.for_attachment(&WA::Symbol(sid));
+            if existing.is_empty() {
+                Some("cpp_return_arm_chain")
+            } else if existing.iter().all(|w| {
+                matches!(
+                    &w.payload,
+                    WP::InferredType(
+                        crate::model::file_analysis::InferredType::HashRef
+                            | crate::model::file_analysis::InferredType::ArrayRef
+                    )
+                )
+            }) {
+                Some(crate::model::witnesses::REFINE_SOURCE)
+            } else {
+                None
+            }
+        });
+        let Some(chain_source) = chain_source else { continue };
         fa.witnesses.push(Witness {
             attachment: WA::SymbolReturnArm(sid),
             source: WitnessSource::Builder("cpp_return_arm".into()),
             payload: WP::Edge(WA::Expr(*ret_span)),
             span: *ret_span,
         });
-        fa.witnesses.push(Witness {
-            attachment: WA::Symbol(sid),
-            source: WitnessSource::Builder("cpp_return_arm_chain".into()),
-            payload: WP::Edge(WA::SymbolReturnArm(sid)),
-            span: *ret_span,
-        });
+        // One chain edge per function; the arms accumulate under it.
+        if chained.insert(sid) {
+            fa.witnesses.push(Witness {
+                attachment: WA::Symbol(sid),
+                source: WitnessSource::Builder(chain_source.into()),
+                payload: WP::Edge(WA::SymbolReturnArm(sid)),
+                span: *ret_span,
+            });
+        }
     }
 
     if !implicit_this_members {
@@ -1199,13 +1461,49 @@ fn remap_spans(
         scopes,
         witnesses,
         parents: _,
+        // FQ rows — leaf/ns strings, no spans to remap.
+        parent_namespaces: _,
+        use_aliases: _,
+        qualified_spellings: _,
         var_reads,
         label_refs,
         receiver_names: _,
+        implicit_variables: _,
+        throwaway_names: _,
+        catch_all_methods: _,
+        class_literal_member: _,
+        types_are_capitalized: _,
+        enum_members: _,
+        member_writes,
+        import_rows,
+        import_template: _,
+        contract_stub: _,
+        return_annotation_template: _,
+        native_type_spellings: _,
+        static_property_sigil: _,
+        rail_labels: _,
+        rail_hints: _,
+        rail_name_seps: _,
+        annot_expr_spans: _,
+        preamble_end: _,
+        imports_bind_names: _,
+        member_shapes_are_strict: _,
+        members_are_package_bound: _,
+        doc_mentions: _,
+        // language-wide facts, no spans to remap.
+        function_scoped_vars: _,
+        constructor_names: _,
+        type_display: _,
         flow_edges,
         moved_from,
         control_regions,
         param_regions,
+        probe_regions,
+        variable_arg_sites,
+        fold_regions,
+        rails,
+        class_rails,
+        key_defs,
         domain_sites,
         macro_returns: _,
         // Populated in enrich_skeleton (post-remap) already in original coords.
@@ -1224,6 +1522,7 @@ fn remap_spans(
         let crate::build::query_extract::SkelSymbol {
             kind: _,
             name: _,
+            receiver_instance_of: _,
             start,
             end,
             name_start,
@@ -1231,10 +1530,13 @@ fn remap_spans(
             package: _,
             scope: _,
             return_type: _,
+            receiver_return: _,
             deref_stack: _,
             attributes: _,
             arity: _,
             qualifier_owned: _,
+            doc: _,
+            deprecation: _,
         } = s;
         *start = r(*start);
         *end = r(*end);
@@ -1249,6 +1551,7 @@ fn remap_spans(
     }
     for rf in refs.iter_mut() {
         let crate::build::query_extract::SkelRef {
+            via: _,
             kind: _,
             name: _,
             start,
@@ -1257,6 +1560,8 @@ fn remap_spans(
             invocant,
             member_op,
             arg_count: _,
+            shape: _,
+            named_by_string: _,
         } = rf;
         (*start, *end) = remap_span(*start, *end);
         // The invocant span is consumed via `expr_type_at_span` (member
@@ -1270,6 +1575,14 @@ fn remap_spans(
         }
     }
     for (_, _, span) in var_reads.iter_mut() {
+        *span = rspan(*span);
+    }
+    // Member-write spans are matched against ref spans in
+    // `into_file_analysis` — original coords, like everything it joins.
+    for span in member_writes.iter_mut() {
+        *span = rspan(*span);
+    }
+    for span in import_rows.iter_mut() {
         *span = rspan(*span);
     }
     // Call-site spans feed the call-value edge (`into_file_analysis`, after
@@ -1337,6 +1650,26 @@ fn remap_spans(
     }
     for span in param_regions.iter_mut() {
         *span = rspan(*span);
+    }
+    for span in probe_regions.iter_mut() {
+        *span = rspan(*span);
+    }
+    for site in variable_arg_sites.iter_mut() {
+        site.var = rspan(site.var);
+        site.args = rspan(site.args);
+    }
+    for (span, _) in fold_regions.iter_mut() {
+        *span = rspan(*span);
+    }
+    for (span, _) in rails.iter_mut() {
+        *span = rspan(*span);
+    }
+    for (span, _) in class_rails.iter_mut() {
+        *span = rspan(*span);
+    }
+    for k in key_defs.iter_mut() {
+        k.key_span = rspan(k.key_span);
+        k.elem_span = rspan(k.elem_span);
     }
     for ds in domain_sites.iter_mut() {
         let crate::model::file_analysis::DomainSite { slot: _, value: _, slot_span } = ds;
@@ -1566,6 +1899,51 @@ impl LanguageRegistry {
             .any(|l| *l == id)
     }
 
+    /// The visibility routing fact for `id`'s language
+    /// (`VisibilityAxis::for_origin`): include-path packs scope by their
+    /// include closure, name-keyed packs have no closure to scope by, the
+    /// host derives its search path. Read from the pack's own
+    /// `include_path_tokens` declaration — never a language-name branch.
+    /// Memoized like `is_pack_language`.
+    /// The classes a language provides in its global namespace — the
+    /// pack's `builtin_types`; empty for a language without a pack.
+    pub fn builtin_types(id: &str) -> &'static [&'static str] {
+        static TYPES: std::sync::OnceLock<Vec<(&'static str, &'static [&'static str])>> =
+            std::sync::OnceLock::new();
+        TYPES
+            .get_or_init(|| {
+                LanguageRegistry::with_enabled()
+                    .drivers
+                    .iter()
+                    .filter_map(|d| d.lang_pack().map(|p| (d.id(), p.builtin_types)))
+                    .collect()
+            })
+            .iter()
+            .find(|(l, _)| *l == id)
+            .map(|(_, t)| *t)
+            .unwrap_or(&[])
+    }
+
+    pub fn pack_visibility(id: &str) -> crate::model::file_analysis::PackVisibility {
+        use crate::model::file_analysis::PackVisibility;
+        static LINKAGE: std::sync::OnceLock<Vec<(&'static str, bool)>> =
+            std::sync::OnceLock::new();
+        LINKAGE
+            .get_or_init(|| {
+                LanguageRegistry::with_enabled()
+                    .drivers
+                    .iter()
+                    .filter_map(|d| d.lang_pack().map(|p| (d.id(), p.include_path_tokens)))
+                    .collect()
+            })
+            .iter()
+            .find(|(l, _)| *l == id)
+            .map(|(_, inc)| {
+                if *inc { PackVisibility::IncludePaths } else { PackVisibility::NameKeyed }
+            })
+            .unwrap_or(PackVisibility::Host)
+    }
+
     /// The declared capabilities of `id`'s driver — THE generic capability
     /// asker (the collapse the two-boolean ceiling in docs/PARKED.md
     /// called for). An id no driver claims answers `DriverCaps::default()`
@@ -1624,6 +2002,7 @@ impl LanguageRegistry {
 
     /// Every id this build can serve — the feature-dependent set, so a caller
     /// enumerating languages never carries its own list to drift.
+    #[cfg(test)]
     pub fn ids(&self) -> Vec<&'static str> {
         self.drivers.iter().map(|d| d.id()).collect()
     }
@@ -1637,6 +2016,7 @@ impl LanguageRegistry {
         match id {
             "cpp" => "C/C++",
             "python" => "Python",
+            "php" => "PHP",
             "r" => "R",
             "cmake" => "CMake",
             _ => id,

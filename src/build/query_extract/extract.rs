@@ -71,7 +71,7 @@ pub(crate) fn peel<'a>(
 
 pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAnalysis, String> {
     let language = tree.language();
-    let query = cached_query(&language, pack.query_source)?;
+    let query = cached_query(&language, effective_query_source(&language, pack))?;
     let cap_names: Vec<String> = query
         .capture_names()
         .iter()
@@ -94,11 +94,24 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     // `@arity.args`.
     let mut arg_counts_by_start: std::collections::HashMap<(usize, usize), usize> =
         std::collections::HashMap::new();
+    // `f(...)` sites: a call with no countable arguments — still a call.
+    let mut placeholder_call_at: std::collections::HashSet<(usize, usize)> = std::collections::HashSet::new();
+    // The same facts keyed by the MATCH that captured the callee alongside
+    // its list: the call pattern joins the two, so `$this->m (1)` — a space
+    // before the parentheses — is still a call. Adjacency stays the fallback
+    // for shapes whose list lands in another match.
+    let mut arg_counts_by_match: HashMap<usize, usize> = HashMap::new();
+    let mut placeholder_by_match: std::collections::HashSet<usize> = Default::default();
     // A callable's declared parameter arity, keyed by the parameter_list span.
     // Associated to its def symbol by span containment in `into_file_analysis`
     // (`@arity.sig` fires a separate match from the def name).
     let mut param_sigs: Vec<(crate::model::file_analysis::Span, crate::model::file_analysis::ParamArity)> =
         Vec::new();
+    // A bare variable written as a call argument, with its position: the
+    // undefined-variable lane asks the callee whether that position binds
+    // (`ParamArity::binds_arg`). Only a language that declares variables by
+    // assignment (`implicit_variables` declared) has a lane to feed.
+    let mut variable_arg_sites: Vec<crate::model::file_analysis::ArgSite> = Vec::new();
     let mut cursor = QueryCursor::new();
     let mut matches = cursor.matches(query, tree.root_node(), source);
     let mut match_counter = 0usize;
@@ -209,9 +222,55 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
             // named children; the C `...` at a CALL site never appears here).
             // Keyed by the list's start so the callee ref finds it by adjacency.
             if cap == "arity.args" {
-                arg_counts_by_start
-                    .insert((node.start_position().row, node.start_position().column),
-                            node.named_child_count());
+                // `f(...)` passes nothing — a first-class callable, not a call;
+                // `f(...$args)` passes an unknowable number. Neither mints a
+                // count: the callee still reads as callable, the arity lane
+                // stands down.
+                let placeholder = (0..node.named_child_count())
+                    .filter_map(|i| node.named_child(i))
+                    .any(|c| {
+                        (!pack.callable_placeholder_kind.is_empty()
+                            && c.kind() == pack.callable_placeholder_kind)
+                            // the spread sits inside an `argument` wrapper
+                            || (!pack.spread_arg_kind.is_empty()
+                                && (c.kind() == pack.spread_arg_kind
+                                    || c.named_child(0).is_some_and(|g| g.kind() == pack.spread_arg_kind)))
+                    });
+                if !placeholder {
+                    arg_counts_by_start
+                        .insert((node.start_position().row, node.start_position().column),
+                                node.named_child_count());
+                    arg_counts_by_match.insert(match_counter, node.named_child_count());
+                    if !pack.implicit_variables.is_empty() {
+                        let args_span = crate::model::file_analysis::Span {
+                            start: node.start_position(),
+                            end: node.end_position(),
+                        };
+                        for (position, arg) in
+                            (0..node.named_child_count()).filter_map(|i| node.named_child(i)).enumerate()
+                        {
+                            // a named argument (`f(out: $x)`) is matched by
+                            // name, not position — no site
+                            if arg.child_by_field_name("name").is_some() || arg.named_child_count() != 1 {
+                                continue;
+                            }
+                            let Some(inner) = arg.named_child(0) else { continue };
+                            if pack.simple_var_kinds.contains(&inner.kind()) {
+                                variable_arg_sites.push(crate::model::file_analysis::ArgSite {
+                                    var: crate::model::file_analysis::Span {
+                                        start: inner.start_position(),
+                                        end: inner.end_position(),
+                                    },
+                                    args: args_span,
+                                    position: position as u32,
+                                });
+                            }
+                        }
+                    }
+                } else {
+                    placeholder_call_at.insert((node.start_position().row, node.start_position().column));
+                    placeholder_by_match.insert(match_counter);
+                }
                 continue;
             }
             // `@arity.sig`: a callable's parameter_list — count declared params
@@ -223,12 +282,28 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                 let mut total = 0usize;
                 let mut required = 0usize;
                 let mut variadic = false;
+                let mut by_ref = 0u64;
                 let mut c = node.walk();
                 for ch in node.children(&mut c) {
                     match ch.kind() {
                         "parameter_declaration" => { total += 1; required += 1; }
                         "optional_parameter_declaration" => { total += 1; }
-                        "variadic_parameter_declaration" | "..." => variadic = true,
+                        // PHP: a parameter with a default is optional; a
+                        // promoted ctor param still counts toward arity; a
+                        // `reference_modifier` makes the position an
+                        // out-parameter the argument lane binds through.
+                        "simple_parameter" | "property_promotion_parameter" => {
+                            if total < 64 && ch.child_by_field_name("reference_modifier").is_some() {
+                                by_ref |= 1u64 << total;
+                            }
+                            total += 1;
+                            if ch.child_by_field_name("default_value").is_none() {
+                                required += 1;
+                            }
+                        }
+                        "variadic_parameter_declaration" | "variadic_parameter" | "..." => {
+                            variadic = true
+                        }
                         _ => {}
                     }
                 }
@@ -237,7 +312,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                         start: node.start_position(),
                         end: node.end_position(),
                     },
-                    crate::model::file_analysis::ParamArity { total, required, variadic, by_ref: 0 },
+                    crate::model::file_analysis::ParamArity { total, required, variadic, by_ref },
                 ));
                 continue;
             }
@@ -278,6 +353,23 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     // ---- join def name-captures to their def event ----
     use std::collections::HashMap;
     let mut names_by_match: HashMap<(usize, String), (String, Point, Point)> = HashMap::new();
+    // `@def.<kind>.anchor` — a name-less def's anchor token (php's `class`
+    // keyword): the pack synthesizes the name from the position, and the
+    // match joins it like a `.name` capture so the def, its `@context`
+    // and its `@parent` edges all read ONE identity.
+    let mut defaulted_matches: HashMap<usize, String> = HashMap::new();
+    // Spans a `variable_name` read pattern must NOT mint as reads: a
+    // static property's `$name` (`Foo::$bar` — a member, `@var.member`) and
+    // any declaration's own name token (a property `$chunks`, a parameter).
+    let mut not_a_read: std::collections::HashSet<(usize, usize)> = std::collections::HashSet::new();
+    let mut def_name_ends: std::collections::HashSet<usize> = std::collections::HashSet::new();
+    // `@hoist` — the same match's def belongs to the PARENT of the scope
+    // the capture sits in (php's by-reference closure capture creates
+    // the variable in the enclosing scope).
+    let mut hoisted: std::collections::HashSet<usize> = std::collections::HashSet::new();
+    // `@member.write` — a member on the LEFT of an assignment (php's
+    // dynamic property declaration site).
+    let mut member_writes: Vec<Span> = Vec::new();
     // `@qualifier` (a `Class::` on an out-of-line def) and `@rettype` (a
     // method's declared return type) — pre-collected like names because the
     // `@def` event fires before these inner captures.
@@ -294,10 +386,73 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     // span; joined to `@ref.member` so op-DX rides the minted ref.
     let mut member_op_raw: HashMap<usize, (crate::model::file_analysis::MemberOp, crate::model::file_analysis::Span)> =
         HashMap::new();
+    // `@hop.call` → the WHOLE member-call expression's span, joined to its
+    // `@ref.member` so the chain-hop witness (`Projected{base, MethodHop}`)
+    // attaches where an OUTER call's receiver span will look for it.
+    let mut hop_call_by_match: HashMap<usize, crate::model::file_analysis::Span> = HashMap::new();
+    // `@dispatch.via` — the dispatching function's name token (`do_action`),
+    // joined to the same match's `@ref.dispatch.named` string as the minted
+    // DispatchCall's `dispatcher` label.
+    let mut dispatch_via_by_match: HashMap<usize, String> = HashMap::new();
+    // `@handler.name` — the token whose TEXT names a `@def.handler.by.<rail>`
+    // handler in the same match (a listener's `handle(X $e)` is a handler
+    // named `X` sitting on the method's name token).
+    let mut handler_name_by_match: HashMap<usize, String> = HashMap::new();
+    // `@key.elem` — the array element a `@def.handler.key` string heads.
+    let mut key_elem_by_match: HashMap<usize, Span> = HashMap::new();
+    // `@seq.source` — a foreach's collection (span + text), joined to the
+    // same match's `@def.var` so the bound var carries the ELEMENT peel;
+    // `@seq.source.key` is the pair form's KEY twin (the Key step).
+    let mut seq_source_by_match: HashMap<usize, (crate::model::file_analysis::Span, String)> =
+        HashMap::new();
+    let mut seq_key_by_match: HashMap<usize, (crate::model::file_analysis::Span, String)> =
+        HashMap::new();
+    // `@nonpublic.target` — def NAME spans whose member carries an access
+    // modifier meaning non-public (the vocabulary lives in the query's
+    // #any-of?). Joined to symbols by name span in a post-pass, stamping
+    // the same `non_public` attribute cpp access regions stamp.
+    // `@static.target` — def NAME spans of `static` members (the "static"
+    // attribute a scoped completion reads).
+    let mut static_name_spans: std::collections::HashSet<(Point, Point)> = std::collections::HashSet::new();
+    // `@alias.target` — a variable declared by reference assignment
+    // (`$h = &$opts['h']`): the `alias` attribute, a write through which is
+    // a use of the storage it names. Keyed by the name token's END: the
+    // capture sits on the sigil-less inner name the def's `$name` wraps.
+    let mut alias_name_ends: std::collections::HashSet<Point> = std::collections::HashSet::new();
+    // `@contract.target` — def NAME spans of contract callables (an
+    // interface's methods, an abstract method): a `contract` attribute, the
+    // requires of the role the declaring container is.
+    let mut contract_name_spans: std::collections::HashSet<(Point, Point)> = std::collections::HashSet::new();
+    let mut nonpublic_name_spans: std::collections::HashSet<(Point, Point)> =
+        std::collections::HashSet::new();
+    // `@classattr.<flavor>` — container-def name spans stamped with a
+    // flavor attribute ("interface"/"trait"): the model's SymKind::Class
+    // covers all three php container kinds, and SUPER/reference walks
+    // need to ask the value which one it is.
+    let mut classattr_by_name_span: HashMap<(Point, Point), String> = HashMap::new();
     for e in &events {
         if let Some(prefix) = e.cap.strip_suffix(".name") {
             names_by_match
                 .insert((e.match_id, prefix.to_string()), (e.text.clone(), e.start, e.end));
+        }
+        if e.cap == "var.member" || e.cap.ends_with(".name") {
+            not_a_read.insert((e.start_byte, e.end_byte));
+            // a declaration's name token is nested in the `$name` a read
+            // pattern also matches: same END byte, never a read
+            def_name_ends.insert(e.end_byte);
+        }
+        if e.cap == "member.write" {
+            member_writes.push(Span { start: e.start, end: e.end });
+        }
+        if e.cap == "hoist" {
+            hoisted.insert(e.match_id);
+        }
+        if let Some(prefix) = e.cap.strip_suffix(".anchor") {
+            let kind = prefix.strip_prefix("def.").unwrap_or(prefix);
+            if let Some(n) = (pack.default_name)(kind, e.start.row, e.start.column) {
+                names_by_match.insert((e.match_id, prefix.to_string()), (n.clone(), e.start, e.end));
+                defaulted_matches.insert(e.match_id, n);
+            }
         }
         if e.cap == "qualifier" {
             qualifier_by_match.insert(e.match_id, e.text.clone());
@@ -307,6 +462,54 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
         }
         if e.cap == "sym.attr" {
             attrs_by_match.entry(e.match_id).or_default().push(e.text.clone());
+        }
+        if e.cap == "hop.call" {
+            hop_call_by_match.insert(
+                e.match_id,
+                crate::model::file_analysis::Span { start: e.start, end: e.end },
+            );
+        }
+        if e.cap == "dispatch.via" {
+            dispatch_via_by_match.insert(e.match_id, e.text.clone());
+        }
+        if e.cap == "handler.name" {
+            handler_name_by_match.insert(e.match_id, e.text.clone());
+        }
+        if e.cap == "key.elem" {
+            key_elem_by_match.insert(e.match_id, Span { start: e.start, end: e.end });
+        }
+        if e.cap == "seq.source.key" {
+            seq_key_by_match.insert(
+                e.match_id,
+                (
+                    crate::model::file_analysis::Span { start: e.start, end: e.end },
+                    e.text.clone(),
+                ),
+            );
+        }
+        if e.cap == "static.target" {
+            static_name_spans.insert((e.start, e.end));
+        }
+        if e.cap == "alias.target" {
+            alias_name_ends.insert(e.end);
+        }
+        if e.cap == "contract.target" {
+            contract_name_spans.insert((e.start, e.end));
+        }
+        if e.cap == "nonpublic.target" {
+            nonpublic_name_spans.insert((e.start, e.end));
+        }
+        if let Some(flavor) = e.cap.strip_prefix("classattr.") {
+            classattr_by_name_span.insert((e.start, e.end), flavor.to_string());
+        }
+        if e.cap == "seq.source" {
+            seq_source_by_match.insert(
+                e.match_id,
+                (
+                    crate::model::file_analysis::Span { start: e.start, end: e.end },
+                    e.text.clone(),
+                ),
+            );
         }
     }
     // `@ns.inline` — an inline namespace's NAME token, fired by a name-only
@@ -385,10 +588,125 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     }
     let mut annot_text_by_var: HashMap<(String, crate::model::file_analysis::ScopeId), String> =
         HashMap::new();
+    // ---- the file's use-map + written parent qualifiers ----
+    // `binding leaf (or alias) → (namespace, real leaf)`, from the `@use.*`
+    // captures; `@parent.fq` carries a parent's own written qualifier. Both
+    // feed the namespace-relative parent resolution in the `@parent` handler
+    // (packs with `namespace_relative_parents` only — empty otherwise).
+    let mut out_use_aliases: Vec<(String, String, String)> = Vec::new();
+    let mut use_map: HashMap<String, (String, String)> = HashMap::new();
+    let mut group_import_sites: Vec<(String, Span)> = Vec::new();
+    let mut parent_fq_by_match: HashMap<usize, String> = HashMap::new();
+    // `@ref.qualified`: the WRITTEN qualifier of a call/ctor/type/parent
+    // spelling (`Downloader\DownloadManager`, `\A\B`) — the use-map pins
+    // the leaf to that namespace instead of counting it as a bare spelling.
+    // `@expr.ctor` matches: a `new self(...)` / `new static(...)` names the
+    // ENCLOSING class, so its ctor ref carries that class's name (the
+    // references and heatmap key), not the literal token.
+    let ctor_matches: std::collections::HashSet<usize> = events
+        .iter()
+        .filter(|e| e.cap == "expr.ctor")
+        .map(|e| e.match_id)
+        .collect();
+    let qualified_by_match: HashMap<usize, String> = events
+        .iter()
+        .filter(|e| e.cap == "ref.qualified")
+        .map(|e| (e.match_id, e.text.clone()))
+        .collect();
+    if pack.namespace_relative_parents {
+        let mut use_fqn: HashMap<usize, String> = HashMap::new();
+        let mut use_prefix: HashMap<usize, String> = HashMap::new();
+        let mut use_leaf: HashMap<usize, (String, Span)> = HashMap::new();
+        let mut use_alias: HashMap<usize, String> = HashMap::new();
+        for e in &events {
+            match e.cap.as_str() {
+                "use.fqn" => {
+                    use_fqn.insert(e.match_id, e.text.clone());
+                }
+                "use.prefix" => {
+                    use_prefix.insert(e.match_id, e.text.clone());
+                }
+                "use.leaf" => {
+                    use_leaf.insert(e.match_id, (e.text.clone(), Span { start: e.start, end: e.end }));
+                }
+                "use.alias" => {
+                    use_alias.insert(e.match_id, e.text.clone());
+                }
+                "parent.fq" => {
+                    parent_fq_by_match.insert(e.match_id, e.text.clone());
+                }
+                _ => {}
+            }
+        }
+        for (mid, fqn) in &use_fqn {
+            let (leaf, ns) = split_ns_leaf(fqn);
+            let key = use_alias.get(mid).cloned().unwrap_or_else(|| leaf.clone());
+            if use_alias.contains_key(mid) {
+                out_use_aliases.push((key.clone(), ns.clone(), leaf.clone()));
+            }
+            use_map.insert(key, (ns, leaf));
+        }
+        // group form: `use A\B\{C, D as E}` — the prefix is the namespace,
+        // each clause's own name the leaf.
+        for (mid, (leaf, span)) in &use_leaf {
+            let Some(prefix) = use_prefix.get(mid) else { continue };
+            let key = use_alias.get(mid).cloned().unwrap_or_else(|| leaf.clone());
+            let ns = prefix.trim_start_matches('\\').to_string();
+            if use_alias.contains_key(mid) {
+                out_use_aliases.push((key.clone(), ns.clone(), leaf.clone()));
+            }
+            // A group clause is an import row like any flat one: the same
+            // `include_directives` row (spelled in full, spanning the leaf
+            // token) feeds the use-map pin and the row-namespace lanes.
+            group_import_sites.push((format!("{ns}\\{leaf}"), *span));
+            use_map.insert(key, (ns, leaf.clone()));
+        }
+    }
 
     // ---- the state machine: scope stack + sticky contexts ----
     let mut out = SkeletonAnalysis::default();
+    // One constructor call per anonymous-class keyword: the def pattern
+    // and each parent pattern share the token.
+    let mut anon_ctor_sites: std::collections::HashSet<(usize, usize)> =
+        std::collections::HashSet::new();
+    out.use_aliases = out_use_aliases;
+    // Group rows land ahead of the flat rows the main loop pushes in
+    // document order; every reader of these lanes is span- or map-keyed,
+    // so the order carries no meaning — do not make a consumer assume it.
+    for (raw, span) in group_import_sites {
+        out.imports.push(raw.clone());
+        out.import_sites.push((raw, span));
+    }
     out.receiver_names = pack.receiver_names.iter().map(|s| s.to_string()).collect();
+    out.implicit_variables = pack.implicit_variables.iter().map(|s| s.to_string()).collect();
+    out.throwaway_names = pack.throwaway_names.iter().map(|s| s.to_string()).collect();
+    out.catch_all_methods = pack.catch_all_methods.iter().map(|s| s.to_string()).collect();
+    out.class_literal_member = pack.class_literal_member.to_string();
+    out.import_template = pack.import_template.to_string();
+    out.contract_stub = pack.contract_stub.to_string();
+    out.return_annotation_template = pack.return_annotation_template.to_string();
+    out.native_type_spellings =
+        pack.native_type_spellings.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+    out.static_property_sigil = pack.static_property_sigil.to_string();
+    {
+        let conv = crate::build::query_extract::rail_conventions_for(pack);
+        out.rail_labels = conv.labels.clone();
+        out.rail_hints = conv.hints.clone();
+        out.rail_name_seps = conv.name_seps.clone();
+    }
+    out.imports_bind_names = pack.imports_bind_names;
+    out.member_shapes_are_strict = pack.member_shapes_are_strict;
+    out.members_are_package_bound = pack.members_are_package_bound;
+    out.enum_members = pack.enum_members.iter().map(|s| s.to_string()).collect();
+    out.member_writes = std::mem::take(&mut member_writes);
+    out.types_are_capitalized = pack.types_are_capitalized;
+    out.function_scoped_vars = pack.function_scoped_vars;
+    out.constructor_names = pack.constructor_names.iter().map(|s| s.to_string()).collect();
+    out.type_display = pack
+        .type_display
+        .iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
     // Template params joined to their owner class — the owner shaped like a
     // def name (a partial spec's spelling canonicalizes) so the key matches
     // the Class symbol's identity. Source order = the `ParamOf` index axis.
@@ -426,10 +744,28 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     // flow.assign joins: match_id → (target name+scope, source span)
     let mut flow_targets: HashMap<usize, (String, ScopeId, Point)> = HashMap::new();
     let mut flow_sources: HashMap<usize, Span> = HashMap::new();
+    // `@flow.assign`: the match is a plain assignment to an existing local
+    // (`FlowEdge::reassigns`) — never a declaration or a member write.
+    let mut flow_assigns: std::collections::HashSet<usize> = Default::default();
     // Rebind shapes with no inflowing value (loop vars: `for x in …`,
     // `for (auto x : …)`) — they mint a `Rebind` FlowEdge so the narrowing
     // cutoff sees them, exactly like Perl's `foreach` var.
     let mut flow_rebinds: Vec<(String, ScopeId, Point)> = Vec::new();
+    // Destructuring slots (`@flow.slot` in a `@flow.slot.list`) and
+    // key-less array-literal tuples (`@tuple.*`) — joined per match after
+    // the loop (docs/adr/destructuring.md).
+    let mut flow_slots: Vec<(usize, String, ScopeId, Point, usize)> = Vec::new();
+    let mut slot_lists: HashMap<usize, (Span, usize, String)> = HashMap::new();
+    let mut tuple_arr_by_match: HashMap<usize, Span> = HashMap::new();
+    let mut tuple_elem_by_match: HashMap<usize, Span> = HashMap::new();
+    let mut tuple_init_by_match: HashMap<usize, (usize, bool)> = HashMap::new();
+    let mut tuple_keyed: std::collections::HashSet<usize> = std::collections::HashSet::new();
+    // `@branch.expr` / `@branch.arm` (match / ternary) and `@subscript.*`,
+    // joined per match after the loop.
+    let mut branch_expr_by_match: HashMap<usize, Span> = HashMap::new();
+    let mut branch_arm_by_match: HashMap<usize, Span> = HashMap::new();
+    let mut subscript_by_match: HashMap<usize, (Span, Option<Span>, Option<i32>, Option<String>)> =
+        HashMap::new();
     let mut annots: HashMap<usize, String> = HashMap::new();
     // keyed-shape collection: ctor + keys grouped per @expr.shape span
     let mut shape_spans: Vec<(usize, usize, Span)> = Vec::new();
@@ -462,6 +798,16 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     // guarded-block region, block scope).
     let mut pending_narrow: Vec<(String, crate::model::file_analysis::InferredType, Span, ScopeId)> =
         Vec::new();
+    // Class-body scopes (`register_class_body`), for the member-targeted
+    // flow (`@flow.target.member`): the witness lands where field readers look.
+    let mut class_body_scopes: std::collections::HashSet<ScopeId> = std::collections::HashSet::new();
+    // Region-shaped narrowings, resolved after the loop (the guard's own
+    // captures may follow the region node in event order): `@narrow.after`
+    // holds from the node's END to the enclosing scope's end, `@narrow.within`
+    // over the node itself — each in the scope open at the node.
+    let mut narrow_after: Vec<(usize, Point, ScopeId)> = Vec::new();
+    let mut narrow_within: Vec<(usize, Span, ScopeId)> = Vec::new();
+    let mut narrow_assert: HashMap<usize, String> = HashMap::new();
     // `std::move(x)` halves, joined per match: the qualifier (`std`) + name
     // (`move`) verify the call IS std::move (no query predicates), the var is
     // the moved subject, the call span the region start + enclosing scope.
@@ -512,6 +858,22 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
         .filter(|e| e.cap == "param.region")
         .map(|e| Span { start: e.start, end: e.end })
         .collect();
+    // Existence probes (`@probe.region`: the argument list of `isset` /
+    // `empty`): a member read inside one asks whether the member exists.
+    out.probe_regions = events
+        .iter()
+        .filter(|e| e.cap == "probe.region")
+        .map(|e| Span { start: e.start, end: e.end })
+        .collect();
+    out.variable_arg_sites = variable_arg_sites;
+    // Fold-only regions (`@fold` / `@fold.comment`): blocks and comment
+    // runs that fold in an editor without being scopes (php has no block
+    // scoping, so an `if` body must not mint one).
+    out.fold_regions = events
+        .iter()
+        .filter(|e| e.cap == "fold" || e.cap == "fold.comment")
+        .map(|e| (Span { start: e.start, end: e.end }, e.cap == "fold.comment"))
+        .collect();
 
     for e in &events {
         while scope_stack.len() > 1
@@ -551,6 +913,15 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                 if let Some(text) = pending_context.remove(&e.match_id) {
                     while context_stack.last().is_some_and(|&(d, _)| d >= scope_stack.len()) {
                         context_stack.pop();
+                    }
+                    // The receiver name (`$this`) IS this class inside its
+                    // body — a witness at the body scope, so a chain based on
+                    // it (`$this->mailer->send()`) resolves through the same
+                    // registry chase as any typed variable. Class bodies
+                    // only: a namespace body carries a context too.
+                    if names_by_match.contains_key(&(e.match_id, "def.class".to_string())) {
+                        register_class_body(&mut out, pack, id, &text, e.start);
+                        class_body_scopes.insert(id);
                     }
                     context_stack.push((scope_stack.len(), text));
                 }
@@ -606,6 +977,19 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
             "narrow.guard" => {
                 narrow_guard.insert(e.match_id, e.text.clone());
             }
+            "narrow.after" => {
+                if let Some(&(_, sid)) = scope_stack.last() {
+                    narrow_after.push((e.match_id, e.end, sid));
+                }
+            }
+            "narrow.within" => {
+                if let Some(&(_, sid)) = scope_stack.last() {
+                    narrow_within.push((e.match_id, Span { start: e.start, end: e.end }, sid));
+                }
+            }
+            "narrow.assert" => {
+                narrow_assert.insert(e.match_id, e.text.clone());
+            }
             "move.scope" => {
                 move_scope_txt.insert(e.match_id, e.text.clone());
             }
@@ -631,7 +1015,13 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                 // Shape the context like a def name (cpp canonicalizes a
                 // spec's template spelling) so members' `package` matches
                 // the container Symbol's identity exactly.
-                let text = (pack.shape_name)(&e.cap, &e.text);
+                // A name-less def's context is its synthesized identity,
+                // never the anchor token's text.
+                let raw = defaulted_matches
+                    .get(&e.match_id)
+                    .cloned()
+                    .unwrap_or_else(|| e.text.clone());
+                let text = (pack.shape_name)(&e.cap, &raw);
                 // If this match's `@scope` starts AFTER this context, the
                 // context belongs to that (not-yet-pushed) body — defer it
                 // so it registers at the body depth and pops with the block.
@@ -646,7 +1036,15 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                     {
                         context_stack.pop();
                     }
-                    context_stack.push((scope_stack.len(), e.text.clone()));
+                    // php puts the class scope on the whole declaration, so
+                    // the body scope is ALREADY open here: it carries the
+                    // class as its package and the receiver witness.
+                    if names_by_match.contains_key(&(e.match_id, "def.class".to_string())) {
+                        let id = scope_stack.last().unwrap().1;
+                        register_class_body(&mut out, pack, id, &raw, e.start);
+                        class_body_scopes.insert(id);
+                    }
+                    context_stack.push((scope_stack.len(), raw));
                 }
             }
             "parent" => {
@@ -658,19 +1056,136 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                     // Shaped like the child's def name (cpp canonicalizes a
                     // template-spelled base) so the edge joins the identity
                     // the target class was filed under.
-                    out.parents
-                        .push((child.clone(), (pack.shape_name)("parent", &e.text)));
+                    let shaped = (pack.shape_name)("parent", &e.text);
+                    if !pack.namespace_relative_parents {
+                        out.parents.push((child.clone(), shaped));
+                    } else {
+                        // php name binding, most-specific first: a written
+                        // qualifier is authoritative; else the file's
+                        // use-map (an ALIAS resolves to the real leaf — the
+                        // `use X as Y` edge was dead under the alias
+                        // spelling); else the unqualified default IS the
+                        // child's own namespace (PHP class names never fall
+                        // through to global). Every edge records its
+                        // namespace for FQ chain validation.
+                        let (leaf, ns) = if let Some(fq) =
+                            parent_fq_by_match.get(&e.match_id)
+                        {
+                            split_ns_leaf(fq)
+                        } else if let Some((ns, real_leaf)) = use_map.get(shaped.as_str()) {
+                            (real_leaf.clone(), ns.clone())
+                        } else {
+                            let ns = out
+                                .symbols
+                                .iter()
+                                .rev()
+                                .find(|s| s.kind == "class" && &s.name == child)
+                                .and_then(|s| s.package.clone())
+                                .unwrap_or_default();
+                            (shaped, ns)
+                        };
+                        out.parents.push((child.clone(), leaf.clone()));
+                        out.parent_namespaces.push((child.clone(), leaf, ns));
+                    }
                 }
             }
-            cap if cap.starts_with("def.") && !cap.ends_with(".name") => {
+            // Hook-NAME identity (the Handler rail): a registration string
+            // (`add_action('init', …)` arg 1) DECLARES the hook — a Handler
+            // symbol whose name and span are the string content, stacking
+            // like every same-named Handler. A firing string
+            // (`do_action('init')`) mints the DispatchCall ref that matches
+            // it. Both are Global-owned: the program shares one flat hook
+            // namespace, no receiver.
+            c if c == "def.handler.named"
+                || c.starts_with("def.handler.named.")
+                || c.starts_with("def.handler.class.")
+                || c.starts_with("def.handler.by.") =>
+            {
+                let span = Span { start: e.start, end: e.end };
+                let mut attributes = Vec::new();
+                let mut name = e.text.clone();
+                if let Some(rail) = c.strip_prefix("def.handler.named.") {
+                    out.rails.push((span, rail.to_string()));
+                } else if let Some(rail) = c.strip_prefix("def.handler.class.") {
+                    out.class_rails.push((span, rail.to_string()));
+                    attributes.push("class_rail".to_string());
+                } else if let Some(rail) = c.strip_prefix("def.handler.by.") {
+                    // named by another token of the match; no name → no handler
+                    let Some(n) = handler_name_by_match.get(&e.match_id) else { continue };
+                    name = n.clone();
+                    out.class_rails.push((span, rail.to_string()));
+                    attributes.push("class_rail".to_string());
+                }
+                out.symbols.push(SkelSymbol {
+                    name,
+                    kind: "handler".to_string(),
+                    start: e.start,
+                    end: e.end,
+                    name_start: e.start,
+                    name_end: e.end,
+                    package: None,
+                    scope: cur_scope,
+                    return_type: None,
+                    receiver_instance_of: None,
+                    receiver_return: false,
+                    deref_stack: Vec::new(),
+                    attributes,
+                    arity: None,
+                    qualifier_owned: false,
+                    doc: None,
+                    deprecation: None,
+                });
+            }
+            "handler.name" => {}
+            "key.elem" => {}
+            "def.handler.key" => {
+                if let Some(elem) = key_elem_by_match.get(&e.match_id) {
+                    out.key_defs.push(crate::build::query_extract::KeyDef {
+                        key: e.text.clone(),
+                        key_span: Span { start: e.start, end: e.end },
+                        elem_span: *elem,
+                    });
+                }
+            }
+            cap if cap.ends_with(".anchor") => {
+                // The anchor of an anonymous class is its construction site:
+                // `new class(...)` invokes the synthesized identity's
+                // constructor, so the ctor gets the MethodCall a `new
+                // self()` mints — fan-in, goto-def and references on
+                // `__construct` see it like any `new Foo()`.
+                if let (Some(ctor), Some(name)) =
+                    (pack.constructor_names.first(), defaulted_matches.get(&e.match_id))
+                {
+                    if anon_ctor_sites.insert((e.start_byte, e.end_byte)) {
+                        let span = Span { start: e.start, end: e.end };
+                        out.refs.push(SkelRef {
+                            via: None,
+                            kind: "member".to_string(),
+                            name: ctor.to_string(),
+                            start: e.start,
+                            end: e.end,
+                            scope: cur_scope,
+                            invocant: Some((span, name.clone())),
+                            member_op: None,
+                            arg_count: None,
+                            shape: crate::model::file_analysis::MemberShape::Callable,
+                            named_by_string: false,
+                        });
+                    }
+                }
+            }
+            cap if cap.starts_with("def.") && !cap.ends_with(".name") && !cap.ends_with(".anchor") => {
                 let kind = cap.strip_prefix("def.").unwrap().to_string();
                 let (name, name_start, name_end, defaulted) = names_by_match
                     .get(&(e.match_id, e.cap.clone()))
                     .cloned()
-                    .map(|(n, s, en)| (n, s, en, false))
+                    .map(|(n, s, en)| {
+                        let d = defaulted_matches.contains_key(&e.match_id);
+                        (n, s, en, d)
+                    })
                     .or_else(|| {
-                        (pack.default_name)(&kind)
-                            .map(|n| (n.to_string(), e.start, e.start, true))
+                        (pack.default_name)(&kind, e.start.row, e.start.column)
+                            .map(|n| (n, e.start, e.start, true))
                     })
                     .unwrap_or((e.text.clone(), e.start, e.end, false));
                 def_name_spans.push((e.start_byte, e.end_byte));
@@ -682,11 +1197,87 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                     .map(|q| q.rsplit("::").next().unwrap_or(q).to_string())
                     .or_else(|| package.clone());
                 let shaped = (pack.shape_name)(&format!("def.{kind}"), &name);
+                let def_scope = if hoisted.contains(&e.match_id) {
+                    out.scopes.get(cur_scope.0 as usize).and_then(|s| s.parent).unwrap_or(cur_scope)
+                } else {
+                    cur_scope
+                };
                 // A class-spec def carries its primary's name — the
                 // (spec, primary) family edge `Specializes` derives from.
                 if let Some(primary) = spec_primary_by_match.get(&e.match_id) {
                     out.specializations
                         .push((shaped.clone(), (pack.shape_name)("spec.primary", primary)));
+                }
+                // Registry field edge (pack-gated — see `field_registry_edges`
+                // on `LangPack`): a data member's type lives as a Variable
+                // witness in its declaring scope, and this edge lets a
+                // property-access hop dispatch the field through the same
+                // class-keyed chase methods use.
+                // Foreach element peel: the loop var's value IS the
+                // collection's uniform element, deferred to query time via
+                // `Projected{base, Element}`. A simple-variable collection
+                // bases on the Variable (its witnesses live on the decl
+                // scope); anything else bases on the collection's own Expr
+                // span, where a member-access hop or call witness already
+                // answers (the same simple-vs-expression split the chain
+                // hop's receiver makes).
+                if kind == "var" {
+                    let seq_join = seq_source_by_match
+                        .get(&e.match_id)
+                        .map(|sv| (sv, crate::model::witnesses::ProjectionStep::Element))
+                        .or_else(|| {
+                            seq_key_by_match
+                                .get(&e.match_id)
+                                .map(|sv| (sv, crate::model::witnesses::ProjectionStep::Key))
+                        });
+                    if let Some(((src_span, src_text), step)) = seq_join {
+                        use crate::model::witnesses as wit;
+                        let simple_var = src_text.starts_with('$')
+                            && src_text[1..].chars().all(|c| c.is_alphanumeric() || c == '_');
+                        let base = if simple_var {
+                            wit::WitnessAttachment::Variable {
+                                name: (pack.shape_name)("ref.var", src_text),
+                                scope: cur_scope,
+                            }
+                        } else {
+                            wit::WitnessAttachment::Expr(*src_span)
+                        };
+                        out.witnesses.push(wit::Witness {
+                            attachment: wit::WitnessAttachment::Variable {
+                                name: (pack.shape_name)("def.var", &name),
+                                scope: cur_scope,
+                            },
+                            source: wit::WitnessSource::Builder("foreach_element".into()),
+                            payload: wit::WitnessPayload::Projected { base, step },
+                            // Zero-width at the decl: the binding types the
+                            // var for its whole lifetime, so it must not be
+                            // skipped as a narrowing fact scoped to the
+                            // token (the same rule annot witnesses follow).
+                            span: Span { start: e.start, end: e.start },
+                        });
+                    }
+                }
+                if kind == "field" && pack.field_registry_edges {
+                    if let Some(cls) = &pkg {
+                        use crate::model::witnesses as wit;
+                        out.witnesses.push(wit::Witness {
+                            attachment: wit::WitnessAttachment::PackageSymbol {
+                                package: cls.clone(),
+                                name: shaped.clone(),
+                            },
+                            // The tag IS the member's value shape: a
+                            // `ValueHop` on this attachment prefers it, a
+                            // `MethodHop` prefers the callable edges.
+                            source: wit::WitnessSource::Builder(
+                                crate::model::witnesses::FIELD_EDGE_SOURCE.into(),
+                            ),
+                            payload: wit::WitnessPayload::Edge(wit::WitnessAttachment::Variable {
+                                name: shaped.clone(),
+                                scope: cur_scope,
+                            }),
+                            span: Span { start: e.start, end: e.end },
+                        });
+                    }
                 }
                 out.symbols.push(SkelSymbol {
                     name: shaped,
@@ -696,14 +1287,31 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                     name_start,
                     name_end,
                     package: pkg,
-                    scope: cur_scope,
+                    scope: def_scope,
                     return_type: rettype_by_match
                         .get(&e.match_id)
                         .and_then(|t| (pack.annot_type)(t)),
+                    receiver_instance_of: None,
+                    receiver_return: rettype_by_match
+                        .get(&e.match_id)
+                        .is_some_and(|t| (pack.rettype_receiver)(t)),
                     deref_stack: nested_stacks.get(&e.match_id).cloned().unwrap_or_default(),
                     attributes: {
                         let mut a =
                             attrs_by_match.get(&e.match_id).cloned().unwrap_or_default();
+                        // `#[Deprecated]` is the attribute spelling of `@deprecated`
+                        if !pack.deprecated_attribute.is_empty()
+                            && a.iter().any(|x| x == pack.deprecated_attribute)
+                            && !a.iter().any(|x| x == "deprecated")
+                        {
+                            a.push("deprecated".to_string());
+                        }
+                        // the declaration WRITES a return annotation — a
+                        // structural fact the type witness cannot carry
+                        // (`: void` names no type)
+                        if rettype_by_match.contains_key(&e.match_id) {
+                            a.push("declared_return".to_string());
+                        }
                         // a default-named symbol is structure, not an
                         // addressable name — completion skips it.
                         if defaulted {
@@ -714,6 +1322,8 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                     // Filled by span association in `into_file_analysis` — the
                     // `@arity.sig` match fires separately from this def name.
                     arity: None,
+                    doc: None,
+                    deprecation: None,
                     qualifier_owned: qualifier_by_match.contains_key(&e.match_id),
                 });
             }
@@ -725,9 +1335,16 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                 ));
             }
             "member.recv" => {
+                // Shaped: a pack can canonicalize a receiver spelling to the
+                // model's invocant vocabulary (php `self::`/`static::` → the
+                // current-package token), so relative static dispatch rides
+                // the same lane as Perl's `__PACKAGE__->`.
                 member_recv.insert(
                     e.match_id,
-                    (crate::model::file_analysis::Span { start: e.start, end: e.end }, e.text.clone()),
+                    (
+                        crate::model::file_analysis::Span { start: e.start, end: e.end },
+                        (pack.shape_name)("member.recv", &e.text),
+                    ),
                 );
             }
             "member.op" => {
@@ -739,6 +1356,130 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                         e.match_id,
                         (*op, crate::model::file_analysis::Span { start: e.start, end: e.end }),
                     );
+                }
+            }
+            // String-named references (the tier-1 pack-plugin vocabulary,
+            // docs/prompt-pack-plugins.md): the captured string-content
+            // node's TEXT is the referenced name and its span IS the rename
+            // unit — the characters inside the quotes. `@ref.call.named`
+            // mints a FunctionCall ref (WP `add_action('init', 'wp_cron')`);
+            // `@ref.method.named` mints a MethodCall ref joined to the same
+            // match's `@member.recv` (`array($this, 'method')` callbacks),
+            // so dispatch types through the receiver like any member ref.
+            // No arg_count: the site registers the callee, it doesn't call
+            // it — an arity hint here would misfeed arity discrimination.
+            "ref.call.named" => {
+                // `'A\\B\\X::method'`: a static-method callable string. The
+                // class part is a qualified spelling (pinned like any other),
+                // the ref a Callable member on that class — the same identity
+                // `[X::class, 'method']` carries, so the backward walk finds it.
+                if let Some((qual, method)) = e.text.split_once("::") {
+                    let (leaf, ns) = split_ns_leaf(qual);
+                    if !ns.is_empty() {
+                        out.qualified_spellings.push((leaf.clone(), format!("\\{ns}")));
+                    }
+                    // The ref's span is the METHOD tail only — rename rewrites
+                    // exactly those characters; the invocant span is the
+                    // qualifier ahead of the `::`.
+                    let method_start = Point {
+                        row: e.end.row,
+                        column: e.end.column.saturating_sub(method.len()),
+                    };
+                    let qual_span = Span {
+                        start: e.start,
+                        end: Point { row: e.start.row, column: e.start.column + qual.len() },
+                    };
+                    out.refs.push(SkelRef {
+                        via: None,
+                        kind: "member".to_string(),
+                        name: method.to_string(),
+                        start: method_start,
+                        end: e.end,
+                        scope: cur_scope,
+                        invocant: Some((qual_span, leaf)),
+                        member_op: None,
+                        arg_count: None,
+                        shape: crate::model::file_analysis::MemberShape::Callable,
+                        named_by_string: false,
+                    });
+                    continue;
+                }
+                out.refs.push(SkelRef {
+                    via: None,
+                    kind: "call".to_string(),
+                    name: e.text.clone(),
+                    start: e.start,
+                    end: e.end,
+                    scope: cur_scope,
+                    invocant: None,
+                    member_op: None,
+                    arg_count: None,
+                    shape: crate::model::file_analysis::MemberShape::Unknown,
+                    named_by_string: false,
+                });
+            }
+            c if c == "ref.dispatch.named"
+                || c.starts_with("ref.dispatch.named.")
+                || c.starts_with("ref.dispatch.class.") =>
+            {
+                if let Some(rail) = c.strip_prefix("ref.dispatch.named.") {
+                    out.rails.push((Span { start: e.start, end: e.end }, rail.to_string()));
+                } else if let Some(rail) = c.strip_prefix("ref.dispatch.class.") {
+                    out.class_rails.push((Span { start: e.start, end: e.end }, rail.to_string()));
+                }
+                out.refs.push(SkelRef {
+                    via: dispatch_via_by_match.get(&e.match_id).cloned(),
+                    kind: "dispatch".to_string(),
+                    name: e.text.clone(),
+                    start: e.start,
+                    end: e.end,
+                    scope: cur_scope,
+                    invocant: None,
+                    member_op: None,
+                    arg_count: None,
+                    shape: crate::model::file_analysis::MemberShape::Unknown,
+                    named_by_string: false,
+                });
+            }
+            // consumed by the prepass join above; nothing to mint here
+            "dispatch.via" => {}
+            // `.self` flavor: the string names a method of the ENCLOSING
+            // class (a PHPUnit attribute argument) — no receiver node
+            // exists, so the invocant is the current-package token,
+            // resolved by the enclosing-class walk like `self::`.
+            "ref.method.named.self" => {
+                out.refs.push(SkelRef {
+                    via: None,
+                    kind: "member".to_string(),
+                    name: e.text.clone(),
+                    start: e.start,
+                    end: e.end,
+                    scope: cur_scope,
+                    invocant: Some((
+                        crate::model::file_analysis::Span { start: e.start, end: e.end },
+                        "__PACKAGE__".to_string(),
+                    )),
+                    member_op: None,
+                    arg_count: None,
+                    shape: crate::model::file_analysis::MemberShape::Callable,
+                    named_by_string: true,
+                });
+            }
+            "ref.method.named" => {
+                if let Some(inv) = member_recv.get(&e.match_id).cloned() {
+                    out.refs.push(SkelRef {
+                    via: None,
+                        kind: "member".to_string(),
+                        name: e.text.clone(),
+                        start: e.start,
+                        end: e.end,
+                        scope: cur_scope,
+                        invocant: Some(inv),
+                        member_op: None,
+                        arg_count: None,
+                        shape: crate::model::file_analysis::MemberShape::Callable,
+                        named_by_string: true,
+                    });
                 }
             }
             cap if cap.starts_with("ref.") => {
@@ -756,6 +1497,39 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                             // (cheap heuristic: same start)
                             s == e.start_byte || en == e.end_byte
                         });
+                // `new self(...)` / `new static(...)`: the token spells no class
+                // name — it IS a call of the constructor on the current class.
+                // Minted as that member call (invocant = the current-package
+                // token, name = the pack's constructor), so the ctor's
+                // references, hover and goto-def see the site while a class
+                // rename never rewrites the `self` token.
+                if !inside_def
+                    && e.cap == "ref.call"
+                    && ctor_matches.contains(&e.match_id)
+                    // `hop.recv` is the pack's receiver-shaping kind — the one
+                    // place its `self`/`static` → current-package table lives.
+                    && crate::model::conventions::is_current_package_token(
+                        &(pack.shape_name)("hop.recv", &e.text),
+                    )
+                {
+                    if let Some(ctor) = pack.constructor_names.first() {
+                        let span = Span { start: e.start, end: e.end };
+                        out.refs.push(SkelRef {
+                            via: None,
+                            kind: "member".to_string(),
+                            name: ctor.to_string(),
+                            start: e.start,
+                            end: e.end,
+                            scope: cur_scope,
+                            invocant: Some((span, "__PACKAGE__".to_string())),
+                            member_op: None,
+                            arg_count: arg_counts_by_start.get(&(e.end.row, e.end.column)).copied(),
+                            shape: crate::model::file_analysis::MemberShape::Callable,
+                            named_by_string: false,
+                        });
+                        continue;
+                    }
+                }
                 if !inside_def {
                     let member_op = member_simple
                         .get(&e.match_id)
@@ -782,27 +1556,145 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                             ));
                         }
                     }
+                    // A SUPER receiver (php `parent::`) spells the model's
+                    // SUPER method token: dispatch starts above the writing
+                    // class, and gd/references/rename ride the existing
+                    // SUPER lane. The invocant becomes the current-package
+                    // token (the receiver is still this object); the ref
+                    // span stays the bare name token, so rename rewrites
+                    // only the name.
+                    let super_recv = e.cap == "ref.member"
+                        && member_recv
+                            .get(&e.match_id)
+                            .is_some_and(|(_, t)| (pack.super_receiver)(t));
                     out.refs.push(SkelRef {
+                    via: None,
                         kind: e.cap.strip_prefix("ref.").unwrap().to_string(),
-                        name: (pack.shape_name)(&e.cap, &e.text),
+                        name: if super_recv {
+                            format!("SUPER::{}", (pack.shape_name)(&e.cap, &e.text))
+                        } else {
+                            (pack.shape_name)(&e.cap, &e.text)
+                        },
                         start: e.start,
                         end: e.end,
                         scope: cur_scope,
-                        invocant: member_recv.get(&e.match_id).cloned(),
+                        invocant: if super_recv {
+                            member_recv
+                                .get(&e.match_id)
+                                .map(|(sp, _)| (*sp, "__PACKAGE__".to_string()))
+                        } else {
+                            member_recv.get(&e.match_id).cloned()
+                        },
                         member_op,
                         // A call ref's arg list opens right where its callee /
                         // method token ends; plain (uncalled) member/type refs
                         // have no adjacent arg list and stay `None`.
                         arg_count: matches!(e.cap.as_str(), "ref.call" | "ref.qcall" | "ref.member")
-                            .then(|| arg_counts_by_start.get(&(e.end.row, e.end.column)).copied())
+                            .then(|| {
+                                arg_counts_by_match
+                                    .get(&e.match_id)
+                                    .or_else(|| arg_counts_by_start.get(&(e.end.row, e.end.column)))
+                                    .copied()
+                            })
                             .flatten(),
+                        // A member token whose match carries an argument list
+                        // names a callable; without one it reads a value. Only
+                        // member tokens carry the fact (a plain call is a
+                        // callable by construction, a type ref neither).
+                        shape: if e.cap == "ref.member" {
+                            if arg_counts_by_match.contains_key(&e.match_id)
+                                || placeholder_by_match.contains(&e.match_id)
+                                || arg_counts_by_start.contains_key(&(e.end.row, e.end.column))
+                                || placeholder_call_at.contains(&(e.end.row, e.end.column))
+                            {
+                                crate::model::file_analysis::MemberShape::Callable
+                            } else {
+                                crate::model::file_analysis::MemberShape::Value
+                            }
+                        } else {
+                            crate::model::file_analysis::MemberShape::Unknown
+                        },
+                        named_by_string: false,
                     });
+                    if let Some(q) = qualified_by_match.get(&e.match_id) {
+                        let leaf = (pack.shape_name)(&e.cap, &e.text);
+                        let raw = q.strip_suffix(leaf.as_str()).unwrap_or_default();
+                        let mut prefix = raw.trim_end_matches('\\').to_string();
+                        // `\Throwable`: no segments, but ABSOLUTE — the
+                        // leading separator is the whole spelling
+                        if prefix.is_empty() && raw.starts_with('\\') {
+                            prefix = "\\".to_string();
+                        }
+                        if !prefix.is_empty() {
+                            out.qualified_spellings.push((leaf, prefix));
+                        }
+                    }
+                    // The chain-hop witness: the whole call's value is
+                    // "dispatch `member` on the receiver's class" — deferred
+                    // to query time via `MethodHop`, so a receiver that is
+                    // itself a call (`$a->b()->c()`) chains through its own
+                    // hop witness at exactly the receiver span. (cpp mints
+                    // via the dedicated `@hop.member` arm below — its ref
+                    // pattern is call-blind, so the called form re-matches.)
+                    if e.cap == "ref.member" && !super_recv {
+                        if let (Some(call_span), Some((recv_span, recv_text))) = (
+                            hop_call_by_match.get(&e.match_id),
+                            member_recv.get(&e.match_id),
+                        ) {
+                            push_hop_witness(
+                                &mut out.witnesses,
+                                pack,
+                                &e.text,
+                                *call_span,
+                                *recv_span,
+                                recv_text,
+                                member_simple.get(&e.match_id).copied().unwrap_or(false),
+                                cur_scope,
+                                arg_counts_by_start
+                                    .get(&(e.end.row, e.end.column))
+                                    .map(|n| *n as u32),
+                                package.as_deref(),
+                            );
+                        }
+                    }
+                }
+            }
+            // cpp's called-member pattern: the ref was already minted by the
+            // call-blind field pattern, so this arm mints ONLY the hop.
+            "hop.member" => {
+                if let (Some(call_span), Some((recv_span, recv_text))) = (
+                    hop_call_by_match.get(&e.match_id),
+                    member_recv.get(&e.match_id),
+                ) {
+                    push_hop_witness(
+                        &mut out.witnesses,
+                        pack,
+                        &e.text,
+                        *call_span,
+                        *recv_span,
+                        recv_text,
+                        member_simple.get(&e.match_id).copied().unwrap_or(false),
+                        cur_scope,
+                        arg_counts_by_start
+                            .get(&(e.end.row, e.end.column))
+                            .map(|n| *n as u32),
+                        package.as_deref(),
+                    );
                 }
             }
             "import.name" => {
                 out.import_sites
                     .push((e.text.clone(), Span { start: e.start, end: e.end }));
                 out.imports.push(e.text.clone());
+            }
+            "preamble" => {
+                out.preamble_end = Some(out.preamble_end.map_or(e.end.row, |r| r.max(e.end.row)));
+            }
+            "import" => {
+                let row = Span { start: e.start, end: e.end };
+                if out.import_rows.last() != Some(&row) {
+                    out.import_rows.push(row);
+                }
             }
             cap if cap.starts_with("expr.lit.") => {
                 let suffix = cap.strip_prefix("expr.lit.").unwrap();
@@ -817,6 +1709,9 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                     });
                 }
             }
+            "expr.read.var"
+                if not_a_read.contains(&(e.start_byte, e.end_byte))
+                    || def_name_ends.contains(&e.end_byte) => {}
             "expr.read.var" => {
                 // a variable READ is an edge: Expr(span) resolves to
                 // whatever the Variable resolves to — same shape the
@@ -851,6 +1746,64 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                 out.return_sites
                     .push((cur_scope, Span { start: e.start, end: e.end }));
             }
+            "flow.slot" => {
+                flow_slots.push((
+                    e.match_id,
+                    (pack.shape_name)("def.var", &e.text),
+                    cur_scope,
+                    e.start,
+                    e.start_byte,
+                ));
+            }
+            "flow.slot.list" => {
+                slot_lists.insert(
+                    e.match_id,
+                    (Span { start: e.start, end: e.end }, e.start_byte, e.text.clone()),
+                );
+            }
+            "tuple.arr" => {
+                tuple_arr_by_match.insert(e.match_id, Span { start: e.start, end: e.end });
+            }
+            "tuple.elem" => {
+                tuple_elem_by_match.insert(e.match_id, Span { start: e.start, end: e.end });
+            }
+            "tuple.init" => {
+                tuple_init_by_match
+                    .insert(e.match_id, (e.start_byte, e.text.trim_start().starts_with("...")));
+            }
+            "tuple.keyed" => {
+                tuple_keyed.insert(e.match_id);
+            }
+            "branch.expr" => {
+                branch_expr_by_match.insert(e.match_id, Span { start: e.start, end: e.end });
+            }
+            "branch.arm" => {
+                branch_arm_by_match.insert(e.match_id, Span { start: e.start, end: e.end });
+            }
+            "subscript.expr" => {
+                subscript_by_match
+                    .entry(e.match_id)
+                    .or_insert((Span { start: e.start, end: e.end }, None, None, None))
+                    .0 = Span { start: e.start, end: e.end };
+            }
+            "subscript.base" => {
+                subscript_by_match
+                    .entry(e.match_id)
+                    .or_insert((Span { start: e.start, end: e.end }, None, None, None))
+                    .1 = Some(Span { start: e.start, end: e.end });
+            }
+            "subscript.int" => {
+                subscript_by_match
+                    .entry(e.match_id)
+                    .or_insert((Span { start: e.start, end: e.end }, None, None, None))
+                    .2 = e.text.trim().parse::<i32>().ok();
+            }
+            "subscript.key" => {
+                subscript_by_match
+                    .entry(e.match_id)
+                    .or_insert((Span { start: e.start, end: e.end }, None, None, None))
+                    .3 = Some(e.text.clone());
+            }
             "flow.target" => {
                 flow_targets.insert(
                     e.match_id,
@@ -866,6 +1819,21 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                         annot.clone(),
                     );
                 }
+            }
+            // A member of the enclosing class as the flow target
+            // (`$this->foo = …`): the witness belongs at the CLASS scope,
+            // where the field's readers look, not at the method's.
+            "flow.target.member" => {
+                let class_scope = scope_stack
+                    .iter()
+                    .rev()
+                    .map(|&(_, sid)| sid)
+                    .find(|sid| class_body_scopes.contains(sid))
+                    .unwrap_or(cur_scope);
+                flow_targets.insert(
+                    e.match_id,
+                    ((pack.shape_name)("def.var", &e.text), class_scope, e.start),
+                );
             }
             "flow.rebind" => {
                 flow_rebinds.push(((pack.shape_name)("def.var", &e.text), cur_scope, e.start));
@@ -894,6 +1862,9 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
             }
             "flow.source" => {
                 flow_sources.insert(e.match_id, Span { start: e.start, end: e.end });
+            }
+            "flow.assign" => {
+                flow_assigns.insert(e.match_id);
             }
             "type.annot" => {
                 annots.insert(e.match_id, e.text.clone());
@@ -964,6 +1935,109 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                         payload: crate::model::witnesses::WitnessPayload::Observation(o),
                         span,
                     });
+                }
+            }
+            "expr.ctor" => {
+                // `new X(...)`: the value IS an instance of X — a structural
+                // fact (the ctor syntax names a class by definition), NOT the
+                // name-case guess the macro rule forbids for bare calls. Edge
+                // into the alias graph: `TypeName` recurses into the defining
+                // file when an index is in hand and terminates at
+                // `ClassName(X)` otherwise, so a cross-file `new WP_Query()`
+                // types the variable with zero local knowledge.
+                let callee = events
+                    .iter()
+                    .find(|x| x.match_id == e.match_id && x.cap == "ref.call")
+                    .map(|x| (pack.shape_name)("ref.call", &x.text));
+                if let Some(name) = callee {
+                    let span = Span { start: e.start, end: e.end };
+                    lit_spans.push((e.start_byte, e.end_byte, span));
+                    // `new self()` / `new static()`: the class is the
+                    // ENCLOSING one (the pack's `hop.recv` shaping names
+                    // the current-class spellings) — a bare `TypeName`
+                    // edge would chase a class literally named "self".
+                    let payload = if crate::model::conventions::is_current_package_token(
+                        &(pack.shape_name)("hop.recv", &name),
+                    ) {
+                        // `self` outside a class (invalid source) has no
+                        // enclosing class — mint nothing.
+                        package.as_ref().map(|cls| {
+                            crate::model::witnesses::WitnessPayload::InferredType(
+                                InferredType::ClassName(cls.clone()),
+                            )
+                        })
+                    } else {
+                        Some(crate::model::witnesses::WitnessPayload::Edge(
+                            crate::model::witnesses::WitnessAttachment::TypeName(name),
+                        ))
+                    };
+                    if let Some(payload) = payload {
+                        out.witnesses.push(crate::model::witnesses::Witness {
+                            attachment: crate::model::witnesses::WitnessAttachment::Expr(span),
+                            source: crate::model::witnesses::WitnessSource::Builder(
+                                "skeleton-ctor".into(),
+                            ),
+                            payload,
+                            span,
+                        });
+                    }
+                }
+            }
+            "expr.classref" => {
+                // `Foo::class` names the class by syntax, exactly as `new Foo`
+                // does — the same alias-graph edge, so `$cls = Foo::class;
+                // $cls::make()` dispatches on Foo.
+                let name = events
+                    .iter()
+                    .find(|x| x.match_id == e.match_id && x.cap == "classref.name")
+                    .map(|x| (pack.shape_name)("ref.call", &x.text));
+                if let Some(name) = name {
+                    // A qualified spelling (`Sql\Column::class`) spells its
+                    // head — the import that head binds is USED here, the
+                    // same fact a qualified call records.
+                    if let Some(q) = e.text.split("::").next() {
+                        let raw = q.trim().strip_suffix(name.as_str()).unwrap_or_default();
+                        let prefix = raw.trim_end_matches('\\').to_string();
+                        if !prefix.is_empty() {
+                            out.qualified_spellings.push((name.clone(), prefix));
+                        }
+                    }
+                    let span = Span { start: e.start, end: e.end };
+                    lit_spans.push((e.start_byte, e.end_byte, span));
+                    out.witnesses.push(crate::model::witnesses::Witness {
+                        attachment: crate::model::witnesses::WitnessAttachment::Expr(span),
+                        source: crate::model::witnesses::WitnessSource::Builder(
+                            "skeleton-classref".into(),
+                        ),
+                        payload: crate::model::witnesses::WitnessPayload::Edge(
+                            crate::model::witnesses::WitnessAttachment::TypeName(name),
+                        ),
+                        span,
+                    });
+                }
+            }
+            // `@expr.annot`: an expression whose VALUE is the class the same
+            // match's `@type.annot` names (`app(Foo::class)` is a Foo — a
+            // container resolves what the argument spells). Declared by an
+            // overlay, so it rides the plugin priority: the expression's own
+            // evidence outranks the callee-return derivation.
+            "expr.annot" => {
+                if let Some(annot) = annot_by_match.get(&e.match_id) {
+                    if let Some(InferredType::ClassName(cn)) = (pack.annot_type)(annot) {
+                        let span = Span { start: e.start, end: e.end };
+                        lit_spans.push((e.start_byte, e.end_byte, span));
+                        out.annot_expr_spans.push(span);
+                        out.witnesses.push(crate::model::witnesses::Witness {
+                            attachment: crate::model::witnesses::WitnessAttachment::Expr(span),
+                            source: crate::model::witnesses::WitnessSource::Plugin(
+                                "overlay-annot".into(),
+                            ),
+                            payload: crate::model::witnesses::WitnessPayload::Edge(
+                                crate::model::witnesses::WitnessAttachment::TypeName(cn),
+                            ),
+                            span,
+                        });
+                    }
                 }
             }
             "expr.call" => {
@@ -1049,10 +2123,25 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     // a trailing-return function matches both its leading-`auto` pattern
     // and the trailing sibling (keep the rettype-bearing copy) ----
     {
-        let mut best: HashMap<(usize, usize), usize> = HashMap::new();
+        // Keyed per name site AND per kind family: a framework overlay
+        // legitimately declares a PROPERTY at a method's own name token
+        // (Eloquent relations — `pages()` the method, `->pages` the
+        // accessor) or a HANDLER there (a listener's `handle(X $e)` is the
+        // event rail's handler named X), and those pairs must survive while
+        // the same-kind duplicates (var vs sub, rettype twins) still collapse.
+        // Handlers key by NAME too: one token can carry several rails'
+        // handlers (a listener's `handle(X $e)` is X's handler AND its own
+        // class's job handler).
+        let family = |kind: &str| match kind {
+            "field" => 1u8,
+            "handler" => 2u8,
+            _ => 0u8,
+        };
+        let mut best: HashMap<(usize, usize, u8, String), usize> = HashMap::new();
         let mut keep = vec![true; out.symbols.len()];
         for (i, sym) in out.symbols.iter().enumerate() {
-            let key = (sym.name_start.row, sym.name_start.column);
+            let tag = if sym.kind == "handler" { sym.name.clone() } else { String::new() };
+            let key = (sym.name_start.row, sym.name_start.column, family(&sym.kind), tag);
             match best.get(&key) {
                 None => {
                     best.insert(key, i);
@@ -1082,6 +2171,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
         // every invocation identifier is a call ref (user functions
         // rename through it; builtin names match no defs, harmlessly)
         out.refs.push(SkelRef {
+                    via: None,
             kind: "call".into(),
             name: cmd.clone(),
             start: cmd_span.start,
@@ -1090,6 +2180,8 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
             invocant: None,
             member_op: None,
             arg_count: Some(args.len()),
+            shape: crate::model::file_analysis::MemberShape::Unknown,
+            named_by_string: false,
         });
         for effect in (pack.cmd_effects)(cmd) {
             match effect {
@@ -1105,10 +2197,14 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                             package: None,
                             scope: *scope,
                             return_type: None,
+                            receiver_return: false,
+            receiver_instance_of: None,
                             deref_stack: Vec::new(),
                             attributes: Vec::new(),
                             arity: None,
                             qualifier_owned: false,
+                            doc: None,
+                            deprecation: None,
                         });
                     }
                 }
@@ -1118,6 +2214,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                             !name.is_empty() && name.chars().all(|c| c.is_ascii_uppercase() || c == '_');
                         if !is_keyword && !name.contains("${") {
                             out.refs.push(SkelRef {
+                    via: None,
                                 kind: "call".into(),
                                 name: name.clone(),
                                 start: span.start,
@@ -1126,6 +2223,8 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                                 invocant: None,
                                 member_op: None,
                                 arg_count: None,
+                                shape: crate::model::file_analysis::MemberShape::Unknown,
+                                named_by_string: false,
                             });
                         }
                     }
@@ -1197,8 +2296,46 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     // Match-id order (deterministic) — two captures targeting the same
     // `Variable{name, scope}` slot would otherwise land witnesses in
     // HashMap-iteration order, flipping the latest-wins winner per process.
+    // Branch arms (match / ternary): the expression's value is its arms'
+    // AGREEMENT (`BranchArmFold`), never a literal found inside it.
+    {
+        let mut seen_expr: std::collections::HashSet<(Point, Point)> = Default::default();
+        for (mid, arm) in &branch_arm_by_match {
+            let Some(expr) = branch_expr_by_match.get(mid) else { continue };
+            if seen_expr.insert((expr.start, expr.end)) {
+                out.witnesses.push(crate::model::witnesses::Witness {
+                    attachment: crate::model::witnesses::WitnessAttachment::Expr(*expr),
+                    source: crate::model::witnesses::WitnessSource::Builder("skeleton".into()),
+                    payload: crate::model::witnesses::WitnessPayload::Edge(
+                        crate::model::witnesses::WitnessAttachment::BranchArm(*expr),
+                    ),
+                    span: *expr,
+                });
+            }
+            out.witnesses.push(crate::model::witnesses::Witness {
+                attachment: crate::model::witnesses::WitnessAttachment::BranchArm(*expr),
+                source: crate::model::witnesses::WitnessSource::Builder("skeleton".into()),
+                payload: crate::model::witnesses::WitnessPayload::Edge(
+                    crate::model::witnesses::WitnessAttachment::Expr(*arm),
+                ),
+                span: *arm,
+            });
+        }
+    }
     let mut flow_mids: Vec<&usize> = flow_targets.keys().collect();
     flow_mids.sort_unstable();
+    // A member-expression rhs (`$q->where('a')`, `w.get()`) is a
+    // value-producing site whose value is NOT any literal inside it (that's
+    // an argument). The literal narrowing below exists for transparent
+    // wrappers only — when a member ref's invocant opens exactly at the
+    // source span, the rhs IS the member expression and the edge must stay
+    // on the full span (the member-chain arm / MCB lane resolve it).
+    let member_anchored: std::collections::HashSet<(usize, usize)> = out
+        .refs
+        .iter()
+        .filter(|r| r.kind == "member")
+        .filter_map(|r| r.invocant.as_ref().map(|(s, _)| (s.start.row, s.start.column)))
+        .collect();
     // A class/struct DATA MEMBER is visible throughout its class body
     // regardless of declaration order (C++ member lookup is not sequential:
     // a method reads a field declared later in a `private:` section below
@@ -1258,17 +2395,48 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
         }
         if let Some(src_span) = flow_sources.get(mid) {
             // Narrow onto the outermost literal the rhs wraps, when the
-            // rhs node itself carries no witness (paren wrappers).
+            // rhs node itself carries no witness (paren wrappers) — but
+            // never into a member expression's argument (see
+            // `member_anchored` above), and never when the rhs span
+            // ALREADY carries its own witness: a chain off a ctor
+            // receiver (`$x = (new W())->c()`) has the ctor as its
+            // largest inner literal, and narrowing onto it would hand
+            // the variable the receiver's class instead of the call's
+            // value (the rhs's own hop witness).
             let src_bytes = byte_range_of(&events, *mid, "flow.source");
-            let target_span = lit_spans
-                .iter()
-                .filter(|&&(s, en, _)| {
-                    src_bytes.is_some_and(|(ss, se)| s >= ss && en <= se)
-                })
-                .max_by_key(|&&(s, en, _)| en - s)
-                .map(|&(_, _, sp)| sp)
-                .filter(|sp| sp != src_span)
-                .unwrap_or(*src_span);
+            let rhs_has_own_witness = out.witnesses.iter().any(|w| {
+                matches!(
+                    &w.attachment,
+                    crate::model::witnesses::WitnessAttachment::Expr(sp)
+                        if sp.start == src_span.start && sp.end == src_span.end
+                )
+            });
+            let target_span = if rhs_has_own_witness
+                || member_anchored
+                    .contains(&(src_span.start.row, src_span.start.column))
+            {
+                *src_span
+            } else {
+                // Only a literal the rhs merely WRAPS (parentheses,
+                // whitespace) is the rhs's value — a literal that is an
+                // ARGUMENT of the rhs (`$r = $handler(new Request(), [])`)
+                // is not, and narrowing onto it handed the variable the
+                // argument's class.
+                let wraps = |s: usize, en: usize| {
+                    src_bytes.is_some_and(|(ss, se)| {
+                        s >= ss
+                            && en <= se
+                            && source[ss..s].iter().chain(source[en..se].iter()).all(|b| matches!(b, b'(' | b')' | b' ' | b'\t' | b'\r' | b'\n'))
+                    })
+                };
+                lit_spans
+                    .iter()
+                    .filter(|&&(s, en, _)| wraps(s, en))
+                    .max_by_key(|&&(s, en, _)| en - s)
+                    .map(|&(_, _, sp)| sp)
+                    .filter(|sp| sp != src_span)
+                    .unwrap_or(*src_span)
+            };
             // Mint a value-flow edge (cpp init is `Whole`); the witness is its
             // lowering, so type inference sees the same `Variable → Edge(Expr)`
             // it always did — now with the source span kept for provenance.
@@ -1278,7 +2446,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                 target_at: *at,
                 source: target_span,
                 extraction: crate::model::file_analysis::Extraction::Whole,
-                reassigns: false,
+                reassigns: flow_assigns.contains(mid),
             });
         }
     }
@@ -1292,6 +2460,115 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
             source: Span { start: at, end: at },
             extraction: crate::model::file_analysis::Extraction::Rebind,
             reassigns: false,
+        });
+    }
+    // Destructuring slots bind POSITIONALLY off their source — the same
+    // FlowEdge lowering Perl's list assignment uses. A keyed list never
+    // binds (its positions are not positions); the defs still landed.
+    {
+        let mut element_hops: std::collections::HashSet<(Point, Point)> = Default::default();
+        for (mid, name, scope, at, byte) in &flow_slots {
+            let Some((list_span, list_byte, list_text)) = slot_lists.get(mid) else { continue };
+            let offset = byte.saturating_sub(*list_byte);
+            let extraction = match slot_position(list_text, offset) {
+                Some(pos) => crate::model::file_analysis::Extraction::Positional(pos),
+                None => match slot_key(list_text, offset) {
+                    Some(k) => crate::model::file_analysis::Extraction::KeyOf(k),
+                    None => continue,
+                },
+            };
+            let source = if let Some(src) = flow_sources.get(mid) {
+                *src
+            } else if let Some((seq_src, _)) = seq_source_by_match.get(mid) {
+                // foreach: the list IS the collection's element; the slots
+                // index into it — two projections chained through the
+                // list's own Expr span.
+                if element_hops.insert((list_span.start, list_span.end)) {
+                    out.witnesses.push(crate::model::witnesses::Witness {
+                        attachment: crate::model::witnesses::WitnessAttachment::Expr(*list_span),
+                        source: crate::model::witnesses::WitnessSource::Builder("skeleton".into()),
+                        payload: crate::model::witnesses::WitnessPayload::Projected {
+                            base: crate::model::witnesses::WitnessAttachment::Expr(*seq_src),
+                            step: crate::model::witnesses::ProjectionStep::Element,
+                        },
+                        span: *list_span,
+                    });
+                }
+                *list_span
+            } else {
+                continue;
+            };
+            out.flow_edges.push(crate::model::file_analysis::FlowEdge {
+                target_name: name.clone(),
+                target_scope: *scope,
+                target_at: *at,
+                source,
+                extraction,
+                reassigns: false,
+            });
+        }
+    }
+    // Key-less array literals are positional TUPLES of their elements'
+    // edges (`return [$queue, $agent]`); a keyed element or a spread makes
+    // the literal a map / open list — the tuple witness is withheld and the
+    // `expr.lit.hashref` / keyed-shape witnesses stand.
+    {
+        let mut by_arr: HashMap<(Point, Point), (Span, Vec<(usize, Span)>, bool)> = HashMap::new();
+        for (mid, arr_span) in &tuple_arr_by_match {
+            let entry = by_arr
+                .entry((arr_span.start, arr_span.end))
+                .or_insert((*arr_span, Vec::new(), false));
+            if tuple_keyed.contains(mid) {
+                entry.2 = true;
+                continue;
+            }
+            if let (Some(elem), Some((byte, spread))) =
+                (tuple_elem_by_match.get(mid), tuple_init_by_match.get(mid))
+            {
+                if *spread {
+                    entry.2 = true;
+                    continue;
+                }
+                entry.1.push((*byte, *elem));
+            }
+        }
+        const MAX_TUPLE: usize = 64;
+        for (_, (arr_span, mut elems, disqualified)) in by_arr {
+            if disqualified || elems.is_empty() || elems.len() > MAX_TUPLE {
+                continue;
+            }
+            elems.sort_by_key(|(b, _)| *b);
+            out.witnesses.push(crate::model::witnesses::Witness {
+                attachment: crate::model::witnesses::WitnessAttachment::Expr(arr_span),
+                source: crate::model::witnesses::WitnessSource::Builder("skeleton".into()),
+                payload: crate::model::witnesses::WitnessPayload::Tuple(
+                    elems
+                        .into_iter()
+                        .map(|(_, s)| crate::model::witnesses::WitnessAttachment::Expr(s))
+                        .collect(),
+                ),
+                span: arr_span,
+            });
+        }
+    }
+    // Subscripts project off their base: an integer index peels a slot, a
+    // literal string key drills a keyed shape — the same `Projected` steps
+    // the foreach/destructuring binders ride.
+    for (expr, base, idx, key) in subscript_by_match.values() {
+        let Some(base) = base else { continue };
+        let step = match (idx, key) {
+            (Some(i), _) => crate::model::witnesses::ProjectionStep::ArrayIndex(*i),
+            (None, Some(k)) => crate::model::witnesses::ProjectionStep::HashKey(k.clone()),
+            _ => continue,
+        };
+        out.witnesses.push(crate::model::witnesses::Witness {
+            attachment: crate::model::witnesses::WitnessAttachment::Expr(*expr),
+            source: crate::model::witnesses::WitnessSource::Builder("skeleton".into()),
+            payload: crate::model::witnesses::WitnessPayload::Projected {
+                base: crate::model::witnesses::WitnessAttachment::Expr(*base),
+                step,
+            },
+            span: *expr,
         });
     }
     // Lower the value-flow edges to type-tier witnesses (the bag is canonical
@@ -1308,6 +2585,22 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     // point-containment ends the narrowing at the rebind — the soundness Perl
     // got from its cutoff, now generic. Every LangPack that narrows (python
     // isinstance, cpp dynamic_cast + optional engagement) gets it free.
+    // The region shapes join here, once every guard capture is in. An
+    // assertion form is honoured only for the pack's declared callees.
+    let regions = narrow_after
+        .into_iter()
+        .map(|(mid, at, sid)| (mid, Span { start: at, end: out.scopes[sid.0 as usize].span.end }, sid))
+        .chain(narrow_within);
+    for (mid, region, sid) in regions {
+        if narrow_assert.get(&mid).is_some_and(|c| !pack.narrow_assertions.contains(&c.as_str())) {
+            continue;
+        }
+        let (Some(var), Some(ty)) = (narrow_var.get(&mid), narrow_type.get(&mid)) else { continue };
+        let guard = narrow_guard.get(&mid).map(String::as_str);
+        if let Some(refined) = (pack.narrow_guard)(guard, ty) {
+            pending_narrow.push(((pack.shape_name)("ref.var", var), refined, region, sid));
+        }
+    }
     for (name, refined, region, scope) in pending_narrow {
         let end = crate::model::file_analysis::earliest_rebind_in(&out.flow_edges, &name, region)
             .unwrap_or(region.end);
@@ -1333,8 +2626,626 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
             }
         }
     }
+    // ---- documentation-comment types: pack vocabulary, positional join ----
+    // A doc comment documents the def that STARTS on the line directly below
+    // its last line (an attribute/modifier line between them breaks the join —
+    // accepted v1). DECLARED types always win: a doc fact fills only where
+    // the syntax carried nothing, because docblocks drift and the tree
+    // doesn't. Perl/C++ packs return no facts, so the pass is a no-op there.
+    {
+        use crate::build::query_extract::DocFact;
+        // Keyed by the comment's END row (the def sits on the next line);
+        // the start row rides along so a `@method` fact can span its own
+        // line inside the comment.
+        let mut by_end_row: HashMap<usize, (usize, Vec<DocFact>)> = HashMap::new();
+        // The bound names imports bring in, for the doc-mention scan below:
+        // an import used only in a docblock (`@var Foo $x`) is used.
+        let bound: std::collections::HashSet<String> = out
+            .import_sites
+            .iter()
+            .map(|(raw, _)| raw.rsplit('\\').next().unwrap_or(raw).to_string())
+            .chain(out.use_aliases.iter().map(|(alias, _, _)| alias.clone()))
+            .collect();
+        for e in &events {
+            if e.cap == "doc.comment" {
+                if !bound.is_empty() {
+                    for word in e.text.split(|c: char| !(c.is_alphanumeric() || c == '_')) {
+                        if bound.contains(word) && !out.doc_mentions.iter().any(|m| m == word) {
+                            out.doc_mentions.push(word.to_string());
+                        }
+                    }
+                }
+                let facts = (pack.doc_types)(&e.text);
+                if !facts.is_empty() {
+                    let entry = by_end_row
+                        .entry(e.end.row)
+                        .or_insert_with(|| (e.start.row, Vec::new()));
+                    entry.1.extend(facts);
+                }
+            }
+        }
+        if !by_end_row.is_empty() {
+            let scope_spans: Vec<Span> = out.scopes.iter().map(|s| s.span).collect();
+            let param_syms: Vec<(String, crate::model::file_analysis::ScopeId, Point)> =
+                out.symbols
+                    .iter()
+                    .filter(|s| s.kind == "var")
+                    .map(|s| (s.name.clone(), s.scope, s.start))
+                    .collect();
+            let mut doc_witnesses: Vec<crate::model::witnesses::Witness> = Vec::new();
+            let mut doc_refs: Vec<SkelRef> = Vec::new();
+            let mut doc_methods: Vec<SkelSymbol> = Vec::new();
+            for sym in out.symbols.iter_mut() {
+                // `@method` rows join to the CLASS docblock (Laravel facades,
+                // Eloquent's `__call` surface): each synthesizes a real
+                // method symbol on the class, spanning the class name token
+                // so gd lands somewhere honest. The other fact kinds join to
+                // callables/fields as before.
+                if matches!(sym.kind.as_str(), "class" | "interface") {
+                    let Some((cstart, facts)) =
+                        sym.start.row.checked_sub(1).and_then(|r| by_end_row.get(&r))
+                    else {
+                        continue;
+                    };
+                    for f in facts {
+                        // `@template T` rows: the class's generic params, in
+                        // row order — the same per-class axis cpp templates
+                        // feed, so `@return TModel` methods publish
+                        // `ParamOf(i)` through the existing writeback.
+                        if let DocFact::Template { name, line } = f {
+                            out.template_params.push((sym.name.clone(), name.clone(), *line));
+                            continue;
+                        }
+                        if let DocFact::Description(d) = f {
+                            sym.doc = Some(d.clone());
+                            continue;
+                        }
+                        if let DocFact::Deprecated(t) = f {
+                            mark_deprecated(sym, t.clone());
+                            continue;
+                        }
+                        if let DocFact::Method { name, ret, line, col } = f {
+                            // Span = the method NAME TOKEN in the fact's own
+                            // `@method` line: a distinct gd/cursor target per
+                            // row (every row on the class name span would
+                            // collapse to one symbol), and the row's ONE
+                            // declaration site — references from the token
+                            // resolve the Method target, rename rewrites it.
+                            let at = Point { row: cstart + line, column: *col };
+                            let at_end = Point { row: at.row, column: col + name.len() };
+                            doc_methods.push(SkelSymbol {
+                                kind: "method".to_string(),
+                                name: name.clone(),
+                                start: at,
+                                end: at_end,
+                                name_start: at,
+                                name_end: at_end,
+                                package: Some(sym.name.clone()),
+                                scope: sym.scope,
+                                return_type: ret
+                                    .as_deref()
+                                    .and_then(|t| (pack.annot_type)(t)),
+                                receiver_return: ret
+                                    .as_deref()
+                                    .is_some_and(|t| (pack.rettype_receiver)(t)),
+                                receiver_instance_of: None,
+                                deref_stack: Vec::new(),
+                                // documentation, not a declaration: no body, no annotation to add
+                                attributes: vec!["documented".to_string()],
+                                arity: None,
+                                qualifier_owned: false,
+                                doc: None,
+                                deprecation: None,
+                            });
+                        }
+                    }
+                    continue;
+                }
+                if !matches!(sym.kind.as_str(), "sub" | "method" | "field" | "anon" | "var") {
+                    continue;
+                }
+                let Some((cstart, facts)) =
+                    sym.start.row.checked_sub(1).and_then(|r| by_end_row.get(&r))
+                else {
+                    continue;
+                };
+                let cstart = *cstart;
+                for f in facts {
+                    match f {
+                        // class-docblock facts; no callable/field join
+                        DocFact::Method { .. } | DocFact::Template { .. } => {}
+                        DocFact::Description(d) => {
+                            if !matches!(sym.kind.as_str(), "var" | "anon") {
+                                sym.doc = Some(d.clone());
+                            }
+                        }
+                        DocFact::Deprecated(t) => mark_deprecated(sym, t.clone()),
+                        DocFact::ReturnRecvInstance { base } => {
+                            if sym.return_type.is_none()
+                                && !sym.receiver_return
+                                && sym.receiver_instance_of.is_none()
+                            {
+                                sym.receiver_instance_of = Some(base.clone());
+                            }
+                        }
+                        DocFact::Return(t) => {
+                            // A doc row fills an undeclared return, and REFINES
+                            // a bare declared container (`: array` +
+                            // `@return array{Queue, Agent}`) — the same rule
+                            // `doc_admits` applies to params.
+                            let bare_container = matches!(
+                                sym.return_type,
+                                Some(InferredType::HashRef | InferredType::ArrayRef)
+                            );
+                            if (sym.return_type.is_none() || bare_container)
+                                && !sym.receiver_return
+                            {
+                                if (pack.rettype_receiver)(t) {
+                                    if sym.return_type.is_none() {
+                                        sym.receiver_return = true;
+                                    }
+                                } else if let Some(doc) = (pack.annot_type)(t) {
+                                    if !bare_container
+                                        || matches!(
+                                            doc,
+                                            InferredType::Sequence(_)
+                                                | InferredType::Parametric(_)
+                                                | InferredType::HashWithKeys { .. }
+                                        )
+                                    {
+                                        sym.return_type = Some(doc);
+                                    }
+                                }
+                            }
+                        }
+                        DocFact::UsesMethod { name, line, col } => {
+                            // PHPUnit `@dataProvider name`: a method REF on
+                            // the enclosing class, spanning the provider
+                            // NAME TOKEN in the docblock — providers gain
+                            // real fan-in, and rename rewrites the token in
+                            // place. Only meaningful on class members (the
+                            // invocant is the class).
+                            if let (true, Some(cls)) = (
+                                matches!(sym.kind.as_str(), "sub" | "method"),
+                                sym.package.as_deref(),
+                            ) {
+                                let start = Point { row: cstart + line, column: *col };
+                                let end = Point {
+                                    row: start.row,
+                                    column: col + name.len(),
+                                };
+                                // Invocant is the CLASS NAME, not
+                                // `__PACKAGE__`: the doc row sits in the
+                                // class-body scope, whose package is the
+                                // NAMESPACE, so the current-package walk
+                                // would resolve the wrong owner — the join
+                                // already knows the class.
+                                doc_refs.push(SkelRef {
+                                    via: None,
+                                    kind: "member".to_string(),
+                                    name: name.clone(),
+                                    start,
+                                    end,
+                                    scope: sym.scope,
+                                    invocant: Some((
+                                        Span { start, end },
+                                        cls.to_string(),
+                                    )),
+                                    member_op: None,
+                                    arg_count: None,
+                                    shape: crate::model::file_analysis::MemberShape::Callable,
+                                    named_by_string: false,
+                                });
+                            }
+                        }
+                        DocFact::Var { ty: t, name: var_name } => {
+                            // The NAMED inline form (`/** @var Type[] $rows */`
+                            // above an assignment) types that specific local.
+                            if let Some(vn) = var_name {
+                                if sym.kind == "var" && &sym.name == vn {
+                                    if let Some(ty) = (pack.annot_type)(t) {
+                                        doc_witnesses.push(doc_cast_witness(
+                                            &sym.name,
+                                            sym.scope,
+                                            ty,
+                                            Span { start: sym.start, end: sym.start },
+                                        ));
+                                    }
+                                    continue;
+                                }
+                                // `@var T $prop` above a PROPERTY (WordPress
+                                // spells every field doc with its name) is
+                                // that field's doc, not a local cast.
+                                if !(sym.kind == "field" && vn.trim_start_matches('$') == sym.name) {
+                                    continue;
+                                }
+                            }
+                            if sym.kind == "var" {
+                                continue;
+                            }
+                            // A documented property types class-wide (member
+                            // lookup is not sequential), exactly like a
+                            // declared field type. Syntax-typed fields skip
+                            // (declared wins — docblocks drift) EXCEPT when
+                            // the doc STRICTLY REFINES a bare container:
+                            // `protected array $h` + `@var list<X>` is the
+                            // canonical refinement — the syntax cannot spell
+                            // the element, the doc exists to add it.
+                            if sym.kind == "field" {
+                                let Some(ty) = (pack.annot_type)(t) else { continue };
+                                if doc_admits(
+                                    pack,
+                                    &annot_text_by_var,
+                                    (&sym.name, sym.scope),
+                                    &ty,
+                                ) {
+                                    let span = scope_spans
+                                        .get(sym.scope.0 as usize)
+                                        .copied()
+                                        .unwrap_or(Span { start: sym.start, end: sym.start });
+                                    // An ANNOTATION, like the declared field
+                                    // type it stands in for: it outranks what
+                                    // a constructor happens to write to the
+                                    // field (`@var A|B $skin` + `$this->skin =
+                                    // new B` reads as the documented union).
+                                    let mut w = doc_witness(&sym.name, sym.scope, ty, span);
+                                    w.source = crate::model::witnesses::WitnessSource::Builder(
+                                        crate::model::witnesses::ANNOT_SOURCE.into(),
+                                    );
+                                    doc_witnesses.push(w);
+                                }
+                            }
+                        }
+                        DocFact::Param { name, ty } => {
+                            // The def's own parameter — untyped, or a bare
+                            // container the doc refines (same rule as Var).
+                            let Some(ty) = (pack.annot_type)(ty) else { continue };
+                            let in_def = |p: Point| {
+                                (p.row, p.column) >= (sym.start.row, sym.start.column)
+                                    && (p.row, p.column) <= (sym.end.row, sym.end.column)
+                            };
+                            if let Some((n, sc, at)) = param_syms.iter().find(|(n, sc, at)| {
+                                n == name
+                                    && in_def(*at)
+                                    && doc_admits(pack, &annot_text_by_var, (n, *sc), &ty)
+                            }) {
+                                // Publish the row CLASS-KEYED too
+                                // (`method#p#$name`): an @inheritDoc override
+                                // in another file reaches it through the
+                                // registry's PackageSymbol inheritance walk
+                                // (every monolog `handleBatch` override was
+                                // blind without this).
+                                if let Some(cls) = sym.package.as_deref() {
+                                    if matches!(sym.kind.as_str(), "sub" | "method") {
+                                        doc_witnesses.push(crate::model::witnesses::Witness {
+                                            attachment:
+                                                crate::model::witnesses::WitnessAttachment::PackageSymbol {
+                                                    package: cls.to_string(),
+                                                    name: format!("{}#p#{}", sym.name, n),
+                                                },
+                                            source: crate::model::witnesses::WitnessSource::Builder(
+                                                "skeleton-doc".into(),
+                                            ),
+                                            payload:
+                                                crate::model::witnesses::WitnessPayload::InferredType(
+                                                    ty.clone(),
+                                                ),
+                                            span: Span { start: *at, end: *at },
+                                        });
+                                    }
+                                }
+                                doc_witnesses.push(doc_witness(
+                                    n,
+                                    *sc,
+                                    ty,
+                                    Span { start: *at, end: *at },
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+            // A refining doc row REPLACES the redundant bare-container annot
+            // witness on its slot (the fold is not latest-wins; leaving the
+            // `array` witness in place would keep beating the refinement).
+            let refined: std::collections::HashSet<(std::string::String, crate::model::file_analysis::ScopeId)> =
+                doc_witnesses
+                    .iter()
+                    .filter(|w| {
+                        matches!(
+                            &w.payload,
+                            crate::model::witnesses::WitnessPayload::InferredType(
+                                InferredType::Sequence(_) | InferredType::Parametric(_)
+                            )
+                        )
+                    })
+                    .filter_map(|w| match &w.attachment {
+                        crate::model::witnesses::WitnessAttachment::Variable { name, scope } => {
+                            Some((name.clone(), *scope))
+                        }
+                        _ => None,
+                    })
+                    .collect();
+            if !refined.is_empty() {
+                out.witnesses.retain(|w| {
+                    let is_container_annot = matches!(
+                        &w.source,
+                        crate::model::witnesses::WitnessSource::Builder(s)
+                            if s == crate::model::witnesses::ANNOT_SOURCE
+                    ) && matches!(
+                        &w.payload,
+                        crate::model::witnesses::WitnessPayload::InferredType(
+                            InferredType::HashRef | InferredType::ArrayRef
+                        )
+                    );
+                    !(is_container_annot
+                        && matches!(
+                            &w.attachment,
+                            crate::model::witnesses::WitnessAttachment::Variable { name, scope }
+                                if refined.contains(&(name.clone(), *scope))
+                        ))
+                });
+            }
+            // A named `@var T $x` above a RE-assignment (php's function-
+            // scoped locals: the def is the FIRST assignment, a later one is
+            // a rebind FlowEdge, not a symbol) casts the variable from that
+            // row on — the `$x = Factory::make(); /** @var Concrete $x */`
+            // idiom that narrows a base-typed factory return.
+            for (end_row, (_, facts)) in &by_end_row {
+                for f in facts {
+                    let DocFact::Var { ty, name: Some(vn) } = f else { continue };
+                    let Some(t) = (pack.annot_type)(ty) else { continue };
+                    let has_def = out
+                        .symbols
+                        .iter()
+                        .any(|s| s.kind == "var" && &s.name == vn && s.start.row == end_row + 1);
+                    if has_def {
+                        continue;
+                    }
+                    if let Some(fe) = out
+                        .flow_edges
+                        .iter()
+                        .find(|fe| &fe.target_name == vn && fe.target_at.row == end_row + 1)
+                    {
+                        out.witnesses.push(doc_cast_witness(
+                            vn,
+                            fe.target_scope,
+                            t,
+                            Span { start: fe.target_at, end: fe.target_at },
+                        ));
+                    }
+                }
+            }
+            out.witnesses.extend(doc_witnesses);
+            out.symbols.extend(doc_methods);
+            out.refs.extend(doc_refs);
+        }
+    }
+    // @inheritDoc param inheritance every syntax-untyped,
+    // locally-undocumented PARAM edges to a class-keyed row
+    // (`PackageSymbol{class, "method#p#$name"}`); the doc-join above
+    // publishes the row where an ancestor's docblock declares the type,
+    // and the registry's inheritance walk carries it across files. A
+    // dangling edge (nothing ever publishes) resolves to None for free.
+    {
+        let method_rows: Vec<(String, String, Span)> = out
+            .symbols
+            .iter()
+            .filter(|s| matches!(s.kind.as_str(), "sub" | "method"))
+            .filter_map(|s| {
+                s.package
+                    .as_ref()
+                    .map(|p| (p.clone(), s.name.clone(), Span { start: s.start, end: s.end }))
+            })
+            .collect();
+        let in_span = |p: Point, sp: &Span| {
+            (p.row, p.column) >= (sp.start.row, sp.start.column)
+                && (p.row, p.column) <= (sp.end.row, sp.end.column)
+        };
+        let mut edges: Vec<crate::model::witnesses::Witness> = Vec::new();
+        // NB: the local `param_sigs` vec — it moves into `out` only at the
+        // end of this fn, so `out.param_sigs` is still empty here.
+        for (sig_span, _) in &param_sigs {
+            let Some((cls, method, _)) = method_rows
+                .iter()
+                .find(|(_, _, msp)| in_span(sig_span.start, msp))
+            else {
+                continue;
+            };
+            for v in out
+                .symbols
+                .iter()
+                .filter(|v| v.kind == "var" && in_span(v.start, sig_span))
+            {
+                // A specifically-typed param never subscribes; a BARE
+                // container annot (`array $records`) still does — the whole
+                // @inheritDoc idiom is "syntax says array, the ancestor's
+                // doc says which element type" (same refinement rule as
+                // `doc_admits`).
+                if let Some(annot) = annot_text_by_var.get(&(v.name.clone(), v.scope)) {
+                    if !matches!(
+                        (pack.annot_type)(annot),
+                        Some(InferredType::HashRef | InferredType::ArrayRef)
+                    ) {
+                        continue;
+                    }
+                }
+                edges.push(crate::model::witnesses::Witness {
+                    attachment: crate::model::witnesses::WitnessAttachment::Variable {
+                        name: v.name.clone(),
+                        scope: v.scope,
+                    },
+                    source: crate::model::witnesses::WitnessSource::Builder(
+                        crate::model::witnesses::INHERIT_PARAM_SOURCE.into(),
+                    ),
+                    payload: crate::model::witnesses::WitnessPayload::Edge(
+                        crate::model::witnesses::WitnessAttachment::PackageSymbol {
+                            package: cls.clone(),
+                            name: format!("{}#p#{}", method, v.name),
+                        },
+                    ),
+                    span: Span { start: v.start, end: v.start },
+                });
+            }
+        }
+        out.witnesses.extend(edges);
+    }
+
+    // Access-modifier stamp: the `@nonpublic.target` name spans mark
+    // members whose modifier means non-public — the same `non_public`
+    // attribute cpp access regions stamp, read by the completion gates.
+    if !nonpublic_name_spans.is_empty()
+        || !classattr_by_name_span.is_empty()
+        || !static_name_spans.is_empty()
+        || !contract_name_spans.is_empty()
+        || !alias_name_ends.is_empty()
+    {
+        for sym in &mut out.symbols {
+            if sym.kind == "var"
+                && alias_name_ends.contains(&sym.name_end)
+                && !sym.attributes.iter().any(|a| a == "alias")
+            {
+                sym.attributes.push("alias".to_string());
+            }
+            if contract_name_spans.contains(&(sym.name_start, sym.name_end))
+                && !sym.attributes.iter().any(|a| a == "contract")
+            {
+                sym.attributes.push("contract".to_string());
+            }
+            if nonpublic_name_spans.contains(&(sym.name_start, sym.name_end))
+                && !sym.attributes.iter().any(|a| a == "non_public")
+            {
+                sym.attributes.push("non_public".to_string());
+            }
+            if static_name_spans.contains(&(sym.name_start, sym.name_end))
+                && !sym.attributes.iter().any(|a| a == "static")
+            {
+                sym.attributes.push("static".to_string());
+            }
+            if let Some(flavor) = classattr_by_name_span.get(&(sym.name_start, sym.name_end)) {
+                if sym.kind == "class" && !sym.attributes.iter().any(|a| a == flavor) {
+                    sym.attributes.push(flavor.clone());
+                }
+            }
+        }
+    }
     out.param_sigs = param_sigs;
     Ok(out)
+}
+
+/// Does a doc row get to type this (name, scope) slot? Yes when the syntax
+/// declared nothing (declared wins — docblocks drift), and ALSO when the doc
+/// is a `Sequence` refining a bare declared container (`array`/`iterable` —
+/// the spelling that cannot carry an element). The doc witness lands AFTER
+/// the declared one, so latest-wins reduction serves the refinement.
+/// The positional index of a destructuring slot: the number of TOP-LEVEL
+/// commas in the list text before the slot's byte offset (`[, $b]` → 1).
+/// `None` for a keyed list (a top-level `=>`): its positions are not
+/// positions, so the slot never binds positionally.
+fn slot_position(list_text: &str, slot_offset: usize) -> Option<usize> {
+    let bytes = list_text.as_bytes();
+    let (mut depth, mut commas) = (0i32, 0usize);
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'(' | b'[' | b'{' => depth += 1,
+            b')' | b']' | b'}' => depth -= 1,
+            b',' if depth == 1 && i < slot_offset => commas += 1,
+            b'=' if depth == 1 && bytes.get(i + 1) == Some(&b'>') => return None,
+            _ => {}
+        }
+        i += 1;
+    }
+    Some(commas)
+}
+
+/// The literal key of a KEYED destructuring slot (`['k' => $v]`): the
+/// quoted string before the `=>` that precedes the slot in its own
+/// top-level segment. `None` for a positional list or a non-literal key.
+fn slot_key(list_text: &str, slot_offset: usize) -> Option<String> {
+    let bytes = list_text.as_bytes();
+    let (mut depth, mut seg_start) = (0i32, 0usize);
+    for (i, &c) in bytes.iter().enumerate().take(slot_offset.min(bytes.len())) {
+        match c {
+            b'(' | b'[' | b'{' => {
+                depth += 1;
+                if depth == 1 {
+                    seg_start = i + 1;
+                }
+            }
+            b')' | b']' | b'}' => depth -= 1,
+            b',' if depth == 1 => seg_start = i + 1,
+            _ => {}
+        }
+    }
+    let seg = &list_text[seg_start..slot_offset.min(list_text.len())];
+    let (key, _) = seg.split_once("=>")?;
+    let key = key.trim();
+    let quoted = key.len() >= 2
+        && ((key.starts_with('\'') && key.ends_with('\''))
+            || (key.starts_with('"') && key.ends_with('"')));
+    quoted.then(|| key[1..key.len() - 1].to_string())
+}
+
+fn doc_admits(
+    pack: &LangPack,
+    annot_text_by_var: &std::collections::HashMap<
+        (std::string::String, crate::model::file_analysis::ScopeId),
+        std::string::String,
+    >,
+    slot: (&str, crate::model::file_analysis::ScopeId),
+    doc_ty: &InferredType,
+) -> bool {
+    match annot_text_by_var.get(&(slot.0.to_string(), slot.1)) {
+        None => true,
+        Some(declared) => {
+            matches!(
+                doc_ty,
+                InferredType::Sequence(_) | InferredType::Parametric(_)
+            ) && matches!(
+                (pack.annot_type)(declared),
+                Some(InferredType::HashRef | InferredType::ArrayRef)
+            )
+        }
+    }
+}
+
+/// A documentation-sourced type witness on a Variable slot — its own source
+/// tag (not `ANNOT_SOURCE`): a doc type is real typing fuel, but the inlay
+/// suppression that hides hints for syntax-annotated declarations should
+/// still show one here (the docblock can sit far from the use).
+/// A NAMED `@var T $x` is a cast the author wrote at that site: it rides
+/// at annotation priority (`REFINE_SOURCE`) so the flow / call-binding
+/// edges the same assignment mints — pushed later, equal priority, and
+/// latest-wins — cannot override it with the factory's declared base.
+fn doc_cast_witness(
+    name: &str,
+    scope: crate::model::file_analysis::ScopeId,
+    ty: InferredType,
+    span: Span,
+) -> crate::model::witnesses::Witness {
+    let mut w = doc_witness(name, scope, ty, span);
+    w.source = crate::model::witnesses::WitnessSource::Builder(
+        crate::model::witnesses::REFINE_SOURCE.into(),
+    );
+    w
+}
+
+fn doc_witness(
+    name: &str,
+    scope: crate::model::file_analysis::ScopeId,
+    ty: InferredType,
+    span: Span,
+) -> crate::model::witnesses::Witness {
+    crate::model::witnesses::Witness {
+        attachment: crate::model::witnesses::WitnessAttachment::Variable {
+            name: name.to_string(),
+            scope,
+        },
+        source: crate::model::witnesses::WitnessSource::Builder("skeleton-doc".into()),
+        payload: crate::model::witnesses::WitnessPayload::InferredType(ty),
+        span,
+    }
 }
 
 /// The `TypeName(alias) → …` payload for an underlying type spelling, resolving
@@ -1377,6 +3288,96 @@ pub(crate) fn looks_like_type_spelling(body: &str) -> bool {
     b.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == ':' || c == ' ')
 }
 
+/// Split a written qualified name into `(leaf, namespace)` at its last
+/// separator, leading-`\` (a php global-anchored spelling) trimmed. A
+/// separator-less spelling is a bare leaf in the global namespace.
+fn split_ns_leaf(fq: &str) -> (String, String) {
+    let t = fq.trim_start_matches('\\');
+    match t.rsplit_once('\\') {
+        Some((ns, leaf)) => (leaf.to_string(), ns.to_string()),
+        None => (t.to_string(), String::new()),
+    }
+}
+
+/// The chain-hop witness for one member-call site: the whole call's value
+/// is `Projected{base, MethodHop{member, arity}}` — dispatch deferred to
+/// query time, when the base's class and the index are in hand. A
+/// simple-var receiver bases on the `Variable` (its witnesses live on the
+/// scope chain, not on the read's span); a current-class receiver (php
+/// `$this->`/`self::` via the pack's `hop.recv` shaping) bases on the
+/// receiver span with a companion `ClassName(enclosing class)` witness —
+/// extraction is the only place that class is in hand; anything else
+/// bases on the receiver's `Expr` span, where a nested call carries its
+/// OWN hop.
+#[allow(clippy::too_many_arguments)]
+fn push_hop_witness(
+    witnesses: &mut Vec<crate::model::witnesses::Witness>,
+    pack: &super::packs::LangPack,
+    member_text: &str,
+    call_span: crate::model::file_analysis::Span,
+    recv_span: crate::model::file_analysis::Span,
+    recv_text: &str,
+    recv_simple: bool,
+    scope: crate::model::file_analysis::ScopeId,
+    arity: Option<u32>,
+    enclosing_class: Option<&str>,
+) {
+    use crate::model::witnesses as wit;
+    let hop_recv = (pack.shape_name)("hop.recv", recv_text);
+    let base = if crate::model::conventions::is_current_package_token(&hop_recv) {
+        let Some(cls) = enclosing_class else { return };
+        witnesses.push(wit::Witness {
+            attachment: wit::WitnessAttachment::Expr(recv_span),
+            source: wit::WitnessSource::Builder("skeleton".into()),
+            payload: wit::WitnessPayload::InferredType(
+                crate::model::file_analysis::InferredType::ClassName(cls.to_string()),
+            ),
+            span: recv_span,
+        });
+        wit::WitnessAttachment::Expr(recv_span)
+    } else if recv_simple {
+        wit::WitnessAttachment::Variable {
+            name: (pack.shape_name)("def.var", recv_text),
+            scope,
+        }
+    } else if is_identifier_text(recv_text) {
+        // A bareword receiver dispatches as the class (Perl's
+        // `User->make` rule; php `Level::Debug` / `Foo::create()`): the
+        // span carries no expression witness of its own, so seed it.
+        witnesses.push(wit::Witness {
+            attachment: wit::WitnessAttachment::Expr(recv_span),
+            source: wit::WitnessSource::Builder("skeleton".into()),
+            payload: wit::WitnessPayload::InferredType(
+                crate::model::file_analysis::InferredType::ClassName(recv_text.to_string()),
+            ),
+            span: recv_span,
+        });
+        wit::WitnessAttachment::Expr(recv_span)
+    } else {
+        wit::WitnessAttachment::Expr(recv_span)
+    };
+    witnesses.push(wit::Witness {
+        attachment: wit::WitnessAttachment::Expr(call_span),
+        source: wit::WitnessSource::Builder("skeleton".into()),
+        payload: wit::WitnessPayload::Projected {
+            base,
+            // Arity-less = a value read (`$this->prop`): the hop asks the
+            // class for the member's VALUE edge, so a same-named method's
+            // return can't answer for the property.
+            step: match arity {
+                Some(arity) => wit::ProjectionStep::MethodHop {
+                    member: (pack.shape_name)("ref.member", member_text),
+                    arity,
+                },
+                None => wit::ProjectionStep::ValueHop {
+                    member: (pack.shape_name)("ref.member", member_text),
+                },
+            },
+        },
+        span: call_span,
+    });
+}
+
 /// A bare identifier lexeme — the only shape that can name an enumerator.
 /// Pure string test (no node-kind probe) so every language's capture text
 /// routes through the same rule.
@@ -1391,4 +3392,45 @@ fn byte_range_of(events: &[Event], match_id: usize, cap: &str) -> Option<(usize,
         .iter()
         .find(|e| e.match_id == match_id && e.cap == cap)
         .map(|e| (e.start_byte, e.end_byte))
+}
+
+/// A class body scope: its package is the class (a member declared
+/// directly in the body — a constant, a property default — resolves its
+/// enclosing class as this, not the namespace), and the receiver name
+/// (`$this`) is witnessed as an instance of it, so every chain based on
+/// the receiver resolves through the registry like any typed variable.
+/// The one spelling of "this declaration is deprecated": the attribute the
+/// lane reads, plus the notice hover and the diagnostic show.
+fn mark_deprecated(sym: &mut crate::build::query_extract::SkelSymbol, text: Option<String>) {
+    if !sym.attributes.iter().any(|a| a == "deprecated") {
+        sym.attributes.push("deprecated".to_string());
+    }
+    if text.is_some() || sym.deprecation.is_none() {
+        sym.deprecation = text;
+    }
+}
+
+fn register_class_body(
+    out: &mut SkeletonAnalysis,
+    pack: &crate::build::query_extract::LangPack,
+    scope: crate::model::file_analysis::ScopeId,
+    class: &str,
+    at: Point,
+) {
+    if let Some(sc) = out.scopes.iter_mut().find(|s| s.id == scope) {
+        sc.package = Some(class.to_string());
+    }
+    for recv in pack.receiver_names {
+        out.witnesses.push(crate::model::witnesses::Witness {
+            attachment: crate::model::witnesses::WitnessAttachment::Variable {
+                name: recv.to_string(),
+                scope,
+            },
+            source: crate::model::witnesses::WitnessSource::Builder("skeleton-receiver".into()),
+            payload: crate::model::witnesses::WitnessPayload::InferredType(
+                crate::model::file_analysis::InferredType::ClassName(class.to_string()),
+            ),
+            span: Span { start: at, end: at },
+        });
+    }
 }

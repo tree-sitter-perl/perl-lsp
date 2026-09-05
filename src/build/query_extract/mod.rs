@@ -33,24 +33,382 @@ use tree_sitter::{Language, Point, Query, QueryCursor, StreamingIterator, Tree};
 /// Compile each pack's skeleton query exactly once and reuse it.
 ///
 /// `Query::new` is expensive (~400ms for the Perl skeleton) and `extract`
-/// runs per file, so recompiling every call dominates the workload. A pack's
-/// `query_source` is a unique `&'static str`, so its pointer identity keys the
-/// compiled query — same pack, same query, one compilation. Leaking the boxed
-/// query is bounded (one per language pack) and gives the `&'static Query` the
-/// cache needs.
-fn cached_query(language: &Language, source: &'static str) -> Result<&'static Query, String> {
+/// runs per file, so recompiling every call dominates the workload. Keyed by
+/// CONTENT hash (not pointer): a runtime-assembled source (bundled query +
+/// pack-plugin overlays) has no stable address, and two assemblies of the
+/// same bytes must share one compilation. Leaking the boxed query is bounded
+/// (one per distinct (language, overlay-set) — overlays never hot-reload
+/// within a process, matching the rhai registry's posture).
+fn cached_query(language: &Language, source: &str) -> Result<&'static Query, String> {
+    use std::collections::hash_map::DefaultHasher;
     use std::collections::HashMap;
-    use std::sync::{Mutex, OnceLock};
-    static CACHE: OnceLock<Mutex<HashMap<usize, &'static Query>>> = OnceLock::new();
+    use std::hash::{Hash, Hasher};
+    use std::sync::{Arc, Mutex, OnceLock};
+    // Single-flight per source: the slot is claimed under the map lock and
+    // compiled OUTSIDE it, so a second worker asking for the same query
+    // waits on the slot instead of compiling a duplicate (every Rayon worker
+    // started on a 1,000-line pack query at once — one wall, N CPUs).
+    type Slot = Arc<OnceLock<Result<&'static Query, String>>>;
+    static CACHE: OnceLock<Mutex<HashMap<u64, Slot>>> = OnceLock::new();
     let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
-    let key = source.as_ptr() as usize;
-    if let Some(q) = cache.lock().unwrap().get(&key) {
-        return Ok(q);
+    let key = {
+        let mut h = DefaultHasher::new();
+        source.hash(&mut h);
+        h.finish()
+    };
+    let slot = cache.lock().unwrap().entry(key).or_default().clone();
+    slot.get_or_init(|| {
+        // One compile per distinct source per process, so a printed phase
+        // line stays bounded; this IS the pack cold-start floor.
+        let query = crate::util::timings::phase("pack.query_compile", || {
+            Query::new(language, source).map_err(|e| format!("query: {e}"))
+        })?;
+        Ok(Box::leak(Box::new(query)))
+    })
+    .clone()
+}
+
+// ---- framework-entry declarations (the heatmap's "runner-invoked" data) ----
+
+/// One declared "a runner invokes this" rule, from an `entry.json`
+/// document (bundled per pack, or `<plugin-dir>/<name>/entry.json`).
+/// A rule matches a symbol when EVERY present condition holds:
+///   * `attributes` — the symbol carries one of these annotation names
+///     (php `#[Test]`, via the `@sym.attr` lane);
+///   * `method_prefix` / `methods` — the symbol's name matches;
+///   * `when_isa` — the symbol's class isa the (leaf-keyed) class.
+/// Rules OR across the set. The engine only EVALUATES these; every
+/// framework name lives in the data files (rule #10: the heatmap never
+/// compares names itself).
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct EntryMarker {
+    #[serde(default)]
+    pub attributes: Vec<String>,
+    #[serde(default)]
+    pub method_prefix: Option<String>,
+    #[serde(default)]
+    pub methods: Vec<String>,
+    #[serde(default)]
+    pub when_isa: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+struct EntryDoc {
+    language: String,
+    entries: Vec<EntryMarker>,
+}
+
+/// One text rail: `calls` are the function names whose first single-quoted
+/// argument names an entity on `rail`, scanned as TEXT in files whose path
+/// ends with one of `files` (a Blade template is text to the grammar).
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct TextRail {
+    pub rail: String,
+    pub calls: Vec<String>,
+    pub files: Vec<String>,
+    /// A substring every name must contain (`"."` for translation keys —
+    /// a bare word is a JSON translation STRING, not a key path).
+    #[serde(default)]
+    pub requires: Option<String>,
+}
+
+/// One path rail: a file whose path contains `under` DEFINES a name on
+/// `rail` — the rest of the path, `skip` leading segments dropped (a
+/// locale), `strip` removed from the end, separators joined by `sep`
+/// (`resources/views/a/b.blade.php` → `a.b`). With `keys`, the file's
+/// returned-array string keys extend that name (`config/app.php` →
+/// `app.name`, nested keys dotted) instead of the file naming itself.
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct PathRail {
+    pub rail: String,
+    pub under: String,
+    #[serde(default)]
+    pub skip: usize,
+    #[serde(default)]
+    pub strip: String,
+    #[serde(default = "default_sep")]
+    pub sep: String,
+    #[serde(default)]
+    pub keys: bool,
+    /// The file's METHODS define names on the rail (a policy class: every
+    /// method is an ability); the path only selects the file.
+    #[serde(default)]
+    pub methods: bool,
+}
+fn default_sep() -> String {
+    ".".to_string()
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+struct RailsDoc {
+    language: String,
+    #[serde(default)]
+    text_rails: Vec<TextRail>,
+    #[serde(default)]
+    path_rails: Vec<PathRail>,
+    /// rail → how the undefined-name lane phrases a miss (`"event": "No
+    /// listener for event"`); default `Undefined <rail>`.
+    #[serde(default)]
+    labels: std::collections::HashMap<String, String>,
+    /// Rails whose miss is a hint, not a warning: their definitions are
+    /// partly runtime-only (framework-default middleware aliases, database
+    /// permissions on the ability rail), so an unmatched name is a lead.
+    #[serde(default)]
+    hints: Vec<String>,
+    /// rail → the separator after which a use carries PARAMETERS
+    /// (`throttle:60,1` names `throttle`); the name and its span end there.
+    #[serde(default)]
+    name_seps: std::collections::HashMap<String, String>,
+}
+
+/// The lane-facing rail conventions of a language, merged over its rail
+/// documents.
+#[derive(Debug, Default, Clone)]
+pub struct RailConventions {
+    pub labels: Vec<(String, String)>,
+    pub hints: Vec<String>,
+    pub name_seps: Vec<(String, String)>,
+}
+
+/// The path rails in force for a language, from the bundled rail documents.
+pub fn path_rails_for(pack: &LangPack) -> std::sync::Arc<Vec<PathRail>> {
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex, OnceLock};
+    static CACHE: OnceLock<Mutex<HashMap<String, Arc<Vec<PathRail>>>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let key = pack.lang_id.to_string();
+    let mut guard = cache.lock().unwrap();
+    if let Some(l) = guard.get(&key) {
+        return Arc::clone(l);
     }
-    let query = Query::new(language, source).map_err(|e| format!("query: {e}"))?;
-    let leaked: &'static Query = Box::leak(Box::new(query));
+    let mut out: Vec<PathRail> = Vec::new();
+    for src in pack.bundled_rail_docs {
+        if let Ok(doc) = serde_json::from_str::<RailsDoc>(src) {
+            if doc.language == pack.lang_id {
+                out.extend(doc.path_rails);
+            }
+        }
+    }
+    let arc = Arc::new(out);
+    guard.insert(key, Arc::clone(&arc));
+    arc
+}
+
+/// The rail conventions (lane labels, hint rails, name separators) from
+/// the bundled rail documents.
+pub fn rail_conventions_for(pack: &LangPack) -> std::sync::Arc<RailConventions> {
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex, OnceLock};
+    static CACHE: OnceLock<Mutex<HashMap<String, Arc<RailConventions>>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let key = pack.lang_id.to_string();
+    let mut guard = cache.lock().unwrap();
+    if let Some(l) = guard.get(&key) {
+        return Arc::clone(l);
+    }
+    let mut out = RailConventions::default();
+    for src in pack.bundled_rail_docs {
+        if let Ok(doc) = serde_json::from_str::<RailsDoc>(src) {
+            if doc.language == pack.lang_id {
+                out.labels.extend(doc.labels);
+                out.hints.extend(doc.hints);
+                out.name_seps.extend(doc.name_seps);
+            }
+        }
+    }
+    out.labels.sort();
+    out.hints.sort();
+    out.name_seps.sort();
+    let arc = Arc::new(out);
+    guard.insert(key, Arc::clone(&arc));
+    arc
+}
+
+/// The text rails in force for a language: bundled documents plus every
+/// discovered `<plugin-dir>/<name>/rails.json` — the `entry.json` posture
+/// (cached per process, a malformed document dropped with a diagnostic).
+pub fn text_rails_for(pack: &LangPack) -> std::sync::Arc<Vec<TextRail>> {
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex, OnceLock};
+    static CACHE: OnceLock<Mutex<HashMap<String, Arc<Vec<TextRail>>>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut paths: Vec<std::path::PathBuf> = Vec::new();
+    for dir in crate::build::plugin::rhai_host::plugin_search_dirs() {
+        if let Ok(read) = std::fs::read_dir(&dir) {
+            for entry in read.flatten() {
+                let candidate = entry.path().join("rails.json");
+                if candidate.is_file() {
+                    paths.push(candidate);
+                }
+            }
+        }
+    }
+    paths.sort();
+    let key = format!("{}|{}", pack.lang_id, paths.len());
+    if let Some(v) = cache.lock().unwrap().get(&key) {
+        return Arc::clone(v);
+    }
+    let mut out: Vec<TextRail> = Vec::new();
+    let mut fold = |src: &str, origin: &dyn std::fmt::Display| {
+        match serde_json::from_str::<RailsDoc>(src) {
+            Ok(doc) if doc.language == pack.lang_id => out.extend(doc.text_rails),
+            Ok(_) => {}
+            Err(e) => eprintln!("perl-lsp: rail declarations {origin} dropped: {e}"),
+        }
+    };
+    for src in pack.bundled_rail_docs {
+        fold(src, &"(bundled)");
+    }
+    for p in &paths {
+        if let Ok(src) = std::fs::read_to_string(p) {
+            fold(&src, &p.display());
+        }
+    }
+    let arc = Arc::new(out);
+    cache.lock().unwrap().insert(key, Arc::clone(&arc));
+    arc
+}
+
+/// The framework-entry rules in force for a language: the pack's bundled
+/// documents plus every discovered `<plugin-dir>/<name>/entry.json`
+/// declaring this language. Cached per (lang, plugin-path set) like the
+/// overlay assembly — entry data never hot-reloads within a process. A
+/// malformed document is dropped with a stderr diagnostic (the bundled
+/// rules and surviving documents still serve — the overlay posture).
+pub fn entry_markers_for(pack: &LangPack) -> std::sync::Arc<Vec<EntryMarker>> {
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex, OnceLock};
+    static CACHE: OnceLock<Mutex<HashMap<String, Arc<Vec<EntryMarker>>>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut paths: Vec<std::path::PathBuf> = Vec::new();
+    for dir in crate::build::plugin::rhai_host::plugin_search_dirs() {
+        if let Ok(read) = std::fs::read_dir(&dir) {
+            for entry in read.flatten() {
+                let candidate = entry.path().join("entry.json");
+                if candidate.is_file() {
+                    paths.push(candidate);
+                }
+            }
+        }
+    }
+    paths.sort();
+    let key = format!("{}|{}", pack.lang_id, paths.len());
+    if let Some(v) = cache.lock().unwrap().get(&key) {
+        return Arc::clone(v);
+    }
+    let mut out: Vec<EntryMarker> = Vec::new();
+    let mut fold = |src: &str, origin: &dyn std::fmt::Display| {
+        match serde_json::from_str::<EntryDoc>(src) {
+            Ok(doc) if doc.language == pack.lang_id => out.extend(doc.entries),
+            Ok(_) => {}
+            Err(e) => eprintln!("perl-lsp: entry declarations {origin} dropped: {e}"),
+        }
+    };
+    for src in pack.bundled_entry_markers {
+        fold(src, &"(bundled)");
+    }
+    for p in &paths {
+        if let Ok(src) = std::fs::read_to_string(p) {
+            fold(&src, &p.display());
+        }
+    }
+    let arc = Arc::new(out);
+    cache.lock().unwrap().insert(key, Arc::clone(&arc));
+    arc
+}
+
+// ---- pack-plugin query overlays (tier 1, docs/prompt-pack-plugins.md) ----
+
+/// Discovered overlay files for a language: every
+/// `<plugin-dir>/<name>/queries/<lang_id>.scm` under the shared plugin
+/// search path (`plugin_search_dirs` — one path for both plugin worlds),
+/// sorted by path so assembly order is deterministic. Read per call, like
+/// `plugin_source_paths` — cheap, and it keeps "what loads" and "what the
+/// cache fingerprint hashes" the same enumeration.
+pub fn pack_overlay_paths(lang_id: &str) -> Vec<std::path::PathBuf> {
+    let mut out: Vec<std::path::PathBuf> = Vec::new();
+    for dir in crate::build::plugin::rhai_host::plugin_search_dirs() {
+        if let Ok(read) = std::fs::read_dir(&dir) {
+            for entry in read.flatten() {
+                let candidate = entry.path().join("queries").join(format!("{lang_id}.scm"));
+                if candidate.is_file() {
+                    out.push(candidate);
+                }
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
+/// The pack's effective query source: the bundled query plus every
+/// surviving discovered overlay, assembled once per distinct overlay set
+/// and leaked (`cached_query` then compiles it once by content).
+///
+/// Per-overlay compile ISOLATION: each overlay is test-compiled ALONE
+/// against the grammar first; one that fails is dropped with a stderr
+/// diagnostic naming the file, and the bundled query + surviving overlays
+/// still serve — the same failure posture as a malformed `.rhai` (one bad
+/// plugin cannot take the language out).
+fn effective_query_source(language: &Language, pack: &LangPack) -> &'static str {
+    use std::collections::hash_map::DefaultHasher;
+    use std::collections::HashMap;
+    use std::hash::{Hash, Hasher};
+    use std::sync::{Mutex, OnceLock};
+    let paths = pack_overlay_paths(pack.lang_id);
+    if paths.is_empty() && pack.bundled_overlays.is_empty() {
+        return pack.query_source;
+    }
+    static ASSEMBLED: OnceLock<Mutex<HashMap<u64, &'static str>>> = OnceLock::new();
+    let cache = ASSEMBLED.get_or_init(|| Mutex::new(HashMap::new()));
+    let sources: Vec<(std::path::PathBuf, String)> = paths
+        .into_iter()
+        .filter_map(|p| std::fs::read_to_string(&p).ok().map(|s| (p, s)))
+        .collect();
+    let key = {
+        let mut h = DefaultHasher::new();
+        pack.lang_id.hash(&mut h);
+        // `bundled_overlays` is a per-`lang_id` compile-time constant, so the
+        // id covers it; a runtime-configurable bundle would have to hash in.
+        pack.query_source.hash(&mut h);
+        for (p, s) in &sources {
+            p.hash(&mut h);
+            s.hash(&mut h);
+        }
+        h.finish()
+    };
+    if let Some(src) = cache.lock().unwrap().get(&key) {
+        return src;
+    }
+    let mut assembled = String::from(pack.query_source);
+    // Bundled overlays get the same isolation as plugin-dir ones: a syntax
+    // slip in one framework document must not take every verb of the
+    // language dark (it did — the documents used to be one `concat!`).
+    for (name, s) in pack.bundled_overlays {
+        match Query::new(language, s) {
+            Ok(_) => {
+                assembled.push('\n');
+                assembled.push_str(s);
+            }
+            Err(e) => {
+                eprintln!("perl-lsp: bundled {} overlay {name} dropped: {e}", pack.lang_id);
+            }
+        }
+    }
+    for (p, s) in &sources {
+        match Query::new(language, s) {
+            Ok(_) => {
+                assembled.push('\n');
+                assembled.push_str(s);
+            }
+            Err(e) => {
+                eprintln!("perl-lsp: pack overlay {} dropped: {e}", p.display());
+            }
+        }
+    }
+    let leaked: &'static str = Box::leak(assembled.into_boxed_str());
     cache.lock().unwrap().insert(key, leaked);
-    Ok(leaked)
+    leaked
 }
 
 mod extract;

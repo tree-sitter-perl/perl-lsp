@@ -24,6 +24,7 @@
 //! Language config is a two-field table (rule #10): the member-access node
 //! kinds and the don't-splice-here set are the only facts that vary.
 
+use crate::model::file_analysis::MemberShape;
 use crate::model::file_analysis::{
     expected_member_op, CrossFileLookup, FileAnalysis, InferredType, Span,
 };
@@ -255,6 +256,94 @@ pub struct MemberCompletionCtx {
     /// `op_fix` corrects it. `Slot::Member.op`'s pack-side answer
     /// (`docs/adr/cursor-slots.md`).
     pub op: crate::model::file_analysis::MemberOp,
+    /// A SCOPED access (`::` — no `.`/`->` token on the member node): the
+    /// class's constants and static members are what completes there.
+    pub scoped: bool,
+}
+
+/// A rail-string slot: the rail a string at the cursor uses, the text
+/// typed before the cursor, and the content span an item's edit replaces.
+pub struct RailStringCtx {
+    pub rail: String,
+    pub prefix: String,
+    pub content: Span,
+}
+
+/// `route('ho|')` / `view('|')` / a template's `@include('|')`: the string
+/// the cursor is in as a use on a string rail. A use the document already
+/// minted (a partial name) answers from its own ref; an EMPTY string mints
+/// nothing, so the cursor's position is spelled into the source as the
+/// sentinel and the pack's rail patterns (parsed regions) and text rails
+/// (a template) decide whether the string is a rail use — the same rules
+/// that mint the ref, never a re-spelling of the dispatcher names.
+pub fn rail_string_ctx(
+    parser: &mut Parser,
+    cfg: &crate::build::query_extract::LangPack,
+    src: &str,
+    old: &Tree,
+    cursor: usize,
+    analysis: &FileAnalysis,
+) -> Option<RailStringCtx> {
+    use crate::model::file_analysis::{HandlerOwner, RefBinding, RefKind};
+    let pos = byte_to_point(src, cursor);
+    let within = |span: &Span, p: Point| {
+        (span.start.row, span.start.column) <= (p.row, p.column)
+            && (p.row, p.column) <= (span.end.row, span.end.column)
+    };
+    let rail_of = |r: &crate::model::file_analysis::Ref| -> Option<String> {
+        if !matches!(r.kind, RefKind::DispatchCall { .. }) {
+            return None;
+        }
+        match &r.binding {
+            Some(RefBinding::Handler { owner: HandlerOwner::Rail(rail), .. }) => Some(rail.clone()),
+            _ => None,
+        }
+    };
+    // the document's own use at the cursor (a partial name)
+    if let Some(r) = analysis.refs().iter().find(|r| within(&r.span, pos) && rail_of(r).is_some()) {
+        let start = point_to_byte(src, r.span.start);
+        return Some(RailStringCtx {
+            rail: rail_of(r)?,
+            prefix: src.get(start..cursor)?.to_string(),
+            content: r.span,
+        });
+    }
+    if !cursor_in_skip(old, src, cursor, cfg) {
+        return None;
+    }
+    let patched = patch(src, cursor);
+    let mut edited = old.clone();
+    edited.edit(&InputEdit {
+        start_byte: cursor,
+        old_end_byte: cursor,
+        new_end_byte: cursor + SENTINEL.len(),
+        start_position: pos,
+        old_end_position: pos,
+        new_end_position: Point::new(pos.row, pos.column + SENTINEL.len()),
+    });
+    let tree = parser.parse(&patched, Some(&edited))?;
+    let mut hit: Option<(Span, String)> = None;
+    if let Ok(skel) = crate::build::query_extract::extract(&tree, patched.as_bytes(), cfg) {
+        hit = skel.rails.iter().find(|(span, _)| within(span, pos)).cloned();
+    }
+    if hit.is_none() {
+        let rails = crate::build::query_extract::text_rails_for(cfg);
+        let all: Vec<&crate::build::query_extract::TextRail> = rails.iter().collect();
+        for r in crate::build::language_driver::scan_text_rails(analysis, &patched, &all) {
+            if within(&r.span, pos) {
+                if let Some(rail) = rail_of(&r) {
+                    hit = Some((r.span, rail));
+                    break;
+                }
+            }
+        }
+    }
+    let (span, rail) = hit?;
+    let start = point_to_byte(&patched, span.start);
+    let prefix = patched.get(start..cursor)?.to_string();
+    // the content span in the ORIGINAL source: the sentinel sits inside it
+    let end = point_to_byte(&patched, span.end).checked_sub(SENTINEL.len())?;
+    Some(RailStringCtx { rail, prefix, content: Span { start: span.start, end: byte_to_point(src, end) } })
 }
 
 pub fn member_completion_ctx_incremental(
@@ -287,11 +376,38 @@ pub fn member_completion_ctx_incremental(
     // Downstream projects `class_name()` without an index, so the
     // exact-spelling-vs-primary dispatch call (a spec class exists for
     // `formatter<int>`) is made HERE, while the index is in hand.
+    // A receiver spelled as the language's receiver keyword (`this`,
+    // `$this`) has no typeable value node — it IS the enclosing class,
+    // read off the cursor's scope chain: self-access member completion
+    // (privates included, inheritance-aware) instead of a scope dump.
     let receiver_type = resolve_node_type(receiver, cfg, &patched, analysis, module_index)
+        .or_else(|| {
+            let txt = receiver.utf8_text(patched.as_bytes()).ok()?;
+            // `self::` / `static::` name the enclosing class the same way
+            // `$this->` does.
+            if !cfg.receiver_names.contains(&txt) && !cfg.self_class_tokens.contains(&txt) {
+                return None;
+            }
+            let sc = analysis.scope_at(byte_to_point(src, cursor))?;
+            analysis
+                .enclosing_class_for_scope(sc)
+                .map(crate::model::file_analysis::InferredType::ClassName)
+        })
+        .or_else(|| {
+            // A bare class token (`Foo::`, `App\Foo::`) IS the class it
+            // spells, leaf-keyed like every class identity.
+            if !cfg.class_token_kinds.contains(&receiver.kind()) {
+                return None;
+            }
+            let txt = receiver.utf8_text(patched.as_bytes()).ok()?;
+            let leaf = txt.rsplit('\\').next().unwrap_or(txt);
+            (!leaf.is_empty()).then(|| crate::model::file_analysis::InferredType::ClassName(leaf.to_string()))
+        })
         .map(|t| analysis.refine_instance_dispatch(t, module_index));
     let op_fix = operator_fix(member, receiver, &patched, analysis, cfg);
     let op = typed_member_op(member, &patched);
-    Some(MemberCompletionCtx { receiver_type, op_fix, op })
+    let scoped = operator_token(member, &patched).is_none();
+    Some(MemberCompletionCtx { receiver_type, op_fix, op, scoped })
 }
 
 /// The domain-comparison completion context: the cursor sits after an
@@ -458,7 +574,9 @@ fn resolve_node_type(
         let field = node.named_child(node.named_child_count() - 1)?;
         let base_ty = resolve_node_type(base, cfg, src, analysis, module_index)?;
         let field_name = field.utf8_text(src.as_bytes()).ok()?;
-        return analysis.member_value_type(&base_ty, field_name, module_index, None, crate::model::file_analysis::MemberShape::Unknown);
+        // a member READ: the value shape (a strict pack never answers it
+        // with a same-named method)
+        return analysis.member_value_type(&base_ty, field_name, module_index, None, MemberShape::Value);
     }
     // a method CALL `recv.method(...)` — the method's return on the
     // receiver's class, resolved through PackageSymbol (inheritance +
@@ -472,7 +590,7 @@ fn resolve_node_type(
             let method = func.named_child(func.named_child_count() - 1)?;
             let recv_ty = resolve_node_type(recv, cfg, src, analysis, module_index)?;
             let method_name = method.utf8_text(src.as_bytes()).ok()?;
-            return analysis.member_value_type(&recv_ty, method_name, module_index, None, crate::model::file_analysis::MemberShape::Unknown);
+            return analysis.member_value_type(&recv_ty, method_name, module_index, None, MemberShape::Callable);
         }
         // A plain call (`make_widget()`, a ctor-on-temporary `Box()`) —
         // `function` isn't member-shaped, so there's no receiver to recurse
@@ -508,7 +626,7 @@ fn resolve_node_type(
                             name,
                             module_index,
                             None,
-                            crate::model::file_analysis::MemberShape::Unknown,
+                            MemberShape::Value,
                         )
                     })
                 {
@@ -521,7 +639,7 @@ fn resolve_node_type(
     analysis.expr_type_at_span(span, module_index)
 }
 
-fn byte_to_point(src: &str, byte: usize) -> Point {
+pub(crate) fn byte_to_point(src: &str, byte: usize) -> Point {
     let mut row = 0;
     let mut col = 0;
     for (i, ch) in src.char_indices() {
@@ -541,3 +659,160 @@ fn byte_to_point(src: &str, byte: usize) -> Point {
 #[cfg(test)]
 #[path = "cursor_sentinel_tests.rs"]
 mod tests;
+
+/// A call site the cursor sits in: the callee token and the active argument.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PackCallSite {
+    /// The callee token (a member call's method name, a function call's
+    /// last name segment, a `new` expression's class name) in original
+    /// coordinates.
+    pub callee: Span,
+    pub active_param: usize,
+}
+
+/// The innermost pack-declared call expression whose argument list holds
+/// the cursor (`docs/adr/cursor-slots.md`'s ArgPosition for pack languages).
+/// Walks the ORIGINAL tree — no sentinel splice: the arguments are what
+/// the user has typed so far, and a cursor right after `(` or `,` is
+/// inside the list by construction.
+pub fn call_at(tree: &Tree, cfg: &crate::build::query_extract::LangPack, src: &str, cursor: usize) -> Option<PackCallSite> {
+    if cfg.call_shapes.is_empty() {
+        return None;
+    }
+    let root = tree.root_node();
+    let at = cursor.min(src.len());
+    let mut node = root.descendant_for_byte_range(at.saturating_sub(1), at)?;
+    loop {
+        if let Some(shape) = cfg.call_shapes.iter().find(|c| c.kind == node.kind()) {
+            if let Some(args) = node.child_by_field_name(shape.args_field) {
+                if args.start_byte() < cursor && cursor <= args.end_byte() {
+                    let callee = if shape.callee_field.is_empty() {
+                        // `new Foo(...)`: the class token is the first
+                        // named child that is not the argument list.
+                        (0..node.named_child_count())
+                            .filter_map(|i| node.named_child(i))
+                            .find(|c| c.id() != args.id())
+                    } else {
+                        node.child_by_field_name(shape.callee_field)
+                    }?;
+                    let tok = last_name_token(callee);
+                    let mut active = 0usize;
+                    for i in 0..args.named_child_count() {
+                        let Some(a) = args.named_child(i) else { continue };
+                        if !cfg.arg_kind.is_empty() && a.kind() != cfg.arg_kind {
+                            continue;
+                        }
+                        if a.start_byte() <= cursor && cursor <= a.end_byte() {
+                            break;
+                        }
+                        if a.end_byte() < cursor {
+                            active += 1;
+                        }
+                    }
+                    return Some(PackCallSite {
+                        callee: Span { start: tok.start_position(), end: tok.end_position() },
+                        active_param: active,
+                    });
+                }
+            }
+        }
+        node = node.parent()?;
+    }
+}
+
+/// The token a callee node names: itself when it is a leaf, else its last
+/// named leaf (`A\B\f` → `f`, `$this->m` → `m`).
+/// One argument of a pack call site: its span and text, and the shapes
+/// that end positional matching (a named argument, a spread, a callable
+/// placeholder).
+pub struct PackArg {
+    pub span: Span,
+    pub text: String,
+    pub named: bool,
+    pub spread: bool,
+}
+
+/// A pack call site with its arguments in source order.
+pub struct PackCallArgs {
+    pub callee: Span,
+    pub args: Vec<PackArg>,
+}
+
+/// Every pack-declared call expression whose callee token sits on one of
+/// `rows`, with its arguments — the same shapes `call_at` reads at a
+/// cursor, walked over a range for the hint lanes.
+pub fn calls_in_rows(
+    tree: &Tree,
+    cfg: &crate::build::query_extract::LangPack,
+    src: &str,
+    rows: std::ops::RangeInclusive<usize>,
+) -> Vec<PackCallArgs> {
+    let mut out = Vec::new();
+    if cfg.call_shapes.is_empty() {
+        return out;
+    }
+    let mut stack = vec![tree.root_node()];
+    while let Some(node) = stack.pop() {
+        if node.end_position().row < *rows.start() || node.start_position().row > *rows.end() {
+            continue;
+        }
+        if let Some(shape) = cfg.call_shapes.iter().find(|c| c.kind == node.kind()) {
+            if let Some(args) = node.child_by_field_name(shape.args_field) {
+                let callee = if shape.callee_field.is_empty() {
+                    (0..node.named_child_count())
+                        .filter_map(|i| node.named_child(i))
+                        .find(|c| c.id() != args.id())
+                } else {
+                    node.child_by_field_name(shape.callee_field)
+                };
+                if let Some(callee) = callee {
+                    let tok = last_name_token(callee);
+                    if rows.contains(&tok.start_position().row) {
+                        let ends_positional = |n: Node<'_>| {
+                            (!cfg.spread_arg_kind.is_empty() && n.kind() == cfg.spread_arg_kind)
+                                || (!cfg.callable_placeholder_kind.is_empty()
+                                    && n.kind() == cfg.callable_placeholder_kind)
+                        };
+                        let mut list = Vec::new();
+                        for i in 0..args.named_child_count() {
+                            let Some(a) = args.named_child(i) else { continue };
+                            if !cfg.arg_kind.is_empty() && a.kind() != cfg.arg_kind {
+                                continue;
+                            }
+                            let named = !cfg.named_arg_field.is_empty()
+                                && a.child_by_field_name(cfg.named_arg_field).is_some();
+                            let spread = ends_positional(a) || a.named_child(0).is_some_and(ends_positional);
+                            list.push(PackArg {
+                                span: Span { start: a.start_position(), end: a.end_position() },
+                                text: src.get(a.start_byte()..a.end_byte()).unwrap_or("").to_string(),
+                                named,
+                                spread,
+                            });
+                        }
+                        out.push(PackCallArgs {
+                            callee: Span { start: tok.start_position(), end: tok.end_position() },
+                            args: list,
+                        });
+                    }
+                }
+            }
+        }
+        for i in (0..node.named_child_count()).rev() {
+            if let Some(c) = node.named_child(i) {
+                stack.push(c);
+            }
+        }
+    }
+    out.sort_by_key(|c| (c.callee.start.row, c.callee.start.column));
+    out
+}
+
+fn last_name_token(n: Node<'_>) -> Node<'_> {
+    let mut cur = n;
+    while cur.named_child_count() > 0 {
+        let Some(last) = (0..cur.named_child_count()).rev().filter_map(|i| cur.named_child(i)).next() else { break };
+        cur = last;
+    }
+    cur
+}
+

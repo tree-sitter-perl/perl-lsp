@@ -871,6 +871,24 @@ pub fn plugin_fingerprint() -> String {
             Err(_) => Vec::new(),
         };
         entries.sort();
+        // Pack-plugin query overlays (`<name>/queries/<lang>.scm`,
+        // docs/prompt-pack-plugins.md) fold into the same hash: editing an
+        // overlay reshapes every cached analysis its language produced, and
+        // this is the one invalidation channel both plugin worlds share.
+        let mut overlays: Vec<std::path::PathBuf> = match std::fs::read_dir(&path) {
+            Ok(read) => read
+                .flatten()
+                .filter_map(|e| std::fs::read_dir(e.path().join("queries")).ok())
+                .flat_map(|q| {
+                    q.flatten()
+                        .map(|f| f.path())
+                        .filter(|p| p.extension().and_then(|s| s.to_str()) == Some("scm"))
+                })
+                .collect(),
+            Err(_) => Vec::new(),
+        };
+        overlays.sort();
+        entries.extend(overlays);
         for p in entries {
             // Path is part of the hash so a rename invalidates.
             p.to_string_lossy().hash(&mut hasher);
@@ -1071,17 +1089,28 @@ mod tests {
         std::fs::write(&plugin_path, r#"fn id() { "v2" } fn triggers() { [] }"#).unwrap();
         let v2 = plugin_fingerprint();
 
+        // 3. Pack-overlay sensitivity — a `<name>/queries/<lang>.scm` edit
+        //    reshapes that language's cached analyses, so it must fold in.
+        let overlay_dir = dir.join("wp/queries");
+        std::fs::create_dir_all(&overlay_dir).unwrap();
+        std::fs::write(overlay_dir.join("php.scm"), "; v1\n").unwrap();
+        let v3 = plugin_fingerprint();
+        std::fs::write(overlay_dir.join("php.scm"), "; v2\n").unwrap();
+        let v4 = plugin_fingerprint();
+
         // Restore env BEFORE asserting so a panic doesn't leak the override.
         match saved {
             Some(v) => std::env::set_var("PERL_LSP_PLUGIN_DIR", v),
             None => std::env::remove_var("PERL_LSP_PLUGIN_DIR"),
         }
         let _ = std::fs::remove_file(&plugin_path);
-        let _ = std::fs::remove_dir(&dir);
+        let _ = std::fs::remove_dir_all(&dir);
 
         assert!(!v1a.is_empty(), "fingerprint should never be empty");
         assert_eq!(v1a, v1b, "fingerprint must be deterministic");
         assert_ne!(v1a, v2, "fingerprint must change when a user plugin's source changes");
+        assert_ne!(v2, v3, "fingerprint must change when a pack overlay appears");
+        assert_ne!(v3, v4, "fingerprint must change when a pack overlay's source changes");
     }
 
     #[test]

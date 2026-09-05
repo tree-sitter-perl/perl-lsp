@@ -911,6 +911,7 @@ fn tok(src: &str, needle: &str, occ: usize) -> Point {
 fn sksym(src: &str, kind: &str, name: &str, occ: usize, package: Option<&str>) -> super::SkelSymbol {
     let ns = tok(src, name, occ);
     super::SkelSymbol {
+        receiver_instance_of: None,
         kind: kind.to_string(),
         name: name.to_string(),
         start: ns,
@@ -920,10 +921,13 @@ fn sksym(src: &str, kind: &str, name: &str, occ: usize, package: Option<&str>) -
         package: package.map(str::to_string),
         scope: crate::model::file_analysis::ScopeId(0),
         return_type: None,
+        receiver_return: false,
         deref_stack: Vec::new(),
         attributes: Vec::new(),
         arity: None,
         qualifier_owned: false,
+        doc: None,
+        deprecation: None,
     }
 }
 
@@ -2580,7 +2584,7 @@ public:
     let recv = InferredType::Parametric(
         ParametricType::instance_from_spelling("Box<int>").unwrap(),
     );
-    let mvt = |m: &str| fa.member_value_type(&recv, m, None, None, crate::model::file_analysis::MemberShape::Unknown);
+    let mvt = |m: &str| fa.member_value_type(&recv, m, None, None, Default::default());
     assert_eq!(mvt("get"), Some(InferredType::ClassName("int".into())), "bare param return");
     assert_eq!(mvt("v_"), Some(InferredType::ClassName("int".into())), "bare param field");
     assert_eq!(
@@ -2598,8 +2602,8 @@ public:
     assert_eq!(mvt("size"), Some(InferredType::Numeric), "concrete member unchanged");
     // No receiver args → no invented answer for param-shaped members.
     let bare = InferredType::ClassName("Box".into());
-    assert_eq!(fa.member_value_type(&bare, "get", None, None, crate::model::file_analysis::MemberShape::Unknown), None);
-    assert_eq!(fa.member_value_type(&bare, "size", None, None, crate::model::file_analysis::MemberShape::Unknown), Some(InferredType::Numeric));
+    assert_eq!(fa.member_value_type(&bare, "get", None, None, Default::default()), None);
+    assert_eq!(fa.member_value_type(&bare, "size", None, None, Default::default()), Some(InferredType::Numeric));
 }
 
 #[test]
@@ -2649,16 +2653,16 @@ template <> struct codec<int, char> {
     );
     // pattern bindings feed member substitution: T bound THROUGH the shape
     assert_eq!(
-        fa.member_value_type(&inst("codec<Widget*, char>"), "deref", None, None, crate::model::file_analysis::MemberShape::Unknown),
+        fa.member_value_type(&inst("codec<Widget*, char>"), "deref", None, None, Default::default()),
         Some(InferredType::ClassName("Widget".into()))
     );
     assert_eq!(
-        fa.member_value_type(&inst("codec<vector<Widget>, char>"), "front", None, None, crate::model::file_analysis::MemberShape::Unknown),
+        fa.member_value_type(&inst("codec<vector<Widget>, char>"), "front", None, None, Default::default()),
         Some(InferredType::ClassName("Widget".into()))
     );
     // a member the spec doesn't define falls through the ladder to the primary
     assert_eq!(
-        fa.member_value_type(&inst("codec<Widget*, char>"), "parse", None, None, crate::model::file_analysis::MemberShape::Unknown),
+        fa.member_value_type(&inst("codec<Widget*, char>"), "parse", None, None, Default::default()),
         Some(InferredType::Numeric)
     );
     // the ladder itself is ranked and never pruned
@@ -2712,4 +2716,39 @@ void go() {
     };
     assert_eq!(gd(11, 13), Some((1, 9)), "w.get().spin() resolves spin on Widget");
     assert_eq!(gd(12, 9), Some((1, 9)), "w.v_.spin() resolves through the field's type");
+}
+
+// ==== PHP pack: the fifth language on the same driver ====
+
+#[test]
+fn cpp_member_chain_types_through_method_hops() {
+    // The identical gap on the cpp side: `auto x = w.get().spin();` — the
+    // called-member pattern mints the hop witness alongside the call-blind
+    // field ref, so the chain types with no intermediate variable.
+    let src = "\
+struct Engine {
+    int spin() { return 7; }
+};
+struct Widget {
+    Engine get() { return Engine(); }
+};
+int f(Widget w) {
+    auto x = w.get().spin();
+    auto e = w.get();
+    return x;
+}
+";
+    let fa = cpp_fa(src);
+    use crate::model::file_analysis::InferredType;
+    let inside = tree_sitter::Point { row: 9, column: 4 };
+    assert_eq!(
+        fa.inferred_type_via_bag("e", inside),
+        Some(InferredType::ClassName("Engine".into())),
+        "single hop must type",
+    );
+    assert_eq!(
+        fa.inferred_type_via_bag("x", inside),
+        Some(InferredType::Numeric),
+        "two-hop chain must type",
+    );
 }

@@ -677,6 +677,11 @@ const DECLARED_FUTURE_PERL_KINDS: &[&str] = &["parenthesized_expression"];
 /// **This list may only shrink.** Adding to it means shipping a new dead arm.
 /// Keyed by (path suffix, kind) rather than line so it survives edits.
 const KNOWN_DEAD_KIND_ARMS: &[(&str, &str)] = &[
+    // The parameter kinds the pack extractor names are the php grammar's; that
+    // grammar arrives with the php pack, whose layering probe then covers them.
+    ("query_extract/extract.rs", "property_promotion_parameter"),
+    ("query_extract/extract.rs", "simple_parameter"),
+    ("query_extract/extract.rs", "variadic_parameter"),
     // Real kind is `loopex_expression` for all three, so `last if $x;` and
     // friends are not recognized as control-flow exits and do not narrow the
     // rest of the block. The one finding here with visible behaviour behind it.

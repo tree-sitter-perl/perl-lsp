@@ -71,7 +71,7 @@
 ; partial `struct X<T*>`): the name is a `template_type`, and the spec is
 ; its OWN Class (per-spec identity — a spec REPLACES the primary's members
 ; wholesale, so it must own a distinct member table; fork 4 of
-; docs/prompt-template-arc.md). The symbol/package name is the canonical
+; docs/adr/cpp-templates.md). The symbol/package name is the canonical
 ; template spelling (`formatter<int, char>` — see
 ; `canonical_template_spelling`); @spec.primary records the base name so
 ; extraction mints the `Specializes` family edge (goto-implementation
@@ -527,7 +527,7 @@
 ; f<char>(..);` — fmt's src/format.cc is entirely this shape). It is a USE
 ; of the named template, not a def-with-body — but a deliberate,
 ; enumerable one, so it mints an outline symbol (fork 2 of
-; docs/prompt-template-arc.md): the class form under the canonical
+; docs/adr/cpp-templates.md): the class form under the canonical
 ; instantiation spelling, the function form under the function's name
 ; (qualified forms join their class via @qualifier, whose template_type
 ; is peeled to the base name — `buffer<char>::append` files under
@@ -643,6 +643,16 @@
   argument: (_) @member.recv
   operator: _ @member.op
   field: (field_identifier) @ref.member)
+
+; The CALLED form additionally mints a chain-hop witness on the whole call's
+; span (`@hop.call` + `@hop.member` — deliberately NOT `@ref.member`, the
+; pattern above already minted the ref): `w.get().spin()` types through the
+; receiver span's own hop with no intermediate variable.
+(call_expression
+  function: (field_expression
+    argument: (_) @member.recv
+    field: (field_identifier) @hop.member)
+  arguments: (argument_list) @arity.args) @hop.call
 
 ; ---- domain typing (int-used-as-enum): a struct-field SLOT compared or
 ; assigned against ANY value. `o->op_type == OP_CONST` / `o->op_type =
@@ -779,7 +789,7 @@
 ; narrowing cutoff end at the reassignment, via the same edge-driven cutoff.
 (assignment_expression
   left: (identifier) @flow.target
-  right: (_) @flow.source)
+  right: (_) @flow.source) @flow.assign
 
 ; `std::move(x)` leaves x in a moved-from (valid-but-unspecified) state: a
 ; subsequent READ of x before it is reassigned is a use-after-move bug.

@@ -8,6 +8,13 @@ there is no do-now-or-pay-later tax. When a finding arrives, expand
 the matching phase from this list (full design sketches in git
 history: `prompt-sequence-types.md` @ 9d34441).
 
+The first QA pull landed (php round-3 R10): phpdoc sequence spellings
+(`list<X>` / `X[]` / `array<K,V>`) parse to a one-slot homogeneous
+`Sequence`, and `ProjectionStep::Element` is the uniform-element peel
+(all elements agree → that type) driving php's foreach binder
+(`Variable → Projected{base, Element}`). A full homogeneous
+classification on FOLD (below) remains unpulled.
+
 1. **Shape lattice** — classify Homogeneous / CycleTuple /
    Heterogeneous on fold; widen on disagreement instead of dropping
    to bare ArrayRef. Includes the `open` flag on `Sequence` (today
