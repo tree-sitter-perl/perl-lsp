@@ -862,6 +862,20 @@ pub(super) fn canonical_file_str(key: &FileKey) -> String {
         .into_owned()
 }
 
+/// The refs of `analysis` that can match `name` under any matcher arm — the
+/// in-file half of the relational narrowing (`RefTable::by_key`), in ref
+/// order. Callers iterate this instead of the whole ref vec.
+pub(super) fn refs_keyed<'a>(
+    analysis: &'a FileAnalysis,
+    name: &str,
+) -> impl Iterator<Item = &'a crate::model::file_analysis::Ref> + 'a {
+    let refs = analysis.refs();
+    analysis
+        .ref_indices_keyed(&crate::model::file_analysis::name_match_key(name))
+        .iter()
+        .map(move |&i| &refs[i])
+}
+
 pub(super) fn collect_from_analysis(
     key: &FileKey,
     analysis: &FileAnalysis,
@@ -964,8 +978,11 @@ pub(super) fn collect_from_analysis(
         !(foldable && span_is_folded_name(analysis, span, folds_through_calls, &target.name))
     };
 
-    // Include declaration spans when this file defines the target.
-    for sym in analysis.symbols() {
+    // Include declaration spans when this file defines the target. Name
+    // equality is `symbol_defines_target`'s first gate, so only the
+    // same-named symbols can pass (in symbol order, as the vec would).
+    for &sid in analysis.symbols_named(&target.name) {
+        let sym = analysis.symbol(sid);
         if symbol_defines_target(sym, target, analysis) {
             out.push(RefLocation {
                 key: key.clone(),
@@ -983,7 +1000,23 @@ pub(super) fn collect_from_analysis(
         TargetKind::Method { class } => Some(Some(class.clone())),
         _ => None,
     };
-    for r in analysis.refs() {
+    // Only the key buckets for the target and its visible aliases can hold
+    // a match; the union is walked in ref order so `out` keeps the vec's
+    // order (the final sort is by start point, and same-start refs — a
+    // chain's outer call and its receiver — rely on insertion order).
+    let target_key = crate::model::file_analysis::name_match_key(&target.name);
+    let mut keyed: Vec<usize> = analysis.ref_indices_keyed(&target_key).to_vec();
+    for a in &visible_aliases {
+        let k = crate::model::file_analysis::name_match_key(&a.name);
+        if k != target_key {
+            keyed.extend_from_slice(analysis.ref_indices_keyed(&k));
+        }
+    }
+    keyed.sort_unstable();
+    keyed.dedup();
+    let all_refs = analysis.refs();
+    for &ri in &keyed {
+        let r = &all_refs[ri];
         // A qualified call (`Foo::baz()` / `$o->Foo::Bar::baz()`) keeps its
         // whole path in `target_name`; match it on the bare callable tail (the
         // dispatch-class checks in the call arms below still pin the right

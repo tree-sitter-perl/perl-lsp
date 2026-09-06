@@ -344,14 +344,14 @@ pub(super) fn matcher_view(
     let view = idx.refs_present(cached);
     let needs_whole = match &target.kind {
         TargetKind::Handler { .. } => !view.provisional_dispatches.is_empty(),
-        TargetKind::Sub { .. } | TargetKind::Method { .. } => view.refs().iter().any(|r| {
+        TargetKind::Sub { .. } | TargetKind::Method { .. } => refs_keyed(&view, &target.name).any(|r| {
             matches!(r.kind, RefKind::MethodCall { .. })
                 && r.unqualified_target_name() == target.name
                 && !r.match_verdict_baked()
         }),
         TargetKind::HashKeyOfSub { .. }
         | TargetKind::HashKeyOfBridged(_)
-        | TargetKind::InternalHashKey { .. } => view.refs().iter().any(|r| {
+        | TargetKind::InternalHashKey { .. } => refs_keyed(&view, &target.name).any(|r| {
             matches!(r.kind, RefKind::HashKeyAccess { .. })
                 && r.target_name == target.name
                 && !r.match_verdict_baked()
