@@ -408,8 +408,7 @@ struct Builder<'a> {
     /// reducer with the right context.
     package_framework: std::collections::HashMap<String, crate::model::witnesses::FrameworkFact>,
 
-    /// Packages with a `bless` in this file: the class evidence a
-    /// parent-less base class (DateTime, Path::Tiny) offers.
+    /// Packages with a `bless` in this file (`PackageFacts::blesses`).
     blessing_packages: std::collections::HashSet<String>,
 
 

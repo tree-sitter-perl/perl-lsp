@@ -630,6 +630,7 @@ fn build_once(
     // Post-pass 5: fill in tail POD docs for subs that didn't get preceding doc
     bphase!("resolve_tail_pod_docs", b.resolve_tail_pod_docs());
 
+    let packages = b.package_facts();
     let mut fa = FileAnalysis::new(crate::model::file_analysis::FileAnalysisParts {
         scopes: b.scopes,
         symbols: b.symbols,
@@ -637,14 +638,7 @@ fn build_once(
         fold_ranges: b.fold_ranges,
         imports: b.imports,
         call_bindings: b.call_bindings,
-        packages: crate::model::file_analysis::PackageFacts::fold(
-            b.package_parents,
-            b.package_uses,
-            b.package_framework,
-            b.role_requires,
-            b.role_packages,
-            b.dynamic_parent_packages,
-        ),
+        packages,
         method_call_bindings: b.method_call_bindings,
         framework_imports: b.framework_imports,
         export: b.export,
@@ -765,12 +759,27 @@ impl<'a> Builder<'a> {
     /// inside the worklist, once `invocant_class` is filled.
     /// `@_` at every sub entry the walk did not seed: the argument window,
     /// headed by the invocant when the sub is a `method` or a named sub of
-    /// a class package (parents, a framework, or a `bless` anywhere in it —
-    /// a verdict complete only after the walk). `consume_arg_head` advanced
+    /// a class package (`PackageFacts::is_class`, complete only after the
+    /// walk). `consume_arg_head` advanced
     /// the window during the walk; a one-element window's tail is empty
     /// either way, so the head can land here.
+    /// The per-package table as the walk has it so far — the one fold of
+    /// the builder's lanes, read by the window seed and the final assembly.
+    fn package_facts(&self) -> std::collections::HashMap<String, PackageFacts> {
+        PackageFacts::fold(
+            self.package_parents.clone(),
+            self.package_uses.clone(),
+            self.package_framework.clone(),
+            self.role_requires.clone(),
+            self.role_packages.clone(),
+            self.dynamic_parent_packages.clone(),
+            self.blessing_packages.clone(),
+        )
+    }
+
     fn seed_arg_windows(&mut self) {
         use crate::model::witnesses::WitnessAttachment;
+        let facts = self.package_facts();
         let seeded: std::collections::HashSet<ScopeId> = self.bag.all().iter().filter_map(|w| match &w.attachment {
             WitnessAttachment::Variable { name, scope } if name == "@_"
                 && w.span.start == self.scopes[scope.0 as usize].span.start => Some(*scope),
@@ -785,9 +794,7 @@ impl<'a> Builder<'a> {
             };
             let (Some(pkg), false) = (scope.package.clone(), seeded.contains(&scope.id)) else { continue };
             let (id, span) = (scope.id, scope.span);
-            let class_pkg = self.package_parents.contains_key(&pkg)
-                || self.framework_modes.contains_key(&pkg)
-                || self.blessing_packages.contains(&pkg);
+            let class_pkg = facts.get(&pkg).is_some_and(PackageFacts::is_class);
             let head = (is_method || (class_pkg && !anon)).then(|| InferredType::FirstParam { package: pkg });
             self.push_type_constraint(TypeConstraint {
                 variable: "@_".into(),

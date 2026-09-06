@@ -187,6 +187,7 @@ impl Surface {
                 framework: _framework, // framework return folds → `ret`; synthesized accessors are already `symbols`
                 requires: _requires, // required names synthesize contract-marker Method symbols that already project
                 dynamic_parents: _dynamic_parents, // honest-silence gate for this file's own diagnostics; resolvable edges ride `parents`
+                blesses: _blesses, // class evidence for this file's own `@_` windows; what that does to returns rides `ret`
             } = facts;
             let entry = by_pkg.entry(pkg.clone()).or_insert_with(|| PackageSurface {
                 name: pkg.clone(),

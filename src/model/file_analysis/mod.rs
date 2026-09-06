@@ -372,6 +372,11 @@ pub struct PackageFacts {
     /// diagnostics stay honest-silent.
     #[serde(default)]
     pub dynamic_parents: bool,
+
+    /// A `bless` in this file targets `pkg` — the class evidence a
+    /// parent-less base class (DateTime, Path::Tiny) offers.
+    #[serde(default)]
+    pub blesses: bool,
 }
 
 impl PackageFacts {
@@ -386,6 +391,7 @@ impl PackageFacts {
         requires: HashMap<String, Vec<String>>,
         roles: HashSet<String>,
         dynamic_parents: HashSet<String>,
+        blessing: HashSet<String>,
     ) -> HashMap<String, PackageFacts> {
         let mut out: HashMap<String, PackageFacts> = HashMap::new();
         for (pkg, v) in parents {
@@ -406,7 +412,17 @@ impl PackageFacts {
         for pkg in dynamic_parents {
             out.entry(pkg).or_default().dynamic_parents = true;
         }
+        for pkg in blessing {
+            out.entry(pkg).or_default().blesses = true;
+        }
         out
+    }
+
+    /// Is this package a class: does it inherit, run a framework, or bless?
+    /// The one spelling of the verdict that makes a named sub's `@_` head
+    /// the invocant.
+    pub fn is_class(&self) -> bool {
+        !self.parents.is_empty() || self.framework.is_some() || self.blesses
     }
 }
 
