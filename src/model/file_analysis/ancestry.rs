@@ -950,6 +950,7 @@ impl FileAnalysis {
                     candidates.push(CompletionCandidate {
                         label: sym.name.clone(),
                         kind: sym.kind,
+                        is_static: sym.attributes.iter().any(|a| a == "static"),
                         detail: Some(self.method_detail(original_class, &sym.name, defining, module_index)),
                         insert_text: None,
                         sort_priority: PRIORITY_LOCAL,
@@ -984,6 +985,7 @@ impl FileAnalysis {
                 candidates.push(CompletionCandidate {
                     label: sym.name.clone(),
                     kind: sym.kind,
+                    is_static: sym.attributes.iter().any(|a| a == "static"),
                     detail: Some(self.method_detail(original_class, &sym.name, defining, module_index)),
                     insert_text: None,
                     sort_priority: PRIORITY_LOCAL,
@@ -1008,7 +1010,7 @@ impl FileAnalysis {
             //       class itself).
             // Collect into a temporary list to avoid borrow-checker
             // issues with the closure capturing &mut seen_names/candidates.
-            let mut bridged: Vec<(String, SymKind, Option<SymbolDetail>, Option<HandlerDisplay>)> = Vec::new();
+            let mut bridged: Vec<(String, SymKind, Option<SymbolDetail>, Option<HandlerDisplay>, bool)> = Vec::new();
             idx.for_each_entity_bridged_to(class_name, &mut |_mod, _cached, sym| {
                 use std::ops::ControlFlow;
                 if !matches!(sym.kind, SymKind::Sub | SymKind::Method) {
@@ -1022,10 +1024,11 @@ impl FileAnalysis {
                     sym.kind,
                     Some(sym.detail.clone()),
                     sym.presentation.display,
+                    sym.attributes.iter().any(|a| a == "static"),
                 ));
                 ControlFlow::Continue(())
             });
-            for (name, kind, detail, display_override) in bridged {
+            for (name, kind, detail, display_override, is_static) in bridged {
                 if seen_names.contains(&name) { continue; }
                 seen_names.insert(name.clone());
                 let is_method = kind == SymKind::Method
@@ -1036,6 +1039,7 @@ impl FileAnalysis {
                 candidates.push(CompletionCandidate {
                     label: name,
                     kind,
+                    is_static,
                     detail: Some(method_detail_str),
                     insert_text: None,
                     sort_priority: PRIORITY_LOCAL,
@@ -1064,6 +1068,7 @@ impl FileAnalysis {
                     candidates.push(CompletionCandidate {
                         label: sym.name.clone(),
                         kind,
+                        is_static: sym.attributes.iter().any(|a| a == "static"),
                         detail: Some(detail),
                         insert_text: None,
                         sort_priority: PRIORITY_LOCAL,

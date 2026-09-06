@@ -17,6 +17,34 @@ impl FileAnalysis {
         self.symbol_return_type_via_bag_ctx(sym_id, arg_count, None)
     }
 
+    /// The edit that imports `fq` for a use at `row`: the pack's
+    /// `import_template` inserted after the last import row above the site,
+    /// else after the package/namespace line, else after the preamble —
+    /// `(insertion point, text)`. `None` when the pack has no import form.
+    pub fn import_edit_for(&self, fq: &str, row: usize) -> Option<(Point, String)> {
+        let template = self.pack.import_template.as_str();
+        if template.is_empty() {
+            return None;
+        }
+        let (line, lead) = match self.pack.import_insertion_line(row) {
+            Some(l) => (l, ""),
+            None => {
+                let after_package = self
+                    .symbols()
+                    .iter()
+                    .filter(|s| matches!(s.kind, SymKind::Package) && s.selection_span.start.row < row)
+                    .map(|s| s.selection_span.end.row + 1)
+                    .max();
+                match after_package {
+                    Some(l) => (l, "\n"),
+                    None => (self.pack.preamble_end.map_or(1, |r| r + 1), "\n"),
+                }
+            }
+        };
+        let stmt = template.replace("{}", fq);
+        Some((Point { row: line, column: 0 }, format!("{lead}{stmt}")))
+    }
+
     /// The inferred return ONLY when every return arm accounts for it: each
     /// arm's expression carries a witness and none of them is `null`. The
     /// arm fold drops an untyped or null arm and answers from the rest,
@@ -281,6 +309,7 @@ impl FileAnalysis {
                 candidates.push(CompletionCandidate {
                     label: "new".to_string(),
                     kind: SymKind::Method,
+                    is_static: false,
                     detail: Some(self.method_detail(class_name, "new", None, module_index)),
                     insert_text: None,
                     sort_priority: PRIORITY_LOCAL,
@@ -371,6 +400,30 @@ impl FileAnalysis {
                 candidates.push(CompletionCandidate {
                     label: sym.name.clone(),
                     kind: sym.kind,
+                    is_static: sym.attributes.iter().any(|a| a == "static"),
+                    detail: None,
+                    insert_text: None,
+                    sort_priority: PRIORITY_LOCAL,
+                    additional_edits: vec![],
+                    import_fact: None,
+                    display_override: None,
+                });
+            }
+        }
+        // Class constants and enum cases (`SymKind::Enumerator`, the
+        // extraction's "const"/"enumerator" flattened): `self::LIMIT`,
+        // `Level::Debug` — members a scoped access completes, under the
+        // same access gate.
+        for sym in &self.symbols {
+            if matches!(sym.kind, SymKind::Enumerator)
+                && self.symbol_in_class(sym.id, cls)
+                && (requesting_class == Some(cls) || !sym.attributes.iter().any(|a| a == "non_public"))
+                && seen.insert(sym.name.clone())
+            {
+                candidates.push(CompletionCandidate {
+                    label: sym.name.clone(),
+                    kind: sym.kind,
+                    is_static: sym.attributes.iter().any(|a| a == "static"),
                     detail: None,
                     insert_text: None,
                     sort_priority: PRIORITY_LOCAL,

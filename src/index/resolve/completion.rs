@@ -128,6 +128,7 @@ impl<'a> CandidateSet<'a> {
                         };
                         out.push(CompletionCandidate {
                             label: name.clone(),
+                            is_static: false,
                             kind: sym.kind.clone(),
                             detail: Some(detail),
                             insert_text: None,
@@ -154,6 +155,7 @@ impl<'a> CandidateSet<'a> {
             out.extend(crate::model::builtins::builtin_functions().map(|name| {
                 CompletionCandidate {
                     label: name.to_string(),
+                    is_static: false,
                     kind: SymKind::Sub,
                     detail: Some("perl builtin".to_string()),
                     insert_text: None,
@@ -210,6 +212,7 @@ impl<'a> CandidateSet<'a> {
                 };
                 CompletionCandidate {
                     label: name,
+                    is_static: false,
                     kind: SymKind::Module,
                     detail,
                     insert_text: None,
@@ -249,6 +252,7 @@ impl<'a> CandidateSet<'a> {
             }
             out.push(CompletionCandidate {
                 label: c.label.clone(),
+                is_static: false,
                 kind: SymKind::Sub,
                 detail: c.detail.or_else(|| Some(format!("from {}", package))),
                 insert_text: Some(c.label),
@@ -280,6 +284,7 @@ impl<'a> CandidateSet<'a> {
             }
             out.push(CompletionCandidate {
                 label: suffix.clone(),
+                is_static: false,
                 kind: SymKind::Module,
                 detail: Some(hint.to_string()),
                 insert_text: Some(suffix),
@@ -337,6 +342,7 @@ impl<'a> CandidateSet<'a> {
                 };
                 out.push(CompletionCandidate {
                     label: s.name.clone(),
+                    is_static: false,
                     kind: s.kind.clone(),
                     detail,
                     insert_text: None,

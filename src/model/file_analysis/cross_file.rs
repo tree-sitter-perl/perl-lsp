@@ -132,6 +132,7 @@ impl FileAnalysis {
                 items.push(CompletionCandidate {
                     label: name.clone(),
                     kind: SymKind::Sub,
+                    is_static: false,
                     detail,
                     insert_text: None,
                     sort_priority: 10,
@@ -150,6 +151,7 @@ impl FileAnalysis {
                 items.push(CompletionCandidate {
                     label: name.clone(),
                     kind: SymKind::Sub,
+                    is_static: false,
                     detail,
                     insert_text: None,
                     sort_priority: 20,
@@ -969,6 +971,11 @@ pub trait CrossFileLookup {
     ) -> Vec<(String, std::sync::Arc<CachedModule>)> {
         Vec::new()
     }
+    /// Every provider of every registered name under `prefix` — the
+    /// name-keyed pack's completion universe. Defaults empty.
+    fn defs_with_prefix(&self, _prefix: &str) -> Vec<(String, Vec<std::sync::Arc<CachedModule>>)> {
+        Vec::new()
+    }
 }
 
 /// A `CrossFileLookup` decorator scoped to ONE querying file's include-closure
@@ -1552,6 +1559,9 @@ impl<'a> CrossFileLookup for ScopedLookup<'a> {
         visible: &std::collections::HashSet<String>,
     ) -> Vec<(String, std::sync::Arc<CachedModule>)> {
         self.inner.visible_defs_with_prefix(prefix, visible)
+    }
+    fn defs_with_prefix(&self, prefix: &str) -> Vec<(String, Vec<std::sync::Arc<CachedModule>>)> {
+        self.inner.defs_with_prefix(prefix)
     }
 }
 

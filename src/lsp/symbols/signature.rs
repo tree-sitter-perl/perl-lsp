@@ -198,6 +198,7 @@ pub(super) fn dispatch_target_completions(
         };
         CompletionCandidate {
             label: name.clone(),
+            is_static: false,
             // Handler kind flows to CompletionItemKind::EVENT via
             // `fa_completion_kind` — consistent with outline and hover.
             kind: FaSymKind::Handler,
