@@ -657,6 +657,20 @@ pub fn write_in_chunks<T>(
     }
 }
 
+/// Total SOURCE bytes of every persisted analysis (all tiers — a sweep
+/// rehydrates @INC providers alongside workspace files). The scale signal
+/// `cache_policy` sizes a batch sweep's rehydration cache from: persisted
+/// at index time, so a warm start reads it for free.
+pub fn persisted_source_bytes(conn: &Connection) -> u64 {
+    conn.query_row(
+        "SELECT COALESCE(SUM(file_size), 0) FROM modules",
+        [],
+        |r| r.get::<_, i64>(0),
+    )
+    .map(|n| n.max(0) as u64)
+    .unwrap_or(0)
+}
+
 /// Every path that currently has shredded derived rows — the bulk twin of
 /// `has_ref_rows` for warm scans (one query instead of one per file).
 pub fn paths_with_ref_rows(conn: &Connection) -> std::collections::HashSet<String> {

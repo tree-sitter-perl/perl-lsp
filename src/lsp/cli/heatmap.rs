@@ -523,8 +523,20 @@ pub(crate) fn cli_heatmap(root: &str, opts: &[String]) {
 
     // One walk per declaration over a frozen index: memoize the relational
     // retrieval for the sweep (same-named declarations share their
-    // candidate set; the shredded-path set is fetched once, not per walk).
+    // candidate set; the shredded-path set is fetched once, not per walk),
+    // and size the rehydration LRU to the corpus — the sweep's working set
+    // by construction (`cache_policy::sweep_bag_cache_cap`).
     let _retrieval = resolve::RetrievalMemoGuard::open();
+    // Every index the sweep rehydrates through: the Perl hub AND each
+    // pack-language sub-index (its own LRU over its own DB).
+    if let Some(cap) = idx.size_bag_cache_for_sweep() {
+        eprintln!("Rehydration cache: {} MiB for the sweep", cap / (1024 * 1024));
+    }
+    idx.for_each_pack_index(|lang, pack| {
+        if let Some(cap) = pack.size_bag_cache_for_sweep() {
+            eprintln!("Rehydration cache ({lang}): {} MiB for the sweep", cap / (1024 * 1024));
+        }
+    });
 
     // Gather rows for one file's symbols through `heatmap_symbol_row` — the
     // one place fan-in/fan-out/dead are computed, so Perl and pack share the
