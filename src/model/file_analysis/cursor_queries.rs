@@ -8,9 +8,19 @@ impl FileAnalysis {
 
     /// Find the ref at a given point (cursor position).
     pub fn ref_at(&self, point: Point) -> Option<&Ref> {
+        // A class-rail emission (`event(new X)`) is a COMPANION of the
+        // class token's own ref at the same span: it never wins the cursor,
+        // so the token keeps resolving as the class; the bus surfaces
+        // through goto-def's union and the handler side's hierarchy.
         self.refs.iter()
             .filter(|r| contains_point(&r.span, point))
-            .min_by_key(|r| span_size(&r.span))
+            .min_by_key(|r| {
+                let companion = matches!(
+                    r.binding,
+                    Some(RefBinding::Handler { owner: HandlerOwner::ClassRail(_), .. })
+                );
+                (span_size(&r.span), companion as u8)
+            })
     }
 
     /// Find the symbol whose selection_span contains the point.

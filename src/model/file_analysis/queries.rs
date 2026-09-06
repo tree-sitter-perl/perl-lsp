@@ -567,6 +567,19 @@ impl FileAnalysis {
         span: Span,
         module_index: Option<&dyn CrossFileLookup>,
     ) -> Option<InferredType> {
+        // A value declared ON the expression by a plugin (`app(Foo::class)`
+        // IS a Foo) outranks the callee-return derivation below — the
+        // witness priority axis, never a source-name branch.
+        if self
+            .witnesses
+            .for_attachment(&crate::model::witnesses::WitnessAttachment::Expr(span))
+            .iter()
+            .any(|w| w.source.priority() >= 100)
+        {
+            if let Some(t) = self.bag_query_expr_span(span, module_index) {
+                return Some(t);
+            }
+        }
         // A call whose span IS this expression — its return type. The
         // exact-span match is what distinguishes "the value of
         // `$f->get_bar()->get_name()`" (the outer call's return) from
