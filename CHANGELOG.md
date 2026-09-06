@@ -6,6 +6,15 @@ crate / VS Code extension versions.
 
 ## Unreleased
 
+### Parser
+
+- **ts-parser-perl 2.0.0.** Fields resolve to named nodes and explicit
+  parens are a real `parenthesized_expression` node. The old field
+  workarounds are gone, and every consumer that only knew the bare
+  `list_expression` spelling now accepts the parenthesized one: export
+  lists, `use` arguments, `use constant`, hash-literal typing, list
+  rebinding. Cached analyses re-derive on first use.
+
 ### Type inference
 
 - **`shift` consumes `@_`; only the first read is the invocant.** A second

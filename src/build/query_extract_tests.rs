@@ -236,21 +236,16 @@ fn query_skeleton_differential_report() {
     assert!(tallies["package"].recall() >= 0.95, "package recall");
     assert!(tallies["sub"].recall() >= 0.90, "sub recall");
 }
+
 #[test]
 fn field_queryability_must_be_probed_per_node() {
-    // The corrected story behind skeleton.scm's variable-def patterns.
-    // The earlier finding claimed the `variable:`/`variables:` fields on
-    // variable_declaration both "match ZERO in the query engine"; that
-    // was a long-standing mis-measurement (the sibling for_statement
-    // `variable:` matches fine — nobody cross-checked). The real,
-    // narrower shape, proved here with numbers:
-    //   - single `variable:` resolves to the (scalar)/(array)/(hash)
-    //     node and IS queryable;
-    //   - paren-list `variables:` resolves in the query engine to the
-    //     anonymous `(` token (same field-table trap as `right:` on
-    //     assignment_expression), so a NAMED-node matcher under it finds
-    //     nothing — but `variables: _` binds the paren and the inner
-    //     vars are reachable as siblings.
+    // The story behind skeleton.scm's variable-def pattern, with numbers.
+    // Every field on `variable_declaration` resolves to a NAMED node in the
+    // query engine: the single `variable:` to its var node, and the
+    // paren-list `variables:` to one var node per slot (the parens and
+    // commas carry no field). A `.scm` may lean on either; the field-less
+    // `(_ (varname))` discriminator below stays the simplest single form
+    // that covers both spellings.
     use tree_sitter::{Query, QueryCursor, StreamingIterator};
     let src = "my $x = 1;\nmy ($a, $b) = @_;\n";
     let mut parser = crate::build::builder::create_parser();
@@ -265,21 +260,15 @@ fn field_queryability_must_be_probed_per_node() {
         }
         n
     };
-    // single field: queryable, resolves to the named var node.
+    // single field: resolves to the named var node.
     assert_eq!(count("(variable_declaration variable: (scalar (varname) @v))"), 1);
-    // paren-list field: a named-node matcher under it finds nothing,
-    // because the field resolves to the anonymous `(` token...
-    assert_eq!(count("(variable_declaration variables: (scalar) @v)"), 0);
-    assert_eq!(count("(variable_declaration variables: (_) @v)"), 0);
-    // ...which `variables: _` (wildcard, matches anon nodes too) binds:
-    // exactly one paren per paren-list declaration.
-    assert_eq!(count("(variable_declaration variables: _ @v)"), 1);
-    // Both fields CAN be reached if wanted (single directly, paren-list
-    // via the paren-anchored sibling) — but skeleton.scm needs neither:
-    // the field-less discriminator `(_ (varname))` covers both spellings
-    // in one pattern (the single form here, plus the two paren-list vars).
+    // paren-list field: one named var node per slot, no punctuation.
+    assert_eq!(count("(variable_declaration variables: (scalar) @v)"), 2);
+    assert_eq!(count("(variable_declaration variables: (_) @v)"), 2);
+    assert_eq!(count("(variable_declaration variables: _ @v)"), 2);
+    // The field-less discriminator covers both spellings in one pattern.
     assert_eq!(count("(variable_declaration variable: (_ (varname) @v))"), 1);
-    assert_eq!(count("(variable_declaration variables: _ (_ (varname) @v))"), 2);
+    assert_eq!(count("(variable_declaration variables: (_ (varname) @v))"), 2);
     assert_eq!(count("(variable_declaration (_ (varname) @v))"), 3);
 }
 

@@ -138,10 +138,8 @@ fn narrow_truncated_at_reassignment() {
 
 #[test]
 fn narrow_truncated_at_list_assignment() {
-    // `($x, $y) = …` rebinds BOTH targets. The parenthesized LHS is where
-    // `child_by_field_name("left")` returns None, so truncation reads the first
-    // named child instead. Narrow `$y` — the non-first target — to prove every
-    // element of the list ends its own narrowing.
+    // `($x, $y) = …` rebinds BOTH targets. Narrow `$y` — the non-first
+    // target — to prove every element of the list ends its own narrowing.
     let fa = build_fa(
         "package P;\nsub f {\n    my ($x, $y) = @_;\n    if ($y->isa('Bar')) {\n        $y->before;\n        ($x, $y) = pair();\n        $y->after;\n    }\n}",
     );

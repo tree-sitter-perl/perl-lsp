@@ -306,36 +306,20 @@ impl<'a> Builder<'a> {
     /// scalar LHS (`my $x`) or a non-declaration. Arrays/hashes in the list
     /// are skipped (they slurp, not bind a single row).
     pub(super) fn paren_list_scalars(&self, lhs: Node<'a>) -> Vec<String> {
-        let mut out = Vec::new();
-        // `my ($a, $b)` parses as a `variable_declaration` with one
-        // `variables` FIELD PER scalar (not a single list node), so walk the
-        // fielded children. A bare paren/list expression on the LHS holds its
-        // scalars as named children directly.
+        // `my ($a, $b)` is a `variable_declaration` with one `variables`
+        // FIELD PER scalar (not a single list node); a bare `($a, $b)` LHS is
+        // a grouping container whose scalars `list_elements` splices out.
         let mut cursor = lhs.walk();
-        match lhs.kind() {
-            "variable_declaration" => {
-                for c in lhs.children_by_field_name("variables", &mut cursor) {
-                    if c.kind() == "scalar" {
-                        if let Ok(t) = c.utf8_text(self.source) {
-                            out.push(t.to_string());
-                        }
-                    }
-                }
-            }
-            "parenthesized_expression" | "list_expression" => {
-                for i in 0..lhs.named_child_count() {
-                    if let Some(c) = lhs.named_child(i) {
-                        if c.kind() == "scalar" {
-                            if let Ok(t) = c.utf8_text(self.source) {
-                                out.push(t.to_string());
-                            }
-                        }
-                    }
-                }
-            }
-            _ => {}
-        }
-        out
+        let elems: Vec<Node<'a>> = match lhs.kind() {
+            "variable_declaration" => lhs.children_by_field_name("variables", &mut cursor).collect(),
+            "parenthesized_expression" | "list_expression" => crate::cst::list_elements(lhs),
+            _ => Vec::new(),
+        };
+        elems
+            .into_iter()
+            .filter(|c| c.kind() == "scalar")
+            .filter_map(|c| c.utf8_text(self.source).ok().map(str::to_string))
+            .collect()
     }
 
     /// Innermost scope id containing `point` (the same smallest-span rule
@@ -362,16 +346,11 @@ impl<'a> Builder<'a> {
             if let Some(var) = lhs.child_by_field_name("variable") {
                 return var.utf8_text(self.source).ok().map(|s| s.to_string());
             }
-            // Paren list: my ($x) = ...
-            if let Some(vars) = lhs.child_by_field_name("variables") {
-                for i in 0..vars.named_child_count() {
-                    if let Some(child) = vars.named_child(i) {
-                        if matches!(child.kind(), "scalar" | "array" | "hash") {
-                            return child.utf8_text(self.source).ok().map(|s| s.to_string());
-                        }
-                    }
-                }
-            }
+            // A paren list (`my ($x) = ...`, the `variables` field) binds in
+            // LIST context — its slots are `lhs_list_targets`' job, and
+            // handing back the first slot here would type it as the whole
+            // RHS.
+            return None;
         }
         if matches!(lhs.kind(), "scalar" | "array" | "hash") {
             return lhs.utf8_text(self.source).ok().map(|s| s.to_string());
@@ -390,23 +369,31 @@ impl<'a> Builder<'a> {
     ) -> Option<Vec<(String, crate::model::file_analysis::Extraction)>> {
         use crate::model::file_analysis::Extraction;
         // `my ($a, $b)` (variable_declaration) OR a bare `($a, $b) = …`
-        // reassignment (a `list_expression` LHS — no `my`).
-        if !matches!(lhs.kind(), "variable_declaration" | "list_expression") {
-            return None;
-        }
-        // A single `my $x` uses the `variable` field; a list `my ($a, $b)` uses
-        // the (repeated) `variables` field. The former is not a list. (A
-        // `list_expression` has no `variable` field, so it falls through.)
-        if lhs.child_by_field_name("variable").is_some() {
-            return None;
-        }
+        // reassignment (a grouping container LHS — no `my`).
+        let elems: Vec<Node<'a>> = match lhs.kind() {
+            // A single `my $x` uses the `variable` field; a list `my ($a, $b)`
+            // uses the (repeated) `variables` field. The former is not a list.
+            "variable_declaration" => {
+                if lhs.child_by_field_name("variable").is_some() {
+                    return None;
+                }
+                let mut cursor = lhs.walk();
+                lhs.children_by_field_name("variables", &mut cursor).collect()
+            }
+            "parenthesized_expression" | "list_expression" => crate::cst::list_elements(lhs),
+            _ => return None,
+        };
         let mut out = Vec::new();
-        let mut cursor = lhs.walk();
         let mut pos = 0usize;
-        for child in lhs.named_children(&mut cursor) {
+        for child in elems {
             let extraction = match child.kind() {
                 "scalar" => Extraction::Positional(pos),
                 "array" | "hash" => Extraction::Slurpy(pos),
+                // `my (undef, $x) = @_` — the placeholder takes a slot.
+                "undef_expression" => {
+                    pos += 1;
+                    continue;
+                }
                 _ => continue,
             };
             if let Ok(t) = child.utf8_text(self.source) {
@@ -423,16 +410,10 @@ impl<'a> Builder<'a> {
     /// `None` when the RHS isn't a literal list (`@arr`, a call) — that path
     /// needs the source typed as a Positional container instead.
     pub(super) fn list_element_nodes(&self, node: Node<'a>) -> Option<Vec<Node<'a>>> {
-        let inner = if node.kind() == "parenthesized_expression" {
-            node.named_child(0)?
-        } else {
-            node
-        };
-        if inner.kind() != "list_expression" {
-            return None;
-        }
-        let mut cursor = inner.walk();
-        Some(inner.named_children(&mut cursor).collect())
+        // A paren group is a literal list whatever it holds — `(5)` is a
+        // one-element list, so `my ($x) = (5)` binds `$x` to the `5`.
+        matches!(node.kind(), "parenthesized_expression" | "list_expression")
+            .then(|| crate::cst::list_elements(node))
     }
 
     pub(super) fn get_hash_var_from_element(&self, node: Node<'a>) -> Option<String> {

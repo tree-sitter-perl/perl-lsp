@@ -33,18 +33,9 @@
 ; column-for-column (descending to (varname) shifts one column right and,
 ; measured, craters def parity).
 ;
-; The earlier finding here claimed the `variable:`/`variables:` fields
-; "match ZERO in the query engine" and cast this field-less form as a
-; workaround. That was a long-standing mis-measurement, NOT a grammar
-; regression: the sibling for_statement `variable:` (below) matches fine
-; and nobody cross-checked the two. Measured — see the unit test
-; `field_queryability_must_be_probed_per_node`: the single `variable:`
-; field IS queryable (resolves to the var node); only the paren-list
-; `variables:` field is quirky, resolving to the anonymous `(` token (the
-; same field-table trap as `right:` on assignment_expression), so
-; `variables: (scalar)` matches nothing while `variables: _` binds the
-; paren. Neither field is needed here — the field-less discriminator is
-; the simplest form that stays correct across both spellings.
+; Both fields are queryable (`field_queryability_must_be_probed_per_node`
+; measures them), but neither is needed here — the field-less
+; discriminator is the simplest form that covers both spellings.
 (variable_declaration
   (_ (varname)) @def.var.name) @def.var
 
@@ -92,11 +83,7 @@
   (list_expression . (autoquoted_bareword) @def.constant.name @def.constant)
   (#eq? @_const "constant"))
 
-; Loop variables (`for my $x (...)`). NOTE: `variable:` here is a
-; field on for_statement and DOES match in queries — the
-; variable_declaration field failure above is node-specific, which is
-; itself the finding: per-node field queryability must be empirically
-; verified, never assumed from the printed CST.
+; Loop variables (`for my $x (...)`).
 (for_statement
   variable: (scalar) @def.var.name) @def.var
 
