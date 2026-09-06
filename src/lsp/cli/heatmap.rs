@@ -453,8 +453,8 @@ pub(crate) fn cli_heatmap(root: &str, opts: &[String]) {
     };
     let scope = override_scope_from_env();
 
-    // Heatmap output keeps its established 1-based/char coordinates.
-    let mut sources = SourceCache::new(CoordFmt::EditorOneBasedChar);
+    // Heatmap output keeps its established 1-based/char coordinates
+    // (`SourceCache::new(CoordFmt::EditorOneBasedChar)` per gather worker).
     let mut symbol_rows: Vec<serde_json::Value> = Vec::new();
     let mut dead_rows: Vec<serde_json::Value> = Vec::new();
     let mut dead_export_rows: Vec<serde_json::Value> = Vec::new();
@@ -538,121 +538,131 @@ pub(crate) fn cli_heatmap(root: &str, opts: &[String]) {
         }
     });
 
-    // Gather rows for one file's symbols through `heatmap_symbol_row` — the
-    // one place fan-in/fan-out/dead are computed, so Perl and pack share the
-    // exact `references()` projection. `hidden_in_outline` folds arity-variant
-    // accessor twins / DSL-import infrastructure into their listed primary
-    // (same contract the outline honors); `heatmap_symbol_eligible` keeps it
-    // to nameable callables/packages.
-    let gather = |ws: &file_store::FileStore,
-                  routing: &dyn file_analysis::CrossFileLookup,
-                  path: &std::path::Path,
-                  analysis: &file_analysis::FileAnalysis,
-                  prune: Option<&(std::collections::HashSet<String>, std::collections::HashSet<(String, String, usize, usize)>)>,
-                  visibility: Option<resolve::RoleMask>,
-                  symbol_rows: &mut Vec<serde_json::Value>,
-                  dead_rows: &mut Vec<serde_json::Value>,
-                  dead_export_rows: &mut Vec<serde_json::Value>,
-                  sources: &mut SourceCache| {
+    // One work item per eligible declaration, through `heatmap_symbol_row`
+    // — the one place fan-in/fan-out/dead are computed, so Perl and pack
+    // share the exact `references()` projection. `hidden_in_outline` folds
+    // arity-variant accessor twins / DSL-import infrastructure into their
+    // listed primary (same contract the outline honors);
+    // `heatmap_symbol_eligible` keeps it to nameable callables/packages.
+    // Tier-specific behavior arrives as data on the item: the routing
+    // index, the pre-prune, the visibility override.
+    struct Item<'a> {
+        routing: &'a (dyn file_analysis::CrossFileLookup + Sync),
+        path: &'a std::path::Path,
+        analysis: &'a file_analysis::FileAnalysis,
+        sym: &'a file_analysis::Symbol,
+        prune: Option<&'a (std::collections::HashSet<String>, std::collections::HashSet<(String, String, usize, usize)>)>,
+        visibility: Option<resolve::RoleMask>,
+    }
+    let mut items: Vec<Item<'_>> = Vec::new();
+    for (path, analysis) in &entries {
         for sym in analysis.symbols() {
             if sym.hidden_in_outline() || !heatmap_symbol_eligible(sym) {
                 continue;
             }
-            // The caller passes its tier's pre-prune (row-store-backed tiers
-            // only); a `None` tier always takes the full projection (see the
-            // gate rationale above).
-            let (forced_fan_in, dead_export_override) = match prune {
-                Some((referenced_names, dead_keys)) => {
-                    let key = file_analysis::name_match_key(&sym.name);
-                    let forced = if referenced_names.contains(&key) {
-                        None // has reference rows — the projection must run
-                    } else {
-                        Some(0usize) // no reference row anywhere → provably empty
-                    };
-                    // The row verdict substitutes ONLY for a skipped walk,
-                    // where it's provably equal to what the projection would
-                    // derive (no ref rows at all ⇒ no cross-file references).
-                    // When the walk runs, the projection decides: a candidate
-                    // row is an over-approximation, so the rows can say
-                    // "maybe used" for an export whose every candidate the
-                    // matcher rejects — a real dead export the row verdict
-                    // would mask.
-                    let de = forced.map(|_| {
-                        let is_callable = matches!(
-                            sym.kind,
-                            file_analysis::SymKind::Sub | file_analysis::SymKind::Method
-                        );
-                        let sel = sym.selection_span.start;
-                        is_callable
-                            && dead_keys.contains(&(
-                                path.to_string_lossy().to_string(),
-                                sym.name.clone(),
-                                sel.row,
-                                sel.column,
-                            ))
-                    });
-                    (forced, de)
-                }
-                _ => (None, None),
-            };
-            let (row, is_callable, dead, dead_export) = heatmap_symbol_row(
-                ws,
-                routing,
-                path,
-                analysis,
-                sym,
-                visibility,
-                scope,
-                has_dynamic_dispatch,
-                forced_fan_in,
-                dead_export_override,
-                sources,
-            );
-            if dead {
-                dead_rows.push(row.clone());
-            }
-            if dead_export {
-                dead_export_rows.push(row.clone());
-            }
-            if emit_all || is_callable || dead {
-                symbol_rows.push(row);
-            }
+            items.push(Item { routing: &idx, path, analysis, sym, prune: perl_prune.as_ref(), visibility: Some(mask) });
         }
-    };
-
-    for (path, analysis) in &entries {
-        gather(
-            &ws,
-            &idx,
-            path,
-            analysis,
-            perl_prune.as_ref(),
-            Some(mask),
-            &mut symbol_rows,
-            &mut dead_rows,
-            &mut dead_export_rows,
-            &mut sources,
-        );
+    }
+    // Pack languages route through their own sub-index (VISIBLE-wide —
+    // pack workspace files ride the DEPENDENCY role); the set derives that
+    // from the origin's stamped language, so no visibility override — and
+    // no pre-prune: their refs aren't in the hub's row store.
+    for (path, analysis, pack) in &pack_entries {
+        for sym in analysis.symbols() {
+            if sym.hidden_in_outline() || !heatmap_symbol_eligible(sym) {
+                continue;
+            }
+            items.push(Item { routing: pack.as_ref(), path, analysis, sym, prune: None, visibility: None });
+        }
     }
 
-    // Pack languages route through their own sub-index (VISIBLE-wide — pack
-    // workspace files ride the DEPENDENCY role); the set derives that from
-    // the origin's stamped language, so no visibility override — and no
-    // pre-prune: their refs aren't in the hub's row store.
-    for (path, analysis, pack) in &pack_entries {
-        let routing: &dyn file_analysis::CrossFileLookup = pack.as_ref();
-        gather(
+    let gather = |item: &Item<'_>, sources: &mut SourceCache| -> (serde_json::Value, bool, bool, bool) {
+        let (path, sym) = (item.path, item.sym);
+        // The item carries its tier's pre-prune (row-store-backed tiers
+        // only); a `None` tier always takes the full projection (see the
+        // gate rationale above).
+        let (forced_fan_in, dead_export_override) = match item.prune {
+            Some((referenced_names, dead_keys)) => {
+                let key = file_analysis::name_match_key(&sym.name);
+                let forced = if referenced_names.contains(&key) {
+                    None // has reference rows — the projection must run
+                } else {
+                    Some(0usize) // no reference row anywhere → provably empty
+                };
+                // The row verdict substitutes ONLY for a skipped walk,
+                // where it's provably equal to what the projection would
+                // derive (no ref rows at all ⇒ no cross-file references).
+                // When the walk runs, the projection decides: a candidate
+                // row is an over-approximation, so the rows can say
+                // "maybe used" for an export whose every candidate the
+                // matcher rejects — a real dead export the row verdict
+                // would mask.
+                let de = forced.map(|_| {
+                    let is_callable = matches!(
+                        sym.kind,
+                        file_analysis::SymKind::Sub | file_analysis::SymKind::Method
+                    );
+                    let sel = sym.selection_span.start;
+                    is_callable
+                        && dead_keys.contains(&(
+                            path.to_string_lossy().to_string(),
+                            sym.name.clone(),
+                            sel.row,
+                            sel.column,
+                        ))
+                });
+                (forced, de)
+            }
+            _ => (None, None),
+        };
+        heatmap_symbol_row(
             &ws,
-            routing,
+            item.routing,
             path,
-            analysis,
-            None,
-            None,
-            &mut symbol_rows,
-            &mut dead_rows,
-            &mut dead_export_rows,
-            &mut sources,
-        );
+            item.analysis,
+            sym,
+            item.visibility,
+            scope,
+            has_dynamic_dispatch,
+            forced_fan_in,
+            dead_export_override,
+            sources,
+        )
+    };
+
+    // Each item is one independent `references()` walk, fanned out over the
+    // Rayon pool PER DECLARATION (`RAYON_NUM_THREADS` bounds it — the knob
+    // that trades wall for peak RSS, since each worker holds its own
+    // in-flight rehydrated candidates). Per-file granularity left the wall
+    // at the longest file's gather (a 300-sub module) whatever the worker
+    // count. Results are collected IN ITEM ORDER and folded below: the
+    // report's sorts are stable and `dead_code_candidates` is emitted
+    // unsorted, so gather order reaches the output and must equal the
+    // serial order (two runs byte-identical is the acceptance). No channel
+    // — unlike `--check` nothing streams; the report is sorted whole.
+    // `SourceCache` is per-worker (line/column rendering only).
+    let _g_gather = crate::util::timings::PhaseGuard::start("cli::heatmap_gather");
+    let results: Vec<(serde_json::Value, bool, bool, bool)> = {
+        use rayon::prelude::*;
+        items
+            .par_iter()
+            .map_init(
+                || SourceCache::new(CoordFmt::EditorOneBasedChar),
+                |sources, item| gather(item, sources),
+            )
+            .collect()
+    };
+    drop(_g_gather);
+    for (row, is_callable, dead, dead_export) in results {
+        if dead {
+            dead_rows.push(row.clone());
+        }
+        if dead_export {
+            dead_export_rows.push(row.clone());
+        }
+        if emit_all || is_callable || dead {
+            symbol_rows.push(row);
+        }
     }
 
     // Heaviest fan-in first — the hotspots a reader wants up top.
