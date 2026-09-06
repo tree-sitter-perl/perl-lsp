@@ -58,9 +58,8 @@ impl<'a> Builder<'a> {
 
     /// A bare `shift` consumes `@_`'s head: from the call's end the window
     /// is the tail, latest-wins like any rebind. Only a shift that certainly
-    /// ran — its statement a direct child of the sub body, no postfix
-    /// modifier — keeps the window known; any other opens it, so later
-    /// reads answer unknown instead of guessing.
+    /// ran (straight-line in the sub body, no postfix modifier) keeps the
+    /// window known; any other opens it, so later reads answer unknown.
     pub(super) fn consume_arg_head(&mut self, node: Node<'a>) {
         let Some(scope) = self.enclosing_sub_scope() else { return };
         let tail = match self.arg_window_at(node) {
@@ -69,11 +68,10 @@ impl<'a> Builder<'a> {
             }
             _ => Vec::new(),
         };
-        let end = node.end_position();
         self.push_type_constraint(TypeConstraint {
             variable: "@_".into(),
             scope,
-            constraint_span: Span { start: end, end },
+            constraint_span: Span { start: node.end_position(), end: node.end_position() },
             inferred_type: InferredType::Sequence(tail),
         });
     }
@@ -98,8 +96,7 @@ impl<'a> Builder<'a> {
     /// with every earlier straight-line `shift` consumed. `None` outside a
     /// sub, or after a shift that may not have run.
     pub(super) fn arg_window_at(&self, node: Node<'a>) -> Option<InferredType> {
-        let p = node.start_position();
-        self.bag_query_variable("@_", self.scope_at_point(p), p)
+        self.bag_query_variable("@_", self.scope_at_point(node.start_position()), node.start_position())
     }
 
     /// Innermost scope containing `point`. Mirrors

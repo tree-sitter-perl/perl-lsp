@@ -310,6 +310,7 @@ fn build_once(
         bag: crate::model::witnesses::WitnessBag::new(),
         unresolved_expr_nodes: Vec::new(),
         package_framework: std::collections::HashMap::new(),
+        blessing_packages: std::collections::HashSet::new(),
         scope_stack: Vec::new(),
         // Perl's implicit top-level package. Without this seed,
         // top-level scripts (`Mojolicious::Lite` apps, one-off
@@ -762,10 +763,46 @@ impl<'a> Builder<'a> {
     /// Method-call return edges (`Expression(refidx) → Edge(PackageSymbol{package, method})`)
     /// are emitted later — by `emit_method_call_return_edges` from
     /// inside the worklist, once `invocant_class` is filled.
+    /// `@_` at every sub entry the walk did not seed: the argument window,
+    /// headed by the invocant when the sub is a `method` or a named sub of
+    /// a class package (parents, a framework, or a `bless` anywhere in it —
+    /// a verdict complete only after the walk). `consume_arg_head` advanced
+    /// the window during the walk; a one-element window's tail is empty
+    /// either way, so the head can land here.
+    fn seed_arg_windows(&mut self) {
+        use crate::model::witnesses::WitnessAttachment;
+        let seeded: std::collections::HashSet<ScopeId> = self.bag.all().iter().filter_map(|w| match &w.attachment {
+            WitnessAttachment::Variable { name, scope } if name == "@_"
+                && w.span.start == self.scopes[scope.0 as usize].span.start => Some(*scope),
+            _ => None,
+        }).collect();
+        for i in 0..self.scopes.len() {
+            let scope = &self.scopes[i];
+            let (is_method, anon) = match &scope.kind {
+                ScopeKind::Method { .. } => (true, false),
+                ScopeKind::Sub { name } => (false, name == "(anon)"),
+                _ => continue,
+            };
+            let (Some(pkg), false) = (scope.package.clone(), seeded.contains(&scope.id)) else { continue };
+            let (id, span) = (scope.id, scope.span);
+            let class_pkg = self.package_parents.contains_key(&pkg)
+                || self.framework_modes.contains_key(&pkg)
+                || self.blessing_packages.contains(&pkg);
+            let head = (is_method || (class_pkg && !anon)).then(|| InferredType::FirstParam { package: pkg });
+            self.push_type_constraint(TypeConstraint {
+                variable: "@_".into(),
+                scope: id,
+                constraint_span: span,
+                inferred_type: InferredType::Sequence(head.into_iter().collect()),
+            });
+        }
+    }
+
     pub(super) fn populate_witness_bag(&mut self) {
         use crate::model::witnesses::{
             TypeObservation, Witness, WitnessAttachment, WitnessPayload, WitnessSource,
         };
+        self.seed_arg_windows();
 
         // Rep observations from `$v->{k}` access. Method-call return
         // edges on `Expression(refidx)` are emitted later — by the

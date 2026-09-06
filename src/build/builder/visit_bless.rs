@@ -29,6 +29,9 @@ impl<'a> Builder<'a> {
     /// 2nd arg (`bless {}`) → current package (Perl's one-arg bless blesses
     /// into the caller's package).
     pub(super) fn visit_bless_call(&mut self, node: Node<'a>) {
+        if let Some(p) = self.current_package.clone() {
+            self.blessing_packages.insert(p);
+        }
         let args = self.extract_call_args(node);
         let obj = match args.first() {
             Some(n) => *n,

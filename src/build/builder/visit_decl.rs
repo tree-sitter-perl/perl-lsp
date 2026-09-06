@@ -735,14 +735,15 @@ impl<'a> Builder<'a> {
         //     user can call it `$c`/`$ctx`/whatever.
         // Framework-specific invocant markers (`as_invocant_params` from
         // a plugin) stack on top via EmittedParam → ParamInfo.
-        let pkg_is_subclass = self.current_package
-            .as_ref()
-            .map_or(false, |p| self.package_parents.contains_key(p));
-        let has_invocant = is_method || pkg_is_subclass || params.first().is_some_and(|p| {
-            crate::model::conventions::is_conventional_invocant_name(&p.name)
-        });
-        if let Some(first) = params.first_mut().filter(|_| has_invocant) {
-            first.is_invocant = true;
+        if let Some(first) = params.first_mut() {
+            let name_says_invocant =
+                crate::model::conventions::is_conventional_invocant_name(&first.name);
+            let pkg_is_subclass = self.current_package
+                .as_ref()
+                .map_or(false, |p| self.package_parents.contains_key(p));
+            if is_method || name_says_invocant || pkg_is_subclass {
+                first.is_invocant = true;
+            }
         }
 
         // Extract preceding POD/comment documentation
@@ -809,7 +810,7 @@ impl<'a> Builder<'a> {
         }
 
         // Detect first-param-is-self pattern
-        self.detect_first_param_type(&params, node, has_invocant);
+        self.detect_first_param_type(&params, node);
 
         // Role-contract param typing: a plugin `param_types()` rule may type
         // a named param (e.g. `$app` in a `Clove::Upgrade::OneTime` doer's
@@ -865,7 +866,7 @@ impl<'a> Builder<'a> {
             None,
         );
         self.record_signature_params(node, &params);
-        self.detect_first_param_type(&params, node, false);
+        self.detect_first_param_type(&params, node);
         self.queue_children_then(node, |b| { b.pop_scope(); });
     }
 
@@ -1277,31 +1278,38 @@ impl<'a> Builder<'a> {
         }
     }
 
-    /// Types the marked invocant param (params[0] normally, params[1] under
-    /// `around`) and seeds `@_`'s argument window for this sub scope: element
-    /// 0 is the invocant when the sub is a method, the rest unknown. Every
-    /// bare `shift` / `$_[N]` projects the window at its own point, and
-    /// `consume_arg_head` advances it — so "is this read the invocant" is
-    /// answered by position, never by the read's shape or the package's look.
-    pub(super) fn detect_first_param_type(&mut self, params: &[ParamInfo], node: Node<'a>, has_invocant: bool) {
-        let invocant = params.iter().find(|p| p.is_invocant && p.name.starts_with('$'));
-        let Some(pkg) = self.current_package.clone() else { return };
-        let (scope, span) = (self.current_scope(), node_to_span(node));
-        if let Some(p) = invocant {
+    pub(super) fn detect_first_param_type(&mut self, params: &[ParamInfo], node: Node<'a>) {
+        // Find the first param with `is_invocant = true` — normally params[0] for
+        // regular methods, but params[1] for `around` modifiers (params[0] is $orig).
+        // The caller that sets up the param list (visit_sub for named subs,
+        // visit_anonymous_sub for modifier bodies) is responsible for marking the
+        // correct param as the invocant.
+        let invocant = params
+            .iter()
+            .find(|p| p.is_invocant && p.name.starts_with('$'));
+        let invocant = match invocant {
+            Some(p) => p,
+            None => return,
+        };
+
+        if let Some(pkg) = self.current_package.clone() {
+            let (scope, span) = (self.current_scope(), node_to_span(node));
+            let head = InferredType::FirstParam { package: pkg };
             self.push_type_constraint(TypeConstraint {
-                variable: p.name.clone(),
+                variable: invocant.name.clone(),
                 scope,
                 constraint_span: span,
-                inferred_type: InferredType::FirstParam { package: pkg.clone() },
+                inferred_type: head.clone(),
+            });
+            // `@_`'s argument window for this scope, headed by the same
+            // invocant (`seed_arg_windows` covers the scopes without one).
+            self.push_type_constraint(TypeConstraint {
+                variable: "@_".into(),
+                scope,
+                constraint_span: span,
+                inferred_type: InferredType::Sequence(vec![head]),
             });
         }
-        let head = (has_invocant || invocant.is_some()).then(|| InferredType::FirstParam { package: pkg });
-        self.push_type_constraint(TypeConstraint {
-            variable: "@_".into(),
-            scope,
-            constraint_span: span,
-            inferred_type: InferredType::Sequence(head.into_iter().collect()),
-        });
     }
 
     pub(super) fn visit_variable_decl(&mut self, node: Node<'a>) {
