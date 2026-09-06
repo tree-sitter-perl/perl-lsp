@@ -746,23 +746,6 @@ impl<'a> Builder<'a> {
     }
 
 
-    /// Post-walk pass: ref-derived facts that don't need walk-time
-    /// visibility — `HashRefAccess` observations from `$v->{k}` refs
-    /// and invocant-mutation facts on hash-key writes. Variable
-    /// witnesses for TCs and walk-time idiom witnesses (branch arms,
-    /// arity gating) are already in the bag — pushed live during the
-    /// walk via `push_type_constraint` and `bag.push` from the emit
-    /// sites.
-    ///
-    /// Method-call return edges (`Expression(refidx) → Edge(PackageSymbol{package, method})`)
-    /// are emitted later — by `emit_method_call_return_edges` from
-    /// inside the worklist, once `invocant_class` is filled.
-    /// `@_` at every sub entry the walk did not seed: the argument window,
-    /// headed by the invocant when the sub is a `method` or a named sub of
-    /// a class package (`PackageFacts::is_class`, complete only after the
-    /// walk). `consume_arg_head` advanced
-    /// the window during the walk; a one-element window's tail is empty
-    /// either way, so the head can land here.
     /// The per-package table as the walk has it so far — the one fold of
     /// the builder's lanes, read by the window seed and the final assembly.
     fn package_facts(&self) -> std::collections::HashMap<String, PackageFacts> {
@@ -777,6 +760,12 @@ impl<'a> Builder<'a> {
         )
     }
 
+    /// `@_` at every sub entry the walk did not seed: the argument window,
+    /// headed by the invocant when the sub is a `method` or a named sub of
+    /// a class package (`PackageFacts::is_class`, complete only after the
+    /// walk). `consume_arg_head`
+    /// advanced the window during the walk; a one-element window's tail is
+    /// empty either way, so the head can land here.
     fn seed_arg_windows(&mut self) {
         use crate::model::witnesses::WitnessAttachment;
         let facts = self.package_facts();
@@ -805,6 +794,17 @@ impl<'a> Builder<'a> {
         }
     }
 
+    /// Post-walk pass: ref-derived facts that don't need walk-time
+    /// visibility — `HashRefAccess` observations from `$v->{k}` refs
+    /// and invocant-mutation facts on hash-key writes. Variable
+    /// witnesses for TCs and walk-time idiom witnesses (branch arms,
+    /// arity gating) are already in the bag — pushed live during the
+    /// walk via `push_type_constraint` and `bag.push` from the emit
+    /// sites.
+    ///
+    /// Method-call return edges (`Expression(refidx) → Edge(PackageSymbol{package, method})`)
+    /// are emitted later — by `emit_method_call_return_edges` from
+    /// inside the worklist, once `invocant_class` is filled.
     pub(super) fn populate_witness_bag(&mut self) {
         use crate::model::witnesses::{
             TypeObservation, Witness, WitnessAttachment, WitnessPayload, WitnessSource,

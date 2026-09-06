@@ -260,7 +260,9 @@ impl<'a> Builder<'a> {
                 }
                 Some(InferredType::ClassName(text.to_string()))
             }
-            // A bare `shift` reads the head of `@_`'s window at its point.
+            // A bare `shift` READS the head of `@_`'s window at its point;
+            // the consume is the walk's `consume_arg_head`, once per node.
+            // This arm re-runs every fold iteration, so it must stay a read.
             "func1op_call_expression" if self.is_shift_call(node) => {
                 self.arg_window_at(node)?.element_at(0).cloned()
             }

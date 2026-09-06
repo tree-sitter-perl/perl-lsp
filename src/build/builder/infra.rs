@@ -76,6 +76,11 @@ impl<'a> Builder<'a> {
         });
     }
 
+    /// Syntactic dominance, the pre-CFG stand-in for "this shift's statement
+    /// runs on every path to the read": straight-line in the sub body, no
+    /// postfix modifier. Under-approximates (any doubt opens the window).
+    /// Subsumed by the CFG tier's reachability (`docs/epics/16-cfg-tier.md`,
+    /// the `FlowEdge` dominance stand-in row) when it lands.
     fn shift_certainly_runs(&self, node: Node<'a>) -> bool {
         if Some(self.current_scope()) != self.enclosing_sub_scope() {
             return false;
