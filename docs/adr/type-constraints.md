@@ -31,7 +31,7 @@ consumers ask the value, they never destructure the serde shape.
 Pairs with `Sequence(Vec<_>)` / `Parametric(_)` (inner-carrying) — the
 `…Of` reads as "constraint of `<inner>`".
 
-### Core extracts the params; the plugin folds them to the inner
+### Core extracts the params; the plugin folds them to the constraint
 
 A type library exports a vocabulary of constructors of varying arity
 (`ArrayRef` at 0, `InstanceOf['Foo']` at 1, `Enum['a','b']` at N).
@@ -78,57 +78,59 @@ outer call already walks — it recurses to arbitrary depth
 value its question via a `constrained_inner(ty)` Rhai helper mirroring
 `InferredType::constrained_inner`, never the serde shape.
 
-## `Maybe[T]` is erased, not modeled — and that is on purpose
+## `Maybe[T]` is `Optional<T>`
 
-`Maybe[InstanceOf['Foo']]` resolves to `TypeConstraintOf(ClassName
-(Foo))`, identical to the bare `InstanceOf['Foo']`. The plugin's
-`Maybe` fold is a **passthrough** — it returns the inner's constrained
-type; the optionalness ("might be undef") is discarded.
+`Maybe[InstanceOf['Foo']]` resolves to
+`TypeConstraintOf(Optional(ClassName(Foo)))`. The plugin's `Maybe` fold
+projects the inner's constrained type and lifts it; the accessor
+projection carries the optionalness through, so `has thing => (isa =>
+Maybe[InstanceOf['My::Thing']])` types the getter `Optional<My::Thing>`.
 
-Erasure is the right call because it satisfies every *resolution* need
-— goto-def, hover, completion, chain dispatch all want the inner class.
-A first-class `InferredType::Maybe(_)` would buy exactly one capability
-erasure can't: the unguarded-optional-access diagnostic (`$t->process`
-on a `Maybe` with no intervening `if ($t)` / `//` guard). That
-diagnostic has since landed — flow-sensitive guard narrowing
-(`docs/adr/flow-narrowing.md`) feeds a first-class
-`InferredType::Optional(Box<_>)` (`docs/adr/optional-types.md`) into D2
-`optional-deref` (`docs/adr/narrowing-diagnostics.md`) — but its
-optionalness comes from branch/return arms and the quoted-string
-`isa => 'Maybe[T]'` form, not from this plugin's bareword `Maybe[...]`
-constructor fold, which still erases (`docs/prompt-optional-types.md`
-tracks wiring it in).
+The declaration says the value may be undef, and every consumer that
+matters can hear it. `InferredType::Optional` is first class
+(`optional-types.md`), flow-sensitive guard narrowing strips it at a
+guard (`flow-narrowing.md`), and D2 `optional-deref`
+(`narrowing-diagnostics.md`) reports an unguarded access. Dispatch is
+unaffected — optional receivers resolve leniently — so the lift costs
+resolution nothing and buys the diagnostic the truth.
 
-A speculative variant would ripple through every `match` on
-`InferredType` (the "never `_ =>`" invariant means every consumer must
-handle it), every reducer, the bincode wire format, and the
-`class_name()` / `constrained_inner()` / `element_at()` projection
-family — all to carry a bit nothing reads. The slot stays clean for a
-later landing: a delegating `class_name()` (so dispatch sees through,
-like `Parametric` delegates to its flavor) plus a new `maybe_inner()`
-projection, the plugin fold flips passthrough → wrap. Additive, not a
-refactor — which is *why* deferring is safe.
+Both spellings reach the same type through the SAME vocabulary, fold and
+parameter walk. Moose's type string is Perl-parsable, so it is re-parsed
+and walked exactly like a constructor written in the file; the two differ
+only in how a leaf name resolves — a node in the file asks the bag, a
+re-parsed leaf asks the plugin vocabulary directly, because a re-parsed
+tree's spans live in the string's own coordinate space and emitting
+witnesses from them would collide with the file's attachments. That is
+the honest limit on "one implementation": one walk, one fold, two
+resolvers. Agreement is structural, not two tables kept in step.
 
-**Revisit this fold when the bareword `Maybe[...]` path needs to feed
-the landed `Optional` lattice** (`docs/prompt-optional-types.md`) — the
-diagnostic and its flow-narrowing are already budgeted and built; what
-remains is wiring this constructor's fold into them.
+The boundary is the parameter, not the wrapper. A parameterized
+container folds to its base rep (`ArrayRef[Int]` → `ArrayRef`) because
+an element type has no `InferredType` slot to ride; that slot is
+sequence-types phase 3 (`prompt-sequence-types.md`), which names this
+fold as its waiting caller.
 
 ## Trade-offs
 
 **`EXTRACT_VERSION` bump** for the `TypeConstraintOf` variant and the
 nested-`ty` shape. Bumping is free; old blobs re-resolve lazily.
 
-**Constraint-name registration is global today.** The
-`type_constraint_names()` gate is a flat list — the cheap first cut. The
-authoritative source is the *import* (`use Types::Standard qw/InstanceOf
-.../` injects exactly those names), so an unrelated `InstanceOf` in a
-package that didn't import it can mis-fire. Moving registration to the
-injection seam (the `use` / `SyntheticUse` / `FrameworkImport` handling)
-is package-scoped and free for synthesized libs (crm's `Clove::Types`
-re-exporting Types::Standard rides its kit's `SyntheticUse`).
-Forward-compatible: only the name-gate migrates; the fold and the
-`TypeConstraintOf` / `has`-projection plumbing are unchanged.
+**Constraint names are import-scoped.** The `type_constraint_names()`
+manifest declares which names are constructors; the enclosing file must
+have IMPORTED the name for a call to type as one
+(`Builder::constraint_name_imported`). The import is the authoritative
+source — `use Types::Standard qw/Str Int/` injects exactly those names,
+`-all` / `:all` / bare `use` expand to the full vocabulary through the
+plugin's `on_use`, and a house library re-exporting Types::Standard
+rides its kit's `SyntheticUse`.
+
+Scoping is what lets the vocabulary include the 0-arity base constants.
+`Str` / `Int` / `Num` / `HashRef` are ordinary English words and common
+sub names, and the gate fires BEFORE local symbol lookup — so an
+unscoped list would silently beat a package's own `sub Str`, and
+hand-curating the names "unlikely to collide" is a partial enumeration
+that is always incomplete (rule #10). Requiring the import costs
+nothing: a Type::Tiny constant must be imported to compile.
 
 ## What's deferred
 
@@ -137,6 +139,14 @@ Forward-compatible: only the name-gate migrates; the fold and the
   indexed from CPAN; the projection design above is chosen partly so
   this composes — `$t` keeps its `TypeConstraintOf` type for dispatch
   while the accessor projects the inner.
-- **Richer vocabulary** (`ArrayRef[InstanceOf[X]]`, `Enum`, `Dict`,
-  `ConsumerOf['Role']`). The `ty`-filling plumbing exists; each is one
-  fold entry.
+- **Richer vocabulary** (`ArrayRef[InstanceOf[X]]`, `Enum`, `Dict`).
+  The `ty`-filling plumbing exists; each is one fold entry.
+- **Retiring the name gate entirely.** A constraint constructor is a sub
+  that returns a constraint value; the honest model is a minted symbol,
+  not a name gate ahead of symbol lookup. The design is
+  `prompt-type-constraint-flow.md`: the plugin's `on_use` mints the sub
+  the runtime installs, and `Name[...]` parameterization is asked of the
+  callee's owner. No `ReturnExpr` shape carries it — `Arg(n)` is inert for
+  Perl (no call site threads argument types into a query), and
+  `InstanceOf['Foo']`'s operand is a literal *value*, which no type-level
+  operator reads.

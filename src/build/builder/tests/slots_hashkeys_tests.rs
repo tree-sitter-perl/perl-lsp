@@ -1016,7 +1016,7 @@ sub register {
 /// Interpolation deref `${ EXPR }` — `scalar > block` with no varname
 /// wrapper — carries real code in strings AND regex patterns:
 /// `s/_to_${\ $self->filetype }$//` holds a method call that must get
-/// refs (the crm Clove::Converter idiom). The outer scalar emits
+/// refs (the crm GenericCo::Converter idiom). The outer scalar emits
 /// nothing (its text is not a variable name).
 #[test]
 fn interpolation_deref_code_gets_refs() {

@@ -252,6 +252,22 @@ impl<'a> Builder<'a> {
                         // payload doesn't bake to a witness shape.
                         b.emit_expr_witness(child);
                         b.last_expr_span.insert(scope, node_to_span(child));
+                        // Classify how this statement exits, using the SAME
+                        // undef vocabulary the return side uses. A `return`
+                        // reaches here too — the grammar wraps it in an
+                        // `expression_statement` like any other — while a
+                        // postfix-conditional return (`return undef if $x`)
+                        // is a `postfix_conditional_expression`, NOT a
+                        // `return_expression`, which is the right answer:
+                        // the sub can still fall past it.
+                        use crate::model::witnesses::tags::UndefArm;
+                        let exit = match child.kind() {
+                            "return_expression" => TailExit::Return,
+                            "undef_expression" => TailExit::Undef(UndefArm::Scalar),
+                            "stub_expression" => TailExit::Undef(UndefArm::EmptyList),
+                            _ => TailExit::Value,
+                        };
+                        b.last_stmt_exit.insert(scope, exit);
                     }
                 });
             }
@@ -813,7 +829,7 @@ impl<'a> Builder<'a> {
         self.detect_first_param_type(&params, node);
 
         // Role-contract param typing: a plugin `param_types()` rule may type
-        // a named param (e.g. `$app` in a `Clove::Upgrade::OneTime` doer's
+        // a named param (e.g. `$app` in a `GenericCo::Upgrade::OneTime` doer's
         // `run_upgrade`). Same mechanism as `detect_first_param_type`.
         self.apply_param_type_manifest(&name, &params, node);
 

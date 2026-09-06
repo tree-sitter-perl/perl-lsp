@@ -749,8 +749,11 @@ impl FileAnalysis {
                 // First-parent-wins per method, mirroring Perl's
                 // default DFS-MRO. Aligned with the local-parent
                 // edge emission in `write_back_sub_return_types`.
+                // Same override seed as the local writeback — see
+                // `own_method_names`. The two must agree, or a child gets one
+                // answer at build and another after enrichment.
                 let mut emitted_for_child: std::collections::HashSet<String> =
-                    std::collections::HashSet::new();
+                    super::own_method_names(self.symbols(), child).collect();
                 for parent in parents {
                     if parent == child {
                         continue;
@@ -1162,8 +1165,9 @@ impl FileAnalysis {
     ) -> Vec<GuardRedundancy> {
         let mut out = Vec::new();
         for g in &self.guard_sites {
-            let Some(prior) =
-                self.inferred_type_via_bag_ctx(&g.subject, g.before_point, module_index)
+            let Some(prior) = self
+                .inferred_type_via_bag_ctx(&g.subject, g.before_point, module_index)
+                .filter(InferredType::is_known)
             else {
                 continue;
             };

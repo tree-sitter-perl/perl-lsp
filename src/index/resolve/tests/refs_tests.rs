@@ -2365,7 +2365,7 @@ fn references_cross_file_sub_fans_out_and_stays_package_scoped() {
 /// Cross-file method references via inheritance: a method defined on
 /// a parent/role, called on a child instance (`$child->m()`) in
 /// another file, must surface when the *parent* class is the target.
-/// This is the crm role case (`Clove::Role::REST::success` called as
+/// This is the crm role case (`GenericCo::Role::REST::success` called as
 /// `$c->success` in every controller that `with`s the role) and the
 /// `todays_rate`/`add_data` shape generally. The matcher uses
 /// `method_rename_chain`, so the parent is on the invocant's

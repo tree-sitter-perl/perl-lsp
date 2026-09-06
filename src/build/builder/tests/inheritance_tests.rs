@@ -783,3 +783,29 @@ sub run {
     let ty = fa.inferred_type_via_bag("$cfg", Point::new(7, 4));
     assert!(ty.is_some_and(|t| t.is_hash_shaped()), "hash-shaped");
 }
+
+#[test]
+fn an_override_never_inherits_the_parents_return_type() {
+    // Perl dispatches to the local sub, so a parent's answer must never
+    // stand in for a name the child overrides. The base here returns a
+    // provable undef; the child returns a string. Before the override set
+    // seeded the inheritance dedup, `Child::file` typed as the BASE's undef
+    // — which then made every guard on its result read as one that can
+    // never pass. `URI::file::Base::file { undef }` under an overriding
+    // `Mac::file` is the real-world shape.
+    let fa = build_fa(
+        "package Base;\nsub file { return undef }\nsub shared { return undef }\npackage Child;\nour @ISA = ('Base');\nsub file { return 'path' }\n1;\n",
+    );
+    assert_eq!(
+        fa.find_method_return_type("Child", "file", None, Some(0)),
+        Some(InferredType::String),
+        "the child's own definition must answer for an overridden name",
+    );
+    // The inheritance edge itself still works for names the child does NOT
+    // define — the seed narrows the dedup, it does not disable it.
+    assert_eq!(
+        fa.find_method_return_type("Child", "shared", None, Some(0)),
+        Some(InferredType::Undef),
+        "a name the child does not override still inherits",
+    );
+}

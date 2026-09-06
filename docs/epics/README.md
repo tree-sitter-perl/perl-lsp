@@ -62,11 +62,12 @@ any of those three.
 | 9 | [Mojo polish: routes, stash, hooks, chains](09-mojo-polish.md) | L | — |
 | 10 | [CLI analysis subcommands + `--migrate`](10-cli-analysis-and-migrate.md) | L | 7/8 for two lint aliases |
 | 11 | [Program boundaries + MAIN-1](11-program-boundaries.md) | M | brands-half waits on 4 |
-| 12 | [Type::Tiny completeness](12-type-tiny-completeness.md) | S–M | — |
+| 12 | [Type::Tiny check-guards](12-type-tiny-completeness.md) | S | — |
 | 13 | [Pack-language ceiling: diagnostics, framework tier, calibration](13-pack-language-ceiling.md) | L | — |
 | 14 | [The per-file stall — C++ beta → GA](14-per-file-stall.md) | M | — |
 | 15 | [Query paths at scale — Tier 1 residual](15-query-paths-at-scale.md) | L | 1 interlocks (candidate sets) |
 | 16 | [The CFG tier — path sensitivity on the bag](16-cfg-tier.md) | L | **4, 7 and 12 owe it seams** — see below |
+| 17 | [Builder decomposition](17-builder-decomposition.md) | S–M | — |
 
 **Suggested order.** 1 first (it is a class of confidently-wrong
 answers, and Veesh named it next); then 14 and 15, because they are the
@@ -102,7 +103,7 @@ residuals, or (d) explicitly out of scope. Nothing is unaccounted for.
 | `prompt-cli-tools.md` — analysis subcommands + `--migrate` | **Epic 10** |
 | `prompt-entrypoint-analysis.md` | **Epic 11** (brands-half stays parked) |
 | `open-problems.md` §"`main::` aggregation across `require`" | **Epic 11** (phase C) |
-| Type::Tiny check-guards, import-scoped vocabulary | **Epic 12**; `ArrayRef[T]` elements parked with sequence-types |
+| Type::Tiny check-guards | **Epic 12**. The import-scoped name gate and the `Maybe[T]` → `Optional<T>` fold are landed (`adr/type-constraints.md`); `ArrayRef[T]` elements are parked with sequence-types, which names the fold as its waiting caller |
 | `open-problems.md` §"Cross-file `ClassIsa`-trigger emissions" | **LANDED** — `plugin.gated_emissions` + `class_isa_prefix` + `enrichment::apply_gated_emissions`; the doc section is stale and Epic 3 Phase A retires it |
 | `prompt-enrichment-inheritance-residual.md` | Landed with the above; only the `ClassIsa`/`param_types` applicability matrix rows remain, verified in **Epic 3** |
 | `prompt-helper-consumption.md` | Phases 1–2 landed; phase 3 (per-app surfaces) **parked** with instance brands |
@@ -157,6 +158,7 @@ residuals, or (d) explicitly out of scope. Nothing is unaccounted for.
 | `prompt-incremental-build.md` | **Parked** with a named bar in-doc; Epic 15 Phase D's measurements are its forcing function |
 | `prompt-storage-residuals.md` | Known unbounded residuals, deliberately listed; not an epic until one is measured to hurt |
 | `prompt-enrichment-delta.md` (enrichment as a delta artifact) | **Design, not started.** Its three named pressures — level-indexed enrichment's rejection, the FHEM crest, the overlay retention story — are all Epic 15 territory; it is the candidate design if Phase B's dedup proves insufficient. Do not start it before Epic 15 Phase C measures the enrichment path fresh |
+| `build/builder/` grab-bag parts | **Epic 17** — behavior-frozen decomposition; the split rule is CLAUDE.md's own, applied per concern rather than per line count |
 | `bench/RESULTS.md` + `bench/baselines.jsonl` | The standing record. Every epic that moves a KPI updates it — see the house rules |
 
 ### Ledgers, not design docs

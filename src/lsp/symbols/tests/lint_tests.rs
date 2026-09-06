@@ -72,7 +72,7 @@ fn test_role_requires_honest_silence() {
 
 #[test]
 fn test_role_requires_default_implementation_provides() {
-    // The Clove::Sheets pattern: the role both requires AND defines
+    // The GenericCo::Sheets pattern: the role both requires AND defines
     // the name (requires as documentation, def as default). The real
     // def must count as provision — only the marker is excluded.
     let msgs = role_requires_diags(

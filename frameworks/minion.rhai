@@ -91,7 +91,7 @@ fn triggers() {
 
 // The task-call capture. We deliberately do NOT gate on the receiver
 // class. A name-prefix match (`== "Minion" || starts_with("Minion::")`)
-// is the rule-#10 antipattern: a real subclass like `Clove::Minion`
+// is the rule-#10 antipattern: a real subclass like `GenericCo::Minion`
 // (`use Mojo::Base 'Minion'`, often overriding `enqueue`) isa Minion but
 // fails the string test, so its dispatch sites silently emit no ref. The
 // cross-file ancestry that would answer "isa Minion?" isn't resolved at

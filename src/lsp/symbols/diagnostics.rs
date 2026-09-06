@@ -316,22 +316,25 @@ pub fn collect_diagnostics(
 
     drop(_g_fn);
     // 5e: Unresolved method diagnostics for locally-defined classes.
-    // Rule-#10 debt: the framework entries below (DBIC/Moose) belong to the
-    // frameworks, not core diagnostics — they move out when plugins can
-    // register meta-methods (docs/prompt-dbic-as-plugin.md) or the Openness
-    // rule lands (docs/prompt-graph-walking.md, Openness).
-    let universal_methods = [
-        "new", "AUTOLOAD", "DESTROY", "can", "isa", "DOES",
-        // Moose adds lowercase `does` alongside UNIVERSAL's uppercase DOES.
-        "does",
-        "VERSION",
-        // DBIC meta-methods (inherited from DBIx::Class::Core)
-        "add_columns", "add_column", "set_primary_key", "table", "resultset_class",
-        "has_many", "has_one", "belongs_to", "might_have", "many_to_many",
-        "load_components", "load_own_components",
-        // Moose/Moo meta-methods
-        "meta",
-    ];
+    //
+    // Core owns ONLY the true `UNIVERSAL::` surface — the methods every Perl
+    // class answers regardless of framework. Everything framework-shaped
+    // (DBIC's `DBIx::Class::Core` inheritance, Moose's meta) is declared by
+    // the plugin that knows it, via the `meta_methods()` manifest, and
+    // arrives baked on the analysis. A per-framework name list here would be
+    // a partial enumeration that silently misses tomorrow's framework
+    // (rule #10).
+    //
+    // Built once as a set, not scanned per ref: the loop below runs per
+    // method-call ref (it carries its own ghost-stats region for that
+    // reason), and the plugin half is an OPEN set — a third-party plugin can
+    // declare as many meta-methods as it likes, so a linear scan here
+    // degrades with the plugin roster rather than staying bounded.
+    let implicitly_answered: std::collections::HashSet<&str> =
+        ["new", "AUTOLOAD", "DESTROY", "can", "isa", "DOES", "VERSION"]
+            .into_iter()
+            .chain(analysis.plugin.meta_methods.iter().map(|s| s.as_str()))
+            .collect();
     let _g_meth = crate::util::ghost_stats::ScopedNs::start("diag.3_unresolved_method_loop");
     for r in analysis.refs() {
         let (invocant, _invocant_span) = match &r.kind {
@@ -345,8 +348,8 @@ pub fn collect_diagnostics(
         };
         let method_name = &r.target_name;
 
-        // Skip universal methods
-        if universal_methods.contains(&method_name.as_str()) {
+        // Skip methods every class of its kind answers without declaring.
+        if implicitly_answered.contains(method_name.as_str()) {
             continue;
         }
 

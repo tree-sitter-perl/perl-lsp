@@ -17,6 +17,11 @@
   `Optional<T>`, the 0-arity base constants (`Str`/`Int`/`Num`/
   `ArrayRef`/…) folding to their reps — both `isa` spellings (quoted
   string and bareword constructor) type accessors identically.
+- The constraint-name gate is import-scoped
+  (`Builder::constraint_name_imported`): a call types as a constraint
+  only where the enclosing file imported the name. That is what lets the
+  vocabulary carry the 0-arity base constants without a local `sub Str`
+  losing to them. Design in `adr/type-constraints.md`.
 - Import vocabulary: `Types::Standard` / `Types::Common::{String,
   Numeric}` / `Types::Common` export lists including the
   `is_X`/`assert_X`/`to_X` companions, `-all`/`:all` expansion, and the
@@ -35,10 +40,10 @@
    `type_constraint_names()` gate is global — ANY call named `Str`/`Int`
    anywhere types as a constraint, colliding with user subs. Scope it to
    packages that actually imported the name.
-3. **Close the `completion-typetiny-imported-blessed` xfail** — a
+2. **Close the `completion-typetiny-imported-blessed` xfail** — a
    generic gap (imported names missing from bareword completion) that
    happens to be pinned on a Type::Tiny fixture.
-4. **Doc hygiene:** `frameworks/type-tiny.rhai` cites a design doc that
+3. **Doc hygiene:** `frameworks/type-tiny.rhai` cites a design doc that
    does not exist (`docs/prompt-type-constraint-types.md`). The design
    lives in `adr/type-constraints.md`; fix the pointer.
 
@@ -53,8 +58,6 @@
    pattern.
 4. `frameworks/type-tiny.rhai` — `types_standard_exports()` (the
    `is_`/`assert_` companion generation) and `base_constant_type`.
-5. `grep -rn 'type_constraint_names' src/build/plugin/mod.rs` — the
-   global gate and its "first cut" caveat.
 6. `docs/prompt-cfg-tier.md` §3.3 and §8.1 — **this epic mints new
    `GuardFact`s over `NarrowSubject`s, which is exactly the
    representation that tier promotes.** Two obligations land on the
@@ -109,26 +112,11 @@
      yet; that is the point.
 7. **Acceptance:** unit tests per form (`is_ArrayRef` if/unless/postfix;
    `assert_Str` fall-through; the `->check` object form; a NON-imported
-   `is_Foo` user sub narrows nothing — see Phase B); **the deref-shape
+   `is_Foo` user sub narrows nothing); **the deref-shape
    diagnostic composes** (an `is_ArrayRef`-guarded `$x->{k}` hash deref
    flags) — one test proving the LATTICE, not just the type, sees the
    guard. Substrate audit: guard-lint counts move only DOWN; triage
    anything up.
-
-### Phase B — import-scoped constraint gate
-
-1. The builder's `type_constraint_names` gate and the Phase-A guard map
-   both consult per-package import state: the name must be imported in
-   the enclosing package (literal qw-list, meta-import expansion, or
-   `SyntheticUse` — all already recorded on `imports` or handled by the
-   plugin's `on_use`).
-2. Keep a compatibility carve-out ONLY if the substrate shows real code
-   using the constructors without importable evidence. **Measure first;
-   the expected answer is no carve-out** — Type::Tiny constants must be
-   imported to compile.
-3. **Acceptance:** a user package with its own `sub Str` — calls type as
-   the sub's return, not a constraint; existing bareword-isa tests still
-   green; substrate audit at parity-or-better.
 
 ### Phase C — imported names in bareword completion
 
@@ -233,9 +221,10 @@ list that grows.**
      inventing one.
    - Measure the payload bytes with `bench/lsp_bench.py`, three runs,
      dated.
-4. **Phase B should make things cheaper**, not more expensive: an
-   import-scoped gate rejects more names earlier. Confirm it does, and
-   report the substrate delta.
+4. **The import-scoped gate rejects before the expensive half** — the
+   param extraction and the rhai fold — so a guard map consulted after
+   it inherits that filter. Confirm the recognizer sits on the same
+   side of it.
 
 ## Verification gate
 
@@ -247,6 +236,5 @@ runs, dated.
 
 ## Sizing
 
-Small-to-medium. A is the core (recognizer + manifest); B is a contained
-gate change with a measurement step; C/D are small. One PR for A+B, one
-for C+D works.
+Small-to-medium. A is the core (recognizer + manifest); C and D are
+small. One PR for A, one for C+D works.

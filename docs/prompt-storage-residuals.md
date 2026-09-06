@@ -9,6 +9,28 @@ or by being explicitly declined.
 
 ## Residency / RAM
 
+- **`Witness` is 240 bytes and the bag is half an analysis.** Measured
+  2026-09-01 on the gold substrate, `--check` with `PERL_LSP_NO_EVICT=1`,
+  3,364 files, 511.7 MB of whole analyses: `witness_vec` **189.97 MB
+  (37.1%)** and `witness_index` **77.12 MB (15.1%)** — the bag is
+  **52.2%** of a whole analysis, the largest thing in it (refs are 27.2%,
+  symbols 7.5%). `size_of::<Witness>()` is **240 B**: attachment 72,
+  payload 104, source 32, span 32 — of which **up to 72 B are inline
+  `String` structs (30%), paid even when the string is empty**, carrying
+  ~30 distinct short tags repeated across every witness in the corpus.
+  **The lever is the struct, not the allocations.** The heap bytes those
+  tags own are only ~5.9 MB (1.1% of the total, and undrilled by
+  `heap_bytes_estimate`, which is `capacity × size_of`), and ~141
+  allocations/file extrapolates to ~19.5M over a CPAN-5k cold index —
+  about 0.6 s against 10.5 minutes, plus zstd eats the repetition on the
+  blob side. So do NOT chase the `.into()`s. Interning the tag or making
+  it `&'static str` shrinks the *element*, which is ~10–15% off the
+  biggest bucket in the biggest resident structure, and lands where it
+  matters: the FHEM per-worker in-flight crest (§1 of
+  `scaling-limits.md`) and `PackBagCache`. Caveats before acting: one
+  corpus, one run, NO_EVICT — re-measure on Koha under the `edit-bench`
+  protocol, and note the tag also serializes into the cache blob, so
+  `&'static str` needs a serde story.
 - **Watcher re-registration never re-strips.** Whole copies pinned until
   restart; a big `git pull` is an unbounded resident delta. Design:
   persist (blob+rows) in the watcher's blocking task, then

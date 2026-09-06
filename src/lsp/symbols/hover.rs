@@ -229,7 +229,10 @@ fn render_symbol_hover(
     module_index: Option<&dyn crate::model::file_analysis::CrossFileLookup>,
 ) -> String {
     if matches!(sym.kind, FaSymKind::Variable | FaSymKind::Field | FaSymKind::Enumerator) {
-        if let Some(ty) = analysis.inferred_type_via_bag_ctx(&sym.name, type_point, module_index) {
+        if let Some(ty) = analysis
+            .inferred_type_via_bag_ctx(&sym.name, type_point, module_index)
+            .filter(InferredType::is_known)
+        {
             // Config-variant macro type → display the concrete leaf recovered
             // from the config-active variant's alias chain, not the join
             // abstraction the type flows as.

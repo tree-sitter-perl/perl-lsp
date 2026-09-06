@@ -420,7 +420,7 @@ fn despan(t: &InferredType) -> InferredType {
             InferredType::Sequence(items.iter().map(despan).collect())
         }
         InferredType::TypeConstraintOf(inner) => {
-            InferredType::TypeConstraintOf(Box::new(despan(inner)))
+            InferredType::TypeConstraintOf(inner.as_deref().map(|i| Box::new(despan(i))))
         }
         InferredType::Optional(inner) => InferredType::Optional(Box::new(despan(inner))),
         InferredType::HashWithKeys { keys, open } => InferredType::HashWithKeys {

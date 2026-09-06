@@ -16,7 +16,7 @@ impl ModuleIndex {
     /// Matching is exact OR last-segment tail: a `plugin 'DataLog'`
     /// load records the default-namespace guess
     /// (`Mojolicious::Plugin::DataLog`) while the resolved provider
-    /// may live in an app-custom tree (`Clove::App::Plugin::DataLog`).
+    /// may live in an app-custom tree (`GenericCo::App::Plugin::DataLog`).
     /// The looseness only SUPPRESSES the lint — the honest-quiet
     /// direction.
     pub fn is_module_loaded(&self, module: &str) -> bool {

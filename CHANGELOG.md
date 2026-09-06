@@ -18,6 +18,51 @@ crate / VS Code extension versions.
   parent, which it previously dropped.
 - Signature help no longer shows a slurpy hash (`my ($self, %attrs) = @_`)
   typed as a sequence of the class.
+- **A reassignment nothing can type no longer leaves the old belief
+  standing.** `my $ct = undef; $ct = f(); defined $ct` read `$ct` as
+  still-undef and flagged the guard as one that can never pass; the
+  write now lands as an unknown value that retires the prior belief. A
+  write that may not run — under a statement modifier, or inside a block
+  the following code cannot assume ran — is treated the same way. On the
+  CPAN substrate this removes 24 `redundant-guard` and 33
+  `unresolved-method` false positives with no new sites.
+- **A later plain assignment retires an earlier class identity.**
+  `my $x = Foo->new; $x = 'str'` read `$x` as `Foo` forever, because the
+  class axis of the type fold was never cleared by a later write.
+- **Every way out of a sub is a return arm.** A guard clause plus an
+  implicit final `$self` (`sub new { … or return undef; …; $self }`) —
+  the most common Perl constructor shape — could not be typed at all;
+  such constructors now type as `Maybe<Class>`, and an all-undef sub
+  says `Undef` instead of nothing.
+- **`isa => Maybe[T]` is `Optional<T>`** rather than a bare `T`, so the
+  deref lints see the declared nullability. Bare `isa => Int` and the
+  quoted spelling reach the same type. Type::Tiny constraint names are
+  recognized only when imported, so a package's own `sub Str` is never
+  mistaken for the constraint.
+- **Moose registered types are no longer read as user classes.** `isa =>
+  'Object'`, `Item`, `Defined`, `Bool`, `ClassName`, `FileHandle` and
+  the rest typed accessors as classes nothing declares; core no longer
+  keeps its own copy of the type vocabulary, and a union such as
+  `'Str|Undef'` declines rather than becoming a class with a pipe in its
+  name.
+- **A method a class defines itself answers for that class.** The
+  inherited definition used to be consulted first, so an override's
+  return type was its parent's.
+
+### Plugins
+
+- **`monkey_patch $class => $name => sub {…}` synthesizes methods**, so
+  goto-def, completion and the unresolved-method lint see them. Literal
+  registrations only; names built by an expression are declined rather
+  than guessed.
+- **Hash-pair options keep their alignment.** A non-string value in a
+  pair list (`handles => { inc => ['add', 1], dec => 'remove' }`) used to
+  vanish and slide every following pair one slot, losing `dec` and
+  binding `inc` to its target. An arrayref value now contributes its
+  first string, which is Sub::HandlesVia's curried shape.
+- `has parent => undef` in Mojo::Base is a mutable slot's initial value,
+  not a promise that the getter returns undef, so `$self->parent->…` is
+  no longer flagged as a guaranteed die.
 
 ### Scoping
 

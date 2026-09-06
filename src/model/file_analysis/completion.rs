@@ -1260,6 +1260,7 @@ pub fn inferred_type_to_tag(ty: &InferredType) -> String {
         InferredType::Optional(inner) => format!("Maybe:{}", inferred_type_to_tag(inner)),
         InferredType::Undef => "Undef".to_string(),
         InferredType::Bool => "Bool".to_string(),
+        InferredType::Unknown => "Unknown".to_string(),
     }
 }
 
@@ -1317,9 +1318,10 @@ pub(crate) fn format_inferred_type(ty: &InferredType) -> String {
             }
             format!("Sequence<{}>", parts.join(", "))
         }
-        InferredType::TypeConstraintOf(inner) => {
-            format!("TypeConstraint<{}>", format_inferred_type(inner))
-        }
+        InferredType::TypeConstraintOf(inner) => match inner {
+            Some(i) => format!("TypeConstraint<{}>", format_inferred_type(i)),
+            None => "TypeConstraint".to_string(),
+        },
         InferredType::BrandedRoute { base, controller, .. } => match controller {
             Some(c) => format!("{}<controller={}>", base, c),
             None => base.clone(),
@@ -1327,6 +1329,7 @@ pub(crate) fn format_inferred_type(ty: &InferredType) -> String {
         InferredType::Optional(inner) => format!("Maybe<{}>", format_inferred_type(inner)),
         InferredType::Undef => "Undef".to_string(),
         InferredType::Bool => "Bool".to_string(),
+        InferredType::Unknown => "unknown".to_string(),
     }
 }
 

@@ -396,6 +396,16 @@ impl<'a> Builder<'a> {
                 }
             }
         }
+        // The write ref at each LHS scalar, so a rebind can find the scope
+        // that BINDS its variable (the ref is already bound by
+        // `resolve_variable_refs`). Transient, like `typed_at`.
+        let var_ref_at: std::collections::HashMap<Point, usize> = self
+            .refs
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| matches!(r.kind, RefKind::Variable) && r.access == AccessKind::Write)
+            .map(|(i, r)| (r.span.start, i))
+            .collect();
         for &node in &idx.assignment_nodes {
             let (Some(left), Some(right)) = (
                 node.child_by_field_name("left"),
@@ -469,38 +479,33 @@ impl<'a> Builder<'a> {
             }
 
             let Some(var) = self.get_var_text_from_lhs(left) else { continue };
+            // A declaration binds fresh; a REBIND replaces a belief, and that
+            // is what `Unknown` exists for. Declarations whose RHS nothing can
+            // type stay absent, as they always have.
+            let is_rebind = left.kind() != "variable_declaration";
+            // A rebind that MAY NOT HAPPEN relative to the scope its witness
+            // lands on — under a statement modifier, a ternary arm, a
+            // short-circuit — leaves old-or-new behind: `Unknown`, never its
+            // own value. It still lands (latest-wins retires the prior belief)
+            // at the statement start, so a guard's own condition reads no value
+            // the write has not produced yet. Block-relative on purpose: inside
+            // the block, the block has run; whether it ran at all is the
+            // binding-scope question below.
+            let conditional = is_rebind && crate::cst::is_conditionally_executed_in_block(node);
             // Compute the fresh type up front so the idempotency check
             // can compare informativeness. (Cheap: a bag chase on the
             // already-resolved RHS.)
             let saved_pkg_probe = self.current_package.clone();
             self.current_package = self.package_at_pos(span.start).map(|s| s.to_string());
-            let fresh = {
+            let fresh = if conditional {
+                Some(InferredType::Unknown)
+            } else {
                 let _t = crate::util::ghost_stats::ScopedNs::start("chain::rhs_probe");
                 self.invocant_type_at_node(right)
                     .or_else(|| self.resolve_invocant_class_tree(right).map(InferredType::ClassName))
             };
             self.current_package = saved_pkg_probe;
 
-            // Idempotency: skip if an already-pushed Variable witness at
-            // this assignment's start is at least as informative as the
-            // fresh answer. A plain `ClassName(Route)` does NOT subsume a
-            // `BrandedRoute`, so the route brand legitimately upgrades the
-            // walk-time materialization on a later fold iteration; once
-            // the brand is in the bag it subsumes the next (identical)
-            // brand and the loop settles.
-            let already_typed = typed_at.get(&(var.clone(), span.start)).is_some_and(|idxs| {
-                idxs.iter().any(|&i| {
-                    let crate::model::witnesses::WitnessPayload::InferredType(t) =
-                        &self.bag.all()[i].payload
-                    else {
-                        return false;
-                    };
-                    fresh.as_ref().map_or(true, |f| t.subsumes_narrowing(f))
-                })
-            });
-            if already_typed {
-                continue;
-            }
             // Innermost scope containing this assignment.
             let _t_scope = crate::util::ghost_stats::ScopedNs::start("chain::scope_pick");
             let scope_idx = self
@@ -519,6 +524,68 @@ impl<'a> Builder<'a> {
                 })
                 .map(|(i, _)| i);
             drop(_t_scope);
+            let sid = scope_idx.map(|i| self.scopes[i].id).unwrap_or(ScopeId(0));
+
+            // AN APPROXIMATION OF A JOIN — delete when Epic 16 Phase C lands.
+            //
+            // A rebind inside a nested block (`if (…) { $x = … }`, a loop body)
+            // is invisible to reads AFTER the block: its witness sits on the
+            // block's scope, which those reads' chains never enter, so they
+            // keep the pre-block belief. The honest value there is `old ⊔ new`,
+            // and a reducer cannot compute that join because it only ever sees
+            // ONE attachment — the write landed on the block's. So the emitter
+            // stands in for the join: `Unknown` on the scope that BINDS the
+            // variable, the one every later read in its extent walks through.
+            // `JoinFold` (`docs/epics/16-cfg-tier.md`, Phase C) answers this
+            // natively — one attachment per variable, write witnesses carrying
+            // their region — and this block goes with it; re-measure
+            // `redundant-guard` on the substrate when it does, that is where
+            // this earns its keep today. Before the idempotency check below:
+            // the walk already typed most rebinds at their own scope, and that
+            // must not skip this.
+            if is_rebind {
+                let binding_scope = var_ref_at
+                    .get(&left.start_position())
+                    .and_then(|&i| self.refs[i].resolved_symbol())
+                    .map(|sym| self.symbols[sym.0 as usize].scope)
+                    .filter(|b| *b != sid);
+                if let Some(bsid) = binding_scope {
+                    let placed = typed_at.get(&(var.clone(), span.start)).is_some_and(|idxs| {
+                        idxs.iter().any(|&i| {
+                            matches!(
+                                &self.bag.all()[i].attachment,
+                                crate::model::witnesses::WitnessAttachment::Variable { scope, .. }
+                                    if *scope == bsid
+                            )
+                        })
+                    });
+                    if !placed {
+                        to_push.push((var.clone(), bsid, span, InferredType::Unknown));
+                    }
+                }
+            }
+
+            // Idempotency: skip if an already-pushed Variable witness at
+            // this assignment's start is at least as informative as the
+            // fresh answer. A plain `ClassName(Route)` does NOT subsume a
+            // `BrandedRoute`, so the route brand legitimately upgrades the
+            // walk-time materialization on a later fold iteration; once
+            // the brand is in the bag it subsumes the next (identical)
+            // brand and the loop settles. `Unknown` subsumes only itself,
+            // so a RHS that resolves on a later iteration lands on top of it.
+            let already_typed = typed_at.get(&(var.clone(), span.start)).is_some_and(|idxs| {
+                idxs.iter().any(|&i| {
+                    let crate::model::witnesses::WitnessPayload::InferredType(t) =
+                        &self.bag.all()[i].payload
+                    else {
+                        return false;
+                    };
+                    fresh.as_ref().map_or(true, |f| t.subsumes_narrowing(f))
+                })
+            });
+            if already_typed {
+                continue;
+            }
 
             // Read the RHS's full `InferredType` first — Parametric
             // shapes need to land on the variable as Parametric, not
@@ -534,7 +601,7 @@ impl<'a> Builder<'a> {
             // recomputing is a straight 2x on the symbolic executor. Only
             // the None case differs (the probe typed under `None`, this
             // path types under the walk's stale `current_package`).
-            let ty_opt = if self.package_at_pos(span.start).is_some() {
+            let ty_opt = if conditional || self.package_at_pos(span.start).is_some() {
                 fresh
             } else {
                 let _t = crate::util::ghost_stats::ScopedNs::start("chain::rhs_type");
@@ -543,10 +610,11 @@ impl<'a> Builder<'a> {
                     .or(fresh)
             };
 
-            if let Some(ty) = ty_opt {
-                let sid = scope_idx.map(|i| self.scopes[i].id).unwrap_or(ScopeId(0));
-                to_push.push((var, sid, span, ty));
-            }
+            // A rebind whose RHS nothing can type still HAPPENED: it lands as
+            // `Unknown`, so latest-wins retires the belief it replaced instead
+            // of the fold reading the stale one.
+            let Some(ty) = ty_opt.or(is_rebind.then_some(InferredType::Unknown)) else { continue };
+            to_push.push((var, sid, span, ty));
         }
 
         for (variable, scope, constraint_span, ty) in to_push {
@@ -1718,8 +1786,13 @@ impl<'a> Builder<'a> {
             // two edges on `PackageSymbol(child, m)` and the
             // materializer's latest-wins reducer would silently pick
             // the second-emitted parent.
+            // Seeded with the child's OWN method names: an override must
+            // never receive a parent edge, because Perl dispatch goes to the
+            // local sub and the parent's answer would silently stand in for
+            // it (a base's `sub file { undef }` typing an overriding
+            // subclass's `file` as undef is the canonical miscarriage).
             let mut emitted_for_child: std::collections::HashSet<String> =
-                std::collections::HashSet::new();
+                crate::model::file_analysis::own_method_names(&self.symbols, child).collect();
             for parent in parents {
                 if parent == child {
                     continue;

@@ -191,6 +191,6 @@ noise · `EXTRACT_VERSION` bump for A–B.
 ## Sizing
 
 Small. A–B one commit each; C is a one-liner; D–G one commit each.
-Parallel-safe with the other epics except Phase D touches
-`shift_denotes_invocant`'s neighborhood — coordinate if Epic 4 is in
-flight.
+Parallel-safe with the other epics except Phase D touches the
+invocant / `@_`-window seam in `builder/infra.rs` — coordinate if Epic 4
+is in flight.

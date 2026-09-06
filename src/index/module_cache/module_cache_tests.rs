@@ -1987,7 +1987,7 @@ fn a_cleared_conclusion_row_is_re_baked_to_the_same_map() {
     let path = std::path::Path::new("/repair/App.pm");
     let cached = parse_source_to_cached(
         "package My::App;\nuse Mojolicious::Lite;\n\
-         plugin 'CloveApp', { alpha => 1, beta => 2 };\n\
+         plugin 'GenericCoApp', { alpha => 1, beta => 2 };\n\
          sub helper { return 'x' }\n1;\n",
         path,
     );
@@ -2104,7 +2104,7 @@ fn the_persisted_surface_is_the_cold_projection() {
     let path = std::path::Path::new("/surf/App.pm");
     let cached = parse_source_to_cached(
         "package My::App;\nuse Mojolicious::Lite;\n\
-         plugin 'CloveApp', { alpha => 1, beta => 2 };\n\
+         plugin 'GenericCoApp', { alpha => 1, beta => 2 };\n\
          sub helper { return 'x' }\n1;\n",
         path,
     );
@@ -2147,7 +2147,7 @@ fn a_surface_from_another_projection_version_reads_absent_and_is_repaired() {
     let path = std::path::Path::new("/surfver/App.pm");
     let cached = parse_source_to_cached(
         "package Ver::App;\nuse Mojolicious::Lite;\n\
-         plugin 'CloveApp', { alpha => 1 };\nsub helper { return 'x' }\n1;\n",
+         plugin 'GenericCoApp', { alpha => 1 };\nsub helper { return 'x' }\n1;\n",
         path,
     );
     assert!(save_to_db(&conn, "Ver::App", &Some(cached.clone()), "workspace"));
@@ -2252,7 +2252,7 @@ fn a_surface_does_not_outlive_its_blob() {
     let path = std::path::Path::new("/erase/App.pm");
     let cached = parse_source_to_cached(
         "package Erase::App;\nuse Mojolicious::Lite;\n\
-         plugin 'CloveApp', { alpha => 1 };\nsub helper { return 'x' }\n1;\n",
+         plugin 'GenericCoApp', { alpha => 1 };\nsub helper { return 'x' }\n1;\n",
         path,
     );
     assert!(save_to_db(&conn, "Erase::App", &Some(cached.clone()), "workspace"));

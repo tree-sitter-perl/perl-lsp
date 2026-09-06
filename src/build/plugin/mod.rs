@@ -983,7 +983,7 @@ pub struct ConstraintParam {
 /// that does `in_role`, the sub `method`'s parameter at index `param` has type
 /// `ClassName(type_class)`." The motivating case is a framework role whose
 /// required method has a typed argument the source can't express — e.g.
-/// `Clove::Upgrade::OneTime`'s `sub run_upgrade ($self, $app)`, where `$app`
+/// `GenericCo::Upgrade::OneTime`'s `sub run_upgrade ($self, $app)`, where `$app`
 /// is the `Mojolicious` app. The builder applies this at the sub-declaration
 /// walk (the one place that sees a sub's params, rule #1), pushing a Variable
 /// type constraint for the param — the same mechanism `detect_first_param_type`
@@ -1107,6 +1107,16 @@ pub trait FrameworkPlugin: Send + Sync {
         &[]
     }
 
+    /// Methods a framework grants every class of its family — DBIC's
+    /// `DBIx::Class::Core` surface, Moose's `meta`/`does`. They resolve
+    /// through runtime machinery no static walk sees, so the
+    /// unresolved-method diagnostic must stay silent on them. Core owns only
+    /// the true `UNIVERSAL::` surface; a per-framework name list in a
+    /// consumer is the rule-#10 shape this replaces. Default empty.
+    fn meta_methods(&self) -> &[String] {
+        &[]
+    }
+
     /// Modules whose `use` turns the consuming package into a ROLE
     /// (the plugin-declared extension of core's base set: Moo::Role /
     /// Moose::Role / Mouse::Role / Role::Tiny). For role engines that
@@ -1161,6 +1171,14 @@ pub trait FrameworkPlugin: Send + Sync {
     /// decline (`name` not ours, or unfoldable params). Arity lives here,
     /// not in the core — see `ConstraintParam`.
     #[allow(unused_variables)]
+    /// Fold a constraint constructor to the constraint VALUE it produces —
+    /// `TypeConstraintOf(inner)`, or `TypeConstraintOf(None)` for a name this
+    /// plugin owns whose inner is not expressible. `None` means only "not my
+    /// vocabulary", which is what lets a caller treat the name as something
+    /// else (Moose reads an unknown type string as a class name).
+    ///
+    /// The registry asks every plugin and takes the first answer, so the fold
+    /// itself is the gate: a plugin that does not recognise the name declines.
     fn type_constraint_inner(
         &self,
         name: &str,
@@ -1572,6 +1590,12 @@ impl PluginRegistry {
             .flat_map(|p| p.app_surface_consumers().iter().map(|s| s.as_str()))
     }
 
+    pub fn meta_methods<'a>(&'a self) -> impl Iterator<Item = &'a str> + 'a {
+        self.plugins
+            .iter()
+            .flat_map(|p| p.meta_methods().iter().map(|s| s.as_str()))
+    }
+
     /// Union of role-maker modules across the registry — the open
     /// extension of the builder's base role-engine set.
     pub fn role_makers<'a>(&'a self) -> impl Iterator<Item = &'a str> + 'a {
@@ -1613,13 +1637,7 @@ impl PluginRegistry {
         name: &str,
         params: &[ConstraintParam],
     ) -> Option<InferredType> {
-        self.plugins.iter().find_map(|p| {
-            if p.type_constraint_names().iter().any(|n| n == name) {
-                p.type_constraint_inner(name, params)
-            } else {
-                None
-            }
-        })
+        self.plugins.iter().find_map(|p| p.type_constraint_inner(name, params))
     }
 
     /// Return plugins whose triggers match the current package context.

@@ -476,7 +476,10 @@ impl FileAnalysis {
         // a role-contract param type (`$c` in a Catalyst action) resolve
         // through cross-file ancestry via the `ReceiverGated` gate.
         if matches!(sym.kind, SymKind::Variable | SymKind::Field) {
-            if let Some(it) = self.inferred_type_via_bag_ctx(&sym.name, at, module_index) {
+            if let Some(it) = self
+                .inferred_type_via_bag_ctx(&sym.name, at, module_index)
+                .filter(InferredType::is_known)
+            {
                 text.push_str(&format!("\n\n*type: {}*", format_inferred_type(&it)));
             }
         }

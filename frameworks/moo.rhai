@@ -36,6 +36,12 @@ fn role_makers() {
     ["Moo::Role", "Moose::Role", "Mouse::Role", "Role::Tiny"]
 }
 
+// Methods the family grants every class it touches: `meta` is the metaclass
+// accessor, and `does` is Moose's lowercase companion to UNIVERSAL's `DOES`.
+// Both resolve through metaclass machinery no static walk sees, so the
+// unresolved-method diagnostic consults this rather than a name list in core.
+fn meta_methods() { ["meta", "does"] }
+
 // The `has`/`option` declaration shape, query-declared. The attr-name
 // head arrives via the `list` projection on @attrs (covers `has 'x'`,
 // `has [qw/a b/]`, `has \@attrs` through the constant fold); the option

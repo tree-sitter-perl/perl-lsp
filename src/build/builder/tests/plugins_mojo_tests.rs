@@ -2111,7 +2111,7 @@ fn gated_dispatch_resolves_cross_file_receiver_query_time() {
 }
 
 /// A Minion SUBCLASS receiver (`Acme::Minion` isa Minion, the crm
-/// `Clove::Minion` shape) must still register + dispatch tasks. The
+/// `GenericCo::Minion` shape) must still register + dispatch tasks. The
 /// receiver types to `ClassName("Acme::Minion")`, which a name-prefix
 /// allowlist (`== "Minion" || starts_with("Minion::")`) silently rejects —
 /// the rule-#10 trap. The plugin no longer gates on receiver class, so the

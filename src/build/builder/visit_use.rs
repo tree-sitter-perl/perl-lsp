@@ -291,7 +291,7 @@ impl<'a> Builder<'a> {
                 .or_default()
                 .push(module_name.clone());
             // Role verdict: base engines ∪ plugin-declared makers.
-            // Shared with SyntheticUse, so kit chains (`use Clove::Role`
+            // Shared with SyntheticUse, so kit chains (`use GenericCo::Role`
             // → SyntheticUse "Moo::Role") mark through either hop.
             if self.role_maker_modules.contains(&module_name) {
                 self.role_packages.insert(pkg);

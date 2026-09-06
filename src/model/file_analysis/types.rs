@@ -138,11 +138,20 @@ pub enum InferredType {
     /// method dispatch on it routes to `Type::Tiny` (deferred), NOT the
     /// inner type. Its one job here is projection: an `isa => <constraint>`
     /// gives its accessor the *constrained* (inner) type via
-    /// `constrained_inner()`. A plugin's `type_constraint_inner` fold
-    /// produces the inner; the core wraps it. See
-    /// `docs/adr/type-constraints.md`. Kept at the END for
-    /// bincode variant-index stability (bump `EXTRACT_VERSION`).
-    TypeConstraintOf(Box<InferredType>),
+    /// `constrained_inner()`.
+    ///
+    /// The inner is OPTIONAL because a name can be known to be a
+    /// constraint while its inner is not expressible: `Object`, `Any` and
+    /// `Defined` are registered Type::Tiny / Moose types that no
+    /// `InferredType` describes, and a bare `InstanceOf` carries no class
+    /// yet. Those are constraints with an unknown inner — distinct from a
+    /// name the vocabulary does not recognise at all, which is not a
+    /// constraint and types as nothing. Collapsing the two is what makes a
+    /// registered type look like a user class.
+    ///
+    /// See `docs/adr/type-constraints.md`. Kept at the END for bincode
+    /// variant-index stability (bump `EXTRACT_VERSION`).
+    TypeConstraintOf(Option<Box<InferredType>>),
     /// A Mojolicious route-builder value carrying the **accumulated
     /// route defaults** in force at this point in the builder chain.
     /// `base` is the class for method dispatch
@@ -212,6 +221,12 @@ pub enum InferredType {
     /// number. Kept at the END for bincode variant-index stability (bump
     /// `EXTRACT_VERSION`).
     Bool,
+    /// A value flowed here that the walker could not name: the RHS of a
+    /// reassignment nothing types. It is a real answer, not an absence —
+    /// latest-wins lets it retire the belief the write replaced, and the
+    /// scope walk stops on it instead of falling through to a shadowed
+    /// namesake. Consumers read it as "no information".
+    Unknown,
 }
 
 /// Concrete parametric flavors + type-level operators. Each
@@ -750,9 +765,27 @@ impl InferredType {
     /// matching on the constraint's shape itself.
     pub fn constrained_inner(&self) -> Option<&InferredType> {
         match self {
-            InferredType::TypeConstraintOf(inner) => Some(inner),
+            InferredType::TypeConstraintOf(inner) => inner.as_deref(),
             _ => None,
         }
+    }
+
+    /// Is this a constraint VALUE, whatever it constrains?
+    ///
+    /// Distinct from `constrained_inner().is_some()`: a constraint whose
+    /// inner is unknown is still a constraint, and a consumer asking
+    /// "should I treat this as a Type::Tiny object" wants this, not the
+    /// projection.
+    pub fn is_type_constraint(&self) -> bool {
+        matches!(self, InferredType::TypeConstraintOf(_))
+    }
+
+    /// Is this the definitive bottom (`Undef`)?
+    ///
+    /// Consumers deciding whether a value can back a CONTRACT ask the value
+    /// rather than matching the variant (rule #10).
+    pub fn is_undef(&self) -> bool {
+        matches!(self, InferredType::Undef)
     }
 
     /// Project a `Sequence(...)` to its element at index `i`. Negative
@@ -829,6 +862,14 @@ impl InferredType {
     /// (let the reducer-stack decide the conflict). Variants
     /// without refinable payload (HashRef/ArrayRef/Regexp/Numeric/
     /// String) subsume themselves trivially.
+    /// `false` for `Unknown` — the answer that says a value flowed here but
+    /// nothing could name it. Display surfaces (hover, inlay, signature) and
+    /// verdicts that need a CONFIDENT type ask this instead of matching the
+    /// variant, so "no information" is spelled once.
+    pub fn is_known(&self) -> bool {
+        !matches!(self, InferredType::Unknown)
+    }
+
     pub fn subsumes_narrowing(&self, narrowing: &InferredType) -> bool {
         match (self, narrowing) {
             // Refinable-payload variants — `self` subsumes only
@@ -952,6 +993,13 @@ pub fn resolve_return_type(return_types: &[InferredType]) -> Option<InferredType
     if return_types.iter().all(|t| t == first) {
         return Some(first.clone());
     }
+    // `Unknown` absorbs: an arm nothing can name makes the join something
+    // nothing can name. Not `None` — that reads as "no arms agree" and lets
+    // a lone typed arm answer for the sub — and not a candidate for the
+    // coarse joins below, which would dress it up as `HashRef` or `Numeric`.
+    if return_types.iter().any(|t| !t.is_known()) {
+        return Some(InferredType::Unknown);
+    }
     // All arms hash-shaped but structurally different (`{a=>1}` vs
     // `{b=>2}`) → degrade to the coarse HashRef rather than Unknown.
     if return_types.iter().all(|t| t.is_hash_shaped()) {
@@ -998,7 +1046,10 @@ pub fn resolve_return_type(return_types: &[InferredType]) -> Option<InferredType
 pub fn join_return_arms(value_types: &[InferredType], has_undef_arm: bool) -> Option<InferredType> {
     let base = resolve_return_type(value_types);
     match base {
-        Some(t) if has_undef_arm && !matches!(t, InferredType::Optional(_)) => {
+        // `Optional<Unknown>` would be a claim ("maybe undef, else a value")
+        // whose value half nothing supports; the undef arm folds into the
+        // same `Unknown`.
+        Some(t) if has_undef_arm && !matches!(t, InferredType::Optional(_)) && t.is_known() => {
             Some(InferredType::Optional(Box::new(t)))
         }
         other => other,

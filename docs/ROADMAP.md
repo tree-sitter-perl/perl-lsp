@@ -35,6 +35,7 @@ measured scaling envelope, and both are properties of every seam.
 | 14 | [The per-file stall](epics/14-per-file-stall.md) | C/C++ is unusable at Godot size; nobody has profiled it yet |
 | 15 | [Query paths at scale](epics/15-query-paths-at-scale.md) | Storage holds at 122x; query paths break |
 | 16 | [The CFG tier](epics/16-cfg-tier.md) | UAM, the cpp D-codes and D9 are all parked on it |
+| 17 | [Builder decomposition](epics/17-builder-decomposition.md) | Grab-bag parts hid a duplicated type table until it mistyped 12 Moose types |
 
 **Suggested order:** 1 first, then 14 and 15 — those two are where the
 product is unusable rather than merely incomplete — then 2–4, then

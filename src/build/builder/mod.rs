@@ -234,6 +234,25 @@ struct DeferredNamedSubParamType {
     plugin_id: String,
 }
 
+/// What the last body-top-level statement of a sub does with control.
+///
+/// Perl yields the last statement's value when control reaches the end, so
+/// that statement is a way OUT of the sub — an arm, exactly like an explicit
+/// `return`. This says which kind, using the same classification the return
+/// side uses, so "is this way out undef" has one answer and not two.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum TailExit {
+    /// The statement is a `return`, so control cannot fall off the end.
+    /// It already contributed its own arm; there is no tail arm.
+    Return,
+    /// The tail evaluates to undef — an undef arm. Carries WHICH spelling,
+    /// because `undef` and `()` diverge in list context
+    /// (`crate::model::witnesses::tags::UndefArm`).
+    Undef(crate::model::witnesses::tags::UndefArm),
+    /// The tail yields a value — a value arm, whether or not it types.
+    Value,
+}
+
 struct Builder<'a> {
     source: &'a [u8],
 
@@ -269,6 +288,8 @@ struct Builder<'a> {
     /// Types ride the bag; this map only carries the structural
     /// pointer to the source span.
     last_expr_span: std::collections::HashMap<ScopeId, Span>,
+    /// How the sub's last body-top-level statement exits — see [`TailExit`].
+    last_stmt_exit: std::collections::HashMap<ScopeId, TailExit>,
     /// For each `$obj->{k} = <rhs>` hash-key WRITE, maps the key node's
     /// span (the span the matching `HashKeyAccess` Write ref carries) to
     /// the RHS expression's span. `populate_witness_bag`'s mutation loop
@@ -443,6 +464,9 @@ struct Builder<'a> {
     /// (`InstanceOf`, …), flattened once. A call to one of these is typed as
     /// `TypeConstraintOf` via the plugin's fold rather than its callee return.
     type_constraint_names: std::collections::HashSet<String>,
+    /// Plugin `meta_methods()` manifest union, flattened once at build.
+    meta_methods: Vec<String>,
+
     /// Plugin `app_surface_consumers()` manifest union, flattened once.
     /// Threaded into `BagContext` so the build-time `PackageSymbol`
     /// inheritance walk injects the synthetic app-surface parent the same
@@ -714,6 +738,20 @@ impl FrameworkMode {
             "Moose" => Some(Self::Moose),
             _ => None,
         }
+    }
+
+    /// Does an unrecognised `isa` STRING name a class in this flavor?
+    ///
+    /// Moose's type registry accepts a class name where a type is expected,
+    /// so a string it does not know is a class. Moo rejects a plain-string
+    /// `isa` at class-definition time — it wants a coderef or a Type::Tiny
+    /// object — so an unknown string there names nothing, and guessing a
+    /// class would be inventing one. Mouse rides the Moose flavor through
+    /// the `framework_mode_makers` manifest.
+    ///
+    /// A property of the mode value, asked by the isa reader (rule #10).
+    fn unknown_isa_string_names_class(self) -> bool {
+        matches!(self, Self::Moose)
     }
 }
 

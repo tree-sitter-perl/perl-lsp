@@ -1315,7 +1315,7 @@ fn thread_path_resolution_feeds_loader_config_shapes() {
     std::fs::create_dir_all(dir.join("lib/My")).unwrap();
     std::fs::write(
         dir.join("lib/My/App.pm"),
-        "package My::App;\nuse Mojolicious::Lite;\nplugin 'CloveApp', { minion => 1, redis => 'r' };\n1;\n",
+        "package My::App;\nuse Mojolicious::Lite;\nplugin 'GenericCoApp', { minion => 1, redis => 'r' };\n1;\n",
     )
     .unwrap();
 
@@ -1332,7 +1332,7 @@ fn thread_path_resolution_feeds_loader_config_shapes() {
     let mut shapes: Vec<String> = Vec::new();
     idx.for_each_loader_shape(&mut |name, _t| shapes.push(name.to_string()));
     assert!(
-        shapes.iter().any(|n| n == "CloveApp"),
+        shapes.iter().any(|n| n == "GenericCoApp"),
         "thread-path resolution must feed loader_config_shapes; got {shapes:?}",
     );
     std::fs::remove_dir_all(&dir).ok();
@@ -1991,7 +1991,7 @@ fn unregistering_a_workspace_file_retracts_its_loader_shapes() {
     let path = dir.join("App.pm");
     std::fs::write(
         &path,
-        "package My::App;\nuse Mojolicious::Lite;\nplugin 'CloveApp', { minion => 1 };\n1;\n",
+        "package My::App;\nuse Mojolicious::Lite;\nplugin 'GenericCoApp', { minion => 1 };\n1;\n",
     )
     .unwrap();
     let canon = std::fs::canonicalize(&path).unwrap();
@@ -2007,14 +2007,14 @@ fn unregistering_a_workspace_file_retracts_its_loader_shapes() {
         out
     };
     assert!(
-        shapes(&idx).iter().any(|n| n == "CloveApp"),
+        shapes(&idx).iter().any(|n| n == "GenericCoApp"),
         "precondition: registration records the shape; got {:?}",
         shapes(&idx)
     );
 
     idx.unregister_workspace_path(&canon);
     assert!(
-        !shapes(&idx).iter().any(|n| n == "CloveApp"),
+        !shapes(&idx).iter().any(|n| n == "GenericCoApp"),
         "a departed contributor's loader shape survived unregistration: {:?}",
         shapes(&idx)
     );

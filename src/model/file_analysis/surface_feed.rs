@@ -82,6 +82,7 @@ impl FileAnalysis {
                     app_surface_consumers,
                     diagnostics: _plugin_diagnostics, // own-file diagnostics presentation
                     gated_emissions: _gated_emissions, // re-fired by this file's OWN enrichment
+                    meta_methods: _meta_methods,     // baked registry union — identical for every file under one plugin set, so it is a property of the PLUGIN FINGERPRINT (which already hard-clears the cache), never of this file's cross-file surface
                 },
 
             // ---- Projection inputs consumed through the derived-query

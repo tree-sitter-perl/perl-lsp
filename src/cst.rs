@@ -572,7 +572,7 @@ fn map_callback_template<'a>(cb: Node<'a>, src: &[u8]) -> Option<Node<'a>> {
 /// land on the word that produced them. Exactly one `$_` in the
 /// template and `map` only (`grep` filters, it doesn't transform);
 /// anything fancier is an honest miss. The crm idiom that motivated
-/// it: `with map "Clove::Sheets::Roles::$_", qw/CSV DB/;`.
+/// it: `with map "GenericCo::Sheets::Roles::$_", qw/CSV DB/;`.
 fn map_built_strings(
     node: Node,
     src: &[u8],
@@ -700,6 +700,18 @@ pub(crate) fn string_list_with_residue(
 /// outer variable's scope) is the caller's check — this answers only
 /// what the syntax between here and the boundary says.
 pub(crate) fn is_conditionally_executed(node: Node) -> bool {
+    conditional_before_boundary(node, false)
+}
+
+/// The same question relative to the enclosing BLOCK: a postfix modifier,
+/// ternary arm or short-circuit chain between `node` and its block counts;
+/// the block's own `if`/loop does not. For a fact that lands on the block's
+/// own scope — inside the block the block has, by construction, run.
+pub(crate) fn is_conditionally_executed_in_block(node: Node) -> bool {
+    conditional_before_boundary(node, true)
+}
+
+fn conditional_before_boundary(node: Node, stop_at_block: bool) -> bool {
     let mut cur = node.parent();
     while let Some(p) = cur {
         match p.kind() {
@@ -707,6 +719,7 @@ pub(crate) fn is_conditionally_executed(node: Node) -> bool {
             | "method_declaration_statement"
             | "anonymous_subroutine_expression"
             | "source_file" => return false,
+            "block" if stop_at_block => return false,
             "conditional_statement"
             | "postfix_conditional_expression"
             | "conditional_expression"

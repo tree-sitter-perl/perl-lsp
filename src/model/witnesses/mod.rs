@@ -20,6 +20,8 @@ use crate::model::file_analysis::{
 
 use tree_sitter::Point;
 
+pub mod tags;
+
 mod types;
 pub use types::*;
 mod reducers;

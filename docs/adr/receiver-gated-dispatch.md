@@ -3,7 +3,7 @@
 A dispatch verb (`$minion->enqueue('task')`, `$emitter->emit('ready')`)
 links a call site to a handler registered elsewhere, but only when the
 *receiver* `isa` the verb's target class. That class often resolves only
-cross-file (`Clove::Minion` extends `Minion` in another module; a Mojo
+cross-file (`GenericCo::Minion` extends `Minion` in another module; a Mojo
 helper returns a `Minion` subclass). Two facts force the design:
 
 - The builder is index-free (rule #1), so a call site can't be confirmed

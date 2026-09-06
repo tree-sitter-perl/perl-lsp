@@ -854,9 +854,154 @@ fn test_return_type_bare_return_optional() {
 
 #[test]
 fn test_return_type_all_bare_returns() {
-    // All bare returns → no return type
+    // Every way out is a provable undef → the definitive `Undef`, not the
+    // silent `None`. `None` means "no idea"; this sub is not unknown, it is
+    // known to yield undef, and the method-on-undef and always-false-guard
+    // diagnostics can only act on the difference.
     let fa = build_fa("sub noop {\n    return;\n}");
-    assert_eq!(fa.sub_return_type_at_arity("noop", None), None);
+    assert_eq!(
+        fa.sub_return_type_at_arity("noop", None),
+        Some(InferredType::Undef)
+    );
+}
+
+#[test]
+fn test_return_type_all_undef_returns() {
+    // `return undef` — the explicit spelling of the same fact.
+    let fa = build_fa("sub nothing {\n    return undef;\n}");
+    assert_eq!(
+        fa.sub_return_type_at_arity("nothing", None),
+        Some(InferredType::Undef)
+    );
+}
+
+#[test]
+fn test_return_type_all_empty_list_returns() {
+    // `return ()` is the third spelling: it coerces to undef in scalar
+    // context, and the return side must agree with the ternary side about
+    // that (both read `stub_expression` as an undef arm).
+    let fa = build_fa("sub empty {\n    return ();\n}");
+    assert_eq!(
+        fa.sub_return_type_at_arity("empty", None),
+        Some(InferredType::Undef)
+    );
+}
+
+#[test]
+fn test_return_type_guard_clause_constructor_is_optional() {
+    // The standard Perl constructor: a guard clause that bails with `return
+    // undef`, then an implicit final `$self`. Both are ways OUT, so the sub
+    // is `Optional<Class>`.
+    //
+    // This is the shape the old model could not type at all. A sub with any
+    // explicit return was excluded from the implicit-return path, so its
+    // fallthrough tail was never an arm and the fold saw only the bail-out.
+    let fa = build_fa(
+        "package Widget;\nsub new {\n    my $class = shift;\n    my $ok = check() or return undef;\n    my $self = bless {}, $class;\n    $self;\n}",
+    );
+    let t = fa.sub_return_type_at_arity("new", None);
+    assert!(
+        matches!(&t, Some(InferredType::Optional(inner)) if matches!(&**inner, InferredType::ClassName(c) if c == "Widget")),
+        "Optional<Widget>, got {t:?}",
+    );
+}
+
+#[test]
+fn test_return_type_undef_tail_is_an_undef_arm() {
+    // A tail can itself be undef. It is an undef ARM, classified by the same
+    // vocabulary the return side uses — not a value arm that happens to type
+    // as Undef. `sub f { undef }` and `sub f { return undef }` state one fact
+    // and must not answer differently.
+    for src in ["sub t { undef }", "sub t { () }"] {
+        let fa = build_fa(src);
+        assert_eq!(
+            fa.sub_return_type_at_arity("t", None),
+            Some(InferredType::Undef),
+            "{src}",
+        );
+    }
+}
+
+#[test]
+fn test_undef_arm_records_which_spelling_produced_it() {
+    // All three coerce to undef in SCALAR context — which is why they share
+    // one Fact family and one verdict today. They diverge in LIST context,
+    // and that is only recoverable at the emission site, so the spelling
+    // rides the Fact's key as a dormant payload.
+    //
+    // The grouping is the Perl one, and it is NOT by syntax: a bare
+    // `return;` is the EMPTY list like `()`, not a one-element list like
+    // `return undef`. That is exactly why `return;` is the recommended
+    // spelling.
+    use crate::model::witnesses::{tags, tags::UndefArm, WitnessPayload};
+    let spellings = |src: &str| -> Vec<Option<UndefArm>> {
+        build_fa(src)
+            .witnesses
+            .all()
+            .iter()
+            .filter_map(|w| match &w.payload {
+                WitnessPayload::Fact { family, value, .. }
+                    if family == tags::FACT_UNDEF_ARM =>
+                {
+                    Some(UndefArm::from_fact_value(value))
+                }
+                _ => None,
+            })
+            .collect()
+    };
+    assert_eq!(spellings("sub f { return undef }"), vec![Some(UndefArm::Scalar)]);
+    assert_eq!(spellings("sub f { return () }"), vec![Some(UndefArm::EmptyList)]);
+    assert_eq!(spellings("sub f { return; }"), vec![Some(UndefArm::EmptyList)]);
+    // The tail spellings classify identically to the return spellings.
+    assert_eq!(spellings("sub f { undef }"), vec![Some(UndefArm::Scalar)]);
+    assert_eq!(spellings("sub f { () }"), vec![Some(UndefArm::EmptyList)]);
+    // …and the verdict is unchanged by the distinction: still just Undef.
+    for src in ["sub f { return undef }", "sub f { return () }", "sub f { return; }"] {
+        assert_eq!(
+            build_fa(src).sub_return_type_at_arity("f", None),
+            Some(InferredType::Undef),
+            "{src}",
+        );
+    }
+}
+
+#[test]
+fn test_return_type_undef_arm_with_fallthrough_tail_not_undef() {
+    // `return undef if $x; compute()` — the fallthrough tail is a way out
+    // that the per-`return` walk never visits. The all-undef gate must not
+    // fire: this sub returns compute()'s value whenever the guard fails,
+    // and claiming `Undef` would be a confident lie rather than a miss.
+    let fa = build_fa("sub gated {\n    my ($x) = @_;\n    return undef if $x;\n    compute();\n}");
+    assert_ne!(
+        fa.sub_return_type_at_arity("gated", None),
+        Some(InferredType::Undef)
+    );
+}
+
+#[test]
+fn test_return_type_undef_arm_before_explicit_return_still_undef() {
+    // The mirror image, and the reason the tail needs a real signal rather
+    // than "is there a last expression": `compute()` here is a discarded
+    // statement, NOT a way out — the sub always leaves through `return
+    // undef`. Reading any trailing expression as a value arm would lose
+    // this verdict.
+    let fa = build_fa("sub always {\n    compute();\n    return undef;\n}");
+    assert_eq!(
+        fa.sub_return_type_at_arity("always", None),
+        Some(InferredType::Undef)
+    );
+}
+
+#[test]
+fn test_return_type_empty_list_return_optional() {
+    // `return ()` beside a typed arm lifts to Optional<T>, same as bare
+    // `return;` — the `{T, undef}` join, not the all-undef verdict.
+    let fa = build_fa("sub find {\n    return () unless 1;\n    return { row => 1 };\n}");
+    let t = fa.sub_return_type_at_arity("find", None);
+    assert!(
+        matches!(&t, Some(InferredType::Optional(inner)) if inner.is_hash_shaped()),
+        "Optional<hash-shaped>, got {t:?}",
+    );
 }
 
 #[test]
