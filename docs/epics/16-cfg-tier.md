@@ -72,7 +72,7 @@ the brief weighs all three options and says why.
 | `NarrowSubject` (builder-transient) | `build/builder/narrowing.rs` | `grep -rn 'NarrowSubject' src/` |
 | The three spellings `Place` converges | across layers | `GuardSite.subject: String`, `moved_from`'s `(String, Span, ScopeId)`, `ArrowDerefSite.receiver` |
 | `FlowEdge` + the dominance stand-in | `model/file_analysis/core_types.rs` | `grep -n 'struct FlowEdge' -A 12 src/model/file_analysis/core_types.rs`; `grep -n 'fn earliest_rebind_in'` |
-| `shift_certainly_runs` — syntactic dominance for the `@_` window (a `shift` under a postfix modifier / loop condition / nested block opens the window) | `build/builder/infra.rs` | `grep -n 'fn shift_certainly_runs' src/build/builder/infra.rs` — reachability replaces the "straight-line or open" rule with the real must-run verdict |
+| `cst::is_conditionally_executed` — the syntactic must-run stand-in, shared by key-write flow edges and the `@_` window (`consume_arg_head`: a conditional `shift` opens the window) | `cst.rs` | `grep -rn 'is_conditionally_executed' src/` — reachability replaces the "unconditional syntax or open" rule with the real must-run verdict |
 | `BranchArmFold` — what grows into `JoinFold` | `model/witnesses/reducers.rs` | `grep -rn 'BranchArmFold' src/model/witnesses/` |
 | The cycle-cut site | `model/witnesses/registry.rs` | `grep -n 'fn query_rec' src/model/witnesses/registry.rs` |
 | Does NOT exist yet | — | `place_state_at`, `PredicateAtom`, `GuardRef`, `ExitFact`, `unreachable_regions` — all return zero hits; that is expected |

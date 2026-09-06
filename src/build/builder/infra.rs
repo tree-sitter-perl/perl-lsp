@@ -58,12 +58,13 @@ impl<'a> Builder<'a> {
 
     /// A bare `shift` consumes `@_`'s head: from the call's end the window
     /// is the tail, latest-wins like any rebind. Only a shift that certainly
-    /// ran (straight-line in the sub body, no postfix modifier) keeps the
-    /// window known; any other opens it, so later reads answer unknown.
+    /// ran keeps the window known (`cst::is_conditionally_executed` is the
+    /// syntactic stand-in for that until the CFG tier, `docs/epics/16-cfg-
+    /// tier.md`); any other opens it, so later reads answer unknown.
     pub(super) fn consume_arg_head(&mut self, node: Node<'a>) {
         let Some(scope) = self.enclosing_sub_scope() else { return };
         let tail = match self.arg_window_at(node) {
-            Some(InferredType::Sequence(v)) if self.shift_certainly_runs(node) => {
+            Some(InferredType::Sequence(v)) if !crate::cst::is_conditionally_executed(node) => {
                 v.into_iter().skip(1).collect()
             }
             _ => Vec::new(),
@@ -74,27 +75,6 @@ impl<'a> Builder<'a> {
             constraint_span: Span { start: node.end_position(), end: node.end_position() },
             inferred_type: InferredType::Sequence(tail),
         });
-    }
-
-    /// Syntactic dominance, the pre-CFG stand-in for "this shift's statement
-    /// runs on every path to the read": straight-line in the sub body, no
-    /// postfix modifier. Under-approximates (any doubt opens the window).
-    /// Subsumed by the CFG tier's reachability (`docs/epics/16-cfg-tier.md`,
-    /// the `FlowEdge` dominance stand-in row) when it lands.
-    fn shift_certainly_runs(&self, node: Node<'a>) -> bool {
-        if Some(self.current_scope()) != self.enclosing_sub_scope() {
-            return false;
-        }
-        let mut cur = node.parent();
-        while let Some(n) = cur {
-            match n.kind() {
-                "expression_statement" => return true,
-                "postfix_conditional_expression" | "postfix_loop_expression"
-                | "postfix_for_expression" => return false,
-                _ => cur = n.parent(),
-            }
-        }
-        false
     }
 
     /// `@_`'s argument window at `node`'s own point: the sub-entry shape
