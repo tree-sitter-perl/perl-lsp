@@ -4,6 +4,27 @@ All notable changes to perl-lsp are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions are the published
 crate / VS Code extension versions.
 
+## Unreleased
+
+### Type inference
+
+- **`shift` consumes `@_`; only the first read is the invocant.** A second
+  `shift`, a `$_[0]` after shifts, a `shift` inside a callback, and
+  `my $x = shift` in a plain helper all used to type as the enclosing
+  class, and subs returning them followed. They answer correctly now.
+- **Method-ness comes from class evidence** (parents, a framework, a
+  `bless` in the package), so the `use Mojo::Base -strict` opt-out is no
+  longer needed and the two-flag form `-base, -strict` now records its
+  parent, which it previously dropped.
+- Signature help no longer shows a slurpy hash (`my ($self, %attrs) = @_`)
+  typed as a sequence of the class.
+
+### Scoping
+
+- **A bare block is a lexical scope.** A `my` inside `{ ... }` used to
+  shadow the outer declaration past the closing brace, so goto-def,
+  rename, and references on the outer variable followed the wrong one.
+
 ## v0.7.0 — 2026-08-31
 
 A large accumulation: a full second language (C/C++ in beta, plus alpha-tier

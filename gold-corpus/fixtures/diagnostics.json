@@ -140,8 +140,8 @@
           "\"file\":\"Daemon.pm\",\"line\":\"92\""
         ]
       },
-      "status": "xfail",
-      "note": "GAP: `on(request => sub { my $tx = shift; $tx->req })` — $tx is a transaction, but first-param-self leaks into the anonymous callback and types it as the Daemon. Unfixed. XPASSes only on a cache whose ref-rows migration silently failed (bag-evicted sweep copies drop the invocant type, hiding the FP) — a healthy store still shows the diagnostic."
+      "status": "gold",
+      "note": "`on(request => sub { my $tx = shift; $tx->req })` — an anonymous sub has its own @_ window with no invocant head, so $tx stays untyped and the Daemon-typed unresolved-method FP is gone."
     }
   ]
 }

@@ -500,9 +500,12 @@ impl FlowEdge {
                 base: WitnessAttachment::Expr(self.source),
                 step: ProjectionStep::ArrayIndex(*n as i32),
             },
-            // A slurpy tail (`@rest`) carries the source's element type — the
-            // whole-source edge approximates it (same element lattice).
-            Extraction::Slurpy(_) => WitnessPayload::Edge(WitnessAttachment::Expr(self.source)),
+            // `my (@all) = …` IS the source; a hash is not the list, and a tail
+            // from a later position has no projection step yet.
+            Extraction::Slurpy(0) if self.target_name.starts_with('@') => {
+                WitnessPayload::Edge(WitnessAttachment::Expr(self.source))
+            }
+            Extraction::Slurpy(_) => return None,
             // KeyOf awaits its HashKey-projection lowering (a later stage).
             Extraction::KeyOf(_) => return None,
             // A bare bind clears to undef — a value the bind uniquely knows

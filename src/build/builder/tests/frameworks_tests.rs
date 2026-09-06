@@ -1622,8 +1622,8 @@ fn test_mojo_base_base_and_strict_still_oo() {
     ] {
         let fa = build_fa(src);
         assert_eq!(
-            fa.inferred_type_via_bag("$x", Point::new(4, 9)),
-            Some(InferredType::ClassName("C".into())),
+            fa.inferred_type_via_bag("$x", Point::new(4, 9)).and_then(|t| t.class_name().map(String::from)),
+            Some("C".into()),
             "-base makes the package OO regardless of a redundant -strict: {src}"
         );
     }

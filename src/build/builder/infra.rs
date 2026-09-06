@@ -56,20 +56,32 @@ impl<'a> Builder<'a> {
         None
     }
 
-    /// Is a bare `shift` / `$_[0]` here the method invocant (→ enclosing class),
-    /// or just `arg[0]`? OO-by-convention is the default (a base class like
-    /// `DateTime` types `bless {...}, ref $_[0]` even without declared parents),
-    /// EXCEPT in a package that explicitly opted out of class machinery via
-    /// `use Mojo::Base -strict`. There the first `@_` element is an ordinary
-    /// argument, so typing it as the class produced bogus `unresolved-method`
-    /// diagnostics (`$tx = shift; $tx->res` in `Mojo::WebSocket`). (rule #10:
-    /// the opt-out is recorded as a package property at the `use` site, not
-    /// re-derived from the `shift` shape here.)
-    pub(super) fn shift_is_invocant_here(&self, node: Node<'a>) -> bool {
-        match self.package_for_node(node) {
-            Some(pkg) => !self.non_oo_packages.contains(&pkg),
-            None => true,
-        }
+    /// A bare `shift` consumes `@_`'s head: from the call's end the window
+    /// is the tail, latest-wins like any rebind. Only a shift that certainly
+    /// ran keeps the window known (`cst::is_conditionally_executed` is the
+    /// syntactic stand-in for that until the CFG tier, `docs/epics/16-cfg-
+    /// tier.md`); any other opens it, so later reads answer unknown.
+    pub(super) fn consume_arg_head(&mut self, node: Node<'a>) {
+        let Some(scope) = self.enclosing_sub_scope() else { return };
+        let tail = match self.arg_window_at(node) {
+            Some(InferredType::Sequence(v)) if !crate::cst::is_conditionally_executed(node) => {
+                v.into_iter().skip(1).collect()
+            }
+            _ => Vec::new(),
+        };
+        self.push_type_constraint(TypeConstraint {
+            variable: "@_".into(),
+            scope,
+            constraint_span: Span { start: node.end_position(), end: node.end_position() },
+            inferred_type: InferredType::Sequence(tail),
+        });
+    }
+
+    /// `@_`'s argument window at `node`'s own point: the sub-entry shape
+    /// with every earlier straight-line `shift` consumed. `None` outside a
+    /// sub, or after a shift that may not have run.
+    pub(super) fn arg_window_at(&self, node: Node<'a>) -> Option<InferredType> {
+        self.bag_query_variable("@_", self.scope_at_point(node.start_position()), node.start_position())
     }
 
     /// Innermost scope containing `point`. Mirrors

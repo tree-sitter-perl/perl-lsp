@@ -814,19 +814,13 @@ impl<'a> Builder<'a> {
         self.package_parents.entry(pkg).or_default().extend(parents);
     }
 
+    /// The `use Mojo::Base ...` args as strings: `-base`/`-strict` flags
+    /// (autoquoted barewords) and parent names, through the DSL-arg list
+    /// walk so `-base, -strict` (one `list_expression`) and folded
+    /// constants read the same as a lone flag. The module itself is a
+    /// `package` node, which the walk never strings.
     pub(super) fn extract_mojo_base_args(&self, node: Node<'a>) -> Vec<String> {
-        let mut args = Vec::new();
-        let module_end = node.child_by_field_name("module")
-            .map(|m| m.end_byte())
-            .unwrap_or(0);
-        for i in 0..node.child_count() {
-            if let Some(child) = node.child(i) {
-                if child.start_byte() <= module_end { continue; }
-                if let Some(text) = self.extract_node_string(child) {
-                    args.push(text);
-                }
-            }
-        }
+        let args: Vec<String> = self.extract_arg_name_list(node).into_iter().map(|(s, _)| s).collect();
         if args.is_empty() {
             // Fallback to standard extraction
             let (standard, _) = self.extract_use_import_list(node);

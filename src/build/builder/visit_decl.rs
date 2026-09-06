@@ -21,12 +21,14 @@ impl<'a> Builder<'a> {
             "assignment_expression" => self.visit_assignment(node),
 
             // A bare `{ ... }` statement is its own block node in this
-            // grammar (no separate `block` child). It's a hard package
-            // boundary like any other block — `{ package Inner; }` must not
-            // leak Inner to following statements.
+            // grammar (no separate `block` child), so the `block` arm below
+            // never sees it. It is both a package boundary (`{ package
+            // Inner; }` must not leak Inner past the close) and a lexical
+            // scope (a `my` inside must not shadow past the close).
             "block_statement" => {
                 self.add_fold_range(node);
-                self.walk_block_package_scoped(node);
+                self.push_scope(ScopeKind::Block, node_to_span(node), None);
+                self.walk_block_package_scoped_then(node, |b| { b.pop_scope(); });
             }
 
             // Blocks create scopes (but only standalone blocks, not sub/class/for bodies)
@@ -83,6 +85,9 @@ impl<'a> Builder<'a> {
             }
             // Built-in calls: abs($x), length($s), time(), etc.
             "func1op_call_expression" | "func0op_call_expression" => {
+                if self.is_shift_call(node) {
+                    self.consume_arg_head(node);
+                }
                 self.visit_func1op(node);
             }
             "method_call_expression" => self.visit_method_call(node),
@@ -1091,10 +1096,8 @@ impl<'a> Builder<'a> {
         match node.kind() {
             "bareword" => node.utf8_text(self.source).ok() == Some("shift"),
             "func1op_call_expression" => {
-                // shift without explicit args: func1op_call_expression with child "shift"
-                node.child(0)
-                    .and_then(|c| c.utf8_text(self.source).ok())
-                    == Some("shift")
+                node.named_child_count() == 0
+                    && node.child(0).and_then(|c| c.utf8_text(self.source).ok()) == Some("shift")
             }
             "ambiguous_function_call_expression" | "function_call_expression" => {
                 use crate::cst::NodeExt;
@@ -1289,12 +1292,22 @@ impl<'a> Builder<'a> {
             None => return,
         };
 
-        if let Some(ref pkg) = self.current_package {
+        if let Some(pkg) = self.current_package.clone() {
+            let (scope, span) = (self.current_scope(), node_to_span(node));
+            let head = InferredType::FirstParam { package: pkg };
             self.push_type_constraint(TypeConstraint {
                 variable: invocant.name.clone(),
-                scope: self.current_scope(),
-                constraint_span: node_to_span(node),
-                inferred_type: InferredType::FirstParam { package: pkg.clone() },
+                scope,
+                constraint_span: span,
+                inferred_type: head.clone(),
+            });
+            // `@_`'s argument window for this scope, headed by the same
+            // invocant (`seed_arg_windows` covers the scopes without one).
+            self.push_type_constraint(TypeConstraint {
+                variable: "@_".into(),
+                scope,
+                constraint_span: span,
+                inferred_type: InferredType::Sequence(vec![head]),
             });
         }
     }
