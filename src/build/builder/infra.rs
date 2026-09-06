@@ -56,20 +56,50 @@ impl<'a> Builder<'a> {
         None
     }
 
-    /// Is a bare `shift` / `$_[0]` here the method invocant (→ enclosing class),
-    /// or just `arg[0]`? OO-by-convention is the default (a base class like
-    /// `DateTime` types `bless {...}, ref $_[0]` even without declared parents),
-    /// EXCEPT in a package that explicitly opted out of class machinery via
-    /// `use Mojo::Base -strict`. There the first `@_` element is an ordinary
-    /// argument, so typing it as the class produced bogus `unresolved-method`
-    /// diagnostics (`$tx = shift; $tx->res` in `Mojo::WebSocket`). (rule #10:
-    /// the opt-out is recorded as a package property at the `use` site, not
-    /// re-derived from the `shift` shape here.)
-    pub(super) fn shift_is_invocant_here(&self, node: Node<'a>) -> bool {
-        match self.package_for_node(node) {
-            Some(pkg) => !self.non_oo_packages.contains(&pkg),
-            None => true,
+    /// A bare `shift` consumes `@_`'s head: from the call's end the window
+    /// is the tail, latest-wins like any rebind. Only a shift that certainly
+    /// ran — its statement a direct child of the sub body, no postfix
+    /// modifier — keeps the window known; any other opens it, so later
+    /// reads answer unknown instead of guessing.
+    pub(super) fn consume_arg_head(&mut self, node: Node<'a>) {
+        let Some(scope) = self.enclosing_sub_scope() else { return };
+        let tail = match self.arg_window_at(node) {
+            Some(InferredType::Sequence(v)) if self.shift_certainly_runs(node) => {
+                v.into_iter().skip(1).collect()
+            }
+            _ => Vec::new(),
+        };
+        let end = node.end_position();
+        self.push_type_constraint(TypeConstraint {
+            variable: "@_".into(),
+            scope,
+            constraint_span: Span { start: end, end },
+            inferred_type: InferredType::Sequence(tail),
+        });
+    }
+
+    fn shift_certainly_runs(&self, node: Node<'a>) -> bool {
+        if Some(self.current_scope()) != self.enclosing_sub_scope() {
+            return false;
         }
+        let mut cur = node.parent();
+        while let Some(n) = cur {
+            match n.kind() {
+                "expression_statement" => return true,
+                "postfix_conditional_expression" | "postfix_loop_expression"
+                | "postfix_for_expression" => return false,
+                _ => cur = n.parent(),
+            }
+        }
+        false
+    }
+
+    /// `@_`'s argument window at `node`'s own point: the sub-entry shape
+    /// with every earlier straight-line `shift` consumed. `None` outside a
+    /// sub, or after a shift that may not have run.
+    pub(super) fn arg_window_at(&self, node: Node<'a>) -> Option<InferredType> {
+        let p = node.start_position();
+        self.bag_query_variable("@_", self.scope_at_point(p), p)
     }
 
     /// Innermost scope containing `point`. Mirrors

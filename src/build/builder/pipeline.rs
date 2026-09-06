@@ -310,7 +310,6 @@ fn build_once(
         bag: crate::model::witnesses::WitnessBag::new(),
         unresolved_expr_nodes: Vec::new(),
         package_framework: std::collections::HashMap::new(),
-        non_oo_packages: std::collections::HashSet::new(),
         scope_stack: Vec::new(),
         // Perl's implicit top-level package. Without this seed,
         // top-level scripts (`Mojolicious::Lite` apps, one-off

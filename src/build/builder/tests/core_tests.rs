@@ -1165,3 +1165,19 @@ fn bare_block_is_a_lexical_scope() {
     assert_eq!(bound(3, 10), Some(inner), "use inside the block binds to the block's decl");
     assert_eq!(bound(5, 6), Some(outer), "use after the block binds to the outer decl again");
 }
+
+#[test]
+fn shift_consumes_the_argument_window() {
+    let src = "package Foo;\nuse parent 'Bar';\nsub greet {\n    my $self = shift;\n    my $name = shift;\n    my $other = $_[0];\n    shift if $name;\n    my $late = $_[0];\n    return $name;\n}\nsub anon { my $s = shift; my $cb = sub { my $x = shift; $x }; $s }\n1;\n";
+    let fa = build_fa(src);
+    let class = |var: &str, row: usize| {
+        fa.inferred_type_via_bag(var, Point::new(row, 60)).and_then(|t| t.class_name().map(str::to_string))
+    };
+    assert_eq!(class("$self", 3).as_deref(), Some("Foo"));
+    assert_eq!(class("$name", 4), None, "the second shift is arg 1, not the invocant");
+    assert_eq!(class("$other", 5), None, "$_[0] after two shifts is arg 2");
+    assert_eq!(class("$late", 7), None, "a conditional shift opens the window");
+    assert_eq!(class("$s", 10).as_deref(), Some("Foo"));
+    assert_eq!(class("$x", 10), None, "an anon sub has its own @_");
+    assert!(fa.sub_return_type_at_arity("greet", None).is_none(), "greet returns arg 1, not Foo");
+}

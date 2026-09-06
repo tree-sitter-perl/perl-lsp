@@ -822,9 +822,13 @@ impl<'a> Builder<'a> {
         for i in 0..node.child_count() {
             if let Some(child) = node.child(i) {
                 if child.start_byte() <= module_end { continue; }
-                if let Some(text) = self.extract_node_string(child) {
-                    args.push(text);
-                }
+                // `-base, -strict` arrives as one `list_expression`.
+                let leaves = if child.kind() == "list_expression" {
+                    (0..child.named_child_count()).filter_map(|j| child.named_child(j)).collect()
+                } else {
+                    vec![child]
+                };
+                args.extend(leaves.into_iter().filter_map(|n| self.extract_node_string(n)));
             }
         }
         if args.is_empty() {

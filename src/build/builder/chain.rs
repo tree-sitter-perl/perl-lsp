@@ -260,15 +260,9 @@ impl<'a> Builder<'a> {
                 }
                 Some(InferredType::ClassName(text.to_string()))
             }
-            // `shift` / `shift()` / `$_[0]` in method-body invocant
-            // position all mean `$self`. Use `package_at_pos` for
-            // post-walk correctness; same reason as the `$self`
-            // case above.
+            // A bare `shift` reads the head of `@_`'s window at its point.
             "func1op_call_expression" if self.is_shift_call(node) => {
-                if !self.shift_is_invocant_here(node) {
-                    return None;
-                }
-                self.package_for_node(node).map(InferredType::ClassName)
+                self.arg_window_at(node)?.element_at(0).cloned()
             }
             "array_element_expression" => {
                 // Arrow deref on an expression (`$x->[0]`,
@@ -282,16 +276,8 @@ impl<'a> Builder<'a> {
                 };
                 let varname = array.named_child(0)?;
                 let index = node.child_by_field_name("index")?;
-                // `$_[0]` is the positional-receiver pseudo-invocant
-                // (`sub m { $_[0]->... }`) — enclosing-class identity,
-                // not a real array read.
-                if self.is_positional_receiver(node) {
-                    if !self.shift_is_invocant_here(node) {
-                        return None;
-                    }
-                    return self.package_for_node(node).map(InferredType::ClassName);
-                }
-                // General `$arr[N]`: read `@arr`'s Sequence shape from
+                // General `$arr[N]` — `$_[N]` included, `@_` being the
+                // argument window: read the Sequence shape from
                 // the bag and project the index. Mirror of
                 // `FileAnalysis::resolve_expression_type`'s array arm.
                 let name = varname.utf8_text(self.source).ok()?;
@@ -330,7 +316,7 @@ impl<'a> Builder<'a> {
             }
             "function_call_expression" | "ambiguous_function_call_expression" => {
                 if self.is_shift_call(node) {
-                    return self.package_for_node(node).map(InferredType::ClassName);
+                    return self.arg_window_at(node)?.element_at(0).cloned();
                 }
                 let func = node.child_by_field_name("function")?;
                 let name = func.utf8_text(self.source).ok()?;

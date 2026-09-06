@@ -408,10 +408,6 @@ struct Builder<'a> {
     /// reducer with the right context.
     package_framework: std::collections::HashMap<String, crate::model::witnesses::FrameworkFact>,
 
-    /// Packages that explicitly opted out of class machinery (`use Mojo::Base
-    /// -strict`). In these, a bare `shift` / `$_[0]` is an ordinary argument,
-    /// not the method invocant — see `shift_is_invocant_here`.
-    non_oo_packages: std::collections::HashSet<String>,
 
     // Walk state
     scope_stack: Vec<ScopeId>,

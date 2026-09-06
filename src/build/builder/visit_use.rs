@@ -327,13 +327,6 @@ impl<'a> Builder<'a> {
                 }
                 if !parents.is_empty() {
                     self.apply_mojo_base_mode(pkg, parents, node);
-                } else if raw_args.iter().any(|a| a == "-strict") {
-                    // Pure `-strict` (no `-base`, no parent): strict-mode only,
-                    // no class machinery. A bare `shift` here is arg[0], not the
-                    // invocant (see `shift_is_invocant_here`).
-                    if let Some(p) = self.current_package.clone() {
-                        self.non_oo_packages.insert(p);
-                    }
                 }
             } else if raw_args.iter().any(|a| a == "-base") {
                 // `use Mojo::EventEmitter -base` / any `use X -base`: X becomes a
