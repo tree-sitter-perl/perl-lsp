@@ -425,7 +425,7 @@ fn walk_refs(
     // BACKWARD half of goto-def's see-through (`#define IncRef(sv)
     // Perl_Inc(sv)` means every `IncRef(...)` call site is a reference to
     // `Perl_Inc`). Computed once per query; empty for Perl.
-    let aliases = crate::util::timings::phase("refs.aliases", || {
+    let aliases = crate::util::ghost_stats::timed("refs.aliases", || {
         delegation_aliases(files, module_index, target, mask)
     });
 
@@ -538,7 +538,9 @@ fn walk_refs(
     if rows_active {
         if let Some(idx) = module_index {
             let keys = retrieval_keys(target, &aliases);
-            let candidate_paths = idx.ref_candidate_paths(&keys);
+            let candidate_paths = crate::util::ghost_stats::timed("refs.retrieval.candidates", || idx.ref_candidate_paths(&keys));
+            crate::util::ghost_stats::count("refs.walks");
+            crate::util::ghost_stats::add_n("refs.candidates", candidate_paths.len() as u64);
             if std::env::var_os("PERL_LSP_REFS_DEBUG").is_some() {
                 eprintln!(
                     "[refs-debug] keys={:?} candidates={} narrow={}",
@@ -548,7 +550,7 @@ fn walk_refs(
                 );
             }
             if narrow_enabled && !candidate_paths.is_empty() {
-                rows_indexed = idx.ref_indexed_paths();
+                rows_indexed = crate::util::ghost_stats::timed("refs.retrieval.indexed_paths", || idx.ref_indexed_paths());
                 candidate_set = candidate_paths.iter().cloned().collect();
             }
             for path in candidate_paths {
@@ -594,16 +596,17 @@ fn walk_refs(
                 // The matcher reads refs (usage sites) AND symbols
                 // (declaration sites) — the rows-axes view, upgraded to
                 // whole only when a matching ref needs the bag.
-                let full = matcher_view(idx, &cached, target);
-                collect_from_analysis(
+                let full = crate::util::ghost_stats::timed("refs.cand.view", || matcher_view(idx, &cached, target));
+                crate::util::ghost_stats::timed("refs.cand.collect", || collect_from_analysis(
                     &key, &full, target, &aliases, module_index, &file_str, &mut out,
-                );
+                ));
             }
         }
     }
 
     // Workspace files.
     if mask.contains(RoleMask::WORKSPACE) {
+        let _t = crate::util::ghost_stats::ScopedNs::start("refs.sweep.workspace");
         for entry in files.workspace_raw().iter() {
             if covered_paths.contains(entry.key()) {
                 continue;
@@ -644,6 +647,7 @@ fn walk_refs(
     // repeats files and HIDES a file that lost every name tie. Skip paths an
     // open/workspace copy already covered — those are fresher.
     if mask.contains(RoleMask::DEPENDENCY) {
+        let _t = crate::util::ghost_stats::ScopedNs::start("refs.sweep.deps");
         if let Some(idx) = module_index {
             idx.for_each_cached_file(&mut |cached| {
                 if !covered_paths.insert(cached.path.clone()) {

@@ -79,18 +79,18 @@ fn heatmap_symbol_row(
     let (fan_in, cross_file_fan_in) = match forced_fan_in {
         Some(n) => (n, 0usize),
         None => {
-            let mut cs = resolve::resolve(
+            let mut cs = crate::util::ghost_stats::timed("heatmap.mint", || resolve::resolve(
                 ws,
                 analysis,
                 file_store::FileKey::Path(path.to_path_buf()),
                 sym.selection_span.start,
                 Some(routing_idx),
                 scope,
-            );
+            ));
             if let Some(mask) = visibility {
                 cs = cs.with_visibility(mask);
             }
-            let locs = cs.references();
+            let locs = crate::util::ghost_stats::timed("heatmap.references", || cs.references());
             let fan_in = locs
                 .iter()
                 .filter(|l| l.access != AccessKind::Declaration)
@@ -112,6 +112,7 @@ fn heatmap_symbol_row(
     // methods only). Packages have no body to scan.
     let is_callable = matches!(sym.kind, SymKind::Sub | SymKind::Method);
     let fan_out: Option<usize> = if is_callable {
+        let _t = crate::util::ghost_stats::ScopedNs::start("heatmap.fanout");
         let mut callees: HashSet<&str> = HashSet::new();
         for r in analysis.refs() {
             if matches!(
