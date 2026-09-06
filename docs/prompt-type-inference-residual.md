@@ -210,28 +210,6 @@ fn reducers() {
 Lets plugins choose fold semantics (LWW, append, max, custom merge) and
 emission timing (threshold-based, end-of-statement, end-of-file).
 
-## Part 8 — The class-assertion axis ignores temporal order
-
-**Symptom:** `my $x = Foo->new; $x = 'str'; $x->m` reads `$x` as `Foo`
-after the rebind. Same for `$x = unknown_fn()`: the `Unknown` witness
-lands, and the answer is still `Foo`.
-
-**Why:** `push_type_constraint` for a `ClassName` pushes two witnesses —
-the plain `InferredType` and a `ClassAssertion` observation. In
-`FrameworkAwareTypeFold` the assertion axis is folded separately and
-answers ahead of `plain_type` (identity-over-rep), with no temporal
-comparison between the axes: a later plain-type write never gets to
-retire an earlier assertion. Latest-wins holds *within* the plain axis
-and *within* the assertion axis, not across them.
-
-**Forward work:** the assertion must carry the same position the plain
-witness does and lose to a later plain-type write on the same
-attachment — one comparison at the point the fold picks between the two
-axes. Measure on the substrate: class-typed variables rebound to a
-non-class value are where `unresolved-method` still over-claims, and
-the `Unknown` witness (`docs/adr/flow-narrowing.md`) only reaches them
-once this lands.
-
 ## Out of scope
 
 - **Univalence / first-class identity types.** Renaming = transport

@@ -61,37 +61,36 @@ start. It is a real answer, not an absence, and each half of that matters:
   matching the variant. Dispatch needs no gate: `class_name()` is `None`.
 
 A rebind that may not run is old-or-new no matter what its RHS is, and
-lands as `Unknown` outright. `cst::is_conditionally_executed` is the one
-spelling of "may not run": a statement modifier, an `if`/loop block, a
-ternary arm, a short-circuit chain. Two consequences of it:
+lands as `Unknown` outright. "May not run" is asked at two granularities,
+both spelled once in `cst.rs` (one climb, two boundaries):
 
-- **`$x = undef if COND`** anchors at the statement start, so the guard's
-  own condition reads no value the write has not produced, and the
-  successor reads no value it may never produce.
-- **`if (…) { $x = … }`, a loop body.** The write's witness sits on the
-  block's scope, which a read after the block never walks through, so
-  that read would keep the pre-block belief. The honest answer there is
-  `old ⊔ new`, and no reducer can compute it: a reducer sees ONE
-  attachment, and the write landed on the block's. So the emitter stands
-  in for the join and puts `Unknown` on the binding scope — the one every
-  later read in the variable's extent walks through. **This is an
-  approximation of a join and is deleted when Epic 16's `JoinFold`
-  lands** (`docs/epics/16-cfg-tier.md`, Phase C); its anchor is in that
-  epic's table.
+- **Relative to the block the witness lands on**
+  (`is_conditionally_executed_in_block`): a statement modifier, a
+  ternary arm, a short-circuit. `$x = undef if COND` anchors at the
+  statement start, so the guard's own condition reads no value the write
+  has not produced, and the successor reads no value it may never
+  produce. The block's own `if`/loop does not count — inside the block,
+  the block has run, so `if (…) { $x = Foo->new; $x->m }` still types
+  the call.
+- **Relative to the variable's binding scope.** A write inside a nested
+  block sits on the block's scope, which a read after the block never
+  walks through, so that read would keep the pre-block belief. The honest
+  answer there is `old ⊔ new`, and no reducer can compute it: a reducer
+  sees ONE attachment, and the write landed on the block's. So the
+  emitter stands in for the join and puts `Unknown` on the binding scope
+  — the one every later read in the variable's extent walks through.
+  **This is an approximation of a join and is deleted when Epic 16's
+  `JoinFold` lands** (`docs/epics/16-cfg-tier.md`, Phase C); its anchor
+  is in that epic's table.
 
-One axis `Unknown` does not reach: a `ClassName` rebind also pushes a
-`ClassAssertion` observation, and the fold's identity-over-rep rule
-answers from that axis without temporal order against plain types. So
-`my $x = Foo->new; $x = 'str'` still reads `Foo` after the rebind — a
-standing defect of that rule, not of `Unknown`, and it caps what a later
-untypeable rebind can retire for class-typed variables.
-
-`Unknown` absorbs in return-arm agreement: an arm nothing can name makes
-the join `Unknown`, not `None` (which reads as "no arms agree" and lets a
-lone typed arm answer for the sub) and not `Optional<Unknown>` (a claim
-whose value half nothing supports — on the substrate it minted
-`optional-deref` at every deref behind a truthiness guard the engine
-does not model, `return unless $enc`).
+The class-identity axis honors the same order. A `ClassName` rebind also
+pushes a `ClassAssertion`, and identity-over-rep lets that axis answer
+ahead of the plain axis; `ClassIdentity` (the axis's one owner in
+`FrameworkAwareTypeFold`) records where the assertion was made and a
+plain-type write at or after it retires it — unless the class subsumes
+the newcomer, a deref's bare `HashRef` being representation, not a new
+value. So `my $x = Foo->new; $x = 'str'` reads `String`, and an
+untypeable rebind reaches class-typed variables too.
 
 Declarations are a first binding, not a rebind: one whose RHS nothing
 can type stays absent. The rule is spelled once, in the fold's

@@ -111,6 +111,44 @@ pub trait WitnessReducer: Send + Sync {
 /// 5. `NumericUse` / `StringUse` / `RegexpUse` project to their types.
 pub struct FrameworkAwareTypeFold;
 
+/// The class-identity axis of `FrameworkAwareTypeFold`: the standing
+/// `ClassName` / `ClassAssertion`, its source priority, and WHERE it was
+/// made. Identity dominates rep, so this axis answers ahead of the plain
+/// axis — which is why it has to be retired explicitly: a plain-type write
+/// at or after it is a newer value, and without the retire `my $x =
+/// Foo->new; $x = 'str'` reads `Foo` forever. One owner for the three
+/// fields, so the two set sites and the one retire site cannot drift.
+#[derive(Default)]
+struct ClassIdentity {
+    name: Option<String>,
+    priority: u8,
+    at: Point,
+}
+
+impl ClassIdentity {
+    fn assert(&mut self, name: &str, priority: u8, at: Point) {
+        if priority >= self.priority {
+            self.name = Some(name.to_string());
+            self.priority = priority;
+            self.at = at;
+        }
+    }
+
+    /// A plain-type write at or after the standing identity, at no lower
+    /// priority, retires it — unless the class subsumes the newcomer: a
+    /// deref's bare `HashRef` reveals representation, not a new value.
+    fn retire_if_superseded(&mut self, newcomer: &InferredType, priority: u8, at: Point) {
+        let superseded = self.name.as_ref().is_some_and(|c| {
+            priority >= self.priority
+                && at >= self.at
+                && !InferredType::ClassName(c.clone()).subsumes_narrowing(newcomer)
+        });
+        if superseded {
+            self.name = None;
+        }
+    }
+}
+
 impl WitnessReducer for FrameworkAwareTypeFold {
     fn name(&self) -> &str {
         "framework_aware_type_fold"
@@ -164,8 +202,7 @@ impl WitnessReducer for FrameworkAwareTypeFold {
         // iteration order — a `Plugin`-sourced assertion (the helper-`$c`
         // override) dominates a `Builder` one (`my $c = shift` typed as the
         // enclosing class). Same axis as `PluginOverrideReducer` on Symbols.
-        let mut class_assertion: Option<String> = None;
-        let mut class_assertion_priority: u8 = 0;
+        let mut class_assertion = ClassIdentity::default();
         let mut first_param_class: Option<String> = None;
         // A `BrandedRoute` is a class identity that carries extra
         // inherited-default data. It must dominate the bare
@@ -203,10 +240,7 @@ impl WitnessReducer for FrameworkAwareTypeFold {
             match &w.payload {
                 WitnessPayload::InferredType(t) => match t {
                     InferredType::ClassName(name) => {
-                        if prio >= class_assertion_priority {
-                            class_assertion = Some(name.clone());
-                            class_assertion_priority = prio;
-                        }
+                        class_assertion.assert(name, prio, w.span.start);
                     }
                     InferredType::FirstParam { package } => {
                         first_param_class = Some(package.clone())
@@ -232,15 +266,13 @@ impl WitnessReducer for FrameworkAwareTypeFold {
                         if prio > plain_type_priority || (prio == plain_type_priority && !subsumed) {
                             plain_type = Some(other.clone());
                             plain_type_priority = prio;
+                            class_assertion.retire_if_superseded(other, prio, w.span.start);
                         }
                     }
                 },
                 WitnessPayload::Observation(obs) => match obs {
                     TypeObservation::ClassAssertion(name) => {
-                        if prio >= class_assertion_priority {
-                            class_assertion = Some(name.clone());
-                            class_assertion_priority = prio;
-                        }
+                        class_assertion.assert(name, prio, w.span.start);
                     }
                     TypeObservation::FirstParamInMethod { package } => {
                         first_param_class = Some(package.clone())
@@ -267,7 +299,7 @@ impl WitnessReducer for FrameworkAwareTypeFold {
         // contradiction or unknown rep, still return the class — the
         // user's intent is object-typed use; a rep mismatch is a
         // separate diagnostic.
-        if let Some(name) = class_assertion.clone().or(first_param_class.clone()) {
+        if let Some(name) = class_assertion.name.clone().or(first_param_class.clone()) {
             let backing = bless_rep.or_else(|| q.framework.backing_rep());
             match (rep_obs, backing) {
                 (None, _) => return ReducedValue::Type(InferredType::ClassName(name)),

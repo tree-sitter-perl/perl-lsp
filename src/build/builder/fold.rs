@@ -483,12 +483,15 @@ impl<'a> Builder<'a> {
             // is what `Unknown` exists for. Declarations whose RHS nothing can
             // type stay absent, as they always have.
             let is_rebind = left.kind() != "variable_declaration";
-            // A rebind that MAY NOT HAPPEN — under a statement modifier, inside
-            // an `if`/loop block, a ternary arm — leaves old-or-new behind:
-            // `Unknown`, never its own value. It still lands (latest-wins
-            // retires the prior belief) at the statement start, so a guard's
-            // own condition reads no value the write has not produced yet.
-            let conditional = is_rebind && crate::cst::is_conditionally_executed(node);
+            // A rebind that MAY NOT HAPPEN relative to the scope its witness
+            // lands on — under a statement modifier, a ternary arm, a
+            // short-circuit — leaves old-or-new behind: `Unknown`, never its
+            // own value. It still lands (latest-wins retires the prior belief)
+            // at the statement start, so a guard's own condition reads no value
+            // the write has not produced yet. Block-relative on purpose: inside
+            // the block, the block has run; whether it ran at all is the
+            // binding-scope question below.
+            let conditional = is_rebind && crate::cst::is_conditionally_executed_in_block(node);
             // Compute the fresh type up front so the idempotency check
             // can compare informativeness. (Cheap: a bag chase on the
             // already-resolved RHS.)

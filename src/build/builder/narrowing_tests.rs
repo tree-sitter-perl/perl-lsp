@@ -807,3 +807,17 @@ fn a_shadowed_rebind_neither_erases_the_outer_belief_nor_borrows_it() {
     assert_eq!(fa.inferred_type_via_bag("$x", Point::new(8, 13)), Some(InferredType::String), "outer untouched");
     assert_eq!(fa.inferred_type_via_bag("$x", Point::new(6, 17)), Some(InferredType::Unknown), "inner stops on Unknown");
 }
+
+#[test]
+fn a_later_plain_write_retires_an_earlier_class_identity() {
+    // The class axis used to answer ahead of the plain axis with no
+    // temporal order between them, so this read Foo after the rebind.
+    let fa = build_fa("package P;\nsub m {\n  my $x = Foo->new;\n  $x = 'str';\n  my $o = $x;\n}\n1;\n");
+    assert_eq!(fa.inferred_type_via_bag("$x", Point::new(4, 11)), Some(InferredType::String));
+    let fa = build_fa("package P;\nsub m {\n  my $x = Foo->new;\n  $x = unknown_fn();\n  my $o = $x;\n}\n1;\n");
+    assert_eq!(fa.inferred_type_via_bag("$x", Point::new(4, 11)), Some(InferredType::Unknown));
+    // Identity-over-rep is untouched: a deref reveals representation, not a
+    // new value, and the class still answers.
+    let fa = build_fa("package P;\nsub m {\n  my $x = Foo->new;\n  my $k = $x->{k};\n  my $o = $x;\n}\n1;\n");
+    assert_eq!(fa.inferred_type_via_bag("$x", Point::new(4, 11)), Some(InferredType::ClassName("Foo".into())));
+}
