@@ -1147,3 +1147,21 @@ fn builtin_call_keyword_gets_a_core_bound_ref() {
         "a CORE-bound builtin call must not mint a rename kind",
     );
 }
+
+#[test]
+fn bare_block_is_a_lexical_scope() {
+    let src = "my $x = 1;\n{\n    my $x = 2;\n    print $x;\n}\nprint $x;\n";
+    let fa = build_fa(src);
+    let outer = fa.resolve_variable("$x", Point::new(0, 3)).expect("outer decl").id;
+    let inner = fa.resolve_variable("$x", Point::new(3, 10)).expect("inner decl").id;
+    assert_ne!(outer, inner);
+    assert_ne!(fa.symbol(outer).scope, fa.symbol(inner).scope, "block must mint its own scope");
+    let bound = |row: usize, col: usize| {
+        fa.refs()
+            .iter()
+            .find(|r| r.target_name == "$x" && matches!(r.kind, RefKind::Variable) && r.span.start == Point::new(row, col))
+            .and_then(|r| r.resolved_symbol())
+    };
+    assert_eq!(bound(3, 10), Some(inner), "use inside the block binds to the block's decl");
+    assert_eq!(bound(5, 6), Some(outer), "use after the block binds to the outer decl again");
+}

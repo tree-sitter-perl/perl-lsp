@@ -21,12 +21,14 @@ impl<'a> Builder<'a> {
             "assignment_expression" => self.visit_assignment(node),
 
             // A bare `{ ... }` statement is its own block node in this
-            // grammar (no separate `block` child). It's a hard package
-            // boundary like any other block — `{ package Inner; }` must not
-            // leak Inner to following statements.
+            // grammar (no separate `block` child), so the `block` arm below
+            // never sees it. It is both a package boundary (`{ package
+            // Inner; }` must not leak Inner past the close) and a lexical
+            // scope (a `my` inside must not shadow past the close).
             "block_statement" => {
                 self.add_fold_range(node);
-                self.walk_block_package_scoped(node);
+                self.push_scope(ScopeKind::Block, node_to_span(node), None);
+                self.walk_block_package_scoped_then(node, |b| { b.pop_scope(); });
             }
 
             // Blocks create scopes (but only standalone blocks, not sub/class/for bodies)
