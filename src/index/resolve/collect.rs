@@ -876,6 +876,17 @@ pub(super) fn refs_keyed<'a>(
         .map(move |&i| &refs[i])
 }
 
+/// Per-walk scratch for facts that depend on the TARGET alone, not on the
+/// file being scanned, so a walk over N candidate files derives each once.
+/// Created by the walk driver; `collect_from_analysis` fills it lazily.
+#[derive(Default)]
+pub(super) struct WalkMemo {
+    /// `pack_member_of_class`'s index-side verdict for a Method target,
+    /// which is the same for every file scanned through the UNSCOPED index
+    /// (a closure-scoped pack file asks its own scope and bypasses this).
+    bare_member_index_verdict: std::cell::OnceCell<Option<bool>>,
+}
+
 pub(super) fn collect_from_analysis(
     key: &FileKey,
     analysis: &FileAnalysis,
@@ -883,6 +894,7 @@ pub(super) fn collect_from_analysis(
     aliases: &[DelegationAlias],
     module_index: Option<&dyn CrossFileLookup>,
     file_str: &str,
+    memo: &WalkMemo,
     out: &mut Vec<RefLocation>,
 ) {
     use crate::model::file_analysis::HashKeyOwner;
@@ -905,7 +917,8 @@ pub(super) fn collect_from_analysis(
     // file's `o->op_type` types against a globally-arbitrary same-named
     // candidate and the site silently drops out. Transparent for Perl
     // (empty closure = the plain index).
-    let scoped_storage: Option<crate::model::file_analysis::ScopedLookup>;
+    let mut scoped_storage: Option<crate::model::file_analysis::ScopedLookup> = None;
+    let unscoped_index = module_index;
     let module_index: Option<&dyn CrossFileLookup> = match module_index {
         Some(idx) if !analysis.pack.include_closure.is_empty() => {
             let path = key_for_sort(key);
@@ -949,7 +962,23 @@ pub(super) fn collect_from_analysis(
     // file, under this file's own closure scope.
     let bare_constant_member = match &target.kind {
         TargetKind::Method { class } => {
-            pack_member_of_class(&target.name, class, analysis, module_index).unwrap_or(false)
+            // This file's own declaration answers first; otherwise the
+            // index's answer, which — through the unscoped index — is the
+            // same for every file this walk scans, so the memo serves it
+            // (a per-file whole-copy rehydrate of the class's file
+            // otherwise, ~58k per BMO heatmap). A scoped (pack) lookup
+            // asks its own closure each time, as before.
+            pack_member_of_class(&target.name, class, analysis, None)
+                .or_else(|| {
+                    if scoped_storage.is_some() {
+                        pack_member_of_class(&target.name, class, analysis, module_index)
+                    } else {
+                        *memo.bare_member_index_verdict.get_or_init(|| {
+                            pack_member_of_class(&target.name, class, analysis, unscoped_index)
+                        })
+                    }
+                })
+                .unwrap_or(false)
         }
         _ => false,
     };

@@ -420,6 +420,7 @@ fn walk_refs(
     // a workspace walk would.
     let _session = crate::model::witnesses::ResolutionSession::enter(module_index);
     let mut out = Vec::new();
+    let memo = WalkMemo::default();
 
     // Names that reach the target through a macro delegation edge — the
     // BACKWARD half of goto-def's see-through (`#define IncRef(sv)
@@ -431,7 +432,7 @@ fn walk_refs(
 
     if let WalkScope::Origin { key, analysis } = scope {
         let file_str = canonical_file_str(key);
-        collect_from_analysis(key, analysis, target, &aliases, module_index, &file_str, &mut out);
+        collect_from_analysis(key, analysis, target, &aliases, module_index, &file_str, &memo, &mut out);
         return sorted_deduped(out);
     }
 
@@ -512,7 +513,7 @@ fn walk_refs(
             if !gate(&doc.analysis, &file_str) {
                 return;
             }
-            collect_from_analysis(&key, &doc.analysis, target, &aliases, module_index, &file_str, &mut out);
+            collect_from_analysis(&key, &doc.analysis, target, &aliases, module_index, &file_str, &memo, &mut out);
         });
     } else {
         // Even if open isn't in the mask, track the paths so a WORKSPACE walk
@@ -598,7 +599,7 @@ fn walk_refs(
                 // whole only when a matching ref needs the bag.
                 let full = crate::util::ghost_stats::timed("refs.cand.view", || matcher_view(idx, &cached, target));
                 crate::util::ghost_stats::timed("refs.cand.collect", || collect_from_analysis(
-                    &key, &full, target, &aliases, module_index, &file_str, &mut out,
+                    &key, &full, target, &aliases, module_index, &file_str, &memo, &mut out,
                 ));
             }
         }
@@ -638,7 +639,7 @@ fn walk_refs(
                 }
                 None => std::sync::Arc::clone(entry.value()),
             };
-            collect_from_analysis(&key, &full, target, &aliases, module_index, &file_str, &mut out);
+            collect_from_analysis(&key, &full, target, &aliases, module_index, &file_str, &memo, &mut out);
         }
     }
 
@@ -668,7 +669,7 @@ fn walk_refs(
                 // row-axes-evicted (rows exist, retrieval switched off) —
                 // the matcher needs refs + symbols, so take the rows view.
                 let full = matcher_view(idx, cached, target);
-                collect_from_analysis(&key, &full, target, &aliases, module_index, &file_str, &mut out);
+                collect_from_analysis(&key, &full, target, &aliases, module_index, &file_str, &memo, &mut out);
             });
         }
     }
