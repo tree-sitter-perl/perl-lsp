@@ -521,6 +521,11 @@ pub(crate) fn cli_heatmap(root: &str, opts: &[String]) {
         None
     };
 
+    // One walk per declaration over a frozen index: memoize the relational
+    // retrieval for the sweep (same-named declarations share their
+    // candidate set; the shredded-path set is fetched once, not per walk).
+    let _retrieval = resolve::RetrievalMemoGuard::open();
+
     // Gather rows for one file's symbols through `heatmap_symbol_row` — the
     // one place fan-in/fan-out/dead are computed, so Perl and pack share the
     // exact `references()` projection. `hidden_in_outline` folds arity-variant

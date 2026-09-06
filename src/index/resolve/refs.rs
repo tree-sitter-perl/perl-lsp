@@ -307,6 +307,90 @@ fn ref_rows_enabled() -> bool {
     }
 }
 
+/// Sweep-wide memo over the relational retrieval — opened by a batch verb
+/// that mints one backward walk per declaration (`--heatmap`) and whose
+/// index is frozen for the run: every declaration of `new` probes the same
+/// key, and every walk re-fetched the whole shredded-path set (one
+/// `SELECT path FROM files` per declaration, ~3 s of a 113 s BMO run) under
+/// the single retained-reader mutex, which a parallel gather would
+/// serialize on. Entries are keyed by index identity + `resolution_epoch`,
+/// so a shape mutation invalidates them like every other epoch memo.
+/// Closed (the default) ⇒ every walk queries the store, exactly as before.
+struct RetrievalMemo {
+    candidates: dashmap::DashMap<(usize, u64, Vec<String>), std::sync::Arc<Vec<PathBuf>>>,
+    indexed: dashmap::DashMap<(usize, u64), std::sync::Arc<std::collections::HashSet<PathBuf>>>,
+}
+
+static RETRIEVAL_MEMO: std::sync::RwLock<Option<RetrievalMemo>> = std::sync::RwLock::new(None);
+
+/// Opens the retrieval memo for one batch sweep; closes (and drops) it on
+/// drop. `PERL_LSP_NO_RETRIEVAL_MEMO=1` leaves it closed — the A/B control.
+pub struct RetrievalMemoGuard(());
+
+impl RetrievalMemoGuard {
+    pub fn open() -> Self {
+        let off = std::env::var("PERL_LSP_NO_RETRIEVAL_MEMO").as_deref() == Ok("1");
+        if !off {
+            if let Ok(mut slot) = RETRIEVAL_MEMO.write() {
+                *slot = Some(RetrievalMemo {
+                    candidates: dashmap::DashMap::new(),
+                    indexed: dashmap::DashMap::new(),
+                });
+            }
+        }
+        RetrievalMemoGuard(())
+    }
+}
+
+impl Drop for RetrievalMemoGuard {
+    fn drop(&mut self) {
+        if let Ok(mut slot) = RETRIEVAL_MEMO.write() {
+            *slot = None;
+        }
+    }
+}
+
+fn index_identity(idx: &dyn CrossFileLookup) -> (usize, u64) {
+    (
+        idx as *const dyn CrossFileLookup as *const () as usize,
+        idx.resolution_epoch(),
+    )
+}
+
+/// `idx.ref_candidate_paths(keys)`, memoized while a sweep memo is open.
+fn retrieve_candidates(idx: &dyn CrossFileLookup, keys: &[String]) -> std::sync::Arc<Vec<PathBuf>> {
+    if let Ok(slot) = RETRIEVAL_MEMO.read() {
+        if let Some(memo) = slot.as_ref() {
+            let (id, epoch) = index_identity(idx);
+            let k = (id, epoch, keys.to_vec());
+            if let Some(hit) = memo.candidates.get(&k) {
+                crate::util::ghost_stats::count("refs.retrieval.memo_hit");
+                return std::sync::Arc::clone(hit.value());
+            }
+            let fresh = std::sync::Arc::new(idx.ref_candidate_paths(keys));
+            memo.candidates.insert(k, std::sync::Arc::clone(&fresh));
+            return fresh;
+        }
+    }
+    std::sync::Arc::new(idx.ref_candidate_paths(keys))
+}
+
+/// `idx.ref_indexed_paths()`, memoized while a sweep memo is open.
+fn retrieve_indexed(idx: &dyn CrossFileLookup) -> std::sync::Arc<std::collections::HashSet<PathBuf>> {
+    if let Ok(slot) = RETRIEVAL_MEMO.read() {
+        if let Some(memo) = slot.as_ref() {
+            let k = index_identity(idx);
+            if let Some(hit) = memo.indexed.get(&k) {
+                return std::sync::Arc::clone(hit.value());
+            }
+            let fresh = std::sync::Arc::new(idx.ref_indexed_paths());
+            memo.indexed.insert(k, std::sync::Arc::clone(&fresh));
+            return fresh;
+        }
+    }
+    std::sync::Arc::new(idx.ref_indexed_paths())
+}
+
 /// The name keys the relational retrieval probes for `target`: the target
 /// name's match key plus every delegation alias's — the same
 /// `name_match_key` spelling rows are written under, so retrieval is exactly
@@ -488,7 +572,7 @@ fn walk_refs(
     // server-warm references 4 sites vs the sweep's 155) and an unresolved
     // candidate falls through to the whole-view sweeps for coverage.
     // Empty candidate retrieval leaves narrowing off entirely.
-    let mut rows_indexed: std::collections::HashSet<PathBuf> = Default::default();
+    let mut rows_indexed: std::sync::Arc<std::collections::HashSet<PathBuf>> = Default::default();
     let mut candidate_set: std::collections::HashSet<PathBuf> = Default::default();
 
     // Open files (canonical — workspace entries for open paths are skipped).
@@ -539,7 +623,7 @@ fn walk_refs(
     if rows_active {
         if let Some(idx) = module_index {
             let keys = retrieval_keys(target, &aliases);
-            let candidate_paths = crate::util::ghost_stats::timed("refs.retrieval.candidates", || idx.ref_candidate_paths(&keys));
+            let candidate_paths = crate::util::ghost_stats::timed("refs.retrieval.candidates", || retrieve_candidates(idx, &keys));
             crate::util::ghost_stats::count("refs.walks");
             crate::util::ghost_stats::add_n("refs.candidates", candidate_paths.len() as u64);
             if std::env::var_os("PERL_LSP_REFS_DEBUG").is_some() {
@@ -551,11 +635,11 @@ fn walk_refs(
                 );
             }
             if narrow_enabled && !candidate_paths.is_empty() {
-                rows_indexed = crate::util::ghost_stats::timed("refs.retrieval.indexed_paths", || idx.ref_indexed_paths());
+                rows_indexed = crate::util::ghost_stats::timed("refs.retrieval.indexed_paths", || retrieve_indexed(idx));
                 candidate_set = candidate_paths.iter().cloned().collect();
             }
-            for path in candidate_paths {
-                if covered_paths.contains(&path) {
+            for path in candidate_paths.iter() {
+                if covered_paths.contains(path) {
                     continue;
                 }
                 // Tier attribution: a FileStore workspace entry rides the
@@ -566,7 +650,7 @@ fn walk_refs(
                 // read-only deps (and vice versa).
                 let ws_arc = files
                     .workspace_raw()
-                    .get(&path)
+                    .get(path)
                     .map(|e| std::sync::Arc::clone(e.value()));
                 let cached = match ws_arc {
                     Some(arc) => {
@@ -582,13 +666,13 @@ fn walk_refs(
                         if !mask.contains(RoleMask::DEPENDENCY) {
                             continue;
                         }
-                        match idx.cached_by_path(&path) {
+                        match idx.cached_by_path(path) {
                             Some(cm) => cm,
                             None => continue,
                         }
                     }
                 };
-                covered_paths.insert(path);
+                covered_paths.insert(path.clone());
                 let key = FileKey::Path(cached.path.clone());
                 let file_str = canonical_file_str(&key);
                 if !gate(&cached.analysis, &file_str) {
