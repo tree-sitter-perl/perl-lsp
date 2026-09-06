@@ -181,10 +181,9 @@ reason, but do not leave them unlabelled:
 - Merge the two index families (Tier 3, structural — likely its own
   arc, and Epic 11's ADR is asked to note the same debt from the
   closure side).
-- The grammar-kind tripwire — IN FLIGHT, and it **must accept DECLARED
-  future kinds or it eats the forward-compat arms**
-  (`parenthesized_expression` is the live example: ~27 deliberate
-  arms, inert until the parser lands the kind).
+- The grammar-kind tripwire — LANDED, accepting DECLARED future kinds so
+  it cannot eat a forward-compat arm (`parenthesized_expression` was the
+  live example until ts-parser-perl 2.0.0 landed it).
 - "A stale cache hides a fix as readily as it hid the crash" — OPEN,
   and it cost one false gold FAIL during integration. This is a
   developer-experience bug with a real cost; `perl-lsp --clear-cache`

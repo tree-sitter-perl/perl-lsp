@@ -148,7 +148,7 @@ impl<'a> Builder<'a> {
             match child.kind() {
                 "quoted_word_list" => self.extract_qw_word_spans(child, names),
                 "anonymous_hash_expression" => self.extract_class_tiny_hash_keys(child, names),
-                "list_expression" => self.collect_class_tiny_attrs(child, names),
+                "list_expression" | "parenthesized_expression" => self.collect_class_tiny_attrs(child, names),
                 _ => {}
             }
         }
@@ -501,7 +501,7 @@ impl<'a> Builder<'a> {
                 _ => continue,
             };
             match child.kind() {
-                "list_expression" => {
+                "list_expression" | "parenthesized_expression" => {
                     self.accumulate_constant_pair(child);
                     return;
                 }
@@ -518,11 +518,7 @@ impl<'a> Builder<'a> {
     /// the value side (extracted into `constant_strings`).
     pub(super) fn accumulate_constant_pair(&mut self, list: Node<'a>) {
         let mut name: Option<(String, Node)> = None;
-        for j in 0..list.child_count() {
-            let c = match list.child(j) {
-                Some(c) if c.is_named() => c,
-                _ => continue,
-            };
+        for c in crate::cst::list_elements(list) {
             match &name {
                 None => {
                     if matches!(c.kind(), "autoquoted_bareword" | "bareword") {
@@ -1354,7 +1350,7 @@ impl<'a> Builder<'a> {
         // list's own Expr witness can't carry that (its meaning
         // depends on the LHS sigil), so type it from the LHS
         // side through the same shape builder.
-        if inferred.is_none() && right.kind() == "list_expression" {
+        if inferred.is_none() && matches!(right.kind(), "list_expression" | "parenthesized_expression") {
             if let Some(vt) = self.get_var_text_from_lhs(left) {
                 if vt.starts_with('%') {
                     inferred = Some(self.hash_literal_type(right));

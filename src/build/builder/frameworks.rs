@@ -911,10 +911,10 @@ impl<'a> Builder<'a> {
     /// name a local sub. Also accepts a bare `exports => [...]` at the top of
     /// the use args (the common minimal form).
     pub(super) fn detect_sub_exporter_use(&mut self, use_node: Node<'a>) {
-        // The args live in the use statement's list_expression child.
+        // The args are the use statement's list child, bare or parenthesized.
         let args = (0..use_node.named_child_count())
             .filter_map(|i| use_node.named_child(i))
-            .find(|c| c.kind() == "list_expression");
+            .find(|c| matches!(c.kind(), "list_expression" | "parenthesized_expression"));
         let Some(args) = args else { return; };
         let setup = self.value_node_after_key(args, "-setup");
         // `-setup => { exports => [...] }` or top-level `exports => [...]`.

@@ -810,9 +810,8 @@ named inputs.
   longer differ in shape, only in acquisition).
 - **Iterative builder walk** — removes the stack-overflow class rather than
   gating it.
-- **Grammar-kind tripwire** — must accept DECLARED future kinds or it fails on
-  the intentional `parenthesized_expression` forward-compat arms and invites
-  exactly the harmful deletion. See `PARKED.md`.
+- **Grammar-kind tripwire** — landed; accepts DECLARED future kinds so it
+  cannot invite the deletion of a forward-compat arm. See `PARKED.md`.
 
 # Not scheduled, with reasons
 

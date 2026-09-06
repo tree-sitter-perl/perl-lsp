@@ -113,10 +113,6 @@ none). Migrate the callers. `extract_key_text` also returns an
 - Item 6's ~400-poke long tail (strangler rule only).
 - Anything DBIC-shaped (Epic 2 owns it).
 - `__DATA__` / `__END__` (section markers, not values).
-- **The forward-compat `parenthesized_expression` arms.** ~27 Perl-side
-  arms are inert today because the kind is absent from ts-parser-perl
-  1.1.4's `node-types.json`, and they become correct the day the parser
-  lands it. Do not "clean them up" — CLAUDE.md says so explicitly.
 
 ## Language-pack beat
 

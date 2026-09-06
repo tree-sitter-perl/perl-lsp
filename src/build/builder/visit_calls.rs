@@ -790,8 +790,7 @@ impl<'a> Builder<'a> {
         // is a flat `key => [..], key2 => [..]` list, so the key precedes its
         // array in named-child order.
         let mut pending_tag: Option<String> = None;
-        for i in 0..table.named_child_count() {
-            let Some(child) = table.named_child(i) else { continue };
+        for child in crate::cst::list_elements(table) {
             // Member names live in the value arrays (after each tag key); the
             // bareword/string keys are selectors, not subs, so they're skipped.
             if child.kind() == "anonymous_array_expression" {
