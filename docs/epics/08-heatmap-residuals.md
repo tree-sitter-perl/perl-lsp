@@ -10,9 +10,10 @@
 One measured cost and two gaps. The cost first, because the gaps make
 it worse:
 
-0. **`--heatmap` runs on one core** while `--check` uses all of them —
-   up to a 17× ratio on a fan-in-heavy corpus. `scaling-limits.md` §5
-   records the fix as "the obvious next step" and nobody has taken it.
+0. ~~**`--heatmap` runs on one core**~~ — **Phase A LANDED 2026-09-06.**
+   BMO 111 s → 8 s (20 threads) / 27 s (serial), byte-identical;
+   `scaling-limits.md` §5 carries the table and the residual (the
+   8-thread knee is allocation churn in the walk — Epic 15's).
 
 Then two gaps, both plugin-knowledge-shaped (rule #10 — never a
 per-verb/per-name list in core):
@@ -57,7 +58,24 @@ per-verb/per-name list in core):
 
 ## Phase breakdown
 
-### Phase A — parallelize the gather (do this first)
+### Phase A — parallelize the gather (do this first) — LANDED 2026-09-06
+
+What landed went past the spec, because attribution showed the serial
+half was not "serial" so much as wasteful: the gather fans out PER
+DECLARATION (per-file left the wall at the longest file), collected in
+item order so the report is byte-identical (verified on WeBWorK, Webmin,
+BMO, `--csv`, `--include-deps`, three runs each); the matcher walks
+`RefTable::by_key` buckets instead of the whole ref vec; target-only facts
+memoize per walk (`WalkMemo`); retrieval memoizes per sweep
+(`RetrievalMemoGuard`); `RetainedReader` is a checkout pool (it was the
+parallel ceiling — its lock was held across every blob decode); and the
+hub LRU is sized to the corpus for the sweep (`cache_policy`). Numbers,
+RSS at default and at 4 workers, and the measured residual are in
+`scaling-limits.md` §5; knobs in `adr/heatmap.md` §Cost. The acceptance
+below was met except the quiet-box re-take, which is still owed before
+seeding baselines.
+
+The original brief, kept for the reasoning:
 
 **`--heatmap` runs on one core.** `scaling-limits.md` §5, measured:
 104–105% CPU throughout, where `--check`'s diagnostics sweep

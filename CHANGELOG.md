@@ -6,6 +6,28 @@ crate / VS Code extension versions.
 
 ## Unreleased
 
+### Heatmap
+
+- **`--heatmap` is 4–14× faster and uses every core.** The per-declaration
+  reference walks fan out over the Rayon pool (`RAYON_NUM_THREADS` bounds
+  it) and the report is byte-identical to the serial one. On BMO (739
+  files) 111 s became 8 s at 20 threads and 27 s single-threaded; Webmin
+  ~35 s became 2.6 s; `--include-deps` on BMO 158 s became 9 s; abseil
+  (C++) 527 s became ~2 minutes. Four things
+  made the serial walk itself cheaper, and they serve `references` and
+  `rename` in the editor too: the matcher reads a per-file match-key index
+  instead of scanning every ref, target-only facts are derived once per
+  walk, the sweep memoizes its relational retrieval, and the retained
+  SQLite reader is a checkout pool — its single lock had serialized every
+  blob decode in the process.
+- **A whole-index sweep sizes the rehydration cache to the corpus.** The
+  stock 128 MiB LRU was cycling BMO's 274 MB working set (a 12% miss rate
+  that cost 3× the wall and doubled peak RSS through decode churn). The
+  heatmap now raises the cap from the persisted source bytes
+  (`src/index/cache_policy.rs`, the one home for cache sizing) for the
+  Perl hub and each pack-language sub-index, and says so on stderr;
+  `PERL_LSP_BAG_CACHE_MB` still pins it.
+
 ### Type inference
 
 - **`shift` consumes `@_`; only the first read is the invocant.** A second

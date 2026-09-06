@@ -248,6 +248,36 @@ miss a declaration-only file. `workspace/symbol` composes the resident
 sweeps with a `syms`-table scan (`sym_rows_matching`) for the workspace
 tier.
 
+**The in-file half of the narrowing is the same key.** Retrieval names the
+candidate files; inside each, `RefTable::by_key` buckets the refs by
+`Ref::match_key` — the identical function the rows are shredded under —
+and the matcher (`collect_from_analysis`, and `matcher_view`'s upgrade
+pre-scan) walks only the buckets for the target's key and its delegation
+aliases, in ref order. Sound by the same argument as retrieval: every arm
+compares either the exact `target_name` or its unqualified tail, and equal
+names have equal keys, so a bucket is a superset of any arm's matches. The
+declaration half narrows through the symbol name index the same way
+(`symbol_defines_target`'s first gate is name equality). Before this, each
+(query, candidate file) pair scanned the file's whole ref vec twice; a
+`--heatmap` over BMO is 1.9M such pairs.
+
+**Readers are a checkout pool.** `RetainedReader` — the retained
+connection the bag-LRU loader, the conclusion loader and `with_rows_conn`
+ride — hands a connection OUT for the call and takes it back after, never
+holding its lock across the caller's closure. The blob loader decodes
+inside that closure (10 µs–3 ms per LRU miss), and a single guarded
+connection serialized every rehydrate in the process: a 20-worker
+`--heatmap` gather measured 188% CPU before, 800–1100% after. Sequential
+callers still see one connection.
+
+**A batch sweep memoizes retrieval.** `RetrievalMemoGuard` (opened by
+`--heatmap`, closed on drop) caches `ref_candidate_paths` per
+(index, epoch, keys) and `ref_indexed_paths` per (index, epoch) for the
+sweep: every declaration of `new` probes the same key, and the
+shredded-path set was otherwise re-fetched once per declaration. Keyed on
+`resolution_epoch`, so a shape mutation invalidates it like every other
+epoch memo; closed, every walk queries the store exactly as before.
+
 The completeness invariant (`docs/adr/memory-slice-2-lru.md`) holds with
 the same proof shape as Slice 2: the rows are shredded from the identical
 post-fold refs/symbols the blob carries, for every indexed file; the
