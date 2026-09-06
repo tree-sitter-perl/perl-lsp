@@ -200,6 +200,32 @@ fn test_resolve_return_type_empty() {
 }
 
 #[test]
+fn unknown_absorbs_in_return_arm_agreement() {
+    // An arm nothing can name makes the join something nothing can name:
+    // not `None` (a lone typed arm would answer for the sub) and not the
+    // coarse HashRef/Numeric joins below it.
+    assert_eq!(
+        resolve_return_type(&[InferredType::ClassName("Foo".into()), InferredType::Unknown]),
+        Some(InferredType::Unknown),
+    );
+    assert_eq!(
+        resolve_return_type(&[InferredType::HashRef, InferredType::Unknown]),
+        Some(InferredType::Unknown),
+    );
+}
+
+#[test]
+fn an_undef_arm_does_not_wrap_unknown_in_optional() {
+    // `Optional<Unknown>` would claim a value half nothing supports.
+    assert_eq!(join_return_arms(&[InferredType::Unknown], true), Some(InferredType::Unknown));
+    // The rule for a KNOWN value arm is untouched.
+    assert_eq!(
+        join_return_arms(&[InferredType::ClassName("Foo".into())], true),
+        Some(InferredType::Optional(Box::new(InferredType::ClassName("Foo".into())))),
+    );
+}
+
+#[test]
 fn test_resolve_return_type_object_subsumes_hashref() {
     // Object + HashRef → Object wins (overloaded objects)
     assert_eq!(

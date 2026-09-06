@@ -35,6 +35,69 @@ Conservative by construction — it under-narrows, never lies. The bias is
 load-bearing for the diagnostics built on top: they miss some real bugs
 but never invent a false `Undef`/`Optional`.
 
+## `Unknown`: a rebind nothing can type still happened
+
+Temporal ordering answers a read from the newest witness at or before it.
+That is only right while every write leaves one. A rebind whose RHS nothing
+can type (`$ct = f($_)` with `f` unresolved) would otherwise leave nothing,
+and the read falls back on the newest belief it *can* see — the one the
+write replaced. `my $ct = undef; … $ct = f(); defined $ct` read `Undef`
+and every `defined` guard on it read as one that can never pass.
+
+So such a rebind lands as `InferredType::Unknown`, through the same
+`push_type_constraint` every typed rebind uses, at the same statement
+start. It is a real answer, not an absence, and each half of that matters:
+
+- **Latest-wins retires the prior belief.** `Unknown` subsumes only itself,
+  so when the RHS resolves on a later fold iteration the real type lands
+  on top of it; until then it is the standing answer.
+- **The scope walk stops on it.** A scope that answers `None` lets the
+  walk continue outward, so a shadowed inner `$x` with its belief gone
+  would answer with the *outer* `$x`. `Some(Unknown)` is authoritative
+  at the binding scope and the walk never reaches the namesake.
+- **Consumers ask the value.** `InferredType::is_known()` is the one
+  spelling of "no information"; display surfaces (hover, inlay hints,
+  signature help) and the guard verdicts filter on it rather than
+  matching the variant. Dispatch needs no gate: `class_name()` is `None`.
+
+A rebind that may not run is old-or-new no matter what its RHS is, and
+lands as `Unknown` outright. `cst::is_conditionally_executed` is the one
+spelling of "may not run": a statement modifier, an `if`/loop block, a
+ternary arm, a short-circuit chain. Two consequences of it:
+
+- **`$x = undef if COND`** anchors at the statement start, so the guard's
+  own condition reads no value the write has not produced, and the
+  successor reads no value it may never produce.
+- **`if (…) { $x = … }`, a loop body.** The write's witness sits on the
+  block's scope, which a read after the block never walks through, so
+  that read would keep the pre-block belief. The honest answer there is
+  `old ⊔ new`, and no reducer can compute it: a reducer sees ONE
+  attachment, and the write landed on the block's. So the emitter stands
+  in for the join and puts `Unknown` on the binding scope — the one every
+  later read in the variable's extent walks through. **This is an
+  approximation of a join and is deleted when Epic 16's `JoinFold`
+  lands** (`docs/epics/16-cfg-tier.md`, Phase C); its anchor is in that
+  epic's table.
+
+One axis `Unknown` does not reach: a `ClassName` rebind also pushes a
+`ClassAssertion` observation, and the fold's identity-over-rep rule
+answers from that axis without temporal order against plain types. So
+`my $x = Foo->new; $x = 'str'` still reads `Foo` after the rebind — a
+standing defect of that rule, not of `Unknown`, and it caps what a later
+untypeable rebind can retire for class-typed variables.
+
+`Unknown` absorbs in return-arm agreement: an arm nothing can name makes
+the join `Unknown`, not `None` (which reads as "no arms agree" and lets a
+lone typed arm answer for the sub) and not `Optional<Unknown>` (a claim
+whose value half nothing supports — on the substrate it minted
+`optional-deref` at every deref behind a truthiness guard the engine
+does not model, `return unless $enc`).
+
+Declarations are a first binding, not a rebind: one whose RHS nothing
+can type stays absent. The rule is spelled once, in the fold's
+assignment pass (`apply_chain_typing_assignments`); it keeps no record of
+where a variable was reassigned, because the witness *is* that record.
+
 ## Subjects: variables and places, one keying
 
 A guard subject is a variable (`$x`) or a **place** — a chain of stable

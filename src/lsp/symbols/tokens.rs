@@ -74,7 +74,7 @@ pub fn inlay_hints(analysis: &FileAnalysis, range: Range) -> Vec<InlayHint> {
                 }
                 if let Some(ty) = analysis.inferred_type_via_bag(&sym.name, sym.span.start) {
                     // Only show Object/HashRef/ArrayRef/CodeRef/Regexp — not Numeric/String
-                    if matches!(ty, InferredType::Numeric | InferredType::String) {
+                    if !ty.is_known() || matches!(ty, InferredType::Numeric | InferredType::String) {
                         continue;
                     }
                     hints.push(InlayHint {

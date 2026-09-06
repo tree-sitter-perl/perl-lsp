@@ -1165,8 +1165,9 @@ impl FileAnalysis {
     ) -> Vec<GuardRedundancy> {
         let mut out = Vec::new();
         for g in &self.guard_sites {
-            let Some(prior) =
-                self.inferred_type_via_bag_ctx(&g.subject, g.before_point, module_index)
+            let Some(prior) = self
+                .inferred_type_via_bag_ctx(&g.subject, g.before_point, module_index)
+                .filter(InferredType::is_known)
             else {
                 continue;
             };

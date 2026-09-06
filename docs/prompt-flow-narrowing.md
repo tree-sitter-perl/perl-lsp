@@ -54,6 +54,18 @@ matching spelling). Revisit if a motivating soundness case appears.
   claimed it, but no commit in any branch ever contained it, so this is
   a design to write rather than a patch to recover.
 
+  **Substrate evidence, and a coupling to `Unknown`.** `Unknown` is
+  absorbing in return-arm agreement (`docs/adr/flow-narrowing.md`)
+  because letting an undef arm wrap it as `Optional<Unknown>` minted
+  `optional-deref` at every deref behind a guard of exactly this family:
+  `my $enc = $self->encoding; return $value unless $enc; $enc->decode`
+  (`Catalyst.pm`), `unless ($smtp) { $self->_throw(…) } … $smtp->message`
+  (12 sites in `Email::Sender::Transport::SMTP`). The first shape is the
+  exit form this item covers; the second needs "this call does not
+  return" for a plain method, which nothing models. Once the exit form
+  narrows, `Optional<Unknown>` becomes the more informative answer and
+  the absorbing rule should be re-measured, not assumed.
+
 ### Negation
 
 - **General `Not` / `Difference` negation** — parked: no positive lookup

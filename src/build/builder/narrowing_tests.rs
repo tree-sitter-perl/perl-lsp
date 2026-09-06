@@ -732,3 +732,78 @@ fn narrow_ref_eq_paren_wrapped_arg() {
     assert_eq!(invocant_class_of(&fa, "go").as_deref(), Some("Foo"));
 }
 
+// ---- `Unknown`: a write nothing can type still happened ----
+
+#[test]
+fn a_rebind_nothing_can_type_retires_the_prior_belief() {
+    // Temporal ordering alone reads the stale belief here: the write's RHS
+    // has no type, so without an `Unknown` witness the fold falls back on
+    // the newest belief it can read — the one the write replaced.
+    let fa = build_fa("sub f {\n  my $ct = undef;\n  $ct = unknown_fn();\n  return defined $ct;\n}");
+    assert_eq!(
+        fa.inferred_type_via_bag("$ct", Point::new(3, 20)),
+        Some(InferredType::Unknown),
+        "the untypeable write must land as Unknown, not leave Undef standing",
+    );
+}
+
+#[test]
+fn a_write_inside_a_loop_body_widens_the_read_after_it() {
+    // The write's own witness sits on the loop body's scope, which the read
+    // after the loop never walks through. The body may not have run, so the
+    // binding scope gets `Unknown` at the write — old-or-new is all that
+    // can be said there, and it is enough to stop `defined $ct` reading as
+    // a guard that can never pass.
+    let fa = build_fa(
+        "sub f {\n  my $ct = undef;\n  for my $x (1,2) { $ct = unknown_fn($x); }\n  return defined $ct;\n}",
+    );
+    assert_eq!(fa.inferred_type_via_bag("$ct", Point::new(3, 20)), Some(InferredType::Unknown));
+}
+
+#[test]
+fn a_typed_write_in_a_block_types_the_block_and_widens_what_follows() {
+    // Inside the block, after the write, the value IS the RHS. Past the
+    // block it is old-or-new.
+    let fa = build_fa(
+        "package P;\nsub m {\n  my $x = 'str';\n  if (c()) {\n    $x = Foo->new;\n    my $i = $x;\n  }\n  my $o = $x;\n}\n1;\n",
+    );
+    assert_eq!(
+        fa.inferred_type_via_bag("$x", Point::new(5, 13)),
+        Some(InferredType::ClassName("Foo".into())),
+        "a read in the block after the write sees the write",
+    );
+    assert_eq!(
+        fa.inferred_type_via_bag("$x", Point::new(7, 11)),
+        Some(InferredType::Unknown),
+        "a read past the block sees neither the stale String nor a Foo that may not have happened",
+    );
+}
+
+#[test]
+fn a_conditional_write_widens_instead_of_asserting() {
+    // `$x = undef if COND` may not happen, so its belief is old-or-new on
+    // both sides of the statement: the guard's own condition must not read
+    // an undef the write has not produced, and the successor must not read
+    // one it may never produce.
+    let fa = build_fa(
+        "sub f {\n  my $isbn = get_isbn();\n  $isbn = undef if $isbn && !$isbn->is_valid;\n  return $isbn;\n}",
+    );
+    for (label, point) in [("inside the guard condition", Point::new(3, 30)), ("after the statement", Point::new(4, 9))] {
+        assert!(
+            !matches!(fa.inferred_type_via_bag("$isbn", point), Some(InferredType::Undef)),
+            "{label}: a conditional write must not assert its value",
+        );
+    }
+}
+
+#[test]
+fn a_shadowed_rebind_neither_erases_the_outer_belief_nor_borrows_it() {
+    // The inner `$x` is a different variable. Its untypeable write must not
+    // touch the outer belief — and, its own belief gone, the inner read must
+    // stop at `Unknown` rather than walk out and answer with the outer's.
+    let fa = build_fa(
+        "package P;\nsub m {\n    my $x = 'str';\n    my $c = sub {\n        my $x = 42;\n        $x = unknown_fn();\n        my $i = $x;\n    };\n    my $o = $x;\n}\n1;\n",
+    );
+    assert_eq!(fa.inferred_type_via_bag("$x", Point::new(8, 13)), Some(InferredType::String), "outer untouched");
+    assert_eq!(fa.inferred_type_via_bag("$x", Point::new(6, 17)), Some(InferredType::Unknown), "inner stops on Unknown");
+}

@@ -711,7 +711,10 @@ pub fn signature_help(
                 // Local: look up inferred type at end of sub body —
                 // route through the witness bag so framework + branch
                 // + arity rules refine the answer.
-                if let Some(ty) = analysis.inferred_type_via_bag(&p.name, sig_info.body_end) {
+                if let Some(ty) = analysis
+                    .inferred_type_via_bag(&p.name, sig_info.body_end)
+                    .filter(InferredType::is_known)
+                {
                     format!("{}: {}", base, format_inferred_type(&ty))
                 } else {
                     base

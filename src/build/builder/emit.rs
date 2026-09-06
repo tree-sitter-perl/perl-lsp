@@ -441,7 +441,7 @@ impl<'a> Builder<'a> {
         spelling: crate::model::witnesses::tags::UndefArm,
     ) {
         use crate::model::witnesses::{
-            tags, FactValue, Witness, WitnessAttachment, WitnessPayload, WitnessSource,
+            tags, Witness, WitnessAttachment, WitnessPayload, WitnessSource,
         };
         self.bag.push(Witness {
             attachment: WitnessAttachment::SymbolReturnArm(sym_id),
