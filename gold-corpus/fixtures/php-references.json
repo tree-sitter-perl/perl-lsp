@@ -1,0 +1,64 @@
+{
+  "capability": "references",
+  "rows": [
+    {
+      "id": "php-refs-method-across-files",
+      "difficulty": "simple",
+      "semantic_area": "php-multilang",
+      "lang": "php",
+      "root": "gold-corpus/php-fixture",
+      "file": "src/Util/Greeter.php",
+      "line": 15,
+      "col": 20,
+      "expect": {
+        "all": [
+          "\"file\":\"Narrow.php\",\"line\":\"11\"",
+          "\"file\":\"Narrow.php\",\"line\":\"12\"",
+          "\"file\":\"Greeter.php\",\"line\":\"16\"",
+          "\"file\":\"Home.php\",\"line\":\"17\"",
+          "\"file\":\"Home.php\",\"line\":\"24\""
+        ],
+        "none": []
+      },
+      "status": "gold"
+    },
+    {
+      "id": "php-refs-class-constant",
+      "difficulty": "simple",
+      "semantic_area": "php-multilang",
+      "lang": "php",
+      "root": "gold-corpus/php-fixture",
+      "file": "src/Util/Grid.php",
+      "line": 5,
+      "col": 17,
+      "expect": {
+        "all": [
+          "\"file\":\"Grid.php\",\"line\":\"6\"",
+          "\"file\":\"Grid.php\",\"line\":\"11\"",
+          "\"file\":\"Home.php\",\"line\":\"19\""
+        ],
+        "none": []
+      },
+      "status": "gold"
+    },
+    {
+      "id": "php-refs-hook-method-from-its-callable-tuple",
+      "difficulty": "simple",
+      "semantic_area": "php-multilang",
+      "lang": "php",
+      "root": "gold-corpus/php-fixture",
+      "comment": "The `[$this, 'onInit']` tuple in `add_action` is a reference to the method.",
+      "file": "src/Wp/Plugin.php",
+      "line": 11,
+      "col": 20,
+      "expect": {
+        "all": [
+          "\"col\":\"37\",\"file\":\"Plugin.php\",\"line\":\"8\"",
+          "\"col\":\"21\",\"file\":\"Plugin.php\",\"line\":\"12\""
+        ],
+        "none": []
+      },
+      "status": "gold"
+    }
+  ]
+}
