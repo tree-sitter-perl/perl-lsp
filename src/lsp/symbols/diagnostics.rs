@@ -1062,6 +1062,44 @@ pub fn pack_symbol_diagnostics(
         }
     }
 
+    // ---- arity on plain calls and constructors (local callees only) ----
+    for r in analysis.refs() {
+        if !matches!(r.kind, RefKind::FunctionCall) {
+            continue;
+        }
+        let Some(n) = r.arg_count else { continue };
+        let name = r.unqualified_target_name();
+        let callee = analysis
+            .symbols_named(name)
+            .iter()
+            .map(|&sid| analysis.symbol(sid))
+            .find(|s| matches!(s.kind, FaSymKind::Sub))
+            .or_else(|| {
+                // `new Foo(...)`: the class's own constructor; a class with
+                // none accepts any argument list
+                let ctor = pack.constructor_names.first()?;
+                if !local_class(name) || catch_all(name) || !ancestry_complete(name) {
+                    return None;
+                }
+                match analysis.resolve_member_in_ancestors(name, ctor, MemberShape::Callable, idx)? {
+                    MethodResolution::Local { sym_id, .. } => Some(analysis.symbol(sym_id)),
+                    _ => None,
+                }
+            });
+        let Some(sym) = callee else { continue };
+        let Some(a) = sym.arity else { continue };
+        if callee_takes_any(&dynamic_arg_calls, sym) {
+            continue;
+        }
+        if n < a.required {
+            push(&mut out, r.span, DiagnosticSeverity::ERROR, "arity-mismatch",
+                format!("Not enough arguments. Expected {}. Found {n}.", a.required));
+        } else if !a.variadic && n > a.total {
+            push(&mut out, r.span, DiagnosticSeverity::WARNING, "arity-mismatch",
+                format!("Too many arguments. Expected {}. Found {n}.", a.total));
+        }
+    }
+
     out
 }
 
