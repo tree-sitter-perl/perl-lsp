@@ -944,6 +944,8 @@ impl SkeletonAnalysis {
                             invocant_span: Some(inv_span),
                             method_name_span: Span { start: r.start, end: r.end },
                             member_op: r.member_op,
+                            shape: crate::model::file_analysis::MemberShape::Unknown,
+                            named_by_string: false,
                         }
                     }
                     // A type-position name (`Widget w;`, `struct op* o`, a
@@ -1068,6 +1070,8 @@ impl SkeletonAnalysis {
                             invocant_span: None,
                             method_name_span: *span,
                             member_op: None,
+                            shape: crate::model::file_analysis::MemberShape::Unknown,
+                            named_by_string: false,
                         },
                         span: *span,
                         scope: crate::model::file_analysis::ScopeId(0),
