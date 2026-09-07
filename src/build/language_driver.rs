@@ -1257,6 +1257,7 @@ fn remap_spans(
     }
     for rf in refs.iter_mut() {
         let crate::build::query_extract::SkelRef {
+            via: _,
             kind: _,
             name: _,
             start,
@@ -1265,6 +1266,8 @@ fn remap_spans(
             invocant,
             member_op,
             arg_count: _,
+            shape: _,
+            named_by_string: _,
         } = rf;
         (*start, *end) = remap_span(*start, *end);
         // The invocant span is consumed via `expr_type_at_span` (member
