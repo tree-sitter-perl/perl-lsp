@@ -117,3 +117,20 @@ registration). A reverse map fed on insert but not on rebuild serves
 cold sessions and starves warm ones — paid twice before this bundle
 made the divergence unrepresentable. New reverse edges go in this
 struct, never as a free-standing map.
+
+## Pack contracts ride the same lane
+
+A pack declares its contract shapes and inherits the check: php's
+skeleton captures an interface's methods and every `abstract` method as
+`@contract.target` (the `contract` symbol attribute → `contract_symbols` +
+the declaring package's `requires`), and an interface, a trait or an
+abstract class is a role (`PackageFacts::is_role`, from the `interface` /
+`trait` / `abstract` class attributes) — it defers its obligations to a
+concrete composer exactly as a Moose role does. `unfulfilled_role_requires`
+then answers php with no php in it: the composer's MRO must provide each
+name with a non-contract declaration, the walk continues through deferring
+ancestors and prunes at concrete ones, and every honest-silence rule above
+holds — except the `AUTOLOAD` silence, which does not transfer: php checks
+a contract when the class is DECLARED, before any call a `__call` could
+catch, so the pack lane (`unimplemented-method`,
+`docs/adr/php-diagnostics.md`) reports through a catch-all method.
