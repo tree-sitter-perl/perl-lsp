@@ -349,3 +349,880 @@ Known residual, named: Glyphs standalone still spends 7.9 s (build) +
 N queries × W witnesses, clone-free but not fold-free, temporal semantics
 make naive memoization wrong. Separate design question; the checked-in
 baselines will hold the line meanwhile.
+
+## 2026-09-02 — PHP answers vs Intelephense (free) and phpactor (sha ee285f2)
+
+Three servers over stdio (`bench/compare/`), same probe battery, same
+checkouts, no `vendor/` in any root (so vendor-defined symbols are dark for
+all three equally): guzzle (10 probes), monolog (8), symfony/demo (3).
+Intelephense 1.x free tier via npm, phpactor 2026.06.23.0 phar with
+`index:build` run first, ours = the r69 binary (`--features cpp,php`),
+cold cache. One run each; latencies are first-call numbers on a shared box.
+
+| | ready (guzzle / monolog / demo) | RSS at end (guzzle / monolog / demo) |
+|---|---|---|
+| ours | 3.5 s / 1.3 s / 1.1 s | 213 / 73 / 63 MB |
+| intelephense | 0.8 / 0.7 / 1.7 s | 316 / 203 / 197 MB |
+| phpactor | 7.2 / 0.8 / 0.3 s (+ index:build 14 / 9 / 10 s) | 133 / 96 / 80 MB |
+
+Answers. Every goto-definition probe (13: `$this->method()`, `Class::static()`,
+`new Foo()`, trait method, property, `parent::__construct`, a `use` leaf, a
+typed parameter) lands on the same symbol in all three tools (Intelephense
+anchors the range at the docblock, the others at the declaration). Reference
+counts against grep truth:
+
+| probe | grep | ours | intelephense | phpactor |
+|---|---|---|---|---|
+| guzzle `Client::sendAsync` | 10 sites + decl | 12 (incl. interface decl) | 12 | 10 (misses `ClientInterface` decl, `Pool.php` site) |
+| guzzle trait `request` | 6 trait sites | 61 | 60 (no interface decl) | 59 (no `Client::request` impl) |
+| guzzle `new Client(` | 304 | 304 | 304 | 304 |
+| guzzle `CookieJar::count` | decl | 1 | 2 — the second is `MockHandler::count()`, another class's same-named method | 1 |
+| monolog `Logger::$handlers` | 10 + decl | 11 | 11 | 11 |
+| monolog `pushHandler` | 50 sites + decl | 42 | 42 | 42 |
+| monolog `addRecord` | 15 + decl | 16 | 16 | 16 |
+| demo `Post::getTitle` | 4 + decl | 5 | 5 | 5 |
+
+(`pushHandler`: all three agree at 42; the grep's extra 8 are `->pushHandler(`
+on receivers no tool types — the count is the tools' shared ceiling, not a
+gap of ours.) Rename: ours = phpactor on both probes (a private method: 3
+edits; a protected property read by a subclass: 16 edits across
+`StreamHandler` + `RotatingFileHandler`); Intelephense free returns none.
+Completion after `$this->`: identical member sets (64 / 43 items) in all
+three. Hover: ours shows the signature and the inferred type
+(`handlers: list<HandlerInterface>` where phpactor shows the docblock's
+`array<int,HandlerInterface>`), but NOT the docblock description text both
+others render — the one visible gap in this battery. Latency: ours is
+single-digit to tens of ms warm like the others, except the first
+cross-file references walk on guzzle (1,057 ms vs Intelephense 110 ms) —
+the cold rehydration cost the R5-4 attribution names.
+
+## 2026-09-02 — the other tools' axes: signature help, docblocks, outline, diagnostics (sha pending net)
+
+Same three servers, same driver (`bench/compare/lspq.py` grew
+`signatureHelp`, `codeAction`, `implementation`, `typeDefinition`,
+`documentSymbol` and a `publishDiagnostics` capture). A two-file fixture
+(`Service` calling a `Mailer` with every mistake an editor should catch)
+plus the round-1 corpora, guzzle and monolog hand-vendored with their PSR
+dependencies (composer's dist downloads are refused by the sandbox proxy).
+
+| axis (fixture) | ours before | ours after | Intelephense free | phpactor |
+|---|---|---|---|---|
+| signature help in `$this->mailer->send($who, │)` | none | `send(string $to, string $subject, string $body = '') : bool`, active 1, docblock | 3 params, active 0/1 | 3 params |
+| hover on a method | signature + type | + docblock summary | docblock | docblock |
+| document outline of a class | 2 flat items | class with its members | 9 (params too) | 3 |
+| diagnostics on `Service.php` | 0 | 8: not enough / too many arguments, undefined method ×2, non-public access, undefined variable, undefined type ×2 | 8 real + 2 "declared but not used" | 0 (phpactor lints docblocks) |
+| type definition on `$this->mailer` | none | none (open) | none (licensed) | `Mailer` |
+| implementations of an interface method | (works) | (works) | none (licensed) | works |
+
+Diagnostics on the corpora (`--check`, every remaining row read —
+`docs/adr/php-diagnostics.md`): guzzle `undefined-type` 1,331 of which
+1,091 are one missing test class and 208 the unvendored PHPUnit;
+`unresolved-method` 2; `undefined-variable` 0; `non-public-access` 0.
+monolog `undefined-type` 158 (PHPUnit attributes, optional transports),
+`unresolved-method` 9 (PHPUnit `createMock` receivers), everything else
+0. symfony/demo without vendor: 358 undefined types, the same storm
+Intelephense reports (35 on `BlogController.php` alone). On the
+battery's own opened files Intelephense's remaining rows are lanes we
+do not have yet: unused symbols, deprecations, documented-vs-declared
+type checks, argument type checks.
+
+Where the answers differ, ours read as the more honest one twice:
+Intelephense counts a same-named `count()` on another class as a
+reference (round 1), and its free tier answers neither implementations
+nor type definitions. Where they lead: the unused/deprecated/type-check
+lanes, and vendor stubs for the global namespace (we carry none, so
+`\Exception` and friends are simply silent).
+
+### `instanceof` narrowing, round 2 (2026-09-02, evening)
+
+Fixture: an interface-typed parameter (`Shape $s`) with the eight guard
+shapes, hover on the receiver at the member call (`bench/compare`,
+`spec-narrow.json`; `ours` = the round-2 build).
+
+| shape | ours | Intelephense | phpactor |
+|---|---|---|---|
+| `if (!$s instanceof Circle) { return; }` then `$s->` | Circle | Circle | Circle |
+| `if (!($s instanceof Circle)) throw …;` then `$s->` | Circle | Circle | Circle |
+| `assert($s instanceof Square);` then `$s->` | Square | Square | Square |
+| `$s instanceof Circle && $s->…` | Circle | Circle | Circle |
+| `$s instanceof Square ? $s->… : 0` | Square | Square | Square |
+| `match (true) { $s instanceof Circle => $s->… }` | Circle | Circle | Circle |
+| `foreach … { if (!$i instanceof Square) continue; $i->… }` | Square | Square | **Shape** |
+| after the loop, `$s->` | Shape | Shape | Shape |
+| negated guard whose body does NOT exit, then `$s->` | Shape | Shape | Shape |
+
+Before round 2 ours answered `Shape` on the first seven rows. The
+diagnostics counts on guzzle / monolog / demo are unchanged by design:
+the interface silence rule stays (member subjects, method guards and
+`is_a()` leave the interface standing), so narrowing pays off on hover,
+completion and goto-def over interface receivers, not on the linter
+surface.
+
+Real sites (monolog, `spec-narrow-monolog.json`):
+
+| site | ours | Intelephense | phpactor |
+|---|---|---|---|
+| `MandrillHandler::__construct`: `$message` (`callable\|Swift_Message` param) after `if (!$message instanceof Swift_Message) { throw … }` | Swift_Message | Swift_Message | Swift_Message |
+| same, before the guard | untyped | mixed | untyped |
+| `Logger::log`: `$level` after `if (!$level instanceof Level) { … $level = static::toMonologLevel($level); }` | Level | Level | mixed\|Level |
+
+Verdict: parity with Intelephense on every narrowing shape probed; ahead
+of phpactor on the loop `continue` form and the reassigning non-exit
+guard.
+
+### Import-class quick-fix (2026-09-02, evening)
+
+Fixture: `Service.php` under `namespace App` calling `Helper::go()` with
+`App\Util\Helper` declared in another file, one unused `use App\Mailer;`
+row. `bench/compare` codeAction probe on the `Helper` token with the
+published diagnostics in context (`spec-import.json`).
+
+| tool | diagnostics on the file | code actions on `Helper` | latency |
+|---|---|---|---|
+| ours | `undefined-type` App\Helper | `Add 'use App\Util\Helper;'` | 1 ms |
+| Intelephense (free) | P1009 undefined type; P1003 `Mailer` declared but not used | none | 2 ms |
+| phpactor | unresolved name; unused import | `Import class "App\Util\Helper"`; `Remove unused imports` | 348 ms |
+
+The undefined-type diagnostic now publishes in the editor once the pack
+index has settled (it was CLI-only).
+
+### Unused imports (2026-09-02, late evening)
+
+The `unused-import` lane on the corpora (`--check --severity hint`):
+
+| corpus | first cut | after minting the missing class refs | verified real |
+|---|---|---|---|
+| guzzle | 21 | 0 | — |
+| monolog | 43 | 2 | 2 (`Aws\Sdk`, `Monolog\Utils`, imported and never mentioned) |
+| symfony demo | 37 | 0 | — |
+
+Every first-cut row was a class the walker had not minted a reference
+for: `#[Attribute]` names, `instanceof` right operands, and namespace-
+qualified static receivers (`Psr7\Utils::x()`). Fixed at the source, so
+goto-def, references and rename now reach those tokens too — the price is
+more `undefined-type` rows on corpora without their vendor tree (monolog
+158 → 257, demo 358 → 512: `PHPUnit\Framework\Attributes\DataProvider`,
+`Symfony\Component\Routing\Attribute\Route`, …), which is the honest
+answer for an uninstalled attribute class, the same one Intelephense gives.
+
+### PHPUnit mocks and typeDefinition (2026-09-02, night)
+
+Mock fixture (`spec-mock.json`: a `TestCase` stub declaring
+`createMock(string $c): MockObject`, `Foo` with `bar()`, a test doing
+`$m = $this->createMock(Foo::class); $m->bar();`):
+
+| tool | hover `$m` | typeDefinition `$m` | goto-def `bar` | completion after `$m->` |
+|---|---|---|---|---|
+| ours | `$m: Foo` | Foo.php | Foo.php:4 | 3 |
+| Intelephense (free) | `mixed $m` | none | none | 0 |
+| phpactor | `MockObject&Foo` | none | Foo.php:4 | 2 |
+
+Ours reads the doubled class from the overlay rule alone; phpactor
+reads PHPUnit's `@template` docblock (with the real PHPUnit installed
+Intelephense would too). Neither of the others answers typeDefinition
+on the mock.
+
+typeDefinition on monolog (`spec-typedef-monolog.json`; ours measured
+with an 8 s settle after open — the harness's readiness probe was a
+same-file definition, which answers before the pack index attaches, and
+the first cross-file probe raced it in the unsettled run):
+
+| token | ours | Intelephense (free) | phpactor |
+|---|---|---|---|
+| `$handler` (param typed `HandlerInterface`) | HandlerInterface.php:20 | none | HandlerInterface.php:20 |
+| `->getFormatter()` (returns `FormatterInterface`) | FormatterInterface.php:20 | none | FormatterInterface.php:20 |
+| `$record->level` (promoted property `Level`) | Level.php:31 | none | Level.php:31 |
+
+Parity with phpactor on every row; Intelephense's free tier answers no
+typeDefinition at all. Latency 2–6 ms per answer.
+
+### Deprecations and the cold references walk (2026-09-02, night)
+
+Deprecation fixture (`spec-depr.json`: a class, two methods — one
+`@deprecated`, one `#[Deprecated]` — and a function, all used from
+another file; published diagnostics captured):
+
+| tool | rows | attribute form (`#[Deprecated]`) | notice text |
+|---|---|---|---|
+| ours | 4 | yes | yes (`'Legacy' is deprecated: use Modern instead`) |
+| Intelephense (free) | 3 | no | no |
+| phpactor | 3 | no | yes |
+
+Cold references, editor path (guzzle `Client::__construct`, 304
+references, workspace persisted, server restarted; three runs each):
+
+| build | first answer (ms) | warm (ms) |
+|---|---|---|
+| decode under the connection lock, no prefetch | 224 / 245 / 271 | ~25 |
+| decode under the lock, rayon prefetch | 245 / 267 / 287 (flat) | ~25 |
+| decode outside the lock, rayon prefetch | 174 / 194 / 189 | ~25 |
+| decode outside the lock, no prefetch | 229 / 209 / 237 | ~25 |
+
+The lock split is what let the prefetch pay: the rehydration loader ran
+zstd + bincode inside the retained SQLite connection's mutex, so
+parallel decodes queued. Intelephense's first references answer on the
+same site was 110 ms in the round-1 ledger; the remaining gap is the
+rows→whole upgrades (10 double-decodes) and the matcher itself.
+
+### Scoreboard refresh with the day-2 final build (2026-09-03, 00:30)
+
+The day-2 battery (`spec2-*.json`) replayed against the final build
+(a289243); the other tools' rows are the day-2 runs. Answered / probed,
+with the median latency per verb.
+
+| corpus · verb | ours | Intelephense (free) | phpactor |
+|---|---|---|---|
+| guzzle · definition | 1/1 · 1 ms | 1/1 · 1 ms | 1/1 · 141 ms |
+| guzzle · hover | 2/2 · 2 ms | 2/2 · 13 ms | 2/2 · 96 ms |
+| guzzle · signatureHelp | 1/1 · 1 ms | 1/1 · 10 ms | 1/1 · 2,040 ms |
+| guzzle · typeDefinition | 1/1 · 1 ms | 0/1 | 1/1 · 15 ms |
+| guzzle · implementation | 1/1 · 6 ms | 0/1 | 1/1 · 75 ms |
+| guzzle · documentSymbol | 1/1 · 1 ms | 1/1 · 12 ms | 1/1 · 107 ms |
+| monolog · definition | 2/2 · 1 ms | 2/2 · 1 ms | 2/2 · 2 ms |
+| monolog · signatureHelp | 1/1 · 1 ms | 1/1 · 8 ms | 1/1 · 24 ms |
+| monolog · implementation | 2/2 · 16 ms | 0/2 | 2/2 · 133 ms |
+| monolog · documentSymbol | 1/1 · 1 ms | 1/1 · 11 ms | 1/1 · 38 ms |
+| demo · completion | 1/1 · 1 ms | 1/1 · 5 ms | 1/1 · 40 ms |
+| demo · typeDefinition | 1/1 · 1 ms | 0/1 | 1/1 · 3 ms |
+| demo · documentSymbol | 1/1 · 1 ms | 1/1 · 4 ms | 1/1 · 5 ms |
+
+demo's definition (0/2 for all three) and hover probes target vendor
+symbols the hand-vendored tree lacks; the diagnostics rows on demo are
+the same undefined-vendor-type findings for ours and Intelephense
+(phpactor reports none).
+
+| corpus | ours ready · RSS | Intelephense | phpactor |
+|---|---|---|---|
+| guzzle | 1.9 s · 355 MB | 1.5 s · 232 MB | 0.7 s · 126 MB |
+| monolog | 1.8 s · 85 MB | 1.1 s · 195 MB | 0.5 s · 119 MB |
+| demo | 1.5 s · 69 MB | 1.1 s · 187 MB | 1.6 s · 117 MB |
+
+guzzle's RSS (213 MB in the round-1 ledger) re-measured under identical
+flags (a 6 s settle after open, so the workspace index has finished):
+pre-day-2 build 355 MB, final 361 MB, final without the prefetch 363 MB.
+The day-2 work did not move it; the round-1 number was taken before the
+index (guzzle's hand-vendored tree included) had landed.
+
+Lanes the others carry that we do not (from the same runs): Intelephense's
+"declared but not used" variable hint and its documented-vs-declared
+type mismatch; both are the next diagnostics axis.
+
+### Lanes the others carry, judged (2026-09-03, 01:05)
+
+- **"Declared but not used" variables** (Intelephense): mirrored as
+  `unused-variable` (hint, unnecessary-tagged; parameters, captures and
+  dynamically-materialized scopes silent).
+- **"Documented type is not compatible with the declared type"**
+  (Intelephense, severity 3): every row it reported on monolog
+  (`Logger.php` 192/205/234, `LineFormatter.php` 55/69) is the
+  fluent-builder `@return $this` / `@return static` against `: self` —
+  an idiom, not a mismatch, and one the extractor already reduces to
+  the same receiver bucket. Not mirrored; noise.
+
+### Lane counts on the corpora, hint severity (2026-09-03, 01:15, build 17977ec)
+
+| corpus | unresolved-method | undefined-property | undefined-type | undefined-variable | unused-import | unused-variable | deprecated | arity |
+|---|---|---|---|---|---|---|---|---|
+| WordPress | 111 | 198 | 94 | 24 | 0 | 611 | 283 | 15 |
+| laravel/framework | 1,521 | 518 | 7,039 | 51 | 6 | 741 | 34 | 14 |
+| guzzle | 2 | 0 | 1,340 | 0 | 0 | 563 | 0 | 2 |
+| monolog | 11 | 13 | 263 | 0 | 2 | 36 | 4 | 0 |
+| symfony demo | 0 | 5 | 519 | 0 | 0 | 0 | 0 | 0 |
+
+Sampled: the `unused-variable` rows on guzzle were by-reference closure
+captures written inside the closure and read outside, a foreach key
+read only as a subscript index, and a variable captured by a nested
+closure; the `undefined-property` rows on laravel were a trait's
+`$this->app` (the composing class provides it) and `$this->load(...)`
+(a first-class callable read as a property); WordPress's `$user->ID`
+after `$user = wp_signon()` keeps an earlier branch's `WP_Error` — an
+untyped reassignment does not yet reset a variable's type. The first
+three are fixed in the next build; the recount follows.
+
+After the fixes (2026-09-03, 01:55, build eb320a4 — trait `$this`,
+by-reference captures, foreach key subscripts, nested-closure captures,
+`$this->load(...)` first-class callables):
+
+| corpus | unresolved-method | undefined-property | undefined-type | undefined-variable | unused-import | unused-variable | deprecated | arity |
+|---|---|---|---|---|---|---|---|---|
+| WordPress | 104 | 195 | 94 | 24 | 0 | 420 | 283 | 15 |
+| laravel/framework | 993 | 101 | 7,039 | 51 | 6 | 257 | 34 | 14 |
+| guzzle | 2 | 0 | 1,340 | 0 | 0 | 98 | 0 | 2 |
+| monolog | 11 | 9 | 263 | 0 | 2 | 24 | 4 | 0 |
+| symfony demo | 0 | 0 | 519 | 0 | 0 | 0 | 0 | 0 |
+
+`unused-variable` fell 563 → 98 on guzzle and 741 → 257 on laravel;
+`undefined-property` 518 → 101 on laravel (trait bodies) and
+`unresolved-method` 1,521 → 993 (trait `$this` calls). WordPress's
+`unused-variable` 611 → 420 and `undefined-property` 195 are the
+untyped-reassignment residual (`docs/adr/flow-narrowing.md`), measured
+next. `undefined-type` is unchanged by construction: those rows are
+vendor classes with no `vendor/` tree installed.
+
+With the untyped-reassignment reset (2026-09-03, 02:20 — a reassignment
+whose value cannot be typed makes the variable unknown, and a return arm
+reading it makes the arm fold a disagreement instead of collapsing to the
+arms that resolved): WordPress `undefined-property` 195 → 132 and
+`unresolved-method` 104 → 89 with no new rows (`get_term()`'s
+`WP_Term|WP_Error` shape); laravel/framework 101 → 94 and 993 → 984.
+The remaining WordPress `undefined-property` rows are mostly `ID` /
+`term_id` / `post_status` / `object_id` reads (17 / 11 / 9 / 7 of 132),
+not yet sampled for their receivers.
+
+Two more slices on the same rows (2026-09-03, 03:30): a documented union
+(`@return WP_Term|WP_Error`, `@var A|B $skin`, `@param A|B $x`, a declared
+`A|B`) is honoured as "cannot be typed" instead of letting the body's arms
+or one member speak for it, every reassignment (typed or not) ends the
+earlier class, a documented property outranks the constructor's write
+to it, and a method call spelled with a space before its parentheses is a
+call. WordPress `undefined-property` 132 → 40 → 32, `unresolved-method`
+89 → 77, `arity-mismatch` 15 → 11, no new rows; laravel 94 / 981.
+What remains on WordPress is `isset($tax->helps)`-style existence probes
+(the read IS the question), dynamic properties on `stdClass`/legacy
+classes (`$cache->ERROR` with the declaration commented out), and
+`is_wp_error()` exit guards whose `@phpstan-assert-if-true` the analyzer
+does not read.
+
+Two silence rules the rows then named (2026-09-03, 04:10): a `$this` call a
+DESCENDANT declares is the template-method idiom (WordPress `ftp_base`
+calling `$this->_exec()` that only `ftp_pure` / `ftp_sockets` implement),
+and a parent's namespace is what the `extends` clause wrote — a namespaced
+`class Exception extends \Exception`, or laravel's `use Carbon\Carbon as
+BaseCarbon; class Carbon extends BaseCarbon`, resolved its parent to
+ITSELF, so the vendor ancestor's members read as missing. WordPress
+`unresolved-method` 77 → 13; laravel 981 → 160 (457 `Carbon::now()`
+rows alone); no new rows anywhere.
+
+| corpus | unresolved-method | undefined-property | undefined-type | undefined-variable | unused-import | unused-variable | deprecated | arity |
+|---|---|---|---|---|---|---|---|---|
+| WordPress | 13 | 32 | 94 | 24 | 0 | 420 | 283 | 11 |
+| laravel/framework | 160 | 91 | 7,039 | 51 | 6 | 257 | 34 | 14 |
+
+### Scoreboard replay with the night's final build (2026-09-03, 04:35, build 11334c6)
+
+The day-2 battery (`spec2-*.json`) replayed once more against the build
+carrying the night's slices (the reassignment reset, unions as
+known-untypable, the template-method and self-parent rules, existence
+probes). Every answered/probed cell of the 00:30 table above is
+unchanged: the same definitions, hovers, signatures, implementations,
+typeDefinitions and outlines, at the same 0–16 ms; the other tools' rows
+are the day-2 runs. Startup and resident memory, this replay:
+
+| corpus | ours ready · RSS | Intelephense | phpactor |
+|---|---|---|---|
+| guzzle | 1.4 s · 365 MB | 1.5 s · 232 MB | 0.7 s · 126 MB |
+| monolog | 1.2 s · 84 MB | 1.1 s · 195 MB | 0.5 s · 119 MB |
+| demo | 1.1 s · 69 MB | 1.1 s · 187 MB | 1.6 s · 117 MB |
+
+One row the replay surfaced in our own diagnostics: guzzle's
+`foreach ($options['curl'] as $option => $_)` reports `$_` as assigned
+but never used — the conventional throwaway name, flagged twice.
+
+### Lane counts, the night's final build (2026-09-03, 04:55, build 8fdb042)
+
+The same five corpora, hint severity, fresh cache, against the build
+carrying every night slice. Read against the 01:15 table above (17977ec).
+
+| corpus | unresolved-method | undefined-property | undefined-type | undefined-variable | unused-import | unused-variable | deprecated | arity |
+|---|---|---|---|---|---|---|---|---|
+| WordPress | 13 | 26 | 94 | 24 | 0 | 420 | 283 | 11 |
+| laravel/framework | 160 | 91 | 7,039 | 51 | 6 | 257 | 34 | 14 |
+| guzzle | 1 | 0 | 1,340 | 0 | 0 | 89 | 0 | 2 |
+| monolog | 11 | 9 | 263 | 0 | 2 | 24 | 4 | 0 |
+| symfony demo | 0 | 0 | 519 | 0 | 0 | 0 | 0 | 0 |
+
+WordPress `unresolved-method` 111 → 13 and `undefined-property`
+198 → 26 over the night; laravel 1,521 → 160 and 518 → 91; guzzle's
+`unused-variable` 563 → 89. Every step was a diff against the previous
+build with zero new rows. What remains is named in the ADR's silence
+rules and the open forks: mock objects behind typed getters (122 of
+laravel's 160), `is_wp_error()` exit guards (nine WordPress rows), dynamic
+properties on legacy classes, and `undefined-type` rows that are vendor
+classes with no `vendor/` tree on disk.
+
+### BookStack, vendor present (2026-09-03, 05:40)
+
+A findings-only dogfood on BookStack — the one corpus here with a real
+`vendor/` tree (laravel/framework installed; the other ~150 packages
+absent, which is what its 2,520 `undefined-type` rows are) — judged the
+lanes for false positives and named ten shapes. Three slices later, the
+member and arity lanes on it:
+
+| build | undefined-property | unresolved-method | arity-mismatch | undefined-variable | unused-import | unused-variable | deprecated |
+|---|---|---|---|---|---|---|---|
+| 8fdb042 (before) | 60 | 24 | 4 | 14 | 77 | 128 | 17 |
+| after promotion / spread / tuples | 4 | 23 | 1 | 13 | 77 | 128 | 17 |
+| after expression-scope static properties | 4 | 23 | 1 | 9 | 77 | 128 | 17 |
+
+The dogfood's sample tallies: `unused-import` 8/8 true, `unused-variable`
+8/8 true, `deprecated` 8/8 true; `undefined-property` 8/8 false before
+the promotion fix (one root cause: untyped promoted properties, which
+Laravel's own event classes use); `undefined-variable` 13/14 false before
+the static-property fix; `arity-mismatch` 4/4 false before the spread
+fix. Hover tracks a variable's type through reassignment at every read
+site probed. Left parked with fixtures: `parent::` under a same-leaf
+alias, method-name case, Laravel facade aliases, an anonymous-class
+return typed by the declared class, an inline `$flags = 0` argument
+reported unused (`docs/PARKED.md`).
+### Member-completion battery, monolog, three tools (2026-09-03, 06:40)
+
+Four member-completion probes on monolog (`bench/compare/lspq.py`,
+readiness = goto-def at `Logger.php` 176:15, fresh cache each run):
+`$this->` inside `Logger`, `$handler->` over the `HandlerInterface`
+receiver, `$record->` in `AbstractProcessingHandler`, and `self::` at the
+level-lookup site.
+
+| probe | ours | Intelephense | phpactor |
+|---|---|---|---|
+| `$this->` in `Logger` | 43 · 6 ms | 43 · 7 ms | 42 · 96 ms |
+| `$handler->` (interface) | 4 · 1 ms | 4 · 2 ms | 4 · 115 ms |
+| `$record->` (LogRecord) | 14 · 3 ms | 14 · 2 ms | 13 · 45 ms |
+| `self::` in `Logger` | 13 · 3 ms | 13 · 2 ms | 14 · 49 ms |
+
+The three instance probes match Intelephense item for item; phpactor
+omits `__construct`. `self::` matched only after the scoped operator
+reached the member half: the php pack's member kinds named the `->` forms
+only, so `self::` fell to the identifier universe and answered 67 items
+(every local in the function plus the members). Now `::` offers the
+class's constants, its `static` members (a `static` attribute the skeleton
+stamps, `is_static` on every candidate) and the pack's class-name literal;
+`->` offers the instance members and hides the constants. The set is
+Intelephense's exactly; phpactor's extra item is a `level: ` named-argument
+snippet, not a member.
+
+### Editor-axes battery, monolog, three tools (2026-09-03, 07:20)
+
+The verbs an editor fires without asking — highlights, call hierarchy,
+workspace symbol search, outline, folding, selection ranges, semantic
+tokens, inlay hints, rename preparation — over `Logger.php` and
+`StreamHandler.php` (`$S/cmp/spec-axes2-monolog.json`, ten probes, the
+same harness and readiness gate as the completion battery).
+
+| probe | ours | Intelephense | phpactor |
+|---|---|---|---|
+| highlight `$this->handlers` (11 sites) | 11 · 4 ms, decl = Write | 11 · 6 ms | 11 · 17 ms, decl = Text |
+| highlight `$handler` param | 2 · 0.5 ms | 2 · 3 ms | 14 · 19 ms (every `$handler` in the file) |
+| prepareCallHierarchy `addRecord` | 1 · incoming 15 · outgoing 5 | unsupported | unsupported |
+| prepareCallHierarchy `pushHandler` | 1 · incoming 29 | unsupported | unsupported |
+| workspace/symbol `Logger` | 23 (substring) · 3 ms | 45 (fuzzy, variables too) · 7 ms | 10 (classes + constants) · 217 ms |
+| workspace/symbol `pushHandler` | 1 · 2 ms | 4 (fuzzy: `PushoverHandler`) · 5 ms | 0 |
+| documentSymbol `Logger.php` | 55 · 0.6 ms | 118 (params/locals nested) · 3 ms | 54 · 29 ms |
+| foldingRange `Logger.php` / `StreamHandler.php` | 162 / 73 (blocks + docblocks) | 0 | 0 |
+| selectionRange `$this->handlers` | 11 levels | none | 1 level |
+| semanticTokens/full `Logger.php` | 446 tokens · 0.5 ms | none | none |
+| inlayHint (lines 575–640) | 9 parameter hints (`level:`, `message:`) · 0.7 ms | licence required | unsupported |
+| prepareRename `handlers` | placeholder `handlers` | null (free tier) | range |
+
+Folding, selection range and the outgoing-calls list were the three gaps
+the battery found: pack documents answered no folds and no selection
+range (both verbs were Perl-only), and outgoing calls listed the
+method's property reads (`handlers`, `fiberLogDepth`, `RFC_5424_LEVELS`)
+beside its callees — 14 rows where the body makes 5 calls. Folding now
+follows the skeleton's scopes plus the pack's fold-only captures (php
+blocks that are not scopes, docblocks as comment folds), selection range
+walks the tree's ancestors for every pack, and a value-shaped member read
+is excluded by its own `MemberShape`. The `$handler` highlight is scope-exact (the
+parameter's two sites); phpactor's 14 is name-blind. Inlay hints were
+the one axis nobody answered: ours emitted type hints only for
+inferred locals and none of the range's locals are untyped. Parameter
+names now ride the signature-help ladder — every positional argument of
+a call whose callee resolves gets `name:` (`addRecord(Level::Debug,
+(string) $message, $context)` shows `level:` and `message:`; `$context`
+is the parameter's own name and shows nothing) — 9 hints over the 65
+lines, 0.7 ms.
+
+### CLI cold-start floor (2026-09-03, 07:40)
+
+Prompted by the question whether the day's rounds had slowed the tests:
+the unit target went 11.2 s → 8.5 s over the day, but `tests/language_scope.rs`
+sat at ~1 s per CLI test (24 tests / 24.9 s → 38 / 36 s), and the r89
+binary from the night before paid the same, so it was a standing floor,
+not a regression. `PERL_LSP_PHASE_TIMING` on a two-file php fixture
+(cold cache, `--check`):
+
+| phase | before | after |
+|---|---|---|
+| `registry::queries` (Perl plugin pattern warm) | 502 ms | not run (no Perl file) |
+| `cli::index_workspace` (0 Perl files) | 544 ms | 9 ms |
+| `pack.query_compile` (assembled php query) | 2 × 540 ms, one per worker | 1 × 541 ms |
+| `cli::index_pack` (2 php files) | 888 ms | 726 ms |
+| wall | 2.6 s | 0.75 s |
+| `tests/language_scope.rs` (38 tests) | 36.0 s | 26.2 s |
+
+The registry warm compiled Perl-only patterns inside the workspace
+indexer whether or not the walk found a Perl file; it now runs only when a
+Perl build follows. The pack query cache was check-then-compile outside
+its lock, so every Rayon worker that reached the php query first compiled
+its own copy (one wall, N CPUs); it is single-flight now. What remains is
+the tree-sitter compile of the 1,000-line assembled php query itself
+(~540 ms, `pack.query_compile`) — the floor a pack-only cold start pays
+once per process; it cannot be persisted (a `Query` is not serializable)
+and splitting the query does not reduce the pattern analysis it pays for.
+
+### Unimplemented contracts, three tools (2026-09-03, 08:00)
+
+A three-file fixture: `interface Greeter { hi(string $n): string; bye(): void }`,
+`abstract class Base implements Greeter` (declares `hi`, adds
+`abstract protected function tag(): string`), then `class En implements
+Greeter` (declares `hi` only), `class Sub extends Base {}` and `class Dyn
+implements Greeter { __call(...) }`.
+
+| | ours | Intelephense | phpactor |
+|---|---|---|---|
+| `En` | `unimplemented-method`: `Greeter::bye()` | P1037 `does not implement method 'bye'` | `Missing methods "bye"` |
+| `Sub` | `Base::tag()`, `Greeter::bye()` | `'tag', 'bye'` | `"bye", "tag"` |
+| `Dyn` (`__call`) | `Greeter::hi()`, `Greeter::bye()` | `'hi', 'bye'` | `"hi", "bye"` |
+| quick-fix | "Implement missing methods" (stubs from the contracts' declarators) | none (free tier) | "Implement contracts" |
+| `abstract class Base` | silent | silent | silent |
+
+Three tools, one verdict per class. The first cut silenced `Dyn` under
+Perl's AUTOLOAD rule; both other tools report it and they are right —
+php checks the contract when the class is declared. Two more corrections
+came from the corpora before the lane shipped: the role lookup took the
+first same-leaf candidate (laravel's `MySqlConnector extends Connector`
+found the Redis `Connector` interface's `connectToCluster()`, 6 rows on
+BookStack's vendor tree and 10 on laravel/framework), and provision was
+Perl's "a def anywhere in the candidate file" (a sibling class in the same
+file provided `hi` for `Dyn`). The parent is now the namespace-pinned
+candidate and provision is package-attributed for a pack whose members
+are package-bound. Rows on monolog, guzzle, BookStack, symfony/demo, Slim,
+laravel/framework and WordPress after the corrections: 0 — code that runs
+has no unimplemented contracts.
+
+### Missing return types, vs phpactor (2026-09-03, 09:40)
+
+phpactor's `worse.missing_return_type` names a method without a native
+return type and the type it infers; Intelephense has no such lane. On the
+axes fixture both name the same two methods with the same types
+(`all()` → `array`, `name()` → `string`); ours adds the "Add return type"
+quick-fix (phpactor's is a separate transform).
+
+The first cut over the corpora reported 5,085 rows on laravel/framework,
+3,680 on BookStack's vendor tree and 1,314 on WordPress — with the
+file-convention gate already in place. Three shapes made most of them and
+each was a guess: the fold drops a `null` arm and answers from the rest
+(`string` over `return "a"; … return null;`), a fluent `return $this`
+spelled the class where `static` is meant, and monolog's `@method`
+docblock rows were reported as bodied methods. The lane now reads the
+TOTAL return (every arm witnessed, none null), never spells the enclosing
+class, and skips documentation rows and closures:
+
+| corpus | first cut | now | spellings now |
+|---|---|---|---|
+| monolog | 92 | 36 | array 26, string 5, bool 2, `Logger` 1 |
+| laravel/framework | 5,085 | 723 | array 418, string 137, bool 56, `Envelope` 11 |
+| WordPress | 1,314 | 156 | array 149, `stdClass` 2, bool 2 |
+
+Eight sampled rows checked against the source: data providers returning
+literal arrays, `__toString` returning `''`, `Str::startsWith` returning
+`false`/`true`, a test stub returning `'foo'`, `initLogger` returning
+`new Logger(...)` — every one a return the annotation would state truly.
+
+### Lane counts, the day's final build (2026-09-03, 09:40, build 98dfe19)
+
+The five corpora at hint severity, fresh cache, against the build carrying
+every slice of the day. Read against the 04:55 table above (8fdb042).
+
+| corpus | unresolved-method | undefined-property | undefined-type | undefined-variable | unused-import | unused-variable | deprecated | arity | unimplemented-method | missing-return-type |
+|---|---|---|---|---|---|---|---|---|---|---|
+| WordPress | 12 | 26 | 94 | 24 | 0 | 420 | 283 | 7 | 0 | 156 |
+| laravel/framework | 152 | 11 | 7,039 | 14 | 6 | 257 | 34 | 11 | 0 | 723 |
+| guzzle | 1 | 0 | 1,340 | 0 | 0 | 89 | 0 | 2 | 0 | 0 |
+| monolog | 10 | 9 | 263 | 0 | 2 | 24 | 4 | 0 | 0 | 36 |
+| symfony demo | 0 | 0 | 519 | 0 | 0 | 0 | 0 | 0 | 0 | 0 |
+
+Since the night table: laravel `undefined-property` 91 → 11 and
+`undefined-variable` 51 → 14 (the promoted-property and expression-scope
+static property rules), `unresolved-method` 160 → 152 (the same-leaf
+parent pin), WordPress `arity-mismatch` 11 → 7 (spread arguments). The
+two new lanes: `unimplemented-method` is 0 everywhere — code that runs
+has no unimplemented contracts — and `missing-return-type` reports only
+where the file's own convention is native return types (guzzle and the
+demo are docblock-typed and stay silent).
+
+### Scoreboard replay with the day's final build (2026-09-03, 09:50, build 98dfe19)
+
+The day-2 battery (`spec2-*.json`) replayed against the final build: every
+answered cell of the 00:30 table is unchanged — the same definitions,
+hovers, signatures, implementations, typeDefinitions and outlines, at the
+same 1–22 ms; the other tools' rows are the day-2 runs. Startup and
+resident memory this replay: guzzle 1.5 s · 376 MB, monolog 1.3 s · 84 MB,
+demo 1.1 s · 68 MB (Intelephense 1.5 s · 232 MB, 1.1 s · 195 MB,
+1.1 s · 187 MB; phpactor 0.7 s · 126 MB, 0.5 s · 119 MB, 1.6 s · 117 MB).
+
+### Auto-import completion, three tools (2026-09-03, 10:00)
+
+`$g = new Gre` in `App\Web\Home` with `App\Util\Greeter` declared in
+another file and not imported:
+
+| | ours | Intelephense | phpactor |
+|---|---|---|---|
+| items | 5, `Greeter` among them · 3 ms | 5, `Greeter` (+ `IntlGregorianCalendar`) | 1: `Greeter (App)` · 62 ms |
+| on accept | inserts `use App\Util\Greeter;` after the last import | inserts the `use` row | inserts the `use` row |
+
+Before the slice we offered four items and no `Greeter` at all: the
+identifier universe of a pack was gated on an include closure, which a
+name-keyed language never has.
+
+### phpmyadmin and composer, first sweep (2026-09-03, 10:30, build 053bf62)
+
+Two corpora the day had not swept, hint severity, fresh cache:
+
+| corpus | files · cold wall | unresolved-method | undefined-property | undefined-type | undefined-variable | unused-import | unused-variable | deprecated | arity | missing-return-type |
+|---|---|---|---|---|---|---|---|---|---|---|
+| phpmyadmin | 1,232 · 9.5 s | 393 → 392 | 7 | 4,210 | 2 | 32 → 0 | 1 | 667 | 8 | 0 |
+| composer | 622 · 4.9 s | 45 → 44 | 2 | 2,548 | 35 | 19 | 132 | 15 | 3 | 13 |
+| Slim | — | 0 | 0 | 1,285 | 0 | 5 | 4 | 0 | 0 | 5 |
+
+phpmyadmin's `deprecated` rows are true: 661 of them are its own
+`DatabaseInterface::getInstance()`, marked `@deprecated` in the source.
+Its `unresolved-method` rows are the mock residual (`expects` on a
+`MockObject`, the open intersection fork). The two fixes the sweep paid
+for: an import used only as a namespace head inside `Sql\Column::class`
+was flagged unused (the class-literal path did not record its qualified
+spelling), and an `instanceof` guard narrowed the second operand of an
+`&&` chain but not the third (`$package instanceof CompletePackageInterface
+&& !$package instanceof AliasPackage && $package->getFunding()` — the
+chain nests left, so the guard sits two levels down). Left parked with
+evidence: by-ref out-parameters read as undefined variables (2 of 4
+sampled composer rows). Slim's five `unused-import` rows are all true
+(`use function htmlentities` never called, an aliased `PHPUnitTestCase`
+never spelled, `dirname`, `RuntimeException`, `stdClass` unused).
+
+### Closing lane sweep, every corpus, final build (2026-09-03, 11:30, build eb310e0)
+
+Hint severity, fresh cache per corpus, one run each:
+
+| corpus | unresolved-method | undefined-property | undefined-type | undefined-variable | unused-import | unused-variable | deprecated | arity | unimplemented-method | missing-return-type |
+|---|---|---|---|---|---|---|---|---|---|---|
+| WordPress | 11 | 26 | 94 | 24 | 0 | 420 | 283 | 7 | 0 | 156 |
+| laravel/framework | 152 | 11 | 7,039 | 14 | 5 | 257 | 34 | 10 | 0 | 723 |
+| guzzle | 1 | 0 | 1,340 | 0 | 0 | 89 | 0 | 2 | 0 | 0 |
+| monolog | 10 | 9 | 258 | 0 | 2 | 24 | 4 | 0 | 0 | 36 |
+| symfony demo | 0 | 0 | 519 | 0 | 0 | 0 | 0 | 0 | 0 | 0 |
+| phpmyadmin | 392 | 7 | 4,206 | 2 | 0 | 1 | 667 | 8 | 0 | 0 |
+| composer | 44 | 2 | 2,548 | 35 | 19 | 132 | 15 | 3 | 0 | 13 |
+
+Against the 09:50 table the four cells that moved are the day's last three
+slices: WordPress `unresolved-method` 12 → 11 and laravel `arity-mismatch`
+11 → 10 (the `parent::` alias reads the parent), laravel `unused-import`
+6 → 5 and monolog `undefined-type` 263 → 258 (a `X\Y::class` literal counts
+as a use of `X`, and its head resolves through the import). phpmyadmin's
+`unused-import` 32 → 0 is the same class-literal rule. Every other cell is
+byte-identical, so the day's completion, hint and quick-fix slices moved
+no diagnostic lane. Wall unchanged: phpmyadmin 9.5 s, composer 4.9 s.
+
+### By-reference out-parameters bind their argument (2026-09-03, 12:10, build under net r116)
+
+The undefined-variable lane, before and after the callee-resolved
+binding rule (`ParamArity::binds_arg` over the extractor's bare-variable
+argument sites), the `$d = &expr` declaration and the variadic parameter
+declaration; hint severity, fresh cache:
+
+| corpus | undefined-variable before | after | unused-variable before | after |
+|---|---|---|---|---|
+| composer | 35 | 0 | 132 | 132 |
+| WordPress | 24 | 4 | 420 | 420 |
+| laravel/framework | 14 | 14 | 257 | 257 |
+| monolog | 0 | 0 | 24 | 24 |
+
+composer's 35 were `$process->execute($cmd, $output, $cwd)` against
+`ProcessExecutor::execute($command, &$output = null, …)` (cross-file, a
+receiver typed by its parameter), `\Composer\Autoload\Init::$files` read
+as a local, and one `$degradedMode = &$this->degradedMode`. WordPress's
+twenty that went silent split three ways: `preg_match` / `preg_match_all`
+/ `fsockopen` / `socket_getsockname` out-parameters (`$matches`, `$out`,
+`$toks`, `$errno`, `$errstr`, `$port`) — php's own functions, which the
+lane cannot resolve and so no longer guesses about; `strpos($wp_version,
+'-src')` twice, a global a `require` sets, silent for the same reason
+(the honest cost of the rule, recorded on the builtin-stubs fork); and
+`function query( ...$args )`, a variadic parameter the query never
+declared. The four survivors: `$wp_version` / `$wp_local_package` read
+outside any call (globals a `require` sets — Intelephense reports them
+too), `unset($v_header_list)` (an `unset` of a never-assigned name), and
+one `$schema` read in `update_item` that the method never assigns — a
+real finding `empty()` hides at runtime. The alias rule keeps the
+unused-variable lane exactly where it was: without it, composer's
+`$headers = &$options['http']['header']; $headers[] = …` gained a false
+row. With `isset` / `empty` / `unset` reads treated as the existence
+question (the member lanes' probe silence, now on the variable lane too):
+WordPress 4 → 2, both `$wp_version`-family globals.
+
+### Final lane table, every corpus, build 8fe1bc1 (2026-09-03, 12:40)
+
+Hint severity, fresh cache per corpus, one run each — the day's closing
+numbers:
+
+| corpus | unresolved-method | undefined-property | undefined-type | undefined-variable | unused-import | unused-variable | deprecated | arity | unimplemented-method | missing-return-type |
+|---|---|---|---|---|---|---|---|---|---|---|
+| WordPress | 11 | 26 | 94 | 2 | 0 | 420 | 283 | 7 | 0 | 156 |
+| laravel/framework | 152 | 11 | 7,039 | 0 | 5 | 257 | 34 | 10 | 0 | 723 |
+| guzzle | 1 | 0 | 1,340 | 0 | 0 | 89 | 0 | 2 | 0 | 0 |
+| monolog | 10 | 9 | 258 | 0 | 2 | 24 | 4 | 0 | 0 | 36 |
+| symfony demo | 0 | 0 | 519 | 0 | 0 | 0 | 0 | 0 | 0 | 0 |
+| phpmyadmin | 392 | 7 | 4,206 | 0 | 0 | 1 | 667 | 8 | 0 | 0 |
+| composer | 44 | 2 | 2,548 | 0 | 19 | 132 | 15 | 3 | 0 | 13 |
+
+Against the 11:30 table only the `undefined-variable` column moved
+(WordPress 24 → 2, laravel 14 → 0, phpmyadmin 2 → 0, composer 35 → 0):
+the by-reference binding, the reference-assignment and variadic
+declarations, and the probe silence. Every other cell is byte-identical.
+
+## Laravel parity arc
+
+### Round 1 — the routes rail (2026-09-03, 15:30, build under net r118)
+
+pterodactyl panel (981 php files, 104 `->name(…)` declarations across
+six routes files, 59 `route()` / `redirect()->route()` uses in PHP):
+
+| probe | result |
+|---|---|
+| `undefined-route` rows, cold | 80 before the reverse-index feed → 0 after (every name declared in a routes file) |
+| `undefined-route` rows, warm (stub path) | 0 |
+| goto-def `redirect()->route('admin.mounts.view')` (MountController) | `routes/admin.php:183` (the `->name` string) |
+| two-file app: goto-def from `route('home')` | the declaration |
+| two-file app: references from the declaration | declaration + every use, cold and warm, and after an edit adds a use (3) |
+| two-file app: rename at the declaration | rewrites inside the quotes at every site |
+| two-file app: `route('nowhere')` | `warning[undefined-route]` |
+| a group prefix `->name('admin.')` | declares nothing (unit test) |
+| a WordPress hook spelled like a route name | does not connect (unit test — rails are namespaces) |
+
+The 80 false rows were not the rail's: the pack tier never fed the
+reverse index, so a handler declared in a classless file (a routes
+file; a WordPress plugin's hook registrations) was unreachable by name
+across files — WordPress hook navigation across files was broken the
+same way. Blade templates (223 `route()` uses in 51 of panel's views) are text
+to the grammar; the text lane (`laravel.rails.json`) mints their uses as
+the same refs: all 223 resolve (0 `undefined-route` in templates),
+references from `admin.mounts.view`'s declaration list 8 sites, 3 of
+them templates (grep: 4 files spell the name).
+
+### Round 2 — the event bus (2026-09-03, 16:10, build under net r120)
+
+koel (9 events, 9 listeners, a `$listen` map, 16 emissions):
+
+| probe | result |
+|---|---|
+| `undefined-event` hints, cold | 8 before the structural emission rule (`Dispatcher::dispatch(new Job)` read the facade as the event) → 1 after: `event(new PasswordReset($user))`, a framework event no app listener answers |
+| goto-def on `event(new SongFavoriteToggled(…))`'s class token | the event class, `LoveTrackOnLastfm::handle`, the `$listen` row — three candidates, never a pick |
+| call hierarchy on `LoveTrackOnLastfm::handle` | incoming: `FavoriteService::toggleFavorite` (the emission) beside the two unit tests that call `handle` directly |
+| rename on the rail | refused by policy — the class rename owns the name |
+| unit + cross-file tests | `$listen` key, listener `handle(X $e)`, `Event::listen`, a job's own `handle`, both emission spellings connect; a typed injected dependency never becomes an emission target |
+
+Two defects the corpus found before the tests did: the def dedup kept
+one handler per token (a listener's `handle(Liked $e)` lost `Liked` to
+its own class's job handler), and the emission's companion ref won the
+cursor tie over the class token's own ref (goto-def lost the class).
+
+### Round 3 — path-defined rails (2026-09-03, 18:15, build under net r121)
+
+BookStack (3,530 files indexed, the real vendor tree; 1,088 `view()` /
+`config()` / `trans()` uses in PHP, 400 in templates), `--check` cold,
+two runs:
+
+| rail | misses | what they are |
+|---|---|---|
+| view | 0 | — |
+| event | 0 | — |
+| lang | 1 | `trans('entities.comment_deleted')` in `CommentController` — the key does not exist (`comment_deleted_success` does): a real BookStack defect the lane found |
+| route | 5 | four framework-default names the vendor tree uses and the app never declares (`login`, `password.reset`, `verification.verify`); two are `$this->route('id')` in a FormRequest — a route PARAMETER read, the member form's receiver unpinned (fixed in round 4's overlay) |
+| config | 213 | BookStack keeps its config under `app/Config/`, not `/config/`; the path rail is Laravel's layout, not a per-project setting yet (a workspace-config seam, parked) |
+
+Both runs agree row for row on the rails. Before the reverse-index
+replay fix the same probe gave view 13–35 and lang 39–96 across runs
+(single-threaded 11 / 39): `rebuild_reverse_index` cleared the edge maps
+and replayed only the module-keyed feeds, so a path-keyed handler feed
+(every classless routes / config / lang file) vanished whenever the
+rebuild raced the bulk index. The path feeds are now recorded and
+replayed with the rest.
+
+Silence rules the corpus wrote: a name ending in `.` / `_` / `-` is a
+prefix the caller concatenates onto (`view('auth.parts.login-form-' .
+$kind)`); a name containing `::` is a package-namespaced view
+(`errors::minimal`) whose provider is outside the path rails; a
+translation key without a dot is a JSON-file string (`__('to')`); an
+`X::dispatch(Consts::EVENT)` emission carries no dispatcher and the
+lane treats it as unnameable.
+
+### Round 4 — gates, middleware, container (2026-09-03, 19:00, build under net r122)
+
+`--check --severity hint`, cold, one run each (three on BookStack, identical):
+
+| app | middleware | ability | binding | what the misses are |
+|---|---|---|---|---|
+| koel (Laravel 11, no vendor tree) | 9 | 5 | 2 | `auth` / `throttle` / `web` / `api` are the framework's defaults, declared in the vendor tree koel does not carry; `*` was a wildcard (`->can('*')`, silenced since); `video` / `audio` / `invite-collaborators` are abilities a database grants; `cache` / `aws` are core container aliases from the same absent vendor tree |
+| panel (Laravel 10, no vendor tree) | 0 | 1 | 4 | `file.read` is a database permission; the bindings are core aliases (`hashids`, `view`, `blade.compiler`) |
+| BookStack (real vendor tree) | 0 | 0 | 5 | the five are vendor helpers reading config-shaped keys through the container (`app('app.debug')`) |
+
+All three rails are hints by declaration (`rails.json` `hints`): their
+definitions are partly runtime-only, so an unmatched name is a lead, not
+an error — the table is the evidence. `throttle:60,1` names `throttle`
+(the rail's `name_seps`), span included, so rename and references stay
+exact. `app(SongRepository::class)->countAccessibleByIds(…)` in koel
+navigates to the repository method (goto-def answered nothing before
+the `@expr.annot` witness). Rename at a policy method renames the method
+alone — the ability rail is reached from the strings, not from the
+declaration token. BookStack's `undefined-route` residual fell from 5 to
+3 (the `$this->route('id')` parameter reads no longer count as names; the
+three left are framework defaults in the vendor tree).
+
+The facade row stays parked: across the three apps, zero bare-alias
+spellings (`use DB;`, `\DB::`) and zero `class_alias()` calls — every
+facade use imports the FQ class, which `@method` already resolves. A
+global-alias class declaration is a seam the corpus does not ask for.
+
+The residual cross-file race is closed. Its window was the pack
+sub-index's own resolver thread: it wakes lazily, and its warm-start
+`rebuild_reverse_index` — a clear-then-refeed of every bucket — landed
+under the diagnostics sweep on a one-shot CLI, so a lookup in the window
+saw an empty rail (view 10–38, lang 12–33 across runs before; three
+identical runs after). Two changes: a core the warm load fed nothing
+into skips the rebuild (nothing to re-derive), and a rebuild's clear
+spares the path-keyed handler feeds, whose only source is the records
+that replay them anyway.
+
+### Round 5 — completion, the battery, gold (2026-09-03, 19:30, build under net r123)
+
+Rail-name completion in the string slot, on panel (104 named routes, 42
+views) cold:
+
+| probe | result |
+|---|---|
+| `view('admin.|` in `LocationController` | every `admin.*` view, nothing from another rail |
+| `route('admin.|` in a Blade partial | every `admin.*` route name through the text rails |
+| `route('|` (empty string) in the gold fixture | every route name (the sentinel path) |
+| `__('auth.|` | the locale file's keys; a first segment without a dot completes nothing (the overlay's regex is the lane's honesty gate) |
+
+The battery against Laravel Idea's feature list, as the arc leaves it:
+
+| Laravel Idea | ours |
+|---|---|
+| route names: completion, goto, usages, rename | all four, plus templates and `undefined-route` |
+| controller actions | class-array callables: goto + references |
+| route URIs / parameters, `Route::resource` names | parked (no identity to connect; name synthesis) |
+| views: goto file, usages, completion, undefined view | all, templates included (`@extends` / `@include` / `@each` / `@component`) |
+| config keys, translation keys | goto the key row, references, rename, completion, undefined-key; the locale segment skipped |
+| `env('KEY')` | parked (`.env` is not a php file) |
+| events ↔ listeners, jobs | emissions and handlers connect across files, call hierarchy walks the bus, `No listener for event` hints; Laravel Idea shows a list, we show a graph |
+| gates / policies | `Gate::define` and every policy method define; `authorize` / `can` / `@can` navigate; a miss is a hint |
+| middleware aliases | kernel maps, `->alias`, the framework defaults; `throttle:60,1` names `throttle`; a miss is a hint |
+| container bindings, `app(Foo::class)` typed | both |
+| facades → real class | the FQ spelling through `@method`; the bare alias parked with corpus evidence (zero uses in three apps) |
+| Eloquent fields from migrations, scopes, validation rules, Livewire, Inertia, generation | out of the box |
+
+Gold: `gold-corpus/laravel-fixture` (15 files) carries one row per rail
+axis — 9 definition, 2 references, 1 rename, 1 call hierarchy, 3
+completion, 1 diagnostics — all gold, cold and warm.
+
+### Arc close (2026-09-03, 19:45)
+
+Every row of the parity matrix is landed or parked with evidence
+(`docs/adr/laravel-rails.md`, "What is deliberately not here"). Seven
+rails (route, event, view, config, lang, middleware, ability, binding),
+one text lane for templates, one path lane for file-defined names,
+rail-name completion, 17 gold rows, three corpora characterized. Two
+defects outside the arc's scope found and fixed on the way: the pack
+tier never fed the reverse index for classless files (WordPress hook
+navigation across files was broken the same way), and a pack sub-index's
+lazily-woken resolver rebuilt the reverse index under the diagnostics
+sweep (nondeterministic cross-file misses on every one-shot CLI run).
