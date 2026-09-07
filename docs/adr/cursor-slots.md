@@ -1,7 +1,5 @@
 # ADR: The cursor Slot — one taxonomy, per-language detectors
 
-Status: accepted (design).
-
 ## Context
 
 Two parallel slot-detection systems answer the same question — "what kind
@@ -62,18 +60,16 @@ enum Slot {
   at both the backend and symbols call sites, which reorder candidates by
   matching type.
 
-## Loose-coupling / undo story (per the standing forks convention)
+## Scope
 
-Additive: `Slot` is a new enum; the detectors keep their files and
-internals; consumers migrate handler-by-handler with behavior byte-guards
-(completion outputs identical on fixtures). Undoing = deleting the enum
-and re-inlining the two detector calls — no serialized state, no
-EXTRACT_VERSION change. If a genuine fork arises mid-implementation
-(e.g. ReceiverCtx's shape), pick loose, log in `docs/open-forks.md`.
+`Slot` carries no serialized state and no `EXTRACT_VERSION` dependency —
+it is a cursor-time value, never cached. The per-language detectors keep
+their own files and internals; consumers switch on `Slot` alone, never on
+language.
 
-## Non-goals
-
-- No new completion behavior in the migration slice (byte-identical).
-- No type-constrained ranking yet (the stub is the deliverable).
-- Perl's sig-help internals stay put; only their slot verdict routes
-  through `detect_slot`.
+Completion ranks candidates by `Slot::expected_type()` for `ArgPosition`
+(param type at index) and comparison-shaped slots (`op_type == |` → the
+field's domain) — wired in `lsp/symbols/completion.rs`. `TypePosition` is
+detected (`FOO x;` in pack languages) but not yet a candidate source:
+completion returns none for it. Perl's sig-help internals are unchanged;
+only their slot verdict routes through `detect_slot`.
