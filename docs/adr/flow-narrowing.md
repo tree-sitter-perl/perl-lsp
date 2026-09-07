@@ -110,6 +110,22 @@ plugin's parameter assertion is minted at the sub's start, ahead of the
 every binding witness sits at or after its binding site, declarations can
 mark too and the rule needs no syntax at all.
 
+The flow tier carries the same rule on its own edge. `FlowEdge::reassigns`
+marks a plain `$x = …` to a name the scope already binds (the pack's
+`@flow.assign`, Perl's non-`my` lhs); the registry materializes that edge
+to what the source produced, or to `Unknown` when the source cannot be
+typed, as a zero-width witness at the assignment carrying
+`REASSIGN_FLOW_SOURCE`. `FrameworkAwareTypeFold` reads that witness as a
+temporal reset: every witness strictly before the latest reassignment at
+or before the query point is dead, the class axis included, so
+`$r = new WP_Error; $r = json_decode(..)` reads as the array. Companions
+minted at the same site survive; a declaration never resets (its
+companions — a first-param constraint at the sub's start, a docblock
+cast — may sit anywhere before it). The return-arm fold keeps the same
+honesty: arms of two different classes are a disagreement (`None`), never
+the arm that happened to come last, and any `Unknown` arm makes the fold
+`Unknown`.
+
 ## Subjects: variables and places, one keying
 
 A guard subject is a variable (`$x`) or a **place** — a chain of stable
