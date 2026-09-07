@@ -111,6 +111,24 @@
       "status": "gold"
     },
     {
+      "id": "php-def-mock-receiver-is-the-doubled-class",
+      "difficulty": "hard",
+      "semantic_area": "php-multilang",
+      "lang": "php",
+      "root": "gold-corpus/php-fixture",
+      "comment": "`$this->createMock(Greeter::class)` types `$m` as the doubled class (the PHPUnit overlay); `$m->hi()` resolves on Greeter.",
+      "file": "tests/GreeterTest.php",
+      "line": 11,
+      "col": 19,
+      "expect": {
+        "all": [
+          "Greeter.php:16:21"
+        ],
+        "none": []
+      },
+      "status": "gold"
+    },
+    {
       "id": "php-def-hook-callable-string-names-the-method",
       "difficulty": "simple",
       "semantic_area": "php-multilang",
