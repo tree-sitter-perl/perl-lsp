@@ -62,6 +62,19 @@ pub struct PackFacts {
     #[serde(default)]
     pub include_directives: Vec<(Span, String)>,
 
+    /// `use A\B as C` rows: (alias, namespace, real leaf). The use-map
+    /// pins the ALIAS spelling to the namespace and leaves the real leaf
+    /// free for the file's own or same-namespace class.
+    #[serde(default)]
+    pub use_aliases: Vec<(String, String, String)>,
+
+    /// Class spellings written with a qualifier: (leaf, written prefix —
+    /// absolute when it starts with `\`, else relative to the file's
+    /// namespace). A qualified spelling pins the leaf to that namespace
+    /// rather than counting as a bare spelling.
+    #[serde(default)]
+    pub qualified_spellings: Vec<(String, String)>,
+
     /// This file's transitive `#include` closure — canonical header paths it
     /// reaches. The cross-file VISIBILITY key: a name resolves preferentially to
     /// a definition in a file this set contains (`ScopedLookup` ranks
@@ -70,6 +83,16 @@ pub struct PackFacts {
     /// there (empty closure → global winner unchanged).
     #[serde(default)]
     pub include_closure: path_intern::ClosureList,
+
+    /// FQ disambiguation rows for the per-package `parents` edges:
+    /// `(child leaf, parent leaf, parent namespace)`, minted by
+    /// namespace-relative packs (php — an alias/import/current-namespace
+    /// resolution decided each edge). The family walks validate a
+    /// leaf-keyed chain hop against these so same-named classes in
+    /// different namespaces stop conflating; an absent row (Perl, cpp)
+    /// means "no claim", never a prune.
+    #[serde(default)]
+    pub parent_namespaces: Vec<(String, String, String)>,
 
     /// Raw domain-typing sites: each `slot`-field access that interacts
     /// with a `value` token (`slot == V`, `slot = V`) at `slot_span`. The
@@ -119,6 +142,9 @@ impl PackFacts {
                 .sum::<usize>();
 
         h.cpp_extras += vcap(&self.macro_defs)
+            + vcap(&self.use_aliases)
+            + vcap(&self.qualified_spellings)
+            + vcap(&self.parent_namespaces)
             + vcap(&self.domain_sites)
             + vcap(&self.moved_from)
             + vcap(&self.control_regions)
