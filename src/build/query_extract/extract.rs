@@ -2760,6 +2760,84 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                             }
                         }
                         DocFact::Deprecated(t) => mark_deprecated(sym, t.clone()),
+                        DocFact::ReturnRecvInstance { base } => {
+                            if sym.return_type.is_none()
+                                && !sym.receiver_return
+                                && sym.receiver_instance_of.is_none()
+                            {
+                                sym.receiver_instance_of = Some(base.clone());
+                            }
+                        }
+                        DocFact::Return(t) => {
+                            // A doc row fills an undeclared return, and REFINES
+                            // a bare declared container (`: array` +
+                            // `@return array{Queue, Agent}`) — the same rule
+                            // `doc_admits` applies to params.
+                            let bare_container = matches!(
+                                sym.return_type,
+                                Some(InferredType::HashRef | InferredType::ArrayRef)
+                            );
+                            if (sym.return_type.is_none() || bare_container)
+                                && !sym.receiver_return
+                            {
+                                if (pack.rettype_receiver)(t) {
+                                    if sym.return_type.is_none() {
+                                        sym.receiver_return = true;
+                                    }
+                                } else if let Some(doc) = (pack.annot_type)(t) {
+                                    if !bare_container
+                                        || matches!(
+                                            doc,
+                                            InferredType::Sequence(_)
+                                                | InferredType::Parametric(_)
+                                                | InferredType::HashWithKeys { .. }
+                                        )
+                                    {
+                                        sym.return_type = Some(doc);
+                                    }
+                                }
+                            }
+                        }
+                        DocFact::UsesMethod { name, line, col } => {
+                            // PHPUnit `@dataProvider name`: a method REF on
+                            // the enclosing class, spanning the provider
+                            // NAME TOKEN in the docblock — providers gain
+                            // real fan-in, and rename rewrites the token in
+                            // place. Only meaningful on class members (the
+                            // invocant is the class).
+                            if let (true, Some(cls)) = (
+                                matches!(sym.kind.as_str(), "sub" | "method"),
+                                sym.package.as_deref(),
+                            ) {
+                                let start = Point { row: cstart + line, column: *col };
+                                let end = Point {
+                                    row: start.row,
+                                    column: col + name.len(),
+                                };
+                                // Invocant is the CLASS NAME, not
+                                // `__PACKAGE__`: the doc row sits in the
+                                // class-body scope, whose package is the
+                                // NAMESPACE, so the current-package walk
+                                // would resolve the wrong owner — the join
+                                // already knows the class.
+                                doc_refs.push(SkelRef {
+                                    via: None,
+                                    kind: "member".to_string(),
+                                    name: name.clone(),
+                                    start,
+                                    end,
+                                    scope: sym.scope,
+                                    invocant: Some((
+                                        Span { start, end },
+                                        cls.to_string(),
+                                    )),
+                                    member_op: None,
+                                    arg_count: None,
+                                    shape: crate::model::file_analysis::MemberShape::Callable,
+                                    named_by_string: false,
+                                });
+                            }
+                        }
                         _ => {}
                     }
                 }
