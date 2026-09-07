@@ -85,6 +85,52 @@ impl<'a> CandidateSet<'a> {
         // models differ, not the seam.
         if self.pack {
             let mut out = Vec::new();
+            // A name-keyed pack (php): every class the index declares under
+            // the prefix that this file cannot already spell bare — not its
+            // own namespace's, not a pinned import — offered with the import
+            // row as the edit that makes it spellable (`import_edit_for`).
+            if self.origin.pack.imports_bind_names
+                && mask.intersects(RoleMask::WORKSPACE | RoleMask::DEPENDENCY)
+            {
+                if let Some(idx) = self.module_index {
+                    let own = self.origin.use_map_pins().own_namespace.clone();
+                    let mut seen: std::collections::HashSet<(String, String)> = Default::default();
+                    for (leaf, cands) in idx.defs_with_prefix(prefix) {
+                        // what the leaf means HERE: pinned to a namespace
+                        // (an import, the file's own declaration) or bare
+                        let pinned = self.origin.leaf_namespace(&leaf);
+                        for cached in cands {
+                            let whole = idx.symbols_present(&cached);
+                            let Some(ns) = whole.declared_type_namespace(&leaf) else { continue };
+                            if !seen.insert((leaf.clone(), ns.clone())) {
+                                continue;
+                            }
+                            let fq = if ns.is_empty() { leaf.clone() } else { format!("{ns}\\{leaf}") };
+                            let spellable = pinned.as_deref() == Some(ns.as_str())
+                                || (pinned.is_none() && own.as_deref() == Some(ns.as_str()));
+                            let (edits, priority) = if spellable {
+                                (vec![], crate::model::file_analysis::PRIORITY_EXPLICIT_IMPORT)
+                            } else if pinned.is_some() {
+                                continue; // the leaf already names another class here
+                            } else {
+                                let Some((at, text)) = self.origin.import_edit_for(&fq, self.point.row) else { continue };
+                                (vec![(Span { start: at, end: at }, text)], crate::model::file_analysis::PRIORITY_UNIMPORTED)
+                            };
+                            out.push(CompletionCandidate {
+                                label: leaf.clone(),
+                                kind: SymKind::Class,
+                                is_static: false,
+                                detail: Some(fq),
+                                insert_text: None,
+                                sort_priority: priority,
+                                additional_edits: edits,
+                                import_fact: None,
+                                display_override: None,
+                            });
+                        }
+                    }
+                }
+            }
             if mask.contains(RoleMask::DEPENDENCY) && !self.origin.pack.include_closure.is_empty() {
                 if let Some(idx) = self.module_index {
                     let visible: std::collections::HashSet<String> =
@@ -128,8 +174,8 @@ impl<'a> CandidateSet<'a> {
                         };
                         out.push(CompletionCandidate {
                             label: name.clone(),
-                            is_static: false,
                             kind: sym.kind.clone(),
+                            is_static: false,
                             detail: Some(detail),
                             insert_text: None,
                             sort_priority: crate::model::file_analysis::PRIORITY_CLOSURE,
@@ -155,8 +201,8 @@ impl<'a> CandidateSet<'a> {
             out.extend(crate::model::builtins::builtin_functions().map(|name| {
                 CompletionCandidate {
                     label: name.to_string(),
-                    is_static: false,
                     kind: SymKind::Sub,
+                    is_static: false,
                     detail: Some("perl builtin".to_string()),
                     insert_text: None,
                     sort_priority: crate::model::file_analysis::PRIORITY_BUILTIN,
@@ -212,8 +258,8 @@ impl<'a> CandidateSet<'a> {
                 };
                 CompletionCandidate {
                     label: name,
-                    is_static: false,
                     kind: SymKind::Module,
+                    is_static: false,
                     detail,
                     insert_text: None,
                     sort_priority,
@@ -252,8 +298,8 @@ impl<'a> CandidateSet<'a> {
             }
             out.push(CompletionCandidate {
                 label: c.label.clone(),
-                is_static: false,
                 kind: SymKind::Sub,
+                is_static: false,
                 detail: c.detail.or_else(|| Some(format!("from {}", package))),
                 insert_text: Some(c.label),
                 sort_priority: 10,
@@ -284,8 +330,8 @@ impl<'a> CandidateSet<'a> {
             }
             out.push(CompletionCandidate {
                 label: suffix.clone(),
-                is_static: false,
                 kind: SymKind::Module,
+                is_static: false,
                 detail: Some(hint.to_string()),
                 insert_text: Some(suffix),
                 sort_priority: 20,
@@ -342,8 +388,8 @@ impl<'a> CandidateSet<'a> {
                 };
                 out.push(CompletionCandidate {
                     label: s.name.clone(),
-                    is_static: false,
                     kind: s.kind.clone(),
+                    is_static: false,
                     detail,
                     insert_text: None,
                     sort_priority: if nested_container { 20 } else { 10 },

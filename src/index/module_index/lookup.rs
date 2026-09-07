@@ -690,7 +690,6 @@ impl CrossFileLookup for ModuleIndex {
             .map(|g| Arc::clone(&g))
             .unwrap_or_default()
     }
-
     fn is_dependency_path(&self, path: &std::path::Path) -> bool {
         match self.core.dependency_roots.read() {
             // Hub semantics: everything cached here came from `@INC`.
@@ -868,6 +867,9 @@ impl CrossFileLookup for ModuleIndex {
         visible: &std::collections::HashSet<String>,
     ) -> Vec<(String, Arc<CachedModule>)> {
         self.visible_defs_with_prefix(prefix, visible)
+    }
+    fn defs_with_prefix(&self, prefix: &str) -> Vec<(String, Vec<Arc<CachedModule>>)> {
+        self.defs_with_prefix(prefix)
     }
 }
 
