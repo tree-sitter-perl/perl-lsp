@@ -71,7 +71,7 @@
 ; partial `struct X<T*>`): the name is a `template_type`, and the spec is
 ; its OWN Class (per-spec identity — a spec REPLACES the primary's members
 ; wholesale, so it must own a distinct member table; fork 4 of
-; docs/prompt-template-arc.md). The symbol/package name is the canonical
+; docs/adr/cpp-templates.md). The symbol/package name is the canonical
 ; template spelling (`formatter<int, char>` — see
 ; `canonical_template_spelling`); @spec.primary records the base name so
 ; extraction mints the `Specializes` family edge (goto-implementation
@@ -527,7 +527,7 @@
 ; f<char>(..);` — fmt's src/format.cc is entirely this shape). It is a USE
 ; of the named template, not a def-with-body — but a deliberate,
 ; enumerable one, so it mints an outline symbol (fork 2 of
-; docs/prompt-template-arc.md): the class form under the canonical
+; docs/adr/cpp-templates.md): the class form under the canonical
 ; instantiation spelling, the function form under the function's name
 ; (qualified forms join their class via @qualifier, whose template_type
 ; is peeled to the base name — `buffer<char>::append` files under
