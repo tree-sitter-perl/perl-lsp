@@ -823,3 +823,161 @@ fn php_nested_generic_over_mixed_keeps_the_outer_shape() {
     assert!(bag.contains("bag: array") && !bag.contains("list"), "{bag}");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Round-6 R6-1/R6-2: an aliased import pins the ALIAS spelling, never the
+/// real leaf (`use B\Event as ScriptEvent;` in namespace `A` leaves the
+/// bare `Event` meaning `A\Event`), a `use` row references only the class
+/// its own namespace names, and a qualified spelling
+/// (`new Downloader\DownloadManager()` inside `Composer`) pins the leaf to
+/// `Composer\Downloader` instead of counting as a bare spelling.
+#[cfg(feature = "php")]
+#[test]
+fn php_aliased_imports_and_qualified_spellings_pin_the_right_class() {
+    let dir = std::env::temp_dir().join(format!("perl-lsp-r6pins-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    for d in ["A", "B", "Composer/Downloader", "Other"] {
+        std::fs::create_dir_all(dir.join(d)).unwrap();
+    }
+    let w = |rel: &str, src: &str| std::fs::write(dir.join(rel), src).unwrap();
+    w("A/Event.php", "<?php\nnamespace A;\nclass Event { public function name(): string { return \"a\"; } }\n");
+    w("B/Event.php", "<?php\nnamespace B;\nuse A\\Event as BaseEvent;\nclass Event extends BaseEvent { public function name(): string { return \"b\"; } }\n");
+    w("A/Dispatcher.php", "<?php\nnamespace A;\nuse B\\Event as ScriptEvent;\nfunction dispatch(): void\n{\n    $e = new Event();\n    $e->name();\n    $s = new ScriptEvent();\n    $s->name();\n}\n");
+    w("Composer/Factory.php", "<?php\nnamespace Composer;\nclass Factory\n{\n    public function make(): void\n    {\n        $dm = new Downloader\\DownloadManager();\n        $dm->go();\n    }\n}\n");
+    w("Composer/Abs.php", "<?php\nnamespace Composer;\nclass Abs\n{\n    public function make(): void\n    {\n        $o = new \\Other\\DownloadManager();\n        $o->go();\n    }\n}\n");
+    w("Composer/Downloader/DownloadManager.php", "<?php\nnamespace Composer\\Downloader;\nclass DownloadManager { public function go(): int { return 1; } }\n");
+    w("Other/DownloadManager.php", "<?php\nnamespace Other;\nclass DownloadManager { public function go(): string { return \"o\"; } }\n");
+    let run = |args: &[&str]| {
+        let out = std::process::Command::new(env!("CARGO_BIN_EXE_perl-lsp"))
+            .args(args)
+            .env("XDG_CACHE_HOME", dir.join(".cache"))
+            .output()
+            .expect("run");
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+    let root = dir.to_str().unwrap();
+    let sites = |out: &str| -> Vec<(String, u64)> {
+        let v: serde_json::Value = serde_json::from_str(out).expect("json");
+        let mut l: Vec<(String, u64)> = v.as_array().unwrap().iter().map(|e| {
+            let f = e["file"].as_str().unwrap();
+            (f[f.rfind('/').map(|i| i + 1).unwrap_or(0)..].to_string(), e["line"].as_u64().unwrap())
+        }).collect();
+        l.sort();
+        l
+    };
+    let gd = run(&["--definition", root, "A/Dispatcher.php", "5", "13"]);
+    assert!(gd.contains("A/Event.php") && !gd.contains("B/Event.php"), "bare `Event` in namespace A is A's: {gd}");
+    let a = sites(&run(&["--references", root, "A/Event.php", "2", "6"]));
+    assert_eq!(a, vec![("Dispatcher.php".into(), 5), ("Event.php".into(), 2), ("Event.php".into(), 2)], "A\\Event: the `new`, its decl, and B's `use A\\Event` row — never `use B\\Event`: {a:?}");
+    let b = sites(&run(&["--references", root, "B/Event.php", "3", "6"]));
+    assert_eq!(b, vec![("Dispatcher.php".into(), 2), ("Event.php".into(), 3)], "B\\Event: the aliased use row and its decl only: {b:?}");
+    let d = sites(&run(&["--references", root, "Composer/Downloader/DownloadManager.php", "2", "40"]));
+    assert_eq!(d, vec![("DownloadManager.php".into(), 2), ("Factory.php".into(), 7)], "relative-qualified `new` site admitted, absolute `\\Other` site not: {d:?}");
+    let o = sites(&run(&["--references", root, "Other/DownloadManager.php", "2", "40"]));
+    assert_eq!(o, vec![("Abs.php".into(), 7), ("DownloadManager.php".into(), 2)], "{o:?}");
+    // Goto-def on the `Event` leaf of B's `use A\Event as BaseEvent;` row
+    // (row 2) names A's class in full — never B's own same-leaf `Event`.
+    let row = run(&["--definition", root, "B/Event.php", "2", "8"]);
+    assert!(row.contains("A/Event.php") && !row.contains("B/Event.php"), "an import row's leaf resolves by the row's namespace: {row}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Round-7 R7-5: a group-use row (`use A\{Foo, Bar as Baz};`) is an
+/// import row like the flat spelling — each clause pins its leaf (or
+/// alias) to the group's namespace, the leaf token is a reference site
+/// goto-def lands from, and references/rename on the class reach the
+/// row and the `new` sites it enables.
+#[cfg(feature = "php")]
+#[test]
+fn php_group_use_rows_answer_like_flat_rows() {
+    let dir = std::env::temp_dir().join(format!("perl-lsp-r7group-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    for d in ["A", "B"] {
+        std::fs::create_dir_all(dir.join(d)).unwrap();
+    }
+    let w = |rel: &str, src: &str| std::fs::write(dir.join(rel), src).unwrap();
+    w("A/Foo.php", "<?php\nnamespace A;\nclass Foo { public function go(): int { return 1; } }\n");
+    w("A/Bar.php", "<?php\nnamespace A;\nclass Bar { public function run(): int { return 2; } }\n");
+    w("B/Use.php", "<?php\nnamespace B;\nuse A\\{Foo, Bar as Baz};\nclass Use1 {\n    public function m(): int { $f = new Foo(); $b = new Baz(); return $f->go() + $b->run(); }\n}\n");
+    let run = |args: &[&str]| {
+        let out = std::process::Command::new(env!("CARGO_BIN_EXE_perl-lsp"))
+            .args(args)
+            .env("XDG_CACHE_HOME", dir.join(".cache"))
+            .output()
+            .expect("run");
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+    let root = dir.to_str().unwrap();
+    let sites = |out: &str| -> Vec<(String, u64)> {
+        let v: serde_json::Value = serde_json::from_str(out).expect("json");
+        let mut l: Vec<(String, u64)> = v.as_array().unwrap().iter().map(|e| {
+            let f = e["file"].as_str().unwrap();
+            (f[f.rfind('/').map(|i| i + 1).unwrap_or(0)..].to_string(), e["line"].as_u64().unwrap())
+        }).collect();
+        l.sort();
+        l
+    };
+    // the `Foo` leaf inside the group row (0-based row 2, col 7)
+    let row = run(&["--definition", root, "B/Use.php", "2", "7"]);
+    assert!(row.contains("A/Foo.php"), "group-use leaf resolves by the group's namespace: {row}");
+    let bar = run(&["--definition", root, "B/Use.php", "2", "12"]);
+    assert!(bar.contains("A/Bar.php"), "aliased group clause's real leaf: {bar}");
+    let new_site = run(&["--definition", root, "B/Use.php", "4", "40"]);
+    assert!(new_site.contains("A/Foo.php"), "`new Foo()` under a group use: {new_site}");
+    let foo = sites(&run(&["--references", root, "A/Foo.php", "2", "6"]));
+    assert_eq!(foo, vec![("Foo.php".into(), 2), ("Use.php".into(), 2), ("Use.php".into(), 4)], "decl, group row, `new` site: {foo:?}");
+    let bar = sites(&run(&["--references", root, "A/Bar.php", "2", "6"]));
+    assert_eq!(bar, vec![("Bar.php".into(), 2), ("Use.php".into(), 2)], "decl and the aliased group clause: {bar:?}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Round-7 R7-4: an anonymous class (`new class(...) extends Base {...}`)
+/// is its own identity — a position-keyed synthesized Class symbol its
+/// members key by — never a member of the enclosing container: an outer
+/// class's same-named property/method has no references inside the
+/// anonymous body, `$this` inside it resolves to its own members, the
+/// `class` keyword is its constructor's call site, and `extends Base`
+/// makes its override an implementation of the base method.
+#[cfg(feature = "php")]
+#[test]
+fn php_anonymous_class_is_its_own_identity() {
+    let dir = std::env::temp_dir().join(format!("perl-lsp-r7anon-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let w = |rel: &str, src: &str| std::fs::write(dir.join(rel), src).unwrap();
+    w("Outer.php", "<?php\nnamespace T;\nclass Outer {\n    private int $n = 1;\n    public function get(): int { return $this->n; }\n    public function make(): object {\n        return new class(3) {\n            public function __construct(private int $n) {}\n            public function get(): int { return $this->n; }\n        };\n    }\n}\n");
+    w("Handler.php", "<?php\nnamespace T;\nclass Handler { public function handle(int $x): int { return $x; } }\nfunction make(): Handler {\n    return new class(3) extends Handler {\n        public function __construct(private int $n) {}\n        public function handle(int $x): int { return $x + $this->n; }\n    };\n}\n");
+    let run = |args: &[&str]| {
+        let out = std::process::Command::new(env!("CARGO_BIN_EXE_perl-lsp"))
+            .args(args)
+            .env("XDG_CACHE_HOME", dir.join(".cache"))
+            .output()
+            .expect("run");
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+    let root = dir.to_str().unwrap();
+    let lines = |out: &str| -> Vec<u64> {
+        let v: serde_json::Value = serde_json::from_str(out).expect("json");
+        let mut l: Vec<u64> = v.as_array().unwrap().iter().map(|e| e["line"].as_u64().unwrap()).collect();
+        l.sort();
+        l
+    };
+    // (positional CLI coordinates and answers are 0-based)
+    // Outer's `$n` (row 3) and `get()` (row 4): the anonymous body's
+    // same-named members are NOT references to them.
+    assert_eq!(lines(&run(&["--references", root, "Outer.php", "3", "17"])), vec![3, 4], "outer `$n` stays outside the anonymous class");
+    assert_eq!(lines(&run(&["--references", root, "Outer.php", "4", "20"])), vec![4], "outer `get()` stays outside the anonymous class");
+    // the anonymous class's own promoted `$n` (row 7) is read by ITS `get()`
+    assert_eq!(lines(&run(&["--references", root, "Outer.php", "7", "52"])), vec![7, 8], "anonymous `$n`: decl + its own `$this->n`");
+    let gd = run(&["--definition", root, "Outer.php", "8", "55"]);
+    assert!(gd.contains("Outer.php:7:"), "`$this->n` inside the anonymous body lands on its promoted property: {gd}");
+    // `extends Handler`: the anonymous override is an implementation of the base method
+    let impls = run(&["--implementations", root, "Handler.php", "2", "33"]);
+    assert!(impls.contains("\"line\": 6"), "anonymous override implements Handler::handle: {impls}");
+    // the `class` keyword is the constructor's call site: neither ctor is dead
+    let heat: serde_json::Value = serde_json::from_str(&run(&["--heatmap", root])).expect("heatmap json");
+    let rows = heat["symbols"].as_array().or_else(|| heat["rows"].as_array()).expect("rows");
+    let ctors: Vec<(String, u64)> = rows.iter().filter(|r| r["name"] == "__construct").map(|r| (r["package"].as_str().unwrap_or("").to_string(), r["fan_in"].as_u64().unwrap_or(0))).collect();
+    assert_eq!(ctors.len(), 2, "{ctors:?}");
+    assert!(ctors.iter().all(|(pkg, fan_in)| pkg.starts_with("class_anonymous_") && *fan_in == 1), "each anonymous ctor keyed by its synthesized class with its `new class(...)` site as fan-in: {ctors:?}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
