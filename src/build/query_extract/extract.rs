@@ -2900,6 +2900,77 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                     }
                 }
             }
+            // A refining doc row REPLACES the redundant bare-container annot
+            // witness on its slot (the fold is not latest-wins; leaving the
+            // `array` witness in place would keep beating the refinement).
+            let refined: std::collections::HashSet<(std::string::String, crate::model::file_analysis::ScopeId)> =
+                doc_witnesses
+                    .iter()
+                    .filter(|w| {
+                        matches!(
+                            &w.payload,
+                            crate::model::witnesses::WitnessPayload::InferredType(
+                                InferredType::Sequence(_) | InferredType::Parametric(_)
+                            )
+                        )
+                    })
+                    .filter_map(|w| match &w.attachment {
+                        crate::model::witnesses::WitnessAttachment::Variable { name, scope } => {
+                            Some((name.clone(), *scope))
+                        }
+                        _ => None,
+                    })
+                    .collect();
+            if !refined.is_empty() {
+                out.witnesses.retain(|w| {
+                    let is_container_annot = matches!(
+                        &w.source,
+                        crate::model::witnesses::WitnessSource::Builder(s)
+                            if s == crate::model::witnesses::ANNOT_SOURCE
+                    ) && matches!(
+                        &w.payload,
+                        crate::model::witnesses::WitnessPayload::InferredType(
+                            InferredType::HashRef | InferredType::ArrayRef
+                        )
+                    );
+                    !(is_container_annot
+                        && matches!(
+                            &w.attachment,
+                            crate::model::witnesses::WitnessAttachment::Variable { name, scope }
+                                if refined.contains(&(name.clone(), *scope))
+                        ))
+                });
+            }
+            // A named `@var T $x` above a RE-assignment (php's function-
+            // scoped locals: the def is the FIRST assignment, a later one is
+            // a rebind FlowEdge, not a symbol) casts the variable from that
+            // row on — the `$x = Factory::make(); /** @var Concrete $x */`
+            // idiom that narrows a base-typed factory return.
+            for (end_row, (_, facts)) in &by_end_row {
+                for f in facts {
+                    let DocFact::Var { ty, name: Some(vn) } = f else { continue };
+                    let Some(t) = (pack.annot_type)(ty) else { continue };
+                    let has_def = out
+                        .symbols
+                        .iter()
+                        .any(|s| s.kind == "var" && &s.name == vn && s.start.row == end_row + 1);
+                    if has_def {
+                        continue;
+                    }
+                    if let Some(fe) = out
+                        .flow_edges
+                        .iter()
+                        .find(|fe| &fe.target_name == vn && fe.target_at.row == end_row + 1)
+                    {
+                        out.witnesses.push(doc_cast_witness(
+                            vn,
+                            fe.target_scope,
+                            t,
+                            Span { start: fe.target_at, end: fe.target_at },
+                        ));
+                    }
+                }
+            }
             out.witnesses.extend(doc_witnesses);
             out.symbols.extend(doc_methods);
             out.refs.extend(doc_refs);
