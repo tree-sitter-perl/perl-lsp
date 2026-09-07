@@ -196,6 +196,56 @@ any '/*whatever' => {whatever => ''} => sub ($c) {
     }
 }
 
+/// An assignment whose value this tier cannot type still HAPPENED: the
+/// variable's earlier class must not stand past it. Before the rebind the
+/// class answers; after it, nothing does — the honest unknown, not a
+/// stale `Foo`.
+#[test]
+fn untyped_reassignment_resets_the_earlier_type() {
+    let src = r#"
+package Foo;
+sub new { bless {}, shift }
+
+package main;
+my $x = Foo->new;
+$x->m;
+$x = compute($x);
+$x->n;
+my $y = Foo->new;
+$y = Foo->new;
+$y->m;
+sub g { my $o = Foo->new; $o = compute($o); return $o }
+sub h { my $o = Foo->new; return $o }
+my $z = Foo->new;
+$z = {};
+$z->{k};
+"#;
+    let fa = build_fa(src);
+    let class_at = |var: &str, row: usize| {
+        fa.inferred_type_via_bag(var, Point::new(row, 0))
+            .and_then(|t| t.class_name().map(str::to_string))
+    };
+    assert_eq!(class_at("$x", 6), Some("Foo".into()), "typed before the rebind");
+    assert_eq!(class_at("$x", 8), None, "an untypable rebind resets the value");
+    assert_eq!(class_at("$y", 11), Some("Foo".into()), "a typed rebind keeps typing");
+    // The reset is a VALUE inside the chase: a return arm reading the reset
+    // variable makes the sub's return unknown rather than falling back to
+    // whatever else resolved — and the boundary never renders it.
+    let ret = |name: &str| {
+        fa.sub_return_type_at_arity(name, None)
+            .and_then(|t| t.class_name().map(str::to_string))
+    };
+    assert_eq!(ret("h"), Some("Foo".into()));
+    assert_eq!(ret("g"), None, "a reset arm is unknown, not the earlier class");
+    // A TYPED reassignment resets too: the class axis does not outlive
+    // `$z = {}` just because a class beats a rep in any order.
+    assert_eq!(class_at("$z", 16), None, "a hash reassignment ends the class");
+    assert_eq!(
+        fa.inferred_type_via_bag("$z", Point::new(16, 0)),
+        Some(InferredType::HashRef)
+    );
+}
+
 /// The honest boundary: a helper name that is NOT statically decidable —
 /// a function call (`compute()`), or an interpolation over an unknown
 /// variable (`"x_$unknown"`) — synthesizes NOTHING. No guess, no
