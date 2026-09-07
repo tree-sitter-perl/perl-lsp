@@ -166,3 +166,86 @@ pub fn semantic_tokens(analysis: &FileAnalysis) -> Vec<SemanticToken> {
 
     result
 }
+
+/// Inlay hints for a pack document: the type hints above plus a
+/// `name:` before every positional argument of a call in `range` whose
+/// callee resolves — the pack's own call shapes find the sites, the
+/// signature-help ladder names the parameters. Positional matching stops
+/// at a named argument or a spread; a variadic parameter covers the rest;
+/// an argument that IS the same-named variable already reads as the name.
+pub fn pack_inlay_hints(
+    analysis: &FileAnalysis,
+    tree: &Tree,
+    text: &str,
+    range: Range,
+    language: &str,
+    module_index: &dyn CrossFileLookup,
+) -> Vec<InlayHint> {
+    let mut hints = inlay_hints(analysis, range);
+    let reg = crate::build::language_driver::LanguageRegistry::with_enabled();
+    let Some(pack) = reg.for_id(language).and_then(|d| d.lang_pack()) else {
+        return hints;
+    };
+    let rows = range.start.line as usize..=range.end.line as usize;
+    for call in crate::build::cursor_sentinel::calls_in_rows(tree, &pack, text, rows) {
+        if call.args.is_empty() {
+            continue;
+        }
+        let Some((_, params, _, _)) =
+            pack_callee_signature(analysis, text, call.callee.start, module_index)
+        else {
+            continue;
+        };
+        let names: Vec<(String, bool)> = params.iter().filter_map(|p| param_name(p)).collect();
+        if names.len() != params.len() {
+            continue; // a parameter the renderer could not name: no guessing
+        }
+        for (i, arg) in call.args.iter().enumerate() {
+            if arg.named || arg.spread {
+                break;
+            }
+            let Some((name, _)) = names.get(i).or_else(|| names.last().filter(|(_, v)| *v)) else {
+                break;
+            };
+            let shown = arg.text.trim();
+            if shown == format!("${name}") || shown == name {
+                continue;
+            }
+            hints.push(InlayHint {
+                position: point_to_position(arg.span.start),
+                label: InlayHintLabel::String(format!("{name}:")),
+                kind: Some(InlayHintKind::PARAMETER),
+                text_edits: None,
+                tooltip: None,
+                padding_left: None,
+                padding_right: Some(true),
+                data: None,
+            });
+        }
+    }
+    hints
+}
+
+/// `(name, variadic)` of one rendered parameter (`string $to`,
+/// `int ...$rest`, `?Foo $x = null`, `const T& v`): the declarator token —
+/// sigil-led where the language has one, else the last token of a
+/// type-then-name pair. A lone type (`int`) names nothing.
+fn param_name(p: &str) -> Option<(String, bool)> {
+    let head = p.split('=').next().unwrap_or(p).trim();
+    let toks: Vec<&str> = head.split_whitespace().collect();
+    let tok = toks
+        .iter()
+        .rev()
+        .find(|t| t.contains('$'))
+        .copied()
+        .or_else(|| if toks.len() >= 2 { toks.last().copied() } else { None })?;
+    let variadic = tok.starts_with("...") || tok.contains("...");
+    let name = tok
+        .trim_start_matches("...")
+        .trim_start_matches(['&', '*', '$'])
+        .trim_end_matches("[]");
+    if name.is_empty() || !name.chars().all(|c| c.is_alphanumeric() || c == '_') {
+        return None;
+    }
+    Some((name.to_string(), variadic))
+}

@@ -1543,6 +1543,25 @@ impl LanguageServer for Backend {
             Some(doc) => doc,
             None => return self.not_ready_or_null(uri),
         };
+        let caps = crate::build::language_driver::LanguageRegistry::caps(doc.language);
+        if caps.pack_signature_help {
+            // A pack document: the call sites come from its own tree and
+            // each callee from the member ladder through the routed pack
+            // index — the same hop signature help takes.
+            let analysis = Arc::clone(&doc.analysis);
+            let tree = doc.tree.clone();
+            let text = doc.text.clone();
+            let language = doc.language;
+            let range = params.range;
+            drop(doc);
+            return self
+                .run_query(move |cx| {
+                    let routed = cx.routed(language);
+                    let hints = symbols::pack_inlay_hints(&analysis, &tree, &text, range, language, routed.as_lookup());
+                    if hints.is_empty() { None } else { Some(hints) }
+                })
+                .await;
+        }
         let hints = symbols::inlay_hints(&doc.analysis, params.range);
         if hints.is_empty() {
             Ok(None)
