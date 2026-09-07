@@ -2780,6 +2780,29 @@ $y = $x;
 }
 
 #[test]
+fn php_parent_edges_from_extends_implements_and_trait_use() {
+    let src = "\
+<?php
+trait T {}
+interface I {}
+class B {}
+class C extends B implements I {
+    use T;
+}
+";
+    let mut parser = php_parser();
+    let tree = parser.parse(src, None).unwrap();
+    let skel = extract(&tree, src.as_bytes(), &php_pack()).unwrap();
+    for parent in ["B", "I", "T"] {
+        assert!(
+            skel.parents.contains(&("C".to_string(), parent.to_string())),
+            "expected C -> {parent}, got {:?}",
+            skel.parents,
+        );
+    }
+}
+
+#[test]
 fn php_type_display_speaks_php_not_perl() {
     let (fa, _) = php_fa("<?php\n$x = 1;\n");
     use crate::model::file_analysis::InferredType;
@@ -2788,6 +2811,55 @@ fn php_type_display_speaks_php_not_perl() {
     assert_eq!(fa.render_type(&InferredType::String), "string");
     // unmapped output passes through
     assert_eq!(fa.render_type(&InferredType::ClassName("User".into())), "User");
+}
+
+#[test]
+fn php_parent_edges_resolve_aliases_and_record_namespaces() {
+    // The FQ identity lane: `use X\Y as Z` parents recorded under Z were
+    // dead edges (Laravel's `Repository as CacheContract` hid the direct
+    // implementer from implementations); unqualified parents bind to the
+    // file's own namespace; written qualifiers carry their own.
+    let src = "\
+<?php
+namespace App\\Cache;
+
+use Illuminate\\Contracts\\Cache\\Repository as CacheContract;
+use Psr\\Log\\{LoggerInterface, NullLogger as Quiet};
+
+class Repo extends \\Vendor\\Base implements CacheContract
+{
+}
+class Local extends Helper
+{
+}
+class Logging extends Quiet
+{
+}
+";
+    let mut parser = php_parser();
+    let tree = parser.parse(src, None).unwrap();
+    let skel = extract(&tree, src.as_bytes(), &php_pack()).unwrap();
+    let rows: Vec<(&str, &str, &str)> = skel
+        .parent_namespaces
+        .iter()
+        .map(|(c, p, n)| (c.as_str(), p.as_str(), n.as_str()))
+        .collect();
+    // alias resolved to the REAL leaf, namespace from the import
+    assert!(
+        rows.contains(&("Repo", "Repository", "Illuminate\\Contracts\\Cache")),
+        "{rows:?}"
+    );
+    assert!(
+        skel.parents.contains(&("Repo".into(), "Repository".into())),
+        "the edge must key the real leaf, not the alias: {:?}",
+        skel.parents
+    );
+    // written qualifier is authoritative
+    assert!(rows.contains(&("Repo", "Base", "Vendor")), "{rows:?}");
+    // unqualified binds to the file's own namespace
+    assert!(rows.contains(&("Local", "Helper", "App\\Cache")), "{rows:?}");
+    // group-use alias resolves through the shared prefix
+    assert!(rows.contains(&("Logging", "NullLogger", "Psr\\Log")), "{rows:?}");
 }
 
 #[test]
