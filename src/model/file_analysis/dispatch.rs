@@ -74,6 +74,13 @@ pub enum HandlerOwner {
     /// Handler is registered on a specific class (typical for Mojo
     /// events, Moose roles, DBIC relationships, etc.).
     Class(String),
+    /// A flat, receiver-less handler namespace: the whole program shares
+    /// one name space of hooks (WordPress `add_action('init', …)` /
+    /// `do_action('init')`). No receiver types the dispatch — the string
+    /// alone is the identity — so receiver-gated machinery (dispatch-verb
+    /// manifests, invocant matching) skips these; name+owner equality is
+    /// the entire match.
+    Global,
 }
 
 // ---- Plugin namespace ----

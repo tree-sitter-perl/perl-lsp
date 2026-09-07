@@ -1296,8 +1296,10 @@ impl FileAnalysis {
         self.for_each_ancestor_class(class_name, module_index, |cls| {
             // (1) Local Handler symbols owned by this class.
             for sym in &self.symbols {
-                if let SymbolDetail::Handler { owner, dispatchers, .. } = &sym.detail {
-                    let HandlerOwner::Class(n) = owner;
+                if let SymbolDetail::Handler {
+                    owner: HandlerOwner::Class(n), dispatchers, ..
+                } = &sym.detail
+                {
                     if n == cls && disp_matches(dispatchers) {
                         visit(sym, "this file");
                     }

@@ -462,7 +462,7 @@ fn string_dispatch_signature_for(
                     sym: &crate::model::file_analysis::Symbol,
                     provenance: Option<&str>| {
         let SymbolDetail::Handler { owner, dispatchers, params, .. } = &sym.detail else { return };
-        let HandlerOwner::Class(n) = owner;
+        let HandlerOwner::Class(n) = owner else { return };
         if n != class { return; }
         let dispatcher_ok = dispatchers.is_empty()
             || dispatchers.iter().any(|d| d == dispatcher);
