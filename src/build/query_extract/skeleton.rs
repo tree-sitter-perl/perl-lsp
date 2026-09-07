@@ -20,6 +20,15 @@ pub struct SkelSymbol {
     /// Declared return type (`@rettype`), for methods/functions — drives
     /// method-return resolution + chaining through PackageSymbol.
     pub return_type: Option<InferredType>,
+    /// The declared return names the RECEIVER (PHP `static`/`$this`/`self`)
+    /// rather than a concrete type — the writeback publishes
+    /// `ReturnExpr::Receiver` so the call site's receiver substitutes
+    /// (fluent builders chain). Set by the pack's `rettype_receiver`.
+    pub receiver_return: bool,
+    /// The documented return is `Base<static>` — an instance of `base`
+    /// parametrized by the receiver (`DocFact::ReturnRecvInstance`); the
+    /// writeback publishes `Operator(InstanceOf{base, [Receiver]})`.
+    pub receiver_instance_of: Option<String>,
     /// Pointer/reference declarator stack, unravelled by `peel_nested` from
     /// a `@nested.target` capture (empty otherwise). Flows to `Symbol.deref_stack`.
     pub deref_stack: Vec<crate::model::file_analysis::DerefStep>,
@@ -38,6 +47,12 @@ pub struct SkelSymbol {
     /// (a header), so `reanchor_truncated_containers` must not re-attribute it to
     /// the enclosing namespace. Not serialized — a driver-internal marker.
     pub qualifier_owned: bool,
+    /// Documentation text joined from the comment directly above the def
+    /// (`DocFact::Description`); flows to `Presentation.doc`.
+    pub doc: Option<String>,
+    /// `@deprecated` text (or `Some(None)`-less: the attribute form has
+    /// no text) — present iff the symbol carries the `deprecated` attribute.
+    pub deprecation: Option<String>,
 }
 
 #[derive(Debug, Clone)]

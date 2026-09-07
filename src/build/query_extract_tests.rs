@@ -900,6 +900,7 @@ fn tok(src: &str, needle: &str, occ: usize) -> Point {
 fn sksym(src: &str, kind: &str, name: &str, occ: usize, package: Option<&str>) -> super::SkelSymbol {
     let ns = tok(src, name, occ);
     super::SkelSymbol {
+        receiver_instance_of: None,
         kind: kind.to_string(),
         name: name.to_string(),
         start: ns,
@@ -909,10 +910,13 @@ fn sksym(src: &str, kind: &str, name: &str, occ: usize, package: Option<&str>) -
         package: package.map(str::to_string),
         scope: crate::model::file_analysis::ScopeId(0),
         return_type: None,
+        receiver_return: false,
         deref_stack: Vec::new(),
         attributes: Vec::new(),
         arity: None,
         qualifier_owned: false,
+        doc: None,
+        deprecation: None,
     }
 }
 

@@ -883,10 +883,14 @@ fn inject_member_blocks(
                 package: Some(base.macro_name.clone()),
                 scope: scope_id,
                 return_type: None,
+                receiver_return: false,
+            receiver_instance_of: None,
                 deref_stack: m.deref_stack.clone(),
                 attributes: Vec::new(),
                 arity: None,
                 qualifier_owned: false,
+                doc: None,
+                deprecation: None,
             });
             // The role member emits the SAME `TypeName` edge an expanded field
             // does — the edge is canonical (the hover leaf + the type chase
@@ -1224,6 +1228,7 @@ fn remap_spans(
         let crate::build::query_extract::SkelSymbol {
             kind: _,
             name: _,
+            receiver_instance_of: _,
             start,
             end,
             name_start,
@@ -1231,10 +1236,13 @@ fn remap_spans(
             package: _,
             scope: _,
             return_type: _,
+            receiver_return: _,
             deref_stack: _,
             attributes: _,
             arity: _,
             qualifier_owned: _,
+            doc: _,
+            deprecation: _,
         } = s;
         *start = r(*start);
         *end = r(*end);
