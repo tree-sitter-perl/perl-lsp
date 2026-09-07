@@ -47,6 +47,10 @@ pub fn cli_plugin_check(args: &[String]) {
         check_pack_overlay(Path::new(path), json_mode);
         return;
     }
+    if Path::new(path).extension().and_then(|s| s.to_str()) == Some("json") {
+        check_entry_declarations(Path::new(path), json_mode);
+        return;
+    }
     let report = check_plugin_file(Path::new(path));
 
     if json_mode {
@@ -56,6 +60,99 @@ pub fn cli_plugin_check(args: &[String]) {
     }
     if !report.is_ok() {
         crate::lsp::cli::exit_with(1, "exit");
+    }
+}
+
+/// The entry-declarations arm of `--plugin-check`: validates an
+/// `entry.json` framework-entry document — parse errors (the loader would
+/// drop the whole document), a `language` no enabled pack serves, rules
+/// with no positive condition (they match nothing), and unknown fields
+/// (silently ignored by the lenient loader — this is what makes a typo'd
+/// `method_perfix` diagnosable).
+fn check_entry_declarations(path: &Path, json_mode: bool) {
+    let source = match std::fs::read_to_string(path) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("cannot read {}: {e}", path.display());
+            crate::lsp::cli::exit_with(2, "exit");
+        }
+    };
+    let known_rule_keys = ["attributes", "method_prefix", "methods", "when_isa"];
+    let doc: serde_json::Value = match serde_json::from_str(&source) {
+        Ok(v) => v,
+        Err(e) => {
+            if json_mode {
+                println!(
+                    "{}",
+                    json!({ "entry": path.display().to_string(), "ok": false, "error": e.to_string() })
+                );
+            } else {
+                println!("FAIL: {e} (the loader would drop this document)");
+            }
+            crate::lsp::cli::exit_with(1, "exit");
+        }
+    };
+    let mut warnings: Vec<String> = Vec::new();
+    let language = doc.get("language").and_then(|v| v.as_str()).unwrap_or("");
+    if language.is_empty() {
+        warnings.push("no `language` field — the loader matches none".to_string());
+    } else if crate::build::language_driver::LanguageRegistry::with_enabled()
+        .for_id(language)
+        .is_none()
+    {
+        warnings.push(format!(
+            "language '{language}' is not served by this build (rules load only under its cargo feature)"
+        ));
+    }
+    for key in doc.as_object().map(|o| o.keys()).into_iter().flatten() {
+        if key != "language" && key != "entries" {
+            warnings.push(format!("unknown top-level field `{key}` (ignored by the loader)"));
+        }
+    }
+    let entries = doc.get("entries").and_then(|v| v.as_array());
+    let mut rules = 0usize;
+    if let Some(entries) = entries {
+        for (i, rule) in entries.iter().enumerate() {
+            rules += 1;
+            let Some(obj) = rule.as_object() else {
+                warnings.push(format!("rule #{i}: not an object"));
+                continue;
+            };
+            for key in obj.keys() {
+                if !known_rule_keys.contains(&key.as_str()) {
+                    warnings.push(format!(
+                        "rule #{i}: unknown field `{key}` (ignored — a typo here silently weakens the rule)"
+                    ));
+                }
+            }
+            let positive = obj.get("attributes").and_then(|v| v.as_array()).is_some_and(|a| !a.is_empty())
+                || obj.get("method_prefix").and_then(|v| v.as_str()).is_some()
+                || obj.get("methods").and_then(|v| v.as_array()).is_some_and(|a| !a.is_empty());
+            if !positive {
+                warnings.push(format!(
+                    "rule #{i}: no positive condition (attributes / method_prefix / methods) — matches nothing"
+                ));
+            }
+        }
+    } else {
+        warnings.push("no `entries` array — the document declares nothing".to_string());
+    }
+    if json_mode {
+        println!(
+            "{}",
+            json!({
+                "entry": path.display().to_string(),
+                "ok": true,
+                "language": language,
+                "rules": rules,
+                "warnings": warnings,
+            })
+        );
+    } else {
+        println!("OK: {rules} rule(s) for '{language}'");
+        for w in &warnings {
+            println!("warning: {w}");
+        }
     }
 }
 
