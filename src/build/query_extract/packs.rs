@@ -728,11 +728,6 @@ pub fn r_pack() -> LangPack {
         shape_name: |_, raw| raw.to_string(),
         default_name: |_, _, _| None,
         annot_type: |_| None,
-        // No reliable lexical ctor convention in R (S4/R5 exist but
-        // rare); class typing arrives via shapes and S3 later.
-        // source("util.R") hands us the path verbatim; library(pkg)
-        // resolves into the installed-library tree (a real install
-        // would consult .libPaths() — not modeled here).
         rettype_receiver: |_| false,
         type_display: &[],
         namespace_relative_parents: false,
@@ -743,6 +738,11 @@ pub fn r_pack() -> LangPack {
         function_scoped_vars: false,
         constructor_names: &[],
         doc_types: |_| vec![],
+        // No reliable lexical ctor convention in R (S4/R5 exist but
+        // rare); class typing arrives via shapes and S3 later.
+        // source("util.R") hands us the path verbatim; library(pkg)
+        // resolves into the installed-library tree (a real install
+        // would consult .libPaths() — not modeled here).
         module_paths: |m| vec![m.to_string()],
         shape_ctor: |callee| matches!(callee, "list" | "data.frame" | "tibble"),
         import_call: |callee, arg| match callee {
@@ -809,8 +809,6 @@ pub fn cmake_pack() -> LangPack {
         shape_name: |_, raw| raw.to_string(),
         default_name: |_, _, _| None,
         annot_type: |_| None,
-        // include(util.cmake) is a literal path; add_subdirectory(src)
-        // means src/CMakeLists.txt. The whole resolution strategy.
         rettype_receiver: |_| false,
         type_display: &[],
         namespace_relative_parents: false,
@@ -821,6 +819,8 @@ pub fn cmake_pack() -> LangPack {
         function_scoped_vars: false,
         constructor_names: &[],
         doc_types: |_| vec![],
+        // include(util.cmake) is a literal path; add_subdirectory(src)
+        // means src/CMakeLists.txt. The whole resolution strategy.
         module_paths: |m| {
             if m.ends_with(".cmake") {
                 vec![m.to_string()]
@@ -890,6 +890,7 @@ pub fn cmake_pack() -> LangPack {
     }
 }
 
+// Live only under `feature = "php"` (or the pack tests); see `python_pack`.
 pub fn cpp_pack() -> LangPack {
     LangPack {
         query_source: include_str!("../../../queries/cpp/skeleton.scm"),
@@ -950,9 +951,6 @@ pub fn cpp_pack() -> LangPack {
                 }
             }
         },
-        // #include "a/b.h" / <vector>: strip the delimiters; a quoted
-        // path is workspace-relative verbatim, a system header resolves
-        // through include dirs (library_roots, later). Tier 1: identity.
         rettype_receiver: |_| false,
         type_display: &[],
         namespace_relative_parents: false,
@@ -963,6 +961,9 @@ pub fn cpp_pack() -> LangPack {
         function_scoped_vars: false,
         constructor_names: &[],
         doc_types: |_| vec![],
+        // #include "a/b.h" / <vector>: strip the delimiters; a quoted
+        // path is workspace-relative verbatim, a system header resolves
+        // through include dirs (library_roots, later). Tier 1: identity.
         module_paths: |m| {
             let p = m.trim_matches(|c: char| c == '"' || c == '<' || c == '>');
             vec![p.to_string()]
@@ -985,11 +986,11 @@ pub fn cpp_pack() -> LangPack {
             };
             Some(InferredType::ClassName(class))
         },
+        narrow_assertions: &[],
         // Rebinding methods: a moved-from object is put back into a known state
         // by these std container/optional/smart-ptr resets, so a use after one
         // is NOT a use-after-move. (An ordinary `x.use()` is not here, so the
         // canonical bug still flags.)
-        narrow_assertions: &[],
         rebind_method: |m| {
             matches!(m, "clear" | "reset" | "assign" | "emplace" | "swap")
         },
@@ -1109,6 +1110,93 @@ pub(super) fn param_return_expr(
     }
 }
 
+/// Normalize one phpdoc type expression to a spelling `annot_type` speaks:
+/// generics stripped (`Collection<int,User>` → `Collection`), `User[]` is
+/// an array, the `null` arm of a union dropped (`?T` too), a REAL union
+/// (`string|false`) rejected — a two-armed claim is not a type answer.
+/// Where the leading type token of a phpdoc tail ends: the first
+/// whitespace OUTSIDE angle brackets — `array<string, User> $map` keeps
+/// its generic arguments (a plain whitespace split truncated it to
+/// `array<string,`). Callers slice `[..end]` for the type and
+/// `[end..]` for what follows (the `$name` of a @param).
+fn phpdoc_type_token_end(s: &str) -> usize {
+    let mut depth = 0usize;
+    for (i, c) in s.char_indices() {
+        if c.is_whitespace() && depth == 0 {
+            return i;
+        }
+        phpdoc_depth_step(c, &mut depth);
+    }
+    s.len()
+}
+
+/// The ONE bracket alphabet of phpdoc type text (`<{(` / `>})`): every
+/// top-level split and the token boundary step depth through here, so a
+/// new bracket spelling is added once, never in lockstep across walkers.
+fn phpdoc_depth_step(c: char, depth: &mut usize) {
+    match c {
+        '<' | '{' | '(' => *depth += 1,
+        '>' | '}' | ')' => *depth = depth.saturating_sub(1),
+        _ => {}
+    }
+}
+
+/// Split phpdoc type text on `sep` at bracket depth 0 (a separator inside
+/// generics / an array shape belongs to the enclosing part).
+fn phpdoc_split_top_level(s: &str, sep: char) -> Vec<&str> {
+    let mut out = Vec::new();
+    let (mut depth, mut start) = (0usize, 0usize);
+    for (i, c) in s.char_indices() {
+        if c == sep && depth == 0 {
+            out.push(&s[start..i]);
+            start = i + 1;
+        } else {
+            phpdoc_depth_step(c, &mut depth);
+        }
+    }
+    out.push(&s[start..]);
+    out
+}
+
+fn phpdoc_type(raw: &str) -> Option<String> {
+    let raw = raw.trim_start();
+    let raw = raw[..phpdoc_type_token_end(raw)].trim_start_matches('?');
+    if raw.is_empty() {
+        return None;
+    }
+    // Union split at TOP LEVEL only — a `|` inside generics is part of one
+    // arm (`static<int, static<int, TValue|TZipValue>>` is a single type;
+    // the naive split saw three and dropped laravel's whole fluent surface).
+    let mut arms = phpdoc_split_top_level(raw, '|');
+    arms.retain(|a| !a.eq_ignore_ascii_case("null") && !a.is_empty());
+    // A union survives WHOLE: `annot_type` answers `Unknown` for it, the
+    // fact every doc row (return, param, var, @method) carries the same way.
+    if arms.len() > 1 {
+        return Some(arms.join("|"));
+    }
+    let [one] = arms.as_slice() else { return None };
+    // Sequence spellings survive WHOLE — `annot_type` parses the element
+    // (`list<X>` / `array<K,V>` / `iterable<X>` / `X[]` → a one-slot
+    // `Sequence`); every other generic still strips to its base class
+    // (`Collection<int,User>` → `Collection`).
+    if one.ends_with("[]")
+        || (one.ends_with('>')
+            && ["list<", "array<", "iterable<", "non-empty-list<", "non-empty-array<"]
+                .iter()
+                .any(|p| one.starts_with(p)))
+        // array-shape spellings (`array{A, B}` / `object{k: T}`) survive
+        // whole too — `annot_type` parses the tuple / keyed shape.
+        || (one.ends_with('}')
+            && ["array{", "list{", "object{", "non-empty-array{", "non-empty-list{"]
+                .iter()
+                .any(|p| one.starts_with(p)))
+    {
+        return Some(one.to_string());
+    }
+    let base = one.split('<').next().unwrap_or(one);
+    (!base.is_empty()).then(|| base.to_string())
+}
+
 /// Peel `T` out of a `std::optional<T>` declared-type text, unqualified
 /// (matching how `annot_type` keys classes by their last `::` segment). `None`
 /// when the text isn't an optional — the type-side gate that keeps the
@@ -1140,3 +1228,36 @@ pub(super) fn lit_type(suffix: &str) -> Option<InferredType> {
         _ => None,
     }
 }
+
+/// The classes, interfaces and attributes php provides in the global
+/// namespace (core + SPL + the bundled extensions a stock build carries).
+const PHP_BUILTIN_TYPES: &[&str] = &[
+    "AllowDynamicProperties", "AppendIterator", "ArgumentCountError", "ArithmeticError", "ArrayAccess",
+    "ArrayIterator", "ArrayObject", "AssertionError", "Attribute", "BackedEnum", "BadFunctionCallException",
+    "BadMethodCallException", "CachingIterator", "CallbackFilterIterator", "Closure", "Collator", "Countable",
+    "CurlHandle", "CurlMultiHandle", "CurlShareHandle", "DOMAttr", "DOMDocument", "DOMElement", "DOMNode",
+    "DOMNodeList", "DOMText", "DOMXPath", "DateInterval", "DatePeriod", "DateTime", "DateTimeImmutable",
+    "DateTimeInterface", "DateTimeZone", "Deprecated", "Directory", "DirectoryIterator", "DivisionByZeroError",
+    "DomainException", "EmptyIterator", "Error", "ErrorException", "Exception", "Fiber", "FilesystemIterator",
+    "FilterIterator", "GMP", "GdImage", "Generator", "GlobIterator", "HashContext", "InfiniteIterator",
+    "IntlCalendar", "IntlChar", "IntlDateFormatter", "IntlException", "IntlTimeZone", "InvalidArgumentException",
+    "Iterator", "IteratorAggregate", "IteratorIterator", "JsonException", "JsonSerializable", "LengthException",
+    "LimitIterator", "Locale", "LogicException", "Memcached", "MessageFormatter", "MultipleIterator",
+    "NoRewindIterator", "Normalizer", "NumberFormatter", "OpenSSLAsymmetricKey", "OpenSSLCertificate",
+    "OuterIterator", "OutOfBoundsException", "OutOfRangeException", "OverflowException", "Override",
+    "PDO", "PDOException", "PDOStatement", "ParentIterator", "ParseError", "Phar", "PharData", "RangeException",
+    "RecursiveArrayIterator", "RecursiveCallbackFilterIterator", "RecursiveDirectoryIterator",
+    "RecursiveIterator", "RecursiveIteratorIterator", "Redis", "RedisException", "ReflectionAttribute",
+    "ReflectionClass", "ReflectionClassConstant", "ReflectionEnum", "ReflectionException", "ReflectionFunction",
+    "ReflectionMethod", "ReflectionNamedType", "ReflectionObject", "ReflectionParameter", "ReflectionProperty",
+    "ReflectionType", "ReflectionUnionType", "RegexIterator", "ResourceBundle", "ReturnTypeWillChange",
+    "RuntimeException", "SeekableIterator", "SensitiveParameter", "Serializable", "SessionHandler",
+    "SessionHandlerInterface", "SimpleXMLElement", "SoapClient", "SoapFault", "SoapHeader", "SoapServer",
+    "SoapVar", "Socket", "SplDoublyLinkedList", "SplFileInfo", "SplFileObject", "SplFixedArray", "SplHeap",
+    "SplMaxHeap", "SplMinHeap", "SplObjectStorage", "SplObserver", "SplPriorityQueue", "SplQueue", "SplStack",
+    "SplSubject", "SplTempFileObject", "Stringable", "Throwable", "Transliterator", "Traversable", "TypeError",
+    "UConverter", "UnderflowException", "UnexpectedValueException", "UnhandledMatchError", "UnitEnum",
+    "ValueError", "WeakMap", "WeakReference", "XMLReader", "XMLWriter", "ZipArchive", "finfo", "mysqli",
+    "mysqli_result", "mysqli_stmt", "stdClass",
+];
+
