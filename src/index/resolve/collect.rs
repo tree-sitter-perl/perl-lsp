@@ -881,12 +881,13 @@ pub(super) fn refs_keyed<'a>(
 /// Created by the walk driver; the matcher fills it lazily.
 #[derive(Default)]
 pub(super) struct WalkMemo {
-    /// `pack_member_of_class`'s verdict per CANDIDATE file of the target's
-    /// class: a whole-copy fetch plus a symbol scan of that candidate,
-    /// which reads nothing about the asker. Which candidates an asker sees
-    /// stays per-asker (`visible_def_candidates` under its closure); what
-    /// each candidate answers is shared across every file the walk scans.
-    pub(super) bare_member_by_candidate:
+    /// `class_member_bare_constant`'s verdict per CANDIDATE file of the
+    /// target's class: a whole-copy fetch plus a symbol scan of that
+    /// candidate, which reads nothing about the asker. Which candidates an
+    /// asker sees stays per-asker (`visible_def_candidates` under its
+    /// closure); what each candidate answers is shared across every file
+    /// the walk scans.
+    pub(super) bare_constant_by_candidate:
         std::cell::RefCell<std::collections::HashMap<PathBuf, Option<bool>>>,
 }
 
@@ -957,14 +958,14 @@ pub(super) fn collect_from_analysis(
     // carry only partial namespace attribution — `pkg_agrees` reads this.
     let relative_ns = !analysis.pack.include_closure.is_empty();
     // Bare unresolved reads count as uses of a Method target only when the
-    // member is an enum-constant shape (its name hoists into the enclosing
-    // scope). Receiver-reached members (struct fields, methods) are matched
-    // through their call sites — a bare same-named token elsewhere is noise
-    // (the `formatter::format` 1621-hit sweep). Resolved once per scanned
-    // file, under this file's own closure scope.
+    // member's name hoists into the enclosing scope (an enumerator's does).
+    // Receiver-reached members (fields, methods) are matched through their
+    // call sites — a bare same-named token elsewhere is noise (the
+    // `formatter::format` 1621-hit sweep). Resolved once per scanned file,
+    // under this file's own closure scope.
     let bare_constant_member = match &target.kind {
         TargetKind::Method { class } => {
-            pack_member_of_class(&target.name, class, analysis, module_index, Some(memo))
+            class_member_bare_constant(&target.name, class, analysis, module_index, Some(memo))
                 .unwrap_or(false)
         }
         _ => false,
@@ -1206,7 +1207,7 @@ pub(super) fn collect_from_analysis(
                 }
             }
             (TargetKind::Package, RefKind::PackageRef) => true,
-            // A pack-language enum constant read by BARE name (`x = OP_SCOPE`,
+            // A class member read by BARE name (`x = OP_SCOPE`,
             // `case OP_SCOPE:`) — a `Variable` ref the generic goto-def
             // resolves to this def by name (the value-read half of the shared
             // Variable/Field DEF). An UNRESOLVED read counts only when the
