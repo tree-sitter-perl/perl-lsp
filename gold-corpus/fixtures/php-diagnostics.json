@@ -85,6 +85,33 @@
         ]
       },
       "status": "gold"
+    },
+    {
+      "id": "php-lar-diag-undefined-rail-names",
+      "difficulty": "simple",
+      "semantic_area": "php-laravel",
+      "lang": "php",
+      "root": "gold-corpus/laravel-fixture",
+      "comment": "`route('nowhere')` and `view('posts.missing')` are the only rail misses: every other rail use in the controller and the templates resolves (no lang / config / event / ability / middleware / binding row).",
+      "line": 0,
+      "col": 0,
+      "expect": {
+        "all": [
+          "\"code\":\"undefined-route\",\"col\":\"22\",\"file\":\"PostController.php\",\"line\":\"30\"",
+          "\"code\":\"undefined-view\",\"col\":\"60\",\"file\":\"PostController.php\",\"line\":\"30\""
+        ],
+        "none": [
+          "undefined-lang",
+          "undefined-config",
+          "undefined-event",
+          "undefined-ability",
+          "undefined-middleware",
+          "undefined-binding",
+          "\"file\":\"show.blade.php\"",
+          "\"file\":\"index.blade.php\""
+        ]
+      },
+      "status": "gold"
     }
   ]
 }

@@ -275,6 +275,24 @@
       "status": "gold"
     },
     {
+      "id": "php-lar-def-ability-policy",
+      "difficulty": "simple",
+      "semantic_area": "php-laravel",
+      "lang": "php",
+      "root": "gold-corpus/laravel-fixture",
+      "comment": "`$this->authorize('update', $post)` lands on `PostPolicy::update` (every policy method is an ability through the `app/Policies/` path rail).",
+      "file": "app/Http/Controllers/PostController.php",
+      "line": 21,
+      "col": 26,
+      "expect": {
+        "all": [
+          "PostPolicy.php:7:21"
+        ],
+        "none": []
+      },
+      "status": "gold"
+    },
+    {
       "id": "php-lar-def-middleware-alias",
       "difficulty": "simple",
       "semantic_area": "php-laravel",
@@ -287,6 +305,24 @@
       "expect": {
         "all": [
           "Kernel.php:8:10"
+        ],
+        "none": []
+      },
+      "status": "gold"
+    },
+    {
+      "id": "php-lar-def-container-binding",
+      "difficulty": "simple",
+      "semantic_area": "php-laravel",
+      "lang": "php",
+      "root": "gold-corpus/laravel-fixture",
+      "comment": "`app('users.default')` lands on the provider's `singleton('users.default', ...)`.",
+      "file": "app/Http/Controllers/PostController.php",
+      "line": 29,
+      "col": 24,
+      "expect": {
+        "all": [
+          "AppServiceProvider.php:9:32"
         ],
         "none": []
       },

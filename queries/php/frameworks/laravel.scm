@@ -387,3 +387,84 @@
           . (string . (string_content) @ref.dispatch.named.middleware .) .))))
   (#eq? @_lmw_R2 "Route")
   (#any-of? @dispatch.via "middleware" "withoutMiddleware"))
+
+; ---- the ability rail (gates and policies) ----
+; `Gate::define('name', …)` / `$gate->define(…)` define; a policy's methods
+; define through the `/app/Policies/` path rail. Uses: `->authorize`,
+; `->can` / `->cannot` / `->cant`, `Gate::allows` and kin, Blade `@can`
+; (text lane). Abilities a database grants never have a token, so a miss
+; is a hint.
+(scoped_call_expression
+  scope: (name) @_lg_G
+  name: (name) @_lg_def
+  arguments: (arguments
+    . (argument (string . (string_content) @def.handler.named.ability .)))
+  (#eq? @_lg_G "Gate")
+  (#eq? @_lg_def "define"))
+(member_call_expression
+  object: (variable_name) @_lg_recv
+  name: (name) @_lg_mdef
+  arguments: (arguments
+    . (argument (string . (string_content) @def.handler.named.ability .)))
+  (#eq? @_lg_recv "$gate")
+  (#eq? @_lg_mdef "define"))
+(member_call_expression
+  name: (name) @dispatch.via
+  arguments: (arguments
+    . (argument (string . (string_content) @ref.dispatch.named.ability .)))
+  (#any-of? @dispatch.via "authorize" "can" "cannot" "cant"))
+(scoped_call_expression
+  scope: (name) @_lg_G2
+  name: (name) @dispatch.via
+  arguments: (arguments
+    . (argument (string . (string_content) @ref.dispatch.named.ability .)))
+  (#eq? @_lg_G2 "Gate")
+  (#any-of? @dispatch.via "allows" "denies" "check" "any" "none" "authorize" "inspect" "has"))
+
+; ---- the binding rail (string-keyed container entries) ----
+; `->singleton('key', …)` / `->bind` / `->bindIf` / `->singletonIf` /
+; `->scoped` / `->instance` / `->alias('key', …)` define (a class-keyed
+; entry is the class's own ref); the framework's core aliases are the keys
+; of `registerCoreContainerAliases`. Uses: `app('key')`, `resolve('key')`,
+; `->make('key')` on the app, `App::make('key')`.
+(member_call_expression
+  name: (name) @_lb_def
+  arguments: (arguments
+    . (argument (string . (string_content) @def.handler.named.binding .)))
+  (#any-of? @_lb_def "singleton" "bind" "bindIf" "singletonIf" "scoped" "scopedIf" "instance" "alias"))
+(scoped_call_expression
+  scope: (name) @_lb_A
+  name: (name) @_lb_sdef
+  arguments: (arguments
+    . (argument (string . (string_content) @def.handler.named.binding .)))
+  (#eq? @_lb_A "App")
+  (#any-of? @_lb_sdef "singleton" "bind" "bindIf" "singletonIf" "scoped" "scopedIf" "instance" "alias"))
+(method_declaration
+  name: (name) @_lb_core
+  body: (compound_statement
+    (foreach_statement
+      (array_creation_expression
+        (array_element_initializer
+          . (string . (string_content) @def.handler.named.binding .) (_)))))
+  (#eq? @_lb_core "registerCoreContainerAliases"))
+(function_call_expression
+  function: (name) @dispatch.via
+  arguments: (arguments
+    . (argument (string . (string_content) @ref.dispatch.named.binding .)))
+  (#any-of? @dispatch.via "app" "resolve"))
+(member_call_expression
+  object: [(member_access_expression name: (name) @_lb_recv)
+           (variable_name) @_lb_recv
+           (function_call_expression function: (name) @_lb_recv)]
+  name: (name) @dispatch.via
+  arguments: (arguments
+    . (argument (string . (string_content) @ref.dispatch.named.binding .)))
+  (#match? @_lb_recv "^\\$?app$")
+  (#any-of? @dispatch.via "make" "makeWith" "bound" "get"))
+(scoped_call_expression
+  scope: (name) @_lb_A2
+  name: (name) @dispatch.via
+  arguments: (arguments
+    . (argument (string . (string_content) @ref.dispatch.named.binding .)))
+  (#eq? @_lb_A2 "App")
+  (#any-of? @dispatch.via "make" "makeWith" "bound"))
