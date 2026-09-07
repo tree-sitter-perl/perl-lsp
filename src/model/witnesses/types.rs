@@ -288,6 +288,15 @@ pub enum WitnessPayload {
     /// mostly-agree → that domain, truly-mixed → none. Kept at the END for
     /// bincode variant-index stability (bump `EXTRACT_VERSION`).
     DomainCompare { enum_type: Option<String> },
+    /// Positional tuple of EDGES: "the value at my attachment is a
+    /// `Sequence` whose slot i is whatever resolves at `elems[i]`". The
+    /// pack spelling of a key-less array literal (`return [$queue,
+    /// $agent]`): element types are query-time values (reads, calls, hops),
+    /// so the tuple stays edges, never a baked `Sequence`; materialization
+    /// drops it WHOLE when any slot is unresolved — a holey tuple
+    /// mis-projects (docs/adr/destructuring.md). Kept at the END for
+    /// bincode variant-index stability (bump `EXTRACT_VERSION`).
+    Tuple(Vec<WitnessAttachment>),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

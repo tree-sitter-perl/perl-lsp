@@ -2132,6 +2132,46 @@ impl ReducerRegistry {
                         }
                     }
                 }
+                WitnessPayload::Tuple(elems) => {
+                    // Every slot must answer: a partial tuple would put the
+                    // wrong type at an index. Opaque frames throughout — the
+                    // value is assembled here, no sub-chase names it.
+                    let mut types = Vec::with_capacity(elems.len());
+                    for el in elems {
+                        let sub_q = ReducerQuery {
+                            attachment: el,
+                            point: q.point,
+                            framework: q.framework,
+                            arity_hint: None,
+                            receiver: q.receiver.clone(),
+                            args: q.args.clone(),
+                            context: q.context,
+                        };
+                        let t = state.in_opaque_frame(|state| {
+                            match &*self.query_rec(bag, &sub_q, state) {
+                                ReducedValue::Type(t) => Some(t.clone()),
+                                ReducedValue::FactMap(_) | ReducedValue::None => None,
+                            }
+                        });
+                        match t {
+                            Some(t) => types.push(t),
+                            None => {
+                                types.clear();
+                                break;
+                            }
+                        }
+                    }
+                    if !types.is_empty() {
+                        out.push(Witness {
+                            attachment: w.attachment.clone(),
+                            source: w.source.clone(),
+                            payload: WitnessPayload::InferredType(
+                                crate::model::file_analysis::InferredType::Sequence(types),
+                            ),
+                            span: w.span,
+                        });
+                    }
+                }
                 WitnessPayload::QualifiedCallReturn { method_lookup, receiver_class, arity } => {
                     // Look the method up on the named/parent class, but the
                     // receiver is the INVOCANT (enclosing) class — prefer a
