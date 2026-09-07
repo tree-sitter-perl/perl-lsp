@@ -261,3 +261,155 @@
 (php_tag) @preamble
 (declare_statement) @preamble
 
+; ---- imports ----
+(namespace_use_declaration
+  (namespace_use_clause (qualified_name) @import.name)) @import
+(namespace_use_declaration
+  (namespace_use_clause (name) @import.name)) @import
+; the imported leaf is a live class reference — cross-file rename
+; rewrites the use line too.
+(namespace_use_clause (qualified_name (name) @ref.type))
+(namespace_use_group (namespace_use_clause . (name) @ref.type))
+; A type position (`Collection $c`, `?Request $r`, `: static`, a union's
+; class arms) spells the class: references/rename on the class reach the
+; hints, and the file's use-map counts the leaf as spelled here.
+; Primitives (`int`, `array`) are `primitive_type`, never matched.
+(named_type (name) @ref.type)
+(named_type (qualified_name (name) @ref.type) @ref.qualified)
+;; `$x instanceof Foo` names the class; `#[Foo]` / `#[Ns\Foo(...)]` names an
+;; attribute class — both are class references (goto-def, rename, the
+;; use-map's spelled set).
+(binary_expression "instanceof" right: (name) @ref.type)
+(binary_expression "instanceof" right: (qualified_name (name) @ref.type) @ref.qualified)
+(attribute (name) @ref.type)
+(attribute (qualified_name (name) @ref.type) @ref.qualified)
+
+; ---- the file's use-map (alias- and group-aware) ----
+; What each imported leaf/alias MEANS — parents resolve through it
+; before the namespace-relative default. Direct clauses anchor on the
+; declaration so the group form (whose clauses are bare names under a
+; shared prefix) never double-mints.
+; the leading `.` anchors pin the import name to the clause's FIRST child:
+; without them the un-fielded (name) alternative also matches the alias
+; node as its own combination, and that poison row races the real one for
+; the same use-map key (HashMap order decided the winner — flaky by build).
+(namespace_use_declaration
+  (namespace_use_clause
+    . (qualified_name) @use.fqn
+    alias: (name)? @use.alias))
+(namespace_use_declaration
+  (namespace_use_clause
+    . (name) @use.fqn
+    alias: (name)? @use.alias))
+(namespace_use_declaration
+  (namespace_name) @use.prefix
+  body: (namespace_use_group
+    (namespace_use_clause
+      . (name) @use.leaf
+      alias: (name)? @use.alias))) @import
+
+; a member on the LEFT of an assignment: php declares a property by
+; writing it (`$this->x = ...`) — the undefined-property lane treats the
+; write as its declaration.
+(assignment_expression
+  left: (member_access_expression name: (name) @member.write))
+(assignment_expression
+  left: (scoped_property_access_expression name: (variable_name (name) @member.write)))
+
+; ---- assignment IS declaration (Perl-loose, Python-identical) ----
+(assignment_expression
+  left: (variable_name) @def.var.name @def.var @flow.target
+  right: (_) @flow.source) @flow.assign
+; `$d = &$this->x` binds `$d` to the value's storage — the same
+; declaration, typed by the same flow; `@alias.target` (on the inner
+; name — a query step holds three captures) marks it, so a write through
+; it (`$d[] = 1`) counts as a use of the storage.
+(reference_assignment_expression
+  left: (variable_name (name) @alias.target) @def.var.name @def.var @flow.target
+  right: (_) @flow.source) @flow.assign
+; `$this->x = <value>`: a property typed by what is written to it. The
+; flow edge lands at the CLASS-BODY scope (`@flow.target.member`), where
+; the field's readers look; `$this` is the receiver spelling.
+(assignment_expression
+  left: (member_access_expression
+    object: (variable_name) @_prop_recv
+    name: (name) @flow.target.member)
+  right: (_) @flow.source
+  (#eq? @_prop_recv "$this"))
+
+; `global $wpdb;` BINDS the global into this function — a declaration
+; the uses hang off, and the anchor a `@global wpdb $wpdb` docblock row
+; types (the Param-style doc join): WordPress's whole `$wpdb->` surface.
+(global_declaration
+  (variable_name) @def.var.name @def.var @flow.target)
+
+; foreach BINDS its loop vars — real declarations (refs/hover/highlight/
+; rename all hang off the def) that rebind per element (the narrowing
+; cutoff). The `"as" .` anchor keeps the ITERATED SOURCE out: `$items` in
+; `foreach ($items as $item)` is a read of an existing variable, and a
+; pseudo-def there would steal the real declaration's later references.
+; The collection joins the same match (`@seq.source`) so the bound var
+; types as the collection's ELEMENT — the `Projected{base, Element}`
+; witness peels a doc-typed sequence (`@var list<Handler>`); the
+; key=>value pair form stays untyped (the key needs its own axis).
+(foreach_statement
+  . (_) @seq.source
+  "as"
+  .
+  (variable_name) @def.var.name @def.var @flow.rebind)
+(foreach_statement
+  . (_) @seq.source
+  "as"
+  .
+  (by_ref (variable_name) @def.var.name @def.var @flow.rebind))
+; pair form: the KEY (first child) peels the collection's key axis, the
+; VALUE (last child) its element — same source join, different step.
+(foreach_statement
+  . (_) @seq.source.key
+  (pair . (variable_name) @def.var.name @def.var @flow.rebind))
+(foreach_statement
+  . (_) @seq.source
+  (pair (variable_name) @def.var.name @def.var @flow.rebind .))
+
+; ---- return sites ----
+; The returned expression's own witness (literal / read / call / tuple
+; literal) types the enclosing function through the driver's return-fuel
+; phase when the signature declares nothing — or declares only a bare
+; container the value refines (`: array` over `return [$q, $a]`,
+; docs/adr/destructuring.md).
+(return_statement (_) @expr.return.value)
+
+; ---- destructuring (docs/adr/destructuring.md) ----
+; `[$a, $b] = f()` / `list($a, $b) = f()`: every slot is a declaration
+; bound POSITIONALLY off the RHS through the same FlowEdge lowering Perl's
+; `my ($a, $b) = f()` uses (Extraction::Positional → ArrayIndex(n)); the
+; position is counted over the list text's top-level commas (`[, $b]`).
+; A keyed list (`['k' => $v]`) declares but never binds positionally;
+; nested list slots are not direct children and stay out.
+(assignment_expression
+  left: (list_literal
+    (variable_name) @def.var.name @def.var @flow.slot) @flow.slot.list
+  right: (_) @flow.source)
+; `foreach ($pairs as [$k, $v])` / `foreach ($m as $i => [$a, $b])`: the
+; list IS the collection's element — slots peel Element, then index.
+(foreach_statement
+  . (_) @seq.source
+  "as"
+  . (list_literal
+      (variable_name) @def.var.name @def.var @flow.slot) @flow.slot.list)
+(foreach_statement
+  . (_) @seq.source
+  (pair
+    (variable_name)
+    (list_literal
+      (variable_name) @def.var.name @def.var @flow.slot) @flow.slot.list .))
+
+; A key-less array literal is a positional TUPLE of its elements' edges
+; (`return [$queue, $agent]`): one match per element, grouped by the
+; array span in extraction; a keyed element or a spread disqualifies the
+; literal (it is a map / open list, never a tuple).
+(array_creation_expression
+  (array_element_initializer . (_) @tuple.elem .) @tuple.init) @tuple.arr
+(array_creation_expression
+  (array_element_initializer (_) (_) @tuple.keyed)) @tuple.arr
+
