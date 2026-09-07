@@ -311,13 +311,15 @@ impl<'a> CandidateSet<'a> {
     /// non-rewritable sites (variable-folded dispatch) keep their
     /// long-standing skip.
     pub fn rename_edits(&self, new_name: &str) -> Result<Vec<(RefLocation, String)>, String> {
-        let editable = if self.pack {
-            RoleMask::VISIBLE
-        } else {
-            self.visibility_override
-                .map(|m| m & RoleMask::EDITABLE)
-                .unwrap_or(RoleMask::EDITABLE)
-        };
+        // One mask for every language: the backward walk attributes a pack
+        // sub-index's files per path (`is_dependency_path`), so a pack
+        // workspace file IS WORKSPACE-tier — the old pack-wide VISIBLE
+        // widening (which let a rename rewrite composer's vendor packages)
+        // is gone.
+        let editable = self
+            .visibility_override
+            .map(|m| m & RoleMask::EDITABLE)
+            .unwrap_or(RoleMask::EDITABLE);
         Ok(match self.resolution() {
             // A pack's constructor-convention name (`__construct`) belongs to
             // the language: its `new self(...)` sites carry no token spelling it,

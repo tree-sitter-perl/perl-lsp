@@ -48,7 +48,7 @@ pub fn index_pack_languages(
     // Collect every language's paths UP FRONT so the grand total (the progress
     // denominator) is known before any file is analyzed — a single monotone
     // 0→100% stream across all pack languages on the one shared token.
-    let mut lang_paths: Vec<(&'static str, Vec<PathBuf>)> = Vec::new();
+    let mut lang_paths: Vec<(&'static str, Vec<PathBuf>, Vec<PathBuf>)> = Vec::new();
     for driver in reg.pack_drivers() {
         let lang = driver.id();
         if !scope.wants(lang) {
@@ -64,24 +64,49 @@ pub fn index_pack_languages(
         }
         let _ = tb.select(lang);
         let Ok(types) = tb.build() else { continue };
-        let paths: Vec<PathBuf> = WalkBuilder::new(root)
-            .types(types)
+        let mut paths: Vec<PathBuf> = WalkBuilder::new(root)
+            .types(types.clone())
             .build()
             .filter_map(|e| e.ok())
             .filter(|e| e.file_type().map(|t| t.is_file()).unwrap_or(false))
             .filter(|e| e.metadata().map(|m| m.len() < 2_000_000).unwrap_or(false))
             .map(|e| e.into_path())
             .collect();
+        // Declared dependency roots (php: composer's vendor packages) sit
+        // OUTSIDE the ignore-aware walk on purpose — the project's own
+        // .gitignore hides `vendor/`, so these are walked with the git
+        // filters off (parents included: the project gitignore must not
+        // veto its own dependency tier). Same size cap, same sub-index;
+        // dedup covers a committed (non-ignored) vendor tree the main walk
+        // already saw.
+        let dep_roots = driver.dependency_roots(root);
+        for dep_root in &dep_roots {
+            paths.extend(
+                WalkBuilder::new(dep_root)
+                    .types(types.clone())
+                    .git_ignore(false)
+                    .git_global(false)
+                    .git_exclude(false)
+                    .parents(false)
+                    .build()
+                    .filter_map(|e| e.ok())
+                    .filter(|e| e.file_type().map(|t| t.is_file()).unwrap_or(false))
+                    .filter(|e| e.metadata().map(|m| m.len() < 2_000_000).unwrap_or(false))
+                    .map(|e| e.into_path()),
+            );
+        }
+        paths.sort();
+        paths.dedup();
         if paths.is_empty() {
             continue;
         }
-        lang_paths.push((lang, paths));
+        lang_paths.push((lang, paths, dep_roots));
     }
-    let grand_total: usize = lang_paths.iter().map(|(_, p)| p.len()).sum();
+    let grand_total: usize = lang_paths.iter().map(|(_, p, _)| p.len()).sum();
 
     let total = AtomicUsize::new(0);
     let done = AtomicUsize::new(0);
-    for (lang, paths) in lang_paths {
+    for (lang, paths, dep_roots) in lang_paths {
         // Slice-2 bag-rehydration LRU: a loader that opens THIS lang's SQLite
         // conn on demand (rusqlite `Connection` isn't `Sync`, so we open per
         // rehydration miss — rare, and SQLite handles concurrent readers) and
@@ -121,6 +146,11 @@ pub fn index_pack_languages(
         let pack_index = Arc::new(
             crate::index::module_index::ModuleIndex::new_for_cli().with_bag_cache(bag_cache),
         );
+        // Flip this sub-index to pack tier semantics: files under the
+        // declared dependency roots are read-only DEPENDENCY, everything
+        // else here is the workspace's own (rename-editable). Set even when
+        // empty — the flip itself is the fact.
+        pack_index.set_dependency_roots(dep_roots);
         // This sub-index's relational-ref-index reader — same per-language DB
         // the drain below writes blobs + rows into.
         {
