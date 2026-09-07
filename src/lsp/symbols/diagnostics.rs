@@ -743,3 +743,340 @@ fn receiver_class(analysis: &FileAnalysis, r: &crate::model::file_analysis::Ref)
         _ => None,
     }
 }
+
+/// The pack-language symbol lanes — the facts only packs mint (`arg_count`
+/// on calls, `ParamArity` on callables, the use-map's namespace pins,
+/// `Ref::binding` on every variable read) turned into the diagnostics an
+/// editor expects of a typed language. Precision first: every lane has a
+/// silence rule for the case it cannot see, named at the rule.
+pub fn pack_symbol_diagnostics(
+    analysis: &FileAnalysis,
+    idx: Option<&dyn CrossFileLookup>,
+    index_settled: bool,
+) -> Vec<Diagnostic> {
+    use crate::model::file_analysis::{HandlerOwner, MemberShape, MethodResolution, ScopeKind, SymbolDetail};
+    let mut out = Vec::new();
+    let pack = &analysis.pack;
+    // Every per-class fact is derived ONCE per class, never per ref: a
+    // 10k-line class file has thousands of member calls on a handful of
+    // classes, and a symbol scan per call is quadratic.
+    let local_classes: std::collections::HashSet<&str> = analysis
+        .symbols()
+        .iter()
+        .filter(|s| matches!(s.kind, FaSymKind::Class | FaSymKind::Package))
+        .map(|s| s.name.as_str())
+        .collect();
+    let local_class = |class: &str| local_classes.contains(class);
+    // A class answering any member name (php `__call`/`__get`) is silent
+    // for every undefined-member lane — Perl's AUTOLOAD rule.
+    let catch_all = |class: &str| {
+        pack.catch_all_methods.iter().any(|m| {
+            analysis.resolve_member_in_ancestors(class, m, MemberShape::Callable, idx).is_some()
+        })
+    };
+    // Callables reading their arguments dynamically (php `func_get_args`)
+    // and scopes materializing variables dynamically (`extract`): the
+    // call sites, collected once, matched by containment.
+    let dynamic_arg_calls = dynamic_call_spans(analysis, &["func_get_args", "func_num_args", "func_get_arg"]);
+    let dynamic_var_calls =
+        dynamic_call_spans(analysis, &["extract", "get_defined_vars", "eval", "parse_str", "compact"]);
+    // closures, for the rebound-`$this` silence
+    let closures: Vec<Span> = analysis
+        .symbols()
+        .iter()
+        .filter(|s| s.attributes.iter().any(|a| a == "anonymous"))
+        .map(|s| s.span)
+        .collect();
+    // php declares a property by writing it: (class, member) of every
+    // member write in the file
+    let written: std::collections::HashSet<(String, String)> = analysis
+        .refs()
+        .iter()
+        .filter(|w| {
+            matches!(w.kind, RefKind::MethodCall { .. })
+                && matches!(w.access, crate::model::file_analysis::AccessKind::Write)
+        })
+        .filter_map(|w| {
+            analysis
+                .method_call_invocant_class(w, idx)
+                .map(|c| (c, w.unqualified_target_name().to_string()))
+        })
+        .collect();
+    // The class's DEFINING analysis plus the facts every lane asks of it,
+    // memoized per class. `None` = a class the lanes stay silent on.
+    struct OwnerFacts {
+        owner: Option<std::sync::Arc<FileAnalysis>>,
+        is_interface: bool,
+        is_enum: bool,
+        /// A trait's `$this` is whatever class composes it: every member
+        /// it does not declare may live there.
+        is_trait: bool,
+        dynamic_arg_calls: Vec<Span>,
+    }
+    // keyed by (leaf, the namespace the CALL means): a `parent::` call's
+    // parent is the parent-namespace row of the class it is written in — an
+    // aliased parent carrying the child's own leaf is not the child
+    let mut owner_memo: HashMap<(String, Option<String>), Option<OwnerFacts>> = HashMap::new();
+    // An ancestor we cannot see — at ANY depth — may declare the member:
+    // silent.
+    let ancestry_complete = |class: &str| ancestry_visible(analysis, idx, class);
+    let push = |out: &mut Vec<Diagnostic>, span: Span, sev: DiagnosticSeverity, code: &str, msg: String| {
+        out.push(Diagnostic {
+            range: span_to_range(span),
+            severity: Some(sev),
+            code: Some(NumberOrString::String(code.to_string())),
+            source: Some("perl-lsp".to_string()),
+            message: msg,
+            ..Default::default()
+        });
+    };
+
+    // ---- undefined member / arity, per member call ----
+    // Template method: `$this->step()` in a base whose SUBCLASS declares
+    // `step` dispatches on the runtime class, which is that subclass. One
+    // graph walk per (class, member, shape).
+    let mut below_memo: HashMap<(String, String, bool), bool> = HashMap::new();
+    for r in analysis.refs() {
+        let RefKind::MethodCall { shape, invocant, named_by_string, .. } = &r.kind else { continue };
+        let name = r.unqualified_target_name();
+        if name.is_empty() || name.starts_with('$') {
+            continue; // `$obj->$dyn()` — dynamic member name
+        }
+        if !pack.class_literal_member.is_empty() && name == pack.class_literal_member {
+            continue; // `Foo::class` is the class-name literal
+        }
+        // The dispatch projection every verb reads (`$this` is a typed
+        // receiver here — the extractor witnesses it at the class body).
+        let Some(class) = analysis.method_call_invocant_class(r, idx) else { continue };
+        // What namespace the CALL means by the leaf: a `parent::` call's
+        // parent is the parent-namespace row of the class it is written in
+        // (an aliased parent carrying the child's own leaf is not the
+        // child); any other call, the file's pin or its own namespace.
+        let super_call = matches!(
+            crate::model::conventions::MethodToken::parse(&r.target_name),
+            crate::model::conventions::MethodToken::Super(_)
+        );
+        let want_ns = if super_call {
+            analysis
+                .scope_at(r.span.start)
+                .and_then(|sc| analysis.enclosing_class_for_scope(sc))
+                .and_then(|c| {
+                    analysis
+                        .pack
+                        .parent_namespaces
+                        .iter()
+                        .find(|(child, parent, _)| *child == c && *parent == class)
+                        .map(|(_, _, ns)| ns.clone())
+                })
+                .or_else(|| analysis.leaf_namespace(&class))
+                .or_else(|| analysis.use_map_pins().own_namespace.clone())
+        } else {
+            analysis.leaf_namespace(&class).or_else(|| analysis.use_map_pins().own_namespace.clone())
+        };
+        let facts = owner_memo.entry((class.clone(), want_ns.clone())).or_insert_with(|| {
+            // The class's DEFINING analysis: this file, or — once the
+            // workspace index is settled — the candidate its namespace
+            // names. An unsettled index would flag every cross-file member.
+            let is_local = local_class(&class)
+                && (want_ns.is_none() || analysis.declared_type_namespace(&class) == want_ns);
+            let owner_arc: Option<std::sync::Arc<FileAnalysis>> = if is_local {
+                None
+            } else if index_settled {
+                let i = idx?;
+                Some(i.visible_def_candidates(&class).into_iter().find_map(|c| {
+                    let a = i.symbols_present(&c);
+                    let declared = a.declared_type_namespace(&class);
+                    (declared.is_some() && (want_ns.is_none() || declared == want_ns)).then_some(a)
+                })?)
+            } else {
+                return None;
+            };
+            let owner: &FileAnalysis = owner_arc.as_deref().unwrap_or(analysis);
+            let owner_has_members = owner.symbols().iter().any(|s| {
+                matches!(s.kind, FaSymKind::Sub | FaSymKind::Method | FaSymKind::Field)
+                    && s.package.as_deref() == Some(class.as_str())
+            });
+            let owner_catch_all = pack.catch_all_methods.iter().any(|m| {
+                owner.resolve_member_in_ancestors(&class, m, MemberShape::Callable, idx).is_some()
+            });
+            if !owner_has_members || owner_catch_all || !ancestry_visible(owner, idx, &class) {
+                return None;
+            }
+            let class_attr = |attr: &str| {
+                owner.symbols().iter().any(|s| {
+                    matches!(s.kind, FaSymKind::Class) && s.name == class && s.attributes.iter().any(|a| a == attr)
+                })
+            };
+            Some(OwnerFacts {
+                // A receiver typed as an INTERFACE names any implementation.
+                // `instanceof` narrowing retypes a VARIABLE receiver, but a
+                // member subject (`$this->x instanceof T`), a method guard
+                // (`->isT()`) or `is_a()` leave the interface type standing
+                // — so the interface stays silent on undefined members
+                // (resolved ones still check arity).
+                is_interface: class_attr("interface"),
+                is_enum: class_attr("enum"),
+                is_trait: class_attr("trait"),
+                dynamic_arg_calls: if owner_arc.is_some() {
+                    dynamic_call_spans(owner, &["func_get_args", "func_num_args", "func_get_arg"])
+                } else {
+                    dynamic_arg_calls.clone()
+                },
+                owner: owner_arc,
+            })
+        });
+        let Some(facts) = facts.as_ref() else { continue };
+        let owner: &FileAnalysis = facts.owner.as_deref().unwrap_or(analysis);
+        let want = match shape {
+            MemberShape::Value => MemberShape::Value,
+            _ => MemberShape::Callable,
+        };
+        // an enum's language-given members
+        if facts.is_enum && pack.enum_members.iter().any(|m| m == name) {
+            continue;
+        }
+        match owner.resolve_member_in_ancestors(&class, name, want, idx) {
+            None if facts.is_interface || facts.is_trait => {}
+            // a class with no declared constructor has the default one
+            None if pack.constructor_names.iter().any(|c| c == name) => {}
+            None if *named_by_string => {
+                // `[$obj, 'name']` is data until dispatch proves it a
+                // callable: a claim only when it resolves
+            }
+            None => {
+                // php declares a property by writing it: a write of this
+                // member on the same class anywhere in the file is its
+                // declaration
+                if matches!(want, MemberShape::Value) && written.contains(&(class.clone(), name.to_string())) {
+                    continue;
+                }
+                // a read inside an existence probe (`isset($x->p)`) IS the
+                // question of whether the member exists
+                if matches!(want, MemberShape::Value)
+                    && analysis.pack.probe_regions.iter().any(|p| p.contains(&r.span))
+                {
+                    continue;
+                }
+                // the receiver is the pack's own (`$this`): the runtime class
+                // may be any descendant, and one of them declares the member
+                let own_receiver = pack.receiver_names.iter().any(|n| n == invocant.text());
+                if own_receiver {
+                    let declared_below = *below_memo
+                        .entry((class.clone(), name.to_string(), matches!(want, MemberShape::Value)))
+                        .or_insert_with(|| {
+                            owner
+                                .dispatch_participants(&class, idx)
+                                .iter()
+                                .filter(|p| **p != class)
+                                .any(|p| owner.resolve_member_in_ancestors(p, name, want, idx).is_some())
+                        });
+                    if declared_below {
+                        continue;
+                    }
+                }
+                // a same-named member of the OTHER shape is a different
+                // finding (a method read as a property) — still undefined
+                let (code, what) = match want {
+                    MemberShape::Value => ("undefined-property", "property"),
+                    _ => ("unresolved-method", "method"),
+                };
+                push(&mut out, r.span, DiagnosticSeverity::ERROR, code, format!("Undefined {what} '{name}'."));
+            }
+            Some(MethodResolution::Local { .. }) => {}
+            Some(MethodResolution::CrossFile { .. }) => {}
+        }
+    }
+
+    out
+}
+
+/// Call sites of the named functions — the dynamic-behaviour markers a
+/// containing scope is silenced by.
+fn dynamic_call_spans(analysis: &FileAnalysis, names: &[&str]) -> Vec<Span> {
+    analysis
+        .refs()
+        .iter()
+        .filter(|c| matches!(c.kind, RefKind::FunctionCall) && names.contains(&c.unqualified_target_name()))
+        .map(|c| c.span)
+        .collect()
+}
+
+/// A callable that reads its arguments dynamically (php `func_get_args`)
+/// accepts any count.
+fn callee_takes_any(dynamic_arg_calls: &[Span], sym: &crate::model::file_analysis::Symbol) -> bool {
+    dynamic_arg_calls.iter().any(|c| span_within(*c, sym.span))
+}
+
+fn span_within(inner: Span, outer: Span) -> bool {
+    outer.contains(&inner)
+}
+
+
+/// Every ancestor of `class`, transitively, is declared somewhere we can
+/// read (this file, or a candidate the lookup reaches). One unreadable
+/// parent anywhere in the chain means a member may live there.
+fn ancestry_visible(analysis: &FileAnalysis, idx: Option<&dyn CrossFileLookup>, class: &str) -> bool {
+    fn walk(
+        a: &FileAnalysis,
+        idx: Option<&dyn CrossFileLookup>,
+        class: &str,
+        seen: &mut std::collections::HashSet<(String, String)>,
+        depth: usize,
+    ) -> bool {
+        if depth > 20 {
+            return true;
+        }
+        for p in a.declared_parents(class) {
+            let leaf = p.rsplit(['\\', ':']).next().unwrap_or(p);
+            // The parent's namespace as THIS edge wrote it (`extends
+            // \Exception` is the global one, whatever leaf the child
+            // carries — `class Exception extends \Exception` must not find
+            // itself), else as this file sees the leaf (its `use` rows, its
+            // own namespace) — a same-leaf stranger elsewhere in the
+            // workspace is not this parent.
+            let want_ns = a
+                .pack
+                .parent_namespaces
+                .iter()
+                .find(|(c, pl, _)| c == class && pl == leaf)
+                .map(|(_, _, ns)| ns.clone())
+                .or_else(|| a.leaf_namespace(leaf))
+                .or_else(|| a.use_map_pins().own_namespace.clone());
+            let local = a
+                .symbols()
+                .iter()
+                .any(|s| matches!(s.kind, FaSymKind::Class | FaSymKind::Package) && s.name == leaf)
+                && a.declared_type_namespace(leaf) == want_ns;
+            if local {
+                if !seen.insert((want_ns.clone().unwrap_or_default(), leaf.to_string())) {
+                    continue;
+                }
+                if !walk(a, idx, leaf, seen, depth + 1) {
+                    return false;
+                }
+                continue;
+            }
+            let Some(i) = idx else { return false };
+            let mut any = false;
+            for c in &i.visible_def_candidates(leaf) {
+                let whole = i.symbols_present(c);
+                let declared = whole.declared_type_namespace(leaf);
+                if declared.is_none() || (want_ns.is_some() && declared != want_ns) {
+                    continue;
+                }
+                any = true;
+                if !seen.insert((declared.unwrap_or_default(), leaf.to_string())) {
+                    continue;
+                }
+                if !walk(&whole, idx, leaf, seen, depth + 1) {
+                    return false;
+                }
+            }
+            if !any {
+                return false;
+            }
+        }
+        true
+    }
+    walk(analysis, idx, class, &mut std::collections::HashSet::new(), 0)
+}
