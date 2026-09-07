@@ -116,7 +116,7 @@ types its `$c`. The gated TC is a *value read through one query seam*
 sufficient.
 
 **`ClassIsa` triggers** (mojo-events `$self->on('ready')` / DBIC `has_many`
-through a cross-file parent chain). Landed since (H7-5). Unlike `param_types`,
+through a cross-file parent chain). Unlike `param_types`,
 these synthesize symbols feeding every symbol-table consumer, so there is no
 single query seam to gate — the answer is DEFERRAL, not gating. The build
 records the syntactically-matched-but-ungated `on_match` emission as a

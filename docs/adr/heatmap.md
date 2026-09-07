@@ -64,6 +64,7 @@ these hold (checked most-specific first):
 |---|---|
 | `exported` | name is in the file's export surface — an external consumer may import it |
 | `constructor` | conventional constructor (`new`) — frameworks instantiate it |
+| `class-referenced` | a pack constructor whose CLASS is named anywhere in the row store (a type hint, `Foo::class`, a `use` row) with no `new` site of its own — a container or factory instantiates it (DI). Keyed by the bare class leaf, so two same-leaf classes in different namespaces shield each other: over-approximate, the sound side |
 | `framework-synthesized` | symbol is plugin-minted (Moo accessors, routes, DBIC rels), not user-written; the framework calls it through machinery the static graph doesn't model |
 | `package-implicit-use` | packages/classes/modules — reachable via `require`, app entrypoints, dynamic class strings; too many invisible vectors to flag |
 | `dynamic-dispatch` | a **method-shaped** sub (declared in a non-`main` package) when the workspace contains **any** `$obj->$method` dispatch — see below |

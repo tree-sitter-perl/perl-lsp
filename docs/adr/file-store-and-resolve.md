@@ -102,15 +102,17 @@ a stored flag that skips the work.
 
 ## Where this is going
 
-Forward residual lives in `prompt-graph-walking.md` (absorbed residuals section):
+The `Namespace` enum (`model/file_analysis/core_types.rs`) landed. Forward
+residual, tracked where each now lives:
 
-- Phase 1: `Namespace` enum (deferred — pluggability question gates phases
-  6+7).
-- Phase 5: eager `Ref.target: SymbolId` (not `Option`); the resolved symbol
-  still rides `Ref.binding` (`RefBinding`, read via `resolved_symbol()`).
-- Phase 6: `Openness` classification + unified diagnostic rule.
-- Phase 7: framework emission rules into framework Namespaces (the Mojo
-  intelligence path).
+- Eager `Ref.target: SymbolId` (not `Option`) — the resolved symbol still
+  rides `Ref.binding` (`RefBinding`, read via `resolved_symbol()`);
+  tracked in `prompt-cst-migration.md`.
+- `Openness` classification + unified diagnostic rule — tracked as the
+  Scope-node taxonomy's Openness diagnostic in `prompt-graph-walking.md`
+  and `ROADMAP.md`.
+- Framework emission rules into framework Namespaces (the Mojo
+  intelligence path) — not yet started, no tracking doc.
 
 CLAUDE.md "Cross-file resolution" + "Cross-file enrichment" sections
 describe the live behavior in operational detail.
