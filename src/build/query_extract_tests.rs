@@ -3790,6 +3790,44 @@ class Stack {
 }
 
 #[test]
+fn php_class_array_callables_are_method_refs() {
+    // `[UserController::class, 'index']` names a dispatchable method — the
+    // Laravel route / event-map convention. The pair mints the same
+    // MethodCall ref a written `UserController::index()` carries, so the
+    // controller action's references include its route registrations (and
+    // it leaves the heatmap dead queue as genuinely referenced).
+    let src = "\
+<?php
+class UserController {
+    public function index(): string { return 'ok'; }
+}
+route_get('/users', [UserController::class, 'index']);
+listen_on('ev', array(UserController::class, 'index'));
+";
+    let (fa, _) = php_fa(src);
+    let resolved = crate::index::resolve::resolve_symbol(
+        &fa,
+        tree_sitter::Point { row: 2, column: 21 },
+        None,
+    );
+    let target = match resolved {
+        Some(crate::index::resolve::ResolvedTarget::Target(t)) => t,
+        other => panic!("index decl must mint a target: {other:?}"),
+    };
+    let locs = crate::index::resolve::refs_to_in_file(
+        &crate::index::file_store::FileStore::new(),
+        None,
+        &target,
+        &crate::index::file_store::FileKey::Path(std::path::PathBuf::from("/cc/t.php")),
+        &fa,
+        crate::index::resolve::RoleMask::VISIBLE,
+    );
+    let sites: Vec<_> = locs.iter().filter(|l| l.span.start.row >= 4).collect();
+    assert_eq!(sites.len(), 2, "both callable-array strings are refs: {locs:?}");
+    assert!(sites.iter().all(|l| l.rewritable), "rename rewrites in-quotes: {sites:?}");
+}
+
+#[test]
 fn php_foreach_pair_form_types_key_and_value() {
     // `foreach ($m as $k => $v)`: the value peels the collection's
     // element (as before), and the KEY peels its key axis — Numeric for
@@ -3902,6 +3940,30 @@ fn php_data_provider_docblock_mints_member_ref_on_name_token() {
 
 
 #[test]
+fn php_stdlib_string_callables_mint_call_refs() {
+    // Callback-slot strings in the fixed-position stdlib builtins are
+    // function refs (`@ref.call.named`): arg-0 family (array_map,
+    // function_exists) and arg-1 family (array_filter, usort). Data
+    // strings in non-callback slots never mint.
+    let src = "<?php\n$a = array_map('fnA', $rows);\nif (function_exists('fnB')) {}\n$b = array_filter($rows, 'fnC');\nusort($rows, 'fnD');\nin_array('notafn', $rows);\narray_map('fnE');\narray_filter('notafn2');\n";
+    let mut parser = php_parser();
+    let tree = parser.parse(src, None).unwrap();
+    let skel = extract(&tree, src.as_bytes(), &php_pack()).unwrap();
+    let calls: Vec<&str> = skel
+        .refs
+        .iter()
+        .filter(|r| r.kind == "call")
+        .map(|r| r.name.as_str())
+        .collect();
+    for want in ["fnA", "fnB", "fnC", "fnD", "fnE"] {
+        assert!(calls.contains(&want), "{want} missing from {calls:?}");
+    }
+    // `in_array`'s needle is data; `array_filter`'s arg 0 is the ARRAY slot.
+    assert!(!calls.contains(&"notafn"), "data string minted: {calls:?}");
+    assert!(!calls.contains(&"notafn2"), "array-slot string minted: {calls:?}");
+}
+
+#[test]
 fn php_destructuring_slots_bind_positionally() {
     use crate::model::file_analysis::Extraction;
     // `[$a, $b] = …` / `list(...)` / `[, $b]` bind each scalar slot to its
@@ -3992,6 +4054,36 @@ fn php_branch_arms_and_subscripts_project() {
     let has_step = |row: usize, pred: &dyn Fn(&ProjectionStep) -> bool| skel.witnesses.iter().any(|w| matches!((&w.attachment, &w.payload), (WitnessAttachment::Expr(sp), WitnessPayload::Projected { step, .. }) if sp.start.row == row && pred(step)));
     assert!(has_step(3, &|s| matches!(s, ProjectionStep::ArrayIndex(0))), "f()[0] peels slot 0");
     assert!(has_step(4, &|s| matches!(s, ProjectionStep::HashKey(k) if k == "name")), "$row['name'] drills the key");
+}
+
+/// `$this->m (1)` — whitespace before the argument list — is the call its
+/// tree says it is: the callee joins its list through the match, not the
+/// byte after the name.
+#[test]
+fn php_spaced_call_keeps_its_callable_shape() {
+    use crate::model::file_analysis::MemberShape;
+    let src = "<?php\nclass D { function m($a) { return 1; } function f() { return $this->m (1) + $this->m(2); } }\n";
+    let mut parser = php_parser();
+    let tree = parser.parse(src, None).unwrap();
+    let skel = extract(&tree, src.as_bytes(), &php_pack()).unwrap();
+    let calls: Vec<(Option<usize>, MemberShape)> = skel
+        .refs
+        .iter()
+        .filter(|r| r.kind == "member" && r.name == "m")
+        .map(|r| (r.arg_count, r.shape))
+        .collect();
+    assert_eq!(calls, vec![(Some(1), MemberShape::Callable), (Some(1), MemberShape::Callable)], "{calls:?}");
+}
+
+#[test]
+fn php_instance_array_callable_is_a_method_ref() {
+    let src = "<?php\nclass L { function on(): void {} function reg(): void { $d = [$this, 'on']; $e = [$obj, 'other']; } }\n";
+    let mut parser = php_parser();
+    let tree = parser.parse(src, None).unwrap();
+    let skel = extract(&tree, src.as_bytes(), &php_pack()).unwrap();
+    let names: Vec<(&str, Option<&str>)> = skel.refs.iter().filter(|r| r.kind == "member").map(|r| (r.name.as_str(), r.invocant.as_ref().map(|(_, t)| t.as_str()))).collect();
+    assert!(names.contains(&("on", Some("$this"))), "{names:?}");
+    assert!(names.contains(&("other", Some("$obj"))), "{names:?}");
 }
 
 /// A three-operand `&&` chain: the guard narrows every later operand, not
