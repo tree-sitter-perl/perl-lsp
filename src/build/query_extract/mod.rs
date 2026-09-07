@@ -170,6 +170,152 @@ pub struct RailConventions {
     pub name_seps: Vec<(String, String)>,
 }
 
+/// The path rails in force for a language, from the bundled rail documents.
+pub fn path_rails_for(pack: &LangPack) -> std::sync::Arc<Vec<PathRail>> {
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex, OnceLock};
+    static CACHE: OnceLock<Mutex<HashMap<String, Arc<Vec<PathRail>>>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let key = pack.lang_id.to_string();
+    let mut guard = cache.lock().unwrap();
+    if let Some(l) = guard.get(&key) {
+        return Arc::clone(l);
+    }
+    let mut out: Vec<PathRail> = Vec::new();
+    for src in pack.bundled_rail_docs {
+        if let Ok(doc) = serde_json::from_str::<RailsDoc>(src) {
+            if doc.language == pack.lang_id {
+                out.extend(doc.path_rails);
+            }
+        }
+    }
+    let arc = Arc::new(out);
+    guard.insert(key, Arc::clone(&arc));
+    arc
+}
+
+/// The rail conventions (lane labels, hint rails, name separators) from
+/// the bundled rail documents.
+pub fn rail_conventions_for(pack: &LangPack) -> std::sync::Arc<RailConventions> {
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex, OnceLock};
+    static CACHE: OnceLock<Mutex<HashMap<String, Arc<RailConventions>>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let key = pack.lang_id.to_string();
+    let mut guard = cache.lock().unwrap();
+    if let Some(l) = guard.get(&key) {
+        return Arc::clone(l);
+    }
+    let mut out = RailConventions::default();
+    for src in pack.bundled_rail_docs {
+        if let Ok(doc) = serde_json::from_str::<RailsDoc>(src) {
+            if doc.language == pack.lang_id {
+                out.labels.extend(doc.labels);
+                out.hints.extend(doc.hints);
+                out.name_seps.extend(doc.name_seps);
+            }
+        }
+    }
+    out.labels.sort();
+    out.hints.sort();
+    out.name_seps.sort();
+    let arc = Arc::new(out);
+    guard.insert(key, Arc::clone(&arc));
+    arc
+}
+
+/// The text rails in force for a language: bundled documents plus every
+/// discovered `<plugin-dir>/<name>/rails.json` — the `entry.json` posture
+/// (cached per process, a malformed document dropped with a diagnostic).
+pub fn text_rails_for(pack: &LangPack) -> std::sync::Arc<Vec<TextRail>> {
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex, OnceLock};
+    static CACHE: OnceLock<Mutex<HashMap<String, Arc<Vec<TextRail>>>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut paths: Vec<std::path::PathBuf> = Vec::new();
+    for dir in crate::build::plugin::rhai_host::plugin_search_dirs() {
+        if let Ok(read) = std::fs::read_dir(&dir) {
+            for entry in read.flatten() {
+                let candidate = entry.path().join("rails.json");
+                if candidate.is_file() {
+                    paths.push(candidate);
+                }
+            }
+        }
+    }
+    paths.sort();
+    let key = format!("{}|{}", pack.lang_id, paths.len());
+    if let Some(v) = cache.lock().unwrap().get(&key) {
+        return Arc::clone(v);
+    }
+    let mut out: Vec<TextRail> = Vec::new();
+    let mut fold = |src: &str, origin: &dyn std::fmt::Display| {
+        match serde_json::from_str::<RailsDoc>(src) {
+            Ok(doc) if doc.language == pack.lang_id => out.extend(doc.text_rails),
+            Ok(_) => {}
+            Err(e) => eprintln!("perl-lsp: rail declarations {origin} dropped: {e}"),
+        }
+    };
+    for src in pack.bundled_rail_docs {
+        fold(src, &"(bundled)");
+    }
+    for p in &paths {
+        if let Ok(src) = std::fs::read_to_string(p) {
+            fold(&src, &p.display());
+        }
+    }
+    let arc = Arc::new(out);
+    cache.lock().unwrap().insert(key, Arc::clone(&arc));
+    arc
+}
+
+/// The framework-entry rules in force for a language: the pack's bundled
+/// documents plus every discovered `<plugin-dir>/<name>/entry.json`
+/// declaring this language. Cached per (lang, plugin-path set) like the
+/// overlay assembly — entry data never hot-reloads within a process. A
+/// malformed document is dropped with a stderr diagnostic (the bundled
+/// rules and surviving documents still serve — the overlay posture).
+pub fn entry_markers_for(pack: &LangPack) -> std::sync::Arc<Vec<EntryMarker>> {
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex, OnceLock};
+    static CACHE: OnceLock<Mutex<HashMap<String, Arc<Vec<EntryMarker>>>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut paths: Vec<std::path::PathBuf> = Vec::new();
+    for dir in crate::build::plugin::rhai_host::plugin_search_dirs() {
+        if let Ok(read) = std::fs::read_dir(&dir) {
+            for entry in read.flatten() {
+                let candidate = entry.path().join("entry.json");
+                if candidate.is_file() {
+                    paths.push(candidate);
+                }
+            }
+        }
+    }
+    paths.sort();
+    let key = format!("{}|{}", pack.lang_id, paths.len());
+    if let Some(v) = cache.lock().unwrap().get(&key) {
+        return Arc::clone(v);
+    }
+    let mut out: Vec<EntryMarker> = Vec::new();
+    let mut fold = |src: &str, origin: &dyn std::fmt::Display| {
+        match serde_json::from_str::<EntryDoc>(src) {
+            Ok(doc) if doc.language == pack.lang_id => out.extend(doc.entries),
+            Ok(_) => {}
+            Err(e) => eprintln!("perl-lsp: entry declarations {origin} dropped: {e}"),
+        }
+    };
+    for src in pack.bundled_entry_markers {
+        fold(src, &"(bundled)");
+    }
+    for p in &paths {
+        if let Ok(src) = std::fs::read_to_string(p) {
+            fold(&src, &p.display());
+        }
+    }
+    let arc = Arc::new(out);
+    cache.lock().unwrap().insert(key, Arc::clone(&arc));
+    arc
+}
 
 mod extract;
 mod packs;
