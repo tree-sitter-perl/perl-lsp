@@ -94,11 +94,24 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     // `@arity.args`.
     let mut arg_counts_by_start: std::collections::HashMap<(usize, usize), usize> =
         std::collections::HashMap::new();
+    // `f(...)` sites: a call with no countable arguments — still a call.
+    let mut placeholder_call_at: std::collections::HashSet<(usize, usize)> = std::collections::HashSet::new();
+    // The same facts keyed by the MATCH that captured the callee alongside
+    // its list: the call pattern joins the two, so `$this->m (1)` — a space
+    // before the parentheses — is still a call. Adjacency stays the fallback
+    // for shapes whose list lands in another match.
+    let mut arg_counts_by_match: HashMap<usize, usize> = HashMap::new();
+    let mut placeholder_by_match: std::collections::HashSet<usize> = Default::default();
     // A callable's declared parameter arity, keyed by the parameter_list span.
     // Associated to its def symbol by span containment in `into_file_analysis`
     // (`@arity.sig` fires a separate match from the def name).
     let mut param_sigs: Vec<(crate::model::file_analysis::Span, crate::model::file_analysis::ParamArity)> =
         Vec::new();
+    // A bare variable written as a call argument, with its position: the
+    // undefined-variable lane asks the callee whether that position binds
+    // (`ParamArity::binds_arg`). Only a language that declares variables by
+    // assignment (`implicit_variables` declared) has a lane to feed.
+    let mut variable_arg_sites: Vec<crate::model::file_analysis::ArgSite> = Vec::new();
     let mut cursor = QueryCursor::new();
     let mut matches = cursor.matches(query, tree.root_node(), source);
     let mut match_counter = 0usize;
@@ -209,9 +222,55 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
             // named children; the C `...` at a CALL site never appears here).
             // Keyed by the list's start so the callee ref finds it by adjacency.
             if cap == "arity.args" {
-                arg_counts_by_start
-                    .insert((node.start_position().row, node.start_position().column),
-                            node.named_child_count());
+                // `f(...)` passes nothing — a first-class callable, not a call;
+                // `f(...$args)` passes an unknowable number. Neither mints a
+                // count: the callee still reads as callable, the arity lane
+                // stands down.
+                let placeholder = (0..node.named_child_count())
+                    .filter_map(|i| node.named_child(i))
+                    .any(|c| {
+                        (!pack.callable_placeholder_kind.is_empty()
+                            && c.kind() == pack.callable_placeholder_kind)
+                            // the spread sits inside an `argument` wrapper
+                            || (!pack.spread_arg_kind.is_empty()
+                                && (c.kind() == pack.spread_arg_kind
+                                    || c.named_child(0).is_some_and(|g| g.kind() == pack.spread_arg_kind)))
+                    });
+                if !placeholder {
+                    arg_counts_by_start
+                        .insert((node.start_position().row, node.start_position().column),
+                                node.named_child_count());
+                    arg_counts_by_match.insert(match_counter, node.named_child_count());
+                    if !pack.implicit_variables.is_empty() {
+                        let args_span = crate::model::file_analysis::Span {
+                            start: node.start_position(),
+                            end: node.end_position(),
+                        };
+                        for (position, arg) in
+                            (0..node.named_child_count()).filter_map(|i| node.named_child(i)).enumerate()
+                        {
+                            // a named argument (`f(out: $x)`) is matched by
+                            // name, not position — no site
+                            if arg.child_by_field_name("name").is_some() || arg.named_child_count() != 1 {
+                                continue;
+                            }
+                            let Some(inner) = arg.named_child(0) else { continue };
+                            if pack.simple_var_kinds.contains(&inner.kind()) {
+                                variable_arg_sites.push(crate::model::file_analysis::ArgSite {
+                                    var: crate::model::file_analysis::Span {
+                                        start: inner.start_position(),
+                                        end: inner.end_position(),
+                                    },
+                                    args: args_span,
+                                    position: position as u32,
+                                });
+                            }
+                        }
+                    }
+                } else {
+                    placeholder_call_at.insert((node.start_position().row, node.start_position().column));
+                    placeholder_by_match.insert(match_counter);
+                }
                 continue;
             }
             // `@arity.sig`: a callable's parameter_list — count declared params
@@ -223,12 +282,28 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                 let mut total = 0usize;
                 let mut required = 0usize;
                 let mut variadic = false;
+                let mut by_ref = 0u64;
                 let mut c = node.walk();
                 for ch in node.children(&mut c) {
                     match ch.kind() {
                         "parameter_declaration" => { total += 1; required += 1; }
                         "optional_parameter_declaration" => { total += 1; }
-                        "variadic_parameter_declaration" | "..." => variadic = true,
+                        // PHP: a parameter with a default is optional; a
+                        // promoted ctor param still counts toward arity; a
+                        // `reference_modifier` makes the position an
+                        // out-parameter the argument lane binds through.
+                        "simple_parameter" | "property_promotion_parameter" => {
+                            if total < 64 && ch.child_by_field_name("reference_modifier").is_some() {
+                                by_ref |= 1u64 << total;
+                            }
+                            total += 1;
+                            if ch.child_by_field_name("default_value").is_none() {
+                                required += 1;
+                            }
+                        }
+                        "variadic_parameter_declaration" | "variadic_parameter" | "..." => {
+                            variadic = true
+                        }
                         _ => {}
                     }
                 }
@@ -237,7 +312,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                         start: node.start_position(),
                         end: node.end_position(),
                     },
-                    crate::model::file_analysis::ParamArity { total, required, variadic, by_ref: 0 },
+                    crate::model::file_analysis::ParamArity { total, required, variadic, by_ref },
                 ));
                 continue;
             }
@@ -278,6 +353,23 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     // ---- join def name-captures to their def event ----
     use std::collections::HashMap;
     let mut names_by_match: HashMap<(usize, String), (String, Point, Point)> = HashMap::new();
+    // `@def.<kind>.anchor` — a name-less def's anchor token (php's `class`
+    // keyword): the pack synthesizes the name from the position, and the
+    // match joins it like a `.name` capture so the def, its `@context`
+    // and its `@parent` edges all read ONE identity.
+    let mut defaulted_matches: HashMap<usize, String> = HashMap::new();
+    // Spans a `variable_name` read pattern must NOT mint as reads: a
+    // static property's `$name` (`Foo::$bar` — a member, `@var.member`) and
+    // any declaration's own name token (a property `$chunks`, a parameter).
+    let mut not_a_read: std::collections::HashSet<(usize, usize)> = std::collections::HashSet::new();
+    let mut def_name_ends: std::collections::HashSet<usize> = std::collections::HashSet::new();
+    // `@hoist` — the same match's def belongs to the PARENT of the scope
+    // the capture sits in (php's by-reference closure capture creates
+    // the variable in the enclosing scope).
+    let mut hoisted: std::collections::HashSet<usize> = std::collections::HashSet::new();
+    // `@member.write` — a member on the LEFT of an assignment (php's
+    // dynamic property declaration site).
+    let mut member_writes: Vec<Span> = Vec::new();
     // `@qualifier` (a `Class::` on an out-of-line def) and `@rettype` (a
     // method's declared return type) — pre-collected like names because the
     // `@def` event fires before these inner captures.
