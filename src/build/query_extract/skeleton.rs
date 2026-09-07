@@ -1261,8 +1261,12 @@ impl SkeletonAnalysis {
                     kind,
                     span,
                     scope: r.scope,
-                    target_name: r.name.clone(),
-                    access: crate::model::file_analysis::AccessKind::Read,
+                    target_name: name,
+                    access: if member_write_spans.contains(&(span.start.row, span.start.column, span.end.row, span.end.column)) {
+                        crate::model::file_analysis::AccessKind::Write
+                    } else {
+                        crate::model::file_analysis::AccessKind::Read
+                    },
                     binding,
                     folded_from: None,
                     arg_count: r.arg_count,
@@ -1314,6 +1318,21 @@ impl SkeletonAnalysis {
             });
         }
         refs.extend(local_refs);
+        // Demoted re-assignments (function-scoped vars): the site is a
+        // WRITE of the one declaration, so references/rename see it and
+        // documentHighlight classifies it honestly.
+        for (name, scope, span) in var_rebind_refs {
+            refs.push(crate::model::file_analysis::Ref {
+                kind: crate::model::file_analysis::RefKind::Variable,
+                span,
+                scope,
+                target_name: name,
+                access: crate::model::file_analysis::AccessKind::Write,
+                binding: None,
+                folded_from: None,
+                arg_count: None,
+            });
+        }
         // Field/member uses recovered from `#define` bodies (`->op_next`): the
         // receiver is a macro parameter with no type, so resolve the field to
         // its declaring class from THIS file's own field symbols and freeze the
@@ -1363,7 +1382,7 @@ impl SkeletonAnalysis {
                             invocant_span: None,
                             method_name_span: *span,
                             member_op: None,
-                            shape: crate::model::file_analysis::MemberShape::Unknown,
+                            shape: crate::model::file_analysis::MemberShape::Value,
                             named_by_string: false,
                         },
                         span: *span,
@@ -1393,11 +1412,92 @@ impl SkeletonAnalysis {
         for (child, parent) in &self.parents {
             packages.entry(child.clone()).or_default().parents.push(parent.clone());
         }
+        // Contracts: an interface, a trait or an abstract class is a role —
+        // it defers its obligations to a concrete composer — and each of
+        // its contract callables is a require that composer must provide
+        // (`unfulfilled_role_requires`, docs/adr/role-contracts.md). The
+        // contract symbols are excluded from provision the way Perl's
+        // `requires` markers are.
+        let mut contract_symbols: std::collections::HashSet<SymbolId> = Default::default();
+        for (i, sym) in symbols.iter().enumerate() {
+            let defers = sym
+                .attributes
+                .iter()
+                .any(|a| a == "interface" || a == "trait" || a == "abstract");
+            if sym.kind == SymKind::Class && defers {
+                packages.entry(sym.name.clone()).or_default().is_role = true;
+            }
+            if matches!(sym.kind, SymKind::Sub | SymKind::Method)
+                && sym.attributes.iter().any(|a| a == "contract")
+            {
+                contract_symbols.insert(SymbolId(i as u32));
+                if let Some(pkg) = &sym.package {
+                    let facts = packages.entry(pkg.clone()).or_default();
+                    if !facts.requires.contains(&sym.name) {
+                        facts.requires.push(sym.name.clone());
+                    }
+                }
+            }
+        }
+        // `$var = $recv->method()` bindings: hand the assignment to the
+        // language-generic MCB→bag bridge (`emit_method_call_binding_edges`),
+        // which resolves the receiver and chases the method's return lazily —
+        // at finalize AND at every enrichment re-run, so a receiver whose
+        // class only types once imports land still resolves. Join: the flow
+        // edge's SOURCE opens at a member ref's invocant; the rightmost such
+        // token is the chain's last hop. A chained receiver's invocant text
+        // (`$u->a()`) names no variable and no-ops harmlessly — single-hop
+        // bindings are the ones that type here.
+        let method_call_bindings: Vec<crate::model::file_analysis::MethodCallBinding> = self
+            .flow_edges
+            .iter()
+            .filter_map(|fe| {
+                self.refs
+                    .iter()
+                    .filter_map(|r| {
+                        let (inv_span, inv_text) = r.invocant.as_ref()?;
+                        (r.kind == "member"
+                            && inv_span.start == fe.source.start
+                            && (r.end.row, r.end.column)
+                                <= (fe.source.end.row, fe.source.end.column))
+                            .then(|| (r, inv_text.clone()))
+                    })
+                    .max_by_key(|(r, _)| (r.start.row, r.start.column))
+                    .map(|(r, inv)| crate::model::file_analysis::MethodCallBinding {
+                        variable: fe.target_name.clone(),
+                        invocant_var: inv,
+                        method_name: r.name.clone(),
+                        scope: fe.target_scope,
+                        span: fe.source,
+                    })
+            })
+            .collect();
         let pack = crate::model::file_analysis::PackFacts {
             // Pack-declared receiver names ride the FA so core's member /
             // outline filters can exclude them generically (lang semantics in
             // the pack, generic logic in core).
             receiver_names: std::mem::take(&mut self.receiver_names),
+            implicit_variables: std::mem::take(&mut self.implicit_variables),
+            throwaway_names: std::mem::take(&mut self.throwaway_names),
+            catch_all_methods: std::mem::take(&mut self.catch_all_methods),
+            class_literal_member: std::mem::take(&mut self.class_literal_member),
+            import_rows: std::mem::take(&mut self.import_rows),
+            import_template: std::mem::take(&mut self.import_template),
+            contract_stub: std::mem::take(&mut self.contract_stub),
+            return_annotation_template: std::mem::take(&mut self.return_annotation_template),
+            native_type_spellings: std::mem::take(&mut self.native_type_spellings),
+            static_property_sigil: std::mem::take(&mut self.static_property_sigil),
+            rail_labels: std::mem::take(&mut self.rail_labels),
+            rail_hints: std::mem::take(&mut self.rail_hints),
+            preamble_end: self.preamble_end,
+            imports_bind_names: self.imports_bind_names,
+            member_shapes_are_strict: self.member_shapes_are_strict,
+            members_are_package_bound: self.members_are_package_bound,
+            doc_mentions: std::mem::take(&mut self.doc_mentions),
+            types_are_capitalized: self.types_are_capitalized,
+            enum_members: std::mem::take(&mut self.enum_members),
+            type_display: std::mem::take(&mut self.type_display),
+            constructor_names: std::mem::take(&mut self.constructor_names),
             // Specialization family edges (spec → primary). NOT an inheritance
             // edge: a spec inherits nothing from its primary (it replaces
             // wholesale), so member resolution must never fall through this
@@ -1416,19 +1516,52 @@ impl SkeletonAnalysis {
                 .drain(..)
                 .map(|(raw, span)| (span, raw))
                 .collect(),
+            parent_namespaces: std::mem::take(&mut self.parent_namespaces),
+            use_aliases: std::mem::take(&mut self.use_aliases),
+            qualified_spellings: std::mem::take(&mut self.qualified_spellings),
             domain_sites: std::mem::take(&mut self.domain_sites),
             moved_from: std::mem::take(&mut self.moved_from),
             control_regions: std::mem::take(&mut self.control_regions),
             param_regions: std::mem::take(&mut self.param_regions),
+            probe_regions: std::mem::take(&mut self.probe_regions),
+            variable_arg_sites: std::mem::take(&mut self.variable_arg_sites),
             ..Default::default()
         };
+        // Folding follows the scopes the skeleton minted: a class body, a
+        // function body, a block — every multi-line one is a region.
+        let mut fold_ranges: Vec<crate::model::file_analysis::FoldRange> = Vec::new();
+        let scope_folds = self
+            .scopes
+            .iter()
+            .filter(|sc| !matches!(sc.kind, crate::model::file_analysis::ScopeKind::File))
+            .map(|sc| (sc.span, false));
+        for (span, comment) in scope_folds.chain(self.fold_regions.drain(..)) {
+            let (start_line, end_line) = (span.start.row, span.end.row);
+            if end_line > start_line
+                && !fold_ranges.iter().any(|f| f.start_line == start_line && f.end_line == end_line)
+            {
+                fold_ranges.push(crate::model::file_analysis::FoldRange {
+                    start_line,
+                    end_line,
+                    kind: if comment {
+                        crate::model::file_analysis::FoldKind::Comment
+                    } else {
+                        crate::model::file_analysis::FoldKind::Region
+                    },
+                });
+            }
+        }
+        fold_ranges.sort_by_key(|f| (f.start_line, f.end_line));
         let mut fa = FileAnalysis::new(FileAnalysisParts {
             scopes: self.scopes,
+            fold_ranges,
+            contract_symbols,
             symbols,
             refs,
             witnesses: bag,
             packages,
             pack,
+            method_call_bindings,
             flow_edges: std::mem::take(&mut self.flow_edges),
             ..Default::default()
         });
