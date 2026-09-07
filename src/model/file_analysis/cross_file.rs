@@ -983,6 +983,45 @@ pub enum VisibilityAxis {
     SearchPath(std::sync::Arc<Vec<std::path::PathBuf>>),
 }
 
+/// A name-keyed origin's leaf→namespace table (`FileAnalysis::
+/// leaf_namespace_pins`): what each unqualified class spelling in that
+/// file means, and the file's own namespace as the default for a leaf it
+/// neither declares nor imports.
+#[derive(Debug, Default)]
+pub struct UseMapPins {
+    /// `leaf → Some(namespace)`; `None` = conflicting evidence, no claim.
+    pub pins: std::collections::HashMap<String, Option<String>>,
+    pub own_namespace: Option<String>,
+    /// The leaves this file writes as class tokens.
+    pub spelled: std::collections::HashSet<String>,
+    /// Every namespace the file can NAME a given real leaf in — its pin
+    /// first, then the namespaces of aliased imports of that leaf (`use
+    /// Support\Collection as BaseCollection` beside its own `Collection`).
+    /// Real-leaf lookups (a parent walk, a class-keyed candidate table)
+    /// admit all of them; `namespace_of` still answers the bare spelling.
+    pub visible: std::collections::HashMap<String, Vec<String>>,
+}
+
+impl UseMapPins {
+    /// The namespace `leaf` means for this origin: its pin, else — for a
+    /// leaf the file itself spells — its own namespace (PHP resolves an
+    /// unqualified class name in the current namespace; there is no global
+    /// fallback for classes). A leaf the file never writes gets no claim:
+    /// its refs reach that class through some other class's dispatch, and
+    /// the namespace the file lives in says nothing about it.
+    pub(crate) fn namespace_of(&self, leaf: &str) -> Option<&str> {
+        match self.pins.get(leaf) {
+            Some(p) => p.as_deref(),
+            None if self.spelled.contains(leaf) => self.own_namespace.as_deref(),
+            None => None,
+        }
+    }
+    /// A leaf the file explicitly named (a `use` row or its own class).
+    fn pinned(&self, leaf: &str) -> bool {
+        matches!(self.pins.get(leaf), Some(Some(_)))
+    }
+}
+
 impl VisibilityAxis {
     /// THE derivation of an origin's visibility rule. Call sites pass the
     /// origin and its index; none of them decides which model applies, so

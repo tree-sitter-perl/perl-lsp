@@ -129,6 +129,7 @@ impl FileAnalysis {
             flow_edges,
             unrowed_attachment_names: Vec::new(),
             degraded: false,
+            use_map_pins: Default::default(),
             // Pack drivers re-stamp their id post-construction.
             language: super::default_language(),
             scope_starts: Vec::new(),
