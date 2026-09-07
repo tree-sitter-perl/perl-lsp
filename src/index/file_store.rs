@@ -228,11 +228,6 @@ impl FileStore {
     }
 
 
-    /// Count of workspace entries.
-    pub fn workspace_len(&self) -> usize {
-        self.workspace.len()
-    }
-
     // ---- Iteration ----
 
     /// Read-only iteration over open Documents. Query paths (`refs_to`,
