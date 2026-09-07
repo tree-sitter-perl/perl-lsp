@@ -172,9 +172,9 @@ is free, old blobs re-resolve lazily.
 
 ## Where this is going
 
-The receiver-relative return-type pillar landed alongside this
-work — `docs/adr/return-expr.md` carries the load-bearing
-decisions. The summary: `WitnessPayload::ReturnExpr(_)` admits
+`docs/adr/return-expr.md` carries the load-bearing decisions for the
+companion receiver-relative return-type pillar. The summary:
+`WitnessPayload::ReturnExpr(_)` admits
 `Concrete(t)` / `Receiver` / `Operator(RowOf(_))` / `UnionOnArgs`
 shapes; `ReturnExprReducer` substitutes `q.receiver` for
 `Receiver` placeholders and dispatches `UnionOnArgs` against
@@ -191,8 +191,8 @@ queue behind this — the ROADMAP carries their order.
 
 External-behavior tests assert against `find_definition` /
 `refs_to` / completion. They don't pattern-match on
-`InferredType::Parametric(...)` internals; they survived the
-v1 → v2 encoding change unchanged.
+`InferredType::Parametric(...)` internals, so an encoding change
+to the variant's internal shape leaves them unchanged.
 
 One internal-shape pin
 (`parametric_resultset_carries_base_and_row`) deliberately

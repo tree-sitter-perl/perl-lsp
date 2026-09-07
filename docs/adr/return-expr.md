@@ -168,15 +168,16 @@ This collapses a third shape into the same attachment family.
 Anon-closures with arity arms dispatch through their `Symbol`
 edge exactly like named subs.
 
-## What it subsumes
+## One evaluator across every call shape
 
-| Old mechanism | Replacement | Site |
-|---|---|---|
-| `extract_resultset_parametric` call-site emit on `Expression(refidx)` | `emit_parametric_return_expr_decls` on `PackageSymbol{base, method}` | `builder.rs` |
-| `ParametricType::return_projection` per-flavor table | `ParametricType::return_method_declarations` | `file_analysis.rs` |
-| `TypeObservation::ArityReturn` variant + `FluentArityDispatch` reducer | `ReturnExpr::UnionOnArgs` + `ReturnExprReducer` | `witnesses.rs` |
-| `SubReturnReducer`'s `arity_hint.is_some()` short-circuit | `ReturnExprReducer` runs first; `SubReturnReducer` claims plain `Symbol + InferredType` only | `witnesses.rs` |
-| Per-call-site arity dispatch baked at walk time | Walk-time `ArityBranch` classification only; types come from arm-fold at fold time | `builder.rs` |
+`emit_parametric_return_expr_decls` (`builder.rs`) declares per-flavor
+projections once on `PackageSymbol{base, method}`;
+`ParametricType::return_method_declarations` (`file_analysis.rs`) is the
+per-flavor table; arity dispatch is `ReturnExpr::UnionOnArgs` evaluated by
+`ReturnExprReducer` (`witnesses.rs`), which runs before `SubReturnReducer`
+— the latter claims only a plain `Symbol + InferredType` attachment.
+Walk time only classifies `ArityBranch`; types come from arm-fold at fold
+time (`builder.rs`).
 
 Three subsumption tests in `return_expr_tests.rs` pin the cross-
 shape uniformity:
@@ -229,7 +230,7 @@ remaining gate is type-system encoding for axis dispatch.
 ## Test discipline
 
 `return_expr_tests.rs` is the regression suite — red-pin tests
-covering the three previously-broken cross-shape routes
+covering the three cross-shape routes that used to break
 (coderef-of-method, dynamic-method, anon-closure) plus the
 in-body arity-discriminated sub case.
 
@@ -239,8 +240,8 @@ without the bag in the loop, so reducer logic is testable in
 isolation.
 
 External-behavior tests (`builder_tests.rs`,
-`type_inference_invariants_tests.rs`) survived the migration —
-the fluent-chain assertions, the Mojo arity tests, and the DBIC
-projection tests are unchanged. Internal-shape pins on
+`type_inference_invariants_tests.rs`) hold unchanged — the
+fluent-chain assertions, the Mojo arity tests, and the DBIC
+projection tests. Internal-shape pins on
 `InferredType::Parametric(...)` from the parametric ADR still
 hold; `ReturnExpr` payloads are tested separately.
