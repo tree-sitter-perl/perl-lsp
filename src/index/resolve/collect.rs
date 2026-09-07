@@ -1029,6 +1029,15 @@ pub(super) fn collect_from_analysis(
             keyed.extend_from_slice(analysis.ref_indices_keyed(&k));
         }
     }
+    // A constructor's construction sites spell the CLASS (`new Foo(...)`
+    // mints a FunctionCall named `Foo`), so its bucket holds refs the
+    // ctor's own name never keys.
+    if let Some(class) = target.ctor_of.as_deref() {
+        let k = crate::model::file_analysis::name_match_key(class);
+        if k != target_key {
+            keyed.extend_from_slice(analysis.ref_indices_keyed(&k));
+        }
+    }
     keyed.sort_unstable();
     keyed.dedup();
     let all_refs = analysis.refs();
@@ -1059,13 +1068,22 @@ pub(super) fn collect_from_analysis(
             && visible_aliases
                 .iter()
                 .any(|a| a.name == r.unqualified_target_name());
-        if !name_matches && !alias_matched {
+        // A construction site (`new Foo(...)`) IS a use of Foo's
+        // constructor: the ctor FunctionCall ref carries the CLASS name,
+        // so a `ctor_of` target admits it — non-rewritable below (the
+        // token spells the class; renaming __construct must not touch it).
+        let ctor_matched = !name_matches
+            && target.ctor_of.as_deref().is_some_and(|class| {
+                matches!(r.kind, RefKind::FunctionCall { .. })
+                    && r.unqualified_target_name() == class
+            });
+        if !name_matches && !alias_matched && !ctor_matched {
             continue;
         }
         // Sub + Method both match any call into that scope — function
         // or method shape — per the "same callable, two shapes"
         // invariant. Filter is a single scope comparison.
-        let matches_kind = alias_matched || match (&target.kind, &r.kind) {
+        let matches_kind = alias_matched || ctor_matched || match (&target.kind, &r.kind) {
             (TargetKind::Sub { .. } | TargetKind::Method { .. },
              RefKind::FunctionCall) => {
                 // callable_scope_for_refs is derived from the same target.kind
@@ -1207,6 +1225,14 @@ pub(super) fn collect_from_analysis(
                 }
             }
             (TargetKind::Package, RefKind::PackageRef) => true,
+            // A construction site spells the class as a call (`new Foo(...)`
+            // mints a FunctionCall named `Foo`) in a pack that declares a
+            // constructor convention; the token IS the class name, so the
+            // class's references and rename reach it. A pack with no such
+            // convention (Perl's `Foo->new`) never mints the shape.
+            (TargetKind::Package, RefKind::FunctionCall) => {
+                !analysis.pack.constructor_names.is_empty()
+            }
             // A class member read by BARE name (`x = OP_SCOPE`,
             // `case OP_SCOPE:`) — a `Variable` ref the generic goto-def
             // resolves to this def by name (the value-read half of the shared
@@ -1342,7 +1368,7 @@ pub(super) fn collect_from_analysis(
                 key: key.clone(),
                 span,
                 access: r.access,
-                rewritable: !alias_matched && rewritable_at(span),
+                rewritable: !alias_matched && !ctor_matched && rewritable_at(span),
                 label: None
             });
             // A call folded from a variable (`my $m = 'process'; $self->$m()`)

@@ -116,6 +116,16 @@ impl TargetRef {
         scope: OverrideScope,
     ) -> Self {
         let method_classes = method_classes_for(origin, &class, &name, module_index, scope);
+        // The pack's constructor convention (php `__construct`) is a fact of
+        // the METHOD TARGET itself: every builder of a Method target — the
+        // rename-kind mapping, the identity lanes, implementations — gets
+        // the ctor marker from this one speller.
+        let ctor_of = origin
+            .pack
+            .constructor_names
+            .iter()
+            .any(|c| c == &name)
+            .then(|| class.clone());
         TargetRef {
             name,
             kind: TargetKind::Method { class },
@@ -123,7 +133,7 @@ impl TargetRef {
             scope,
             def_paths: Vec::new(),
             bare_constant: false,
-            ctor_of: None,
+            ctor_of,
             class_ns: None,
             member_shape: Default::default(),
         }
@@ -186,6 +196,12 @@ impl TargetRef {
     /// owner-less hash key can't be matched by name alone elsewhere and stays
     /// single-file. References ignores this — it walks every kind cross-file.
     pub fn supports_cross_file_rename(&self) -> bool {
+        // A pack's constructor-convention name (`__construct`) is the
+        // language's, not the author's: nothing renames it, and its `new
+        // self(...)` sites carry no token that spells it.
+        if self.ctor_of.is_some() {
+            return false;
+        }
         matches!(
             self.kind,
             TargetKind::Sub { .. }
@@ -229,6 +245,15 @@ impl TargetRef {
                 // routing fact. Macro-named cursors never reach this arm
                 // (the canonical FileScopeValue lanes claim them first,
                 // WITH def_paths).
+                // The pack's constructor convention is a fact of the target
+                // whichever cursor minted it: a decl-side cursor on
+                // `__construct` arrives here as a Sub, and its references
+                // must admit the class's `new Foo(...)` sites exactly as the
+                // call-side Method target does.
+                let ctor_of = package
+                    .as_ref()
+                    .filter(|_| origin.pack.constructor_names.iter().any(|c| c == &name))
+                    .cloned();
                 TargetRef {
                     name,
                     kind: TargetKind::Sub { package },
@@ -236,7 +261,7 @@ impl TargetRef {
                     scope,
                     def_paths: Vec::new(),
                     bare_constant: false,
-                    ctor_of: None,
+                    ctor_of,
                     class_ns: None,
                     member_shape: Default::default(),
                 }

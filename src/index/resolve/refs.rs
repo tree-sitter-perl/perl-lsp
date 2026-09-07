@@ -397,6 +397,16 @@ fn retrieve_indexed(idx: &dyn CrossFileLookup) -> std::sync::Arc<std::collection
 /// as generous as the matcher's name checks.
 pub(super) fn retrieval_keys(target: &TargetRef, aliases: &[DelegationAlias]) -> Vec<String> {
     let mut keys = vec![crate::model::file_analysis::name_match_key(&target.name)];
+    // A constructor's call sites spell the CLASS (`new Foo(...)`), never the
+    // ctor name — without the class key the row filter never hands the
+    // matcher the files that hold them (every cross-file `new` dropped, and
+    // the heatmap called the ctor dead).
+    if let Some(class) = target.ctor_of.as_deref() {
+        let k = crate::model::file_analysis::name_match_key(class);
+        if !keys.contains(&k) {
+            keys.push(k);
+        }
+    }
     for a in aliases {
         let k = crate::model::file_analysis::name_match_key(&a.name);
         if !keys.contains(&k) {
