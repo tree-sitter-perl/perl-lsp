@@ -1322,9 +1322,16 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                 ));
             }
             "member.recv" => {
+                // Shaped: a pack can canonicalize a receiver spelling to the
+                // model's invocant vocabulary (php `self::`/`static::` → the
+                // current-package token), so relative static dispatch rides
+                // the same lane as Perl's `__PACKAGE__->`.
                 member_recv.insert(
                     e.match_id,
-                    (crate::model::file_analysis::Span { start: e.start, end: e.end }, e.text.clone()),
+                    (
+                        crate::model::file_analysis::Span { start: e.start, end: e.end },
+                        (pack.shape_name)("member.recv", &e.text),
+                    ),
                 );
             }
             "member.op" => {
@@ -1336,6 +1343,130 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                         e.match_id,
                         (*op, crate::model::file_analysis::Span { start: e.start, end: e.end }),
                     );
+                }
+            }
+            // String-named references (the tier-1 pack-plugin vocabulary,
+            // docs/prompt-pack-plugins.md): the captured string-content
+            // node's TEXT is the referenced name and its span IS the rename
+            // unit — the characters inside the quotes. `@ref.call.named`
+            // mints a FunctionCall ref (WP `add_action('init', 'wp_cron')`);
+            // `@ref.method.named` mints a MethodCall ref joined to the same
+            // match's `@member.recv` (`array($this, 'method')` callbacks),
+            // so dispatch types through the receiver like any member ref.
+            // No arg_count: the site registers the callee, it doesn't call
+            // it — an arity hint here would misfeed arity discrimination.
+            "ref.call.named" => {
+                // `'A\\B\\X::method'`: a static-method callable string. The
+                // class part is a qualified spelling (pinned like any other),
+                // the ref a Callable member on that class — the same identity
+                // `[X::class, 'method']` carries, so the backward walk finds it.
+                if let Some((qual, method)) = e.text.split_once("::") {
+                    let (leaf, ns) = split_ns_leaf(qual);
+                    if !ns.is_empty() {
+                        out.qualified_spellings.push((leaf.clone(), format!("\\{ns}")));
+                    }
+                    // The ref's span is the METHOD tail only — rename rewrites
+                    // exactly those characters; the invocant span is the
+                    // qualifier ahead of the `::`.
+                    let method_start = Point {
+                        row: e.end.row,
+                        column: e.end.column.saturating_sub(method.len()),
+                    };
+                    let qual_span = Span {
+                        start: e.start,
+                        end: Point { row: e.start.row, column: e.start.column + qual.len() },
+                    };
+                    out.refs.push(SkelRef {
+                        via: None,
+                        kind: "member".to_string(),
+                        name: method.to_string(),
+                        start: method_start,
+                        end: e.end,
+                        scope: cur_scope,
+                        invocant: Some((qual_span, leaf)),
+                        member_op: None,
+                        arg_count: None,
+                        shape: crate::model::file_analysis::MemberShape::Callable,
+                        named_by_string: false,
+                    });
+                    continue;
+                }
+                out.refs.push(SkelRef {
+                    via: None,
+                    kind: "call".to_string(),
+                    name: e.text.clone(),
+                    start: e.start,
+                    end: e.end,
+                    scope: cur_scope,
+                    invocant: None,
+                    member_op: None,
+                    arg_count: None,
+                    shape: crate::model::file_analysis::MemberShape::Unknown,
+                    named_by_string: false,
+                });
+            }
+            c if c == "ref.dispatch.named"
+                || c.starts_with("ref.dispatch.named.")
+                || c.starts_with("ref.dispatch.class.") =>
+            {
+                if let Some(rail) = c.strip_prefix("ref.dispatch.named.") {
+                    out.rails.push((Span { start: e.start, end: e.end }, rail.to_string()));
+                } else if let Some(rail) = c.strip_prefix("ref.dispatch.class.") {
+                    out.class_rails.push((Span { start: e.start, end: e.end }, rail.to_string()));
+                }
+                out.refs.push(SkelRef {
+                    via: dispatch_via_by_match.get(&e.match_id).cloned(),
+                    kind: "dispatch".to_string(),
+                    name: e.text.clone(),
+                    start: e.start,
+                    end: e.end,
+                    scope: cur_scope,
+                    invocant: None,
+                    member_op: None,
+                    arg_count: None,
+                    shape: crate::model::file_analysis::MemberShape::Unknown,
+                    named_by_string: false,
+                });
+            }
+            // consumed by the prepass join above; nothing to mint here
+            "dispatch.via" => {}
+            // `.self` flavor: the string names a method of the ENCLOSING
+            // class (a PHPUnit attribute argument) — no receiver node
+            // exists, so the invocant is the current-package token,
+            // resolved by the enclosing-class walk like `self::`.
+            "ref.method.named.self" => {
+                out.refs.push(SkelRef {
+                    via: None,
+                    kind: "member".to_string(),
+                    name: e.text.clone(),
+                    start: e.start,
+                    end: e.end,
+                    scope: cur_scope,
+                    invocant: Some((
+                        crate::model::file_analysis::Span { start: e.start, end: e.end },
+                        "__PACKAGE__".to_string(),
+                    )),
+                    member_op: None,
+                    arg_count: None,
+                    shape: crate::model::file_analysis::MemberShape::Callable,
+                    named_by_string: true,
+                });
+            }
+            "ref.method.named" => {
+                if let Some(inv) = member_recv.get(&e.match_id).cloned() {
+                    out.refs.push(SkelRef {
+                    via: None,
+                        kind: "member".to_string(),
+                        name: e.text.clone(),
+                        start: e.start,
+                        end: e.end,
+                        scope: cur_scope,
+                        invocant: Some(inv),
+                        member_op: None,
+                        arg_count: None,
+                        shape: crate::model::file_analysis::MemberShape::Callable,
+                        named_by_string: true,
+                    });
                 }
             }
             cap if cap.starts_with("ref.") => {
