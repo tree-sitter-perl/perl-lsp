@@ -71,7 +71,7 @@ pub(crate) fn peel<'a>(
 
 pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAnalysis, String> {
     let language = tree.language();
-    let query = cached_query(&language, pack.query_source)?;
+    let query = cached_query(&language, effective_query_source(&language, pack))?;
     let cap_names: Vec<String> = query
         .capture_names()
         .iter()
