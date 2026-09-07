@@ -567,3 +567,51 @@
 
 (variable_name) @expr.read.var
 
+; ---- literals ----
+(string) @expr.lit.string
+(encapsed_string) @expr.lit.string
+(heredoc) @expr.lit.string
+(integer) @expr.lit.number
+(float) @expr.lit.number
+(boolean) @expr.lit.bool
+; a PHP array is an ordered hash map whatever the bracket style.
+(array_creation_expression) @expr.lit.hashref
+
+; keyed literal shape: `['timeout' => 30]` → HashWithKeys{timeout} — the
+; structural-shape lane (one match per string-keyed element; a pure list
+; literal fires none and stays a plain hashref).
+(array_creation_expression
+  "[" @shape.ctor
+  (array_element_initializer (string (string_content) @shape.key))) @expr.shape
+(array_creation_expression
+  "array" @shape.ctor
+  (array_element_initializer (string (string_content) @shape.key))) @expr.shape
+
+; ---- branch arms: `match` / ternary type as their ARMS' agreement ----
+; One match per arm, each carrying the whole expression's span
+; (`@branch.expr`) so extraction joins arm → expression: the expression's
+; `Expr` edges to `BranchArm(span)`, every arm edges its own `Expr` there,
+; and `BranchArmFold` answers only when the arms agree. Without this the
+; assignment's literal-narrowing picked the largest literal INSIDE the
+; match — a discriminant string — as the value's type.
+(match_expression
+  body: (match_block
+    (match_conditional_expression return_expression: (_) @branch.arm))) @branch.expr
+(match_expression
+  body: (match_block
+    (match_default_expression return_expression: (_) @branch.arm))) @branch.expr
+(conditional_expression
+  body: (_) @branch.arm) @branch.expr
+(conditional_expression
+  alternative: (_) @branch.arm) @branch.expr
+
+; ---- subscripts: `f()[0]` / `$row['name']` project off the base ----
+; An integer index peels a tuple/sequence slot (`list<T>` → T); a literal
+; string key drills a keyed shape (`array{name: string}` → string).
+(subscript_expression
+  . (_) @subscript.base
+  (integer) @subscript.int .) @subscript.expr
+(subscript_expression
+  . (_) @subscript.base
+  (string (string_content) @subscript.key) .) @subscript.expr
+
