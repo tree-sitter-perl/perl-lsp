@@ -29,8 +29,15 @@ pub struct RefTable {
     #[serde(skip, default)]
     evicted: bool,
 
+    /// Refs bucketed by `Ref::match_key` — the SAME key the relational
+    /// `refs` rows carry, so an in-file probe narrows exactly as the
+    /// cross-file retrieval does: every matcher arm compares either the
+    /// exact `target_name` or its unqualified tail, and equal names have
+    /// equal keys, so the bucket for a target's key is a superset of what
+    /// any arm can match. The backward walk reads this instead of scanning
+    /// the whole vec per (query, candidate file).
     #[serde(skip, default)]
-    by_name: HashMap<String, Vec<usize>>,
+    by_key: HashMap<String, Vec<usize>>,
 
     /// Refs indexed by the SymbolId they resolve to — "refs to symbol X"
     /// is an O(1) lookup.
@@ -89,9 +96,9 @@ impl RefTable {
         self.refs.push(r);
     }
 
-    /// Ref indexes whose `target_name` is `name`.
-    pub fn by_name(&self, name: &str) -> Option<&Vec<usize>> {
-        self.by_name.get(name)
+    /// Ref indexes whose `match_key` is `key`, in ref order.
+    pub fn by_key(&self, key: &str) -> &[usize] {
+        self.by_key.get(key).map_or(&[], |v| v.as_slice())
     }
 
     /// Ref indexes resolving to `sym_id`.
@@ -129,14 +136,11 @@ impl RefTable {
     /// Rebuild every index from the current refs. Both the name/target
     /// lookups and the start-anchored call index.
     pub fn rebuild_indices(&mut self) {
-        self.by_name.clear();
+        self.by_key.clear();
         self.by_target.clear();
         self.call_by_start.clear();
         for (i, r) in self.refs.iter().enumerate() {
-            self.by_name
-                .entry(r.target_name.clone())
-                .or_default()
-                .push(i);
+            self.by_key.entry(r.match_key()).or_default().push(i);
             if let Some(sym_id) = r.resolved_symbol() {
                 self.by_target.entry(sym_id).or_default().push(i);
             }
@@ -171,13 +175,10 @@ impl RefTable {
     /// restores that prefix verbatim before appending only synthetic
     /// key refs.
     pub fn refresh_name_target_indices(&mut self) {
-        self.by_name.clear();
+        self.by_key.clear();
         self.by_target.clear();
         for (i, r) in self.refs.iter().enumerate() {
-            self.by_name
-                .entry(r.target_name.clone())
-                .or_default()
-                .push(i);
+            self.by_key.entry(r.match_key()).or_default().push(i);
             if let Some(sym_id) = r.resolved_symbol() {
                 self.by_target.entry(sym_id).or_default().push(i);
             }
@@ -190,7 +191,7 @@ impl RefTable {
     /// index and rehydrates through `whole_present`. Idempotent.
     pub fn evict(&mut self) {
         self.refs = Vec::new();
-        self.by_name = HashMap::new();
+        self.by_key = HashMap::new();
         self.by_target = HashMap::new();
         self.call_by_start = HashMap::new();
         self.evicted = true;
@@ -212,8 +213,8 @@ impl RefTable {
                 .map(|r| r.target_name.capacity() + std::mem::size_of::<String>())
                 .sum::<usize>();
 
-        let mut b = mcap(&self.by_target) + mcap(&self.call_by_start) + mcap(&self.by_name);
-        for (k, v) in &self.by_name {
+        let mut b = mcap(&self.by_target) + mcap(&self.call_by_start) + mcap(&self.by_key);
+        for (k, v) in &self.by_key {
             b += k.capacity() + v.capacity() * std::mem::size_of::<usize>();
         }
         for v in self.by_target.values() {

@@ -862,6 +862,35 @@ pub(super) fn canonical_file_str(key: &FileKey) -> String {
         .into_owned()
 }
 
+/// The refs of `analysis` that can match `name` under any matcher arm — the
+/// in-file half of the relational narrowing (`RefTable::by_key`), in ref
+/// order. Callers iterate this instead of the whole ref vec.
+pub(super) fn refs_keyed<'a>(
+    analysis: &'a FileAnalysis,
+    name: &str,
+) -> impl Iterator<Item = &'a crate::model::file_analysis::Ref> + 'a {
+    let refs = analysis.refs();
+    analysis
+        .ref_indices_keyed(&crate::model::file_analysis::name_match_key(name))
+        .iter()
+        .map(move |&i| &refs[i])
+}
+
+/// Per-walk scratch for facts that depend on the TARGET alone, not on the
+/// file being scanned, so a walk over N candidate files derives each once.
+/// Created by the walk driver; the matcher fills it lazily.
+#[derive(Default)]
+pub(super) struct WalkMemo {
+    /// `class_member_bare_constant`'s verdict per CANDIDATE file of the
+    /// target's class: a whole-copy fetch plus a symbol scan of that
+    /// candidate, which reads nothing about the asker. Which candidates an
+    /// asker sees stays per-asker (`visible_def_candidates` under its
+    /// closure); what each candidate answers is shared across every file
+    /// the walk scans.
+    pub(super) bare_constant_by_candidate:
+        std::cell::RefCell<std::collections::HashMap<PathBuf, Option<bool>>>,
+}
+
 pub(super) fn collect_from_analysis(
     key: &FileKey,
     analysis: &FileAnalysis,
@@ -869,6 +898,7 @@ pub(super) fn collect_from_analysis(
     aliases: &[DelegationAlias],
     module_index: Option<&dyn CrossFileLookup>,
     file_str: &str,
+    memo: &WalkMemo,
     out: &mut Vec<RefLocation>,
 ) {
     use crate::model::file_analysis::HashKeyOwner;
@@ -928,14 +958,15 @@ pub(super) fn collect_from_analysis(
     // carry only partial namespace attribution — `pkg_agrees` reads this.
     let relative_ns = !analysis.pack.include_closure.is_empty();
     // Bare unresolved reads count as uses of a Method target only when the
-    // member is an enum-constant shape (its name hoists into the enclosing
-    // scope). Receiver-reached members (struct fields, methods) are matched
-    // through their call sites — a bare same-named token elsewhere is noise
-    // (the `formatter::format` 1621-hit sweep). Resolved once per scanned
-    // file, under this file's own closure scope.
+    // member's name hoists into the enclosing scope (an enumerator's does).
+    // Receiver-reached members (fields, methods) are matched through their
+    // call sites — a bare same-named token elsewhere is noise (the
+    // `formatter::format` 1621-hit sweep). Resolved once per scanned file,
+    // under this file's own closure scope.
     let bare_constant_member = match &target.kind {
         TargetKind::Method { class } => {
-            pack_member_of_class(&target.name, class, analysis, module_index).unwrap_or(false)
+            class_member_bare_constant(&target.name, class, analysis, module_index, Some(memo))
+                .unwrap_or(false)
         }
         _ => false,
     };
@@ -964,8 +995,11 @@ pub(super) fn collect_from_analysis(
         !(foldable && span_is_folded_name(analysis, span, folds_through_calls, &target.name))
     };
 
-    // Include declaration spans when this file defines the target.
-    for sym in analysis.symbols() {
+    // Include declaration spans when this file defines the target. Name
+    // equality is `symbol_defines_target`'s first gate, so only the
+    // same-named symbols can pass (in symbol order, as the vec would).
+    for &sid in analysis.symbols_named(&target.name) {
+        let sym = analysis.symbol(sid);
         if symbol_defines_target(sym, target, analysis) {
             out.push(RefLocation {
                 key: key.clone(),
@@ -983,7 +1017,23 @@ pub(super) fn collect_from_analysis(
         TargetKind::Method { class } => Some(Some(class.clone())),
         _ => None,
     };
-    for r in analysis.refs() {
+    // Only the key buckets for the target and its visible aliases can hold
+    // a match; the union is walked in ref order so `out` keeps the vec's
+    // order (the final sort is by start point, and same-start refs — a
+    // chain's outer call and its receiver — rely on insertion order).
+    let target_key = crate::model::file_analysis::name_match_key(&target.name);
+    let mut keyed: Vec<usize> = analysis.ref_indices_keyed(&target_key).to_vec();
+    for a in &visible_aliases {
+        let k = crate::model::file_analysis::name_match_key(&a.name);
+        if k != target_key {
+            keyed.extend_from_slice(analysis.ref_indices_keyed(&k));
+        }
+    }
+    keyed.sort_unstable();
+    keyed.dedup();
+    let all_refs = analysis.refs();
+    for &ri in &keyed {
+        let r = &all_refs[ri];
         // A qualified call (`Foo::baz()` / `$o->Foo::Bar::baz()`) keeps its
         // whole path in `target_name`; match it on the bare callable tail (the
         // dispatch-class checks in the call arms below still pin the right
@@ -1157,7 +1207,7 @@ pub(super) fn collect_from_analysis(
                 }
             }
             (TargetKind::Package, RefKind::PackageRef) => true,
-            // A pack-language enum constant read by BARE name (`x = OP_SCOPE`,
+            // A class member read by BARE name (`x = OP_SCOPE`,
             // `case OP_SCOPE:`) — a `Variable` ref the generic goto-def
             // resolves to this def by name (the value-read half of the shared
             // Variable/Field DEF). An UNRESOLVED read counts only when the

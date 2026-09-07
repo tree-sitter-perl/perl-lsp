@@ -146,6 +146,38 @@ hits one is still listed honestly as a review-queue entry:
   `.c`/`.cpp` lists as two rows, exactly as a Perl package reopened across files
   does; fan-in is identical on both.
 
+## Cost
+
+A batch verb, not an interactive one (`docs/scaling-limits.md` §5 carries
+the dated numbers). The gather is one independent `references()` walk per
+declaration, fanned out over the Rayon pool per file and collected in entry
+order, so the report is byte-identical to the serial one (its sorts are
+stable and the dead-code list is unsorted — gather order reaches the
+output). The knobs, each measured on BMO (739 files, 12k walks):
+
+- **`RAYON_NUM_THREADS`** bounds the workers. Wall trades against peak RSS
+  — each worker holds its own in-flight rehydrated candidates — so a
+  memory-bound box reaches for `4`.
+- **`PERL_LSP_BAG_CACHE_MB`** pins the rehydration LRU. Unset, the sweep
+  sizes it to the corpus (`cache_policy::sweep_bag_cache_cap`: persisted
+  source bytes × the 65× expansion estimator, floored at the stock
+  128 MiB, ceilinged at half of RAM) and says so on stderr. The sweep's
+  working set is the corpus by construction, and an LRU smaller than a
+  cyclically scanned working set misses on every pass: at the stock cap
+  BMO's 274 MB working set ran a 12% miss rate that cost 3× the wall and
+  DOUBLED peak RSS through decode churn. Pinning the knob disables the
+  derivation (it is the A/B lever). Every index the sweep rehydrates
+  through is sized — the Perl hub and each pack-language sub-index — each
+  independently (no summed budget), so the per-pool ceiling bounds one
+  runaway derivation rather than the process.
+- **`PERL_LSP_NO_RETRIEVAL_MEMO=1`** closes the sweep's retrieval memo
+  (`docs/adr/relational-ref-index.md`) — the A/B control.
+- **`PERL_LSP_GHOST_STATS=1`** attributes the wall (`heatmap.mint`,
+  `heatmap.references`, `refs.cand.view` / `refs.cand.collect`,
+  `refs.retrieval.*`, `refs.sweep.*` — accumulated, never per-walk lines).
+  Its counters take a global lock per event, so a ghost run is a
+  single-thread measurement: pair it with `RAYON_NUM_THREADS=1`.
+
 ## Identity invariant
 
 Identity + counting go through `resolve::resolve(...)` at the symbol's declared

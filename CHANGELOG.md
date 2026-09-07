@@ -6,6 +6,18 @@ crate / VS Code extension versions.
 
 ## Unreleased
 
+### Heatmap
+
+- **`--heatmap` is 4–14× faster and uses every core.** BMO (739 files)
+  111 s → 8 s, Webmin ~35 s → 2.6 s, `--include-deps` on BMO 158 s → 9 s,
+  abseil (C++) 527 s → ~2 min. The report is byte-identical to before;
+  `RAYON_NUM_THREADS` bounds the workers when memory matters more than
+  wall. The same work makes `references` and `rename` cheaper in the
+  editor.
+- **A heatmap run sizes its cache to the project** and says so on stderr
+  (`Rehydration cache: N MiB for the sweep`). `PERL_LSP_BAG_CACHE_MB` still
+  pins it.
+
 ### Type inference
 
 - **`shift` consumes `@_`; only the first read is the invocant.** A second

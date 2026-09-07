@@ -1244,6 +1244,24 @@ impl ModuleIndex {
         self.core.bag_cache.read().ok().and_then(|g| g.clone())
     }
 
+    /// Size this index's rehydration LRU for a batch sweep over the whole
+    /// index (`cache_policy::sweep_bag_cache_cap` — the corpus IS the working
+    /// set, so the cap follows the persisted source bytes). Monotone: never
+    /// lowers the cap. Skipped when `PERL_LSP_BAG_CACHE_MB` pins it — that
+    /// knob is the A/B lever and must win. Returns the cap in effect, in
+    /// bytes, when a cache is installed.
+    pub fn size_bag_cache_for_sweep(&self) -> Option<usize> {
+        let cache = self.bag_cache_ref()?;
+        if std::env::var_os("PERL_LSP_BAG_CACHE_MB").is_some() {
+            return Some(cache.cap_bytes());
+        }
+        let source_bytes = self
+            .with_rows_conn(crate::index::module_cache::persisted_source_bytes)
+            .unwrap_or(0);
+        let cap = crate::index::cache_policy::sweep_bag_cache_cap(source_bytes, cache.cap_bytes());
+        Some(cache.raise_cap(cap))
+    }
+
     pub fn set_conclusion_cache(
         &self,
         cache: Arc<crate::index::conclusion_cache::ConclusionCache>,

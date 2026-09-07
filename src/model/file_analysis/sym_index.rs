@@ -69,12 +69,12 @@ impl FileAnalysis {
         self.symbols.in_scope(scope)
     }
 
-    /// Find all refs with a given target name.
-    #[allow(dead_code)]
-    pub fn refs_named(&self, name: &str) -> Vec<&Ref> {
-        self.refs.by_name(name)
-            .map(|idxs| idxs.iter().map(|&i| &self.refs[i]).collect())
-            .unwrap_or_default()
+    /// Indexes (into `refs()`) of every ref whose `match_key` is `key`, in
+    /// ref order — the in-file half of the relational narrowing. A key
+    /// spelled through `name_match_key` retrieves everything any matcher
+    /// arm could match for that name (see `RefTable::by_key`).
+    pub fn ref_indices_keyed(&self, key: &str) -> &[usize] {
+        self.refs.by_key(key)
     }
 
     /// Find all refs that resolve to a specific symbol.

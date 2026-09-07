@@ -53,7 +53,10 @@ pub struct PackBagCache {
     /// alarm is assertable.
     resyncs: AtomicUsize,
     /// `maxCacheMb * 1 MiB`. `0` ⇒ never retain (rehydrate-and-drop).
-    cap_bytes: usize,
+    /// Monotone after construction (`raise_cap`): a batch sweep sizes the
+    /// cache up to its working set, never down — a cap that shrinks below
+    /// one entry is the `evict_to_cap` collapse (`docs/adr/memory-slice-2-lru.md`).
+    cap_bytes: AtomicUsize,
     /// Per-path invalidation generation: `invalidate` bumps, a loading
     /// `bag_for` records the value BEFORE its decode and only retains when
     /// it is unchanged after — otherwise a decode racing a writer's
@@ -91,7 +94,7 @@ impl PackBagCache {
             clock: AtomicU64::new(0),
             bytes: AtomicUsize::new(0),
             resyncs: AtomicUsize::new(0),
-            cap_bytes,
+            cap_bytes: AtomicUsize::new(cap_bytes),
             generation: DashMap::new(),
             loader: Box::new(loader),
             ghost: crate::util::ghost_stats::GhostStats::new_if_enabled(format!(
@@ -99,6 +102,18 @@ impl PackBagCache {
                 cap_bytes / (1024 * 1024)
             )),
         }
+    }
+
+    /// Current cap in bytes.
+    pub fn cap_bytes(&self) -> usize {
+        self.cap_bytes.load(Ordering::Relaxed)
+    }
+
+    /// Raise the cap to `to` — a no-op when the cap is already at least
+    /// that (monotone by design, see `cap_bytes`). Returns the cap in
+    /// effect afterwards.
+    pub fn raise_cap(&self, to: usize) -> usize {
+        self.cap_bytes.fetch_max(to, Ordering::Relaxed).max(to)
     }
 
     fn tick(&self) -> u64 {
@@ -195,7 +210,7 @@ impl PackBagCache {
             loaded.evict_witness_bag();
         }
         let fa = Arc::new(loaded);
-        if self.cap_bytes == 0 {
+        if self.cap_bytes() == 0 {
             return Ok(fa); // rehydrate-and-drop
         }
         // Retain only if no invalidation landed during the decode — the
@@ -240,7 +255,7 @@ impl PackBagCache {
     /// evicts `keep` (the just-inserted path) so a single oversized bag over
     /// the whole cap still resolves the query it was loaded for.
     fn evict_to_cap(&self, keep: &Path) {
-        while self.bytes.load(Ordering::Relaxed) > self.cap_bytes {
+        while self.bytes.load(Ordering::Relaxed) > self.cap_bytes() {
             // Lowest recency stamp = least recently used.
             let victim = self
                 .recency
@@ -415,7 +430,7 @@ mod tests {
             "cache collapsed to {} entries — the eviction ratchet is back",
             cache.entries.len()
         );
-        assert!(cache.bytes.load(Ordering::Relaxed) <= cache.cap_bytes);
+        assert!(cache.bytes.load(Ordering::Relaxed) <= cache.cap_bytes());
     }
 
     /// Threads racing the same decode both insert; only one entry survives, so
@@ -495,7 +510,7 @@ mod tests {
         let a = PathBuf::from("/x/a.h");
         cache.bag_for(&a);
         assert!(
-            cache.bytes.load(Ordering::Relaxed) > cache.cap_bytes,
+            cache.bytes.load(Ordering::Relaxed) > cache.cap_bytes(),
             "precondition: the entry alone exceeds the cap"
         );
         let truth: usize = cache.entries.iter().map(|e| e.value().1).sum();

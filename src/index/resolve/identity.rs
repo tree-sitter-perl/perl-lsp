@@ -389,7 +389,7 @@ pub fn resolve_symbol_scoped(
             // visibility identity. Perl methods are Sub/Method symbols —
             // never class content — and keep empty `def_paths` (no gate).
             if let TargetKind::Method { class } = &t.kind {
-                if let Some(bare) = pack_member_of_class(&t.name, class, analysis, module_index) {
+                if let Some(bare) = class_member_bare_constant(&t.name, class, analysis, module_index, None) {
                     t.def_paths = pack_class_def_paths(&t, analysis, module_index);
                     t.bare_constant = bare;
                 }
@@ -399,17 +399,20 @@ pub fn resolve_symbol_scoped(
     })
 }
 
-/// Is `name` a pack-language class-content member (struct field, member-block
-/// role member, enum constant) of `class` — in the origin file or the class's
-/// module as the origin sees it? `Some(bare)` when it is, where `bare` is the
-/// enum-constant verdict (`class_content_is_bare_constant`): whether bare
-/// unresolved reads of the name count as uses. `None` keeps the pack
-/// visibility gate off Perl Method targets minted from the same cursor kinds.
-pub(super) fn pack_member_of_class(
+/// The bare-constant verdict for class member `class::name`, as the origin
+/// sees it (the origin file first, then the class's candidate files):
+/// `Some(true)` when the member's name hoists into the enclosing scope, so
+/// a bare unresolved read of it is a use; `Some(false)` when it is class
+/// content (`symbol_is_class_content` — a field, a member-block role
+/// member, an enumerator) reached only through a receiver; `None` when
+/// `name` is not class content of `class` at all. A shape test, not a
+/// language one — a Method target whose member is a sub declines on kind.
+pub(super) fn class_member_bare_constant(
     name: &str,
     class: &str,
     origin: &FileAnalysis,
     idx: Option<&dyn CrossFileLookup>,
+    memo: Option<&WalkMemo>,
 ) -> Option<bool> {
     let check = |a: &FileAnalysis| {
         a.symbols()
@@ -424,9 +427,22 @@ pub(super) fn pack_member_of_class(
     check(origin).or_else(|| {
         idx.and_then(|i| {
             // Whichever candidate file declaring `class` holds the member.
-            i.visible_def_candidates(class)
-                .iter()
-                .find_map(|c| check(&i.whole_present(c)))
+            // A candidate's verdict is a whole-copy fetch plus a scan of
+            // THAT file; under a walk memo each candidate pays it once
+            // however many askers (scoped or not) reach it.
+            i.visible_def_candidates(class).iter().find_map(|c| {
+                let Some(memo) = memo else {
+                    return check(&i.whole_present(c));
+                };
+                if let Some(v) = memo.bare_constant_by_candidate.borrow().get(&c.path) {
+                    return *v;
+                }
+                let v = check(&i.whole_present(c));
+                memo.bare_constant_by_candidate
+                    .borrow_mut()
+                    .insert(c.path.clone(), v);
+                v
+            })
         })
     })
 }

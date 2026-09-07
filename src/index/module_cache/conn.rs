@@ -267,18 +267,27 @@ pub fn open_cache_db_readonly(_workspace_root: Option<&str>, _lang: &str) -> Opt
     None
 }
 
-/// A retained read connection: opened once through the caller's opener,
-/// reused across calls, reopened when the DB file was unlinked/recreated
-/// underneath it (inode change — `--clear-cache`, a row-format rebuild).
+/// Retained read connections: opened through the caller's opener, reused
+/// across calls, reopened when the DB file was unlinked/recreated
+/// underneath one (inode change — `--clear-cache`, a row-format rebuild).
 ///
-/// The ONE speller of retain-with-recheck: `ModuleIndex::with_rows_conn`
-/// and the conclusion cache's loader both ride it. A per-call open costs
-/// milliseconds (file open, WAL handshake, the CANTOPEN retry ladder)
-/// against the microsecond query it serves — measured at 5.1 ms/call over
-/// 70k conclusion-map loads, 360 s of accumulated open cost in one cold
-/// `--check`, 13x the next-largest term in the run.
+/// The ONE speller of retain-with-recheck: `ModuleIndex::with_rows_conn`,
+/// the bag-LRU loader and the conclusion cache's loader all ride it. A
+/// per-call open costs milliseconds (file open, WAL handshake, the
+/// CANTOPEN retry ladder) against the microsecond query it serves —
+/// measured at 5.1 ms/call over 70k conclusion-map loads, 360 s of
+/// accumulated open cost in one cold `--check`, 13x the next-largest term
+/// in the run.
+///
+/// A CHECKOUT POOL, not one guarded connection: `with` holds the lock only
+/// to take a connection out and to put it back, never across `f`. The blob
+/// loader decodes inside `f` (10 µs–3 ms per miss), and one mutex around
+/// it serialized every rehydrate in the process — a 20-worker `--heatmap`
+/// gather measured 188% CPU with that lock in place. Sequential callers
+/// still see exactly one connection; concurrent callers grow the pool to
+/// their peak overlap and reuse it from then on.
 pub struct RetainedReader {
-    cell: std::sync::Mutex<Option<(Connection, u64)>>,
+    pool: std::sync::Mutex<Vec<(Connection, u64)>>,
 }
 
 impl Default for RetainedReader {
@@ -289,7 +298,7 @@ impl Default for RetainedReader {
 
 impl RetainedReader {
     pub fn new() -> Self {
-        RetainedReader { cell: std::sync::Mutex::new(None) }
+        RetainedReader { pool: std::sync::Mutex::new(Vec::new()) }
     }
 
     fn db_ino(conn: &Connection) -> u64 {
@@ -313,8 +322,8 @@ impl RetainedReader {
     /// OPENER changed (a new workspace root), which the inode recheck cannot
     /// see: same file may exist at both paths.
     pub fn reset(&self) {
-        let mut guard = self.cell.lock().unwrap_or_else(|p| p.into_inner());
-        *guard = None;
+        let mut guard = self.pool.lock().unwrap_or_else(|p| p.into_inner());
+        guard.clear();
     }
 
     /// Run `f` on the retained connection, opening through `opener` when
@@ -326,22 +335,26 @@ impl RetainedReader {
         opener: impl FnOnce() -> Option<Connection>,
         f: impl FnOnce(&Connection) -> R,
     ) -> Option<R> {
-        // Poison-proof: the Option is a pure cache — a panic in an earlier
-        // holder must not permanently disable retrieval.
-        let mut guard = self.cell.lock().unwrap_or_else(|p| p.into_inner());
-        if let Some((conn, ino)) = guard.as_ref() {
+        // Poison-proof: the pool is a pure cache — a panic in an earlier
+        // holder must not permanently disable retrieval (a connection
+        // checked out by a panicking caller is simply never returned).
+        let mut held = self.pool.lock().unwrap_or_else(|p| p.into_inner()).pop();
+        if let Some((conn, ino)) = held.as_ref() {
             if Self::db_ino(conn) != *ino {
-                *guard = None; // file unlinked/recreated — reopen below
+                held = None; // file unlinked/recreated — reopen below
             }
         }
-        if guard.is_none() {
-            *guard = opener().map(|c| {
+        let (conn, ino) = match held {
+            Some(h) => h,
+            None => {
+                let c = opener()?;
                 let ino = Self::db_ino(&c);
                 (c, ino)
-            });
-        }
-        let (conn, _) = guard.as_ref()?;
-        Some(f(conn))
+            }
+        };
+        let out = f(&conn);
+        self.pool.lock().unwrap_or_else(|p| p.into_inner()).push((conn, ino));
+        Some(out)
     }
 }
 

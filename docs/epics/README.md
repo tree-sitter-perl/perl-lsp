@@ -58,7 +58,7 @@ any of those three.
 | 5 | [One-seam sweep: magic tokens + cst backlog](05-one-seam-sweep.md) | S | — |
 | 6 | [Rename provenance (residual)](06-rename-provenance.md) | S–M | 1 gates Phase B |
 | 7 | [Diagnostic framework: codes, config, SARIF](07-diagnostic-framework.md) | L | after 3's promotions |
-| 8 | [Heatmap: parallelize, then the residuals](08-heatmap-residuals.md) | M | interlocks with 7 |
+| 8 | [Heatmap residuals: Handlers + plugin-owned reachability](08-heatmap-residuals.md) | M | interlocks with 7 |
 | 9 | [Mojo polish: routes, stash, hooks, chains](09-mojo-polish.md) | L | — |
 | 10 | [CLI analysis subcommands + `--migrate`](10-cli-analysis-and-migrate.md) | L | 7/8 for two lint aliases |
 | 11 | [Program boundaries + MAIN-1](11-program-boundaries.md) | M | brands-half waits on 4 |
@@ -154,7 +154,7 @@ residuals, or (d) explicitly out of scope. Nothing is unaccounted for.
 | `prompt-scale-validation-hitlist.md` §Validation ("OWED" rows) | **Epic 15** Phase D — cold cpan5k with every fix in, the differential sweep, the `PackBagCache` re-soak |
 | `prompt-scale-validation-hitlist.md` Tier 2/3 open rows (`query_rec` 512-depth, `cursor_slot.rs:205`, index-family merge) | **Epic 15** Phase C, or explicitly declined there |
 | `scaling-limits.md` §1 (FHEM `package main` monoculture) | **Epic 1** owns the mechanism (the 534-member candidate set IS the package-identity relation) and **Epic 15** owns the sweep-level dedup |
-| `scaling-limits.md` §5 (`--heatmap` is a batch verb, and single-threaded) | **Epic 8 Phase A** — the doc's own closing line schedules it ("the obvious next step"): 104–105% CPU where `--check` uses every core, up to a 17x ratio. The batch-verb framing stays honest either way; the deeper fan-in cost is Epic 15 Phase A |
+| `scaling-limits.md` §5 (`--heatmap` is a batch verb) | **Landed** (2026-09-06). The residuals it records — the 8-thread knee (allocation churn in the walk) and the pack-only per-visit costs — are Epic 15 Phase A and Epic 14, not Epic 8 |
 | `prompt-incremental-build.md` | **Parked** with a named bar in-doc; Epic 15 Phase D's measurements are its forcing function |
 | `prompt-storage-residuals.md` | Known unbounded residuals, deliberately listed; not an epic until one is measured to hurt |
 | `prompt-enrichment-delta.md` (enrichment as a delta artifact) | **Design, not started.** Its three named pressures — level-indexed enrichment's rejection, the FHEM crest, the overlay retention story — are all Epic 15 territory; it is the candidate design if Phase B's dedup proves insufficient. Do not start it before Epic 15 Phase C measures the enrichment path fresh |

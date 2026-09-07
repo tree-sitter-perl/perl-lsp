@@ -7,14 +7,7 @@
 
 ## Mission
 
-One measured cost and two gaps. The cost first, because the gaps make
-it worse:
-
-0. **`--heatmap` runs on one core** while `--check` uses all of them —
-   up to a 17× ratio on a fan-in-heavy corpus. `scaling-limits.md` §5
-   records the fix as "the obvious next step" and nobody has taken it.
-
-Then two gaps, both plugin-knowledge-shaped (rule #10 — never a
+Two gaps, both plugin-knowledge-shaped (rule #10 — never a
 per-verb/per-name list in core):
 
 1. **Handlers become heatmap-eligible** with a plugin-stamped
@@ -57,59 +50,7 @@ per-verb/per-name list in core):
 
 ## Phase breakdown
 
-### Phase A — parallelize the gather (do this first)
-
-**`--heatmap` runs on one core.** `scaling-limits.md` §5, measured:
-104–105% CPU throughout, where `--check`'s diagnostics sweep
-parallelises across all of them. The ratios there are two effects
-compounding — more work per declaration, done serially:
-
-| corpus | `--check` | `--heatmap` | ratio | max fan-in |
-|---|---:|---:|---:|---:|
-| WeBWorK (225 files) | 3.80 s | 5.00 s | 1.3x | 81 |
-| Webmin (1,333) | 4.76 s | 31.07 s | 6.5x | 199 |
-| BMO (739) | 5.39 s | 91.69 s | **17x** | 340 |
-
-Cost tracks **fan-in, not file count** — BMO is smaller than Webmin and
-costs 3× more, which follows from what the verb does. The doc's own
-closing line: *"the serial half looks addressable with the same
-`par_iter` + channel shape the diagnostics sweep already uses. Not
-attempted; recorded as the obvious next step."*
-
-**It goes first because the rest of this epic adds symbols to the
-listing.** Handlers (Phases B–C) mean more declarations, each with a
-fan-in walk. Parallelising first lands those additions on a faster
-baseline and makes their measured cost legible instead of buried.
-
-1. The shape is already map-then-collect. `cli_heatmap`'s two gather
-   loops (`entries`, then `pack_entries`) call one `gather` closure per
-   file, which pushes into four accumulators (`symbol_rows`,
-   `dead_rows`, `dead_export_rows`) plus a `SourceCache`. Convert to
-   `par_iter` producing per-file row batches, then concatenate — copy
-   the diagnostics sweep's `par_iter` + channel shape rather than
-   inventing one.
-2. **`SourceCache` is the only shared mutable, and it partitions
-   cleanly** — it is keyed by path and `gather` is per-file. Give each
-   worker its own (`map_init` or fold/reduce) rather than putting a
-   mutex on the hot path.
-3. **Determinism is already safe, and must stay that way.** Both output
-   sorts are TOTAL — `symbol_rows` on `(fan_in desc, file, line)` and
-   `dead_export_rows` on `(name, file, line)` — so gather order cannot
-   reach the output. Verify that rather than trusting it: this codebase
-   has already paid for three fold-nondeterminism bugs (PR #123, where
-   witnesses landed in `HashMap` order and the same file built twice
-   differed). **Acceptance includes two runs byte-identical**, on a
-   corpus with ties.
-4. **Do not parallelise the pack loop and the Perl loop into one pass**
-   without checking their routing: they pass different `CrossFileLookup`
-   implementations, different visibility masks, and the pack loop has no
-   pre-prune (its refs are not in the hub's row store). Two parallel
-   loops is fine; one loop with a branch inside is the rule-#10 shape.
-5. **Acceptance:** BMO and Webmin wall, three runs, dated, before and
-   after; byte-identical output across two runs; **peak RSS reported
-   alongside** — see the Scaling beat, this trades wall for memory.
-
-### Phase B — plugin-stamped Handler definition site
+### Phase A — plugin-stamped Handler definition site
 
 1. **CHECK FIRST:** if Handlers already carry a declaration span that
    the fan-in subtraction simply does not use, this phase is wiring, not
@@ -129,7 +70,7 @@ baseline and makes their measured cost legible instead of buried.
    dead-candidate), and the same pair for a route and an event.
    `EXTRACT_VERSION` bump if the Handler shape changed.
 
-### Phase C — Handlers in the report
+### Phase B — Handlers in the report
 
 1. `heatmap_symbol_eligible` admits stamped Handlers; the fan-in
    subtraction uses the stamped site.
@@ -141,7 +82,7 @@ baseline and makes their measured cost legible instead of buried.
    updated. **Decide and document** in `adr/heatmap.md`'s schema
    section — a silent shape change breaks every downstream consumer.
 
-### Phase D — framework-consumed reachability
+### Phase C — framework-consumed reachability
 
 1. New plugin manifest `framework_consumed()` → the method names a
    framework invokes through its own machinery: Mojo (`startup`),
@@ -184,12 +125,12 @@ the entry-point guard reads the analysis language's declared
 `entrypoint_symbols`, and `Namespace::Language` distinguishes native
 symbols. A C++ heatmap run exists and works. That means:
 
-1. **Phase C's eligibility change is cross-language by default.** A
+1. **Phase B's eligibility change is cross-language by default.** A
    pack language that mints Handler-shaped symbols gets them listed;
    one that does not is unaffected. Verify the C++ heatmap output is
-   byte-identical before/after Phase C — if it is not, the eligibility
+   byte-identical before/after Phase B — if it is not, the eligibility
    predicate grew a Perl assumption.
-2. **Phase D's `framework_consumed` manifest is a `.rhai` plugin
+2. **Phase C's `framework_consumed` manifest is a `.rhai` plugin
    hook, and pack languages have no rhai plugin tier.** Their framework
    knowledge, when it exists, arrives as query overlays and driver
    capabilities. So `framework_consumed` needs a second producer to be
@@ -201,7 +142,7 @@ symbols. A C++ heatmap run exists and works. That means:
 3. Do NOT let the guard become a name list in `heatmap.rs`. That is the
    rule-#10 failure this epic exists to prevent, and it is the exact
    shape a "just add `main` for C++" fix would take.
-4. The `--heatmap` schema decision in Phase C is user-visible for every
+4. The `--heatmap` schema decision in Phase B is user-visible for every
    language. Whatever version story you pick applies to all of them.
 
 ## Scaling beat
@@ -211,20 +152,18 @@ explicitly. This epic must not blur that.**
 
 Facts to respect:
 
-1. **Phase A is this epic's own scaling work, and it trades wall for
-   memory.** Heatmap memory is currently mild *because* it is serial
-   (Webmin 0.47 → 0.95 GB, BMO 0.49 → 0.70 GB — a wall cost, not a
-   memory one). Parallelising multiplies the in-flight working set by
-   worker count, and `scaling-limits.md` §1 already established that
-   **per-worker in-flight sets own the crest** on the `--check` sweep:
-   `RAYON_NUM_THREADS=4` cuts its peak 67% for 4.9% wall. Expect the
-   same knob to matter here, report peak RSS at the default and at 4,
-   and say in the docs which the user should reach for.
+1. **The gather is parallel per declaration and the sweep sizes its
+   rehydration LRU to the corpus** (`adr/heatmap.md` §Cost has the
+   knobs; `scaling-limits.md` §5 the dated numbers). Per-worker
+   in-flight sets own the RSS crest, so any phase that changes the wall
+   reports peak RSS at the default worker count and at
+   `RAYON_NUM_THREADS=4`, three runs, dated.
 2. **The deeper heatmap cost is not addressable here.** Fan-in is the
    `references()` projection, and references at scale is Epic 15
-   Phase A (265–368 s at 138k files, still OPEN). Phase A of this epic
-   makes the serial half parallel; Epic 15 makes each walk cheaper.
-   They compose and neither substitutes for the other.
+   Phase A (265–368 s at 138k files, still OPEN) — as is the per-visit
+   allocation churn `scaling-limits.md` §5 measured as the heatmap's
+   own residual (the 8-thread knee). Epic 15 makes each walk cheaper;
+   this epic must not try to.
 3. **The heatmap runs `cli_full_startup` with `LanguageScope::All`**
    (`grep -n 'LanguageScope::All' src/lsp/cli/heatmap.rs`) — correct,
    because it sweeps the workspace, and CLAUDE.md's rule is that
@@ -234,7 +173,7 @@ Facts to respect:
    that bounds as workspace-scale tools.
 4. **Fan-in must stay the `references()` projection.** It is also the
    most expensive thing the heatmap does — references at 138k files
-   takes 265–368 s (2026-08-17, Tier 1 #3, still OPEN). Phase B/C add
+   takes 265–368 s (2026-08-17, Tier 1 #3, still OPEN). Phases A/B add
    Handlers to the listing, which adds symbols whose fan-in must be
    computed. **Report the delta in listed-symbol count and in wall
    time** on Koha, three runs, dated. If Handlers add 20% more symbols,
@@ -247,7 +186,7 @@ Facts to respect:
    Handler that is pre-pruned because the row store never saw it is a
    silently-wrong "dead" verdict, which is the one thing the heatmap
    promises never to do.
-6. **Phase D's guard is a set membership check per symbol** — cheap, as
+6. **Phase C's guard is a set membership check per symbol** — cheap, as
    long as the set is baked once per file and not recomputed. Keep it in
    the plugin lane, default-empty.
 7. The honest framing in `adr/heatmap.md` — over-approximation, named
@@ -260,11 +199,9 @@ Facts to respect:
 `./e2e/run.sh` · a `--heatmap` run over the substrate committed as a
 before/after summary in the PR: **dead candidates by kind** — Handlers
 should ADD candidates (orphans found) while framework-consumed REMOVES
-false ones; both deltas listed · C++ heatmap output unchanged by Phase C ·
-Koha `--heatmap` wall, three runs, dated · for Phase A: BMO/Webmin wall
-**and peak RSS** before and after, plus two runs byte-identical.
+false ones; both deltas listed · C++ heatmap output unchanged by Phase B ·
+Koha `--heatmap` wall, three runs, dated.
 
 ## Sizing
 
-Medium. A is small, self-contained and independently valuable — ship it
-alone if the rest stalls. B+C are one PR arc, D a second.
+Medium. A+B are one PR arc, C a second.
