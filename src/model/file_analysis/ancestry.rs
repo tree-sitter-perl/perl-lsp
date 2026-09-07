@@ -851,6 +851,11 @@ impl FileAnalysis {
         // class but not a name a method call can ever spell.
         let visible = |sym: &Symbol| {
             crate::model::conventions::is_callable_sub_name(&sym.name)
+                // A lexical sub/method (`my sub` / `my method`) is scoped to
+                // its block, not the class: it never dispatches by name on an
+                // MRO and is invisible cross-file. The point-aware `&name`
+                // lane (`complete_lexical_methods_at`) owns offering it.
+                && !matches!(&sym.detail, SymbolDetail::Sub { lexical: true, .. })
                 && (requesting_class == Some(class_name)
                     || !sym.attributes.iter().any(|a| a == "non_public"))
         };
