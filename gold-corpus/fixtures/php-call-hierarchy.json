@@ -1,0 +1,25 @@
+{
+  "capability": "call-hierarchy",
+  "rows": [
+    {
+      "id": "php-callhier-incoming-across-files",
+      "difficulty": "simple",
+      "semantic_area": "php-multilang",
+      "lang": "php",
+      "root": "gold-corpus/php-fixture",
+      "file": "src/Util/Greeter.php",
+      "line": 15,
+      "col": 20,
+      "expect": {
+        "all": [
+          "\"name\":\"pick\"",
+          "\"name\":\"run\"",
+          "\"name\":\"again\"",
+          "\"item\":{\"col\":\"21\",\"file\":\"Greeter.php\",\"kind\":\"Method\",\"line\":\"16\",\"name\":\"hi\"}"
+        ],
+        "none": []
+      },
+      "status": "gold"
+    }
+  ]
+}

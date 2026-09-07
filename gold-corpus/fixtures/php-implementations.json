@@ -1,0 +1,24 @@
+{
+  "capability": "implementations",
+  "rows": [
+    {
+      "id": "php-impl-interface-method",
+      "difficulty": "simple",
+      "semantic_area": "php-multilang",
+      "lang": "php",
+      "root": "gold-corpus/php-fixture",
+      "file": "src/Contracts/Speaker.php",
+      "line": 5,
+      "col": 20,
+      "expect": {
+        "all": [
+          "\"file\":\"Impl.php\",\"line\":\"6\"",
+          "\"file\":\"Impl.php\",\"line\":\"16\"",
+          "\"file\":\"Impl.php\",\"line\":\"28\""
+        ],
+        "none": []
+      },
+      "status": "gold"
+    }
+  ]
+}
