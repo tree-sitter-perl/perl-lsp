@@ -844,6 +844,14 @@ pub trait CrossFileLookup {
     ) -> Option<(&std::path::Path, &std::collections::HashSet<String>)> {
         None
     }
+    /// Scope-less BY RULE (`VisibilityAxis::Flat` — a name-keyed pack):
+    /// consumers that degrade a closure scope to agreement folds admit the
+    /// FULL candidate table under it. `false` everywhere else, including
+    /// `Transparent` ("no rule known yet") — an unwarmed host origin must
+    /// not suddenly sweep the pack candidate table.
+    fn flat_scope(&self) -> bool {
+        false
+    }
     fn for_each_cached(&self, f: &mut dyn FnMut(&str, &std::sync::Arc<CachedModule>));
     /// Visit every distinct cached FILE exactly once. `for_each_cached` is
     /// keyed by NAME with one winner per key, so a pack file that loses every
@@ -971,6 +979,15 @@ pub enum VisibilityAxis {
     /// known (an unwarmed on-open doc).
     #[default]
     Transparent,
+    /// Everything visible BY RULE — a name-keyed pack language (PHP,
+    /// Python) whose imports name modules, not paths: same-named
+    /// workspace candidates are genuine siblings, never closure-scoped.
+    /// Distinct from `Transparent` ("no rule known yet"): a Flat scope
+    /// deliberately mints NO `def_paths` gate and admits the full
+    /// candidate table where a closure scope degrades to agreement
+    /// folds. The scope-less base every name-keyed axis shares; an origin
+    /// that carries pins gets `UseMap` instead.
+    Flat,
     /// Flat linkage (C): a candidate is visible when the asker's `#include`
     /// closure reaches it, or when it includes the asker back.
     IncludeClosure,
@@ -1022,22 +1039,42 @@ impl UseMapPins {
     }
 }
 
+/// How an origin's language scopes cross-file visibility — the routing
+/// fact `for_origin` consumes. Derived by the registry from the pack's
+/// own linkage declaration (`include_path_tokens`), never a
+/// language-name branch here or at a call site.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PackVisibility {
+    /// Not a pack: the host's search-path derivation (`use lib` ∪ @INC).
+    Host,
+    /// Include-path linkage (C/C++): a name is visible through the
+    /// asker's `#include` closure.
+    IncludePaths,
+    /// Name-keyed pack (PHP/Python/R/CMake): imports name modules, not
+    /// paths — there is no closure to scope by, and the host's @INC
+    /// roots would rank every candidate invisible. Visibility is the
+    /// origin's own use-map (`UseMap`), `Flat` when it carries none.
+    NameKeyed,
+}
+
 impl VisibilityAxis {
     /// THE derivation of an origin's visibility rule. Call sites pass the
     /// origin and its index; none of them decides which model applies, so
     /// a new model reaches every projection by changing this one function.
     ///
-    /// `pack_language` is the routing fact the driver stamped on the
-    /// analysis — the caller reads it from the registry rather than this
-    /// layer importing the driver.
+    /// `visibility` is the routing fact for the origin's language — the
+    /// caller reads it from the registry (`pack_visibility`) rather than
+    /// this layer importing the driver.
     pub fn for_origin(
         origin: &FileAnalysis,
         self_path: Option<&std::path::Path>,
         index: &dyn CrossFileLookup,
-        pack_language: bool,
+        visibility: PackVisibility,
     ) -> Self {
-        if pack_language {
-            return VisibilityAxis::IncludeClosure;
+        match visibility {
+            PackVisibility::IncludePaths => return VisibilityAxis::IncludeClosure,
+            PackVisibility::NameKeyed => return VisibilityAxis::Flat,
+            PackVisibility::Host => {}
         }
         let inc = index.inc_roots();
         // The overwhelmingly common origin declares no `use lib`, and this
@@ -1101,7 +1138,9 @@ impl VisibilityAxis {
     /// everything equally visible.
     fn rank(&self, path: &std::path::Path) -> Option<usize> {
         match self {
-            VisibilityAxis::Transparent | VisibilityAxis::IncludeClosure => Some(0),
+            VisibilityAxis::Transparent
+            | VisibilityAxis::Flat
+            | VisibilityAxis::IncludeClosure => Some(0),
             VisibilityAxis::SearchPath(roots) if roots.is_empty() => Some(0),
             VisibilityAxis::SearchPath(roots) => {
                 // Longest-prefix wins, THEN root order: a vendored
@@ -1116,6 +1155,15 @@ impl VisibilityAxis {
                     .map(|(i, _)| i)
             }
         }
+    }
+}
+
+impl VisibilityAxis {
+    /// Scope-less BY RULE: a name-keyed pack's axis (with or without
+    /// pins) mints no closure gate and admits the full candidate table
+    /// wherever a closure scope would degrade to agreement folds.
+    fn name_keyed(&self) -> bool {
+        matches!(self, VisibilityAxis::Flat)
     }
 }
 
@@ -1177,7 +1225,9 @@ impl<'a> CrossFileLookup for ScopedLookup<'a> {
     }
     fn visible_def_candidates(&self, name: &str) -> Vec<std::sync::Arc<CachedModule>> {
         match &self.axis {
-            VisibilityAxis::Transparent => self.inner.def_candidates(name),
+            VisibilityAxis::Transparent | VisibilityAxis::Flat => {
+                self.inner.def_candidates(name)
+            }
             VisibilityAxis::IncludeClosure => {
                 // Flat linkage: keep candidates CONNECTED to the asker —
                 // visible in its include closure, or including the asker
@@ -1338,7 +1388,19 @@ impl<'a> CrossFileLookup for ScopedLookup<'a> {
     fn visibility_scope(
         &self,
     ) -> Option<(&std::path::Path, &std::collections::HashSet<String>)> {
+        // A Flat axis IS "no scope": answering the path + closure set
+        // would let the backward gate (`pack_def_paths`) narrow a
+        // name-keyed pack's references to its (empty) include closure —
+        // same-file-only answers, measured on WordPress/monolog.
+        // (Transparent still answers: the host's "no rule known yet" case
+        // predates the axis and its consumers' closure tests no-op there.)
+        if self.axis.name_keyed() {
+            return None;
+        }
         self.self_path.as_deref().map(|p| (p, &self.visible))
+    }
+    fn flat_scope(&self) -> bool {
+        self.axis.name_keyed()
     }
     fn for_each_cached(&self, f: &mut dyn FnMut(&str, &std::sync::Arc<CachedModule>)) {
         self.inner.for_each_cached(f)
