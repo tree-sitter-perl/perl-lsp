@@ -199,6 +199,26 @@
         "none": []
       },
       "status": "gold"
+    },
+    {
+      "id": "php-lar-def-event-emission",
+      "difficulty": "simple",
+      "semantic_area": "php-laravel",
+      "lang": "php",
+      "root": "gold-corpus/laravel-fixture",
+      "comment": "`event(new PostPublished(...))`: the class, the listener's `handle(PostPublished $e)` and the `$listen` row — every candidate, never a pick.",
+      "file": "app/Http/Controllers/PostController.php",
+      "line": 22,
+      "col": 18,
+      "expect": {
+        "all": [
+          "PostPublished.php:5:7",
+          "NotifyFollowers.php:9:21",
+          "EventServiceProvider.php:11:9"
+        ],
+        "none": []
+      },
+      "status": "gold"
     }
   ]
 }

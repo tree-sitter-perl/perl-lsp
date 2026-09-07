@@ -20,6 +20,25 @@
         "none": []
       },
       "status": "gold"
+    },
+    {
+      "id": "php-lar-callhier-listener-incoming-emission",
+      "difficulty": "simple",
+      "semantic_area": "php-laravel",
+      "lang": "php",
+      "root": "gold-corpus/laravel-fixture",
+      "comment": "call hierarchy on a listener's `handle` counts the controller's `event(new PostPublished(...))` as an incoming call (the event bus is a graph).",
+      "file": "app/Listeners/NotifyFollowers.php",
+      "line": 8,
+      "col": 20,
+      "expect": {
+        "all": [
+          "\"name\":\"show\"",
+          "\"item\":{\"col\":\"21\",\"file\":\"NotifyFollowers.php\",\"kind\":\"Method\",\"line\":\"9\",\"name\":\"handle\"}"
+        ],
+        "none": []
+      },
+      "status": "gold"
     }
   ]
 }
