@@ -2002,6 +2002,7 @@ impl LanguageRegistry {
 
     /// Every id this build can serve — the feature-dependent set, so a caller
     /// enumerating languages never carries its own list to drift.
+    #[cfg(test)]
     pub fn ids(&self) -> Vec<&'static str> {
         self.drivers.iter().map(|d| d.id()).collect()
     }
@@ -2015,6 +2016,7 @@ impl LanguageRegistry {
         match id {
             "cpp" => "C/C++",
             "python" => "Python",
+            "php" => "PHP",
             "r" => "R",
             "cmake" => "CMake",
             _ => id,
