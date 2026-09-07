@@ -226,7 +226,7 @@ pub(super) fn dispatch_handler_locations(
                             key: FileKey::Path(cached.path.clone()),
                             span: sym.selection_span,
                             access: AccessKind::Declaration,
-                            rewritable: true,
+                            rewritable: !matches!(owner, HandlerOwner::ClassRail(_)),
                             label: None
                         });
                     }

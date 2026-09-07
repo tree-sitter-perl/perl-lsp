@@ -204,6 +204,11 @@ impl TargetRef {
         if self.ctor_of.is_some() {
             return false;
         }
+        // A class-keyed rail's spans are emission/handler tokens; its
+        // names belong to the class rename.
+        if matches!(&self.kind, TargetKind::Handler { owner: crate::model::file_analysis::HandlerOwner::ClassRail(_), .. }) {
+            return false;
+        }
         matches!(
             self.kind,
             TargetKind::Sub { .. }
