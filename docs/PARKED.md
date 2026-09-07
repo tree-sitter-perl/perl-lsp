@@ -246,6 +246,17 @@ marked otherwise; the drain re-derived each rationale against current code.
 
 ## Residual-bug tier (pinned, xfail'd where reducible)
 
+- **php `use X as Alias` spellings resolve nothing.** The use-map axis
+  pins the alias spelling to its namespace (`use_aliases`) and leaves the
+  real leaf to the file's own class, but a hint/`new`/receiver spelled
+  `Alias` still finds no candidate — candidates are keyed by the real
+  leaf (honest empty, never a stranger).
+  Translating the alias to the real leaf at extraction is wrong when the
+  file also declares that leaf itself; the fix is namespace-qualified
+  class identity — `docs/open-forks.md`, "GraphView node identity is
+  leaf-keyed", option C. `parent::` through an aliased parent already
+  works via `parent_namespaces` rows.
+
 - **Cross-file functional-cast / constructor typing** (callee is NOT a
   local symbol). The name-case ctor heuristic is DEAD: a call's value is now
   the callee's own resolution (`query_extract::into_file_analysis` call-site
@@ -452,6 +463,89 @@ marked otherwise; the drain re-derived each rationale against current code.
   same-named classes in other namespaces collide. The Perl owner-gate half
   landed (`62426fa`); the cpp half needs namespace-qualified class identity
   in the rename target. Destructive-if-applied.
+- **PHP method-level `@template`** (round-3 R6/R10b): a class-level
+  `@template T` row feeds the same per-class param axis cpp templates use,
+  but a METHOD-level `@template TValue` (e.g. Laravel's `BuildsQueries`
+  trait `first()`) is a separate binding the class-keyed axis doesn't
+  model. Laravel 12's CONDITIONAL generic returns (`($id is ... ?
+  Collection<...> : TModel|null)` on `find`) are beyond the parser and
+  correctly rejected — not a target, stays untyped. Rendering doc PROSE on
+  hover is also still unread.
+- **PHP completion: declared type loses to the bag in one lane** (round-3
+  R11 tail): a declared `: int` return annotates as `int|float` in
+  completion specifically (the bag beats the decl there; elsewhere the
+  decl wins). Multi-line signatures also truncate in completion detail.
+- **PHP `global $x` refs are always empty** (round-3 R11 tail): `global
+  $wpdb;`-style bindings never collect refs; hover on `$wpdb` answers the
+  CLASS by name coincidence, not the global binding.
+- **PHP string-callable overlay residuals** (round-4 H7): the
+  variadic-tail callback family (`array_udiff` & co — callback LAST
+  positional arg) and key-position forms (`'sanitize_callback' => 'fn'`)
+  aren't covered by the fixed-position `stdlib.scm` overlay. (The
+  `'Class::method'` string spelling resolves on both segments, and
+  `[$obj, 'm']` / `[$this, 'm']` instance-array callables mint member refs
+  through the skeleton — neither is parked.) Two rename
+  residuals from the same family, root-caused but not fixed: LogglyHandler
+  (a closure param threaded through an `array_filter` callback) and
+  MailHandler's `$highestRecord` (assignment flow into a null-guarded
+  accumulator local).
+- **PHP vendor-resolved method hover drops the signature** (round-4 H12):
+  cross-file method hover through the vendor/dependency tier renders the
+  generic member arm instead of the method-signature arm.
+- **PHP `--heatmap` fan-in walk cost on large corpora** (round-5 R5-4): a
+  1,232-file phpMyAdmin heatmap costs ~2 minutes cold and warm. Indexing
+  is 3.0s cold / 0.2s warm; the rest is the per-symbol `references()`
+  walk. Attributed 2026-09-02 (warm, `PERL_LSP_GHOST_STATS`, quiet box,
+  one run — wall 74-78s, well under the 1m50s recorded from an earlier,
+  possibly loaded-box run, so the three-run protocol still owes a
+  baseline): both per-walk rehydration memos are defeated on the heatmap
+  path — `sweep.lookup`/`sweep.memo_miss` both 1,536,053 (the
+  thread-local `SWEEP_MEMO` is never open on the heatmap's walk loop) and
+  `session.foreign_index` 1,586,824 (the session memo sees an index id
+  other than the walk's) — so a file rehydrates once PER WALK instead of
+  once per run: `rehydrate.loader` 19.1s over 1.54M calls (mostly
+  `bagcache.hit`, ~12µs each — it is the call count that hurts),
+  `bagcache.decode` 12.3s over 35,564 decodes, `bag.rebuild_index_witnesses`
+  4.09M calls. Unblock: open the sweep memo (or the shared
+  `SWEEP_PROVIDERS`) for the heatmap's walk loop, and give the heatmap's
+  session the walk's index id — not the matcher, which is already
+  row-narrowed (the pack tier's own-row-store pre-prune already landed).
+- **PHP method names are case-insensitive; the lookup is exact** (monolog
+  dogfood, one row; WordPress `sodium_compat` a second — `::substR()` on a
+  method declared `substr()`): `$formatter->indentStackTraces()` on a
+  method declared `indentStacktraces()` reports unresolved. `symbols_named` and the
+  cross-file by-name index are exact-case; a pack convention
+  (`methods_case_insensitive`) would need a folded name index on both the
+  local and the module tiers, for the Callable shape only (properties and
+  constants stay exact). Two corpora now show a row each — the next
+  diagnostics slice.
+- **Two WordPress `unresolved-method` rows resolve to the wrong receiver
+  class** (build 8fe1bc1): `$user->has_cap()` in `wp-login.php` (the
+  receiver comes out of `wp_signon()`'s `WP_User|WP_Error` and an
+  `is_wp_error()` function guard the narrowing lane does not read) and
+  `$class::test()` in `Requests::get_transport()` (`$class` iterates
+  `self::$transports`, an array of class-strings; `test` is the
+  `Transport` interface's static method). Both need the receiver dumped
+  before a fix; neither is a lane rule.
+- **Laravel facade aliases (`use DB;`, bare `DB::` in a namespace-less
+  migration)** report an undefined type: the alias is registered at
+  runtime (`Facade::defaultAliases()` + `config/app.php`), no static
+  source declares `class DB`. A Laravel overlay reading the framework's
+  default alias map is the honest fix; the qualified spelling
+  (`use Illuminate\Support\Facades\DB;`) already resolves. Evidence
+  against building it: across BookStack, panel and koel there are zero
+  bare-alias spellings (`use DB;`, `\DB::`) and zero `class_alias()`
+  calls — every facade use imports the FQ class. A global-alias class
+  declaration is a seam no corpus asks for.
+- **PHP `self::VOID`-style constant names read as undefined properties**
+  (round-8): tree-sitter-php lexes a keyword-spelled constant NAME
+  (`VOID`, `STRING`, `ARRAY` — PHP keywords are case-insensitive) as the
+  `void` type keyword, so `const VOID = 'void';` is an ERROR node the
+  extractor never sees; both reads of `self::VOID` in WordPress's
+  `class-wp-block-processor.php` report `undefined-property`. A grammar
+  fix upstream; recovering the declaration out of the ERROR node (rule
+  #1: scan ERROR children for `const NAME =`) is deferred until a corpus
+  shows more than the two known rows.
 
 ## Cross-references
 - Gap shapes behind open xfails: `gold-corpus/KNOWN-GAPS.md`
