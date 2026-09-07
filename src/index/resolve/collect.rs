@@ -939,6 +939,50 @@ pub(super) fn collect_from_analysis(
         other => other,
     };
 
+    // The same-leaf gate: a class-keyed target whose origin pinned the
+    // class to a namespace is not referenced by a file whose SAME leaf
+    // means a class in another namespace — that file's `Factory` calls,
+    // decls and `new` sites belong to the stranger. Both claims come from
+    // the files' own scopes (`pinned_namespace`), so only a use-map axis
+    // ever gates: a closure-carrying (cpp) file's partial namespace
+    // attribution stays `pkg_agrees`'s business, and a scope that makes
+    // no claim keeps every ref matched on the receiver chain as before.
+    // When the file's claim disagrees, its `use` rows can still name the
+    // target's class by full namespace (`use A\Event as BaseEvent;` inside
+    // a file whose own bare `Event` is another class): those rows stay in,
+    // everything else in the file is the stranger's.
+    let mut import_rows_only = false;
+    if let Some(want) = target.class_ns.as_deref() {
+        let leaf = match &target.kind {
+            TargetKind::Method { class } => Some(class.as_str()),
+            TargetKind::Sub { package } => package.as_deref(),
+            TargetKind::Package => Some(target.name.as_str()),
+            _ => None,
+        };
+        if let Some(leaf) = leaf {
+            let claim = module_index.and_then(|idx| idx.pinned_namespace(leaf));
+            if claim.is_some_and(|ns| ns != want) {
+                if !matches!(target.kind, TargetKind::Package) {
+                    return;
+                }
+                import_rows_only = true;
+            }
+        }
+    }
+    // A `use` row names ONE class in full: its leaf token references the
+    // target only when the row's namespace is the target's (`use B\Event
+    // as ScriptEvent;` is never a reference to `A\Event`, whatever the
+    // file's own `Event` means).
+    let import_row_verdict = |span: &Span| -> Option<bool> {
+        let want = target.class_ns.as_deref()?;
+        let (_, raw) = analysis.pack.import_row_covering(span)?;
+        Some(
+            raw.trim_start_matches('\\')
+                .rsplit_once('\\')
+                .is_some_and(|(ns, leaf)| ns == want && leaf == target.name),
+        )
+    };
+
     // Package globals match by package + (qualified) name, not the callable
     // scope machinery below — and their spans need sigil handling — so collect
     // them on a dedicated path.
@@ -999,6 +1043,9 @@ pub(super) fn collect_from_analysis(
     // equality is `symbol_defines_target`'s first gate, so only the
     // same-named symbols can pass (in symbol order, as the vec would).
     for &sid in analysis.symbols_named(&target.name) {
+        if import_rows_only {
+            break;
+        }
         let sym = analysis.symbol(sid);
         if symbol_defines_target(sym, target, analysis) {
             out.push(RefLocation {
@@ -1043,6 +1090,16 @@ pub(super) fn collect_from_analysis(
     let all_refs = analysis.refs();
     for &ri in &keyed {
         let r = &all_refs[ri];
+        if matches!(r.kind, RefKind::PackageRef) {
+            match import_row_verdict(&r.span) {
+                Some(false) => continue,
+                Some(true) => {}
+                None if import_rows_only => continue,
+                None => {}
+            }
+        } else if import_rows_only {
+            continue;
+        }
         // A qualified call (`Foo::baz()` / `$o->Foo::Bar::baz()`) keeps its
         // whole path in `target_name`; match it on the bare callable tail (the
         // dispatch-class checks in the call arms below still pin the right

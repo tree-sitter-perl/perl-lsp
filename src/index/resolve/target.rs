@@ -126,6 +126,7 @@ impl TargetRef {
             .iter()
             .any(|c| c == &name)
             .then(|| class.clone());
+        let class_ns = module_index.and_then(|idx| idx.pinned_namespace(&class));
         TargetRef {
             name,
             kind: TargetKind::Method { class },
@@ -134,7 +135,7 @@ impl TargetRef {
             def_paths: Vec::new(),
             bare_constant: false,
             ctor_of,
-            class_ns: None,
+            class_ns,
             member_shape: Default::default(),
         }
     }
@@ -155,6 +156,7 @@ impl TargetRef {
         module_index: Option<&dyn CrossFileLookup>,
     ) -> Self {
         let method_classes = origin.owned_accessor_family(&class, module_index);
+        let class_ns = module_index.and_then(|idx| idx.pinned_namespace(&class));
         TargetRef {
             name,
             kind: TargetKind::Method { class },
@@ -163,7 +165,7 @@ impl TargetRef {
             def_paths: Vec::new(),
             bare_constant: false,
             ctor_of: None,
-            class_ns: None,
+            class_ns,
             member_shape: Default::default(),
         }
     }
@@ -254,6 +256,9 @@ impl TargetRef {
                     .as_ref()
                     .filter(|_| origin.pack.constructor_names.iter().any(|c| c == &name))
                     .cloned();
+                let class_ns = package
+                    .as_deref()
+                    .and_then(|c| module_index.and_then(|idx| idx.pinned_namespace(c)));
                 TargetRef {
                     name,
                     kind: TargetKind::Sub { package },
@@ -262,14 +267,22 @@ impl TargetRef {
                     def_paths: Vec::new(),
                     bare_constant: false,
                     ctor_of,
-                    class_ns: None,
+                    class_ns,
                     member_shape: Default::default(),
                 }
             }
             RenameKind::Method { name, class } => {
                 TargetRef::method(name, class, origin, module_index, scope)
             }
-            RenameKind::Package(name) => TargetRef::new(name, TargetKind::Package),
+            RenameKind::Package(name) => {
+                // A class-name cursor is leaf-keyed like a member's class:
+                // the origin's use-map pin tells its `Collection` from the
+                // two other files' `Collection`s in the references walk.
+                let class_ns = module_index.and_then(|idx| idx.pinned_namespace(&name));
+                let mut t = TargetRef::new(name, TargetKind::Package);
+                t.class_ns = class_ns;
+                t
+            }
             RenameKind::Handler { owner, name } => {
                 TargetRef::new(name.clone(), TargetKind::Handler { owner, name })
             }
