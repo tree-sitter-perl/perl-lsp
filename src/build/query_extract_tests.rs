@@ -2930,6 +2930,36 @@ $n = $r->count();
 }
 
 #[test]
+fn php_property_field_is_sigil_less_and_joins_its_member_access() {
+    // Declared `$name`, accessed `$this->name` — the field keys on the
+    // inner name token so the access site's target joins the symbol
+    // (sigil-ful fields never matched their own uses; hitlist H3).
+    let src = "\
+<?php
+class User {
+    public string $name;
+    public function greet(): string {
+        return $this->name;
+    }
+}
+";
+    let (fa, _) = php_fa(src);
+    use crate::model::file_analysis::{RefKind, SymKind};
+    let field = fa
+        .symbols()
+        .iter()
+        .find(|s| s.name == "name" && matches!(s.kind, SymKind::Field))
+        .expect("sigil-less Field symbol");
+    assert_eq!(field.package.as_deref(), Some("User"));
+    assert!(
+        fa.refs().iter().any(|r| {
+            matches!(r.kind, RefKind::MethodCall { .. }) && r.target_name == "name"
+        }),
+        "the $this->name access mints a member ref targeting the field's name",
+    );
+}
+
+#[test]
 fn php_type_display_speaks_php_not_perl() {
     let (fa, _) = php_fa("<?php\n$x = 1;\n");
     use crate::model::file_analysis::InferredType;
@@ -3693,6 +3723,70 @@ function f(Query $q) {
 
 
 #[test]
+fn php_promoted_property_navigation_and_rename_group() {
+    // Round-3 R3: `public readonly Level $level` in a ctor signature
+    // declares BOTH the class field and the ctor param with ONE token.
+    // The access token must navigate (the class-content gate exempts
+    // Fields from the method-scope refusal), and the identity is a GROUP:
+    // rename from any spelling rewrites the decl, the member accesses,
+    // AND the `$level` body uses — leaving any of them behind breaks code.
+    let src = "\
+<?php
+class Level {
+    public function name(): string { return 'x'; }
+}
+class Record {
+    public function __construct(public readonly Level $level) {
+        echo $level->name();
+    }
+}
+function use_it(Record $record): Level {
+    return $record->level;
+}
+";
+    let (fa, _) = php_fa(src);
+    // From the ACCESS token (`$record->level`, row 10 col 20):
+    let resolved = crate::index::resolve::resolve_symbol(
+        &fa,
+        tree_sitter::Point { row: 10, column: 20 },
+        None,
+    );
+    let Some(crate::index::resolve::ResolvedTarget::Group { local_spans, decl_spans, members, .. }) =
+        resolved
+    else {
+        panic!("promoted-property access must resolve to the param group: {resolved:?}");
+    };
+    assert_eq!(members.len(), 1, "one walked member (the field target)");
+    assert_eq!(members[0].target.name, "level");
+    // The decl axis is the field token (row 5, cols 55-60 — bare name).
+    assert_eq!(decl_spans.len(), 1);
+    assert_eq!(
+        (decl_spans[0].1.start.row, decl_spans[0].1.start.column),
+        (5, 55),
+        "decl span is the bare field token: {decl_spans:?}"
+    );
+    // The ctor-body use (`$level` row 6 col 13) rides sigil-narrowed.
+    assert!(
+        local_spans
+            .iter()
+            .any(|s| s.start.row == 6 && s.start.column == 14),
+        "the param body use joins the group sigil-narrowed: {local_spans:?}"
+    );
+    // From the DECL token: the same group (the Variable wins symbol_at;
+    // the field twin re-targets it).
+    let from_decl = crate::index::resolve::resolve_symbol(
+        &fa,
+        tree_sitter::Point { row: 5, column: 57 },
+        None,
+    );
+    assert!(
+        matches!(from_decl, Some(crate::index::resolve::ResolvedTarget::Group { .. })),
+        "decl-side cursor resolves to the same group: {from_decl:?}"
+    );
+}
+
+
+#[test]
 fn php_self_const_in_property_defaults_resolves() {
     // R11: `self::CONST` in a class-LEVEL initializer (property default)
     // was deterministically dark while the method-body form worked — the
@@ -3825,6 +3919,50 @@ listen_on('ev', array(UserController::class, 'index'));
     let sites: Vec<_> = locs.iter().filter(|l| l.span.start.row >= 4).collect();
     assert_eq!(sites.len(), 2, "both callable-array strings are refs: {locs:?}");
     assert!(sites.iter().all(|l| l.rewritable), "rename rewrites in-quotes: {sites:?}");
+}
+
+#[test]
+fn php_visibility_gates_member_completion() {
+    // private/protected members complete only from inside their own
+    // class's body: the `@nonpublic.mark` patterns stamp the same
+    // `non_public` attribute cpp access regions stamp, and the existing
+    // requesting_class gate does the rest. Covers methods, properties,
+    // consts, and promoted ctor params.
+    let src = "\
+<?php
+class Acct {
+    private string $secret;
+    private const SALT = 'x';
+    protected function guard(): bool { return true; }
+    private function inner(): int { return 1; }
+    public function api(): int { return $this->inner(); }
+    public function __construct(private string $key) {}
+}
+";
+    let (fa, _) = php_fa(src);
+    let labels = |requesting: Option<&str>| -> Vec<String> {
+        fa.complete_members_for_class("Acct", None, requesting)
+            .into_iter()
+            .map(|c| c.label)
+            .collect()
+    };
+    let external = labels(None);
+    for hidden in ["secret", "SALT", "guard", "inner", "key"] {
+        assert!(
+            !external.iter().any(|n| n == hidden),
+            "{hidden} must not complete externally: {external:?}"
+        );
+    }
+    assert!(external.iter().any(|n| n == "api"), "public stays: {external:?}");
+    let internal = labels(Some("Acct"));
+    // (consts complete via the qualified `Acct::` lane, not the member
+    // gather — SALT is asserted absent above and not expected here)
+    for own in ["secret", "guard", "inner", "key", "api"] {
+        assert!(
+            internal.iter().any(|n| n == own),
+            "{own} completes from inside the class: {internal:?}"
+        );
+    }
 }
 
 #[test]
