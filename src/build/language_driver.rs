@@ -1260,27 +1260,58 @@ fn emit_return_fuel(
                 .map(|sym| (s.id, sym.id))
         })
         .collect();
+    let mut gate: HashMap<SymbolId, Option<&'static str>> = HashMap::new();
+    let mut chained: std::collections::HashSet<SymbolId> = std::collections::HashSet::new();
     for (ret_scope, ret_span) in return_sites {
         let owner = std::iter::successors(Some(*ret_scope), |sc| {
             scope_parent.get(sc).copied().flatten()
         })
         .find_map(|sc| scope_to_symbol.get(&sc).copied());
         let Some(sid) = owner else { continue };
-        if !fa.witnesses.for_attachment(&WA::Symbol(sid)).is_empty() {
-            continue; // a declared return already carries its own witness
-        }
+        // The per-function gate is decided ONCE, on the first return site
+        // seen for that function, from the bag as the walk left it — this
+        // loop writes the very `Symbol` witnesses the gate reads, so a live
+        // read would let the first arm block every later one (a two-return
+        // function typed by its first return only). `None` = declared,
+        // leave alone; `Some(tag)` = chain the arms under that source. A
+        // BARE declared container (`: array`) is the one declaration the
+        // returned value may refine (a tuple literal / a keyed shape): its
+        // chain rides at annot priority so the refinement beats the annot
+        // (docs/adr/destructuring.md).
+        let chain_source = *gate.entry(sid).or_insert_with(|| {
+            let existing = fa.witnesses.for_attachment(&WA::Symbol(sid));
+            if existing.is_empty() {
+                Some("cpp_return_arm_chain")
+            } else if existing.iter().all(|w| {
+                matches!(
+                    &w.payload,
+                    WP::InferredType(
+                        crate::model::file_analysis::InferredType::HashRef
+                            | crate::model::file_analysis::InferredType::ArrayRef
+                    )
+                )
+            }) {
+                Some(crate::model::witnesses::REFINE_SOURCE)
+            } else {
+                None
+            }
+        });
+        let Some(chain_source) = chain_source else { continue };
         fa.witnesses.push(Witness {
             attachment: WA::SymbolReturnArm(sid),
             source: WitnessSource::Builder("cpp_return_arm".into()),
             payload: WP::Edge(WA::Expr(*ret_span)),
             span: *ret_span,
         });
-        fa.witnesses.push(Witness {
-            attachment: WA::Symbol(sid),
-            source: WitnessSource::Builder("cpp_return_arm_chain".into()),
-            payload: WP::Edge(WA::SymbolReturnArm(sid)),
-            span: *ret_span,
-        });
+        // One chain edge per function; the arms accumulate under it.
+        if chained.insert(sid) {
+            fa.witnesses.push(Witness {
+                attachment: WA::Symbol(sid),
+                source: WitnessSource::Builder(chain_source.into()),
+                payload: WP::Edge(WA::SymbolReturnArm(sid)),
+                span: *ret_span,
+            });
+        }
     }
 
     if !implicit_this_members {
@@ -1866,6 +1897,51 @@ impl LanguageRegistry {
             })
             .iter()
             .any(|l| *l == id)
+    }
+
+    /// The visibility routing fact for `id`'s language
+    /// (`VisibilityAxis::for_origin`): include-path packs scope by their
+    /// include closure, name-keyed packs have no closure to scope by, the
+    /// host derives its search path. Read from the pack's own
+    /// `include_path_tokens` declaration — never a language-name branch.
+    /// Memoized like `is_pack_language`.
+    /// The classes a language provides in its global namespace — the
+    /// pack's `builtin_types`; empty for a language without a pack.
+    pub fn builtin_types(id: &str) -> &'static [&'static str] {
+        static TYPES: std::sync::OnceLock<Vec<(&'static str, &'static [&'static str])>> =
+            std::sync::OnceLock::new();
+        TYPES
+            .get_or_init(|| {
+                LanguageRegistry::with_enabled()
+                    .drivers
+                    .iter()
+                    .filter_map(|d| d.lang_pack().map(|p| (d.id(), p.builtin_types)))
+                    .collect()
+            })
+            .iter()
+            .find(|(l, _)| *l == id)
+            .map(|(_, t)| *t)
+            .unwrap_or(&[])
+    }
+
+    pub fn pack_visibility(id: &str) -> crate::model::file_analysis::PackVisibility {
+        use crate::model::file_analysis::PackVisibility;
+        static LINKAGE: std::sync::OnceLock<Vec<(&'static str, bool)>> =
+            std::sync::OnceLock::new();
+        LINKAGE
+            .get_or_init(|| {
+                LanguageRegistry::with_enabled()
+                    .drivers
+                    .iter()
+                    .filter_map(|d| d.lang_pack().map(|p| (d.id(), p.include_path_tokens)))
+                    .collect()
+            })
+            .iter()
+            .find(|(l, _)| *l == id)
+            .map(|(_, inc)| {
+                if *inc { PackVisibility::IncludePaths } else { PackVisibility::NameKeyed }
+            })
+            .unwrap_or(PackVisibility::Host)
     }
 
     /// The declared capabilities of `id`'s driver — THE generic capability
