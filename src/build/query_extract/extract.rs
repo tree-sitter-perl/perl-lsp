@@ -2838,6 +2838,64 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                                 });
                             }
                         }
+                        DocFact::Var { ty: t, name: var_name } => {
+                            // The NAMED inline form (`/** @var Type[] $rows */`
+                            // above an assignment) types that specific local.
+                            if let Some(vn) = var_name {
+                                if sym.kind == "var" && &sym.name == vn {
+                                    if let Some(ty) = (pack.annot_type)(t) {
+                                        doc_witnesses.push(doc_cast_witness(
+                                            &sym.name,
+                                            sym.scope,
+                                            ty,
+                                            Span { start: sym.start, end: sym.start },
+                                        ));
+                                    }
+                                    continue;
+                                }
+                                // `@var T $prop` above a PROPERTY (WordPress
+                                // spells every field doc with its name) is
+                                // that field's doc, not a local cast.
+                                if !(sym.kind == "field" && vn.trim_start_matches('$') == sym.name) {
+                                    continue;
+                                }
+                            }
+                            if sym.kind == "var" {
+                                continue;
+                            }
+                            // A documented property types class-wide (member
+                            // lookup is not sequential), exactly like a
+                            // declared field type. Syntax-typed fields skip
+                            // (declared wins — docblocks drift) EXCEPT when
+                            // the doc STRICTLY REFINES a bare container:
+                            // `protected array $h` + `@var list<X>` is the
+                            // canonical refinement — the syntax cannot spell
+                            // the element, the doc exists to add it.
+                            if sym.kind == "field" {
+                                let Some(ty) = (pack.annot_type)(t) else { continue };
+                                if doc_admits(
+                                    pack,
+                                    &annot_text_by_var,
+                                    (&sym.name, sym.scope),
+                                    &ty,
+                                ) {
+                                    let span = scope_spans
+                                        .get(sym.scope.0 as usize)
+                                        .copied()
+                                        .unwrap_or(Span { start: sym.start, end: sym.start });
+                                    // An ANNOTATION, like the declared field
+                                    // type it stands in for: it outranks what
+                                    // a constructor happens to write to the
+                                    // field (`@var A|B $skin` + `$this->skin =
+                                    // new B` reads as the documented union).
+                                    let mut w = doc_witness(&sym.name, sym.scope, ty, span);
+                                    w.source = crate::model::witnesses::WitnessSource::Builder(
+                                        crate::model::witnesses::ANNOT_SOURCE.into(),
+                                    );
+                                    doc_witnesses.push(w);
+                                }
+                            }
+                        }
                         _ => {}
                     }
                 }
@@ -2903,6 +2961,67 @@ fn slot_key(list_text: &str, slot_offset: usize) -> Option<String> {
         && ((key.starts_with('\'') && key.ends_with('\''))
             || (key.starts_with('"') && key.ends_with('"')));
     quoted.then(|| key[1..key.len() - 1].to_string())
+}
+
+fn doc_admits(
+    pack: &LangPack,
+    annot_text_by_var: &std::collections::HashMap<
+        (std::string::String, crate::model::file_analysis::ScopeId),
+        std::string::String,
+    >,
+    slot: (&str, crate::model::file_analysis::ScopeId),
+    doc_ty: &InferredType,
+) -> bool {
+    match annot_text_by_var.get(&(slot.0.to_string(), slot.1)) {
+        None => true,
+        Some(declared) => {
+            matches!(
+                doc_ty,
+                InferredType::Sequence(_) | InferredType::Parametric(_)
+            ) && matches!(
+                (pack.annot_type)(declared),
+                Some(InferredType::HashRef | InferredType::ArrayRef)
+            )
+        }
+    }
+}
+
+/// A documentation-sourced type witness on a Variable slot — its own source
+/// tag (not `ANNOT_SOURCE`): a doc type is real typing fuel, but the inlay
+/// suppression that hides hints for syntax-annotated declarations should
+/// still show one here (the docblock can sit far from the use).
+/// A NAMED `@var T $x` is a cast the author wrote at that site: it rides
+/// at annotation priority (`REFINE_SOURCE`) so the flow / call-binding
+/// edges the same assignment mints — pushed later, equal priority, and
+/// latest-wins — cannot override it with the factory's declared base.
+fn doc_cast_witness(
+    name: &str,
+    scope: crate::model::file_analysis::ScopeId,
+    ty: InferredType,
+    span: Span,
+) -> crate::model::witnesses::Witness {
+    let mut w = doc_witness(name, scope, ty, span);
+    w.source = crate::model::witnesses::WitnessSource::Builder(
+        crate::model::witnesses::REFINE_SOURCE.into(),
+    );
+    w
+}
+
+fn doc_witness(
+    name: &str,
+    scope: crate::model::file_analysis::ScopeId,
+    ty: InferredType,
+    span: Span,
+) -> crate::model::witnesses::Witness {
+    crate::model::witnesses::Witness {
+        attachment: crate::model::witnesses::WitnessAttachment::Variable {
+            name: name.to_string(),
+            scope,
+        },
+        source: crate::model::witnesses::WitnessSource::Builder("skeleton-doc".into()),
+        payload: crate::model::witnesses::WitnessPayload::InferredType(ty),
+        span,
+    }
 }
 
 /// The `TypeName(alias) → …` payload for an underlying type spelling, resolving
