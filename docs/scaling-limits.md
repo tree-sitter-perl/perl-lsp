@@ -146,68 +146,39 @@ corpus needs both measured.
 
 ## 5. `--heatmap` is a batch verb, not an interactive one
 
-| corpus | `--check` | `--heatmap` | ratio | max fan-in |
-|---|---:|---:|---:|---:|
-| WeBWorK (225 files) | 3.80 s | 5.00 s | 1.3x | 81 |
-| Webmin (1,333) | 4.76 s | 31.07 s | 6.5x | 199 |
-| BMO (739) | 5.39 s | 91.69 s | **17x** | 340 |
+It mints the `references()` projection at every declaration, so the work
+is declarations × their fan-in — cost tracks **fan-in, not file count**
+(BMO is smaller than Webmin and costs more). The gather fans out per
+declaration over the Rayon pool and the sweep sizes its rehydration LRU
+to the corpus; the knobs are in `docs/adr/heatmap.md` §Cost and the
+walk's seams in `docs/adr/relational-ref-index.md`.
 
-Cost tracks **fan-in**, not file count — BMO is smaller than Webmin and costs
-3x more. That follows from what the verb does: it mints the `references()`
-projection at every declaration, so the work is declarations x their fan-in.
+Measured 2026-09-06 on a loaded box — a quiet-box re-take is owed before
+any of this is seeded into `bench/baselines.jsonl`. Three runs each;
+output byte-identical to the single-threaded verb in every configuration:
 
-Those numbers are the pre-2026-09-06 state, kept because the SHAPE of the
-cost (declarations × fan-in) is still what the verb does. **It ran on one
-core** (104-105% CPU) and, worse, every candidate-file visit re-scanned the
-file's whole ref vec twice and every LRU miss decoded under one process-wide
-mutex. Re-measured 2026-09-06 after the gather fanned out per declaration
-and the walk stopped doing that (loaded box — a quiet-box re-take is owed
-before any of this is seeded into `bench/baselines.jsonl`; three runs each,
-byte-identical output to the serial verb in every configuration):
+| corpus | 1 thr | 4 thr | 20 thr | peak RSS, 4 → 20 thr |
+|---|---:|---:|---:|---|
+| WeBWorK (225) | 2.3 s | 1.1 s | 1.4 s | 297 → 325 MB |
+| Webmin (1,333) | 12.5 s | 4.7 s | 2.6 s | 825 → 870 MB |
+| BMO (739) | 27 s | 8.9 s | 8.1 s | 649 → 715 MB |
+| BMO `--include-deps` | — | — | 9.0 s | 713 MB |
+| abseil (C++, 875) | — | — | 118–132 s | 1.62 GB |
 
-| corpus | before (1 thr) | after, 1 thr | after, 4 thr | after, 20 thr | peak RSS before → 4 → 20 |
-|---|---:|---:|---:|---:|---|
-| WeBWorK (225) | 3.1 s | 2.3 s | 1.1 s | 1.4 s | 288 → 297 → 325 MB |
-| Webmin (1,333) | 29–42 s | 12.5 s | 4.7 s | 2.6 s | 831 → 825 → 870 MB |
-| BMO (739) | 111 s | 27 s | 8.9 s | 8.1 s | 655 → 649 → 715 MB |
-| BMO `--include-deps` | 158 s | — | — | 9.0 s | 679 → — → 713 MB |
-| abseil (C++, 875) | 527 s | — | — | 118–132 s | 1.23 → — → 1.62 GB |
+**Residuals, measured:**
 
-Where BMO's 111 s went, by ghost accumulator: 59 s in the candidate-file
-view (LRU lookups, a 12% miss rate decoding under the reader mutex, and a
-linear pre-scan per visit), 27 s in the matcher's linear ref scan, 7 s in
-SQL retrieval (a `SELECT path FROM files` PER WALK), plus ~58k whole-copy
-rehydrates from a pack-only member probe running once per candidate file.
-The five levers, in order of landing: the match-key ref index
-(`RefTable::by_key`), a per-walk memo for target-only facts, the sweep
-retrieval memo, the reader checkout pool (the parallel ceiling — 188% CPU
-with the lock, 800–1500% without), and the corpus-sized rehydration LRU
-(`cache_policy` — 35 s → 9 s at 20 threads on its own, AND lower RSS,
-because the stock cap was cycling a 274 MB working set). `docs/adr/heatmap.md`
-§Cost has the knobs; `docs/adr/relational-ref-index.md` the seams.
-
-**Pack languages ride the same levers** — the key index, the walk memo,
-the retrieval memo, the reader pool and the corpus-sized LRU are all
-language-blind (abseil's cpp sub-index sized itself to 632 MiB; every
-rehydrated copy of any language rebuilds the key index in
-`after_deserialize`) — but the pack walk keeps pack-only per-visit costs
-this work did not touch: the textual-inclusion sweep over every cached
-file per walk, the per-file `ScopedLookup` and closure gate, and the
-scoped member probe (the walk memo deliberately bypasses a closure-scoped
-lookup, whose answer is per-asker). That is why abseil gains 4× where
-BMO gains 14×; those are Epic 14/15 items, not heatmap ones.
-
-**Residual, measured:** the knee is 8 threads on BMO (6.3 s at 711% CPU);
-20 threads reach the same wall at 4× the CPU, and `MALLOC_ARENA_MAX=2`
-makes it much WORSE (13.6 s), so the contention is allocation churn inside
-the walk — per-candidate `PathBuf` clones and per-walk candidate-set copies
-— not a lock. That is Epic 15's references-walk work, and it applies to the
-LSP verb as much as here. Attribution is by ghost accumulator only: this
-box's `perf_event_paranoid=4` blocks `perf` and `samply`.
-
-Memory stays mild: the parallel gather adds ~10% peak RSS at 20 workers
-over serial, and the corpus-sized LRU LOWERED it relative to the thrashing
-default.
+- **The knee is 8 threads on BMO** (6.3 s at 711% CPU); 20 threads reach
+  the same wall at 4× the CPU, and `MALLOC_ARENA_MAX=2` makes it much
+  WORSE (13.6 s), so the contention is allocation churn inside the walk
+  — per-candidate `PathBuf` clones and per-walk candidate-set copies —
+  not a lock. That is Epic 15's references-walk work, and it applies to
+  the LSP verb as much as here. Attribution is by ghost accumulator only:
+  this box's `perf_event_paranoid=4` blocks `perf` and `samply`.
+- **Pack walks keep pack-only per-visit costs** the shared walk seams do
+  not touch: the textual-inclusion sweep over every cached file per
+  walk, the per-file `ScopedLookup` and closure gate, and the scoped
+  member probe's per-asker candidate filtering. That is why abseil sits
+  where it does in the table. Epic 14/15 items, not heatmap ones.
 
 ## 6. Single huge files: one accidental O(bindings x bag) pass, now fixed
 
