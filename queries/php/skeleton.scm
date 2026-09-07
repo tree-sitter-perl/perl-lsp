@@ -754,3 +754,41 @@
       right: [(name) (qualified_name)] @narrow.type))
   return_expression: (_) @narrow.within)
 
+; ---- operator evidence (the Perl edge, alive in PHP) ----
+; `.` is string-only, arithmetic is numeric-only: usage sites leak the
+; operand's type even when the initializer is unknowable.
+(binary_expression
+  left: (variable_name) @obs.string
+  ".")
+(binary_expression
+  "."
+  right: (variable_name) @obs.string)
+(augmented_assignment_expression
+  left: (variable_name) @obs.string
+  ".=")
+(binary_expression
+  left: (variable_name) @obs.numeric
+  ["+" "-" "*" "/" "%" "**" "<=>"])
+(binary_expression
+  ["+" "-" "*" "/" "%" "**" "<=>"]
+  right: (variable_name) @obs.numeric)
+
+; ---- folding ----
+; Blocks fold whether or not they are scopes (php has no block scoping, so
+; an `if` body is a fold, never a scope); a docblock folds as a comment.
+(compound_statement) @fold
+(declaration_list) @fold
+(comment) @fold.comment
+
+; ---- contracts ----
+; An interface's methods and an abstract method are contracts a concrete
+; composer must fulfil (the role-requires lane, docs/adr/role-contracts.md);
+; an abstract class defers them the way an interface or a trait does.
+(interface_declaration
+  body: (declaration_list (method_declaration name: (name) @contract.target)))
+(method_declaration
+  (abstract_modifier)
+  name: (name) @contract.target)
+(class_declaration
+  (abstract_modifier)
+  name: (name) @classattr.abstract)
