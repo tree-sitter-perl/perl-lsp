@@ -314,18 +314,26 @@ impl FileAnalysis {
         for sym in &self.symbols {
             if matches!(sym.kind, SymKind::Variable | SymKind::Field)
                 && self.symbol_in_class(sym.id, cls)
-                && !self
-                    .pack.param_regions
-                    .iter()
-                    .any(|pr| contains(pr, &sym.selection_span))
-                // the class body itself, or a nested container body inside it
-                // (an inline union's members complete flat on the struct) —
-                // but never a method body (its locals carry the sticky class
-                // package too; the Sub boundary is what marks them locals).
-                && class_body.is_none_or(|cb| {
-                    self.scope_chain(sym.scope).contains(&cb)
-                        && !self.scope_within_sub_body(sym.scope)
-                })
+                // A Field is class content BY KIND — extraction only mints it
+                // for real data members, and constructor promotion (php
+                // `__construct(public string $name)`) legitimately places one
+                // inside a sub body and a param region, so the locals gates
+                // below apply to Variables only.
+                && (matches!(sym.kind, SymKind::Field)
+                    || (!self
+                        .pack
+                        .param_regions
+                        .iter()
+                        .any(|pr| contains(pr, &sym.selection_span))
+                        // the class body itself, or a nested container body
+                        // inside it (an inline union's members complete flat
+                        // on the struct) — but never a method body (its
+                        // locals carry the sticky class package too; the Sub
+                        // boundary is what marks them locals).
+                        && class_body.is_none_or(|cb| {
+                            self.scope_chain(sym.scope).contains(&cb)
+                                && !self.scope_within_sub_body(sym.scope)
+                        })))
                 && !self.pack.receiver_names.contains(&sym.name)
                 // an anonymous container (`(union)`) is structure, not an
                 // addressable member
