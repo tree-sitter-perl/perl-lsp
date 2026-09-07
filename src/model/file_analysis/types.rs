@@ -1023,9 +1023,14 @@ pub fn resolve_return_type(return_types: &[InferredType]) -> Option<InferredType
     }
     // Object subsumes HashRef: if some returns are Object(X) and others are
     // hash-shaped, the Object wins (overloaded hash access is common in Perl).
-    let mut object = None;
+    let mut object: Option<InferredType> = None;
     for t in return_types {
         if t.is_object() {
+            // Two different classes are a disagreement, not a choice of the
+            // arm that came last (`WP_Term` vs `WP_Error`).
+            if object.as_ref().is_some_and(|o| o != t) {
+                return None;
+            }
             object = Some(t.clone());
         } else if !t.is_hash_shaped() {
             // Non-hash, non-Object disagreement → Unknown
