@@ -103,7 +103,7 @@ pub(super) fn string_content_span_at(tree: &Tree, point: Point) -> Option<Span> 
 /// replacing, the replacement is the identifier text, no decoration.
 /// `insert_text` is also cleared — textEdit takes precedence in the
 /// LSP spec, and leaving both set confuses some clients.
-pub(super) fn retarget_items_to_span(items: &mut [CompletionItem], span: Span) {
+pub(crate) fn retarget_items_to_span(items: &mut [CompletionItem], span: Span) {
     let range = span_to_range(span);
     for item in items {
         item.text_edit = Some(tower_lsp::lsp_types::CompletionTextEdit::Edit(
@@ -198,10 +198,10 @@ pub(super) fn dispatch_target_completions(
         };
         CompletionCandidate {
             label: name.clone(),
-            is_static: false,
             // Handler kind flows to CompletionItemKind::EVENT via
             // `fa_completion_kind` — consistent with outline and hover.
             kind: FaSymKind::Handler,
+            is_static: false,
             detail: Some(detail),
             // Bare inside quotes / autoquote, quoted otherwise — see
             // `needs_quotes` above. Accepting the suggestion lands
@@ -426,20 +426,13 @@ fn dispatch_info_for_enclosing_call(
     // First DispatchCall ref whose span is contained by this call.
     for r in analysis.refs() {
         let RefKind::DispatchCall { dispatcher } = &r.kind else { continue };
-        if !span_contains_span(&call_start, &r.span) { continue; }
+        if !call_start.contains(&r.span) { continue; }
         let Some(HandlerOwner::Class(class)) = r.handler_owner() else { continue };
         return Some((r.target_name.clone(), class.clone(), dispatcher.clone()));
     }
     None
 }
 
-fn span_contains_span(outer: &crate::model::file_analysis::Span, inner: &crate::model::file_analysis::Span) -> bool {
-    let o_start = (outer.start.row, outer.start.column);
-    let o_end   = (outer.end.row,   outer.end.column);
-    let i_start = (inner.start.row, inner.start.column);
-    let i_end   = (inner.end.row,   inner.end.column);
-    o_start <= i_start && i_end <= o_end
-}
 
 /// Build sig help for a known (class, dispatcher, handler_name). Walks
 /// the current file's symbols AND every cached module — otherwise a
@@ -463,6 +456,7 @@ fn string_dispatch_signature_for(
                     sym: &crate::model::file_analysis::Symbol,
                     provenance: Option<&str>| {
         let SymbolDetail::Handler { owner, dispatchers, params, .. } = &sym.detail else { return };
+        // Global handlers are not class-dispatched — no receiver signature here.
         let HandlerOwner::Class(n) = owner else { return };
         if n != class { return; }
         let dispatcher_ok = dispatchers.is_empty()
@@ -716,7 +710,7 @@ pub fn signature_help(
                     .inferred_type_via_bag(&p.name, sig_info.body_end)
                     .filter(InferredType::is_known)
                 {
-                    format!("{}: {}", base, format_inferred_type(&ty))
+                    format!("{}: {}", base, analysis.render_type(&ty))
                 } else {
                     base
                 }
