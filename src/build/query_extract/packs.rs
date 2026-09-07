@@ -1055,6 +1055,7 @@ pub fn php_pack() -> LangPack {
         lang_id: "php",
         bundled_entry_markers: &[
             include_str!("../../../queries/php/frameworks/phpunit.entry.json"),
+            include_str!("../../../queries/php/frameworks/laravel.entry.json"),
             include_str!("../../../queries/php/frameworks/symfony.entry.json"),
         ],
         bundled_rail_docs: &[include_str!("../../../queries/php/frameworks/laravel.rails.json")],

@@ -1,0 +1,9 @@
+{
+  "language": "php",
+  "entries": [
+    { "methods": ["handle"], "when_isa": "ShouldQueue" },
+    { "methods": ["handle"], "when_isa": "Command" },
+    { "methods": ["boot", "register"], "when_isa": "ServiceProvider" },
+    { "methods": ["broadcastOn", "broadcastAs", "broadcastWith"], "when_isa": "ShouldBroadcast" }
+  ]
+}
