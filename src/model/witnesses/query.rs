@@ -165,8 +165,14 @@ pub fn query_sub_return_type(
             // Distinct return types across reachable candidates (a genuine
             // ambiguity) collapse to silence; agreeing decls (prototype +
             // definition of the one function) fold to their shared answer.
-            if let Some((self_path, visible)) = idx.visibility_scope() {
-                let self_str = self_path.to_string_lossy();
+            // A Flat scope (name-keyed pack — PHP) has no closure to gate by:
+            // every candidate is reachable BY RULE, and the same agreement
+            // fold below keeps a genuinely duplicated name silent. Transparent
+            // hosts (no rule known yet) still skip the arm entirely.
+            let scope = idx
+                .visibility_scope()
+                .map(|(p, v)| (p.to_string_lossy().into_owned(), v));
+            if scope.is_some() || idx.flat_scope() {
                 let mut answer: Option<InferredType> = None;
                 let mut ambiguous = false;
                 for cached in idx.def_candidates(sub_name) {
@@ -174,8 +180,11 @@ pub fn query_sub_return_type(
                     // Reachability reads pinned fields (path + include_closure),
                     // so gate BEFORE rehydrating — an unreachable candidate
                     // never pays a bag decode.
-                    let reachable = visible.contains(p.as_ref())
-                        || cached.analysis.pack.include_closure.contains(self_str.as_ref());
+                    let reachable = match &scope {
+                        Some((self_str, visible)) => visible.contains(p.as_ref())
+                            || cached.analysis.pack.include_closure.contains(self_str),
+                        None => true,
+                    };
                     if !reachable {
                         continue;
                     }
