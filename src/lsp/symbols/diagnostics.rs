@@ -1028,6 +1028,40 @@ pub fn pack_symbol_diagnostics(
         }
     }
 
+    // ---- deprecated functions and classes, local or cross-file ----
+    for r in analysis.refs() {
+        let (leaf, want_class) = match r.kind {
+            RefKind::FunctionCall => (r.unqualified_target_name(), false),
+            RefKind::PackageRef => (r.unqualified_target_name(), true),
+            _ => continue,
+        };
+        if leaf.is_empty() || analysis.pack.import_row_covering(&r.span).is_some() {
+            continue;
+        }
+        let is_kind = |s: &crate::model::file_analysis::Symbol| {
+            if want_class { matches!(s.kind, FaSymKind::Class) } else { matches!(s.kind, FaSymKind::Sub) }
+        };
+        let local = analysis.symbols_named(leaf).iter().map(|&sid| analysis.symbol(sid)).find(|s| is_kind(s)).and_then(deprecation_of);
+        // Cross-file: only a declaration in the namespace THIS file means by
+        // the leaf (its pin, else its own namespace) — a same-leaf stranger
+        // elsewhere in the workspace is a different declaration.
+        let found = local.or_else(|| {
+            let i = idx?;
+            let want_ns = analysis.leaf_namespace(leaf).or_else(|| analysis.use_map_pins().own_namespace.clone());
+            i.visible_def_candidates(leaf).into_iter().find_map(|c| {
+                let a = i.symbols_present(&c);
+                a.symbols_named(leaf)
+                    .iter()
+                    .map(|&sid| a.symbol(sid))
+                    .find(|s| is_kind(s) && (want_ns.is_none() || s.package == want_ns))
+                    .and_then(deprecation_of)
+            })
+        });
+        if let Some(text) = found {
+            out.push(deprecated_diag(r.span, leaf, &text));
+        }
+    }
+
     out
 }
 
