@@ -351,6 +351,7 @@ pub(crate) fn combine_forced() -> Option<bool> {
 }
 
 /// Run `f` with combine mode pinned. Restores the previous setting after.
+#[cfg(test)]
 pub(crate) fn with_combine<R>(combined: bool, f: impl FnOnce() -> R) -> R {
     let prev = COMBINE_FORCED.with(|c| c.replace(Some(combined)));
     let out = f();
