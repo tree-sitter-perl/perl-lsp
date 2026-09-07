@@ -3090,6 +3090,45 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
         }
         out.witnesses.extend(edges);
     }
+
+    // Access-modifier stamp: the `@nonpublic.target` name spans mark
+    // members whose modifier means non-public — the same `non_public`
+    // attribute cpp access regions stamp, read by the completion gates.
+    if !nonpublic_name_spans.is_empty()
+        || !classattr_by_name_span.is_empty()
+        || !static_name_spans.is_empty()
+        || !contract_name_spans.is_empty()
+        || !alias_name_ends.is_empty()
+    {
+        for sym in &mut out.symbols {
+            if sym.kind == "var"
+                && alias_name_ends.contains(&sym.name_end)
+                && !sym.attributes.iter().any(|a| a == "alias")
+            {
+                sym.attributes.push("alias".to_string());
+            }
+            if contract_name_spans.contains(&(sym.name_start, sym.name_end))
+                && !sym.attributes.iter().any(|a| a == "contract")
+            {
+                sym.attributes.push("contract".to_string());
+            }
+            if nonpublic_name_spans.contains(&(sym.name_start, sym.name_end))
+                && !sym.attributes.iter().any(|a| a == "non_public")
+            {
+                sym.attributes.push("non_public".to_string());
+            }
+            if static_name_spans.contains(&(sym.name_start, sym.name_end))
+                && !sym.attributes.iter().any(|a| a == "static")
+            {
+                sym.attributes.push("static".to_string());
+            }
+            if let Some(flavor) = classattr_by_name_span.get(&(sym.name_start, sym.name_end)) {
+                if sym.kind == "class" && !sym.attributes.iter().any(|a| a == flavor) {
+                    sym.attributes.push(flavor.clone());
+                }
+            }
+        }
+    }
     out.param_sigs = param_sigs;
     Ok(out)
 }
