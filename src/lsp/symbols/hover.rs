@@ -32,36 +32,71 @@ pub fn pack_hover_markdown(
                 // type (`T get()` on a `Box<int>` receiver → `int`) — shown
                 // only when the substitution actually changed the answer,
                 // so non-template hovers stay byte-identical.
-                let recv_ty = match &r.kind {
-                    RefKind::MethodCall { invocant_span: Some(sp), .. } => {
-                        analysis.expr_type_at_span(*sp, Some(midx))
+                let (recv_ty, shape) = match &r.kind {
+                    RefKind::MethodCall { invocant_span: Some(sp), shape, .. } => {
+                        (analysis.expr_type_at_span(*sp, Some(midx)), *shape)
                     }
-                    _ => None,
+                    _ => (None, Default::default()),
                 };
                 let substituted = |raw: Option<InferredType>| -> Option<InferredType> {
                     let sub = recv_ty
                         .as_ref()
-                        .and_then(|t| analysis.member_value_type(t, field, Some(midx), None, crate::model::file_analysis::MemberShape::Unknown))?;
+                        .and_then(|t| analysis.member_value_type(t, field, Some(midx), None, shape))?;
                     (raw.as_ref() != Some(&sub)).then_some(sub)
                 };
-                if let Some(crate::model::file_analysis::MethodResolution::Local { sym_id, .. }) =
-                    analysis.resolve_method_in_ancestors(&cn, field, Some(midx))
-                {
-                    let sym = analysis.symbol(sym_id);
-                    if matches!(sym.kind, FaSymKind::Method | FaSymKind::Sub) {
-                        let mut text = render_symbol_hover(
-                            sym, source, language, analysis, sym.span.start, Some(midx),
-                        );
-                        if let Some(rt) = substituted(
-                            analysis.find_method_return_type(&cn, field, Some(midx), None),
-                        ) {
-                            text.push_str(&format!(
-                                "\n\n*returns: {}*",
-                                crate::model::file_analysis::format_inferred_type(&rt)
-                            ));
-                        }
-                        return Some(text);
+                use crate::model::file_analysis::MethodResolution;
+                let returns_line = |text: &mut String| {
+                    if let Some(rt) = substituted(
+                        analysis.find_method_return_type(&cn, field, Some(midx), None),
+                    ) {
+                        text.push_str(&format!("\n\n*returns: {}*", analysis.render_type(&rt)));
                     }
+                };
+                let shape = match &r.kind {
+                    RefKind::MethodCall { shape, .. } => *shape,
+                    _ => Default::default(),
+                };
+                match analysis.resolve_member_in_ancestors(&cn, field, shape, Some(midx)) {
+                    Some(MethodResolution::Local { sym_id, .. }) => {
+                        let sym = analysis.symbol(sym_id);
+                        if matches!(sym.kind, FaSymKind::Method | FaSymKind::Sub) {
+                            let mut text = render_symbol_hover(
+                                sym, source, language, analysis, sym.span.start, Some(midx),
+                            );
+                            returns_line(&mut text);
+                            return Some(text);
+                        }
+                    }
+                    // A cross-file method renders exactly like a local one —
+                    // its signature line read from the DEFINING file (a cached
+                    // analysis carries spans, not source), labeled by kind. The
+                    // kind-agnostic `member: type` fallback below is for data
+                    // members; a method routed there lost its signature and
+                    // read as a property.
+                    Some(MethodResolution::CrossFile { class, def_module }) => {
+                        let module = def_module.as_deref().unwrap_or(class.as_str());
+                        let cached = midx
+                            .candidate_defining_sub_in_package(module, &class, field)
+                            .or_else(|| midx.get_cached(module));
+                        if let Some(cached) = cached {
+                            let whole = midx.whole_present(&cached);
+                            let sym = whole.symbols().iter().find(|s| {
+                                matches!(s.kind, FaSymKind::Method | FaSymKind::Sub)
+                                    && s.name == field
+                                    && s.package.as_deref() == Some(class.as_str())
+                            });
+                            if let (Some(sym), Ok(text)) =
+                                (sym, std::fs::read_to_string(&cached.path))
+                            {
+                                let mut out = render_symbol_hover(
+                                    sym, &text, language, &whole, sym.span.start, Some(midx),
+                                );
+                                returns_line(&mut out);
+                                return Some(out);
+                            }
+                        }
+                    }
+                    None => {}
                 }
                 // A param-typed member substitutes the same way (`T v_;` on
                 // `Box<int>` reads `v_: int`; a cross-file method's return
@@ -73,7 +108,7 @@ pub fn pack_hover_markdown(
                         "```{}\n{}: {}\n```\n\n*member*",
                         language,
                         field,
-                        crate::model::file_analysis::format_inferred_type(&sub)
+                        analysis.render_type(&sub)
                     ));
                 }
                 // The member's declared type may be a config-variant macro whose
@@ -241,7 +276,7 @@ fn render_symbol_hover(
                         .type_name_edge_of(&sym.name, sym.scope)
                         .and_then(|sp| config_variant_leaf_display(analysis, &sp, midx))
                 })
-                .unwrap_or_else(|| sym.display_type(&ty));
+                .unwrap_or_else(|| analysis.display_type_of(sym, &ty));
             // A union member's def-site hover carries the storage overlay,
             // same as the member-access path (`FileAnalysis::member_hover`).
             let overlay = match analysis.union_overlay(sym) {
