@@ -389,7 +389,7 @@ pub fn resolve_symbol_scoped(
             // visibility identity. Perl methods are Sub/Method symbols —
             // never class content — and keep empty `def_paths` (no gate).
             if let TargetKind::Method { class } = &t.kind {
-                if let Some(bare) = pack_member_of_class(&t.name, class, analysis, module_index) {
+                if let Some(bare) = pack_member_of_class(&t.name, class, analysis, module_index, None) {
                     t.def_paths = pack_class_def_paths(&t, analysis, module_index);
                     t.bare_constant = bare;
                 }
@@ -410,6 +410,7 @@ pub(super) fn pack_member_of_class(
     class: &str,
     origin: &FileAnalysis,
     idx: Option<&dyn CrossFileLookup>,
+    memo: Option<&WalkMemo>,
 ) -> Option<bool> {
     let check = |a: &FileAnalysis| {
         a.symbols()
@@ -424,9 +425,22 @@ pub(super) fn pack_member_of_class(
     check(origin).or_else(|| {
         idx.and_then(|i| {
             // Whichever candidate file declaring `class` holds the member.
-            i.visible_def_candidates(class)
-                .iter()
-                .find_map(|c| check(&i.whole_present(c)))
+            // A candidate's verdict is a whole-copy fetch plus a scan of
+            // THAT file; under a walk memo each candidate pays it once
+            // however many askers (scoped or not) reach it.
+            i.visible_def_candidates(class).iter().find_map(|c| {
+                let Some(memo) = memo else {
+                    return check(&i.whole_present(c));
+                };
+                if let Some(v) = memo.bare_member_by_candidate.borrow().get(&c.path) {
+                    return *v;
+                }
+                let v = check(&i.whole_present(c));
+                memo.bare_member_by_candidate
+                    .borrow_mut()
+                    .insert(c.path.clone(), v);
+                v
+            })
         })
     })
 }
