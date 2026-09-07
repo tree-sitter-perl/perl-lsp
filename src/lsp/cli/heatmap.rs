@@ -81,6 +81,20 @@ pub(crate) fn framework_entry_claims(
     })
 }
 
+/// The row-store key under which a pack constructor's references live: its
+/// CLASS name (`new Foo(...)` carries the class, `retrieval_keys`), bare —
+/// so two same-leaf classes in different namespaces share one key, and a
+/// reference to either keeps both constructors off the dead list (the
+/// over-approximation is the sound direction for a guard).
+fn ctor_class_key(analysis: &file_analysis::FileAnalysis, sym: &file_analysis::Symbol) -> Option<String> {
+    analysis
+        .pack
+        .constructor_names
+        .iter()
+        .any(|c| c == &sym.name)
+        .then(|| sym.package.as_deref().map(file_analysis::name_match_key))
+        .flatten()
+}
 #[allow(clippy::too_many_arguments)]
 fn heatmap_symbol_row(
     ws: &file_store::FileStore,
@@ -93,6 +107,7 @@ fn heatmap_symbol_row(
     has_dynamic_dispatch: bool,
     forced_fan_in: Option<usize>,
     dead_export_override: Option<bool>,
+    class_referenced: bool,
     sources: &mut SourceCache,
 ) -> (serde_json::Value, bool, bool, bool) {
     use file_analysis::{AccessKind, Namespace, RefKind, SymKind};
@@ -182,6 +197,12 @@ fn heatmap_symbol_row(
         Some("exported")
     } else if conventions::is_constructor_name(&sym.name) {
         Some("constructor")
+    } else if class_referenced {
+        // A pack constructor whose CLASS is referenced somewhere (a type
+        // hint, `Foo::class`, a `use` row) with no `new` site of its own: a
+        // container or factory instantiates it (DI). Over-approximates
+        // reachability on the sound side, like every guard here.
+        Some("class-referenced")
     } else if !native {
         Some("framework-synthesized")
     } else if is_callable
@@ -451,7 +472,13 @@ impl HeatmapItem<'_> {
         };
         let sym = self.sym;
         let key = file_analysis::name_match_key(&sym.name);
-        let forced = if referenced_names.contains(&key) {
+        // A constructor's references are its class's construction sites
+        // (`new Foo(...)` — the ctor FunctionCall carries the CLASS name,
+        // `retrieval_keys`), so the class key is a reference row for it too.
+        let ctor_key = ctor_class_key(self.analysis, sym);
+        let forced = if referenced_names.contains(&key)
+            || ctor_key.as_ref().is_some_and(|k| referenced_names.contains(k))
+        {
             None // has reference rows — the projection must run
         } else {
             Some(0usize) // no reference row anywhere → provably empty
@@ -471,6 +498,18 @@ impl HeatmapItem<'_> {
                 ))
         });
         (forced, dead_export)
+    }
+
+    /// Is this declaration's constructor kept alive by its CLASS being named
+    /// anywhere? The row store is the cheap oracle (reference rows are
+    /// candidate rows — an over-approximation, the sound direction for a
+    /// guard); without rows the guard stays off and the constructor is
+    /// judged by its `new` sites alone.
+    fn class_referenced(&self) -> bool {
+        match (self.prune, ctor_class_key(self.analysis, self.sym)) {
+            (Some((referenced_names, _)), Some(key)) => referenced_names.contains(&key),
+            _ => false,
+        }
     }
 }
 
@@ -713,6 +752,7 @@ pub(crate) fn cli_heatmap(root: &str, opts: &[String]) {
                         has_dynamic_dispatch,
                         forced_fan_in,
                         dead_export_override,
+                        item.class_referenced(),
                         sources,
                     )
                 },
