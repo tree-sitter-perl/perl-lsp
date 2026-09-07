@@ -2857,6 +2857,23 @@ class C extends B implements I {
 }
 
 #[test]
+fn php_keyed_array_literal_types_as_hash_with_keys() {
+    let src = "\
+<?php
+$cfg = ['timeout' => 30, 'retries' => 3];
+";
+    let (fa, _) = php_fa(src);
+    let end = tree_sitter::Point { row: 2, column: 0 };
+    match fa.inferred_type_via_bag("$cfg", end) {
+        Some(crate::model::file_analysis::InferredType::HashWithKeys { keys, .. }) => {
+            let names: Vec<&str> = keys.iter().map(|(k, _)| k.as_str()).collect();
+            assert!(names.contains(&"timeout") && names.contains(&"retries"), "{names:?}");
+        }
+        other => panic!("expected HashWithKeys, got {other:?}"),
+    }
+}
+
+#[test]
 fn php_static_return_substitutes_the_receiver_fluently() {
     // `: static` publishes ReturnExpr::Receiver — the member-chain arm
     // threads the real receiver, and the MCB path's default receiver
@@ -3752,6 +3769,48 @@ fn php_data_provider_docblock_mints_member_ref_on_name_token() {
 
 
 #[test]
+fn php_destructuring_slots_bind_positionally() {
+    use crate::model::file_analysis::Extraction;
+    // `[$a, $b] = …` / `list(...)` / `[, $b]` bind each scalar slot to its
+    // POSITION (top-level commas before it); a keyed list declares its
+    // vars but binds none of them positionally; foreach list slots index
+    // off the collection's element (the list span carries the Element hop).
+    let src = "<?php\n[$a, $b] = f();\nlist($c, $d) = g();\n[, $e] = h();\n['k' => $v] = k();\nforeach ($rows as [$x, $y]) {}\n";
+    let mut parser = php_parser();
+    let tree = parser.parse(src, None).unwrap();
+    let skel = extract(&tree, src.as_bytes(), &php_pack()).unwrap();
+    let pos = |name: &str| -> Option<Extraction> {
+        skel.flow_edges
+            .iter()
+            .find(|f| f.target_name == name)
+            .map(|f| f.extraction.clone())
+    };
+    assert_eq!(pos("$a"), Some(Extraction::Positional(0)));
+    assert_eq!(pos("$b"), Some(Extraction::Positional(1)));
+    assert_eq!(pos("$c"), Some(Extraction::Positional(0)));
+    assert_eq!(pos("$d"), Some(Extraction::Positional(1)));
+    assert_eq!(pos("$e"), Some(Extraction::Positional(1)), "skipped slot counts");
+    assert_eq!(pos("$v"), Some(Extraction::KeyOf("k".into())), "keyed list binds by key, never by position");
+    assert!(skel.symbols.iter().any(|s| s.kind == "var" && s.name == "$v"), "…but still declares");
+    assert_eq!(pos("$y"), Some(Extraction::Positional(1)), "foreach list slot");
+    let (_, y_src) = skel
+        .flow_edges
+        .iter()
+        .find(|f| f.target_name == "$y")
+        .map(|f| (f.target_name.clone(), f.source))
+        .unwrap();
+    assert!(
+        skel.witnesses.iter().any(|w| matches!(
+            (&w.attachment, &w.payload),
+            (crate::model::witnesses::WitnessAttachment::Expr(sp),
+             crate::model::witnesses::WitnessPayload::Projected { step: crate::model::witnesses::ProjectionStep::Element, .. })
+            if *sp == y_src
+        )),
+        "the list span peels the collection's Element"
+    );
+}
+
+#[test]
 fn php_narrowing_guard_shapes() {
     // instanceof narrows in every guard position a body can sit under: a
     // namespace-qualified class token, an `elseif` arm, and either
@@ -3771,6 +3830,35 @@ fn php_narrowing_guard_shapes() {
     for v in ["$a", "$b", "$c", "$d"] {
         assert!(narrowed(v), "{v} narrowed to the leafed class");
     }
+}
+
+#[test]
+fn php_keyed_destructuring_binds_through_hash_keys() {
+    use crate::model::file_analysis::Extraction;
+    let src = "<?php\n['advisories' => $adv, \"count\" => $n] = f();\nforeach ($rows as ['k' => $v]) {}\n";
+    let mut parser = php_parser();
+    let tree = parser.parse(src, None).unwrap();
+    let skel = extract(&tree, src.as_bytes(), &php_pack()).unwrap();
+    let ext = |name: &str| skel.flow_edges.iter().find(|f| f.target_name == name).map(|f| f.extraction.clone());
+    assert_eq!(ext("$adv"), Some(Extraction::KeyOf("advisories".into())));
+    assert_eq!(ext("$n"), Some(Extraction::KeyOf("count".into())));
+    assert_eq!(ext("$v"), Some(Extraction::KeyOf("k".into())), "foreach keyed list");
+}
+
+#[test]
+fn php_branch_arms_and_subscripts_project() {
+    use crate::model::witnesses::{ProjectionStep, WitnessAttachment, WitnessPayload};
+    let src = "<?php\n$t = match ($c) { 'a' => X::A, default => X::B };\n$u = $c ? f() : g();\n$m = f()[0];\n$r = $row['name'];\n";
+    let mut parser = php_parser();
+    let tree = parser.parse(src, None).unwrap();
+    let skel = extract(&tree, src.as_bytes(), &php_pack()).unwrap();
+    let arms = |row: usize| skel.witnesses.iter().filter(|w| matches!(&w.attachment, WitnessAttachment::BranchArm(sp) if sp.start.row == row)).count();
+    assert_eq!(arms(1), 2, "match: one arm witness per arm");
+    assert_eq!(arms(2), 2, "ternary: both arms");
+    assert!(skel.witnesses.iter().any(|w| matches!((&w.attachment, &w.payload), (WitnessAttachment::Expr(sp), WitnessPayload::Edge(WitnessAttachment::BranchArm(_))) if sp.start.row == 1)), "the match's own Expr edges to its arms");
+    let has_step = |row: usize, pred: &dyn Fn(&ProjectionStep) -> bool| skel.witnesses.iter().any(|w| matches!((&w.attachment, &w.payload), (WitnessAttachment::Expr(sp), WitnessPayload::Projected { step, .. }) if sp.start.row == row && pred(step)));
+    assert!(has_step(3, &|s| matches!(s, ProjectionStep::ArrayIndex(0))), "f()[0] peels slot 0");
+    assert!(has_step(4, &|s| matches!(s, ProjectionStep::HashKey(k) if k == "name")), "$row['name'] drills the key");
 }
 
 /// A three-operand `&&` chain: the guard narrows every later operand, not
