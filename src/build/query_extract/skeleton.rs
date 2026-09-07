@@ -516,6 +516,8 @@ impl SkeletonAnalysis {
                     // the symbol for hover; the listing verdict is stamped
                     // here so warm stub rebuilds mint it identically.
                     hide_in_outline: s.attributes.iter().any(|a| a == "include_guard"),
+                    deprecation: None,
+                    doc: None,
                     display: None,
                     label: None,
                 },
