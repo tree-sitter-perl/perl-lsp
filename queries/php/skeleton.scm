@@ -615,3 +615,142 @@
   . (_) @subscript.base
   (string (string_content) @subscript.key) .) @subscript.expr
 
+; ---- guard narrowing: `if ($x instanceof User) { ... }` ----
+; The class token may be bare or namespace-qualified (`Op\Install` —
+; `annot_type` leafs it). The guard may sit alone, be a conjunct of `&&`
+; (both operands hold inside the body, so either side narrows), or open
+; an `elseif` arm. A negated guard narrows only when its body exits
+; (the `@narrow.after` shapes below).
+(if_statement
+  condition: (parenthesized_expression
+    (binary_expression
+      left: (variable_name) @narrow.var
+      "instanceof" @narrow.guard
+      right: [(name) (qualified_name)] @narrow.type))
+  body: (compound_statement) @scope)
+(else_if_clause
+  condition: (parenthesized_expression
+    (binary_expression
+      left: (variable_name) @narrow.var
+      "instanceof" @narrow.guard
+      right: [(name) (qualified_name)] @narrow.type))
+  body: (compound_statement) @scope)
+(if_statement
+  condition: (parenthesized_expression
+    (binary_expression
+      left: (binary_expression
+        left: (variable_name) @narrow.var
+        "instanceof" @narrow.guard
+        right: [(name) (qualified_name)] @narrow.type)
+      "&&"))
+  body: (compound_statement) @scope)
+(if_statement
+  condition: (parenthesized_expression
+    (binary_expression
+      "&&"
+      right: (binary_expression
+        left: (variable_name) @narrow.var
+        "instanceof" @narrow.guard
+        right: [(name) (qualified_name)] @narrow.type)))
+  body: (compound_statement) @scope)
+(if_statement
+  condition: (parenthesized_expression
+    (binary_expression
+      left: (binary_expression
+        left: (binary_expression
+          left: (variable_name) @narrow.var
+          "instanceof" @narrow.guard
+          right: [(name) (qualified_name)] @narrow.type)
+        "&&")
+      "&&"))
+  body: (compound_statement) @scope)
+
+;; A NEGATED guard whose body leaves the scope (`if (!$x instanceof T)
+;; { return; }`, `throw`, `continue`, `break`) narrows the REMAINDER of
+;; the enclosing scope: `@narrow.after` marks the statement the refinement
+;; starts after. The body is the exit itself or a block whose LAST
+;; statement exits.
+(if_statement
+  condition: (parenthesized_expression
+    (unary_op_expression
+      "!"
+      argument: [
+        (binary_expression
+          left: (variable_name) @narrow.var
+          "instanceof" @narrow.guard
+          right: [(name) (qualified_name)] @narrow.type)
+        (parenthesized_expression
+          (binary_expression
+            left: (variable_name) @narrow.var
+            "instanceof" @narrow.guard
+            right: [(name) (qualified_name)] @narrow.type))]))
+  body: [
+    (return_statement)
+    (continue_statement)
+    (break_statement)
+    (expression_statement (throw_expression))
+    (compound_statement [(return_statement) (continue_statement) (break_statement) (expression_statement (throw_expression))] .)]) @narrow.after
+;; `assert($x instanceof T);` — the pack's `narrow_assertions` decide
+;; which callees assert (the capture fires for any call; core gates).
+(expression_statement
+  (function_call_expression
+    function: (name) @narrow.assert
+    arguments: (arguments
+      (argument
+        (binary_expression
+          left: (variable_name) @narrow.var
+          "instanceof" @narrow.guard
+          right: [(name) (qualified_name)] @narrow.type))))) @narrow.after
+;; Expression-level regions: the refinement holds WITHIN the marked node —
+;; the right operand of `&&`, the ternary's true arm, a `match` arm's
+;; return expression.
+(binary_expression
+  left: (binary_expression
+    left: (variable_name) @narrow.var
+    "instanceof" @narrow.guard
+    right: [(name) (qualified_name)] @narrow.type)
+  "&&"
+  right: (_) @narrow.within)
+; A longer `&&` chain nests left: `A instanceof X && B && C` is
+; `((A instanceof X) && B) && C`, so the guard sits one or two levels
+; down the left spine and every later operand holds under it.
+(binary_expression
+  left: (binary_expression
+    left: (binary_expression
+      left: (variable_name) @narrow.var
+      "instanceof" @narrow.guard
+      right: [(name) (qualified_name)] @narrow.type)
+    "&&")
+  "&&"
+  right: (_) @narrow.within)
+(binary_expression
+  left: (binary_expression
+    left: (binary_expression
+      left: (binary_expression
+        left: (variable_name) @narrow.var
+        "instanceof" @narrow.guard
+        right: [(name) (qualified_name)] @narrow.type)
+      "&&")
+    "&&")
+  "&&"
+  right: (_) @narrow.within)
+(conditional_expression
+  condition: [
+    (binary_expression
+      left: (variable_name) @narrow.var
+      "instanceof" @narrow.guard
+      right: [(name) (qualified_name)] @narrow.type)
+    (parenthesized_expression
+      (binary_expression
+        left: (variable_name) @narrow.var
+        "instanceof" @narrow.guard
+        right: [(name) (qualified_name)] @narrow.type))]
+  body: (_) @narrow.within)
+(match_conditional_expression
+  conditional_expressions: (match_condition_list
+    (binary_expression
+      left: (variable_name) @narrow.var
+      "instanceof" @narrow.guard
+      right: [(name) (qualified_name)] @narrow.type))
+  return_expression: (_) @narrow.within)
+
