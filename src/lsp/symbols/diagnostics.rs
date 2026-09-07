@@ -1100,6 +1100,124 @@ pub fn pack_symbol_diagnostics(
         }
     }
 
+    // ---- undefined variable: an unbound read inside a callable ----
+    if !pack.implicit_variables.is_empty() {
+        // occurrences per (callable scope, name) — a name read MORE than
+        // once is presumed bound by a call the callee lane below cannot
+        // resolve; the single stray read is the typo this lane names.
+        let callable_of = |scope: crate::model::file_analysis::ScopeId| {
+            analysis.scope_chain(scope).into_iter().find(|&sc| {
+                matches!(analysis.scope(sc).kind, ScopeKind::Sub { .. } | ScopeKind::Method { .. })
+            })
+        };
+        let mut seen: HashMap<(u32, String), usize> = HashMap::new();
+        for r in analysis.refs() {
+            if matches!(r.kind, RefKind::Variable) && r.target_name.starts_with('$') {
+                if let Some(sc) = callable_of(r.scope) {
+                    *seen.entry((sc.0, r.target_name.clone())).or_default() += 1;
+                }
+            }
+        }
+        // A bare variable written as a call argument is bound by the call
+        // when the callee declares that position by reference (`&$out`).
+        // The callee resolves as signature help resolves it: the receiver
+        // through the dispatch projection, a plain call by name, locally
+        // then across files. An UNRESOLVABLE callee is silence, not a
+        // guess: php's own functions carry no declaration here
+        // (`preg_match($re, $s, $m)` binds `$m`), and a `__call` class
+        // answers every name.
+        let calls_by_args_start: HashMap<(usize, usize), &crate::model::file_analysis::Ref> = analysis
+            .refs()
+            .iter()
+            .filter(|r| matches!(r.kind, RefKind::MethodCall { .. } | RefKind::FunctionCall))
+            .map(|r| ((r.span.end.row, r.span.end.column), r))
+            .collect();
+        let callee_arity = |call: &crate::model::file_analysis::Ref| -> Option<crate::model::file_analysis::ParamArity> {
+            let name = call.unqualified_target_name();
+            let callable = |s: &crate::model::file_analysis::Symbol| matches!(s.kind, FaSymKind::Sub | FaSymKind::Method);
+            match &call.kind {
+                RefKind::MethodCall { shape, .. } => {
+                    let class = analysis.method_call_invocant_class(call, idx)?;
+                    match analysis.resolve_member_in_ancestors(&class, name, *shape, idx)? {
+                        MethodResolution::Local { sym_id, .. } => analysis.symbol(sym_id).param_arity(),
+                        MethodResolution::CrossFile { class, def_module } => {
+                            let ix = idx?;
+                            let module = def_module.as_deref().unwrap_or(class.as_str());
+                            let cached = ix.candidate_defining_sub_in_package(module, &class, name)?;
+                            let view = ix.symbols_present(&cached);
+                            let syms = view.symbols();
+                            syms.iter()
+                                .find(|s| callable(s) && s.name == name && s.package.as_deref() == Some(class.as_str()))
+                                .or_else(|| syms.iter().find(|s| callable(s) && s.name == name))
+                                .and_then(|s| s.param_arity())
+                        }
+                    }
+                }
+                RefKind::FunctionCall => {
+                    if let Some(sym) = analysis
+                        .symbols_named(name)
+                        .iter()
+                        .map(|&sid| analysis.symbol(sid))
+                        .find(|s| matches!(s.kind, FaSymKind::Sub))
+                    {
+                        return sym.param_arity();
+                    }
+                    let ix = idx?;
+                    let cached = ix.visible_def_candidates(name).into_iter().next()?;
+                    let view = ix.symbols_present(&cached);
+                    view.symbols()
+                        .iter()
+                        .find(|s| matches!(s.kind, FaSymKind::Sub) && s.name == name)
+                        .and_then(|s| s.param_arity())
+                }
+                _ => None,
+            }
+        };
+        // `Some(true)` bound by the call, `Some(false)` a plain read,
+        // `None` an argument of a callee this lane cannot resolve
+        let argument_binding = |var: Span| -> Option<bool> {
+            let Some(site) = analysis.pack.variable_arg_sites.iter().find(|s| s.var == var) else {
+                return Some(false);
+            };
+            let call = calls_by_args_start.get(&(site.args.start.row, site.args.start.column))?;
+            let arity = callee_arity(call)?;
+            Some(arity.binds_arg(site.position as usize))
+        };
+        for r in analysis.refs() {
+            // a WRITE binds (php declares a variable by assigning it)
+            if !matches!(r.kind, RefKind::Variable)
+                || r.binding.is_some()
+                || matches!(r.access, crate::model::file_analysis::AccessKind::Write)
+                || !r.target_name.starts_with('$')
+            {
+                continue;
+            }
+            if pack.implicit_variables.contains(&r.target_name) {
+                continue;
+            }
+            let Some(sc) = callable_of(r.scope) else { continue };
+            if seen.get(&(sc.0, r.target_name.clone())).copied().unwrap_or(0) != 1 {
+                continue;
+            }
+            if argument_binding(r.span) != Some(false) {
+                continue;
+            }
+            // `isset($x)` / `empty($x)` / `unset($x)`: the read IS the
+            // existence question, the member lanes' probe silence
+            if analysis.pack.probe_regions.iter().any(|p| p.contains(&r.span)) {
+                continue;
+            }
+            // a callable that materializes variables dynamically is silent
+            let body = analysis.scope(sc).span;
+            if dynamic_var_calls.iter().any(|c| span_within(*c, body)) {
+                continue;
+            }
+            push(&mut out, r.span, DiagnosticSeverity::ERROR, "undefined-variable",
+                format!("Undefined variable '{}'.", r.target_name));
+        }
+
+    }
+
     out
 }
 
