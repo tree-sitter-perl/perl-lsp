@@ -1038,6 +1038,202 @@ fn php_annot_type(text: &str) -> Option<InferredType> {
     }
 }
 
+pub fn php_pack() -> LangPack {
+    LangPack {
+        // Base skeleton + the bundled framework overlays (pure query
+        // vocabulary — see each overlay's header for the doctrine note).
+        query_source: include_str!("../../../queries/php/skeleton.scm"),
+        bundled_overlays: &[
+            ("stdlib.scm", include_str!("../../../queries/php/stdlib.scm")),
+        ],
+        lang_id: "php",
+        bundled_entry_markers: &[
+        ],
+        bundled_rail_docs: &[],
+        // variable_name captures carry the `$` (PHP spells it at every
+        // use, like Perl); names/classes pass through verbatim. A
+        // `self::`/`static::` receiver IS the enclosing class — spelled as
+        // the model's current-package invocant token so relative static
+        // dispatch resolves like Perl's `__PACKAGE__->` (late static
+        // binding over-approximates to the writing class; accepted).
+        // `parent::` stays a residual (needs the SUPER method-token lane).
+        shape_name: |kind, raw| {
+            if kind == "member.recv" && matches!(raw, "self" | "static") {
+                return "__PACKAGE__".to_string();
+            }
+            // The chain-hop lane's receiver: `$this` is the enclosing class
+            // instance, so a `$this->a()->b()` chain bases its first hop on
+            // the class (`self`/`static` arrive already canonicalized by the
+            // member.recv arm above). Scoped to hop shaping — the minted
+            // ref's invocant keeps the written `$this` spelling.
+            if kind == "hop.recv" && matches!(raw, "$this" | "self" | "static") {
+                return "__PACKAGE__".to_string();
+            }
+            raw.to_string()
+        },
+        default_name: |kind, row, col| match kind {
+            "anon" => Some("(anon)".to_string()),
+            // `new class(...) {...}` — PHP's own runtime spelling is
+            // `class@anonymous<file>:<line>`; ours stays identifier-shaped
+            // and file-local by construction (nothing else spells it).
+            "class" => Some(format!("class_anonymous_{}_{}", row + 1, col + 1)),
+            _ => None,
+        },
+        // Declared types (params, properties, returns) ARE the witness
+        // source — PHP's gradual typing seeds the bag, inference covers
+        // the untyped legacy tier. `?T` peels to T (nullability is not a
+        // navigation fact); unions/intersections defer (None → the flow
+        // edge carries); `self`/`static` receiver substitution is a
+        // documented residual (needs ReturnExpr::Receiver plumbing).
+        annot_type: php_annot_type,
+        // `: static` / `: $this` are late-bound to the call's receiver —
+        // fluent builders chain through `ReturnExpr::Receiver`. `self`
+        // strictly means the defining class; substituting the receiver
+        // over-approximates only for inherited methods (accepted).
+        rettype_receiver: |text| {
+            matches!(text.trim().trim_start_matches('?'), "static" | "$this" | "self")
+        },
+        namespace_relative_parents: true,
+        field_registry_edges: true,
+        super_receiver: |t| t == "parent",
+        self_class_tokens: &["self", "static"],
+        class_token_kinds: &["name", "qualified_name"],
+        function_scoped_vars: true,
+        constructor_names: &["__construct"],
+        // phpdoc: the type vocabulary of REAL PHP — most of WordPress and
+        // half of Laravel's public API type only here.
+        doc_types: php_doc_types,
+        // PHP's own spellings for the engine's value lattice; a PHP array
+        // is one type whichever rep the engine inferred.
+        type_display: &[
+            ("String", "string"),
+            ("Numeric", "int|float"),
+            ("Bool", "bool"),
+            ("HashRef", "array"),
+            ("ArrayRef", "array"),
+            ("Undef", "null"),
+            ("CodeRef", "callable"),
+            ("Sequence", "list"),
+        ],
+        // PSR-4's real map lives in composer.json (autoload roots); the
+        // one executable line is the namespace-mirrors-directories shape.
+        module_paths: |m| {
+            let base = m.trim_start_matches('\\').replace('\\', "/");
+            vec![format!("{base}.php")]
+        },
+        // `['k' => v]` / `array('k', v)` construct keyed values; the
+        // shape query gates on a string-keyed element, so these tokens
+        // only ever arrive for genuinely keyed literals.
+        shape_ctor: |callee| matches!(callee, "[" | "array"),
+        import_call: |_, _| None,
+        cmd_effects: |_| vec![],
+        // `$x instanceof User` refines $x to User inside the guard.
+        narrow_guard: |guard, ty| {
+            // The class token leafs like every other class spelling
+            // (`Op\Install` → `Install`; classes are filed by leaf).
+            (guard == Some("instanceof"))
+                .then(|| php_annot_type(ty))
+                .flatten()
+                .filter(|t| matches!(t, InferredType::ClassName(_)))
+        },
+        narrow_assertions: &["assert"],
+        rebind_method: |_| false,
+        // `$this->` is mandatory — no receiver elision (unlike C++).
+        implicit_this_members: false,
+        include_path_tokens: false,
+        preprocessor_macros: false,
+        entrypoint_symbols: &[],
+        runtime_invoked_methods: &[
+            "__toString", "__invoke", "__get", "__set", "__isset", "__unset",
+            "__call", "__callStatic", "__clone", "__destruct", "__wakeup",
+            "__sleep", "__serialize", "__unserialize", "__debugInfo",
+            "__set_state", "__toBool",
+            // SPL interface contracts the engine calls structurally
+            // (`count($x)`, `foreach`, `$x[$k]`, `json_encode`, `serialize`).
+            "count", "getIterator", "current", "key", "next", "rewind", "valid",
+            "offsetExists", "offsetGet", "offsetSet", "offsetUnset",
+            "jsonSerialize", "serialize", "unserialize",
+        ],
+        // class/trait/interface bodies are brace-delimited, so a member
+        // orphaned by a misparse can re-anchor positionally.
+        brace_scoped_members: true,
+        call_shapes: &[
+            CallShape { kind: "member_call_expression", callee_field: "name", args_field: "arguments" },
+            CallShape { kind: "nullsafe_member_call_expression", callee_field: "name", args_field: "arguments" },
+            CallShape { kind: "scoped_call_expression", callee_field: "name", args_field: "arguments" },
+            CallShape { kind: "function_call_expression", callee_field: "function", args_field: "arguments" },
+            CallShape { kind: "object_creation_expression", callee_field: "", args_field: "arguments" },
+        ],
+        arg_kind: "argument",
+        throwaway_names: &["$_"],
+        implicit_variables: &[
+            "$this", "$GLOBALS", "$_SERVER", "$_GET", "$_POST", "$_FILES", "$_COOKIE",
+            "$_SESSION", "$_REQUEST", "$_ENV", "$argv", "$argc", "$http_response_header",
+        ],
+        catch_all_methods: &["__call", "__callStatic", "__get"],
+        callable_placeholder_kind: "variadic_placeholder",
+        spread_arg_kind: "variadic_unpacking",
+        named_arg_field: "name",
+        contract_stub: "public function {}\n{\n    // TODO: implement\n}",
+        return_annotation_template: ": {}",
+        native_type_spellings: &[
+            ("String", "string"),
+            ("Bool", "bool"),
+            ("HashRef", "array"),
+            ("ArrayRef", "array"),
+            ("Sequence", "array"),
+            ("CodeRef", "callable"),
+        ],
+        static_property_sigil: "$",
+        class_literal_member: "class",
+        import_template: "use {};\n",
+        imports_bind_names: true,
+        deprecated_attribute: "Deprecated",
+        builtin_types: PHP_BUILTIN_TYPES,
+        member_shapes_are_strict: true,
+        members_are_package_bound: true,
+        types_are_capitalized: true,
+        enum_members: &["value", "name", "cases", "from", "tryFrom"],
+        trigger_chars: &["$", ">", ":"],
+        receiver_names: &["$this"],
+        nested_peel: PeelSpec { wrappers: &[], annot_kinds: &[], leaf_to_def: &[], record_stack: true },
+        recv_peel: PeelSpec {
+            wrappers: &[("parenthesized_expression", crate::model::file_analysis::DerefKind::Pointer)],
+            annot_kinds: &[],
+            leaf_to_def: &[],
+            record_stack: false,
+        },
+        // one meaningful member operator family (`->`/`?->`): no op-DX.
+        op_map: &[],
+        simple_var_kinds: &["variable_name"],
+        qualifier_peel: &[],
+        // calls included: PHP's method call is ONE flat node (unlike cpp,
+        // where the call wraps a field_expression), so mid-token member
+        // completion (`->ma|p`) must climb to the call node itself.
+        member_kinds: &[
+            "member_access_expression",
+            "member_call_expression",
+            "nullsafe_member_call_expression",
+            // `Foo::m(`, `self::CONST`, `static::$prop`: a scoped access is
+            // a member access whose receiver is the class token.
+            "scoped_call_expression",
+            "scoped_property_access_expression",
+            "class_constant_access_expression",
+        ],
+        skip_kinds: &["string", "string_content", "comment"],
+        call_kinds: &[
+            "function_call_expression",
+            "member_call_expression",
+            "scoped_call_expression",
+            "nullsafe_member_call_expression",
+            "object_creation_expression",
+        ],
+        domain_compare_kinds: &[],
+        domain_compare_ops: &[],
+        oolfn: OutOfLineSpec::OFF,
+    }
+}
+
 pub fn cpp_pack() -> LangPack {
     LangPack {
         query_source: include_str!("../../../queries/cpp/skeleton.scm"),
