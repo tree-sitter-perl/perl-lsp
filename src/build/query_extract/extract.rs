@@ -2462,6 +2462,52 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
             reassigns: false,
         });
     }
+    // Destructuring slots bind POSITIONALLY off their source — the same
+    // FlowEdge lowering Perl's list assignment uses. A keyed list never
+    // binds (its positions are not positions); the defs still landed.
+    {
+        let mut element_hops: std::collections::HashSet<(Point, Point)> = Default::default();
+        for (mid, name, scope, at, byte) in &flow_slots {
+            let Some((list_span, list_byte, list_text)) = slot_lists.get(mid) else { continue };
+            let offset = byte.saturating_sub(*list_byte);
+            let extraction = match slot_position(list_text, offset) {
+                Some(pos) => crate::model::file_analysis::Extraction::Positional(pos),
+                None => match slot_key(list_text, offset) {
+                    Some(k) => crate::model::file_analysis::Extraction::KeyOf(k),
+                    None => continue,
+                },
+            };
+            let source = if let Some(src) = flow_sources.get(mid) {
+                *src
+            } else if let Some((seq_src, _)) = seq_source_by_match.get(mid) {
+                // foreach: the list IS the collection's element; the slots
+                // index into it — two projections chained through the
+                // list's own Expr span.
+                if element_hops.insert((list_span.start, list_span.end)) {
+                    out.witnesses.push(crate::model::witnesses::Witness {
+                        attachment: crate::model::witnesses::WitnessAttachment::Expr(*list_span),
+                        source: crate::model::witnesses::WitnessSource::Builder("skeleton".into()),
+                        payload: crate::model::witnesses::WitnessPayload::Projected {
+                            base: crate::model::witnesses::WitnessAttachment::Expr(*seq_src),
+                            step: crate::model::witnesses::ProjectionStep::Element,
+                        },
+                        span: *list_span,
+                    });
+                }
+                *list_span
+            } else {
+                continue;
+            };
+            out.flow_edges.push(crate::model::file_analysis::FlowEdge {
+                target_name: name.clone(),
+                target_scope: *scope,
+                target_at: *at,
+                source,
+                extraction,
+                reassigns: false,
+            });
+        }
+    }
     // Lower the value-flow edges to type-tier witnesses (the bag is canonical
     // for types; the edges are the provenance tier above it).
     for fe in &out.flow_edges {
@@ -2519,6 +2565,60 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     }
     out.param_sigs = param_sigs;
     Ok(out)
+}
+
+/// Does a doc row get to type this (name, scope) slot? Yes when the syntax
+/// declared nothing (declared wins — docblocks drift), and ALSO when the doc
+/// is a `Sequence` refining a bare declared container (`array`/`iterable` —
+/// the spelling that cannot carry an element). The doc witness lands AFTER
+/// the declared one, so latest-wins reduction serves the refinement.
+/// The positional index of a destructuring slot: the number of TOP-LEVEL
+/// commas in the list text before the slot's byte offset (`[, $b]` → 1).
+/// `None` for a keyed list (a top-level `=>`): its positions are not
+/// positions, so the slot never binds positionally.
+fn slot_position(list_text: &str, slot_offset: usize) -> Option<usize> {
+    let bytes = list_text.as_bytes();
+    let (mut depth, mut commas) = (0i32, 0usize);
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'(' | b'[' | b'{' => depth += 1,
+            b')' | b']' | b'}' => depth -= 1,
+            b',' if depth == 1 && i < slot_offset => commas += 1,
+            b'=' if depth == 1 && bytes.get(i + 1) == Some(&b'>') => return None,
+            _ => {}
+        }
+        i += 1;
+    }
+    Some(commas)
+}
+
+/// The literal key of a KEYED destructuring slot (`['k' => $v]`): the
+/// quoted string before the `=>` that precedes the slot in its own
+/// top-level segment. `None` for a positional list or a non-literal key.
+fn slot_key(list_text: &str, slot_offset: usize) -> Option<String> {
+    let bytes = list_text.as_bytes();
+    let (mut depth, mut seg_start) = (0i32, 0usize);
+    for (i, &c) in bytes.iter().enumerate().take(slot_offset.min(bytes.len())) {
+        match c {
+            b'(' | b'[' | b'{' => {
+                depth += 1;
+                if depth == 1 {
+                    seg_start = i + 1;
+                }
+            }
+            b')' | b']' | b'}' => depth -= 1,
+            b',' if depth == 1 => seg_start = i + 1,
+            _ => {}
+        }
+    }
+    let seg = &list_text[seg_start..slot_offset.min(list_text.len())];
+    let (key, _) = seg.split_once("=>")?;
+    let key = key.trim();
+    let quoted = key.len() >= 2
+        && ((key.starts_with('\'') && key.ends_with('\''))
+            || (key.starts_with('"') && key.ends_with('"')));
+    quoted.then(|| key[1..key.len() - 1].to_string())
 }
 
 /// The `TypeName(alias) → …` payload for an underlying type spelling, resolving
