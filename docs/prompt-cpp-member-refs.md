@@ -11,25 +11,22 @@ core machinery. The resolution seam it feeds: `docs/adr/resolution-candidate-set
 
 ## Residual forward work — each a separate careful change
 
-1. **Full `LangCfg`→`LangPack` fold.** The correctness (Python call kind) is
-   already fixed via `call_kinds`/`simple_var_kinds`. Merging `member_kinds`
-   is blocked on generalizing the cpp-grammar-coupled `member_access_sites`
-   op-DX walk to python's `attribute` node + an explicit `operator_correctable`
-   flag — else a naive merge risks a python op-DX regression. The cpp
-   `recv_wrapper_kinds` (LangPack) / `wrapper_kinds` (LangCfg) overlap dedups
-   in the same move.
-2. **Layering-test LSP-layer teeth.** `backend.rs`/`symbols.rs` should name no
+The `LangCfg`→`LangPack` fold is landed (one config, one lookup;
+`member_kinds` and the `recv_wrapper_kinds`/`wrapper_kinds` overlap are
+gone with it). What remains:
+
+1. **Layering-test LSP-layer teeth.** `backend.rs`/`symbols.rs` should name no
    `child_by_field_name`/`TreeCursor`/`descendant_for_*`/`std::fs::read*`
    (route through `cursor_sentinel`/`CrossFileLookup`), or the boundary erodes
    per language. Blocked on PRE-EXISTING Perl `descendant_for_point_range` in
    symbols.rs — strict teeth would force refactoring unrelated Perl first (else
    it's an allowlist).
-3. **`==perl`→capability methods.** The `== "perl"` string branches want
-   `LanguageDriver` capability methods (`cheap_synchronous_build()`,
-   `has_preprocessor()`, `wants_enrichment()`). Per-branch design: some span LSP
-   handlers, CLI modes, and caching and are fundamental, not capabilities; a
-   blanket `is_pack()` is a half-measure.
-4. **Macros (`OP_NULL`/`BASEOP`) as cross-file refs** → a macro usage that
+2. **`==perl`→capability methods.** `has_preprocessor_macros()` is the first
+   `LanguageRegistry` capability method; three raw `== "perl"` string branches
+   remain (`backend/indexing.rs` ×2, `builder/pattern_dispatch.rs`). Per-branch
+   design: some span LSP handlers, CLI modes, and caching and are fundamental,
+   not capabilities; a blanket `is_pack()` is a half-measure.
+3. **Macros (`OP_NULL`/`BASEOP`) as cross-file refs** → a macro usage that
    survives as an identifier should be a ref core resolves cross-file, deleting
    `pack_xfile_word_at` + its `#define`-line re-grep (rule-#10) + the symbols
    cross-file `fs::read` (route through `CrossFileLookup`), once def-ness is a
