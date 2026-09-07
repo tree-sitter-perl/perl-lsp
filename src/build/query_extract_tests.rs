@@ -2706,3 +2706,38 @@ void go() {
     assert_eq!(gd(11, 13), Some((1, 9)), "w.get().spin() resolves spin on Widget");
     assert_eq!(gd(12, 9), Some((1, 9)), "w.v_.spin() resolves through the field's type");
 }
+
+// ==== PHP pack: the fifth language on the same driver ====
+
+#[test]
+fn cpp_member_chain_types_through_method_hops() {
+    // The identical gap on the cpp side: `auto x = w.get().spin();` — the
+    // called-member pattern mints the hop witness alongside the call-blind
+    // field ref, so the chain types with no intermediate variable.
+    let src = "\
+struct Engine {
+    int spin() { return 7; }
+};
+struct Widget {
+    Engine get() { return Engine(); }
+};
+int f(Widget w) {
+    auto x = w.get().spin();
+    auto e = w.get();
+    return x;
+}
+";
+    let fa = cpp_fa(src);
+    use crate::model::file_analysis::InferredType;
+    let inside = tree_sitter::Point { row: 9, column: 4 };
+    assert_eq!(
+        fa.inferred_type_via_bag("e", inside),
+        Some(InferredType::ClassName("Engine".into())),
+        "single hop must type",
+    );
+    assert_eq!(
+        fa.inferred_type_via_bag("x", inside),
+        Some(InferredType::Numeric),
+        "two-hop chain must type",
+    );
+}
