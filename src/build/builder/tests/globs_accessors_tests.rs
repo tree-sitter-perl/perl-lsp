@@ -698,6 +698,9 @@ sub retry {
                 package: Some("QA::C".to_string()),
             },
             method_classes: Vec::new(), scope: crate::index::resolve::OverrideScope::Dispatch, def_paths: Vec::new(), bare_constant: false,
+            ctor_of: None,
+            class_ns: None,
+            member_shape: Default::default(),
         },
         RoleMask::EDITABLE,
     );
@@ -816,6 +819,9 @@ sub opt_b { 'b' }
                 package: Some("QA::E".to_string()),
             },
             method_classes: Vec::new(), scope: crate::index::resolve::OverrideScope::Dispatch, def_paths: Vec::new(), bare_constant: false,
+            ctor_of: None,
+            class_ns: None,
+            member_shape: Default::default(),
         },
         RoleMask::EDITABLE,
     );

@@ -67,6 +67,27 @@ pub struct TargetRef {
     /// (`class_content_is_bare_constant`); the matcher may also re-derive it
     /// per scanned file when the index is in hand.
     pub bare_constant: bool,
+    /// `Some(class)` when this Method target IS the class's constructor by
+    /// the pack's convention (php `__construct`): references then also
+    /// admit the class's construction sites (`new Foo(...)` — the ctor
+    /// FunctionCall ref carries the CLASS name), non-rewritable, since the
+    /// token spells the class. Set in the identity lane from
+    /// `PackFacts::constructor_names`; `None` everywhere else.
+    pub ctor_of: Option<String>,
+    /// The namespace the ORIGIN's scope pins for this target's class leaf
+    /// (`CrossFileLookup::pinned_namespace` — a use-map axis's `use` row,
+    /// own declaration, or own namespace). Class-keyed targets are leaf-keyed everywhere else (the
+    /// override family, the dispatch chain, the by-name index), and three
+    /// same-leaf `Factory`s share every one of those; the pin is what tells
+    /// a scanned file's `Factory` from the target's. `None` = no claim
+    /// (Perl, cpp, an un-imported leaf), and the gate stands down.
+    pub class_ns: Option<String>,
+    /// The written shape of the member this target names, set ONLY when
+    /// the declaring class overloads the name across kinds (a property AND
+    /// a method called `recorded` — `member_kinds_overloaded`). Declaration
+    /// and reference matching are then shape-strict; everywhere else it is
+    /// `Unknown` and the matchers stay name-keyed as before.
+    pub member_shape: crate::model::file_analysis::MemberShape,
     /// Pack-language visibility identity: the canonical paths of the files
     /// that define this target AS THE ORIGIN FILE SEES IT (the origin itself,
     /// candidates in its include closure, and candidates whose closure reaches
@@ -102,6 +123,9 @@ impl TargetRef {
             scope,
             def_paths: Vec::new(),
             bare_constant: false,
+            ctor_of: None,
+            class_ns: None,
+            member_shape: Default::default(),
         }
     }
 
@@ -128,6 +152,9 @@ impl TargetRef {
             scope: OverrideScope::Hierarchy,
             def_paths: Vec::new(),
             bare_constant: false,
+            ctor_of: None,
+            class_ns: None,
+            member_shape: Default::default(),
         }
     }
 
@@ -144,6 +171,9 @@ impl TargetRef {
             scope: OverrideScope::default(),
             def_paths: Vec::new(),
             bare_constant: false,
+            ctor_of: None,
+            class_ns: None,
+            member_shape: Default::default(),
         }
     }
 
@@ -206,6 +236,9 @@ impl TargetRef {
                     scope,
                     def_paths: Vec::new(),
                     bare_constant: false,
+                    ctor_of: None,
+                    class_ns: None,
+                    member_shape: Default::default(),
                 }
             }
             RenameKind::Method { name, class } => {
