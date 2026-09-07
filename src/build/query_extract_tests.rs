@@ -2874,6 +2874,25 @@ $cfg = ['timeout' => 30, 'retries' => 3];
 }
 
 #[test]
+fn php_enum_cases_are_enumerators_typed_by_their_enum() {
+    let src = "\
+<?php
+enum Suit {
+    case Hearts;
+    case Spades;
+}
+";
+    let (fa, _) = php_fa(src);
+    let case_sym = fa
+        .symbols()
+        .iter()
+        .find(|s| s.name == "Hearts")
+        .expect("enum case symbol");
+    assert_eq!(case_sym.kind, crate::model::file_analysis::SymKind::Enumerator);
+    assert_eq!(case_sym.package.as_deref(), Some("Suit"));
+}
+
+#[test]
 fn php_static_return_substitutes_the_receiver_fluently() {
     // `: static` publishes ReturnExpr::Receiver — the member-chain arm
     // threads the real receiver, and the MCB path's default receiver
@@ -3460,6 +3479,37 @@ function get_things(): int {
 }
 
 #[test]
+fn php_enum_cases_are_not_bare_constants() {
+    // Round-3 R4 residual: a php enum case is only ever
+    // `Level::Debug`-reachable — never a bare token — so it must not
+    // take cpp's unscoped-enum hoisting lane (bare_constant), which
+    // let ANY same-named PackageRef match: renaming a case rewrote an
+    // unrelated class's use-import leaf.
+    let src = "\
+<?php
+enum Level: int {
+    case Debug = 100;
+}
+class User {
+    const VERSION = \"1\";
+}
+";
+    let (fa, _) = php_fa(src);
+    use crate::model::file_analysis::SymKind;
+    for name in ["Debug", "VERSION"] {
+        let sym = fa
+            .symbols()
+            .iter()
+            .find(|s| matches!(s.kind, SymKind::Enumerator) && s.name == name)
+            .unwrap();
+        assert!(
+            !fa.class_content_is_bare_constant(sym),
+            "{name} must not be bare-reachable",
+        );
+    }
+}
+
+#[test]
 fn php_new_self_types_as_enclosing_class() {
     // `(new self())->forceFill(...)` — `new self()` is the ENCLOSING
     // class, not a class named "self"; the ctor witness carries it so
@@ -3579,6 +3629,44 @@ class Child extends Base {
 }
 
 #[test]
+fn php_class_constant_and_enum_case_access() {
+    // `User::VERSION` / `Level::Debug` are class-keyed member accesses:
+    // the access site mints a member ref (gd/references connect), and a
+    // TRUE enum case's value types as its enum. A class const's VALUE
+    // stays untyped (typing it as the class would be wrong — residual).
+    let src = "\
+<?php
+class User {
+    const VERSION = \"1.0\";
+}
+enum Level: int {
+    case Debug = 100;
+}
+$v = User::VERSION;
+$d = Level::Debug;
+echo $v;
+";
+    let (fa, _) = php_fa(src);
+    use crate::model::file_analysis::{InferredType, RefKind};
+    let version_ref = fa.refs().iter().find(|r| {
+        matches!(r.kind, RefKind::MethodCall { .. }) && r.target_name == "VERSION"
+    });
+    assert!(version_ref.is_some(), "const access mints a member ref");
+    let d = fa.inferred_type_via_bag("$d", tree_sitter::Point { row: 9, column: 0 });
+    assert_eq!(
+        d,
+        Some(InferredType::ClassName("Level".into())),
+        "enum case types as its enum: {d:?}"
+    );
+    let v = fa.inferred_type_via_bag("$v", tree_sitter::Point { row: 9, column: 0 });
+    assert_ne!(
+        v,
+        Some(InferredType::ClassName("User".into())),
+        "a const's VALUE must never type as the owning class"
+    );
+}
+
+#[test]
 fn php_fluent_chain_substitutes_receiver_through_hops() {
     // `: static` returns are receiver-relative; the hop passes the base's
     // type as the dispatch receiver, so a fluent builder chain keeps the
@@ -3603,6 +3691,51 @@ function f(Query $q) {
 
 
 
+
+#[test]
+fn php_self_const_in_property_defaults_resolves() {
+    // R11: `self::CONST` in a class-LEVEL initializer (property default)
+    // was deterministically dark while the method-body form worked — the
+    // class-body scope opens under the OUTER package context, so the
+    // invocant ladder's scope-chain walk found no enclosing class.
+    // The structural fallback (narrowest containing Class symbol) fixes it.
+    let src = "\
+<?php
+class Fmt {
+    public const FORMAT = 'Y-m-d';
+    protected string $fmt = self::FORMAT;
+    public function render(): string {
+        return self::FORMAT;
+    }
+}
+";
+    let (fa, _) = php_fa(src);
+    let resolved = crate::index::resolve::resolve_symbol(
+        &fa,
+        tree_sitter::Point { row: 3, column: 35 },
+        None,
+    );
+    let target = match resolved {
+        Some(crate::index::resolve::ResolvedTarget::Target(t)) => t,
+        other => panic!("property-default self::FORMAT must resolve: {other:?}"),
+    };
+    assert!(
+        matches!(&target.kind, crate::index::resolve::TargetKind::Method { class } if class == "Fmt"),
+        "resolves to the class const: {target:?}"
+    );
+    let locs = crate::index::resolve::refs_to_in_file(
+        &crate::index::file_store::FileStore::new(),
+        None,
+        &target,
+        &crate::index::file_store::FileKey::Path(std::path::PathBuf::from("/r5/t.php")),
+        &fa,
+        crate::index::resolve::RoleMask::VISIBLE,
+    );
+    let rows: Vec<usize> = locs.iter().map(|l| l.span.start.row).collect();
+    assert!(rows.contains(&2), "the const decl: {locs:?}");
+    assert!(rows.contains(&3), "the property-default use: {locs:?}");
+    assert!(rows.contains(&5), "the method-body use: {locs:?}");
+}
 
 #[test]
 fn php_foreach_element_typing_peels_doc_sequences() {
