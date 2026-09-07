@@ -744,10 +744,28 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     // flow.assign joins: match_id → (target name+scope, source span)
     let mut flow_targets: HashMap<usize, (String, ScopeId, Point)> = HashMap::new();
     let mut flow_sources: HashMap<usize, Span> = HashMap::new();
+    // `@flow.assign`: the match is a plain assignment to an existing local
+    // (`FlowEdge::reassigns`) — never a declaration or a member write.
+    let mut flow_assigns: std::collections::HashSet<usize> = Default::default();
     // Rebind shapes with no inflowing value (loop vars: `for x in …`,
     // `for (auto x : …)`) — they mint a `Rebind` FlowEdge so the narrowing
     // cutoff sees them, exactly like Perl's `foreach` var.
     let mut flow_rebinds: Vec<(String, ScopeId, Point)> = Vec::new();
+    // Destructuring slots (`@flow.slot` in a `@flow.slot.list`) and
+    // key-less array-literal tuples (`@tuple.*`) — joined per match after
+    // the loop (docs/adr/destructuring.md).
+    let mut flow_slots: Vec<(usize, String, ScopeId, Point, usize)> = Vec::new();
+    let mut slot_lists: HashMap<usize, (Span, usize, String)> = HashMap::new();
+    let mut tuple_arr_by_match: HashMap<usize, Span> = HashMap::new();
+    let mut tuple_elem_by_match: HashMap<usize, Span> = HashMap::new();
+    let mut tuple_init_by_match: HashMap<usize, (usize, bool)> = HashMap::new();
+    let mut tuple_keyed: std::collections::HashSet<usize> = std::collections::HashSet::new();
+    // `@branch.expr` / `@branch.arm` (match / ternary) and `@subscript.*`,
+    // joined per match after the loop.
+    let mut branch_expr_by_match: HashMap<usize, Span> = HashMap::new();
+    let mut branch_arm_by_match: HashMap<usize, Span> = HashMap::new();
+    let mut subscript_by_match: HashMap<usize, (Span, Option<Span>, Option<i32>, Option<String>)> =
+        HashMap::new();
     let mut annots: HashMap<usize, String> = HashMap::new();
     // keyed-shape collection: ctor + keys grouped per @expr.shape span
     let mut shape_spans: Vec<(usize, usize, Span)> = Vec::new();
@@ -780,6 +798,16 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     // guarded-block region, block scope).
     let mut pending_narrow: Vec<(String, crate::model::file_analysis::InferredType, Span, ScopeId)> =
         Vec::new();
+    // Class-body scopes (`register_class_body`), for the member-targeted
+    // flow (`@flow.target.member`): the witness lands where field readers look.
+    let mut class_body_scopes: std::collections::HashSet<ScopeId> = std::collections::HashSet::new();
+    // Region-shaped narrowings, resolved after the loop (the guard's own
+    // captures may follow the region node in event order): `@narrow.after`
+    // holds from the node's END to the enclosing scope's end, `@narrow.within`
+    // over the node itself — each in the scope open at the node.
+    let mut narrow_after: Vec<(usize, Point, ScopeId)> = Vec::new();
+    let mut narrow_within: Vec<(usize, Span, ScopeId)> = Vec::new();
+    let mut narrow_assert: HashMap<usize, String> = HashMap::new();
     // `std::move(x)` halves, joined per match: the qualifier (`std`) + name
     // (`move`) verify the call IS std::move (no query predicates), the var is
     // the moved subject, the call span the region start + enclosing scope.
@@ -949,7 +977,13 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                 // Shape the context like a def name (cpp canonicalizes a
                 // spec's template spelling) so members' `package` matches
                 // the container Symbol's identity exactly.
-                let text = (pack.shape_name)(&e.cap, &e.text);
+                // A name-less def's context is its synthesized identity,
+                // never the anchor token's text.
+                let raw = defaulted_matches
+                    .get(&e.match_id)
+                    .cloned()
+                    .unwrap_or_else(|| e.text.clone());
+                let text = (pack.shape_name)(&e.cap, &raw);
                 // If this match's `@scope` starts AFTER this context, the
                 // context belongs to that (not-yet-pushed) body — defer it
                 // so it registers at the body depth and pops with the block.
@@ -976,16 +1010,133 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                     // Shaped like the child's def name (cpp canonicalizes a
                     // template-spelled base) so the edge joins the identity
                     // the target class was filed under.
-                    out.parents
-                        .push((child.clone(), (pack.shape_name)("parent", &e.text)));
+                    let shaped = (pack.shape_name)("parent", &e.text);
+                    if !pack.namespace_relative_parents {
+                        out.parents.push((child.clone(), shaped));
+                    } else {
+                        // php name binding, most-specific first: a written
+                        // qualifier is authoritative; else the file's
+                        // use-map (an ALIAS resolves to the real leaf — the
+                        // `use X as Y` edge was dead under the alias
+                        // spelling); else the unqualified default IS the
+                        // child's own namespace (PHP class names never fall
+                        // through to global). Every edge records its
+                        // namespace for FQ chain validation.
+                        let (leaf, ns) = if let Some(fq) =
+                            parent_fq_by_match.get(&e.match_id)
+                        {
+                            split_ns_leaf(fq)
+                        } else if let Some((ns, real_leaf)) = use_map.get(shaped.as_str()) {
+                            (real_leaf.clone(), ns.clone())
+                        } else {
+                            let ns = out
+                                .symbols
+                                .iter()
+                                .rev()
+                                .find(|s| s.kind == "class" && &s.name == child)
+                                .and_then(|s| s.package.clone())
+                                .unwrap_or_default();
+                            (shaped, ns)
+                        };
+                        out.parents.push((child.clone(), leaf.clone()));
+                        out.parent_namespaces.push((child.clone(), leaf, ns));
+                    }
                 }
             }
-            cap if cap.starts_with("def.") && !cap.ends_with(".name") => {
+            // Hook-NAME identity (the Handler rail): a registration string
+            // (`add_action('init', …)` arg 1) DECLARES the hook — a Handler
+            // symbol whose name and span are the string content, stacking
+            // like every same-named Handler. A firing string
+            // (`do_action('init')`) mints the DispatchCall ref that matches
+            // it. Both are Global-owned: the program shares one flat hook
+            // namespace, no receiver.
+            c if c == "def.handler.named"
+                || c.starts_with("def.handler.named.")
+                || c.starts_with("def.handler.class.")
+                || c.starts_with("def.handler.by.") =>
+            {
+                let span = Span { start: e.start, end: e.end };
+                let mut attributes = Vec::new();
+                let mut name = e.text.clone();
+                if let Some(rail) = c.strip_prefix("def.handler.named.") {
+                    out.rails.push((span, rail.to_string()));
+                } else if let Some(rail) = c.strip_prefix("def.handler.class.") {
+                    out.class_rails.push((span, rail.to_string()));
+                    attributes.push("class_rail".to_string());
+                } else if let Some(rail) = c.strip_prefix("def.handler.by.") {
+                    // named by another token of the match; no name → no handler
+                    let Some(n) = handler_name_by_match.get(&e.match_id) else { continue };
+                    name = n.clone();
+                    out.class_rails.push((span, rail.to_string()));
+                    attributes.push("class_rail".to_string());
+                }
+                out.symbols.push(SkelSymbol {
+                    name,
+                    kind: "handler".to_string(),
+                    start: e.start,
+                    end: e.end,
+                    name_start: e.start,
+                    name_end: e.end,
+                    package: None,
+                    scope: cur_scope,
+                    return_type: None,
+                    receiver_instance_of: None,
+                    receiver_return: false,
+                    deref_stack: Vec::new(),
+                    attributes,
+                    arity: None,
+                    qualifier_owned: false,
+                    doc: None,
+                    deprecation: None,
+                });
+            }
+            "handler.name" => {}
+            "key.elem" => {}
+            "def.handler.key" => {
+                if let Some(elem) = key_elem_by_match.get(&e.match_id) {
+                    out.key_defs.push(crate::build::query_extract::KeyDef {
+                        key: e.text.clone(),
+                        key_span: Span { start: e.start, end: e.end },
+                        elem_span: *elem,
+                    });
+                }
+            }
+            cap if cap.ends_with(".anchor") => {
+                // The anchor of an anonymous class is its construction site:
+                // `new class(...)` invokes the synthesized identity's
+                // constructor, so the ctor gets the MethodCall a `new
+                // self()` mints — fan-in, goto-def and references on
+                // `__construct` see it like any `new Foo()`.
+                if let (Some(ctor), Some(name)) =
+                    (pack.constructor_names.first(), defaulted_matches.get(&e.match_id))
+                {
+                    if anon_ctor_sites.insert((e.start_byte, e.end_byte)) {
+                        let span = Span { start: e.start, end: e.end };
+                        out.refs.push(SkelRef {
+                            via: None,
+                            kind: "member".to_string(),
+                            name: ctor.to_string(),
+                            start: e.start,
+                            end: e.end,
+                            scope: cur_scope,
+                            invocant: Some((span, name.clone())),
+                            member_op: None,
+                            arg_count: None,
+                            shape: crate::model::file_analysis::MemberShape::Callable,
+                            named_by_string: false,
+                        });
+                    }
+                }
+            }
+            cap if cap.starts_with("def.") && !cap.ends_with(".name") && !cap.ends_with(".anchor") => {
                 let kind = cap.strip_prefix("def.").unwrap().to_string();
                 let (name, name_start, name_end, defaulted) = names_by_match
                     .get(&(e.match_id, e.cap.clone()))
                     .cloned()
-                    .map(|(n, s, en)| (n, s, en, false))
+                    .map(|(n, s, en)| {
+                        let d = defaulted_matches.contains_key(&e.match_id);
+                        (n, s, en, d)
+                    })
                     .or_else(|| {
                         (pack.default_name)(&kind, e.start.row, e.start.column)
                             .map(|n| (n, e.start, e.start, true))
