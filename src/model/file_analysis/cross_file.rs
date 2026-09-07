@@ -781,6 +781,12 @@ pub trait CrossFileLookup {
     fn ref_indexed_paths(&self) -> std::collections::HashSet<std::path::PathBuf> {
         std::collections::HashSet::new()
     }
+    /// Warm the rows views of `paths` before a walk reads them one by one:
+    /// decode is CPU-bound and the walk is sequential, so an index that
+    /// can decode in parallel does it here and the walk hits its LRU.
+    /// Default: nothing (a lookup without a decode cache has nothing to
+    /// warm).
+    fn prefetch_refs(&self, _paths: &[std::path::PathBuf]) {}
     /// Path-keyed cached-module lookup — the retrieval above hands back
     /// paths; this maps them onto the resident registration (for the
     /// visibility gate + whole-copy rehydration). Default `None`.
@@ -821,6 +827,17 @@ pub trait CrossFileLookup {
     /// rather than blind.
     fn inc_roots(&self) -> std::sync::Arc<Vec<std::path::PathBuf>> {
         std::sync::Arc::new(Vec::new())
+    }
+    /// Is `path` in this lookup's read-only DEPENDENCY tier? Tier
+    /// attribution for the masked backward walk: a dependency site is
+    /// visible to references but never rewritten by rename. The Perl hub's
+    /// whole cache is dependency BY CONSTRUCTION (workspace Perl files live
+    /// in the FileStore, so anything here came from `@INC`) — hence the
+    /// default. A pack sub-index holds the workspace's own files too, so it
+    /// overrides with membership in its registered dependency-root set
+    /// (composer's vendor packages).
+    fn is_dependency_path(&self, _path: &std::path::Path) -> bool {
+        true
     }
     /// The workspace root, for resolving an origin's relative `use lib`
     /// entries — Perl resolves those against the process CWD, which for a
@@ -1216,6 +1233,9 @@ impl<'a> CrossFileLookup for ScopedLookup<'a> {
     fn resolution_epoch(&self) -> u64 {
         self.inner.resolution_epoch()
     }
+    fn is_dependency_path(&self, path: &std::path::Path) -> bool {
+        self.inner.is_dependency_path(path)
+    }
     fn get_cached(&self, module_name: &str) -> Option<std::sync::Arc<CachedModule>> {
         // A search-path origin's winner is PER-ASKER: the same name means
         // whichever provider this file's own @INC reaches first. Falling
@@ -1391,6 +1411,9 @@ impl<'a> CrossFileLookup for ScopedLookup<'a> {
     ) -> std::sync::Arc<FileAnalysis> {
         // Same delegation rule as `symbols_present`.
         self.inner.refs_present(cached)
+    }
+    fn prefetch_refs(&self, paths: &[std::path::PathBuf]) {
+        self.inner.prefetch_refs(paths)
     }
     fn candidate_may_declare(
         &self,
