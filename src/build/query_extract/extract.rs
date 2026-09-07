@@ -2165,3 +2165,44 @@ fn byte_range_of(events: &[Event], match_id: usize, cap: &str) -> Option<(usize,
         .find(|e| e.match_id == match_id && e.cap == cap)
         .map(|e| (e.start_byte, e.end_byte))
 }
+
+/// A class body scope: its package is the class (a member declared
+/// directly in the body — a constant, a property default — resolves its
+/// enclosing class as this, not the namespace), and the receiver name
+/// (`$this`) is witnessed as an instance of it, so every chain based on
+/// the receiver resolves through the registry like any typed variable.
+/// The one spelling of "this declaration is deprecated": the attribute the
+/// lane reads, plus the notice hover and the diagnostic show.
+fn mark_deprecated(sym: &mut crate::build::query_extract::SkelSymbol, text: Option<String>) {
+    if !sym.attributes.iter().any(|a| a == "deprecated") {
+        sym.attributes.push("deprecated".to_string());
+    }
+    if text.is_some() || sym.deprecation.is_none() {
+        sym.deprecation = text;
+    }
+}
+
+fn register_class_body(
+    out: &mut SkeletonAnalysis,
+    pack: &crate::build::query_extract::LangPack,
+    scope: crate::model::file_analysis::ScopeId,
+    class: &str,
+    at: Point,
+) {
+    if let Some(sc) = out.scopes.iter_mut().find(|s| s.id == scope) {
+        sc.package = Some(class.to_string());
+    }
+    for recv in pack.receiver_names {
+        out.witnesses.push(crate::model::witnesses::Witness {
+            attachment: crate::model::witnesses::WitnessAttachment::Variable {
+                name: recv.to_string(),
+                scope,
+            },
+            source: crate::model::witnesses::WitnessSource::Builder("skeleton-receiver".into()),
+            payload: crate::model::witnesses::WitnessPayload::InferredType(
+                crate::model::file_analysis::InferredType::ClassName(class.to_string()),
+            ),
+            span: Span { start: at, end: at },
+        });
+    }
+}
