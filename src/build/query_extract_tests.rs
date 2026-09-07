@@ -2814,6 +2814,43 @@ fn php_type_display_speaks_php_not_perl() {
 }
 
 #[test]
+fn php_self_and_static_calls_dispatch_as_the_enclosing_class() {
+    // `self::helper()` / `static::helper()` are current-package dispatch —
+    // the receiver canonicalizes to the model's `__PACKAGE__` token, so
+    // gd/hover/refs ride the same lane as Perl's `__PACKAGE__->helper`.
+    let src = "\
+<?php
+class Util {
+    public static function helper(): string {
+        return \"h\";
+    }
+    public function run(): string {
+        return self::helper() . static::helper();
+    }
+}
+";
+    let (fa, _) = php_fa(src);
+    use crate::model::file_analysis::RefKind;
+    let self_calls: Vec<_> = fa
+        .refs()
+        .iter()
+        .filter(|r| {
+            matches!(&r.kind, RefKind::MethodCall { invocant, .. }
+                if invocant.text() == "__PACKAGE__")
+        })
+        .collect();
+    assert_eq!(self_calls.len(), 2, "both relative static calls canonicalize");
+    // and the dispatch class resolves to the enclosing class
+    for r in self_calls {
+        assert_eq!(
+            fa.method_call_invocant_class(r, None).as_deref(),
+            Some("Util"),
+            "relative static dispatch lands on the enclosing class",
+        );
+    }
+}
+
+#[test]
 fn php_parent_edges_resolve_aliases_and_record_namespaces() {
     // The FQ identity lane: `use X\Y as Z` parents recorded under Z were
     // dead edges (Laravel's `Repository as CacheContract` hid the direct
@@ -3076,5 +3113,83 @@ int f(Widget w) {
         fa.inferred_type_via_bag("x", inside),
         Some(InferredType::Numeric),
         "two-hop chain must type",
+    );
+}
+
+#[test]
+fn php_new_self_types_as_enclosing_class() {
+    // `(new self())->forceFill(...)` — `new self()` is the ENCLOSING
+    // class, not a class named "self"; the ctor witness carries it so
+    // the chain dispatches (BookStack's createForEntity idiom).
+    let src = "\
+<?php
+class Deletion
+{
+    public function label(): string
+    {
+        return \"d\";
+    }
+
+    public static function make(): string
+    {
+        $record = new self();
+        $x = (new self())->label();
+        return $x;
+    }
+}
+";
+    let (fa, _) = php_fa(src);
+    use crate::model::file_analysis::InferredType;
+    let at = tree_sitter::Point { row: 12, column: 8 };
+    assert_eq!(
+        fa.inferred_type_via_bag("$record", at),
+        Some(InferredType::ClassName("Deletion".into())),
+        "new self() types as the enclosing class",
+    );
+    assert_eq!(
+        fa.inferred_type_via_bag("$x", at),
+        Some(InferredType::String),
+        "and the chained call off it dispatches (the flow edge must not
+         narrow onto the ctor literal when the rhs has its own hop)",
+    );
+}
+
+
+#[test]
+fn php_parent_call_mints_super_token() {
+    // `parent::normalize()` rides the model's SUPER lane: the ref's
+    // target is the SUPER-qualified token with a current-package
+    // invocant, dispatch starts ABOVE the writing class (round-3 R1:
+    // gd/refs missed every parent:: site and rename corrupted code).
+    let src = "\
+<?php
+class Base {
+    public function normalize(): string { return \"b\"; }
+}
+class Child extends Base {
+    public function normalize(): string {
+        return parent::normalize() . \"c\";
+    }
+}
+";
+    let (fa, _) = php_fa(src);
+    use crate::model::file_analysis::RefKind;
+    let sup = fa
+        .refs()
+        .iter()
+        .find(|r| r.target_name == "SUPER::normalize")
+        .expect("parent:: call carries the SUPER token");
+    assert!(matches!(sup.kind, RefKind::MethodCall { .. }));
+    // the ref span is the bare name token (rename rewrites only it)
+    assert_eq!(sup.span.end.column - sup.span.start.column, "normalize".len());
+    // and no ClassName(\"parent\") ghost witness leaked from the hop lane
+    use crate::model::witnesses::WitnessPayload;
+    use crate::model::file_analysis::InferredType;
+    assert!(
+        !fa.witnesses.all().iter().any(|w| matches!(
+            &w.payload,
+            WitnessPayload::InferredType(InferredType::ClassName(c)) if c == "parent"
+        )),
+        "no fake class 'parent'",
     );
 }
