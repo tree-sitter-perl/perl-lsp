@@ -20,6 +20,26 @@
         "none": []
       },
       "status": "gold"
+    },
+    {
+      "id": "php-lar-rename-route-name",
+      "difficulty": "simple",
+      "semantic_area": "php-laravel",
+      "lang": "php",
+      "root": "gold-corpus/laravel-fixture",
+      "comment": "rename at `->name('home')` rewrites inside the quotes at the declaration and the template's `route('home')`.",
+      "file": "routes/web.php",
+      "line": 5,
+      "col": 57,
+      "expect": {
+        "all": [
+          "show.blade.php\":[{\"col\":\"19\",\"end_col\":\"23\",\"end_line\":\"2\",\"line\":\"2\",\"new_text\":\"landing\"}",
+          "web.php\":[{\"col\":\"57\",\"end_col\":\"61\",\"end_line\":\"5\",\"line\":\"5\",\"new_text\":\"landing\"}"
+        ],
+        "none": []
+      },
+      "status": "gold",
+      "newname": "landing"
     }
   ]
 }

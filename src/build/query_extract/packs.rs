@@ -1057,7 +1057,7 @@ pub fn php_pack() -> LangPack {
             include_str!("../../../queries/php/frameworks/phpunit.entry.json"),
             include_str!("../../../queries/php/frameworks/symfony.entry.json"),
         ],
-        bundled_rail_docs: &[],
+        bundled_rail_docs: &[include_str!("../../../queries/php/frameworks/laravel.rails.json")],
         // variable_name captures carry the `$` (PHP spells it at every
         // use, like Perl); names/classes pass through verbatim. A
         // `self::`/`static::` receiver IS the enclosing class — spelled as
