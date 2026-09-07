@@ -981,3 +981,135 @@ fn php_anonymous_class_is_its_own_identity() {
     assert!(ctors.iter().all(|(pkg, fan_in)| pkg.starts_with("class_anonymous_") && *fan_in == 1), "each anonymous ctor keyed by its synthesized class with its `new class(...)` site as fan-in: {ctors:?}");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Day-2 diagnostics axis: the php lanes `--check` reports on a project —
+/// undefined method / property (through a typed `$this->prop` chain, with
+/// non-public access told apart), argument-count mismatch both ways,
+/// undefined variable, undefined type — and the shapes every lane must
+/// stay SILENT on: `catch ($e)`, `use (&$x)`, `Foo::$static`, property
+/// declarations, `Foo::class`, `f(...)`, `\Throwable`, `use function`,
+/// enum members, a property declared by writing it, a class whose parent
+/// the workspace cannot see.
+#[cfg(feature = "php")]
+#[test]
+fn php_diagnostic_lanes_report_the_real_findings_and_nothing_else() {
+    let dir = std::env::temp_dir().join(format!("perl-lsp-d2diag-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    let w = |rel: &str, src: &str| std::fs::write(dir.join(rel), src).unwrap();
+    w("composer.json", "{\"autoload\": {\"psr-4\": {\"App\\\\\": \"src/\"}}}");
+    w("src/Mailer.php", "<?php\nnamespace App;\n\nclass Mailer\n{\n    private string $from = 'noreply@example.com';\n\n    public function send(string $to, string $subject, string $body = ''): bool\n    {\n        return $to !== '' && $subject !== '';\n    }\n}\n");
+    w("src/Service.php", "<?php\nnamespace App;\n\nclass Service\n{\n    public function __construct(private Mailer $mailer) {}\n\n    public function run(string $who): void\n    {\n        $this->mailer->send($who);\n        $this->mailer->sendLater($who, 'x');\n        $this->mailer->from;\n        $this->missingMethod();\n        $count = strlen($who) + $undefinedVar;\n        $req = new Request('GET', '/');\n        Helper::go();\n        $this->mailer->send($who, 'subject', 'body', 'extra');\n    }\n}\n");
+    w("src/Quiet.php", "<?php\nnamespace App;\nuse function Other\\helper;\nuse Exception;\nenum Level: int { case Low = 1; public function label(): string { return $this->name . $this->value; } }\nclass Quiet extends Unseen\n{\n    public static $count = 0;\n    private $dyn;\n    public function go(array $rows): int\n    {\n        try { $x = 1; } catch (\\Throwable $e) { return $e->getCode(); }\n        $seen = 0;\n        $cb = function () use (&$seen) { $seen++; };\n        $cb();\n        self::$count++;\n        Quiet::$count = 2;\n        $this->created = true;\n        $this->created;\n        $name = Quiet::class;\n        $f = strlen(...);\n        $this->inherited();\n        $lvl = Level::from(1);\n        return $seen + \\count($rows) + $lvl->value;\n    }\n}\n");
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_perl-lsp"))
+        .args(["--check", dir.to_str().unwrap()])
+        .env("XDG_CACHE_HOME", dir.join(".cache"))
+        .output()
+        .expect("run");
+    let err = String::from_utf8_lossy(&out.stderr);
+    let rows: Vec<&str> = err.lines().filter(|l| l.contains("[")).collect();
+    let has = |file: &str, code: &str, needle: &str| rows.iter().any(|l| l.contains(file) && l.contains(&format!("[{code}]")) && l.contains(needle));
+    assert!(has("Service.php", "arity-mismatch", "Expected 2. Found 1"), "{err}");
+    assert!(has("Service.php", "arity-mismatch", "Expected 3. Found 4"), "{err}");
+    assert!(has("Service.php", "unresolved-method", "sendLater"), "{err}");
+    assert!(has("Service.php", "unresolved-method", "missingMethod"), "{err}");
+    assert!(has("Service.php", "non-public-access", "'from'"), "{err}");
+    assert!(has("Service.php", "undefined-variable", "$undefinedVar"), "{err}");
+    assert!(has("Service.php", "undefined-type", "App\\Helper"), "{err}");
+    assert!(has("Service.php", "undefined-type", "App\\Request"), "{err}");
+    // and nothing beyond those eight — a duplicated row is a regression
+    let service = rows.iter().filter(|l| l.contains("Service.php")).count();
+    assert_eq!(service, 8, "{err}");
+    // the ONE real finding in Quiet.php is its unseen parent; every other
+    // shape there is a silence rule
+    let quiet: Vec<&&str> = rows.iter().filter(|l| l.contains("Quiet.php")).collect();
+    assert_eq!(quiet.len(), 1, "the silence rules: {quiet:?}");
+    assert!(quiet[0].contains("[undefined-type]") && quiet[0].contains("App\\Unseen"), "{quiet:?}");
+    let mailer: Vec<&&str> = rows.iter().filter(|l| l.contains("Mailer.php")).collect();
+    assert!(mailer.is_empty(), "{mailer:?}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Day-2: a call through a callable VARIABLE (`$r = $handler(new Foo(), [])`)
+/// has no known value — it must not take an argument's constructor type
+/// (the assignment narrowing only descends into a literal the right-hand
+/// side merely wraps in parentheses).
+#[cfg(feature = "php")]
+#[test]
+fn php_callable_variable_call_does_not_take_its_arguments_type() {
+    let dir = std::env::temp_dir().join(format!("perl-lsp-d2callvar-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("T.php"), "<?php\nnamespace T;\nclass Foo { public function go(): int { return 1; } }\nclass Bar { public function run(): int { return 2; } }\nfunction mk(): Bar { return new Bar(); }\nfunction test(callable $a): void {\n    $r = $a(new Foo(), []);\n    $s = mk(new Foo());\n    $t = (new Foo());\n}\n").unwrap();
+    let run = |line: &str, col: &str| {
+        let out = std::process::Command::new(env!("CARGO_BIN_EXE_perl-lsp"))
+            .args(["--hover", dir.to_str().unwrap(), "--at", &format!("{}:{}:{}", dir.join("T.php").display(), line, col)])
+            .env("XDG_CACHE_HOME", dir.join(".cache"))
+            .output()
+            .expect("run");
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+    let r = run("7", "6");
+    // untyped: the hover shows the source line, never a `$r: Foo` type line
+    assert!(!r.contains("$r: "), "`$r` took the argument's type: {r}");
+    let s = run("8", "6");
+    assert!(s.contains("Bar"), "a named function's declared return: {s}");
+    let t = run("9", "6");
+    assert!(t.contains("Foo"), "a parenthesized literal is the value: {t}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+
+/// Round-6 R6-6 / R6-7 / R6-8: a `'A\\F::cb'` string callable is a Callable
+/// member reference on `F` (references from the method reach it); `new
+/// self(...)` names the enclosing class (its ctor's references and
+/// hover see it); a middle segment of a `use` row is a namespace and
+/// answers nothing rather than a same-named class elsewhere.
+#[cfg(feature = "php")]
+#[test]
+fn php_string_callables_new_self_and_import_row_segments() {
+    let dir = std::env::temp_dir().join(format!("perl-lsp-r6c-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("A/Sub")).unwrap();
+    let w = |rel: &str, src: &str| std::fs::write(dir.join(rel), src).unwrap();
+    w("A/F.php", "<?php\nnamespace A;\nclass F\n{\n    public static function mk(): self { return new self(1); }\n    public function __construct(int $n) {}\n    public static function cb(): void {}\n}\n");
+    w("A/Use.php", "<?php\nnamespace A;\nuse A\\Sub\\Thing;\ncall_user_func('A\\F::cb');\n$f = F::mk();\n");
+    w("A/Sub/Thing.php", "<?php\nnamespace A\\Sub;\nclass Thing {}\n");
+    w("A/Sub.php", "<?php\nnamespace A;\nclass Sub {}\n");
+    let run = |args: &[&str]| {
+        let out = std::process::Command::new(env!("CARGO_BIN_EXE_perl-lsp"))
+            .args(args)
+            .env("XDG_CACHE_HOME", dir.join(".cache"))
+            .output()
+            .expect("run");
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+    let root = dir.to_str().unwrap();
+    let lines = |out: &str| -> Vec<u64> {
+        let v: serde_json::Value = serde_json::from_str(out).expect("json");
+        let mut l: Vec<u64> = v.as_array().unwrap().iter().map(|e| e["line"].as_u64().unwrap()).collect();
+        l.sort();
+        l
+    };
+    let ctor = lines(&run(&["--references", root, "A/F.php", "5", "20"]));
+    assert_eq!(ctor, vec![4, 5], "`new self(1)` (row 4) is a construction site of F");
+    let hover = run(&["--hover", root, "A/F.php", "4", "53"]);
+    assert!(hover.contains("__construct"), "`self` in `new self` is the constructor call: {hover}");
+    let gd = run(&["--definition", root, "A/F.php", "4", "53"]);
+    assert!(gd.contains("F.php:5:"), "goto-def on `self` lands on the constructor: {gd}");
+    let rename = run(&["--rename", root, "A/F.php", "5", "20", "build"]);
+    assert!(!rename.contains("\"line\": 4"), "a constructor-convention name is not renameable: {rename}");
+    let cb = run(&["--references", root, "A/F.php", "6", "28"]);
+    assert!(cb.contains("Use.php"), "the string callable site references `cb`: {cb}");
+    // Renaming `cb` rewrites exactly the method tail inside the string
+    // (`'A\\F::cb'` → `'A\\F::run'`), never the class qualifier.
+    let rename: serde_json::Value = serde_json::from_str(&run(&["--rename", root, "A/F.php", "6", "28", "run"])).expect("json");
+    let use_edits = rename.as_object().unwrap().iter().find(|(k, _)| k.ends_with("Use.php")).map(|(_, v)| v.clone()).expect("Use.php edited");
+    let e = &use_edits.as_array().unwrap()[0];
+    let src_line = "call_user_func('A\\F::cb');";
+    let cb_col = src_line.find("cb'").unwrap() as u64;
+    assert_eq!((e["line"].as_u64(), e["col"].as_u64(), e["end_col"].as_u64()), (Some(3), Some(cb_col), Some(cb_col + 2)), "{use_edits}");
+    let mid = run(&["--definition", root, "A/Use.php", "2", "8"]);
+    assert!(!mid.contains("Sub.php"), "a `use` row's middle segment is a namespace, not class `A\\Sub`: {mid}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
