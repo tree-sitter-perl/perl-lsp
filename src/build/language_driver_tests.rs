@@ -946,30 +946,36 @@ fn driver_caps_axes_are_reviewed_exhaustively() {
             cursor_context,
             hover_info,
             signature_help,
+            pack_signature_help,
             selection_range,
             synchronous_rebuild,
             context_gather,
             pack_invalidation,
             cross_file_words,
             entrypoint_symbols,
+            runtime_invoked_methods,
             include_path_tokens,
             preprocessor_macros,
         } = d.caps();
         // The hub lanes (enrichment, native cursor/hover/rebuild verbs) and
         // the pack lanes (invalidator, gather, bare words) are disjoint
         // architectures today — one driver never straddles both.
+        // selectionRange is a tree-ancestor walk with no language in it —
+        // both architectures serve it, so it belongs to neither family.
+        let _ = selection_range;
         let hub_family = hub_enrichment
             || cursor_context
             || hover_info
             || signature_help
-            || selection_range
             || synchronous_rebuild;
         let pack_family = pack_invalidation
+            || pack_signature_help
             || context_gather
             || cross_file_words
             || include_path_tokens
             || preprocessor_macros
-            || !entrypoint_symbols.is_empty();
+            || !entrypoint_symbols.is_empty()
+            || !runtime_invoked_methods.is_empty();
         assert!(
             !(hub_family && pack_family),
             "driver {} declares capabilities from both serving architectures",
@@ -992,3 +998,4 @@ fn exactly_one_fallback_driver() {
     assert_eq!(n, 1, "exactly one driver claims unclaimed files");
     assert!(reg.fallback().claims_unclaimed());
 }
+

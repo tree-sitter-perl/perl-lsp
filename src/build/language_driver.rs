@@ -45,6 +45,11 @@ pub struct DriverCaps {
     pub hover_info: bool,
     /// The signatureHelp verb is served (the cursor-context handler).
     pub signature_help: bool,
+    /// Pack-family signature help: the call site from the document's own
+    /// tree (`cursor_sentinel::call_at` on the pack's `call_shapes`), the
+    /// signature from the defining file's text. Disjoint from the hub's
+    /// `signature_help` (Perl's cursor-context path).
+    pub pack_signature_help: bool,
     /// The selectionRange verb is served (the tree-shape handler).
     pub selection_range: bool,
     /// A didChange rebuild is cheap enough to run synchronously on the
@@ -68,6 +73,10 @@ pub struct DriverCaps {
     /// See `LangPack::entrypoint_symbols` — symbols the runtime enters
     /// through the ABI, alive at zero fan-in by contract.
     pub entrypoint_symbols: &'static [&'static str],
+    /// See `LangPack::runtime_invoked_methods` — method names the runtime
+    /// invokes structurally (php magic methods); the heatmap's dead-code
+    /// flagging shields them.
+    pub runtime_invoked_methods: &'static [&'static str],
     /// See `LangPack::include_path_tokens`.
     pub include_path_tokens: bool,
     /// See `LangPack::preprocessor_macros`.
@@ -156,6 +165,15 @@ pub trait LanguageDriver: Send + Sync {
     fn sniff(&self, _prefix: &str) -> bool {
         false
     }
+    /// Extra DEPENDENCY-tier roots this language's projects declare outside
+    /// the ignore-aware workspace walk (php: composer's `vendor/` packages,
+    /// which the project's own .gitignore hides). The bulk indexer walks
+    /// these WITHOUT gitignore filtering and feeds them into the same
+    /// per-language sub-index — the pack tier is already dependency-masked
+    /// (read-only for rename) in the backward walk. Empty = none.
+    fn dependency_roots(&self, _workspace_root: &std::path::Path) -> Vec<std::path::PathBuf> {
+        Vec::new()
+    }
 }
 
 /// Perl — the reference driver. Wraps the production builder; behaviour
@@ -170,6 +188,9 @@ pub trait LanguageDriver: Send + Sync {
 /// asserts the verb surface and regressions are caught; `Beta` = broad gold
 /// coverage, known gaps documented; `Alpha` = it parses and answers, with
 /// little or no net watching it — expect wrong answers.
+// The pack drivers that construct `Beta`/`Alpha` are feature-gated, so a
+// default (Perl-only) build sees only `Stable`.
+#[allow(dead_code)]
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Maturity {
     Stable,
@@ -303,6 +324,10 @@ pub struct PackDriver {
     /// concept). Stamps a `non_public` attribute on member symbols so
     /// completion can filter by visibility.
     access_regions: Option<fn(&mut tree_sitter::Parser, &str) -> Vec<crate::build::cpp_reparse::AccessRegion>>,
+    /// Extra DEPENDENCY-tier roots a project of this language declares
+    /// outside the ignore-aware walk (php: composer's vendor packages).
+    /// `None` = the workspace walk is the whole story.
+    dependency_roots: Option<fn(&Path) -> Vec<std::path::PathBuf>>,
 }
 
 /// Pre-parse external state gathered in phase 1 (`gather_pack_context`) and
@@ -394,6 +419,9 @@ impl LanguageDriver for PackDriver {
     fn lang_pack(&self) -> Option<crate::build::query_extract::LangPack> {
         Some((self.pack)())
     }
+    fn dependency_roots(&self, workspace_root: &Path) -> Vec<std::path::PathBuf> {
+        self.dependency_roots.map(|f| f(workspace_root)).unwrap_or_default()
+    }
     fn caps(&self) -> DriverCaps {
         let pack = (self.pack)();
         DriverCaps {
@@ -405,8 +433,13 @@ impl LanguageDriver for PackDriver {
             pack_invalidation: true,
             cross_file_words: true,
             entrypoint_symbols: pack.entrypoint_symbols,
+            runtime_invoked_methods: pack.runtime_invoked_methods,
+            // declared by the pack's call shapes — no shapes, no verb
+            pack_signature_help: !pack.call_shapes.is_empty(),
             include_path_tokens: pack.include_path_tokens,
             preprocessor_macros: pack.preprocessor_macros,
+            // The verb walks tree ancestors — no language in it.
+            selection_range: true,
             ..Default::default()
         }
     }
@@ -678,6 +711,7 @@ fn cpp_driver() -> PackDriver {
         input_fingerprint: Some(crate::build::cpp_reparse::toolchain_fingerprint),
         sniff: Some(crate::build::cpp_reparse::looks_like_c_family),
         access_regions: Some(crate::build::cpp_reparse::access_regions),
+        dependency_roots: None,
     }
 }
 
@@ -702,6 +736,7 @@ fn python_driver() -> PackDriver {
         input_fingerprint: None,
         sniff: None,
         access_regions: None,
+        dependency_roots: None,
     }
 }
 
@@ -726,6 +761,7 @@ fn r_driver() -> PackDriver {
         input_fingerprint: None,
         sniff: None,
         access_regions: None,
+        dependency_roots: None,
     }
 }
 
@@ -751,6 +787,7 @@ fn cmake_driver() -> PackDriver {
         input_fingerprint: None,
         sniff: None,
         access_regions: None,
+        dependency_roots: None,
     }
 }
 
