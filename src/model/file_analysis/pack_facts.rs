@@ -20,6 +20,34 @@ pub struct PackFacts {
     /// lives in `conventions.rs`, so this stays empty there.
     #[serde(default)]
     pub receiver_names: Vec<String>,
+    /// Variables the runtime binds without a declaration (php `$this`,
+    /// superglobals) — the undefined-variable lane's silence list.
+    #[serde(default)]
+    pub implicit_variables: Vec<String>,
+    /// The language's throwaway binding names (php `$_`) — written to be
+    /// discarded, so the unused-variable lane never reports them.
+    #[serde(default)]
+    pub throwaway_names: Vec<String>,
+    /// Methods whose presence makes a class answer any member name (php
+    /// `__call`/`__get`) — the undefined-member lanes stay silent on it.
+    #[serde(default)]
+    pub catch_all_methods: Vec<String>,
+    /// The member name that is the class-name literal (php `Foo::class`).
+    #[serde(default)]
+    pub class_literal_member: String,
+    /// Type names are capitalized by convention (an import row with a
+    /// lowercase leaf names a function or constant).
+    #[serde(default)]
+    pub types_are_capitalized: bool,
+    /// Members every enum carries by language rule.
+    #[serde(default)]
+    pub enum_members: Vec<String>,
+    /// The sigil a static property is spelled with after the scope operator.
+    #[serde(default)]
+    pub static_property_sigil: String,
+    /// Imported names a doc comment mentions.
+    #[serde(default)]
+    pub doc_mentions: Vec<String>,
 
     /// The language's display vocabulary for the engine's value lattice:
     /// `format_inferred_type` tag → this language's spelling (php:
@@ -29,6 +57,14 @@ pub struct PackFacts {
     /// through. Empty for Perl — the engine's tags ARE its vocabulary.
     #[serde(default)]
     pub type_display: Vec<(String, String)>,
+
+    /// The language's constructor-method names (php `__construct`), from
+    /// the LangPack — the identity lane marks a Method target with one of
+    /// these names as `ctor_of` its class, admitting construction sites
+    /// into its references. Empty for Perl (`new` is a convention, not a
+    /// keyword — `is_constructor_name` serves the ranking lanes instead).
+    #[serde(default)]
+    pub constructor_names: Vec<String>,
 
     /// Template-specialization family edges: canonical spec spelling
     /// (`formatter<int, char>`) → primary base name (`formatter`). NOT an
@@ -164,6 +200,14 @@ impl PackFacts {
         h.misc += map_str_vec(&self.template_params)
             + mcap(&self.specializes)
             + vcap(&self.receiver_names)
-            + vcap(&self.type_display);
+            + vcap(&self.implicit_variables)
+            + vcap(&self.throwaway_names)
+            + vcap(&self.catch_all_methods)
+            + self.class_literal_member.capacity()
+            + vcap(&self.enum_members)
+            + self.static_property_sigil.capacity()
+            + vcap(&self.doc_mentions)
+            + vcap(&self.type_display)
+            + vcap(&self.constructor_names);
     }
 }
