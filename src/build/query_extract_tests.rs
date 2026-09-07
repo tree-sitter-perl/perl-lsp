@@ -2874,6 +2874,46 @@ $cfg = ['timeout' => 30, 'retries' => 3];
 }
 
 #[test]
+fn php_cross_file_function_refs_through_refs_to() {
+    // Declaration in a.php, call in b.php, the production refs_to
+    // walks both — Perl parity for the references verb.
+    let (fa_a, _) = php_fa("<?php\nfunction helper($x) {\n    return $x;\n}\n");
+    let (fa_b, _) = php_fa("<?php\n$z = helper(1);\n");
+
+    let store = crate::index::file_store::FileStore::new();
+    let pa = std::path::PathBuf::from("/fake/php/a.php");
+    let pb = std::path::PathBuf::from("/fake/php/b.php");
+    store.insert_workspace(pa.clone(), fa_a);
+    store.insert_workspace(pb.clone(), fa_b);
+
+    let target = crate::index::resolve::TargetRef::new(
+        "helper".into(),
+        crate::index::resolve::TargetKind::Sub { package: None },
+    );
+    let locs = crate::index::resolve::refs_to(&store, None, &target, crate::index::resolve::RoleMask::EDITABLE);
+    let by_file: Vec<(String, crate::model::file_analysis::AccessKind)> = locs
+        .iter()
+        .map(|l| {
+            let f = match &l.key {
+                crate::index::file_store::FileKey::Path(p) => {
+                    p.file_name().unwrap().to_string_lossy().to_string()
+                }
+                crate::index::file_store::FileKey::Url(u) => u.to_string(),
+            };
+            (f, l.access)
+        })
+        .collect();
+    assert!(
+        by_file.contains(&("a.php".into(), crate::model::file_analysis::AccessKind::Declaration)),
+        "expected the def in a.php, got {by_file:?}",
+    );
+    assert!(
+        by_file.contains(&("b.php".into(), crate::model::file_analysis::AccessKind::Read)),
+        "expected the call in b.php, got {by_file:?}",
+    );
+}
+
+#[test]
 fn php_enum_cases_are_enumerators_typed_by_their_enum() {
     let src = "\
 <?php
@@ -3476,6 +3516,53 @@ class Logger {
 }
 
 #[test]
+fn php_builder_generics_project_the_model_back_out() {
+    // The Eloquent Builder lane: `@template TModel` on the class feeds
+    // the same per-class param axis cpp templates use; `@return
+    // Builder2<static>` publishes InstanceOf{Builder2, [Receiver]}; a
+    // `@return TModel|null` method projects the receiver's arg back
+    // out via the existing ParamOf writeback. Net: `Book2::query()
+    // ->first()` types as Book2 with zero engine special-cases.
+    let src = "\
+<?php
+/**
+ * @template TModel of Model
+ */
+class Builder2 {
+    /** @return $this */
+    public function whereX(string $c) { return $this; }
+    /** @return TModel|null */
+    public function first() { return null; }
+}
+class Book2 {
+    /** @return Builder2<static> */
+    public static function query() { return new Builder2(); }
+}
+function f(): string {
+    $b = Book2::query();
+    $x = Book2::query()->whereX('a')->first();
+    echo $x;
+    return 's';
+}
+";
+    let (fa, _) = php_fa(src);
+    use crate::model::file_analysis::InferredType;
+    let at = tree_sitter::Point { row: 17, column: 4 };
+    let b = fa.inferred_type_via_bag("$b", at);
+    assert_eq!(
+        b.as_ref().and_then(|t| t.class_name()),
+        Some("Builder2"),
+        "query() carries a Builder instance: {b:?}"
+    );
+    let x = fa.inferred_type_via_bag("$x", at);
+    assert_eq!(
+        x,
+        Some(InferredType::ClassName("Book2".into())),
+        "first() projects the receiver's model back out: {x:?}"
+    );
+}
+
+#[test]
 fn php_new_sites_are_constructor_references_but_never_rename_targets() {
     // Round-3 R9: references on __construct answered 1 (itself) while
     // 304 `new Client(` sites existed — every constructor landed in the
@@ -3551,6 +3638,87 @@ function get_things(): int {
     );
     let n = fa.inferred_type_via_bag("$n", at);
     assert_eq!(n, Some(InferredType::Numeric), "and the call off it dispatches: {n:?}");
+}
+
+#[test]
+fn php_builder_generics_cross_file_through_self_leaf_parent() {
+    // The BookStack shape end-to-end ACROSS FILES: app User extends app
+    // Model, which extends the vendor Model under an ALIAS (self-leaf
+    // edge), whose query() returns Builder<static>; Builder's
+    // firstWhere() projects TModel. The all-local twin passes — this
+    // pins the cross-file walk.
+    let vendor_model = "\
+<?php
+namespace Acme\\Eloquent;
+class Model {
+    /** @return \\Acme\\Eloquent\\Builder5<static> */
+    public static function query() { return new Builder5(); }
+}
+";
+    let vendor_builder = "\
+<?php
+namespace Acme\\Eloquent;
+/**
+ * @template TModel of \\Acme\\Eloquent\\Model
+ */
+class Builder5 {
+    /** @return TModel|null */
+    public function firstWhere(string $c) { return null; }
+}
+";
+    let app_model = "\
+<?php
+namespace App5;
+use Acme\\Eloquent\\Model as EloquentModel;
+class Model extends EloquentModel {
+}
+";
+    let app_user = "\
+<?php
+namespace App5;
+class User5 extends Model {
+}
+";
+    let run = "\
+<?php
+use App5\\User5;
+$u = User5::query()->firstWhere('id');
+echo $u;
+";
+    let (fa_vm, _) = php_fa(vendor_model);
+    let (fa_vb, _) = php_fa(vendor_builder);
+    let (fa_am, _) = php_fa(app_model);
+    let (fa_au, _) = php_fa(app_user);
+    let (fa_run, _) = php_fa(run);
+
+    let idx = crate::index::module_index::ModuleIndex::new_for_test();
+    let mk = |path: &str, fa: crate::model::file_analysis::FileAnalysis| {
+        std::sync::Arc::new(crate::index::module_index::CachedModule::new(
+            std::path::PathBuf::from(path),
+            std::sync::Arc::new(fa),
+        ))
+    };
+    idx.insert_cache_providers(
+        "Model",
+        Some(vec![
+            mk("/gen/app/Model.php", fa_am),
+            mk("/gen/vendor/Model.php", fa_vm),
+        ]),
+    );
+    idx.insert_cache("Builder5", Some(mk("/gen/vendor/Builder5.php", fa_vb)));
+    idx.insert_cache("User5", Some(mk("/gen/app/User5.php", fa_au)));
+
+    use crate::model::file_analysis::InferredType;
+    let u = fa_run.inferred_type_via_bag_ctx(
+        "$u",
+        tree_sitter::Point { row: 3, column: 0 },
+        Some(&idx),
+    );
+    assert_eq!(
+        u,
+        Some(InferredType::ClassName("User5".into())),
+        "cross-file generics chain: {u:?}"
+    );
 }
 
 #[test]
