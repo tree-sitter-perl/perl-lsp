@@ -132,5 +132,5 @@ name with a non-contract declaration, the walk continues through deferring
 ancestors and prunes at concrete ones, and every honest-silence rule above
 holds — except the `AUTOLOAD` silence, which does not transfer: php checks
 a contract when the class is DECLARED, before any call a `__call` could
-catch, so the pack lane (`unimplemented-method`,
-`docs/adr/php-diagnostics.md`) reports through a catch-all method.
+catch, so the pack lane (`unimplemented-method`) reports through a
+catch-all method.
