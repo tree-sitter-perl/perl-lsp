@@ -1394,6 +1394,111 @@ pub fn pack_symbol_diagnostics(
         }
     }
 
+    // ---- undefined type: a class name the namespace cannot supply ----
+    if index_settled {
+        if let Some(idx) = idx {
+            let pins = analysis.use_map_pins();
+            // a namespace-less file lives in the global namespace
+            let own_ns = pins.own_namespace.clone().unwrap_or_default();
+            {
+                let own = own_ns.as_str();
+                let ns_heads: std::collections::HashSet<&str> = pack
+                    .qualified_spellings
+                    .iter()
+                    .filter_map(|(_, prefix)| prefix.trim_start_matches('\\').split('\\').next())
+                    .filter(|h| !h.is_empty())
+                    .collect();
+                let mut reported: std::collections::HashSet<(usize, usize)> = std::collections::HashSet::new();
+                for r in analysis.refs() {
+                    // a class reference, or a constructor call (`new Foo()`
+                    // carries the class name) that no function answers
+                    let is_type_ref = match r.kind {
+                        RefKind::PackageRef => true,
+                        RefKind::FunctionCall => {
+                            pack.types_are_capitalized
+                                && r.target_name.rsplit('\\').next().unwrap_or("").chars().next().is_some_and(|c| c.is_uppercase())
+                                && !analysis.symbols_named(r.unqualified_target_name()).iter().any(|&sid| matches!(analysis.symbol(sid).kind, FaSymKind::Sub))
+                        }
+                        _ => false,
+                    };
+                    if !is_type_ref {
+                        continue;
+                    }
+                    let written = r.target_name.as_str();
+                    // absolute names reach the global namespace (builtins we
+                    // carry no stubs for) — silent
+                    if written.starts_with('\\') || written.contains("::") {
+                        continue;
+                    }
+                    let leaf = written.rsplit('\\').next().unwrap_or(written);
+                    if leaf.is_empty() || matches!(leaf, "self" | "static" | "parent") {
+                        continue;
+                    }
+                    // a segment used as a NAMESPACE prefix in this file
+                    // (`Psr7\Utils`) names a namespace, not a type
+                    if ns_heads.contains(leaf) {
+                        continue;
+                    }
+                    if analysis.pack.import_row_covering(&r.span).is_some() {
+                        // an import row naming a function/constant, not a type
+                        if pack.types_are_capitalized && leaf.chars().next().is_some_and(|c| c.is_lowercase()) {
+                            continue;
+                        }
+                        // a row whose leaf the file never spells bare imports
+                        // a NAMESPACE (`use GuzzleHttp\Psr7;` then
+                        // `Psr7\Utils`) or nothing — no type to assert
+                        if !pins.spelled.contains(leaf) {
+                            continue;
+                        }
+                    }
+                    let ns = match pins.pins.get(leaf) {
+                        Some(Some(ns)) => ns.clone(),
+                        Some(None) => continue, // conflicting evidence
+                        None => match written.rsplit_once('\\') {
+                            Some((prefix, _)) => format!("{own}\\{prefix}"),
+                            None => own.to_string(),
+                        },
+                    };
+                    // the global namespace is the builtins we carry no stubs
+                    // for — silent, unless the workspace declares the leaf
+                    // under a namespace and nowhere global: then the type is
+                    // real and missing its import
+                    let declared = type_namespaces(analysis, idx, leaf);
+                    if ns.is_empty() {
+                        if declared.is_empty()
+                            || declared.iter().any(|d| d.is_empty())
+                            || crate::build::language_driver::LanguageRegistry::builtin_types(&analysis.language)
+                                .contains(&leaf)
+                        {
+                            continue;
+                        }
+                    } else if declared.contains(&ns) {
+                        continue;
+                    }
+                    if !reported.insert((r.span.start.row, r.span.start.column)) {
+                        continue;
+                    }
+                    // every namespace that DOES declare the leaf is an import
+                    // the quick-fix can offer
+                    let candidates: Vec<String> =
+                        declared.iter().filter(|d| !d.is_empty()).map(|d| format!("{d}\\{leaf}")).collect();
+                    out.push(Diagnostic {
+                        range: span_to_range(r.span),
+                        severity: Some(DiagnosticSeverity::ERROR),
+                        code: Some(NumberOrString::String("undefined-type".to_string())),
+                        source: Some("perl-lsp".to_string()),
+                        message: if ns.is_empty() {
+                            format!("Undefined type '{leaf}'.")
+                        } else {
+                            format!("Undefined type '{ns}\\{leaf}'.")
+                        },
+                        data: (!candidates.is_empty()).then(|| serde_json::json!({ "candidates": candidates })),
+                        ..Default::default()
+                    });
+                }
+            }
+        }
+    }
     out
 }
 
@@ -1420,6 +1525,21 @@ fn deprecated_diag(span: Span, name: &str, text: &Option<String>) -> Diagnostic 
         tags: Some(vec![DiagnosticTag::DEPRECATED]),
         ..Default::default()
     }
+}
+
+/// Every namespace declaring a type named `leaf`: this file's own
+/// declaration plus every workspace/dependency candidate — the set the
+/// undefined-type lane tests membership in and the import quick-fix lists.
+fn type_namespaces(analysis: &FileAnalysis, idx: &dyn CrossFileLookup, leaf: &str) -> Vec<String> {
+    let mut out: Vec<String> = analysis.declared_type_namespace(leaf).into_iter().collect();
+    for c in idx.def_candidates(leaf) {
+        if let Some(ns) = idx.symbols_present(&c).declared_type_namespace(leaf) {
+            if !out.contains(&ns) {
+                out.push(ns);
+            }
+        }
+    }
+    out
 }
 
 /// Call sites of the named functions — the dynamic-behaviour markers a
