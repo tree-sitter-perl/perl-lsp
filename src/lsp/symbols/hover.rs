@@ -41,7 +41,7 @@ pub fn pack_hover_markdown(
                 let substituted = |raw: Option<InferredType>| -> Option<InferredType> {
                     let sub = recv_ty
                         .as_ref()
-                        .and_then(|t| analysis.member_value_type(t, field, Some(midx), None))?;
+                        .and_then(|t| analysis.member_value_type(t, field, Some(midx), None, crate::model::file_analysis::MemberShape::Unknown))?;
                     (raw.as_ref() != Some(&sub)).then_some(sub)
                 };
                 if let Some(crate::model::file_analysis::MethodResolution::Local { sym_id, .. }) =
