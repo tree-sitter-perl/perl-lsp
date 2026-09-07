@@ -976,4 +976,147 @@ impl FileAnalysis {
         }
     }
 
+    /// The namespace this file's own `class LEAF` declaration carries
+    /// (`None` package = the global namespace, spelled `""`). `None` when
+    /// the file declares no such class.
+    pub fn declared_class_namespace(&self, leaf: &str) -> Option<String> {
+        self.symbols()
+            .iter()
+            .find(|s| matches!(s.kind, SymKind::Class) && s.name == leaf)
+            .map(|s| s.package.clone().unwrap_or_default())
+    }
+
+    /// The namespace `leaf` means AS SEEN FROM this file — the use-map
+    /// pins' answer (`UseMapPins::namespace_of`: the file's own declaration,
+    /// its `use` rows with aliases honored, its qualified spellings, and its
+    /// own namespace for a leaf it spells bare). `None` = the file makes no
+    /// claim, and every consumer of the pin stands down.
+    pub fn leaf_namespace(&self, leaf: &str) -> Option<String> {
+        self.use_map_pins().namespace_of(leaf).map(str::to_string)
+    }
+
+    /// Is the import of `ns\leaf` bound under an alias in this file? Then
+    /// the file spells that class by the alias, and the real leaf means
+    /// something else here (its own class, or its namespace's).
+    fn import_is_aliased(&self, ns: &str, leaf: &str) -> bool {
+        self.pack
+            .use_aliases
+            .iter()
+            .any(|(_, ans, aleaf)| ans == ns && aleaf == leaf)
+    }
+
+    /// Every leaf→namespace pin this file carries — its own class
+    /// declarations plus its qualified imports — the table a use-map
+    /// visibility axis is built from (`UseMapPins`). A leaf with
+    /// CONFLICTING evidence (declared here AND imported from elsewhere:
+    /// `use Support\Collection as BaseCollection; class Collection extends
+    /// BaseCollection`) pins to nothing — both classes are live in this
+    /// file under one leaf, and a wrong pin is a silent wrong answer.
+    /// `spelled` is every leaf the file writes as a class token (type
+    /// positions, parent clauses, `new X`, `X::m()` receivers): the
+    /// own-namespace default applies to those alone, never to a leaf the
+    /// file only reaches through some other class's dispatch.
+    pub fn use_map_pins(&self) -> std::sync::Arc<UseMapPins> {
+        self.use_map_pins
+            .get_or_init(|| std::sync::Arc::new(self.leaf_namespace_pins()))
+            .clone()
+    }
+
+    fn leaf_namespace_pins(&self) -> UseMapPins {
+        let mut pins: std::collections::HashMap<String, Option<String>> =
+            std::collections::HashMap::new();
+        let pin = |pins: &mut std::collections::HashMap<String, Option<String>>,
+                       leaf: &str,
+                       ns: &str| {
+            pins.entry(leaf.to_string())
+                .and_modify(|p| {
+                    if p.as_deref() != Some(ns) {
+                        *p = None;
+                    }
+                })
+                .or_insert_with(|| Some(ns.to_string()));
+        };
+        for (_, raw) in &self.pack.include_directives {
+            let t = raw.trim_start_matches('\\');
+            if let Some((ns, leaf)) = t.rsplit_once('\\') {
+                // An aliased row pins the alias spelling (below), never the
+                // real leaf: `use Script\Event as ScriptEvent` in a file
+                // whose bare `Event` is its own namespace's class.
+                if self.import_is_aliased(ns, leaf) {
+                    continue;
+                }
+                pin(&mut pins, leaf, ns);
+            }
+        }
+        let mut visible: std::collections::HashMap<String, Vec<String>> =
+            std::collections::HashMap::new();
+        for (alias, ns, leaf) in &self.pack.use_aliases {
+            pin(&mut pins, alias, ns);
+            let v = visible.entry(leaf.clone()).or_default();
+            if !v.contains(ns) {
+                v.push(ns.clone());
+            }
+        }
+        let mut own: Option<String> = None;
+        let mut several = false;
+        for s in self.symbols().iter() {
+            match s.kind {
+                SymKind::Class => {
+                    let ns = s.package.clone().unwrap_or_default();
+                    pins.entry(s.name.clone())
+                        .and_modify(|p| {
+                            if p.as_deref() != Some(ns.as_str()) {
+                                *p = None;
+                            }
+                        })
+                        .or_insert(Some(ns));
+                }
+                SymKind::Package => {
+                    if own.as_deref().is_some_and(|o| o != s.name) {
+                        several = true;
+                    }
+                    own.get_or_insert_with(|| s.name.clone());
+                }
+                _ => {}
+            }
+        }
+        let own_ns = if several { None } else { own.clone() };
+        // A qualified spelling names its namespace outright: absolute with a
+        // leading `\`, else relative to the file's own namespace (php's
+        // rule for `new Downloader\DownloadManager()` inside `Composer`).
+        for (leaf, prefix) in &self.pack.qualified_spellings {
+            let ns = match prefix.strip_prefix('\\') {
+                Some(abs) => abs.to_string(),
+                None => match &own_ns {
+                    Some(o) => format!("{o}\\{prefix}"),
+                    None => prefix.clone(),
+                },
+            };
+            pin(&mut pins, leaf, &ns);
+        }
+        let mut spelled: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for r in self.refs() {
+            match &r.kind {
+                RefKind::PackageRef | RefKind::FunctionCall => {
+                    spelled.insert(r.unqualified_target_name().to_string());
+                }
+                RefKind::MethodCall { invocant, .. } => {
+                    let t = invocant.text();
+                    if crate::model::conventions::is_bareword_class_name(t) {
+                        spelled.insert(t.rsplit(['\\', ':']).next().unwrap_or(t).to_string());
+                    }
+                }
+                _ => {}
+            }
+        }
+        for (leaf, ns) in &pins {
+            if let Some(ns) = ns {
+                let v = visible.entry(leaf.clone()).or_default();
+                if !v.contains(ns) {
+                    v.insert(0, ns.clone());
+                }
+            }
+        }
+        UseMapPins { pins, own_namespace: own_ns, spelled, visible }
+    }
 }
