@@ -195,7 +195,7 @@ pub(super) enum WalkScope<'a> {
 /// `refs_to` narrowed to ONE file — the origin scope of the same driver,
 /// so the highlights image is the in-file slice of `references()` without
 /// paying the workspace walk per cursor move.
-pub(super) fn refs_to_in_file(
+pub(crate) fn refs_to_in_file(
     files: &FileStore,
     module_index: Option<&dyn CrossFileLookup>,
     target: &TargetRef,
@@ -648,6 +648,17 @@ fn walk_refs(
                 rows_indexed = crate::util::ghost_stats::timed("refs.retrieval.indexed_paths", || retrieve_indexed(idx));
                 candidate_set = candidate_paths.iter().cloned().collect();
             }
+            // Decode the candidate set in parallel before the sequential
+            // match: cold, decode was ~60% of the first answer. Workspace
+            // FileStore entries answer resident and are skipped; the
+            // prefetch's own cap means a candidate set past it decodes its
+            // tail serially, as before.
+            let to_warm: Vec<std::path::PathBuf> = candidate_paths
+                .iter()
+                .filter(|p| !covered_paths.contains(*p) && !files.workspace_raw().contains_key(*p))
+                .cloned()
+                .collect();
+            idx.prefetch_refs(&to_warm);
             for path in candidate_paths.iter() {
                 if covered_paths.contains(path) {
                     continue;
@@ -781,8 +792,10 @@ fn walk_refs(
                 // Rows-off fallback sweep: copies here may still be
                 // row-axes-evicted (rows exist, retrieval switched off) —
                 // the matcher needs refs + symbols, so take the rows view.
-                let full = matcher_view(idx, cached, target);
-                collect_from_analysis(&key, &full, target, &aliases, module_index, &file_str, &memo, &mut out);
+                let full = crate::util::ghost_stats::timed("refs.cand.view", || matcher_view(idx, cached, target));
+                crate::util::ghost_stats::timed("refs.cand.collect", || {
+                    collect_from_analysis(&key, &full, target, &aliases, module_index, &file_str, &memo, &mut out)
+                });
             });
         }
     }
