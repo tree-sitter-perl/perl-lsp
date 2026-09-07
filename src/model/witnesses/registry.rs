@@ -2063,6 +2063,64 @@ impl ReducerRegistry {
                                 })
                             }
                             ProjectionStep::ArrayIndex(i) => t.element_at(*i).cloned(),
+                            ProjectionStep::Element => match &t {
+                                crate::model::file_analysis::InferredType::Sequence(elems) => {
+                                    let mut it = elems.iter();
+                                    it.next().filter(|first| it.all(|e| e == *first)).cloned()
+                                }
+                                // A parametric container's TRAILING argument is
+                                // its element by the same positional convention
+                                // `ParamOf` projects (`array<K, V>` → V,
+                                // `vector<T>` → T) — no base-name branch.
+                                crate::model::file_analysis::InferredType::Parametric(
+                                    crate::model::file_analysis::ParametricType::Instance {
+                                        args, ..
+                                    },
+                                ) => args.last().cloned(),
+                                _ => None,
+                            },
+                            ProjectionStep::Key => match &t {
+                                // A sequence's keys ARE its positions.
+                                crate::model::file_analysis::InferredType::Sequence(_) => {
+                                    Some(crate::model::file_analysis::InferredType::Numeric)
+                                }
+                                // A two-argument instance keys by its first
+                                // argument (`array<string, V>` → string).
+                                crate::model::file_analysis::InferredType::Parametric(
+                                    crate::model::file_analysis::ParametricType::Instance {
+                                        args, ..
+                                    },
+                                ) if args.len() == 2 => args.first().cloned(),
+                                _ => None,
+                            },
+                            ProjectionStep::MethodHop { member, arity } => {
+                                // Fresh dispatch on the base's class at the
+                                // call site's own arity; the base type IS the
+                                // dynamic receiver, so a fluent `Receiver`
+                                // return substitutes it (`$q->where()->get()`).
+                                t.class_name().map(str::to_string).and_then(|class| {
+                                    let att = WitnessAttachment::PackageSymbol {
+                                        package: class,
+                                        name: member.clone(),
+                                    };
+                                    let sub_q = ReducerQuery {
+                                        attachment: &att,
+                                        point: q.point,
+                                        framework: q.framework,
+                                        arity_hint: Some(*arity),
+                                        receiver: Some(t.clone()),
+                                        args: q.args.clone(),
+                                        context: q.context,
+                                    };
+                                    state.in_opaque_frame(|state| {
+                                        match &*self.query_rec(bag, &sub_q, state) {
+                                            ReducedValue::Type(t) => Some(t.clone()),
+                                            ReducedValue::FactMap(_)
+                                            | ReducedValue::None => None,
+                                        }
+                                    })
+                                })
+                            }
                         };
                         if let Some(t) = projected {
                             out.push(Witness {

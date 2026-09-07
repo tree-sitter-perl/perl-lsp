@@ -294,6 +294,32 @@ pub enum WitnessPayload {
 pub enum ProjectionStep {
     HashKey(String),
     ArrayIndex(i32),
+    /// A method-call hop off the base value: "dispatch `member` on
+    /// whatever class the base resolves to, at the call's own arity."
+    /// The registry's spelling of a receiver-EXPRESSION method call —
+    /// `$a->b()->c()` has no variable for the outer hop's receiver, so
+    /// no `MethodCallBinding` can bridge it; the hop defers the
+    /// dispatch to query time, when the base's class (and the index)
+    /// are in hand, then chases `PackageSymbol{class, member}` like any
+    /// edge. Minted per member-call site by pack extraction; the base
+    /// is the receiver's `Variable` (simple receiver) or `Expr` (a
+    /// nested call's span, carrying its own hop). Kept at the END for
+    /// bincode variant-index stability (bump `EXTRACT_VERSION`).
+    MethodHop { member: String, arity: u32 },
+    /// The UNIFORM element of a sequence — the foreach/iteration peel
+    /// (`foreach ($this->handlers as $handler)` types `$handler` as the
+    /// collection's element). Projects a `Sequence` all of whose elements
+    /// agree to that one type; a heterogeneous tuple or an untyped
+    /// `ArrayRef`/`HashRef` answers `None` (no index is in hand, so no
+    /// per-slot answer exists). Kept at the END for bincode variant-index
+    /// stability (bump `EXTRACT_VERSION`).
+    Element,
+    /// The KEY axis of an iterated collection — the pair-form foreach's
+    /// first binding (`foreach ($m as $k => $v)`). A `Sequence`'s keys ARE
+    /// its positions (`Numeric`); a two-argument parametric instance
+    /// (`array<string, V>` docs) projects its first argument. Kept at the
+    /// END for bincode variant-index stability (bump `EXTRACT_VERSION`).
+    Key,
 }
 
 /// A sub's return type as a **deferred computation**, not a value:
