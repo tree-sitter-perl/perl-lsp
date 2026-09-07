@@ -19,6 +19,14 @@ designs live in `docs/prompt-storage-residuals.md`.
 | [Decl→def ranking on QUALIFIED / member goto-def](#decldef-ranking-on-qualified--member-goto-def--2026-07-15--open-claude) | 07-15 | should qualified goto-def rank def-over-decl, via the shared seam (B) or a local patch (A)? |
 | [Cross-file gated-emission visibility](#cross-file-gated-emission-visibility--2026-07-17--open-claude) | 07-17 | how do cross-file readers see a DBIC result class's deferred accessors — index-time materialize (picked) vs a per-query enriched overlay? |
 | [DBIC source-moniker disambiguation without a typed `$schema`](#dbic-source-moniker-disambiguation-without-a-typed-schema--2026-07-17--open-claude) | 07-17 | is the largest-source-family heuristic acceptable as the interim, or should moniker resolution wait for schema-value provenance? |
+| [GraphView node identity is leaf-keyed](#graphview-node-identity-is-leaf-keyed--2026-09-01--open-claude) | 09-01 | should `Node::Class` carry the namespace so a same-leaf aliased parent stops needing a per-consumer bypass (two exist)? |
+| [PHP builtin stubs for the global namespace](#php-builtin-stubs-for-the-global-namespace--2026-09-02--open-claude) | 09-02 | bundle phpstorm-stubs, a compiled subset, or stay silent on the global namespace? |
+| [Diagnostic severity without vendor](#diagnostic-severity-without-vendor--2026-09-02--open-claude) | 09-02 | keep ERROR for undefined types whose whole dependency is missing, or demote to WARNING? |
+| [Anonymous classes need an identity](#anonymous-classes-need-an-identity--2026-09-02--open-claude) | 09-02 | php `new class(...)` members register under the enclosing container — an outer member's rename corrupts the anonymous one; position-keyed synthetic identity (A) or scope-local members (B)? |
+| [Union types in the lattice](#union-types-in-the-lattice--2026-09-02--open-claude) | 09-02 | `list<A|B>` / `A|B` returns: add a `Union` variant, pick an arm, or stay dark? |
+| [Dead-code queue vs library public API](#dead-code-queue-vs-library-public-api--2026-09-02--open-claude) | 09-02 | should `--heatmap` learn a library mode that never flags public members whose callers live out of tree? |
+| [Use-map pin with no indexed declaration answers empty](#use-map-pin-with-no-indexed-declaration-answers-empty--2026-09-02--open-claude) | 09-02 | when a php file `use`s a class no indexed file declares (vendor not indexed), should gd/hover answer nothing, or fall back to a same-leaf candidate from another namespace? |
+| [Relation properties typed from the relation's return generic](#relation-properties-typed-from-the-relations-return-generic--2026-09-02--open-claude) | 09-02 | should `@return BelongsTo<Book, $this>` type the magic property `->book` as `Book` by an engine rule ("to-one relation type's first argument"), or stay overlay-shaped (bare/one-modifier `belongsTo(X::class)` only)? |
 
 Format per entry:
 
@@ -237,3 +245,335 @@ Format per entry:
   schema's result namespaces) move from core (`resolve_dbic_source_moniker`,
   where it sits with `extract_resultset_parametric`) into the DBIC plugin
   manifest when the DBIC-as-plugin port lands?
+
+---
+
+## GraphView node identity is leaf-keyed — 2026-09-01 — OPEN (Claude)
+- **Context:** the php round-4 `parent::` fix (H8). `GraphView`'s ancestor
+  edges are keyed by LEAF class name (`docs/adr/graph-walking.md`), so a
+  same-leaf parent in another namespace (`use Support\Collection as
+  BaseCollection; class Collection extends BaseCollection`) collapses onto
+  the child's own node and `walk(Node::Class(child))` cannot tell them
+  apart. Two consumers now carry their own bypass: `resolve_super_method`
+  (ancestry.rs — a `parent_namespaces`-row pre-pass before the graph walk)
+  and `CandidateSet::super_def_locations` (definitions.rs — walks
+  `declared_parents` directly with per-row namespace routing, never
+  entering the graph). The round-close sweep flagged the duplication.
+- **Options:** A — keep the two bypasses (status quo; a third same-leaf
+  consumer will grow a third). B — one shared `same_leaf_parent` helper
+  both call (mechanical dedupe, identity stays leaf-keyed). C — give
+  `Node::Class` a namespace-qualified identity for pack languages (the
+  edge derivation reads `parent_namespaces` rows), so the graph itself
+  distinguishes the parent and every walker inherits it — the rule-#10
+  answer, but it touches every `Node::Class` constructor and the
+  descendant/family walks' dedup keys.
+- **Picked:** A for now (nothing further changed in the sweep; the two
+  interface predicates were deduped onto `FileAnalysis::declares_interface`).
+- **Undo cost:** B is an afternoon; C is a slice with its own gold rows
+  (every leaf-keyed consumer re-examined) and a cache bump.
+- **Discussion needed:** is C worth a slice now, or does it wait until a
+  third consumer appears? Perl is absolute-named and never hits this.
+- **Update 2026-09-02 (round-5 R5-1):** the use-map visibility axis is a
+  THIRD consumer of leaf identity, and it is where `use X as Alias`
+  stops: the alias spelling can't be resolved by translating it to the
+  real leaf at extraction (H8's file means two different classes by
+  `Collection` and `BaseCollection`), and can't be pinned without a
+  namespace-qualified class identity. So alias-spelled hints/`new`/
+  receivers resolve nothing today (never a wrong class). C is now the
+  only path to alias support — a concrete reason to schedule it.
+- **Update 2026-09-02 (round-7 re-probe):** the third case, and the most
+  visible one — WordPress's SimplePie writes `use
+  SimplePie\XML\Declaration\Parser as DeclarationParser;` precisely to
+  disambiguate three `Parser`s, and every `DeclarationParser::...` site
+  is dark. Translating the alias to its real leaf at extraction would
+  make those sites resolve to BOTH `Parser`s the file can see (own and
+  aliased), which is imprecise rather than wrong; only a
+  namespace-qualified `Node::Class` answers with one.
+- **Update 2026-09-02 (round-7 close):** group-use rows now mint import
+  rows like the flat spelling, so `use A\{Foo, Bar as Baz};` pins `Baz`
+  exactly as `use A\Bar as Baz;` does — and its `new Baz()` sites are
+  dark for exactly the same reason. Same fork, fourth spelling; nothing
+  new to decide.
+
+---
+
+## PHP builtin stubs for the global namespace — 2026-09-02 — OPEN (Claude)
+
+- **Where:** the diagnostics lanes and completion. We carry no
+  description of PHP's global namespace (`\Exception`, `DateTime`,
+  `strlen`, `preg_match`'s by-reference out-parameter…), so every lane
+  is SILENT on it (`\Foo`, `use Foo;`, a file without a namespace), a
+  bare variable argued to an unresolvable callee is silence (the
+  out-parameter it may be — `preg_match`'s `$m` — cannot be told from the
+  stray read it may be: WordPress's `strpos($wp_version, …)`, a global a
+  `require` sets, went silent with it), and completion cannot offer
+  builtins. Intelephense ships JetBrains'
+  `phpstorm-stubs` (Apache-2.0); phpactor reads the same stubs.
+- **Options:**
+  - A. Bundle a stub tier (phpstorm-stubs, ~30 MB of PHP; or a compiled
+    subset: names, arities, by-ref parameters, return types) indexed as
+    a dependency root like `vendor/`. Every lane gains the global
+    namespace; `undefined-function` becomes possible.
+  - B. Stay silent on the global namespace; ship a small hand-written
+    table (by-ref parameters + return types of the ~200 most-called
+    functions) as pack data.
+  - C. Read the user's own stubs if present (`PERL_LSP_PHP_STUBS`), else B.
+- **Picked:** none. Today = the silence rules.
+- **Undo cost:** A is a dependency-root registration + a fingerprint;
+  the licence question (Apache-2.0 notice) is real but standard.
+- **Discussion needed:** is a 30 MB stub tree acceptable in the
+  distribution, or is the compiled subset the shape you want?
+
+---
+
+## Diagnostic severity without vendor — 2026-09-02 — OPEN (Claude)
+
+- **Where:** `undefined-type` on a project whose `vendor/` is absent or
+  partial (symfony/demo: 358 errors, every one a Symfony/Doctrine class).
+  Intelephense reports the same storm as errors; PHPStan refuses to run.
+- **Options:** A. keep ERROR (PHP fatals at runtime on those lines);
+  B. WARNING when the name's namespace root has NO class anywhere in the
+  index (the whole dependency is missing, not one class); C. a
+  workspace-level notice ("composer install is missing") and INFORMATION
+  per site.
+- **Picked:** A (parity). Undo cost: one severity table.
+- **Discussion needed:** B is honest and cheap — a missing dependency is
+  a different fact from a typo — but hides a typo in a stray namespace.
+
+---
+
+## Anonymous classes need an identity — 2026-09-02 — OPEN (Claude)
+
+- **Where:** php `new class(...) extends Base { ... }` (guzzle/monolog
+  tests, Laravel service providers, PSR fixtures). The skeleton has no
+  `@def.class` for `anonymous_class` (no name node to capture), so its
+  members register under whatever container encloses the expression.
+- **Symptoms:** (1) references/rename on an outer class's member of the
+  same name reach into the anonymous class — a rename CORRUPTS it;
+  (2) `$this->m()` inside the anonymous body resolves against the outer
+  container; (3) its `__construct` has no construction site and flags
+  dead; (4) `extends Base` inside it records no parent edge, so the
+  override is invisible to `implementations`.
+- **Options:**
+  - A. Position-keyed synthesized name (`class@anonymous:<line>:<col>`,
+    close to PHP's own runtime spelling) minted by the extractor for a
+    name-less `@def.class`, with the `@context.package` join accepting
+    the defaulted name (today a context is the TEXT of a captured name
+    node — the join needs "the def this match minted" as a second
+    source). Members key by the synthetic name; `$this` inside resolves
+    to it; the `new class(...)` site mints the ctor call on it.
+    Hover/outline show the synthetic name (PHP users already read it in
+    stack traces).
+  - B. Treat the anonymous body as a lexical scope only (no class
+    symbol): members become scope-local, never package-keyed, so they
+    neither collide with the outer class nor answer `$this`. Fixes the
+    corruption, keeps the dead-queue miss and the dark `$this`.
+  - C. Hoist to the base: key members under `Base` (the `extends`
+    target) as overrides. Wrong the moment two anonymous subclasses of
+    one base disagree; rejected.
+- **Picked:** A, landed 2026-09-02: `@def.class.anchor` on the `class`
+  keyword; the pack's `default_name(kind, row, col)` spells
+  `class_anonymous_<line>_<col>` (identifier-shaped — the name rides the
+  bareword-class lanes, so PHP's own `class@anonymous` spelling is out);
+  the pre-pass joins the synthesized name into `names_by_match` so the
+  def, the `@context.package` and the `@parent` arms read one identity;
+  the brace-scoped re-anchor pass admits an `anonymous`-attributed
+  container. Members never leak to the enclosing container again.
+- **Undo cost:** A touches the extractor's def/context join generically
+  (cpp's `(union)` / php's `(anon)` closure defaults ride the same
+  `default_name` seam — a position suffix there changes visible names,
+  so the suffix must be opt-in per kind, on the pack). Cache bump.
+- **Spike (read-only, 2026-09-02) — what A actually costs:**
+  - The context join is the one generic seam. A member's `package` is
+    the top of `context_stack`, pushed from the TEXT of a captured name
+    node (`extract.rs` context arm); a name-less def has no such node.
+    `names_by_match` is populated only from `.name` captures — the
+    `default_name` fallback runs inside the def arm and is never written
+    back — so BOTH the context arm and the `@parent` arm would need the
+    def arm's fallback (factored once, or the class identity and its
+    parent edge drift apart). Event order is deterministic (`start asc,
+    end desc`: the whole-node def sorts before a same-start keyword
+    capture) and a class-body context is deferred to its `@scope`
+    anyway, so ordering is not the risk; the duplicated fallback is.
+  - A position suffix on the defaulted name is safe: every production
+    consumer of a defaulted symbol gates on the `anonymous` ATTRIBUTE
+    (`complete_pack_qualified`, the member-completion filter), never on
+    the string; one cpp test looks `(union)` up by literal. But
+    `default_name` returns `&'static str` and cannot see the position —
+    a per-kind opt-in on the pack (or the caller suffixing only for
+    opted-in kinds) keeps `(anon)`/`(union)` untouched.
+  - `$this` follows by construction: `enclosing_class_for_scope` takes
+    the innermost scope carrying a package, so once the anonymous body
+    is a `@scope` whose context is the synthetic name, nothing in
+    `invocants.rs` / `cursor_sentinel.rs` changes.
+  - cpp's anonymous aggregate is the REVERSE choice (members flatten
+    onto the enclosing struct — correct C semantics) and is not
+    reusable here. Files: `queries/php/skeleton.scm`, `packs.rs` (php
+    `default_name` "class" arm + the opt-in), `extract.rs` (the shared
+    fallback). Cache bump.
+- **Discussion needed:** the spelling. `class_anonymous_7_20` shows in
+  outline / hover / workspace-symbol; PHP users read `class@anonymous`
+  in stack traces. Keeping it identifier-shaped is load-bearing (the
+  ctor call rides the bareword-class receiver lane); a display-only
+  rename (hover/outline label from the `anonymous` attribute) is the
+  cheap way to show `class@anonymous` without changing the identity.
+  Also: should it be excluded from workspace-symbol (nothing spells it)?
+
+---
+
+## Union types in the lattice — 2026-09-02 — OPEN (Claude)
+- **Context:** php round 5 (composer): `@return list<CompletePackage|CompleteAliasPackage>` — a union INSIDE a generic — leaves the foreach var dark on every verb (hover/gd/refs/rename/completion), isolated against a working `list<Single>` control. `InferredType` has no union; `phpdoc_type` rejects a two-armed spelling ("a two-armed claim is not a type answer") and `php_annot_type` returns `None` for `A|B`, so the whole element type drops.
+- **Options:** A — stay dark (status quo; honest, but composer's package-loading core path is exactly this shape). B — a `Union(Vec<InferredType>)` variant: dispatch = the INTERSECTION of the arms' member sets, hover renders `A|B`, `element_at`/projections map over the arms; a lattice change (bincode append, cache bump) touching every reducer that matches on `InferredType`. C — "first class arm wins" as a display-only heuristic: wrong for members the second arm lacks, cheap.
+- **Picked:** A, sharpened (2026-09-03): a union is KNOWN untypable —
+  `php_annot_type` answers `InferredType::Unknown` for two or more
+  non-null arms (a doc row, a declared `A|B`, a nested element), the
+  value rides every chase (a call, a copy, a return arm: the arm fold
+  reads it as a disagreement instead of electing the arms that resolved)
+  and the registry boundary projects it to `None`, so no renderer sees it
+  and the member lanes stay silent on it. Still dark on hover; B remains
+  the real answer.
+- **Undo cost:** B is a slice with its own gold rows; C is an afternoon and a documented lie.
+- **Discussion needed:** is B worth its blast radius? `?T` (`Optional`) already exists as a one-armed union; the general case is the question.
+
+## Dead-code queue vs library public API — 2026-09-02 — OPEN (Claude)
+- **Context:** composer/phpMyAdmin heatmap sampling: after the ctor fix the remaining false positives are public Plugin/Event-class API, PSR interface implementations and framework-invoked overrides (Symfony Console `getLongVersion`) — callers live OUT of the indexed tree. Framework overrides are `entry.json` data; the general "this is a library's public surface" fact is not.
+- **Options:** A — status quo (the queue is honest about "no caller found in this index", the doc says so). B — a `--library` heatmap mode: never flag `public` members of non-final classes / interface implementations. C — infer library-ness from `composer.json` (`"type": "library"` + PSR-4 autoload roots) and apply B automatically.
+- **Picked:** A (nothing changed); Symfony Console overrides can go into `symfony.entry.json` as data regardless.
+- **Undo cost:** B/C are small and reversible.
+- **Discussion needed:** which of B/C, and whether "public" should mean the PHP visibility keyword or the autoload roots.
+
+---
+
+## Use-map pin with no indexed declaration answers empty — 2026-09-02 — OPEN (Claude)
+- **Context:** round-5 R5-1 (`VisibilityAxis::UseMap`). A php origin's
+  `use Symfony\...\Request;` pins the leaf `Request` to that namespace.
+  When no indexed file declares it (the vendor tree is not in the
+  workspace, or composer's tier is off), `visible_def_candidates` answers
+  EMPTY — gd/hover/completion on that class go dark. Before the axis they
+  answered a same-leaf stranger (`Http\Client\Request`) — wrong, but
+  something. Laravel's `Auth/SessionGuard.php:150` is the live case.
+- **Options:** A — empty (picked): the file said what it means, a
+  stranger is a lie. B — degrade to the full same-leaf table, ranked by
+  the own namespace, when the pinned filter is empty (SearchPath's
+  degrade rule). C — empty for navigation, stranger for TYPE chases only
+  (member completion would at least show something).
+- **Picked:** A, per the smartmatch principle (predictable over clever)
+  and rename safety — B would re-admit the stranger's members into the
+  references walk through the dispatch chain. One arm in
+  `ScopedLookup::visible_def_candidates` (the `pinned` branch); B is a
+  three-line change there, C a shape flag on the query.
+- **Undo cost:** trivial (one match arm); the pin test would need its
+  "un-indexed pinned class answers empty" expectation flipped.
+- **Discussion needed:** is dark-but-honest the right default for an
+  editor surface, or should the composer vendor tier be the answer
+  (index what `use` names, then the question never arises)?
+
+---
+
+## Relation properties typed from the relation's return generic — 2026-09-02 — OPEN (Claude)
+- **Context:** round-6 R6-5. Eloquent's `__get` turns `book()` into a
+  property `->book` of the RELATED model. The laravel overlay mints that
+  property from the method body's shape (`return $this->belongsTo(Book::class)`,
+  now also behind one chained modifier). BookStack's declaration also
+  carries `@return BelongsTo<Book, $this>` — the related class is right
+  there in the docblock, independent of the body's shape (deeper chains,
+  `belongsTo` behind a helper, a relation defined by a trait).
+- **Options:** A — overlay-only, extend the body patterns as shapes turn
+  up (status quo; each new shape is a query edit). B — an engine rule
+  expressed as overlay DATA: the overlay declares "this class is a to-one
+  relation type; its first type argument is the property's type"
+  (`relation_types = { BelongsTo: 0, HasOne: 0, ... }`), and the property
+  witness reads the method's parametric return — shape-independent, but
+  the engine grows a "type argument N of a return type becomes a field
+  type" mechanism. C — both: the body shape when no docblock exists, the
+  generic when it does.
+- **Picked:** A for now (the chained-modifier pattern landed as data).
+- **Undo cost:** B is a small reducer-side change plus an overlay data
+  table; nothing persisted changes shape.
+- **Discussion needed:** is B's mechanism ("a declared relation type's
+  argument types a magic property") general enough to earn engine space
+  (Doctrine collections, Django managers would use it too), or is it
+  Laravel-specific enough to stay overlay-shaped?
+
+---
+
+## Intersection types (`MockObject&Foo`) — 2026-09-02 — OPEN (Claude)
+- **Context:** PHPUnit types a mock as `MockObject&Foo`, in its own
+  `@return` and in the `/** @var Foo&MockObject $m */` idiom tests write.
+  The lattice has no intersection: `php_annot_type` rejects any `&`/`|`
+  spelling outright, and the PHPUnit overlay now types the mock as the
+  doubled class alone (`createMock(Foo::class)` → `Foo`), which is what
+  navigation and the lanes need; `$m->expects()` / `->method()` (the
+  `MockObject` side) stay unresolved on a mock, and a docblock
+  intersection still types nothing.
+- **Options:** A — pick one arm by a rule that needs no names: the arm
+  that is not the callee's native declared return type is the refinement
+  (`MockObject` is what `createMock` declares; `Foo` is what the docblock
+  adds), and for a standalone `@var A&B` the first arm. B — an
+  `InferredType::Intersection(Vec<InferredType>)` variant: member
+  resolution tries each arm in order, completion unions the members, the
+  reducers treat it as a class name for dispatch of the first arm. C — A
+  now, B when a second consumer appears (Doctrine proxies, PHPStan's
+  `T&object` generics).
+- **Picked:** the overlay rule alone; no intersection parsing yet.
+- **Undo cost:** A is contained in `php_annot_type`; B touches the type
+  enum, `despan`, the reducers' class-name projections and every
+  `class_name()` consumer — a real slice.
+- **Discussion needed:** is B worth its footprint before unions
+  (`docs/open-forks.md`, "Union types in the lattice") land — the two
+  are the same lattice change with opposite member semantics, and doing
+  one without the other bakes an asymmetry into `InferredType`.
+
+## Negative narrowing: `is_wp_error()` exit guards — 2026-09-03 — OPEN (Claude)
+- **Context:** WordPress guards a `WP_Term|WP_Error` value with
+  `if ( is_wp_error( $term ) ) { return $term; }` and reads
+  `$term->term_id` after it. `is_wp_error` carries
+  `@phpstan-assert-if-true WP_Error $thing`. The narrowing tier handles
+  `instanceof` and the pack's `narrow_assertions` (`assert`), and a
+  negated exit for those shapes; it has no "not T" value, so a call guard
+  whose assertion lives on the CALLEE's docblock (another file) narrows
+  nothing. With a union now known-untypable (`InferredType::Unknown`)
+  the read stays silent in the lane when the value came from the union;
+  the rows that remain are the ones where a branch assigned `new
+  WP_Error(...)` and the exit guard should have taken that arm away
+  (taxonomy.php `get_term_link`, wp-login `$user->ID`: 9 rows).
+- **Options:** A — a negative lattice value (`InferredType::Not(Box<T>)`
+  or a region witness "everything but T") the fold applies to the after
+  region, plus reading `@phpstan-assert-if-true` / `@phpstan-assert-if-false`
+  / `@phpstan-assert` off the callee's doc facts through the registry at
+  query time (the callee is cross-file). B — an approximation at query
+  time only: when the after region opens on a value whose class IS the
+  asserted class, answer `Unknown` there; when it is anything else, leave
+  it. C — nothing: the rows are honest under "path-insensitive; branch
+  assignment stands".
+- **Picked:** C for now — nine rows, and A is the same lattice change as
+  unions/intersections (docs/open-forks.md, "Union types in the
+  lattice"), which should land as one design.
+- **Undo cost:** none; B is contained in the narrowing tier and the
+  php doc facts.
+- **Discussion needed:** whether the lattice grows a negative value at
+  all, or narrowing stays positive-only and unions carry the residual.
+
+## Style lanes: default-on hints or opt-in — 2026-09-03 — OPEN (Claude)
+
+- **Context:** `missing-return-type` (and `unused-variable` before it) is a
+  STYLE finding, not a defect: the code runs. It publishes as a HINT under
+  a per-file convention gate (only where the file already writes native
+  return types), and still reports 723 rows on laravel/framework and 156
+  on WordPress. phpactor ships its equivalent (`worse.missing_return_type`)
+  as a lane the user enables; Intelephense has none. `--check` prints hints
+  only under `--severity hint`, so the CLI is unaffected; an editor shows
+  every hint faintly.
+- **Options:** A — default-on HINT with the convention gate (today). B —
+  opt-in through `DiagnosticOptions` (a workspace setting names the style
+  lanes it wants), silent otherwise. C — default-on, but only for the OPEN
+  document (never workspace-wide publishes), so it reads as an editor
+  affordance for the file being edited rather than a project-wide verdict.
+- **Picked:** A, because the quick-fix is the point and the gate keeps it
+  out of docblock-typed codebases; the count on laravel says an editor
+  user in that codebase would see it often.
+- **Undo cost:** one predicate at the publish site; the lane and the fix
+  are unchanged under any option.
+- **Discussion needed:** which style lanes exist by default, and whether
+  style findings need their own severity/config channel distinct from
+  defects.
