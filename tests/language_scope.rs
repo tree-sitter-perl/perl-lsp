@@ -1113,3 +1113,165 @@ fn php_string_callables_new_self_and_import_row_segments() {
     assert!(!mid.contains("Sub.php"), "a `use` row's middle segment is a namespace, not class `A\\Sub`: {mid}");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// `instanceof` narrows beyond the `if` block: a negated guard whose body
+/// exits narrows the rest of the scope, `assert()` does too, and the
+/// expression regions (`&&` right operand, ternary true arm, `match` arm)
+/// narrow within themselves. A negated guard whose body does NOT exit
+/// narrows nothing.
+#[cfg(feature = "php")]
+#[test]
+fn php_instanceof_narrows_exits_assertions_and_expression_regions() {
+    let dir = std::env::temp_dir().join(format!("perl-lsp-narrow2-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let src = "<?php\nnamespace App;\ninterface Shape { public function area(): float; }\nclass Circle implements Shape { public function area(): float { return 1.0; } public function radius(): int { return 2; } }\nclass Square implements Shape { public function area(): float { return 1.0; } public function side(): int { return 3; } }\nclass Use1 {\n    public function a(Shape $s): int {\n        if (!$s instanceof Circle) { return 0; }\n        return $s->radius();\n    }\n    public function b(Shape $s): int {\n        if (!($s instanceof Circle)) throw new \\RuntimeException('x');\n        return $s->radius();\n    }\n    public function c(Shape $s): int {\n        assert($s instanceof Square);\n        return $s->side();\n    }\n    public function d(Shape $s): int {\n        return $s instanceof Circle && $s->radius() > 1 ? 1 : 0;\n    }\n    public function e(Shape $s): int {\n        return $s instanceof Square ? $s->side() : 0;\n    }\n    public function f(Shape $s): int {\n        return match (true) { $s instanceof Circle => $s->radius(), default => 0 };\n    }\n    public function h(Shape $s): float {\n        foreach ([$s] as $i) { if (!$i instanceof Square) continue; return $i->side(); }\n        return $s->area();\n    }\n    public function i(Shape $s): int {\n        if (!$s instanceof Circle) { error_log('not a circle'); }\n        return $s->radius();\n    }\n}\n";
+    std::fs::write(dir.join("Narrow.php"), src).unwrap();
+    let lines: Vec<&str> = src.lines().collect();
+    let run = |args: &[&str]| {
+        let out = std::process::Command::new(env!("CARGO_BIN_EXE_perl-lsp"))
+            .args(args)
+            .env("XDG_CACHE_HOME", dir.join(".cache"))
+            .output()
+            .expect("run");
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+    let root = dir.to_str().unwrap();
+    // the receiver's hover type at the member call on `row` — goto-def would
+    // find a uniquely-named member with no narrowing at all
+    let receiver = |row: usize, var: &str| -> String {
+        let col = lines[row].find(&format!("{var}->")).unwrap();
+        let out = run(&["--hover", root, "Narrow.php", &row.to_string(), &col.to_string()]);
+        out.lines().find(|l| l.starts_with(var)).unwrap_or("").to_string()
+    };
+    assert_eq!(receiver(8, "$s"), "$s: Circle", "negated block exit");
+    assert_eq!(receiver(12, "$s"), "$s: Circle", "negated brace-less throw");
+    assert_eq!(receiver(16, "$s"), "$s: Square", "assert()");
+    assert_eq!(receiver(19, "$s"), "$s: Circle", "`&&` right operand");
+    assert_eq!(receiver(22, "$s"), "$s: Square", "ternary true arm");
+    assert_eq!(receiver(25, "$s"), "$s: Circle", "match arm");
+    assert_eq!(receiver(28, "$i"), "$i: Square", "`continue` inside a loop body");
+    assert_eq!(receiver(29, "$s"), "$s: Shape", "the loop's narrowing stays inside the loop");
+    assert_eq!(receiver(33, "$s"), "$s: Shape", "a negated guard that does not exit narrows nothing");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The unused-import lane's silence rules: a name spelled only as an
+/// `instanceof` operand, an attribute, a namespace prefix or a docblock
+/// word is used; the one row nothing spells is the finding.
+#[cfg(feature = "php")]
+#[test]
+fn php_unused_import_lane_counts_every_spelling() {
+    let dir = std::env::temp_dir().join(format!("perl-lsp-d2unused-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    let w = |rel: &str, src: &str| std::fs::write(dir.join(rel), src).unwrap();
+    w("composer.json", "{\"autoload\": {\"psr-4\": {\"App\\\\\": \"src/\"}}}");
+    w("src/Use1.php", "<?php\nnamespace App;\n\nuse App\\Guard;\nuse App\\Attr\\Route;\nuse App\\Psr7;\nuse App\\Doc\\Shape;\nuse App\\Never;\nuse App\\Aliased as Other;\nuse const App\\LIMIT;\nuse App\\Tr\\Mixin;\nuse Exception as NativeException;\nuse App\\Str;\n\ntrait Composed { use Mixin; }\nclass E extends NativeException {}\nclass Use1\n{\n    /** @var Shape */\n    private $shape;\n\n    #[Route('/x')]\n    public function run($x): int\n    {\n        if ($x instanceof Guard) { return 1; }\n        $o = new Other();\n        $m = 'x';\n        $anon = new class { public function go($m) { return Str::$m(); } };\n        return Psr7\\Utils::count($o);\n    }\n}\n");
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_perl-lsp"))
+        .args(["--check", dir.to_str().unwrap(), "--severity", "hint"])
+        .env("XDG_CACHE_HOME", dir.join(".cache"))
+        .output()
+        .expect("run");
+    let err = String::from_utf8_lossy(&out.stderr);
+    let unused: Vec<&str> = err.lines().filter(|l| l.contains("[unused-import]")).collect();
+    assert_eq!(unused.len(), 1, "{err}");
+    assert!(unused[0].contains("'Never'"), "{unused:?}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+
+/// The deprecation lane: `@deprecated` (with and without text) and the
+/// `#[Deprecated]` attribute on a method, a function and a class, used from
+/// another file — each use is a deprecated-tagged hint; nothing else is.
+#[cfg(feature = "php")]
+#[test]
+fn php_deprecation_lane_flags_every_use_of_a_deprecated_declaration() {
+    let dir = std::env::temp_dir().join(format!("perl-lsp-d2depr-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    let w = |rel: &str, src: &str| std::fs::write(dir.join(rel), src).unwrap();
+    w("composer.json", "{\"autoload\": {\"psr-4\": {\"App\\\\\": \"src/\"}}}");
+    w("src/Legacy.php", "<?php\nnamespace App;\n\n/** @deprecated use Modern instead */\nclass Legacy\n{\n    /** @deprecated */\n    public function old(): int { return 1; }\n    #[Deprecated]\n    public function older(): int { return 2; }\n    public function fine(): int { return 3; }\n}\n\n/** @deprecated since 2.0 */\nfunction legacy_helper(): int { return 4; }\nfunction fine_helper(): int { return 5; }\n");
+    w("src/Caller.php", "<?php\nnamespace App;\n\nclass Caller\n{\n    public function run(Legacy $l): int\n    {\n        return $l->old() + $l->older() + $l->fine() + legacy_helper() + fine_helper();\n    }\n}\n");
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_perl-lsp"))
+        .args(["--check", dir.to_str().unwrap(), "--severity", "hint"])
+        .env("XDG_CACHE_HOME", dir.join(".cache"))
+        .output()
+        .expect("run");
+    let err = String::from_utf8_lossy(&out.stderr);
+    let rows: Vec<&str> = err.lines().filter(|l| l.contains("[deprecated]") && l.contains("Caller.php")).collect();
+    let has = |needle: &str| rows.iter().any(|l| l.contains(needle));
+    assert!(has("'old' is deprecated."), "{err}");
+    assert!(has("'older' is deprecated."), "{err}");
+    assert!(has("'legacy_helper' is deprecated: since 2.0"), "{err}");
+    assert!(has("'Legacy' is deprecated: use Modern instead"), "{err}");
+    assert!(!has("fine"), "{rows:?}");
+    assert_eq!(rows.len(), 4, "{rows:?}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+
+/// A property typed by what the constructor writes to it — no declared
+/// type, no docblock: `$this->mailer = new Mailer()` types `$this->mailer`
+/// for every reader in the class.
+#[cfg(feature = "php")]
+#[test]
+fn php_properties_are_typed_by_assignment() {
+    let dir = std::env::temp_dir().join(format!("perl-lsp-d2assign-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    let w = |rel: &str, src: &str| std::fs::write(dir.join(rel), src).unwrap();
+    w("composer.json", "{\"autoload\": {\"psr-4\": {\"App\\\\\": \"src/\"}}}");
+    w("src/Mailer.php", "<?php\nnamespace App;\nclass Mailer\n{\n    public function send(): bool { return true; }\n}\n");
+    let svc = "<?php\nnamespace App;\nclass Service\n{\n    private $mailer;\n    public function __construct()\n    {\n        $this->mailer = new Mailer();\n    }\n    public function run(): bool\n    {\n        return $this->mailer->send();\n    }\n}\n";
+    w("src/Service.php", svc);
+    let lines: Vec<&str> = svc.lines().collect();
+    let run = |args: &[&str]| {
+        let out = std::process::Command::new(env!("CARGO_BIN_EXE_perl-lsp"))
+            .args(args)
+            .env("XDG_CACHE_HOME", dir.join(".cache"))
+            .output()
+            .expect("run");
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+    let root = dir.to_str().unwrap();
+    let col = lines[11].find("mailer->").unwrap();
+    let hover = run(&["--hover", root, "src/Service.php", "11", &col.to_string()]);
+    assert!(hover.contains("mailer: Mailer"), "{hover}");
+    let col = lines[11].find("send()").unwrap();
+    let def = run(&["--definition", root, "src/Service.php", "11", &col.to_string()]);
+    assert!(def.contains("src/Mailer.php:4:"), "{def}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+
+/// The unused-variable lane: a local assigned and never read is an
+/// unnecessary-tagged hint at its declaration; parameters (promoted ones
+/// too), a closure's captured variable, a read through `++`, and a callable
+/// that materializes variables dynamically stay quiet.
+#[cfg(feature = "php")]
+#[test]
+fn php_unused_variable_lane_flags_locals_never_read() {
+    let dir = std::env::temp_dir().join(format!("perl-lsp-d2unusedvar-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    let w = |rel: &str, src: &str| std::fs::write(dir.join(rel), src).unwrap();
+    w("composer.json", "{\"autoload\": {\"psr-4\": {\"App\\\\\": \"src/\"}}}");
+    w("src/C.php", "<?php\nnamespace App;\nclass C\n{\n    public function __construct(private int $promoted) {}\n    public function run(int $param, array $rows): int\n    {\n        $unused = 1;\n        $used = 2;\n        $captured = 3;\n        $f = function () use ($captured) { return $captured; };\n        foreach ($rows as $k => $v) { echo $v; }\n        try { $x = 1; } catch (\\Throwable $e) { }\n        $cnt = 0;\n        $cnt++;\n        return $used + $f();\n    }\n    public function dyn(): array { $a = 1; return compact('a'); }\n}\n");
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_perl-lsp"))
+        .args(["--check", dir.to_str().unwrap(), "--severity", "hint"])
+        .env("XDG_CACHE_HOME", dir.join(".cache"))
+        .output()
+        .expect("run");
+    let err = String::from_utf8_lossy(&out.stderr);
+    let mut names: Vec<&str> = err
+        .lines()
+        .filter(|l| l.contains("[unused-variable]"))
+        .filter_map(|l| l.split('\'').nth(1))
+        .collect();
+    names.sort();
+    assert_eq!(names, vec!["$e", "$k", "$unused", "$x"], "{err}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
