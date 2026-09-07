@@ -68,7 +68,19 @@ async fn main() {
             cli_hover_single_file(&args[2], &args[3], &args[4]);
             return;
         }
-        Some("--type-at") if args.len() >= 5 => {
+        // `--type-at` mirrors `--hover`'s three forms: `<root> --at <f:l:c>`,
+        // `<root> <file> <line> <col>` (cross-file, full startup), and the
+        // legacy single-file `<file> <line> <col>`. Every other cursor verb
+        // takes a root, so the root spelling must not die on `Is a directory`.
+        Some("--type-at") if args.len() >= 5 && args.get(3).map(|s| s == "--at").unwrap_or(false) => {
+            cli_cursor("type-at", &args[2], &args[3..]);
+            return;
+        }
+        Some("--type-at") if args.len() >= 6 => {
+            cli_cursor("type-at", &args[2], &args[3..6]);
+            return;
+        }
+        Some("--type-at") if args.len() == 5 => {
             cli_type_at(&args[2], &args[3], &args[4]);
             return;
         }

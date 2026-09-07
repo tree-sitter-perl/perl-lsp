@@ -273,8 +273,8 @@
         ],
         "none": []
       },
-      "status": "xfail",
-      "note": "GAP: my $abs=$self->clone -> should be Mojo::URL but clone mistyped HashRef propagates."
+      "status": "gold",
+      "note": "my $abs=$self->clone -> Mojo::URL. Fixed by threading the module index into the rooted --type-at (cross-file clone return resolves)."
     },
     {
       "id": "ti-bool-comparison",
