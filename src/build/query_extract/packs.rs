@@ -1052,6 +1052,7 @@ pub fn php_pack() -> LangPack {
         ],
         lang_id: "php",
         bundled_entry_markers: &[
+            include_str!("../../../queries/php/frameworks/phpunit.entry.json"),
         ],
         bundled_rail_docs: &[],
         // variable_name captures carry the `$` (PHP spells it at every
