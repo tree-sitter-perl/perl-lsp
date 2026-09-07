@@ -2874,6 +2874,24 @@ $cfg = ['timeout' => 30, 'retries' => 3];
 }
 
 #[test]
+fn php_concat_observation_types_untyped_var() {
+    // The Perl edge alive in PHP: `.` is string-only, so an untyped
+    // parameter types from HOW IT'S USED — no initializer needed.
+    let src = "\
+<?php
+function g($s) {
+    $t = $s . \"!\";
+}
+";
+    let (fa, _) = php_fa(src);
+    let inside = tree_sitter::Point { row: 3, column: 0 };
+    assert_eq!(
+        fa.inferred_type_via_bag("$s", inside),
+        Some(crate::model::file_analysis::InferredType::String),
+    );
+}
+
+#[test]
 fn php_cross_file_function_refs_through_refs_to() {
     // Declaration in a.php, call in b.php, the production refs_to
     // walks both — Perl parity for the references verb.
@@ -3753,6 +3771,53 @@ class User {
 }
 
 #[test]
+fn php_reassignment_rebinds_one_variable_identity() {
+    // Round-3 R5 (the rename hazard): PHP vars are FUNCTION-scoped —
+    // an assignment in an `if` block declares for the whole function
+    // and re-assignment REBINDS. One declaration per (name, function),
+    // re-anchored to the sub scope; later assignments are write refs.
+    let src = "\
+<?php
+function orderBooks(bool $flip): string {
+    $order = 'name';
+    if ($flip) {
+        $order = 'desc';
+    } else {
+        $order = 'asc';
+    }
+    echo $order;
+    return $order;
+}
+";
+    let (fa, _) = php_fa(src);
+    use crate::model::file_analysis::{RefKind, SymKind};
+    let decls: Vec<_> = fa
+        .symbols()
+        .iter()
+        .filter(|s| matches!(s.kind, SymKind::Variable) && s.name == "$order")
+        .collect();
+    assert_eq!(decls.len(), 1, "one identity per function: {decls:?}");
+    let writes = fa
+        .refs()
+        .iter()
+        .filter(|r| {
+            matches!(r.kind, RefKind::Variable)
+                && r.target_name == "$order"
+                && matches!(r.access, crate::model::file_analysis::AccessKind::Write)
+        })
+        .count();
+    assert_eq!(writes, 2, "each re-assignment is a write ref");
+    // and a use in a DIFFERENT block resolves to the one declaration
+    let reads_bound = fa.refs().iter().any(|r| {
+        matches!(r.kind, RefKind::Variable)
+            && r.target_name == "$order"
+            && r.span.start.row == 8
+            && r.resolved_symbol().is_some()
+    });
+    assert!(reads_bound, "the echo use binds the function-scoped decl");
+}
+
+#[test]
 fn php_new_self_types_as_enclosing_class() {
     // `(new self())->forceFill(...)` — `new self()` is the ENCLOSING
     // class, not a class named "self"; the ctor witness carries it so
@@ -4456,6 +4521,28 @@ fn php_branch_arms_and_subscripts_project() {
     let has_step = |row: usize, pred: &dyn Fn(&ProjectionStep) -> bool| skel.witnesses.iter().any(|w| matches!((&w.attachment, &w.payload), (WitnessAttachment::Expr(sp), WitnessPayload::Projected { step, .. }) if sp.start.row == row && pred(step)));
     assert!(has_step(3, &|s| matches!(s, ProjectionStep::ArrayIndex(0))), "f()[0] peels slot 0");
     assert!(has_step(4, &|s| matches!(s, ProjectionStep::HashKey(k) if k == "name")), "$row['name'] drills the key");
+}
+
+/// A union spelling is `Unknown` — the value this lattice cannot hold — at
+/// the top level only: `A|null` is its one arm, a `|` nested inside a
+/// generic is the element's business (and must not re-read the same
+/// text forever), and a container with an untypable element is untypable
+/// as a whole, so `Unknown` never nests past the boundary scrub.
+#[test]
+fn php_union_spellings_are_unknown_and_never_nest() {
+    let at = php_pack().annot_type;
+    assert_eq!(at("Err|User"), Some(InferredType::Unknown));
+    assert_eq!(at("int|string"), Some(InferredType::Unknown));
+    assert_eq!(at("Err|null"), Some(InferredType::ClassName("Err".into())));
+    assert_eq!(at("?Err"), Some(InferredType::ClassName("Err".into())));
+    // a `|` inside a generic is the element's: an untypable element makes
+    // the container untypable, a nullable one is its arm
+    assert_eq!(at("array<int|string>"), Some(InferredType::Unknown));
+    assert_eq!(at("list<Err|User>"), Some(InferredType::Unknown));
+    assert_eq!(at("(Err|User)[]"), None);
+    assert_eq!(at("array{a: int|string}"), Some(InferredType::Unknown));
+    assert_eq!(at("array{int|string, int}"), Some(InferredType::Unknown));
+    assert_eq!(at("array<int, string|null>"), Some(InferredType::Sequence(vec![InferredType::String])));
 }
 
 /// `$this->m (1)` — whitespace before the argument list — is the call its
