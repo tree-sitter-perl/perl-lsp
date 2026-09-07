@@ -1700,6 +1700,64 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                 out.return_sites
                     .push((cur_scope, Span { start: e.start, end: e.end }));
             }
+            "flow.slot" => {
+                flow_slots.push((
+                    e.match_id,
+                    (pack.shape_name)("def.var", &e.text),
+                    cur_scope,
+                    e.start,
+                    e.start_byte,
+                ));
+            }
+            "flow.slot.list" => {
+                slot_lists.insert(
+                    e.match_id,
+                    (Span { start: e.start, end: e.end }, e.start_byte, e.text.clone()),
+                );
+            }
+            "tuple.arr" => {
+                tuple_arr_by_match.insert(e.match_id, Span { start: e.start, end: e.end });
+            }
+            "tuple.elem" => {
+                tuple_elem_by_match.insert(e.match_id, Span { start: e.start, end: e.end });
+            }
+            "tuple.init" => {
+                tuple_init_by_match
+                    .insert(e.match_id, (e.start_byte, e.text.trim_start().starts_with("...")));
+            }
+            "tuple.keyed" => {
+                tuple_keyed.insert(e.match_id);
+            }
+            "branch.expr" => {
+                branch_expr_by_match.insert(e.match_id, Span { start: e.start, end: e.end });
+            }
+            "branch.arm" => {
+                branch_arm_by_match.insert(e.match_id, Span { start: e.start, end: e.end });
+            }
+            "subscript.expr" => {
+                subscript_by_match
+                    .entry(e.match_id)
+                    .or_insert((Span { start: e.start, end: e.end }, None, None, None))
+                    .0 = Span { start: e.start, end: e.end };
+            }
+            "subscript.base" => {
+                subscript_by_match
+                    .entry(e.match_id)
+                    .or_insert((Span { start: e.start, end: e.end }, None, None, None))
+                    .1 = Some(Span { start: e.start, end: e.end });
+            }
+            "subscript.int" => {
+                subscript_by_match
+                    .entry(e.match_id)
+                    .or_insert((Span { start: e.start, end: e.end }, None, None, None))
+                    .2 = e.text.trim().parse::<i32>().ok();
+            }
+            "subscript.key" => {
+                subscript_by_match
+                    .entry(e.match_id)
+                    .or_insert((Span { start: e.start, end: e.end }, None, None, None))
+                    .3 = Some(e.text.clone());
+            }
             "flow.target" => {
                 flow_targets.insert(
                     e.match_id,
@@ -2071,6 +2129,32 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     // Match-id order (deterministic) — two captures targeting the same
     // `Variable{name, scope}` slot would otherwise land witnesses in
     // HashMap-iteration order, flipping the latest-wins winner per process.
+    // Branch arms (match / ternary): the expression's value is its arms'
+    // AGREEMENT (`BranchArmFold`), never a literal found inside it.
+    {
+        let mut seen_expr: std::collections::HashSet<(Point, Point)> = Default::default();
+        for (mid, arm) in &branch_arm_by_match {
+            let Some(expr) = branch_expr_by_match.get(mid) else { continue };
+            if seen_expr.insert((expr.start, expr.end)) {
+                out.witnesses.push(crate::model::witnesses::Witness {
+                    attachment: crate::model::witnesses::WitnessAttachment::Expr(*expr),
+                    source: crate::model::witnesses::WitnessSource::Builder("skeleton".into()),
+                    payload: crate::model::witnesses::WitnessPayload::Edge(
+                        crate::model::witnesses::WitnessAttachment::BranchArm(*expr),
+                    ),
+                    span: *expr,
+                });
+            }
+            out.witnesses.push(crate::model::witnesses::Witness {
+                attachment: crate::model::witnesses::WitnessAttachment::BranchArm(*expr),
+                source: crate::model::witnesses::WitnessSource::Builder("skeleton".into()),
+                payload: crate::model::witnesses::WitnessPayload::Edge(
+                    crate::model::witnesses::WitnessAttachment::Expr(*arm),
+                ),
+                span: *arm,
+            });
+        }
+    }
     let mut flow_mids: Vec<&usize> = flow_targets.keys().collect();
     flow_mids.sort_unstable();
     // A class/struct DATA MEMBER is visible throughout its class body
