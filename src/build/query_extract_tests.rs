@@ -4213,6 +4213,31 @@ class Stack {
 }
 
 #[test]
+fn php_attributes_land_on_symbols() {
+    // `#[Attr]` annotations ride the @sym.attr lane onto Symbol.attributes
+    // — the substrate the framework-entry machinery and hover read.
+    let src = "\
+<?php
+#[AllowDynamicProperties]
+class Foo {
+    #[Test]
+    #[DataProvider('cases')]
+    public function testAdd(): void {}
+}
+#[AsCommand]
+function run_it(): void {}
+";
+    let (fa, _) = php_fa(src);
+    let cls = fa.symbols().iter().find(|s| s.name == "Foo").expect("class");
+    assert!(cls.attributes.iter().any(|a| a == "AllowDynamicProperties"), "{:?}", cls.attributes);
+    let m = fa.symbols().iter().find(|s| s.name == "testAdd").expect("method");
+    assert!(m.attributes.iter().any(|a| a == "Test"), "{:?}", m.attributes);
+    assert!(m.attributes.iter().any(|a| a == "DataProvider"), "{:?}", m.attributes);
+    let f = fa.symbols().iter().find(|s| s.name == "run_it").expect("fn");
+    assert!(f.attributes.iter().any(|a| a == "AsCommand"), "{:?}", f.attributes);
+}
+
+#[test]
 fn php_class_array_callables_are_method_refs() {
     // `[UserController::class, 'index']` names a dispatchable method — the
     // Laravel route / event-map convention. The pair mints the same
@@ -4575,6 +4600,45 @@ fn php_instance_array_callable_is_a_method_ref() {
     assert!(names.contains(&("other", Some("$obj"))), "{names:?}");
 }
 
+/// The inputs the missing-return-type lane reads: a declared return
+/// annotation is a `cpp_method_return` witness on the symbol, and a bodied
+/// callable without one still types through its return arms.
+#[cfg(feature = "php")]
+#[test]
+fn php_declared_and_inferred_returns_reach_the_symbol() {
+    let src = "\
+<?php
+namespace App;
+class Queue {
+    private array $items = [];
+    public function push(string $x): void { $this->items[] = $x; }
+    public function all() { return $this->items; }
+    public function name() { return \"q\"; }
+    public function me() { return $this; }
+    public function maybe($x) { if ($x) { return \"a\"; } return null; }
+}
+";
+    let reg = crate::build::language_driver::LanguageRegistry::with_enabled();
+    let driver = reg.for_id("php").expect("php driver");
+    let fa = driver.analyze(src);
+    use crate::model::file_analysis::{InferredType, SymKind};
+    let sym = |n: &str| fa.symbols().iter().find(|s| matches!(s.kind, SymKind::Method | SymKind::Sub) && s.name == n).unwrap_or_else(|| panic!("no {n}")).id;
+    let declared = |n: &str| fa.symbol(sym(n)).attributes.iter().any(|a| a == "declared_return");
+    assert!(declared("push"), "`: void` is a declared return even though it names no type");
+    assert!(!declared("all"));
+    let all = fa.symbol_return_type_via_bag(sym("all"), None);
+    let name = fa.symbol_return_type_via_bag(sym("name"), None);
+    let me = fa.symbol_return_type_via_bag(sym("me"), None);
+    assert!(matches!(all, Some(InferredType::HashRef) | Some(InferredType::ArrayRef)), "all(): {all:?}");
+    assert_eq!(name, Some(InferredType::String), "name(): {name:?}");
+    assert_eq!(me, Some(InferredType::ClassName("Queue".into())), "me(): {me:?}");
+    // a null arm makes the return nullable: the fold answers `string` (right
+    // for a hover), the total view does not (right for writing the type)
+    assert_eq!(fa.total_inferred_return(sym("maybe")), None, "maybe(): a null arm");
+    assert_eq!(fa.total_inferred_return(sym("name")), Some(InferredType::String));
+}
+
+
 /// A three-operand `&&` chain: the guard narrows every later operand, not
 /// only the second (`(A instanceof X && B) && C` nests left).
 #[cfg(feature = "php")]
@@ -4595,5 +4659,24 @@ function f($p) {
         fa.inferred_type_via_bag("$p", third),
         Some(InferredType::ClassName("User".into())),
         "the third operand holds under the guard",
+    );
+}
+
+/// `Sql\Column::class` spells the `Sql` head: the import that head binds is
+/// used (the unused-import lane reads `qualified_spellings`).
+#[cfg(feature = "php")]
+#[test]
+fn php_class_literal_with_a_qualified_head_records_the_spelling() {
+    let src = "\
+<?php
+namespace App;
+use App\\Controllers\\Sql;
+$m = [Sql\\ColumnController::class => 1];
+";
+    let (fa, _) = php_fa(src);
+    assert!(
+        fa.pack.qualified_spellings.iter().any(|(leaf, prefix)| leaf == "ColumnController" && prefix == "Sql"),
+        "{:?}",
+        fa.pack.qualified_spellings
     );
 }
