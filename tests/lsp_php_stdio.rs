@@ -295,3 +295,100 @@ fn php_unimplemented_method_over_stdio() {
     let _ = c.child.wait();
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A class declared under another namespace completes on its leaf with the
+/// `use` row as the edit that makes it spellable; a class the file already
+/// imports or declares carries no edit.
+#[test]
+fn php_auto_import_completion_over_stdio() {
+    let dir = std::env::temp_dir().join(format!("perl-lsp-d2autoimport-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("src/Util")).unwrap();
+    std::fs::create_dir_all(dir.join("src/Web")).unwrap();
+    let w = |rel: &str, src: &str| std::fs::write(dir.join(rel), src).unwrap();
+    w("composer.json", "{\"autoload\": {\"psr-4\": {\"App\\\\\": \"src/\"}}}");
+    w("src/Util/Greeter.php", "<?php\nnamespace App\\Util;\n\nclass Greeter\n{\n    public function hi(string $n): string { return $n; }\n}\n");
+    w("src/Util/Grid.php", "<?php\nnamespace App\\Util;\n\nclass Grid\n{\n}\n");
+    let home = "<?php\nnamespace App\\Web;\n\nuse App\\Util\\Grid;\n\nclass Home\n{\n    public function run(): string\n    {\n        $g = new Gre\n        $x = new Grid();\n        return $g->hi(\"x\");\n    }\n}\n";
+    w("src/Web/Home.php", home);
+    let mut c = Client::spawn(&dir);
+    c.request("initialize", serde_json::json!({"processId": null, "rootUri": uri(&dir), "capabilities": {}}));
+    c.notify("initialized", serde_json::json!({}));
+    let u = uri(&dir.join("src/Web/Home.php"));
+    c.notify("textDocument/didOpen", serde_json::json!({"textDocument": {"uri": u, "languageId": "php", "version": 1, "text": home}}));
+    let col = |line: usize, needle: &str| home.lines().nth(line).unwrap().find(needle).unwrap();
+    // readiness: the pack index answers a cross-file definition (`Grid` is imported)
+    let mut ready = false;
+    for _ in 0..120 {
+        let r = c.request("textDocument/definition", serde_json::json!({"textDocument": {"uri": u}, "position": {"line": 10, "character": col(10, "Grid")}}));
+        if r.as_array().is_some_and(|a| !a.is_empty()) || r.is_object() {
+            ready = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(250));
+    }
+    assert!(ready, "definition never answered");
+    let items = |c: &mut Client, line: usize, character: usize| -> Vec<serde_json::Value> {
+        let r = c.request("textDocument/completion", serde_json::json!({"textDocument": {"uri": u}, "position": {"line": line, "character": character}}));
+        r.get("items").and_then(|i| i.as_array()).cloned().or_else(|| r.as_array().cloned()).unwrap_or_default()
+    };
+    let gre = items(&mut c, 9, col(9, "Gre") + 3);
+    let g = gre.iter().find(|i| i["label"] == "Greeter").unwrap_or_else(|| panic!("Greeter offered: {gre:?}"));
+    assert_eq!(g["detail"], "App\\Util\\Greeter", "{g}");
+    let edits = g["additionalTextEdits"].as_array().cloned().unwrap_or_default();
+    assert_eq!(edits.len(), 1, "{g}");
+    assert_eq!(edits[0]["newText"], "use App\\Util\\Greeter;\n", "{g}");
+    assert_eq!(edits[0]["range"]["start"]["line"], 4, "after the last use row: {g}");
+    // the imported class completes without an edit
+    let gri = items(&mut c, 10, col(10, "Gri") + 3);
+    let gd = gri.iter().find(|i| i["label"] == "Grid").unwrap_or_else(|| panic!("Grid offered: {gri:?}"));
+    assert!(gd["additionalTextEdits"].is_null() || gd["additionalTextEdits"].as_array().is_some_and(|a| a.is_empty()), "{gd}");
+    c.request("shutdown", serde_json::Value::Null);
+    c.notify("exit", serde_json::Value::Null);
+    let _ = c.child.wait();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `parent::__construct()` under a same-leaf alias (`use App\Base\Manager as
+/// BaseManager; class Manager extends BaseManager`) is the PARENT's
+/// constructor: no arity report for a call the parent accepts, one for a
+/// call it does not.
+#[test]
+fn php_parent_call_under_same_leaf_alias_over_stdio() {
+    let dir = std::env::temp_dir().join(format!("perl-lsp-d2palias-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("src/Base")).unwrap();
+    std::fs::create_dir_all(dir.join("src/App")).unwrap();
+    let w = |rel: &str, src: &str| std::fs::write(dir.join(rel), src).unwrap();
+    w("composer.json", "{\"autoload\": {\"psr-4\": {\"App\\\\\": \"src/\"}}}");
+    w("src/Base/Manager.php", "<?php\nnamespace App\\Base;\n\nclass Manager\n{\n    public function __construct()\n    {\n    }\n\n    public function boot(string $env): void\n    {\n    }\n}\n");
+    let child = "<?php\nnamespace App\\App;\n\nuse App\\Base\\Manager as BaseManager;\n\nclass Manager extends BaseManager\n{\n    public function __construct(array $x)\n    {\n        parent::__construct();\n        parent::boot('dev', 'extra');\n    }\n}\n";
+    w("src/App/Manager.php", child);
+    let mut c = Client::spawn(&dir);
+    c.request("initialize", serde_json::json!({"processId": null, "rootUri": uri(&dir), "capabilities": {}}));
+    c.notify("initialized", serde_json::json!({}));
+    let u = uri(&dir.join("src/App/Manager.php"));
+    c.notify("textDocument/didOpen", serde_json::json!({"textDocument": {"uri": u, "languageId": "php", "version": 1, "text": child}}));
+    // the arity lane runs once the pack index settles: wait for the one true report
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    let mut diags: Vec<serde_json::Value> = Vec::new();
+    while std::time::Instant::now() < deadline {
+        c.request("textDocument/documentSymbol", serde_json::json!({"textDocument": {"uri": u}}));
+        if let Some(n) = c.notes.iter().rev().find(|n| n["method"] == "textDocument/publishDiagnostics" && n["params"]["uri"] == u) {
+            let ds: Vec<serde_json::Value> = n["params"]["diagnostics"].as_array().cloned().unwrap_or_default();
+            if ds.iter().any(|d| d["code"] == "arity-mismatch") {
+                diags = ds;
+                break;
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(250));
+    }
+    let arity: Vec<(u64, String)> = diags.iter().filter(|d| d["code"] == "arity-mismatch").map(|d| (d["range"]["start"]["line"].as_u64().unwrap(), d["message"].as_str().unwrap_or("").to_string())).collect();
+    assert_eq!(arity.len(), 1, "only the call the parent rejects: {arity:?}");
+    assert_eq!(arity[0].0, 10, "{arity:?}");
+    assert!(arity[0].1.contains("Expected 1"), "the PARENT's boot(string $env): {arity:?}");
+    c.request("shutdown", serde_json::Value::Null);
+    c.notify("exit", serde_json::Value::Null);
+    let _ = c.child.wait();
+    let _ = std::fs::remove_dir_all(&dir);
+}
