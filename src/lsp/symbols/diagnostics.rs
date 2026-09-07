@@ -982,12 +982,78 @@ pub fn pack_symbol_diagnostics(
                 };
                 push(&mut out, r.span, DiagnosticSeverity::ERROR, code, format!("Undefined {what} '{name}'."));
             }
-            Some(MethodResolution::Local { .. }) => {}
+            Some(MethodResolution::Local { sym_id, .. }) => {
+                let sym = owner.symbol(sym_id);
+                if let Some(text) = deprecation_of(sym) {
+                    out.push(deprecated_diag(r.span, name, &text));
+                }
+                // non-public member reached from outside its class — unless
+                // from inside a closure, whose `$this` may be rebound to the
+                // owner (`Closure::bind`, `->call($obj)`: the private-access
+                // idiom tests live on)
+                let in_closure = analysis
+                    .scope_chain(r.scope)
+                    .into_iter()
+                    .any(|sc| closures.iter().any(|c| span_within(analysis.scope(sc).span, *c)));
+                // a property READ that resolved only to a same-named METHOD
+                // (or the reverse) is not an access violation
+                let shape_agrees = match want {
+                    MemberShape::Value => matches!(sym.kind, FaSymKind::Field | FaSymKind::Variable),
+                    _ => matches!(sym.kind, FaSymKind::Method | FaSymKind::Sub),
+                };
+                if shape_agrees && !in_closure && sym.attributes.iter().any(|a| a == "non_public") {
+                    let from = analysis.enclosing_class_for_scope(r.scope);
+                    let owner = sym.package.clone().unwrap_or_default();
+                    if from.as_deref() != Some(owner.as_str())
+                        && !from.as_deref().is_some_and(|f| analysis.class_isa(f, &owner, idx))
+                    {
+                        push(&mut out, r.span, DiagnosticSeverity::ERROR, "non-public-access",
+                            format!("Cannot access non-public member '{name}' of {owner} from {} scope.", from.as_deref().unwrap_or("global")));
+                    }
+                }
+                // arity: the written argument count against the declared list
+                if let (Some(n), Some(a)) = (r.arg_count, sym.arity) {
+                    if !callee_takes_any(&facts.dynamic_arg_calls, sym) {
+                        if n < a.required {
+                            push(&mut out, r.span, DiagnosticSeverity::ERROR, "arity-mismatch",
+                                format!("Not enough arguments. Expected {}. Found {n}.", a.required));
+                        } else if !a.variadic && n > a.total {
+                            push(&mut out, r.span, DiagnosticSeverity::WARNING, "arity-mismatch",
+                                format!("Too many arguments. Expected {}. Found {n}.", a.total));
+                        }
+                    }
+                }
+            }
             Some(MethodResolution::CrossFile { .. }) => {}
         }
     }
 
     out
+}
+
+/// A deprecated declaration's notice: `Some(text)` when the `deprecated`
+/// attribute is set (the text may be absent), `None` otherwise.
+fn deprecation_of(sym: &crate::model::file_analysis::Symbol) -> Option<Option<String>> {
+    sym.attributes
+        .iter()
+        .any(|a| a == "deprecated")
+        .then(|| sym.presentation.deprecation.clone())
+}
+
+/// The deprecated-tagged hint at a use site.
+fn deprecated_diag(span: Span, name: &str, text: &Option<String>) -> Diagnostic {
+    Diagnostic {
+        range: span_to_range(span),
+        severity: Some(DiagnosticSeverity::HINT),
+        code: Some(NumberOrString::String("deprecated".to_string())),
+        source: Some("perl-lsp".to_string()),
+        message: match text {
+            Some(t) => format!("'{name}' is deprecated: {t}"),
+            None => format!("'{name}' is deprecated."),
+        },
+        tags: Some(vec![DiagnosticTag::DEPRECATED]),
+        ..Default::default()
+    }
 }
 
 /// Call sites of the named functions — the dynamic-behaviour markers a
