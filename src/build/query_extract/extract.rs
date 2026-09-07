@@ -1497,6 +1497,39 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                             // (cheap heuristic: same start)
                             s == e.start_byte || en == e.end_byte
                         });
+                // `new self(...)` / `new static(...)`: the token spells no class
+                // name — it IS a call of the constructor on the current class.
+                // Minted as that member call (invocant = the current-package
+                // token, name = the pack's constructor), so the ctor's
+                // references, hover and goto-def see the site while a class
+                // rename never rewrites the `self` token.
+                if !inside_def
+                    && e.cap == "ref.call"
+                    && ctor_matches.contains(&e.match_id)
+                    // `hop.recv` is the pack's receiver-shaping kind — the one
+                    // place its `self`/`static` → current-package table lives.
+                    && crate::model::conventions::is_current_package_token(
+                        &(pack.shape_name)("hop.recv", &e.text),
+                    )
+                {
+                    if let Some(ctor) = pack.constructor_names.first() {
+                        let span = Span { start: e.start, end: e.end };
+                        out.refs.push(SkelRef {
+                            via: None,
+                            kind: "member".to_string(),
+                            name: ctor.to_string(),
+                            start: e.start,
+                            end: e.end,
+                            scope: cur_scope,
+                            invocant: Some((span, "__PACKAGE__".to_string())),
+                            member_op: None,
+                            arg_count: arg_counts_by_start.get(&(e.end.row, e.end.column)).copied(),
+                            shape: crate::model::file_analysis::MemberShape::Callable,
+                            named_by_string: false,
+                        });
+                        continue;
+                    }
+                }
                 if !inside_def {
                     let member_op = member_simple
                         .get(&e.match_id)
@@ -1902,6 +1935,109 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                         payload: crate::model::witnesses::WitnessPayload::Observation(o),
                         span,
                     });
+                }
+            }
+            "expr.ctor" => {
+                // `new X(...)`: the value IS an instance of X — a structural
+                // fact (the ctor syntax names a class by definition), NOT the
+                // name-case guess the macro rule forbids for bare calls. Edge
+                // into the alias graph: `TypeName` recurses into the defining
+                // file when an index is in hand and terminates at
+                // `ClassName(X)` otherwise, so a cross-file `new WP_Query()`
+                // types the variable with zero local knowledge.
+                let callee = events
+                    .iter()
+                    .find(|x| x.match_id == e.match_id && x.cap == "ref.call")
+                    .map(|x| (pack.shape_name)("ref.call", &x.text));
+                if let Some(name) = callee {
+                    let span = Span { start: e.start, end: e.end };
+                    lit_spans.push((e.start_byte, e.end_byte, span));
+                    // `new self()` / `new static()`: the class is the
+                    // ENCLOSING one (the pack's `hop.recv` shaping names
+                    // the current-class spellings) — a bare `TypeName`
+                    // edge would chase a class literally named "self".
+                    let payload = if crate::model::conventions::is_current_package_token(
+                        &(pack.shape_name)("hop.recv", &name),
+                    ) {
+                        // `self` outside a class (invalid source) has no
+                        // enclosing class — mint nothing.
+                        package.as_ref().map(|cls| {
+                            crate::model::witnesses::WitnessPayload::InferredType(
+                                InferredType::ClassName(cls.clone()),
+                            )
+                        })
+                    } else {
+                        Some(crate::model::witnesses::WitnessPayload::Edge(
+                            crate::model::witnesses::WitnessAttachment::TypeName(name),
+                        ))
+                    };
+                    if let Some(payload) = payload {
+                        out.witnesses.push(crate::model::witnesses::Witness {
+                            attachment: crate::model::witnesses::WitnessAttachment::Expr(span),
+                            source: crate::model::witnesses::WitnessSource::Builder(
+                                "skeleton-ctor".into(),
+                            ),
+                            payload,
+                            span,
+                        });
+                    }
+                }
+            }
+            "expr.classref" => {
+                // `Foo::class` names the class by syntax, exactly as `new Foo`
+                // does — the same alias-graph edge, so `$cls = Foo::class;
+                // $cls::make()` dispatches on Foo.
+                let name = events
+                    .iter()
+                    .find(|x| x.match_id == e.match_id && x.cap == "classref.name")
+                    .map(|x| (pack.shape_name)("ref.call", &x.text));
+                if let Some(name) = name {
+                    // A qualified spelling (`Sql\Column::class`) spells its
+                    // head — the import that head binds is USED here, the
+                    // same fact a qualified call records.
+                    if let Some(q) = e.text.split("::").next() {
+                        let raw = q.trim().strip_suffix(name.as_str()).unwrap_or_default();
+                        let prefix = raw.trim_end_matches('\\').to_string();
+                        if !prefix.is_empty() {
+                            out.qualified_spellings.push((name.clone(), prefix));
+                        }
+                    }
+                    let span = Span { start: e.start, end: e.end };
+                    lit_spans.push((e.start_byte, e.end_byte, span));
+                    out.witnesses.push(crate::model::witnesses::Witness {
+                        attachment: crate::model::witnesses::WitnessAttachment::Expr(span),
+                        source: crate::model::witnesses::WitnessSource::Builder(
+                            "skeleton-classref".into(),
+                        ),
+                        payload: crate::model::witnesses::WitnessPayload::Edge(
+                            crate::model::witnesses::WitnessAttachment::TypeName(name),
+                        ),
+                        span,
+                    });
+                }
+            }
+            // `@expr.annot`: an expression whose VALUE is the class the same
+            // match's `@type.annot` names (`app(Foo::class)` is a Foo — a
+            // container resolves what the argument spells). Declared by an
+            // overlay, so it rides the plugin priority: the expression's own
+            // evidence outranks the callee-return derivation.
+            "expr.annot" => {
+                if let Some(annot) = annot_by_match.get(&e.match_id) {
+                    if let Some(InferredType::ClassName(cn)) = (pack.annot_type)(annot) {
+                        let span = Span { start: e.start, end: e.end };
+                        lit_spans.push((e.start_byte, e.end_byte, span));
+                        out.annot_expr_spans.push(span);
+                        out.witnesses.push(crate::model::witnesses::Witness {
+                            attachment: crate::model::witnesses::WitnessAttachment::Expr(span),
+                            source: crate::model::witnesses::WitnessSource::Plugin(
+                                "overlay-annot".into(),
+                            ),
+                            payload: crate::model::witnesses::WitnessPayload::Edge(
+                                crate::model::witnesses::WitnessAttachment::TypeName(cn),
+                            ),
+                            span,
+                        });
+                    }
                 }
             }
             "expr.call" => {
