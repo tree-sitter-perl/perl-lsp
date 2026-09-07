@@ -930,6 +930,37 @@ fn python_driver() -> PackDriver {
     }
 }
 
+#[cfg(feature = "php")]
+fn php_driver() -> PackDriver {
+    PackDriver {
+        id: "php",
+        maturity: Maturity::Alpha,
+        // `.phtml` templates parse under the same html-mixed grammar
+        // (HTML is inert `text`); `.blade.php` degrades the same way.
+        exts: &["php", "phtml"],
+        filenames: &[],
+        make_parser: || {
+            let mut p = tree_sitter::Parser::new();
+            // The `php` flavor (not `php_only`): real files start at
+            // `<?php` and may interleave HTML.
+            p.set_language(&tree_sitter_php::LANGUAGE_PHP.into()).expect("php grammar");
+            p
+        },
+        pack: crate::build::query_extract::php_pack,
+        transform: None,
+        gather_macros: None,
+        collect_macro_defs: None,
+        member_blocks: None,
+        include_closure: None,
+        input_fingerprint: None,
+        sniff: None,
+        access_regions: None,
+        // composer's vendor packages — the project gitignores them, so the
+        // workspace walk can't see the dependency tier without this.
+        dependency_roots: Some(crate::build::composer::composer_dependency_roots),
+    }
+}
+
 #[cfg(feature = "r")]
 fn r_driver() -> PackDriver {
     PackDriver {
@@ -1827,6 +1858,8 @@ impl LanguageRegistry {
         drivers.push(Box::new(cpp_driver()));
         #[cfg(feature = "python")]
         drivers.push(Box::new(python_driver()));
+        #[cfg(feature = "php")]
+        drivers.push(Box::new(php_driver()));
         #[cfg(feature = "r")]
         drivers.push(Box::new(r_driver()));
         #[cfg(feature = "cmake")]
