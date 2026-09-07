@@ -71,7 +71,11 @@ impl FileAnalysis {
                     throwaway_names: _throwaway_names,       // pack-wide convention
                     catch_all_methods: _catch_all_methods, // pack-wide convention
                     class_literal_member: _class_literal_member, // pack-wide convention
+                    import_rows: _import_rows, // editing aid, not cross-file-visible
+                    import_template: _import_template, // pack-wide convention
                     static_property_sigil: _static_property_sigil, // pack-wide convention
+                    preamble_end: _preamble_end, // an editing aid
+                    imports_bind_names: _imports_bind_names, // pack-wide convention
                     doc_mentions: _doc_mentions, // a file-local lint fact
                     types_are_capitalized: _types_are_capitalized, // pack-wide convention
                     enum_members: _enum_members, // pack-wide convention

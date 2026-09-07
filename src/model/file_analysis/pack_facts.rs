@@ -42,9 +42,23 @@ pub struct PackFacts {
     /// Members every enum carries by language rule.
     #[serde(default)]
     pub enum_members: Vec<String>,
+    /// Whole import-statement spans, in file order.
+    #[serde(default)]
+    pub import_rows: Vec<Span>,
+    /// The import statement template, `{}` standing for the qualified name;
+    /// empty when the language has no import quick-fix.
+    #[serde(default)]
+    pub import_template: String,
     /// The sigil a static property is spelled with after the scope operator.
     #[serde(default)]
     pub static_property_sigil: String,
+    /// The last row of the file preamble (open tag, `declare` rows).
+    #[serde(default)]
+    pub preamble_end: Option<usize>,
+    /// Import rows bind names the file spells (php), so a row nothing
+    /// spells is unused; false for text-splicing includes.
+    #[serde(default)]
+    pub imports_bind_names: bool,
     /// Imported names a doc comment mentions.
     #[serde(default)]
     pub doc_mentions: Vec<String>,
@@ -167,6 +181,16 @@ impl PackFacts {
     /// `span`, if any. The one speller for "is this token inside an import
     /// row": the row's leaf carries its own ref; every other segment is a
     /// namespace no by-name lookup should answer for.
+    /// The line an import quick-fix inserts at: right after the last import
+    /// row that starts above `row`.
+    pub fn import_insertion_line(&self, row: usize) -> Option<usize> {
+        self.import_rows
+            .iter()
+            .filter(|r| r.start.row < row)
+            .map(|r| r.end.row + 1)
+            .max()
+    }
+
     pub fn import_row_covering(&self, span: &Span) -> Option<&(Span, String)> {
         self.include_directives.iter().find(|(row, _)| {
             (row.start.row, row.start.column) <= (span.start.row, span.start.column)
@@ -205,6 +229,8 @@ impl PackFacts {
             + vcap(&self.catch_all_methods)
             + self.class_literal_member.capacity()
             + vcap(&self.enum_members)
+            + vcap(&self.import_rows)
+            + self.import_template.capacity()
             + self.static_property_sigil.capacity()
             + vcap(&self.doc_mentions)
             + vcap(&self.type_display)
