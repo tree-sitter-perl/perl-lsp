@@ -1048,6 +1048,7 @@ pub fn php_pack() -> LangPack {
         bundled_overlays: &[
             ("frameworks/wordpress.scm", include_str!("../../../queries/php/frameworks/wordpress.scm")),
             ("frameworks/phpunit.scm", include_str!("../../../queries/php/frameworks/phpunit.scm")),
+            ("frameworks/symfony.scm", include_str!("../../../queries/php/frameworks/symfony.scm")),
             ("stdlib.scm", include_str!("../../../queries/php/stdlib.scm")),
         ],
         lang_id: "php",
