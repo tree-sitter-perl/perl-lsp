@@ -676,6 +676,38 @@ pub(crate) fn cli_heatmap(root: &str, opts: &[String]) {
         None
     };
 
+    // The pack tiers carry the same row store in their own sub-index (the
+    // pack persist writer shreds every analysis it commits), so each gets
+    // the same pre-prune — computed once per distinct sub-index, gated on
+    // full coverage of that tier's entries exactly like the hub's.
+    let mut pack_prunes: Vec<(*const module_index::ModuleIndex, Option<PruneIndex>)> = Vec::new();
+    if rows_env_on && !include_deps {
+        for (_, _, pack) in &pack_entries {
+            let key = std::sync::Arc::as_ptr(pack);
+            if pack_prunes.iter().any(|(k, _)| *k == key) {
+                continue;
+            }
+            let prune = match (pack.ref_prune_index(), pack.unused_exported_syms()) {
+                (Some((referenced_names, shredded)), Some(dead)) => {
+                    let covered = pack_entries
+                        .iter()
+                        .filter(|(_, _, p)| std::sync::Arc::as_ptr(p) == key)
+                        .all(|(p, _, _)| shredded.contains(p.to_string_lossy().as_ref()));
+                    covered.then(|| {
+                        (
+                            referenced_names,
+                            dead.into_iter()
+                                .map(|d| (d.path, d.name, d.start_row, d.start_col))
+                                .collect(),
+                        )
+                    })
+                }
+                _ => None,
+            };
+            pack_prunes.push((key, prune));
+        }
+    }
+
     // One walk per declaration over a frozen index: memoize the relational
     // retrieval for the sweep (same-named declarations share their
     // candidate set; the shredded-path set is fetched once, not per walk),
@@ -710,14 +742,18 @@ pub(crate) fn cli_heatmap(root: &str, opts: &[String]) {
     }
     // Pack languages route through their own sub-index (VISIBLE-wide —
     // pack workspace files ride the DEPENDENCY role); the set derives that
-    // from the origin's stamped language, so no visibility override — and
-    // no pre-prune: their refs aren't in the hub's row store.
+    // from the origin's stamped language, so no visibility override. The
+    // pre-prune is the sub-index's own.
     for (path, analysis, pack) in &pack_entries {
+        let prune = pack_prunes
+            .iter()
+            .find(|(k, _)| *k == std::sync::Arc::as_ptr(pack))
+            .and_then(|(_, p)| p.as_ref());
         for sym in analysis.symbols() {
             if sym.hidden_in_outline() || !heatmap_symbol_eligible(sym) {
                 continue;
             }
-            items.push(HeatmapItem { routing: pack.as_ref(), path, analysis, sym, prune: None, visibility: None });
+            items.push(HeatmapItem { routing: pack.as_ref(), path, analysis, sym, prune, visibility: None });
         }
     }
 
