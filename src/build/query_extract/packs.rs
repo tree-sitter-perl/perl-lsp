@@ -1257,6 +1257,200 @@ pub(super) fn param_return_expr(
     }
 }
 
+/// phpdoc `@return` / `@param` / `@var` facts out of one `/** */` comment.
+/// Only doc comments participate (a `//` or plain `/* */` never carries
+/// the vocabulary); each tag line yields at most one fact.
+fn php_doc_types(text: &str) -> Vec<DocFact> {
+    if !text.starts_with("/**") {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    // Summary paragraph: the prose before the first tag line, one line per
+    // source line (a blank line keeps a paragraph break as a blank line).
+    let mut desc: Vec<String> = Vec::new();
+    for line in text.lines() {
+        let l = line.trim().trim_start_matches('/').trim_start_matches('*').trim_end_matches('/').trim_end_matches('*').trim();
+        if l.starts_with('@') {
+            break;
+        }
+        desc.push(l.to_string());
+    }
+    while desc.last().is_some_and(|l| l.is_empty()) {
+        desc.pop();
+    }
+    while desc.first().is_some_and(|l| l.is_empty()) {
+        desc.remove(0);
+    }
+    if desc.is_empty() {
+        // `/** @var array Default request options */`: a property's only
+        // prose is the tag's trailer — after the type and an optional
+        // `$name`.
+        for line in text.lines() {
+            let l = line.trim().trim_start_matches('/').trim_start_matches('*').trim_end_matches('/').trim_end_matches('*').trim();
+            if let Some(rest) = l.strip_prefix("@var ") {
+                let mut words = rest.split_whitespace();
+                let _ty = words.next();
+                let mut rest: Vec<&str> = words.collect();
+                if rest.first().is_some_and(|w| w.starts_with('$')) {
+                    rest.remove(0);
+                }
+                if !rest.is_empty() {
+                    desc.push(rest.join(" "));
+                }
+                break;
+            }
+        }
+    }
+    if !desc.is_empty() {
+        out.push(DocFact::Description(desc.join("\n")));
+    }
+    for (lineno, line) in text.lines().enumerate() {
+        // Normalize both spellings: a `* @param` continuation line and the
+        // single-line `/** @return X */` form.
+        let l = line
+            .trim()
+            .trim_start_matches('/')
+            .trim_start_matches('*')
+            .trim_end_matches('/')
+            .trim_end_matches('*')
+            .trim();
+        if let Some(rest) = l
+            .strip_prefix("@return ")
+            .or_else(|| l.strip_prefix("@phpstan-return "))
+            .or_else(|| l.strip_prefix("@psalm-return "))
+        {
+            // `Base<static>` / `Base<self>` / `Base<$this>`: the value is
+            // an instance of Base parametrized by the RECEIVER — a
+            // deferred shape, not a strippable generic.
+            let head = rest.split_whitespace().next().unwrap_or("");
+            let recv_inst = head
+                .strip_suffix('>')
+                .and_then(|h| h.split_once('<'))
+                .filter(|(_, arg)| matches!(*arg, "static" | "self" | "$this"))
+                .and_then(|(base, _)| phpdoc_type(base))
+                // Leafed: dispatch is leaf-keyed, and an FQ base
+                // (`\Illuminate\...\Builder<static>`) would miss it.
+                .map(|b| b.rsplit('\\').next().unwrap_or(&b).to_string());
+            if let Some(base) = recv_inst {
+                out.push(DocFact::ReturnRecvInstance { base });
+            } else if let Some(t) = phpdoc_type(rest) {
+                out.push(DocFact::Return(t));
+            }
+        } else if let Some(rest) = l.strip_prefix("@template ")
+            .or_else(|| l.strip_prefix("@template-covariant "))
+        {
+            if let Some(name) = rest.split_whitespace().next() {
+                if !name.is_empty()
+                    && name.chars().all(|c| c == '_' || c.is_ascii_alphanumeric())
+                {
+                    out.push(DocFact::Template { name: name.to_string(), line: lineno });
+                }
+            }
+        } else if let Some(rest) = l
+            .strip_prefix("@param ")
+            .or_else(|| l.strip_prefix("@phpstan-param "))
+            .or_else(|| l.strip_prefix("@psalm-param "))
+            .or_else(|| l.strip_prefix("@global "))
+        {
+            // `@global wpdb $wpdb` types the `global $wpdb;` binding the
+            // def below declares — same (type, $name) shape as @param,
+            // same join (the first var of that name declared in the def).
+            // `@param string $name description`; the typeless `@param $x`
+            // form and variadics (`...$args`) carry nothing typeable.
+            let rest = rest.trim_start();
+            let ty_end = phpdoc_type_token_end(rest);
+            let (ty, tail) = rest.split_at(ty_end);
+            if let Some(name) = tail.split_whitespace().next() {
+                if name.starts_with('$') {
+                    if let Some(t) = phpdoc_type(ty) {
+                        out.push(DocFact::Param {
+                            name: name.trim_end_matches(',').to_string(),
+                            ty: t,
+                        });
+                    }
+                }
+            }
+        } else if let Some(rest) = l
+            .strip_prefix("@var ")
+            .or_else(|| l.strip_prefix("@phpstan-var "))
+            .or_else(|| l.strip_prefix("@psalm-var "))
+        {
+            if let Some(t) = phpdoc_type(rest) {
+                let rest = rest.trim_start();
+                let name = rest[phpdoc_type_token_end(rest)..]
+                    .split_whitespace()
+                    .next()
+                    .filter(|n| n.starts_with('$'))
+                    .map(|n| n.to_string());
+                out.push(DocFact::Var { ty: t, name });
+            }
+        } else if let Some(rest) = l.strip_prefix("@dataProvider ") {
+            if let Some(name) = rest.split_whitespace().next() {
+                if name.chars().all(|c| c == '_' || c.is_ascii_alphanumeric()) {
+                    // Byte column of the provider NAME in the RAW line, so
+                    // the ref spans the token (rename rewrites it in place;
+                    // anchored past the tag so a name that happens to be a
+                    // substring of "@dataProvider" can't mis-anchor).
+                    let col = line
+                        .find("@dataProvider")
+                        .and_then(|tag| {
+                            line[tag..].find(name).map(|o| tag + o)
+                        })
+                        .unwrap_or(0);
+                    out.push(DocFact::UsesMethod {
+                        name: name.to_string(),
+                        line: lineno,
+                        col,
+                    });
+                }
+            }
+        } else if l == "@deprecated" || l.starts_with("@deprecated ") {
+            let text = l["@deprecated".len()..].trim();
+            out.push(DocFact::Deprecated((!text.is_empty()).then(|| text.to_string())));
+        } else if let Some(rest) = l.strip_prefix("@method ") {
+            // `@method [static] T name(args)`; the type is optional
+            // (`@method foo()`), the name token is whatever carries the
+            // `(`. `static` is dispatch surface, not a return spelling.
+            let rest = rest.strip_prefix("static ").unwrap_or(rest);
+            let mut it = rest.split_whitespace();
+            if let Some(t0) = it.next() {
+                let (ret, name_tok) = if t0.contains('(') {
+                    (None, t0)
+                } else {
+                    match it.next() {
+                        Some(t1) => (Some(t0), t1),
+                        None => (None, t0),
+                    }
+                };
+                let name = name_tok.split('(').next().unwrap_or("");
+                if !name.is_empty()
+                    && name
+                        .chars()
+                        .all(|c| c == '_' || c.is_ascii_alphanumeric())
+                {
+                    // Byte column of the method NAME in the RAW line —
+                    // the synthesized symbol spans the token, so the
+                    // cursor lands on it and rename rewrites it in place.
+                    // Anchored on `name(` (the name always carries the
+                    // paren) so a name echoed in the return type can't
+                    // mis-anchor.
+                    let col = line
+                        .find(&format!("{name}("))
+                        .or_else(|| line.find(name))
+                        .unwrap_or(0);
+                    out.push(DocFact::Method {
+                        name: name.to_string(),
+                        ret: ret.and_then(phpdoc_type),
+                        line: lineno,
+                        col,
+                    });
+                }
+            }
+        }
+    }
+    out
+}
+
 /// Normalize one phpdoc type expression to a spelling `annot_type` speaks:
 /// generics stripped (`Collection<int,User>` → `Collection`), `User[]` is
 /// an array, the `null` arm of a union dropped (`?T` too), a REAL union
