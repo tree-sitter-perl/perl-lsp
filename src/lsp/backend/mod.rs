@@ -250,6 +250,7 @@ struct PackHealCtx {
     degraded_progress: Arc<dashmap::DashMap<Url, NumberOrString>>,
     gather_reg: Arc<GatherRegistry>,
     work_done: Arc<std::sync::atomic::AtomicBool>,
+    index_ready: Arc<IndexReady>,
 }
 
 /// How long a verb is willing to wait for in-flight state
