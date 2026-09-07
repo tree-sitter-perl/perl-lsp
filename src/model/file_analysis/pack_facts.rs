@@ -174,6 +174,28 @@ pub struct PackFacts {
     /// from a bug.
     #[serde(default)]
     pub param_regions: Vec<Span>,
+    /// Existence-probe argument spans (`@probe.region`: php `isset(…)` /
+    /// `empty(…)`). A member read inside one IS the question of whether
+    /// the member exists; the undefined-member lanes stay silent there.
+    #[serde(default)]
+    pub probe_regions: Vec<Span>,
+    /// A bare variable written as a call argument (`f($x, $out)`), with the
+    /// argument list it sits in and its position there. The
+    /// undefined-variable lane joins the call ref through the list's start
+    /// (the callee token ends there, the adjacency `arg_count` also rides)
+    /// and asks the callee's `ParamArity::binds_arg`: a by-reference
+    /// position binds the variable instead of reading it.
+    #[serde(default)]
+    pub variable_arg_sites: Vec<ArgSite>,
+}
+
+/// One bare-variable argument: `var` is the variable token, `args` the
+/// enclosing argument list, `position` its index in that list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArgSite {
+    pub var: Span,
+    pub args: Span,
+    pub position: u32,
 }
 
 impl PackFacts {
@@ -219,7 +241,9 @@ impl PackFacts {
             + vcap(&self.domain_sites)
             + vcap(&self.moved_from)
             + vcap(&self.control_regions)
-            + vcap(&self.param_regions);
+            + vcap(&self.param_regions)
+            + vcap(&self.probe_regions)
+            + vcap(&self.variable_arg_sites);
 
         h.misc += map_str_vec(&self.template_params)
             + mcap(&self.specializes)

@@ -237,7 +237,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                         start: node.start_position(),
                         end: node.end_position(),
                     },
-                    crate::model::file_analysis::ParamArity { total, required, variadic },
+                    crate::model::file_analysis::ParamArity { total, required, variadic, by_ref: 0 },
                 ));
                 continue;
             }

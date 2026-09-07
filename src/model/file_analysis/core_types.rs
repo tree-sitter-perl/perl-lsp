@@ -202,6 +202,14 @@ impl Namespace {
 /// it and never re-derives presentation from the detail. Kind-semantic
 /// facts (`is_constant`, `opaque_return`, `lexical`) stay on
 /// `SymbolDetail` — they change behavior, not rendering.
+impl Span {
+    /// `other` lies within this span (inclusive at both ends).
+    pub fn contains(&self, other: &Span) -> bool {
+        (self.start.row, self.start.column) <= (other.start.row, other.start.column)
+            && (other.end.row, other.end.column) <= (self.end.row, self.end.column)
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Presentation {
     /// Suppress this symbol in listing views. Set for presentation
@@ -296,6 +304,11 @@ pub struct ParamArity {
     /// A trailing `...` (C variadic / template pack): any arg count ≥
     /// `required` is accepted.
     pub variadic: bool,
+    /// Positions declared by reference (bit `k` = parameter `k`, php's
+    /// `&$out`): a bare variable written there is BOUND by the call, not
+    /// read. Perl and C++ mint none.
+    #[serde(default)]
+    pub by_ref: u64,
 }
 
 impl ParamArity {
@@ -304,6 +317,12 @@ impl ParamArity {
     /// visible unpruned. `2` = exact (`argc == total`, no variadic); `1` =
     /// compatible (defaults fill the gap, or a variadic tail absorbs the
     /// extra); `0` = mismatch (too few required, or too many for a fixed arity).
+    /// Whether an argument written at `position` is bound by the call
+    /// (the parameter there is declared by reference).
+    pub fn binds_arg(&self, position: usize) -> bool {
+        position < 64 && self.by_ref & (1u64 << position) != 0
+    }
+
     pub fn fit(&self, argc: usize) -> u8 {
         let compatible = argc >= self.required && (self.variadic || argc <= self.total);
         if !compatible {
@@ -627,7 +646,7 @@ impl Symbol {
                 .filter(|p| !p.is_slurpy && !p.is_invocant && p.default.is_none())
                 .count();
             let variadic = params.iter().any(|p| p.is_slurpy);
-            return Some(ParamArity { total, required, variadic });
+            return Some(ParamArity { total, required, variadic, by_ref: 0 });
         }
         None
     }
