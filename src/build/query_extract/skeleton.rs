@@ -435,7 +435,11 @@ impl SkeletonAnalysis {
                 continue;
             }
             let (ns, ne) = (pt(s.name_start), pt(s.name_end));
-            if source.get(ns..ne) != Some(s.name.as_str()) {
+            // A default-named container (php's anonymous class) is spelled
+            // by its anchor token, not its name; the brace body follows
+            // the anchor the same way.
+            let anchored = s.attributes.iter().any(|a| a == "anonymous");
+            if !anchored && source.get(ns..ne) != Some(s.name.as_str()) {
                 continue; // macro-synthesized or shaped name: not textually locatable
             }
             if let Some((open, close)) = brace_body_extent(bytes, ne) {
@@ -487,9 +491,76 @@ impl SkeletonAnalysis {
     /// nothing but capture events. The existence proof that the engine
     /// is language-agnostic above this seam.
     pub fn into_file_analysis(mut self) -> crate::model::file_analysis::FileAnalysis {
+        let rails = std::mem::take(&mut self.rails);
+        let class_rails = std::mem::take(&mut self.class_rails);
+        let rail_name_seps = std::mem::take(&mut self.rail_name_seps);
+        let rail_owner = |span: Span| -> crate::model::file_analysis::HandlerOwner {
+            if let Some((_, rail)) = class_rails.iter().find(|(s, _)| *s == span) {
+                return crate::model::file_analysis::HandlerOwner::ClassRail(rail.clone());
+            }
+            rails
+                .iter()
+                .find(|(s, _)| *s == span)
+                .map(|(_, rail)| crate::model::file_analysis::HandlerOwner::Rail(rail.clone()))
+                .unwrap_or(crate::model::file_analysis::HandlerOwner::Global)
+        };
         use crate::model::file_analysis::{
             FileAnalysis, FileAnalysisParts, SymKind, Symbol, SymbolDetail, SymbolId,
         };
+        // Function-scoped variable unification (pack fact — php): every
+        // assignment mints a var def, so one variable becomes an island
+        // per assignment and a rename from any island rewrites a
+        // fragment. Per (name, owning sub scope): the FIRST def is the
+        // declaration, re-anchored to the sub scope so every use in
+        // every block binds it through the chain; the rest demote to
+        // WRITE references. Runs before anything reads `self.symbols`,
+        // so the parallel-index passes below stay aligned.
+        let mut var_rebind_refs: Vec<(String, crate::model::file_analysis::ScopeId, Span)> =
+            Vec::new();
+        if self.function_scoped_vars {
+            use crate::model::file_analysis::ScopeKind;
+            let owning_sub = |mut s: crate::model::file_analysis::ScopeId| {
+                loop {
+                    let sc = &self.scopes[s.0 as usize];
+                    if matches!(sc.kind, ScopeKind::Sub { .. }) {
+                        return s;
+                    }
+                    match sc.parent {
+                        Some(p) => s = p,
+                        None => return s,
+                    }
+                }
+            };
+            let mut first: std::collections::HashMap<
+                (String, crate::model::file_analysis::ScopeId),
+                usize,
+            > = std::collections::HashMap::new();
+            let mut keep = vec![true; self.symbols.len()];
+            for (i, s) in self.symbols.iter().enumerate() {
+                if s.kind != "var" {
+                    continue;
+                }
+                let key = (s.name.clone(), owning_sub(s.scope));
+                match first.entry(key) {
+                    std::collections::hash_map::Entry::Vacant(e) => {
+                        e.insert(i);
+                    }
+                    std::collections::hash_map::Entry::Occupied(_) => {
+                        keep[i] = false;
+                        var_rebind_refs.push((
+                            s.name.clone(),
+                            s.scope,
+                            Span { start: s.name_start, end: s.name_end },
+                        ));
+                    }
+                }
+            }
+            for ((_, owner), i) in first {
+                self.symbols[i].scope = owner;
+            }
+            let mut it = keep.iter();
+            self.symbols.retain(|_| *it.next().unwrap());
+        }
         // A NAMED typedef `typedef struct N {...} N;` matches both the
         // struct_specifier and the type_definition → two `class N` AT THE
         // SAME SPAN (one node, two capture patterns — e.g. the bodied
@@ -612,6 +683,14 @@ impl SkeletonAnalysis {
                     // a named enum value — distinct from both Variable and
                     // Field.
                     "enumerator" => SymKind::Enumerator,
+                    // a class-scoped compile-time constant (PHP `const`):
+                    // Enumerator's outline/completion shape WITHOUT the
+                    // parent-enum value typing (a const's value is its
+                    // initializer, not the owning class).
+                    "const" => SymKind::Enumerator,
+                    // a string-named hook registration (`@def.handler.named`):
+                    // the model's Handler — same-named registrations stack.
+                    "handler" => SymKind::Handler,
                     // "unionfield" (an inline union member-field container)
                     // stays Variable — its "union" attribute drives the
                     // outline-nesting branch keyed on SymKind::Variable below.
@@ -621,7 +700,17 @@ impl SkeletonAnalysis {
                 selection_span: Span { start: s.name_start, end: s.name_end },
                 scope: s.scope,
                 package: s.package.clone(),
-                detail: SymbolDetail::None,
+                detail: if s.kind == "handler" {
+                    // Flat namespaces (WP hooks: Global; a Laravel rail: its
+                    // name) — the string alone is the identity, no receiver.
+                    SymbolDetail::Handler {
+                        owner: rail_owner(Span { start: s.name_start, end: s.name_end }),
+                        dispatchers: Vec::new(),
+                        params: Vec::new(),
+                    }
+                } else {
+                    SymbolDetail::None
+                },
                 namespace: crate::model::file_analysis::Namespace::Language,
                 presentation: crate::model::file_analysis::Presentation {
                     // An include-guard `#define` is compilation plumbing,
@@ -629,9 +718,11 @@ impl SkeletonAnalysis {
                     // still resolvable (rule #7). The attribute stays on
                     // the symbol for hover; the listing verdict is stamped
                     // here so warm stub rebuilds mint it identically.
-                    hide_in_outline: s.attributes.iter().any(|a| a == "include_guard"),
-                    deprecation: None,
-                    doc: None,
+                    // a class-rail handler sits on another symbol's token
+                    // (a listener's `handle`); the outline shows that one
+                    hide_in_outline: s.attributes.iter().any(|a| a == "include_guard" || a == "class_rail"),
+                    doc: s.doc.clone(),
+                    deprecation: s.deprecation.clone(),
                     display: None,
                     label: None,
                 },
