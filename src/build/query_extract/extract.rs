@@ -858,6 +858,22 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
         .filter(|e| e.cap == "param.region")
         .map(|e| Span { start: e.start, end: e.end })
         .collect();
+    // Existence probes (`@probe.region`: the argument list of `isset` /
+    // `empty`): a member read inside one asks whether the member exists.
+    out.probe_regions = events
+        .iter()
+        .filter(|e| e.cap == "probe.region")
+        .map(|e| Span { start: e.start, end: e.end })
+        .collect();
+    out.variable_arg_sites = variable_arg_sites;
+    // Fold-only regions (`@fold` / `@fold.comment`): blocks and comment
+    // runs that fold in an editor without being scopes (php has no block
+    // scoping, so an `if` body must not mint one).
+    out.fold_regions = events
+        .iter()
+        .filter(|e| e.cap == "fold" || e.cap == "fold.comment")
+        .map(|e| (Span { start: e.start, end: e.end }, e.cap == "fold.comment"))
+        .collect();
 
     for e in &events {
         while scope_stack.len() > 1
@@ -1494,6 +1510,15 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                     .push((e.text.clone(), Span { start: e.start, end: e.end }));
                 out.imports.push(e.text.clone());
             }
+            "preamble" => {
+                out.preamble_end = Some(out.preamble_end.map_or(e.end.row, |r| r.max(e.end.row)));
+            }
+            "import" => {
+                let row = Span { start: e.start, end: e.end };
+                if out.import_rows.last() != Some(&row) {
+                    out.import_rows.push(row);
+                }
+            }
             cap if cap.starts_with("expr.lit.") => {
                 let suffix = cap.strip_prefix("expr.lit.").unwrap();
                 if let Some(t) = lit_type(suffix) {
@@ -1507,6 +1532,9 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                     });
                 }
             }
+            "expr.read.var"
+                if not_a_read.contains(&(e.start_byte, e.end_byte))
+                    || def_name_ends.contains(&e.end_byte) => {}
             "expr.read.var" => {
                 // a variable READ is an edge: Expr(span) resolves to
                 // whatever the Variable resolves to — same shape the
@@ -1739,10 +1767,25 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     // a trailing-return function matches both its leading-`auto` pattern
     // and the trailing sibling (keep the rettype-bearing copy) ----
     {
-        let mut best: HashMap<(usize, usize), usize> = HashMap::new();
+        // Keyed per name site AND per kind family: a framework overlay
+        // legitimately declares a PROPERTY at a method's own name token
+        // (Eloquent relations — `pages()` the method, `->pages` the
+        // accessor) or a HANDLER there (a listener's `handle(X $e)` is the
+        // event rail's handler named X), and those pairs must survive while
+        // the same-kind duplicates (var vs sub, rettype twins) still collapse.
+        // Handlers key by NAME too: one token can carry several rails'
+        // handlers (a listener's `handle(X $e)` is X's handler AND its own
+        // class's job handler).
+        let family = |kind: &str| match kind {
+            "field" => 1u8,
+            "handler" => 2u8,
+            _ => 0u8,
+        };
+        let mut best: HashMap<(usize, usize, u8, String), usize> = HashMap::new();
         let mut keep = vec![true; out.symbols.len()];
         for (i, sym) in out.symbols.iter().enumerate() {
-            let key = (sym.name_start.row, sym.name_start.column);
+            let tag = if sym.kind == "handler" { sym.name.clone() } else { String::new() };
+            let key = (sym.name_start.row, sym.name_start.column, family(&sym.kind), tag);
             match best.get(&key) {
                 None => {
                     best.insert(key, i);
