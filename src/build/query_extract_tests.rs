@@ -3998,7 +3998,89 @@ function f(Query $q) {
     assert_eq!(r, Some(InferredType::String), "fluent chain must type: {r:?}");
 }
 
+#[test]
+fn php_wp_hook_string_callbacks_are_function_refs() {
+    // Round-3 R8 (docs/prompt-pack-plugins.md tier 1): the string in
+    // `add_action('init', 'wp_cron')` names the function. The WordPress
+    // overlay's `@ref.call.named` mints an ordinary FunctionCall ref whose
+    // span is the content between the quotes — references connect both
+    // directions and rename rewrites exactly those characters.
+    let src = "\
+<?php
+function wp_cron(): int { return 1; }
+add_action('init', 'wp_cron');
+add_filter('the_content', 'wp_cron', 10, 2);
+remove_action('init', 'wp_cron');
+";
+    let (fa, _) = php_fa(src);
+    // cursor on the wp_cron decl name
+    let resolved = crate::index::resolve::resolve_symbol(
+        &fa,
+        tree_sitter::Point { row: 1, column: 10 },
+        None,
+    );
+    let target = match resolved {
+        Some(crate::index::resolve::ResolvedTarget::Target(t)) => t,
+        other => panic!("wp_cron decl must mint a target: {other:?}"),
+    };
+    let locs = crate::index::resolve::refs_to_in_file(
+        &crate::index::file_store::FileStore::new(),
+        None,
+        &target,
+        &crate::index::file_store::FileKey::Path(std::path::PathBuf::from("/wp/t.php")),
+        &fa,
+        crate::index::resolve::RoleMask::VISIBLE,
+    );
+    let hook_sites: Vec<_> = locs.iter().filter(|l| l.span.start.row >= 2).collect();
+    assert_eq!(hook_sites.len(), 3, "all three registration strings are refs: {locs:?}");
+    assert!(
+        hook_sites.iter().all(|l| l.rewritable),
+        "rename rewrites the string content: {hook_sites:?}"
+    );
+    // the span is the content INSIDE the quotes: `add_action('init', 'wp_cron');`
+    let first = hook_sites.iter().find(|l| l.span.start.row == 2).expect("row-2 site");
+    assert_eq!((first.span.start.column, first.span.end.column), (20, 27), "span is the quoted content: {first:?}");
+}
 
+#[test]
+fn php_wp_hook_array_callbacks_are_method_refs() {
+    // The `array($this, 'on_save')` / `[$this, 'on_save']` callback forms:
+    // the overlay's `@ref.method.named` + same-match `@member.recv` mint the
+    // SAME MethodCall ref a written `$this->on_save()` carries, so the
+    // method's references include its hook registrations.
+    let src = "\
+<?php
+class Plugin {
+    public function register(): void {
+        add_action('save_post', array($this, 'on_save'));
+        add_filter('the_content', [$this, 'on_save']);
+    }
+    public function on_save(): int { return 1; }
+}
+";
+    let (fa, _) = php_fa(src);
+    let resolved = crate::index::resolve::resolve_symbol(
+        &fa,
+        tree_sitter::Point { row: 6, column: 21 },
+        None,
+    );
+    let target = match resolved {
+        Some(crate::index::resolve::ResolvedTarget::Target(t)) => t,
+        other => panic!("on_save decl must mint a target: {other:?}"),
+    };
+    let locs = crate::index::resolve::refs_to_in_file(
+        &crate::index::file_store::FileStore::new(),
+        None,
+        &target,
+        &crate::index::file_store::FileKey::Path(std::path::PathBuf::from("/wp/p.php")),
+        &fa,
+        crate::index::resolve::RoleMask::VISIBLE,
+    );
+    let hook_sites: Vec<_> =
+        locs.iter().filter(|l| l.span.start.row == 3 || l.span.start.row == 4).collect();
+    assert_eq!(hook_sites.len(), 2, "both array-callback strings are refs: {locs:?}");
+    assert!(hook_sites.iter().all(|l| l.rewritable), "rename reaches them: {hook_sites:?}");
+}
 
 
 #[test]
@@ -4064,6 +4146,55 @@ function use_it(Record $record): Level {
     );
 }
 
+#[test]
+fn php_wp_hook_name_identity_connects_registration_and_firing() {
+    // Hook-NAME identity on the Handler rail: `add_action('init', …)`
+    // declares the hook (a Global-owned Handler named by the string) and
+    // `do_action('init')` fires it. References from either side list
+    // both; rename rewrites the name inside the quotes at every site.
+    let src = "\
+<?php
+function wp_cron(): int { return 1; }
+add_action('init', 'wp_cron');
+add_action('init', 'other_cb');
+do_action('init');
+do_action('shutdown');
+";
+    let (fa, _) = php_fa(src);
+    // cursor on the FIRING string ('init' at row 4, inside quotes)
+    let resolved = crate::index::resolve::resolve_symbol(
+        &fa,
+        tree_sitter::Point { row: 4, column: 12 },
+        None,
+    );
+    let target = match resolved {
+        Some(crate::index::resolve::ResolvedTarget::Target(t)) => t,
+        other => panic!("firing string must mint the Handler target: {other:?}"),
+    };
+    assert!(
+        matches!(
+            &target.kind,
+            crate::index::resolve::TargetKind::Handler {
+                owner: crate::model::file_analysis::HandlerOwner::Global,
+                name
+            } if name == "init"
+        ),
+        "Global handler identity: {target:?}"
+    );
+    let locs = crate::index::resolve::refs_to_in_file(
+        &crate::index::file_store::FileStore::new(),
+        None,
+        &target,
+        &crate::index::file_store::FileKey::Path(std::path::PathBuf::from("/wp/h.php")),
+        &fa,
+        crate::index::resolve::RoleMask::VISIBLE,
+    );
+    let rows: Vec<usize> = locs.iter().map(|l| l.span.start.row).collect();
+    assert!(rows.contains(&2) && rows.contains(&3), "both registrations: {locs:?}");
+    assert!(rows.contains(&4), "the firing site: {locs:?}");
+    assert!(!rows.contains(&5), "'shutdown' is a different hook: {locs:?}");
+    assert!(locs.iter().all(|l| l.rewritable), "rename rewrites inside quotes: {locs:?}");
+}
 
 #[test]
 fn php_member_rename_never_rewrites_import_leaves() {
