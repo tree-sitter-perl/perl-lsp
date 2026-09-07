@@ -185,7 +185,7 @@ impl FileAnalysis {
             if opaque {
                 return String::new();
             }
-            format!("{} → {}", base, format_inferred_type(&rt))
+            format!("{} → {}", base, self.render_type(&rt))
         } else {
             base
         }

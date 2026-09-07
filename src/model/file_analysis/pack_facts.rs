@@ -21,6 +21,15 @@ pub struct PackFacts {
     #[serde(default)]
     pub receiver_names: Vec<String>,
 
+    /// The language's display vocabulary for the engine's value lattice:
+    /// `format_inferred_type` tag → this language's spelling (php:
+    /// `"HashRef"` → `"array"`, `"Numeric"` → `"int|float"`). Applied by
+    /// `FileAnalysis::render_type` / `display_type_of` at every human
+    /// surface; a tag not in the map (class names, parametrics) passes
+    /// through. Empty for Perl — the engine's tags ARE its vocabulary.
+    #[serde(default)]
+    pub type_display: Vec<(String, String)>,
+
     /// Template-specialization family edges: canonical spec spelling
     /// (`formatter<int, char>`) → primary base name (`formatter`). NOT an
     /// inheritance edge — a spec REPLACES the primary wholesale (its member
@@ -117,6 +126,7 @@ impl PackFacts {
 
         h.misc += map_str_vec(&self.template_params)
             + mcap(&self.specializes)
-            + vcap(&self.receiver_names);
+            + vcap(&self.receiver_names)
+            + vcap(&self.type_display);
     }
 }
