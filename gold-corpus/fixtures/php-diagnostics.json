@@ -1,0 +1,90 @@
+{
+  "capability": "diagnostics",
+  "rows": [
+    {
+      "id": "php-diag-parent-arity-under-alias",
+      "difficulty": "hard",
+      "semantic_area": "php-multilang",
+      "lang": "php",
+      "root": "gold-corpus/php-fixture",
+      "comment": "`parent::boot('dev','extra')` against the PARENT's boot(string $env); `parent::__construct()` is accepted.",
+      "line": 0,
+      "col": 0,
+      "expect": {
+        "all": [
+          "\"code\":\"arity-mismatch\",\"col\":\"16\",\"file\":\"Manager.php\",\"line\":\"10\""
+        ],
+        "none": [
+          "\"file\":\"Manager.php\",\"line\":\"9\""
+        ]
+      },
+      "status": "gold"
+    },
+    {
+      "id": "php-diag-unimplemented-contracts",
+      "difficulty": "simple",
+      "semantic_area": "php-multilang",
+      "lang": "php",
+      "root": "gold-corpus/php-fixture",
+      "comment": "Loud misses hush(); Sub misses tag() and hush(); the abstract Base and the complete Quiet are silent.",
+      "line": 0,
+      "col": 0,
+      "expect": {
+        "all": [
+          "\"code\":\"unimplemented-method\",\"col\":\"6\",\"file\":\"Impl.php\",\"line\":\"13\"",
+          "`Speaker::hush()`",
+          "\"code\":\"unimplemented-method\",\"col\":\"6\",\"file\":\"Impl.php\",\"line\":\"21\"",
+          "`Base::tag()`"
+        ],
+        "none": [
+          "\"file\":\"Impl.php\",\"line\":\"3\"",
+          "\"file\":\"Impl.php\",\"line\":\"25\""
+        ]
+      },
+      "status": "gold"
+    },
+    {
+      "id": "php-diag-missing-return-types",
+      "difficulty": "simple",
+      "semantic_area": "php-multilang",
+      "lang": "php",
+      "root": "gold-corpus/php-fixture",
+      "line": 0,
+      "col": 0,
+      "expect": {
+        "all": [
+          "\"code\":\"missing-return-type\",\"col\":\"23\",\"file\":\"Impl.php\",\"line\":\"36\"",
+          "\"code\":\"missing-return-type\",\"col\":\"20\",\"file\":\"Greeter.php\",\"line\":\"21\""
+        ],
+        "none": [
+          "\"code\":\"missing-return-type\",\"file\":\"Home.php\""
+        ]
+      },
+      "status": "gold"
+    },
+    {
+      "id": "php-diag-arity-unused-variable-unused-import",
+      "difficulty": "simple",
+      "semantic_area": "php-multilang",
+      "lang": "php",
+      "root": "gold-corpus/php-fixture",
+      "comment": "`use App\\Sql;` spelled only as the head of `Sql\\ColumnController::class` is used; no member/variable lane fires anywhere in the fixture.",
+      "line": 0,
+      "col": 0,
+      "expect": {
+        "all": [
+          "\"code\":\"arity-mismatch\",\"col\":\"31\",\"file\":\"Home.php\",\"line\":\"23\"",
+          "\"code\":\"unused-variable\",\"col\":\"8\",\"file\":\"Home.php\",\"line\":\"17\"",
+          "\"code\":\"unused-import\",\"col\":\"4\",\"file\":\"services.php\",\"line\":\"5\""
+        ],
+        "none": [
+          "\"code\":\"unused-import\",\"col\":\"4\",\"file\":\"services.php\",\"line\":\"3\"",
+          "\"code\":\"unresolved-method\"",
+          "\"code\":\"undefined-property\"",
+          "\"code\":\"undefined-variable\""
+        ]
+      },
+      "status": "gold"
+    }
+  ]
+}
