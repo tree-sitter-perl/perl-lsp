@@ -2905,6 +2905,64 @@ fn php_type_display_speaks_php_not_perl() {
 }
 
 #[test]
+fn php_docblock_types_fill_what_the_syntax_left_untyped() {
+    // phpdoc is the type vocabulary of real PHP: `@return`/`@param`/`@var`
+    // facts fill syntax-untyped slots (declared types always win), with
+    // generics stripped and `X|null` collapsed.
+    let src = "\
+<?php
+class Repo {
+    /** @var array<string,int> */
+    public $counts;
+
+    /**
+     * @param string $name
+     * @return User|null
+     */
+    public function find($name) {
+        $x = $name;
+        return null;
+    }
+
+    /** @return static */
+    public function fresh(): static {
+        return $this;
+    }
+}
+/** @return Collection<int> */
+function collect($v = null) {}
+";
+    let (fa, _) = php_fa(src);
+    use crate::model::file_analysis::InferredType;
+    // @param on a syntax-untyped parameter
+    let inside = tree_sitter::Point { row: 10, column: 8 };
+    assert_eq!(fa.inferred_type_via_bag("$name", inside), Some(InferredType::String));
+    // @return with a null-collapsed union → the sub's return
+    assert_eq!(
+        fa.sub_return_type_at_arity("find", None),
+        Some(InferredType::ClassName("User".into())),
+    );
+    // generic-stripped @return on a free function
+    assert_eq!(
+        fa.sub_return_type_at_arity("collect", None),
+        Some(InferredType::ClassName("Collection".into())),
+    );
+    // @var on an untyped property — class-wide extent. A string-keyed
+    // `array<K, V>` doc keeps BOTH axes as a two-argument parametric
+    // instance (the foreach Key/Element peels read them).
+    let in_class = tree_sitter::Point { row: 4, column: 0 };
+    assert_eq!(
+        fa.inferred_type_via_bag("counts", in_class),
+        Some(InferredType::Parametric(
+            crate::model::file_analysis::ParametricType::Instance {
+                base: "array".into(),
+                args: vec![InferredType::String, InferredType::Numeric],
+            }
+        ))
+    );
+}
+
+#[test]
 fn php_self_and_static_calls_dispatch_as_the_enclosing_class() {
     // `self::helper()` / `static::helper()` are current-package dispatch —
     // the receiver canonicalizes to the model's `__PACKAGE__` token, so
@@ -3300,6 +3358,39 @@ class Logger {
 }
 
 #[test]
+fn php_global_docblock_types_the_binding() {
+    // WordPress's typing convention: `@global wpdb $wpdb` above the
+    // function + `global $wpdb;` inside. The global statement is a real
+    // declaration (uses hang off it), and the doc row types it — so
+    // `$wpdb->query(...)` dispatches.
+    let src = "\
+<?php
+class wpdb {
+    public function query(string $sql): int { return 1; }
+}
+/**
+ * @global wpdb $wpdb
+ */
+function get_things(): int {
+    global $wpdb;
+    $n = $wpdb->query('SELECT 1');
+    return $n;
+}
+";
+    let (fa, _) = php_fa(src);
+    use crate::model::file_analysis::InferredType;
+    let at = tree_sitter::Point { row: 10, column: 4 };
+    let w = fa.inferred_type_via_bag("$wpdb", at);
+    assert_eq!(
+        w,
+        Some(InferredType::ClassName("wpdb".into())),
+        "the global binding types from the doc row: {w:?}"
+    );
+    let n = fa.inferred_type_via_bag("$n", at);
+    assert_eq!(n, Some(InferredType::Numeric), "and the call off it dispatches: {n:?}");
+}
+
+#[test]
 fn php_new_self_types_as_enclosing_class() {
     // `(new self())->forceFill(...)` — `new self()` is the ENCLOSING
     // class, not a class named "self"; the ctor witness carries it so
@@ -3337,6 +3428,47 @@ class Deletion
     );
 }
 
+
+#[test]
+fn php_method_docblock_synthesizes_class_methods() {
+    // `@method` rows on a CLASS docblock are Laravel's facade surface
+    // (and Eloquent's `__call` documentation): each becomes a real
+    // method symbol, so `CacheFacade::store(...)` dispatches, types,
+    // and completes like a declared method.
+    let src = "\
+<?php
+/**
+ * @method static \\App\\Cache\\Repo store(string $name)
+ * @method static mixed get(string $key)
+ * @method bool has(string $key)
+ */
+class CacheFacade
+{
+}
+$r = CacheFacade::store('x');
+echo $r;
+";
+    let (fa, _) = php_fa(src);
+    use crate::model::file_analysis::{InferredType, SymKind};
+    let names: Vec<&str> = fa
+        .symbols()
+        .iter()
+        .filter(|s| {
+            matches!(s.kind, SymKind::Method) && s.package.as_deref() == Some("CacheFacade")
+        })
+        .map(|s| s.name.as_str())
+        .collect();
+    for m in ["store", "get", "has"] {
+        assert!(names.contains(&m), "{m} synthesized: {names:?}");
+    }
+    // the documented return drives the scoped-call hop
+    let r = fa.inferred_type_via_bag("$r", tree_sitter::Point { row: 10, column: 0 });
+    assert_eq!(
+        r,
+        Some(InferredType::ClassName("Repo".into())),
+        "documented return types the call: {r:?}"
+    );
+}
 
 #[test]
 fn php_parent_call_mints_super_token() {
@@ -3401,6 +3533,75 @@ function f(Query $q) {
 }
 
 
+
+
+#[test]
+fn php_inherit_doc_param_edges_and_publication() {
+    use crate::model::witnesses::{WitnessAttachment, WitnessPayload};
+    // Publication half: the interface's @param array<Rec> lands class-keyed
+    // as PackageSymbol{Iface, "handleBatch#p#$records"}.
+    let (iface, _) = php_fa(
+        "<?php\nnamespace App;\ninterface Iface\n{\n    /**\n     * @param array<Rec> $records\n     */\n    public function handleBatch(array $records): void;\n}\n",
+    );
+    let published: Vec<String> = iface
+        .witnesses
+        .all()
+        .iter()
+        .filter_map(|w| match (&w.attachment, &w.payload) {
+            (
+                WitnessAttachment::PackageSymbol { package, name },
+                WitnessPayload::InferredType(_),
+            ) if name.contains("#p#") => Some(format!("{package}::{name}")),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        published.iter().any(|p| p.contains("Iface") && p.contains("handleBatch#p#")),
+        "publication missing: {published:?}"
+    );
+
+    // Subscription half: the bare-`array` override param edges to its OWN
+    // class's row (the registry inheritance walk carries it to Iface).
+    let (impl_fa, _) = php_fa(
+        "<?php\nnamespace App;\nclass Impl implements Iface\n{\n    /**\n     * @inheritDoc\n     */\n    public function handleBatch(array $records): void\n    {\n        foreach ($records as $record) {\n            echo $record->level;\n        }\n    }\n}\n",
+    );
+    let edges: Vec<String> = impl_fa
+        .witnesses
+        .all()
+        .iter()
+        .filter_map(|w| match (&w.attachment, &w.payload) {
+            (
+                WitnessAttachment::Variable { name, .. },
+                WitnessPayload::Edge(WitnessAttachment::PackageSymbol { package, name: ps }),
+            ) => Some(format!("{name} -> {package}::{ps}")),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        edges.iter().any(|e| e.contains("records") && e.contains("Impl::handleBatch#p#")),
+        "subscription edge missing: {edges:?}"
+    );
+}
+#[test]
+fn php_data_provider_docblock_mints_member_ref_on_name_token() {
+    let src = "<?php\nnamespace App\\Tests;\nclass T\n{\n    /**\n     * @dataProvider algorithmProvider\n     */\n    public function testX(string $a): void {}\n\n    public static function algorithmProvider(): iterable\n    {\n        yield ['md5'];\n    }\n}\n";
+    let mut parser = php_parser();
+    let tree = parser.parse(src, None).unwrap();
+    let skel = extract(&tree, src.as_bytes(), &php_pack()).unwrap();
+    // The `@dataProvider` doc fact mints a member ref SPANNING the
+    // provider-name token (rename rewrites it in place). The invocant is
+    // the CLASS NAME (not `__PACKAGE__`): the doc row's scope is the
+    // class body, whose package is the NAMESPACE, so the current-package
+    // walk would resolve the wrong owner.
+    let r = skel
+        .refs
+        .iter()
+        .find(|r| r.name == "algorithmProvider" && r.kind == "member")
+        .expect("@dataProvider member ref missing");
+    assert_eq!((r.start.row, r.start.column), (5, 21), "name-token span");
+    assert_eq!(r.end.column, 21 + "algorithmProvider".len());
+    assert_eq!(r.invocant.as_ref().map(|(_, t)| t.as_str()), Some("T"));
+}
 
 
 #[test]
