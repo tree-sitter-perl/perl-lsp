@@ -109,6 +109,13 @@ impl<'a> CandidateSet<'a> {
         fallback.map(|l| vec![l])
     }
 
+    /// Word-keyed fallbacks stand down inside an import row
+    /// (`PackFacts::import_row_covering`).
+    fn point_in_import_row(&self, point: tree_sitter::Point) -> bool {
+        let here = Span { start: point, end: point };
+        self.origin.pack.import_row_covering(&here).is_some()
+    }
+
     /// The def site of `member` on `class` — origin symbols first, then the
     /// class's own cached file. Serves the template-family ranked goto-def
     /// (one location per ladder class that actually defines the member).
@@ -119,14 +126,14 @@ impl<'a> CandidateSet<'a> {
         // parent `absl`. The set is derived once per scanned fa (the inline
         // attribution rides the file that opened the namespace, so it is
         // recomputed per file, never shared).
-        let member_span_in = |fa: &crate::model::file_analysis::FileAnalysis| -> Option<Span> {
-            let owners = pack_inline_owner_set(fa, class);
+        let member_span_in = |fa: &crate::model::file_analysis::FileAnalysis, cls: &str| -> Option<Span> {
+            let owners = pack_inline_owner_set(fa, cls);
             fa.symbols()
                 .iter()
                 .find(|s| s.name == member && pack_member_of(fa, s, &owners))
                 .map(|s| s.selection_span)
         };
-        if let Some(span) = member_span_in(self.origin) {
+        if let Some(span) = member_span_in(self.origin, class) {
             return Some(self.origin_decl(span));
         }
         let idx = self.idx()?;
@@ -142,10 +149,49 @@ impl<'a> CandidateSet<'a> {
         };
         // Class-keyed cached module — the fast path when `class` names a
         // struct/class/enum that is itself a cache key. Every candidate
-        // file declaring the class may hold the member.
-        for cached in idx.visible_def_candidates(class) {
-            if let Some(span) = member_span_in(&idx.whole_present(&cached)) {
-                return loc_of(&cached, span);
+        // file declaring the class may hold the member — and an INHERITED
+        // member lives on an ancestor (`View::query()` finds Eloquent
+        // Model's `query`), so the lookup walks the leaf-keyed parent
+        // edges child-first (the instance-receiver path gets this from
+        // the invocant ladder's ancestor walk; a bareword-scoped call
+        // resolves here and needs its own).
+        {
+            let mut queue: std::collections::VecDeque<String> =
+                std::iter::once(class.to_string()).collect();
+            let mut seen: std::collections::HashSet<String> = Default::default();
+            let mut budget = 64usize;
+            while let Some(cls) = queue.pop_front() {
+                if !seen.insert(cls.clone()) || budget == 0 {
+                    continue;
+                }
+                budget -= 1;
+                for parent in self.origin.declared_parents(&cls) {
+                    queue.push_back(parent.clone());
+                }
+                // The origin's use-map pins the leaf to ONE namespace
+                // (`use Support\Facades\Cache;` — without
+                // this, gd on `Cache::store` landed on an unrelated
+                // same-leaf class in a never-imported namespace). A
+                // candidate declaring the class under a DIFFERENT
+                // namespace is not the class this file means; candidates
+                // with no namespace claim stay admissible.
+                let want_ns = self.origin.leaf_namespace(&cls);
+                for cached in idx.visible_def_candidates(&cls) {
+                    let a = idx.whole_present(&cached);
+                    if let (Some(want), Some(cand)) =
+                        (&want_ns, a.declared_class_namespace(&cls))
+                    {
+                        if want != &cand {
+                            continue;
+                        }
+                    }
+                    if let Some(span) = member_span_in(&a, &cls) {
+                        return loc_of(&cached, span);
+                    }
+                    for parent in a.declared_parents(&cls) {
+                        queue.push_back(parent.clone());
+                    }
+                }
             }
         }
         let Some((self_path, visible)) = idx.visibility_scope() else {
@@ -166,7 +212,7 @@ impl<'a> CandidateSet<'a> {
                 if !connected(&cached) {
                     continue;
                 }
-                if let Some(span) = member_span_in(&idx.whole_present(&cached)) {
+                if let Some(span) = member_span_in(&idx.whole_present(&cached), class) {
                     return loc_of(&cached, span);
                 }
             }
@@ -185,7 +231,7 @@ impl<'a> CandidateSet<'a> {
             }
             // Broad scan, cold tail only (both keyed lookups missed) — the
             // rehydration LRU bounds the per-file cost for evicted copies.
-            if let Some(span) = member_span_in(&idx.whole_present(cached)) {
+            if let Some(span) = member_span_in(&idx.whole_present(cached), class) {
                 let p = cached.path.to_string_lossy().into_owned();
                 if hit.as_ref().is_none_or(|(hp, _)| p < *hp) {
                     hit = Some((p, span));
@@ -517,10 +563,17 @@ impl<'a> CandidateSet<'a> {
                 }
             }
         }
-        // Cross-file: the full def-candidates table, closure-connected to the
-        // origin (same connectivity gate as the decl→def ranking).
-        if let Some((self_path, visible)) = idx.visibility_scope() {
-            let self_str = self_path.to_string_lossy().into_owned();
+        // Cross-file: the full def-candidates table. Connectivity is
+        // closure-based under an include-path scope; a scope-less
+        // (Transparent) lookup admits every candidate — a name-keyed pack's
+        // same-named definitions are genuine siblings (WordPress's noop.php
+        // stubs vs the real implementations), and the ranked, never-pruned
+        // family is the honest answer where a single winner was confidently
+        // wrong. Arity fit then floats the real signature above a stub.
+        {
+            let scope = idx
+                .visibility_scope()
+                .map(|(p, v)| (p.to_string_lossy().into_owned(), v));
             let origin_path = key_for_sort(&self.origin_key);
             let mut cached_files = idx.def_candidates(&name);
             cached_files.sort_by(|a, b| a.path.cmp(&b.path));
@@ -528,9 +581,14 @@ impl<'a> CandidateSet<'a> {
                 if cached.path == origin_path {
                     continue;
                 }
-                let p = cached.path.to_string_lossy().into_owned();
-                let connected = visible.contains(&p)
-                    || cached.analysis.pack.include_closure.contains(&self_str);
+                let connected = match &scope {
+                    Some((self_str, visible)) => {
+                        let p = cached.path.to_string_lossy().into_owned();
+                        visible.contains(&p)
+                            || cached.analysis.pack.include_closure.contains(self_str)
+                    }
+                    None => true,
+                };
                 if !connected {
                     continue;
                 }
@@ -1014,9 +1072,19 @@ impl<'a> CandidateSet<'a> {
                 // the picker when a real type declaration exists.
                 let mut type_hits: Vec<RefLocation> = Vec::new();
                 let mut value_hits: Vec<RefLocation> = Vec::new();
+                // A token INSIDE an import row names its class in full: the
+                // row's namespace is the only relevant one (`use
+                // SimplePie\XML\Declaration\Parser as DeclarationParser;`
+                // means that `Parser`, not the file's own or a stranger's).
+                let row_ns = analysis.import_row_namespace(&r.span);
                 for cached in idx.visible_def_candidates(&r.target_name) {
                     if Url::from_file_path(&cached.path).is_ok() {
                         let whole = idx.whole_present(&cached);
+                        if let Some(ns) = row_ns.as_deref() {
+                            if whole.declared_type_namespace(&r.target_name).as_deref() != Some(ns) {
+                                continue;
+                            }
+                        }
                         let loc = |span| RefLocation {
                             key: FileKey::Path(cached.path.clone()),
                             span,
@@ -1087,15 +1155,19 @@ impl<'a> CandidateSet<'a> {
                     // freeze normally serves same-file dispatch, but a bridged
                     // invocant is never frozen (its class needs the index), so
                     // re-resolve here.
+                    let shape = match &r.kind {
+                        RefKind::MethodCall { shape, .. } => *shape,
+                        _ => Default::default(),
+                    };
                     if let Some(MethodResolution::Local { sym_id, .. }) =
-                        analysis.resolve_method_in_ancestors(&cn, method, Some(idx))
+                        analysis.resolve_member_in_ancestors(&cn, method, shape, Some(idx))
                     {
                         if let Some(sym) = analysis.symbols().iter().find(|s| s.id == sym_id) {
                             return vec![self.origin_decl(sym.selection_span)];
                         }
                     }
                     if let Some(MethodResolution::CrossFile { ref class, ref def_module, .. }) =
-                        analysis.resolve_method_in_ancestors(&cn, method, Some(idx))
+                        analysis.resolve_member_in_ancestors(&cn, method, shape, Some(idx))
                     {
                         // One path for both: a real inherited method lives in
                         // `class`'s own module; a plugin-bridged helper lives
@@ -1118,6 +1190,31 @@ impl<'a> CandidateSet<'a> {
                             // completion (`materialize_gated_emissions`), so the
                             // whole view carries it — no per-query enrichment.
                             let whole = idx.whole_present(&cached);
+                            // A value read lands on the stored member first;
+                            // the callable arm below stays its fallback.
+                            let field_sym = || {
+                                whole.symbols().iter().find(|s| {
+                                    matches!(
+                                        s.kind,
+                                        SymKind::Variable | SymKind::Field | SymKind::Enumerator
+                                    ) && s.name == method
+                                        && s.package.as_deref() == Some(class.as_str())
+                                        && whole.symbol_is_class_content(s)
+                                }).map(|s| s.selection_span)
+                            };
+                            if shape == crate::model::file_analysis::MemberShape::Value {
+                                if let Some(span) = field_sym() {
+                                    if Url::from_file_path(&cached.path).is_ok() {
+                                        return vec![RefLocation {
+                                            key: FileKey::Path(cached.path.clone()),
+                                            span,
+                                            access: AccessKind::Declaration,
+                                            rewritable: true,
+                                            label: None,
+                                        }];
+                                    }
+                                }
+                            }
                             if let Some(sub_info) = whole.sub_info_view(method) {
                                 if Url::from_file_path(&cached.path).is_ok() {
                                     // A pack member call lands on the class
@@ -1269,8 +1366,10 @@ impl<'a> CandidateSet<'a> {
         // Last resort (pack): a token no query captures — a namespace middle
         // segment (`StatusCode` in `absl::StatusCode::kNotFound` is a
         // namespace_identifier, ref-less) — resolves by word to a named
-        // type/namespace def.
-        if self.pack {
+        // type/namespace def. Never inside an import row: `Http` in
+        // `use Illuminate\Http\Request;` names a namespace segment, and a
+        // same-named class elsewhere is not it.
+        if self.pack && !self.point_in_import_row(point) {
             if let Some(source) = self.source {
                 if let Some(word) = word_at_point(source, point) {
                     if let Some(loc) = self.type_def_location(word, idx) {
