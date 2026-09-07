@@ -659,3 +659,160 @@ pub(crate) fn byte_to_point(src: &str, byte: usize) -> Point {
 #[cfg(test)]
 #[path = "cursor_sentinel_tests.rs"]
 mod tests;
+
+/// A call site the cursor sits in: the callee token and the active argument.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PackCallSite {
+    /// The callee token (a member call's method name, a function call's
+    /// last name segment, a `new` expression's class name) in original
+    /// coordinates.
+    pub callee: Span,
+    pub active_param: usize,
+}
+
+/// The innermost pack-declared call expression whose argument list holds
+/// the cursor (`docs/adr/cursor-slots.md`'s ArgPosition for pack languages).
+/// Walks the ORIGINAL tree — no sentinel splice: the arguments are what
+/// the user has typed so far, and a cursor right after `(` or `,` is
+/// inside the list by construction.
+pub fn call_at(tree: &Tree, cfg: &crate::build::query_extract::LangPack, src: &str, cursor: usize) -> Option<PackCallSite> {
+    if cfg.call_shapes.is_empty() {
+        return None;
+    }
+    let root = tree.root_node();
+    let at = cursor.min(src.len());
+    let mut node = root.descendant_for_byte_range(at.saturating_sub(1), at)?;
+    loop {
+        if let Some(shape) = cfg.call_shapes.iter().find(|c| c.kind == node.kind()) {
+            if let Some(args) = node.child_by_field_name(shape.args_field) {
+                if args.start_byte() < cursor && cursor <= args.end_byte() {
+                    let callee = if shape.callee_field.is_empty() {
+                        // `new Foo(...)`: the class token is the first
+                        // named child that is not the argument list.
+                        (0..node.named_child_count())
+                            .filter_map(|i| node.named_child(i))
+                            .find(|c| c.id() != args.id())
+                    } else {
+                        node.child_by_field_name(shape.callee_field)
+                    }?;
+                    let tok = last_name_token(callee);
+                    let mut active = 0usize;
+                    for i in 0..args.named_child_count() {
+                        let Some(a) = args.named_child(i) else { continue };
+                        if !cfg.arg_kind.is_empty() && a.kind() != cfg.arg_kind {
+                            continue;
+                        }
+                        if a.start_byte() <= cursor && cursor <= a.end_byte() {
+                            break;
+                        }
+                        if a.end_byte() < cursor {
+                            active += 1;
+                        }
+                    }
+                    return Some(PackCallSite {
+                        callee: Span { start: tok.start_position(), end: tok.end_position() },
+                        active_param: active,
+                    });
+                }
+            }
+        }
+        node = node.parent()?;
+    }
+}
+
+/// The token a callee node names: itself when it is a leaf, else its last
+/// named leaf (`A\B\f` → `f`, `$this->m` → `m`).
+/// One argument of a pack call site: its span and text, and the shapes
+/// that end positional matching (a named argument, a spread, a callable
+/// placeholder).
+pub struct PackArg {
+    pub span: Span,
+    pub text: String,
+    pub named: bool,
+    pub spread: bool,
+}
+
+/// A pack call site with its arguments in source order.
+pub struct PackCallArgs {
+    pub callee: Span,
+    pub args: Vec<PackArg>,
+}
+
+/// Every pack-declared call expression whose callee token sits on one of
+/// `rows`, with its arguments — the same shapes `call_at` reads at a
+/// cursor, walked over a range for the hint lanes.
+pub fn calls_in_rows(
+    tree: &Tree,
+    cfg: &crate::build::query_extract::LangPack,
+    src: &str,
+    rows: std::ops::RangeInclusive<usize>,
+) -> Vec<PackCallArgs> {
+    let mut out = Vec::new();
+    if cfg.call_shapes.is_empty() {
+        return out;
+    }
+    let mut stack = vec![tree.root_node()];
+    while let Some(node) = stack.pop() {
+        if node.end_position().row < *rows.start() || node.start_position().row > *rows.end() {
+            continue;
+        }
+        if let Some(shape) = cfg.call_shapes.iter().find(|c| c.kind == node.kind()) {
+            if let Some(args) = node.child_by_field_name(shape.args_field) {
+                let callee = if shape.callee_field.is_empty() {
+                    (0..node.named_child_count())
+                        .filter_map(|i| node.named_child(i))
+                        .find(|c| c.id() != args.id())
+                } else {
+                    node.child_by_field_name(shape.callee_field)
+                };
+                if let Some(callee) = callee {
+                    let tok = last_name_token(callee);
+                    if rows.contains(&tok.start_position().row) {
+                        let ends_positional = |n: Node<'_>| {
+                            (!cfg.spread_arg_kind.is_empty() && n.kind() == cfg.spread_arg_kind)
+                                || (!cfg.callable_placeholder_kind.is_empty()
+                                    && n.kind() == cfg.callable_placeholder_kind)
+                        };
+                        let mut list = Vec::new();
+                        for i in 0..args.named_child_count() {
+                            let Some(a) = args.named_child(i) else { continue };
+                            if !cfg.arg_kind.is_empty() && a.kind() != cfg.arg_kind {
+                                continue;
+                            }
+                            let named = !cfg.named_arg_field.is_empty()
+                                && a.child_by_field_name(cfg.named_arg_field).is_some();
+                            let spread = ends_positional(a) || a.named_child(0).is_some_and(ends_positional);
+                            list.push(PackArg {
+                                span: Span { start: a.start_position(), end: a.end_position() },
+                                text: src.get(a.start_byte()..a.end_byte()).unwrap_or("").to_string(),
+                                named,
+                                spread,
+                            });
+                        }
+                        out.push(PackCallArgs {
+                            callee: Span { start: tok.start_position(), end: tok.end_position() },
+                            args: list,
+                        });
+                    }
+                }
+            }
+        }
+        for i in (0..node.named_child_count()).rev() {
+            if let Some(c) = node.named_child(i) {
+                stack.push(c);
+            }
+        }
+    }
+    out.sort_by_key(|c| (c.callee.start.row, c.callee.start.column));
+    out
+}
+
+fn last_name_token(n: Node<'_>) -> Node<'_> {
+    let mut cur = n;
+    while cur.named_child_count() > 0 {
+        let Some(last) = (0..cur.named_child_count()).rev().filter_map(|i| cur.named_child(i)).next() else { break };
+        cur = last;
+    }
+    cur
+}
+
