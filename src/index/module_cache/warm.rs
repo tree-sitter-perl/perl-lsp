@@ -112,9 +112,13 @@ pub(crate) enum RowGeneration {
     Missing,
     /// The file changed on disk — skip silently.
     StampStale,
-    /// Blob shape predates EXTRACT_VERSION — the caller decides between
-    /// skip (workspace tiers re-analyze from the walk) and queue-for-
-    /// re-resolve (the name-keyed @INC tier).
+    /// Blob shape is not THIS binary's `EXTRACT_VERSION` — older OR newer.
+    /// A newer stamp is a downgrade (an editor rolled its plugin back
+    /// against a warm cache); its blobs decode to nothing this binary can
+    /// read, and admitting them registered stubs nothing could rehydrate:
+    /// 739 files indexed, 0 symbols, 0 diagnostics, silently. The caller
+    /// decides between skip (workspace tiers re-analyze from the walk) and
+    /// queue-for-re-resolve (the name-keyed @INC tier).
     VersionStale,
     Current(PathBuf),
 }
@@ -134,10 +138,33 @@ pub(crate) fn classify_row_generation(
         Some(_) => return RowGeneration::StampStale,
         None => return RowGeneration::Missing,
     }
-    if row_extract_version < EXTRACT_VERSION {
+    if row_extract_version != EXTRACT_VERSION {
         return RowGeneration::VersionStale;
     }
     RowGeneration::Current(path)
+}
+
+#[cfg(test)]
+mod row_generation_tests {
+    use super::*;
+
+    /// A row stamped by ANY other binary version is foreign — newer as much
+    /// as older. The `<` this replaced let a downgrade warm-load blobs it
+    /// could not decode and answer empty.
+    #[test]
+    fn foreign_extract_version_is_stale_in_both_directions() {
+        let dir = std::env::temp_dir().join(format!("rowgen_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("x.pm");
+        std::fs::write(&file, "package X; 1;\n").unwrap();
+        let path = file.to_string_lossy().into_owned();
+        let (mtime, size) = crate::index::module_cache::file_stamp(&file).unwrap();
+        let verdict = |v: i64| classify_row_generation(&path, mtime, size, v);
+        assert!(matches!(verdict(EXTRACT_VERSION), RowGeneration::Current(_)));
+        assert!(matches!(verdict(EXTRACT_VERSION - 1), RowGeneration::VersionStale));
+        assert!(matches!(verdict(EXTRACT_VERSION + 1), RowGeneration::VersionStale));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
 
 /// One admitted warm row, in the lane the store could serve it from.
