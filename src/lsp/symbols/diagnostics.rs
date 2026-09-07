@@ -1216,6 +1216,73 @@ pub fn pack_symbol_diagnostics(
                 format!("Undefined variable '{}'.", r.target_name));
         }
 
+        // ---- unused variable: a local written and never read ----
+        // A read counts for the callable it sits in, every enclosing callable
+        // (a closure's `use ($x)` reads the outer `$x` through its own copy)
+        // and every callable nested inside it (a by-reference capture is
+        // written inside the closure and read by the scope around it); a
+        // same-named declaration in a nested callable is the capture itself.
+        let callables_up = |scope: crate::model::file_analysis::ScopeId| -> Vec<u32> {
+            analysis
+                .scope_chain(scope)
+                .into_iter()
+                .filter(|&sc| matches!(analysis.scope(sc).kind, ScopeKind::Sub { .. } | ScopeKind::Method { .. }))
+                .map(|sc| sc.0)
+                .collect()
+        };
+        let mut read_chains: HashMap<String, Vec<Vec<u32>>> = HashMap::new();
+        for r in analysis.refs() {
+            if !matches!(r.kind, RefKind::Variable)
+                || matches!(r.access, crate::model::file_analysis::AccessKind::Write)
+                || !r.target_name.starts_with('$')
+            {
+                continue;
+            }
+            read_chains.entry(r.target_name.clone()).or_default().push(callables_up(r.scope));
+        }
+        let mut decl_chains: HashMap<String, Vec<(u32, Vec<u32>)>> = HashMap::new();
+        for sym in analysis.symbols() {
+            if matches!(sym.kind, FaSymKind::Variable) && sym.name.starts_with('$') {
+                if let Some(sc) = callable_of(sym.scope) {
+                    decl_chains.entry(sym.name.clone()).or_default().push((sc.0, callables_up(sym.scope)));
+                }
+            }
+        }
+        for sym in analysis.symbols() {
+            if !matches!(sym.kind, FaSymKind::Variable) || !sym.name.starts_with('$') {
+                continue;
+            }
+            let Some(sc) = callable_of(sym.scope) else { continue };
+            // an alias (`$h = &$opts['h']`) is written to reach its storage
+            if pack.implicit_variables.contains(&sym.name)
+                || pack.throwaway_names.contains(&sym.name)
+                || pack.param_regions.iter().any(|p| p.contains(&sym.span))
+                || sym.attributes.iter().any(|a| a == "alias")
+            {
+                continue;
+            }
+            let body = analysis.scope(sc).span;
+            if dynamic_var_calls.iter().any(|c| span_within(*c, body)) {
+                continue;
+            }
+            let related = |chain: &Vec<u32>| chain.contains(&sc.0) || callables_up(sym.scope).iter().any(|c| chain.first() == Some(c));
+            let read = read_chains.get(&sym.name).is_some_and(|chains| chains.iter().any(related));
+            let captured = decl_chains
+                .get(&sym.name)
+                .is_some_and(|ds| ds.iter().any(|(owner, chain)| *owner != sc.0 && chain.contains(&sc.0)));
+            if read || captured {
+                continue;
+            }
+            out.push(Diagnostic {
+                range: span_to_range(sym.selection_span),
+                severity: Some(DiagnosticSeverity::HINT),
+                code: Some(NumberOrString::String("unused-variable".to_string())),
+                source: Some("perl-lsp".to_string()),
+                message: format!("'{}' is assigned but never used.", sym.name),
+                tags: Some(vec![DiagnosticTag::UNNECESSARY]),
+                ..Default::default()
+            });
+        }
     }
 
     out
