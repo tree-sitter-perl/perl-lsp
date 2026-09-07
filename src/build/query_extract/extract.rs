@@ -669,8 +669,8 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                     .cloned()
                     .map(|(n, s, en)| (n, s, en, false))
                     .or_else(|| {
-                        (pack.default_name)(&kind)
-                            .map(|n| (n.to_string(), e.start, e.start, true))
+                        (pack.default_name)(&kind, e.start.row, e.start.column)
+                            .map(|n| (n, e.start, e.start, true))
                     })
                     .unwrap_or((e.text.clone(), e.start, e.end, false));
                 def_name_spans.push((e.start_byte, e.end_byte));

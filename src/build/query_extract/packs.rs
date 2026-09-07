@@ -9,16 +9,107 @@ use super::*;
 /// MINIMAL on purpose so the findings honestly measure how far
 /// patterns alone go.
 pub struct LangPack {
+    /// The base skeleton query. Bundled overlays (`bundled_overlays`) are
+    /// appended at assembly, each test-compiled alone first, so one broken
+    /// document drops with a diagnostic instead of taking the language out.
     pub query_source: &'static str,
+    /// Bundled framework/stdlib overlays: (document name, source).
+    pub bundled_overlays: &'static [(&'static str, &'static str)],
+    /// The registry's language id (`"php"`, `"cpp"`, ...) — keys pack-plugin
+    /// query overlays (`<plugin-dir>/<name>/queries/<lang_id>.scm`,
+    /// docs/prompt-pack-plugins.md) onto the language they extend.
+    pub lang_id: &'static str,
+    /// Bundled framework-entry declarations (`entry.json` documents, see
+    /// `EntryMarker`): which attribute names / method conventions mean "a
+    /// runner invokes this" for the heatmap's framework-entry guard. The
+    /// framework vocabulary lives in these DATA files (like the bundled
+    /// `.scm` overlays), never in engine code; plugin dirs extend the set.
+    pub bundled_entry_markers: &'static [&'static str],
+    /// Rail documents (`rails.json`): text rails — string-named uses a
+    /// grammar cannot see (a Blade template's `route('x')`), scanned as
+    /// text into `DispatchCall` refs on the named rail.
+    pub bundled_rail_docs: &'static [&'static str],
     /// Shape a captured name token's text (e.g. keep the sigil on a
     /// Perl variable). `capture_kind` is the vocabulary name
     /// (`def.var`, `ref.method`, ...) so one pack hook serves all.
     pub shape_name: fn(capture_kind: &str, raw: &str) -> String,
-    /// Name for defs with no name token (anonymous subs).
-    pub default_name: fn(kind: &str) -> Option<&'static str>,
+    /// Name for defs with no name token (anonymous subs, anonymous
+    /// classes), given the def's 0-based start position: a kind whose
+    /// instances must stay distinct (php's anonymous classes — two per test
+    /// file is normal) spells the position in; structure-only defaults
+    /// (`(anon)`, `(union)`) ignore it. The spelling must be
+    /// identifier-shaped: the name rides the bareword-class lanes.
+    pub default_name: fn(kind: &str, row: usize, col: usize) -> Option<String>,
     /// Map a `@type.annot` token's text to a type — the pack predicate
     /// for languages whose ring 3 is partly in the tree (`x: int`).
     pub annot_type: fn(text: &str) -> Option<InferredType>,
+    /// Does a `@rettype` spelling name the RECEIVER rather than a concrete
+    /// type (PHP `static`/`$this`/`self`)? The writeback then publishes
+    /// `ReturnExpr::Receiver` so fluent builders chain — asked of the pack,
+    /// never a name branch in the engine (rule #10).
+    pub rettype_receiver: fn(text: &str) -> bool,
+    /// Display vocabulary: engine type tag → this language's spelling
+    /// (php `"HashRef"` → `"array"`). Rides `PackFacts.type_display`;
+    /// every human surface translates through it. Empty = engine tags.
+    pub type_display: &'static [(&'static str, &'static str)],
+    /// Do this language's UNQUALIFIED parent names bind namespace-
+    /// relatively (php: an un-imported `extends Base` in `namespace App`
+    /// means `App\Base`, aliases and imports first)? Turns on the use-map
+    /// parent resolution: `@parent` leaves resolve through the file's
+    /// `@use.*` captures (alias → the real leaf) and every parent edge
+    /// records its namespace for FQ chain validation. False = parents pass
+    /// through verbatim with no namespace rows (Perl's package names are
+    /// absolute; cpp identity is its own arc).
+    pub namespace_relative_parents: bool,
+    /// Field types answer through the registry: each data-member decl mints
+    /// `PackageSymbol{class, field} → Edge(Variable)` so a property-access
+    /// hop (`$this->query->where(...)`) dispatches the field and chains.
+    /// True only where the registry IS the field-type authority (php).
+    /// False for cpp: its field answers go through the instantiation-aware
+    /// `member_value_type` lane (template-param substitution, typedef
+    /// display), and a registry edge answers the RAW declared type first —
+    /// `item_: T` instead of the substituted `int`.
+    pub field_registry_edges: bool,
+    /// Does this receiver spelling mean "dispatch from the parent of the
+    /// writing class, skipping it" (php `parent::`)? The ref is then
+    /// minted with the model's SUPER method token (`SUPER::name`, the
+    /// Perl `$self->SUPER::m` spelling) and a current-package invocant,
+    /// so goto-def, references, and rename all ride the existing SUPER
+    /// lane (`resolve_super_method`, refs_to's SUPER arm) — asked of the
+    /// pack, never a name branch in the engine (rule #10).
+    pub super_receiver: fn(text: &str) -> bool,
+    /// Receiver tokens that name the ENCLOSING class itself for member
+    /// access (php `self::` / `static::`): no typeable value node, the class
+    /// is read off the cursor's scope chain — the `receiver_names` rule for
+    /// a scoped access. Empty = none.
+    pub self_class_tokens: &'static [&'static str],
+    /// Node kinds of a bare CLASS TOKEN in receiver position (php `Foo::m(`,
+    /// `App\Foo::CONST` — `name` / `qualified_name`): the receiver's value
+    /// is the class it spells (leaf-keyed, like every class identity).
+    /// Empty = none.
+    pub class_token_kinds: &'static [&'static str],
+    /// Are local variables FUNCTION-scoped (php: an assignment inside an
+    /// `if` block declares for the whole function, and re-assignment is a
+    /// REBIND of the same variable, not a fresh declaration)? Var defs
+    /// then anchor to the nearest enclosing sub scope and same-scope
+    /// re-assignments demote to write references — one identity per
+    /// function, so references/rename see every site instead of
+    /// per-assignment islands (round-3 R5: a rename from any island
+    /// rewrote a fragment and broke the code). False = block-scoped
+    /// (cpp) or handled natively (Perl's `my`).
+    pub function_scoped_vars: bool,
+    /// The pack's constructor-method names (php `__construct`): a Method
+    /// target with one of these names is the class's constructor, and its
+    /// references include the class's `new Foo(...)` sites (non-rewritable
+    /// — the token spells the class). Rides `PackFacts::constructor_names`.
+    pub constructor_names: &'static [&'static str],
+    /// Documentation-comment type facts (phpdoc `@return`/`@param`/`@var`):
+    /// the pack parses ITS OWN doc vocabulary out of a `@doc.comment`
+    /// capture's text, returning type spellings `annot_type` speaks.
+    /// The engine joins each comment to the def directly below it and
+    /// fills ONLY where the syntax declared nothing — declared types win
+    /// (docblocks drift). Empty = no doc lane.
+    pub doc_types: fn(text: &str) -> Vec<DocFact>,
     /// Module-name → workspace-relative candidate paths — the entire
     /// per-language cross-file resolution strategy ("the one executable
     /// line"). Python: `pkg.mod` → pkg/mod.py | pkg/mod/__init__.py.
@@ -281,6 +372,64 @@ pub(crate) const C_FIELD_DECL_PEEL: PeelSpec = PeelSpec {
     record_stack: true,
 };
 
+/// A call-expression shape signature help climbs to from the cursor
+/// (`cursor_sentinel::call_at`).
+#[derive(Debug, Clone, Copy)]
+pub struct CallShape {
+    pub kind: &'static str,
+    /// Field naming the callee token (a member call's `name`, a function
+    /// call's `function`); the LAST `name`-like descendant is the token.
+    pub callee_field: &'static str,
+    /// Field holding the argument list node.
+    pub args_field: &'static str,
+}
+
+/// One type fact parsed from a documentation comment (`LangPack::doc_types`).
+/// The type is a raw spelling the pack has already normalized to what its
+/// `annot_type` accepts (generics stripped, `X|null` collapsed to `X`).
+#[derive(Debug, Clone)]
+pub enum DocFact {
+    /// `@return T` — the documented return of the def below the comment.
+    Return(String),
+    /// `@param T $name` — a documented parameter type; `name` carries the
+    /// language's own spelling (php keeps the `$`).
+    Param { name: String, ty: String },
+    /// `@var T [$name]` — the documented type of the property/variable
+    /// below (or, with a `$name`, of that specific local — the inline
+    /// `/** @var Type[] $rows */` idiom above an assignment).
+    Var { ty: String, name: Option<String> },
+    /// `@dataProvider name` — a PHPUnit docblock row naming a sibling
+    /// METHOD the runner will invoke. The join mints a real method
+    /// reference (invocant = the enclosing class) on the fact's own
+    /// line, so providers gain fan-in and rename reaches the row.
+    UsesMethod { name: String, line: usize, col: usize },
+    /// `@method [static] T name(...)` on a CLASS docblock — a documented
+    /// virtual method (Laravel facades, Eloquent's `__call` surface). The
+    /// join synthesizes a real method symbol on the class below, spanning
+    /// the fact's own `@method` line (`line` = 0-based offset within the
+    /// comment) so each row is a distinct, honest gd target.
+    Method { name: String, ret: Option<String>, line: usize, col: usize },
+    /// `@deprecated [text]` — the declaration is deprecated; the text is
+    /// what the diagnostic shows.
+    Deprecated(Option<String>),
+    /// `@template T [of X]` on a CLASS docblock — a declared generic
+    /// parameter, in row order (`line` is the ordering key). Feeds the
+    /// SAME per-class `template_params` axis cpp templates use, so a
+    /// method whose `@return` names the param publishes `ParamOf(i)`
+    /// through the existing writeback (Eloquent's `Builder<TModel>`).
+    Template { name: String, line: usize },
+    /// `@return Base<static|self|$this>` — the return is an instance of
+    /// `base` PARAMETRIZED BY THE RECEIVER (`Model::query()` returns
+    /// `Builder<static>`): the join publishes
+    /// `Operator(InstanceOf{base, [Receiver]})`, so `Book::query()`
+    /// carries `Builder<Book>` and a later `->first()` (`@return
+    /// TModel`) projects `Book` back out.
+    ReturnRecvInstance { base: String },
+    /// The comment's summary paragraph — every line before the first
+    /// `@tag`, joined; the text hover shows under the signature.
+    Description(String),
+}
+
 /// One effect of a command-dispatched statement.
 // Variants are constructed only by `cmake_pack` (command languages) and read by
 // the generic cmd-effect match; both absent in a build without that feature.
@@ -307,6 +456,10 @@ pub enum CmdEffect {
 pub fn perl_pack() -> LangPack {
     LangPack {
         query_source: include_str!("../../../queries/perl/skeleton.scm"),
+        bundled_overlays: &[],
+        lang_id: "perl",
+        bundled_entry_markers: &[],
+        bundled_rail_docs: &[],
         shape_name: |kind, raw| match kind {
             // The builder stores variable symbols WITH sigil; varname
             // captures are sigil-less. Predicate re-attaches nothing —
@@ -314,11 +467,21 @@ pub fn perl_pack() -> LangPack {
             // already carries the sigil.
             _ => raw.to_string(),
         },
-        default_name: |kind| match kind {
-            "anon" => Some("(anon)"),
+        default_name: |kind, _, _| match kind {
+            "anon" => Some("(anon)".to_string()),
             _ => None,
         },
         annot_type: |_| None,
+        rettype_receiver: |_| false,
+        type_display: &[],
+        namespace_relative_parents: false,
+        field_registry_edges: false,
+        super_receiver: |_| false,
+        self_class_tokens: &[],
+        class_token_kinds: &[],
+        function_scoped_vars: false,
+        constructor_names: &[],
+        doc_types: |_| vec![],
         module_paths: |m| vec![format!("{}.pm", m.replace("::", "/"))],
         shape_ctor: |_| false,
         import_call: |_, _| None,
@@ -352,8 +515,12 @@ pub fn perl_pack() -> LangPack {
 pub fn python_pack() -> LangPack {
     LangPack {
         query_source: include_str!("../../../queries/python/skeleton.scm"),
+        bundled_overlays: &[],
+        lang_id: "python",
+        bundled_entry_markers: &[],
+        bundled_rail_docs: &[],
         shape_name: |_, raw| raw.to_string(),
-        default_name: |_| None,
+        default_name: |_, _, _| None,
         annot_type: |text| match text.trim() {
             "str" => Some(InferredType::String),
             "int" | "float" => Some(InferredType::Numeric),
@@ -364,6 +531,16 @@ pub fn python_pack() -> LangPack {
             }
             _ => None,
         },
+        rettype_receiver: |_| false,
+        type_display: &[],
+        namespace_relative_parents: false,
+        field_registry_edges: false,
+        super_receiver: |_| false,
+        self_class_tokens: &[],
+        class_token_kinds: &[],
+        function_scoped_vars: false,
+        constructor_names: &[],
+        doc_types: |_| vec![],
         module_paths: |m| {
             let base = m.replace('.', "/");
             vec![format!("{base}.py"), format!("{base}/__init__.py")]
@@ -406,14 +583,28 @@ pub fn python_pack() -> LangPack {
 pub fn r_pack() -> LangPack {
     LangPack {
         query_source: include_str!("../../../queries/r/skeleton.scm"),
+        bundled_overlays: &[],
+        lang_id: "r",
+        bundled_entry_markers: &[],
+        bundled_rail_docs: &[],
         shape_name: |_, raw| raw.to_string(),
-        default_name: |_| None,
+        default_name: |_, _, _| None,
         annot_type: |_| None,
         // No reliable lexical ctor convention in R (S4/R5 exist but
         // rare); class typing arrives via shapes and S3 later.
         // source("util.R") hands us the path verbatim; library(pkg)
         // resolves into the installed-library tree (a real install
         // would consult .libPaths() — not modeled here).
+        rettype_receiver: |_| false,
+        type_display: &[],
+        namespace_relative_parents: false,
+        field_registry_edges: false,
+        super_receiver: |_| false,
+        self_class_tokens: &[],
+        class_token_kinds: &[],
+        function_scoped_vars: false,
+        constructor_names: &[],
+        doc_types: |_| vec![],
         module_paths: |m| vec![m.to_string()],
         shape_ctor: |callee| matches!(callee, "list" | "data.frame" | "tibble"),
         import_call: |callee, arg| match callee {
@@ -450,11 +641,25 @@ pub fn r_pack() -> LangPack {
 pub fn cmake_pack() -> LangPack {
     LangPack {
         query_source: include_str!("../../../queries/cmake/skeleton.scm"),
+        bundled_overlays: &[],
+        lang_id: "cmake",
+        bundled_entry_markers: &[],
+        bundled_rail_docs: &[],
         shape_name: |_, raw| raw.to_string(),
-        default_name: |_| None,
+        default_name: |_, _, _| None,
         annot_type: |_| None,
         // include(util.cmake) is a literal path; add_subdirectory(src)
         // means src/CMakeLists.txt. The whole resolution strategy.
+        rettype_receiver: |_| false,
+        type_display: &[],
+        namespace_relative_parents: false,
+        field_registry_edges: false,
+        super_receiver: |_| false,
+        self_class_tokens: &[],
+        class_token_kinds: &[],
+        function_scoped_vars: false,
+        constructor_names: &[],
+        doc_types: |_| vec![],
         module_paths: |m| {
             if m.ends_with(".cmake") {
                 vec![m.to_string()]
@@ -504,6 +709,10 @@ pub fn cmake_pack() -> LangPack {
 pub fn cpp_pack() -> LangPack {
     LangPack {
         query_source: include_str!("../../../queries/cpp/skeleton.scm"),
+        bundled_overlays: &[],
+        lang_id: "cpp",
+        bundled_entry_markers: &[],
+        bundled_rail_docs: &[],
         // Template spellings get ONE canonical whitespace form so a
         // specialization's identity (`formatter<int, char>`) matches
         // however the source wrapped it. Identity for every non-template
@@ -512,8 +721,8 @@ pub fn cpp_pack() -> LangPack {
         // an anonymous inline union has no name token of its own; the
         // synthetic container is outline structure, not an addressable
         // member (the "anonymous" attribute keeps it out of completion).
-        default_name: |kind| match kind {
-            "unionfield" => Some("(union)"),
+        default_name: |kind, _, _| match kind {
+            "unionfield" => Some("(union)".to_string()),
             _ => None,
         },
         // C++ declared types ARE the witness source. Primitives → the
@@ -560,6 +769,16 @@ pub fn cpp_pack() -> LangPack {
         // #include "a/b.h" / <vector>: strip the delimiters; a quoted
         // path is workspace-relative verbatim, a system header resolves
         // through include dirs (library_roots, later). Tier 1: identity.
+        rettype_receiver: |_| false,
+        type_display: &[],
+        namespace_relative_parents: false,
+        field_registry_edges: false,
+        super_receiver: |_| false,
+        self_class_tokens: &[],
+        class_token_kinds: &[],
+        function_scoped_vars: false,
+        constructor_names: &[],
+        doc_types: |_| vec![],
         module_paths: |m| {
             let p = m.trim_matches(|c: char| c == '"' || c == '<' || c == '>');
             vec![p.to_string()]
