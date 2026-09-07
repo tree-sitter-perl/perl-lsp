@@ -2508,6 +2508,69 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
             });
         }
     }
+    // Key-less array literals are positional TUPLES of their elements'
+    // edges (`return [$queue, $agent]`); a keyed element or a spread makes
+    // the literal a map / open list — the tuple witness is withheld and the
+    // `expr.lit.hashref` / keyed-shape witnesses stand.
+    {
+        let mut by_arr: HashMap<(Point, Point), (Span, Vec<(usize, Span)>, bool)> = HashMap::new();
+        for (mid, arr_span) in &tuple_arr_by_match {
+            let entry = by_arr
+                .entry((arr_span.start, arr_span.end))
+                .or_insert((*arr_span, Vec::new(), false));
+            if tuple_keyed.contains(mid) {
+                entry.2 = true;
+                continue;
+            }
+            if let (Some(elem), Some((byte, spread))) =
+                (tuple_elem_by_match.get(mid), tuple_init_by_match.get(mid))
+            {
+                if *spread {
+                    entry.2 = true;
+                    continue;
+                }
+                entry.1.push((*byte, *elem));
+            }
+        }
+        const MAX_TUPLE: usize = 64;
+        for (_, (arr_span, mut elems, disqualified)) in by_arr {
+            if disqualified || elems.is_empty() || elems.len() > MAX_TUPLE {
+                continue;
+            }
+            elems.sort_by_key(|(b, _)| *b);
+            out.witnesses.push(crate::model::witnesses::Witness {
+                attachment: crate::model::witnesses::WitnessAttachment::Expr(arr_span),
+                source: crate::model::witnesses::WitnessSource::Builder("skeleton".into()),
+                payload: crate::model::witnesses::WitnessPayload::Tuple(
+                    elems
+                        .into_iter()
+                        .map(|(_, s)| crate::model::witnesses::WitnessAttachment::Expr(s))
+                        .collect(),
+                ),
+                span: arr_span,
+            });
+        }
+    }
+    // Subscripts project off their base: an integer index peels a slot, a
+    // literal string key drills a keyed shape — the same `Projected` steps
+    // the foreach/destructuring binders ride.
+    for (expr, base, idx, key) in subscript_by_match.values() {
+        let Some(base) = base else { continue };
+        let step = match (idx, key) {
+            (Some(i), _) => crate::model::witnesses::ProjectionStep::ArrayIndex(*i),
+            (None, Some(k)) => crate::model::witnesses::ProjectionStep::HashKey(k.clone()),
+            _ => continue,
+        };
+        out.witnesses.push(crate::model::witnesses::Witness {
+            attachment: crate::model::witnesses::WitnessAttachment::Expr(*expr),
+            source: crate::model::witnesses::WitnessSource::Builder("skeleton".into()),
+            payload: crate::model::witnesses::WitnessPayload::Projected {
+                base: crate::model::witnesses::WitnessAttachment::Expr(*base),
+                step,
+            },
+            span: *expr,
+        });
+    }
     // Lower the value-flow edges to type-tier witnesses (the bag is canonical
     // for types; the edges are the provenance tier above it).
     for fe in &out.flow_edges {
