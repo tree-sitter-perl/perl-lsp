@@ -1426,3 +1426,131 @@ fn php_existence_probes_stay_quiet() {
     assert!(rows[0].contains("'real'"), "{rows:?}");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Three shapes BookStack's vendor tree surfaced: an untyped or by-ref
+/// constructor-promoted property still declares the property (and the
+/// ctor local), a spread argument makes a call's count unknowable, and a
+/// `[$obj, 'name']` tuple names a method only when it resolves.
+#[cfg(feature = "php")]
+#[test]
+fn php_promotion_spread_and_string_named_tuples() {
+    let dir = std::env::temp_dir().join(format!("perl-lsp-d2prom-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    let w = |rel: &str, src: &str| std::fs::write(dir.join(rel), src).unwrap();
+    w("composer.json", "{\"autoload\": {\"psr-4\": {\"App\\\\\": \"src/\"}}}");
+    w("src/A.php", "<?php\nnamespace App;\nclass Hist\n{\n    public function __construct(protected $stream, protected &$container, public int $size) {}\n    public function count(): int\n    {\n        return count($this->container) + $this->size + $this->stream + $this->nope;\n    }\n}\nclass Fwd\n{\n    public function all(): array { return []; }\n    public function fwd(): array\n    {\n        return $this->all(...func_get_args());\n    }\n    public function tuples(Hist $h): array\n    {\n        return [[$h, 'not-a-method'], [$h, 'count']];\n    }\n}\n");
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_perl-lsp"))
+        .args(["--check", dir.to_str().unwrap()])
+        .env("XDG_CACHE_HOME", dir.join(".cache"))
+        .output()
+        .expect("run");
+    let err = String::from_utf8_lossy(&out.stderr);
+    let rows: Vec<&str> = err.lines().filter(|l| l.contains("A.php") && l.contains('[')).collect();
+    assert_eq!(rows.len(), 1, "{err}");
+    assert!(rows[0].contains("'nope'"), "{rows:?}");
+    // the resolving tuple still navigates: `count` on Hist is a reference
+    let def = std::process::Command::new(env!("CARGO_BIN_EXE_perl-lsp"))
+        .args(["--definition", dir.to_str().unwrap(), "src/A.php", "19", "44"])
+        .env("XDG_CACHE_HOME", dir.join(".cache"))
+        .output()
+        .expect("run");
+    let def = String::from_utf8_lossy(&def.stdout);
+    assert!(def.contains("A.php:5:"), "{def}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `$cls::$fields` — a static property through an expression scope — is a
+/// member read of the class the expression names, never a local variable.
+#[cfg(feature = "php")]
+#[test]
+fn php_static_property_through_an_expression_scope() {
+    let dir = std::env::temp_dir().join(format!("perl-lsp-d2sprop-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    let w = |rel: &str, src: &str| std::fs::write(dir.join(rel), src).unwrap();
+    w("composer.json", "{\"autoload\": {\"psr-4\": {\"App\\\\\": \"src/\"}}}");
+    w("src/Entity.php", "<?php\nnamespace App;\nclass Entity\n{\n    public static $fields = ['a'];\n    public static function make(): Entity { return new Entity(); }\n}\n");
+    w("src/Use.php", "<?php\nnamespace App;\nclass Use_\n{\n    public function f(Entity $e): array\n    {\n        $cls = Entity::class;\n        return [$cls::$fields, Entity::make()::$fields, $e::$fields];\n    }\n}\n");
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_perl-lsp"))
+        .args(["--check", dir.to_str().unwrap()])
+        .env("XDG_CACHE_HOME", dir.join(".cache"))
+        .output()
+        .expect("run");
+    let err = String::from_utf8_lossy(&out.stderr);
+    let rows: Vec<&str> = err.lines().filter(|l| l.contains(".php") && l.contains('[')).collect();
+    assert!(rows.is_empty(), "{err}");
+    let def = std::process::Command::new(env!("CARGO_BIN_EXE_perl-lsp"))
+        .args(["--definition", dir.to_str().unwrap(), "src/Use.php", "7", "24"])
+        .env("XDG_CACHE_HOME", dir.join(".cache"))
+        .output()
+        .expect("run");
+    let def = String::from_utf8_lossy(&def.stdout);
+    assert!(def.contains("Entity.php:4:"), "{def}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Silence rules the corpora demanded: a trait's `$this` is the composing
+/// class (no undefined members), a first-class callable member
+/// (`$this->load(...)`) is a call, a subscript's index is a read, and a
+/// by-reference capture written inside the closure and read outside — or
+/// captured by a nested closure — is used.
+#[cfg(feature = "php")]
+#[test]
+fn php_lanes_stay_quiet_on_traits_captures_and_first_class_callables() {
+    let dir = std::env::temp_dir().join(format!("perl-lsp-d2fp2-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    let w = |rel: &str, src: &str| std::fs::write(dir.join(rel), src).unwrap();
+    w("composer.json", "{\"autoload\": {\"psr-4\": {\"App\\\\\": \"src/\"}}}");
+    w("src/A.php", "<?php\nnamespace App;\ntrait T\n{\n    public function go(): int\n    {\n        $this->startSession();\n        return $this->app['x'];\n    }\n}\nclass K\n{\n    public function load(string $c): void {}\n    public function reg(): void\n    {\n        spl_autoload_register($this->load(...), true, true);\n    }\n    public function keys(array $promises): array\n    {\n        $results = [];\n        foreach ($promises as $key => $promise) {\n            $results[$key] = $promise;\n        }\n        $called = [];\n        $p = function ($size) use (&$called) { $called[] = $size; return 1; };\n        $p(1);\n        $result = null;\n        $f = function ($v) use (&$result): void { $result = ['v' => $v]; };\n        $f(2);\n        $dead = 3;\n        foreach ($results as $_ => $v) { $called[] = $v; }\n        return [$results, $called, $result];\n    }\n}\n");
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_perl-lsp"))
+        .args(["--check", dir.to_str().unwrap(), "--severity", "hint"])
+        .env("XDG_CACHE_HOME", dir.join(".cache"))
+        .output()
+        .expect("run");
+    let err = String::from_utf8_lossy(&out.stderr);
+    let rows: Vec<&str> = err.lines().filter(|l| l.contains("A.php") && l.contains('[')).collect();
+    assert_eq!(rows.len(), 1, "{err}");
+    assert!(rows[0].contains("[unused-variable]") && rows[0].contains("'$dead'"), "{rows:?}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The undefined-variable lane binds a bare variable written into a
+/// by-reference parameter — the callee resolved locally or across files,
+/// through a receiver or by name — stays silent for a callee it cannot
+/// resolve (php's own `preg_match`), still names the stray read into a
+/// by-value parameter, reads `\Ns\Cls::$prop` as a member, never a local,
+/// and treats `unset($x)` / `empty($x)` as the existence question.
+#[cfg(feature = "php")]
+#[test]
+fn php_undefined_variable_lane_reads_by_reference_parameters() {
+    let dir = std::env::temp_dir().join(format!("perl-lsp-d2byref-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    let w = |rel: &str, src: &str| std::fs::write(dir.join(rel), src).unwrap();
+    w("composer.json", "{\"autoload\": {\"psr-4\": {\"App\\\\\": \"src/\"}}}");
+    w("src/Process.php", "<?php\nnamespace App;\nclass Process\n{\n    public function execute(array $cmd, &$output = null, ?string $cwd = null): int { return 0; }\n}\n");
+    w("src/Init.php", "<?php\nnamespace App;\nclass Init\n{\n    public static $files = [];\n}\n");
+    w("src/Runner.php", "<?php\nnamespace App;\nfunction fill(array &$out): void { $out = [1]; }\nfunction helper(string $x): int { return strlen($x); }\nclass Runner\n{\n    public function run(Process $p): int\n    {\n        $p->execute(['ls'], $ignored, '/');\n        fill($local);\n        preg_match('/a/', 'abc', $m);\n        $n = \\App\\Init::$files;\n        helper($typo);\n        $dm = &$this->mode;\n        $dm = true;\n        unset($gone);\n        if (empty($maybe)) { return 0; }\n        return count($n);\n    }\n    private bool $mode = false;\n}\n");
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_perl-lsp"))
+        .args(["--check", dir.to_str().unwrap(), "--severity", "hint"])
+        .env("XDG_CACHE_HOME", dir.join(".cache"))
+        .output()
+        .expect("run");
+    let err = String::from_utf8_lossy(&out.stderr);
+    let names: Vec<&str> = err
+        .lines()
+        .filter(|l| l.contains("[undefined-variable]"))
+        .filter_map(|l| l.split('\'').nth(1))
+        .collect();
+    assert_eq!(names, vec!["$typo"], "{err}");
+    // `$dm` is an alias written through: the unused-variable lane leaves it
+    let unused: Vec<&str> = err
+        .lines()
+        .filter(|l| l.contains("[unused-variable]"))
+        .filter_map(|l| l.split('\'').nth(1))
+        .collect();
+    assert!(!unused.contains(&"$dm"), "{err}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
