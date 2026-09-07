@@ -84,6 +84,15 @@ impl ModuleBucket {
         }
     }
 
+    /// Keep only the members `keep` accepts (a rebuild's clear, which
+    /// spares the path-keyed handler feeds).
+    pub fn retain_keys(&mut self, keep: impl Fn(&str) -> bool) {
+        self.modules.retain(|m| keep(m));
+        if let Some(seen) = &mut self.seen {
+            seen.retain(|m| keep(m));
+        }
+    }
+
     pub fn is_empty(&self) -> bool {
         self.modules.is_empty()
     }
@@ -131,6 +140,9 @@ pub struct ModuleEdgeIndexes {
     /// (re-feeds are exactly when it's needed); `remove_path_record` drops
     /// it when the file itself goes.
     name_records: DashMap<std::path::PathBuf, FedNames>,
+    /// Path key → the handler names it fed (rail / hook definitions), kept
+    /// across `clear` like `name_records`, replayed by the rebuild.
+    handler_records: DashMap<String, Vec<(String, crate::model::file_analysis::HandlerOwner)>>,
     /// Every module name `feed` has published edges under, and — the point
     /// — WHICH bucket keys it was published under in each map, so
     /// `purge_module` touches only its own edges.
@@ -199,6 +211,7 @@ impl ModuleEdgeIndexes {
             specs: DashMap::new(),
             providers: DashMap::new(),
             name_records: DashMap::new(),
+            handler_records: DashMap::new(),
             fed_modules: DashMap::new(),
         }
     }
@@ -255,6 +268,50 @@ impl ModuleEdgeIndexes {
         // earlier siblings' keys unrecorded and their edges unpurgeable.
         let mut rec = self.fed_modules.entry(module_name.to_string()).or_default();
         rec.merge(&fed);
+    }
+
+    /// Feed handler names under a PATH-shaped module key (the pack tier's
+    /// registration has no name key for a classless file — a Laravel
+    /// routes file declares no class). `def_candidates` resolves the path
+    /// key through the per-path registry, so `modules_with_symbol(name)`
+    /// → `visible_def_candidates(key)` reaches the file like any module.
+    /// Marks the member fed, so `purge_module(key)` clears it.
+    pub fn feed_handlers(&self, module_key: &str, names: &[(String, crate::model::file_analysis::HandlerOwner)]) {
+        // Recorded per path key so a rebuild (`clear` + re-feed from the
+        // name-keyed cache, which never holds a path key) replays it —
+        // the `name_records` rule for the handler axis.
+        if names.is_empty() {
+            self.handler_records.remove(module_key);
+            return;
+        }
+        self.handler_records.insert(module_key.to_string(), names.to_vec());
+        let mut fed = FedKeys::default();
+        for (name, _owner) in names {
+            fed.names.insert(name);
+            self.names.entry(name.clone()).or_default().insert(module_key);
+        }
+        let mut rec = self.fed_modules.entry(module_key.to_string()).or_default();
+        rec.merge(&fed);
+    }
+
+    /// Every handler name declared on the string rail `rail` across the
+    /// recorded feeds — the rail-name completion source. Owners ride the
+    /// records, so this never rehydrates a file.
+    pub fn rail_names(&self, rail: &str) -> Vec<String> {
+        let mut out: Vec<String> = self
+            .handler_records
+            .iter()
+            .flat_map(|e| {
+                e.value()
+                    .iter()
+                    .filter(|(_, o)| matches!(o, crate::model::file_analysis::HandlerOwner::Rail(r) if r == rail))
+                    .map(|(n, _)| n.clone())
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        out.sort();
+        out.dedup();
+        out
     }
 
     /// Publish ONE specialization edge (primary → spec). The pack path
@@ -331,10 +388,6 @@ impl ModuleEdgeIndexes {
     pub fn children_of(&self, parent: &str) -> Vec<String> {
         self.children.get(parent).map(|b| b.as_slice().to_vec()).unwrap_or_default()
     }
-    #[cfg(test)]
-    pub fn providers_of(&self, pkg: &str) -> Vec<String> {
-        self.providers.get(pkg).map(|b| b.as_slice().to_vec()).unwrap_or_default()
-    }
 
     /// Record `path`'s indexable-name list from a WHOLE analysis so a later
     /// `feed` of its stripped copy replays it — the pre-strip half of the
@@ -386,13 +439,31 @@ impl ModuleEdgeIndexes {
     /// Drop `path`'s recorded name list (the file itself is gone).
     pub fn remove_path_record(&self, path: &std::path::Path) {
         self.name_records.remove(path);
+        self.handler_records.remove(&*path.to_string_lossy());
+    }
+
+    /// Replay every recorded handler feed — the rebuild's second half,
+    /// after the name-keyed re-feed.
+    pub fn replay_handler_records(&self) {
+        let records: Vec<(String, Vec<(String, crate::model::file_analysis::HandlerOwner)>)> =
+            self.handler_records.iter().map(|e| (e.key().clone(), e.value().clone())).collect();
+        for (key, names) in records {
+            self.feed_handlers(&key, &names);
+        }
     }
 
     /// Wipe the edge maps for a rebuild. Deliberately KEEPS `name_records`
     /// — the rebuild re-feeds from cache copies that may be symbol-evicted,
-    /// and the records are their only complete name source.
+    /// and the records are their only complete name source. The PATH-keyed
+    /// handler feeds stay too: the name-keyed cache never held them, so a
+    /// rebuild has nothing to re-derive them from, and a reader in the
+    /// clear-to-replay window must not see a rail go blank.
     pub fn clear(&self) {
-        self.names.clear();
+        let is_path_key = |k: &str| std::path::Path::new(k).is_absolute();
+        self.names.retain(|_name, bucket| {
+            bucket.retain_keys(|k| is_path_key(k));
+            !bucket.is_empty()
+        });
         self.bridges.clear();
         self.children.clear();
         self.specs.clear();
@@ -400,7 +471,7 @@ impl ModuleEdgeIndexes {
         // The marks describe the maps just emptied; keeping them would let
         // a later purge take the sweep for a module with no edges left,
         // and — worse — a re-feed would find its mark already set.
-        self.fed_modules.clear();
+        self.fed_modules.retain(|k, _| is_path_key(k));
     }
 
     /// One walk of `symbols()` for both symbol-derived feed halves — the
@@ -483,6 +554,11 @@ pub(crate) struct PackRegistrationParts {
     pub(super) arc: Arc<FileAnalysis>,
     pub(super) feed: Vec<(String, bool)>,
     pub(super) specs: Vec<(String, String)>,
+    /// Handler names (rail / hook definitions) — fed to the reverse index
+    /// under the file's PATH key, never to the def-candidate tables: a
+    /// route name is reachable by name, never offered as an identifier
+    /// nor a class-slot winner.
+    pub(super) handlers: Vec<(String, crate::model::file_analysis::HandlerOwner)>,
     pub(super) surface: Option<crate::model::surface::Surface>,
 }
 
@@ -497,6 +573,9 @@ impl PackRegistrationParts {
     }
     pub(crate) fn specs(&self) -> &[(String, String)] {
         &self.specs
+    }
+    pub(crate) fn handlers(&self) -> &[(String, crate::model::file_analysis::HandlerOwner)] {
+        &self.handlers
     }
     /// The projected surface — valid only BEFORE `record_surface` takes it.
     /// Panics after, rather than handing back an empty one: the caller that
@@ -515,8 +594,9 @@ impl PackRegistrationParts {
     /// tripwire-counted at its call sites.
     pub(crate) fn whole(arc: Arc<FileAnalysis>) -> Self {
         let (feed, specs) = ModuleIndex::prepare_pack_feed(&arc);
+        let handlers = ModuleIndex::handler_names(&arc);
         let surface = crate::model::surface::Surface::project(&arc);
-        PackRegistrationParts { arc, feed, specs, surface: Some(surface) }
+        PackRegistrationParts { arc, feed, specs, handlers, surface: Some(surface) }
     }
 
     /// Rehydrate a token from a warm stub — the persisted form of a prior
@@ -528,6 +608,7 @@ impl PackRegistrationParts {
             arc: Arc::new(stub.skeleton),
             feed: stub.feed,
             specs: stub.specs,
+            handlers: stub.handlers,
             surface: Some(stub.surface),
         }
     }

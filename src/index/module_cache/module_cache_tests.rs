@@ -989,7 +989,7 @@ fn warm_stub_roundtrip_and_lane_selection() {
     skeleton.evict_refs();
     skeleton.evict_symbols();
 
-    let blob = encode_stub(&feed, &specs, &surface, &skeleton).expect("encodes");
+    let blob = encode_stub(&feed, &specs, &[], &surface, &skeleton).expect("encodes");
     let stub = decode_stub(&blob).expect("decodes");
     assert_eq!(stub.feed, feed);
     assert_eq!(stub.surface, surface);
