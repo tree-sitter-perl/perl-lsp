@@ -5018,6 +5018,38 @@ do_action('home');
     assert!(locs.iter().all(|l| l.rewritable), "rename rewrites inside quotes: {locs:?}");
 }
 
+/// `app(Foo::class)` / `resolve(Foo::class)` / `->make(Foo::class)` IS a
+/// Foo: the overlay declares the call's value, so a chain off it
+/// dispatches on Foo and the callee's own (untypable) return never wins.
+#[cfg(feature = "php")]
+#[test]
+fn php_laravel_container_resolution_types_the_expression() {
+    let src = "\
+<?php
+namespace App;
+class Repo { public function find() { return 1; } }
+class Svc {
+    public function go() { return app(Repo::class)->find(); }
+    public function go2() { return $this->app->make(Repo::class)->find(); }
+    public function go3() { return resolve(Repo::class)->find(); }
+}
+";
+    let (fa, _) = php_fa(src);
+    let lines: Vec<&str> = src.lines().collect();
+    for (row, head) in [(4, "app(Repo::class)"), (5, "$this->app->make(Repo::class)"), (6, "resolve(Repo::class)")] {
+        let start = lines[row].find(head).unwrap();
+        let span = crate::model::file_analysis::Span {
+            start: tree_sitter::Point { row, column: start },
+            end: tree_sitter::Point { row, column: start + head.len() },
+        };
+        let t = fa.expr_type_at_span(span, None);
+        assert!(
+            matches!(&t, Some(crate::model::file_analysis::InferredType::ClassName(c)) if c.ends_with("Repo")),
+            "{head} is a Repo: {t:?}"
+        );
+    }
+}
+
 /// The event bus is a class-keyed rail: `event(new X)` / `X::dispatch()`
 /// emit, a listener's `handle(X $e)`, a `$listen` key and `Event::listen`
 /// register — references from either side list all of them; the rail is

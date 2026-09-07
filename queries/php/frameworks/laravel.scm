@@ -284,3 +284,31 @@
   (#eq? @_ll_facade "Lang")
   (#any-of? @dispatch.via "get" "has" "choice")
   (#match? @ref.dispatch.named.lang "^[A-Za-z0-9_/:-]+\\.[A-Za-z0-9_./:-]+$"))
+
+; ---- the container resolves what the argument spells ----
+; `app(Foo::class)` / `resolve(Foo::class)` / `->make(Foo::class)` /
+; `App::make(Foo::class)` IS a Foo: the call's value is declared on the
+; expression (`@expr.annot`), so a chain off it dispatches on Foo.
+((function_call_expression
+  function: (name) @_lapp
+  arguments: (arguments
+    . (argument (class_constant_access_expression
+        . [(name) (qualified_name)] @type.annot (name) @_lapp_k .)))) @expr.annot
+  (#any-of? @_lapp "app" "resolve")
+  (#eq? @_lapp_k "class"))
+((member_call_expression
+  name: (name) @_lmake
+  arguments: (arguments
+    . (argument (class_constant_access_expression
+        . [(name) (qualified_name)] @type.annot (name) @_lmake_k .)))) @expr.annot
+  (#any-of? @_lmake "make" "makeWith")
+  (#eq? @_lmake_k "class"))
+((scoped_call_expression
+  scope: (name) @_lA
+  name: (name) @_lAmake
+  arguments: (arguments
+    . (argument (class_constant_access_expression
+        . [(name) (qualified_name)] @type.annot (name) @_lA_k .)))) @expr.annot
+  (#eq? @_lA "App")
+  (#any-of? @_lAmake "make" "makeWith")
+  (#eq? @_lA_k "class"))
