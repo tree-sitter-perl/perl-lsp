@@ -154,3 +154,110 @@
 (enum_case
   name: (name) @def.enumerator.name) @def.enumerator
 
+; ---- callables ----
+; @rettype carries the declared return type → method-return chaining
+; through PackageSymbol, same chase Perl and C++ use.
+(function_definition
+  attributes: (attribute_list
+    (attribute_group
+      (attribute [(name) (qualified_name (name))] @sym.attr)+)+)?
+  name: (name) @def.sub.name
+  return_type: (_)? @rettype) @def.sub
+(method_declaration
+  attributes: (attribute_list
+    (attribute_group
+      (attribute [(name) (qualified_name (name))] @sym.attr)+)+)?
+  name: (name) @def.method.name
+  return_type: (_)? @rettype) @def.method
+
+; sub-body content is shielded from outline + class-content (a method
+; local carries the sticky class package; the Sub boundary marks it local).
+(function_definition) @scope.sub
+(method_declaration) @scope.sub
+(anonymous_function) @def.anon @scope.sub
+(arrow_function) @def.anon @scope.sub
+
+; declared-parameter arity: overload-family ranking fuel (a call's written
+; arg count floats the fitting signature above a same-named stub).
+(formal_parameters) @arity.sig
+
+; docblocks: the pack's `doc_types` parses `@return`/`@param`/`@var` out of
+; the comment; the engine joins each to the def directly below. Declared
+; types win — the doc lane fills only what the syntax left untyped.
+(comment) @doc.comment
+
+; ---- properties: class data members, typed ----
+; The field keys SIGIL-LESS (the inner name token): declared `$name`,
+; accessed `$this->name` — the access site drops the `$`, so a sigil-ful
+; symbol would never join its own uses (and the class-content gate
+; rightly reads sigils as Perl shapes). kind "field" → class-wide type
+; extent (member lookup is not sequential).
+(property_declaration
+  type: (_) @type.annot
+  (property_element name: (variable_name (name) @def.field.name @def.field @flow.target)))
+(property_declaration
+  (property_element name: (variable_name (name) @def.field.name @def.field)))
+; PHP 8 constructor promotion: `__construct(private string $name)` declares
+; BOTH the property (sigil-less member) and the ctor-body local (`$name`).
+; The type is optional (`protected $stream`) and the name may be
+; by-reference (`protected &$container`); both spellings declare the
+; property and the ctor-body local.
+(property_promotion_parameter
+  type: (_)? @type.annot
+  name: [(variable_name (name) @def.field.name @def.field @flow.target)
+         (by_ref (variable_name (name) @def.field.name @def.field @flow.target))])
+(property_promotion_parameter
+  name: [(variable_name) @def.var.name @def.var
+         (by_ref (variable_name) @def.var.name @def.var)])
+
+; class constants: `const VERSION = '1.0';` — compile-time constants,
+; outlined as enum members (not callables: Perl's `use constant` shape
+; would render them as methods inside a class).
+(const_declaration
+  (const_element (name) @def.const.name) @def.const)
+
+; ---- parameters (typed → a direct annot witness) ----
+(simple_parameter
+  type: (_) @type.annot
+  name: (variable_name) @def.var.name @def.var @flow.target)
+(simple_parameter
+  name: (variable_name) @def.var.name @def.var)
+; `...$args` declares the variadic parameter (its type is the element's,
+; never the parameter's).
+(variadic_parameter
+  name: (variable_name) @def.var.name @def.var)
+; closure captures: `function () use ($y)` re-declares $y in the closure;
+; `use (&$y)` binds by reference — the same declaration.
+(anonymous_function_use_clause
+  (variable_name) @def.var.name @def.var)
+; by reference, php creates the variable in the ENCLOSING scope when it
+; does not exist — the declaration hoists there (`@hoist`).
+(anonymous_function_use_clause
+  (by_ref (variable_name) @def.var.name @def.var @hoist))
+; `static $map = [...]` declares a function-static local; `$rows[] = $x`
+; auto-vivifies `$rows` — both declare.
+(static_variable_declaration
+  name: (variable_name) @def.var.name @def.var)
+(assignment_expression
+  left: (subscript_expression . (variable_name) @def.var.name @def.var))
+; `catch (E $e)` binds the exception variable.
+(catch_clause
+  name: (variable_name) @def.var.name @def.var)
+
+; A parameter list is a region, not a body: a parameter is the caller's
+; contract, never an unused local.
+(formal_parameters) @param.region
+; `isset($x->p)` / `empty($x->p)`: the read IS the existence question, so
+; the undefined-member lanes stay silent inside the probe's argument list.
+((function_call_expression
+   function: (name) @_probe
+   arguments: (arguments) @probe.region)
+ (#any-of? @_probe "isset" "empty"))
+; `unset($x)` asks the same question of a variable (and answers it).
+(unset_statement) @probe.region
+
+; The file preamble an import may not precede: the open tag and
+; `declare(...)` rows (php requires `declare(strict_types=1)` first).
+(php_tag) @preamble
+(declare_statement) @preamble
+
