@@ -312,3 +312,78 @@
   (#eq? @_lA "App")
   (#any-of? @_lAmake "make" "makeWith")
   (#eq? @_lA_k "class"))
+
+; ---- the middleware rail (aliases and groups by name) ----
+; Definitions: the kernel's alias/group maps, `$middleware->alias([…])` /
+; `->group('name', […])` (Laravel 11's bootstrap), `Route::aliasMiddleware`
+; / `Route::middlewareGroup`, and the framework's own `defaultAliases()`.
+; A use names the head before the parameter separator (`throttle:60,1`).
+(property_element
+  name: (variable_name) @_lmw_prop
+  default_value: (array_creation_expression
+    (array_element_initializer
+      . (string . (string_content) @def.handler.named.middleware .) (_)))
+  (#any-of? @_lmw_prop "$middlewareAliases" "$routeMiddleware" "$middlewareGroups"))
+(member_call_expression
+  name: (name) @_lmw_alias
+  arguments: (arguments
+    . (argument (array_creation_expression
+        (array_element_initializer
+          . (string . (string_content) @def.handler.named.middleware .) (_)))))
+  (#eq? @_lmw_alias "alias"))
+(member_call_expression
+  object: (variable_name) @_lmw_recv
+  name: (name) @_lmw_g
+  arguments: (arguments
+    . (argument (string . (string_content) @def.handler.named.middleware .)))
+  (#eq? @_lmw_recv "$middleware")
+  (#any-of? @_lmw_g "group" "appendToGroup" "prependToGroup"))
+(scoped_call_expression
+  name: (name) @_lmw_s
+  arguments: (arguments
+    . (argument (string . (string_content) @def.handler.named.middleware .)))
+  (#any-of? @_lmw_s "aliasMiddleware" "middlewareGroup"))
+(member_call_expression
+  name: (name) @_lmw_m
+  arguments: (arguments
+    . (argument (string . (string_content) @def.handler.named.middleware .)))
+  (#any-of? @_lmw_m "aliasMiddleware" "middlewareGroup"))
+(method_declaration
+  name: (name) @_lmw_def
+  body: (compound_statement
+    (expression_statement
+      (assignment_expression
+        right: (array_creation_expression
+          (array_element_initializer
+            . (string . (string_content) @def.handler.named.middleware .) (_))))))
+  (#eq? @_lmw_def "defaultAliases"))
+; uses: `->middleware('auth')`, `->middleware(['auth', 'throttle:x'])`,
+; `->withoutMiddleware(…)`, `Route::middleware(…)`
+(member_call_expression
+  name: (name) @dispatch.via
+  arguments: (arguments
+    . (argument (string . (string_content) @ref.dispatch.named.middleware .)))
+  (#any-of? @dispatch.via "middleware" "withoutMiddleware"))
+(member_call_expression
+  name: (name) @dispatch.via
+  arguments: (arguments
+    . (argument (array_creation_expression
+        (array_element_initializer
+          . (string . (string_content) @ref.dispatch.named.middleware .) .))))
+  (#any-of? @dispatch.via "middleware" "withoutMiddleware"))
+(scoped_call_expression
+  scope: (name) @_lmw_R
+  name: (name) @dispatch.via
+  arguments: (arguments
+    . (argument (string . (string_content) @ref.dispatch.named.middleware .)))
+  (#eq? @_lmw_R "Route")
+  (#any-of? @dispatch.via "middleware" "withoutMiddleware"))
+(scoped_call_expression
+  scope: (name) @_lmw_R2
+  name: (name) @dispatch.via
+  arguments: (arguments
+    . (argument (array_creation_expression
+        (array_element_initializer
+          . (string . (string_content) @ref.dispatch.named.middleware .) .))))
+  (#eq? @_lmw_R2 "Route")
+  (#any-of? @dispatch.via "middleware" "withoutMiddleware"))

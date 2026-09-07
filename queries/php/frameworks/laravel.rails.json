@@ -16,6 +16,9 @@
     "event": "No listener for event",
     "view": "Undefined view",
     "config": "Undefined config key",
-    "lang": "Undefined translation key"
-  }
+    "lang": "Undefined translation key",
+    "middleware": "Undefined middleware"
+  },
+  "hints": ["middleware"],
+  "name_seps": { "middleware": ":" }
 }

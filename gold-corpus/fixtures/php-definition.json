@@ -275,6 +275,24 @@
       "status": "gold"
     },
     {
+      "id": "php-lar-def-middleware-alias",
+      "difficulty": "simple",
+      "semantic_area": "php-laravel",
+      "lang": "php",
+      "root": "gold-corpus/laravel-fixture",
+      "comment": "`->middleware('auth:web')` names `auth` (the head before the parameter separator) and lands on the kernel's alias row.",
+      "file": "app/Http/Controllers/PostController.php",
+      "line": 11,
+      "col": 27,
+      "expect": {
+        "all": [
+          "Kernel.php:8:10"
+        ],
+        "none": []
+      },
+      "status": "gold"
+    },
+    {
       "id": "php-lar-def-container-resolution-typed",
       "difficulty": "simple",
       "semantic_area": "php-laravel",
