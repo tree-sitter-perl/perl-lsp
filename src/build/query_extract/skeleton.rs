@@ -867,8 +867,37 @@ impl SkeletonAnalysis {
                 span,
             };
             for (i, sym) in symbols.iter().enumerate() {
-                if !matches!(sym.kind, SymKind::Method | SymKind::Sub) {
+                if !matches!(sym.kind, SymKind::Method | SymKind::Sub | SymKind::Enumerator) {
                     continue;
+                }
+                // A receiver-shaped declared return (`: static`) publishes the
+                // deferred substituting shape: the member-chain arm threads the
+                // real receiver, and the class-keyed lookup's default receiver
+                // (`ClassName(class)`) covers the MCB path — both fluent.
+                // (`self` strictly means the DEFINING class, not the runtime
+                // receiver; substituting the receiver over-approximates only
+                // where a subclass inherits the method — accepted residual.)
+                if self.symbols[i].receiver_return {
+                    bag.push(mk(
+                        WA::Symbol(sym.id),
+                        WP::ReturnExpr(crate::model::witnesses::ReturnExpr::Receiver),
+                        sym.span,
+                    ));
+                }
+                // `@return Base<static>`: an instance of `base` parametrized
+                // by the receiver — `Book::query()` carries `Builder<Book>`,
+                // and a later `@return TModel` hop projects `Book` out via
+                // the same `ParamOf` axis cpp instantiations use.
+                if let Some(base) = &self.symbols[i].receiver_instance_of {
+                    use crate::model::witnesses::{ParametricOp, ReturnExpr};
+                    bag.push(mk(
+                        WA::Symbol(sym.id),
+                        WP::ReturnExpr(ReturnExpr::Operator(ParametricOp::InstanceOf {
+                            base: base.clone(),
+                            args: vec![ReturnExpr::Receiver],
+                        })),
+                        sym.span,
+                    ));
                 }
                 if let Some(ret) = &self.symbols[i].return_type {
                     // A return that MENTIONS the owning class's template
@@ -893,13 +922,30 @@ impl SkeletonAnalysis {
                     };
                     bag.push(mk(WA::Symbol(sym.id), pay, sym.span));
                 }
-                if matches!(sym.kind, SymKind::Method) {
+                if matches!(sym.kind, SymKind::Method | SymKind::Enumerator) {
+                    // Enumerators too: `Level::Debug` / a class const is a
+                    // class-keyed member access, and its hop witness chases
+                    // the same PackageSymbol edge a method return does.
                     if let Some(class) = &sym.package {
                         bag.push(mk(
                             WA::PackageSymbol { package: class.clone(), name: sym.name.clone() },
                             WP::Edge(WA::Symbol(sym.id)),
                             sym.span,
                         ));
+                        // A TRUE enum case's value is an instance of its
+                        // enum (php `Level::Debug`, cpp `Color::kRed`). A
+                        // class CONST (extraction kind "const", flattened
+                        // to the same SymKind) is its literal's value —
+                        // typing it as the class would be wrong, so it
+                        // stays untyped here (residual: thread the value
+                        // span).
+                        if self.symbols[i].kind == "enumerator" {
+                            bag.push(mk(
+                                WA::Symbol(sym.id),
+                                WP::InferredType(InferredType::ClassName(class.clone())),
+                                sym.span,
+                            ));
+                        }
                     }
                 }
             }
@@ -993,7 +1039,14 @@ impl SkeletonAnalysis {
             // call resolves to its n-th argument's value witness.
             let call_args: std::collections::HashMap<Span, &Vec<Span>> =
                 self.macro_call_arg_spans.iter().map(|(s, a)| (*s, a)).collect();
+            let annot_exprs: std::collections::HashSet<Span> =
+                self.annot_expr_spans.iter().copied().collect();
             for (span, name) in &self.call_sites {
+                // An overlay declared this call's value (`@expr.annot`) —
+                // the callee's return is not its type.
+                if annot_exprs.contains(span) {
+                    continue;
+                }
                 // Identity/projection macro: the call's value IS its n-th
                 // argument. Edge to the argument's own `Expr` witness rather
                 // than the param-agnostic Symbol return (edges-not-values).
@@ -1103,6 +1156,11 @@ impl SkeletonAnalysis {
         // A `@ref.type` on a def's OWN name token (class/enum/typedef
         // declaring itself) is the declaration, not a use — suppress by
         // exact selection-span match so the Symbol stays the only claimant.
+        let member_write_spans: std::collections::HashSet<(usize, usize, usize, usize)> = self
+            .member_writes
+            .iter()
+            .map(|sp| (sp.start.row, sp.start.column, sp.end.row, sp.end.column))
+            .collect();
         let decl_name_spans: std::collections::HashSet<(usize, usize, usize, usize)> = symbols
             .iter()
             .map(|s| {
@@ -1121,6 +1179,7 @@ impl SkeletonAnalysis {
                 use crate::model::file_analysis::{RefBinding, RefKind};
                 let mut span = Span { start: r.start, end: r.end };
                 let mut binding = None;
+                let mut name = r.name.clone();
                 let kind = match r.kind.as_str() {
                     "call" => RefKind::FunctionCall,
                     // Qualified call (`fmt::format_to(...)`): Perl parity —
@@ -1151,8 +1210,35 @@ impl SkeletonAnalysis {
                             invocant_span: Some(inv_span),
                             method_name_span: Span { start: r.start, end: r.end },
                             member_op: r.member_op,
-                            shape: crate::model::file_analysis::MemberShape::Unknown,
-                            named_by_string: false,
+                            shape: r.shape,
+                            named_by_string: r.named_by_string,
+                        }
+                    }
+                    // A hook-firing string (`do_action('init')` arg 1): the
+                    // model's DispatchCall, Global-owned (see the "handler"
+                    // symbol arm) — refs_to pairs it with the stacked Handler
+                    // registrations by name+owner equality.
+                    "dispatch" => {
+                        let owner = rail_owner(Span { start: r.start, end: r.end });
+                        // A rail with a parameter separator: the use names
+                        // the head (`throttle:60,1` → `throttle`), and the
+                        // span ends with it — a string never spans rows.
+                        if let crate::model::file_analysis::HandlerOwner::Rail(rail) = &owner {
+                            if let Some((_, sep)) = rail_name_seps.iter().find(|(rl, _)| rl == rail) {
+                                if let Some(cut) = name.find(sep.as_str()) {
+                                    if cut > 0 {
+                                        span.end = tree_sitter::Point {
+                                            row: span.start.row,
+                                            column: span.start.column + cut,
+                                        };
+                                        name.truncate(cut);
+                                    }
+                                }
+                            }
+                        }
+                        binding = Some(RefBinding::Handler { owner, sym: None });
+                        RefKind::DispatchCall {
+                            dispatcher: r.via.clone().unwrap_or_default(),
                         }
                     }
                     // A type-position name (`Widget w;`, `struct op* o`, a
