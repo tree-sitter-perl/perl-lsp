@@ -68,6 +68,109 @@ fn cached_query(language: &Language, source: &str) -> Result<&'static Query, Str
     .clone()
 }
 
+// ---- framework-entry declarations (the heatmap's "runner-invoked" data) ----
+
+/// One declared "a runner invokes this" rule, from an `entry.json`
+/// document (bundled per pack, or `<plugin-dir>/<name>/entry.json`).
+/// A rule matches a symbol when EVERY present condition holds:
+///   * `attributes` — the symbol carries one of these annotation names
+///     (php `#[Test]`, via the `@sym.attr` lane);
+///   * `method_prefix` / `methods` — the symbol's name matches;
+///   * `when_isa` — the symbol's class isa the (leaf-keyed) class.
+/// Rules OR across the set. The engine only EVALUATES these; every
+/// framework name lives in the data files (rule #10: the heatmap never
+/// compares names itself).
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct EntryMarker {
+    #[serde(default)]
+    pub attributes: Vec<String>,
+    #[serde(default)]
+    pub method_prefix: Option<String>,
+    #[serde(default)]
+    pub methods: Vec<String>,
+    #[serde(default)]
+    pub when_isa: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+struct EntryDoc {
+    language: String,
+    entries: Vec<EntryMarker>,
+}
+
+/// One text rail: `calls` are the function names whose first single-quoted
+/// argument names an entity on `rail`, scanned as TEXT in files whose path
+/// ends with one of `files` (a Blade template is text to the grammar).
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct TextRail {
+    pub rail: String,
+    pub calls: Vec<String>,
+    pub files: Vec<String>,
+    /// A substring every name must contain (`"."` for translation keys —
+    /// a bare word is a JSON translation STRING, not a key path).
+    #[serde(default)]
+    pub requires: Option<String>,
+}
+
+/// One path rail: a file whose path contains `under` DEFINES a name on
+/// `rail` — the rest of the path, `skip` leading segments dropped (a
+/// locale), `strip` removed from the end, separators joined by `sep`
+/// (`resources/views/a/b.blade.php` → `a.b`). With `keys`, the file's
+/// returned-array string keys extend that name (`config/app.php` →
+/// `app.name`, nested keys dotted) instead of the file naming itself.
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct PathRail {
+    pub rail: String,
+    pub under: String,
+    #[serde(default)]
+    pub skip: usize,
+    #[serde(default)]
+    pub strip: String,
+    #[serde(default = "default_sep")]
+    pub sep: String,
+    #[serde(default)]
+    pub keys: bool,
+    /// The file's METHODS define names on the rail (a policy class: every
+    /// method is an ability); the path only selects the file.
+    #[serde(default)]
+    pub methods: bool,
+}
+fn default_sep() -> String {
+    ".".to_string()
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+struct RailsDoc {
+    language: String,
+    #[serde(default)]
+    text_rails: Vec<TextRail>,
+    #[serde(default)]
+    path_rails: Vec<PathRail>,
+    /// rail → how the undefined-name lane phrases a miss (`"event": "No
+    /// listener for event"`); default `Undefined <rail>`.
+    #[serde(default)]
+    labels: std::collections::HashMap<String, String>,
+    /// Rails whose miss is a hint, not a warning: their definitions are
+    /// partly runtime-only (framework-default middleware aliases, database
+    /// permissions on the ability rail), so an unmatched name is a lead.
+    #[serde(default)]
+    hints: Vec<String>,
+    /// rail → the separator after which a use carries PARAMETERS
+    /// (`throttle:60,1` names `throttle`); the name and its span end there.
+    #[serde(default)]
+    name_seps: std::collections::HashMap<String, String>,
+}
+
+/// The lane-facing rail conventions of a language, merged over its rail
+/// documents.
+#[derive(Debug, Default, Clone)]
+pub struct RailConventions {
+    pub labels: Vec<(String, String)>,
+    pub hints: Vec<String>,
+    pub name_seps: Vec<(String, String)>,
+}
+
+
 mod extract;
 mod packs;
 mod skeleton;
