@@ -699,3 +699,127 @@ fn php_expression_receivers_dispatch_statically_and_class_refs_reach_every_spell
     assert_eq!(n, 5, "class rename rewrites its declaration + four spellings: {rename}");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Round-5 R5-4: the php tier's heatmap fan-in is pre-pruned from its OWN
+/// row store (the pack persist writer shreds every analysis), and the
+/// prune is answer-preserving: the resident-only walk (`PERL_LSP_REF_ROWS=0`)
+/// and the pruned walk report identical fan-in per symbol — including the
+/// constructor, whose references are the class's `new` sites (the class
+/// key counts as a reference row for it).
+#[cfg(feature = "php")]
+#[test]
+fn php_heatmap_pre_prune_preserves_every_fan_in() {
+    let dir = std::env::temp_dir().join(format!("perl-lsp-r5heat-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("Helper.php"),
+        "<?php\nnamespace App;\nclass Helper\n{\n    public function __construct(private int $n) {}\n    public function assist(): void {}\n    public static function make(): static { return new static(1); }\n    public function unused(): void {}\n}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("Box.php"),
+        "<?php\nnamespace App;\nclass Box\n{\n    public function go(): void\n    {\n        $h = new Helper(2);\n        $h->assist();\n        Helper::make();\n    }\n}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("Bag.php"),
+        "<?php\nnamespace App;\nclass Bag implements \\Countable\n{\n    public function count(): int { return 0; }\n}\n",
+    )
+    .unwrap();
+    // A service nobody `new`s — a container does (the type hint names it).
+    std::fs::write(
+        dir.join("Svc.php"),
+        "<?php\nnamespace App;\nclass Svc\n{\n    public function __construct(private Helper $h) {}\n    public function run(): void { $this->h->assist(); }\n}\nclass Consumer\n{\n    public function __construct(private Svc $svc) {}\n}\n",
+    )
+    .unwrap();
+    let run_full = |rows: &str| -> serde_json::Value {
+        let out = std::process::Command::new(env!("CARGO_BIN_EXE_perl-lsp"))
+            .args(["--heatmap", dir.to_str().unwrap()])
+            .env("XDG_CACHE_HOME", dir.join(".cache"))
+            .env("PERL_LSP_REF_ROWS", rows)
+            .output()
+            .expect("run");
+        serde_json::from_str(&String::from_utf8_lossy(&out.stdout)).expect("heatmap json")
+    };
+    let run = |rows: &str| -> std::collections::BTreeMap<String, u64> {
+        let out = std::process::Command::new(env!("CARGO_BIN_EXE_perl-lsp"))
+            .args(["--heatmap", dir.to_str().unwrap()])
+            .env("XDG_CACHE_HOME", dir.join(".cache"))
+            .env("PERL_LSP_REF_ROWS", rows)
+            .output()
+            .expect("run");
+        let v: serde_json::Value =
+            serde_json::from_str(&String::from_utf8_lossy(&out.stdout)).expect("heatmap json");
+        v["symbols"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|s| (format!("{}::{}", s["package"].as_str().unwrap_or(""), s["name"].as_str().unwrap()), s["fan_in"].as_u64().unwrap()))
+            .collect()
+    };
+    // Cold (writes the rows), then the two warm projections.
+    let _ = run("1");
+    let pruned = run("1");
+    let walked = run("0");
+    assert_eq!(pruned, walked, "the pre-prune must not change any fan-in");
+    // `new Helper(2)` in Box.php plus `new static(1)` inside `make()`.
+    assert_eq!(pruned.get("Helper::__construct"), Some(&2), "ctor fan-in = its `new` sites: {pruned:?}");
+    assert_eq!(pruned.get("Helper::unused"), Some(&0), "{pruned:?}");
+    assert_eq!(pruned.get("Helper::make"), Some(&1), "{pruned:?}");
+    // R6-9: `Svc::__construct` has no `new` site, but `Svc` is named by a
+    // type hint — a container instantiates it, so the ctor is shielded
+    // (`class-referenced`) when the row store can answer; `Consumer`'s
+    // ctor (its class named nowhere) stays a candidate.
+    let full = run_full("1");
+    let ctor_of = |class: &str| -> serde_json::Value {
+        full["symbols"].as_array().unwrap().iter()
+            .find(|s| s["name"] == "__construct" && s["package"] == class)
+            .cloned().expect(class)
+    };
+    let svc = ctor_of("Svc");
+    assert_eq!(svc["reachable_guard"].as_str(), Some("class-referenced"), "{svc}");
+    assert_eq!(svc["dead_code_candidate"], false, "{svc}");
+    let consumer = ctor_of("Consumer");
+    assert_eq!(consumer["dead_code_candidate"], true, "{consumer}");
+    // An SPL contract method (`Countable::count`) is runtime-invoked, never dead.
+    let count = full["symbols"].as_array().unwrap().iter()
+        .find(|s| s["name"] == "count" && s["package"] == "Bag").cloned().expect("Bag::count");
+    assert_eq!(count["reachable_guard"].as_str(), Some("runtime-invoked"), "{count}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Round-5 R5-7: a nested generic whose innermost element is `mixed`
+/// (`array<array<mixed>>`) types as a sequence of arrays instead of
+/// collapsing the whole annotation — the inner `array<mixed>` is the bare
+/// `array` shape.
+#[cfg(feature = "php")]
+#[test]
+fn php_nested_generic_over_mixed_keeps_the_outer_shape() {
+    let dir = std::env::temp_dir().join(format!("perl-lsp-r5nested-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("Grid.php"),
+        "<?php\nnamespace App;\nclass Grid\n{\n    /** @var array<array<mixed>> */\n    private array $rows = [];\n    /** @var array<mixed> */\n    private array $bag = [];\n    public function go(): void\n    {\n        foreach ($this->rows as $row) { $row; }\n    }\n}\n",
+    )
+    .unwrap();
+    let run = |args: &[&str]| {
+        let out = std::process::Command::new(env!("CARGO_BIN_EXE_perl-lsp"))
+            .args(args)
+            .env("XDG_CACHE_HOME", dir.join(".cache"))
+            .output()
+            .expect("run");
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+    let root = dir.to_str().unwrap();
+    let prop = run(&["--hover", root, "Grid.php", "5", "19"]);
+    assert!(prop.contains("list<array>"), "the outer generic survives: {prop}");
+    let row = run(&["--hover", root, "Grid.php", "10", "40"]);
+    assert!(row.contains("$row: array"), "the element is an array: {row}");
+    // A top-level `array<mixed>` IS the bare `array` shape (it used to type
+    // nothing); the display says so and nothing invents element keys.
+    let bag = run(&["--hover", root, "Grid.php", "7", "19"]);
+    assert!(bag.contains("bag: array") && !bag.contains("list"), "{bag}");
+    let _ = std::fs::remove_dir_all(&dir);
+}

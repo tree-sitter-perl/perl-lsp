@@ -419,3 +419,4 @@ fn dynamic_dispatch_shields_unreferenced_methods() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
