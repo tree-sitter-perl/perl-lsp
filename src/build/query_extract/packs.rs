@@ -138,6 +138,10 @@ pub struct LangPack {
     /// "which guard means which refinement" (rule #10); core just scopes
     /// the witness to the block.
     pub narrow_guard: fn(guard: Option<&str>, type_text: &str) -> Option<InferredType>,
+    /// Callees that ASSERT their argument (php `assert`): a guard passed to
+    /// one narrows the rest of the enclosing scope. The `@narrow.assert`
+    /// capture fires for any call around a guard; core honours only these.
+    pub narrow_assertions: &'static [&'static str],
     /// Does calling `method` on a variable REBIND it — putting a moved-from
     /// object back into a known state (`clear`/`reset`/`assign`/…)? Used to end
     /// a moved-from region (and any narrowing) at the reset call, so a use after
@@ -175,6 +179,13 @@ pub struct LangPack {
     /// scripts). Consumed by the heatmap's reachability guard — asked of
     /// the pack, never a name/language branch (rule #10).
     pub entrypoint_symbols: &'static [&'static str],
+    /// Method names the RUNTIME invokes structurally (php magic methods —
+    /// `__toString`, `__invoke`, `__get`, ...): zero in-repo call sites is
+    /// the EXPECTED state, so the heatmap's dead-code flagging shields
+    /// them (the method-shaped sibling of `entrypoint_symbols`). The
+    /// constructor stays on its own lane (`constructor_names` — its call
+    /// sites are real `new` refs, so an unconstructed ctor honestly flags).
+    pub runtime_invoked_methods: &'static [&'static str],
     /// Container membership (class/struct/union/namespace) is delimited by
     /// literal `{`/`}` in the source, so a member that lost its enclosing
     /// container to a tree-sitter misparse can be re-anchored by matching the
@@ -183,6 +194,87 @@ pub struct LangPack {
     /// indentation-scoped (Python) or non-nesting packs.
     /// `docs/adr/config-superposition-declarations.md`.
     pub brace_scoped_members: bool,
+    /// The call expressions signature help can anchor on: node kind, the
+    /// field naming the callee token, the field holding the argument list.
+    /// Empty = the language declares no signature help.
+    pub call_shapes: &'static [CallShape],
+    /// Variables the runtime binds without a declaration (php's `$this`
+    /// and superglobals): never "undefined".
+    pub implicit_variables: &'static [&'static str],
+    /// The language's THROWAWAY binding names (php `$_` in `foreach ($a
+    /// as $k => $_)`): written to be discarded, so never "unused".
+    pub throwaway_names: &'static [&'static str],
+    /// Methods whose presence makes a class answer ANY member name
+    /// (php `__call`/`__callStatic`, `__get`) — the undefined-member lanes
+    /// stay silent on such a class, as Perl's do on `AUTOLOAD`.
+    pub catch_all_methods: &'static [&'static str],
+    /// The node kind of a first-class-callable placeholder in an argument
+    /// list (php `f(...)` → `variadic_placeholder`): such a call passes no
+    /// arguments, so it mints no count. Empty = none.
+    pub callable_placeholder_kind: &'static str,
+    /// The node kind of an argument SPREAD (php `f(...$args)` →
+    /// `variadic_unpacking`): the call's count is unknowable, so it mints
+    /// none and the arity lane stands down. Empty = none.
+    pub spread_arg_kind: &'static str,
+    /// Field a named argument carries its label under (php `f(name: 1)`):
+    /// positional parameter hints stop at the first one. Empty = the pack
+    /// has no named-argument form.
+    pub named_arg_field: &'static str,
+    /// How the implement-missing-methods quick-fix spells a stub for one
+    /// contract declarator (`{}` = the declarator as written after the name,
+    /// `hi(string $n): string`). Empty = the pack offers no stub.
+    pub contract_stub: &'static str,
+    /// How a native return annotation is spelled after the parameter list
+    /// (`{}` = the type). Empty = the pack has no return annotations to add.
+    pub return_annotation_template: &'static str,
+    /// Engine type name → the pack's NATIVE spelling for a declared type
+    /// (`"HashRef"` → `"array"`); an engine type absent here has no native
+    /// spelling the pack would write (`Numeric`: `int` or `float`?). Unlike
+    /// `type_display`, this is what goes INTO the source.
+    pub native_type_spellings: &'static [(&'static str, &'static str)],
+    /// The sigil a static property is spelled with after the scope
+    /// operator (php `self::$count`), while an instance read drops it
+    /// (`$o->count`). Empty = the spelling is the bare name in both.
+    pub static_property_sigil: &'static str,
+    /// A member name that is the CLASS-NAME LITERAL, never a member
+    /// (php `Foo::class`). Empty = none.
+    pub class_literal_member: &'static str,
+    /// The import statement that brings a fully-qualified name into scope,
+    /// `{}` standing for the name (php `use {};\n`). Empty = the language
+    /// has no import quick-fix.
+    pub import_template: &'static str,
+    /// An import row binds a NAME the file then spells (php `use A\B;`),
+    /// as opposed to splicing text (`#include`). Only bound names can be
+    /// unused.
+    pub imports_bind_names: bool,
+    /// The attribute that marks a declaration deprecated (php
+    /// `#[Deprecated]`); empty = none. Lands as the `deprecated` symbol
+    /// attribute exactly like the docblock tag.
+    pub deprecated_attribute: &'static str,
+    /// Class, interface and attribute names the language itself provides
+    /// in the global namespace (php's core + SPL): a global reference to
+    /// one is never a type missing its import.
+    pub builtin_types: &'static [&'static str],
+    /// A value read (`$x->m`) never resolves to a method and a call never
+    /// to a field — no other-kind fallback (Perl's accessor calls need it;
+    /// php's syntax decides the kind).
+    pub member_shapes_are_strict: bool,
+    /// A member declaration belongs to the container that encloses it and
+    /// nothing else — no cross-package installs (Perl's typeglobs): a
+    /// contract is provided only by a declaration attributed to the
+    /// composer's own MRO, never by a sibling class in the same file.
+    pub members_are_package_bound: bool,
+    /// Type names start with a capital by convention, so an import row
+    /// whose leaf starts lowercase names a function or constant, not a
+    /// type (php's `use function A\b;` — the grammar parses it as a class
+    /// row).
+    pub types_are_capitalized: bool,
+    /// Members every enum carries by language rule (php: `->value`,
+    /// `->name`, `::cases()`, `::from()`, `::tryFrom()`).
+    pub enum_members: &'static [&'static str],
+    /// The node kind of ONE argument inside a call's argument list (php
+    /// `argument`); empty = every named child of the list is an argument.
+    pub arg_kind: &'static str,
     /// Completion trigger characters for the LSP
     /// `completionProvider.triggerCharacters` slot — the client auto-fires
     /// completion (and reports the char in `CompletionContext`) when one is
@@ -487,12 +579,35 @@ pub fn perl_pack() -> LangPack {
         import_call: |_, _| None,
         cmd_effects: |_| vec![],
         narrow_guard: |_, _| None,
+        narrow_assertions: &[],
         rebind_method: |_| false,
         implicit_this_members: false,
         include_path_tokens: false,
         preprocessor_macros: false,
         entrypoint_symbols: &[],
+        runtime_invoked_methods: &[],
         brace_scoped_members: false,
+        call_shapes: &[],
+        arg_kind: "",
+        implicit_variables: &[],
+        throwaway_names: &[],
+        catch_all_methods: &[],
+        callable_placeholder_kind: "",
+        spread_arg_kind: "",
+        named_arg_field: "",
+        contract_stub: "",
+        return_annotation_template: "",
+        native_type_spellings: &[],
+        static_property_sigil: "",
+        class_literal_member: "",
+        import_template: "",
+        imports_bind_names: false,
+        deprecated_attribute: "",
+        builtin_types: &[],
+        member_shapes_are_strict: false,
+        members_are_package_bound: true,
+        types_are_capitalized: false,
+        enum_members: &[],
         trigger_chars: &["$", "@", "%", ">", ":", "{"],
         receiver_names: &[],
         nested_peel: PeelSpec { wrappers: &[], annot_kinds: &[], leaf_to_def: &[], record_stack: true },
@@ -550,12 +665,35 @@ pub fn python_pack() -> LangPack {
         cmd_effects: |_| vec![],
         // `isinstance(x, Foo)` narrows x to Foo inside the guard.
         narrow_guard: |guard, ty| (guard == Some("isinstance")).then(|| InferredType::ClassName(ty.to_string())),
+        narrow_assertions: &[],
         rebind_method: |_| false,
         implicit_this_members: false,
         include_path_tokens: false,
         preprocessor_macros: false,
         entrypoint_symbols: &[],
+        runtime_invoked_methods: &[],
         brace_scoped_members: false,
+        call_shapes: &[],
+        arg_kind: "",
+        implicit_variables: &[],
+        throwaway_names: &[],
+        catch_all_methods: &[],
+        callable_placeholder_kind: "",
+        spread_arg_kind: "",
+        named_arg_field: "",
+        contract_stub: "",
+        return_annotation_template: "",
+        native_type_spellings: &[],
+        static_property_sigil: "",
+        class_literal_member: "",
+        import_template: "",
+        imports_bind_names: false,
+        deprecated_attribute: "",
+        builtin_types: &[],
+        member_shapes_are_strict: false,
+        members_are_package_bound: true,
+        types_are_capitalized: false,
+        enum_members: &[],
         trigger_chars: &["."],
         receiver_names: &["self", "cls"],
         nested_peel: PeelSpec { wrappers: &[], annot_kinds: &[], leaf_to_def: &[], record_stack: true },
@@ -613,12 +751,35 @@ pub fn r_pack() -> LangPack {
         },
         cmd_effects: |_| vec![],
         narrow_guard: |_, _| None,
+        narrow_assertions: &[],
         rebind_method: |_| false,
         implicit_this_members: false,
         include_path_tokens: false,
         preprocessor_macros: false,
         entrypoint_symbols: &[],
+        runtime_invoked_methods: &[],
         brace_scoped_members: false,
+        call_shapes: &[],
+        arg_kind: "",
+        implicit_variables: &[],
+        throwaway_names: &[],
+        catch_all_methods: &[],
+        callable_placeholder_kind: "",
+        spread_arg_kind: "",
+        named_arg_field: "",
+        contract_stub: "",
+        return_annotation_template: "",
+        native_type_spellings: &[],
+        static_property_sigil: "",
+        class_literal_member: "",
+        import_template: "",
+        imports_bind_names: false,
+        deprecated_attribute: "",
+        builtin_types: &[],
+        member_shapes_are_strict: false,
+        members_are_package_bound: true,
+        types_are_capitalized: false,
+        enum_members: &[],
         trigger_chars: &["$", "@", ":"],
         receiver_names: &[],
         nested_peel: PeelSpec { wrappers: &[], annot_kinds: &[], leaf_to_def: &[], record_stack: true },
@@ -684,12 +845,35 @@ pub fn cmake_pack() -> LangPack {
             _ => vec![],
         },
         narrow_guard: |_, _| None,
+        narrow_assertions: &[],
         rebind_method: |_| false,
         implicit_this_members: false,
         include_path_tokens: false,
         preprocessor_macros: false,
         entrypoint_symbols: &[],
+        runtime_invoked_methods: &[],
         brace_scoped_members: false,
+        call_shapes: &[],
+        arg_kind: "",
+        implicit_variables: &[],
+        throwaway_names: &[],
+        catch_all_methods: &[],
+        callable_placeholder_kind: "",
+        spread_arg_kind: "",
+        named_arg_field: "",
+        contract_stub: "",
+        return_annotation_template: "",
+        native_type_spellings: &[],
+        static_property_sigil: "",
+        class_literal_member: "",
+        import_template: "",
+        imports_bind_names: false,
+        deprecated_attribute: "",
+        builtin_types: &[],
+        member_shapes_are_strict: false,
+        members_are_package_bound: true,
+        types_are_capitalized: false,
+        enum_members: &[],
         trigger_chars: &["{", "("],
         receiver_names: &[],
         nested_peel: PeelSpec { wrappers: &[], annot_kinds: &[], leaf_to_def: &[], record_stack: true },
@@ -805,6 +989,7 @@ pub fn cpp_pack() -> LangPack {
         // by these std container/optional/smart-ptr resets, so a use after one
         // is NOT a use-after-move. (An ordinary `x.use()` is not here, so the
         // canonical bug still flags.)
+        narrow_assertions: &[],
         rebind_method: |m| {
             matches!(m, "clear" | "reset" | "assign" | "emplace" | "swap")
         },
@@ -813,7 +998,29 @@ pub fn cpp_pack() -> LangPack {
         include_path_tokens: true,
         preprocessor_macros: true,
         entrypoint_symbols: &["main"],
+        runtime_invoked_methods: &[],
         brace_scoped_members: true,
+        call_shapes: &[],
+        arg_kind: "",
+        implicit_variables: &[],
+        throwaway_names: &[],
+        catch_all_methods: &[],
+        callable_placeholder_kind: "",
+        spread_arg_kind: "",
+        named_arg_field: "",
+        contract_stub: "",
+        return_annotation_template: "",
+        native_type_spellings: &[],
+        static_property_sigil: "",
+        class_literal_member: "",
+        import_template: "",
+        imports_bind_names: false,
+        deprecated_attribute: "",
+        builtin_types: &[],
+        member_shapes_are_strict: false,
+        members_are_package_bound: true,
+        types_are_capitalized: false,
+        enum_members: &[],
         trigger_chars: &[".", ">", ":"],
         receiver_names: &["this"],
         // `field_identifier` only ever names a struct/class member (the
