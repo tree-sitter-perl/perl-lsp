@@ -191,6 +191,19 @@ pub fn code_actions(
             continue;
         }
 
+        // An undefined type the workspace declares elsewhere: one import per
+        // declaring namespace, in the pack's own import syntax.
+        if matches!(&diag.code, Some(NumberOrString::String(s)) if s == "undefined-type") {
+            actions.extend(make_import_type_actions(analysis, uri, diag));
+            continue;
+        }
+        // An unused import whose row binds only that name: delete the row.
+        if matches!(&diag.code, Some(NumberOrString::String(s)) if s == "unused-import") {
+            if let Some(action) = make_remove_import_action(uri, diag) {
+                actions.push(action);
+            }
+            continue;
+        }
         let code_matches = matches!(
             &diag.code,
             Some(NumberOrString::String(s)) if s == "unresolved-function"
@@ -265,6 +278,59 @@ pub fn code_actions(
     }
 
     actions
+}
+
+/// Delete the whole import row the diagnostic names (`data.row` = its
+/// first and last line), newline included.
+fn make_remove_import_action(uri: &Url, diag: &Diagnostic) -> Option<CodeActionOrCommand> {
+    let row = diag.data.as_ref()?.get("row")?.as_array()?;
+    let (first, last) = (row.first()?.as_u64()? as u32, row.get(1)?.as_u64()? as u32);
+    let edit = TextEdit {
+        range: Range {
+            start: Position { line: first, character: 0 },
+            end: Position { line: last + 1, character: 0 },
+        },
+        new_text: String::new(),
+    };
+    let mut changes = HashMap::new();
+    changes.insert(uri.clone(), vec![edit]);
+    Some(CodeActionOrCommand::CodeAction(CodeAction {
+        title: "Remove unused import".to_string(),
+        kind: Some(CodeActionKind::QUICKFIX),
+        diagnostics: Some(vec![diag.clone()]),
+        edit: Some(WorkspaceEdit { changes: Some(changes), ..Default::default() }),
+        is_preferred: Some(true),
+        ..Default::default()
+    }))
+}
+
+/// `Add 'use Ns\Leaf;'` for each candidate the diagnostic carries, inserted
+/// after the last import row above the site, else after the namespace
+/// declaration above it (a blank line between), else after the first line.
+fn make_import_type_actions(analysis: &FileAnalysis, uri: &Url, diag: &Diagnostic) -> Vec<CodeActionOrCommand> {
+    let Some(candidates) = diag.data.as_ref().and_then(|d| d.get("candidates")).and_then(|v| v.as_array()) else {
+        return Vec::new();
+    };
+    let point = position_to_point(diag.range.start);
+    candidates
+        .iter()
+        .filter_map(|c| c.as_str())
+        .filter_map(|fq| analysis.import_edit_for(fq, point.row).map(|e| (fq, e)))
+        .enumerate()
+        .map(|(i, (_fq, (at, text)))| {
+            let pos = point_to_position(at);
+            let mut changes = HashMap::new();
+            changes.insert(uri.clone(), vec![TextEdit { range: Range { start: pos, end: pos }, new_text: text.clone() }]);
+            CodeActionOrCommand::CodeAction(CodeAction {
+                title: format!("Add '{}'", text.trim()),
+                kind: Some(CodeActionKind::QUICKFIX),
+                diagnostics: Some(vec![diag.clone()]),
+                edit: Some(WorkspaceEdit { changes: Some(changes), ..Default::default() }),
+                is_preferred: Some(i == 0 && candidates.len() == 1),
+                ..Default::default()
+            })
+        })
+        .collect()
 }
 
 /// D2 quick-fix: insert `return unless defined $r;` on its own line just
