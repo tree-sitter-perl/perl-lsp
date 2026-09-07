@@ -3000,6 +3000,58 @@ class Util {
 }
 
 #[test]
+fn php_foreach_loop_vars_are_declarations_but_the_source_is_not() {
+    // Round-2 finding: loop-bound vars minted no symbol, so refs/hover/
+    // highlight/rename were all dark on one of PHP's most common shapes.
+    // The `"as" .` anchor keeps the iterated SOURCE a plain read — a
+    // pseudo-def there would steal the real decl's later references.
+    let src = "\
+<?php
+function walk($items, $map) {
+    foreach ($items as $item) {
+        echo $item;
+    }
+    foreach ($map as $k => $v) {
+        echo $k . $v;
+    }
+    foreach ($items as &$ref) {
+        $ref = 1;
+    }
+    return $items;
+}
+";
+    let mut parser = php_parser();
+    let tree = parser.parse(src, None).unwrap();
+    let skel = extract(&tree, src.as_bytes(), &php_pack()).unwrap();
+    let var_defs: Vec<&str> = skel
+        .symbols
+        .iter()
+        .filter(|s| s.kind == "var")
+        .map(|s| s.name.as_str())
+        .collect();
+    for bound in ["$item", "$k", "$v", "$ref"] {
+        assert!(var_defs.contains(&bound), "{bound} must be declared; got {var_defs:?}");
+    }
+    // exactly one $items declaration — the parameter, not a foreach pseudo-def
+    assert_eq!(
+        var_defs.iter().filter(|n| **n == "$items").count(),
+        1,
+        "the iterated source must not re-declare: {var_defs:?}",
+    );
+    // and the loop var's use resolves to its binding (ref minted + bound)
+    let fa = skel.into_file_analysis();
+    use crate::model::file_analysis::RefKind;
+    assert!(
+        fa.refs().iter().any(|r| {
+            matches!(r.kind, RefKind::Variable)
+                && r.target_name == "$item"
+                && r.resolved_symbol().is_some()
+        }),
+        "the echo use of $item resolves to the loop binding",
+    );
+}
+
+#[test]
 fn php_parent_edges_resolve_aliases_and_record_namespaces() {
     // The FQ identity lane: `use X\Y as Z` parents recorded under Z were
     // dead edges (Laravel's `Repository as CacheContract` hid the direct
@@ -3534,6 +3586,101 @@ function f(Query $q) {
 
 
 
+
+#[test]
+fn php_foreach_element_typing_peels_doc_sequences() {
+    // R10: `foreach ($this->handlers as $handler)` — the loop var types as
+    // the collection's ELEMENT: `@var list<X>` / `X[]` doc rows parse to a
+    // one-slot Sequence (REFINING a bare declared `array` — the spelling
+    // that cannot carry an element), and the foreach binder's
+    // `Projected{base, Element}` witness peels it, for member-access and
+    // simple-variable collections both.
+    let src = "\
+<?php
+class HandlerInterface {
+    public function handle(): string { return 'x'; }
+}
+class Stack {
+    /** @var list<HandlerInterface> */
+    protected array $handlers = [];
+    public function run(): void {
+        foreach ($this->handlers as $handler) {
+            $r = $handler->handle();
+        }
+    }
+    /** @param HandlerInterface[] $items */
+    public function drain(array $items): void {
+        foreach ($items as $h) {
+            $s = $h->handle();
+        }
+    }
+}
+";
+    let (fa, _) = php_fa(src);
+    use crate::model::file_analysis::InferredType;
+    let h = fa.inferred_type_via_bag("$handler", tree_sitter::Point { row: 9, column: 17 });
+    assert_eq!(
+        h,
+        Some(InferredType::ClassName("HandlerInterface".into())),
+        "member-access collection peels to the element: {h:?}"
+    );
+    let r = fa.inferred_type_via_bag("$r", tree_sitter::Point { row: 9, column: 13 });
+    assert_eq!(r, Some(InferredType::String), "and the element dispatches: {r:?}");
+    let h2 = fa.inferred_type_via_bag("$h", tree_sitter::Point { row: 15, column: 17 });
+    assert_eq!(
+        h2,
+        Some(InferredType::ClassName("HandlerInterface".into())),
+        "simple-variable collection (X[] param doc) peels too: {h2:?}"
+    );
+    // The sequence spellings never mint bogus classes.
+    assert_eq!((crate::build::query_extract::php_pack().annot_type)("list<A>"),
+        Some(InferredType::Sequence(vec![InferredType::ClassName("A".into())])));
+    assert_eq!((crate::build::query_extract::php_pack().annot_type)("array<int, \\App\\User>"),
+        Some(InferredType::Sequence(vec![InferredType::ClassName("User".into())])));
+}
+
+#[test]
+fn php_foreach_pair_form_types_key_and_value() {
+    // `foreach ($m as $k => $v)`: the value peels the collection's
+    // element (as before), and the KEY peels its key axis — Numeric for
+    // sequences (keys ARE positions: list<X>, X[], array<int,X>), and
+    // the declared key type for `array<string, X>` docs (carried as a
+    // two-argument parametric instance).
+    let src = "\
+<?php
+class User {
+    public function name(): string { return 'n'; }
+}
+class Reg {
+    /** @var array<string, User> */
+    protected array $byEmail = [];
+    /** @var list<User> */
+    protected array $ordered = [];
+    public function scan(): void {
+        foreach ($this->byEmail as $email => $user) {
+            $n = $user->name();
+        }
+        foreach ($this->ordered as $i => $u) {
+            $m = $u->name();
+        }
+    }
+}
+";
+    let (fa, _) = php_fa(src);
+    use crate::model::file_analysis::InferredType;
+    let email = fa.inferred_type_via_bag("$email", tree_sitter::Point { row: 11, column: 17 });
+    assert_eq!(email, Some(InferredType::String), "map key types from the doc: {email:?}");
+    let user = fa.inferred_type_via_bag("$user", tree_sitter::Point { row: 11, column: 17 });
+    assert_eq!(
+        user,
+        Some(InferredType::ClassName("User".into())),
+        "map value peels through the Instance carrier: {user:?}"
+    );
+    let i = fa.inferred_type_via_bag("$i", tree_sitter::Point { row: 14, column: 17 });
+    assert_eq!(i, Some(InferredType::Numeric), "sequence keys are positions: {i:?}");
+    let u = fa.inferred_type_via_bag("$u", tree_sitter::Point { row: 14, column: 17 });
+    assert_eq!(u, Some(InferredType::ClassName("User".into())), "value still peels: {u:?}");
+}
 
 #[test]
 fn php_inherit_doc_param_edges_and_publication() {
