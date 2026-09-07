@@ -386,10 +386,73 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     // span; joined to `@ref.member` so op-DX rides the minted ref.
     let mut member_op_raw: HashMap<usize, (crate::model::file_analysis::MemberOp, crate::model::file_analysis::Span)> =
         HashMap::new();
+    // `@hop.call` → the WHOLE member-call expression's span, joined to its
+    // `@ref.member` so the chain-hop witness (`Projected{base, MethodHop}`)
+    // attaches where an OUTER call's receiver span will look for it.
+    let mut hop_call_by_match: HashMap<usize, crate::model::file_analysis::Span> = HashMap::new();
+    // `@dispatch.via` — the dispatching function's name token (`do_action`),
+    // joined to the same match's `@ref.dispatch.named` string as the minted
+    // DispatchCall's `dispatcher` label.
+    let mut dispatch_via_by_match: HashMap<usize, String> = HashMap::new();
+    // `@handler.name` — the token whose TEXT names a `@def.handler.by.<rail>`
+    // handler in the same match (a listener's `handle(X $e)` is a handler
+    // named `X` sitting on the method's name token).
+    let mut handler_name_by_match: HashMap<usize, String> = HashMap::new();
+    // `@key.elem` — the array element a `@def.handler.key` string heads.
+    let mut key_elem_by_match: HashMap<usize, Span> = HashMap::new();
+    // `@seq.source` — a foreach's collection (span + text), joined to the
+    // same match's `@def.var` so the bound var carries the ELEMENT peel;
+    // `@seq.source.key` is the pair form's KEY twin (the Key step).
+    let mut seq_source_by_match: HashMap<usize, (crate::model::file_analysis::Span, String)> =
+        HashMap::new();
+    let mut seq_key_by_match: HashMap<usize, (crate::model::file_analysis::Span, String)> =
+        HashMap::new();
+    // `@nonpublic.target` — def NAME spans whose member carries an access
+    // modifier meaning non-public (the vocabulary lives in the query's
+    // #any-of?). Joined to symbols by name span in a post-pass, stamping
+    // the same `non_public` attribute cpp access regions stamp.
+    // `@static.target` — def NAME spans of `static` members (the "static"
+    // attribute a scoped completion reads).
+    let mut static_name_spans: std::collections::HashSet<(Point, Point)> = std::collections::HashSet::new();
+    // `@alias.target` — a variable declared by reference assignment
+    // (`$h = &$opts['h']`): the `alias` attribute, a write through which is
+    // a use of the storage it names. Keyed by the name token's END: the
+    // capture sits on the sigil-less inner name the def's `$name` wraps.
+    let mut alias_name_ends: std::collections::HashSet<Point> = std::collections::HashSet::new();
+    // `@contract.target` — def NAME spans of contract callables (an
+    // interface's methods, an abstract method): a `contract` attribute, the
+    // requires of the role the declaring container is.
+    let mut contract_name_spans: std::collections::HashSet<(Point, Point)> = std::collections::HashSet::new();
+    let mut nonpublic_name_spans: std::collections::HashSet<(Point, Point)> =
+        std::collections::HashSet::new();
+    // `@classattr.<flavor>` — container-def name spans stamped with a
+    // flavor attribute ("interface"/"trait"): the model's SymKind::Class
+    // covers all three php container kinds, and SUPER/reference walks
+    // need to ask the value which one it is.
+    let mut classattr_by_name_span: HashMap<(Point, Point), String> = HashMap::new();
     for e in &events {
         if let Some(prefix) = e.cap.strip_suffix(".name") {
             names_by_match
                 .insert((e.match_id, prefix.to_string()), (e.text.clone(), e.start, e.end));
+        }
+        if e.cap == "var.member" || e.cap.ends_with(".name") {
+            not_a_read.insert((e.start_byte, e.end_byte));
+            // a declaration's name token is nested in the `$name` a read
+            // pattern also matches: same END byte, never a read
+            def_name_ends.insert(e.end_byte);
+        }
+        if e.cap == "member.write" {
+            member_writes.push(Span { start: e.start, end: e.end });
+        }
+        if e.cap == "hoist" {
+            hoisted.insert(e.match_id);
+        }
+        if let Some(prefix) = e.cap.strip_suffix(".anchor") {
+            let kind = prefix.strip_prefix("def.").unwrap_or(prefix);
+            if let Some(n) = (pack.default_name)(kind, e.start.row, e.start.column) {
+                names_by_match.insert((e.match_id, prefix.to_string()), (n.clone(), e.start, e.end));
+                defaulted_matches.insert(e.match_id, n);
+            }
         }
         if e.cap == "qualifier" {
             qualifier_by_match.insert(e.match_id, e.text.clone());
@@ -399,6 +462,54 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
         }
         if e.cap == "sym.attr" {
             attrs_by_match.entry(e.match_id).or_default().push(e.text.clone());
+        }
+        if e.cap == "hop.call" {
+            hop_call_by_match.insert(
+                e.match_id,
+                crate::model::file_analysis::Span { start: e.start, end: e.end },
+            );
+        }
+        if e.cap == "dispatch.via" {
+            dispatch_via_by_match.insert(e.match_id, e.text.clone());
+        }
+        if e.cap == "handler.name" {
+            handler_name_by_match.insert(e.match_id, e.text.clone());
+        }
+        if e.cap == "key.elem" {
+            key_elem_by_match.insert(e.match_id, Span { start: e.start, end: e.end });
+        }
+        if e.cap == "seq.source.key" {
+            seq_key_by_match.insert(
+                e.match_id,
+                (
+                    crate::model::file_analysis::Span { start: e.start, end: e.end },
+                    e.text.clone(),
+                ),
+            );
+        }
+        if e.cap == "static.target" {
+            static_name_spans.insert((e.start, e.end));
+        }
+        if e.cap == "alias.target" {
+            alias_name_ends.insert(e.end);
+        }
+        if e.cap == "contract.target" {
+            contract_name_spans.insert((e.start, e.end));
+        }
+        if e.cap == "nonpublic.target" {
+            nonpublic_name_spans.insert((e.start, e.end));
+        }
+        if let Some(flavor) = e.cap.strip_prefix("classattr.") {
+            classattr_by_name_span.insert((e.start, e.end), flavor.to_string());
+        }
+        if e.cap == "seq.source" {
+            seq_source_by_match.insert(
+                e.match_id,
+                (
+                    crate::model::file_analysis::Span { start: e.start, end: e.end },
+                    e.text.clone(),
+                ),
+            );
         }
     }
     // `@ns.inline` — an inline namespace's NAME token, fired by a name-only
@@ -477,10 +588,125 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     }
     let mut annot_text_by_var: HashMap<(String, crate::model::file_analysis::ScopeId), String> =
         HashMap::new();
+    // ---- the file's use-map + written parent qualifiers ----
+    // `binding leaf (or alias) → (namespace, real leaf)`, from the `@use.*`
+    // captures; `@parent.fq` carries a parent's own written qualifier. Both
+    // feed the namespace-relative parent resolution in the `@parent` handler
+    // (packs with `namespace_relative_parents` only — empty otherwise).
+    let mut out_use_aliases: Vec<(String, String, String)> = Vec::new();
+    let mut use_map: HashMap<String, (String, String)> = HashMap::new();
+    let mut group_import_sites: Vec<(String, Span)> = Vec::new();
+    let mut parent_fq_by_match: HashMap<usize, String> = HashMap::new();
+    // `@ref.qualified`: the WRITTEN qualifier of a call/ctor/type/parent
+    // spelling (`Downloader\DownloadManager`, `\A\B`) — the use-map pins
+    // the leaf to that namespace instead of counting it as a bare spelling.
+    // `@expr.ctor` matches: a `new self(...)` / `new static(...)` names the
+    // ENCLOSING class, so its ctor ref carries that class's name (the
+    // references and heatmap key), not the literal token.
+    let ctor_matches: std::collections::HashSet<usize> = events
+        .iter()
+        .filter(|e| e.cap == "expr.ctor")
+        .map(|e| e.match_id)
+        .collect();
+    let qualified_by_match: HashMap<usize, String> = events
+        .iter()
+        .filter(|e| e.cap == "ref.qualified")
+        .map(|e| (e.match_id, e.text.clone()))
+        .collect();
+    if pack.namespace_relative_parents {
+        let mut use_fqn: HashMap<usize, String> = HashMap::new();
+        let mut use_prefix: HashMap<usize, String> = HashMap::new();
+        let mut use_leaf: HashMap<usize, (String, Span)> = HashMap::new();
+        let mut use_alias: HashMap<usize, String> = HashMap::new();
+        for e in &events {
+            match e.cap.as_str() {
+                "use.fqn" => {
+                    use_fqn.insert(e.match_id, e.text.clone());
+                }
+                "use.prefix" => {
+                    use_prefix.insert(e.match_id, e.text.clone());
+                }
+                "use.leaf" => {
+                    use_leaf.insert(e.match_id, (e.text.clone(), Span { start: e.start, end: e.end }));
+                }
+                "use.alias" => {
+                    use_alias.insert(e.match_id, e.text.clone());
+                }
+                "parent.fq" => {
+                    parent_fq_by_match.insert(e.match_id, e.text.clone());
+                }
+                _ => {}
+            }
+        }
+        for (mid, fqn) in &use_fqn {
+            let (leaf, ns) = split_ns_leaf(fqn);
+            let key = use_alias.get(mid).cloned().unwrap_or_else(|| leaf.clone());
+            if use_alias.contains_key(mid) {
+                out_use_aliases.push((key.clone(), ns.clone(), leaf.clone()));
+            }
+            use_map.insert(key, (ns, leaf));
+        }
+        // group form: `use A\B\{C, D as E}` — the prefix is the namespace,
+        // each clause's own name the leaf.
+        for (mid, (leaf, span)) in &use_leaf {
+            let Some(prefix) = use_prefix.get(mid) else { continue };
+            let key = use_alias.get(mid).cloned().unwrap_or_else(|| leaf.clone());
+            let ns = prefix.trim_start_matches('\\').to_string();
+            if use_alias.contains_key(mid) {
+                out_use_aliases.push((key.clone(), ns.clone(), leaf.clone()));
+            }
+            // A group clause is an import row like any flat one: the same
+            // `include_directives` row (spelled in full, spanning the leaf
+            // token) feeds the use-map pin and the row-namespace lanes.
+            group_import_sites.push((format!("{ns}\\{leaf}"), *span));
+            use_map.insert(key, (ns, leaf.clone()));
+        }
+    }
 
     // ---- the state machine: scope stack + sticky contexts ----
     let mut out = SkeletonAnalysis::default();
+    // One constructor call per anonymous-class keyword: the def pattern
+    // and each parent pattern share the token.
+    let mut anon_ctor_sites: std::collections::HashSet<(usize, usize)> =
+        std::collections::HashSet::new();
+    out.use_aliases = out_use_aliases;
+    // Group rows land ahead of the flat rows the main loop pushes in
+    // document order; every reader of these lanes is span- or map-keyed,
+    // so the order carries no meaning — do not make a consumer assume it.
+    for (raw, span) in group_import_sites {
+        out.imports.push(raw.clone());
+        out.import_sites.push((raw, span));
+    }
     out.receiver_names = pack.receiver_names.iter().map(|s| s.to_string()).collect();
+    out.implicit_variables = pack.implicit_variables.iter().map(|s| s.to_string()).collect();
+    out.throwaway_names = pack.throwaway_names.iter().map(|s| s.to_string()).collect();
+    out.catch_all_methods = pack.catch_all_methods.iter().map(|s| s.to_string()).collect();
+    out.class_literal_member = pack.class_literal_member.to_string();
+    out.import_template = pack.import_template.to_string();
+    out.contract_stub = pack.contract_stub.to_string();
+    out.return_annotation_template = pack.return_annotation_template.to_string();
+    out.native_type_spellings =
+        pack.native_type_spellings.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+    out.static_property_sigil = pack.static_property_sigil.to_string();
+    {
+        let conv = crate::build::query_extract::rail_conventions_for(pack);
+        out.rail_labels = conv.labels.clone();
+        out.rail_hints = conv.hints.clone();
+        out.rail_name_seps = conv.name_seps.clone();
+    }
+    out.imports_bind_names = pack.imports_bind_names;
+    out.member_shapes_are_strict = pack.member_shapes_are_strict;
+    out.members_are_package_bound = pack.members_are_package_bound;
+    out.enum_members = pack.enum_members.iter().map(|s| s.to_string()).collect();
+    out.member_writes = std::mem::take(&mut member_writes);
+    out.types_are_capitalized = pack.types_are_capitalized;
+    out.function_scoped_vars = pack.function_scoped_vars;
+    out.constructor_names = pack.constructor_names.iter().map(|s| s.to_string()).collect();
+    out.type_display = pack
+        .type_display
+        .iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
     // Template params joined to their owner class — the owner shaped like a
     // def name (a partial spec's spelling canonicalizes) so the key matches
     // the Class symbol's identity. Source order = the `ParamOf` index axis.
@@ -1484,6 +1710,17 @@ pub(crate) fn looks_like_type_spelling(body: &str) -> bool {
         return false;
     }
     b.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == ':' || c == ' ')
+}
+
+/// Split a written qualified name into `(leaf, namespace)` at its last
+/// separator, leading-`\` (a php global-anchored spelling) trimmed. A
+/// separator-less spelling is a bare leaf in the global namespace.
+fn split_ns_leaf(fq: &str) -> (String, String) {
+    let t = fq.trim_start_matches('\\');
+    match t.rsplit_once('\\') {
+        Some((ns, leaf)) => (leaf.to_string(), ns.to_string()),
+        None => (t.to_string(), String::new()),
+    }
 }
 
 /// A bare identifier lexeme — the only shape that can name an enumerator.
