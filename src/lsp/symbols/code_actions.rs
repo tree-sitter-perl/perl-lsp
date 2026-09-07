@@ -161,11 +161,19 @@ pub fn pack_diagnostics(analysis: &FileAnalysis, options: DiagnosticOptions) -> 
 pub fn code_actions(
     diagnostics: &[Diagnostic],
     analysis: &FileAnalysis,
+    text: &str,
     uri: &Url,
 ) -> Vec<CodeActionOrCommand> {
     let mut actions = Vec::new();
 
     for diag in diagnostics {
+        // A missing return type: the inferred spelling after the parameter list.
+        if matches!(&diag.code, Some(NumberOrString::String(s)) if s == "missing-return-type") {
+            if let Some(action) = make_return_type_action(analysis, text, uri, diag) {
+                actions.push(action);
+            }
+            continue;
+        }
         // Member-access operator swap: replace the operator token (the
         // diagnostic's range) with the correct one (`data.operator`).
         if matches!(&diag.code, Some(NumberOrString::String(s)) if s == MEMBER_OP_CODE) {
@@ -395,4 +403,87 @@ fn make_add_to_qw_action(
         is_preferred: Some(true),
         ..Default::default()
     }))
+}
+
+/// "Add return type": the pack's return-annotation template with the
+/// diagnostic's spelling, inserted right after the parameter list's closing
+/// parenthesis (found from the name token with the quote-aware scan a
+/// signature render uses — a `)` inside a default value is not the close).
+fn make_return_type_action(
+    analysis: &FileAnalysis,
+    text: &str,
+    uri: &Url,
+    diag: &Diagnostic,
+) -> Option<CodeActionOrCommand> {
+    let template = analysis.pack.return_annotation_template.as_str();
+    if template.is_empty() {
+        return None;
+    }
+    let spelling = diag.data.as_ref()?.get("spelling")?.as_str()?;
+    let name_end = crate::build::cursor_sentinel::point_to_byte(text, position_to_point(diag.range.end));
+    let close = params_close_byte(text, name_end)?;
+    let at = byte_to_position(text, close + 1);
+    let mut changes = HashMap::new();
+    changes.insert(uri.clone(), vec![TextEdit { range: Range { start: at, end: at }, new_text: template.replace("{}", spelling) }]);
+    Some(CodeActionOrCommand::CodeAction(CodeAction {
+        title: format!("Add return type `{}`", template.replace("{}", spelling).trim()),
+        kind: Some(CodeActionKind::QUICKFIX),
+        diagnostics: Some(vec![diag.clone()]),
+        edit: Some(WorkspaceEdit { changes: Some(changes), ..Default::default() }),
+        is_preferred: Some(true),
+        ..Default::default()
+    }))
+}
+
+/// Byte offset of the `)` closing the first parenthesized group at or after
+/// `from`; quotes hide a `)` inside a default value.
+fn params_close_byte(text: &str, from: usize) -> Option<usize> {
+    let mut depth = 0i32;
+    let mut opened = false;
+    let mut quote: Option<char> = None;
+    let mut escaped = false;
+    for (off, ch) in text.get(from..)?.char_indices() {
+        if let Some(q) = quote {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == q {
+                quote = None;
+            }
+            continue;
+        }
+        match ch {
+            '\'' | '"' => quote = Some(ch),
+            '(' => {
+                depth += 1;
+                opened = true;
+            }
+            ')' => {
+                depth -= 1;
+                if opened && depth == 0 {
+                    return Some(from + off);
+                }
+            }
+            '{' | ';' if !opened => return None,
+            _ => {}
+        }
+    }
+    None
+}
+
+fn byte_to_position(text: &str, byte: usize) -> Position {
+    let (mut line, mut col) = (0u32, 0u32);
+    for (i, ch) in text.char_indices() {
+        if i >= byte {
+            break;
+        }
+        if ch == '\n' {
+            line += 1;
+            col = 0;
+        } else {
+            col += ch.len_utf16() as u32;
+        }
+    }
+    Position { line, character: col }
 }
