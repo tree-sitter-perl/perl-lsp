@@ -229,6 +229,13 @@ impl PackFacts {
     /// `span`, if any. The one speller for "is this token inside an import
     /// row": the row's leaf carries its own ref; every other segment is a
     /// namespace no by-name lookup should answer for.
+    pub fn import_row_covering(&self, span: &Span) -> Option<&(Span, String)> {
+        self.include_directives.iter().find(|(row, _)| {
+            (row.start.row, row.start.column) <= (span.start.row, span.start.column)
+                && (span.end.row, span.end.column) <= (row.end.row, row.end.column)
+        })
+    }
+
     /// The line an import quick-fix inserts at: right after the last import
     /// row that starts above `row`.
     pub fn import_insertion_line(&self, row: usize) -> Option<usize> {
@@ -237,13 +244,6 @@ impl PackFacts {
             .filter(|r| r.start.row < row)
             .map(|r| r.end.row + 1)
             .max()
-    }
-
-    pub fn import_row_covering(&self, span: &Span) -> Option<&(Span, String)> {
-        self.include_directives.iter().find(|(row, _)| {
-            (row.start.row, row.start.column) <= (span.start.row, span.start.column)
-                && (span.end.row, span.end.column) <= (row.end.row, row.end.column)
-        })
     }
 
     /// Add this lane's footprint to a heap probe: the include bucket (the

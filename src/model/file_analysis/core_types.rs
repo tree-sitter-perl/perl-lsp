@@ -193,6 +193,14 @@ impl Namespace {
     }
 }
 
+impl Span {
+    /// `other` lies within this span (inclusive at both ends).
+    pub fn contains(&self, other: &Span) -> bool {
+        (self.start.row, self.start.column) <= (other.start.row, other.start.column)
+            && (other.end.row, other.end.column) <= (self.end.row, self.end.column)
+    }
+}
+
 // ---- Symbol ----
 
 /// How a symbol presents to humans — the ONE policy home for listing
@@ -202,14 +210,6 @@ impl Namespace {
 /// it and never re-derives presentation from the detail. Kind-semantic
 /// facts (`is_constant`, `opaque_return`, `lexical`) stay on
 /// `SymbolDetail` — they change behavior, not rendering.
-impl Span {
-    /// `other` lies within this span (inclusive at both ends).
-    pub fn contains(&self, other: &Span) -> bool {
-        (self.start.row, self.start.column) <= (other.start.row, other.start.column)
-            && (other.end.row, other.end.column) <= (self.end.row, self.end.column)
-    }
-}
-
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Presentation {
     /// Suppress this symbol in listing views. Set for presentation
@@ -317,12 +317,6 @@ impl ParamArity {
     /// visible unpruned. `2` = exact (`argc == total`, no variadic); `1` =
     /// compatible (defaults fill the gap, or a variadic tail absorbs the
     /// extra); `0` = mismatch (too few required, or too many for a fixed arity).
-    /// Whether an argument written at `position` is bound by the call
-    /// (the parameter there is declared by reference).
-    pub fn binds_arg(&self, position: usize) -> bool {
-        position < 64 && self.by_ref & (1u64 << position) != 0
-    }
-
     pub fn fit(&self, argc: usize) -> u8 {
         let compatible = argc >= self.required && (self.variadic || argc <= self.total);
         if !compatible {
@@ -332,6 +326,12 @@ impl ParamArity {
         } else {
             1
         }
+    }
+
+    /// Whether an argument written at `position` is bound by the call
+    /// (the parameter there is declared by reference).
+    pub fn binds_arg(&self, position: usize) -> bool {
+        position < 64 && self.by_ref & (1u64 << position) != 0
     }
 }
 

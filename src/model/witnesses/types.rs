@@ -160,12 +160,12 @@ pub const INHERIT_PARAM_SOURCE: &str = "inherit-param";
 /// Annot priority for the same reason as `INHERIT_PARAM_SOURCE`: the
 /// materialized `Sequence` must beat the `HashRef` annot, and at equal
 /// priority latest-wins does it (`HashRef` never subsumes `Sequence`).
+pub const REFINE_SOURCE: &str = "refines-container";
+
 /// Source tag of a class-member VALUE edge (`PackageSymbol{cls, field} →
 /// Edge(Variable)`): the registry's member-shape preference partitions a
 /// class attachment's edges on it.
 pub const FIELD_EDGE_SOURCE: &str = "field_edge";
-
-pub const REFINE_SOURCE: &str = "refines-container";
 
 /// Source tag of a REASSIGNMENT's flow edge (`FlowEdge::reassigns`): the
 /// only witness whose failure to resolve `materialize` turns into an

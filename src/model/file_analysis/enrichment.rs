@@ -280,7 +280,6 @@ impl EnrichmentProfile {
             stamp_method_targets: self.stamp_method_targets || other.stamp_method_targets,
         }
     }
-
 }
 
 /// The process's declared profile. `full()` until a verb says otherwise.

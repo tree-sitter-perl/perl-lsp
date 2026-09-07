@@ -35,7 +35,6 @@ pub(super) enum WalkTask<'a> {
 /// True when the env gate asks for the pre-worklist recursive descent.
 /// Read once per build, not per node.
 #[cfg(test)]
-#[cfg(test)]
 pub(super) fn recursive_walk_requested() -> bool {
     std::env::var_os("PERL_LSP_RECURSIVE_WALK").is_some_and(|v| v == "1")
 }
