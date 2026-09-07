@@ -104,6 +104,30 @@ pub fn pack_completion(
             ) {
                 return (items, false);
             }
+            // Typed receiver, gather declined. The deliberate fall-through
+            // below serves a class the analysis KNOWS (cpp's
+            // self-access-sees-private gold case — the class is local).
+            // A class nothing declares anywhere (a vendor type with no
+            // vendor/ present — guzzle's PromiseInterface, round 3) has
+            // no honest members to offer, and the identifier universe
+            // after `->` is noise wearing confidence: answer EMPTY.
+            let class_known = !analysis.symbols_named(&class).is_empty()
+                || !xidx.def_candidates(&class).is_empty();
+            if !class_known {
+                return (Vec::new(), true);
+            }
+        }
+        // An UNTYPEABLE receiver's member slot answers EMPTY, never the
+        // file-scope identifier universe: after `->`/`.` only the
+        // receiver's members are valid, and ~200 unrelated locals is noise
+        // wearing confidence (measured on guzzle/laravel, round 1).
+        // `isIncomplete` so the client re-asks as typing narrows the
+        // receiver. A TYPED receiver whose member gather declined falls
+        // through on purpose — the self-access-sees-private cpp path is
+        // served by the in-scope fallback (gold:
+        // cpp-completion-access-specifier-self-access-sees-private).
+        if receiver.receiver_type.is_none() {
+            return (Vec::new(), true);
         }
     }
     // `fmtx::|` — a qualified path completes to the OWNER's members
