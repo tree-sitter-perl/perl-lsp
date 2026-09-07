@@ -1275,3 +1275,154 @@ fn php_unused_variable_lane_flags_locals_never_read() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+
+/// The global namespace knows the classes php itself provides: `new
+/// Exception` in a namespace-less file is not a type missing its import
+/// because a vendored `Vendor\Exception` exists; a string callable with
+/// escape sequences (`'\\Sodium\\bin2hex'`) is no type reference; a
+/// workspace class used without its import still reports.
+#[cfg(feature = "php")]
+#[test]
+fn php_global_namespace_builtins_and_escaped_string_callables_stay_quiet() {
+    let dir = std::env::temp_dir().join(format!("perl-lsp-d2globals-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("src/Util")).unwrap();
+    std::fs::create_dir_all(dir.join("vendor/x")).unwrap();
+    std::fs::create_dir_all(dir.join("bin")).unwrap();
+    let w = |rel: &str, src: &str| std::fs::write(dir.join(rel), src).unwrap();
+    w("composer.json", "{\"autoload\": {\"psr-4\": {\"App\\\\\": \"src/\"}}}");
+    w("vendor/x/Exception.php", "<?php\nnamespace Vendor;\nclass Exception extends \\Exception {}\n");
+    w("src/Util/Helper.php", "<?php\nnamespace App\\Util;\nclass Helper { public static function go(): int { return 1; } }\n");
+    w("bin/run.php", "<?php\ntry { throw new Exception('x'); } catch (Exception $e) { echo $e; }\n$d = new DateTime();\nHelper::go();\n");
+    w("src/Sodium.php", "<?php\nnamespace Sodium;\nif (!is_callable('\\\\Sodium\\\\bin2hex')) { echo 1; }\n");
+    w("src/Svc.php", "<?php\nnamespace App;\nclass Svc\n{\n    public function session(): int { return 1; }\n    public function store()\n    {\n        return $this->session->store;\n    }\n}\n");
+    let run = |args: &[&str]| {
+        let out = std::process::Command::new(env!("CARGO_BIN_EXE_perl-lsp"))
+            .args(args)
+            .env("XDG_CACHE_HOME", dir.join(".cache"))
+            .output()
+            .expect("run");
+        format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr))
+    };
+    let root = dir.to_str().unwrap();
+    let err = run(&["--check", root, "--severity", "hint"]);
+    let undefined: Vec<&str> = err.lines().filter(|l| l.contains("[undefined-type]")).collect();
+    assert_eq!(undefined.len(), 1, "{err}");
+    assert!(undefined[0].contains("bin/run.php") && undefined[0].contains("'Helper'"), "{undefined:?}");
+    // a value read of a name only a method carries is an undeclared property —
+    // for the lane, goto-def and hover alike
+    assert!(err.lines().any(|l| l.contains("Svc.php") && l.contains("[undefined-property]") && l.contains("'session'")), "{err}");
+    let def = run(&["--definition", root, "src/Svc.php", "7", "22"]);
+    assert!(!def.contains("Svc.php:4:"), "a value read must not answer the method: {def}");
+    let hover = run(&["--hover", root, "src/Svc.php", "7", "22"]);
+    assert!(!hover.contains("session: "), "a value read must not type through the method: {hover}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+
+#[cfg(feature = "php")]
+/// `$u = new Err()` then `$u = signon()` — a return the lattice cannot
+/// hold. The earlier class must not stand past the rebind, so `$u->ID` is
+/// not reported against `Err`; a same-scope rebind to a KNOWN class still
+/// types the read (`$k`), and its missing member still reports.
+#[test]
+fn php_untyped_reassignment_resets_the_receiver() {
+    let dir = std::env::temp_dir().join(format!("perl-lsp-d2reset-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    let w = |rel: &str, src: &str| std::fs::write(dir.join(rel), src).unwrap();
+    w("composer.json", "{\"autoload\": {\"psr-4\": {\"App\\\\\": \"src/\"}}}");
+    // `d()` returns `Err` on one arm and, on the other, a variable reset by
+    // an untyped call: the arms disagree, so `$w` is untyped and `$w->ID`
+    // stays silent (the WordPress `get_term()` shape).
+    // `u()` documents a union and returns one arm: the doc is the
+    // answer (known untypable), so `$p->nope` stays silent; a typed
+    // reassignment to an array ends the class (`$q->nope` silent too).
+    w("src/A.php", "<?php\nnamespace App;\nclass Err { public function code(): int { return 1; } }\nclass User { public int $ID = 0; }\nclass Skinned {\n    /** @var Err|User $skin */\n    public $skin;\n    public function __construct() { $this->skin = new Err(); }\n    public function go(): int { return $this->skin->overwrite; }\n}\n/** @param Err|User $s */\nfunction sk($s) { return $s->overwrite; }\nfunction signon() { return $_SERVER['u']; }\nfunction d(int $t) { if ($t) { return new Err(); } $_t = new User(); $_t = signon(); return $_t; }\n/** @return User|Err */\nfunction u() { return new User(); }\nfunction f(bool $b): int\n{\n    $u = new Err();\n    if ($b) { $u = new Err(); }\n    $u = signon();\n    $k = new Err();\n    $k = new User();\n    $w = d(1);\n    $p = u();\n    $q = new Err();\n    $q = ['a' => 1];\n    return $u->ID + $k->ID + $k->nope + $w->ID + $p->nope + $q->nope;\n}\n");
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_perl-lsp"))
+        .args(["--check", dir.to_str().unwrap()])
+        .env("XDG_CACHE_HOME", dir.join(".cache"))
+        .output()
+        .expect("run");
+    let err = String::from_utf8_lossy(&out.stderr);
+    let rows: Vec<&str> = err.lines().filter(|l| l.contains("A.php") && l.contains('[')).collect();
+    assert_eq!(rows.len(), 1, "{err}");
+    assert!(rows[0].contains("[undefined-property]") && rows[0].contains("'nope'"), "{rows:?}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `$this->step()` in a base class that only a subclass implements is the
+/// template-method idiom: the runtime receiver is the subclass. A member
+/// no descendant declares still reports, and so does the same call on a
+/// foreign receiver typed as the base.
+#[cfg(feature = "php")]
+#[test]
+fn php_template_method_calls_on_this_stay_quiet() {
+    let dir = std::env::temp_dir().join(format!("perl-lsp-d2tmpl-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    let w = |rel: &str, src: &str| std::fs::write(dir.join(rel), src).unwrap();
+    w("composer.json", "{\"autoload\": {\"psr-4\": {\"App\\\\\": \"src/\"}}}");
+    w("src/Base.php", "<?php\nnamespace App;\nclass Base\n{\n    public function run(): int\n    {\n        return $this->step() + $this->nope();\n    }\n    public function drive(Base $b): int\n    {\n        return $b->step();\n    }\n}\n");
+    w("src/Impl.php", "<?php\nnamespace App;\nclass Impl extends Base\n{\n    public function step(): int\n    {\n        return 1;\n    }\n}\n");
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_perl-lsp"))
+        .args(["--check", dir.to_str().unwrap()])
+        .env("XDG_CACHE_HOME", dir.join(".cache"))
+        .output()
+        .expect("run");
+    let err = String::from_utf8_lossy(&out.stderr);
+    let rows: Vec<&str> = err.lines().filter(|l| l.contains(".php") && l.contains('[')).collect();
+    assert_eq!(rows.len(), 2, "{err}");
+    assert!(rows.iter().any(|l| l.contains("Base.php:7") && l.contains("'nope'")), "{rows:?}");
+    assert!(rows.iter().any(|l| l.contains("Base.php:11") && l.contains("'step'")), "{rows:?}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `class Exception extends \Exception` in a namespace: the parent is the
+/// GLOBAL one (no stubs carry it), never the child itself, so the builtin
+/// ancestor's members are unreadable and the lane stays silent. A parent
+/// the workspace does declare still checks its members.
+#[cfg(feature = "php")]
+#[test]
+fn php_same_leaf_global_parent_is_not_the_child() {
+    let dir = std::env::temp_dir().join(format!("perl-lsp-d2selfp-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    let w = |rel: &str, src: &str| std::fs::write(dir.join(rel), src).unwrap();
+    w("composer.json", "{\"autoload\": {\"psr-4\": {\"App\\\\\": \"src/\"}}}");
+    w("src/Exception.php", "<?php\nnamespace App;\nclass Exception extends \\Exception\n{\n    public function errorMessage(): string\n    {\n        return htmlspecialchars($this->getMessage());\n    }\n}\n");
+    w("src/Sub.php", "<?php\nnamespace App;\nclass Base { public function ok(): int { return 1; } }\nclass Sub extends Base\n{\n    public function go(): int\n    {\n        return $this->ok() + $this->nope();\n    }\n}\n");
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_perl-lsp"))
+        .args(["--check", dir.to_str().unwrap()])
+        .env("XDG_CACHE_HOME", dir.join(".cache"))
+        .output()
+        .expect("run");
+    let err = String::from_utf8_lossy(&out.stderr);
+    let rows: Vec<&str> = err.lines().filter(|l| l.contains(".php") && l.contains('[')).collect();
+    assert_eq!(rows.len(), 1, "{err}");
+    assert!(rows[0].contains("Sub.php:8") && rows[0].contains("'nope'"), "{rows:?}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `isset($this->p)` / `empty($this->q)` ask whether the member exists;
+/// only the plain read (`$this->real`) reports.
+#[cfg(feature = "php")]
+#[test]
+fn php_existence_probes_stay_quiet() {
+    let dir = std::env::temp_dir().join(format!("perl-lsp-d2probe-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    let w = |rel: &str, src: &str| std::fs::write(dir.join(rel), src).unwrap();
+    w("composer.json", "{\"autoload\": {\"psr-4\": {\"App\\\\\": \"src/\"}}}");
+    w("src/P.php", "<?php\nnamespace App;\nclass P\n{\n    public int $x = 1;\n    public function f(): bool\n    {\n        return isset($this->nope) || empty($this->gone) || $this->real;\n    }\n}\n");
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_perl-lsp"))
+        .args(["--check", dir.to_str().unwrap()])
+        .env("XDG_CACHE_HOME", dir.join(".cache"))
+        .output()
+        .expect("run");
+    let err = String::from_utf8_lossy(&out.stderr);
+    let rows: Vec<&str> = err.lines().filter(|l| l.contains("P.php") && l.contains('[')).collect();
+    assert_eq!(rows.len(), 1, "{err}");
+    assert!(rows[0].contains("'real'"), "{rows:?}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
