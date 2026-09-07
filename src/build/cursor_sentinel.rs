@@ -256,6 +256,94 @@ pub struct MemberCompletionCtx {
     /// `op_fix` corrects it. `Slot::Member.op`'s pack-side answer
     /// (`docs/adr/cursor-slots.md`).
     pub op: crate::model::file_analysis::MemberOp,
+    /// A SCOPED access (`::` — no `.`/`->` token on the member node): the
+    /// class's constants and static members are what completes there.
+    pub scoped: bool,
+}
+
+/// A rail-string slot: the rail a string at the cursor uses, the text
+/// typed before the cursor, and the content span an item's edit replaces.
+pub struct RailStringCtx {
+    pub rail: String,
+    pub prefix: String,
+    pub content: Span,
+}
+
+/// `route('ho|')` / `view('|')` / a template's `@include('|')`: the string
+/// the cursor is in as a use on a string rail. A use the document already
+/// minted (a partial name) answers from its own ref; an EMPTY string mints
+/// nothing, so the cursor's position is spelled into the source as the
+/// sentinel and the pack's rail patterns (parsed regions) and text rails
+/// (a template) decide whether the string is a rail use — the same rules
+/// that mint the ref, never a re-spelling of the dispatcher names.
+pub fn rail_string_ctx(
+    parser: &mut Parser,
+    cfg: &crate::build::query_extract::LangPack,
+    src: &str,
+    old: &Tree,
+    cursor: usize,
+    analysis: &FileAnalysis,
+) -> Option<RailStringCtx> {
+    use crate::model::file_analysis::{HandlerOwner, RefBinding, RefKind};
+    let pos = byte_to_point(src, cursor);
+    let within = |span: &Span, p: Point| {
+        (span.start.row, span.start.column) <= (p.row, p.column)
+            && (p.row, p.column) <= (span.end.row, span.end.column)
+    };
+    let rail_of = |r: &crate::model::file_analysis::Ref| -> Option<String> {
+        if !matches!(r.kind, RefKind::DispatchCall { .. }) {
+            return None;
+        }
+        match &r.binding {
+            Some(RefBinding::Handler { owner: HandlerOwner::Rail(rail), .. }) => Some(rail.clone()),
+            _ => None,
+        }
+    };
+    // the document's own use at the cursor (a partial name)
+    if let Some(r) = analysis.refs().iter().find(|r| within(&r.span, pos) && rail_of(r).is_some()) {
+        let start = point_to_byte(src, r.span.start);
+        return Some(RailStringCtx {
+            rail: rail_of(r)?,
+            prefix: src.get(start..cursor)?.to_string(),
+            content: r.span,
+        });
+    }
+    if !cursor_in_skip(old, src, cursor, cfg) {
+        return None;
+    }
+    let patched = patch(src, cursor);
+    let mut edited = old.clone();
+    edited.edit(&InputEdit {
+        start_byte: cursor,
+        old_end_byte: cursor,
+        new_end_byte: cursor + SENTINEL.len(),
+        start_position: pos,
+        old_end_position: pos,
+        new_end_position: Point::new(pos.row, pos.column + SENTINEL.len()),
+    });
+    let tree = parser.parse(&patched, Some(&edited))?;
+    let mut hit: Option<(Span, String)> = None;
+    if let Ok(skel) = crate::build::query_extract::extract(&tree, patched.as_bytes(), cfg) {
+        hit = skel.rails.iter().find(|(span, _)| within(span, pos)).cloned();
+    }
+    if hit.is_none() {
+        let rails = crate::build::query_extract::text_rails_for(cfg);
+        let all: Vec<&crate::build::query_extract::TextRail> = rails.iter().collect();
+        for r in crate::build::language_driver::scan_text_rails(analysis, &patched, &all) {
+            if within(&r.span, pos) {
+                if let Some(rail) = rail_of(&r) {
+                    hit = Some((r.span, rail));
+                    break;
+                }
+            }
+        }
+    }
+    let (span, rail) = hit?;
+    let start = point_to_byte(&patched, span.start);
+    let prefix = patched.get(start..cursor)?.to_string();
+    // the content span in the ORIGINAL source: the sentinel sits inside it
+    let end = point_to_byte(&patched, span.end).checked_sub(SENTINEL.len())?;
+    Some(RailStringCtx { rail, prefix, content: Span { start: span.start, end: byte_to_point(src, end) } })
 }
 
 pub fn member_completion_ctx_incremental(
@@ -288,11 +376,38 @@ pub fn member_completion_ctx_incremental(
     // Downstream projects `class_name()` without an index, so the
     // exact-spelling-vs-primary dispatch call (a spec class exists for
     // `formatter<int>`) is made HERE, while the index is in hand.
+    // A receiver spelled as the language's receiver keyword (`this`,
+    // `$this`) has no typeable value node — it IS the enclosing class,
+    // read off the cursor's scope chain: self-access member completion
+    // (privates included, inheritance-aware) instead of a scope dump.
     let receiver_type = resolve_node_type(receiver, cfg, &patched, analysis, module_index)
+        .or_else(|| {
+            let txt = receiver.utf8_text(patched.as_bytes()).ok()?;
+            // `self::` / `static::` name the enclosing class the same way
+            // `$this->` does.
+            if !cfg.receiver_names.contains(&txt) && !cfg.self_class_tokens.contains(&txt) {
+                return None;
+            }
+            let sc = analysis.scope_at(byte_to_point(src, cursor))?;
+            analysis
+                .enclosing_class_for_scope(sc)
+                .map(crate::model::file_analysis::InferredType::ClassName)
+        })
+        .or_else(|| {
+            // A bare class token (`Foo::`, `App\Foo::`) IS the class it
+            // spells, leaf-keyed like every class identity.
+            if !cfg.class_token_kinds.contains(&receiver.kind()) {
+                return None;
+            }
+            let txt = receiver.utf8_text(patched.as_bytes()).ok()?;
+            let leaf = txt.rsplit('\\').next().unwrap_or(txt);
+            (!leaf.is_empty()).then(|| crate::model::file_analysis::InferredType::ClassName(leaf.to_string()))
+        })
         .map(|t| analysis.refine_instance_dispatch(t, module_index));
     let op_fix = operator_fix(member, receiver, &patched, analysis, cfg);
     let op = typed_member_op(member, &patched);
-    Some(MemberCompletionCtx { receiver_type, op_fix, op })
+    let scoped = operator_token(member, &patched).is_none();
+    Some(MemberCompletionCtx { receiver_type, op_fix, op, scoped })
 }
 
 /// The domain-comparison completion context: the cursor sits after an
