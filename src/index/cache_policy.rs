@@ -21,12 +21,58 @@ pub const SOURCE_TO_ANALYSIS_EXPANSION: u64 = 65;
 /// the ceiling bounds one runaway derivation, it is not a global budget.
 const RAM_CEILING_SHARE: u64 = 2;
 
-/// Physical RAM in bytes, from `/proc/meminfo`; `None` where unreadable.
+/// Physical RAM in bytes. POSIX `sysconf` on unix (Linux and mac alike),
+/// `GlobalMemoryStatusEx` on Windows — kernel32 is linked by every Windows
+/// target, so no crate. `None` only on a platform with neither, or when the
+/// call itself fails; the ceiling is then skipped, never guessed.
 pub fn physical_ram_bytes() -> Option<u64> {
-    let text = std::fs::read_to_string("/proc/meminfo").ok()?;
-    let line = text.lines().find(|l| l.starts_with("MemTotal:"))?;
-    let kb: u64 = line.split_whitespace().nth(1)?.parse().ok()?;
-    Some(kb * 1024)
+    #[cfg(unix)]
+    {
+        // SAFETY: `sysconf` reads a constant and touches nothing else.
+        let pages = unsafe { libc::sysconf(libc::_SC_PHYS_PAGES) };
+        let page = unsafe { libc::sysconf(libc::_SC_PAGE_SIZE) };
+        if pages <= 0 || page <= 0 {
+            return None;
+        }
+        return (pages as u64).checked_mul(page as u64);
+    }
+    #[cfg(windows)]
+    {
+        // MEMORYSTATUSEX, field for field.
+        #[repr(C)]
+        struct MemoryStatusEx {
+            length: u32,
+            memory_load: u32,
+            total_phys: u64,
+            avail_phys: u64,
+            total_page_file: u64,
+            avail_page_file: u64,
+            total_virtual: u64,
+            avail_virtual: u64,
+            avail_extended_virtual: u64,
+        }
+        #[link(name = "kernel32")]
+        extern "system" {
+            fn GlobalMemoryStatusEx(buffer: *mut MemoryStatusEx) -> i32;
+        }
+        let mut status = MemoryStatusEx {
+            length: std::mem::size_of::<MemoryStatusEx>() as u32,
+            memory_load: 0,
+            total_phys: 0,
+            avail_phys: 0,
+            total_page_file: 0,
+            avail_page_file: 0,
+            total_virtual: 0,
+            avail_virtual: 0,
+            avail_extended_virtual: 0,
+        };
+        // SAFETY: the struct is `repr(C)` in the documented layout with
+        // `length` set, which is the API's whole contract.
+        let ok = unsafe { GlobalMemoryStatusEx(&mut status) };
+        return (ok != 0).then_some(status.total_phys);
+    }
+    #[allow(unreachable_code)]
+    None
 }
 
 /// The rehydration-LRU cap for a BATCH SWEEP over the whole index (one
@@ -60,6 +106,15 @@ mod tests {
         let cap = sweep_bag_cache_cap(ten_mb, stock);
         assert!(cap > stock);
         assert!(cap as u64 <= ten_mb * SOURCE_TO_ANALYSIS_EXPANSION);
+    }
+
+    /// The ceiling must not vanish silently on a shipped platform: a
+    /// `None` here would make the bound test below pass empty.
+    #[test]
+    fn physical_ram_is_readable_on_shipped_platforms() {
+        if cfg!(any(unix, windows)) {
+            assert!(physical_ram_bytes().is_some_and(|b| b > 0));
+        }
     }
 
     #[test]
