@@ -995,18 +995,11 @@ impl<'a> Builder<'a> {
                     // the next @_ element, so the LHS vars are positional params
                     // in order. Gate on every RHS element being a shift call so
                     // a real list value (`my ($a,$b) = foo()`) isn't misread.
-                    // The RHS is the last named child, NOT `child_by_field_name
-                    // ("right")` — for a parenthesized RHS that field points at
-                    // the `(` token (the documented assignment-field gotcha).
-                    let rhs_list = assign
-                        .named_child(assign.named_child_count().saturating_sub(1))
-                        .filter(|n| n.kind() == "list_expression");
-                    let all_shifts = rhs_list.is_some_and(|list| {
-                        list.named_child_count() > 0
-                            && (0..list.named_child_count())
-                                .filter_map(|j| list.named_child(j))
-                                .all(|c| self.is_shift_call(c))
-                    });
+                    let rhs_elems = assign
+                        .child_by_field_name("right")
+                        .and_then(|r| self.list_element_nodes(r));
+                    let all_shifts = rhs_elems
+                        .is_some_and(|elems| !elems.is_empty() && elems.iter().all(|c| self.is_shift_call(*c)));
                     if all_shifts {
                         if let Some(left) = assign.child_by_field_name("left") {
                             let list_params: Vec<ParamInfo> = self.collect_vars_from_decl(left)
@@ -1371,19 +1364,18 @@ impl<'a> Builder<'a> {
             // — a `$h = (…)` list is scalar-of-last, not a hashref. A `bless {…}`
             // / `func()` RHS is a CALL, not a bare literal, so it's excluded here
             // (those keys are owned elsewhere — bless `InternalKey`, return `Sub`).
-            // `child_by_field_name("right")` still returns the `(` token, so find
-            // the RHS by named child.
             let rhs_kinds: &[&str] = match sigil {
                 '%' => &["list_expression", "parenthesized_expression"],
                 '$' => &["anonymous_hash_expression"],
                 _ => &[],
             };
             if !rhs_kinds.is_empty() {
-                if let Some(rhs) = node.parent().filter(|p| p.kind() == "assignment_expression").and_then(|p| {
-                    (0..p.named_child_count())
-                        .filter_map(|i| p.named_child(i))
-                        .find(|c| c.id() != node.id() && rhs_kinds.contains(&c.kind()))
-                }) {
+                if let Some(rhs) = node
+                    .parent()
+                    .filter(|p| p.kind() == "assignment_expression")
+                    .and_then(|p| p.child_by_field_name("right"))
+                    .filter(|r| rhs_kinds.contains(&r.kind()))
+                {
                     self.emit_lexical_hash_literal_keys(name, rhs);
                 }
             }

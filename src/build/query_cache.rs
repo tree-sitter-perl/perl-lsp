@@ -83,14 +83,22 @@ pub fn exports_qw() -> &'static Query {
                   (variable_declaration (array) @var)
                   (array) @var
                 ]
-                (quoted_word_list (string_content) @words))
+                right: (quoted_word_list (string_content) @words))
               (assignment_expression
                 left: [
                   (variable_declaration (array) @var)
                   (array) @var
                 ]
-                (list_expression
+                right: (parenthesized_expression
                   (quoted_word_list (string_content) @words)))
+              (assignment_expression
+                left: [
+                  (variable_declaration (array) @var)
+                  (array) @var
+                ]
+                right: (parenthesized_expression
+                  (list_expression
+                    (quoted_word_list (string_content) @words))))
             ]
             "#,
         )
@@ -113,14 +121,22 @@ pub fn exports_paren_list() -> &'static Query {
                   (variable_declaration (array) @var)
                   (array) @var
                 ]
-                (list_expression
+                right: (parenthesized_expression
+                  (list_expression
+                    (string_literal (string_content) @word))))
+              (assignment_expression
+                left: [
+                  (variable_declaration (array) @var)
+                  (array) @var
+                ]
+                right: (parenthesized_expression
                   (string_literal (string_content) @word)))
               (assignment_expression
                 left: [
                   (variable_declaration (array) @var)
                   (array) @var
                 ]
-                (string_literal (string_content) @word))
+                right: (string_literal (string_content) @word))
             ]
             "#,
         )

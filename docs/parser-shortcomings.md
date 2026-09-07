@@ -48,7 +48,7 @@ package Perl::Tidy::Formatter;
 1;
 ```
 
-**Actual** — fixed upstream: the currently pinned ts-parser-perl (1.1.4)
+**Actual** — fixed upstream: the currently pinned ts-parser-perl (2.0.0)
 parses a real `Perl/Tidy/Formatter.pm` with 0 ERROR nodes, in the shape
 described below as *Expected* — a `package_statement` immediately followed
 by a sibling `block_statement` holding the `use`/`our`/`sub` declarations

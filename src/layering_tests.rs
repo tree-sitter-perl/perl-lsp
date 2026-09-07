@@ -650,20 +650,15 @@ fn query_verbs_route_through_run_query() {
 /// Kinds a `kind()` comparison may name even though the grammar does not have
 /// them YET. Everything here is deliberate forward-compatibility, not debt.
 ///
-/// `parenthesized_expression` is absent from ts-parser-perl on purpose and is
-/// coming in the next release — it is a breaking change, and nearly every
-/// tree-sitter grammar needs that wrapper or aliases and fields misbehave. The
-/// ~27 Perl-side arms that name it are inert today and become correct the day
-/// the parser lands. **Do not "clean them up"** (see CLAUDE.md's gotchas), and
-/// do not let this tripwire be the reason someone does.
+/// Adding a name here is a claim that a future grammar release will define it,
+/// and the entry must be removed the release it lands, or the tripwire would
+/// keep excusing a spelling the grammar could now contradict. Anything else
+/// belongs in the grammar or out of the code.
 ///
-/// The pack side is unaffected: `parenthesized_expression` is already a real
-/// tree-sitter-cpp kind, which is why this check is per-language rather than
-/// against the union — the union would silently excuse the Perl arms.
-///
-/// Adding a name here is a claim that a future grammar release will define it.
-/// Anything else belongs in the grammar or out of the code.
-const DECLARED_FUTURE_PERL_KINDS: &[&str] = &["parenthesized_expression"];
+/// Per-language on purpose: a kind one grammar defines (tree-sitter-cpp has
+/// had `parenthesized_expression` all along) must not excuse a Perl-side arm,
+/// so the check runs against each language's own kind set, never the union.
+const DECLARED_FUTURE_PERL_KINDS: &[&str] = &[];
 
 /// Dead `kind()` arms that already existed when this tripwire landed.
 ///

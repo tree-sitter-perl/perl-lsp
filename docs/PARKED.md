@@ -20,33 +20,12 @@ marked otherwise; the drain re-derived each rationale against current code.
   dead kind remains: `"no_statement"` (removed at the one site;
   `no Foo;` parses as `use_statement`).
 
-  **`"parenthesized_expression"` is NOT debt — do not sweep it.** The 27
-  Perl-side arms (`build/builder/`: frameworks 8, visit_method 5,
-  visit_use 3, visit_calls 2, extract 2, visit_decl 1, infra 1;
-  `cst.rs` 4; `lsp/cursor_context.rs` 1) are deliberate forward-compat:
-  the kind is **coming in the next ts-parser-perl release** and has been
-  slow-walked because it is a breaking change. Essentially every
-  tree-sitter grammar carries this wrapper node — without it, aliases
-  and fields misbehave. The arms are inert today and correct the day the
-  parser lands; deleting them means writing them again. The 4 pack-side
-  comparisons (`build/cpp_reparse/defs.rs` 2,
-  `build/query_extract/packs.rs` 2) are live NOW — it is already a real
-  tree-sitter-cpp kind.
-  The durable fix is worth more than the sweep, but the naive version
-  is wrong: a test asserting every `kind()`-compared string exists in
-  the grammar would fail on the forward-compat arms above, and the
-  obvious response — deleting them — is the harmful outcome. The
-  tripwire has to distinguish a TYPO from an ANTICIPATION, and only a
-  declaration can do that. So: one named home for
-  forward-compat kinds (a `grammar_future` constant per kind, used at
-  every anticipating site), and a test asserting each `kind()`-compared
-  string is either a current grammar kind or a declared future one
-  (`layering_tests.rs` is the precedent for the structural assertion).
-  Then `"require_statement"` fails the test the day it is written,
-  `"parenthesized_expression"` passes because it is declared, and when
-  the parser lands the constant deletes and every site keeps working.
-  Without the declaration half, the tripwire is a hazard rather than
-  a net.
+  The tripwire landed (`layering_tests::kind_comparisons_name_real_grammar_kinds`):
+  every `kind()`-compared string must be a current grammar kind or a
+  DECLARED future one (`DECLARED_FUTURE_PERL_KINDS`, per-language so a
+  cpp kind cannot excuse a Perl arm). `parenthesized_expression` was the
+  declared example until ts-parser-perl 2.0.0 landed it; the list is
+  empty today.
 
 - **Two include-BFS walkers + two `file_stamp` fns** (cpp_reparse vs
   module_cache): thrice examined, thrice left (different contracts/layers:

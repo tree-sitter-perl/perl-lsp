@@ -179,8 +179,8 @@ pub(crate) fn call_args<'a>(call_node: Node<'a>) -> Vec<Node<'a>> {
 
 /// Flatten a pair-list container's children into one token stream, splicing
 /// EVERY nested `list_expression` / `parenthesized_expression` inline. A plain
-/// comma list is already flat (tree-sitter-perl ≥1.1.4), but explicit parens
-/// (`a => (b => c)`) still nest a sub-list — and that's pure *grouping* in Perl:
+/// comma list is already flat, but explicit parens (`a => (b => c)`) nest a
+/// sub-list — and that's pure *grouping* in Perl:
 /// a bare list always flattens into its surroundings (`key => (a, b)` IS
 /// `key, a, b`; the grouped-value spelling is the ref `[a, b]`). So we descend
 /// nested groups wherever they appear, yielding the flat sibling sequence a
@@ -196,6 +196,19 @@ pub(crate) fn flatten_list<'a>(list: Node<'a>, out: &mut Vec<Node<'a>>) {
             out.push(child);
         }
     }
+}
+
+/// The named elements of a grouping container — a `parenthesized_expression`
+/// or `list_expression` — with nested groups spliced inline: [`flatten_list`]
+/// minus the punctuation. `($a, $b)` is `parenthesized_expression` over a
+/// `list_expression`, `($a)` is `parenthesized_expression` over the scalar,
+/// and a bare `$a, $b` is a `list_expression`; all three yield their scalars.
+/// Callers gate on the container kind — a non-group node yields its own
+/// children.
+pub(crate) fn list_elements<'a>(list: Node<'a>) -> Vec<Node<'a>> {
+    let mut flat = Vec::new();
+    flatten_list(list, &mut flat);
+    flat.into_iter().filter(|n| n.is_named()).collect()
 }
 
 /// Peel transparent grouping wrappers — a `parenthesized_expression` or a
