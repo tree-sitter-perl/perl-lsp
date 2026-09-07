@@ -1739,7 +1739,7 @@ fn the_conclusion_fingerprint_is_not_stale() {
     );
 
     let mut acc: u64 = 0xcbf2_9ce4_8422_2325;
-    let mut fnv = |acc: &mut u64, bytes: &[u8]| {
+    let fnv = |acc: &mut u64, bytes: &[u8]| {
         for b in bytes {
             *acc ^= *b as u64;
             *acc = acc.wrapping_mul(0x0000_0100_0000_01b3);
