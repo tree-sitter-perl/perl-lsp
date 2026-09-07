@@ -1278,6 +1278,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                 target_at: *at,
                 source: target_span,
                 extraction: crate::model::file_analysis::Extraction::Whole,
+                reassigns: false,
             });
         }
     }
@@ -1290,6 +1291,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
             target_at: at,
             source: Span { start: at, end: at },
             extraction: crate::model::file_analysis::Extraction::Rebind,
+            reassigns: false,
         });
     }
     // Lower the value-flow edges to type-tier witnesses (the bag is canonical
