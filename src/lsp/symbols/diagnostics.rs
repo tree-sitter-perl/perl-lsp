@@ -1338,6 +1338,62 @@ pub fn pack_symbol_diagnostics(
         }
     }
 
+    // ---- undefined rail name: a use on a named rail (`route('home')`)
+    // that no definition on that rail answers, here or in the settled
+    // index. Names a framework synthesizes (`Route::resource`) have no
+    // definition token, so the lane warns rather than errors.
+    if index_settled {
+        if let Some(idx) = idx {
+            let defines = |syms: &[crate::model::file_analysis::Symbol], owner: &HandlerOwner, name: &str| {
+                syms.iter().any(|s| {
+                    s.name == name && matches!(&s.detail, SymbolDetail::Handler { owner: o, .. } if o == owner)
+                })
+            };
+            for r in analysis.refs() {
+                if !matches!(r.kind, RefKind::DispatchCall { .. }) {
+                    continue;
+                }
+                let Some(owner @ (HandlerOwner::Rail(rail) | HandlerOwner::ClassRail(rail))) = r.handler_owner() else { continue };
+                let name = r.target_name.as_str();
+                // Silence: a name the lane cannot answer for. A trailing
+                // separator is a PREFIX the caller concatenates onto
+                // (`view('auth.parts.login-form-' . $kind)`); a `::` names
+                // a package-namespaced rail (`errors::minimal`) whose
+                // provider file lives outside the path rails; a class-keyed
+                // emission with no dispatcher (`Theme::dispatch(X::CONST)`)
+                // is an event the overlay could not name; a `*` is a
+                // wildcard (`->can('*')`), never one name.
+                if name.ends_with(['.', '_', '-']) || name.contains("::") || name.contains('*') {
+                    continue;
+                }
+                if let (HandlerOwner::ClassRail(_), RefKind::DispatchCall { dispatcher }) = (owner, &r.kind) {
+                    if dispatcher.is_empty() {
+                        continue;
+                    }
+                }
+                if defines(analysis.symbols(), owner, name) {
+                    continue;
+                }
+                if !crate::index::resolve::handler_definitions(owner, name, idx).is_empty() {
+                    continue;
+                }
+                // a class-keyed rail's miss is a dead emission — a hint
+                let severity = match owner {
+                    HandlerOwner::ClassRail(_) => DiagnosticSeverity::HINT,
+                    _ if pack.rail_hints.iter().any(|h| h == rail) => DiagnosticSeverity::HINT,
+                    _ => DiagnosticSeverity::WARNING,
+                };
+                let label = pack
+                    .rail_labels
+                    .iter()
+                    .find(|(r, _)| r == rail)
+                    .map(|(_, l)| l.clone())
+                    .unwrap_or_else(|| format!("Undefined {rail}"));
+                push(&mut out, r.span, severity, &format!("undefined-{rail}"), format!("{label} '{name}'."));
+            }
+        }
+    }
+
     out
 }
 
