@@ -1203,13 +1203,49 @@ fn remap_spans(
         scopes,
         witnesses,
         parents: _,
+        // FQ rows — leaf/ns strings, no spans to remap.
+        parent_namespaces: _,
+        use_aliases: _,
+        qualified_spellings: _,
         var_reads,
         label_refs,
         receiver_names: _,
+        implicit_variables: _,
+        throwaway_names: _,
+        catch_all_methods: _,
+        class_literal_member: _,
+        types_are_capitalized: _,
+        enum_members: _,
+        member_writes,
+        import_rows,
+        import_template: _,
+        contract_stub: _,
+        return_annotation_template: _,
+        native_type_spellings: _,
+        static_property_sigil: _,
+        rail_labels: _,
+        rail_hints: _,
+        rail_name_seps: _,
+        annot_expr_spans: _,
+        preamble_end: _,
+        imports_bind_names: _,
+        member_shapes_are_strict: _,
+        members_are_package_bound: _,
+        doc_mentions: _,
+        // language-wide facts, no spans to remap.
+        function_scoped_vars: _,
+        constructor_names: _,
+        type_display: _,
         flow_edges,
         moved_from,
         control_regions,
         param_regions,
+        probe_regions,
+        variable_arg_sites,
+        fold_regions,
+        rails,
+        class_rails,
+        key_defs,
         domain_sites,
         macro_returns: _,
         // Populated in enrich_skeleton (post-remap) already in original coords.
@@ -1283,6 +1319,14 @@ fn remap_spans(
     for (_, _, span) in var_reads.iter_mut() {
         *span = rspan(*span);
     }
+    // Member-write spans are matched against ref spans in
+    // `into_file_analysis` — original coords, like everything it joins.
+    for span in member_writes.iter_mut() {
+        *span = rspan(*span);
+    }
+    for span in import_rows.iter_mut() {
+        *span = rspan(*span);
+    }
     // Call-site spans feed the call-value edge (`into_file_analysis`, after
     // this remap) and must speak original coords like the flow-edge source
     // (the same call span) they land beside.
@@ -1348,6 +1392,26 @@ fn remap_spans(
     }
     for span in param_regions.iter_mut() {
         *span = rspan(*span);
+    }
+    for span in probe_regions.iter_mut() {
+        *span = rspan(*span);
+    }
+    for site in variable_arg_sites.iter_mut() {
+        site.var = rspan(site.var);
+        site.args = rspan(site.args);
+    }
+    for (span, _) in fold_regions.iter_mut() {
+        *span = rspan(*span);
+    }
+    for (span, _) in rails.iter_mut() {
+        *span = rspan(*span);
+    }
+    for (span, _) in class_rails.iter_mut() {
+        *span = rspan(*span);
+    }
+    for k in key_defs.iter_mut() {
+        k.key_span = rspan(k.key_span);
+        k.elem_span = rspan(k.elem_span);
     }
     for ds in domain_sites.iter_mut() {
         let crate::model::file_analysis::DomainSite { slot: _, value: _, slot_span } = ds;

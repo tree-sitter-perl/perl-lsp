@@ -106,11 +106,22 @@ pub struct SkeletonAnalysis {
     /// span). Goto-def on the token resolves the header; the span is what the
     /// bare `imports` list drops. Carried onto `FileAnalysis.pack.include_directives`.
     pub import_sites: Vec<(String, crate::model::file_analysis::Span)>,
+    /// `use A\B as C` rows: (alias, namespace, real leaf). Carried onto
+    /// `FileAnalysis.pack.use_aliases`.
+    pub use_aliases: Vec<(String, String, String)>,
+    /// Class spellings written WITH a qualifier: (leaf, written prefix).
+    /// Carried onto `FileAnalysis.pack.qualified_spellings`.
+    pub qualified_spellings: Vec<(String, String)>,
     pub scope_count: usize,
     pub scopes: Vec<crate::model::file_analysis::Scope>,
     pub witnesses: Vec<crate::model::witnesses::Witness>,
     /// (child class, parent class) inheritance edges — `@parent` captures.
     pub parents: Vec<(String, String)>,
+    /// FQ disambiguation rows for the edges above, minted only by
+    /// namespace-relative packs: `(child leaf, parent leaf, parent
+    /// namespace)` — empty namespace = the global one. Same-named classes
+    /// in different namespaces stop conflating in the family walks.
+    pub parent_namespaces: Vec<(String, String, String)>,
     /// (specialization, primary) family edges — a `@spec.primary` capture in
     /// a class-def match whose name is a template spelling. Rides onto
     /// `FileAnalysis.pack.specializes`; the graph's `Specializes` edge derives from
@@ -143,6 +154,54 @@ pub struct SkeletonAnalysis {
     /// named is the method receiver, not a class member — its (wrongly
     /// sticky-tagged) class package is cleared in `into_file_analysis`.
     pub receiver_names: Vec<String>,
+    pub implicit_variables: Vec<String>,
+    pub throwaway_names: Vec<String>,
+    pub catch_all_methods: Vec<String>,
+    pub class_literal_member: String,
+    pub types_are_capitalized: bool,
+    pub enum_members: Vec<String>,
+    /// Member tokens on the left of an assignment (dynamic property sites).
+    pub member_writes: Vec<Span>,
+    /// Whole import-statement spans (`use A\B;` rows), for the insertion
+    /// point of an import quick-fix.
+    pub import_rows: Vec<Span>,
+    /// The pack's import statement template (`import_template`).
+    pub import_template: String,
+    /// The pack's contract stub template (`contract_stub`).
+    pub contract_stub: String,
+    /// The pack's native return-annotation template and native type spellings.
+    pub return_annotation_template: String,
+    pub native_type_spellings: Vec<(String, String)>,
+    pub static_property_sigil: String,
+    /// rail → the undefined-name lane's phrasing (`rails.json` labels).
+    pub rail_labels: Vec<(String, String)>,
+    /// Rails whose miss is a hint (`rails.json` hints).
+    pub rail_hints: Vec<String>,
+    /// rail → the parameter separator a use's name ends at (`rails.json`).
+    pub rail_name_seps: Vec<(String, String)>,
+    /// Expression spans whose value an overlay declared (`@expr.annot`) —
+    /// the callee-return edge is not minted for them.
+    pub annot_expr_spans: Vec<crate::model::file_analysis::Span>,
+    /// The last row of the file preamble (open tag, `declare` rows): an
+    /// inserted import goes after it when no import or namespace anchors.
+    pub preamble_end: Option<usize>,
+    /// `imports_bind_names`, baked.
+    pub imports_bind_names: bool,
+    /// `member_shapes_are_strict`, baked.
+    pub member_shapes_are_strict: bool,
+    /// `members_are_package_bound`, baked.
+    pub members_are_package_bound: bool,
+    /// Imported names a doc comment mentions (`@var Foo`, `@throws Foo`,
+    /// `@see Foo`): a use the tree never shows.
+    pub doc_mentions: Vec<String>,
+    /// The pack's `function_scoped_vars` fact (php) — drives the var
+    /// unification pass in `into_file_analysis`.
+    pub function_scoped_vars: bool,
+    /// The pack's constructor-method names, riding to `PackFacts`.
+    pub constructor_names: Vec<String>,
+    /// The pack's display vocabulary (engine tag → language spelling),
+    /// carried onto `PackFacts.type_display`.
+    pub type_display: Vec<(String, String)>,
     /// Value-flow edges minted from `@flow` captures (`source → target`,
     /// extraction). Lowered to type witnesses here; carried onto the FA as the
     /// provenance tier.
@@ -158,6 +217,27 @@ pub struct SkeletonAnalysis {
     /// Parameter-list spans (`@param.region`). The use-after-move check reads
     /// these to tell a moved parameter from a moved local (`use_after_move_reads`).
     pub param_regions: Vec<crate::model::file_analysis::Span>,
+    /// Existence-probe argument spans (`@probe.region`); the member lanes
+    /// stay silent inside them.
+    pub probe_regions: Vec<crate::model::file_analysis::Span>,
+    /// Bare-variable call arguments with their positions (`PackFacts`'s
+    /// lane of the same name).
+    pub variable_arg_sites: Vec<crate::model::file_analysis::ArgSite>,
+    /// Fold-only regions (`@fold` / `@fold.comment`, the bool = comment);
+    /// joined with the scopes into `fold_ranges`.
+    pub fold_regions: Vec<(crate::model::file_analysis::Span, bool)>,
+    /// Rail-suffixed handler defs / dispatch refs (`@def.handler.named.<rail>`,
+    /// `@ref.dispatch.named.<rail>`): the token span → the rail name. Read
+    /// at mint time to give the Handler / DispatchCall a `HandlerOwner::Rail`.
+    pub rails: Vec<(crate::model::file_analysis::Span, String)>,
+    /// Class-keyed rails (`@def.handler.class.<rail>` / `.by.<rail>`,
+    /// `@ref.dispatch.class.<rail>`): token span → rail name, minted as
+    /// `HandlerOwner::ClassRail`.
+    pub class_rails: Vec<(crate::model::file_analysis::Span, String)>,
+    /// Array-key DEF candidates (`@def.handler.key` on a string key, its
+    /// element on `@key.elem`): promoted to rail names by the driver when
+    /// the file's path rail says so (`config/app.php` → `app.<key>`).
+    pub key_defs: Vec<KeyDef>,
     /// Domain-typing sites: a `@domain.slot` field access compared/assigned
     /// against a `@domain.value` token. Raw (value's enum resolves cross-file
     /// at query time); folds onto `Field{owner, name}` for the int-used-as-enum
