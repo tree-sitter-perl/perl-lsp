@@ -430,7 +430,12 @@ pub fn index_workspace_with_index(
         // the parallel build below. Otherwise the first `build()` to trigger
         // the registry's OnceLock stalls every other Rayon worker on it,
         // charging ~1s of one-time compile to whichever files happen to block.
-        let _ = crate::build::plugin::default_plugin_registry();
+        // Only when there is a Perl build to serve: on a pack-only workspace
+        // the ~500 ms warm would be paid by every CLI verb and test for a
+        // registry nothing here reads (a later Perl open builds it lazily).
+        if !paths.is_empty() {
+            let _ = crate::build::plugin::default_plugin_registry();
+        }
 
         paths.par_iter().for_each(|path| {
             // Blobs are keyed canonical (matches the warm rows + the CLI's
