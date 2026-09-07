@@ -259,6 +259,14 @@ impl TargetRef {
                 let class_ns = package
                     .as_deref()
                     .and_then(|c| module_index.and_then(|idx| idx.pinned_namespace(c)));
+                // A Sub cursor names a callable; the shape matters only where
+                // the class also stores a value under the name.
+                let member_shape = match package.as_deref() {
+                    Some(cls) if origin.member_kinds_overloaded(cls, &name, module_index) => {
+                        crate::model::file_analysis::MemberShape::Callable
+                    }
+                    _ => Default::default(),
+                };
                 TargetRef {
                     name,
                     kind: TargetKind::Sub { package },
@@ -268,7 +276,7 @@ impl TargetRef {
                     bare_constant: false,
                     ctor_of,
                     class_ns,
-                    member_shape: Default::default(),
+                    member_shape,
                 }
             }
             RenameKind::Method { name, class } => {
