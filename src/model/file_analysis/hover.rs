@@ -24,12 +24,38 @@ impl FileAnalysis {
     }
 
     fn translate_type_label(&self, raw: String) -> String {
-        self.pack
-            .type_display
-            .iter()
-            .find(|(k, _)| *k == raw)
-            .map(|(_, v)| v.clone())
-            .unwrap_or(raw)
+        if self.pack.type_display.is_empty() {
+            return raw;
+        }
+        // Token-wise: a composite label (`Sequence<String>`,
+        // `array<String, String>`) is translated per identifier so the
+        // engine's spellings never leak inside a generic argument either.
+        let mut out = String::with_capacity(raw.len());
+        let mut tok = String::new();
+        let flush = |tok: &mut String, out: &mut String| {
+            if tok.is_empty() {
+                return;
+            }
+            let mapped = self
+                .pack
+                .type_display
+                .iter()
+                .find(|(k, _)| k == tok)
+                .map(|(_, v)| v.clone())
+                .unwrap_or_else(|| tok.clone());
+            out.push_str(&mapped);
+            tok.clear();
+        };
+        for c in raw.chars() {
+            if c.is_alphanumeric() || c == '_' {
+                tok.push(c);
+            } else {
+                flush(&mut tok, &mut out);
+                out.push(c);
+            }
+        }
+        flush(&mut tok, &mut out);
+        out
     }
 
     /// Hover info: return display text for the symbol at cursor.
