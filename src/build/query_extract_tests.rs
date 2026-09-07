@@ -3856,6 +3856,50 @@ class Deletion
     );
 }
 
+#[test]
+fn php_eloquent_relations_declare_accessor_properties() {
+    // The Laravel overlay (queries/php/frameworks/laravel.scm): a
+    // relation method declares the same-named PROPERTY Eloquent's
+    // __get serves. To-one relations carry the related class, so
+    // `$b->cover->path` chains; to-many stay untyped Collections but
+    // still navigate by name.
+    let src = "\
+<?php
+class Image {
+    public string $path;
+}
+class Book {
+    public function cover() { return $this->belongsTo(Image::class); }
+    public function pages() { return $this->hasMany(Page::class); }
+    public function author() { return $this->plainCall(Image::class); }
+}
+function f(Book $b): string {
+    $x = $b->cover->path;
+    echo $x;
+    return $x;
+}
+";
+    let (fa, _) = php_fa(src);
+    use crate::model::file_analysis::{InferredType, SymKind};
+    let fields: Vec<&str> = fa
+        .symbols()
+        .iter()
+        .filter(|s| matches!(s.kind, SymKind::Field) && s.package.as_deref() == Some("Book"))
+        .map(|s| s.name.as_str())
+        .collect();
+    assert!(fields.contains(&"cover"), "to-one relation field: {fields:?}");
+    assert!(fields.contains(&"pages"), "to-many relation field: {fields:?}");
+    assert!(
+        !fields.contains(&"author"),
+        "a non-relation call must NOT mint a field: {fields:?}"
+    );
+    let x = fa.inferred_type_via_bag("$x", tree_sitter::Point { row: 11, column: 4 });
+    assert_eq!(
+        x,
+        Some(InferredType::String),
+        "to-one relation chains through the related class: {x:?}"
+    );
+}
 
 #[test]
 fn php_method_docblock_synthesizes_class_methods() {
