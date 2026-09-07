@@ -272,15 +272,15 @@ impl EnrichmentProfile {
         !needed.stamp_method_targets || self.stamp_method_targets
     }
 
-    /// The least profile covering both — what a fuller request re-enriches
-    /// at. Joining rather than replacing means a `full` request arriving
-    /// after a `diagnostics` one leaves an entry that still serves the
-    /// diagnostics verb, instead of two verbs evicting each other forever.
+    /// The least profile covering both. Test-only until a server verb
+    /// declares a partial profile (the overlay pins hold the join rule).
+    #[cfg(test)]
     pub const fn join(self, other: EnrichmentProfile) -> EnrichmentProfile {
         EnrichmentProfile {
             stamp_method_targets: self.stamp_method_targets || other.stamp_method_targets,
         }
     }
+
 }
 
 /// The process's declared profile. `full()` until a verb says otherwise.
@@ -296,10 +296,10 @@ static PROFILE: std::sync::OnceLock<EnrichmentProfile> = std::sync::OnceLock::ne
 /// A SERVER verb must never call this — not because a partial profile is
 /// unavailable there, but because the cell is the wrong scope for it: one
 /// process serves many verbs, and a value set here outlives the verb that
-/// wanted it and answers the next one. A server verb declares its profile on
-/// its `ResolutionSession` instead (`ResolutionSession::declare_profile`),
-/// which is per-walk, and the overlay records the profile each copy was built
-/// under so a partial one is never served to a fuller request.
+/// wanted it and answers the next one. The per-walk declaration a server
+/// verb would use (`ResolutionSession::declared_profile`) is a read-only
+/// slot today — no verb sets it, so every server walk enriches `full()`
+/// (docs/PARKED.md, design-debt tier).
 pub fn declare_enrichment_profile(profile: EnrichmentProfile) {
     let _ = PROFILE.set(profile);
 }

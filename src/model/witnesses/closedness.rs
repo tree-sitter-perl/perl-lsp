@@ -212,6 +212,7 @@ impl ClosednessCertificate {
     }
 
     /// How many ancestor names this certificate covers.
+    #[cfg(test)]
     pub fn closure_len(&self) -> usize {
         self.closure.len()
     }
