@@ -1943,16 +1943,19 @@ impl ReducerRegistry {
                             }
                         }
                     };
-                    if let Some(t) = resolved {
-                        out.push(Witness {
+                    match resolved {
+                        Some(t) => out.push(Witness {
                             attachment: w.attachment.clone(),
                             source: w.source.clone(),
                             payload: WitnessPayload::InferredType(t),
                             span: w.span,
-                        });
+                        }),
+                        // An edge that didn't resolve drops out — same as a
+                        // witness no reducer claims — unless it was an
+                        // assignment, which still HAPPENED: the variable now
+                        // holds something untypable, not its earlier value.
+                        None => out.extend(opaque_rebind_of(bag, w)),
                     }
-                    // An edge that didn't resolve drops out — same as a
-                    // witness no reducer claims.
                 }
                 WitnessPayload::CallReturn { target, arity } => {
                     // A fresh method dispatch at the call's own arity. The
@@ -2122,14 +2125,17 @@ impl ReducerRegistry {
                                 })
                             }
                         };
-                        if let Some(t) = projected {
-                            out.push(Witness {
+                        match projected {
+                            Some(t) => out.push(Witness {
                                 attachment: w.attachment.clone(),
                                 source: w.source.clone(),
                                 payload: WitnessPayload::InferredType(t),
                                 span: w.span,
-                            });
+                            }),
+                            None => out.extend(opaque_rebind_of(bag, w)),
                         }
+                    } else {
+                        out.extend(opaque_rebind_of(bag, w));
                     }
                 }
                 WitnessPayload::Tuple(elems) => {
@@ -2279,6 +2285,42 @@ impl ReducerRegistry {
     }
 }
 
+/// The reset an unresolved REASSIGNMENT edge materializes to
+/// (`REASSIGN_FLOW_SOURCE`, zero-width at the assignment site). A
+/// declaration's edge never resets — its companions (a first-param
+/// constraint at the sub's start, a docblock cast) may sit anywhere
+/// before it — and a region-spanned edge is a narrowing fact whose
+/// failure stays a plain drop-out.
+fn is_reassign_edge(w: &Witness) -> bool {
+    matches!(w.attachment, WitnessAttachment::Variable { .. })
+        && w.span.start == w.span.end
+        && matches!(&w.source, WitnessSource::Builder(t) if t == REASSIGN_FLOW_SOURCE)
+}
+
+/// A reassignment whose source nothing can type still HAPPENED: the
+/// variable now holds something untypable, not its earlier value. Unless
+/// nothing was bound before it — a pack without declaration syntax marks
+/// every plain assignment `reassigns`, and the FIRST one in a scope is the
+/// declaration, which stays absent exactly as a `my` whose RHS nothing can
+/// type does.
+fn opaque_rebind_of(bag: &WitnessBag, w: &Witness) -> Option<Witness> {
+    if !is_reassign_edge(w) {
+        return None;
+    }
+    let WitnessAttachment::Variable { name, scope } = &w.attachment else {
+        return None;
+    };
+    if !scope_binds_variable_before(bag, name, *scope, w.span.start) {
+        return None;
+    }
+    Some(Witness {
+        attachment: w.attachment.clone(),
+        source: w.source.clone(),
+        payload: WitnessPayload::InferredType(InferredType::Unknown),
+        span: w.span,
+    })
+}
+
 /// Does this scope *bind* the variable — establish its value/identity via
 /// an explicit type, an assignment edge, or a class/bless observation — as
 /// opposed to merely OBSERVING rep use (`$v->{k}` → `HashRefAccess`)? A
@@ -2288,12 +2330,27 @@ impl ReducerRegistry {
 /// variants count as bindings by default — only the bare rep/scalar
 /// observations are the weak case.
 fn scope_binds_variable(bag: &WitnessBag, var: &str, scope: ScopeId, point: Point) -> bool {
+    binds_variable_where(bag, var, scope, |w| w.span.start <= point)
+}
+
+/// `scope_binds_variable` with the binding strictly BEFORE `point` —
+/// companions minted at `point` itself (the site under question) don't count.
+fn scope_binds_variable_before(bag: &WitnessBag, var: &str, scope: ScopeId, point: Point) -> bool {
+    binds_variable_where(bag, var, scope, |w| w.span.start < point)
+}
+
+fn binds_variable_where(
+    bag: &WitnessBag,
+    var: &str,
+    scope: ScopeId,
+    at: impl Fn(&Witness) -> bool,
+) -> bool {
     let att = WitnessAttachment::Variable {
         name: var.to_string(),
         scope,
     };
     bag.for_attachment(&att).iter().any(|w| {
-        w.span.start <= point
+        at(w)
             && !matches!(
                 &w.payload,
                 WitnessPayload::Observation(

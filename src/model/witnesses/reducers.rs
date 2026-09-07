@@ -226,6 +226,26 @@ impl WitnessReducer for FrameworkAwareTypeFold {
         let mut plain_type: Option<InferredType> = None;
         let mut plain_type_priority: u8 = 0;
 
+        // A REASSIGNMENT (`REASSIGN_FLOW_SOURCE`, zero-width at its site —
+        // materialized to what it produced, or to `InferredType::Unknown`
+        // when its source could not be typed) is a temporal RESET: at the
+        // query point, every binding strictly before the latest one is dead
+        // — the class axis included, which otherwise wins in any order, so
+        // `$r = new WP_Error; $r = json_decode(..)` reads as the array.
+        // Companions minted at the same site survive, and observations
+        // after it accrue as usual; with nothing typed after it the answer
+        // IS `Unknown`, so a chase that reads the variable carries the
+        // reset on instead of falling back.
+        let reset_at = ws
+            .iter()
+            .filter(|w| {
+                w.span.start == w.span.end
+                    && matches!(&w.source, WitnessSource::Builder(t) if t == REASSIGN_FLOW_SOURCE)
+            })
+            .map(|w| w.span.start)
+            .filter(|s| narrow_point.map_or(true, |p| *s <= p))
+            .max();
+
         for w in ws {
             // Temporal ordering: only consider witnesses emitted at or
             // before the query point — a later reassignment shouldn't
@@ -234,6 +254,9 @@ impl WitnessReducer for FrameworkAwareTypeFold {
                 if w.span.start > point {
                     continue;
                 }
+            }
+            if reset_at.is_some_and(|r| w.span.start < r) {
+                continue;
             }
             // Skip scoped InferredType witnesses that don't contain the
             // query point — narrowing facts for a different slice of the
@@ -253,6 +276,10 @@ impl WitnessReducer for FrameworkAwareTypeFold {
                         first_param_class = Some(package.clone())
                     }
                     b @ InferredType::BrandedRoute { .. } => branded = Some(b.clone()),
+                    // `Unknown` rides the plain axis like any value: a
+                    // materialized reset, or an annotated union (`@var A|B`)
+                    // at its source's priority, retires the standing belief
+                    // the same way a concrete type does.
                     // Source priority breaks ties first (an EXPLICIT
                     // annotation — `ANNOT_SOURCE`, priority 20 — governs over
                     // an inferred flow type, priority 10, whatever the order
@@ -301,7 +328,6 @@ impl WitnessReducer for FrameworkAwareTypeFold {
         if let Some(b) = branded {
             return ReducedValue::Type(b);
         }
-
         // Class axis wins when consistent with the rep axis. On
         // contradiction or unknown rep, still return the class — the
         // user's intent is object-typed use; a rep mismatch is a
@@ -352,6 +378,9 @@ impl WitnessReducer for FrameworkAwareTypeFold {
             return ReducedValue::Type(InferredType::String);
         }
 
+        if reset_at.is_some() {
+            return ReducedValue::Type(InferredType::Unknown);
+        }
         ReducedValue::None
     }
 }
