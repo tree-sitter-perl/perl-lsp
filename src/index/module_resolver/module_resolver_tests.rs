@@ -672,3 +672,60 @@ fn a_bulk_index_marks_the_consumers_of_what_changed() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// The Flat axis contract (name-keyed packs): scope-less BY RULE — no
+/// `visibility_scope` (so `pack_def_paths` mints no closure gate and the
+/// backward walk stays unfiltered), `flat_scope()` set (so the cross-file
+/// return arm admits the full candidate table), full `visible_def_candidates`.
+/// Transparent keeps the host's pre-existing answers: scope present,
+/// `flat_scope` false — an unwarmed Perl origin never sweeps pack tables.
+#[test]
+fn flat_axis_is_scopeless_by_rule_transparent_is_not() {
+    use crate::model::file_analysis::{CrossFileLookup, ScopedLookup, VisibilityAxis};
+    let idx = crate::index::module_index::ModuleIndex::new_for_test();
+    let empty = Default::default();
+    let self_path = std::path::PathBuf::from("/w/a.php");
+
+    let flat = ScopedLookup::new(&idx, &empty, Some(self_path.as_path()), VisibilityAxis::Flat);
+    assert!(flat.visibility_scope().is_none(), "Flat mints no def_paths gate");
+    assert!(flat.flat_scope());
+
+    let transparent =
+        ScopedLookup::new(&idx, &empty, Some(self_path.as_path()), VisibilityAxis::Transparent);
+    assert!(transparent.visibility_scope().is_some(), "host behavior unchanged");
+    assert!(!transparent.flat_scope());
+
+    let closure =
+        ScopedLookup::new(&idx, &empty, Some(self_path.as_path()), VisibilityAxis::IncludeClosure);
+    assert!(closure.visibility_scope().is_some());
+    assert!(!closure.flat_scope());
+
+    // A use-map axis is Flat's scope-less contract PLUS the pins: the
+    // imported leaf answers its `use` row, an unpinned leaf the origin's
+    // own namespace, and every other axis makes no claim at all.
+    let pins = crate::model::file_analysis::UseMapPins {
+        pins: [
+            ("Collection".to_string(), Some("B".to_string())),
+            ("Factory".to_string(), None),
+        ]
+        .into_iter()
+        .collect(),
+        own_namespace: Some("App".to_string()),
+        spelled: ["Request".to_string()].into_iter().collect(),
+        visible: Default::default(),
+    };
+    let usemap = ScopedLookup::new(
+        &idx,
+        &empty,
+        Some(self_path.as_path()),
+        VisibilityAxis::UseMap(std::sync::Arc::new(pins)),
+    );
+    assert!(usemap.visibility_scope().is_none(), "UseMap mints no def_paths gate");
+    assert!(usemap.flat_scope());
+    assert_eq!(usemap.pinned_namespace("Collection").as_deref(), Some("B"));
+    assert_eq!(usemap.pinned_namespace("Request").as_deref(), Some("App"), "spelled leaf: own namespace");
+    assert!(usemap.pinned_namespace("Factory").is_none(), "conflicting evidence: no claim");
+    assert!(usemap.pinned_namespace("Helper").is_none(), "never spelled: no claim");
+    assert!(flat.pinned_namespace("Collection").is_none());
+    assert!(closure.pinned_namespace("Collection").is_none());
+}
