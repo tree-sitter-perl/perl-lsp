@@ -271,7 +271,7 @@ impl<'a> Builder<'a> {
         // looks for a ref at the cursor, else falls back to `symbol_at`, which
         // would return this very Module symbol's own span). The cross-file
         // PackageRef resolver (symbols.rs) maps the name to its file; an
-        // in-file package resolves locally via `find_package_or_class`; a
+        // in-file package resolves locally via `find_package_or_class_in`; a
         // pragma that resolves to neither is an honest no-jump. Only for real
         // source — a synthetic `use` has no name span to anchor on.
         if node.is_some() {

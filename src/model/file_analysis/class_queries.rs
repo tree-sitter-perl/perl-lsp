@@ -987,6 +987,17 @@ impl FileAnalysis {
             .map(|s| s.package.clone().unwrap_or_default())
     }
 
+    /// Like `declared_class_namespace`, for the type-space kinds a goto-def
+    /// landing admits (Package | Class) — the same predicate the local
+    /// lanes' `find_package_or_class_in` applies, so the cross-file Package
+    /// lane and the in-file lane agree on what an import row can name.
+    pub fn declared_type_namespace(&self, leaf: &str) -> Option<String> {
+        self.symbols()
+            .iter()
+            .find(|s| matches!(s.kind, SymKind::Package | SymKind::Class) && s.name == leaf)
+            .map(|s| s.package.clone().unwrap_or_default())
+    }
+
     /// The namespace `leaf` means AS SEEN FROM this file — the use-map
     /// pins' answer (`UseMapPins::namespace_of`: the file's own declaration,
     /// its `use` rows with aliases honored, its qualified spellings, and its
@@ -1009,10 +1020,14 @@ impl FileAnalysis {
     /// Every leaf→namespace pin this file carries — its own class
     /// declarations plus its qualified imports — the table a use-map
     /// visibility axis is built from (`UseMapPins`). A leaf with
-    /// CONFLICTING evidence (declared here AND imported from elsewhere:
-    /// `use Support\Collection as BaseCollection; class Collection extends
-    /// BaseCollection`) pins to nothing — both classes are live in this
-    /// file under one leaf, and a wrong pin is a silent wrong answer.
+    /// CONFLICTING evidence (declared here AND imported bare from
+    /// elsewhere, or imported bare from two namespaces) pins to nothing —
+    /// a wrong pin is a silent wrong answer. An ALIASED import never
+    /// conflicts: it pins the alias spelling and adds its namespace to
+    /// `visible` for the real leaf (`use Support\Collection as
+    /// BaseCollection; class Collection extends BaseCollection` pins
+    /// `Collection` to this file's own class and keeps `Support` reachable
+    /// for the parent walk).
     /// `spelled` is every leaf the file writes as a class token (type
     /// positions, parent clauses, `new X`, `X::m()` receivers): the
     /// own-namespace default applies to those alone, never to a leaf the
@@ -1064,13 +1079,7 @@ impl FileAnalysis {
             match s.kind {
                 SymKind::Class => {
                     let ns = s.package.clone().unwrap_or_default();
-                    pins.entry(s.name.clone())
-                        .and_modify(|p| {
-                            if p.as_deref() != Some(ns.as_str()) {
-                                *p = None;
-                            }
-                        })
-                        .or_insert(Some(ns));
+                    pin(&mut pins, &s.name, &ns);
                 }
                 SymKind::Package => {
                     if own.as_deref().is_some_and(|o| o != s.name) {
@@ -1159,5 +1168,17 @@ impl FileAnalysis {
             }
         }
         false
+    }
+
+    /// The namespace an import row spells for the token at `span`, when
+    /// the token sits inside one of this file's `use` rows: `use
+    /// A\\B\\Parser as DeclarationParser;` names `A\\B`'s `Parser` and no other —
+    /// not this file's own `Parser`, not a stranger's. `None` outside rows
+    /// (or for an unqualified row, which makes no namespace claim).
+    pub fn import_row_namespace(&self, span: &Span) -> Option<String> {
+        let (_, raw) = self.pack.import_row_covering(span)?;
+        raw.trim_start_matches('\\')
+            .rsplit_once('\\')
+            .map(|(ns, _)| ns.to_string())
     }
 }
