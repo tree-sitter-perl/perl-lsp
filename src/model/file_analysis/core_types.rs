@@ -514,8 +514,13 @@ impl FlowEdge {
                 WitnessPayload::Edge(WitnessAttachment::Expr(self.source))
             }
             Extraction::Slurpy(_) => return None,
-            // KeyOf awaits its HashKey-projection lowering (a later stage).
-            Extraction::KeyOf(_) => return None,
+            // The value at a literal key of the source — a keyed
+            // destructure (`['k' => $v] = f()`) projecting through the
+            // source's keyed shape (`HashWithKeys`) at query time.
+            Extraction::KeyOf(k) => WitnessPayload::Projected {
+                base: WitnessAttachment::Expr(self.source),
+                step: ProjectionStep::HashKey(k.clone()),
+            },
             // A bare bind clears to undef — a value the bind uniquely knows
             // (like a literal), so a direct `InferredType`, not an edge.
             Extraction::Cleared => WitnessPayload::InferredType(InferredType::Undef),
