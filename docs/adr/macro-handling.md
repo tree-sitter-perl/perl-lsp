@@ -1,7 +1,5 @@
 # ADR: Semantic handling of C/C++ macros
 
-Status: accepted (incremental).
-
 ## Context
 
 Macros are pervasive in C / perl5 and carry real program meaning, but a macro
@@ -26,7 +24,7 @@ already valid syntax.
 
 | kind | body | treatment |
 |---|---|---|
-| object-like, type-valued | `#define X U16` | `TypeName(X)` alias edge (landed) |
+| object-like, type-valued | `#define X U16` | `TypeName(X)` alias edge |
 | object-like, value | `#define MAX 100` | typed constant (infer type from body) |
 | object-like, marker | `#define FLAG` | flag symbol — refs/goto, no type |
 | function-like, expression | `#define MAX(a,b) …` | **global sub, implied return typing** |
@@ -175,5 +173,5 @@ stay in the delegation lane; projection macros returning a member
 - **Function-like implied return typing** rides the expansion-policy flip: a
   function-like macro whose use already parses as a clean `call_expression` is
   left unexpanded, and the existing sub-return bag path types the call for
-  free (`SkeletonAnalysis::macro_returns`, landed). Parametric return
+  free (`SkeletonAnalysis::macro_returns`). Parametric return
   (`Param(n)`) is gold-tested end-to-end.
