@@ -2626,6 +2626,149 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
             }
         }
     }
+    // ---- documentation-comment types: pack vocabulary, positional join ----
+    // A doc comment documents the def that STARTS on the line directly below
+    // its last line (an attribute/modifier line between them breaks the join —
+    // accepted v1). DECLARED types always win: a doc fact fills only where
+    // the syntax carried nothing, because docblocks drift and the tree
+    // doesn't. Perl/C++ packs return no facts, so the pass is a no-op there.
+    {
+        use crate::build::query_extract::DocFact;
+        // Keyed by the comment's END row (the def sits on the next line);
+        // the start row rides along so a `@method` fact can span its own
+        // line inside the comment.
+        let mut by_end_row: HashMap<usize, (usize, Vec<DocFact>)> = HashMap::new();
+        // The bound names imports bring in, for the doc-mention scan below:
+        // an import used only in a docblock (`@var Foo $x`) is used.
+        let bound: std::collections::HashSet<String> = out
+            .import_sites
+            .iter()
+            .map(|(raw, _)| raw.rsplit('\\').next().unwrap_or(raw).to_string())
+            .chain(out.use_aliases.iter().map(|(alias, _, _)| alias.clone()))
+            .collect();
+        for e in &events {
+            if e.cap == "doc.comment" {
+                if !bound.is_empty() {
+                    for word in e.text.split(|c: char| !(c.is_alphanumeric() || c == '_')) {
+                        if bound.contains(word) && !out.doc_mentions.iter().any(|m| m == word) {
+                            out.doc_mentions.push(word.to_string());
+                        }
+                    }
+                }
+                let facts = (pack.doc_types)(&e.text);
+                if !facts.is_empty() {
+                    let entry = by_end_row
+                        .entry(e.end.row)
+                        .or_insert_with(|| (e.start.row, Vec::new()));
+                    entry.1.extend(facts);
+                }
+            }
+        }
+        if !by_end_row.is_empty() {
+            let scope_spans: Vec<Span> = out.scopes.iter().map(|s| s.span).collect();
+            let param_syms: Vec<(String, crate::model::file_analysis::ScopeId, Point)> =
+                out.symbols
+                    .iter()
+                    .filter(|s| s.kind == "var")
+                    .map(|s| (s.name.clone(), s.scope, s.start))
+                    .collect();
+            let mut doc_witnesses: Vec<crate::model::witnesses::Witness> = Vec::new();
+            let mut doc_refs: Vec<SkelRef> = Vec::new();
+            let mut doc_methods: Vec<SkelSymbol> = Vec::new();
+            for sym in out.symbols.iter_mut() {
+                // `@method` rows join to the CLASS docblock (Laravel facades,
+                // Eloquent's `__call` surface): each synthesizes a real
+                // method symbol on the class, spanning the class name token
+                // so gd lands somewhere honest. The other fact kinds join to
+                // callables/fields as before.
+                if matches!(sym.kind.as_str(), "class" | "interface") {
+                    let Some((cstart, facts)) =
+                        sym.start.row.checked_sub(1).and_then(|r| by_end_row.get(&r))
+                    else {
+                        continue;
+                    };
+                    for f in facts {
+                        // `@template T` rows: the class's generic params, in
+                        // row order — the same per-class axis cpp templates
+                        // feed, so `@return TModel` methods publish
+                        // `ParamOf(i)` through the existing writeback.
+                        if let DocFact::Template { name, line } = f {
+                            out.template_params.push((sym.name.clone(), name.clone(), *line));
+                            continue;
+                        }
+                        if let DocFact::Description(d) = f {
+                            sym.doc = Some(d.clone());
+                            continue;
+                        }
+                        if let DocFact::Deprecated(t) = f {
+                            mark_deprecated(sym, t.clone());
+                            continue;
+                        }
+                        if let DocFact::Method { name, ret, line, col } = f {
+                            // Span = the method NAME TOKEN in the fact's own
+                            // `@method` line: a distinct gd/cursor target per
+                            // row (every row on the class name span would
+                            // collapse to one symbol), and the row's ONE
+                            // declaration site — references from the token
+                            // resolve the Method target, rename rewrites it.
+                            let at = Point { row: cstart + line, column: *col };
+                            let at_end = Point { row: at.row, column: col + name.len() };
+                            doc_methods.push(SkelSymbol {
+                                kind: "method".to_string(),
+                                name: name.clone(),
+                                start: at,
+                                end: at_end,
+                                name_start: at,
+                                name_end: at_end,
+                                package: Some(sym.name.clone()),
+                                scope: sym.scope,
+                                return_type: ret
+                                    .as_deref()
+                                    .and_then(|t| (pack.annot_type)(t)),
+                                receiver_return: ret
+                                    .as_deref()
+                                    .is_some_and(|t| (pack.rettype_receiver)(t)),
+                                receiver_instance_of: None,
+                                deref_stack: Vec::new(),
+                                // documentation, not a declaration: no body, no annotation to add
+                                attributes: vec!["documented".to_string()],
+                                arity: None,
+                                qualifier_owned: false,
+                                doc: None,
+                                deprecation: None,
+                            });
+                        }
+                    }
+                    continue;
+                }
+                if !matches!(sym.kind.as_str(), "sub" | "method" | "field" | "anon" | "var") {
+                    continue;
+                }
+                let Some((cstart, facts)) =
+                    sym.start.row.checked_sub(1).and_then(|r| by_end_row.get(&r))
+                else {
+                    continue;
+                };
+                let cstart = *cstart;
+                for f in facts {
+                    match f {
+                        // class-docblock facts; no callable/field join
+                        DocFact::Method { .. } | DocFact::Template { .. } => {}
+                        DocFact::Description(d) => {
+                            if !matches!(sym.kind.as_str(), "var" | "anon") {
+                                sym.doc = Some(d.clone());
+                            }
+                        }
+                        DocFact::Deprecated(t) => mark_deprecated(sym, t.clone()),
+                        _ => {}
+                    }
+                }
+            }
+            out.witnesses.extend(doc_witnesses);
+            out.symbols.extend(doc_methods);
+            out.refs.extend(doc_refs);
+        }
+    }
     out.param_sigs = param_sigs;
     Ok(out)
 }
