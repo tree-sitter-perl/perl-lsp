@@ -898,6 +898,15 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                     while context_stack.last().is_some_and(|&(d, _)| d >= scope_stack.len()) {
                         context_stack.pop();
                     }
+                    // The receiver name (`$this`) IS this class inside its
+                    // body — a witness at the body scope, so a chain based on
+                    // it (`$this->mailer->send()`) resolves through the same
+                    // registry chase as any typed variable. Class bodies
+                    // only: a namespace body carries a context too.
+                    if names_by_match.contains_key(&(e.match_id, "def.class".to_string())) {
+                        register_class_body(&mut out, pack, id, &text, e.start);
+                        class_body_scopes.insert(id);
+                    }
                     context_stack.push((scope_stack.len(), text));
                 }
                 // a guard narrowing whose block is THIS scope → the refined type
@@ -998,7 +1007,15 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                     {
                         context_stack.pop();
                     }
-                    context_stack.push((scope_stack.len(), e.text.clone()));
+                    // php puts the class scope on the whole declaration, so
+                    // the body scope is ALREADY open here: it carries the
+                    // class as its package and the receiver witness.
+                    if names_by_match.contains_key(&(e.match_id, "def.class".to_string())) {
+                        let id = scope_stack.last().unwrap().1;
+                        register_class_body(&mut out, pack, id, &raw, e.start);
+                        class_body_scopes.insert(id);
+                    }
+                    context_stack.push((scope_stack.len(), raw));
                 }
             }
             "parent" => {
