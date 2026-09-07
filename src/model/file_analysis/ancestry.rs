@@ -1015,7 +1015,9 @@ impl FileAnalysis {
             //       class itself).
             // Collect into a temporary list to avoid borrow-checker
             // issues with the closure capturing &mut seen_names/candidates.
-            let mut bridged: Vec<(String, SymKind, Option<SymbolDetail>, Option<HandlerDisplay>, bool)> = Vec::new();
+            // (name, kind, detail, display, is_static)
+            type Bridged = (String, SymKind, Option<SymbolDetail>, Option<HandlerDisplay>, bool);
+            let mut bridged: Vec<Bridged> = Vec::new();
             idx.for_each_entity_bridged_to(class_name, &mut |_mod, _cached, sym| {
                 use std::ops::ControlFlow;
                 if !matches!(sym.kind, SymKind::Sub | SymKind::Method) {

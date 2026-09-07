@@ -50,7 +50,7 @@ fn install_term_handler() {
     // async-signal-safe. SIGTERM's default is termination, so replacing it
     // cannot lose a stop — it only makes the stop graceful.
     unsafe {
-        libc::signal(libc::SIGTERM, on_term as libc::sighandler_t);
+        libc::signal(libc::SIGTERM, on_term as extern "C" fn(libc::c_int) as libc::sighandler_t);
     }
 }
 
