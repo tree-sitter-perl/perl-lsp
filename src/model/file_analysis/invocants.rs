@@ -889,7 +889,7 @@ impl FileAnalysis {
         if let Some(InferredType::ClassName(c)) = self.sub_return_type_at_arity(bare, Some(0)) {
             return Some(InferredType::ClassName(c));
         }
-        Some(InferredType::ClassName(invocant.to_string()))
+        Some(InferredType::ClassName(self.class_spelling_identity(invocant)))
     }
 
     /// Walk the scope chain to find the enclosing class or package.
@@ -1137,7 +1137,9 @@ impl FileAnalysis {
             // parent — a same-leaf stranger (a `Connector` interface in
             // another namespace beside the `Connector` base class next
             // door) is not, whatever it requires.
-            let want_ns = if self.pack.imports_bind_names {
+            let want_ns = if let Some(ns) = self.identity_namespace(c) {
+                Some(ns)
+            } else if self.pack.imports_bind_names {
                 self.pack
                     .parent_namespaces
                     .iter()

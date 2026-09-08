@@ -58,7 +58,17 @@ impl<'a> UseMap<'a> {
             .or_else(|| {
                 self.rows.iter().find_map(|(_, raw)| {
                     let t = raw.trim_start_matches(sep);
-                    (t.rsplit(sep).next() == Some(head)).then(|| t.to_string())
+                    if t.rsplit(sep).next() != Some(head) {
+                        return None;
+                    }
+                    // a row bound under an alias binds the alias, never
+                    // its leaf (`use A\Event as ScriptEvent` leaves `Event`
+                    // to the file's own namespace)
+                    let aliased = self
+                        .aliases
+                        .iter()
+                        .any(|(_, ns, leaf)| join(ns, leaf, sep) == t);
+                    (!aliased).then(|| t.to_string())
                 })
             })
             .unwrap_or_else(|| match self.own_namespace {
@@ -139,10 +149,20 @@ mod tests {
         let m = map(&rows, &aliases, Some("App"));
         assert_eq!(m.resolve("P"), "GuzzleHttp\\Promise");
         assert_eq!(m.resolve("P\\Promise"), "GuzzleHttp\\Promise\\Promise");
-        // the real leaf of an aliased import is NOT bound by the alias row
-        // — `Promise` here is whatever else names it, i.e. the file's own
-        // namespace — unless a plain row binds it too.
-        assert_eq!(m.resolve("Promise"), "GuzzleHttp\\Promise");
+        // the real leaf of an aliased import is NOT bound by the alias row:
+        // `Promise` is whatever else names it, i.e. the file's own namespace
+        assert_eq!(m.resolve("Promise"), "App\\Promise");
+    }
+
+    #[test]
+    fn an_aliased_row_binds_its_alias_never_its_leaf() {
+        // the row is in `rows` too (every import row is), yet `Event`
+        // means the file's own class, not the aliased import
+        let rows = vec![(span(), "B\\Event".to_string())];
+        let aliases = vec![("ScriptEvent".to_string(), "B".to_string(), "Event".to_string())];
+        let m = map(&rows, &aliases, Some("A"));
+        assert_eq!(m.resolve("ScriptEvent"), "B\\Event");
+        assert_eq!(m.resolve("Event"), "A\\Event");
     }
 
     #[test]

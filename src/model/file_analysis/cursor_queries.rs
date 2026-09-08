@@ -1220,7 +1220,11 @@ impl FileAnalysis {
                     // fallback below; if that also has no class, bail rather
                     // than return a class-less Method rename.
                 }
-                RefKind::PackageRef => return Some(RenameKind::Package(r.target_name.clone())),
+                // the written spelling names an identity (a namespaced
+                // pack resolves it through the file's use-map)
+                RefKind::PackageRef => {
+                    return Some(RenameKind::Package(self.class_spelling_identity(&r.target_name)))
+                }
                 RefKind::HashKeyAccess { .. } => return Some(RenameKind::HashKey(r.target_name.clone())),
                 RefKind::DispatchCall { .. } if r.handler_owner().is_some() => {
                     let owner = r.handler_owner().unwrap();

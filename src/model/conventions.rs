@@ -52,6 +52,9 @@ pub fn is_bareword_class_name(text: &str) -> bool {
     // `::` is Perl's separator, `\` php's (`App\Support\Str`) — either way
     // every segment must be a plain identifier, so a receiver EXPRESSION
     // (`(new Coll([1]))->wrapUp([2])`) never passes as a class token.
+    // A leading `\` is php's ABSOLUTE spelling (`\A\F`, a string
+    // callable's class): still a class token, resolved as written.
+    let text = text.strip_prefix('\\').unwrap_or(text);
     !text.is_empty()
         && text
             .split("::")

@@ -569,6 +569,17 @@ pub trait CrossFileLookup {
     fn visible_def_candidates(&self, name: &str) -> Vec<std::sync::Arc<CachedModule>> {
         self.def_candidates(name)
     }
+    /// `visible_def_candidates` with its WIDENING verdict: `true` when the
+    /// name is an identity nothing indexed declares and the candidates are
+    /// the same-leaf classes of other namespaces — the over-approximation
+    /// dirty code wants, which every answer built on it must say out loud
+    /// (`MethodResolution::CrossFile::widened`). A raw index never widens.
+    fn visible_def_candidates_widening(
+        &self,
+        name: &str,
+    ) -> (Vec<std::sync::Arc<CachedModule>>, bool) {
+        (self.visible_def_candidates(name), false)
+    }
     /// Among the files declaring `pkg`, the one that DEFINES sub/method
     /// `member` — package-attributed first (a reopened package's sub lives
     /// under `pkg`), then any-package (cross-package typeglob installs,
@@ -1236,6 +1247,82 @@ impl<'a> ScopedLookup<'a> {
     }
 }
 
+impl<'a> ScopedLookup<'a> {
+    /// The use-map candidate set for `name`, with the widening verdict.
+    /// An IDENTITY (a qualified name) is exact: the declarations filed
+    /// under it, else the same-leaf declarations whose namespace is its
+    /// own; only when neither exists do the leaf's other declarations
+    /// stand in, WIDENED. A bare leaf is a spelling: the origin's pins
+    /// rank and filter the leaf's declarations as the file means them.
+    fn use_map_candidates(
+        &self,
+        pins: &UseMapPins,
+        name: &str,
+    ) -> (Vec<std::sync::Arc<CachedModule>>, bool) {
+        if let (Some(ns), leaf) = split_qualified(name) {
+            let exact = self.inner.def_candidates(name);
+            if !exact.is_empty() {
+                return (exact, false);
+            }
+            let mut agree: Vec<std::sync::Arc<CachedModule>> = Vec::new();
+            let mut rest: Vec<std::sync::Arc<CachedModule>> = Vec::new();
+            for c in self.inner.def_candidates(leaf) {
+                match self.inner.symbols_present(&c).declared_class_namespace(leaf) {
+                    Some(d) if d == ns => agree.push(c),
+                    _ => rest.push(c),
+                }
+            }
+            if !agree.is_empty() {
+                return (agree, false);
+            }
+            let widened = !rest.is_empty();
+            return (rest, widened);
+        }
+        let cands = self.inner.def_candidates(name);
+        // One candidate has nothing to disambiguate; the table read
+        // below rehydrates symbols, so only a genuinely ambiguous
+        // leaf pays it.
+        if cands.len() < 2 {
+            return (cands, false);
+        }
+                let want = pins.namespace_of(name);
+                let visible = pins.visible.get(name);
+                if want.is_none() && visible.is_none() {
+                    return (cands, false);
+                }
+                // A declaration under a namespace the file can NAME this leaf
+                // in (its pin, or an aliased import of the same leaf) is a
+                // class this file means; one under another namespace is a
+                // stranger sharing the leaf. A pinned leaf keeps only those —
+                // an empty answer is the honest one when the named class
+                // isn't indexed. The own-namespace default is a RANK, not a
+                // filter: the file made no claim, so the table stays whole
+                // with its own namespace first.
+                let pinned = pins.pinned(name);
+                let rank = |ns: &str| -> Option<usize> {
+                    if want == Some(ns) {
+                        return Some(0);
+                    }
+                    visible.and_then(|v| v.iter().position(|x| x == ns)).map(|i| i + 1)
+                };
+                let mut agree: Vec<(usize, std::sync::Arc<CachedModule>)> = Vec::new();
+                let mut rest: Vec<std::sync::Arc<CachedModule>> = Vec::new();
+                for c in cands {
+                    let declared = self.inner.symbols_present(&c).declared_class_namespace(name);
+                    match declared.as_deref().and_then(rank) {
+                        Some(r) => agree.push((r, c)),
+                        None if declared.is_some() && pinned => {}
+                        None => rest.push(c),
+                    }
+                }
+                agree.sort_by_key(|(r, _)| *r);
+                let mut out: Vec<std::sync::Arc<CachedModule>> =
+                    agree.into_iter().map(|(_, c)| c).collect();
+                out.extend(rest);
+                (out, false)
+    }
+}
+
 impl<'a> CrossFileLookup for ScopedLookup<'a> {
     fn resolution_epoch(&self) -> u64 {
         self.inner.resolution_epoch()
@@ -1274,55 +1361,21 @@ impl<'a> CrossFileLookup for ScopedLookup<'a> {
         // OUTSIDE the querying file's closure (a `.c` body nobody includes).
         self.inner.def_candidates(name)
     }
+    fn visible_def_candidates_widening(
+        &self,
+        name: &str,
+    ) -> (Vec<std::sync::Arc<CachedModule>>, bool) {
+        match &self.axis {
+            VisibilityAxis::UseMap(pins) => self.use_map_candidates(pins, name),
+            _ => (self.visible_def_candidates(name), false),
+        }
+    }
     fn visible_def_candidates(&self, name: &str) -> Vec<std::sync::Arc<CachedModule>> {
         match &self.axis {
             VisibilityAxis::Transparent | VisibilityAxis::Flat => {
                 self.inner.def_candidates(name)
             }
-            VisibilityAxis::UseMap(pins) => {
-                let cands = self.inner.def_candidates(name);
-                // One candidate has nothing to disambiguate; the table read
-                // below rehydrates symbols, so only a genuinely ambiguous
-                // leaf pays it.
-                if cands.len() < 2 {
-                    return cands;
-                }
-                let want = pins.namespace_of(name);
-                let visible = pins.visible.get(name);
-                if want.is_none() && visible.is_none() {
-                    return cands;
-                }
-                // A declaration under a namespace the file can NAME this leaf
-                // in (its pin, or an aliased import of the same leaf) is a
-                // class this file means; one under another namespace is a
-                // stranger sharing the leaf. A pinned leaf keeps only those —
-                // an empty answer is the honest one when the named class
-                // isn't indexed. The own-namespace default is a RANK, not a
-                // filter: the file made no claim, so the table stays whole
-                // with its own namespace first.
-                let pinned = pins.pinned(name);
-                let rank = |ns: &str| -> Option<usize> {
-                    if want == Some(ns) {
-                        return Some(0);
-                    }
-                    visible.and_then(|v| v.iter().position(|x| x == ns)).map(|i| i + 1)
-                };
-                let mut agree: Vec<(usize, std::sync::Arc<CachedModule>)> = Vec::new();
-                let mut rest: Vec<std::sync::Arc<CachedModule>> = Vec::new();
-                for c in cands {
-                    let declared = self.inner.symbols_present(&c).declared_class_namespace(name);
-                    match declared.as_deref().and_then(rank) {
-                        Some(r) => agree.push((r, c)),
-                        None if declared.is_some() && pinned => {}
-                        None => rest.push(c),
-                    }
-                }
-                agree.sort_by_key(|(r, _)| *r);
-                let mut out: Vec<std::sync::Arc<CachedModule>> =
-                    agree.into_iter().map(|(_, c)| c).collect();
-                out.extend(rest);
-                out
-            }
+            VisibilityAxis::UseMap(pins) => self.use_map_candidates(pins, name).0,
             VisibilityAxis::IncludeClosure => {
                 // Flat linkage: keep candidates CONNECTED to the asker —
                 // visible in its include closure, or including the asker

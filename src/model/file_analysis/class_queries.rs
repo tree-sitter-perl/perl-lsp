@@ -1061,6 +1061,15 @@ impl FileAnalysis {
         }
     }
 
+    /// The namespace a class identity carries, for a namespaced pack: the
+    /// qualifier of the FQN, the global namespace spelled `""`. `None`
+    /// for a pack whose identities carry no namespace, so a consumer's
+    /// origin-side ladder (pins, own namespace) still answers there.
+    pub fn identity_namespace(&self, cls: &str) -> Option<String> {
+        self.pack.namespace_sep?;
+        Some(split_qualified(cls).0.unwrap_or_default().to_string())
+    }
+
     /// The identity a class spelling written in this file names: the
     /// use-map's answer for a namespace-separated pack, the spelling
     /// itself otherwise (Perl's `Foo::Bar` is already its identity).

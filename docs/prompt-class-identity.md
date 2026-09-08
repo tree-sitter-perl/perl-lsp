@@ -45,13 +45,32 @@ written), so the over-approximation is WANTED — but it has to be loud.
    stamp and reports "member `m` found on `X\Y`, not on the class this
    file names (`A\B`)". Same silence rules as `unresolved-method` (the
    receiver is THE dispatch projection; an unknown receiver says nothing).
-5. **Spellings resolve once, in extraction.** A post-walk pass over the
-   skeleton resolves every class spelling through the pack's
-   `class_identity(written, ctx)` hook, the pure `UseMap::resolve` ladder
-   (`model/file_analysis/use_map.rs`): absolute spelling → itself; head
-   segment → its alias, else its `use` row, else the file's own namespace;
-   the rest hangs off that. `leaf_namespace_pins` calls the same resolver,
-   so the pins and the identities cannot disagree.
+5. **Spellings resolve once, in extraction.** The extractor resolves every
+   class spelling AS IT MINTS it, through one `ident` resolver built from
+   the pre-collected `use` rows, aliases and the namespace in force at the
+   spelling's position: the pure `UseMap::resolve` ladder
+   (`model/file_analysis/use_map.rs`) — absolute spelling → itself; head
+   segment → its alias, else its `use` row (an aliased row binds the alias,
+   never its leaf), else the file's own namespace; the rest hangs off that.
+   A declaration joins its namespace directly (`decl_ident`); a template
+   parameter name and the current-class tokens are exempt. Every type the
+   pack's annotation predicate returns passes through
+   `InferredType::map_class_names`, so a qualified element inside
+   `array<int, \App\User>` resolves like a bare one. The query side's
+   `leaf_namespace_pins` and `class_spelling_identity` call the same
+   ladder, so the pins, the identities and a written receiver's class
+   cannot disagree. The capability is `LangPack::namespace_sep`, baked
+   into `PackFacts::namespace_sep`; a pack without one is untouched.
+6. **The index registers the identity AND its leaf.** `collect_linkage_feed`
+   feeds a namespaced symbol under both keys: the identity is the exact
+   key, the leaf the widening one (`ScopedLookup::use_map_candidates`).
+   A `TargetRef`'s `class_ns` is the identity's own namespace
+   (`identity_namespace`), the origin's pin only for a bare spelling.
+7. **A class token references the target iff it names its identity.** The
+   matcher resolves a `PackageRef` / construction-site spelling through the
+   file's use-map (a token inside an import row names the row's class in
+   full) and compares identities — `use B\Collection; new Collection()`
+   reaches `B\Collection` and never the same-leaf stranger.
 
 ## Landing across the stacked branches
 

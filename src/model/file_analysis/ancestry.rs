@@ -573,13 +573,19 @@ impl FileAnalysis {
             // the whole relation. The goto-def consumer re-picks the
             // defining candidate with the same test.
             crate::util::ghost_stats::mroc_begin();
-            for cached in idx.visible_def_candidates(cls) {
+            // The set may be WIDENED: nothing indexed declares `cls`, so
+            // the same-leaf classes of other namespaces stand in. Each
+            // then answers under its OWN identity — the member lives on
+            // the stranger — and the verdict rides the result.
+            let (cands, widened) = idx.visible_def_candidates_widening(cls);
+            let leaf = name_match_key(cls);
+            for cached in cands {
                 // Rows-backed pre-filter (`docs/prompt-relational-iteration.md`):
                 // skip the rehydrate when the row store PROVES this candidate
                 // declares nothing named `method_name` under `cls`. Fail-open
                 // everywhere the store cannot speak; the equiv switch runs the
                 // skipped scan anyway and screams on divergence.
-                let may_declare = idx.candidate_may_declare(&cached, method_name, cls);
+                let may_declare = widened || idx.candidate_may_declare(&cached, method_name, cls);
                 if !may_declare {
                     crate::util::ghost_stats::count("mroc.candidate_prefiltered");
                     if !member_prefilter_equiv() {
@@ -603,9 +609,19 @@ impl FileAnalysis {
                 let whole = crate::util::ghost_stats::in_ancestor_walk(|| {
                     idx.symbols_present(&cached)
                 });
+                let cand_cls: String = if widened {
+                    whole
+                        .symbols
+                        .iter()
+                        .find(|s| matches!(s.kind, SymKind::Class) && name_match_key(&s.name) == leaf)
+                        .map(|s| s.name.clone())
+                        .unwrap_or_else(|| cls.to_string())
+                } else {
+                    cls.to_string()
+                };
                 let has_member = whole.symbols.iter().any(|s| {
                     s.name == method_name
-                        && s.package.as_deref() == Some(cls)
+                        && s.package.as_deref() == Some(cand_cls.as_str())
                         && !s.is_reexport()
                         && agrees(s.kind)
                         && (matches!(s.kind, SymKind::Sub | SymKind::Method)
@@ -641,7 +657,7 @@ impl FileAnalysis {
                     }
                 }
                 if has_member {
-                    return Some(MethodResolution::CrossFile { class: cls.to_string(), def_module: None, widened: false });
+                    return Some(MethodResolution::CrossFile { class: cand_cls, def_module: None, widened });
                 }
                 // A cross-file DBIC result class's column/relationship accessors
                 // are DEFERRED plugin emissions (`gated_emissions`) that the raw
