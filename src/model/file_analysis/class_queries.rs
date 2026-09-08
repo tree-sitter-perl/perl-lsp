@@ -1155,19 +1155,6 @@ impl FileAnalysis {
         }
     }
 
-    /// The identity a class-like symbol is filed under cross-file: its
-    /// name joined to its package by the pack's namespace separator
-    /// (`App\Models\User` for `class User` under `namespace App\Models`),
-    /// or the name itself when the pack has no separator (Perl's `Foo::Bar`
-    /// IS the name; C's flat linkage). The global namespace joins to
-    /// nothing.
-    pub fn class_identity(&self, sym: &Symbol) -> String {
-        match (self.pack.namespace_sep, sym.package.as_deref()) {
-            (Some(sep), Some(ns)) if !ns.is_empty() => format!("{ns}{sep}{}", sym.name),
-            _ => sym.name.clone(),
-        }
-    }
-
     fn leaf_namespace_pins(&self) -> UseMapPins {
         let mut pins: std::collections::HashMap<String, Option<String>> =
             std::collections::HashMap::new();

@@ -153,8 +153,9 @@ pub struct PackFacts {
 
     /// The pack's namespace separator, when class identity is a namespace-
     /// qualified name (`\` for the use-map packs). `None` = spellings are
-    /// identities already (C's flat linkage, Perl keys its own `::`), so
-    /// `FileAnalysis::class_identity` returns the symbol's name unjoined.
+    /// identities already (C's flat linkage, Perl keys its own `::`); the
+    /// namespace questions (`identity_namespace`, `class_spelling_identity`)
+    /// gate on it.
     #[serde(default)]
     pub namespace_sep: Option<char>,
 
