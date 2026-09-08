@@ -85,7 +85,7 @@
       "col": 15,
       "expect": {
         "all": [
-          "$m: Greeter",
+          "$m: App\\Util\\Greeter",
           "*variable*"
         ],
         "none": []

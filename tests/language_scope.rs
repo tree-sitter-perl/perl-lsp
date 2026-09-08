@@ -1214,9 +1214,9 @@ fn php_phpunit_mocks_type_as_the_doubled_class() {
         let out = run(&["--hover", root, "tests/FooTest.php", &row.to_string(), &col.to_string()]);
         out.lines().find(|l| l.starts_with(var)).unwrap_or("").to_string()
     };
-    assert_eq!(receiver(14, "$m"), "$m: Foo", "createMock");
-    assert_eq!(receiver(16, "$s"), "$s: Foo", "createStub");
-    assert_eq!(receiver(18, "$b"), "$b: Foo", "getMockBuilder chain");
+    assert_eq!(receiver(14, "$m"), "$m: App\\Foo", "createMock");
+    assert_eq!(receiver(16, "$s"), "$s: App\\Foo", "createStub");
+    assert_eq!(receiver(18, "$b"), "$b: App\\Foo", "getMockBuilder chain");
     let col = lines[19].find("bar()").unwrap();
     let def = run(&["--definition", root, "tests/FooTest.php", "19", &col.to_string()]);
     assert!(def.contains("src/Foo.php:4:"), "the property form reaches Foo::bar: {def}");
