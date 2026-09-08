@@ -1057,7 +1057,18 @@ impl FileAnalysis {
                 .inferred_type_via_bag(text, point)
                 .and_then(|t| t.class_name().map(str::to_string)),
             InvocantText::NonScalar(_) => None,
-            InvocantText::Bareword(b) => Some(b.to_string()),
+            InvocantText::Bareword(b) => Some(self.class_spelling_identity(b)),
+        }
+    }
+
+    /// The identity a class spelling written in this file names: the
+    /// use-map's answer for a namespace-separated pack, the spelling
+    /// itself otherwise (Perl's `Foo::Bar` is already its identity).
+    pub fn class_spelling_identity(&self, written: &str) -> String {
+        if self.pack.namespace_sep.is_some() {
+            self.use_map().resolve(written)
+        } else {
+            written.to_string()
         }
     }
 
@@ -1067,7 +1078,7 @@ impl FileAnalysis {
     pub fn declared_class_namespace(&self, leaf: &str) -> Option<String> {
         self.symbols()
             .iter()
-            .find(|s| matches!(s.kind, SymKind::Class) && s.name == leaf)
+            .find(|s| matches!(s.kind, SymKind::Class) && (s.name == leaf || name_match_key(&s.name) == leaf))
             .map(|s| s.package.clone().unwrap_or_default())
     }
 
@@ -1078,7 +1089,10 @@ impl FileAnalysis {
     pub fn declared_type_namespace(&self, leaf: &str) -> Option<String> {
         self.symbols()
             .iter()
-            .find(|s| matches!(s.kind, SymKind::Package | SymKind::Class) && s.name == leaf)
+            .find(|s| {
+                matches!(s.kind, SymKind::Package | SymKind::Class)
+                    && (s.name == leaf || name_match_key(&s.name) == leaf)
+            })
             .map(|s| s.package.clone().unwrap_or_default())
     }
 
@@ -1199,8 +1213,10 @@ impl FileAnalysis {
         for s in self.symbols().iter() {
             match s.kind {
                 SymKind::Class => {
+                    // the symbol is filed under its identity (the FQN for a
+                    // namespaced pack); the pin is keyed by the leaf it binds
                     let ns = s.package.clone().unwrap_or_default();
-                    pin(&mut pins, &s.name, &ns);
+                    pin(&mut pins, &name_match_key(&s.name), &ns);
                 }
                 SymKind::Package => {
                     if own.as_deref().is_some_and(|o| o != s.name) {

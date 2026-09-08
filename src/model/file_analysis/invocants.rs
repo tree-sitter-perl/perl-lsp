@@ -1024,7 +1024,7 @@ impl FileAnalysis {
                 {
                     return Some(c);
                 }
-                Some(invocant.to_string())
+                Some(self.class_spelling_identity(invocant))
             }
         }
     }
