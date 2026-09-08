@@ -807,7 +807,7 @@ pub fn pack_callee_signature(
                 crate::model::file_analysis::MethodResolution::Local { sym_id, .. } => {
                     found = render(text, analysis.symbol(sym_id));
                 }
-                crate::model::file_analysis::MethodResolution::CrossFile { class, def_module } => {
+                crate::model::file_analysis::MethodResolution::CrossFile { class, def_module, .. } => {
                     let module = def_module.as_deref().unwrap_or(class.as_str());
                     let cached = module_index.candidate_defining_sub_in_package(module, &class, &name)?;
                     let whole = module_index.whole_present(&cached);

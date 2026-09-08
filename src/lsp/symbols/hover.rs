@@ -73,7 +73,7 @@ pub fn pack_hover_markdown(
                     // kind-agnostic `member: type` fallback below is for data
                     // members; a method routed there lost its signature and
                     // read as a property.
-                    Some(MethodResolution::CrossFile { class, def_module }) => {
+                    Some(MethodResolution::CrossFile { class, def_module, .. }) => {
                         let module = def_module.as_deref().unwrap_or(class.as_str());
                         let cached = midx
                             .candidate_defining_sub_in_package(module, &class, field)

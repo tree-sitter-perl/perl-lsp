@@ -9,6 +9,10 @@ use super::*;
 pub mod codes {
     pub const UNRESOLVED_FUNCTION: &str = "unresolved-function";
     pub const UNRESOLVED_METHOD: &str = "unresolved-method";
+    /// A member found on a same-named class in ANOTHER namespace because
+    /// the class this file names is not indexed — the honest over-
+    /// approximation, said out loud (`docs/prompt-class-identity.md`).
+    pub const RESOLVED_BY_WIDENING: &str = "resolved-by-widening";
     pub const UNDEF_DEREF: &str = "undef-deref";
     pub const OPTIONAL_DEREF: &str = "optional-deref";
     pub const DEREF_SHAPE_MISMATCH: &str = "deref-shape-mismatch";
@@ -856,7 +860,9 @@ pub fn pack_symbol_diagnostics(
             crate::model::conventions::MethodToken::parse(&r.target_name),
             crate::model::conventions::MethodToken::Super(_)
         );
-        let want_ns = if super_call {
+        let want_ns = if let Some(ns) = analysis.identity_namespace(&class) {
+            Some(ns)
+        } else if super_call {
             analysis
                 .scope_at(r.span.start)
                 .and_then(|sc| analysis.enclosing_class_for_scope(sc))
@@ -1024,6 +1030,22 @@ pub fn pack_symbol_diagnostics(
                     }
                 }
             }
+            Some(MethodResolution::CrossFile { class: on, widened: true, .. }) => {
+                // The answer stands (goto-def, hover and completion all
+                // serve it), but it is confidently wrong whenever the code
+                // is — an import not yet written, a namespace typo — so
+                // the widening is a finding of its own.
+                push(
+                    &mut out,
+                    r.span,
+                    DiagnosticSeverity::WARNING,
+                    codes::RESOLVED_BY_WIDENING,
+                    format!(
+                        "'{name}' resolved on '{on}': the class this file names, '{class}', is not \
+                         indexed, so a same-named class in another namespace answered."
+                    ),
+                );
+            }
             Some(MethodResolution::CrossFile { .. }) => {}
         }
     }
@@ -1047,6 +1069,18 @@ pub fn pack_symbol_diagnostics(
         // elsewhere in the workspace is a different declaration.
         let found = local.or_else(|| {
             let i = idx?;
+            // A class token names an identity (the use-map's answer); a
+            // function keeps the leaf under the namespace this file means.
+            if want_class {
+                let ident = analysis.class_spelling_identity(leaf);
+                return i.visible_def_candidates(&ident).into_iter().find_map(|c| {
+                    let a = i.symbols_present(&c);
+                    a.symbols()
+                        .iter()
+                        .find(|s| is_kind(s) && (s.name == ident || s.name == leaf))
+                        .and_then(deprecation_of)
+                });
+            }
             let want_ns = analysis.leaf_namespace(leaf).or_else(|| analysis.use_map_pins().own_namespace.clone());
             i.visible_def_candidates(leaf).into_iter().find_map(|c| {
                 let a = i.symbols_present(&c);
@@ -1140,7 +1174,7 @@ pub fn pack_symbol_diagnostics(
                     let class = analysis.method_call_invocant_class(call, idx)?;
                     match analysis.resolve_member_in_ancestors(&class, name, *shape, idx)? {
                         MethodResolution::Local { sym_id, .. } => analysis.symbol(sym_id).param_arity(),
-                        MethodResolution::CrossFile { class, def_module } => {
+                        MethodResolution::CrossFile { class, def_module, .. } => {
                             let ix = idx?;
                             let module = def_module.as_deref().unwrap_or(class.as_str());
                             let cached = ix.candidate_defining_sub_in_package(module, &class, name)?;
@@ -1720,11 +1754,14 @@ fn ancestry_visible(analysis: &FileAnalysis, idx: Option<&dyn CrossFileLookup>, 
             // own namespace) — a same-leaf stranger elsewhere in the
             // workspace is not this parent.
             let want_ns = a
-                .pack
-                .parent_namespaces
-                .iter()
-                .find(|(c, pl, _)| c == class && pl == leaf)
-                .map(|(_, _, ns)| ns.clone())
+                .identity_namespace(p)
+                .or_else(|| {
+                    a.pack
+                        .parent_namespaces
+                        .iter()
+                        .find(|(c, pl, _)| c == class && pl == leaf)
+                        .map(|(_, _, ns)| ns.clone())
+                })
                 .or_else(|| a.leaf_namespace(leaf))
                 .or_else(|| a.use_map_pins().own_namespace.clone());
             let local = a
