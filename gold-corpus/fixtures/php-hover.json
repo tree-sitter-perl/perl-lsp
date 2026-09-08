@@ -68,7 +68,7 @@
       "col": 19,
       "expect": {
         "all": [
-          "$p: Greeter"
+          "$p: App\\Util\\Greeter"
         ],
         "none": []
       },

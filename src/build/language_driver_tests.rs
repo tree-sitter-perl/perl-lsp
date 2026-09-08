@@ -1013,8 +1013,8 @@ fn php_tuple_literal_returns_type_as_sequence() {
     let reg = LanguageRegistry::with_enabled();
     let fa = reg.for_path(std::path::Path::new("T.php")).unwrap().analyze(src);
     let tuple = Some(InferredType::Sequence(vec![
-        InferredType::ClassName("Queue".into()),
-        InferredType::ClassName("Agent".into()),
+        InferredType::ClassName("App\\Queue".into()),
+        InferredType::ClassName("App\\Agent".into()),
     ]));
     assert_eq!(fa.sub_return_type_at_arity("lit", Some(0)), tuple, "bare `: array` refined");
     assert_eq!(fa.sub_return_type_at_arity("undecl", Some(0)), tuple, "undeclared return");
@@ -1038,7 +1038,7 @@ fn php_every_return_site_contributes_an_arm() {
     let fa = reg.for_path(std::path::Path::new("T.php")).unwrap().analyze(src);
     assert_eq!(
         fa.sub_return_type_at_arity("agree", Some(1)),
-        Some(InferredType::ClassName("Queue".into()))
+        Some(InferredType::ClassName("App\\Queue".into()))
     );
     // Both arms land (the fold's own agreement policy decides the answer;
     // the pin is that the SECOND site is no longer dropped).
@@ -1063,7 +1063,7 @@ fn php_named_var_doc_casts_a_rebound_local() {
     let fa = reg.for_path(std::path::Path::new("T.php")).unwrap().analyze(src);
     assert_eq!(
         fa.inferred_type_via_bag("$p", tree_sitter::Point { row: 8, column: 4 }),
-        Some(InferredType::ClassName("Sub".into())),
+        Some(InferredType::ClassName("App\\Sub".into())),
         "cast applies from the rebind on"
     );
 }

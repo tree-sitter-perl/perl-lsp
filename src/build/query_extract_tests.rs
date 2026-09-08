@@ -2757,14 +2757,14 @@ $y = $x;
         .map(|s| (s.kind.clone(), s.name.clone()))
         .collect();
     assert!(names.contains(&("package".into(), "App".into())), "{names:?}");
-    assert!(names.contains(&("class".into(), "Greeter".into())), "{names:?}");
+    assert!(names.contains(&("class".into(), "App\\Greeter".into())), "{names:?}");
     assert!(names.contains(&("method".into(), "greet".into())), "{names:?}");
     assert!(names.contains(&("field".into(), "prefix".into())), "{names:?}");
     assert!(names.contains(&("var".into(), "$x".into())), "{names:?}");
     assert!(skel.imports.contains(&"App\\Support\\Str".to_string()), "{:?}", skel.imports);
     // the method tags with its class, not the namespace
     let greet = skel.symbols.iter().find(|s| s.name == "greet").unwrap();
-    assert_eq!(greet.package.as_deref(), Some("Greeter"));
+    assert_eq!(greet.package.as_deref(), Some("App\\Greeter"));
 
     let fa = skel.into_file_analysis();
     let end = tree_sitter::Point { row: 16, column: 0 };
@@ -3206,22 +3206,24 @@ class Logging extends Quiet
         .iter()
         .map(|(c, p, n)| (c.as_str(), p.as_str(), n.as_str()))
         .collect();
-    // alias resolved to the REAL leaf, namespace from the import
+    // alias resolved to the REAL leaf, namespace from the import; the
+    // edge itself carries both ends' identities
     assert!(
-        rows.contains(&("Repo", "Repository", "Illuminate\\Contracts\\Cache")),
+        rows.contains(&("App\\Cache\\Repo", "Repository", "Illuminate\\Contracts\\Cache")),
         "{rows:?}"
     );
     assert!(
-        skel.parents.contains(&("Repo".into(), "Repository".into())),
-        "the edge must key the real leaf, not the alias: {:?}",
+        skel.parents
+            .contains(&("App\\Cache\\Repo".into(), "Illuminate\\Contracts\\Cache\\Repository".into())),
+        "the edge must carry the real identity, not the alias: {:?}",
         skel.parents
     );
     // written qualifier is authoritative
-    assert!(rows.contains(&("Repo", "Base", "Vendor")), "{rows:?}");
+    assert!(rows.contains(&("App\\Cache\\Repo", "Base", "Vendor")), "{rows:?}");
     // unqualified binds to the file's own namespace
-    assert!(rows.contains(&("Local", "Helper", "App\\Cache")), "{rows:?}");
+    assert!(rows.contains(&("App\\Cache\\Local", "Helper", "App\\Cache")), "{rows:?}");
     // group-use alias resolves through the shared prefix
-    assert!(rows.contains(&("Logging", "NullLogger", "Psr\\Log")), "{rows:?}");
+    assert!(rows.contains(&("App\\Cache\\Logging", "NullLogger", "Psr\\Log")), "{rows:?}");
 }
 
 #[test]
@@ -3268,19 +3270,21 @@ class LogRepo implements Repository
             std::sync::Arc::new(fa),
         ))
     };
-    idx.insert_cache_providers(
-        "Repository",
-        Some(vec![
-            mk("/fq/contracts/cache/Repository.php", fa_cc.clone()),
-            mk("/fq/contracts/log/Repository.php", fa_cl),
-        ]),
-    );
-    idx.insert_cache("CacheRepo", Some(mk("/fq/cache/CacheRepo.php", fa_ic)));
-    idx.insert_cache("LogRepo", Some(mk("/fq/log/LogRepo.php", fa_il)));
+    let cc = mk("/fq/contracts/cache/Repository.php", fa_cc.clone());
+    let cl = mk("/fq/contracts/log/Repository.php", fa_cl);
+    let ic = mk("/fq/cache/CacheRepo.php", fa_ic);
+    let il = mk("/fq/log/LogRepo.php", fa_il);
+    idx.insert_cache_providers("Repository", Some(vec![cc.clone(), cl.clone()]));
+    idx.insert_cache("Contracts\\Cache\\Repository", Some(cc));
+    idx.insert_cache("Contracts\\Log\\Repository", Some(cl));
+    idx.insert_cache("CacheRepo", Some(ic.clone()));
+    idx.insert_cache("Cache\\CacheRepo", Some(ic));
+    idx.insert_cache("LogRepo", Some(il.clone()));
+    idx.insert_cache("Log\\LogRepo", Some(il));
 
     // Origin = the cache contract's own file; cursor identity = the class.
     let target = crate::index::resolve::TargetRef::new(
-        "Repository".into(),
+        "Contracts\\Cache\\Repository".into(),
         crate::index::resolve::TargetKind::Package,
     );
     let locs = crate::index::resolve::implementations_of(&fa_cc, Some(&idx), &target);
@@ -3346,20 +3350,23 @@ class Repository implements ConfigContract
             std::sync::Arc::new(fa),
         ))
     };
+    let cc = mk("/fq2/contracts/cache/Repository.php", fa_cc.clone());
+    let kc = mk("/fq2/contracts/config/Repository.php", fa_kc);
+    let ic = mk("/fq2/cache/Repository.php", fa_ic);
+    let ik = mk("/fq2/config/Repository.php", fa_ik);
     idx.insert_cache_providers(
         "Repository",
-        Some(vec![
-            mk("/fq2/contracts/cache/Repository.php", fa_cc.clone()),
-            mk("/fq2/contracts/config/Repository.php", fa_kc),
-            mk("/fq2/cache/Repository.php", fa_ic),
-            mk("/fq2/config/Repository.php", fa_ik),
-        ]),
+        Some(vec![cc.clone(), kc.clone(), ic.clone(), ik.clone()]),
     );
+    idx.insert_cache("Contracts\\Cache\\Repository", Some(cc));
+    idx.insert_cache("Contracts\\Config\\Repository", Some(kc));
+    idx.insert_cache("Cache\\Repository", Some(ic));
+    idx.insert_cache("Config\\Repository", Some(ik));
 
     // Cursor on `pull` in the CACHE contract.
     let target = crate::index::resolve::TargetRef::method(
         "pull".into(),
-        "Repository".into(),
+        "Contracts\\Cache\\Repository".into(),
         &fa_cc,
         Some(&idx),
         crate::index::resolve::OverrideScope::Hierarchy,
@@ -3387,7 +3394,7 @@ class Repository implements ConfigContract
 
     // Package arm (cursor on the interface NAME): same self-loop, same rows.
     let target = crate::index::resolve::TargetRef::new(
-        "Repository".into(),
+        "Contracts\\Cache\\Repository".into(),
         crate::index::resolve::TargetKind::Package,
     );
     let locs = crate::index::resolve::implementations_of(&fa_cc, Some(&idx), &target);
@@ -3716,15 +3723,19 @@ echo $u;
             std::sync::Arc::new(fa),
         ))
     };
-    idx.insert_cache_providers(
-        "Model",
-        Some(vec![
-            mk("/gen/app/Model.php", fa_am),
-            mk("/gen/vendor/Model.php", fa_vm),
-        ]),
-    );
-    idx.insert_cache("Builder5", Some(mk("/gen/vendor/Builder5.php", fa_vb)));
-    idx.insert_cache("User5", Some(mk("/gen/app/User5.php", fa_au)));
+    // Registered as the linkage feed does: under the identity AND the
+    // leaf it binds.
+    let am = mk("/gen/app/Model.php", fa_am);
+    let vm = mk("/gen/vendor/Model.php", fa_vm);
+    let vb = mk("/gen/vendor/Builder5.php", fa_vb);
+    let au = mk("/gen/app/User5.php", fa_au);
+    idx.insert_cache_providers("Model", Some(vec![am.clone(), vm.clone()]));
+    idx.insert_cache("App5\\Model", Some(am));
+    idx.insert_cache("Acme\\Eloquent\\Model", Some(vm));
+    idx.insert_cache("Builder5", Some(vb.clone()));
+    idx.insert_cache("Acme\\Eloquent\\Builder5", Some(vb));
+    idx.insert_cache("User5", Some(au.clone()));
+    idx.insert_cache("App5\\User5", Some(au));
 
     use crate::model::file_analysis::InferredType;
     let u = fa_run.inferred_type_via_bag_ctx(
@@ -3734,7 +3745,7 @@ echo $u;
     );
     assert_eq!(
         u,
-        Some(InferredType::ClassName("User5".into())),
+        Some(InferredType::ClassName("App5\\User5".into())),
         "cross-file generics chain: {u:?}"
     );
 }
@@ -3892,7 +3903,7 @@ echo $r;
     let r = fa.inferred_type_via_bag("$r", tree_sitter::Point { row: 10, column: 0 });
     assert_eq!(
         r,
-        Some(InferredType::ClassName("Repo".into())),
+        Some(InferredType::ClassName("App\\Cache\\Repo".into())),
         "documented return types the call: {r:?}"
     );
 }
@@ -4208,8 +4219,10 @@ class Stack {
     // The sequence spellings never mint bogus classes.
     assert_eq!((crate::build::query_extract::php_pack().annot_type)("list<A>"),
         Some(InferredType::Sequence(vec![InferredType::ClassName("A".into())])));
+    // A qualified element keeps its spelling: the extractor's identity
+    // pass resolves it, the predicate only checks the shape.
     assert_eq!((crate::build::query_extract::php_pack().annot_type)("array<int, \\App\\User>"),
-        Some(InferredType::Sequence(vec![InferredType::ClassName("User".into())])));
+        Some(InferredType::Sequence(vec![InferredType::ClassName("\\App\\User".into())])));
 }
 
 #[test]
@@ -4427,7 +4440,7 @@ fn php_data_provider_docblock_mints_member_ref_on_name_token() {
         .expect("@dataProvider member ref missing");
     assert_eq!((r.start.row, r.start.column), (5, 21), "name-token span");
     assert_eq!(r.end.column, 21 + "algorithmProvider".len());
-    assert_eq!(r.invocant.as_ref().map(|(_, t)| t.as_str()), Some("T"));
+    assert_eq!(r.invocant.as_ref().map(|(_, t)| t.as_str()), Some("App\\Tests\\T"));
 }
 
 
@@ -4507,15 +4520,18 @@ fn php_narrowing_guard_shapes() {
     let mut parser = php_parser();
     let tree = parser.parse(src, None).unwrap();
     let skel = extract(&tree, src.as_bytes(), &php_pack()).unwrap();
-    let narrowed = |v: &str| {
+    let narrowed = |v: &str, cls: &str| {
         skel.witnesses.iter().any(|w| matches!(
             (&w.attachment, &w.payload),
             (WitnessAttachment::Variable { name, .. }, WitnessPayload::InferredType(InferredType::ClassName(c)))
-            if name == v && c == "Install"
+            if name == v && c == cls
         ))
     };
-    for v in ["$a", "$b", "$c", "$d"] {
-        assert!(narrowed(v), "{v} narrowed to the leafed class");
+    // the guard's class token resolves through the file's use-map: the
+    // relative qualifier hangs off the namespace, the bare leaf joins it
+    assert!(narrowed("$a", "App\\Op\\Install"), "$a narrowed to the qualified class");
+    for v in ["$b", "$c", "$d"] {
+        assert!(narrowed(v, "App\\Install"), "{v} narrowed to the class");
     }
 }
 
@@ -4631,7 +4647,7 @@ class Queue {
     let me = fa.symbol_return_type_via_bag(sym("me"), None);
     assert!(matches!(all, Some(InferredType::HashRef) | Some(InferredType::ArrayRef)), "all(): {all:?}");
     assert_eq!(name, Some(InferredType::String), "name(): {name:?}");
-    assert_eq!(me, Some(InferredType::ClassName("Queue".into())), "me(): {me:?}");
+    assert_eq!(me, Some(InferredType::ClassName("App\\Queue".into())), "me(): {me:?}");
     // a null arm makes the return nullable: the fold answers `string` (right
     // for a hover), the total view does not (right for writing the type)
     assert_eq!(fa.total_inferred_return(sym("maybe")), None, "maybe(): a null arm");

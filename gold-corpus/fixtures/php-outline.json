@@ -12,9 +12,9 @@
       "col": 0,
       "expect": {
         "all": [
-          "\"kind\":\"Class\",\"line\":\"3\",\"name\":\"Base\"",
-          "\"kind\":\"Method\",\"line\":\"10\",\"name\":\"tag\",\"package\":\"Base\"",
-          "\"kind\":\"Class\",\"line\":\"21\",\"name\":\"Sub\""
+          "\"kind\":\"Class\",\"line\":\"3\",\"name\":\"App\\\\Contracts\\\\Base\"",
+          "\"kind\":\"Method\",\"line\":\"10\",\"name\":\"tag\",\"package\":\"App\\\\Contracts\\\\Base\"",
+          "\"kind\":\"Class\",\"line\":\"21\",\"name\":\"App\\\\Contracts\\\\Sub\""
         ],
         "none": []
       },

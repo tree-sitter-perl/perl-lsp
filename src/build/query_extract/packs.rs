@@ -1027,13 +1027,15 @@ fn php_annot_type(text: &str) -> Option<InferredType> {
         "void" | "null" | "mixed" | "never" | "object" | "callable" | "self"
         | "static" | "parent" => None,
         t => {
-            // `\App\Models\User` / `App\User` key by the unqualified
-            // leaf — the same identity classes are filed under.
+            // The spelling as written, qualifier and all: the extractor's
+            // identity pass resolves it through the file's use-map
+            // (`\App\Models\User` is absolute, `Op\Install` hangs off the
+            // namespace); only the leaf is checked for class-name shape.
             let leaf = t.rsplit('\\').next().unwrap_or(t);
             (!leaf.is_empty()
                 && leaf.chars().next().is_some_and(|c| c.is_alphabetic() || c == '_')
                 && !leaf.contains(['<', '>', '[', ']', '{', '}']))
-            .then(|| ClassName(leaf.to_string()))
+            .then(|| ClassName(t.to_string()))
         }
     }
 }
@@ -1093,7 +1095,6 @@ pub fn php_pack() -> LangPack {
         rettype_receiver: |text| {
             matches!(text.trim().trim_start_matches('?'), "static" | "$this" | "self")
         },
-        namespace_relative_parents: true,
         field_registry_edges: true,
         super_receiver: |t| t == "parent",
         self_class_tokens: &["self", "static"],
@@ -1193,6 +1194,7 @@ pub fn php_pack() -> LangPack {
         member_shapes_are_strict: true,
         members_are_package_bound: true,
         types_are_capitalized: true,
+        namespace_sep: Some('\\'),
         enum_members: &["value", "name", "cases", "from", "tryFrom"],
         trigger_chars: &["$", ">", ":"],
         receiver_names: &["$this"],
@@ -1523,10 +1525,10 @@ fn php_doc_types(text: &str) -> Vec<DocFact> {
                 .strip_suffix('>')
                 .and_then(|h| h.split_once('<'))
                 .filter(|(_, arg)| matches!(*arg, "static" | "self" | "$this"))
-                .and_then(|(base, _)| phpdoc_type(base))
-                // Leafed: dispatch is leaf-keyed, and an FQ base
-                // (`\Illuminate\...\Builder<static>`) would miss it.
-                .map(|b| b.rsplit('\\').next().unwrap_or(&b).to_string());
+                // As written: the extractor's identity pass resolves the
+                // base (an FQ `\Illuminate\...\Builder<static>` and a bare
+                // `Builder<static>` land on one identity).
+                .and_then(|(base, _)| phpdoc_type(base));
             if let Some(base) = recv_inst {
                 out.push(DocFact::ReturnRecvInstance { base });
             } else if let Some(t) = phpdoc_type(rest) {

@@ -508,7 +508,7 @@ fn php_constructor_references_reach_new_sites_across_files() {
     let src_line = "class Src { public function __construct(private string $p) {} public function go(): void { $this->p; } }";
     let col = (src_line.find("$this").unwrap() + 1).to_string();
     let hover = run(&["--hover", dir.to_str().unwrap(), "Src.php", "2", &col]);
-    assert!(hover.contains("$this: Src"), "`$this` hovers as the enclosing class: {hover}");
+    assert!(hover.contains("$this: App\\Src"), "`$this` hovers as the enclosing class: {hover}");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -764,9 +764,9 @@ fn php_heatmap_pre_prune_preserves_every_fan_in() {
     let walked = run("0");
     assert_eq!(pruned, walked, "the pre-prune must not change any fan-in");
     // `new Helper(2)` in Box.php plus `new static(1)` inside `make()`.
-    assert_eq!(pruned.get("Helper::__construct"), Some(&2), "ctor fan-in = its `new` sites: {pruned:?}");
-    assert_eq!(pruned.get("Helper::unused"), Some(&0), "{pruned:?}");
-    assert_eq!(pruned.get("Helper::make"), Some(&1), "{pruned:?}");
+    assert_eq!(pruned.get("App\\Helper::__construct"), Some(&2), "ctor fan-in = its `new` sites: {pruned:?}");
+    assert_eq!(pruned.get("App\\Helper::unused"), Some(&0), "{pruned:?}");
+    assert_eq!(pruned.get("App\\Helper::make"), Some(&1), "{pruned:?}");
     // R6-9: `Svc::__construct` has no `new` site, but `Svc` is named by a
     // type hint — a container instantiates it, so the ctor is shielded
     // (`class-referenced`) when the row store can answer; `Consumer`'s
@@ -777,14 +777,14 @@ fn php_heatmap_pre_prune_preserves_every_fan_in() {
             .find(|s| s["name"] == "__construct" && s["package"] == class)
             .cloned().expect(class)
     };
-    let svc = ctor_of("Svc");
+    let svc = ctor_of("App\\Svc");
     assert_eq!(svc["reachable_guard"].as_str(), Some("class-referenced"), "{svc}");
     assert_eq!(svc["dead_code_candidate"], false, "{svc}");
-    let consumer = ctor_of("Consumer");
+    let consumer = ctor_of("App\\Consumer");
     assert_eq!(consumer["dead_code_candidate"], true, "{consumer}");
     // An SPL contract method (`Countable::count`) is runtime-invoked, never dead.
     let count = full["symbols"].as_array().unwrap().iter()
-        .find(|s| s["name"] == "count" && s["package"] == "Bag").cloned().expect("Bag::count");
+        .find(|s| s["name"] == "count" && s["package"] == "App\\Bag").cloned().expect("Bag::count");
     assert_eq!(count["reachable_guard"].as_str(), Some("runtime-invoked"), "{count}");
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -978,7 +978,7 @@ fn php_anonymous_class_is_its_own_identity() {
     let rows = heat["symbols"].as_array().or_else(|| heat["rows"].as_array()).expect("rows");
     let ctors: Vec<(String, u64)> = rows.iter().filter(|r| r["name"] == "__construct").map(|r| (r["package"].as_str().unwrap_or("").to_string(), r["fan_in"].as_u64().unwrap_or(0))).collect();
     assert_eq!(ctors.len(), 2, "{ctors:?}");
-    assert!(ctors.iter().all(|(pkg, fan_in)| pkg.starts_with("class_anonymous_") && *fan_in == 1), "each anonymous ctor keyed by its synthesized class with its `new class(...)` site as fan-in: {ctors:?}");
+    assert!(ctors.iter().all(|(pkg, fan_in)| pkg.rsplit('\\').next().unwrap_or(pkg).starts_with("class_anonymous_") && *fan_in == 1), "each anonymous ctor keyed by its synthesized class with its `new class(...)` site as fan-in: {ctors:?}");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -1144,15 +1144,15 @@ fn php_instanceof_narrows_exits_assertions_and_expression_regions() {
         let out = run(&["--hover", root, "Narrow.php", &row.to_string(), &col.to_string()]);
         out.lines().find(|l| l.starts_with(var)).unwrap_or("").to_string()
     };
-    assert_eq!(receiver(8, "$s"), "$s: Circle", "negated block exit");
-    assert_eq!(receiver(12, "$s"), "$s: Circle", "negated brace-less throw");
-    assert_eq!(receiver(16, "$s"), "$s: Square", "assert()");
-    assert_eq!(receiver(19, "$s"), "$s: Circle", "`&&` right operand");
-    assert_eq!(receiver(22, "$s"), "$s: Square", "ternary true arm");
-    assert_eq!(receiver(25, "$s"), "$s: Circle", "match arm");
-    assert_eq!(receiver(28, "$i"), "$i: Square", "`continue` inside a loop body");
-    assert_eq!(receiver(29, "$s"), "$s: Shape", "the loop's narrowing stays inside the loop");
-    assert_eq!(receiver(33, "$s"), "$s: Shape", "a negated guard that does not exit narrows nothing");
+    assert_eq!(receiver(8, "$s"), "$s: App\\Circle", "negated block exit");
+    assert_eq!(receiver(12, "$s"), "$s: App\\Circle", "negated brace-less throw");
+    assert_eq!(receiver(16, "$s"), "$s: App\\Square", "assert()");
+    assert_eq!(receiver(19, "$s"), "$s: App\\Circle", "`&&` right operand");
+    assert_eq!(receiver(22, "$s"), "$s: App\\Square", "ternary true arm");
+    assert_eq!(receiver(25, "$s"), "$s: App\\Circle", "match arm");
+    assert_eq!(receiver(28, "$i"), "$i: App\\Square", "`continue` inside a loop body");
+    assert_eq!(receiver(29, "$s"), "$s: App\\Shape", "the loop's narrowing stays inside the loop");
+    assert_eq!(receiver(33, "$s"), "$s: App\\Shape", "a negated guard that does not exit narrows nothing");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -1238,7 +1238,7 @@ fn php_properties_are_typed_by_assignment() {
     let root = dir.to_str().unwrap();
     let col = lines[11].find("mailer->").unwrap();
     let hover = run(&["--hover", root, "src/Service.php", "11", &col.to_string()]);
-    assert!(hover.contains("mailer: Mailer"), "{hover}");
+    assert!(hover.contains("mailer: App\\Mailer"), "{hover}");
     let col = lines[11].find("send()").unwrap();
     let def = run(&["--definition", root, "src/Service.php", "11", &col.to_string()]);
     assert!(def.contains("src/Mailer.php:4:"), "{def}");

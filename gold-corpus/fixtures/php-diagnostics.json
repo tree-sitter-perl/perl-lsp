@@ -32,9 +32,9 @@
       "expect": {
         "all": [
           "\"code\":\"unimplemented-method\",\"col\":\"6\",\"file\":\"Impl.php\",\"line\":\"13\"",
-          "`Speaker::hush()`",
+          "`App\\\\Contracts\\\\Speaker::hush()`",
           "\"code\":\"unimplemented-method\",\"col\":\"6\",\"file\":\"Impl.php\",\"line\":\"21\"",
-          "`Base::tag()`"
+          "`App\\\\Contracts\\\\Base::tag()`"
         ],
         "none": [
           "\"file\":\"Impl.php\",\"line\":\"3\"",

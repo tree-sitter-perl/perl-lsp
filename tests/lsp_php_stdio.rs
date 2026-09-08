@@ -120,7 +120,7 @@ fn php_signature_help_outline_and_diagnostics_over_stdio() {
     assert!(td.as_array().map(|a| a.is_empty()).unwrap_or(true), "a bool-returning call has no class: {td}");
     // the outline nests members under the class
     let syms = c.request("textDocument/documentSymbol", serde_json::json!({"textDocument": {"uri": svc}}));
-    let class = syms.as_array().unwrap().iter().find(|s| s["name"] == "Service").expect("class");
+    let class = syms.as_array().unwrap().iter().find(|s| s["name"] == "App\\Service").expect("class");
     let kids: Vec<&str> = class["children"].as_array().unwrap().iter().filter_map(|k| k["name"].as_str()).collect();
     assert!(kids.contains(&"__construct") && kids.contains(&"run"), "{kids:?}");
     // diagnostics: the didOpen publish carries the undefined method
@@ -274,13 +274,13 @@ fn php_unimplemented_method_over_stdio() {
     let msgs: Vec<String> = contract.iter().map(|d| d["message"].as_str().unwrap_or("").to_string()).collect();
     assert_eq!(contract.len(), 3, "one diagnostic per concrete composer: {msgs:?}");
     let en_diag = contract.iter().find(|d| d["range"]["start"]["line"] == 3).expect("En is reported");
-    assert!(en_diag["message"].as_str().unwrap().contains("`Greeter::bye()`") && !en_diag["message"].as_str().unwrap().contains("hi()"), "{msgs:?}");
+    assert!(en_diag["message"].as_str().unwrap().contains("`App\\Greeter::bye()`") && !en_diag["message"].as_str().unwrap().contains("hi()"), "{msgs:?}");
     let sub_diag = contract.iter().find(|d| d["range"]["start"]["line"] == 11).expect("Sub is reported");
     let sub_msg = sub_diag["message"].as_str().unwrap();
-    assert!(sub_msg.contains("`Greeter::bye()`") && sub_msg.contains("`Base::tag()`") && !sub_msg.contains("hi()"), "{sub_msg}");
+    assert!(sub_msg.contains("`App\\Greeter::bye()`") && sub_msg.contains("`App\\Base::tag()`") && !sub_msg.contains("hi()"), "{sub_msg}");
     // `__call` catches calls at runtime; the contract is checked at declaration
     let dyn_diag = contract.iter().find(|d| d["range"]["start"]["line"] == 15).expect("Dyn is reported");
-    assert!(dyn_diag["message"].as_str().unwrap().contains("`Greeter::hi()`"), "{msgs:?}");
+    assert!(dyn_diag["message"].as_str().unwrap().contains("`App\\Greeter::hi()`"), "{msgs:?}");
     // the quick-fix on Sub: both stubs before the closing brace
     let acts = c.request("textDocument/codeAction", serde_json::json!({"textDocument": {"uri": u}, "range": sub_diag["range"], "context": {"diagnostics": [sub_diag]}}));
     let act = acts.as_array().and_then(|a| a.iter().find(|x| x["title"].as_str().unwrap_or("").starts_with("Implement"))).cloned().unwrap_or_else(|| panic!("implement action; diag data {} actions {acts}", sub_diag["data"]));
