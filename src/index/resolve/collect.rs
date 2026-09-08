@@ -992,7 +992,8 @@ pub(super) fn collect_from_analysis(
             _ => None,
         };
         if let Some(leaf) = leaf {
-            let claim = module_index.and_then(|idx| idx.pinned_namespace(leaf));
+            let leaf = crate::model::file_analysis::name_match_key(leaf);
+            let claim = module_index.and_then(|idx| idx.pinned_namespace(&leaf));
             if claim.is_some_and(|ns| ns != want) {
                 if !matches!(target.kind, TargetKind::Package) {
                     return;
@@ -1008,10 +1009,11 @@ pub(super) fn collect_from_analysis(
     let import_row_verdict = |span: &Span| -> Option<bool> {
         let want = target.class_ns.as_deref()?;
         let (_, raw) = analysis.pack.import_row_covering(span)?;
+        let target_leaf = crate::model::file_analysis::name_match_key(&target.name);
         Some(
             raw.trim_start_matches('\\')
                 .rsplit_once('\\')
-                .is_some_and(|(ns, leaf)| ns == want && leaf == target.name),
+                .is_some_and(|(ns, leaf)| ns == want && leaf == target_leaf),
         )
     };
 
@@ -1141,8 +1143,25 @@ pub(super) fn collect_from_analysis(
         // whole path in `target_name`; match it on the bare callable tail (the
         // dispatch-class checks in the call arms below still pin the right
         // package/class). Every other ref kind matches by exact name.
+        // A class token (a `PackageRef`, or the class a construction site
+        // spells as a call) references the target iff the spelling NAMES
+        // the target's identity — the file's use-map resolves it, so `use
+        // B\Collection; new Collection()` reaches `B\Collection` and never
+        // the same-leaf stranger. A language whose spellings are identities
+        // compares them verbatim.
+        let spelled_identity = || match analysis.pack.import_row_covering(&r.span) {
+            // a token inside an import row names the row's class in full,
+            // whatever the file's own use-map would make of the leaf
+            Some((_, raw)) => raw.trim_start_matches('\\').to_string(),
+            None => analysis.class_spelling_identity(&r.target_name),
+        };
         let name_matches = if matches!(r.kind, RefKind::FunctionCall { .. } | RefKind::MethodCall { .. }) {
             r.unqualified_target_name() == target.name
+                || (matches!(r.kind, RefKind::FunctionCall { .. })
+                    && matches!(target.kind, TargetKind::Package)
+                    && spelled_identity() == target.name)
+        } else if matches!(r.kind, RefKind::PackageRef) {
+            r.target_name == target.name || spelled_identity() == target.name
         } else {
             r.target_name == target.name
         };
@@ -1169,7 +1188,7 @@ pub(super) fn collect_from_analysis(
         let ctor_matched = !name_matches
             && target.ctor_of.as_deref().is_some_and(|class| {
                 matches!(r.kind, RefKind::FunctionCall { .. })
-                    && r.unqualified_target_name() == class
+                    && (r.unqualified_target_name() == class || spelled_identity() == class)
             });
         if !name_matches && !alias_matched && !ctor_matched {
             continue;

@@ -56,7 +56,7 @@ pub fn rehydration_miss_count() -> usize {
 /// (name, declares-a-Class) per visible symbol. Collected before any strip
 /// so the feeds and tie-breaks never read an emptied `symbols`.
 fn collect_linkage_feed(analysis: &FileAnalysis) -> Vec<(String, bool)> {
-    let mut index: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+    let mut index: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
     let mut feed: Vec<(String, bool)> = Vec::new();
     for sym in analysis.symbols() {
         // The C-linkage surface (`FileAnalysis::is_linkage_visible`) —
@@ -66,13 +66,23 @@ fn collect_linkage_feed(analysis: &FileAnalysis) -> Vec<(String, bool)> {
             continue;
         }
         let is_class = matches!(sym.kind, SymKind::Class);
-        match index.get(sym.name.as_str()) {
-            // A file declaring both a value AND a Class under one name
-            // ranks as a Class.
-            Some(&i) => feed[i].1 |= is_class,
-            None => {
-                index.insert(sym.name.as_str(), feed.len());
-                feed.push((sym.name.clone(), is_class));
+        // A namespaced identity registers under itself AND the leaf it
+        // binds: the identity is the exact key, the leaf the widening one
+        // (`ScopedLookup::use_map_candidates`).
+        let leaf = crate::model::file_analysis::name_match_key(&sym.name);
+        let keys: [Option<&str>; 2] = [
+            Some(sym.name.as_str()),
+            (analysis.pack.namespace_sep.is_some() && leaf != sym.name).then_some(leaf.as_str()),
+        ];
+        for key in keys.into_iter().flatten() {
+            match index.get(key) {
+                // A file declaring both a value AND a Class under one name
+                // ranks as a Class.
+                Some(&i) => feed[i].1 |= is_class,
+                None => {
+                    index.insert(key.to_string(), feed.len());
+                    feed.push((key.to_string(), is_class));
+                }
             }
         }
     }

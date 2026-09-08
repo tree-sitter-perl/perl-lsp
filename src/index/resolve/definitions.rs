@@ -23,11 +23,13 @@ impl<'a> CandidateSet<'a> {
                          child: &str,
                          parent: &str|
          -> Option<String> {
-            a.pack
-                .parent_namespaces
-                .iter()
-                .find(|(c, p, _)| c == child && p == parent)
-                .map(|(_, _, ns)| ns.clone())
+            a.identity_namespace(parent).or_else(|| {
+                a.pack
+                    .parent_namespaces
+                    .iter()
+                    .find(|(c, p, _)| c == child && p == parent)
+                    .map(|(_, _, ns)| ns.clone())
+            })
         };
         let method_decl_in = |a: &crate::model::file_analysis::FileAnalysis,
                               cls: &str|
@@ -1077,7 +1079,18 @@ impl<'a> CandidateSet<'a> {
                 // SimplePie\XML\Declaration\Parser as DeclarationParser;`
                 // means that `Parser`, not the file's own or a stranger's).
                 let row_ns = analysis.import_row_namespace(&r.span);
-                for cached in idx.visible_def_candidates(&r.target_name) {
+                // The identity the token names: the row's own namespace
+                // for a token inside an import row, else the file's
+                // use-map answer for the spelling.
+                let ident = match (row_ns.as_deref(), analysis.pack.namespace_sep) {
+                    (Some(""), Some(_)) => r.target_name.clone(),
+                    (Some(ns), Some(sep)) => format!("{ns}{sep}{}", r.target_name),
+                    _ => analysis.class_spelling_identity(&r.target_name),
+                };
+                let names_target = |s: &crate::model::file_analysis::Symbol| {
+                    s.name == ident || s.name == r.target_name
+                };
+                for cached in idx.visible_def_candidates(&ident) {
                     if Url::from_file_path(&cached.path).is_ok() {
                         let whole = idx.whole_present(&cached);
                         if let Some(ns) = row_ns.as_deref() {
@@ -1093,7 +1106,7 @@ impl<'a> CandidateSet<'a> {
                             label: None,
                         };
                         if let Some(s) = whole.symbols().iter().find(|s| {
-                            s.name == r.target_name
+                            names_target(s)
                                 && matches!(
                                     s.kind,
                                     SymKind::Package | SymKind::Class | SymKind::Module
@@ -1107,7 +1120,7 @@ impl<'a> CandidateSet<'a> {
                         // file top. Pack-only structural gates; Perl module
                         // lookups keep the file-top fallback.
                         } else if let Some(s) = whole.symbols().iter().find(|s| {
-                            s.name == r.target_name
+                            names_target(s)
                                 && (whole.symbol_is_class_content(s)
                                     || whole.symbol_is_file_scope_value(s))
                         }) {
@@ -1286,6 +1299,35 @@ impl<'a> CandidateSet<'a> {
         // owner-anchored step (`qualifier_at_point` + `member_def_location`),
         // which fires unconditionally for pack routing before this tail.
         if let Some(r) = analysis.ref_at(point) {
+            // A construction site (`new Foo(...)`, a call spelling the
+            // class in a pack with a constructor convention) lands on the
+            // class's declaration — the token spells the class; the
+            // constructor's own references reach the site through `ctor_of`.
+            if matches!(r.kind, RefKind::FunctionCall { .. })
+                && !analysis.pack.constructor_names.is_empty()
+            {
+                let ident = analysis.class_spelling_identity(&r.target_name);
+                for cached in idx.visible_def_candidates(&ident) {
+                    if Url::from_file_path(&cached.path).is_err() {
+                        continue;
+                    }
+                    let whole = idx.whole_present(&cached);
+                    let Some(class) = whole
+                        .symbols()
+                        .iter()
+                        .find(|s| matches!(s.kind, SymKind::Class) && s.name == ident)
+                    else {
+                        continue;
+                    };
+                    return vec![RefLocation {
+                        key: FileKey::Path(cached.path.clone()),
+                        span: class.selection_span,
+                        access: AccessKind::Declaration,
+                        rewritable: false,
+                        label: None,
+                    }];
+                }
+            }
             if matches!(r.kind, RefKind::FunctionCall { .. } | RefKind::Variable) {
                 let name = r.unqualified_target_name();
                 for cached in idx.visible_def_candidates(name) {

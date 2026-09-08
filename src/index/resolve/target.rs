@@ -126,7 +126,9 @@ impl TargetRef {
             .iter()
             .any(|c| c == &name)
             .then(|| class.clone());
-        let class_ns = module_index.and_then(|idx| idx.pinned_namespace(&class));
+        let class_ns = origin
+            .identity_namespace(&class)
+            .or_else(|| module_index.and_then(|idx| idx.pinned_namespace(&class)));
         TargetRef {
             name,
             kind: TargetKind::Method { class },
@@ -156,7 +158,9 @@ impl TargetRef {
         module_index: Option<&dyn CrossFileLookup>,
     ) -> Self {
         let method_classes = origin.owned_accessor_family(&class, module_index);
-        let class_ns = module_index.and_then(|idx| idx.pinned_namespace(&class));
+        let class_ns = origin
+            .identity_namespace(&class)
+            .or_else(|| module_index.and_then(|idx| idx.pinned_namespace(&class)));
         TargetRef {
             name,
             kind: TargetKind::Method { class },
@@ -261,9 +265,11 @@ impl TargetRef {
                     .as_ref()
                     .filter(|_| origin.pack.constructor_names.iter().any(|c| c == &name))
                     .cloned();
-                let class_ns = package
-                    .as_deref()
-                    .and_then(|c| module_index.and_then(|idx| idx.pinned_namespace(c)));
+                let class_ns = package.as_deref().and_then(|c| {
+                    origin
+                        .identity_namespace(c)
+                        .or_else(|| module_index.and_then(|idx| idx.pinned_namespace(c)))
+                });
                 // A Sub cursor names a callable; the shape matters only where
                 // the class also stores a value under the name.
                 let member_shape = match package.as_deref() {
@@ -291,7 +297,9 @@ impl TargetRef {
                 // A class-name cursor is leaf-keyed like a member's class:
                 // the origin's use-map pin tells its `Collection` from the
                 // two other files' `Collection`s in the references walk.
-                let class_ns = module_index.and_then(|idx| idx.pinned_namespace(&name));
+                let class_ns = origin
+                    .identity_namespace(&name)
+                    .or_else(|| module_index.and_then(|idx| idx.pinned_namespace(&name)));
                 let mut t = TargetRef::new(name, TargetKind::Package);
                 t.class_ns = class_ns;
                 t
