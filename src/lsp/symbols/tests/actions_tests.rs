@@ -651,8 +651,8 @@ class Widget {
 fn perl_list_return_destructures_positionally() {
     // `return (A->new, B->new)` is a positional tuple (`list_expression` in
     // value position types as `Sequence`), so `my ($q, $a) = mk()` binds
-    // each slot to its element (docs/adr/destructuring.md). The slurpy
-    // tail carries the whole source (the documented approximation).
+    // each slot to its element (docs/adr/destructuring.md). A slurpy tail
+    // from a later position has no projection step and stays untyped.
     let source = "\
 package Queue; sub new { bless {}, shift }
 package Agent; sub new { bless {}, shift }
@@ -668,5 +668,5 @@ my ($first, @rest) = mk();
     assert_eq!(analysis.inferred_type_via_bag("$a", at), Some(InferredType::ClassName("Agent".into())));
     let at2 = tree_sitter::Point { row: 6, column: 0 };
     assert_eq!(analysis.inferred_type_via_bag("$first", at2), Some(InferredType::ClassName("Queue".into())));
-    assert!(matches!(analysis.inferred_type_via_bag("@rest", at2), Some(InferredType::Sequence(_))), "slurpy tail: whole-source lattice");
+    assert_eq!(analysis.inferred_type_via_bag("@rest", at2), None, "slurpy tail: no projection step, untyped");
 }
