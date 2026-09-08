@@ -16,7 +16,7 @@ pub const EXTRACT_VERSION: i64 = 197;
 /// Unlike `EXTRACT_VERSION` (which governs the blobs), a mismatch only wipes
 /// the derived `refs`/`files`/`strings` tables — the blobs stay valid and the
 /// next warm re-shreds rows from the already-decoded analyses for free.
-pub(super) const REF_ROWS_VERSION: &str = "6";
+pub(super) const REF_ROWS_VERSION: &str = "7";
 
 /// Row format of the `conclusions` lane. Bump on any change to the row's
 /// SHAPE or to what its stamp means.

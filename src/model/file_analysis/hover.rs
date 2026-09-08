@@ -124,7 +124,7 @@ impl FileAnalysis {
                                         }
                                         return Some(text);
                                     }
-                                    Some(MethodResolution::CrossFile { ref class, ref def_module }) => {
+                                    Some(MethodResolution::CrossFile { ref class, ref def_module, .. }) => {
                                         if let Some(idx) = module_index {
                                             // Bridged helper lives in `def_module`; real
                                             // inherited method in `class`'s own module.
@@ -242,7 +242,7 @@ impl FileAnalysis {
                                 }
                                 return Some(text);
                             }
-                            Some(MethodResolution::CrossFile { ref class, ref def_module }) => {
+                            Some(MethodResolution::CrossFile { ref class, ref def_module, .. }) => {
                                 if let Some(idx) = module_index {
                                     // Bridged helper lives in `def_module`; real
                                     // inherited method in `class`'s own module.

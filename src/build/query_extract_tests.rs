@@ -476,7 +476,7 @@ fn python_cross_file_method_dispatch_through_mro_walk() {
         "no name-case guess: `g` is untyped until the callee resolves to a known type",
     );
     match fa_b.resolve_method_in_ancestors("Greeter", "greet", Some(&idx)) {
-        Some(crate::model::file_analysis::MethodResolution::CrossFile { class, def_module }) => {
+        Some(crate::model::file_analysis::MethodResolution::CrossFile { class, def_module, .. }) => {
             assert_eq!(class, "Greeter");
             assert_eq!(def_module.as_deref(), Some("a"));
         }

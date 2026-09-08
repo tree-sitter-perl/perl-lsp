@@ -1122,6 +1122,38 @@ impl FileAnalysis {
             .clone()
     }
 
+    /// This file's use-map resolver over its own namespace
+    /// (`own_namespace`); `use_map_with` takes the namespace from a caller
+    /// that already derived it.
+    pub fn use_map(&self) -> UseMap<'_> {
+        let pins = self
+            .use_map_pins
+            .get_or_init(|| std::sync::Arc::new(self.leaf_namespace_pins()));
+        self.use_map_with(pins.own_namespace.as_deref())
+    }
+
+    fn use_map_with<'a>(&'a self, own_namespace: Option<&'a str>) -> UseMap<'a> {
+        UseMap {
+            rows: &self.pack.include_directives,
+            aliases: &self.pack.use_aliases,
+            own_namespace,
+            sep: self.pack.namespace_sep.unwrap_or('\\'),
+        }
+    }
+
+    /// The identity a class-like symbol is filed under cross-file: its
+    /// name joined to its package by the pack's namespace separator
+    /// (`App\Models\User` for `class User` under `namespace App\Models`),
+    /// or the name itself when the pack has no separator (Perl's `Foo::Bar`
+    /// IS the name; C's flat linkage). The global namespace joins to
+    /// nothing.
+    pub fn class_identity(&self, sym: &Symbol) -> String {
+        match (self.pack.namespace_sep, sym.package.as_deref()) {
+            (Some(sep), Some(ns)) if !ns.is_empty() => format!("{ns}{sep}{}", sym.name),
+            _ => sym.name.clone(),
+        }
+    }
+
     fn leaf_namespace_pins(&self) -> UseMapPins {
         let mut pins: std::collections::HashMap<String, Option<String>> =
             std::collections::HashMap::new();
@@ -1180,43 +1212,12 @@ impl FileAnalysis {
             }
         }
         let own_ns = if several { None } else { own.clone() };
-        // A qualified spelling names its namespace outright: absolute with a
-        // leading `\`, else relative to the file's own namespace (php's
-        // rule for `new Downloader\DownloadManager()` inside `Composer`).
+        // A qualified spelling names its namespace outright — the use-map
+        // resolver's answer for the whole spelling, split back to the pin's
+        // (namespace, leaf) shape.
+        let map = self.use_map_with(own_ns.as_deref());
         for (leaf, prefix) in &self.pack.qualified_spellings {
-            let ns = match prefix.strip_prefix('\\') {
-                Some(abs) => abs.to_string(),
-                None => {
-                    // `P\Promise` under `use GuzzleHttp\Promise as P;` and
-                    // `Psr7\Utils` under `use GuzzleHttp\Psr7;`: the head
-                    // segment is an alias or an imported namespace, and the
-                    // rest hangs off what it names.
-                    let (head, rest) = prefix
-                        .split_once('\\')
-                        .map(|(h, r)| (h, Some(r)))
-                        .unwrap_or((prefix.as_str(), None));
-                    let base = self
-                        .pack
-                        .use_aliases
-                        .iter()
-                        .find(|(alias, _, _)| alias == head)
-                        .map(|(_, ns, l)| format!("{ns}\\{l}"))
-                        .or_else(|| {
-                            self.pack.include_directives.iter().find_map(|(_, raw)| {
-                                let t = raw.trim_start_matches('\\');
-                                (t.rsplit('\\').next() == Some(head)).then(|| t.to_string())
-                            })
-                        });
-                    match (base, &own_ns) {
-                        (Some(b), _) => match rest {
-                            Some(r) => format!("{b}\\{r}"),
-                            None => b,
-                        },
-                        (None, Some(o)) => format!("{o}\\{prefix}"),
-                        (None, None) => prefix.clone(),
-                    }
-                }
-            };
+            let (ns, _) = map.resolve_split(&format!("{prefix}\\{leaf}"));
             pin(&mut pins, leaf, &ns);
         }
         let mut spelled: std::collections::HashSet<String> = std::collections::HashSet::new();

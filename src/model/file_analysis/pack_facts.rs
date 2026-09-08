@@ -151,6 +151,13 @@ pub struct PackFacts {
     #[serde(default)]
     pub qualified_spellings: Vec<(String, String)>,
 
+    /// The pack's namespace separator, when class identity is a namespace-
+    /// qualified name (`\` for the use-map packs). `None` = spellings are
+    /// identities already (C's flat linkage, Perl keys its own `::`), so
+    /// `FileAnalysis::class_identity` returns the symbol's name unjoined.
+    #[serde(default)]
+    pub namespace_sep: Option<char>,
+
     /// This file's transitive `#include` closure — canonical header paths it
     /// reaches. The cross-file VISIBILITY key: a name resolves preferentially to
     /// a definition in a file this set contains (`ScopedLookup` ranks

@@ -58,7 +58,14 @@ pub enum MethodResolution {
     /// Every consumer resolves location/signature the same way —
     /// `whole_present(get_cached(def_module.unwrap_or(class))).sub_info_view(method)` — so bridged
     /// helpers and real inherited methods share one code path.
-    CrossFile { class: String, def_module: Option<String> },
+    ///
+    /// `widened` records that the walk found the member on a same-leaf
+    /// class the origin never named — the honest over-approximation a
+    /// leaf-keyed candidate table admits when the pinned identity declares
+    /// nothing. The answer still lands (dirty real-world editing wants it),
+    /// but it is confidently wrong whenever the code is, so the diagnostics
+    /// lane reads this flag and says so (`docs/prompt-class-identity.md`).
+    CrossFile { class: String, def_module: Option<String>, widened: bool },
 }
 
 impl MethodResolution {
@@ -67,6 +74,12 @@ impl MethodResolution {
         match self {
             MethodResolution::Local { class, .. } | MethodResolution::CrossFile { class, .. } => class,
         }
+    }
+
+    /// Did the walk reach this answer by widening past the origin's pinned
+    /// identity? A local hit never widens.
+    pub fn widened(&self) -> bool {
+        matches!(self, MethodResolution::CrossFile { widened: true, .. })
     }
 }
 

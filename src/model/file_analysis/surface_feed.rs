@@ -92,6 +92,7 @@ impl FileAnalysis {
                     parent_namespaces: _parent_namespaces, // rides the parents edges (already projected); read live per query like specializes
                     use_aliases: _use_aliases,             // this file's OWN spelling table; a consumer never sees an alias
                     qualified_spellings: _qualified_spellings, // same: how THIS file spells classes
+                    namespace_sep: _namespace_sep,   // LangPack-wide convention, identical across the pack's files
                     template_params: _template_params, // instantiation substitution reads the provider live
                     include_closure: _include_closure, // this file's OWN visibility ranking key; its freshness lane is the closure dep-stamp (`closure_stamp`)
                     domain_sites: _domain_sites,     // raw sites; domains resolve live at query time

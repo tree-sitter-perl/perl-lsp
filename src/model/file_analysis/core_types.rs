@@ -845,10 +845,19 @@ pub struct Ref {
 /// after the last `::` is the basename; everything before it is the package.
 /// An unqualified name yields `(None, name)`. A leading `::` (`::foo`, the
 /// `main::` shorthand) yields an empty-string package, preserved verbatim.
+///
+/// A name qualified with the namespace separator (`App\Models\User`) splits
+/// the same way — the class identity of a use-map language is its FQN, and
+/// the relational key stays the leaf (`name_match_key`) so a written
+/// spelling and its identity land in one bucket. `App\Foo::bar` splits on
+/// the member qualifier first, keeping the class whole.
 pub fn split_qualified(name: &str) -> (Option<&str>, &str) {
     match name.rsplit_once("::") {
         Some((pkg, base)) => (Some(pkg), base),
-        None => (None, name),
+        None => match name.rsplit_once('\\') {
+            Some((pkg, base)) => (Some(pkg), base),
+            None => (None, name),
+        },
     }
 }
 

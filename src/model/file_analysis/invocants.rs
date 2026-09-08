@@ -1068,7 +1068,7 @@ impl FileAnalysis {
         module_index: Option<&dyn CrossFileLookup>,
     ) -> Option<String> {
         let res = self.resolve_method_in_ancestors(class, name, module_index)?;
-        let MethodResolution::CrossFile { class: on_class, def_module: Some(module) } = res
+        let MethodResolution::CrossFile { class: on_class, def_module: Some(module), .. } = res
         else {
             return None;
         };

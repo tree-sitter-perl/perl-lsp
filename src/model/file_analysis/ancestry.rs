@@ -641,7 +641,7 @@ impl FileAnalysis {
                     }
                 }
                 if has_member {
-                    return Some(MethodResolution::CrossFile { class: cls.to_string(), def_module: None });
+                    return Some(MethodResolution::CrossFile { class: cls.to_string(), def_module: None, widened: false });
                 }
                 // A cross-file DBIC result class's column/relationship accessors
                 // are DEFERRED plugin emissions (`gated_emissions`) that the raw
@@ -656,7 +656,7 @@ impl FileAnalysis {
             // but lives in a differently-named module file (`*{'DateTime::'.
             // $sub} = …` inside `package DateTime::PP`). Record the home module.
             if let Some(home) = idx.module_declaring_method_in_package(method_name, cls) {
-                return Some(MethodResolution::CrossFile { class: cls.to_string(), def_module: Some(home) });
+                return Some(MethodResolution::CrossFile { class: cls.to_string(), def_module: Some(home), widened: false });
             }
             // Plugin-bridged method (a Mojo helper synthesized in another file,
             // bridged to `cls`). Record the registration module so the def
@@ -674,7 +674,7 @@ impl FileAnalysis {
                 ControlFlow::Continue(())
             });
             if bridged_module.is_some() {
-                return Some(MethodResolution::CrossFile { class: cls.to_string(), def_module: bridged_module });
+                return Some(MethodResolution::CrossFile { class: cls.to_string(), def_module: bridged_module, widened: false });
             }
         }
         None
@@ -802,6 +802,7 @@ impl FileAnalysis {
                         return Some(MethodResolution::CrossFile {
                             class: parent.clone(),
                             def_module: None,
+                            widened: false,
                         });
                     }
                 }

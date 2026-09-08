@@ -12,6 +12,8 @@ use tree_sitter::Point;
 
 mod cross_file;
 pub use cross_file::*;
+mod use_map;
+pub use use_map::*;
 mod core_types;
 pub use core_types::*;
 mod ref_table;
