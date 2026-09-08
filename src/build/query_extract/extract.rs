@@ -591,8 +591,8 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     // ---- the file's use-map + written parent qualifiers ----
     // `binding leaf (or alias) → (namespace, real leaf)`, from the `@use.*`
     // captures; `@parent.fq` carries a parent's own written qualifier. Both
-    // feed the namespace-relative parent resolution in the `@parent` handler
-    // (packs with `namespace_relative_parents` only — empty otherwise).
+    // feed the class-identity resolver below (packs with a namespace
+    // separator only — empty otherwise).
     let mut out_use_aliases: Vec<(String, String, String)> = Vec::new();
     let mut use_map: HashMap<String, (String, String)> = HashMap::new();
     let mut group_import_sites: Vec<(String, Span)> = Vec::new();
@@ -613,7 +613,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
         .filter(|e| e.cap == "ref.qualified")
         .map(|e| (e.match_id, e.text.clone()))
         .collect();
-    if pack.namespace_relative_parents {
+    if pack.namespace_sep.is_some() {
         let mut use_fqn: HashMap<usize, String> = HashMap::new();
         let mut use_prefix: HashMap<usize, String> = HashMap::new();
         let mut use_leaf: HashMap<usize, (String, Span)> = HashMap::new();
@@ -663,6 +663,87 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
         }
     }
 
+    // ---- class identities ----
+    // With a namespace separator every class spelling resolves ONCE, here,
+    // to the identity it names: `UseMap::resolve` — the same ladder the
+    // query side's pins are built from — over the rows just collected and
+    // the namespace in force at the spelling's position. A declaration
+    // joins its namespace directly. Without a separator a spelling IS its
+    // identity, and every resolver below is the identity function.
+    let ident_rows: Vec<(Span, String)> = use_map
+        .iter()
+        .filter(|(key, (_, leaf))| *key == leaf)
+        .map(|(_, (ns, leaf))| {
+            let zero = Point { row: 0, column: 0 };
+            let sep = pack.namespace_sep.unwrap_or('\\');
+            let row = if ns.is_empty() { leaf.clone() } else { format!("{ns}{sep}{leaf}") };
+            (Span { start: zero, end: zero }, row)
+        })
+        .collect();
+    let ident_aliases = out_use_aliases.clone();
+    let namespace_marks: Vec<(Point, String)> = {
+        let mut v: Vec<(Point, String)> = events
+            .iter()
+            .filter(|e| e.cap == "def.package.name")
+            .map(|e| (e.start, e.text.trim_start_matches(pack.namespace_sep.unwrap_or('\\')).to_string()))
+            .collect();
+        v.sort_by_key(|(p, _)| (p.row, p.column));
+        v
+    };
+    let namespace_at = |at: Point| -> Option<&str> {
+        namespace_marks
+            .iter()
+            .rev()
+            .find(|(p, _)| (p.row, p.column) <= (at.row, at.column))
+            .map(|(_, n)| n.as_str())
+    };
+    // A template parameter is a name in its own axis (`ParamOf` keys on
+    // the bare spelling), never a class spelling to resolve.
+    let template_names: std::collections::HashSet<String> = events
+        .iter()
+        .filter(|e| e.cap == "doc.comment")
+        .flat_map(|e| (pack.doc_types)(&e.text))
+        .filter_map(|f| match f {
+            super::packs::DocFact::Template { name, .. } => Some(name),
+            _ => None,
+        })
+        .collect();
+    let ident = |written: &str, at: Point| -> String {
+        // the current-class spellings name no namespace; the model
+        // resolves them to the enclosing class
+        if pack.self_class_tokens.contains(&written)
+            || crate::model::conventions::is_current_package_token(written)
+            || template_names.contains(written)
+        {
+            return written.to_string();
+        }
+        match pack.namespace_sep {
+            None => written.to_string(),
+            Some(sep) => crate::model::file_analysis::UseMap {
+                rows: &ident_rows,
+                aliases: &ident_aliases,
+                own_namespace: namespace_at(at),
+                sep,
+            }
+            .resolve(written),
+        }
+    };
+    let ident_type = |ty: InferredType, at: Point| -> InferredType {
+        match pack.namespace_sep {
+            None => ty,
+            Some(_) => ty.map_class_names(&mut |c| ident(c, at)),
+        }
+    };
+    let annot_ident = |text: &str, at: Point| -> Option<InferredType> {
+        (pack.annot_type)(text).map(|t| ident_type(t, at))
+    };
+    let decl_ident = |leaf: &str, at: Point| -> String {
+        match (pack.namespace_sep, namespace_at(at)) {
+            (Some(sep), Some(ns)) if !ns.is_empty() => format!("{ns}{sep}{leaf}"),
+            _ => leaf.to_string(),
+        }
+    };
+
     // ---- the state machine: scope stack + sticky contexts ----
     let mut out = SkeletonAnalysis::default();
     // One constructor call per anonymous-class keyword: the def pattern
@@ -700,6 +781,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     out.enum_members = pack.enum_members.iter().map(|s| s.to_string()).collect();
     out.member_writes = std::mem::take(&mut member_writes);
     out.types_are_capitalized = pack.types_are_capitalized;
+    out.namespace_sep = pack.namespace_sep;
     out.function_scoped_vars = pack.function_scoped_vars;
     out.constructor_names = pack.constructor_names.iter().map(|s| s.to_string()).collect();
     out.type_display = pack
@@ -954,7 +1036,9 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                         })
                     });
                     let guard = narrow_guard.get(&nmid).map(String::as_str);
-                    if let Some(refined) = ty.and_then(|t| (pack.narrow_guard)(guard, &t)) {
+                    if let Some(refined) =
+                        ty.and_then(|t| (pack.narrow_guard)(guard, &t)).map(|r| ident_type(r, e.start))
+                    {
                         // Defer: the region cutoff (first rebind edge) needs the
                         // FlowEdges, minted after this loop. Carry the FULL
                         // guarded-block region [start, end]; the post-pass
@@ -1017,9 +1101,11 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                 // the container Symbol's identity exactly.
                 // A name-less def's context is its synthesized identity,
                 // never the anchor token's text.
-                let raw = defaulted_matches
-                    .get(&e.match_id)
-                    .cloned()
+                let raw = names_by_match
+                    .get(&(e.match_id, "def.class".to_string()))
+                    .filter(|_| pack.namespace_sep.is_some())
+                    .map(|(n, _, _)| n.clone())
+                    .or_else(|| defaulted_matches.get(&e.match_id).cloned())
                     .unwrap_or_else(|| e.text.clone());
                 let text = (pack.shape_name)(&e.cap, &raw);
                 // If this match's `@scope` starts AFTER this context, the
@@ -1057,35 +1143,25 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                     // template-spelled base) so the edge joins the identity
                     // the target class was filed under.
                     let shaped = (pack.shape_name)("parent", &e.text);
-                    if !pack.namespace_relative_parents {
-                        out.parents.push((child.clone(), shaped));
-                    } else {
-                        // php name binding, most-specific first: a written
-                        // qualifier is authoritative; else the file's
-                        // use-map (an ALIAS resolves to the real leaf — the
-                        // `use X as Y` edge was dead under the alias
-                        // spelling); else the unqualified default IS the
-                        // child's own namespace (PHP class names never fall
-                        // through to global). Every edge records its
-                        // namespace for FQ chain validation.
-                        let (leaf, ns) = if let Some(fq) =
-                            parent_fq_by_match.get(&e.match_id)
-                        {
-                            split_ns_leaf(fq)
-                        } else if let Some((ns, real_leaf)) = use_map.get(shaped.as_str()) {
-                            (real_leaf.clone(), ns.clone())
-                        } else {
-                            let ns = out
-                                .symbols
-                                .iter()
-                                .rev()
-                                .find(|s| s.kind == "class" && &s.name == child)
-                                .and_then(|s| s.package.clone())
-                                .unwrap_or_default();
-                            (shaped, ns)
-                        };
-                        out.parents.push((child.clone(), leaf.clone()));
-                        out.parent_namespaces.push((child.clone(), leaf, ns));
+                    // The parent pattern is its own match: its name entry
+                    // is the pre-scan leaf, so the child's identity joins
+                    // the namespace here exactly as the def handler did.
+                    let child = decl_ident(child, e.start);
+                    match pack.namespace_sep {
+                        None => out.parents.push((child.clone(), shaped)),
+                        Some(_) => {
+                            // The written spelling — its own qualifier when
+                            // it has one, else the (possibly aliased) leaf —
+                            // resolves to the parent's identity; the
+                            // namespace rides beside the leaf for the FQ
+                            // chain validation.
+                            let written =
+                                parent_fq_by_match.get(&e.match_id).cloned().unwrap_or(shaped);
+                            let fqn = ident(&written, e.start);
+                            let (leaf, ns) = split_ns_leaf(&fqn);
+                            out.parents.push((child.clone(), fqn));
+                            out.parent_namespaces.push((child.clone(), leaf, ns));
+                        }
                     }
                 }
             }
@@ -1188,6 +1264,21 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                             .map(|n| (n, e.start, e.start, true))
                     })
                     .unwrap_or((e.text.clone(), e.start, e.end, false));
+                // A class declaration's identity is its FQN — the leaf
+                // joined to the namespace in force — so its members file
+                // under it and every spelling of it resolves to one key.
+                // The match's name entry carries it too: the `@context` and
+                // `@parent` handlers of the same match read ONE identity.
+                let name = if kind == "class" {
+                    let fqn = decl_ident(&name, e.start);
+                    if fqn != name {
+                        names_by_match
+                            .insert((e.match_id, e.cap.clone()), (fqn.clone(), name_start, name_end));
+                    }
+                    fqn
+                } else {
+                    name
+                };
                 def_name_spans.push((e.start_byte, e.end_byte));
                 // An out-of-line def's `Class::` qualifier names its owner
                 // (the LAST `::` segment, the unqualified class the engine
@@ -1196,6 +1287,14 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                     .get(&e.match_id)
                     .map(|q| q.rsplit("::").next().unwrap_or(q).to_string())
                     .or_else(|| package.clone());
+                // A class's package is its NAMESPACE, whatever context it
+                // sits in (an anonymous class inside a method is still
+                // filed under the namespace its identity carries).
+                let pkg = if kind == "class" && pack.namespace_sep.is_some() {
+                    namespace_at(e.start).map(str::to_string)
+                } else {
+                    pkg
+                };
                 let shaped = (pack.shape_name)(&format!("def.{kind}"), &name);
                 let def_scope = if hoisted.contains(&e.match_id) {
                     out.scopes.get(cur_scope.0 as usize).and_then(|s| s.parent).unwrap_or(cur_scope)
@@ -1290,7 +1389,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                     scope: def_scope,
                     return_type: rettype_by_match
                         .get(&e.match_id)
-                        .and_then(|t| (pack.annot_type)(t)),
+                        .and_then(|t| annot_ident(t, e.start)),
                     receiver_instance_of: None,
                     receiver_return: rettype_by_match
                         .get(&e.match_id)
@@ -1396,7 +1495,11 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                         start: method_start,
                         end: e.end,
                         scope: cur_scope,
-                        invocant: Some((qual_span, leaf)),
+                        // A string names its class ABSOLUTELY (`'A\F::cb'`
+                        // is `\A\F`, never relative to the namespace): the
+                        // invocant spells it so, and the use-map resolution
+                        // every bareword receiver goes through keeps it.
+                        invocant: Some((qual_span, format!("\\{}", qual.trim_start_matches('\\')))),
                         member_op: None,
                         arg_count: None,
                         shape: crate::model::file_analysis::MemberShape::Callable,
@@ -1654,6 +1757,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                                     .get(&(e.end.row, e.end.column))
                                     .map(|n| *n as u32),
                                 package.as_deref(),
+                                &|c| ident(c, e.start),
                             );
                         }
                     }
@@ -1679,6 +1783,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                             .get(&(e.end.row, e.end.column))
                             .map(|n| *n as u32),
                         package.as_deref(),
+                        &|c| ident(c, e.start),
                     );
                 }
             }
@@ -1967,8 +2072,14 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                             )
                         })
                     } else {
+                        let written = qualified_by_match
+                            .get(&e.match_id)
+                            .map(String::as_str)
+                            .unwrap_or(name.as_str());
                         Some(crate::model::witnesses::WitnessPayload::Edge(
-                            crate::model::witnesses::WitnessAttachment::TypeName(name),
+                            crate::model::witnesses::WitnessAttachment::TypeName(ident(
+                                written, e.start,
+                            )),
                         ))
                     };
                     if let Some(payload) = payload {
@@ -1992,6 +2103,8 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                     .find(|x| x.match_id == e.match_id && x.cap == "classref.name")
                     .map(|x| (pack.shape_name)("ref.call", &x.text));
                 if let Some(name) = name {
+                    let written =
+                        e.text.split("::").next().map(|q| q.trim().to_string()).unwrap_or_else(|| name.clone());
                     // A qualified spelling (`Sql\Column::class`) spells its
                     // head — the import that head binds is USED here, the
                     // same fact a qualified call records.
@@ -2010,7 +2123,9 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                             "skeleton-classref".into(),
                         ),
                         payload: crate::model::witnesses::WitnessPayload::Edge(
-                            crate::model::witnesses::WitnessAttachment::TypeName(name),
+                            crate::model::witnesses::WitnessAttachment::TypeName(ident(
+                                &written, e.start,
+                            )),
                         ),
                         span,
                     });
@@ -2023,7 +2138,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
             // evidence outranks the callee-return derivation.
             "expr.annot" => {
                 if let Some(annot) = annot_by_match.get(&e.match_id) {
-                    if let Some(InferredType::ClassName(cn)) = (pack.annot_type)(annot) {
+                    if let Some(InferredType::ClassName(cn)) = annot_ident(annot, e.start) {
                         let span = Span { start: e.start, end: e.end };
                         lit_spans.push((e.start_byte, e.end_byte, span));
                         out.annot_expr_spans.push(span);
@@ -2375,7 +2490,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
             // primitives stay leaves; `None` (auto/void) defers to the flow
             // edge as before. `TypeName` chases the typedef or falls back to
             // the same `ClassName`, so a plain struct/class is unchanged.
-            let payload = match (pack.annot_type)(annot) {
+            let payload = match annot_ident(annot, *at) {
                 Some(InferredType::ClassName(cn)) => Some(
                     crate::model::witnesses::WitnessPayload::Edge(
                         crate::model::witnesses::WitnessAttachment::TypeName(cn),
@@ -2597,7 +2712,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
         }
         let (Some(var), Some(ty)) = (narrow_var.get(&mid), narrow_type.get(&mid)) else { continue };
         let guard = narrow_guard.get(&mid).map(String::as_str);
-        if let Some(refined) = (pack.narrow_guard)(guard, ty) {
+        if let Some(refined) = (pack.narrow_guard)(guard, ty).map(|r| ident_type(r, region.start)) {
             pending_narrow.push(((pack.shape_name)("ref.var", var), refined, region, sid));
         }
     }
@@ -2724,7 +2839,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                                 scope: sym.scope,
                                 return_type: ret
                                     .as_deref()
-                                    .and_then(|t| (pack.annot_type)(t)),
+                                    .and_then(|t| annot_ident(t, at)),
                                 receiver_return: ret
                                     .as_deref()
                                     .is_some_and(|t| (pack.rettype_receiver)(t)),
@@ -2765,7 +2880,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                                 && !sym.receiver_return
                                 && sym.receiver_instance_of.is_none()
                             {
-                                sym.receiver_instance_of = Some(base.clone());
+                                sym.receiver_instance_of = Some(ident(base, sym.start));
                             }
                         }
                         DocFact::Return(t) => {
@@ -2784,7 +2899,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                                     if sym.return_type.is_none() {
                                         sym.receiver_return = true;
                                     }
-                                } else if let Some(doc) = (pack.annot_type)(t) {
+                                } else if let Some(doc) = annot_ident(t, sym.start) {
                                     if !bare_container
                                         || matches!(
                                             doc,
@@ -2843,7 +2958,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                             // above an assignment) types that specific local.
                             if let Some(vn) = var_name {
                                 if sym.kind == "var" && &sym.name == vn {
-                                    if let Some(ty) = (pack.annot_type)(t) {
+                                    if let Some(ty) = annot_ident(t, sym.start) {
                                         doc_witnesses.push(doc_cast_witness(
                                             &sym.name,
                                             sym.scope,
@@ -2872,7 +2987,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                             // canonical refinement — the syntax cannot spell
                             // the element, the doc exists to add it.
                             if sym.kind == "field" {
-                                let Some(ty) = (pack.annot_type)(t) else { continue };
+                                let Some(ty) = annot_ident(t, sym.start) else { continue };
                                 if doc_admits(
                                     pack,
                                     &annot_text_by_var,
@@ -2899,7 +3014,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                         DocFact::Param { name, ty } => {
                             // The def's own parameter — untyped, or a bare
                             // container the doc refines (same rule as Var).
-                            let Some(ty) = (pack.annot_type)(ty) else { continue };
+                            let Some(ty) = annot_ident(ty, sym.start) else { continue };
                             let in_def = |p: Point| {
                                 (p.row, p.column) >= (sym.start.row, sym.start.column)
                                     && (p.row, p.column) <= (sym.end.row, sym.end.column)
@@ -2994,7 +3109,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
             for (end_row, (_, facts)) in &by_end_row {
                 for f in facts {
                     let DocFact::Var { ty, name: Some(vn) } = f else { continue };
-                    let Some(t) = (pack.annot_type)(ty) else { continue };
+                    let Some(t) = annot_ident(ty, Point { row: *end_row, column: 0 }) else { continue };
                     let has_def = out
                         .symbols
                         .iter()
@@ -3321,6 +3436,7 @@ fn push_hop_witness(
     scope: crate::model::file_analysis::ScopeId,
     arity: Option<u32>,
     enclosing_class: Option<&str>,
+    class_ident: &dyn Fn(&str) -> String,
 ) {
     use crate::model::witnesses as wit;
     let hop_recv = (pack.shape_name)("hop.recv", recv_text);
@@ -3348,7 +3464,7 @@ fn push_hop_witness(
             attachment: wit::WitnessAttachment::Expr(recv_span),
             source: wit::WitnessSource::Builder("skeleton".into()),
             payload: wit::WitnessPayload::InferredType(
-                crate::model::file_analysis::InferredType::ClassName(recv_text.to_string()),
+                crate::model::file_analysis::InferredType::ClassName(class_ident(recv_text)),
             ),
             span: recv_span,
         });

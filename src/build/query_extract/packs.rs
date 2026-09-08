@@ -52,15 +52,6 @@ pub struct LangPack {
     /// (php `"HashRef"` → `"array"`). Rides `PackFacts.type_display`;
     /// every human surface translates through it. Empty = engine tags.
     pub type_display: &'static [(&'static str, &'static str)],
-    /// Do this language's UNQUALIFIED parent names bind namespace-
-    /// relatively (php: an un-imported `extends Base` in `namespace App`
-    /// means `App\Base`, aliases and imports first)? Turns on the use-map
-    /// parent resolution: `@parent` leaves resolve through the file's
-    /// `@use.*` captures (alias → the real leaf) and every parent edge
-    /// records its namespace for FQ chain validation. False = parents pass
-    /// through verbatim with no namespace rows (Perl's package names are
-    /// absolute; cpp identity is its own arc).
-    pub namespace_relative_parents: bool,
     /// Field types answer through the registry: each data-member decl mints
     /// `PackageSymbol{class, field} → Edge(Variable)` so a property-access
     /// hop (`$this->query->where(...)`) dispatches the field and chains.
@@ -269,6 +260,14 @@ pub struct LangPack {
     /// type (php's `use function A\b;` — the grammar parses it as a class
     /// row).
     pub types_are_capitalized: bool,
+    /// The namespace separator when the pack's class identity is a
+    /// namespace-qualified name (`\\` for php). With one, the extractor
+    /// mints every class identity — declarations, parents, constructor
+    /// and type spellings, static receivers — as the FQN resolved through
+    /// the file's use-map (`UseMap::resolve`), and `PackFacts::
+    /// namespace_sep` carries it for the query side. `None` = a spelling
+    /// IS its identity (C's flat linkage).
+    pub namespace_sep: Option<char>,
     /// Members every enum carries by language rule (php: `->value`,
     /// `->name`, `::cases()`, `::from()`, `::tryFrom()`).
     pub enum_members: &'static [&'static str],
@@ -566,7 +565,6 @@ pub fn perl_pack() -> LangPack {
         annot_type: |_| None,
         rettype_receiver: |_| false,
         type_display: &[],
-        namespace_relative_parents: false,
         field_registry_edges: false,
         super_receiver: |_| false,
         self_class_tokens: &[],
@@ -607,6 +605,7 @@ pub fn perl_pack() -> LangPack {
         member_shapes_are_strict: false,
         members_are_package_bound: true,
         types_are_capitalized: false,
+        namespace_sep: None,
         enum_members: &[],
         trigger_chars: &["$", "@", "%", ">", ":", "{"],
         receiver_names: &[],
@@ -648,7 +647,6 @@ pub fn python_pack() -> LangPack {
         },
         rettype_receiver: |_| false,
         type_display: &[],
-        namespace_relative_parents: false,
         field_registry_edges: false,
         super_receiver: |_| false,
         self_class_tokens: &[],
@@ -693,6 +691,7 @@ pub fn python_pack() -> LangPack {
         member_shapes_are_strict: false,
         members_are_package_bound: true,
         types_are_capitalized: false,
+        namespace_sep: None,
         enum_members: &[],
         trigger_chars: &["."],
         receiver_names: &["self", "cls"],
@@ -730,7 +729,6 @@ pub fn r_pack() -> LangPack {
         annot_type: |_| None,
         rettype_receiver: |_| false,
         type_display: &[],
-        namespace_relative_parents: false,
         field_registry_edges: false,
         super_receiver: |_| false,
         self_class_tokens: &[],
@@ -779,6 +777,7 @@ pub fn r_pack() -> LangPack {
         member_shapes_are_strict: false,
         members_are_package_bound: true,
         types_are_capitalized: false,
+        namespace_sep: None,
         enum_members: &[],
         trigger_chars: &["$", "@", ":"],
         receiver_names: &[],
@@ -811,7 +810,6 @@ pub fn cmake_pack() -> LangPack {
         annot_type: |_| None,
         rettype_receiver: |_| false,
         type_display: &[],
-        namespace_relative_parents: false,
         field_registry_edges: false,
         super_receiver: |_| false,
         self_class_tokens: &[],
@@ -873,6 +871,7 @@ pub fn cmake_pack() -> LangPack {
         member_shapes_are_strict: false,
         members_are_package_bound: true,
         types_are_capitalized: false,
+        namespace_sep: None,
         enum_members: &[],
         trigger_chars: &["{", "("],
         receiver_names: &[],
@@ -953,7 +952,6 @@ pub fn cpp_pack() -> LangPack {
         },
         rettype_receiver: |_| false,
         type_display: &[],
-        namespace_relative_parents: false,
         field_registry_edges: false,
         super_receiver: |_| false,
         self_class_tokens: &[],
@@ -1021,6 +1019,7 @@ pub fn cpp_pack() -> LangPack {
         member_shapes_are_strict: false,
         members_are_package_bound: true,
         types_are_capitalized: false,
+        namespace_sep: None,
         enum_members: &[],
         trigger_chars: &[".", ">", ":"],
         receiver_names: &["this"],
