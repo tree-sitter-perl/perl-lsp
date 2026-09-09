@@ -74,14 +74,6 @@ pub struct TargetRef {
     /// token spells the class. Set in the identity lane from
     /// `PackFacts::constructor_names`; `None` everywhere else.
     pub ctor_of: Option<String>,
-    /// The namespace the ORIGIN's scope pins for this target's class leaf
-    /// (`CrossFileLookup::pinned_namespace` — a use-map axis's `use` row,
-    /// own declaration, or own namespace). Class-keyed targets are leaf-keyed everywhere else (the
-    /// override family, the dispatch chain, the by-name index), and three
-    /// same-leaf `Factory`s share every one of those; the pin is what tells
-    /// a scanned file's `Factory` from the target's. `None` = no claim
-    /// (Perl, cpp, an un-imported leaf), and the gate stands down.
-    pub class_ns: Option<String>,
     /// The written shape of the member this target names, set ONLY when
     /// the declaring class overloads the name across kinds (a property AND
     /// a method called `recorded` — `member_kinds_overloaded`). Declaration
@@ -126,9 +118,6 @@ impl TargetRef {
             .iter()
             .any(|c| c == &name)
             .then(|| class.clone());
-        let class_ns = origin
-            .identity_namespace(&class)
-            .or_else(|| module_index.and_then(|idx| idx.pinned_namespace(&class)));
         TargetRef {
             name,
             kind: TargetKind::Method { class },
@@ -137,7 +126,6 @@ impl TargetRef {
             def_paths: Vec::new(),
             bare_constant: false,
             ctor_of,
-            class_ns,
             member_shape: Default::default(),
         }
     }
@@ -158,9 +146,6 @@ impl TargetRef {
         module_index: Option<&dyn CrossFileLookup>,
     ) -> Self {
         let method_classes = origin.owned_accessor_family(&class, module_index);
-        let class_ns = origin
-            .identity_namespace(&class)
-            .or_else(|| module_index.and_then(|idx| idx.pinned_namespace(&class)));
         TargetRef {
             name,
             kind: TargetKind::Method { class },
@@ -169,7 +154,6 @@ impl TargetRef {
             def_paths: Vec::new(),
             bare_constant: false,
             ctor_of: None,
-            class_ns,
             member_shape: Default::default(),
         }
     }
@@ -188,7 +172,6 @@ impl TargetRef {
             def_paths: Vec::new(),
             bare_constant: false,
             ctor_of: None,
-            class_ns: None,
             member_shape: Default::default(),
         }
     }
@@ -265,11 +248,6 @@ impl TargetRef {
                     .as_ref()
                     .filter(|_| origin.pack.constructor_names.iter().any(|c| c == &name))
                     .cloned();
-                let class_ns = package.as_deref().and_then(|c| {
-                    origin
-                        .identity_namespace(c)
-                        .or_else(|| module_index.and_then(|idx| idx.pinned_namespace(c)))
-                });
                 // A Sub cursor names a callable; the shape matters only where
                 // the class also stores a value under the name.
                 let member_shape = match package.as_deref() {
@@ -286,7 +264,6 @@ impl TargetRef {
                     def_paths: Vec::new(),
                     bare_constant: false,
                     ctor_of,
-                    class_ns,
                     member_shape,
                 }
             }
@@ -294,15 +271,10 @@ impl TargetRef {
                 TargetRef::method(name, class, origin, module_index, scope)
             }
             RenameKind::Package(name) => {
-                // A class-name cursor is leaf-keyed like a member's class:
-                // the origin's use-map pin tells its `Collection` from the
-                // two other files' `Collection`s in the references walk.
-                let class_ns = origin
-                    .identity_namespace(&name)
-                    .or_else(|| module_index.and_then(|idx| idx.pinned_namespace(&name)));
-                let mut t = TargetRef::new(name, TargetKind::Package);
-                t.class_ns = class_ns;
-                t
+                // A class-name cursor names an identity; the matcher
+                // resolves every scanned file's spelling to one too, so
+                // three same-leaf `Collection`s never share a target.
+                TargetRef::new(name, TargetKind::Package)
             }
             RenameKind::Handler { owner, name } => {
                 TargetRef::new(name.clone(), TargetKind::Handler { owner, name })

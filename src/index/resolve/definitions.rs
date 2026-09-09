@@ -4,9 +4,9 @@ use super::*;
 
 impl<'a> CandidateSet<'a> {
     /// `parent::method` definition sites: a bounded BFS over the DECLARED
-    /// parent edges (never the enclosing class itself), namespace-routed
-    /// through the pack's `parent_namespaces` rows so a same-leaf aliased
-    /// parent resolves into the RIGHT file, and interface-marked classes
+    /// parent edges (never the enclosing class itself), each edge carrying
+    /// the parent's identity so a same-leaf aliased parent resolves into
+    /// the RIGHT file, and interface-marked classes
     /// (the "interface" flavor attribute) defer to concrete ones —
     /// `parent::` runs the class chain, and the abstract stub answers only
     /// when nothing concrete defines the method. `None` = no parent
@@ -19,17 +19,8 @@ impl<'a> CandidateSet<'a> {
     ) -> Option<Vec<RefLocation>> {
         let analysis = self.origin;
         let encl = analysis.enclosing_class_for_scope(r.scope)?;
-        let parent_ns = |a: &crate::model::file_analysis::FileAnalysis,
-                         child: &str,
-                         parent: &str|
-         -> Option<String> {
-            a.identity_namespace(parent).or_else(|| {
-                a.pack
-                    .parent_namespaces
-                    .iter()
-                    .find(|(c, p, _)| c == child && p == parent)
-                    .map(|(_, _, ns)| ns.clone())
-            })
+        let parent_ns = |a: &crate::model::file_analysis::FileAnalysis, parent: &str| -> Option<String> {
+            a.identity_namespace(parent)
         };
         let method_decl_in = |a: &crate::model::file_analysis::FileAnalysis,
                               cls: &str|
@@ -47,7 +38,7 @@ impl<'a> CandidateSet<'a> {
         let mut queue: std::collections::VecDeque<(String, Option<String>)> = analysis
             .declared_parents(&encl)
             .iter()
-            .map(|p| (p.clone(), parent_ns(analysis, &encl, p)))
+            .map(|p| (p.clone(), parent_ns(analysis, p)))
             .collect();
         let mut fallback: Option<RefLocation> = None;
         let mut seen: std::collections::HashSet<(String, String)> = Default::default();
@@ -103,7 +94,7 @@ impl<'a> CandidateSet<'a> {
                         whole
                             .declared_parents(&parent)
                             .iter()
-                            .map(|p| (p.clone(), parent_ns(&whole, &parent, p))),
+                            .map(|p| (p.clone(), parent_ns(&whole, p))),
                     );
                 }
             }

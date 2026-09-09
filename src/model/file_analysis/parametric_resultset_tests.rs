@@ -368,7 +368,6 @@ $schema->resultset('Schema::Result::Users')->search({ name => 'X' });
         kind: TargetKind::HashKeyOfBridged("Schema::Result::Users".to_string()),
         method_classes: Vec::new(), scope: crate::index::resolve::OverrideScope::Dispatch, def_paths: Vec::new(), bare_constant: false,
 ctor_of: None,
-class_ns: None,
 member_shape: Default::default(),
     };
     let refs = refs_to(&store, Some(&idx), &target, RoleMask::WORKSPACE);
@@ -495,7 +494,6 @@ my $name = $schema->resultset('Schema::Result::Users')->find(1)->name;
             },
             method_classes: Vec::new(), scope: crate::index::resolve::OverrideScope::Dispatch, def_paths: Vec::new(), bare_constant: false,
 ctor_of: None,
-class_ns: None,
 member_shape: Default::default(),
         },
         RoleMask::EDITABLE,
@@ -815,7 +813,6 @@ sub action {
         kind: TargetKind::HashKeyOfBridged("Schema::Result::Sner".to_string()),
         method_classes: Vec::new(), scope: crate::index::resolve::OverrideScope::Dispatch, def_paths: Vec::new(), bare_constant: false,
 ctor_of: None,
-class_ns: None,
 member_shape: Default::default(),
     };
     let refs = refs_to(&store, Some(&idx), &target, RoleMask::WORKSPACE);
@@ -888,7 +885,6 @@ sub action {
         kind: TargetKind::HashKeyOfBridged("Schema::Result::Sner".to_string()),
         method_classes: Vec::new(), scope: crate::index::resolve::OverrideScope::Dispatch, def_paths: Vec::new(), bare_constant: false,
 ctor_of: None,
-class_ns: None,
 member_shape: Default::default(),
     };
     let refs = refs_to(&store, Some(&idx), &target, RoleMask::WORKSPACE);

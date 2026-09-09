@@ -86,7 +86,6 @@ $d->ping;
         kind: TargetKind::Method { class: "Base".to_string() },
         method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), bare_constant: false,
             ctor_of: None,
-            class_ns: None,
             member_shape: Default::default(),
     };
 
@@ -157,7 +156,6 @@ $b->ping;
         kind: TargetKind::Method { class: "Base".to_string() },
         method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), bare_constant: false,
             ctor_of: None,
-            class_ns: None,
             member_shape: Default::default(),
     };
 
@@ -231,7 +229,6 @@ $g->hello;
         kind: TargetKind::Method { class: "Greeter".to_string() },
         method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), bare_constant: false,
             ctor_of: None,
-            class_ns: None,
             member_shape: Default::default(),
     };
 
