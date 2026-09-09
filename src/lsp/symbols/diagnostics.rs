@@ -852,33 +852,9 @@ pub fn pack_symbol_diagnostics(
         // The dispatch projection every verb reads (`$this` is a typed
         // receiver here — the extractor witnesses it at the class body).
         let Some(class) = analysis.method_call_invocant_class(r, idx) else { continue };
-        // What namespace the CALL means by the leaf: a `parent::` call's
-        // parent is the parent-namespace row of the class it is written in
-        // (an aliased parent carrying the child's own leaf is not the
-        // child); any other call, the file's pin or its own namespace.
-        let super_call = matches!(
-            crate::model::conventions::MethodToken::parse(&r.target_name),
-            crate::model::conventions::MethodToken::Super(_)
-        );
-        let want_ns = if let Some(ns) = analysis.identity_namespace(&class) {
-            Some(ns)
-        } else if super_call {
-            analysis
-                .scope_at(r.span.start)
-                .and_then(|sc| analysis.enclosing_class_for_scope(sc))
-                .and_then(|c| {
-                    analysis
-                        .pack
-                        .parent_namespaces
-                        .iter()
-                        .find(|(child, parent, _)| *child == c && *parent == class)
-                        .map(|(_, _, ns)| ns.clone())
-                })
-                .or_else(|| analysis.leaf_namespace(&class))
-                .or_else(|| analysis.use_map_pins().own_namespace.clone())
-        } else {
-            analysis.leaf_namespace(&class).or_else(|| analysis.use_map_pins().own_namespace.clone())
-        };
+        // The receiver is an identity: its own namespace names the class's
+        // defining candidate (a pack without namespaces makes no claim).
+        let want_ns = analysis.identity_namespace(&class);
         let facts = owner_memo.entry((class.clone(), want_ns.clone())).or_insert_with(|| {
             // The class's DEFINING analysis: this file, or — once the
             // workspace index is settled — the candidate its namespace
@@ -1739,58 +1715,50 @@ fn ancestry_visible(analysis: &FileAnalysis, idx: Option<&dyn CrossFileLookup>, 
         a: &FileAnalysis,
         idx: Option<&dyn CrossFileLookup>,
         class: &str,
-        seen: &mut std::collections::HashSet<(String, String)>,
+        seen: &mut std::collections::HashSet<String>,
         depth: usize,
     ) -> bool {
         if depth > 20 {
             return true;
         }
         for p in a.declared_parents(class) {
-            let leaf = p.rsplit(['\\', ':']).next().unwrap_or(p);
-            // The parent's namespace as THIS edge wrote it (`extends
-            // \Exception` is the global one, whatever leaf the child
-            // carries — `class Exception extends \Exception` must not find
-            // itself), else as this file sees the leaf (its `use` rows, its
-            // own namespace) — a same-leaf stranger elsewhere in the
-            // workspace is not this parent.
-            let want_ns = a
-                .identity_namespace(p)
-                .or_else(|| {
-                    a.pack
-                        .parent_namespaces
-                        .iter()
-                        .find(|(c, pl, _)| c == class && pl == leaf)
-                        .map(|(_, _, ns)| ns.clone())
-                })
-                .or_else(|| a.leaf_namespace(leaf))
-                .or_else(|| a.use_map_pins().own_namespace.clone());
+            // The edge carries the parent's identity: a namespaced pack's
+            // symbol is filed under it (`class Exception extends \Exception`
+            // never finds itself), a pack without namespaces under the leaf.
+            let key: &str = if a.identity_namespace(p).is_some() {
+                p
+            } else {
+                p.rsplit(['\\', ':']).next().unwrap_or(p)
+            };
             let local = a
                 .symbols()
                 .iter()
-                .any(|s| matches!(s.kind, FaSymKind::Class | FaSymKind::Package) && s.name == leaf)
-                && a.declared_type_namespace(leaf) == want_ns;
+                .any(|s| matches!(s.kind, FaSymKind::Class | FaSymKind::Package) && s.name == key);
             if local {
-                if !seen.insert((want_ns.clone().unwrap_or_default(), leaf.to_string())) {
+                if !seen.insert(key.to_string()) {
                     continue;
                 }
-                if !walk(a, idx, leaf, seen, depth + 1) {
+                if !walk(a, idx, key, seen, depth + 1) {
                     return false;
                 }
                 continue;
             }
             let Some(i) = idx else { return false };
             let mut any = false;
-            for c in &i.visible_def_candidates(leaf) {
+            for c in &i.visible_def_candidates(key) {
                 let whole = i.symbols_present(c);
-                let declared = whole.declared_type_namespace(leaf);
-                if declared.is_none() || (want_ns.is_some() && declared != want_ns) {
+                let declares = whole
+                    .symbols()
+                    .iter()
+                    .any(|s| matches!(s.kind, FaSymKind::Class | FaSymKind::Package) && s.name == key);
+                if !declares {
                     continue;
                 }
                 any = true;
-                if !seen.insert((declared.unwrap_or_default(), leaf.to_string())) {
+                if !seen.insert(key.to_string()) {
                     continue;
                 }
-                if !walk(&whole, idx, leaf, seen, depth + 1) {
+                if !walk(&whole, idx, key, seen, depth + 1) {
                     return false;
                 }
             }
