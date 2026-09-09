@@ -2323,12 +2323,14 @@ fn is_reassign_edge(w: &Witness) -> bool {
         && matches!(&w.source, WitnessSource::Builder(t) if t == REASSIGN_FLOW_SOURCE)
 }
 
-/// A reassignment whose source nothing can type still HAPPENED: the
-/// variable now holds something untypable, not its earlier value. Unless
-/// nothing was bound before it — a pack without declaration syntax marks
-/// every plain assignment `reassigns`, and the FIRST one in a scope is the
-/// declaration, which stays absent exactly as a `my` whose RHS nothing can
-/// type does.
+/// A reassignment whose source nothing can type still HAPPENED: the edge
+/// materializes to its reset marker, an `Unknown` at the site under the
+/// reassign source, which `FrameworkAwareTypeFold` reads as the cutoff.
+/// Unless nothing was bound before it in the scope — asked of the BAG, edges
+/// included, because the prior binding may itself be an edge nothing typed
+/// — in which case this assignment IS the declaration (a pack without
+/// declaration syntax marks every plain assignment) and stays absent
+/// exactly as a `my` whose RHS nothing can type does.
 fn opaque_rebind_of(bag: &WitnessBag, w: &Witness) -> Option<Witness> {
     if !is_reassign_edge(w) {
         return None;

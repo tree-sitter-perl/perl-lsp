@@ -712,6 +712,30 @@ impl<'a> Builder<'a> {
         self.push_type_constraint_from(tc, crate::model::witnesses::WitnessSource::Plugin(plugin_id));
     }
 
+    /// The reset marker for a plain assignment to an already-bound name:
+    /// zero-width at the site, `REASSIGN_FLOW_SOURCE`, an `Unknown` payload.
+    /// `FrameworkAwareTypeFold` reads it as the cutoff every earlier belief
+    /// dies at, and as the value only when nothing typed lands at or after
+    /// it. Idempotent per site, so the worklist fold can mint it each round.
+    pub(crate) fn push_reset_marker(&mut self, variable: String, scope: ScopeId, at: Point) {
+        use crate::model::witnesses::{Witness, WitnessAttachment, WitnessPayload, WitnessSource};
+        let attachment = WitnessAttachment::Variable { name: variable, scope };
+        let already = self.bag.for_attachment(&attachment).iter().any(|w| {
+            w.span.start == at
+                && w.span.end == at
+                && matches!(&w.source, WitnessSource::Builder(t) if t == crate::model::witnesses::REASSIGN_FLOW_SOURCE)
+        });
+        if already {
+            return;
+        }
+        self.bag.push(Witness {
+            attachment,
+            source: WitnessSource::Builder(crate::model::witnesses::REASSIGN_FLOW_SOURCE.into()),
+            payload: WitnessPayload::InferredType(InferredType::Unknown),
+            span: Span { start: at, end: at },
+        });
+    }
+
     pub(super) fn push_type_constraint_from(
         &mut self,
         tc: TypeConstraint,

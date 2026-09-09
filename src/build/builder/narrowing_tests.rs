@@ -819,3 +819,49 @@ fn a_later_plain_write_retires_an_earlier_class_identity() {
     let fa = build_fa("package P;\nsub m {\n  my $x = Foo->new;\n  my $k = $x->{k};\n  my $o = $x;\n}\n1;\n");
     assert_eq!(fa.inferred_type_via_bag("$x", Point::new(4, 11)), Some(InferredType::ClassName("Foo".into())));
 }
+
+#[test]
+fn a_rebind_to_a_bare_ref_retires_an_object() {
+    // The class-over-rep rule protects a DEREF (`$x->{k}` reveals the
+    // object's representation); an assignment of a bare ref is a new value,
+    // and only the reset marker tells the two apart — a subsumption test on
+    // the types cannot.
+    for (rhs, want) in [
+        ("{}", InferredType::HashRef),
+        ("[]", InferredType::ArrayRef),
+        ("$h", InferredType::HashRef),
+    ] {
+        let src = format!(
+            "package P;\nsub m {{\n  my $h = {{}};\n  my $x = Foo->new;\n  $x = {rhs};\n  my $o = $x;\n}}\n1;\n"
+        );
+        let fa = build_fa(&src);
+        assert_eq!(
+            fa.inferred_type_via_bag("$x", Point::new(5, 11)),
+            Some(want),
+            "`$x = {rhs}` after `Foo->new` must read the ref, not Foo",
+        );
+    }
+}
+
+#[test]
+fn evidence_after_an_untypable_rebind_revives_the_variable() {
+    // The reset has supremacy over its PAST only: a deref after it is new
+    // evidence, and the variable reads through it.
+    let fa = build_fa(
+        "package P;\nsub m {\n  my $x = Foo->new;\n  $x = unknown_fn();\n  my $k = $x->{k};\n  my $o = $x;\n}\n1;\n",
+    );
+    assert_eq!(fa.inferred_type_via_bag("$x", Point::new(5, 11)), Some(InferredType::HashRef));
+    // With nothing after the reset the reset IS the answer.
+    let fa = build_fa("package P;\nsub m {\n  my $x = Foo->new;\n  $x = unknown_fn();\n  my $o = $x;\n}\n1;\n");
+    assert_eq!(fa.inferred_type_via_bag("$x", Point::new(4, 11)), Some(InferredType::Unknown));
+}
+
+#[test]
+fn a_declaration_nothing_can_type_stays_absent() {
+    // A first binding retires nothing, so its untypable RHS is absence (let
+    // enrichment or usage fill it), never a reset.
+    let fa = build_fa("package P;\nsub m {\n  my $x = unknown_fn();\n  my $o = $x;\n}\n1;\n");
+    assert_eq!(fa.inferred_type_via_bag("$x", Point::new(3, 11)), None);
+    let fa = build_fa("package P;\nsub m {\n  my $x = unknown_fn();\n  my $k = $x->{k};\n  my $o = $x;\n}\n1;\n");
+    assert_eq!(fa.inferred_type_via_bag("$x", Point::new(4, 11)), Some(InferredType::HashRef));
+}

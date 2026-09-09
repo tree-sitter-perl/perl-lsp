@@ -10,7 +10,7 @@ const SCHEMA_VERSION: &str = "10";
 /// Bumped when the builder's analysis output changes shape in a way that
 /// invalidates cached blobs. Unlike `SCHEMA_VERSION`, this does not drop
 /// the table — stale entries are re-resolved lazily with priority.
-pub const EXTRACT_VERSION: i64 = 198;
+pub const EXTRACT_VERSION: i64 = 199;
 
 /// Bumped when the ROW format of the relational ref index changes shape.
 /// Unlike `EXTRACT_VERSION` (which governs the blobs), a mismatch only wipes

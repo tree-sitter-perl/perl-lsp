@@ -115,36 +115,22 @@ pub struct FrameworkAwareTypeFold;
 /// `ClassName` / `ClassAssertion`, its source priority, and WHERE it was
 /// made. Identity dominates rep, so this axis answers ahead of the plain
 /// axis — which is why it has to be retired explicitly: a plain-type write
-/// at or after it is a newer value, and without the retire `my $x =
-/// Foo->new; $x = 'str'` reads `Foo` forever. One owner for the three
-/// fields, so the two set sites and the one retire site cannot drift.
+/// Retirement is the reset cutoff's job (`my $x = Foo->new; $x = 'str'`
+/// reads `String` because the rebind's marker kills the assertion before
+/// it), never a comparison of the newcomer against the class: a deref's
+/// bare `HashRef` and an assignment's are the same value, and only the
+/// marker tells a write from an observation.
 #[derive(Default)]
 struct ClassIdentity {
     name: Option<String>,
     priority: u8,
-    at: Point,
 }
 
 impl ClassIdentity {
-    fn assert(&mut self, name: &str, priority: u8, at: Point) {
+    fn assert(&mut self, name: &str, priority: u8) {
         if priority >= self.priority {
             self.name = Some(name.to_string());
             self.priority = priority;
-            self.at = at;
-        }
-    }
-
-    /// A plain-type write at or after the standing identity, at no lower
-    /// priority, retires it — unless the class subsumes the newcomer: a
-    /// deref's bare `HashRef` reveals representation, not a new value.
-    fn retire_if_superseded(&mut self, newcomer: &InferredType, priority: u8, at: Point) {
-        let superseded = self.name.as_ref().is_some_and(|c| {
-            priority >= self.priority
-                && at >= self.at
-                && !InferredType::ClassName(c.clone()).subsumes_narrowing(newcomer)
-        });
-        if superseded {
-            self.name = None;
         }
     }
 }
@@ -225,25 +211,43 @@ impl WitnessReducer for FrameworkAwareTypeFold {
         let mut re = false;
         let mut plain_type: Option<InferredType> = None;
         let mut plain_type_priority: u8 = 0;
+        let mut plain_type_at: Option<Point> = None;
+        // Where a rep / scalar-context observation last landed: evidence
+        // after a reset revives the variable through those axes.
+        let mut last_observation_at: Option<Point> = None;
 
-        // A REASSIGNMENT (`REASSIGN_FLOW_SOURCE`, zero-width at its site —
-        // materialized to what it produced, or to `InferredType::Unknown`
-        // when its source could not be typed) is a temporal RESET: at the
-        // query point, every binding strictly before the latest one is dead
-        // — the class axis included, which otherwise wins in any order, so
-        // `$r = new WP_Error; $r = json_decode(..)` reads as the array.
-        // Companions minted at the same site survive, and observations
-        // after it accrue as usual; with nothing typed after it the answer
-        // IS `Unknown`, so a chase that reads the variable carries the
-        // reset on instead of falling back.
+        // A reassignment (`REASSIGN_FLOW_SOURCE`, zero-width at the write's
+        // site — materialized to the value it produced, or to the `Unknown`
+        // marker when nothing typed it) is a temporal RESET: at the query
+        // point every belief strictly before the latest one is dead — the
+        // class axis included, which otherwise wins in any order, so
+        // `$r = Foo->new; $r = {}` reads the hash. Companions minted at the
+        // site survive; what lands after accrues. A first assignment in a
+        // scope resets nothing and its marker, if any, is not a value.
+        let in_window = |w: &Witness| narrow_point.is_none_or(|p| w.span.start <= p);
+        let is_reset_marker = |w: &Witness| {
+            w.span.start == w.span.end
+                && matches!(&w.source, WitnessSource::Builder(t) if t == REASSIGN_FLOW_SOURCE)
+        };
+        let bound_before = |site: Point| {
+            ws.iter().filter(|w| in_window(w)).any(|w| {
+                w.span.start < site
+                    && matches!(
+                        &w.payload,
+                        WitnessPayload::InferredType(_)
+                            | WitnessPayload::Observation(
+                                TypeObservation::ClassAssertion(_)
+                                    | TypeObservation::FirstParamInMethod { .. }
+                                    | TypeObservation::BlessTarget(_)
+                            )
+                    )
+            })
+        };
         let reset_at = ws
             .iter()
-            .filter(|w| {
-                w.span.start == w.span.end
-                    && matches!(&w.source, WitnessSource::Builder(t) if t == REASSIGN_FLOW_SOURCE)
-            })
+            .filter(|w| in_window(w))
+            .filter(|w| is_reset_marker(w))
             .map(|w| w.span.start)
-            .filter(|s| narrow_point.is_none_or(|p| *s <= p))
             .max();
 
         for w in ws {
@@ -270,16 +274,26 @@ impl WitnessReducer for FrameworkAwareTypeFold {
             match &w.payload {
                 WitnessPayload::InferredType(t) => match t {
                     InferredType::ClassName(name) => {
-                        class_assertion.assert(name, prio, w.span.start);
+                        class_assertion.assert(name, prio);
                     }
                     InferredType::FirstParam { package } => {
                         first_param_class = Some(package.clone())
                     }
                     b @ InferredType::BrandedRoute { .. } => branded = Some(b.clone()),
-                    // `Unknown` rides the plain axis like any value: a
-                    // materialized reset, or an annotated union (`@var A|B`)
-                    // at its source's priority, retires the standing belief
-                    // the same way a concrete type does.
+                    // A reset marker's `Unknown` has supremacy over its PAST
+                    // only: it never displaces a typed value at or after its
+                    // own site (the rebind's RHS, or a later write), and a
+                    // marker that retired nothing is not a value at all. An
+                    // annotated union (`@var A|B`) is a claim about the value
+                    // and rides the plain axis like any other.
+                    InferredType::Unknown if is_reset_marker(w) => {
+                        let stands = plain_type_at.is_some_and(|at| at >= w.span.start);
+                        if !stands && bound_before(w.span.start) {
+                            plain_type = Some(InferredType::Unknown);
+                            plain_type_priority = prio;
+                            plain_type_at = Some(w.span.start);
+                        }
+                    }
                     // Source priority breaks ties first (an EXPLICIT
                     // annotation — `ANNOT_SOURCE`, priority 20 — governs over
                     // an inferred flow type, priority 10, whatever the order
@@ -300,27 +314,45 @@ impl WitnessReducer for FrameworkAwareTypeFold {
                         if prio > plain_type_priority || (prio == plain_type_priority && !subsumed) {
                             plain_type = Some(other.clone());
                             plain_type_priority = prio;
-                            class_assertion.retire_if_superseded(other, prio, w.span.start);
+                            plain_type_at = Some(w.span.start);
                         }
                     }
                 },
-                WitnessPayload::Observation(obs) => match obs {
-                    TypeObservation::ClassAssertion(name) => {
-                        class_assertion.assert(name, prio, w.span.start);
+                WitnessPayload::Observation(obs) => {
+                    match obs {
+                        TypeObservation::ClassAssertion(name) => {
+                            class_assertion.assert(name, prio);
+                        }
+                        TypeObservation::FirstParamInMethod { package } => {
+                            first_param_class = Some(package.clone())
+                        }
+                        TypeObservation::HashRefAccess => rep_obs = merge_rep(rep_obs, Rep::Hash),
+                        TypeObservation::ArrayRefAccess => rep_obs = merge_rep(rep_obs, Rep::Array),
+                        TypeObservation::CodeRefInvocation => rep_obs = merge_rep(rep_obs, Rep::Code),
+                        TypeObservation::BlessTarget(r) => bless_rep = Some(*r),
+                        TypeObservation::NumericUse => num = true,
+                        TypeObservation::StringUse => str_ = true,
+                        TypeObservation::RegexpUse => re = true,
                     }
-                    TypeObservation::FirstParamInMethod { package } => {
-                        first_param_class = Some(package.clone())
+                    if !matches!(
+                        obs,
+                        TypeObservation::ClassAssertion(_) | TypeObservation::FirstParamInMethod { .. }
+                    ) {
+                        last_observation_at = last_observation_at.max(Some(w.span.start));
                     }
-                    TypeObservation::HashRefAccess => rep_obs = merge_rep(rep_obs, Rep::Hash),
-                    TypeObservation::ArrayRefAccess => rep_obs = merge_rep(rep_obs, Rep::Array),
-                    TypeObservation::CodeRefInvocation => rep_obs = merge_rep(rep_obs, Rep::Code),
-                    TypeObservation::BlessTarget(r) => bless_rep = Some(*r),
-                    TypeObservation::NumericUse => num = true,
-                    TypeObservation::StringUse => str_ = true,
-                    TypeObservation::RegexpUse => re = true,
-                },
+                }
                 _ => {}
             }
+        }
+        // An `Unknown` on the plain axis (a reset the RHS never typed, a
+        // join approximation) yields to rep and scalar-context evidence that
+        // lands strictly after it: `$r = f(); $r->{k}` reads the hash. An
+        // annotation-priority `Unknown` is a claim and keeps its place.
+        if matches!(plain_type, Some(InferredType::Unknown))
+            && plain_type_priority <= WitnessSource::Builder(String::new()).priority()
+            && last_observation_at > plain_type_at
+        {
+            plain_type = None;
         }
 
         // A branded route dominates the bare-class companion: the

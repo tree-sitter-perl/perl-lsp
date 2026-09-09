@@ -35,7 +35,7 @@ Conservative by construction — it under-narrows, never lies. The bias is
 load-bearing for the diagnostics built on top: they miss some real bugs
 but never invent a false `Undef`/`Optional`.
 
-## `Unknown`: a rebind nothing can type still happened
+## A rebind is a reset
 
 Temporal ordering answers a read from the newest witness at or before it.
 That is only right while every write leaves one. A rebind whose RHS nothing
@@ -44,21 +44,41 @@ and the read falls back on the newest belief it *can* see — the one the
 write replaced. `my $ct = undef; … $ct = f(); defined $ct` read `Undef`
 and every `defined` guard on it read as one that can never pass.
 
-So such a rebind lands as `InferredType::Unknown`, through the same
-`push_type_constraint` every typed rebind uses, at the same statement
-start. It is a real answer, not an absence, and each half of that matters:
+So every plain assignment mints a **reset marker**: a zero-width witness at
+the write's site under `REASSIGN_FLOW_SOURCE`. Perl's walk mints it in the
+assignment visit, before anything downstream is typed; the flow lane's
+reassign edge (`FlowEdge::reassigns`) lands on the same site post-walk and
+materializes to the RHS's value, or to an `Unknown` under the same source
+when nothing typed it (`opaque_rebind_of`). A pack assignment is the flow
+edge alone. `FrameworkAwareTypeFold` reads the marker three ways:
 
-- **Latest-wins retires the prior belief.** `Unknown` subsumes only itself,
-  so when the RHS resolves on a later fold iteration the real type lands
-  on top of it; until then it is the standing answer.
-- **The scope walk stops on it.** A scope that answers `None` lets the
-  walk continue outward, so a shadowed inner `$x` with its belief gone
-  would answer with the *outer* `$x`. `Some(Unknown)` is authoritative
-  at the binding scope and the walk never reaches the namesake.
-- **Consumers ask the value.** `InferredType::is_known()` is the one
-  spelling of "no information"; display surfaces (hover, inlay hints,
-  signature help) and the guard verdicts filter on it rather than
-  matching the variant. Dispatch needs no gate: `class_name()` is `None`.
+- **It is a cutoff.** At the query point, every witness strictly before
+  the latest reset is dead, on every axis — the class assertion, the rep
+  observations, the first-param constraint. Companions minted at the site
+  itself survive. This is the only retirement there is: `my $x = Foo->new;
+  $x = {}` reads `HashRef` because the marker killed `Foo`, not because a
+  hash fails to subsume a class. A subsumption test cannot do that job —
+  a deref's `HashRef` and an assignment's are the same value, and only the
+  marker tells a write from an observation. Identity-over-rep still holds
+  for the deref, which mints no marker.
+- **Its `Unknown` has supremacy over its past only.** The marker is a value
+  when nothing typed stands at or after its site; a typed RHS at the site
+  and any later write displace it, and rep or scalar-context evidence
+  landing after it revives the variable through those axes
+  (`$r = f(); $r->{k}` reads the hash). An annotation-priority `Unknown`
+  (`@var A|B`) is a claim about the value and keeps its place.
+- **A first binding resets nothing.** `opaque_rebind_of` asks the bag —
+  edges included, since the prior binding may itself be an edge nothing
+  typed — whether the scope bound the name before the write; if not, this
+  assignment is the declaration (a pack without declaration syntax marks
+  every plain assignment) and its untypable RHS stays absent, exactly as
+  a `my` whose RHS nothing can type does. Absence keeps the evidence door
+  open; a reset closes it on what came before.
+
+`Unknown` is a real answer where it stands, and each half of that matters:
+the scope walk stops on it (a shadowed inner `$x` with its belief gone
+never answers with the outer's), and consumers ask the value
+(`InferredType::is_known()`) rather than matching the variant.
 
 A rebind that may not run is old-or-new no matter what its RHS is, and
 lands as `Unknown` outright. "May not run" is asked at two granularities,
@@ -76,26 +96,19 @@ both spelled once in `cst.rs` (one climb, two boundaries):
   block sits on the block's scope, which a read after the block never
   walks through, so that read would keep the pre-block belief. The honest
   answer there is `old ⊔ new`, and no reducer can compute it: a reducer
-  sees ONE attachment, and the write landed on the block's. So the
-  emitter stands in for the join and puts `Unknown` on the binding scope
-  — the one every later read in the variable's extent walks through.
+  sees ONE attachment, and the write landed on the block's. So the fold
+  stands in for the join and puts a reset marker on the binding scope —
+  the one every later read in the variable's extent walks through.
   **This is an approximation of a join and is deleted when Epic 16's
   `JoinFold` lands** (`docs/epics/16-cfg-tier.md`, Phase C); its anchor
   is in that epic's table.
 
-The class-identity axis honors the same order. A `ClassName` rebind also
-pushes a `ClassAssertion`, and identity-over-rep lets that axis answer
-ahead of the plain axis; `ClassIdentity` (the axis's one owner in
-`FrameworkAwareTypeFold`) records where the assertion was made and a
-plain-type write at or after it retires it — unless the class subsumes
-the newcomer, a deref's bare `HashRef` being representation, not a new
-value. So `my $x = Foo->new; $x = 'str'` reads `String`, and an
-untypeable rebind reaches class-typed variables too.
-
-Declarations are a first binding, not a rebind: one whose RHS nothing
-can type stays absent. The rule is spelled once, in the fold's
-assignment pass (`apply_chain_typing_assignments`); it keeps no record of
-where a variable was reassigned, because the witness *is* that record.
+Declarations do not mint a marker, and that is placement rather than
+principle: a declaration's companions may legitimately sit before it (a
+plugin's parameter assertion is minted at the sub's start, ahead of the
+`my $c = shift` it describes), and a cutoff there would erase them. Once
+every binding witness sits at or after its binding site, declarations can
+mark too and the rule needs no syntax at all.
 
 ## Subjects: variables and places, one keying
 
