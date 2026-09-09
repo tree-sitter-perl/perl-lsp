@@ -651,3 +651,63 @@ gain value/type-flow semantics AND an upstream Perl TSG definition ships.
   mitigations assessed (abandoned-heal churn, save-during-index invalidation
   cone, pre-expanded-cache cap thrash) — see the slice brief of 2026-07-17.
 
+---
+
+## GraphView node identity is leaf-keyed — 2026-09-01 — RESOLVED (veesh, 2026-09-08)
+- **Context:** the php round-4 `parent::` fix (H8). `GraphView`'s ancestor
+  edges are keyed by LEAF class name (`docs/adr/graph-walking.md`), so a
+  same-leaf parent in another namespace (`use Support\Collection as
+  BaseCollection; class Collection extends BaseCollection`) collapses onto
+  the child's own node and `walk(Node::Class(child))` cannot tell them
+  apart. Two consumers now carry their own bypass: `resolve_super_method`
+  (ancestry.rs — a `parent_namespaces`-row pre-pass before the graph walk)
+  and `CandidateSet::super_def_locations` (definitions.rs — walks
+  `declared_parents` directly with per-row namespace routing, never
+  entering the graph). The round-close sweep flagged the duplication.
+- **Options:** A — keep the two bypasses (status quo; a third same-leaf
+  consumer will grow a third). B — one shared `same_leaf_parent` helper
+  both call (mechanical dedupe, identity stays leaf-keyed). C — give
+  `Node::Class` a namespace-qualified identity for pack languages (the
+  edge derivation reads `parent_namespaces` rows), so the graph itself
+  distinguishes the parent and every walker inherits it — the rule-#10
+  answer, but it touches every `Node::Class` constructor and the
+  descendant/family walks' dedup keys.
+- **Picked:** A for now (nothing further changed in the sweep; the two
+  interface predicates were deduped onto `FileAnalysis::declares_interface`).
+- **Undo cost:** B is an afternoon; C is a slice with its own gold rows
+  (every leaf-keyed consumer re-examined) and a cache bump.
+- **Discussion needed:** is C worth a slice now, or does it wait until a
+  third consumer appears? Perl is absolute-named and never hits this.
+- **Update 2026-09-02 (round-5 R5-1):** the use-map visibility axis is a
+  THIRD consumer of leaf identity, and it is where `use X as Alias`
+  stops: the alias spelling can't be resolved by translating it to the
+  real leaf at extraction (H8's file means two different classes by
+  `Collection` and `BaseCollection`), and can't be pinned without a
+  namespace-qualified class identity. So alias-spelled hints/`new`/
+  receivers resolve nothing today (never a wrong class). C is now the
+  only path to alias support — a concrete reason to schedule it.
+- **Update 2026-09-02 (round-7 re-probe):** the third case, and the most
+  visible one — WordPress's SimplePie writes `use
+  SimplePie\XML\Declaration\Parser as DeclarationParser;` precisely to
+  disambiguate three `Parser`s, and every `DeclarationParser::...` site
+  is dark. Translating the alias to its real leaf at extraction would
+  make those sites resolve to BOTH `Parser`s the file can see (own and
+  aliased), which is imprecise rather than wrong; only a
+  namespace-qualified `Node::Class` answers with one.
+- **Update 2026-09-02 (round-7 close):** group-use rows now mint import
+  rows like the flat spelling, so `use A\{Foo, Bar as Baz};` pins `Baz`
+  exactly as `use A\Bar as Baz;` does — and its `new Baz()` sites are
+  dark for exactly the same reason. Same fork, fourth spelling; nothing
+  new to decide.
+- **Resolution (2026-09-08): C.** Class identity is the fully-qualified
+  name for every language (`docs/prompt-class-identity.md`): the extractor
+  resolves each spelling through the file's use-map as it mints it, so
+  `Node::Class` carries `App\Collection` and `Support\Collection` as two
+  nodes, every walker distinguishes them by construction, and the two
+  bypasses (the `parent_namespaces` pre-pass in `resolve_super_method`, the
+  per-row routing in `super_def_locations`) and the lane itself are
+  deleted. Aliased spellings resolve through the same ladder (`use X as
+  Alias` → `Alias` names `X`). Resolution widens to a same-leaf stranger only
+  when nothing indexed declares the identity, and says so
+  (`resolved-by-widening`).
+
