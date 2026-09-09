@@ -3201,29 +3201,19 @@ class Logging extends Quiet
     let mut parser = php_parser();
     let tree = parser.parse(src, None).unwrap();
     let skel = extract(&tree, src.as_bytes(), &php_pack()).unwrap();
-    let rows: Vec<(&str, &str, &str)> = skel
-        .parent_namespaces
-        .iter()
-        .map(|(c, p, n)| (c.as_str(), p.as_str(), n.as_str()))
-        .collect();
-    // alias resolved to the REAL leaf, namespace from the import; the
-    // edge itself carries both ends' identities
+    let edges: Vec<(&str, &str)> = skel.parents.iter().map(|(c, p)| (c.as_str(), p.as_str())).collect();
+    // an alias resolves to the real identity, namespace from the import;
+    // the edge carries both ends' identities
     assert!(
-        rows.contains(&("App\\Cache\\Repo", "Repository", "Illuminate\\Contracts\\Cache")),
-        "{rows:?}"
-    );
-    assert!(
-        skel.parents
-            .contains(&("App\\Cache\\Repo".into(), "Illuminate\\Contracts\\Cache\\Repository".into())),
-        "the edge must carry the real identity, not the alias: {:?}",
-        skel.parents
+        edges.contains(&("App\\Cache\\Repo", "Illuminate\\Contracts\\Cache\\Repository")),
+        "the edge must carry the real identity, not the alias: {edges:?}"
     );
     // written qualifier is authoritative
-    assert!(rows.contains(&("App\\Cache\\Repo", "Base", "Vendor")), "{rows:?}");
+    assert!(edges.contains(&("App\\Cache\\Repo", "Vendor\\Base")), "{edges:?}");
     // unqualified binds to the file's own namespace
-    assert!(rows.contains(&("App\\Cache\\Local", "Helper", "App\\Cache")), "{rows:?}");
+    assert!(edges.contains(&("App\\Cache\\Local", "App\\Cache\\Helper")), "{edges:?}");
     // group-use alias resolves through the shared prefix
-    assert!(rows.contains(&("App\\Cache\\Logging", "NullLogger", "Psr\\Log")), "{rows:?}");
+    assert!(edges.contains(&("App\\Cache\\Logging", "Psr\\Log\\NullLogger")), "{edges:?}");
 }
 
 #[test]
