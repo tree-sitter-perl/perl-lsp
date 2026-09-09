@@ -4,23 +4,15 @@
 
 Perl mints class identity as the FQN: `ClassName("Foo::Bar")`, a method
 symbol's `package` is `Foo::Bar`, `PackageSymbol{package: "Foo::Bar"}`.
-The use-map packs (PHP) mint the LEAF: `ClassName("Collection")`, method
-`package = "Collection"`, `PackageSymbol{package: "Collection"}`, and the
-namespace rides beside it on the class symbol alone. Every consumer that
-needs the namespace back re-derives it from the origin file's use-map pins
-(`VisibilityAxis::UseMap`, `TargetRef::class_ns`, the matcher's
-`pinned_namespace` gate). That is a lossy projection minted where the
-information was in hand: the extractor SAW `namespace App\Support;` and
-`use Illuminate\Support\Collection as BaseCollection;` and threw the
-qualifier away.
-
-The cost is a silent wrong answer. `resolve_member_in_ancestors` walks
-`visible_def_candidates(leaf)` and takes the first class declaring the
-member; when the pinned identity declares nothing and a same-leaf stranger
-does, the answer lands on the stranger. Hover, goto-def and the
-`unresolved-method` lane all read Some/None and say nothing. Real-world
-code is dirty by design (a class edited half-way, an import not yet
-written), so the over-approximation is WANTED — but it has to be loud.
+A use-map pack (PHP) that minted the LEAF instead had every consumer
+re-derive the namespace from the origin file's use-map pins — a lossy
+projection minted where the extractor had the qualifier in hand, and the
+source of a silent wrong answer: `resolve_member_in_ancestors` walked the
+leaf's candidates and took the first class declaring the member, so when
+the named class lacked it and a same-leaf stranger had it, the answer
+landed on the stranger and every lane read Some/None and said nothing.
+Real-world code is dirty by design (a class edited half-way, an import not
+yet written), so the over-approximation is WANTED — but it has to be loud.
 
 ## The decision
 
@@ -72,30 +64,25 @@ written), so the over-approximation is WANTED — but it has to be loud.
    full) and compares identities — `use B\Collection; new Collection()`
    reaches `B\Collection` and never the same-leaf stranger.
 
-## Landing across the stacked branches
+## Retired with it
 
-Additive per layer, so each branch stays reviewable and the last stage
-flips the behaviour:
+The leaf-era plumbing is gone, not gated: `PackFacts::parent_namespaces`
+(the parent edge carries the parent's identity), `TargetRef::class_ns` and
+`CrossFileLookup::pinned_namespace` (the matcher compares identities, so a
+stranger's spelling never matches), the import-rows-only gate, and the
+leaf-space FQ family validation in `implementations_of`.
 
-- **model** (`claude/split-1-model`): `UseMap` resolver; `split_qualified`
-  learns the separator (`REF_ROWS_VERSION` bump — the key function
-  changed for qualified spellings); `MethodResolution::CrossFile.widened`
-  (constructed `false` everywhere; `widened()` accessor); the qualified-
-  spelling pin arm routes through the resolver.
-- **build** (`split-2-build`): the extraction post-pass and the
-  `LangPack::class_identity` hook (identity by default).
-- **index** (`split-3-index`): the ancestry walk narrows on FQN, widens on
-  leaf, stamps `widened`; `class_ns` and the stranger gate become no-ops
-  by construction and are retired after merge.
-- **lsp** (`split-4-lsp`): the `resolved-by-widening` lane; hover and
-  type-at render the FQN; completion label = leaf, detail = FQN.
-- **php** (`split-5-php`): the php hook (`\`); `ClassName("Leaf")`
-  assertions re-keyed to FQNs; gold rows re-verified.
-- **frameworks / laravel**: overlays re-verified against the FQN key.
+## Residuals
 
-## What does NOT change
-
-`VisibilityAxis::UseMap` and the pins stay: they answer visibility (what
-a bare spelling MEANS here), which is the origin's question; identity is
-the target's. The `visible` widening for aliased imports stays a rank on
-the candidate table, never a filter.
+- **An anonymous class's identity joins the file namespace, not the
+  enclosing class** (`T\class_anonymous_7_20` inside `T\Outer::make`),
+  and its symbol's `package` is that namespace. The identity is unique by
+  construction (row and column), so nothing collides; it only reads
+  oddly in an outline.
+- **The leaf key double-feeds the edge index.** The linkage feed registers
+  a namespaced symbol under its identity AND its leaf, and
+  `rebuild_name_registration` feeds the edge indexes once per key, so a
+  php class's inheritance and bridge edges are recorded twice (once per
+  spelling). Correctness is unaffected (buckets dedup members; walks
+  dedup by node); the cost is in `docs/scaling-limits.md` §7, unmeasured
+  on a large corpus.

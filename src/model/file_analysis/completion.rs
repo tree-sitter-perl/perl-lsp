@@ -75,12 +75,6 @@ impl MethodResolution {
             MethodResolution::Local { class, .. } | MethodResolution::CrossFile { class, .. } => class,
         }
     }
-
-    /// Did the walk reach this answer by widening past the origin's pinned
-    /// identity? A local hit never widens.
-    pub fn widened(&self) -> bool {
-        matches!(self, MethodResolution::CrossFile { widened: true, .. })
-    }
 }
 
 /// Result of resolving a sub/method call — local symbol or cross-file metadata.

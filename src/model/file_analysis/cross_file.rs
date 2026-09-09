@@ -882,13 +882,6 @@ pub trait CrossFileLookup {
     fn flat_scope(&self) -> bool {
         false
     }
-    /// The namespace THIS scope's origin means by the unqualified class
-    /// `leaf` — its `use` row, its own declaration, or (a name-keyed pack's
-    /// rule) its own namespace. `None` = the scope makes no claim, and every
-    /// same-leaf gate built on it stands down. Only a use-map axis answers.
-    fn pinned_namespace(&self, _leaf: &str) -> Option<String> {
-        None
-    }
     fn for_each_cached(&self, f: &mut dyn FnMut(&str, &std::sync::Arc<CachedModule>));
     /// Visit every distinct cached FILE exactly once. `for_each_cached` is
     /// keyed by NAME with one winner per key, so a pack file that loses every
@@ -1552,12 +1545,6 @@ impl<'a> CrossFileLookup for ScopedLookup<'a> {
     }
     fn flat_scope(&self) -> bool {
         self.axis.name_keyed()
-    }
-    fn pinned_namespace(&self, leaf: &str) -> Option<String> {
-        match &self.axis {
-            VisibilityAxis::UseMap(pins) => pins.namespace_of(leaf).map(str::to_string),
-            _ => None,
-        }
     }
     fn for_each_cached(&self, f: &mut dyn FnMut(&str, &std::sync::Arc<CachedModule>)) {
         self.inner.for_each_cached(f)

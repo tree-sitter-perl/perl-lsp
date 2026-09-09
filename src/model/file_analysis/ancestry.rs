@@ -790,40 +790,6 @@ impl FileAnalysis {
         method_name: &str,
         module_index: Option<&dyn CrossFileLookup>,
     ) -> Option<MethodResolution> {
-        // A SAME-LEAF parent (php aliased import — `use Support\Collection
-        // as BaseCollection; class Collection extends BaseCollection`)
-        // collapses into the ORIGIN node of the leaf-keyed walk below and
-        // is skipped, so `parent::` fell through to a DEEPER ancestor
-        // (typically an interface's abstract stub). Resolve it explicitly
-        // first: the pack's parent-namespace row names the parent's
-        // namespace, and the candidate file whose Class symbol carries
-        // that namespace is the real parent.
-        if let Some(idx) = module_index {
-            for (child, parent, ns) in &self.pack.parent_namespaces {
-                if child != enclosing || parent != enclosing {
-                    continue;
-                }
-                for cached in idx.visible_def_candidates(parent) {
-                    let whole = idx.whole_present(&cached);
-                    let cand_ns = whole
-                        .symbols()
-                        .iter()
-                        .find(|s| matches!(s.kind, SymKind::Class) && &s.name == parent)
-                        .map(|s| s.package.clone().unwrap_or_default());
-                    if cand_ns.as_deref() == Some(ns.as_str())
-                        && whole
-                            .method_resolution_on_class(parent, method_name, MemberShape::Unknown, module_index)
-                            .is_some()
-                    {
-                        return Some(MethodResolution::CrossFile {
-                            class: parent.clone(),
-                            def_module: None,
-                            widened: false,
-                        });
-                    }
-                }
-            }
-        }
         // SUPER:: searches the PARENTS, never the enclosing class — so
         // it is the bare `walk`, origin-excluded by construction. A hit on
         // an INTERFACE-marked class (php: the same SymKind::Class, told

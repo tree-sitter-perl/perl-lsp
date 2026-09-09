@@ -89,7 +89,6 @@ impl FileAnalysis {
                     type_display: _type_display,     // LangPack-wide display vocabulary, same reasoning
                     constructor_names: _constructor_names, // LangPack-wide convention, identical across the pack's files
                     specializes: _specializes,       // family edges; the file re-registers on its own rebuild even when Unchanged
-                    parent_namespaces: _parent_namespaces, // rides the parents edges (already projected); read live per query like specializes
                     use_aliases: _use_aliases,             // this file's OWN spelling table; a consumer never sees an alias
                     qualified_spellings: _qualified_spellings, // same: how THIS file spells classes
                     namespace_sep: _namespace_sep,   // LangPack-wide convention, identical across the pack's files

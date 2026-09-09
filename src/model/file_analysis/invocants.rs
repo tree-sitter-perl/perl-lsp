@@ -1130,26 +1130,14 @@ impl FileAnalysis {
         // there (a base CLASS's composed roles were checked at its own
         // composition site), preserving the role-only edge semantics of
         // docs/adr/role-contracts.md.
-        let role_requires_of = |composer: &str, c: &str| -> Option<Vec<String>> {
-            // A name-keyed pack pins the parent's namespace: the edge's own
-            // row (`extends \Exception`), else the composer's use map / own
-            // namespace. The candidate carrying that namespace IS the
-            // parent — a same-leaf stranger (a `Connector` interface in
-            // another namespace beside the `Connector` base class next
-            // door) is not, whatever it requires.
-            let want_ns = if let Some(ns) = self.identity_namespace(c) {
-                Some(ns)
-            } else if self.pack.imports_bind_names {
-                self.pack
-                    .parent_namespaces
-                    .iter()
-                    .find(|(child, parent, _)| child == composer && parent == c)
-                    .map(|(_, _, ns)| ns.clone())
-                    .or_else(|| self.leaf_namespace(c))
-                    .or_else(|| self.use_map_pins().own_namespace.clone())
-            } else {
-                None // a path-keyed language (Perl) has no namespace pins
-            };
+        let role_requires_of = |_composer: &str, c: &str| -> Option<Vec<String>> {
+            // A namespaced pack's parent edge carries the parent's identity:
+            // the candidate declaring THAT namespace is the parent — a
+            // same-leaf stranger (a `Connector` interface in another
+            // namespace beside the `Connector` base class next door) is
+            // not, whatever it requires. A path-keyed language (Perl) has no
+            // namespace claim.
+            let want_ns = self.identity_namespace(c);
             let is_local = self
                 .symbols
                 .iter()
