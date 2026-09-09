@@ -39,14 +39,6 @@ pub(super) fn recursive_walk_requested() -> bool {
     std::env::var_os("PERL_LSP_RECURSIVE_WALK").is_some_and(|v| v == "1")
 }
 
-/// A shipped binary has one walk. The recursive descent exists only under
-/// `cfg(test)`, purely so the equivalence tests can hold it against the
-/// iterative one; it compiles out of everything else.
-#[cfg(not(test))]
-pub(super) fn recursive_walk_requested() -> bool {
-    false
-}
-
 thread_local! {
     /// Per-thread walk-mode override for the equivalence harness, which
     /// builds the same tree both ways and compares the serialized result.
@@ -55,11 +47,13 @@ thread_local! {
     static FORCED: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
 }
 
+#[cfg(test)]
 pub(super) fn recursive_walk_forced() -> Option<bool> {
     FORCED.with(|f| f.get())
 }
 
 /// Run `f` with the walk mode pinned. Restores the previous setting after.
+#[cfg(test)]
 pub(crate) fn with_walk_mode<R>(recursive: bool, f: impl FnOnce() -> R) -> R {
     let prev = FORCED.with(|c| c.replace(Some(recursive)));
     let out = f();

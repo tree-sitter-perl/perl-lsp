@@ -14,151 +14,56 @@ reason is a result, and four of the five are mostly that.
 
 ## 1. `PackInvalidator::swap` strips against a persist it never checked — **fixed, `586823d`**
 
-`src/index/pack_invalidator.rs`.
-
-The watcher's re-analysis path hand-rolls its own persist loop instead of
-using `run_persist_writer`, and discards both signals that say whether a blob
-landed: `save_to_db`'s `bool` return, and `tx.commit()`'s `Result` (`let _ =
-tx.commit()`, not even logged). `persisted` is then set to `true`
-unconditionally, and it is the strip license:
-
-```rust
-if persisted && !arc.degraded && eviction_enabled() {
-    let _ = pack.register_symbols_stripping((*p).clone(), (**arc).clone(), true, true);
-}
-```
-
-So `persisted` means "a connection opened", not "a blob landed". It lies when
-the commit fails (`SQLITE_FULL`, I/O error, an unretryable busy — the whole
-batch rolls back), when one file's `save_to_db` fails while the commit
-succeeds, or when `unchecked_transaction()` errored and a mid-loop failure
-left the autocommit batch partial.
-
-**The failure is stale, not empty, which is worse.** A rollback leaves the
-previous generation's row intact, and `load_one_diag`
-(`module_cache/blob.rs:163-175`) deliberately skips stamp validation for a
-single-row path:
-
-> `// Single-row paths deliberately skip stamp validation — the registered`
-> `// generation may legitimately predate an unsaved edit, and the caller`
-> `// invalidates the LRU on file change.`
-
-The loader therefore **succeeds**, returning the pre-edit analysis. References,
-goto-def and types answer against the pre-edit generation of an edited file for
-the rest of the session, with no `REHYDRATION_MISSES` increment, no log line,
-and no `PERL_LSP_STRICT_RESIDENCY` panic. Only a file never persisted before
-takes the honest wrong-empty-and-counted path.
-
-The rest of the codebase already has this right, which is what makes it a
-defect rather than a design question: `run_persist_writer`
-(`module_resolver/persist.rs:136-199`) owns BEGIN/COMMIT/ROLLBACK and routes
-every entry to `on_committed` or `on_fallback`; `save_module_generation`
-returns "whether the blob row landed (**the strip-legality signal**)";
-`conn.rs:58-61` already names this exact hazard — *"a failed commit after
-resident copies were stripped is unrecoverable for the session"* — and
-mitigates only the BUSY lane with a 10 s `busy_timeout`. `PackInvalidator::swap`
-is the one persist site that opted out of all of it.
-
-The persist collapses onto `run_persist_writer` rather than threading a
-second spelling of the same verdict through the hand-rolled loop: it already
-owns BEGIN IMMEDIATE / COMMIT / ROLLBACK and the committed/fallback fork, and
-two spellings of "did the blob land" is how the wrong one survives. Per-path
-truth rides `save_to_db`'s verdict into the committed lane, so one file's
-failure no longer licenses its siblings' strip; rows are no longer shredded
-for a blob that did not land. Registration is one method both writer lanes
-and the no-cache-DB path share — the writer's own no-connection arm drains
-its channel unregistered, which would otherwise have dropped those files.
-
-Base-verified on both lanes, which finding #2 made possible: a `RAISE(ROLLBACK)`
-trigger discards the whole transaction (every copy must stay whole) and a
-`RAISE(ABORT)` trigger scoped to one path fails that blob alone under a
-succeeding commit (that file stays whole, its sibling still strips). Both
-assertions fail against the previous `swap`. A third test is the control —
-with a healthy DB the copies DO strip, so "registered whole" is evidence
-about the failure lane rather than evidence the branch was never reached.
+`src/index/pack_invalidator.rs`. The watcher's re-analysis path hand-rolled
+its own persist loop instead of using `run_persist_writer`, discarding both
+signals that say whether a blob landed (`save_to_db`'s `bool`, `tx.commit()`'s
+`Result`) and setting `persisted = true` unconditionally — the strip
+license. On a rollback the *stale* prior-generation row loads successfully
+(the single-row loader deliberately skips stamp validation), so references/
+goto-def/types silently answer against the pre-edit generation for the rest
+of the session, with no counter, log line, or `PERL_LSP_STRICT_RESIDENCY`
+panic. The persist now collapses onto `run_persist_writer`'s existing
+BEGIN/COMMIT/ROLLBACK + committed/fallback fork, so one file's failure no
+longer licenses its siblings' strip. Base-verified with SQLite triggers
+forcing both the whole-transaction-rollback and single-blob-abort lanes.
 
 ## 2. The persist/strip licence is untestable, and it is the one thing worth testing — **fixed, `3e14958`**
 
-`#[cfg(test)] open_cache_db -> None` made every strip-licensing decision —
-`persisted`, `strip_import_copy`'s gate, the writer's committed/fallback fork —
-unreachable from `cargo test`. Everything that decides whether a resident copy
-may be stripped is therefore exercised only by the gold harness and by
-corpus runs, and only when those happen to take the failure lane, which they
-essentially never do.
-
-This is the coverage shape that let #1 exist and would let the gate split's
-two failure lanes (below) ship unexercised.
-
-The real writer open is now factored behind `open_cache_db_at`, so both
-profiles drive the same body — WAL, busy handling, schema init, the
-corruption-only recreate — rather than a test-shaped parallel one, and
-`with_test_cache_dir` installs a real DB for the current thread only. Unset
-(the default) `open_cache_db` still answers `None`, so no existing test
-changed behaviour; the short busy timeout it carries is what lets a test
-drive a contended writer without waiting out the production one. Failure
-lanes are injected with SQLite triggers rather than lock timing, which makes
-each one deterministic.
+`#[cfg(test)] open_cache_db -> None` made every strip-licensing decision
+unreachable from `cargo test` — exercised only by the gold harness and corpus
+runs, and only when they happen to take the failure lane (which they
+essentially never do). This is the coverage shape that let #1 exist. The
+writer open now factors behind `open_cache_db_at` so both profiles (test and
+production) drive the same body, and failure lanes inject via SQLite
+triggers rather than lock timing, so each is deterministic.
 
 ## 3. `ResolveQueue`'s priority lane can lose its wakeup — **fixed, `7febd2b`**
 
-`IndexCore`'s `ResolveQueue` guards two lanes with two mutexes but parks on one
-condvar, and a condvar is bound to the mutex it waits on — `pending`. A
-`priority` push therefore has no ordering against the drain at all:
-
-1. drain locks `priority`, sees empty, unlocks;
-2. `request_resolve` locks `priority`, pushes a stale module, unlocks,
-   `notify_one()` — **nobody is parked yet, the notification is discarded**;
-3. drain locks `pending`, sees empty, parks in `wait(pending)`.
-
-The wait loop never re-checked `priority`, so the batch slept until unrelated
-`pending` traffic arrived. On an `EXTRACT_VERSION` bump — the documented
-priority trigger — every `request_resolve` takes the priority branch, so
-nothing ever pushes `pending` and the resolver thread sleeps for the rest of
-the session: cross-file resolution silently never completes and every affected
-verb answers unresolved, permanently.
-
-Both halves were needed. The loop now checks `priority` inside the wait with
-`pending` held, and producers notify through `ResolveQueue::notify_new_work`,
-which takes `pending` so a push can neither be missed by the check nor land its
-notify in the pre-park window. Lock order is pending-then-priority in the drain,
-so producers release `priority` first.
-
-Base-verified: `priority_push_wakes_a_parked_drain` hits its 5 s timeout before
-the change (exit 101) and returns in 0.3 s after.
-
-The rest of `IndexCore`'s locking is clean, and the specific hazard family the
-brief named is not present:
-
-- **No guard held across `resolve()`.** Every `lsp/backend/server.rs` handler
-  snapshots `(Arc::clone(&doc.analysis), text, language)` and drops the
-  `FileStore` shard guard before `run_query`, each site carrying the reason.
-  `document_symbol` holds its guard across `extract_symbols`, which is a pure
-  read of the snapshot with no `for_each_open` and no await — safe.
-- **No lock-order cycle into the queue.** `request_resolve` is called under a
-  `FileStore` open-shard guard (`server.rs:331`), giving shard→queue. There is
-  no reverse edge: producers hold a queue mutex only across the push, and
-  `on_resolved` fires *outside* `core.resolved.mu` (`thread.rs:295-305`).
-- `ensure_workspace_indexed` does no synchronous `FileStore` work under the
-  caller's guard — it swaps a latch and `spawn_blocking`s.
+`IndexCore`'s `ResolveQueue` guarded two lanes with two mutexes but parked on
+one condvar bound to only one of them (`pending`), so a `priority` push had
+no ordering against the drain: the notify could land before anyone parked,
+and the wait loop never re-checked `priority`. On an `EXTRACT_VERSION` bump —
+the documented priority trigger — every push took that branch, so the
+resolver thread could sleep for the rest of the session: cross-file
+resolution silently never completes. Fixed by checking `priority` inside the
+wait with `pending` held, and routing producer notifies through
+`ResolveQueue::notify_new_work`, which takes `pending` so a push can neither
+be missed nor land its notify in the pre-park window. Base-verified:
+`priority_push_wakes_a_parked_drain` timed out at 5 s before, returns in
+0.3 s after. The rest of `IndexCore`'s locking was audited clean: no guard
+held across `resolve()`, no lock-order cycle into the queue.
 
 ## 4. The byte-accounting alarm fired on a designed state — **fixed, `841ef9e`**
 
-`evict_to_cap` never evicts `keep` ("a single oversized bag over the whole cap
-still resolves the query it was loaded for"), so an entry larger than the cap
-reaches the out-of-victims arm on **every** insert, with the charge total
-perfectly correct — and that arm called `resync_bytes`, which unconditionally
-counted `pack_bag_cache.resync_bytes_fired`. That is the counter `5cf44dfd`
-added to name the drift that collapsed the LRU to one entry and grew the
-process to 13.9 GB. A benign, reachable trigger on that counter is exactly what
-the next real instance would hide behind — and the oversized-entry case is not
-exotic at 122×.
-
-`resync_bytes` now recomputes first and reports only when the stored total
-actually needed correcting; the count is also readable off the cache rather
-than only under `PERL_LSP_GHOST_STATS`, so both halves are assertable.
-Base-verified: `an_oversized_entry_is_not_reported_as_drift` fails before
-(`left: 1, right: 0`) and passes after, while `a_drifted_counter_is_reported`
-passes throughout.
+`evict_to_cap` never evicts `keep` (a single oversized bag over the whole cap
+still resolves the query it was loaded for), so an entry larger than the cap
+hit the out-of-victims arm on every insert — which unconditionally counted
+`resync_bytes_fired`, the drift counter `5cf44dfd` added. A benign, reachable
+trigger on that counter is exactly what a real drift instance would hide
+behind, and the oversized-entry case is not exotic at 122×. `resync_bytes`
+now recomputes first and reports only when the stored total actually needed
+correcting. Base-verified: `an_oversized_entry_is_not_reported_as_drift`
+fails before, passes after.
 
 ### The two-flavors-one-budget question: clean, and structurally so
 

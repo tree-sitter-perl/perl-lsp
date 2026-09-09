@@ -58,7 +58,14 @@ pub enum MethodResolution {
     /// Every consumer resolves location/signature the same way —
     /// `whole_present(get_cached(def_module.unwrap_or(class))).sub_info_view(method)` — so bridged
     /// helpers and real inherited methods share one code path.
-    CrossFile { class: String, def_module: Option<String> },
+    ///
+    /// `widened` records that the walk found the member on a same-leaf
+    /// class the origin never named — the honest over-approximation a
+    /// leaf-keyed candidate table admits when the pinned identity declares
+    /// nothing. The answer still lands (dirty real-world editing wants it),
+    /// but it is confidently wrong whenever the code is, so the diagnostics
+    /// lane reads this flag and says so (`docs/prompt-class-identity.md`).
+    CrossFile { class: String, def_module: Option<String>, widened: bool },
 }
 
 impl MethodResolution {
@@ -107,6 +114,9 @@ pub enum ImportFact {
 pub struct CompletionCandidate {
     pub label: String,
     pub kind: SymKind,
+    /// The member is declared `static` (the extraction's "static"
+    /// attribute): what a scoped access (`Foo::`) offers.
+    pub is_static: bool,
     pub detail: Option<String>,
     pub insert_text: Option<String>,
     pub sort_priority: u8,
@@ -266,11 +276,15 @@ impl FileAnalysis {
             // An anonymous sub (name `(anon)`) has no callable name — never a
             // method candidate. Gate on callability, not the `(anon)` spelling.
             .filter(|s| crate::model::conventions::is_callable_sub_name(&s.name))
+            // Lexicals never complete bare on a receiver; the `&name` lane
+            // (`complete_lexical_methods_at`) is their one member source.
+            .filter(|s| !matches!(&s.detail, SymbolDetail::Sub { lexical: true, .. }))
             .filter(|s| !s.namespace.is_framework())
             .filter(|s| seen.insert(s.name.clone()))
             .map(|s| CompletionCandidate {
                 label: s.name.clone(),
                 kind: s.kind,
+                is_static: false,
                 detail: Some(
                     if matches!(s.kind, SymKind::Method) {
                         "method"
@@ -320,6 +334,7 @@ impl FileAnalysis {
             candidates.push(CompletionCandidate {
                 label: def.name.clone(),
                 kind: SymKind::Variable,
+                is_static: false,
                 detail: Some(detail),
                 insert_text: None,
                 sort_priority: if is_dynamic { PRIORITY_DYNAMIC } else { PRIORITY_FILE_WIDE },
@@ -339,6 +354,7 @@ impl FileAnalysis {
                         candidates.push(CompletionCandidate {
                             label: key.clone(),
                             kind: SymKind::Variable,
+                            is_static: false,
                             detail: Some(format!("{}()->{{{}}}", name, key)),
                             insert_text: None,
                             sort_priority: PRIORITY_FILE_WIDE,
@@ -456,6 +472,7 @@ impl FileAnalysis {
                 out.push(CompletionCandidate {
                     label: def.name.clone(),
                     kind: SymKind::Variable,
+                    is_static: false,
                     detail: Some(detail),
                     insert_text: None,
                     sort_priority: PRIORITY_FILE_WIDE,
@@ -494,6 +511,7 @@ impl FileAnalysis {
                     out.push(CompletionCandidate {
                         label: k,
                         kind: SymKind::Variable,
+                        is_static: false,
                         detail: Some(format!("{}() option", sub_name)),
                         insert_text: None,
                         sort_priority: PRIORITY_FILE_WIDE,
@@ -505,6 +523,47 @@ impl FileAnalysis {
             }
         }
 
+        out
+    }
+
+    /// Lexical methods (`my method name`) callable at `point`, offered with
+    /// the `&` call-syntax prefix — `$invocant->&name(...)` is the only
+    /// spelling that dispatches one, so the inserted text must carry it.
+    /// Scope rule matches the bare lexical-sub gate: visible from the
+    /// declaration down, within the declaring block only. The class-keyed
+    /// MRO walk excludes these symbols entirely (they don't dispatch by
+    /// name and are invisible cross-file); this lane is their one source.
+    pub fn complete_lexical_methods_at(&self, point: Point) -> Vec<CompletionCandidate> {
+        let mut out = Vec::new();
+        for sym in &self.symbols {
+            if !matches!(sym.kind, SymKind::Method) {
+                continue;
+            }
+            if !matches!(&sym.detail, SymbolDetail::Sub { lexical: true, .. }) {
+                continue;
+            }
+            if !crate::model::conventions::is_callable_sub_name(&sym.name) {
+                continue;
+            }
+            let enclosing = &self.scope(sym.scope).span;
+            let visible = (point.row, point.column)
+                >= (sym.span.start.row, sym.span.start.column)
+                && (point.row, point.column) <= (enclosing.end.row, enclosing.end.column);
+            if !visible {
+                continue;
+            }
+            out.push(CompletionCandidate {
+                label: format!("&{}", sym.name),
+                kind: SymKind::Method,
+                is_static: false,
+                detail: Some("my method".to_string()),
+                insert_text: Some(format!("&{}", sym.name)),
+                sort_priority: PRIORITY_LOCAL,
+                additional_edits: vec![],
+                import_fact: None,
+                display_override: None,
+            });
+        }
         out
     }
 
@@ -534,9 +593,28 @@ impl FileAnalysis {
             if matches!(sym.kind, SymKind::Sub | SymKind::Method)
                 && crate::model::conventions::is_callable_sub_name(&sym.name)
             {
+                // A lexical sub (`my sub helper`) is callable only inside
+                // its declaring block, from its declaration down — offering
+                // it file-wide completes a name that would not compile.
+                if let SymbolDetail::Sub { lexical: true, .. } = &sym.detail {
+                    // A lexical METHOD has no bare-call spelling at all — it
+                    // dispatches only as `$invocant->&name`; the member lane
+                    // (`complete_lexical_methods_at`) owns it.
+                    if matches!(sym.kind, SymKind::Method) {
+                        continue;
+                    }
+                    let enclosing = &self.scope(sym.scope).span;
+                    let visible = (point.row, point.column)
+                        >= (sym.span.start.row, sym.span.start.column)
+                        && (point.row, point.column) <= (enclosing.end.row, enclosing.end.column);
+                    if !visible {
+                        continue;
+                    }
+                }
                 candidates.push(CompletionCandidate {
                     label: sym.name.clone(),
                     kind: sym.kind,
+                    is_static: false,
                     detail: Some(
                         if matches!(sym.kind, SymKind::Method) {
                             "method"
@@ -560,6 +638,7 @@ impl FileAnalysis {
                 candidates.push(CompletionCandidate {
                     label: sym.name.clone(),
                     kind: sym.kind,
+                    is_static: false,
                     detail: Some(
                         if matches!(sym.kind, SymKind::Class) {
                             "class"
@@ -661,6 +740,7 @@ impl FileAnalysis {
                     .map(|k| CompletionCandidate {
                         label: format!("{} =>", k),
                         kind: SymKind::Variable,
+                        is_static: false,
                         detail: Some(format!("{}(%{})", call_name, slurpy_name)),
                         insert_text: Some(format!("{} => ", k)),
                         sort_priority: PRIORITY_LOCAL,
@@ -682,6 +762,7 @@ impl FileAnalysis {
                     .map(|k| CompletionCandidate {
                         label: format!("{} =>", k),
                         kind: SymKind::Variable,
+                        is_static: false,
                         detail: Some(format!("{}()", call_name)),
                         insert_text: Some(format!("{} => ", k)),
                         sort_priority: PRIORITY_LOCAL,
@@ -1011,6 +1092,7 @@ impl FileAnalysis {
                                 candidates.push(CompletionCandidate {
                                     label: format!("{} =>", key),
                                     kind: SymKind::Variable,
+                                    is_static: false,
                                     detail: Some(format!("{}->new(:param)", class_name)),
                                     insert_text: Some(format!("{} => ", key)),
                                     sort_priority: PRIORITY_LOCAL,
@@ -1072,6 +1154,7 @@ fn generate_cross_sigil_candidates(
                 out.push(CompletionCandidate {
                     label: format!("${}", bare_name),
                     kind: SymKind::Variable,
+                    is_static: false,
                     detail: detail.clone(),
                     insert_text: Some(bare_name.to_string()),
                     sort_priority: priority,
@@ -1084,6 +1167,7 @@ fn generate_cross_sigil_candidates(
                 out.push(CompletionCandidate {
                     label: format!("${}[]", bare_name),
                     kind: SymKind::Variable,
+                    is_static: false,
                     detail: detail.clone().or(Some(format!("@{}", bare_name))),
                     insert_text: Some(format!("{}[", bare_name)),
                     sort_priority: priority,
@@ -1094,6 +1178,7 @@ fn generate_cross_sigil_candidates(
                 out.push(CompletionCandidate {
                     label: format!("$#{}", bare_name),
                     kind: SymKind::Variable,
+                    is_static: false,
                     detail: detail
                         .clone()
                         .or(Some(format!("last index of @{}", bare_name))),
@@ -1108,6 +1193,7 @@ fn generate_cross_sigil_candidates(
                 out.push(CompletionCandidate {
                     label: format!("${}{{}}", bare_name),
                     kind: SymKind::Variable,
+                    is_static: false,
                     detail: detail.clone().or(Some(format!("%{}", bare_name))),
                     insert_text: Some(format!("{}{{", bare_name)),
                     sort_priority: priority,
@@ -1122,6 +1208,7 @@ fn generate_cross_sigil_candidates(
                 out.push(CompletionCandidate {
                     label: format!("@{}", bare_name),
                     kind: SymKind::Variable,
+                    is_static: false,
                     detail: detail.clone(),
                     insert_text: Some(bare_name.to_string()),
                     sort_priority: priority,
@@ -1132,6 +1219,7 @@ fn generate_cross_sigil_candidates(
                 out.push(CompletionCandidate {
                     label: format!("@{}[]", bare_name),
                     kind: SymKind::Variable,
+                    is_static: false,
                     detail: Some("array slice".to_string()),
                     insert_text: Some(format!("{}[", bare_name)),
                     sort_priority: priority.saturating_add(1),
@@ -1144,6 +1232,7 @@ fn generate_cross_sigil_candidates(
                 out.push(CompletionCandidate {
                     label: format!("@{}{{}}", bare_name),
                     kind: SymKind::Variable,
+                    is_static: false,
                     detail: detail.clone().or(Some("hash slice".to_string())),
                     insert_text: Some(format!("{}{{", bare_name)),
                     sort_priority: priority,
@@ -1158,6 +1247,7 @@ fn generate_cross_sigil_candidates(
                 out.push(CompletionCandidate {
                     label: format!("%{}", bare_name),
                     kind: SymKind::Variable,
+                    is_static: false,
                     detail: detail.clone(),
                     insert_text: Some(bare_name.to_string()),
                     sort_priority: priority,
@@ -1168,6 +1258,7 @@ fn generate_cross_sigil_candidates(
                 out.push(CompletionCandidate {
                     label: format!("%{}{{}}", bare_name),
                     kind: SymKind::Variable,
+                    is_static: false,
                     detail: Some("hash kv slice".to_string()),
                     insert_text: Some(format!("{}{{", bare_name)),
                     sort_priority: priority.saturating_add(1),
@@ -1180,6 +1271,7 @@ fn generate_cross_sigil_candidates(
                 out.push(CompletionCandidate {
                     label: format!("%{}[]", bare_name),
                     kind: SymKind::Variable,
+                    is_static: false,
                     detail: Some("array kv slice".to_string()),
                     insert_text: Some(format!("{}[", bare_name)),
                     sort_priority: priority,

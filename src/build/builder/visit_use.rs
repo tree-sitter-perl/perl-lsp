@@ -271,7 +271,7 @@ impl<'a> Builder<'a> {
         // looks for a ref at the cursor, else falls back to `symbol_at`, which
         // would return this very Module symbol's own span). The cross-file
         // PackageRef resolver (symbols.rs) maps the name to its file; an
-        // in-file package resolves locally via `find_package_or_class`; a
+        // in-file package resolves locally via `find_package_or_class_in`; a
         // pragma that resolves to neither is an honest no-jump. Only for real
         // source — a synthetic `use` has no name span to anchor on.
         if node.is_some() {
@@ -1336,6 +1336,28 @@ impl<'a> Builder<'a> {
     /// read is only valid after the RHS walk has allocated its refs and
     /// anon-sub symbols.
     fn assignment_after_rhs(&mut self, node: Node<'a>, left: Node<'a>, right: Node<'a>) {
+        // A plain assignment (no `my`) RESETS its targets: the marker lands
+        // now, before the walk types anything downstream of it, so a later
+        // `my $o = $x` folds against the value this write produced rather
+        // than the belief it replaced. The flow lane re-mints the same site
+        // post-walk (its edge is the RHS's query-time value); the reducer
+        // reads either as the cutoff.
+        if left.kind() != "variable_declaration" {
+            let at = left.start_position();
+            let scope = self.current_scope();
+            match self.lhs_list_targets(left) {
+                Some(targets) => {
+                    for (vt, _) in targets {
+                        self.push_reset_marker(vt, scope, at);
+                    }
+                }
+                None => {
+                    if let Some(vt) = self.get_var_text_from_lhs(left) {
+                        self.push_reset_marker(vt, scope, at);
+                    }
+                }
+            }
+        }
         // Push the RHS's Expr(span) witness so the bag is
         // canonical for this expression, then query for the
         // resolved type. `emit_expr_witness` covers every

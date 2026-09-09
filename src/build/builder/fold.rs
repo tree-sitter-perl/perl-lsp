@@ -379,6 +379,7 @@ impl<'a> Builder<'a> {
         // O(assignments * bag) (6+ s of a 46k-line file's fold). Safe as a
         // snapshot: the RHS typer takes `&self`, and this pass's own pushes
         // land only after the loop, so the bag cannot change mid-loop.
+        let mut markers: Vec<(String, ScopeId, Point)> = Vec::new();
         let mut typed_at: std::collections::HashMap<(String, Point), Vec<usize>> =
             std::collections::HashMap::new();
         {
@@ -526,23 +527,15 @@ impl<'a> Builder<'a> {
             drop(_t_scope);
             let sid = scope_idx.map(|i| self.scopes[i].id).unwrap_or(ScopeId(0));
 
-            // AN APPROXIMATION OF A JOIN — delete when Epic 16 Phase C lands.
-            //
-            // A rebind inside a nested block (`if (…) { $x = … }`, a loop body)
-            // is invisible to reads AFTER the block: its witness sits on the
-            // block's scope, which those reads' chains never enter, so they
-            // keep the pre-block belief. The honest value there is `old ⊔ new`,
-            // and a reducer cannot compute that join because it only ever sees
-            // ONE attachment — the write landed on the block's. So the emitter
-            // stands in for the join: `Unknown` on the scope that BINDS the
-            // variable, the one every later read in its extent walks through.
-            // `JoinFold` (`docs/epics/16-cfg-tier.md`, Phase C) answers this
-            // natively — one attachment per variable, write witnesses carrying
-            // their region — and this block goes with it; re-measure
-            // `redundant-guard` on the substrate when it does, that is where
-            // this earns its keep today. Before the idempotency check below:
-            // the walk already typed most rebinds at their own scope, and that
-            // must not skip this.
+            // A rebind is a RESET at its site: the flow lane's reassign edge
+            // is the marker on the write's own scope, and every belief before
+            // it dies there (`FrameworkAwareTypeFold`'s cutoff), whatever the
+            // RHS turns out to be. A write inside a nested block is invisible
+            // to reads after the block, which never walk the block's scope,
+            // so the variable's BINDING scope gets a marker too, standing in
+            // for the join (`old ⊔ new`, which no reducer can compute from
+            // one attachment; `JoinFold`, `docs/epics/16-cfg-tier.md` Phase
+            // C, answers natively and this marker goes with it).
             if is_rebind {
                 let binding_scope = var_ref_at
                     .get(&left.start_position())
@@ -550,18 +543,7 @@ impl<'a> Builder<'a> {
                     .map(|sym| self.symbols[sym.0 as usize].scope)
                     .filter(|b| *b != sid);
                 if let Some(bsid) = binding_scope {
-                    let placed = typed_at.get(&(var.clone(), span.start)).is_some_and(|idxs| {
-                        idxs.iter().any(|&i| {
-                            matches!(
-                                &self.bag.all()[i].attachment,
-                                crate::model::witnesses::WitnessAttachment::Variable { scope, .. }
-                                    if *scope == bsid
-                            )
-                        })
-                    });
-                    if !placed {
-                        to_push.push((var.clone(), bsid, span, InferredType::Unknown));
-                    }
+                    markers.push((var.clone(), bsid, span.start));
                 }
             }
 
@@ -610,10 +592,9 @@ impl<'a> Builder<'a> {
                     .or(fresh)
             };
 
-            // A rebind whose RHS nothing can type still HAPPENED: it lands as
-            // `Unknown`, so latest-wins retires the belief it replaced instead
-            // of the fold reading the stale one.
-            let Some(ty) = ty_opt.or(is_rebind.then_some(InferredType::Unknown)) else { continue };
+            // A rebind whose RHS nothing can type pushes no value: its reset
+            // marker (above) is the record that it happened.
+            let Some(ty) = ty_opt else { continue };
             to_push.push((var, sid, span, ty));
         }
 
@@ -624,6 +605,9 @@ impl<'a> Builder<'a> {
                 constraint_span,
                 inferred_type: ty,
             });
+        }
+        for (variable, scope, at) in markers {
+            self.push_reset_marker(variable, scope, at);
         }
     }
 

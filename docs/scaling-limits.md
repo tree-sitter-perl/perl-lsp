@@ -329,3 +329,19 @@ build and a short interval **re-adds per emission** (a 3,268-line file reported
 `[05]` added a thread-local per-build scope emitting one `[build-scope]` block
 at build end, delta'd per build. That is what made this root-cause possible, and
 it is immune to both failure modes.
+
+## 7. The leaf key double-feeds the edge index — UNMEASURED
+
+A namespaced pack's symbol registers under two keys — its identity
+(`App\Models\User`) and the leaf it binds (`User`) — because the identity is
+the exact lookup and the leaf the widening one (`docs/prompt-class-identity.md`).
+`rebuild_name_registration` feeds `ModuleEdgeIndexes` once per registered
+key, so every php class's parent, bridge and specialization edges are fed
+twice, and the INHERITS_INV descendant buckets carry both spellings of each
+child. Buckets dedup members and the graph walker dedups nodes, so answers are
+unchanged; the cost is a second feed per class at registration and a
+doubled descendant list to expand in `implementations`. Not yet measured on
+a large php corpus (WordPress core, laravel/framework); the fix, when the
+number warrants it, is to feed edges under the identity key only — the leaf
+registration needs the candidate table, never the edge indexes.
+

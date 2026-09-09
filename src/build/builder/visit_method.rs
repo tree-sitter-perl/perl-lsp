@@ -160,6 +160,8 @@ impl<'a> Builder<'a> {
                                 invocant_span,
                                 method_name_span,
                                 member_op: None,
+                                shape: crate::model::file_analysis::MemberShape::Unknown,
+                                named_by_string: false,
                             },
                             node_to_span(node),
                             rname,
@@ -181,6 +183,8 @@ impl<'a> Builder<'a> {
                         invocant_span,
                         method_name_span,
                         member_op: None,
+                        shape: crate::model::file_analysis::MemberShape::Unknown,
+                        named_by_string: false,
                     },
                     node_to_span(node),
                     name.clone(),
@@ -320,7 +324,7 @@ impl<'a> Builder<'a> {
                         // Class-name invocant (`Foo->bar`): the bareword is a
                         // package, not a local sub. Emit a narrower PackageRef
                         // at the invocant span so cursor-on-`Foo` resolves to
-                        // the `package Foo` decl (local via find_package_or_class,
+                        // the `package Foo` decl (local via find_package_or_class_in,
                         // cross-file via the module index) exactly like `use Foo`,
                         // instead of falling through to the wider MethodCall ref
                         // that describes `bar`. ref_at prefers the narrower span,

@@ -230,9 +230,9 @@ impl ResolutionSession {
         })
     }
 
-    /// Did this walk run out of consult budget? An exhausted walk answered
-    /// from what it had reached — callers that report completeness read
-    /// this before the guard drops.
+    /// Did this walk run out of consult budget? Test-only: the budget pins
+    /// read it before the guard drops (production reads the taken twin below).
+    #[cfg(test)]
     pub fn degraded() -> bool {
         SESSION.with(|s| s.borrow().as_ref().is_some_and(|st| st.exhausted))
     }
@@ -248,17 +248,16 @@ impl ResolutionSession {
     }
 
     /// Consults performed vs answered from the memo for the open session.
-    /// `None` when no session is open.
+    /// `None` when no session is open. Test-only: the memo pins read it.
+    #[cfg(test)]
     pub fn stats() -> Option<SessionStats> {
         SESSION.with(|s| s.borrow().as_ref().map(|st| st.stats))
     }
 
-    /// Declare what this walk's verb reads out of enrichment.
-    ///
-    /// Call on an OPEN session. A verb that declares nothing gets `full()`,
-    /// so a new verb is never silently under-served — the failure direction is
-    /// "did more work than it needed", never "was handed a copy missing what
-    /// it asked for".
+    /// Declare what this walk's verb reads out of enrichment. Test-only:
+    /// no server verb declares a profile yet (every server walk enriches
+    /// `full()`); the pins hold the mechanism until one does.
+    #[cfg(test)]
     pub fn declare_profile(profile: crate::model::file_analysis::EnrichmentProfile) {
         SESSION.with(|s| {
             if let Some(st) = s.borrow_mut().as_mut() {

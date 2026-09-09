@@ -483,7 +483,7 @@ fn two_askers_with_different_use_lib_see_different_providers() {
 
     let empty = Default::default();
     let resolved_by = |fa: &crate::model::file_analysis::FileAnalysis| {
-        let axis = VisibilityAxis::for_origin(fa, None, &idx, false);
+        let axis = VisibilityAxis::for_origin(fa, None, &idx, crate::model::file_analysis::PackVisibility::Host);
         let scoped = ScopedLookup::new(&idx, &empty, None, axis);
         scoped.get_cached("Twin").map(|c| c.path.clone())
     };

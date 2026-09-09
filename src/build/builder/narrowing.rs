@@ -787,6 +787,7 @@ impl<'a> Builder<'a> {
                         at,
                         node_to_span(bare),
                         crate::model::file_analysis::Extraction::Rebind,
+                        false,
                     );
                 }
                 continue;
@@ -798,6 +799,7 @@ impl<'a> Builder<'a> {
                         loopvar.start_position(),
                         node_to_span(src),
                         crate::model::file_analysis::Extraction::Rebind,
+                        false,
                     );
                 }
                 continue;
@@ -812,6 +814,7 @@ impl<'a> Builder<'a> {
                     // the declarative capture.
                     let elem_nodes = self.list_element_nodes(src);
                     let at = lhs_node.start_position();
+                    let reassigns = lhs_node.kind() != "variable_declaration";
                     for (vt, extraction) in targets {
                         let (source, extraction) = match (&elem_nodes, &extraction) {
                             (Some(nodes), crate::model::file_analysis::Extraction::Positional(n))
@@ -822,17 +825,20 @@ impl<'a> Builder<'a> {
                             }
                             _ => (source_span, extraction),
                         };
-                        self.push_flow_edge(vt, at, source, extraction);
+                        self.push_flow_edge(vt, at, source, extraction, reassigns);
                     }
                 } else if let Some(vt) = self.get_var_text_from_lhs(lhs_node) {
+                    let reassigns = lhs_node.kind() != "variable_declaration";
                     self.push_flow_edge(
                         vt,
                         lhs_node.start_position(),
                         source_span,
                         crate::model::file_analysis::Extraction::Whole,
+                        reassigns,
                     );
                 }
             } else if let Some(tnode) = caps.target {
+                // `@flow.target` is the bare-scalar lhs: a reassignment.
                 if let Ok(vt) = tnode.utf8_text(self.source) {
                     let vt = vt.to_string();
                     self.push_flow_edge(
@@ -840,6 +846,7 @@ impl<'a> Builder<'a> {
                         tnode.start_position(),
                         source_span,
                         crate::model::file_analysis::Extraction::Whole,
+                        true,
                     );
                 }
             }
@@ -873,15 +880,23 @@ impl<'a> Builder<'a> {
         at: Point,
         source: Span,
         extraction: crate::model::file_analysis::Extraction,
+        reassigns: bool,
     ) {
         let scope = self.scope_at_point(at);
-        let already_typed = self.bag_query_variable(&name, scope, at).is_some();
+        // A REASSIGNMENT always lowers: its edge is the reset point the
+        // fold keys on (`FlowEdge::reassigns`), whatever the walk's eager TC
+        // for the same statement said — the two agree, or the refined TC
+        // subsumes the edge's re-derived shape. A declaration keeps the
+        // gate: its companions land anywhere in the scope, and a typed
+        // declaration needs no fallback edge.
+        let already_typed = !reassigns && self.bag_query_variable(&name, scope, at).is_some();
         let fe = crate::model::file_analysis::FlowEdge {
             target_name: name,
             target_scope: scope,
             target_at: at,
             source,
             extraction,
+            reassigns,
         };
         if !already_typed {
             if let Some(w) = fe.lower_to_witness() {

@@ -2142,7 +2142,7 @@ fn typeglob_install_is_found_through_the_class_keyed_provider_index() {
     // End-to-end: a caller's `DateTime->_ymd2rd` resolves to the installer.
     let caller = build_fa("package Caller;\nsub go { return DateTime->_ymd2rd(1); }\n1;\n");
     match caller.resolve_method_in_ancestors("DateTime", "_ymd2rd", Some(&idx)) {
-        Some(MethodResolution::CrossFile { class, def_module }) => {
+        Some(MethodResolution::CrossFile { class, def_module, .. }) => {
             assert_eq!(class, "DateTime");
             assert_eq!(def_module.as_deref(), Some("DateTime::PP"));
         }
@@ -2225,7 +2225,7 @@ fn typeglob_fallback_still_answers_from_a_candidate_the_ancestor_walk_rejected()
     );
     let caller = build_fa("package Caller;\nsub go { return Widget->paint(); }\n1;\n");
     match caller.resolve_method_in_ancestors("Widget", "paint", Some(&idx)) {
-        Some(MethodResolution::CrossFile { class, def_module }) => {
+        Some(MethodResolution::CrossFile { class, def_module, .. }) => {
             assert_eq!(class, "Widget");
             assert_eq!(def_module.as_deref(), Some("Widget"));
         }

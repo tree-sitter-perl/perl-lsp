@@ -928,7 +928,7 @@ impl<'a> CandidateSet<'a> {
                             return vec![self.origin_decl(sym.selection_span)];
                         }
                     }
-                    if let Some(MethodResolution::CrossFile { ref class, ref def_module }) =
+                    if let Some(MethodResolution::CrossFile { ref class, ref def_module, .. }) =
                         analysis.resolve_method_in_ancestors(&cn, method, Some(idx))
                     {
                         // One path for both: a real inherited method lives in

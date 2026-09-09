@@ -176,7 +176,7 @@ the rule above, and the epics do not supersede them:
   logged for later ratification, per the loosely-coupled-option
   convention. Read it before relitigating a fork.
 - `docs/forks-resolved.md`, `docs/review-narrow-seams.md`,
-  `docs/rework-hitlist.md`, `docs/gold-roadmap.md`,
+  `docs/gold-roadmap.md`,
   `docs/cpp-golive-map.md`, `docs/hitlist-*.md` — completed audits, arc
   records and working docs. The `docs-gc` skill converts them to their
   durable form when their arc closes; do not treat a closed hitlist as
