@@ -1152,15 +1152,10 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                         Some(_) => {
                             // The written spelling — its own qualifier when
                             // it has one, else the (possibly aliased) leaf —
-                            // resolves to the parent's identity; the
-                            // namespace rides beside the leaf for the FQ
-                            // chain validation.
+                            // resolves to the parent's identity.
                             let written =
                                 parent_fq_by_match.get(&e.match_id).cloned().unwrap_or(shaped);
-                            let fqn = ident(&written, e.start);
-                            let (leaf, ns) = split_ns_leaf(&fqn);
-                            out.parents.push((child.clone(), fqn));
-                            out.parent_namespaces.push((child.clone(), leaf, ns));
+                            out.parents.push((child.clone(), ident(&written, e.start)));
                         }
                     }
                 }
