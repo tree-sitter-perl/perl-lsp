@@ -1343,3 +1343,169 @@ fn cli_exits_flush_instrumentation() {
         violations.join("\n")
     );
 }
+
+// ---- Rules #12–#14 tripwires ----------------------------------------------
+//
+// Each is a count-exact, shrink-only allowlist keyed by path relative to
+// `src/`: a NEW site fails until it is added here with a reason, and a
+// retired site fails until its entry goes — so the list can never quietly
+// grow, and an entry marked `retire:` is a known debt with an owner.
+
+/// Non-test source files in `layers`, keyed by their `src/`-relative path.
+fn layer_files(layers: &[Layer]) -> Vec<(String, String)> {
+    let src = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
+    source_files()
+        .into_iter()
+        .filter(|(_, layer, _)| layers.contains(layer))
+        .map(|(path, _, _)| {
+            let rel = path.strip_prefix(&src).expect("under src/").to_string_lossy().to_string();
+            (rel, fs::read_to_string(&path).expect("read source"))
+        })
+        .collect()
+}
+
+/// Count, per file, the non-comment lines `hit` accepts.
+fn count_lines(files: &[(String, String)], hit: &dyn Fn(&str) -> bool) -> HashMap<String, usize> {
+    let mut seen = HashMap::new();
+    for (rel, text) in files {
+        let n = text
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("//"))
+            .filter(|l| hit(l))
+            .count();
+        if n > 0 {
+            seen.insert(rel.clone(), n);
+        }
+    }
+    seen
+}
+
+/// Diff `seen` against `allow` — every site allowlisted with its exact count,
+/// every allowlisted count still present. `what` names the rule for the
+/// message.
+fn allowlist_drift(what: &str, seen: &HashMap<String, usize>, allow: &[(&str, usize, &str)]) -> Vec<String> {
+    let mut out = Vec::new();
+    let expected: HashMap<&str, (usize, &str)> = allow.iter().map(|(f, n, why)| (*f, (*n, *why))).collect();
+    let mut files: Vec<&String> = seen.keys().collect();
+    files.sort();
+    for file in files {
+        let n = seen[file];
+        match expected.get(file.as_str()) {
+            Some((exp, _)) if *exp == n => {}
+            Some((exp, why)) => out.push(format!(
+                "{what}: {file} has {n} site(s), allowlisted {exp} ({why}) — a new site is a \
+                 rule violation until it is justified here; a retired one shrinks the entry"
+            )),
+            None => out.push(format!(
+                "{what}: {file} has {n} site(s) and is not allowlisted — see CLAUDE.md rules #12–#14"
+            )),
+        }
+    }
+    for (file, exp, _) in allow {
+        if !seen.contains_key(*file) {
+            out.push(format!("{what}: {file} allowlisted ({exp}) but no site found — drop the entry"));
+        }
+    }
+    out
+}
+
+/// Rule #12: a language's spellings have ONE home — `conventions.rs` for
+/// Perl, the `LangPack` (as data on `PackFacts`) for a pack. A namespace
+/// separator, a sigil, or an attribute name as a LITERAL anywhere else in
+/// the model or index tiers is that language leaking upward.
+#[test]
+fn language_spellings_have_one_home() {
+    let files = layer_files(&[Layer::Model, Layer::Index]);
+    let attr = ["\"static\"", "\"interface\"", "\"abstract\"", "\"readonly\"", "\"final\""];
+    let seen = count_lines(&files, &|l| {
+        l.contains("'\\\\'") || l.contains("\"\\\\\"") || l.contains("'$'") || attr.iter().any(|a| l.contains(a))
+    });
+    let allow: &[(&str, usize, &str)] = &[
+        ("index/module_cache/rows.rs", 2, "SQLite LIKE escaping — SQL syntax, not a language spelling"),
+        ("model/conventions.rs", 6, "Perl's home (4 sigil sites); retire: 2 php separator arms in is_bareword_class_name"),
+        ("model/file_analysis/ancestry.rs", 5, "retire: \"static\"/\"interface\" attribute strings → the symbol flag set"),
+        ("model/file_analysis/class_queries.rs", 9, "retire: 6 php separator literals (use-map pins) + 2 \"static\"; 1 Perl sigil trim (legacy)"),
+        ("model/file_analysis/completion.rs", 10, "Perl sigils re-derived outside conventions.rs — legacy, shrink-only"),
+        ("model/file_analysis/core_types.rs", 3, "retire: split_qualified's php separator arm; 2 Perl sigil matches (legacy)"),
+        ("model/file_analysis/cursor_queries.rs", 5, "retire: 1 php sigil probe (promoted twin); 4 Perl sigil sites (legacy)"),
+        ("model/file_analysis/enrichment.rs", 1, "Perl sigil on a hash-key access (legacy)"),
+        ("model/file_analysis/hover.rs", 1, "retire: separator peel of a class identity → name_match_key"),
+        ("model/file_analysis/invocants.rs", 3, "Perl sigil sites (legacy)"),
+        ("model/file_analysis/outline.rs", 1, "Perl sigil default (legacy)"),
+        ("model/file_analysis/queries.rs", 1, "Perl sigil probe (legacy)"),
+        ("model/file_analysis/use_map.rs", 1, "retire: php separator default → the pack's declared separator"),
+    ];
+    let drift = allowlist_drift("rule #12 (language spellings)", &seen, allow);
+    assert!(drift.is_empty(), "{}", drift.join("\n"));
+}
+
+/// Rule #13: the model never parses a string this codebase rendered. Every
+/// `split`-family call in the model is allowlisted with the reason it is
+/// SOURCE-side (a written spelling, a source-spelled name); a rendered
+/// label, a joined row, or a formatted type being split is a violation.
+#[test]
+fn rendered_strings_are_not_reparsed() {
+    let files = layer_files(&[Layer::Model]);
+    let fns = [".split(", ".rsplit(", ".split_once(", ".rsplit_once(", ".splitn(", ".rsplitn("];
+    let seen = count_lines(&files, &|l| fns.iter().any(|f| l.contains(f)));
+    let allow: &[(&str, usize, &str)] = &[
+        ("model/conventions.rs", 3, "source text: Perl qualified names and class tokens"),
+        ("model/file_analysis/class_queries.rs", 3, "retire: raw `use` rows re-split → structured import rows"),
+        ("model/file_analysis/core_types.rs", 2, "split_qualified — a name as written in source (its php arm retires under #12)"),
+        ("model/file_analysis/enrichment.rs", 1, "Perl package leaf vs a load name — both source-spelled"),
+        ("model/file_analysis/hover.rs", 2, "retire: a rendered type label peeled and split → formatter vocabulary hook"),
+        ("model/file_analysis/invocants.rs", 2, "Perl `::` on source-spelled class and sub names"),
+        ("model/file_analysis/types.rs", 1, "canonical_template_spelling — a C++ instance as written in source"),
+        ("model/file_analysis/use_map.rs", 3, "resolving WRITTEN spellings"),
+    ];
+    let drift = allowlist_drift("rule #13 (rendered strings)", &seen, allow);
+    assert!(drift.is_empty(), "{}", drift.join("\n"));
+}
+
+/// Rule #14: a `WitnessSource` tag is provenance (clear-and-emit,
+/// `--dump-package`), never a semantic switch. A reducer or registry
+/// branch comparing a witness's source against a `*_SOURCE` constant is
+/// reading a kind that belongs on the payload or the attachment.
+#[test]
+fn source_tags_are_provenance_only() {
+    let files = layer_files(&[Layer::Model]);
+    let seen = count_lines(&files, &|l| {
+        l.contains("_SOURCE") && (l.contains("==") || l.contains("!=")) && !l.contains("remove_by_source_tag")
+    });
+    let allow: &[(&str, usize, &str)] = &[
+        ("model/witnesses/reducers.rs", 1, "retire: the reset marker → its own payload"),
+        ("model/witnesses/registry.rs", 2, "retire: field-edge partition → the ClassValue attachment; reassign edge → the Reset payload"),
+        ("model/witnesses/types.rs", 1, "retire: priority derived from the tag → a source KIND carrying its priority"),
+    ];
+    let drift = allowlist_drift("rule #14 (source tags)", &seen, allow);
+    assert!(drift.is_empty(), "{}", drift.join("\n"));
+}
+
+/// Rule #14: `PackFacts` is per-FILE facts. A per-language constant (the
+/// same value for every file of a language) does not belong on it, and a
+/// per-site fact a query joins back to a symbol is a witness or a ref
+/// binding, not a new `Vec` here. The count is a ratchet: adding a field
+/// means bumping it AND saying in the owning ADR why the fact is neither.
+#[test]
+fn pack_facts_fields_are_ratcheted() {
+    let text = fs::read_to_string(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/model/file_analysis/pack_facts.rs"),
+    )
+    .expect("read pack_facts.rs");
+    let start = text.find("pub struct PackFacts {").expect("PackFacts struct");
+    let body = &text[start..];
+    let end = body.find("\n}\n").expect("struct end");
+    let fields = body[..end].lines().filter(|l| l.starts_with("    pub ")).count();
+    const RATCHET: usize = 36;
+    assert!(
+        fields <= RATCHET,
+        "PackFacts grew to {fields} fields (ratchet {RATCHET}). A per-language constant goes on \
+         the language's conventions; a per-site fact is a witness or a ref binding (CLAUDE.md \
+         rule #14). If this field is genuinely per-file and neither, bump the ratchet in the \
+         same commit and say why in the owning ADR."
+    );
+    assert!(
+        fields == RATCHET,
+        "PackFacts shrank to {fields} fields — lower the ratchet ({RATCHET}) so it keeps biting"
+    );
+}

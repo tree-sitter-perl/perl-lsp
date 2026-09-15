@@ -72,9 +72,21 @@ the language-generic extraction tier). Pure-mechanical slices may stay
 sonnet. Fable is never spawned as an agent.
 
 Brief each slice with the repo's architecture rules that bite: rule #1
-(single tree-consumer per tier), rule #10 (no shape special-cases),
-edges-not-values, clear-and-emit for re-emittable passes. Agents commit to
-their worktree branch and do NOT push.
+(single tree-consumer per tier), rule #10 (no shape special-cases), rules
+#11–#14 (mint at the producer; one home per language's spellings; never
+reparse a rendered string; facts have one shape), edges-not-values,
+clear-and-emit for re-emittable passes. Agents commit to their worktree
+branch and do NOT push.
+
+**Vocabulary needs a justification.** Any commit that adds an enum variant,
+a `RefKind`, a `WitnessAttachment`, a `PackFacts` field, a `WitnessSource`
+tag, or a bool flag on a facts struct carries one sentence in its message
+naming the existing discriminator it replaces and why none of them fit.
+A fix slice that cannot write that sentence has found a rule-#11 or
+rule-#14 case, not a vocabulary gap — the deadline pressure of a fix slice
+is exactly when the smallest diff is a tag on an existing shape, and every
+such tag in the php arc's review traced back to a fact the producer
+already had. Put the sentence in the brief; check for it at the merge gate.
 
 ### Operational discipline (learned the hard way — sandbox restarts EAT unpushed work)
 
@@ -143,6 +155,37 @@ rot (no history narration), doc currency (`docs/PARKED.md` pruned of
 landed items, hitlist rows marked LANDED, KNOWN-GAPS current), warnings.
 Leave-alone verdicts get RECORDED so the next sweep doesn't re-litigate.
 
+## Phase 7 — arc-close review (the coordinator, not an agent)
+
+The round-close sweep reads one round's diff. An arc is several rounds,
+and the findings that cost the most in review were invisible per round:
+each commit's tag, flag, or fallback looked locally justified, and the
+sum was a vocabulary nobody would have designed. So before an arc is
+handed over for review, the coordinator reads the WHOLE diff from the
+arc's base (`git diff <arc-base>..HEAD`, not the last round's) against
+CLAUDE.md rules #10–#14 as a checklist, per hunk:
+
+- **#10** — does this branch on a shape (a name, a base, a language, a
+  provenance) instead of asking the value?
+- **#11** — is this deriving something the producer had (a re-derived
+  relation by span/sigil/column; a structural fallback for a scope fact
+  the extractor could have stamped)?
+- **#12** — is there a separator, sigil, or attribute name as a literal
+  outside `conventions.rs` / the pack?
+- **#13** — is a rendered string being split, tokenized, or peeled?
+- **#14** — is a per-site fact a side table instead of a witness/binding;
+  a witness anchored somewhere other than its source site; a source tag
+  read for meaning; a per-language constant on a per-file struct?
+
+Every finding is fixed before the push, or recorded in
+`docs/open-forks.md` with the reason it is deferred. The layering
+tripwires (`language_spellings_have_one_home`,
+`rendered_strings_are_not_reparsed`, `source_tags_are_provenance_only`,
+`pack_facts_fields_are_ratcheted`) must be green with NO allowlist growth
+over the arc — an allowlist entry added during the arc is a finding, not
+a fix. Green nets are not evidence here: none of the five root causes
+above changes a test's answer.
+
 ## Exit criteria for a round
 
 - Hitlist rows all LANDED or explicitly parked with evidence.
@@ -150,6 +193,16 @@ Leave-alone verdicts get RECORDED so the next sweep doesn't re-litigate.
 - Full net green, pushed.
 - `docs/PARKED.md` + `docs/open-forks.md` current.
 - A round summary appended to the session/brag doc.
+
+## Exit criteria for an arc (before handing over for review)
+
+- Every round's criteria above.
+- Phase 7 done: the whole-arc diff read against rules #10–#14, findings
+  fixed or recorded as open forks, tripwire allowlists no larger than at
+  the arc's base.
+- Every vocabulary addition in the arc (variant / ref kind / attachment /
+  facts field / source tag / flag) has its justification sentence in a
+  commit message.
 
 Then either fire the next round (new corpus repos debut + re-probes of
 everything just fixed) or park the language with its limits pinned.
