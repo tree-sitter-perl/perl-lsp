@@ -27,6 +27,34 @@ marked otherwise; the drain re-derived each rationale against current code.
   declared example until ts-parser-perl 2.0.0 landed it; the list is
   empty today.
 
+- **`PackFacts` is one lane for every pack language** (recorded
+  2026-09-15, for after the php release). Thirty-four fields, of which a
+  Perl analysis carries none and a php analysis carries the cpp ones
+  (`macro_defs`, `include_directives`, `include_closure`, `moved_from`,
+  `template_params`, `specializes`) as empty vecs — and the reverse. The
+  ratchet (`layering_tests::pack_facts_fields_are_ratcheted`) stops the
+  lane growing, not the sharing. The shape wanted: one sub-struct per
+  language family the pack declares (`CppFacts`, `PhpFacts`), each
+  default-empty, with the language-generic rows (`receiver_names`,
+  `import_rows`, `namespace_sep`, the region spans) staying on
+  `PackFacts`; `surface_feed` destructures each exhaustively the way it
+  does the lanes today. Cost: an `EXTRACT_VERSION` bump and every
+  `pack.<field>` reader re-pathed; the win is that a cpp field cannot be
+  read on a php analysis by construction. Not before release: it reshapes
+  the blob for no user-visible change.
+
+- **Two homes for a declaration's documentation text** (recorded
+  2026-09-15, for after the php release). Perl POD / preceding-comment
+  docs render from `SymbolDetail::Sub { doc }`; a php docblock's summary
+  renders from `Presentation::doc`. Same question ("what does hover show
+  under the signature"), two fields, two render paths in `hover.rs`. The
+  detail's field predates `Presentation`; the unification is to move the
+  Perl text onto `Presentation::doc` (presentation, not kind semantics —
+  the struct's own rule) and delete the detail field, with `resolve_tail_pod_docs`
+  and the plugin hover paths writing there. Cost: a blob bump and the
+  hover/completion-detail readers; the POD-source tests (`docs.rs`) keep
+  their assertions. Not before release: the two render identically today.
+
 - **Two include-BFS walkers + two `file_stamp` fns** (cpp_reparse vs
   module_cache): thrice examined, thrice left (different contracts/layers:
   parse-heavy macro gather vs memoized line-scan closure; `(hash,size)`
