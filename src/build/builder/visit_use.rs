@@ -1336,13 +1336,14 @@ impl<'a> Builder<'a> {
     /// read is only valid after the RHS walk has allocated its refs and
     /// anon-sub symbols.
     fn assignment_after_rhs(&mut self, node: Node<'a>, left: Node<'a>, right: Node<'a>) {
-        // A plain assignment (no `my`) RESETS its targets: the marker lands
-        // now, before the walk types anything downstream of it, so a later
-        // `my $o = $x` folds against the value this write produced rather
-        // than the belief it replaced. The flow lane re-mints the same site
-        // post-walk (its edge is the RHS's query-time value); the reducer
-        // reads either as the cutoff.
-        if left.kind() != "variable_declaration" {
+        // Every write RESETS its targets — a declaration and a plain
+        // assignment alike: the marker lands now, before the walk types
+        // anything downstream of it, so a later `my $o = $x` folds against
+        // the value this write produced rather than the belief it replaced.
+        // A first write retires nothing, so a declaration costs nothing; the
+        // facts a declaration must not kill (a parameter assertion) are
+        // anchored at the binding site, never before it.
+        {
             let at = left.start_position();
             let scope = self.current_scope();
             match self.lhs_list_targets(left) {
@@ -1688,11 +1689,16 @@ impl<'a> Builder<'a> {
                 Some(s) => s,
                 None => continue,
             };
+            // Anchored at the parameter's binding site (see `binding_site_of`).
+            let at = self
+                .binding_site_of(&var_name, scope)
+                .map(|p| Span { start: p, end: p })
+                .unwrap_or(sub_span);
             self.push_plugin_type_constraint(
                 TypeConstraint {
                     variable: var_name,
                     scope,
-                    constraint_span: sub_span,
+                    constraint_span: at,
                     inferred_type: d.inferred_type.clone(),
                 },
                 d.plugin_id.clone(),

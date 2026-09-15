@@ -167,12 +167,9 @@ pub const INHERIT_PARAM_SOURCE: &str = "inherit-param";
 /// priority latest-wins does it (`HashRef` never subsumes `Sequence`).
 pub const REFINE_SOURCE: &str = "refines-container";
 
-/// Source tag of a REASSIGNMENT's flow edge (`FlowEdge::reassigns`): the
-/// only witness whose failure to resolve `materialize` turns into an
-/// `OpaqueRebind` reset. Every other assignment lowering is a declaration
-/// (`"flow"`) or a companion (`mcb`, `chain_assignment`) and drops out
-/// silently when it cannot answer.
-pub const REASSIGN_FLOW_SOURCE: &str = "flow-reassign";
+/// Source tag of the builder's write markers (`WitnessPayload::Reset`) —
+/// provenance only; the payload carries the meaning.
+pub const RESET_SOURCE: &str = "reset";
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum WitnessSource {
@@ -184,6 +181,32 @@ pub enum WitnessSource {
     Enrichment(String),
     /// Derived from another ref — rename transport chases these as a DAG.
     DerivedFrom(RefIdx),
+    /// A DECLARED fact: an explicit annotation in the source
+    /// (`ANNOT_SOURCE`), an inherited doc (`INHERIT_PARAM_SOURCE`), or a
+    /// return arm refining a declared container (`REFINE_SOURCE`). A
+    /// source KIND, so it outranks inference by construction and no
+    /// reducer reads the tag to find out. Kept at the END for bincode
+    /// variant-index stability (bump `EXTRACT_VERSION`).
+    Annotation(String),
+}
+
+impl WitnessPayload {
+    /// Does this witness BIND the variable's value — a type, a class
+    /// assertion, a first-param or bless witness — as opposed to observing
+    /// its use (a deref, a numeric context)? The reset rule and the
+    /// scope-binding walk ask this one question.
+    pub fn binds_value(&self) -> bool {
+        match self {
+            WitnessPayload::InferredType(_) => true,
+            WitnessPayload::Observation(o) => matches!(
+                o,
+                TypeObservation::ClassAssertion(_)
+                    | TypeObservation::FirstParamInMethod { .. }
+                    | TypeObservation::BlessTarget(_)
+            ),
+            _ => false,
+        }
+    }
 }
 
 impl WitnessSource {
@@ -200,11 +223,7 @@ impl WitnessSource {
     pub fn priority(&self) -> u8 {
         match self {
             WitnessSource::Plugin(_) => 100,
-            WitnessSource::Builder(tag)
-                if tag == ANNOT_SOURCE || tag == INHERIT_PARAM_SOURCE || tag == REFINE_SOURCE =>
-            {
-                20
-            }
+            WitnessSource::Annotation(_) => 20,
             WitnessSource::Builder(_)
             | WitnessSource::Enrichment(_)
             | WitnessSource::DerivedFrom(_) => 10,
@@ -309,6 +328,17 @@ pub enum WitnessPayload {
     /// mis-projects (docs/adr/destructuring.md). Kept at the END for
     /// bincode variant-index stability (bump `EXTRACT_VERSION`).
     Tuple(Vec<WitnessAttachment>),
+    /// A WRITE to the attachment's variable at this (zero-width) site —
+    /// a declaration or a plain assignment alike. `FrameworkAwareTypeFold`
+    /// reads it as the cutoff every earlier belief dies at, and as the
+    /// value (`Unknown`) only when something was bound before it and
+    /// nothing typed lands at or after it: a first binding resets nothing.
+    /// The site is the write's own token, and every fact about the
+    /// variable that must survive the write — a parameter assertion, a
+    /// declared type — is anchored AT its binding site, never before it
+    /// (rule #14). Kept at the END for bincode variant-index stability
+    /// (bump `EXTRACT_VERSION`).
+    Reset,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

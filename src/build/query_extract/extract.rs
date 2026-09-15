@@ -1250,7 +1250,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
             if let Some(payload) = payload {
                 out.witnesses.push(crate::model::witnesses::Witness {
                     attachment: var.clone(),
-                    source: crate::model::witnesses::WitnessSource::Builder(crate::model::witnesses::ANNOT_SOURCE.into()),
+                    source: crate::model::witnesses::WitnessSource::Annotation(crate::model::witnesses::ANNOT_SOURCE.into()),
                     payload,
                     span: annot_span,
                 });

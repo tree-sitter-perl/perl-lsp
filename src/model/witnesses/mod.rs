@@ -153,6 +153,14 @@ impl WitnessBag {
     /// "was this variable's type written EXPLICITLY" (`skeleton-annot`) vs
     /// inferred — the inlay-hint suppression for languages with explicit
     /// types (`int c` needs no `: int` hint; `auto x` does).
+    /// Does an explicitly DECLARED fact (`WitnessSource::Annotation`) sit on
+    /// `att`? Inlay hints skip a variable whose type is written.
+    pub fn has_annotation(&self, att: &WitnessAttachment) -> bool {
+        self.index.get(att).is_some_and(|idxs| {
+            idxs.iter().any(|&i| matches!(&self.witnesses[i].source, WitnessSource::Annotation(_)))
+        })
+    }
+
     pub fn has_builder_source(&self, att: &WitnessAttachment, tag: &str) -> bool {
         self.index.get(att).is_some_and(|idxs| {
             idxs.iter().any(|&i| {

@@ -300,14 +300,13 @@ struct op { BASEOP };
     let op_type = sym_in(&fa, "op_type");
     assert_eq!(op_type.kind, SymKind::Field);
     assert!(
-        fa.witnesses.has_builder_source(
+        fa.witnesses.has_annotation(
             &crate::model::witnesses::WitnessAttachment::Variable {
                 name: "op_type".into(),
                 scope: op_type.scope,
             },
-            crate::model::witnesses::ANNOT_SOURCE,
         ),
-        "macro-body member carries the ANNOT_SOURCE witness"
+        "macro-body member carries the declared-type witness"
     );
 
     // The renderers then agree: inlay over the member declarations emits no hint

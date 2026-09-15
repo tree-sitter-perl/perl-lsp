@@ -1226,8 +1226,14 @@ impl<'a> Builder<'a> {
         self.param_type_wildcards = wildcards;
 
         let scope = self.current_scope();
-        let span = node_to_span(node);
         for (variable, in_role, class, from_loader) in to_gate {
+            // Anchored at the parameter's binding token, like every other
+            // parameter assertion: the declaration's own write marker
+            // retires only what lies strictly before it.
+            let span = self
+                .param_binding_site(node, &variable)
+                .map(|p| Span { start: p, end: p })
+                .unwrap_or_else(|| node_to_span(node));
             if from_loader {
                 // Callee-side marker: the real type arrives at
                 // enrichment from caller PluginLoad facts. The static
@@ -1287,6 +1293,46 @@ impl<'a> Builder<'a> {
         }
     }
 
+    /// The token that binds `name` in `sub_node`: its signature parameter,
+    /// else the leading `my (…) = @_` / `my $x = shift` declaration of the
+    /// body. `None` when the sub reads `@_` without ever binding the name.
+    pub(super) fn param_binding_site(&self, sub_node: Node<'a>, name: &str) -> Option<Point> {
+        for i in 0..sub_node.child_count() {
+            if let Some(sig) = sub_node.child(i) {
+                if sig.kind() == "signature" {
+                    for j in 0..sig.named_child_count() {
+                        if let Some(param) = sig.named_child(j) {
+                            if self.first_var_child(param).as_deref() == Some(name) {
+                                return Some(param.start_position());
+                            }
+                        }
+                    }
+                    return None;
+                }
+            }
+        }
+        let body = sub_node.child_by_field_name("body")?;
+        for i in 0..body.named_child_count() {
+            let Some(stmt) = body.named_child(i) else { continue };
+            let assign = if stmt.kind() == "expression_statement" {
+                stmt.named_child(0).filter(|n| n.kind() == "assignment_expression")
+            } else if stmt.kind() == "assignment_expression" {
+                Some(stmt)
+            } else {
+                None
+            };
+            let Some(assign) = assign else { break };
+            let Some(left) = assign.child_by_field_name("left") else { continue };
+            if left.kind() != "variable_declaration" {
+                continue;
+            }
+            if let Some((_, span)) = self.collect_vars_from_decl(left).into_iter().find(|(n, _)| n == name) {
+                return Some(span.start);
+            }
+        }
+        None
+    }
+
     pub(super) fn detect_first_param_type(&mut self, params: &[ParamInfo], node: Node<'a>) {
         // Find the first param with `is_invocant = true` — normally params[0] for
         // regular methods, but params[1] for `around` modifiers (params[0] is $orig).
@@ -1304,10 +1350,16 @@ impl<'a> Builder<'a> {
         if let Some(pkg) = self.current_package.clone() {
             let (scope, span) = (self.current_scope(), node_to_span(node));
             let head = InferredType::FirstParam { package: pkg };
+            // Anchored at the invocant's binding token: the declaration's
+            // own write marker retires only what lies strictly before it.
+            let at = self
+                .param_binding_site(node, &invocant.name)
+                .map(|p| Span { start: p, end: p })
+                .unwrap_or(span);
             self.push_type_constraint(TypeConstraint {
                 variable: invocant.name.clone(),
                 scope,
-                constraint_span: span,
+                constraint_span: at,
                 inferred_type: head.clone(),
             });
             // `@_`'s argument window for this scope, headed by the same

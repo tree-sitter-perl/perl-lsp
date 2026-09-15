@@ -903,7 +903,7 @@ fn inject_member_blocks(
             if let Some(payload) = payload {
                 skel.witnesses.push(Witness {
                     attachment: WitnessAttachment::Variable { name: m.name.clone(), scope: scope_id },
-                    source: WitnessSource::Builder(crate::model::witnesses::ANNOT_SOURCE.into()),
+                    source: WitnessSource::Annotation(crate::model::witnesses::ANNOT_SOURCE.into()),
                     payload,
                     span: m.name_span,
                 });

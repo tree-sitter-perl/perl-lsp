@@ -4,6 +4,23 @@
 use super::*;
 
 impl FileAnalysis {
+    /// Where `var` is bound inside `scope` — the earliest declaring
+    /// `Variable` symbol within the scope's span. The anchor every fact
+    /// about a parameter lands at (a declaration's write marker retires
+    /// only what lies strictly before it); `None` when nothing declares it.
+    pub fn binding_site_of(&self, var: &str, scope: ScopeId) -> Option<Point> {
+        let region = self.scopes.get(scope.0 as usize)?.span;
+        self.symbols
+            .iter()
+            .filter(|s| {
+                matches!(s.kind, SymKind::Variable)
+                    && s.name == var
+                    && contains_point(&region, s.selection_span.start)
+            })
+            .map(|s| s.selection_span.start)
+            .min_by_key(|p| (p.row, p.column))
+    }
+
     // ---- Query methods ----
 
     /// Find the innermost scope containing a point.

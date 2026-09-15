@@ -1467,11 +1467,7 @@ fn source_tags_are_provenance_only() {
     let seen = count_lines(&files, &|l| {
         l.contains("_SOURCE") && (l.contains("==") || l.contains("!=")) && !l.contains("remove_by_source_tag")
     });
-    let allow: &[(&str, usize, &str)] = &[
-        ("model/witnesses/reducers.rs", 1, "retire: the reset marker → its own payload"),
-        ("model/witnesses/registry.rs", 1, "retire: reassign edge → the Reset payload"),
-        ("model/witnesses/types.rs", 1, "retire: priority derived from the tag → a source KIND carrying its priority"),
-    ];
+    let allow: &[(&str, usize, &str)] = &[];
     let drift = allowlist_drift("rule #14 (source tags)", &seen, allow);
     assert!(drift.is_empty(), "{}", drift.join("\n"));
 }

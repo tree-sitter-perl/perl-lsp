@@ -1619,13 +1619,11 @@ pub(crate) fn cli_dump_package(root: &str, package_name: &str) {
             continue;
         };
 
-        // Pick a point inside the sub body so scope-resolved param
-        // lookups land in the right scope. End of line N+1 is past
-        // any signature parens for almost every shape.
-        let probe = tree_sitter::Point::new(
-            sym.span.start.row.saturating_add(1),
-            0,
-        );
+        // A parameter's type is asked at the END of the sub body — the
+        // same point signature help uses — so every binding-site fact
+        // (`my $c = shift`, a plugin's claim anchored on that token) is in
+        // the temporal window.
+        let probe = sym.span.end;
 
         let bag_default = analysis
             .sub_return_type_at_arity(&sym.name, None)

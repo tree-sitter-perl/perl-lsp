@@ -116,6 +116,24 @@ impl<'a> Builder<'a> {
         self.add_symbol_ns(name, kind, span, selection_span, detail, Namespace::Language)
     }
 
+    /// Where `var` is bound inside `scope` — the earliest declaring
+    /// `Variable` symbol within the scope's span. The anchor every fact
+    /// about a parameter lands at, so the declaration's own write marker
+    /// (which retires everything strictly before it) leaves the fact
+    /// standing; `None` when nothing declares it (a `$_[0]` read).
+    pub(super) fn binding_site_of(&self, var: &str, scope: ScopeId) -> Option<Point> {
+        let region = self.scopes.get(scope.0 as usize)?.span;
+        self.symbols
+            .iter()
+            .filter(|s| {
+                matches!(s.kind, SymKind::Variable)
+                    && s.name == var
+                    && crate::model::file_analysis::contains_point(&region, s.selection_span.start)
+            })
+            .map(|s| s.selection_span.start)
+            .min_by_key(|p| (p.row, p.column))
+    }
+
     /// Record that `a` and `b` were minted from one declaration token
     /// (`Symbol::declared_with`), each way.
     pub(super) fn pair_co_declared(&mut self, a: SymbolId, b: SymbolId) {

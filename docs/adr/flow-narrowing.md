@@ -35,7 +35,7 @@ Conservative by construction — it under-narrows, never lies. The bias is
 load-bearing for the diagnostics built on top: they miss some real bugs
 but never invent a false `Undef`/`Optional`.
 
-## A rebind is a reset
+## A write is a reset
 
 Temporal ordering answers a read from the newest witness at or before it.
 That is only right while every write leaves one. A rebind whose RHS nothing
@@ -44,13 +44,15 @@ and the read falls back on the newest belief it *can* see — the one the
 write replaced. `my $ct = undef; … $ct = f(); defined $ct` read `Undef`
 and every `defined` guard on it read as one that can never pass.
 
-So every plain assignment mints a **reset marker**: a zero-width witness at
-the write's site under `REASSIGN_FLOW_SOURCE`. Perl's walk mints it in the
-assignment visit, before anything downstream is typed; the flow lane's
-reassign edge (`FlowEdge::reassigns`) lands on the same site post-walk and
-materializes to the RHS's value, or to an `Unknown` under the same source
-when nothing typed it (`opaque_rebind_of`). A pack assignment is the flow
-edge alone. `FrameworkAwareTypeFold` reads the marker three ways:
+So every write mints a **reset marker** — `WitnessPayload::Reset`, a
+zero-width witness at the write's site — a declaration and a plain
+assignment alike; there is no second kind of write. Perl's walk mints it in
+the assignment visit, before anything downstream is typed; the flow lane
+mints the same site again post-walk (idempotent), so the two lanes agree on
+every write by construction, and its edge is the RHS's value, a plain
+`Edge` that simply drops out when nothing types it. The marker is a
+PAYLOAD, never a source tag a reducer inspects (CLAUDE.md rule #14).
+`FrameworkAwareTypeFold` reads it three ways:
 
 - **It is a cutoff.** At the query point, every witness strictly before
   the latest reset is dead, on every axis — the class assertion, the rep
@@ -67,13 +69,19 @@ edge alone. `FrameworkAwareTypeFold` reads the marker three ways:
   landing after it revives the variable through those axes
   (`$r = f(); $r->{k}` reads the hash). An annotation-priority `Unknown`
   (`@var A|B`) is a claim about the value and keeps its place.
-- **A first binding resets nothing.** `opaque_rebind_of` asks the bag —
-  edges included, since the prior binding may itself be an edge nothing
-  typed — whether the scope bound the name before the write; if not, this
-  assignment is the declaration (a pack without declaration syntax marks
-  every plain assignment) and its untypable RHS stays absent, exactly as
-  a `my` whose RHS nothing can type does. Absence keeps the evidence door
+- **A first binding resets nothing.** A marker with no value-binding
+  witness before it (`WitnessPayload::binds_value`) is not a value: the
+  write is the declaration — `my $x = f()`, or a pack's first `$x = f()`
+  — and its untypable RHS stays absent. Absence keeps the evidence door
   open; a reset closes it on what came before.
+
+Because a declaration is a write, every fact about a variable that must
+survive its declaration is anchored AT the binding token, never before it:
+the first-param assertion (`my ($self) = @_` — the `$self` token), a
+plugin's parameter claim (`binding_site_of`), a pack's declared type. A
+fact anchored at a sub's start would be retired by the declaration's own
+marker, and the only alternative — exempting declarations — would make a
+language without declaration syntax a special case.
 
 `Unknown` is a real answer where it stands, and each half of that matters:
 the scope walk stops on it (a shadowed inner `$x` with its belief gone

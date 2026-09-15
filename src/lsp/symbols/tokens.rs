@@ -63,12 +63,11 @@ pub fn inlay_hints(analysis: &FileAnalysis, range: Range) -> Vec<InlayHint> {
                 // explicit types mark the declaration with a `skeleton-annot`
                 // witness; inferred ones (`auto`, Perl) have none, so they
                 // still get the hint.
-                if analysis.witnesses.has_builder_source(
+                if analysis.witnesses.has_annotation(
                     &crate::model::witnesses::WitnessAttachment::Variable {
                         name: sym.name.clone(),
                         scope: sym.scope,
                     },
-                    crate::model::witnesses::ANNOT_SOURCE,
                 ) {
                     continue;
                 }

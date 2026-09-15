@@ -564,11 +564,9 @@ pub struct FlowEdge {
     pub source: Span,
     pub extraction: Extraction,
     /// A plain assignment to a name the scope ALREADY binds (`$x = …`, never
-    /// `my $x = …` / a parameter / a class member): the one shape whose
-    /// untypable source RESETS the variable (`REASSIGN_FLOW_SOURCE`). A
-    /// declaration's companions (a first-param constraint at the sub's
-    /// start, a docblock cast) may sit anywhere before it, so a declaration
-    /// never resets; a member's writers have no order at all.
+    /// `my $x = …` / a parameter / a class member). Provenance: the reset a
+    /// write performs is its own witness (`WitnessPayload::Reset`, minted
+    /// at every write site), not a property of this edge.
     #[serde(default)]
     pub reassigns: bool,
 }
@@ -611,17 +609,12 @@ impl FlowEdge {
             // Rebind-only: recorded in `flow_edges` for the cutoff, no type.
             Extraction::Rebind => return None,
         };
-        let tag = if self.reassigns {
-            crate::model::witnesses::REASSIGN_FLOW_SOURCE
-        } else {
-            "flow"
-        };
         Some(Witness {
             attachment: WitnessAttachment::Variable {
                 name: self.target_name.clone(),
                 scope: self.target_scope,
             },
-            source: WitnessSource::Builder(tag.into()),
+            source: WitnessSource::Builder("flow".into()),
             payload,
             span: Span { start: self.target_at, end: self.target_at },
         })
