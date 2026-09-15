@@ -404,10 +404,10 @@ impl FileAnalysis {
     ) -> String {
         let class = match owner {
             HandlerOwner::Class(n) => n.as_str(),
-            // A Global handler's namespace is the whole program — there is
-            // no class to gather stacked registrations under; the header
-            // renders and the class-keyed gathers below find nothing.
-            HandlerOwner::Global | HandlerOwner::Rail(_) | HandlerOwner::ClassRail(_) => "",
+            // A rail has no class to gather stacked registrations under;
+            // the header renders and the class-keyed gathers below find
+            // nothing.
+            HandlerOwner::Rail(_) => "",
         };
 
         // Gather stacked registrations from this file first, then any

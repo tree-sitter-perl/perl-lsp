@@ -16,8 +16,8 @@ impl FileAnalysis {
             .filter(|r| contains_point(&r.span, point))
             .min_by_key(|r| {
                 let companion = matches!(
-                    r.binding,
-                    Some(RefBinding::Handler { owner: HandlerOwner::ClassRail(_), .. })
+                    &r.binding,
+                    Some(RefBinding::Handler { owner, .. }) if owner.names_are_classes()
                 );
                 (span_size(&r.span), companion as u8)
             })
