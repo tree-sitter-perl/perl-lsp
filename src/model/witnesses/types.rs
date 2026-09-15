@@ -139,6 +139,24 @@ pub enum WitnessAttachment {
     /// declares answers a child's read. Kept at the END for bincode
     /// variant-index stability (bump `EXTRACT_VERSION`).
     Field { owner: String, name: String },
+    /// Parameter `index` of the callable `name` in `package`, AS A BINDING
+    /// TARGET: the attachment a call site's argument aliases when the
+    /// parameter is declared by reference (php `&$out`, C++ `T&`). The
+    /// callee's own extraction pushes `Param{..} → Edge(Variable{param,
+    /// body_scope})` for exactly its by-reference positions and nothing for
+    /// the others, so the binding mode is a fact the callee's bag holds —
+    /// minted where the declaration is read (rule #11), never a bit a
+    /// consumer tests. A call site pushes `Variable(arg) → Edge(Param{..})`
+    /// (or `Projected{receiver, ParamOf}` through a dispatch) for every bare
+    /// variable it passes; the chase answers only where the callee aliases
+    /// the position, so a by-value argument's edge drops out and the
+    /// variable is left as it was. Bound-but-untyped answers `Unknown`
+    /// ("a value flowed here"), because the binding is a fact even when
+    /// the callee never types what it leaves behind. Cross-file the
+    /// registry walks the callee's candidate files and parents the way
+    /// `Field` does. Kept at the END for bincode variant-index stability
+    /// (bump `EXTRACT_VERSION`).
+    Param { package: String, name: String, index: u32 },
 }
 
 /// Index into `FileAnalysis::refs`.
@@ -377,6 +395,12 @@ pub enum ProjectionStep {
     /// (`array<string, V>` docs) projects its first argument. Kept at the
     /// END for bincode variant-index stability (bump `EXTRACT_VERSION`).
     Key,
+    /// Parameter `index` of member `member` dispatched on the base's class:
+    /// chases `Param{class, member, index}` — the call-site half of a
+    /// by-reference binding whose receiver is a value (`$p->execute($cmd,
+    /// $out)`), the same deferred-dispatch shape as `MethodHop`. Kept at
+    /// the END for bincode variant-index stability (bump `EXTRACT_VERSION`).
+    ParamOf { member: String, index: u32 },
 }
 
 /// A sub's return type as a **deferred computation**, not a value:

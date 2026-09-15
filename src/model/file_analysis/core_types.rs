@@ -360,11 +360,6 @@ pub struct ParamArity {
     /// A trailing `...` (C variadic / template pack): any arg count ≥
     /// `required` is accepted.
     pub variadic: bool,
-    /// Positions declared by reference (bit `k` = parameter `k`, php's
-    /// `&$out`): a bare variable written there is BOUND by the call, not
-    /// read. Perl and C++ mint none.
-    #[serde(default)]
-    pub by_ref: u64,
 }
 
 impl ParamArity {
@@ -382,12 +377,6 @@ impl ParamArity {
         } else {
             1
         }
-    }
-
-    /// Whether an argument written at `position` is bound by the call
-    /// (the parameter there is declared by reference).
-    pub fn binds_arg(&self, position: usize) -> bool {
-        position < 64 && self.by_ref & (1u64 << position) != 0
     }
 }
 
@@ -703,7 +692,7 @@ impl Symbol {
                 .filter(|p| !p.is_slurpy && !p.is_invocant && p.default.is_none())
                 .count();
             let variadic = params.iter().any(|p| p.is_slurpy);
-            return Some(ParamArity { total, required, variadic, by_ref: 0 });
+            return Some(ParamArity { total, required, variadic });
         }
         None
     }

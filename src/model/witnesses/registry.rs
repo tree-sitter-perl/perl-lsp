@@ -448,6 +448,8 @@ impl ReducerRegistry {
         // refinement and must never be the type that flows.
         r.register(Box::new(FieldValueReducer));
         r.register(Box::new(DomainCoherenceFold));
+        // `Param{..}` is a disjoint attachment shape; order isn't load-bearing.
+        r.register(Box::new(ParamBindingReducer));
         // Last — fallback for "this Symbol's stored return type".
         r.register(Box::new(SubReturnReducer));
         r
@@ -1206,6 +1208,80 @@ impl ReducerRegistry {
                 );
                 for p in parents {
                     let parent_att = WitnessAttachment::Field { owner: p, name: name.clone() };
+                    let sub_q = ReducerQuery {
+                        attachment: &parent_att,
+                        point: q.point,
+                        framework: q.framework,
+                        arity_hint: None,
+                        receiver: q.receiver.clone(),
+                        args: q.args.clone(),
+                        context: q.context,
+                    };
+                    let v = self.query_rec(bag, &sub_q, state);
+                    if *v != ReducedValue::None {
+                        return (*v).clone();
+                    }
+                }
+            }
+        }
+
+        // `Param{package, name, index}`: the callee's bag is the authority.
+        // Its own witness present but untyped → the position IS bound, so
+        // `Unknown` (a value flowed, nothing named it) rather than silence —
+        // silence would read as by-value. Absent locally → the callee lives
+        // elsewhere (cross-file primary) or the position is a parent's
+        // (ancestry): the `Field` ladder, same shared visited set.
+        if let WitnessAttachment::Param { package, name, index } = q.attachment {
+            if !bag.for_attachment(q.attachment).is_empty() {
+                return ReducedValue::Type(InferredType::Unknown);
+            }
+            if let Some(ctx) = q.context {
+                if ctx.module_index.is_none() {
+                    super::note_bake_exit("param", false);
+                }
+                if let Some(idx) = ctx.module_index {
+                    for cached in idx.visible_def_candidates(package) {
+                        crate::util::ghost_stats::count("moc.provider_fetched");
+                        crate::util::ghost_stats::count("mocsite.param");
+                        let full = idx.bag_present(&cached);
+                        if std::ptr::eq(bag, &full.witnesses) {
+                            continue;
+                        }
+                        let cached_ctx = BagContext {
+                            scopes: &full.scopes,
+                            package_framework: &full.packages,
+                            module_index: Some(idx),
+                            package_parents: &full.packages,
+                            app_surface_consumers: &full.plugin.app_surface_consumers,
+                        };
+                        let sub_q = ReducerQuery {
+                            attachment: q.attachment,
+                            // Cross-file: point normalized (see the slot arm).
+                            point: None,
+                            framework: q.framework,
+                            arity_hint: None,
+                            receiver: q.receiver.clone(),
+                            args: q.args.clone(),
+                            context: Some(&cached_ctx),
+                        };
+                        let v = self.query_rec(&full.witnesses, &sub_q, state);
+                        if *v != ReducedValue::None {
+                            return (*v).clone();
+                        }
+                    }
+                }
+                let parents = crate::model::file_analysis::parents_of(
+                    package,
+                    ctx.package_parents,
+                    ctx.module_index,
+                    ctx.app_surface_consumers,
+                );
+                for p in parents {
+                    let parent_att = WitnessAttachment::Param {
+                        package: p,
+                        name: name.clone(),
+                        index: *index,
+                    };
                     let sub_q = ReducerQuery {
                         attachment: &parent_att,
                         point: q.point,
@@ -2166,6 +2242,34 @@ impl ReducerRegistry {
                                 ) if args.len() == 2 => args.first().cloned(),
                                 _ => None,
                             },
+                            ProjectionStep::ParamOf { member, index } => {
+                                // The dispatch class picks the callee; the
+                                // callee's bag says whether the position
+                                // aliases (`Param` fallback below).
+                                t.class_name().map(str::to_string).and_then(|class| {
+                                    let att = WitnessAttachment::Param {
+                                        package: class,
+                                        name: member.clone(),
+                                        index: *index,
+                                    };
+                                    let sub_q = ReducerQuery {
+                                        attachment: &att,
+                                        point: q.point,
+                                        framework: q.framework,
+                                        arity_hint: None,
+                                        receiver: Some(t.clone()),
+                                        args: q.args.clone(),
+                                        context: q.context,
+                                    };
+                                    state.in_opaque_frame(|state| {
+                                        match &*self.query_rec(bag, &sub_q, state) {
+                                            ReducedValue::Type(t) => Some(t.clone()),
+                                            ReducedValue::FactMap(_)
+                                            | ReducedValue::None => None,
+                                        }
+                                    })
+                                })
+                            }
                             ProjectionStep::MethodHop { member, arity: _ }
                             | ProjectionStep::ValueHop { member } => {
                                 // The step's kind picks the attachment: a call

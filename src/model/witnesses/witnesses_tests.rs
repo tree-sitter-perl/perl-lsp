@@ -1294,3 +1294,168 @@ fn value_hop_on_a_method_only_name_answers_nothing() {
     };
     assert_eq!(reg.query(&bag, &q), ReducedValue::None);
 }
+
+// ---- By-reference parameter binding: the `Param` attachment ----
+
+/// The callee side of a by-reference binding, as its extraction publishes
+/// it: `Param{S, execute, 1} → Edge(Variable{$output, body})`, and `$output`
+/// typed by the callee's own last write.
+fn callee_aliasing_position_one(bag: &mut WitnessBag, typed: bool) {
+    let body = ScopeId(1);
+    // Zero-width at the write's site, inside the body scope a
+    // context-carrying test declares (rows 1..3): a SPANNED type witness is
+    // a narrowing region and would be skipped at the scope's end point.
+    let push = |bag: &mut WitnessBag, att: WitnessAttachment, payload: WitnessPayload| {
+        bag.push(Witness {
+            attachment: att,
+            source: WitnessSource::Builder("test".into()),
+            payload,
+            span: span(2, 0, 2, 0),
+        });
+    };
+    if typed {
+        push(
+            bag,
+            WitnessAttachment::Variable { name: "$output".into(), scope: body },
+            WitnessPayload::InferredType(InferredType::String),
+        );
+    }
+    push(
+        bag,
+        WitnessAttachment::Param { package: "S".into(), name: "execute".into(), index: 1 },
+        WitnessPayload::Edge(WitnessAttachment::Variable { name: "$output".into(), scope: body }),
+    );
+}
+
+fn ask_var(bag: &WitnessBag, name: &str) -> ReducedValue {
+    let att = WitnessAttachment::Variable { name: name.into(), scope: ScopeId(0) };
+    let q = ReducerQuery {
+        args: Vec::new(),
+        attachment: &att,
+        point: None,
+        framework: FrameworkFact::Plain,
+        arity_hint: None,
+        receiver: None,
+        context: None,
+    };
+    ReducerRegistry::with_defaults().query(bag, &q)
+}
+
+#[test]
+fn param_of_binds_the_argument_through_the_receiver_and_only_at_aliased_positions() {
+    // `$p->execute($cmd, $out)`: position 1 aliases, position 0 does not.
+    // The call site pushes the same edge for both bare variables; only the
+    // position the callee's bag aliases answers.
+    let mut bag = WitnessBag::new();
+    callee_aliasing_position_one(&mut bag, true);
+    let s0 = ScopeId(0);
+    let var = |n: &str| WitnessAttachment::Variable { name: n.into(), scope: s0 };
+    let push = |bag: &mut WitnessBag, att: WitnessAttachment, payload: WitnessPayload| {
+        bag.push(Witness {
+            attachment: att,
+            source: WitnessSource::Builder("test".into()),
+            payload,
+            span: span(5, 0, 5, 0),
+        });
+    };
+    push(&mut bag, var("$p"), WitnessPayload::InferredType(InferredType::ClassName("S".into())));
+    for (name, index) in [("$cmd", 0u32), ("$out", 1u32)] {
+        push(
+            &mut bag,
+            var(name),
+            WitnessPayload::Projected {
+                base: var("$p"),
+                step: ProjectionStep::ParamOf { member: "execute".into(), index },
+            },
+        );
+    }
+    assert_eq!(
+        ask_var(&bag, "$out"),
+        ReducedValue::Type(InferredType::String),
+        "the aliased position binds the argument to what the callee left in it"
+    );
+    assert_eq!(ask_var(&bag, "$cmd"), ReducedValue::None, "a by-value position binds nothing");
+}
+
+#[test]
+fn a_bound_but_untyped_out_parameter_answers_unknown_not_silence() {
+    // `function execute($cmd, &$output)` with no type and no write the
+    // walker can name: the argument IS bound (a value flowed), so the
+    // answer is `Unknown` — silence would read as by-value.
+    let mut bag = WitnessBag::new();
+    callee_aliasing_position_one(&mut bag, false);
+    let s0 = ScopeId(0);
+    bag.push(Witness {
+        attachment: WitnessAttachment::Variable { name: "$out".into(), scope: s0 },
+        source: WitnessSource::Builder("test".into()),
+        payload: WitnessPayload::Edge(WitnessAttachment::Param {
+            package: "S".into(),
+            name: "execute".into(),
+            index: 1,
+        }),
+        span: span(5, 0, 5, 0),
+    });
+    assert_eq!(ask_var(&bag, "$out"), ReducedValue::Type(InferredType::Unknown));
+}
+
+#[test]
+fn a_parent_class_aliased_position_answers_the_child_dispatch() {
+    // `Child extends S` declares nothing; `$c->execute($cmd, $out)` on a
+    // `Child` receiver walks to S's `Param` the way a field read would.
+    let mut bag = WitnessBag::new();
+    callee_aliasing_position_one(&mut bag, true);
+    let s0 = ScopeId(0);
+    let var = |n: &str| WitnessAttachment::Variable { name: n.into(), scope: s0 };
+    let push = |bag: &mut WitnessBag, att: WitnessAttachment, payload: WitnessPayload| {
+        bag.push(Witness {
+            attachment: att,
+            source: WitnessSource::Builder("test".into()),
+            payload,
+            span: span(5, 0, 5, 0),
+        });
+    };
+    push(&mut bag, var("$c"), WitnessPayload::InferredType(InferredType::ClassName("Child".into())));
+    push(
+        &mut bag,
+        var("$out"),
+        WitnessPayload::Projected {
+            base: var("$c"),
+            step: ProjectionStep::ParamOf { member: "execute".into(), index: 1 },
+        },
+    );
+    let mut packages: std::collections::HashMap<String, crate::model::file_analysis::PackageFacts> =
+        std::collections::HashMap::new();
+    packages.entry("Child".into()).or_default().parents = vec!["S".into()];
+    // The context's scope chain is what the callee's `Variable` edge walks.
+    let scopes: Vec<Scope> = vec![
+        Scope { id: ScopeId(0), parent: None, kind: crate::model::file_analysis::ScopeKind::File, span: span(0, 0, 9, 0), package: None },
+        Scope {
+            id: ScopeId(1),
+            parent: Some(ScopeId(0)),
+            kind: crate::model::file_analysis::ScopeKind::Method { name: "execute".into() },
+            span: span(1, 0, 3, 0),
+            package: Some("S".into()),
+        },
+    ];
+    let ctx = BagContext {
+        scopes: &scopes,
+        package_framework: &packages,
+        module_index: None,
+        package_parents: &packages,
+        app_surface_consumers: &[],
+    };
+    let att = var("$out");
+    let q = ReducerQuery {
+        args: Vec::new(),
+        attachment: &att,
+        point: None,
+        framework: FrameworkFact::Plain,
+        arity_hint: None,
+        receiver: None,
+        context: Some(&ctx),
+    };
+    assert_eq!(
+        ReducerRegistry::with_defaults().query(&bag, &q),
+        ReducedValue::Type(InferredType::String)
+    );
+}

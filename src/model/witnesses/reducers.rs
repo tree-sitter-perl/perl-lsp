@@ -811,6 +811,38 @@ impl WitnessReducer for FieldValueReducer {
     }
 }
 
+// ---- Parameter binding ----
+//
+// Claims `Param{package, name, index}` carrying a materialized
+// `InferredType` — the by-reference parameter's aliasing edge
+// (`Edge(Variable{param, body_scope})`) after `materialize` chased it.
+// Latest wins: what the callee last left in the parameter is what the
+// caller's variable holds after the call. The bound-but-untyped answer
+// (`Unknown`) is the registry's, not this reducer's — it needs the raw
+// bag to tell "edge that resolved to nothing" from "no edge".
+
+pub struct ParamBindingReducer;
+
+impl WitnessReducer for ParamBindingReducer {
+    fn name(&self) -> &str {
+        "param_binding"
+    }
+
+    fn claims(&self, w: &Witness) -> bool {
+        matches!(w.attachment, WitnessAttachment::Param { .. })
+            && matches!(w.payload, WitnessPayload::InferredType(_))
+    }
+
+    fn reduce(&self, ws: &[&Witness], _q: &ReducerQuery) -> ReducedValue {
+        for w in ws.iter().rev() {
+            if let WitnessPayload::InferredType(t) = &w.payload {
+                return ReducedValue::Type(t.clone());
+            }
+        }
+        ReducedValue::None
+    }
+}
+
 // ---- Domain-coherence fold (int-used-as-enum) ----
 //
 // Claims `Field{owner, name}` carrying `DomainCompare{enum_type}` — the
