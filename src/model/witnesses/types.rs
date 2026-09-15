@@ -240,12 +240,32 @@ impl WitnessSource {
     /// remaining weights only need `Plugin > annotation > everything else`.
     pub fn priority(&self) -> u8 {
         match self {
-            WitnessSource::Plugin(_) => 100,
+            WitnessSource::Plugin(_) => Self::OVERRIDE_PRIORITY,
             WitnessSource::Annotation(_) => 20,
             WitnessSource::Builder(_)
             | WitnessSource::Enrichment(_)
-            | WitnessSource::DerivedFrom(_) => 10,
+            | WitnessSource::DerivedFrom(_) => Self::INFERENCE_PRIORITY,
         }
+    }
+
+    /// The priority every inferred (builder / enrichment / derived) source
+    /// carries — the floor a source must clear to outrank inference.
+    pub const INFERENCE_PRIORITY: u8 = 10;
+    /// The priority of a declared override (a plugin manifest's answer):
+    /// "inference reaches the wrong answer here", so it short-circuits
+    /// every reducer beneath it.
+    pub const OVERRIDE_PRIORITY: u8 = 100;
+
+    /// Does this source outrank an inferred answer on the same attachment?
+    /// (An annotation or an override; never a flow guess.)
+    pub fn outranks_inference(&self) -> bool {
+        self.priority() > Self::INFERENCE_PRIORITY
+    }
+
+    /// Is this source a declared override — one that dominates every
+    /// other answer on its attachment, whatever else is there?
+    pub fn is_override(&self) -> bool {
+        self.priority() >= Self::OVERRIDE_PRIORITY
     }
 }
 

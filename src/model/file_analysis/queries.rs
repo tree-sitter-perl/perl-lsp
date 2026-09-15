@@ -586,7 +586,7 @@ impl FileAnalysis {
             .witnesses
             .for_attachment(&crate::model::witnesses::WitnessAttachment::Expr(span))
             .iter()
-            .any(|w| w.source.priority() >= 100)
+            .any(|w| w.source.is_override())
         {
             if let Some(t) = self.bag_query_expr_span(span, module_index) {
                 return Some(t);

@@ -948,7 +948,7 @@ impl WitnessReducer for PluginOverrideReducer {
     fn claims(&self, w: &Witness) -> bool {
         matches!(w.attachment, WitnessAttachment::Symbol(_))
             && matches!(w.payload, WitnessPayload::InferredType(_))
-            && w.source.priority() > 10
+            && w.source.outranks_inference()
     }
 
     fn reduce(&self, ws: &[&Witness], _q: &ReducerQuery) -> ReducedValue {

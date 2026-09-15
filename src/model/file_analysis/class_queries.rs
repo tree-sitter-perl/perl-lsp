@@ -1073,6 +1073,14 @@ impl FileAnalysis {
     /// The identity a class spelling written in this file names: the
     /// use-map's answer for a namespace-separated pack, the spelling
     /// itself otherwise (Perl's `Foo::Bar` is already its identity).
+    ///
+    /// Takes a WRITTEN spelling — a ref's `target_name`, an invocant
+    /// bareword — never an identity. Resolution is not idempotent: a
+    /// relative qualified spelling resolves its head through the file's
+    /// imports, so feeding it an FQN whose head collides with an import
+    /// alias re-qualifies it (`use_map_tests::resolve_is_not_idempotent`).
+    /// Symbols, parents and witnesses already carry identities (the
+    /// extractor resolves as it mints); only ref text is written.
     pub fn class_spelling_identity(&self, written: &str) -> String {
         match self.use_map() {
             Some(map) => map.resolve(written),

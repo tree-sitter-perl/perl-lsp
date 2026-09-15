@@ -76,3 +76,18 @@ fn split_keeps_the_global_namespace_empty() {
     let n = map(&[], &[], Some("A\\B"));
     assert_eq!(n.resolve_split("C"), ("A\\B".to_string(), "C".to_string()));
 }
+
+/// `resolve` takes a WRITTEN spelling. It is not idempotent: an identity
+/// whose head segment collides with an import alias would be re-qualified
+/// on a second pass, so a consumer must never feed it an FQN it already
+/// holds (`FileAnalysis::class_spelling_identity`'s contract).
+#[test]
+fn resolve_is_not_idempotent() {
+    let aliases = vec![("App".to_string(), "Vendor".to_string(), "App".to_string())];
+    let m = map(&[], &aliases, Some("Site"));
+    let once = m.resolve("App\\Models\\User");
+    assert_eq!(once, "Vendor\\App\\Models\\User");
+    let twice = m.resolve(&once);
+    assert_eq!(twice, "Site\\Vendor\\App\\Models\\User", "a second pass re-qualifies");
+    assert_ne!(once, twice);
+}
