@@ -1422,18 +1422,16 @@ fn language_spellings_have_one_home() {
     });
     let allow: &[(&str, usize, &str)] = &[
         ("index/module_cache/rows.rs", 2, "SQLite LIKE escaping — SQL syntax, not a language spelling"),
-        ("model/conventions.rs", 6, "Perl's home (4 sigil sites); retire: 2 php separator arms in is_bareword_class_name"),
+        ("model/conventions.rs", 6, "Perl's home: sigil sites, plus the registry test registering a pack separator"),
         ("model/file_analysis/ancestry.rs", 5, "retire: \"static\"/\"interface\" attribute strings → the symbol flag set"),
-        ("model/file_analysis/class_queries.rs", 9, "retire: 6 php separator literals (use-map pins) + 2 \"static\"; 1 Perl sigil trim (legacy)"),
+        ("model/file_analysis/class_queries.rs", 3, "retire: 2 \"static\" → the symbol flag set; 1 Perl sigil trim (legacy)"),
         ("model/file_analysis/completion.rs", 10, "Perl sigils re-derived outside conventions.rs — legacy, shrink-only"),
-        ("model/file_analysis/core_types.rs", 3, "retire: split_qualified's php separator arm; 2 Perl sigil matches (legacy)"),
+        ("model/file_analysis/core_types.rs", 1, "Perl sigil match on a qualified variable (legacy)"),
         ("model/file_analysis/cursor_queries.rs", 5, "retire: 1 php sigil probe (promoted twin); 4 Perl sigil sites (legacy)"),
         ("model/file_analysis/enrichment.rs", 1, "Perl sigil on a hash-key access (legacy)"),
-        ("model/file_analysis/hover.rs", 1, "retire: separator peel of a class identity → name_match_key"),
         ("model/file_analysis/invocants.rs", 3, "Perl sigil sites (legacy)"),
         ("model/file_analysis/outline.rs", 1, "Perl sigil default (legacy)"),
         ("model/file_analysis/queries.rs", 1, "Perl sigil probe (legacy)"),
-        ("model/file_analysis/use_map.rs", 1, "retire: php separator default → the pack's declared separator"),
     ];
     let drift = allowlist_drift("rule #12 (language spellings)", &seen, allow);
     assert!(drift.is_empty(), "{}", drift.join("\n"));
@@ -1449,11 +1447,9 @@ fn rendered_strings_are_not_reparsed() {
     let fns = [".split(", ".rsplit(", ".split_once(", ".rsplit_once(", ".splitn(", ".rsplitn("];
     let seen = count_lines(&files, &|l| fns.iter().any(|f| l.contains(f)));
     let allow: &[(&str, usize, &str)] = &[
-        ("model/conventions.rs", 3, "source text: Perl qualified names and class tokens"),
-        ("model/file_analysis/class_queries.rs", 3, "retire: raw `use` rows re-split → structured import rows"),
-        ("model/file_analysis/core_types.rs", 2, "split_qualified — a name as written in source (its php arm retires under #12)"),
+        ("model/conventions.rs", 4, "source text: Perl qualified names, class tokens, and the registered-separator splits"),
+        ("model/file_analysis/class_queries.rs", 1, "`use` rows as written, split on the pack's declared separator"),
         ("model/file_analysis/enrichment.rs", 1, "Perl package leaf vs a load name — both source-spelled"),
-        ("model/file_analysis/hover.rs", 2, "retire: a rendered type label peeled and split → formatter vocabulary hook"),
         ("model/file_analysis/invocants.rs", 2, "Perl `::` on source-spelled class and sub names"),
         ("model/file_analysis/types.rs", 1, "canonical_template_spelling — a C++ instance as written in source"),
         ("model/file_analysis/use_map.rs", 3, "resolving WRITTEN spellings"),

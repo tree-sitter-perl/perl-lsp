@@ -8,6 +8,94 @@
 //!
 //! Pure `&str` predicates only: no tree-sitter, so `file_analysis.rs` (which
 //! must stay tree-free) can use them. Node-level semantics live in `cst.rs`.
+//!
+//! This file is also where a PACK's namespace separator reaches the name
+//! key functions: `split_qualified` / `name_match_key` run where no
+//! analysis is in hand (row-store probes, target names), so the separators
+//! the loaded packs declare are registered here once, as data, and Perl's
+//! `::` is the one spelling this file owns outright (CLAUDE.md rule #12).
+
+use std::sync::RwLock;
+
+/// The namespace separators the loaded packs declared (`LangPack::
+/// namespace_sep`), registered at pack load. Over-splitting on another
+/// language's separator cannot mis-key a name — no language's names contain
+/// another's separator — and the worst case is a wider candidate bucket,
+/// which the matcher narrows on the rehydrated analysis anyway.
+static NAMESPACE_SEPARATORS: RwLock<Vec<String>> = RwLock::new(Vec::new());
+
+/// Declare a pack's namespace separator. Idempotent; called wherever a
+/// pack's facts are baked, so any analysis carrying a separator has
+/// registered it before a key of its names is ever computed.
+pub fn register_namespace_separator(sep: &str) {
+    if sep.is_empty() {
+        return;
+    }
+    let mut seps = NAMESPACE_SEPARATORS.write().unwrap_or_else(|e| e.into_inner());
+    if !seps.iter().any(|s| s == sep) {
+        seps.push(sep.to_string());
+    }
+}
+
+/// `(namespace, leaf)` of a name qualified by a registered pack separator.
+fn split_on_pack_separator(name: &str) -> Option<(&str, &str)> {
+    let seps = NAMESPACE_SEPARATORS.read().unwrap_or_else(|e| e.into_inner());
+    seps.iter().find_map(|sep| name.rsplit_once(sep.as_str()))
+}
+
+/// The registered pack separator `name` starts with, if any — a pack's
+/// ABSOLUTE spelling (`\A\F`).
+fn leading_pack_separator(name: &str) -> Option<&str> {
+    let seps = NAMESPACE_SEPARATORS.read().unwrap_or_else(|e| e.into_inner());
+    seps.iter().find(|sep| name.starts_with(sep.as_str())).map(|sep| &name[..sep.len()])
+}
+
+/// Split a possibly-qualified name into `(Option<package>, basename)`.
+///
+/// A name token may carry a `Pkg::` qualifier (`Foo::Bar::baz`, `@Pkg::EXPORT`,
+/// `$Foo::Bar::x`). Resolution is always `(qualifier ?? current_package,
+/// basename)`. This is the ONE place that decides "is this name qualified" —
+/// every per-construct stripper (`Ref::unqualified_target_name`,
+/// `Builder::export_var_basename`, FQ-variable ref emission) routes through it
+/// (rule #10: encode the "is qualified" property once).
+///
+/// Input must be sigil-free (callers strip `$`/`@`/`%`/`&` first). The text
+/// after the last `::` is the basename; everything before it is the package.
+/// An unqualified name yields `(None, name)`. A leading `::` (`::foo`, the
+/// `main::` shorthand) yields an empty-string package, preserved verbatim.
+///
+/// A name qualified with a REGISTERED pack separator (`App\Models\User`)
+/// splits the same way — the class identity of a use-map language is its
+/// FQN, and the relational key stays the leaf (`name_match_key`) so a written
+/// spelling and its identity land in one bucket. `App\Foo::bar` splits on
+/// the member qualifier first, keeping the class whole.
+pub fn split_qualified(name: &str) -> (Option<&str>, &str) {
+    match name.rsplit_once("::") {
+        Some((pkg, base)) => (Some(pkg), base),
+        None => match split_on_pack_separator(name) {
+            Some((pkg, base)) => (Some(pkg), base),
+            None => (None, name),
+        },
+    }
+}
+
+/// The relational ref index's shared key function: rows are keyed by
+/// `name_match_key(ref.target_name)`, retrieval probes
+/// `name_match_key(target.name)` — one function on both sides, so a row can
+/// never be missed by a spelling the matcher would accept (arms compare
+/// exact names or their unqualified tails; equal names have equal tails).
+/// Sigil variables keep the sigil on the tail (`$Foo::x` → `$x`) because
+/// variable identities carry it.
+pub fn name_match_key(name: &str) -> String {
+    let mut chars = name.chars();
+    if let Some(sigil) = chars.next() {
+        if matches!(sigil, '$' | '@' | '%') {
+            let (_, base) = split_qualified(chars.as_str());
+            return format!("{sigil}{base}");
+        }
+    }
+    split_qualified(name).1.to_string()
+}
 
 /// Conventional invocant variable names — `sub f { my ($self) = @_ }` and
 /// friends. Accepts the bare identifier or the `$`-sigiled spelling so both
@@ -49,21 +137,37 @@ pub fn is_constructor_name(name: &str) -> bool {
 /// A class here is `InferredType::ClassName(text)`; only accept text a
 /// package could actually be spelled as.
 pub fn is_bareword_class_name(text: &str) -> bool {
-    // `::` is Perl's separator, `\` php's (`App\Support\Str`) — either way
-    // every segment must be a plain identifier, so a receiver EXPRESSION
-    // (`(new Coll([1]))->wrapUp([2])`) never passes as a class token.
-    // A leading `\` is php's ABSOLUTE spelling (`\A\F`, a string
-    // callable's class): still a class token, resolved as written.
-    let text = text.strip_prefix('\\').unwrap_or(text);
-    !text.is_empty()
-        && text
-            .split("::")
-            .flat_map(|part| part.split('\\'))
-            .all(|seg| {
-                let mut chars = seg.chars();
-                matches!(chars.next(), Some(c) if c.is_ascii_alphabetic() || c == '_')
-                    && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
-            })
+    // Every segment — between `::` and between a registered pack
+    // separator — must be a plain identifier, so a receiver EXPRESSION
+    // (`(new Coll([1]))->wrapUp([2])`) never passes as a class token. A
+    // leading pack separator is that pack's ABSOLUTE spelling: still a
+    // class token, resolved as written.
+    let text = match leading_pack_separator(text) {
+        Some(sep) => &text[sep.len()..],
+        None => text,
+    };
+    let is_ident = |seg: &str| {
+        let mut chars = seg.chars();
+        matches!(chars.next(), Some(c) if c.is_ascii_alphabetic() || c == '_')
+            && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+    };
+    if text.is_empty() {
+        return false;
+    }
+    text.split("::").all(|part| {
+        let mut rest = part;
+        loop {
+            match split_on_pack_separator(rest) {
+                Some((head, tail)) => {
+                    if !is_ident(tail) {
+                        return false;
+                    }
+                    rest = head;
+                }
+                None => return is_ident(rest),
+            }
+        }
+    })
 }
 
 /// `__PACKAGE__` — the compile-time token for the enclosing package.
@@ -350,6 +454,20 @@ mod tests {
         for bad in ["(ref $self)", "(", "(ref $self", "$self", "1Foo", "Foo::", "::Foo", ""] {
             assert!(!is_bareword_class_name(bad), "{bad:?} must NOT be a class name");
         }
+    }
+
+    #[test]
+    fn registered_pack_separator_qualifies_names_and_class_tokens() {
+        // A pack declares its separator as data; the key functions and the
+        // class-token check read it — nothing here spells the pack's syntax.
+        super::register_namespace_separator("\\");
+        assert_eq!(super::split_qualified("App\\Models\\User"), (Some("App\\Models"), "User"));
+        assert_eq!(super::split_qualified("App\\Foo::bar"), (Some("App\\Foo"), "bar"));
+        assert_eq!(super::name_match_key("App\\Models\\User"), "User");
+        assert!(is_bareword_class_name("App\\Support\\Str"));
+        assert!(is_bareword_class_name("\\A\\F"), "an absolute spelling is a class token");
+        assert!(!is_bareword_class_name("(new Coll([1]))"));
+        assert!(!is_bareword_class_name("A\\"));
     }
 
     #[test]

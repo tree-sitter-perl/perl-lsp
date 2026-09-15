@@ -148,12 +148,13 @@ pub struct PackFacts {
     pub qualified_spellings: Vec<(String, String)>,
 
     /// The pack's namespace separator, when class identity is a namespace-
-    /// qualified name (`\` for the use-map packs). `None` = spellings are
+    /// qualified name (the use-map packs). `None` = spellings are
     /// identities already (C's flat linkage, Perl keys its own `::`); the
     /// namespace questions (`identity_namespace`, `class_spelling_identity`)
-    /// gate on it.
+    /// gate on it. Data, never a literal downstream: every split of a
+    /// written spelling in the model reads this (rule #12).
     #[serde(default)]
-    pub namespace_sep: Option<char>,
+    pub namespace_sep: Option<String>,
 
     /// This file's transitive `#include` closure — canonical header paths it
     /// reaches. The cross-file VISIBILITY key: a name resolves preferentially to

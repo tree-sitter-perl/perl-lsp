@@ -5,22 +5,31 @@
 use super::*;
 
 impl FileAnalysis {
-    /// `format_inferred_type` through this file's language vocabulary
-    /// (`PackFacts.type_display`): a mapped tag renders as the language's
-    /// own spelling (php `array`, not `HashRef`); unmapped output (class
-    /// names, parametrics) and every Perl analysis (empty map) pass
-    /// through. THE type-label projection for human surfaces — hover,
-    /// inlay hints, signatures, completion detail all route here so a
-    /// language's vocabulary can't leak on one surface and not another.
+    /// This file's type vocabulary (`PackFacts.type_display`): a mapped
+    /// engine tag renders as the language's own spelling (php `array`, not
+    /// `HashRef`); an unmapped tag, every class name, and every Perl
+    /// analysis (empty map) pass through.
+    fn type_vocab(&self) -> impl Fn(&str) -> Option<String> + '_ {
+        move |tag: &str| {
+            self.pack
+                .type_display
+                .iter()
+                .find(|(k, _)| k == tag)
+                .map(|(_, v)| v.clone())
+        }
+    }
+
+    /// THE type-label projection for human surfaces — hover, inlay hints,
+    /// signatures, completion detail all route here so a language's
+    /// vocabulary can't leak on one surface and not another.
     pub fn render_type(&self, ty: &InferredType) -> String {
-        let raw = format_inferred_type(ty);
-        self.translate_type_label(raw)
+        format_type_with(ty, &self.type_vocab())
     }
 
     /// `Symbol::display_type` (class/deref-aware) through the same
     /// vocabulary.
     pub fn display_type_of(&self, sym: &Symbol, ty: &InferredType) -> String {
-        self.translate_type_label(sym.display_type(ty))
+        sym.display_type_with(ty, &self.type_vocab())
     }
 
     /// The NATIVE spelling a declaration would be written with for an
@@ -30,54 +39,18 @@ impl FileAnalysis {
     /// vocabulary (`type_display`) is a different question.
     pub fn native_type_spelling(&self, ty: &InferredType) -> Option<String> {
         if let InferredType::ClassName(n) = ty {
-            let leaf = n.rsplit(['\\', ':']).next().unwrap_or(n);
+            let (ns, leaf) = split_qualified(n);
             // the leaf must mean THIS class where it would be written
-            let ns = if n.len() > leaf.len() { Some(n[..n.len() - leaf.len() - 1].to_string()) } else { None };
             let seen = self.leaf_namespace(leaf).or_else(|| self.use_map_pins().own_namespace.clone());
-            return (ns.is_none() || seen.is_none() || ns == seen).then(|| leaf.to_string());
+            return (ns.is_none() || seen.is_none() || ns.map(str::to_string) == seen)
+                .then(|| leaf.to_string());
         }
-        let raw = format_inferred_type(ty);
-        let root = raw.split(['<', '(']).next().unwrap_or(&raw);
+        let root = format_type_root(ty);
         self.pack
             .native_type_spellings
             .iter()
-            .find(|(k, _)| k == root)
+            .find(|(k, _)| *k == root)
             .map(|(_, v)| v.clone())
-    }
-
-    fn translate_type_label(&self, raw: String) -> String {
-        if self.pack.type_display.is_empty() {
-            return raw;
-        }
-        // Token-wise: a composite label (`Sequence<String>`,
-        // `array<String, String>`) is translated per identifier so the
-        // engine's spellings never leak inside a generic argument either.
-        let mut out = String::with_capacity(raw.len());
-        let mut tok = String::new();
-        let flush = |tok: &mut String, out: &mut String| {
-            if tok.is_empty() {
-                return;
-            }
-            let mapped = self
-                .pack
-                .type_display
-                .iter()
-                .find(|(k, _)| k == tok)
-                .map(|(_, v)| v.clone())
-                .unwrap_or_else(|| tok.clone());
-            out.push_str(&mapped);
-            tok.clear();
-        };
-        for c in raw.chars() {
-            if c.is_alphanumeric() || c == '_' {
-                tok.push(c);
-            } else {
-                flush(&mut tok, &mut out);
-                out.push(c);
-            }
-        }
-        flush(&mut tok, &mut out);
-        out
     }
 
     /// Hover info: return display text for the symbol at cursor.
@@ -313,15 +286,10 @@ impl FileAnalysis {
                     return None;
                 }
                 RefKind::PackageRef => {
-                    let row_ns = self.import_row_namespace(&r.span);
-                    for &sid in self.symbols_named(&r.target_name) {
+                    let identity = self.spelled_identity(r);
+                    for &sid in self.symbols_named(&identity) {
                         let sym = self.symbol(sid);
-                        if matches!(sym.kind, SymKind::Package | SymKind::Class) {
-                            if let Some(ns) = row_ns.as_deref() {
-                                if sym.package.as_deref().unwrap_or("") != ns {
-                                    continue;
-                                }
-                            }
+                        if matches!(sym.kind, SymKind::Package | SymKind::Class) && sym.name == identity {
                             return Some(self.format_symbol_hover(sym, source, module_index));
                         }
                     }

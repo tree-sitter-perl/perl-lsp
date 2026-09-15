@@ -618,14 +618,22 @@ impl Symbol {
     /// member hover, inlay hints, and signature help all render through it, so
     /// the pointer stars can't vanish on some surfaces and not others.
     pub fn display_type(&self, ty: &InferredType) -> String {
+        self.display_type_with(ty, &|_| None)
+    }
+
+    /// `display_type` through a language's type vocabulary
+    /// (`FileAnalysis::display_type_of` supplies the file's).
+    pub fn display_type_with(&self, ty: &InferredType, vocab: super::completion::TypeVocab) -> String {
         // A template instance displays its full spelling (`Box<Widget>`)
         // — presentation keeps the args even though dispatch keys the
         // base. Other flavors keep the dispatch-class display.
-        let base = ty
-            .as_parametric()
-            .and_then(|p| p.exact_spelling())
-            .or_else(|| ty.class_name().map(String::from))
-            .unwrap_or_else(|| format_inferred_type(ty));
+        let base = match ty.as_parametric() {
+            Some(p @ ParametricType::Instance { .. }) => super::completion::format_parametric_with(p, vocab),
+            _ => ty
+                .class_name()
+                .map(String::from)
+                .unwrap_or_else(|| super::completion::format_type_with(ty, vocab)),
+        };
         let stars: String = self.deref_stack.iter().map(|s| s.render()).collect();
         format!("{}{}", base, stars)
     }
@@ -832,52 +840,7 @@ pub struct Ref {
     pub arg_count: Option<usize>,
 }
 
-/// Split a possibly-qualified name into `(Option<package>, basename)`.
-///
-/// A name token may carry a `Pkg::` qualifier (`Foo::Bar::baz`, `@Pkg::EXPORT`,
-/// `$Foo::Bar::x`). Resolution is always `(qualifier ?? current_package,
-/// basename)`. This is the ONE place that decides "is this name qualified" —
-/// every per-construct stripper (`Ref::unqualified_target_name`,
-/// `Builder::export_var_basename`, FQ-variable ref emission) routes through it
-/// (rule #10: encode the "is qualified" property once).
-///
-/// Input must be sigil-free (callers strip `$`/`@`/`%`/`&` first). The text
-/// after the last `::` is the basename; everything before it is the package.
-/// An unqualified name yields `(None, name)`. A leading `::` (`::foo`, the
-/// `main::` shorthand) yields an empty-string package, preserved verbatim.
-///
-/// A name qualified with the namespace separator (`App\Models\User`) splits
-/// the same way — the class identity of a use-map language is its FQN, and
-/// the relational key stays the leaf (`name_match_key`) so a written
-/// spelling and its identity land in one bucket. `App\Foo::bar` splits on
-/// the member qualifier first, keeping the class whole.
-pub fn split_qualified(name: &str) -> (Option<&str>, &str) {
-    match name.rsplit_once("::") {
-        Some((pkg, base)) => (Some(pkg), base),
-        None => match name.rsplit_once('\\') {
-            Some((pkg, base)) => (Some(pkg), base),
-            None => (None, name),
-        },
-    }
-}
-
-/// The relational ref index's shared key function: rows are keyed by
-/// `name_match_key(ref.target_name)`, retrieval probes
-/// `name_match_key(target.name)` — one function on both sides, so a row can
-/// never be missed by a spelling the matcher would accept (arms compare
-/// exact names or their unqualified tails; equal names have equal tails).
-/// Sigil variables keep the sigil on the tail (`$Foo::x` → `$x`) because
-/// variable identities carry it.
-pub fn name_match_key(name: &str) -> String {
-    let mut chars = name.chars();
-    if let Some(sigil) = chars.next() {
-        if matches!(sigil, '$' | '@' | '%') {
-            let (_, base) = split_qualified(chars.as_str());
-            return format!("{sigil}{base}");
-        }
-    }
-    split_qualified(name).1.to_string()
-}
+pub use crate::model::conventions::{name_match_key, split_qualified};
 
 impl Ref {
     /// The receiver view of a member access (`MethodCall` / `FieldAccess`);

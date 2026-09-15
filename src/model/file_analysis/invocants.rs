@@ -1135,49 +1135,37 @@ impl FileAnalysis {
         // composition site), preserving the role-only edge semantics of
         // docs/adr/role-contracts.md.
         let role_requires_of = |_composer: &str, c: &str| -> Option<Vec<String>> {
-            // A namespaced pack's parent edge carries the parent's identity:
-            // the candidate declaring THAT namespace is the parent — a
-            // same-leaf stranger (a `Connector` interface in another
-            // namespace beside the `Connector` base class next door) is
-            // not, whatever it requires. A path-keyed language (Perl) has no
-            // namespace claim.
-            let want_ns = self.identity_namespace(c);
-            let is_local = self
-                .symbols
-                .iter()
-                .any(|s| matches!(s.kind, SymKind::Package | SymKind::Class) && s.name == c)
-                && (want_ns.is_none() || self.declared_type_namespace(c) == want_ns);
-            if is_local {
+            // A parent edge carries the parent's IDENTITY (the FQN for a
+            // namespaced pack, the package name for Perl), so the file
+            // declaring exactly that name is the parent — a same-leaf
+            // stranger in another namespace is not, whatever it requires.
+            if self.find_type_decl(c).is_some() {
                 if !self.is_role_package(c) {
                     return None;
                 }
                 return Some(self.role_requires(c).to_vec());
             }
             // Role-ness and requires live in the packages lane (never
-            // evicted) of whichever candidate file declares the role.
+            // evicted) of whichever candidate file declares the role. The
+            // declaration rides the symbols axis (a resident copy is
+            // stripped), so the identity check reads that axis.
             let idx = module_index?;
             let candidates = idx.visible_def_candidates(c);
-            // The namespace rides the symbols axis (a resident copy is
-            // stripped); role-ness and requires ride the packages lane.
-            let pinned = match &want_ns {
-                Some(ns) => candidates.iter().find(|cached| {
-                    idx.symbols_present(cached).declared_type_namespace(c).as_deref() == Some(ns.as_str())
-                }),
-                None => None,
-            };
-            match (pinned, want_ns) {
-                // the pinned declaration decides, role or not
-                (Some(cached), _) => cached
+            if self.identity_namespace(c).is_some() {
+                // the declaration of that identity decides, role or not;
+                // none visible is not a guess
+                let declared = candidates
+                    .iter()
+                    .find(|cached| idx.symbols_present(cached).find_type_decl(c).is_some())?;
+                return declared
                     .analysis
                     .is_role_package(c)
-                    .then(|| cached.analysis.role_requires(c).to_vec()),
-                // a pin nothing visible satisfies: not a guess
-                (None, Some(_)) => None,
-                (None, None) => candidates
-                    .iter()
-                    .find(|cached| cached.analysis.is_role_package(c))
-                    .map(|cached| cached.analysis.role_requires(c).to_vec()),
+                    .then(|| declared.analysis.role_requires(c).to_vec());
             }
+            candidates
+                .iter()
+                .find(|cached| cached.analysis.is_role_package(c))
+                .map(|cached| cached.analysis.role_requires(c).to_vec())
         };
 
         let mut out: Vec<UnfulfilledRequire> = Vec::new();
@@ -1628,24 +1616,6 @@ impl FileAnalysis {
             .any(|m| m.name == name && at.is_none_or(|s| m.selection_span == s))
     }
 
-    /// Find the definition span of a package or class by name.
-    /// The file's own Package/Class declaration named `name`, narrowed to a
-    /// namespace claim when the token carries one: a token inside an import
-    /// row names its class in full, so this file's own same-leaf class is
-    /// not it unless the namespaces agree.
-    pub(super) fn find_package_or_class_in(&self, name: &str, ns: Option<&str>) -> Option<Span> {
-        for &sid in self.symbols_named(name) {
-            let sym = self.symbol(sid);
-            if matches!(sym.kind, SymKind::Package | SymKind::Class) {
-                if let Some(ns) = ns {
-                    if sym.package.as_deref().unwrap_or("") != ns {
-                        continue;
-                    }
-                }
-                return Some(sym.selection_span);
-            }
-        }
-        None
-    }
+
 
 }
