@@ -170,6 +170,21 @@ pub fn is_bareword_class_name(text: &str) -> bool {
     })
 }
 
+/// Corinna `field` attribute spellings, asked as predicates so no consumer
+/// re-spells them: `:param` (a constructor key), `:reader`, and the writer
+/// family (`:writer` / `:mutator` / `:accessor`).
+pub fn field_attr_is_param(attr: &str) -> bool {
+    attr == "param"
+}
+
+pub fn field_attr_is_reader(attr: &str) -> bool {
+    attr == "reader"
+}
+
+pub fn field_attr_is_writer(attr: &str) -> bool {
+    matches!(attr, "writer" | "mutator" | "accessor")
+}
+
 /// `__PACKAGE__` — the compile-time token for the enclosing package.
 pub fn is_current_package_token(text: &str) -> bool {
     text == "__PACKAGE__"

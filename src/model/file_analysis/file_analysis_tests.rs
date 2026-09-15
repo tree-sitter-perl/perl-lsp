@@ -155,6 +155,8 @@ fn test_resolve_sub_return_type() {
             presentation: Default::default(),
             attributes: Vec::new(),
             deref_stack: Vec::new(),
+            flags: Default::default(),
+            declared_with: None,
             arity: None,
         }],
         ..Default::default()
@@ -2955,4 +2957,31 @@ sub recorded { 1 }
         Some(MethodResolution::Local { .. })
     ));
     assert!(fa.resolve_field_in_ancestors("W", "recorded", None).is_none());
+}
+
+#[test]
+fn has_synthesis_links_accessor_and_ctor_key_as_co_declared() {
+    // One `has 'size'` token mints the accessor Method and the constructor
+    // key; the pair is a minted relation, so the group finds the accessor
+    // through it rather than through a span coincidence.
+    let fa = build_fa_from_source(
+        "\
+package Widget;
+use Moo;
+has 'size' => (is => 'rw');
+1;
+",
+    );
+    let key = fa
+        .symbols()
+        .iter()
+        .find(|s| s.kind == SymKind::HashKeyDef && s.name == "size")
+        .expect("ctor key");
+    let accessor = fa
+        .symbols()
+        .iter()
+        .find(|s| s.kind == SymKind::Method && s.name == "size")
+        .expect("accessor");
+    assert_eq!(key.declared_with, Some(accessor.id));
+    assert_eq!(accessor.declared_with, Some(key.id));
 }

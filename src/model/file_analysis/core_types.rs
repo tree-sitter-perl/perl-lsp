@@ -203,6 +203,51 @@ impl Span {
 
 // ---- Symbol ----
 
+/// Declaration facts a symbol carries, as a closed flag set. A pack maps
+/// its attribute strings onto these at skeleton conversion; consumers ask
+/// `has(..)` and never compare an attribute string.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct SymbolFlags(u32);
+
+impl SymbolFlags {
+    pub const NONE: SymbolFlags = SymbolFlags(0);
+    /// A class-level member (`static`), reached through the class, not an instance.
+    pub const STATIC: SymbolFlags = SymbolFlags(1 << 0);
+    /// A `Class` symbol that is an interface: its members are contracts, and a
+    /// concrete definer outranks it on the MRO.
+    pub const INTERFACE: SymbolFlags = SymbolFlags(1 << 1);
+    /// Declared abstract.
+    pub const ABSTRACT: SymbolFlags = SymbolFlags(1 << 2);
+    /// A default-named container (`(union)`): structure, not an addressable name.
+    pub const ANONYMOUS: SymbolFlags = SymbolFlags(1 << 3);
+    /// Not public: completes only from inside its own class's body.
+    pub const NON_PUBLIC: SymbolFlags = SymbolFlags(1 << 4);
+    /// A union container: its body nests its members in the outline.
+    pub const UNION: SymbolFlags = SymbolFlags(1 << 5);
+    /// An `extern` declaration: a definition elsewhere is the landing.
+    pub const EXTERN: SymbolFlags = SymbolFlags(1 << 6);
+    /// An inline namespace: its members are visible from the parent.
+    pub const INLINE: SymbolFlags = SymbolFlags(1 << 7);
+    /// A re-export (`using Base::m;`): API surface, not a definition.
+    pub const REEXPORT: SymbolFlags = SymbolFlags(1 << 8);
+    /// An include-guard `#define`: compilation plumbing, folded from listings.
+    pub const INCLUDE_GUARD: SymbolFlags = SymbolFlags(1 << 9);
+    /// A function-like `#define`: a real callable that hover labels a macro.
+    pub const MACRO: SymbolFlags = SymbolFlags(1 << 10);
+    /// Marked deprecated (the notice text rides `Presentation::deprecation`).
+    pub const DEPRECATED: SymbolFlags = SymbolFlags(1 << 11);
+
+    pub const fn has(self, f: SymbolFlags) -> bool {
+        self.0 & f.0 != 0
+    }
+    pub const fn with(self, f: SymbolFlags) -> SymbolFlags {
+        SymbolFlags(self.0 | f.0)
+    }
+    pub fn insert(&mut self, f: SymbolFlags) {
+        self.0 |= f.0;
+    }
+}
+
 /// How a symbol presents to humans — the ONE policy home for listing
 /// views (document outline, workspace-symbol, heatmap, completion
 /// icons). Minted at symbol synthesis by whoever creates the symbol
@@ -266,13 +311,24 @@ pub struct Symbol {
     /// How this symbol presents in listing views — see [`Presentation`].
     #[serde(default)]
     pub presentation: Presentation,
-    /// Free-string annotations the language pack attaches to this symbol —
-    /// today, the signal a recovered C++ class's declarator-position
-    /// attribute macro carried (`exported`, `deprecated`), looked up in the
-    /// plugin-declared attribute-macro vocabulary. Empty for ordinary
-    /// symbols. Surfaced in pack hover.
+    /// Free-string annotations the language pack attaches to this symbol
+    /// — the pack's OWN vocabulary (a php `readonly`, the signal a recovered
+    /// C++ attribute macro carried), surfaced in pack hover. Display only:
+    /// the model reasons on `flags`, never on these strings (rule #12).
     #[serde(default)]
     pub attributes: Vec<String>,
+    /// The closed set of declaration facts the model reasons on, minted by
+    /// whoever creates the symbol — the pack maps its attribute vocabulary
+    /// onto them at conversion, the Perl builder sets them directly.
+    #[serde(default)]
+    pub flags: SymbolFlags,
+    /// The OTHER symbol the same declaration token minted: a `has` accessor
+    /// and its constructor key, a promoted constructor parameter and its
+    /// field. Minted where the pair is synthesized, so no consumer
+    /// re-derives the pairing from span equality or column arithmetic
+    /// (rule #11).
+    #[serde(default)]
+    pub declared_with: Option<SymbolId>,
     /// The pointer/reference declarator stack a typed variable carries,
     /// outermost→leaf (`Box** pp` → `[Pointer, Pointer]`, `Box*& rp` →
     /// `[Reference, Pointer]`). Pointer-ness is dropped for type RESOLUTION
@@ -595,7 +651,7 @@ impl Symbol {
     /// the class's API surface (outline/completion) but not a definition —
     /// member resolution sees through it to the origin ancestor.
     pub fn is_reexport(&self) -> bool {
-        self.attributes.iter().any(|a| a == "reexport")
+        self.flags.has(SymbolFlags::REEXPORT)
     }
 
     /// Bare variable/field name without the sigil. Uses the sigil stored

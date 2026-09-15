@@ -116,6 +116,13 @@ impl<'a> Builder<'a> {
         self.add_symbol_ns(name, kind, span, selection_span, detail, Namespace::Language)
     }
 
+    /// Record that `a` and `b` were minted from one declaration token
+    /// (`Symbol::declared_with`), each way.
+    pub(super) fn pair_co_declared(&mut self, a: SymbolId, b: SymbolId) {
+        self.symbols[a.0 as usize].declared_with = Some(b);
+        self.symbols[b.0 as usize].declared_with = Some(a);
+    }
+
     pub(super) fn add_symbol_ns(
         &mut self,
         name: String,
@@ -166,6 +173,8 @@ impl<'a> Builder<'a> {
             namespace,
             presentation: Default::default(),
             attributes: Vec::new(),
+            flags: Default::default(),
+            declared_with: None,
             deref_stack: Vec::new(),
             // Perl carries params in `SymbolDetail::Sub`; `param_arity()`
             // reads them. No pack-minted arity here.

@@ -1,6 +1,7 @@
 //! The skeleton data model: symbol/ref rows and `SkeletonAnalysis`,
 //! including its projection into `FileAnalysis`.
 
+use crate::model::file_analysis::SymbolFlags;
 use super::*;
 
 /// The skeleton's symbol row — deliberately stringly-kinded: the kind
@@ -512,10 +513,10 @@ impl SkeletonAnalysis {
                 presentation: crate::model::file_analysis::Presentation {
                     // An include-guard `#define` is compilation plumbing,
                     // not a program entity — folded from listing views but
-                    // still resolvable (rule #7). The attribute stays on
-                    // the symbol for hover; the listing verdict is stamped
-                    // here so warm stub rebuilds mint it identically.
-                    hide_in_outline: s.attributes.iter().any(|a| a == "include_guard"),
+                    // still resolvable (rule #7). The listing verdict is
+                    // stamped here so warm stub rebuilds mint it identically.
+                    hide_in_outline: symbol_flags_of(&s.kind, &s.attributes)
+                        .has(SymbolFlags::INCLUDE_GUARD),
                     deprecation: None,
                     doc: None,
                     display: None,
@@ -537,6 +538,8 @@ impl SkeletonAnalysis {
                     }
                     a
                 },
+                flags: symbol_flags_of(&s.kind, &s.attributes),
+                declared_with: None,
                 deref_stack: s.deref_stack.clone(),
                 arity: s.arity,
             })
@@ -1145,4 +1148,37 @@ impl SkeletonAnalysis {
         fa.finalize_post_walk();
         fa
     }
+}
+
+/// The closed flag set a pack symbol carries, from the skeleton's kind and
+/// the pack's attribute vocabulary — the ONE place a pack's attribute
+/// spellings become model facts (rule #12: the model asks the flag, never
+/// the string).
+fn symbol_flags_of(kind: &str, attributes: &[String]) -> SymbolFlags {
+    let mut flags = SymbolFlags::NONE;
+    match kind {
+        "union" | "unionfield" => flags.insert(SymbolFlags::UNION),
+        "reexport" => flags.insert(SymbolFlags::REEXPORT),
+        "macro" => flags.insert(SymbolFlags::MACRO),
+        _ => {}
+    }
+    for a in attributes {
+        let f = match a.as_str() {
+            "static" => SymbolFlags::STATIC,
+            "interface" => SymbolFlags::INTERFACE,
+            "abstract" => SymbolFlags::ABSTRACT,
+            "anonymous" => SymbolFlags::ANONYMOUS,
+            "non_public" => SymbolFlags::NON_PUBLIC,
+            "union" => SymbolFlags::UNION,
+            "extern" => SymbolFlags::EXTERN,
+            "inline" => SymbolFlags::INLINE,
+            "reexport" => SymbolFlags::REEXPORT,
+            "include_guard" => SymbolFlags::INCLUDE_GUARD,
+            "macro" => SymbolFlags::MACRO,
+            "deprecated" => SymbolFlags::DEPRECATED,
+            _ => continue,
+        };
+        flags.insert(f);
+    }
+    flags
 }

@@ -145,7 +145,7 @@ pub(super) fn pack_inline_owner_set(fa: &crate::model::file_analysis::FileAnalys
         let mut grew = false;
         for s in fa.symbols() {
             if s.kind == SymKind::Package
-                && s.attributes.iter().any(|a| a == "inline")
+                && s.flags.has(crate::model::file_analysis::SymbolFlags::INLINE)
                 && s.package.as_deref().is_some_and(|p| owners.iter().any(|o| o == p))
                 && !owners.contains(&s.name)
             {

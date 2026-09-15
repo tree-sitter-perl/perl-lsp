@@ -773,7 +773,7 @@ impl FileAnalysis {
         self.symbols().iter().any(|s| {
             matches!(s.kind, SymKind::Class)
                 && s.name == class
-                && s.attributes.iter().any(|x| x == "interface")
+                && s.flags.has(SymbolFlags::INTERFACE)
         })
     }
 
@@ -920,7 +920,7 @@ impl FileAnalysis {
                 // lane (`complete_lexical_methods_at`) owns offering it.
                 && !matches!(&sym.detail, SymbolDetail::Sub { lexical: true, .. })
                 && (requesting_class == Some(class_name)
-                    || !sym.attributes.iter().any(|a| a == "non_public"))
+                    || !sym.flags.has(SymbolFlags::NON_PUBLIC))
         };
 
         // Local methods in this class
@@ -936,7 +936,7 @@ impl FileAnalysis {
                     candidates.push(CompletionCandidate {
                         label: sym.name.clone(),
                         kind: sym.kind,
-                        is_static: sym.attributes.iter().any(|a| a == "static"),
+                        is_static: sym.flags.has(SymbolFlags::STATIC),
                         detail: Some(self.method_detail(original_class, &sym.name, defining, module_index)),
                         insert_text: None,
                         sort_priority: PRIORITY_LOCAL,
@@ -971,7 +971,7 @@ impl FileAnalysis {
                 candidates.push(CompletionCandidate {
                     label: sym.name.clone(),
                     kind: sym.kind,
-                    is_static: sym.attributes.iter().any(|a| a == "static"),
+                    is_static: sym.flags.has(SymbolFlags::STATIC),
                     detail: Some(self.method_detail(original_class, &sym.name, defining, module_index)),
                     insert_text: None,
                     sort_priority: PRIORITY_LOCAL,
@@ -1012,7 +1012,7 @@ impl FileAnalysis {
                     sym.kind,
                     Some(sym.detail.clone()),
                     sym.presentation.display,
-                    sym.attributes.iter().any(|a| a == "static"),
+                    sym.flags.has(SymbolFlags::STATIC),
                 ));
                 ControlFlow::Continue(())
             });
@@ -1056,7 +1056,7 @@ impl FileAnalysis {
                     candidates.push(CompletionCandidate {
                         label: sym.name.clone(),
                         kind,
-                        is_static: sym.attributes.iter().any(|a| a == "static"),
+                        is_static: sym.flags.has(SymbolFlags::STATIC),
                         detail: Some(detail),
                         insert_text: None,
                         sort_priority: PRIORITY_LOCAL,

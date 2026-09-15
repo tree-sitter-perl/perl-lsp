@@ -589,14 +589,14 @@ impl FileAnalysis {
         self.attr_pair_group(attr, class)
     }
 
-    /// A `has`-synthesized attr pair: accessor Method + constructor
-    /// HashKeyDef with the same name, package, and selection span (they
-    /// were minted from the one `has 'name'` token — span equality is
-    /// what distinguishes the pair from a real `sub name` that happens
-    /// to share a class with someone's ctor key).
+    /// A synthesized attr pair: accessor Method + HashKeyDef minted from
+    /// the one `has 'name'` / `add_columns` token, linked at synthesis
+    /// through `Symbol::declared_with` — the relation is a fact the
+    /// minting site recorded, never a span coincidence a real `sub name`
+    /// could share.
     fn attr_pair_group(&self, bare: &str, class: &str) -> Option<FieldGroup> {
         // (1) Constructor-key pairing (Moo/Mojo `has`): the ctor-key HashKeyDef
-        // is the anchor; the accessor (if any) shares its selection span.
+        // is the anchor; the accessor (if any) is its declared twin.
         if let Some(key_def) = self.symbols.iter().find(|s| {
             matches!(s.kind, SymKind::HashKeyDef)
                 && s.name == bare
@@ -608,12 +608,10 @@ impl FileAnalysis {
                     } if p == class && crate::model::conventions::is_constructor_name(name)
                 )
         }) {
-            let accessor = self.symbols.iter().find(|s| {
-                matches!(s.kind, SymKind::Method)
-                    && s.name == bare
-                    && s.package.as_deref() == Some(class)
-                    && s.selection_span == key_def.selection_span
-            });
+            let accessor = key_def
+                .declared_with
+                .map(|id| self.symbol(id))
+                .filter(|s| matches!(s.kind, SymKind::Method));
             return Some(FieldGroup {
                 field_sym: None,
                 decl_span: Some(key_def.selection_span),
@@ -624,19 +622,16 @@ impl FileAnalysis {
             });
         }
         // (2) Class-key pairing (DBIC `add_columns`, Class::Accessor): an
-        // accessor Method and a `Class`-owned HashKeyDef of the same name
-        // minted from the SAME token (span equality is the synthesized-pair
-        // signal). The key side is reached via the `has_class_key` member;
-        // here we just confirm the pair exists and pin the decl span.
+        // accessor Method whose declared twin is a `Bridged`-owned
+        // HashKeyDef. The key side is reached via the `has_class_key`
+        // member; here we just confirm the pair exists and pin the decl span.
         let accessor = self.symbols.iter().find(|s| {
             matches!(s.kind, SymKind::Method)
                 && s.name == bare
                 && s.package.as_deref() == Some(class)
         })?;
-        let paired = self.symbols.iter().any(|s| {
+        let paired = accessor.declared_with.map(|id| self.symbol(id)).is_some_and(|s| {
             matches!(s.kind, SymKind::HashKeyDef)
-                && s.name == bare
-                && s.selection_span == accessor.selection_span
                 && matches!(
                     &s.detail,
                     SymbolDetail::HashKeyDef { owner: HashKeyOwner::Bridged { class: c }, .. } if c == class
@@ -667,8 +662,8 @@ impl FileAnalysis {
             decl_span: None,
             class: sym.package.clone()?,
             bare: sym.name[1..].to_string(),
-            has_param: attributes.iter().any(|a| a == "param"),
-            has_reader: attributes.iter().any(|a| a == "reader"),
+            has_param: attributes.iter().any(|a| crate::model::conventions::field_attr_is_param(a)),
+            has_reader: attributes.iter().any(|a| crate::model::conventions::field_attr_is_reader(a)),
         })
     }
 
@@ -988,25 +983,16 @@ impl FileAnalysis {
     /// The Field twin of a promoted-constructor-property PARAM token: php's
     /// `__construct(public readonly Level $level)` declares BOTH the ctor
     /// param (a `$level` Variable, body uses) and the class Field (`level`,
-    /// member accesses) with ONE source token. A cursor there lands on the
-    /// Variable (emitted first); resolution wants the member identity, so
-    /// re-target structurally: a Field one sigil-column to the right on the
-    /// same token. Perl analyses never exhibit the shape (fields there are
-    /// sigil-less symbols on their own tokens).
+    /// member accesses) with ONE source token, and the extractor links the
+    /// two through `declared_with`. A cursor there lands on the Variable
+    /// (emitted first); resolution wants the member identity.
     pub fn promoted_field_twin(&self, sym: &Symbol) -> Option<&Symbol> {
-        if !matches!(sym.kind, SymKind::Variable) || !sym.name.starts_with('$') {
+        if !matches!(sym.kind, SymKind::Variable) {
             return None;
         }
-        let bare = &sym.name[1..];
-        self.symbols_named(bare)
-            .iter()
-            .map(|&sid| self.symbol(sid))
-            .find(|f| {
-                matches!(f.kind, SymKind::Field)
-                    && f.selection_span.start.row == sym.selection_span.start.row
-                    && f.selection_span.start.column == sym.selection_span.start.column + 1
-                    && f.selection_span.end == sym.selection_span.end
-            })
+        sym.declared_with
+            .map(|id| self.symbol(id))
+            .filter(|f| matches!(f.kind, SymKind::Field))
     }
 
     /// The promoted param's (field decl span, variable USE spans) —
@@ -1026,23 +1012,21 @@ impl FileAnalysis {
                     && f.package.as_deref() == Some(class)
                     && self.symbol_is_class_content(f)
             })?;
-        let sigiled = format!("${member}");
-        let var_id = self
-            .symbols_named(&sigiled)
-            .iter()
-            .copied()
-            .find(|&sid| {
-                let v = self.symbol(sid);
-                matches!(v.kind, SymKind::Variable)
-                    && v.selection_span.start.row == field.selection_span.start.row
-                    && v.selection_span.start.column + 1 == field.selection_span.start.column
-                    && v.selection_span.end == field.selection_span.end
-            })?;
+        let var = field
+            .declared_with
+            .map(|id| self.symbol(id))
+            .filter(|v| matches!(v.kind, SymKind::Variable))?;
+        // A use span covers the sigiled variable; the group writes the bare
+        // member name, so each use narrows past the variable's OWN sigil.
+        let sigil_len = match &var.detail {
+            SymbolDetail::Variable { sigil, .. } => sigil.len_utf8(),
+            _ => 0,
+        };
         let uses = self
-            .collect_refs_for_target(var_id, false, None)
+            .collect_refs_for_target(var.id, false, None)
             .into_iter()
             .map(|(span, _)| Span {
-                start: Point::new(span.start.row, span.start.column + 1),
+                start: Point::new(span.start.row, span.start.column + sigil_len),
                 end: span.end,
             })
             .collect();

@@ -204,7 +204,7 @@ fn render_candidate_hover(
 /// the attribute is the value-borne "this Sub is macro-shaped" fact,
 /// checked before the kind match rather than re-deriving it from the name.
 fn hover_kind_label(sym: &crate::model::file_analysis::Symbol) -> &'static str {
-    if sym.attributes.iter().any(|a| a == "macro") {
+    if sym.flags.has(crate::model::file_analysis::SymbolFlags::MACRO) {
         return "macro";
     }
     match sym.kind {

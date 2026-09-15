@@ -938,8 +938,9 @@ fn stamp_access_regions(fa: &mut FileAnalysis, regions: &[crate::build::cpp_repa
                 (s.end.row - s.start.row, s.end.column.saturating_sub(s.start.column))
             })
             .is_some_and(|r| r.non_public);
-        if non_public && !sym.attributes.iter().any(|a| a == "non_public") {
+        if non_public && !sym.flags.has(crate::model::file_analysis::SymbolFlags::NON_PUBLIC) {
             sym.attributes.push("non_public".to_string());
+            sym.flags.insert(crate::model::file_analysis::SymbolFlags::NON_PUBLIC);
         }
     }
 }

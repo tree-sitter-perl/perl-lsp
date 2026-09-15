@@ -31,6 +31,17 @@ bug). The repr gate IS whether InternalKey was minted: no query-time
 site is the one place that knows. Plugins enroll name-mapped
 projections (`predicate => 1` → `has_size`) through the same entity.
 
+## The pair is a minted relation
+
+A `has` accessor and its constructor key are two symbols from one token;
+so are a DBIC column accessor and its bridged key, and a php promoted
+constructor parameter and its field. The minting site records the pair as
+`Symbol::declared_with` (each way), and every consumer — `attr_pair_group`,
+the promoted-param twin, the rename group's variable-use fold — reads that
+relation. Span equality and sigil-column arithmetic are never the signal
+(CLAUDE.md rule #11): a real `sub name` sharing a class with someone's ctor
+key is not a pair, and the minting site is the only place that knows.
+
 ## Membership is strict, never `found_by`
 
 Internal-key membership matches `HashKeyOwner::Class(class)` by strict

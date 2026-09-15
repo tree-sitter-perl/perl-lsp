@@ -1084,7 +1084,7 @@ impl FileAnalysis {
         for sym in &self.symbols {
             if matches!(sym.kind, SymKind::Field) {
                 if let SymbolDetail::Field { ref attributes, .. } = sym.detail {
-                    if attributes.contains(&"param".to_string()) {
+                    if attributes.iter().any(|a| crate::model::conventions::field_attr_is_param(a)) {
                         // Check this field belongs to the class
                         if self.symbol_in_class(sym.id, class_name) {
                             let key = sym.bare_name().to_string();

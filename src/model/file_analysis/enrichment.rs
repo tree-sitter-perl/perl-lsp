@@ -160,6 +160,8 @@ impl FileAnalysis {
                     namespace: ns.clone(),
                     presentation: gs.presentation.clone(),
                     attributes: Vec::new(),
+                    flags: Default::default(),
+                    declared_with: None,
                     deref_stack: Vec::new(),
                     arity: None,
                 });

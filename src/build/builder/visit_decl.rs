@@ -1389,9 +1389,9 @@ impl<'a> Builder<'a> {
                 let has_param;
                 if let Some(last_sym) = self.symbols.last() {
                     if let SymbolDetail::Field { ref attributes, .. } = last_sym.detail {
-                        has_reader = attributes.iter().any(|a| a == "reader");
-                        has_writer = attributes.iter().any(|a| a == "writer");
-                        has_param = attributes.iter().any(|a| a == "param");
+                        has_reader = attributes.iter().any(|a| crate::model::conventions::field_attr_is_reader(a));
+                        has_writer = attributes.iter().any(|a| crate::model::conventions::field_attr_is_writer(a));
+                        has_param = attributes.iter().any(|a| crate::model::conventions::field_attr_is_param(a));
                     } else {
                         has_reader = false;
                         has_writer = false;

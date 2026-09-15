@@ -232,6 +232,17 @@ impl<'a> Builder<'a> {
                 } else {
                     self.add_symbol_ns(name, SymKind::Method, span, selection_span, detail, ns)
                 };
+                // The ctor/column key the same plugin token minted first,
+                // if any — the pair is a fact of the token, recorded here.
+                let twin = self.symbols.iter().find(|s| {
+                    matches!(s.kind, SymKind::HashKeyDef)
+                        && s.name == self.symbols[sid.0 as usize].name
+                        && s.selection_span == selection_span
+                        && s.package == target_pkg
+                }).map(|s| s.id);
+                if let Some(k) = twin {
+                    self.pair_co_declared(k, sid);
+                }
                 // Stamped post-mint; kept out of `add_symbol_ns` so the
                 // core constructor stays narrow (defaults for the
                 // builder-native paths, plugin policy only here).
@@ -288,7 +299,20 @@ impl<'a> Builder<'a> {
             }
             plugin::EmitAction::HashKeyDef { name, owner, span, selection_span } => {
                 let detail = SymbolDetail::HashKeyDef { owner, is_dynamic: false };
-                self.add_symbol_ns(name, SymKind::HashKeyDef, span, selection_span, detail, ns);
+                let pkg = self.current_package.clone();
+                let key_id =
+                    self.add_symbol_ns(name.clone(), SymKind::HashKeyDef, span, selection_span, detail, ns);
+                // The accessor the same plugin token minted (DBIC `add_columns`,
+                // Class::Accessor): one declaration, two symbols.
+                let twin = self.symbols.iter().find(|s| {
+                    matches!(s.kind, SymKind::Method)
+                        && s.name == name
+                        && s.selection_span == selection_span
+                        && s.package == pkg
+                }).map(|s| s.id);
+                if let Some(m) = twin {
+                    self.pair_co_declared(m, key_id);
+                }
             }
             plugin::EmitAction::HashKeyAccess { name, owner, var_text, span, access } => {
                 // Owner-carrying binding so the linkage pass (which looks
