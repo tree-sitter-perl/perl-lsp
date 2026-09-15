@@ -880,6 +880,30 @@ pub fn name_match_key(name: &str) -> String {
 }
 
 impl Ref {
+    /// The receiver view of a member access (`MethodCall` / `FieldAccess`);
+    /// `None` for every other kind.
+    pub fn member_site(&self) -> Option<MemberSite<'_>> {
+        match &self.kind {
+            RefKind::MethodCall { invocant, invocant_span, method_name_span, member_op, .. } => {
+                Some(MemberSite {
+                    invocant,
+                    invocant_span: *invocant_span,
+                    name_span: *method_name_span,
+                    member_op: member_op.as_ref(),
+                })
+            }
+            RefKind::FieldAccess { invocant, invocant_span, member_name_span, member_op } => {
+                Some(MemberSite {
+                    invocant,
+                    invocant_span: *invocant_span,
+                    name_span: *member_name_span,
+                    member_op: member_op.as_ref(),
+                })
+            }
+            _ => None,
+        }
+    }
+
     /// The unqualified callable name for a `FunctionCall` ref. A
     /// fully-qualified call (`Foo::Bar::baz(...)`) keeps the whole path in
     /// `target_name` (the qualified-name hash-key binding logic and rename
@@ -983,7 +1007,7 @@ impl Ref {
     /// matched costs one whole decode, never a wrong answer.
     pub fn match_verdict_baked(&self) -> bool {
         match &self.kind {
-            RefKind::MethodCall { .. } => self.method_target().is_some(),
+            RefKind::MethodCall { .. } | RefKind::FieldAccess { .. } => self.method_target().is_some(),
             RefKind::HashKeyAccess { .. } => matches!(
                 self.hash_key_owner(),
                 Some(o) if !matches!(o, HashKeyOwner::Variable { .. })
@@ -1051,12 +1075,13 @@ impl Ref {
             RefKind::HashKeyAccess { .. } => 4,
             RefKind::ContainerAccess => 5,
             RefKind::DispatchCall { .. } => 6,
+            RefKind::FieldAccess { .. } => 7,
         };
         let (qual_kind, qual): (u8, Option<String>) = match &self.kind {
             RefKind::FunctionCall => {
                 (1, self.resolved_package().map(str::to_string))
             }
-            RefKind::MethodCall { .. } => (
+            RefKind::MethodCall { .. } | RefKind::FieldAccess { .. } => (
                 2,
                 self.method_target().map(|t| t.invocant_class().to_string()),
             ),
@@ -1239,21 +1264,6 @@ pub enum RenameKind {
     Handler { owner: HandlerOwner, name: String },
 }
 
-/// The shape a member token was WRITTEN in — the value-borne fact that
-/// tells a property from a same-named method (rule #10: consumers ask the
-/// ref, never "is this php"). `Unknown` = the language does not
-/// distinguish (Perl's `$o->m` is a call with or without parens), and
-/// every shape gate stands down.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-pub enum MemberShape {
-    #[default]
-    Unknown,
-    /// Invoked, or named as a callable (`$o->m()`, `[$o, 'm']`).
-    Callable,
-    /// Read as a stored value (`$o->prop`, `obj->field`).
-    Value,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[allow(dead_code)]
 pub enum RefKind {
@@ -1289,12 +1299,6 @@ pub enum RefKind {
         /// — its `deref_stack` decides the expected operator). `None` for Perl
         /// (one operator) and wrapper/chain receivers.
         member_op: Option<(MemberOp, Span)>,
-        /// What the written token names: a callable (an argument list
-        /// follows, or a callable-string form) or a stored value (a bare
-        /// member read). A pack whose members can share a name across
-        /// kinds (php `$this->recorded` beside `recorded()`) mints it;
-        /// Perl, where `$o->m` IS a call, leaves it `Unknown`.
-        shape: MemberShape,
         /// The member was NAMED BY A STRING (`[$obj, 'method']`, a class-array
         /// callable): a rename/reference target when it resolves, never an
         /// unresolved-member finding when it does not — a two-element array
@@ -1322,6 +1326,37 @@ pub enum RefKind {
     DispatchCall {
         dispatcher: String,
     },
+    /// A member VALUE on a receiver — `$this->prop`, `obj->field`, a
+    /// `$this->prop = …` write. The syntax told the extractor the token
+    /// names a stored value, not a callable, so the ref says so instead
+    /// of carrying a call ref plus a shape tag (rule #11). Resolves over
+    /// the class's value members only (`Field` / class-content
+    /// `Variable`), never a method: a value read of a name only a method
+    /// carries is an undeclared property. A language whose member read IS
+    /// a call (Perl's `$o->m`) never mints one. Receiver fields mirror
+    /// `MethodCall`'s so the invocant ladder serves both through
+    /// `Ref::member_site`. Kept at the END for bincode variant-index
+    /// stability (bump `EXTRACT_VERSION`).
+    FieldAccess {
+        invocant: crate::model::conventions::Invocant,
+        invocant_span: Option<Span>,
+        /// The member token alone (`r.span` may cover the whole access).
+        member_name_span: Span,
+        member_op: Option<(MemberOp, Span)>,
+    },
+}
+
+/// The receiver half of a member access, whatever the member's kind — the
+/// one view the invocant ladder, op-DX and the rename token gate read, so
+/// a `FieldAccess` and a `MethodCall` on the same receiver resolve it the
+/// same way.
+#[derive(Debug, Clone, Copy)]
+pub struct MemberSite<'a> {
+    pub invocant: &'a crate::model::conventions::Invocant,
+    pub invocant_span: Option<Span>,
+    /// The member token: the method name or the field name.
+    pub name_span: Span,
+    pub member_op: Option<&'a (MemberOp, Span)>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

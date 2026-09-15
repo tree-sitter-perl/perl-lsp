@@ -1084,7 +1084,7 @@ impl FileAnalysis {
         let mut out = Vec::new();
         for r in self.refs() {
             let (receiver, form) = match &r.kind {
-                RefKind::MethodCall { invocant, .. } => {
+                RefKind::MethodCall { invocant, .. } | RefKind::FieldAccess { invocant, .. } => {
                     // Only a scalar invocant can be undef/Optional; a
                     // bareword/`__PACKAGE__`/chain/bridged receiver never
                     // narrows here.

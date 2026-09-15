@@ -1195,3 +1195,102 @@ fn old_plugin_spelling_still_deserializes() {
         assert_eq!(got, want, "{spelling} names the same attachment");
     }
 }
+
+// ---- Member kinds: a value hop and a call hop chase different subjects ----
+
+#[test]
+fn value_hop_chases_the_field_subject_and_method_hop_the_package_symbol() {
+    // `S` overloads `v` across kinds: a field typed Numeric and a method
+    // returning String. `$r = $s->v` reads the field, `$c = $s->v()` calls
+    // the method — two attachments, so neither can answer for the other.
+    let mut bag = WitnessBag::new();
+    let s0 = ScopeId(0);
+    let var = |n: &str| WitnessAttachment::Variable { name: n.into(), scope: s0 };
+    let push = |bag: &mut WitnessBag, att: WitnessAttachment, payload: WitnessPayload| {
+        bag.push(Witness {
+            attachment: att,
+            source: WitnessSource::Builder("test".into()),
+            payload,
+            span: span(0, 0, 0, 0),
+        });
+    };
+    push(&mut bag, var("$s"), WitnessPayload::InferredType(InferredType::ClassName("S".into())));
+    push(&mut bag, var("v"), WitnessPayload::InferredType(InferredType::Numeric));
+    push(
+        &mut bag,
+        WitnessAttachment::Field { owner: "S".into(), name: "v".into() },
+        WitnessPayload::Edge(var("v")),
+    );
+    push(
+        &mut bag,
+        WitnessAttachment::PackageSymbol { package: "S".into(), name: "v".into() },
+        WitnessPayload::InferredType(InferredType::String),
+    );
+    push(
+        &mut bag,
+        var("$r"),
+        WitnessPayload::Projected { base: var("$s"), step: ProjectionStep::ValueHop { member: "v".into() } },
+    );
+    push(
+        &mut bag,
+        var("$c"),
+        WitnessPayload::Projected {
+            base: var("$s"),
+            step: ProjectionStep::MethodHop { member: "v".into(), arity: 0 },
+        },
+    );
+    let reg = ReducerRegistry::with_defaults();
+    let ask = |att: &WitnessAttachment| {
+        let q = ReducerQuery {
+            args: Vec::new(),
+            attachment: att,
+            point: None,
+            framework: FrameworkFact::Plain,
+            arity_hint: None,
+            receiver: None,
+            context: None,
+        };
+        reg.query(&bag, &q)
+    };
+    assert_eq!(ask(&var("$r")), ReducedValue::Type(InferredType::Numeric), "a value read is the field");
+    assert_eq!(ask(&var("$c")), ReducedValue::Type(InferredType::String), "a call is the method");
+}
+
+#[test]
+fn value_hop_on_a_method_only_name_answers_nothing() {
+    // No field `m` anywhere: the read must not fall through to the method.
+    let mut bag = WitnessBag::new();
+    let s0 = ScopeId(0);
+    let var = |n: &str| WitnessAttachment::Variable { name: n.into(), scope: s0 };
+    let push = |bag: &mut WitnessBag, att: WitnessAttachment, payload: WitnessPayload| {
+        bag.push(Witness {
+            attachment: att,
+            source: WitnessSource::Builder("test".into()),
+            payload,
+            span: span(0, 0, 0, 0),
+        });
+    };
+    push(&mut bag, var("$s"), WitnessPayload::InferredType(InferredType::ClassName("S".into())));
+    push(
+        &mut bag,
+        WitnessAttachment::PackageSymbol { package: "S".into(), name: "m".into() },
+        WitnessPayload::InferredType(InferredType::String),
+    );
+    push(
+        &mut bag,
+        var("$r"),
+        WitnessPayload::Projected { base: var("$s"), step: ProjectionStep::ValueHop { member: "m".into() } },
+    );
+    let reg = ReducerRegistry::with_defaults();
+    let att = var("$r");
+    let q = ReducerQuery {
+        args: Vec::new(),
+        attachment: &att,
+        point: None,
+        framework: FrameworkFact::Plain,
+        arity_hint: None,
+        receiver: None,
+        context: None,
+    };
+    assert_eq!(reg.query(&bag, &q), ReducedValue::None);
+}

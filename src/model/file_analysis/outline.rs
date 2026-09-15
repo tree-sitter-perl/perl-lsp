@@ -561,6 +561,9 @@ impl FileAnalysis {
                     let mods = 0; // TODO: readonly for ro accessors, static for class methods
                     tokens.push(PerlSemanticToken { span: *method_name_span, token_type: TOK_METHOD, modifiers: mods });
                 }
+                RefKind::FieldAccess { member_name_span, .. } => {
+                    tokens.push(PerlSemanticToken { span: *member_name_span, token_type: TOK_PROPERTY, modifiers: 0 });
+                }
                 RefKind::PackageRef => {
                     tokens.push(PerlSemanticToken { span: r.span, token_type: TOK_NAMESPACE, modifiers: 0 });
                 }

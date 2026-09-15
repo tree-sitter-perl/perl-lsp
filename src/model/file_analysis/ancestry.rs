@@ -494,29 +494,10 @@ impl FileAnalysis {
         &self,
         cls: &str,
         method_name: &str,
-        shape: MemberShape,
         module_index: Option<&dyn CrossFileLookup>,
+        agrees: &dyn Fn(SymKind) -> bool,
     ) -> Option<MethodResolution> {
-        // A written shape asks for the agreeing kind FIRST (`$this->recorded`
-        // reads the property, `$this->recorded()` calls the method); the
-        // other kind stays the fallback so a class that does not overload
-        // the name answers exactly as a shape-less lookup would.
-        let agrees = |kind: SymKind| match shape {
-            MemberShape::Unknown => true,
-            MemberShape::Callable => matches!(kind, SymKind::Sub | SymKind::Method),
-            MemberShape::Value => !matches!(kind, SymKind::Sub | SymKind::Method),
-        };
-        if shape != MemberShape::Unknown {
-            if let Some(r) = self.member_resolution_on_class_pass(cls, method_name, module_index, &agrees) {
-                return Some(r);
-            }
-            // php: the syntax decided the kind; a value read of a name only
-            // a method carries is an undeclared property, not that method.
-            if self.pack.member_shapes_are_strict {
-                return None;
-            }
-        }
-        self.member_resolution_on_class_pass(cls, method_name, module_index, &|_| true)
+        self.member_resolution_on_class_pass(cls, method_name, module_index, agrees)
     }
 
     fn member_resolution_on_class_pass(
@@ -696,31 +677,48 @@ impl FileAnalysis {
         None
     }
 
-    /// Walk the inheritance chain to find a method (DFS, matches Perl's default MRO).
+    /// Walk the inheritance chain to find a CALLED member (DFS, Perl's
+    /// default MRO). Any member kind answers: a language whose member read
+    /// is a call (Perl's `$o->m`, a `has` accessor) has no value-read
+    /// syntax, so the call is the only spelling a data member ever gets.
     pub fn resolve_method_in_ancestors(
         &self,
         class_name: &str,
         method_name: &str,
         module_index: Option<&dyn CrossFileLookup>,
     ) -> Option<MethodResolution> {
-        self.resolve_member_in_ancestors(class_name, method_name, MemberShape::Unknown, module_index)
+        self.resolve_member_in_ancestors(class_name, method_name, module_index, &|_| true)
     }
 
-    /// `resolve_method_in_ancestors` with the cursor token's written shape:
-    /// a value read prefers the class's property, a call its method, on
-    /// every class of the walk (the other kind stays the fallback).
-    pub fn resolve_member_in_ancestors(
+    /// Walk the inheritance chain to find a VALUE member — what a
+    /// `FieldAccess` ref names. Callables never answer: the syntax said the
+    /// token reads a stored value, so a name only a method carries is an
+    /// undeclared property here, not that method.
+    pub fn resolve_field_in_ancestors(
+        &self,
+        class_name: &str,
+        field_name: &str,
+        module_index: Option<&dyn CrossFileLookup>,
+    ) -> Option<MethodResolution> {
+        self.resolve_member_in_ancestors(class_name, field_name, module_index, &|k| {
+            !matches!(k, SymKind::Sub | SymKind::Method)
+        })
+    }
+
+    /// The MRO walk both member walks share; `agrees` is the kind family
+    /// the asking ref admits.
+    fn resolve_member_in_ancestors(
         &self,
         class_name: &str,
         method_name: &str,
-        shape: MemberShape,
         module_index: Option<&dyn CrossFileLookup>,
+        agrees: &dyn Fn(SymKind) -> bool,
     ) -> Option<MethodResolution> {
         let _t = crate::util::ghost_stats::ScopedNs::start("mroc.total");
         let mut result: Option<MethodResolution> = None;
         let mut iface_fallback: Option<MethodResolution> = None;
         self.for_each_ancestor_class(class_name, module_index, |cls| {
-            match self.method_resolution_on_class(cls, method_name, shape, module_index) {
+            match self.method_resolution_on_class(cls, method_name, module_index, agrees) {
                 // An INTERFACE hit is held as fallback, never the answer
                 // while a concrete definer exists: php's MRO interleaves
                 // `implements` (header) ahead of `use Trait` (body), so the
@@ -808,7 +806,7 @@ impl FileAnalysis {
                 let crate::model::graph::Node::Class(cls) = n else {
                     return crate::model::graph::WalkControl::Continue;
                 };
-                match self.method_resolution_on_class(cls, method_name, MemberShape::Unknown, module_index) {
+                match self.method_resolution_on_class(cls, method_name, module_index, &|_| true) {
                     Some(r) => {
                         if self.hit_class_is_interface(cls, &r, module_index) {
                             iface_fallback.get_or_insert(r);

@@ -7,8 +7,10 @@
 > for any Perl field (owner = declaring class via the ancestor walk);
 > `field_subject_of_ref` routes any access shape (accessor call / `$self->{k}` /
 > Corinna field var) onto it without seeing the flavor. The refs-splat below and
-> the C domain fold are two consumers of the ONE subject. Perl *domain* typing on
-> that subject is deferred — see `docs/cpp-golive-map.md` item 3.
+> the C domain fold are two consumers of the ONE subject, and a pack field's
+> VALUE edge (`Field → Edge(Variable{decl})`, chased by `ValueHop`) is a third —
+> `member-kinds.md`. Perl *domain* typing on that subject is deferred — see
+> `docs/cpp-golive-map.md` item 3.
 
 A framework field declaration is ONE name spelled several ways. Moo:
 `has size` ↔ accessor `$w->size` ↔ ctor key `Widget->new(size => …)` ↔

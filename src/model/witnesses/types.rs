@@ -131,8 +131,13 @@ pub enum WitnessAttachment {
     /// `DomainCoherenceFold` folds them into the slot's DOMAIN type
     /// (`op_type: uint16_t` storage → `opcode` domain). The domain is a
     /// defeasible refinement for human surfaces; it never changes the
-    /// storage type that flows. Kept at the END for bincode variant-index
-    /// stability (bump `EXTRACT_VERSION`).
+    /// storage type that flows. The slot's VALUE rides the same
+    /// attachment as an `Edge(Variable{decl})` the pack extractor pushes
+    /// per field declaration: `ProjectionStep::ValueHop` chases it, and
+    /// the registry's `Field` fallback walks the owner's candidate files
+    /// and parents the way `PackageSymbol`'s does — a field a parent
+    /// declares answers a child's read. Kept at the END for bincode
+    /// variant-index stability (bump `EXTRACT_VERSION`).
     Field { owner: String, name: String },
 }
 
@@ -161,11 +166,6 @@ pub const INHERIT_PARAM_SOURCE: &str = "inherit-param";
 /// materialized `Sequence` must beat the `HashRef` annot, and at equal
 /// priority latest-wins does it (`HashRef` never subsumes `Sequence`).
 pub const REFINE_SOURCE: &str = "refines-container";
-
-/// Source tag of a class-member VALUE edge (`PackageSymbol{cls, field} →
-/// Edge(Variable)`): the registry's member-shape preference partitions a
-/// class attachment's edges on it.
-pub const FIELD_EDGE_SOURCE: &str = "field_edge";
 
 /// Source tag of a REASSIGNMENT's flow edge (`FlowEdge::reassigns`): the
 /// only witness whose failure to resolve `materialize` turns into an
@@ -335,10 +335,11 @@ pub enum ProjectionStep {
     /// per-slot answer exists). Kept at the END for bincode variant-index
     /// stability (bump `EXTRACT_VERSION`).
     Element,
-    /// A member READ (`$this->prop`, `obj->field`): dispatches `member` on
-    /// the base's class with no arity, preferring the class's value edge
-    /// (`FIELD_EDGE_SOURCE`) over a same-named callable's return. Kept at
-    /// the END for bincode variant-index stability (bump `EXTRACT_VERSION`).
+    /// A member VALUE read (`$this->prop`, `obj->field`): chases
+    /// `Field{owner: the base's class, name: member}` — the storage slot's
+    /// own attachment — never `PackageSymbol`, so a same-named callable's
+    /// return can never answer a value read. Kept at the END for bincode
+    /// variant-index stability (bump `EXTRACT_VERSION`).
     ValueHop { member: String },
     /// The KEY axis of an iterated collection — the pair-form foreach's
     /// first binding (`foreach ($m as $k => $v)`). A `Sequence`'s keys ARE

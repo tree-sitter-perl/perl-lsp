@@ -86,9 +86,8 @@ impl FileAnalysis {
                     // Nothing local; leave cross-file resolution to
                     // the LSP adapter (symbols::find_definition).
                 }
-                RefKind::MethodCall { .. } => {
-
-                    // Method dispatch is the frozen edge, full stop.
+                RefKind::MethodCall { .. } | RefKind::FieldAccess { .. } => {
+                    // Member dispatch is the frozen edge, full stop.
                     // `Local` lands on the local symbol; `CrossFile`
                     // returns None so the LSP adapter resolves via the
                     // ModuleIndex; a `None` edge (invocant didn't infer —
@@ -332,6 +331,15 @@ impl FileAnalysis {
                                 _ => {}
                             }
                         }
+                        (RefKind::FieldAccess { member_name_span, .. },
+                         SymKind::Field | SymKind::Variable) if r.unqualified_target_name() == sym.name => {
+                            match (self.method_call_invocant_class(r, module_index), &sym_package) {
+                                (Some(cn), Some(pkg)) if cn == *pkg => {
+                                    results.push((*member_name_span, r.access));
+                                }
+                                _ => {}
+                            }
+                        }
                         (RefKind::PackageRef, SymKind::Package | SymKind::Class | SymKind::Module)
                             if r.target_name == sym.name =>
                             results.push((r.span, r.access)),
@@ -348,13 +356,10 @@ impl FileAnalysis {
         // free: every `->op_type` across every struct pasting a role macro
         // froze onto the one `BASEOP::op_type` member, so they splat together.
         for r in self.refs() {
-            if let (
-                RefKind::MethodCall { method_name_span, .. },
-                Some(MethodTarget::Local { sym_id, .. }),
-            ) = (&r.kind, r.method_target())
-            {
+            let Some(site) = r.member_site() else { continue };
+            if let Some(MethodTarget::Local { sym_id, .. }) = r.method_target() {
                 if *sym_id == target_id {
-                    results.push((*method_name_span, r.access));
+                    results.push((site.name_span, r.access));
                 }
             }
         }
@@ -1186,7 +1191,8 @@ impl FileAnalysis {
                         package,
                     });
                 }
-                RefKind::MethodCall { method_name_span, .. } => {
+                RefKind::MethodCall { method_name_span, .. }
+                | RefKind::FieldAccess { member_name_span: method_name_span, .. } => {
                     // `ref_at` can return a MethodCall ref for a cursor anywhere
                     // in the call — its span covers the args. But only the
                     // method-name token renames the method: a hash key in the
@@ -1372,9 +1378,10 @@ impl FileAnalysis {
                         edits.push((r.span, new_name.to_string()));
                     }
                 }
-                RefKind::MethodCall { method_name_span, .. } => {
-                    // MethodCall refs target a class — `None` scope
-                    // doesn't reach methods.
+                RefKind::MethodCall { method_name_span, .. }
+                | RefKind::FieldAccess { member_name_span: method_name_span, .. } => {
+                    // Member refs target a class — `None` scope
+                    // doesn't reach members.
                     if let (Some(cls), Some(wanted)) =
                         (self.method_call_invocant_class(r, module_index), scope.as_ref())
                     {

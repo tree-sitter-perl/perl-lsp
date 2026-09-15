@@ -1474,7 +1474,7 @@ fn source_tags_are_provenance_only() {
     });
     let allow: &[(&str, usize, &str)] = &[
         ("model/witnesses/reducers.rs", 1, "retire: the reset marker → its own payload"),
-        ("model/witnesses/registry.rs", 2, "retire: field-edge partition → the ClassValue attachment; reassign edge → the Reset payload"),
+        ("model/witnesses/registry.rs", 1, "retire: reassign edge → the Reset payload"),
         ("model/witnesses/types.rs", 1, "retire: priority derived from the tag → a source KIND carrying its priority"),
     ];
     let drift = allowlist_drift("rule #14 (source tags)", &seen, allow);
@@ -1496,7 +1496,7 @@ fn pack_facts_fields_are_ratcheted() {
     let body = &text[start..];
     let end = body.find("\n}\n").expect("struct end");
     let fields = body[..end].lines().filter(|l| l.starts_with("    pub ")).count();
-    const RATCHET: usize = 36;
+    const RATCHET: usize = 35;
     assert!(
         fields <= RATCHET,
         "PackFacts grew to {fields} fields (ratchet {RATCHET}). A per-language constant goes on \

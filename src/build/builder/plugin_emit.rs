@@ -388,7 +388,6 @@ impl<'a> Builder<'a> {
                         invocant_span,
                         method_name_span: span,
                         member_op: None,
-                        shape: crate::model::file_analysis::MemberShape::Unknown,
                         named_by_string: false,
                     },
                     span,

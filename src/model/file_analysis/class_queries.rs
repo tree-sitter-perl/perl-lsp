@@ -536,7 +536,7 @@ impl FileAnalysis {
         field: &str,
         module_index: Option<&dyn CrossFileLookup>,
     ) -> Option<InferredType> {
-        match self.resolve_method_in_ancestors(class, field, module_index)? {
+        match self.resolve_field_in_ancestors(class, field, module_index)? {
             MethodResolution::Local { sym_id, .. } => {
                 self.inferred_type_via_bag(field, self.symbol(sym_id).span.end)
             }
@@ -679,7 +679,7 @@ impl FileAnalysis {
         module_index: Option<&dyn CrossFileLookup>,
     ) -> Option<crate::model::witnesses::WitnessAttachment> {
         let (class, name) = match &r.kind {
-            RefKind::MethodCall { .. } => {
+            RefKind::MethodCall { .. } | RefKind::FieldAccess { .. } => {
                 let class = self.method_call_invocant_class(r, module_index)?;
                 (class, r.unqualified_target_name().to_string())
             }
@@ -1242,7 +1242,7 @@ impl FileAnalysis {
                 RefKind::PackageRef | RefKind::FunctionCall => {
                     spelled.insert(r.unqualified_target_name().to_string());
                 }
-                RefKind::MethodCall { invocant, .. } => {
+                RefKind::MethodCall { invocant, .. } | RefKind::FieldAccess { invocant, .. } => {
                     let t = invocant.text();
                     if crate::model::conventions::is_bareword_class_name(t) {
                         spelled.insert(t.rsplit(['\\', ':']).next().unwrap_or(t).to_string());
@@ -1260,46 +1260,6 @@ impl FileAnalysis {
             }
         }
         UseMapPins { pins, own_namespace: own_ns, spelled, visible }
-    }
-
-    /// Does `class` carry BOTH a callable (`Sub`/`Method`) and a stored
-    /// value (class-content `Variable`/`Field`) named `name` — in this file
-    /// or in any file the query can see declaring the class? The one gate
-    /// every shape-strict matcher asks: a class that does not overload the
-    /// name keeps every walk name-keyed.
-    pub fn member_kinds_overloaded(
-        &self,
-        class: &str,
-        name: &str,
-        module_index: Option<&dyn CrossFileLookup>,
-    ) -> bool {
-        let tally = |a: &FileAnalysis, callable: &mut bool, value: &mut bool| {
-            for &sid in a.symbols_named(name) {
-                let sym = a.symbol(sid);
-                if sym.package.as_deref() != Some(class) {
-                    continue;
-                }
-                match sym.kind {
-                    SymKind::Sub | SymKind::Method => *callable = true,
-                    _ if a.symbol_is_class_content(sym) => *value = true,
-                    _ => {}
-                }
-            }
-        };
-        let (mut callable, mut value) = (false, false);
-        tally(self, &mut callable, &mut value);
-        if callable && value {
-            return true;
-        }
-        if let Some(idx) = module_index {
-            for cached in idx.visible_def_candidates(class) {
-                tally(&idx.symbols_present(&cached), &mut callable, &mut value);
-                if callable && value {
-                    return true;
-                }
-            }
-        }
-        false
     }
 
     /// The namespace an import row spells for the token at `span`, when

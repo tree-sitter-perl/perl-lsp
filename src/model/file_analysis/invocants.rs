@@ -92,6 +92,17 @@ impl FileAnalysis {
                         }
                     }
                 }
+                RefKind::FieldAccess { .. } => {
+                    // The value walk only, and no name-match fallback: an
+                    // unpinned receiver is an honest miss for a field.
+                    let cn = self.method_call_invocant_class(r, module_index)?;
+                    if let Some(MethodResolution::Local { sym_id, .. }) =
+                        self.resolve_field_in_ancestors(&cn, r.unqualified_target_name(), module_index)
+                    {
+                        return Some((sym_id, true));
+                    }
+                    return None;
+                }
                 RefKind::PackageRef => {
                     for &sid in self.symbols_named(&r.target_name) {
                         if matches!(self.symbol(sid).kind, SymKind::Package | SymKind::Class | SymKind::Module) {
@@ -299,53 +310,49 @@ impl FileAnalysis {
         Vec::new()
     }
 
-    /// A member's VALUE on a receiver — the receiver-typed entry every
-    /// tree-free member consumer routes through (the pack chain arm of
-    /// `expr_type_at_span`, the sentinel's receiver typing, member hover).
-    /// Dispatch runs the specificity ladder (`dispatch_of`), method
-    /// returns thread the (rebound) receiver into the `PackageSymbol`
-    /// query so `ReturnExpr::ParamOf` substitutes; a data field falls
-    /// back to its declared type with the class's params substituted
-    /// against the receiver's instance args.
+    /// A member's VALUE on a receiver when the asker does not know the
+    /// member's kind — the sentinel's receiver typing mid-keystroke, member
+    /// hover before a ref exists. Dispatch runs the specificity ladder
+    /// (`dispatch_of`); a method's return threads the (rebound) receiver
+    /// into the `PackageSymbol` query so `ReturnExpr::ParamOf` substitutes,
+    /// and a data field answers only when no callable carries the name. A
+    /// consumer holding the ref asks by kind instead: a `MethodCall`
+    /// routes here with its arity, a `FieldAccess` to `field_value_type`.
     pub fn member_value_type(
         &self,
         receiver: &InferredType,
         member: &str,
         module_index: Option<&dyn CrossFileLookup>,
         arg_count: Option<usize>,
-        shape: MemberShape,
     ) -> Option<InferredType> {
-        // On a strict pack the written shape picks the rung: a value read
-        // never means the method, a call never the field.
-        let strict = self.pack.member_shapes_are_strict;
         // The whole ladder, most-specific first: a member the winning spec
         // doesn't define falls through to the next rung (ultimately the
         // primary) — same never-pruned order goto-def presents.
         for (class, recv) in self.dispatch_ladder_of(receiver, module_index) {
-            // The registry publication is name-keyed (a field's assignment
-            // rides it too), so a value read on a strict pack takes the
-            // declared field first and consults the registry only when no
-            // method carries the name.
-            let value_read = strict && shape == MemberShape::Value;
-            if value_read {
-                if let Some(raw) = self.field_type_on_class(&class, member, module_index) {
-                    return Some(self.substitute_member_type(raw, &class, &recv, module_index));
-                }
-                if self
-                    .resolve_member_in_ancestors(&class, member, MemberShape::Callable, module_index)
-                    .is_some()
-                {
-                    continue;
-                }
-            }
             if let Some(t) =
                 self.method_return_type_on(&class, &recv, member, module_index, arg_count)
             {
                 return Some(t);
             }
-            if strict && shape == MemberShape::Callable {
+            let Some(raw) = self.field_type_on_class(&class, member, module_index) else {
                 continue;
-            }
+            };
+            return Some(self.substitute_member_type(raw, &class, &recv, module_index));
+        }
+        None
+    }
+
+    /// A VALUE member's type on a receiver — what a `FieldAccess` ref
+    /// reads: the declared (or assigned) type of the field the receiver's
+    /// class carries, with the class's params substituted against the
+    /// receiver's instance args. A callable never answers.
+    pub fn field_value_type(
+        &self,
+        receiver: &InferredType,
+        member: &str,
+        module_index: Option<&dyn CrossFileLookup>,
+    ) -> Option<InferredType> {
+        for (class, recv) in self.dispatch_ladder_of(receiver, module_index) {
             let Some(raw) = self.field_type_on_class(&class, member, module_index) else {
                 continue;
             };
@@ -421,9 +428,7 @@ impl FileAnalysis {
         r: &Ref,
         module_index: Option<&dyn CrossFileLookup>,
     ) -> Option<String> {
-        let RefKind::MethodCall { invocant, .. } = &r.kind else {
-            return None;
-        };
+        let invocant = r.member_site()?.invocant;
         let cn = 'cn: {
             // A qualified method token names its dispatch class explicitly
             // — Perl ignores the invocant's class for the lookup, so the
@@ -711,9 +716,8 @@ impl FileAnalysis {
         r: &Ref,
         module_index: Option<&dyn CrossFileLookup>,
     ) -> Option<InferredType> {
-        let RefKind::MethodCall { invocant, invocant_span, .. } = &r.kind else {
-            return None;
-        };
+        let site = r.member_site()?;
+        let (invocant, invocant_span) = (site.invocant, &site.invocant_span);
         let invocant = match invocant {
             crate::model::conventions::Invocant::Bridged { token, match_mode, .. } => {
                 return self

@@ -77,10 +77,6 @@ pub struct PackFacts {
     /// spells is unused; false for text-splicing includes.
     #[serde(default)]
     pub imports_bind_names: bool,
-    /// A value read never resolves to a method, a call never to a field
-    /// (php); false lets Perl's accessor calls answer either kind.
-    #[serde(default)]
-    pub member_shapes_are_strict: bool,
     /// A member declaration belongs only to its enclosing container (no
     /// cross-package installs): contract provision is package-attributed.
     #[serde(default)]

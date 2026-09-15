@@ -792,6 +792,35 @@ impl WitnessReducer for TypeNameReducer {
     }
 }
 
+// ---- Field value ----
+//
+// Claims `Field{owner, name}` carrying a materialized `InferredType` — the
+// storage slot's value edge (`Edge(Variable{decl})`, pushed per field
+// declaration) after `materialize` chased it. Latest wins: the declaring
+// file's `Variable` fold already ranked annotation over assignment.
+
+pub struct FieldValueReducer;
+
+impl WitnessReducer for FieldValueReducer {
+    fn name(&self) -> &str {
+        "field_value"
+    }
+
+    fn claims(&self, w: &Witness) -> bool {
+        matches!(w.attachment, WitnessAttachment::Field { .. })
+            && matches!(w.payload, WitnessPayload::InferredType(_))
+    }
+
+    fn reduce(&self, ws: &[&Witness], _q: &ReducerQuery) -> ReducedValue {
+        for w in ws.iter().rev() {
+            if let WitnessPayload::InferredType(t) = &w.payload {
+                return ReducedValue::Type(t.clone());
+            }
+        }
+        ReducedValue::None
+    }
+}
+
 // ---- Domain-coherence fold (int-used-as-enum) ----
 //
 // Claims `Field{owner, name}` carrying `DomainCompare{enum_type}` — the
@@ -804,9 +833,11 @@ impl WitnessReducer for TypeNameReducer {
 // verdict never depends on witness-push order or HashMap iteration.
 //
 // The domain is defeasible — it refines the human surfaces (hover / the
-// navigation bridge), never the storage type that flows. Nothing on the
-// flow axis (Variable/Expr/Symbol/PackageSymbol) queries `Field`, so
-// returning the domain as a `ClassName` here can't leak into flow typing.
+// navigation bridge), never the storage type that flows. The flow axis
+// reaches `Field` only through a `ValueHop`, and `FieldValueReducer` is
+// registered ahead of this fold, so a slot with a value edge answers its
+// storage type before the vote is consulted; the vote itself is asked only
+// by `field_domain_for_owner`, over a private bag of `DomainCompare`.
 
 pub struct DomainCoherenceFold;
 

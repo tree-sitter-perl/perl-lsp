@@ -227,16 +227,11 @@ impl FileAnalysis {
         mut f: impl FnMut(&str, MemberOp, Span, &[DerefStep]),
     ) {
         for r in self.refs() {
-            let RefKind::MethodCall {
-                invocant,
-                invocant_span: Some(span),
-                member_op: Some((typed, op_span)),
-                ..
-            } = &r.kind
-            else {
+            let Some(site) = r.member_site() else { continue };
+            let (Some(span), Some((typed, op_span))) = (site.invocant_span, site.member_op) else {
                 continue;
             };
-            let recv = invocant.text();
+            let recv = site.invocant.text();
             let Some(stack) = self.var_deref_stack_at(recv, span.start) else {
                 continue;
             };
@@ -626,38 +621,38 @@ impl FileAnalysis {
         // value on it — methods through `PackageSymbol` with the receiver
         // threaded (`ParamOf` substitutes), fields through the declared
         // type with params substituted.
-        if let Some((inv, member, arity, shape)) = self
+        if let Some((inv, r)) = self
             .refs
             .iter()
             .filter_map(|r| {
-                let RefKind::MethodCall {
-                    invocant_span: Some(inv), method_name_span, ..
-                } = &r.kind
-                else {
-                    return None;
-                };
-                if r.span != *method_name_span
+                let site = r.member_site()?;
+                let inv = site.invocant_span?;
+                let name_span = site.name_span;
+                if r.span != name_span
                     || inv.start != span.start
-                    || (method_name_span.end.row, method_name_span.end.column)
+                    || (name_span.end.row, name_span.end.column)
                         > (span.end.row, span.end.column)
                     || (inv.end.row, inv.end.column)
-                        >= (method_name_span.start.row, method_name_span.start.column)
+                        >= (name_span.start.row, name_span.start.column)
                 {
                     return None;
                 }
-                Some((*inv, r, method_name_span.start))
+                Some((inv, r, name_span.start))
             })
             .max_by_key(|(_, _, mstart)| (mstart.row, mstart.column))
-            .map(|(inv, r, _)| {
-                let shape = match &r.kind {
-                    RefKind::MethodCall { shape, .. } => *shape,
-                    _ => Default::default(),
-                };
-                (inv, r.unqualified_target_name().to_string(), None::<usize>, shape)
-            })
+            .map(|(inv, r, _)| (inv, r))
         {
             if let Some(recv_ty) = self.expr_type_at_span(inv, module_index) {
-                if let Some(t) = self.member_value_type(&recv_ty, &member, module_index, arity, shape) {
+                let member = r.unqualified_target_name();
+                // The ref's kind picks the rung: a value read never means
+                // the method, a call never the field.
+                let t = match &r.kind {
+                    RefKind::FieldAccess { .. } => {
+                        self.field_value_type(&recv_ty, member, module_index)
+                    }
+                    _ => self.member_value_type(&recv_ty, member, module_index, None),
+                };
+                if let Some(t) = t {
                     return Some(t);
                 }
             }

@@ -444,9 +444,8 @@ impl FileAnalysis {
             // at build time. Leaving the edge `None` makes `refs_to` /
             // goto-def re-consult the plugin at query time (with the
             // index in hand) instead of trusting a guessed token.
-            if !matches!(r.kind, RefKind::MethodCall { .. })
-                || matches!(&r.kind, RefKind::MethodCall { invocant, .. } if invocant.is_bridged())
-            {
+            let Some(site) = r.member_site() else { continue };
+            if site.invocant.is_bridged() {
                 continue;
             }
             crate::util::ghost_stats::count("stamp.methodcall_considered");
@@ -458,11 +457,14 @@ impl FileAnalysis {
             let target = (|| self
                 .method_call_invocant_class(r, module_index)
                 .map(|cn| {
-                    let shape = match &r.kind {
-                        RefKind::MethodCall { shape, .. } => *shape,
-                        _ => Default::default(),
+                    let member = r.unqualified_target_name();
+                    let resolved = match &r.kind {
+                        RefKind::FieldAccess { .. } => {
+                            self.resolve_field_in_ancestors(&cn, member, module_index)
+                        }
+                        _ => self.resolve_method_in_ancestors(&cn, member, module_index),
                     };
-                    match self.resolve_member_in_ancestors(&cn, r.unqualified_target_name(), shape, module_index) {
+                    match resolved {
                         Some(MethodResolution::Local { sym_id, .. }) => MethodTarget::Local {
                             sym_id,
                             invocant_class: cn,

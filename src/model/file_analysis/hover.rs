@@ -283,6 +283,35 @@ impl FileAnalysis {
                         }
                     }
                 }
+                RefKind::FieldAccess { .. } => {
+                    let cn = r.method_target().map(|t| t.invocant_class().to_string());
+                    let member = r.unqualified_target_name();
+                    if let Some(ref cn) = cn {
+                        match self.resolve_field_in_ancestors(cn, member, module_index) {
+                            Some(MethodResolution::Local { sym_id, .. }) => {
+                                let sym = self.symbol(sym_id);
+                                return Some(self.format_symbol_hover(sym, source, module_index));
+                            }
+                            Some(MethodResolution::CrossFile { ref class, .. }) => {
+                                let idx = module_index?;
+                                for cached in idx.visible_def_candidates(class) {
+                                    let whole = idx.whole_present(&cached);
+                                    let Some(sym) = whole.symbols().iter().find(|s| {
+                                        !matches!(s.kind, SymKind::Sub | SymKind::Method)
+                                            && s.name == member
+                                            && s.package.as_deref() == Some(class.as_str())
+                                            && whole.symbol_is_class_content(s)
+                                    }) else {
+                                        continue;
+                                    };
+                                    return Some(whole.format_symbol_hover(sym, "", Some(idx)));
+                                }
+                            }
+                            None => {}
+                        }
+                    }
+                    return None;
+                }
                 RefKind::PackageRef => {
                     let row_ns = self.import_row_namespace(&r.span);
                     for &sid in self.symbols_named(&r.target_name) {

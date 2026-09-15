@@ -441,9 +441,12 @@ impl ReducerRegistry {
         // so order isn't load-bearing — grouped with the other class-keyed
         // fallbacks. The `ClassName(name)` terminal lives in query_rec_body.
         r.register(Box::new(TypeNameReducer));
-        // DomainCoherenceFold claims the disjoint `Field{..}` shape (the
-        // int-used-as-enum domain vote) — no overlap with any flow-axis
-        // reducer, so order isn't load-bearing.
+        // The two `Field{..}` reducers claim disjoint PAYLOADS on one
+        // attachment: FieldValueReducer the slot's materialized value edge
+        // (what a `ValueHop` reads), DomainCoherenceFold the `DomainCompare`
+        // vote. Value first is load-bearing — the domain is a human-surface
+        // refinement and must never be the type that flows.
+        r.register(Box::new(FieldValueReducer));
         r.register(Box::new(DomainCoherenceFold));
         // Last — fallback for "this Symbol's stored return type".
         r.register(Box::new(SubReturnReducer));
@@ -1152,6 +1155,74 @@ impl ReducerRegistry {
             );
         }
 
+        // `Field{owner, name}` the local bag couldn't answer: the slot's
+        // value edge lives in the file declaring `owner` (cross-file
+        // primary), or the slot is a PARENT's (ancestry) — hops (1) and (2)
+        // of the `PackageSymbol` ladder, same shared visited set. No bridge
+        // hop: a plugin entity is a callable, never a stored value.
+        if let WitnessAttachment::Field { owner, name } = q.attachment {
+            if let Some(ctx) = q.context {
+                if ctx.module_index.is_none() {
+                    // A value hop runs under an opaque frame (the projection
+                    // combines it), so no conclusion key names this exit.
+                    super::note_bake_exit("field", false);
+                }
+                if let Some(idx) = ctx.module_index {
+                    for cached in idx.visible_def_candidates(owner) {
+                        crate::util::ghost_stats::count("moc.provider_fetched");
+                        crate::util::ghost_stats::count("mocsite.field");
+                        let full = idx.bag_present(&cached);
+                        if std::ptr::eq(bag, &full.witnesses) {
+                            continue;
+                        }
+                        let cached_ctx = BagContext {
+                            scopes: &full.scopes,
+                            package_framework: &full.packages,
+                            module_index: Some(idx),
+                            package_parents: &full.packages,
+                            app_surface_consumers: &full.plugin.app_surface_consumers,
+                        };
+                        let sub_q = ReducerQuery {
+                            attachment: q.attachment,
+                            // Cross-file: point normalized (see the slot arm).
+                            point: None,
+                            framework: q.framework,
+                            arity_hint: None,
+                            receiver: q.receiver.clone(),
+                            args: q.args.clone(),
+                            context: Some(&cached_ctx),
+                        };
+                        let v = self.query_rec(&full.witnesses, &sub_q, state);
+                        if *v != ReducedValue::None {
+                            return (*v).clone();
+                        }
+                    }
+                }
+                let parents = crate::model::file_analysis::parents_of(
+                    owner,
+                    ctx.package_parents,
+                    ctx.module_index,
+                    ctx.app_surface_consumers,
+                );
+                for p in parents {
+                    let parent_att = WitnessAttachment::Field { owner: p, name: name.clone() };
+                    let sub_q = ReducerQuery {
+                        attachment: &parent_att,
+                        point: q.point,
+                        framework: q.framework,
+                        arity_hint: None,
+                        receiver: q.receiver.clone(),
+                        args: q.args.clone(),
+                        context: q.context,
+                    };
+                    let v = self.query_rec(bag, &sub_q, state);
+                    if *v != ReducedValue::None {
+                        return (*v).clone();
+                    }
+                }
+            }
+        }
+
         ReducedValue::None
     }
 
@@ -1852,27 +1923,6 @@ impl ReducerRegistry {
         state: &mut QueryState,
     ) -> Vec<Witness> {
         let raw = bag.for_attachment(q.attachment);
-        // Member-shape preference on a class attachment: a class can carry
-        // BOTH a value edge (`FIELD_EDGE_SOURCE`, the property) and callable
-        // edges (the method's return chain) under one member name. An
-        // arity-less query is a value read and takes the value edge; a
-        // query with an arity is a call and takes the callable edges. With
-        // only one kind present nothing is dropped — the shape only decides
-        // when the class genuinely overloads the name across kinds.
-        let raw: Vec<&Witness> = if matches!(q.attachment, WitnessAttachment::PackageSymbol { .. }) {
-            let is_field = |w: &&Witness| {
-                matches!(&w.source, WitnessSource::Builder(t) if t == FIELD_EDGE_SOURCE)
-            };
-            let fields = raw.iter().filter(|w| is_field(w)).count();
-            if fields > 0 && fields < raw.len() {
-                let want_field = q.arity_hint.is_none();
-                raw.into_iter().filter(|w| is_field(w) == want_field).collect()
-            } else {
-                raw
-            }
-        } else {
-            raw
-        };
         // Is this attachment's value a pass-through of ONE sub-chase, or a fold
         // over several? With siblings present, whatever a sub-chase answers is
         // combined with them before this frame returns, so no single exit key
@@ -2119,19 +2169,34 @@ impl ReducerRegistry {
                             },
                             ProjectionStep::MethodHop { member, arity: _ }
                             | ProjectionStep::ValueHop { member } => {
-                                let arity = match step {
-                                    ProjectionStep::MethodHop { arity, .. } => Some(*arity),
-                                    _ => None,
-                                };
-                                // Fresh dispatch on the base's class at the
-                                // call site's own arity; the base type IS the
-                                // dynamic receiver, so a fluent `Receiver`
-                                // return substitutes it (`$q->where()->get()`).
-                                t.class_name().map(str::to_string).and_then(|class| {
-                                    let att = WitnessAttachment::PackageSymbol {
-                                        package: class,
-                                        name: member.clone(),
+                                // The step's kind picks the attachment: a call
+                                // dispatches `PackageSymbol{class, member}` at
+                                // the call's own arity, a value read chases
+                                // `Field{class, member}` — the slot's own
+                                // subject — so a same-named callable's return
+                                // can never answer a read, nor a field a call.
+                                // The base type IS the dynamic receiver, so a
+                                // fluent `Receiver` return substitutes it
+                                // (`$q->where()->get()`).
+                                let (att_of, arity): (fn(String, String) -> WitnessAttachment, Option<u32>) =
+                                    match step {
+                                        ProjectionStep::MethodHop { arity, .. } => (
+                                            |class, name| WitnessAttachment::PackageSymbol {
+                                                package: class,
+                                                name,
+                                            },
+                                            Some(*arity),
+                                        ),
+                                        _ => (
+                                            |class, name| WitnessAttachment::Field {
+                                                owner: class,
+                                                name,
+                                            },
+                                            None,
+                                        ),
                                     };
+                                t.class_name().map(str::to_string).and_then(|class| {
+                                    let att = att_of(class, member.clone());
                                     let sub_q = ReducerQuery {
                                         attachment: &att,
                                         point: q.point,

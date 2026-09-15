@@ -2937,3 +2937,22 @@ fn probe_heap_estimate_vs_truth_on_a_giant_file() {
     );
     eprintln!("{}", fa.heap_estimate());
 }
+
+#[test]
+fn field_walk_admits_value_members_only() {
+    // A called member admits any kind (Perl's `$o->m` is the only spelling
+    // a data member ever gets); a VALUE read admits fields alone, so a
+    // name only a method carries is an honest miss for it.
+    let fa = build_fa_from_source(
+        "\
+package W;
+sub recorded { 1 }
+1;
+",
+    );
+    assert!(matches!(
+        fa.resolve_method_in_ancestors("W", "recorded", None),
+        Some(MethodResolution::Local { .. })
+    ));
+    assert!(fa.resolve_field_in_ancestors("W", "recorded", None).is_none());
+}
