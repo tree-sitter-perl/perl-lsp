@@ -1212,6 +1212,7 @@ fn remap_spans(
         moved_from,
         control_regions,
         param_regions,
+        key_defs,
         domain_sites,
         macro_returns: _,
         // Populated in enrich_skeleton (post-remap) already in original coords.
@@ -1260,6 +1261,7 @@ fn remap_spans(
     }
     for rf in refs.iter_mut() {
         let crate::build::query_extract::SkelRef {
+            via: _,
             kind: _,
             name: _,
             start,

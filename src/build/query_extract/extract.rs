@@ -792,6 +792,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                         }
                     }
                     out.refs.push(SkelRef {
+                    via: None,
                         kind: e.cap.strip_prefix("ref.").unwrap().to_string(),
                         name: (pack.shape_name)(&e.cap, &e.text),
                         start: e.start,
@@ -1093,6 +1094,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
         // every invocation identifier is a call ref (user functions
         // rename through it; builtin names match no defs, harmlessly)
         out.refs.push(SkelRef {
+                    via: None,
             kind: "call".into(),
             name: cmd.clone(),
             start: cmd_span.start,
@@ -1135,6 +1137,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                             !name.is_empty() && name.chars().all(|c| c.is_ascii_uppercase() || c == '_');
                         if !is_keyword && !name.contains("${") {
                             out.refs.push(SkelRef {
+                    via: None,
                                 kind: "call".into(),
                                 name: name.clone(),
                                 start: span.start,

@@ -68,6 +68,10 @@ pub struct SkelRef {
     /// invocant types query-time via `expr_type_at_span(span)` (text → the
     /// `InvocantName`). `None` for plain calls / var refs.
     pub invocant: Option<(crate::model::file_analysis::Span, String)>,
+    /// For a `"dispatch"` ref (`@ref.dispatch.named`): the dispatching
+    /// function's name (`do_action`, `apply_filters`) — the `RefKind::
+    /// DispatchCall::dispatcher` label. `None` for every other kind.
+    pub via: Option<String>,
     /// The written member operator (`.`/`->`) + its span, mapped from the
     /// `@member.op` token's kind via the pack `op_map`, `Some` only when the
     /// IMMEDIATE receiver is a simple variable. Rides onto the MethodCall ref
@@ -84,6 +88,15 @@ pub struct SkelRef {
     /// Named by a string literal (`[$obj, 'method']`) — see
     /// `RefKind::MethodCall::named_by_string`.
     pub named_by_string: bool,
+}
+
+/// A string array key and the element it heads — nesting is span
+/// containment among elements.
+#[derive(Debug, Clone)]
+pub struct KeyDef {
+    pub key: String,
+    pub key_span: crate::model::file_analysis::Span,
+    pub elem_span: crate::model::file_analysis::Span,
 }
 
 #[derive(Debug, Default)]
@@ -150,6 +163,10 @@ pub struct SkeletonAnalysis {
     /// Parameter-list spans (`@param.region`). The use-after-move check reads
     /// these to tell a moved parameter from a moved local (`use_after_move_reads`).
     pub param_regions: Vec<crate::model::file_analysis::Span>,
+    /// Array-key DEF candidates (`@def.handler.key` on a string key, its
+    /// element on `@key.elem`): promoted to rail names by the driver when
+    /// the file's path rail says so (`config/app.php` → `app.<key>`).
+    pub key_defs: Vec<KeyDef>,
     /// Domain-typing sites: a `@domain.slot` field access compared/assigned
     /// against a `@domain.value` token. Raw (value's enum resolves cross-file
     /// at query time); folds onto `Field{owner, name}` for the int-used-as-enum
