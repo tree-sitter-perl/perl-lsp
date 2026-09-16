@@ -72,6 +72,21 @@ pub fn shred_derived_rows(
     seeds: &[crate::model::file_analysis::RefRowSeed],
     sym_seeds: &[crate::model::file_analysis::SymRowSeed],
 ) -> rusqlite::Result<()> {
+    // Accumulated, never printed per file: the row-store write cost is what
+    // an index change on these tables moves, and the persist writer runs
+    // this once per file.
+    crate::util::ghost_stats::timed("persist.shred", || {
+        shred_derived_rows_inner(conn, path, source, seeds, sym_seeds)
+    })
+}
+
+fn shred_derived_rows_inner(
+    conn: &Connection,
+    path: &str,
+    source: &str,
+    seeds: &[crate::model::file_analysis::RefRowSeed],
+    sym_seeds: &[crate::model::file_analysis::SymRowSeed],
+) -> rusqlite::Result<()> {
     // Sticky workspace tier: project lib/ files are inside the walk AND on
     // @INC (add_project_lib_paths), so the resolver re-shreds them as
     // 'import'. The walk's verdict wins — downgrading would let the @INC
@@ -527,12 +542,21 @@ pub fn sym_member_row_exists(
     // container stays EXACT-match: it is a package name, and its match key
     // strips the qualifier, which would let `Base` claim `My::Base`'s rows.
     conn.prepare_cached(
+        // Two EXISTS halves, never one `OR` inside a WHERE: SQLite plans an
+        // OR over two IN-subqueries as a scan of the `file_id` prefix
+        // (21,605 rows for a 1,200-helper file, ~3 ms), while each half on
+        // its own is a point probe on `(file_id, name_id|key_id,
+        // container_id)` — ~15 µs on the same file.
         "SELECT EXISTS(
             SELECT 1 FROM syms y
              WHERE y.file_id = ?1
-               AND y.container_id = (SELECT str_id FROM strings WHERE s = ?4)
-               AND (y.name_id IN (SELECT str_id FROM strings WHERE s IN (?2, ?3))
-                    OR y.key_id IN (SELECT str_id FROM strings WHERE s IN (?2, ?3))))",
+               AND y.name_id IN (SELECT str_id FROM strings WHERE s IN (?2, ?3))
+               AND y.container_id = (SELECT str_id FROM strings WHERE s = ?4))
+         OR EXISTS(
+            SELECT 1 FROM syms y
+             WHERE y.file_id = ?1
+               AND y.key_id IN (SELECT str_id FROM strings WHERE s IN (?2, ?3))
+               AND y.container_id = (SELECT str_id FROM strings WHERE s = ?4))",
     )
     .ok()?
     .query_row(params![file_id, name, norm, container], |row| row.get(0))
@@ -574,11 +598,15 @@ pub fn sym_name_row_exists(
         .ok()?;
     let norm = probe_spelling(name, names);
     conn.prepare_cached(
+        // Split halves for the same reason as `sym_member_row_exists`.
         "SELECT EXISTS(
             SELECT 1 FROM syms y
              WHERE y.file_id = ?1
-               AND (y.name_id IN (SELECT str_id FROM strings WHERE s IN (?2, ?3))
-                    OR y.key_id IN (SELECT str_id FROM strings WHERE s IN (?2, ?3))))",
+               AND y.name_id IN (SELECT str_id FROM strings WHERE s IN (?2, ?3)))
+         OR EXISTS(
+            SELECT 1 FROM syms y
+             WHERE y.file_id = ?1
+               AND y.key_id IN (SELECT str_id FROM strings WHERE s IN (?2, ?3)))",
     )
     .ok()?
     .query_row(params![file_id, name, norm], |row| row.get(0))
@@ -615,8 +643,11 @@ pub fn name_row_exists(
          OR EXISTS(
             SELECT 1 FROM syms y
              WHERE y.file_id = ?1
-               AND (y.name_id IN (SELECT str_id FROM strings WHERE s IN (?2, ?3))
-                    OR y.key_id IN (SELECT str_id FROM strings WHERE s IN (?2, ?3))))",
+               AND y.name_id IN (SELECT str_id FROM strings WHERE s IN (?2, ?3)))
+         OR EXISTS(
+            SELECT 1 FROM syms y
+             WHERE y.file_id = ?1
+               AND y.key_id IN (SELECT str_id FROM strings WHERE s IN (?2, ?3)))",
     )
     .ok()?
     .query_row(params![file_id, name, norm], |row| row.get(0))
