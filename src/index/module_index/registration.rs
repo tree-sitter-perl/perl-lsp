@@ -1231,6 +1231,15 @@ impl ModuleIndex {
         self
     }
 
+    /// Declare this index a PACK sub-index whose dependency tier is exactly
+    /// the given roots (composer's vendor packages) — every other file it
+    /// holds is the workspace's own, so the masked backward walk attributes
+    /// it WORKSPACE (rename-editable). The hub never calls this: its whole
+    /// cache is `@INC`-tier by construction.
+    pub fn set_dependency_roots(&self, roots: Vec<std::path::PathBuf>) {
+        self.core.set_dependency_roots(roots);
+    }
+
     /// Post-`Arc` variant for the hub, set alongside the workspace root.
     /// LAST root wins — a re-rooted session must not keep rehydrating from
     /// the first root's DB while the writers moved to the new one.
