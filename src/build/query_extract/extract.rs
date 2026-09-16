@@ -388,6 +388,11 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     // ---- join def name-captures to their def event ----
     use std::collections::HashMap;
     let mut names_by_match: HashMap<(usize, String), (String, Point, Point)> = HashMap::new();
+    // `@def.<kind>.anchor` — a name-less def's anchor token (php's `class`
+    // keyword): the pack synthesizes the name from the position, and the
+    // match joins it like a `.name` capture so the def, its `@context`
+    // and its `@parent` edges all read ONE identity.
+    let mut defaulted_matches: HashMap<usize, String> = HashMap::new();
     let mut not_a_read: std::collections::HashSet<(usize, usize)> = std::collections::HashSet::new();
     let mut def_name_ends: std::collections::HashSet<usize> = std::collections::HashSet::new();
     // `@member.write` — a member on the LEFT of an assignment (php's
@@ -691,6 +696,10 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
 
     // ---- the state machine: scope stack + sticky contexts ----
     let mut out = SkeletonAnalysis::default();
+    // One constructor call per anonymous-class keyword: the def pattern
+    // and each parent pattern share the token.
+    let mut anon_ctor_sites: std::collections::HashSet<(usize, usize)> =
+        std::collections::HashSet::new();
     out.use_aliases = out_use_aliases;
     // Group rows land ahead of the flat rows the main loop pushes in
     // document order; every reader of these lanes is span- or map-keyed,
@@ -1078,6 +1087,33 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                     });
                 }
             }
+            cap if cap.ends_with(".anchor") => {
+                // The anchor of an anonymous class is its construction site:
+                // `new class(...)` invokes the synthesized identity's
+                // constructor, so the ctor gets the MethodCall a `new
+                // self()` mints — fan-in, goto-def and references on
+                // `__construct` see it like any `new Foo()`.
+                if let (Some(ctor), Some(name)) =
+                    (pack.constructor_names.first(), defaulted_matches.get(&e.match_id))
+                {
+                    if anon_ctor_sites.insert((e.start_byte, e.end_byte)) {
+                        let span = Span { start: e.start, end: e.end };
+                        out.refs.push(SkelRef {
+                            via: None,
+                            kind: "member".to_string(),
+                            name: ctor.to_string(),
+                            start: e.start,
+                            end: e.end,
+                            scope: cur_scope,
+                            invocant: Some((span, name.clone())),
+                            member_op: None,
+                            arg_count: None,
+                            value_read: false,
+                            named_by_string: false,
+                        });
+                    }
+                }
+            }
             cap if cap.starts_with("def.") && !cap.ends_with(".name") && !cap.ends_with(".anchor") => {
                 let kind = cap.strip_prefix("def.").unwrap().to_string();
                 let (name, name_start, name_end, defaulted) = names_by_match
@@ -1097,6 +1133,14 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                     .get(&e.match_id)
                     .map(|q| q.rsplit("::").next().unwrap_or(q).to_string())
                     .or_else(|| package.clone());
+                // A class's package is its NAMESPACE, whatever context it
+                // sits in (an anonymous class inside a method is still
+                // filed under the namespace its identity carries).
+                let pkg = if kind == "class" && pack.names.use_map_sep().is_some() {
+                    namespace_at(e.start).map(str::to_string)
+                } else {
+                    pkg
+                };
                 let shaped = (pack.shape_name)(&format!("def.{kind}"), &name);
                 // A class-spec def carries its primary's name — the
                 // (spec, primary) family edge `Specializes` derives from.
@@ -1185,6 +1229,39 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                             // (cheap heuristic: same start)
                             s == e.start_byte || en == e.end_byte
                         });
+                // `new self(...)` / `new static(...)`: the token spells no class
+                // name — it IS a call of the constructor on the current class.
+                // Minted as that member call (invocant = the current-package
+                // token, name = the pack's constructor), so the ctor's
+                // references, hover and goto-def see the site while a class
+                // rename never rewrites the `self` token.
+                if !inside_def
+                    && e.cap == "ref.call"
+                    && ctor_matches.contains(&e.match_id)
+                    // `hop.recv` is the pack's receiver-shaping kind — the one
+                    // place its `self`/`static` → current-package table lives.
+                    && crate::model::conventions::is_current_package_token(
+                        &(pack.shape_name)("hop.recv", &e.text),
+                    )
+                {
+                    if let Some(ctor) = pack.constructor_names.first() {
+                        let span = Span { start: e.start, end: e.end };
+                        out.refs.push(SkelRef {
+                            via: None,
+                            kind: "member".to_string(),
+                            name: ctor.to_string(),
+                            start: e.start,
+                            end: e.end,
+                            scope: cur_scope,
+                            invocant: Some((span, "__PACKAGE__".to_string())),
+                            member_op: None,
+                            arg_count: arg_counts_by_start.get(&(e.end.row, e.end.column)).copied(),
+                            value_read: false,
+                            named_by_string: false,
+                        });
+                        continue;
+                    }
+                }
                 if !inside_def {
                     let member_op = member_simple
                         .get(&e.match_id)
