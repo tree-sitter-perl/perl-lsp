@@ -969,15 +969,23 @@ impl<'a> CandidateSet<'a> {
                     // freeze normally serves same-file dispatch, but a bridged
                     // invocant is never frozen (its class needs the index), so
                     // re-resolve here.
-                    if let Some(MethodResolution::Local { sym_id, .. }) =
-                        analysis.resolve_method_in_ancestors(&cn, method, Some(idx))
-                    {
+                    // A value read walks the value kinds only; a call walks
+                    // everything (`docs/adr/member-kinds.md`).
+                    let is_value_read = matches!(r.kind, RefKind::FieldAccess { .. });
+                    let walk = |class: &str| {
+                        if is_value_read {
+                            analysis.resolve_field_in_ancestors(class, method, Some(idx))
+                        } else {
+                            analysis.resolve_method_in_ancestors(class, method, Some(idx))
+                        }
+                    };
+                    if let Some(MethodResolution::Local { sym_id, .. }) = walk(&cn) {
                         if let Some(sym) = analysis.symbols().iter().find(|s| s.id == sym_id) {
                             return vec![self.origin_decl(sym.selection_span)];
                         }
                     }
                     if let Some(MethodResolution::CrossFile { ref class, ref def_module, .. }) =
-                        analysis.resolve_method_in_ancestors(&cn, method, Some(idx))
+                        walk(&cn)
                     {
                         // One path for both: a real inherited method lives in
                         // `class`'s own module; a plugin-bridged helper lives
@@ -1000,6 +1008,29 @@ impl<'a> CandidateSet<'a> {
                             // completion (`materialize_gated_emissions`), so the
                             // whole view carries it — no per-query enrichment.
                             let whole = idx.whole_present(&cached);
+                            // A value read lands on the stored member first;
+                            // the callable arm below stays its fallback.
+                            let field_sym = || {
+                                whole.symbols().iter().find(|s| {
+                                    MemberKind::of_sym(s.kind) == MemberKind::Value
+                                        && s.name == method
+                                        && s.package.as_deref() == Some(class.as_str())
+                                        && whole.symbol_is_class_content(s)
+                                }).map(|s| s.selection_span)
+                            };
+                            if is_value_read {
+                                if let Some(span) = field_sym() {
+                                    if Url::from_file_path(&cached.path).is_ok() {
+                                        return vec![RefLocation {
+                                            key: FileKey::Path(cached.path.clone()),
+                                            span,
+                                            access: AccessKind::Declaration,
+                                            rewritable: true,
+                                            label: None,
+                                        }];
+                                    }
+                                }
+                            }
                             if let Some(sub_info) = whole.sub_info_view(method) {
                                 if Url::from_file_path(&cached.path).is_ok() {
                                     // A pack member call lands on the class
@@ -1031,13 +1062,11 @@ impl<'a> CandidateSet<'a> {
                                     )];
                                 }
                             }
-                            // cpp data field (or enum constant): a
-                            // Variable/Field/Enumerator member, not a sub.
+                            // cpp data field (or enum constant): a stored
+                            // member, not a sub.
                             if let Some(sym) = whole.symbols().iter().find(|s| {
-                                matches!(
-                                    s.kind,
-                                    SymKind::Variable | SymKind::Field | SymKind::Enumerator
-                                ) && s.name == method
+                                MemberKind::of_sym(s.kind) == MemberKind::Value
+                                    && s.name == method
                                     && s.package.as_deref() == Some(class.as_str())
                                     && whole.symbol_is_class_content(s)
                             }) {
