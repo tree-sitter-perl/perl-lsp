@@ -1626,6 +1626,7 @@ impl SkeletonAnalysis {
             witnesses: bag,
             packages,
             pack,
+            method_call_bindings,
             flow_edges: std::mem::take(&mut self.flow_edges),
             ..Default::default()
         });
