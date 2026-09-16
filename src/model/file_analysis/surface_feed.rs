@@ -79,6 +79,7 @@ impl FileAnalysis {
                     static_property_sigil: _static_property_sigil, // pack-wide convention
                     rail_labels: _rail_labels,       // pack-wide convention
                     rail_hints: _rail_hints,         // pack-wide convention
+                    class_named_rails: _class_named_rails, // overlay-wide convention
                     preamble_end: _preamble_end, // an editing aid
                     imports_bind_names: _imports_bind_names, // pack-wide convention
                     members_are_package_bound: _members_are_package_bound, // pack-wide convention

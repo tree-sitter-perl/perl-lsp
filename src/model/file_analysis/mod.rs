@@ -806,6 +806,8 @@ mod tests;
 mod call_ref_index_tests;
 #[cfg(test)]
 mod use_map_tests;
+#[cfg(test)]
+mod dispatch_tests;
 
 #[cfg(test)]
 #[path = "parametric_resultset_tests.rs"]

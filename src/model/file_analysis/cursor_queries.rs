@@ -12,7 +12,7 @@ impl FileAnalysis {
         // `Ref::is_cursor_companion`) yields to the token's own ref.
         self.refs.iter()
             .filter(|r| contains_point(&r.span, point))
-            .min_by_key(|r| (span_size(&r.span), r.is_cursor_companion() as u8))
+            .min_by_key(|r| (span_size(&r.span), r.is_cursor_companion(&self.pack) as u8))
     }
 
     /// Find the symbol whose selection_span contains the point.

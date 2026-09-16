@@ -70,6 +70,13 @@ pub struct PackFacts {
     /// runtime-only, so an unmatched name is a lead, not an error.
     #[serde(default)]
     pub rail_hints: Vec<String>,
+    /// Rails whose names are CLASS identities (the rail document's
+    /// `names_are: class` — Laravel's event bus). Per-overlay data the
+    /// file carries, like `rail_labels`: which overlays load is a property
+    /// of the workspace, not of the language, so it is not a language
+    /// convention reached by id. Read through `HandlerOwner::names_are`.
+    #[serde(default)]
+    pub class_named_rails: Vec<String>,
     /// The last row of the file preamble (open tag, `declare` rows).
     #[serde(default)]
     pub preamble_end: Option<usize>,
@@ -264,6 +271,7 @@ impl PackFacts {
             + self.static_property_sigil.capacity()
             + self.rail_labels.iter().map(|(a, b)| a.capacity() + b.capacity()).sum::<usize>()
             + self.rail_hints.iter().map(|a| a.capacity()).sum::<usize>()
+            + self.class_named_rails.iter().map(|a| a.capacity()).sum::<usize>()
             + vcap(&self.doc_mentions)
             + vcap(&self.type_display)
             + vcap(&self.constructor_names);

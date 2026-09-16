@@ -1058,8 +1058,8 @@ impl Ref {
     /// one case today is a class-named rail's use (`event(new X)`), a
     /// companion of the class token's own ref — the stacked-refs fork in
     /// `docs/open-forks.md` is where a second case would reopen the shape.
-    pub fn is_cursor_companion(&self) -> bool {
-        self.handler_owner().is_some_and(|o| o.names_are_classes())
+    pub fn is_cursor_companion(&self, pack: &PackFacts) -> bool {
+        self.handler_owner().is_some_and(|o| o.names_are_classes(pack))
     }
 
     /// Whether matching this ref against a target consults only the frozen

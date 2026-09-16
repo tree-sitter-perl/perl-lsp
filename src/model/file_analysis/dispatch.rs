@@ -90,7 +90,7 @@ pub enum HandlerOwner {
 }
 
 /// What a rail's names denote — the rail document's `names_are`
-/// declaration (`register_rail_names`), read through
+/// declaration, carried as `PackFacts::class_named_rails` and read through
 /// `HandlerOwner::names_are`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RailNames {
@@ -107,62 +107,26 @@ pub enum RailNames {
     Classes,
 }
 
-/// Rail name → what its names denote. Process-wide like a pack's
-/// namespace separator: a rail document is a per-framework constant,
-/// registered when the overlay loads, so an owner carrying the rail
-/// name has had its declaration registered before any query reads it.
-/// Unregistered rails denote strings — the common case, and the
-/// conservative one (a string rail's projections never lie about a
-/// class).
-static RAIL_NAMES: std::sync::RwLock<Vec<(String, RailNames)>> =
-    std::sync::RwLock::new(Vec::new());
-
-/// Declare what a rail's names denote. Idempotent; a re-declaration
-/// replaces the earlier one.
-pub fn register_rail_names(rail: &str, names: RailNames) {
-    let mut rails = RAIL_NAMES.write().unwrap_or_else(|e| e.into_inner());
-    match rails.iter_mut().find(|(r, _)| r == rail) {
-        Some(slot) => slot.1 = names,
-        None => rails.push((rail.to_string(), names)),
-    }
-}
-
 impl HandlerOwner {
-    /// What this owner's names denote. A class-owned handler's name is an
-    /// event string; a rail answers from its document's declaration.
-    pub fn names_are(&self) -> RailNames {
+    /// What this owner's names denote, under the rail declarations `pack`
+    /// carries. A class-owned handler's name is an event string; a rail
+    /// nobody declared denotes strings — the common and conservative case.
+    pub fn names_are(&self, pack: &PackFacts) -> RailNames {
         match self {
             HandlerOwner::Class(_) => RailNames::Strings,
-            HandlerOwner::Rail(rail) => RAIL_NAMES
-                .read()
-                .unwrap_or_else(|e| e.into_inner())
-                .iter()
-                .find(|(r, _)| r == rail)
-                .map_or(RailNames::Strings, |(_, n)| *n),
+            HandlerOwner::Rail(rail) => {
+                if pack.class_named_rails.iter().any(|r| r == rail) {
+                    RailNames::Classes
+                } else {
+                    RailNames::Strings
+                }
+            }
         }
     }
 
     /// The rail's names are class identities — see `RailNames::Classes`.
-    pub fn names_are_classes(&self) -> bool {
-        self.names_are() == RailNames::Classes
-    }
-}
-
-#[cfg(test)]
-mod rail_names_tests {
-    use super::*;
-
-    #[test]
-    fn a_rail_denotes_strings_until_its_document_says_classes() {
-        let rail = HandlerOwner::Rail("rail-names-test-event".into());
-        assert_eq!(rail.names_are(), RailNames::Strings);
-        register_rail_names("rail-names-test-event", RailNames::Classes);
-        assert!(rail.names_are_classes());
-        // A class-owned handler's name is an event string whatever the rails say.
-        assert_eq!(HandlerOwner::Class("App".into()).names_are(), RailNames::Strings);
-        // Re-declaration replaces, never duplicates.
-        register_rail_names("rail-names-test-event", RailNames::Strings);
-        assert!(!rail.names_are_classes());
+    pub fn names_are_classes(&self, pack: &PackFacts) -> bool {
+        self.names_are(pack) == RailNames::Classes
     }
 }
 
