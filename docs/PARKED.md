@@ -151,6 +151,22 @@ marked otherwise; the drain re-derived each rationale against current code.
   correctness memo cleared on resolve-stack drain vs long-lived
   byte-accounted LRU invalidated on content change. Never unify under one
   cache abstraction. [recorded 2026-07-17]
+- **The identifier class is ASCII, decided in the model.**
+  `conventions::is_bareword_class_name` (and `is_callable_sub_name` over
+  it) accepts a segment as an identifier only when it is
+  `[A-Za-z_][A-Za-z0-9_]*`. Perl (`use utf8`), PHP (`\x80-\xff` bytes)
+  and Python all admit non-ASCII identifiers, so a class or sub named in
+  Hebrew or with an accented letter is not a class token to us: no
+  invocant class, no completion candidate, no callable name. Wrong for
+  those languages and hard-coded in the one tier that must not know
+  what an identifier character is. **Fix:** identifier classification
+  becomes a per-language declaration on the analysis alongside the
+  separator and sigils (`NameSpellings` — the same seam those two now
+  ride), so the model asks the language's spellings whether a character
+  starts or continues an identifier and never decides itself. Additive:
+  a `NameSpellings` field with the ASCII class as the default preserves
+  every current answer. [recorded 2026-09-16]
+
 - **"Any pack language is on" has no name — it is an 18-fold literal
   disjunction.** The shared pack machinery (`PackDriver` itself,
   `query_extract`'s dead-code gate) is gated by

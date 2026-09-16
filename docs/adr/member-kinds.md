@@ -54,6 +54,33 @@ A language where a method is also readable as a value (JS `obj.method`)
 publishes the callable on BOTH attachments at mint; the model never learns
 which language did that.
 
+### Perl accesses that are semantically value reads
+
+A Perl `$o->name` with no arguments is often a value read in intent (a
+`has` accessor, a hand-written getter), and the question arises whether
+the builder should mint a `FieldAccess` for it. It does not, and the
+reason is where the fact lives: the site carries no evidence — `$o->name`
+and `$o->name()` are one syntax, and a 0-arity callee is a property of
+the TARGET, not of the site (a 0-arity sub may compute, side-effect, or
+dispatch). Deciding the kind at the call site from the callee's arity
+would be a shape branch on the target (rule #10), and it would be minted
+in the consumer from a fact the producer already has. What the site wants
+is the VALUE, and that already flows: the call walk's value-kind fallback
+and `member_value_type` answer a method's return first and a field's value
+second, so an accessor read types without a second ref kind.
+
+If Perl ever mints a value-read fact, it is minted at the declaration by
+the producer that knows the sub is storage-shaped — a `has` accessor is
+already a `Method` symbol paired with its `HashKeyDef`s, and an `:lvalue`
+sub (assignable like a field: `$o->name = 'x'`) is the one Perl
+declaration whose members ARE value slots. That is the open note: an
+`:lvalue` sub is a `Sub` symbol today, and its write sites are plain
+`MethodCall` refs with no write access classification. Minting it as a
+member with a value edge (`Field{owner, name}` alongside the `Symbol`) is
+the producer-side fact that would make `$o->name = ...` a write in
+`documentHighlight` and references, and it needs nothing from this ADR's
+seams beyond the extractor's attribute walk (`SymbolFlags`).
+
 ## What this replaced
 
 A `MemberShape { Unknown, Callable, Value }` tag on `MethodCall`, a

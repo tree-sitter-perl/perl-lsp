@@ -345,3 +345,20 @@ a large php corpus (WordPress core, laravel/framework); the fix, when the
 number warrants it, is to feed edges under the identity key only — the leaf
 registration needs the candidate table, never the edge indexes.
 
+## 8. An unresolved-method miss on an absent class costs 4.6 ms — MEASURED, not fixed
+
+`--check`'s unresolved-method lane pays ~4.6 ms per `$obj->method` site
+whose invocant class no index provides: a synthetic 1,200-helper Mojolicious
+file (every helper calling `$c->render` against a `Mojolicious::Controller`
+that is not installed) spent 35 s on 7,202 such misses, against under 1 s
+for everything else in the same build (measured 2026-09-15, release build,
+fresh `XDG_CACHE_HOME`). A miss on a class nothing declares should be the
+cheap answer — the cost is the per-site ancestor walk and candidate probe
+running to exhaustion with no negative memo across sites of one file, so
+the second miss on the same absent class pays what the first did. The
+shape to fix it is a per-sweep negative memo keyed on the class (the
+`RetrievalMemoGuard` the heatmap already opens for its working set), not a
+cheaper walk. Recorded for the tightening round; the population affected is
+any file whose framework base class is outside the index (a vendored app
+with its dependencies uninstalled).
+
