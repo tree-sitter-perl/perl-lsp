@@ -215,6 +215,16 @@ pub struct SkeletonAnalysis {
     /// Parameter-list spans (`@param.region`). The use-after-move check reads
     /// these to tell a moved parameter from a moved local (`use_after_move_reads`).
     pub param_regions: Vec<crate::model::file_analysis::Span>,
+    /// Rail-suffixed handler defs / dispatch refs (`@def.handler.named.<rail>`,
+    /// `@ref.dispatch.named.<rail>`): the token span → the rail name. Read
+    /// at mint time to give the Handler / DispatchCall a `HandlerOwner::Rail`.
+    pub rails: Vec<(crate::model::file_analysis::Span, String)>,
+    /// Class-keyed rails (`@def.handler.class.<rail>` / `.by.<rail>`,
+    /// `@ref.dispatch.class.<rail>`): token span → rail name. The owner is
+    /// the same `HandlerOwner::Rail`; that the rail's names are classes is
+    /// the rail document's declaration, carried as
+    /// `PackFacts::class_named_rails` (`HandlerOwner::names_are`).
+    pub class_rails: Vec<(crate::model::file_analysis::Span, String)>,
     /// Array-key DEF candidates (`@def.handler.key` on a string key, its
     /// element on `@key.elem`): promoted to rail names by the driver when
     /// the file's path rail says so (`config/app.php` → `app.<key>`).
@@ -468,6 +478,29 @@ impl SkeletonAnalysis {
     /// nothing but capture events. The existence proof that the engine
     /// is language-agnostic above this seam.
     pub fn into_file_analysis(mut self) -> crate::model::file_analysis::FileAnalysis {
+        let rails = std::mem::take(&mut self.rails);
+        let class_rails = std::mem::take(&mut self.class_rails);
+        let rail_name_seps = std::mem::take(&mut self.rail_name_seps);
+        // Every rail is named: the extractor mints a handler def / dispatch
+        // ref only from a rail-suffixed capture, so a token with no rail
+        // entry here is an extractor invariant broken, not a flat default.
+        let rail_owner = |span: Span| -> crate::model::file_analysis::HandlerOwner {
+            class_rails
+                .iter()
+                .chain(rails.iter())
+                .find(|(s, _)| *s == span)
+                .map(|(_, rail)| crate::model::file_analysis::HandlerOwner::Rail(rail.clone()))
+                .unwrap_or_else(|| {
+                    debug_assert!(false, "a handler token at {span:?} names no rail");
+                    crate::model::file_analysis::HandlerOwner::Rail(String::new())
+                })
+        };
+        let mut class_named_rails: Vec<String> = Vec::new();
+        for (_, rail) in &class_rails {
+            if !class_named_rails.contains(rail) {
+                class_named_rails.push(rail.clone());
+            }
+        }
         use crate::model::file_analysis::{
             FileAnalysis, FileAnalysisParts, SymKind, Symbol, SymbolDetail, SymbolId,
         };
@@ -594,6 +627,9 @@ impl SkeletonAnalysis {
                     // a named enum value — distinct from both Variable and
                     // Field.
                     "enumerator" => SymKind::Enumerator,
+                    // a string-named hook registration (`@def.handler.named`):
+                    // the model's Handler — same-named registrations stack.
+                    "handler" => SymKind::Handler,
                     // "unionfield" (an inline union member-field container)
                     // stays Variable — its "union" attribute drives the
                     // outline-nesting branch keyed on SymKind::Variable below.
@@ -603,17 +639,29 @@ impl SkeletonAnalysis {
                 selection_span: Span { start: s.name_start, end: s.name_end },
                 scope: s.scope,
                 package: s.package.clone(),
-                detail: SymbolDetail::None,
+                detail: if s.kind == "handler" {
+                    // A flat namespace (a rail): the string alone is the
+                    // identity, no receiver.
+                    SymbolDetail::Handler {
+                        owner: rail_owner(Span { start: s.name_start, end: s.name_end }),
+                        dispatchers: Vec::new(),
+                        params: Vec::new(),
+                    }
+                } else {
+                    SymbolDetail::None
+                },
                 namespace: crate::model::file_analysis::Namespace::Language,
                 presentation: crate::model::file_analysis::Presentation {
                     // An include-guard `#define` is compilation plumbing,
                     // not a program entity — folded from listing views but
                     // still resolvable (rule #7). The listing verdict is
                     // stamped here so warm stub rebuilds mint it identically.
+                    // A class-rail handler sits on another symbol's token (a
+                    // listener's `handle`); the outline shows that one.
                     hide_in_outline: symbol_flags_of(&s.kind, &s.attributes)
-                        .contains(SymbolFlags::INCLUDE_GUARD),
-                    deprecation: None,
-                    doc: None,
+                        .intersects(SymbolFlags::INCLUDE_GUARD | SymbolFlags::CLASS_RAIL),
+                    doc: s.doc.clone(),
+                    deprecation: s.deprecation.clone(),
                     display: None,
                     label: None,
                 },
@@ -1019,6 +1067,7 @@ impl SkeletonAnalysis {
                 use crate::model::file_analysis::{RefBinding, RefKind};
                 let mut span = Span { start: r.start, end: r.end };
                 let mut binding = None;
+                let mut name = r.name.clone();
                 let kind = match r.kind.as_str() {
                     "call" => RefKind::FunctionCall,
                     // Qualified call (`fmt::format_to(...)`): Perl parity —
@@ -1065,6 +1114,33 @@ impl SkeletonAnalysis {
                             }
                         }
                     }
+                    // A hook-firing string (`do_action('init')` arg 1): the
+                    // model's DispatchCall on its rail (see the "handler"
+                    // symbol arm) — refs_to pairs it with the stacked Handler
+                    // registrations by name+owner equality.
+                    "dispatch" => {
+                        let owner = rail_owner(Span { start: r.start, end: r.end });
+                        // A rail with a parameter separator: the use names
+                        // the head (`throttle:60,1` → `throttle`), and the
+                        // span ends with it — a string never spans rows.
+                        if let crate::model::file_analysis::HandlerOwner::Rail(rail) = &owner {
+                            if let Some((_, sep)) = rail_name_seps.iter().find(|(rl, _)| rl == rail) {
+                                if let Some(cut) = name.find(sep.as_str()) {
+                                    if cut > 0 {
+                                        span.end = tree_sitter::Point {
+                                            row: span.start.row,
+                                            column: span.start.column + cut,
+                                        };
+                                        name.truncate(cut);
+                                    }
+                                }
+                            }
+                        }
+                        binding = Some(RefBinding::Handler { owner, sym: None });
+                        RefKind::DispatchCall {
+                            dispatcher: r.via.clone().unwrap_or_default(),
+                        }
+                    }
                     // A type-position name (`Widget w;`, `struct op* o`, a
                     // base-class clause): the same PackageRef a Perl package
                     // use carries, so type gd/gr ride the Package machinery.
@@ -1085,8 +1161,12 @@ impl SkeletonAnalysis {
                     kind,
                     span,
                     scope: r.scope,
-                    target_name: r.name.clone(),
-                    access: crate::model::file_analysis::AccessKind::Read,
+                    target_name: name,
+                    access: if member_write_spans.contains(&(span.start.row, span.start.column, span.end.row, span.end.column)) {
+                        crate::model::file_analysis::AccessKind::Write
+                    } else {
+                        crate::model::file_analysis::AccessKind::Read
+                    },
                     binding,
                     folded_from: None,
                     arg_count: r.arg_count,
@@ -1266,6 +1346,7 @@ impl SkeletonAnalysis {
             moved_from: std::mem::take(&mut self.moved_from),
             control_regions: std::mem::take(&mut self.control_regions),
             param_regions: std::mem::take(&mut self.param_regions),
+            class_named_rails,
             ..Default::default()
         };
         let mut fa = FileAnalysis::new(FileAnalysisParts {

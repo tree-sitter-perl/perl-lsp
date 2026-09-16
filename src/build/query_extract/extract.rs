@@ -297,6 +297,12 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     // span; joined to `@ref.member` so op-DX rides the minted ref.
     let mut member_op_raw: HashMap<usize, (crate::model::file_analysis::MemberOp, crate::model::file_analysis::Span)> =
         HashMap::new();
+    // `@handler.name` — the token whose TEXT names a `@def.handler.by.<rail>`
+    // handler in the same match (a listener's `handle(X $e)` is a handler
+    // named `X` sitting on the method's name token).
+    let mut handler_name_by_match: HashMap<usize, String> = HashMap::new();
+    // `@key.elem` — the array element a `@def.handler.key` string heads.
+    let mut key_elem_by_match: HashMap<usize, Span> = HashMap::new();
     for e in &events {
         if let Some(prefix) = e.cap.strip_suffix(".name") {
             names_by_match
@@ -313,6 +319,12 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
         }
         if e.cap == "sym.attr" {
             attrs_by_match.entry(e.match_id).or_default().push(e.text.clone());
+        }
+        if e.cap == "handler.name" {
+            handler_name_by_match.insert(e.match_id, e.text.clone());
+        }
+        if e.cap == "key.elem" {
+            key_elem_by_match.insert(e.match_id, Span { start: e.start, end: e.end });
         }
     }
     // `@ns.inline` — an inline namespace's NAME token, fired by a name-only
@@ -864,7 +876,65 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                         .push((child.clone(), (pack.shape_name)("parent", &e.text)));
                 }
             }
-            cap if cap.starts_with("def.") && !cap.ends_with(".name") => {
+            // Hook-NAME identity (the Handler rail): a registration string
+            // (`add_action('init', …)` arg 1) DECLARES the hook — a Handler
+            // symbol whose name and span are the string content, stacking
+            // like every same-named Handler. A firing string
+            // (`do_action('init')`) mints the DispatchCall ref that matches
+            // it. Both are Global-owned: the program shares one flat hook
+            // namespace, no receiver.
+            c if c == "def.handler.named"
+                || c.starts_with("def.handler.named.")
+                || c.starts_with("def.handler.class.")
+                || c.starts_with("def.handler.by.") =>
+            {
+                let span = Span { start: e.start, end: e.end };
+                let mut attributes = Vec::new();
+                let mut name = e.text.clone();
+                if let Some(rail) = c.strip_prefix("def.handler.named.") {
+                    out.rails.push((span, rail.to_string()));
+                } else if let Some(rail) = c.strip_prefix("def.handler.class.") {
+                    out.class_rails.push((span, rail.to_string()));
+                    attributes.push("class_rail".to_string());
+                } else if let Some(rail) = c.strip_prefix("def.handler.by.") {
+                    // named by another token of the match; no name → no handler
+                    let Some(n) = handler_name_by_match.get(&e.match_id) else { continue };
+                    name = n.clone();
+                    out.class_rails.push((span, rail.to_string()));
+                    attributes.push("class_rail".to_string());
+                }
+                out.symbols.push(SkelSymbol {
+                    name,
+                    kind: "handler".to_string(),
+                    start: e.start,
+                    end: e.end,
+                    name_start: e.start,
+                    name_end: e.end,
+                    package: None,
+                    scope: cur_scope,
+                    return_type: None,
+                    receiver_instance_of: None,
+                    receiver_return: false,
+                    deref_stack: Vec::new(),
+                    attributes,
+                    arity: None,
+                    qualifier_owned: false,
+                    doc: None,
+                    deprecation: None,
+                });
+            }
+            "handler.name" => {}
+            "key.elem" => {}
+            "def.handler.key" => {
+                if let Some(elem) = key_elem_by_match.get(&e.match_id) {
+                    out.key_defs.push(crate::build::query_extract::KeyDef {
+                        key: e.text.clone(),
+                        key_span: Span { start: e.start, end: e.end },
+                        elem_span: *elem,
+                    });
+                }
+            }
+            cap if cap.starts_with("def.") && !cap.ends_with(".name") && !cap.ends_with(".anchor") => {
                 let kind = cap.strip_prefix("def.").unwrap().to_string();
                 let (name, name_start, name_end, defaulted) = names_by_match
                     .get(&(e.match_id, e.cap.clone()))
@@ -1260,10 +1330,25 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     // a trailing-return function matches both its leading-`auto` pattern
     // and the trailing sibling (keep the rettype-bearing copy) ----
     {
-        let mut best: HashMap<(usize, usize), usize> = HashMap::new();
+        // Keyed per name site AND per kind family: a framework overlay
+        // legitimately declares a PROPERTY at a method's own name token
+        // (Eloquent relations — `pages()` the method, `->pages` the
+        // accessor) or a HANDLER there (a listener's `handle(X $e)` is the
+        // event rail's handler named X), and those pairs must survive while
+        // the same-kind duplicates (var vs sub, rettype twins) still collapse.
+        // Handlers key by NAME too: one token can carry several rails'
+        // handlers (a listener's `handle(X $e)` is X's handler AND its own
+        // class's job handler).
+        let family = |kind: &str| match kind {
+            "field" => 1u8,
+            "handler" => 2u8,
+            _ => 0u8,
+        };
+        let mut best: HashMap<(usize, usize, u8, String), usize> = HashMap::new();
         let mut keep = vec![true; out.symbols.len()];
         for (i, sym) in out.symbols.iter().enumerate() {
-            let key = (sym.name_start.row, sym.name_start.column);
+            let tag = if sym.kind == "handler" { sym.name.clone() } else { String::new() };
+            let key = (sym.name_start.row, sym.name_start.column, family(&sym.kind), tag);
             match best.get(&key) {
                 None => {
                     best.insert(key, i);
