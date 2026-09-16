@@ -703,6 +703,10 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                     return_type: rettype_by_match
                         .get(&e.match_id)
                         .and_then(|t| (pack.annot_type)(t)),
+                    receiver_instance_of: None,
+                    receiver_return: rettype_by_match
+                        .get(&e.match_id)
+                        .is_some_and(|t| (pack.rettype_receiver)(t)),
                     deref_stack: nested_stacks.get(&e.match_id).cloned().unwrap_or_default(),
                     attributes: {
                         let mut a =
@@ -717,6 +721,8 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                     // Filled by span association in `into_file_analysis` — the
                     // `@arity.sig` match fires separately from this def name.
                     arity: None,
+                    doc: None,
+                    deprecation: None,
                     qualifier_owned: qualifier_by_match.contains_key(&e.match_id),
                 });
             }
@@ -1112,10 +1118,14 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                             package: None,
                             scope: *scope,
                             return_type: None,
+                            receiver_return: false,
+            receiver_instance_of: None,
                             deref_stack: Vec::new(),
                             attributes: Vec::new(),
                             arity: None,
                             qualifier_owned: false,
+                            doc: None,
+                            deprecation: None,
                         });
                     }
                 }
