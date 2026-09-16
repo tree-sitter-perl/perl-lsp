@@ -241,6 +241,7 @@ pub fn resolve_symbol_scoped(
                     module_index,
                     scope,
                 );
+                t.member_kind = Some(MemberKind::of_sym(sym.kind));
                 t.def_paths = pack_class_def_paths(&t, analysis, module_index);
                 t.bare_constant = analysis.class_content_is_bare_constant(sym);
                 return Some(ResolvedTarget::Target(t));
@@ -342,6 +343,7 @@ pub fn resolve_symbol_scoped(
                         module_index,
                         scope,
                     );
+                    t.member_kind = r.resolved_symbol().map(|id| MemberKind::of_sym(analysis.symbol(id).kind));
                     t.def_paths = pack_class_def_paths(&t, analysis, module_index);
                     t.bare_constant = bare;
                     return Some(ResolvedTarget::Target(t));
@@ -384,6 +386,18 @@ pub fn resolve_symbol_scoped(
             else {
                 return None;
             };
+            // A member cursor's ref kind (a value read or a call) names the
+            // member family the target belongs to; a sub DECLARATION cursor
+            // names a callable.
+            if matches!(t.kind, TargetKind::Method { .. }) {
+                t.member_kind = match analysis.ref_at(point) {
+                    Some(r) => MemberKind::of_ref(&r.kind),
+                    None => analysis
+                        .symbol_at(point)
+                        .filter(|s| matches!(s.kind, SymKind::Sub | SymKind::Method))
+                        .map(|_| MemberKind::Callable),
+                };
+            }
             // A member-ACCESS cursor (`c->fd`) reaches here as a generic
             // Method kind; when the member is pack class content the target
             // is the same one its DEF site mints, so it carries the same
