@@ -1702,6 +1702,49 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                             ));
                         }
                     }
+                    // A construction site (`new Foo(...)`) is two facts on one
+                    // token: the token names the CLASS (a `PackageRef`, so the
+                    // class's references and rename own it), and the site calls
+                    // the class's constructor (a member call of the pack's
+                    // constructor name on that class, so the constructor's
+                    // references and goto-def see it). Neither consumer has to
+                    // ask whether a call that spells a class name constructs.
+                    if e.cap == "ref.call" && ctor_matches.contains(&e.match_id) {
+                        if let Some(ctor) = pack.constructor_names.first() {
+                            let span = Span { start: e.start, end: e.end };
+                            let class = (pack.shape_name)("ref.type", &e.text);
+                            out.refs.push(SkelRef {
+                                via: None,
+                                kind: "type".to_string(),
+                                name: class.clone(),
+                                start: e.start,
+                                end: e.end,
+                                scope: cur_scope,
+                                invocant: None,
+                                member_op: None,
+                                arg_count: None,
+                                value_read: false,
+                                named_by_string: false,
+                            });
+                            out.refs.push(SkelRef {
+                                via: None,
+                                kind: "member".to_string(),
+                                name: ctor.to_string(),
+                                start: e.start,
+                                end: e.end,
+                                scope: cur_scope,
+                                invocant: Some((span, class)),
+                                member_op: None,
+                                arg_count: arg_counts_by_match
+                                    .get(&e.match_id)
+                                    .or_else(|| arg_counts_by_start.get(&(e.end.row, e.end.column)))
+                                    .copied(),
+                                value_read: false,
+                                named_by_string: false,
+                            });
+                            continue;
+                        }
+                    }
                     // A SUPER receiver (php `parent::`) spells the model's
                     // SUPER method token: dispatch starts above the writing
                     // class, and gd/references/rename ride the existing
