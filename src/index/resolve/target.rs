@@ -69,6 +69,23 @@ pub struct TargetRef {
     /// (`class_content_is_bare_constant`); the matcher may also re-derive it
     /// per scanned file when the index is in hand.
     pub bare_constant: bool,
+    /// `Some(class)` when this Method target IS the class's constructor by
+    /// the pack's convention (php `__construct`). Read by the rename policy
+    /// alone — the name belongs to the language, so nothing renames it. Its
+    /// references need no marker: a construction site mints the constructor
+    /// call itself, which the ordinary member arm matches. Set in the
+    /// identity lane from `PackFacts::constructor_names`; `None` everywhere
+    /// else.
+    pub ctor_of: Option<String>,
+    /// Which member family this target names, minted from the fact that
+    /// produced it: a `FieldAccess` cursor or a stored-member declaration is
+    /// `Value`, a `MethodCall` cursor or a sub declaration `Callable`, and a
+    /// target that is not a member (or one built where no cursor told) is
+    /// `None`. `docs/adr/member-kinds.md`: the value side is strict — a
+    /// value target is declared by stored members and referenced by value
+    /// reads — while a callable keeps the call walk's value-kind fallback
+    /// for declarations and never claims a value read.
+    pub member_kind: Option<MemberKind>,
     /// Pack-language visibility identity: the canonical paths of the files
     /// that define this target AS THE ORIGIN FILE SEES IT (the origin itself,
     /// candidates in its include closure, and candidates whose closure reaches
@@ -97,6 +114,17 @@ impl TargetRef {
         scope: OverrideScope,
     ) -> Self {
         let method_classes = method_classes_for(origin, &class, &name, module_index, scope);
+        // The pack's constructor convention (php `__construct`) is a fact of
+        // the METHOD TARGET itself: every builder of a Method target — the
+        // rename-kind mapping, the identity lanes, implementations — gets
+        // the ctor marker from this one speller, so the rename policy reads
+        // it wherever the cursor landed.
+        let ctor_of = origin
+            .pack
+            .constructor_names
+            .iter()
+            .any(|c| c == &name)
+            .then(|| class.clone());
         TargetRef {
             name,
             names: origin.names().clone(),
@@ -105,6 +133,8 @@ impl TargetRef {
             scope,
             def_paths: Vec::new(),
             bare_constant: false,
+            ctor_of,
+            member_kind: None,
         }
     }
 
@@ -132,6 +162,8 @@ impl TargetRef {
             scope: OverrideScope::Hierarchy,
             def_paths: Vec::new(),
             bare_constant: false,
+            ctor_of: None,
+            member_kind: None,
         }
     }
 
@@ -149,6 +181,8 @@ impl TargetRef {
             scope: OverrideScope::Dispatch,
             def_paths: Vec::new(),
             bare_constant: false,
+            ctor_of: None,
+            member_kind: None,
         }
     }
 
@@ -168,6 +202,8 @@ impl TargetRef {
             scope: OverrideScope::default(),
             def_paths: Vec::new(),
             bare_constant: false,
+            ctor_of: None,
+            member_kind: None,
         }
     }
 
@@ -223,6 +259,15 @@ impl TargetRef {
                 // routing fact. Macro-named cursors never reach this arm
                 // (the canonical FileScopeValue lanes claim them first,
                 // WITH def_paths).
+                // The pack's constructor convention is a fact of the target
+                // whichever cursor minted it: a decl-side cursor on
+                // `__construct` arrives here as a Sub, and the rename policy
+                // must refuse it exactly as it does the call-side Method
+                // target.
+                let ctor_of = package
+                    .as_ref()
+                    .filter(|_| origin.pack.constructor_names.iter().any(|c| c == &name))
+                    .cloned();
                 TargetRef {
                     name,
                     names: origin.names().clone(),
@@ -231,6 +276,8 @@ impl TargetRef {
                     scope,
                     def_paths: Vec::new(),
                     bare_constant: false,
+                    ctor_of,
+                    member_kind: Some(MemberKind::Callable),
                 }
             }
             RenameKind::Method { name, class } => {
