@@ -198,7 +198,7 @@ pub(super) enum WalkScope<'a> {
 /// `refs_to` narrowed to ONE file — the origin scope of the same driver,
 /// so the highlights image is the in-file slice of `references()` without
 /// paying the workspace walk per cursor move.
-pub(super) fn refs_to_in_file(
+pub(crate) fn refs_to_in_file(
     files: &FileStore,
     module_index: Option<&dyn CrossFileLookup>,
     target: &TargetRef,
@@ -934,7 +934,6 @@ pub fn implementations_of(
         },
     );
     implementers.retain(|p| !contract_line.contains(p));
-
     let mut out: Vec<RefLocation> = Vec::new();
     for pkg in &implementers {
         // class → home module(s): exact cache key for the common

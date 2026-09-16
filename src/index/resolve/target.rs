@@ -300,7 +300,12 @@ impl TargetRef {
             RenameKind::Method { name, class } => {
                 TargetRef::method(name, class, origin, module_index, scope)
             }
-            RenameKind::Package(name) => TargetRef::new(name, TargetKind::Package, origin),
+            RenameKind::Package(name) => {
+                // A class-name cursor names an identity; the matcher
+                // resolves every scanned file's spelling to one too, so
+                // three same-leaf `Collection`s never share a target.
+                TargetRef::new(name, TargetKind::Package, origin)
+            }
             RenameKind::Handler { owner, name } => {
                 let names = owner.names_are(&origin.pack);
                 TargetRef::new(name.clone(), TargetKind::Handler { owner, name, names }, origin)
