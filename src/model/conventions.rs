@@ -170,19 +170,18 @@ pub fn is_bareword_class_name(text: &str) -> bool {
     })
 }
 
-/// Corinna `field` attribute spellings, asked as predicates so no consumer
-/// re-spells them: `:param` (a constructor key), `:reader`, and the writer
-/// family (`:writer` / `:mutator` / `:accessor`).
-pub fn field_attr_is_param(attr: &str) -> bool {
-    attr == "param"
-}
-
-pub fn field_attr_is_reader(attr: &str) -> bool {
-    attr == "reader"
-}
-
-pub fn field_attr_is_writer(attr: &str) -> bool {
-    matches!(attr, "writer" | "mutator" | "accessor")
+/// Perl's attribute vocabulary, spelling → flag — the one table for a
+/// Corinna `field` attribute (`:param`, `:reader`, the writer family
+/// `:writer` / `:mutator` / `:accessor`), the way a pack declares its own.
+/// A spelling with no declaration fact (`:ro` style hints) is display-only.
+pub fn field_attribute_flag(attr: &str) -> Option<crate::model::file_analysis::SymbolFlags> {
+    use crate::model::file_analysis::SymbolFlags;
+    Some(match attr {
+        "param" => SymbolFlags::PARAM,
+        "reader" => SymbolFlags::READER,
+        "writer" | "mutator" | "accessor" => SymbolFlags::WRITER,
+        _ => return None,
+    })
 }
 
 /// `__PACKAGE__` — the compile-time token for the enclosing package.

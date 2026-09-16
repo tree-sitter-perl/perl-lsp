@@ -643,7 +643,7 @@ impl FileAnalysis {
     }
 
     fn field_group_of(&self, sym: &Symbol) -> Option<FieldGroup> {
-        let SymbolDetail::Field { ref attributes, .. } = sym.detail else {
+        let SymbolDetail::Field { .. } = sym.detail else {
             return None;
         };
         if !sym.name.starts_with('$') {
@@ -654,8 +654,8 @@ impl FileAnalysis {
             decl_span: None,
             class: sym.package.clone()?,
             bare: sym.name[1..].to_string(),
-            has_param: attributes.iter().any(|a| crate::model::conventions::field_attr_is_param(a)),
-            has_reader: attributes.iter().any(|a| crate::model::conventions::field_attr_is_reader(a)),
+            has_param: sym.flags.contains(SymbolFlags::PARAM),
+            has_reader: sym.flags.contains(SymbolFlags::READER),
         })
     }
 

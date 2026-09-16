@@ -328,7 +328,7 @@ impl<'a> CandidateSet<'a> {
                     continue;
                 }
                 // a default-named symbol is structure, not an addressable name
-                if s.flags.has(crate::model::file_analysis::SymbolFlags::ANONYMOUS) {
+                if s.flags.contains(crate::model::file_analysis::SymbolFlags::ANONYMOUS) {
                     continue;
                 }
                 if !seen.insert(s.name.clone()) {

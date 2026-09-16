@@ -389,18 +389,18 @@ impl FileAnalysis {
                 && !self.pack.receiver_names.contains(&sym.name)
                 // an anonymous container (`(union)`) is structure, not an
                 // addressable member
-                && !sym.flags.has(SymbolFlags::ANONYMOUS)
+                && !sym.flags.contains(SymbolFlags::ANONYMOUS)
                 // access-specifier gate: a non-public member
                 // completes only from inside its OWN class's lexical body —
                 // two-state (friend/protected-via-inheritance not modeled).
                 && (requesting_class == Some(cls)
-                    || !sym.flags.has(SymbolFlags::NON_PUBLIC))
+                    || !sym.flags.contains(SymbolFlags::NON_PUBLIC))
                 && seen.insert(sym.name.clone())
             {
                 candidates.push(CompletionCandidate {
                     label: sym.name.clone(),
                     kind: sym.kind,
-                    is_static: sym.flags.has(SymbolFlags::STATIC),
+                    is_static: sym.flags.contains(SymbolFlags::STATIC),
                     detail: None,
                     insert_text: None,
                     sort_priority: PRIORITY_LOCAL,
@@ -417,13 +417,13 @@ impl FileAnalysis {
         for sym in &self.symbols {
             if matches!(sym.kind, SymKind::Enumerator)
                 && self.symbol_in_class(sym.id, cls)
-                && (requesting_class == Some(cls) || !sym.flags.has(SymbolFlags::NON_PUBLIC))
+                && (requesting_class == Some(cls) || !sym.flags.contains(SymbolFlags::NON_PUBLIC))
                 && seen.insert(sym.name.clone())
             {
                 candidates.push(CompletionCandidate {
                     label: sym.name.clone(),
                     kind: sym.kind,
-                    is_static: sym.flags.has(SymbolFlags::STATIC),
+                    is_static: sym.flags.contains(SymbolFlags::STATIC),
                     detail: None,
                     insert_text: None,
                     sort_priority: PRIORITY_LOCAL,
@@ -495,7 +495,7 @@ impl FileAnalysis {
         };
         self.symbols.iter().find(|c| {
             c.id != sym.id
-                && c.flags.has(SymbolFlags::UNION)
+                && c.flags.contains(SymbolFlags::UNION)
                 && Some(c.scope) == sc.parent
                 && contains(&c.span, &sc.span)
         })

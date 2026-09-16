@@ -319,7 +319,7 @@ impl FileAnalysis {
                     // `(union)`) nests its members: the body scope inside its
                     // span holds them. Attribute-gated — plain variables
                     // never own nested outline structure.
-                    if sym.flags.has(SymbolFlags::UNION) {
+                    if sym.flags.contains(SymbolFlags::UNION) {
                         let children = self
                             .find_body_scope(sym)
                             .map(|s| self.outline_children_of(s))
@@ -424,7 +424,7 @@ impl FileAnalysis {
         // the exact arm) are untouched. Union-attributed Variables (inline
         // field-union containers) own a body the same way.
         if matches!(sym.kind, SymKind::Package | SymKind::Class)
-            || sym.flags.has(SymbolFlags::UNION)
+            || sym.flags.contains(SymbolFlags::UNION)
         {
             let start = (sym.span.start.row, sym.span.start.column);
             let end = (sym.span.end.row, sym.span.end.column);
@@ -458,10 +458,8 @@ impl FileAnalysis {
                             let is_param = matches!(decl_kind, DeclKind::Param | DeclKind::ForVar);
                             (*sigil, readonly, is_param)
                         }
-                        SymbolDetail::Field { sigil, attributes } => {
-                            let readonly = !attributes
-                                .iter()
-                                .any(|a| crate::model::conventions::field_attr_is_writer(a));
+                        SymbolDetail::Field { sigil, .. } => {
+                            let readonly = !sym.flags.contains(SymbolFlags::WRITER);
                             (*sigil, readonly, true)
                         }
                         _ => continue,

@@ -1425,7 +1425,7 @@ fn language_spellings_have_one_home() {
         ("model/conventions.rs", 6, "Perl's home: sigil sites, plus the registry test registering a pack separator"),
         ("model/file_analysis/class_queries.rs", 1, "Perl sigil trim on a Corinna field (legacy)"),
         ("model/file_analysis/completion.rs", 10, "Perl sigils re-derived outside conventions.rs — legacy, shrink-only"),
-        ("model/file_analysis/core_types.rs", 1, "Perl sigil match on a qualified variable (legacy)"),
+        ("model/file_analysis/core_types.rs", 4, "the canonical attribute vocabulary (`TryFrom<&str> for SymbolFlags`) — the one table every language maps its spellings onto — plus a Perl sigil match on a qualified variable (legacy)"),
         ("model/file_analysis/cursor_queries.rs", 4, "Perl sigil sites (legacy)"),
         ("model/file_analysis/enrichment.rs", 1, "Perl sigil on a hash-key access (legacy)"),
         ("model/file_analysis/invocants.rs", 3, "Perl sigil sites (legacy)"),

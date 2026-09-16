@@ -203,48 +203,103 @@ impl Span {
 
 // ---- Symbol ----
 
-/// Declaration facts a symbol carries, as a closed flag set. A pack maps
-/// its attribute strings onto these at skeleton conversion; consumers ask
-/// `has(..)` and never compare an attribute string.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-pub struct SymbolFlags(u32);
-
-impl SymbolFlags {
-    pub const NONE: SymbolFlags = SymbolFlags(0);
-    /// A class-level member (`static`), reached through the class, not an instance.
-    pub const STATIC: SymbolFlags = SymbolFlags(1 << 0);
-    /// A `Class` symbol that is an interface: its members are contracts, and a
-    /// concrete definer outranks it on the MRO.
-    pub const INTERFACE: SymbolFlags = SymbolFlags(1 << 1);
-    /// Declared abstract.
-    pub const ABSTRACT: SymbolFlags = SymbolFlags(1 << 2);
-    /// A default-named container (`(union)`): structure, not an addressable name.
-    pub const ANONYMOUS: SymbolFlags = SymbolFlags(1 << 3);
-    /// Not public: completes only from inside its own class's body.
-    pub const NON_PUBLIC: SymbolFlags = SymbolFlags(1 << 4);
-    /// A union container: its body nests its members in the outline.
-    pub const UNION: SymbolFlags = SymbolFlags(1 << 5);
-    /// An `extern` declaration: a definition elsewhere is the landing.
-    pub const EXTERN: SymbolFlags = SymbolFlags(1 << 6);
-    /// An inline namespace: its members are visible from the parent.
-    pub const INLINE: SymbolFlags = SymbolFlags(1 << 7);
-    /// A re-export (`using Base::m;`): API surface, not a definition.
-    pub const REEXPORT: SymbolFlags = SymbolFlags(1 << 8);
-    /// An include-guard `#define`: compilation plumbing, folded from listings.
-    pub const INCLUDE_GUARD: SymbolFlags = SymbolFlags(1 << 9);
-    /// A function-like `#define`: a real callable that hover labels a macro.
-    pub const MACRO: SymbolFlags = SymbolFlags(1 << 10);
-    /// Marked deprecated (the notice text rides `Presentation::deprecation`).
-    pub const DEPRECATED: SymbolFlags = SymbolFlags(1 << 11);
-
-    pub const fn has(self, f: SymbolFlags) -> bool {
-        self.0 & f.0 != 0
+bitflags::bitflags! {
+    /// Declaration facts a symbol carries, as a closed flag set. Every
+    /// language maps its own attribute spellings onto these where it
+    /// mints the symbol — a pack at skeleton conversion through
+    /// `TryFrom<&str>` over the canonical names, Perl through
+    /// `conventions::field_attribute_flag` — and consumers ask
+    /// `contains(..)`, never compare an attribute string. Closed on
+    /// purpose: every flag so far has a language-generic meaning, and the
+    /// set rides the cache blob (`docs/adr/symbol-flags.md`).
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+    pub struct SymbolFlags: u32 {
+        /// A class-level member (`static`), reached through the class, not an instance.
+        const STATIC = 1 << 0;
+        /// A `Class` symbol that is an interface: its members are contracts, and a
+        /// concrete definer outranks it on the MRO.
+        const INTERFACE = 1 << 1;
+        /// Declared abstract.
+        const ABSTRACT = 1 << 2;
+        /// A default-named container (`(union)`): structure, not an addressable name.
+        const ANONYMOUS = 1 << 3;
+        /// Not public: completes only from inside its own class's body.
+        const NON_PUBLIC = 1 << 4;
+        /// A union container: its body nests its members in the outline.
+        const UNION = 1 << 5;
+        /// An `extern` declaration: a definition elsewhere is the landing.
+        const EXTERN = 1 << 6;
+        /// An inline namespace: its members are visible from the parent.
+        const INLINE = 1 << 7;
+        /// A re-export (`using Base::m;`): API surface, not a definition.
+        const REEXPORT = 1 << 8;
+        /// An include-guard `#define`: compilation plumbing, folded from listings.
+        const INCLUDE_GUARD = 1 << 9;
+        /// A function-like `#define`: a real callable that hover labels a macro.
+        const MACRO = 1 << 10;
+        /// Marked deprecated (the notice text rides `Presentation::deprecation`).
+        const DEPRECATED = 1 << 11;
+        /// A storage slot with a constructor key (Corinna `:param`, a promoted
+        /// constructor parameter): `Class->new(name => …)` binds it.
+        const PARAM = 1 << 12;
+        /// A storage slot with a generated reader (Corinna `:reader`, Moo
+        /// `is => 'ro'`).
+        const READER = 1 << 13;
+        /// A storage slot with a generated writer (Corinna `:writer` /
+        /// `:mutator` / `:accessor`, Moo `is => 'rw'`).
+        const WRITER = 1 << 14;
     }
-    pub const fn with(self, f: SymbolFlags) -> SymbolFlags {
-        SymbolFlags(self.0 | f.0)
+}
+
+/// The wire form is the bare bit set — the same `u32` the cache blob has
+/// always carried, so a flag added at the tail reads old blobs unchanged.
+impl Serialize for SymbolFlags {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        self.bits().serialize(s)
     }
-    pub fn insert(&mut self, f: SymbolFlags) {
-        self.0 |= f.0;
+}
+
+impl<'de> Deserialize<'de> for SymbolFlags {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        u32::deserialize(d).map(SymbolFlags::from_bits_retain)
+    }
+}
+
+/// An attribute spelling no flag answers to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnknownAttribute(pub String);
+
+impl std::fmt::Display for UnknownAttribute {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "unknown symbol attribute `{}`", self.0)
+    }
+}
+
+/// The canonical attribute vocabulary — the ONE table from a spelling to
+/// a flag. A pack's skeleton conversion and its overlay validation both
+/// go through it, so a spelling that mints nothing is an error at the
+/// producer rather than a silent skip.
+impl TryFrom<&str> for SymbolFlags {
+    type Error = UnknownAttribute;
+    fn try_from(name: &str) -> Result<Self, Self::Error> {
+        Ok(match name {
+            "static" => SymbolFlags::STATIC,
+            "interface" => SymbolFlags::INTERFACE,
+            "abstract" => SymbolFlags::ABSTRACT,
+            "anonymous" => SymbolFlags::ANONYMOUS,
+            "non_public" => SymbolFlags::NON_PUBLIC,
+            "union" => SymbolFlags::UNION,
+            "extern" => SymbolFlags::EXTERN,
+            "inline" => SymbolFlags::INLINE,
+            "reexport" => SymbolFlags::REEXPORT,
+            "include_guard" => SymbolFlags::INCLUDE_GUARD,
+            "macro" => SymbolFlags::MACRO,
+            "deprecated" => SymbolFlags::DEPRECATED,
+            "param" => SymbolFlags::PARAM,
+            "reader" => SymbolFlags::READER,
+            "writer" => SymbolFlags::WRITER,
+            other => return Err(UnknownAttribute(other.to_string())),
+        })
     }
 }
 
@@ -633,7 +688,7 @@ impl Symbol {
     /// the class's API surface (outline/completion) but not a definition —
     /// member resolution sees through it to the origin ancestor.
     pub fn is_reexport(&self) -> bool {
-        self.flags.has(SymbolFlags::REEXPORT)
+        self.flags.contains(SymbolFlags::REEXPORT)
     }
 
     /// Bare variable/field name without the sigil. Uses the sigil stored

@@ -124,7 +124,7 @@ impl<'a> CandidateSet<'a> {
             }
             SymKind::Variable => {
                 decl_fa.symbol_is_file_scope_value(sym)
-                    && sym.flags.has(crate::model::file_analysis::SymbolFlags::EXTERN)
+                    && sym.flags.contains(crate::model::file_analysis::SymbolFlags::EXTERN)
             }
             _ => false,
         };
@@ -156,7 +156,7 @@ impl<'a> CandidateSet<'a> {
                     _ => {
                         matches!(s.kind, SymKind::Variable)
                             && a.symbol_is_file_scope_value(s)
-                            && !s.flags.has(crate::model::file_analysis::SymbolFlags::EXTERN)
+                            && !s.flags.contains(crate::model::file_analysis::SymbolFlags::EXTERN)
                     }
                 }
         };

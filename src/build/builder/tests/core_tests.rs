@@ -1181,3 +1181,26 @@ fn anonymous_and_named_sub_bodies_share_their_sub_scope() {
         fa.scopes.iter().map(|s| &s.kind).collect::<Vec<_>>()
     );
 }
+
+/// Corinna `field` attributes reach the closed flag set through Perl's own
+/// spelling table (`conventions::field_attribute_flag`), the way a pack's
+/// reach it through `TryFrom<&str>`; the synthesis reads the flags, and a
+/// spelling with no declaration fact stays display text.
+#[test]
+fn corinna_field_attributes_become_symbol_flags() {
+    let fa = build_fa(
+        "use v5.38;\nclass Point {\n    field $x :param :reader;\n    field $y :accessor :Foo;\n    field $z;\n}\n",
+    );
+    let flags_of = |name: &str| {
+        fa.symbols()
+            .iter()
+            .find(|s| s.name == name && matches!(s.kind, SymKind::Field))
+            .unwrap_or_else(|| panic!("{name} declared"))
+            .flags
+    };
+    assert_eq!(flags_of("$x"), SymbolFlags::PARAM | SymbolFlags::READER);
+    assert_eq!(flags_of("$y"), SymbolFlags::WRITER, ":accessor is a writer; :Foo mints no flag");
+    assert_eq!(flags_of("$z"), SymbolFlags::empty());
+    assert!(SymbolFlags::try_from("nonsense").is_err(), "an unknown spelling is an error, never a silent skip");
+    assert_eq!(SymbolFlags::try_from("static").unwrap(), SymbolFlags::STATIC);
+}

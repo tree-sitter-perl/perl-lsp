@@ -1,6 +1,7 @@
 //! Declaration visitors: the `visit_node` dispatcher, ERROR recovery,
 //! packages/classes/subs, parameter extraction, variable decls and loops.
 
+use crate::model::file_analysis::SymbolFlags;
 use super::*;
 
 impl<'a> Builder<'a> {
@@ -1395,13 +1396,26 @@ impl<'a> Builder<'a> {
             } else {
                 SymbolDetail::Variable { sigil, decl_kind }
             };
-            self.add_symbol(
+            let sym_id = self.add_symbol(
                 name.clone(),
                 sym_kind,
                 node_to_span(node),
                 *var_span,
                 detail,
             );
+            // A field's declaration facts ride the closed flag set (rule
+            // #12): the attribute spellings become flags here, once, and
+            // stay on the symbol as display text.
+            if decl_kind == DeclKind::Field {
+                let attributes = self.collect_attributes(node);
+                let flags = attributes
+                    .iter()
+                    .filter_map(|a| crate::model::conventions::field_attribute_flag(a))
+                    .fold(SymbolFlags::empty(), |acc, f| acc | f);
+                let sym = &mut self.symbols[sym_id.0 as usize];
+                sym.flags = flags;
+                sym.attributes = attributes;
+            }
             self.add_ref(
                 RefKind::Variable,
                 *var_span,
@@ -1436,25 +1450,10 @@ impl<'a> Builder<'a> {
             // Synthesize accessor methods for `field $x :reader` / `:writer`
             if decl_kind == DeclKind::Field {
                 let bare_name = &name[1..]; // strip sigil
-                // Re-read attrs from the symbol we just stored (avoid re-collecting)
-                let has_reader;
-                let has_writer;
-                let has_param;
-                if let Some(last_sym) = self.symbols.last() {
-                    if let SymbolDetail::Field { ref attributes, .. } = last_sym.detail {
-                        has_reader = attributes.iter().any(|a| crate::model::conventions::field_attr_is_reader(a));
-                        has_writer = attributes.iter().any(|a| crate::model::conventions::field_attr_is_writer(a));
-                        has_param = attributes.iter().any(|a| crate::model::conventions::field_attr_is_param(a));
-                    } else {
-                        has_reader = false;
-                        has_writer = false;
-                        has_param = false;
-                    }
-                } else {
-                    has_reader = false;
-                    has_writer = false;
-                    has_param = false;
-                }
+                let flags = self.symbols[sym_id.0 as usize].flags;
+                let has_reader = flags.contains(SymbolFlags::READER);
+                let has_writer = flags.contains(SymbolFlags::WRITER);
+                let has_param = flags.contains(SymbolFlags::PARAM);
                 // Bare-name sub-span of the `$x` token: synthesized
                 // projections (ctor key, reader) select THIS, not the
                 // sigiled var span — a rename writing a bare replacement

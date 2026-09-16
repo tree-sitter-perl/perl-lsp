@@ -1083,8 +1083,8 @@ impl FileAnalysis {
         let mut candidates = Vec::new();
         for sym in &self.symbols {
             if matches!(sym.kind, SymKind::Field) {
-                if let SymbolDetail::Field { ref attributes, .. } = sym.detail {
-                    if attributes.iter().any(|a| crate::model::conventions::field_attr_is_param(a)) {
+                if let SymbolDetail::Field { .. } = sym.detail {
+                    if sym.flags.contains(SymbolFlags::PARAM) {
                         // Check this field belongs to the class
                         if self.symbol_in_class(sym.id, class_name) {
                             let key = sym.bare_name().to_string();

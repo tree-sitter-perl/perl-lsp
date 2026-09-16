@@ -516,7 +516,7 @@ impl SkeletonAnalysis {
                     // still resolvable (rule #7). The listing verdict is
                     // stamped here so warm stub rebuilds mint it identically.
                     hide_in_outline: symbol_flags_of(&s.kind, &s.attributes)
-                        .has(SymbolFlags::INCLUDE_GUARD),
+                        .contains(SymbolFlags::INCLUDE_GUARD),
                     deprecation: None,
                     doc: None,
                     display: None,
@@ -1155,30 +1155,19 @@ impl SkeletonAnalysis {
 /// spellings become model facts (rule #12: the model asks the flag, never
 /// the string).
 fn symbol_flags_of(kind: &str, attributes: &[String]) -> SymbolFlags {
-    let mut flags = SymbolFlags::NONE;
-    match kind {
-        "union" | "unionfield" => flags.insert(SymbolFlags::UNION),
-        "reexport" => flags.insert(SymbolFlags::REEXPORT),
-        "macro" => flags.insert(SymbolFlags::MACRO),
-        _ => {}
-    }
-    for a in attributes {
-        let f = match a.as_str() {
-            "static" => SymbolFlags::STATIC,
-            "interface" => SymbolFlags::INTERFACE,
-            "abstract" => SymbolFlags::ABSTRACT,
-            "anonymous" => SymbolFlags::ANONYMOUS,
-            "non_public" => SymbolFlags::NON_PUBLIC,
-            "union" => SymbolFlags::UNION,
-            "extern" => SymbolFlags::EXTERN,
-            "inline" => SymbolFlags::INLINE,
-            "reexport" => SymbolFlags::REEXPORT,
-            "include_guard" => SymbolFlags::INCLUDE_GUARD,
-            "macro" => SymbolFlags::MACRO,
-            "deprecated" => SymbolFlags::DEPRECATED,
-            _ => continue,
-        };
+    let mut flags = SymbolFlags::empty();
+    // A structural kind that IS a flag (`unionfield` is a union's member
+    // container); the canonical table answers the rest.
+    if let Ok(f) = SymbolFlags::try_from(if kind == "unionfield" { "union" } else { kind }) {
         flags.insert(f);
+    }
+    // A `@sym.attr` token is source text (cpp's `register`, a php `#[Attr]`
+    // name): a spelling the table does not know is display-only, never an
+    // error — the query-DECLARED spellings are validated at overlay compile.
+    for a in attributes {
+        if let Ok(f) = SymbolFlags::try_from(a.as_str()) {
+            flags.insert(f);
+        }
     }
     flags
 }
