@@ -998,7 +998,15 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                 // Shape the context like a def name (cpp canonicalizes a
                 // spec's template spelling) so members' `package` matches
                 // the container Symbol's identity exactly.
-                let text = (pack.shape_name)(&e.cap, &e.text);
+                // A name-less def's context is its synthesized identity,
+                // never the anchor token's text.
+                let raw = names_by_match
+                    .get(&(e.match_id, "def.class".to_string()))
+                    .filter(|_| pack.names.use_map_sep().is_some())
+                    .map(|(n, _, _)| n.clone())
+                    .or_else(|| defaulted_matches.get(&e.match_id).cloned())
+                    .unwrap_or_else(|| e.text.clone());
+                let text = (pack.shape_name)(&e.cap, &raw);
                 // If this match's `@scope` starts AFTER this context, the
                 // context belongs to that (not-yet-pushed) body — defer it
                 // so it registers at the body depth and pops with the block.
@@ -1025,8 +1033,22 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                     // Shaped like the child's def name (cpp canonicalizes a
                     // template-spelled base) so the edge joins the identity
                     // the target class was filed under.
-                    out.parents
-                        .push((child.clone(), (pack.shape_name)("parent", &e.text)));
+                    let shaped = (pack.shape_name)("parent", &e.text);
+                    // The parent pattern is its own match: its name entry
+                    // is the pre-scan leaf, so the child's identity joins
+                    // the namespace here exactly as the def handler did.
+                    let child = decl_ident(child, e.start);
+                    match pack.names.use_map_sep() {
+                        None => out.parents.push((child.clone(), shaped)),
+                        Some(_) => {
+                            // The written spelling — its own qualifier when
+                            // it has one, else the (possibly aliased) leaf —
+                            // resolves to the parent's identity.
+                            let written =
+                                parent_fq_by_match.get(&e.match_id).cloned().unwrap_or(shaped);
+                            out.parents.push((child.clone(), ident(&written, e.start)));
+                        }
+                    }
                 }
             }
             // Hook-NAME identity (the Handler rail): a registration string
@@ -1125,13 +1147,31 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                             .map(|n| (n, e.start, e.start, true))
                     })
                     .unwrap_or((e.text.clone(), e.start, e.end, false));
+                // A class declaration's identity is its FQN — the leaf
+                // joined to the namespace in force — so its members file
+                // under it and every spelling of it resolves to one key.
+                // The match's name entry carries it too: the `@context` and
+                // `@parent` handlers of the same match read ONE identity.
+                let name = if kind == "class" {
+                    let fqn = decl_ident(&name, e.start);
+                    if fqn != name {
+                        names_by_match
+                            .insert((e.match_id, e.cap.clone()), (fqn.clone(), name_start, name_end));
+                    }
+                    fqn
+                } else {
+                    name
+                };
                 def_name_spans.push((e.start_byte, e.end_byte));
                 // An out-of-line def's `Class::` qualifier names its owner
                 // (the LAST `::` segment, the unqualified class the engine
                 // keys by) — override the enclosing-namespace context.
                 let pkg = qualifier_by_match
                     .get(&e.match_id)
-                    .map(|q| q.rsplit("::").next().unwrap_or(q).to_string())
+                    .map(|q| match pack.names.sep() {
+                        Some(sep) => q.rsplit(sep).next().unwrap_or(q).to_string(),
+                        None => q.to_string(),
+                    })
                     .or_else(|| package.clone());
                 // A class's package is its NAMESPACE, whatever context it
                 // sits in (an anonymous class inside a method is still
@@ -1394,6 +1434,20 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                                     span: Span { start: *at, end: *at },
                                 });
                             }
+                        }
+                    }
+                    if let Some(q) = qualified_by_match.get(&e.match_id) {
+                        let leaf = (pack.shape_name)(&e.cap, &e.text);
+                        let raw = q.strip_suffix(leaf.as_str()).unwrap_or_default();
+                        let sep = pack.names.use_map_sep().unwrap_or_default();
+                        let mut prefix = raw.trim_end_matches(sep).to_string();
+                        // `\Throwable`: no segments, but ABSOLUTE — the
+                        // leading separator is the whole spelling
+                        if prefix.is_empty() && !sep.is_empty() && raw.starts_with(sep) {
+                            prefix = sep.to_string();
+                        }
+                        if !prefix.is_empty() {
+                            out.qualified_spellings.push((leaf, prefix));
                         }
                     }
                     // The chain-hop witness: the whole call's value is
