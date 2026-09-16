@@ -393,8 +393,15 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     // match joins it like a `.name` capture so the def, its `@context`
     // and its `@parent` edges all read ONE identity.
     let mut defaulted_matches: HashMap<usize, String> = HashMap::new();
+    // Spans a `variable_name` read pattern must NOT mint as reads: a
+    // static property's `$name` (`Foo::$bar` — a member, `@var.member`) and
+    // any declaration's own name token (a property `$chunks`, a parameter).
     let mut not_a_read: std::collections::HashSet<(usize, usize)> = std::collections::HashSet::new();
     let mut def_name_ends: std::collections::HashSet<usize> = std::collections::HashSet::new();
+    // `@hoist` — the same match's def belongs to the PARENT of the scope
+    // the capture sits in (php's by-reference closure capture creates
+    // the variable in the enclosing scope).
+    let mut hoisted: std::collections::HashSet<usize> = std::collections::HashSet::new();
     // `@member.write` — a member on the LEFT of an assignment (php's
     // dynamic property declaration site).
     let mut member_writes: Vec<Span> = Vec::new();
@@ -462,6 +469,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
         if let Some(prefix) = e.cap.strip_suffix(".name") {
             names_by_match
                 .insert((e.match_id, prefix.to_string()), (e.text.clone(), e.start, e.end));
+        }
         if e.cap == "var.member" || e.cap.ends_with(".name") {
             not_a_read.insert((e.start_byte, e.end_byte));
             // a declaration's name token is nested in the `$name` a read
@@ -471,6 +479,15 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
         if e.cap == "member.write" {
             member_writes.push(Span { start: e.start, end: e.end });
         }
+        if e.cap == "hoist" {
+            hoisted.insert(e.match_id);
+        }
+        if let Some(prefix) = e.cap.strip_suffix(".anchor") {
+            let kind = prefix.strip_prefix("def.").unwrap_or(prefix);
+            if let Some(n) = (pack.default_name)(kind, e.start.row, e.start.column) {
+                names_by_match.insert((e.match_id, prefix.to_string()), (n.clone(), e.start, e.end));
+                defaulted_matches.insert(e.match_id, n);
+            }
         }
         if e.cap == "qualifier" {
             qualifier_by_match.insert(e.match_id, e.text.clone());
@@ -1315,6 +1332,11 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                     pkg
                 };
                 let shaped = (pack.shape_name)(&format!("def.{kind}"), &name);
+                let def_scope = if hoisted.contains(&e.match_id) {
+                    out.scopes.get(cur_scope.0 as usize).and_then(|s| s.parent).unwrap_or(cur_scope)
+                } else {
+                    cur_scope
+                };
                 // A class-spec def carries its primary's name — the
                 // (spec, primary) family edge `Specializes` derives from.
                 if let Some(primary) = spec_primary_by_match.get(&e.match_id) {
@@ -1402,7 +1424,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                     name_start,
                     name_end,
                     package: pkg,
-                    scope: cur_scope,
+                    scope: def_scope,
                     return_type: rettype_by_match
                         .get(&e.match_id)
                         .and_then(|t| annot_ident(t, e.start)),
@@ -1861,6 +1883,15 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                 out.import_sites
                     .push((e.text.clone(), Span { start: e.start, end: e.end }));
                 out.imports.push(e.text.clone());
+            }
+            "preamble" => {
+                out.preamble_end = Some(out.preamble_end.map_or(e.end.row, |r| r.max(e.end.row)));
+            }
+            "import" => {
+                let row = Span { start: e.start, end: e.end };
+                if out.import_rows.last() != Some(&row) {
+                    out.import_rows.push(row);
+                }
             }
             cap if cap.starts_with("expr.lit.") => {
                 let suffix = cap.strip_prefix("expr.lit.").unwrap();
