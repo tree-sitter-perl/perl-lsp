@@ -116,6 +116,10 @@ pub struct LangPack {
     /// "which guard means which refinement" (rule #10); core just scopes
     /// the witness to the block.
     pub narrow_guard: fn(guard: Option<&str>, type_text: &str) -> Option<InferredType>,
+    /// Callees that ASSERT their argument (php `assert`): a guard passed to
+    /// one narrows the rest of the enclosing scope. The `@narrow.assert`
+    /// capture fires for any call around a guard; core honours only these.
+    pub narrow_assertions: &'static [&'static str],
     /// Does calling `method` on a variable REBIND it — putting a moved-from
     /// object back into a known state (`clear`/`reset`/`assign`/…)? Used to end
     /// a moved-from region (and any narrowing) at the reset call, so a use after
@@ -153,6 +157,13 @@ pub struct LangPack {
     /// scripts). Consumed by the heatmap's reachability guard — asked of
     /// the pack, never a name/language branch (rule #10).
     pub entrypoint_symbols: &'static [&'static str],
+    /// Method names the RUNTIME invokes structurally (php magic methods —
+    /// `__toString`, `__invoke`, `__get`, ...): zero in-repo call sites is
+    /// the EXPECTED state, so the heatmap's dead-code flagging shields
+    /// them (the method-shaped sibling of `entrypoint_symbols`). The
+    /// constructor stays on its own lane (`constructor_names` — its call
+    /// sites are real `new` refs, so an unconstructed ctor honestly flags).
+    pub runtime_invoked_methods: &'static [&'static str],
     /// Container membership (class/struct/union/namespace) is delimited by
     /// literal `{`/`}` in the source, so a member that lost its enclosing
     /// container to a tree-sitter misparse can be re-anchored by matching the
@@ -165,6 +176,16 @@ pub struct LangPack {
     /// field naming the callee token, the field holding the argument list.
     /// Empty = the language declares no signature help.
     pub call_shapes: &'static [CallShape],
+    /// Variables the runtime binds without a declaration (php's `$this`
+    /// and superglobals): never "undefined".
+    pub implicit_variables: &'static [&'static str],
+    /// The language's THROWAWAY binding names (php `$_` in `foreach ($a
+    /// as $k => $_)`): written to be discarded, so never "unused".
+    pub throwaway_names: &'static [&'static str],
+    /// Methods whose presence makes a class answer ANY member name
+    /// (php `__call`/`__callStatic`, `__get`) — the undefined-member lanes
+    /// stay silent on such a class, as Perl's do on `AUTOLOAD`.
+    pub catch_all_methods: &'static [&'static str],
     /// The node kind of a first-class-callable placeholder in an argument
     /// list (php `f(...)` → `variadic_placeholder`): such a call passes no
     /// arguments, so it mints no count. Empty = none.
@@ -197,6 +218,23 @@ pub struct LangPack {
     /// as opposed to splicing text (`#include`). Only bound names can be
     /// unused.
     pub imports_bind_names: bool,
+    /// Class, interface and attribute names the language itself provides
+    /// in the global namespace (php's core + SPL): a global reference to
+    /// one is never a type missing its import.
+    pub builtin_types: &'static [&'static str],
+    /// A member declaration belongs to the container that encloses it and
+    /// nothing else — no cross-package installs (Perl's typeglobs): a
+    /// contract is provided only by a declaration attributed to the
+    /// composer's own MRO, never by a sibling class in the same file.
+    pub members_are_package_bound: bool,
+    /// Type names start with a capital by convention, so an import row
+    /// whose leaf starts lowercase names a function or constant, not a
+    /// type (php's `use function A\b;` — the grammar parses it as a class
+    /// row).
+    pub types_are_capitalized: bool,
+    /// Members every enum carries by language rule (php: `->value`,
+    /// `->name`, `::cases()`, `::from()`, `::tryFrom()`).
+    pub enum_members: &'static [&'static str],
     /// The node kind of ONE argument inside a call's argument list (php
     /// `argument`); empty = every named child of the list is an argument.
     pub arg_kind: &'static str,
@@ -501,14 +539,19 @@ pub fn perl_pack() -> LangPack {
         import_call: |_, _| None,
         cmd_effects: |_| vec![],
         narrow_guard: |_, _| None,
+        narrow_assertions: &[],
         rebind_method: |_| false,
         implicit_this_members: false,
         include_path_tokens: false,
         preprocessor_macros: false,
         entrypoint_symbols: &[],
+        runtime_invoked_methods: &[],
         brace_scoped_members: false,
         call_shapes: &[],
         arg_kind: "",
+        implicit_variables: &[],
+        throwaway_names: &[],
+        catch_all_methods: &[],
         callable_placeholder_kind: "",
         pair_arrow: "=>",
         spread_arg_kind: "",
@@ -517,6 +560,10 @@ pub fn perl_pack() -> LangPack {
         class_literal_member: "",
         import_template: "",
         imports_bind_names: false,
+        builtin_types: &[],
+        members_are_package_bound: true,
+        types_are_capitalized: false,
+        enum_members: &[],
         trigger_chars: &["$", "@", "%", ">", ":", "{"],
         receiver_names: &[],
         nested_peel: PeelSpec { wrappers: &[], annot_kinds: &[], leaf_to_def: &[], record_stack: true },
@@ -571,14 +618,19 @@ pub fn python_pack() -> LangPack {
         cmd_effects: |_| vec![],
         // `isinstance(x, Foo)` narrows x to Foo inside the guard.
         narrow_guard: |guard, ty| (guard == Some("isinstance")).then(|| InferredType::ClassName(ty.to_string())),
+        narrow_assertions: &[],
         rebind_method: |_| false,
         implicit_this_members: false,
         include_path_tokens: false,
         preprocessor_macros: false,
         entrypoint_symbols: &[],
+        runtime_invoked_methods: &[],
         brace_scoped_members: false,
         call_shapes: &[],
         arg_kind: "",
+        implicit_variables: &[],
+        throwaway_names: &[],
+        catch_all_methods: &[],
         callable_placeholder_kind: "",
         pair_arrow: "",
         spread_arg_kind: "",
@@ -587,6 +639,10 @@ pub fn python_pack() -> LangPack {
         class_literal_member: "",
         import_template: "",
         imports_bind_names: false,
+        builtin_types: &[],
+        members_are_package_bound: true,
+        types_are_capitalized: false,
+        enum_members: &[],
         trigger_chars: &["."],
         receiver_names: &["self", "cls"],
         nested_peel: PeelSpec { wrappers: &[], annot_kinds: &[], leaf_to_def: &[], record_stack: true },
@@ -641,14 +697,19 @@ pub fn r_pack() -> LangPack {
         },
         cmd_effects: |_| vec![],
         narrow_guard: |_, _| None,
+        narrow_assertions: &[],
         rebind_method: |_| false,
         implicit_this_members: false,
         include_path_tokens: false,
         preprocessor_macros: false,
         entrypoint_symbols: &[],
+        runtime_invoked_methods: &[],
         brace_scoped_members: false,
         call_shapes: &[],
         arg_kind: "",
+        implicit_variables: &[],
+        throwaway_names: &[],
+        catch_all_methods: &[],
         callable_placeholder_kind: "",
         pair_arrow: "",
         spread_arg_kind: "",
@@ -657,6 +718,10 @@ pub fn r_pack() -> LangPack {
         class_literal_member: "",
         import_template: "",
         imports_bind_names: false,
+        builtin_types: &[],
+        members_are_package_bound: true,
+        types_are_capitalized: false,
+        enum_members: &[],
         trigger_chars: &["$", "@", ":"],
         receiver_names: &[],
         nested_peel: PeelSpec { wrappers: &[], annot_kinds: &[], leaf_to_def: &[], record_stack: true },
@@ -719,14 +784,19 @@ pub fn cmake_pack() -> LangPack {
             _ => vec![],
         },
         narrow_guard: |_, _| None,
+        narrow_assertions: &[],
         rebind_method: |_| false,
         implicit_this_members: false,
         include_path_tokens: false,
         preprocessor_macros: false,
         entrypoint_symbols: &[],
+        runtime_invoked_methods: &[],
         brace_scoped_members: false,
         call_shapes: &[],
         arg_kind: "",
+        implicit_variables: &[],
+        throwaway_names: &[],
+        catch_all_methods: &[],
         callable_placeholder_kind: "",
         pair_arrow: "",
         spread_arg_kind: "",
@@ -735,6 +805,10 @@ pub fn cmake_pack() -> LangPack {
         class_literal_member: "",
         import_template: "",
         imports_bind_names: false,
+        builtin_types: &[],
+        members_are_package_bound: true,
+        types_are_capitalized: false,
+        enum_members: &[],
         trigger_chars: &["{", "("],
         receiver_names: &[],
         nested_peel: PeelSpec { wrappers: &[], annot_kinds: &[], leaf_to_def: &[], record_stack: true },
@@ -844,6 +918,7 @@ pub fn cpp_pack() -> LangPack {
             };
             Some(InferredType::ClassName(class))
         },
+        narrow_assertions: &[],
         // Rebinding methods: a moved-from object is put back into a known state
         // by these std container/optional/smart-ptr resets, so a use after one
         // is NOT a use-after-move. (An ordinary `x.use()` is not here, so the
@@ -856,9 +931,13 @@ pub fn cpp_pack() -> LangPack {
         include_path_tokens: true,
         preprocessor_macros: true,
         entrypoint_symbols: &["main"],
+        runtime_invoked_methods: &[],
         brace_scoped_members: true,
         call_shapes: &[],
         arg_kind: "",
+        implicit_variables: &[],
+        throwaway_names: &[],
+        catch_all_methods: &[],
         callable_placeholder_kind: "",
         pair_arrow: "",
         spread_arg_kind: "",
@@ -867,6 +946,10 @@ pub fn cpp_pack() -> LangPack {
         class_literal_member: "",
         import_template: "",
         imports_bind_names: false,
+        builtin_types: &[],
+        members_are_package_bound: true,
+        types_are_capitalized: false,
+        enum_members: &[],
         trigger_chars: &[".", ">", ":"],
         receiver_names: &["this"],
         // `field_identifier` only ever names a struct/class member (the
@@ -1073,3 +1156,36 @@ pub(super) fn lit_type(suffix: &str) -> Option<InferredType> {
         _ => None,
     }
 }
+
+/// The classes, interfaces and attributes php provides in the global
+/// namespace (core + SPL + the bundled extensions a stock build carries).
+const PHP_BUILTIN_TYPES: &[&str] = &[
+    "AllowDynamicProperties", "AppendIterator", "ArgumentCountError", "ArithmeticError", "ArrayAccess",
+    "ArrayIterator", "ArrayObject", "AssertionError", "Attribute", "BackedEnum", "BadFunctionCallException",
+    "BadMethodCallException", "CachingIterator", "CallbackFilterIterator", "Closure", "Collator", "Countable",
+    "CurlHandle", "CurlMultiHandle", "CurlShareHandle", "DOMAttr", "DOMDocument", "DOMElement", "DOMNode",
+    "DOMNodeList", "DOMText", "DOMXPath", "DateInterval", "DatePeriod", "DateTime", "DateTimeImmutable",
+    "DateTimeInterface", "DateTimeZone", "Deprecated", "Directory", "DirectoryIterator", "DivisionByZeroError",
+    "DomainException", "EmptyIterator", "Error", "ErrorException", "Exception", "Fiber", "FilesystemIterator",
+    "FilterIterator", "GMP", "GdImage", "Generator", "GlobIterator", "HashContext", "InfiniteIterator",
+    "IntlCalendar", "IntlChar", "IntlDateFormatter", "IntlException", "IntlTimeZone", "InvalidArgumentException",
+    "Iterator", "IteratorAggregate", "IteratorIterator", "JsonException", "JsonSerializable", "LengthException",
+    "LimitIterator", "Locale", "LogicException", "Memcached", "MessageFormatter", "MultipleIterator",
+    "NoRewindIterator", "Normalizer", "NumberFormatter", "OpenSSLAsymmetricKey", "OpenSSLCertificate",
+    "OuterIterator", "OutOfBoundsException", "OutOfRangeException", "OverflowException", "Override",
+    "PDO", "PDOException", "PDOStatement", "ParentIterator", "ParseError", "Phar", "PharData", "RangeException",
+    "RecursiveArrayIterator", "RecursiveCallbackFilterIterator", "RecursiveDirectoryIterator",
+    "RecursiveIterator", "RecursiveIteratorIterator", "Redis", "RedisException", "ReflectionAttribute",
+    "ReflectionClass", "ReflectionClassConstant", "ReflectionEnum", "ReflectionException", "ReflectionFunction",
+    "ReflectionMethod", "ReflectionNamedType", "ReflectionObject", "ReflectionParameter", "ReflectionProperty",
+    "ReflectionType", "ReflectionUnionType", "RegexIterator", "ResourceBundle", "ReturnTypeWillChange",
+    "RuntimeException", "SeekableIterator", "SensitiveParameter", "Serializable", "SessionHandler",
+    "SessionHandlerInterface", "SimpleXMLElement", "SoapClient", "SoapFault", "SoapHeader", "SoapServer",
+    "SoapVar", "Socket", "SplDoublyLinkedList", "SplFileInfo", "SplFileObject", "SplFixedArray", "SplHeap",
+    "SplMaxHeap", "SplMinHeap", "SplObjectStorage", "SplObserver", "SplPriorityQueue", "SplQueue", "SplStack",
+    "SplSubject", "SplTempFileObject", "Stringable", "Throwable", "Transliterator", "Traversable", "TypeError",
+    "UConverter", "UnderflowException", "UnexpectedValueException", "UnhandledMatchError", "UnitEnum",
+    "ValueError", "WeakMap", "WeakReference", "XMLReader", "XMLWriter", "ZipArchive", "finfo", "mysqli",
+    "mysqli_result", "mysqli_stmt", "stdClass",
+];
+
