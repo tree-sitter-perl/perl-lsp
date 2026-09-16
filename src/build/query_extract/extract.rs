@@ -2806,6 +2806,407 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
             }
         }
     }
+    // ---- documentation-comment types: pack vocabulary, positional join ----
+    // A doc comment documents the def that STARTS on the line directly below
+    // its last line (an attribute/modifier line between them breaks the join —
+    // accepted v1). DECLARED types always win: a doc fact fills only where
+    // the syntax carried nothing, because docblocks drift and the tree
+    // doesn't. Perl/C++ packs return no facts, so the pass is a no-op there.
+    {
+        use crate::build::query_extract::DocFact;
+        // Keyed by the comment's END row (the def sits on the next line);
+        // the start row rides along so a `@method` fact can span its own
+        // line inside the comment.
+        let mut by_end_row: HashMap<usize, (usize, Vec<DocFact>)> = HashMap::new();
+        // The bound names imports bring in, for the doc-mention scan below:
+        // an import used only in a docblock (`@var Foo $x`) is used.
+        let bound: std::collections::HashSet<String> = out
+            .import_sites
+            .iter()
+            .map(|(raw, _)| match pack.names.sep() {
+                Some(sep) => raw.rsplit(sep).next().unwrap_or(raw).to_string(),
+                None => raw.to_string(),
+            })
+            .chain(out.use_aliases.iter().map(|(alias, _, _)| alias.clone()))
+            .collect();
+        for e in &events {
+            if e.cap == "doc.comment" {
+                if !bound.is_empty() {
+                    for word in e.text.split(|c: char| !(c.is_alphanumeric() || c == '_')) {
+                        if bound.contains(word) && !out.doc_mentions.iter().any(|m| m == word) {
+                            out.doc_mentions.push(word.to_string());
+                        }
+                    }
+                }
+                let facts = (pack.doc_types)(&e.text);
+                if !facts.is_empty() {
+                    let entry = by_end_row
+                        .entry(e.end.row)
+                        .or_insert_with(|| (e.start.row, Vec::new()));
+                    entry.1.extend(facts);
+                }
+            }
+        }
+        if !by_end_row.is_empty() {
+            let scope_spans: Vec<Span> = out.scopes.iter().map(|s| s.span).collect();
+            let param_syms: Vec<(String, crate::model::file_analysis::ScopeId, Point)> =
+                out.symbols
+                    .iter()
+                    .filter(|s| s.kind == "var")
+                    .map(|s| (s.name.clone(), s.scope, s.start))
+                    .collect();
+            let mut doc_witnesses: Vec<crate::model::witnesses::Witness> = Vec::new();
+            let mut doc_refs: Vec<SkelRef> = Vec::new();
+            let mut doc_methods: Vec<SkelSymbol> = Vec::new();
+            for sym in out.symbols.iter_mut() {
+                // `@method` rows join to the CLASS docblock (Laravel facades,
+                // Eloquent's `__call` surface): each synthesizes a real
+                // method symbol on the class, spanning the class name token
+                // so gd lands somewhere honest. The other fact kinds join to
+                // callables/fields as before.
+                if matches!(sym.kind.as_str(), "class" | "interface") {
+                    let Some((cstart, facts)) =
+                        sym.start.row.checked_sub(1).and_then(|r| by_end_row.get(&r))
+                    else {
+                        continue;
+                    };
+                    for f in facts {
+                        // `@template T` rows: the class's generic params, in
+                        // row order — the same per-class axis cpp templates
+                        // feed, so `@return TModel` methods publish
+                        // `ParamOf(i)` through the existing writeback.
+                        if let DocFact::Template { name, line } = f {
+                            out.template_params.push((sym.name.clone(), name.clone(), *line));
+                            continue;
+                        }
+                        if let DocFact::Description(d) = f {
+                            sym.doc = Some(d.clone());
+                            continue;
+                        }
+                        if let DocFact::Deprecated(t) = f {
+                            mark_deprecated(sym, t.clone());
+                            continue;
+                        }
+                        if let DocFact::Method { name, ret, line, col } = f {
+                            // Span = the method NAME TOKEN in the fact's own
+                            // `@method` line: a distinct gd/cursor target per
+                            // row (every row on the class name span would
+                            // collapse to one symbol), and the row's ONE
+                            // declaration site — references from the token
+                            // resolve the Method target, rename rewrites it.
+                            let at = Point { row: cstart + line, column: *col };
+                            let at_end = Point { row: at.row, column: col + name.len() };
+                            doc_methods.push(SkelSymbol {
+                                kind: "method".to_string(),
+                                name: name.clone(),
+                                start: at,
+                                end: at_end,
+                                name_start: at,
+                                name_end: at_end,
+                                package: Some(sym.name.clone()),
+                                scope: sym.scope,
+                                return_type: ret
+                                    .as_deref()
+                                    .and_then(|t| annot_ident(t, at)),
+                                receiver_return: ret
+                                    .as_deref()
+                                    .is_some_and(|t| (pack.rettype_receiver)(t)),
+                                receiver_instance_of: None,
+                                deref_stack: Vec::new(),
+                                // documentation, not a declaration: no body, no annotation to add
+                                attributes: vec!["documented".to_string()],
+                                arity: None,
+                                qualifier_owned: false,
+                                doc: None,
+                                deprecation: None,
+                            });
+                        }
+                    }
+                    continue;
+                }
+                if !matches!(sym.kind.as_str(), "sub" | "method" | "field" | "anon" | "var") {
+                    continue;
+                }
+                let Some((cstart, facts)) =
+                    sym.start.row.checked_sub(1).and_then(|r| by_end_row.get(&r))
+                else {
+                    continue;
+                };
+                let cstart = *cstart;
+                for f in facts {
+                    match f {
+                        // class-docblock facts; no callable/field join
+                        DocFact::Method { .. } | DocFact::Template { .. } => {}
+                        DocFact::Description(d) => {
+                            if !matches!(sym.kind.as_str(), "var" | "anon") {
+                                sym.doc = Some(d.clone());
+                            }
+                        }
+                        DocFact::Deprecated(t) => mark_deprecated(sym, t.clone()),
+                        DocFact::ReturnRecvInstance { base } => {
+                            if sym.return_type.is_none()
+                                && !sym.receiver_return
+                                && sym.receiver_instance_of.is_none()
+                            {
+                                sym.receiver_instance_of = Some(ident(base, sym.start));
+                            }
+                        }
+                        DocFact::Return(t) => {
+                            // A doc row fills an undeclared return, and REFINES
+                            // a bare declared container (`: array` +
+                            // `@return array{Queue, Agent}`) — the same rule
+                            // `doc_admits` applies to params.
+                            let bare_container = matches!(
+                                sym.return_type,
+                                Some(InferredType::HashRef | InferredType::ArrayRef)
+                            );
+                            if (sym.return_type.is_none() || bare_container)
+                                && !sym.receiver_return
+                            {
+                                if (pack.rettype_receiver)(t) {
+                                    if sym.return_type.is_none() {
+                                        sym.receiver_return = true;
+                                    }
+                                } else if let Some(doc) = annot_ident(t, sym.start) {
+                                    if !bare_container
+                                        || matches!(
+                                            doc,
+                                            InferredType::Sequence(_)
+                                                | InferredType::Parametric(_)
+                                                | InferredType::HashWithKeys { .. }
+                                        )
+                                    {
+                                        sym.return_type = Some(doc);
+                                    }
+                                }
+                            }
+                        }
+                        DocFact::UsesMethod { name, line, col } => {
+                            // PHPUnit `@dataProvider name`: a method REF on
+                            // the enclosing class, spanning the provider
+                            // NAME TOKEN in the docblock — providers gain
+                            // real fan-in, and rename rewrites the token in
+                            // place. Only meaningful on class members (the
+                            // invocant is the class).
+                            if let (true, Some(cls)) = (
+                                matches!(sym.kind.as_str(), "sub" | "method"),
+                                sym.package.as_deref(),
+                            ) {
+                                let start = Point { row: cstart + line, column: *col };
+                                let end = Point {
+                                    row: start.row,
+                                    column: col + name.len(),
+                                };
+                                // Invocant is the CLASS NAME, not
+                                // `__PACKAGE__`: the doc row sits in the
+                                // class-body scope, whose package is the
+                                // NAMESPACE, so the current-package walk
+                                // would resolve the wrong owner — the join
+                                // already knows the class.
+                                doc_refs.push(SkelRef {
+                                    via: None,
+                                    kind: "member".to_string(),
+                                    name: name.clone(),
+                                    start,
+                                    end,
+                                    scope: sym.scope,
+                                    invocant: Some((
+                                        Span { start, end },
+                                        cls.to_string(),
+                                    )),
+                                    member_op: None,
+                                    arg_count: None,
+                                    value_read: false,
+                                    named_by_string: false,
+                                });
+                            }
+                        }
+                        DocFact::Var { ty: t, name: var_name } => {
+                            // The NAMED inline form (`/** @var Type[] $rows */`
+                            // above an assignment) types that specific local.
+                            if let Some(vn) = var_name {
+                                if sym.kind == "var" && &sym.name == vn {
+                                    if let Some(ty) = annot_ident(t, sym.start) {
+                                        doc_witnesses.push(doc_cast_witness(
+                                            &sym.name,
+                                            sym.scope,
+                                            ty,
+                                            Span { start: sym.start, end: sym.start },
+                                        ));
+                                    }
+                                    continue;
+                                }
+                                // `@var T $prop` above a PROPERTY (WordPress
+                                // spells every field doc with its name) is
+                                // that field's doc, not a local cast.
+                                if !(sym.kind == "field"
+                                    && vn.trim_start_matches(|c| pack.names.is_sigil(c)) == sym.name)
+                                {
+                                    continue;
+                                }
+                            }
+                            if sym.kind == "var" {
+                                continue;
+                            }
+                            // A documented property types class-wide (member
+                            // lookup is not sequential), exactly like a
+                            // declared field type. Syntax-typed fields skip
+                            // (declared wins — docblocks drift) EXCEPT when
+                            // the doc STRICTLY REFINES a bare container:
+                            // `protected array $h` + `@var list<X>` is the
+                            // canonical refinement — the syntax cannot spell
+                            // the element, the doc exists to add it.
+                            if sym.kind == "field" {
+                                let Some(ty) = annot_ident(t, sym.start) else { continue };
+                                if doc_admits(
+                                    pack,
+                                    &annot_text_by_var,
+                                    (&sym.name, sym.scope),
+                                    &ty,
+                                ) {
+                                    let span = scope_spans
+                                        .get(sym.scope.0 as usize)
+                                        .copied()
+                                        .unwrap_or(Span { start: sym.start, end: sym.start });
+                                    // An ANNOTATION, like the declared field
+                                    // type it stands in for: it outranks what
+                                    // a constructor happens to write to the
+                                    // field (`@var A|B $skin` + `$this->skin =
+                                    // new B` reads as the documented union).
+                                    let mut w = doc_witness(&sym.name, sym.scope, ty, span);
+                                    w.source = crate::model::witnesses::WitnessSource::Annotation(
+                                        crate::model::witnesses::AnnotationKind::Declared,
+                                    );
+                                    doc_witnesses.push(w);
+                                }
+                            }
+                        }
+                        DocFact::Param { name, ty } => {
+                            // The def's own parameter — untyped, or a bare
+                            // container the doc refines (same rule as Var).
+                            let Some(ty) = annot_ident(ty, sym.start) else { continue };
+                            let in_def = |p: Point| {
+                                (p.row, p.column) >= (sym.start.row, sym.start.column)
+                                    && (p.row, p.column) <= (sym.end.row, sym.end.column)
+                            };
+                            if let Some((n, sc, at)) = param_syms.iter().find(|(n, sc, at)| {
+                                n == name
+                                    && in_def(*at)
+                                    && doc_admits(pack, &annot_text_by_var, (n, *sc), &ty)
+                            }) {
+                                // Publish the row CLASS-KEYED too
+                                // (`method#p#$name`): an @inheritDoc override
+                                // in another file reaches it through the
+                                // registry's PackageSymbol inheritance walk
+                                // (every monolog `handleBatch` override was
+                                // blind without this).
+                                if let Some(cls) = sym.package.as_deref() {
+                                    if matches!(sym.kind.as_str(), "sub" | "method") {
+                                        doc_witnesses.push(crate::model::witnesses::Witness {
+                                            attachment:
+                                                crate::model::witnesses::WitnessAttachment::PackageSymbol {
+                                                    package: cls.to_string(),
+                                                    name: format!("{}#p#{}", sym.name, n),
+                                                },
+                                            source: crate::model::witnesses::WitnessSource::Builder(
+                                                "skeleton-doc".into(),
+                                            ),
+                                            payload:
+                                                crate::model::witnesses::WitnessPayload::InferredType(
+                                                    ty.clone(),
+                                                ),
+                                            span: Span { start: *at, end: *at },
+                                        });
+                                    }
+                                }
+                                doc_witnesses.push(doc_witness(
+                                    n,
+                                    *sc,
+                                    ty,
+                                    Span { start: *at, end: *at },
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+            // A refining doc row REPLACES the redundant bare-container annot
+            // witness on its slot (the fold is not latest-wins; leaving the
+            // `array` witness in place would keep beating the refinement).
+            let refined: std::collections::HashSet<(std::string::String, crate::model::file_analysis::ScopeId)> =
+                doc_witnesses
+                    .iter()
+                    .filter(|w| {
+                        matches!(
+                            &w.payload,
+                            crate::model::witnesses::WitnessPayload::InferredType(
+                                InferredType::Sequence(_) | InferredType::Parametric(_)
+                            )
+                        )
+                    })
+                    .filter_map(|w| match &w.attachment {
+                        crate::model::witnesses::WitnessAttachment::Variable { name, scope } => {
+                            Some((name.clone(), *scope))
+                        }
+                        _ => None,
+                    })
+                    .collect();
+            if !refined.is_empty() {
+                out.witnesses.retain(|w| {
+                    let is_container_annot = matches!(
+                        &w.source,
+                        crate::model::witnesses::WitnessSource::Annotation(
+                            crate::model::witnesses::AnnotationKind::Declared
+                        )
+                    ) && matches!(
+                        &w.payload,
+                        crate::model::witnesses::WitnessPayload::InferredType(
+                            InferredType::HashRef | InferredType::ArrayRef
+                        )
+                    );
+                    !(is_container_annot
+                        && matches!(
+                            &w.attachment,
+                            crate::model::witnesses::WitnessAttachment::Variable { name, scope }
+                                if refined.contains(&(name.clone(), *scope))
+                        ))
+                });
+            }
+            // A named `@var T $x` above a RE-assignment (php's function-
+            // scoped locals: the def is the FIRST assignment, a later one is
+            // a rebind FlowEdge, not a symbol) casts the variable from that
+            // row on — the `$x = Factory::make(); /** @var Concrete $x */`
+            // idiom that narrows a base-typed factory return.
+            for (end_row, (_, facts)) in &by_end_row {
+                for f in facts {
+                    let DocFact::Var { ty, name: Some(vn) } = f else { continue };
+                    let Some(t) = annot_ident(ty, Point { row: *end_row, column: 0 }) else { continue };
+                    let has_def = out
+                        .symbols
+                        .iter()
+                        .any(|s| s.kind == "var" && &s.name == vn && s.start.row == end_row + 1);
+                    if has_def {
+                        continue;
+                    }
+                    if let Some(fe) = out
+                        .flow_edges
+                        .iter()
+                        .find(|fe| &fe.target_name == vn && fe.target_at.row == end_row + 1)
+                    {
+                        out.witnesses.push(doc_cast_witness(
+                            vn,
+                            fe.target_scope,
+                            t,
+                            Span { start: fe.target_at, end: fe.target_at },
+                        ));
+                    }
+                }
+            }
+            out.witnesses.extend(doc_witnesses);
+            out.symbols.extend(doc_methods);
+            out.refs.extend(doc_refs);
+        }
+    }
 
     // Access-modifier stamp: the `@nonpublic.target` name spans mark
     // members whose modifier means non-public — the same `non_public`
@@ -2848,6 +3249,12 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     out.param_sigs = param_sigs;
     Ok(out)
 }
+
+/// Does a doc row get to type this (name, scope) slot? Yes when the syntax
+/// declared nothing (declared wins — docblocks drift), and ALSO when the doc
+/// is a `Sequence` refining a bare declared container (`array`/`iterable` —
+/// the spelling that cannot carry an element). The doc witness lands AFTER
+/// the declared one, so latest-wins reduction serves the refinement.
 /// The positional index of a destructuring slot: the number of TOP-LEVEL
 /// commas in the list text before the slot's byte offset (`[, $b]` → 1).
 /// `None` for a keyed list (a top-level `=>`): its positions are not
@@ -2895,6 +3302,67 @@ fn slot_key(list_text: &str, slot_offset: usize, arrow: &str) -> Option<String> 
         && ((key.starts_with('\'') && key.ends_with('\''))
             || (key.starts_with('"') && key.ends_with('"')));
     quoted.then(|| key[1..key.len() - 1].to_string())
+}
+
+fn doc_admits(
+    pack: &LangPack,
+    annot_text_by_var: &std::collections::HashMap<
+        (std::string::String, crate::model::file_analysis::ScopeId),
+        std::string::String,
+    >,
+    slot: (&str, crate::model::file_analysis::ScopeId),
+    doc_ty: &InferredType,
+) -> bool {
+    match annot_text_by_var.get(&(slot.0.to_string(), slot.1)) {
+        None => true,
+        Some(declared) => {
+            matches!(
+                doc_ty,
+                InferredType::Sequence(_) | InferredType::Parametric(_)
+            ) && matches!(
+                (pack.annot_type)(declared),
+                Some(InferredType::HashRef | InferredType::ArrayRef)
+            )
+        }
+    }
+}
+
+/// A documentation-sourced type witness on a Variable slot — its own source
+/// tag (not `Annotation(Declared)`): a doc type is real typing fuel, but the inlay
+/// suppression that hides hints for syntax-annotated declarations should
+/// still show one here (the docblock can sit far from the use).
+/// A NAMED `@var T $x` is a cast the author wrote at that site: it rides
+/// at annotation priority (`Annotation(Refinement)`) so the flow / call-binding
+/// edges the same assignment mints — pushed later, equal priority, and
+/// latest-wins — cannot override it with the factory's declared base.
+fn doc_cast_witness(
+    name: &str,
+    scope: crate::model::file_analysis::ScopeId,
+    ty: InferredType,
+    span: Span,
+) -> crate::model::witnesses::Witness {
+    let mut w = doc_witness(name, scope, ty, span);
+    w.source = crate::model::witnesses::WitnessSource::Annotation(
+        crate::model::witnesses::AnnotationKind::Refinement,
+    );
+    w
+}
+
+fn doc_witness(
+    name: &str,
+    scope: crate::model::file_analysis::ScopeId,
+    ty: InferredType,
+    span: Span,
+) -> crate::model::witnesses::Witness {
+    crate::model::witnesses::Witness {
+        attachment: crate::model::witnesses::WitnessAttachment::Variable {
+            name: name.to_string(),
+            scope,
+        },
+        source: crate::model::witnesses::WitnessSource::Builder("skeleton-doc".into()),
+        payload: crate::model::witnesses::WitnessPayload::InferredType(ty),
+        span,
+    }
 }
 
 /// The `TypeName(alias) → …` payload for an underlying type spelling, resolving
