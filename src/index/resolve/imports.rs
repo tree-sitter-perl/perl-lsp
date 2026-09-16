@@ -206,6 +206,7 @@ pub(super) fn completion_detail_for_import(
 /// so both resolve handlers identically.
 pub(super) fn dispatch_handler_locations(
     owner: &HandlerOwner,
+    names: crate::model::file_analysis::RailNames,
     name: &str,
     module_index: &dyn CrossFileLookup,
 ) -> Vec<RefLocation> {
@@ -226,7 +227,9 @@ pub(super) fn dispatch_handler_locations(
                             key: FileKey::Path(cached.path.clone()),
                             span: sym.selection_span,
                             access: AccessKind::Declaration,
-                            rewritable: true,
+                            // a class-keyed rail's handler token spells the
+                            // class, never the rail name
+                            rewritable: names != crate::model::file_analysis::RailNames::Classes,
                             label: None
                         });
                     }

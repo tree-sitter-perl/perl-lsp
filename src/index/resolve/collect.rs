@@ -1018,8 +1018,13 @@ pub(super) fn collect_from_analysis(
         TargetKind::Sub { .. } | TargetKind::Method { .. } => (true, false),
         _ => (false, false),
     };
+    // a class-keyed rail's sites are tokens of other names — never rewritten
+    let class_rail = matches!(
+        &target.kind,
+        TargetKind::Handler { names: crate::model::file_analysis::RailNames::Classes, .. }
+    );
     let rewritable_at = |span: Span| {
-        !(foldable && span_is_folded_name(analysis, span, folds_through_calls, &target.name))
+        !class_rail && !(foldable && span_is_folded_name(analysis, span, folds_through_calls, &target.name))
     };
 
     // Include declaration spans when this file defines the target. Name
