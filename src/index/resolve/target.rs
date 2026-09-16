@@ -208,6 +208,19 @@ impl TargetRef {
         }
     }
 
+    /// Does this target's name belong to the LANGUAGE rather than the
+    /// author? A pack's constructor convention (`__construct`) is spelled by
+    /// nothing a rename could rewrite — its `new self(...)` sites carry no
+    /// token naming it — and a class-keyed rail's spans are emission tokens
+    /// whose names belong to the class rename. Nothing renames either one,
+    /// cross-file OR locally, so the one policy method answers for
+    /// `rename_edits` and for the prepareRename gate alike: an offer the
+    /// rename would refuse is worse than no offer.
+    pub fn rename_is_language_owned(&self) -> bool {
+        self.ctor_of.is_some()
+            || matches!(&self.kind, TargetKind::Handler { names: RailNames::Classes, .. })
+    }
+
     /// Whether this target renames cross-file through `refs_to` (matched by
     /// owner/scope structure across the workspace) vs. the single-file
     /// `rename_at` fallback. Per-feature policy lives on the target (rule #10),
@@ -217,6 +230,9 @@ impl TargetRef {
     /// owner-less hash key can't be matched by name alone elsewhere and stays
     /// single-file. References ignores this — it walks every kind cross-file.
     pub fn supports_cross_file_rename(&self) -> bool {
+        if self.rename_is_language_owned() {
+            return false;
+        }
         matches!(
             self.kind,
             TargetKind::Sub { .. }

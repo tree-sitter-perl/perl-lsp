@@ -281,6 +281,7 @@ impl<'a> CandidateSet<'a> {
     /// refuse (alias-spelled sites) or no-op on must not offer a box.
     pub fn renameable(&self) -> bool {
         match self.resolution() {
+            Some(ResolvedTarget::Target(t)) if t.rename_is_language_owned() => false,
             Some(ResolvedTarget::Target(t)) if t.supports_cross_file_rename() => {
                 if self.pack {
                     self.rename_edits("x").is_ok_and(|e| !e.is_empty())
@@ -319,6 +320,7 @@ impl<'a> CandidateSet<'a> {
                 .unwrap_or(RoleMask::EDITABLE)
         };
         Ok(match self.resolution() {
+            Some(ResolvedTarget::Target(t)) if t.rename_is_language_owned() => Vec::new(),
             Some(ResolvedTarget::Target(t)) if t.supports_cross_file_rename() => {
                 let locations = refs_to(self.files, self.module_index, t, editable);
                 if self.pack && locations.iter().any(|l| !l.rewritable) {
