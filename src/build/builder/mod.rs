@@ -258,6 +258,11 @@ struct Builder<'a> {
 
     scopes: Vec<Scope>,
     symbols: Vec<Symbol>,
+    /// `name → symbol ids`, maintained at every mint (`add_symbol_in_package`)
+    /// so a by-name question during the walk (`binding_site_of`) reads a
+    /// short list instead of scanning every symbol — the same index the
+    /// `SymbolTable` rebuilds for the finished analysis.
+    symbols_by_name: std::collections::HashMap<String, Vec<SymbolId>>,
     refs: Vec<Ref>,
     /// Plugin-emitted `VarType` constraints, resolved to scopes only
     /// after the whole CST has been walked (plugin dispatch runs

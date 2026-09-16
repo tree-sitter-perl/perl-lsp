@@ -277,6 +277,7 @@ fn build_once(
         source,
         scopes: Vec::new(),
         symbols: Vec::new(),
+        symbols_by_name: std::collections::HashMap::new(),
         refs: Vec::new(),
         deferred_var_types: Vec::new(),
         deferred_named_sub_param_types: Vec::new(),

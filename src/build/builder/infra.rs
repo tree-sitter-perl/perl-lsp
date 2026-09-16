@@ -117,17 +117,22 @@ impl<'a> Builder<'a> {
     }
 
     /// Where `var` is bound inside `scope` — the earliest declaring
-    /// `Variable` symbol within the scope's span. The anchor every fact
-    /// about a parameter lands at, so the declaration's own write marker
-    /// (which retires everything strictly before it) leaves the fact
-    /// standing; `None` when nothing declares it (a `$_[0]` read).
+    /// `Variable` symbol within the scope's span (a helper callback's
+    /// `my ($c) = @_` sits in the body block one scope below the sub, so
+    /// the region is the rule, not scope membership). The anchor every
+    /// fact about a parameter lands at, so the declaration's own write
+    /// marker (which retires everything strictly before it) leaves the
+    /// fact standing; `None` when nothing declares it (a `$_[0]` read).
+    /// Reads the name index: O(symbols sharing the name), never O(symbols).
     pub(super) fn binding_site_of(&self, var: &str, scope: ScopeId) -> Option<Point> {
         let region = self.scopes.get(scope.0 as usize)?.span;
-        self.symbols
-            .iter()
+        self.symbols_by_name
+            .get(var)
+            .into_iter()
+            .flatten()
+            .map(|id| &self.symbols[id.0 as usize])
             .filter(|s| {
                 matches!(s.kind, SymKind::Variable)
-                    && s.name == var
                     && crate::model::file_analysis::contains_point(&region, s.selection_span.start)
             })
             .map(|s| s.selection_span.start)
@@ -174,6 +179,7 @@ impl<'a> Builder<'a> {
     ) -> SymbolId {
         let id = SymbolId(self.next_symbol_id);
         self.next_symbol_id += 1;
+        self.symbols_by_name.entry(name.clone()).or_default().push(id);
         // Every symbol attaches to the current lexical scope. Package
         // context lives separately in `package_ranges`; the variable
         // resolver gates `our` decls by package match at lookup time

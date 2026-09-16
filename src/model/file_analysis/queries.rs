@@ -10,11 +10,11 @@ impl FileAnalysis {
     /// only what lies strictly before it); `None` when nothing declares it.
     pub fn binding_site_of(&self, var: &str, scope: ScopeId) -> Option<Point> {
         let region = self.scopes.get(scope.0 as usize)?.span;
-        self.symbols
+        self.symbols_named(var)
             .iter()
+            .map(|&id| self.symbol(id))
             .filter(|s| {
                 matches!(s.kind, SymKind::Variable)
-                    && s.name == var
                     && contains_point(&region, s.selection_span.start)
             })
             .map(|s| s.selection_span.start)
