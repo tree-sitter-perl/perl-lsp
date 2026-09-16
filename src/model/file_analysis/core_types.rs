@@ -874,6 +874,57 @@ impl Symbol {
     }
 }
 
+/// Which member family a name belongs to — the axis that keeps a value read
+/// and a call from answering each other (`docs/adr/member-kinds.md`). Minted
+/// from the fact that produced a name: the ref kind at a use, the symbol
+/// kind at a declaration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MemberKind {
+    /// A stored value: a field, class-content variable or enumerator.
+    Value,
+    /// A sub or method.
+    Callable,
+}
+
+impl MemberKind {
+    /// The family a ref's own kind states: a value read is `Value`, a call
+    /// `Callable`, anything else no member at all.
+    pub fn of_ref(kind: &RefKind) -> Option<Self> {
+        match kind {
+            RefKind::FieldAccess { .. } => Some(MemberKind::Value),
+            RefKind::MethodCall { .. } => Some(MemberKind::Callable),
+            _ => None,
+        }
+    }
+
+    /// The family a declaration's symbol kind states.
+    pub fn of_sym(kind: SymKind) -> Self {
+        if matches!(kind, SymKind::Sub | SymKind::Method) {
+            MemberKind::Callable
+        } else {
+            MemberKind::Value
+        }
+    }
+
+    /// May a declaration of `kind` define a target of this family? The value
+    /// side is strict; a callable keeps the call walk's value-kind fallback
+    /// (a language whose member read IS a call reaches stored members through
+    /// it).
+    pub fn admits_decl(self, kind: SymKind) -> bool {
+        match self {
+            MemberKind::Value => MemberKind::of_sym(kind) == MemberKind::Value,
+            MemberKind::Callable => true,
+        }
+    }
+
+    /// May a ref of family `other` reference a target of this family? A
+    /// value read never reaches a callable and a call never reaches a value
+    /// target: each side's syntax already said which it wanted.
+    pub fn admits_ref(self, other: Option<MemberKind>) -> bool {
+        other.is_none_or(|o| o == self)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum SymKind {
     Variable,

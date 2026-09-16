@@ -701,7 +701,7 @@ impl FileAnalysis {
         module_index: Option<&dyn CrossFileLookup>,
     ) -> Option<MethodResolution> {
         self.resolve_member_in_ancestors(class_name, field_name, module_index, &|k| {
-            !matches!(k, SymKind::Sub | SymKind::Method)
+            MemberKind::of_sym(k) == MemberKind::Value
         })
     }
 
