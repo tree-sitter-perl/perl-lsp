@@ -23,7 +23,7 @@ pub fn pack_hover_markdown(
     // symbol on another class) can't hijack it with the wrong scope.
     // A data field shows `field: type` (member_hover, keyed on the field's own
     // scope); a method shows its signature.
-    if let Some(r) = analysis.ref_at(point).filter(|r| matches!(r.kind, RefKind::MethodCall { .. })) {
+    if let Some(r) = analysis.ref_at(point).filter(|r| r.member_site().is_some()) {
         if let Some(midx) = module_index {
             if let Some(cn) = analysis.method_call_invocant_class(r, Some(midx)) {
                 let field = r.unqualified_target_name(analysis.names());
@@ -32,12 +32,10 @@ pub fn pack_hover_markdown(
                 // type (`T get()` on a `Box<int>` receiver → `int`) — shown
                 // only when the substitution actually changed the answer,
                 // so non-template hovers stay byte-identical.
-                let recv_ty = match &r.kind {
-                    RefKind::MethodCall { invocant_span: Some(sp), .. } => {
-                        analysis.expr_type_at_span(*sp, Some(midx))
-                    }
-                    _ => None,
-                };
+                let recv_ty = r
+                    .member_site()
+                    .and_then(|m| m.invocant_span)
+                    .and_then(|sp| analysis.expr_type_at_span(sp, Some(midx)));
                 let substituted = |raw: Option<InferredType>| -> Option<InferredType> {
                     let sub = recv_ty
                         .as_ref()

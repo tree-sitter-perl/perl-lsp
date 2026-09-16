@@ -585,8 +585,8 @@ impl<'a> CandidateSet<'a> {
         // both offer.
         if self.pack {
             if let Some(r) = analysis.ref_at(point) {
-                if let RefKind::MethodCall { invocant_span: Some(inv), .. } = &r.kind {
-                    if let Some(recv_ty) = analysis.expr_type_at_span(*inv, self.idx()) {
+                if let Some(inv) = r.member_site().and_then(|m| m.invocant_span) {
+                    if let Some(recv_ty) = analysis.expr_type_at_span(inv, self.idx()) {
                         if recv_ty.as_parametric().is_some() {
                             let member = r.unqualified_target_name(analysis.names());
                             let mut out: Vec<RefLocation> = Vec::new();
@@ -909,8 +909,9 @@ impl<'a> CandidateSet<'a> {
                 }
             }
 
-            // Cross-file method goto-def: inherited methods through the index.
-            if matches!(r.kind, RefKind::MethodCall { .. }) {
+            // Cross-file member goto-def: inherited methods and fields through
+            // the index.
+            if r.member_site().is_some() {
                 use crate::model::file_analysis::MethodResolution;
                 // FQ `$o->Foo::Bar::m` dispatches the bare `m` on the named class.
                 let method = r.unqualified_target_name(analysis.names());
