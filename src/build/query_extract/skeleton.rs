@@ -682,6 +682,11 @@ impl SkeletonAnalysis {
                     // a named enum value — distinct from both Variable and
                     // Field.
                     "enumerator" => SymKind::Enumerator,
+                    // a class-scoped compile-time constant (PHP `const`):
+                    // Enumerator's outline/completion shape WITHOUT the
+                    // parent-enum value typing (a const's value is its
+                    // initializer, not the owning class).
+                    "const" => SymKind::Enumerator,
                     // a string-named hook registration (`@def.handler.named`):
                     // the model's Handler — same-named registrations stack.
                     "handler" => SymKind::Handler,
@@ -863,8 +868,37 @@ impl SkeletonAnalysis {
                 span,
             };
             for (i, sym) in symbols.iter().enumerate() {
-                if !matches!(sym.kind, SymKind::Method | SymKind::Sub) {
+                if !matches!(sym.kind, SymKind::Method | SymKind::Sub | SymKind::Enumerator) {
                     continue;
+                }
+                // A receiver-shaped declared return (`: static`) publishes the
+                // deferred substituting shape: the member-chain arm threads the
+                // real receiver, and the class-keyed lookup's default receiver
+                // (`ClassName(class)`) covers the MCB path — both fluent.
+                // (`self` strictly means the DEFINING class, not the runtime
+                // receiver; substituting the receiver over-approximates only
+                // where a subclass inherits the method — accepted residual.)
+                if self.symbols[i].receiver_return {
+                    bag.push(mk(
+                        WA::Symbol(sym.id),
+                        WP::ReturnExpr(crate::model::witnesses::ReturnExpr::Receiver),
+                        sym.span,
+                    ));
+                }
+                // `@return Base<static>`: an instance of `base` parametrized
+                // by the receiver — `Book::query()` carries `Builder<Book>`,
+                // and a later `@return TModel` hop projects `Book` out via
+                // the same `ParamOf` axis cpp instantiations use.
+                if let Some(base) = &self.symbols[i].receiver_instance_of {
+                    use crate::model::witnesses::{ParametricOp, ReturnExpr};
+                    bag.push(mk(
+                        WA::Symbol(sym.id),
+                        WP::ReturnExpr(ReturnExpr::Operator(ParametricOp::InstanceOf {
+                            base: base.clone(),
+                            args: vec![ReturnExpr::Receiver],
+                        })),
+                        sym.span,
+                    ));
                 }
                 if let Some(ret) = &self.symbols[i].return_type {
                     // A return that MENTIONS the owning class's template
@@ -889,13 +923,30 @@ impl SkeletonAnalysis {
                     };
                     bag.push(mk(WA::Symbol(sym.id), pay, sym.span));
                 }
-                if matches!(sym.kind, SymKind::Method) {
+                if matches!(sym.kind, SymKind::Method | SymKind::Enumerator) {
+                    // Enumerators too: `Level::Debug` / a class const is a
+                    // class-keyed member access, and its hop witness chases
+                    // the same PackageSymbol edge a method return does.
                     if let Some(class) = &sym.package {
                         bag.push(mk(
                             WA::PackageSymbol { package: class.clone(), name: sym.name.clone() },
                             WP::Edge(WA::Symbol(sym.id)),
                             sym.span,
                         ));
+                        // A TRUE enum case's value is an instance of its
+                        // enum (php `Level::Debug`, cpp `Color::kRed`). A
+                        // class CONST (extraction kind "const", flattened
+                        // to the same SymKind) is its literal's value —
+                        // typing it as the class would be wrong, so it
+                        // stays untyped here (residual: thread the value
+                        // span).
+                        if self.symbols[i].kind == "enumerator" {
+                            bag.push(mk(
+                                WA::Symbol(sym.id),
+                                WP::InferredType(InferredType::ClassName(class.clone())),
+                                sym.span,
+                            ));
+                        }
                     }
                 }
             }
