@@ -815,6 +815,13 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     // Class-body scopes (`register_class_body`), for the member-targeted
     // flow (`@flow.target.member`): the witness lands where field readers look.
     let mut class_body_scopes: std::collections::HashSet<ScopeId> = std::collections::HashSet::new();
+    // Region-shaped narrowings, resolved after the loop (the guard's own
+    // captures may follow the region node in event order): `@narrow.after`
+    // holds from the node's END to the enclosing scope's end, `@narrow.within`
+    // over the node itself — each in the scope open at the node.
+    let mut narrow_after: Vec<(usize, Point, ScopeId)> = Vec::new();
+    let mut narrow_within: Vec<(usize, Span, ScopeId)> = Vec::new();
+    let mut narrow_assert: HashMap<usize, String> = HashMap::new();
     // `std::move(x)` halves, joined per match: the qualifier (`std`) + name
     // (`move`) verify the call IS std::move (no query predicates), the var is
     // the moved subject, the call span the region start + enclosing scope.
@@ -962,7 +969,9 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                         })
                     });
                     let guard = narrow_guard.get(&nmid).map(String::as_str);
-                    if let Some(refined) = ty.and_then(|t| (pack.narrow_guard)(guard, &t)) {
+                    if let Some(refined) =
+                        ty.and_then(|t| (pack.narrow_guard)(guard, &t)).map(|r| ident_type(r, e.start))
+                    {
                         // Defer: the region cutoff (first rebind edge) needs the
                         // FlowEdges, minted after this loop. Carry the FULL
                         // guarded-block region [start, end]; the post-pass
@@ -984,6 +993,19 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
             }
             "narrow.guard" => {
                 narrow_guard.insert(e.match_id, e.text.clone());
+            }
+            "narrow.after" => {
+                if let Some(&(_, sid)) = scope_stack.last() {
+                    narrow_after.push((e.match_id, e.end, sid));
+                }
+            }
+            "narrow.within" => {
+                if let Some(&(_, sid)) = scope_stack.last() {
+                    narrow_within.push((e.match_id, Span { start: e.start, end: e.end }, sid));
+                }
+            }
+            "narrow.assert" => {
+                narrow_assert.insert(e.match_id, e.text.clone());
             }
             "move.scope" => {
                 move_scope_txt.insert(e.match_id, e.text.clone());
@@ -2062,6 +2084,22 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     // point-containment ends the narrowing at the rebind — the soundness Perl
     // got from its cutoff, now generic. Every LangPack that narrows (python
     // isinstance, cpp dynamic_cast + optional engagement) gets it free.
+    // The region shapes join here, once every guard capture is in. An
+    // assertion form is honoured only for the pack's declared callees.
+    let regions = narrow_after
+        .into_iter()
+        .map(|(mid, at, sid)| (mid, Span { start: at, end: out.scopes[sid.0 as usize].span.end }, sid))
+        .chain(narrow_within);
+    for (mid, region, sid) in regions {
+        if narrow_assert.get(&mid).is_some_and(|c| !pack.narrow_assertions.contains(&c.as_str())) {
+            continue;
+        }
+        let (Some(var), Some(ty)) = (narrow_var.get(&mid), narrow_type.get(&mid)) else { continue };
+        let guard = narrow_guard.get(&mid).map(String::as_str);
+        if let Some(refined) = (pack.narrow_guard)(guard, ty).map(|r| ident_type(r, region.start)) {
+            pending_narrow.push(((pack.shape_name)("ref.var", var), refined, region, sid));
+        }
+    }
     for (name, refined, region, scope) in pending_narrow {
         let end = crate::model::file_analysis::earliest_rebind_in(&out.flow_edges, &name, region)
             .unwrap_or(region.end);
