@@ -3,6 +3,13 @@
 use super::*;
 
 impl<'a> CandidateSet<'a> {
+    /// Word-keyed fallbacks stand down inside an import row
+    /// (`PackFacts::import_row_covering`).
+    fn point_in_import_row(&self, point: tree_sitter::Point) -> bool {
+        let here = Span { start: point, end: point };
+        self.origin.pack.import_row_covering(&here).is_some()
+    }
+
     /// The def site of `member` on `class` — origin symbols first, then the
     /// class's own cached file. Serves the template-family ranked goto-def
     /// (one location per ladder class that actually defines the member).
@@ -895,9 +902,29 @@ impl<'a> CandidateSet<'a> {
                 // the picker when a real type declaration exists.
                 let mut type_hits: Vec<RefLocation> = Vec::new();
                 let mut value_hits: Vec<RefLocation> = Vec::new();
-                for cached in idx.visible_def_candidates(&r.target_name) {
+                // The identity the token names — a token INSIDE an import
+                // row names its class in full (`use SimplePie\XML\Parser as
+                // DeclarationParser;` means that `Parser`, not the file's
+                // own or a stranger's), anywhere else the file's use-map
+                // answer for the spelling. Inside a row the row's namespace
+                // is the only relevant one, so a candidate must declare the
+                // leaf under it.
+                let ident = analysis.spelled_identity(r);
+                let row_ns = analysis
+                    .pack
+                    .import_row_covering(&r.span)
+                    .and_then(|_| analysis.identity_namespace(&ident));
+                let names_target = |s: &crate::model::file_analysis::Symbol| {
+                    s.name == ident || s.name == r.target_name
+                };
+                for cached in idx.visible_def_candidates(&ident) {
                     if Url::from_file_path(&cached.path).is_ok() {
                         let whole = idx.whole_present(&cached);
+                        if let Some(ns) = row_ns.as_deref() {
+                            if whole.declared_class_namespace(&r.target_name).as_deref() != Some(ns) {
+                                continue;
+                            }
+                        }
                         let loc = |span| RefLocation {
                             key: FileKey::Path(cached.path.clone()),
                             span,
@@ -906,7 +933,7 @@ impl<'a> CandidateSet<'a> {
                             label: None,
                         };
                         if let Some(s) = whole.symbols().iter().find(|s| {
-                            s.name == r.target_name
+                            names_target(s)
                                 && matches!(
                                     s.kind,
                                     SymKind::Package | SymKind::Class | SymKind::Module
@@ -920,7 +947,7 @@ impl<'a> CandidateSet<'a> {
                         // file top. Pack-only structural gates; Perl module
                         // lookups keep the file-top fallback.
                         } else if let Some(s) = whole.symbols().iter().find(|s| {
-                            s.name == r.target_name
+                            names_target(s)
                                 && (whole.symbol_is_class_content(s)
                                     || whole.symbol_is_file_scope_value(s))
                         }) {
@@ -1180,8 +1207,10 @@ impl<'a> CandidateSet<'a> {
         // Last resort (pack): a token no query captures — a namespace middle
         // segment (`StatusCode` in `absl::StatusCode::kNotFound` is a
         // namespace_identifier, ref-less) — resolves by word to a named
-        // type/namespace def.
-        if self.pack {
+        // type/namespace def. Never inside an import row: `Http` in
+        // `use Illuminate\Http\Request;` names a namespace segment, and a
+        // same-named class elsewhere is not it.
+        if self.pack && !self.point_in_import_row(point) {
             if let Some(source) = self.source {
                 if let Some(word) = word_at_point(source, point) {
                     if let Some(loc) = self.type_def_location(word, idx) {
