@@ -776,6 +776,9 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     // flow.assign joins: match_id → (target name+scope, source span)
     let mut flow_targets: HashMap<usize, (String, ScopeId, Point)> = HashMap::new();
     let mut flow_sources: HashMap<usize, Span> = HashMap::new();
+    // `@flow.assign`: the match is a plain assignment to an existing local
+    // (`FlowEdge::reassigns`) — never a declaration or a member write.
+    let mut flow_assigns: std::collections::HashSet<usize> = Default::default();
     // Rebind shapes with no inflowing value (loop vars: `for x in …`,
     // `for (auto x : …)`) — they mint a `Rebind` FlowEdge so the narrowing
     // cutoff sees them, exactly like Perl's `foreach` var.
@@ -1618,6 +1621,21 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                     );
                 }
             }
+            // A member of the enclosing class as the flow target
+            // (`$this->foo = …`): the witness belongs at the CLASS scope,
+            // where the field's readers look, not at the method's.
+            "flow.target.member" => {
+                let class_scope = scope_stack
+                    .iter()
+                    .rev()
+                    .map(|&(_, sid)| sid)
+                    .find(|sid| class_body_scopes.contains(sid))
+                    .unwrap_or(cur_scope);
+                flow_targets.insert(
+                    e.match_id,
+                    ((pack.shape_name)("def.var", &e.text), class_scope, e.start),
+                );
+            }
             "flow.rebind" => {
                 flow_rebinds.push(((pack.shape_name)("def.var", &e.text), cur_scope, e.start));
             }
@@ -1645,6 +1663,9 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
             }
             "flow.source" => {
                 flow_sources.insert(e.match_id, Span { start: e.start, end: e.end });
+            }
+            "flow.assign" => {
+                flow_assigns.insert(e.match_id);
             }
             "type.annot" => {
                 annots.insert(e.match_id, e.text.clone());
@@ -1975,6 +1996,18 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     // HashMap-iteration order, flipping the latest-wins winner per process.
     let mut flow_mids: Vec<&usize> = flow_targets.keys().collect();
     flow_mids.sort_unstable();
+    // A member-expression rhs (`$q->where('a')`, `w.get()`) is a
+    // value-producing site whose value is NOT any literal inside it (that's
+    // an argument). The literal narrowing below exists for transparent
+    // wrappers only — when a member ref's invocant opens exactly at the
+    // source span, the rhs IS the member expression and the edge must stay
+    // on the full span (the member-chain arm / MCB lane resolve it).
+    let member_anchored: std::collections::HashSet<(usize, usize)> = out
+        .refs
+        .iter()
+        .filter(|r| r.kind == "member")
+        .filter_map(|r| r.invocant.as_ref().map(|(s, _)| (s.start.row, s.start.column)))
+        .collect();
     // A class/struct DATA MEMBER is visible throughout its class body
     // regardless of declaration order (C++ member lookup is not sequential:
     // a method reads a field declared later in a `private:` section below
@@ -2034,17 +2067,48 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
         }
         if let Some(src_span) = flow_sources.get(mid) {
             // Narrow onto the outermost literal the rhs wraps, when the
-            // rhs node itself carries no witness (paren wrappers).
+            // rhs node itself carries no witness (paren wrappers) — but
+            // never into a member expression's argument (see
+            // `member_anchored` above), and never when the rhs span
+            // ALREADY carries its own witness: a chain off a ctor
+            // receiver (`$x = (new W())->c()`) has the ctor as its
+            // largest inner literal, and narrowing onto it would hand
+            // the variable the receiver's class instead of the call's
+            // value (the rhs's own hop witness).
             let src_bytes = byte_range_of(&events, *mid, "flow.source");
-            let target_span = lit_spans
-                .iter()
-                .filter(|&&(s, en, _)| {
-                    src_bytes.is_some_and(|(ss, se)| s >= ss && en <= se)
-                })
-                .max_by_key(|&&(s, en, _)| en - s)
-                .map(|&(_, _, sp)| sp)
-                .filter(|sp| sp != src_span)
-                .unwrap_or(*src_span);
+            let rhs_has_own_witness = out.witnesses.iter().any(|w| {
+                matches!(
+                    &w.attachment,
+                    crate::model::witnesses::WitnessAttachment::Expr(sp)
+                        if sp.start == src_span.start && sp.end == src_span.end
+                )
+            });
+            let target_span = if rhs_has_own_witness
+                || member_anchored
+                    .contains(&(src_span.start.row, src_span.start.column))
+            {
+                *src_span
+            } else {
+                // Only a literal the rhs merely WRAPS (parentheses,
+                // whitespace) is the rhs's value — a literal that is an
+                // ARGUMENT of the rhs (`$r = $handler(new Request(), [])`)
+                // is not, and narrowing onto it handed the variable the
+                // argument's class.
+                let wraps = |s: usize, en: usize| {
+                    src_bytes.is_some_and(|(ss, se)| {
+                        s >= ss
+                            && en <= se
+                            && source[ss..s].iter().chain(source[en..se].iter()).all(|b| matches!(b, b'(' | b')' | b' ' | b'\t' | b'\r' | b'\n'))
+                    })
+                };
+                lit_spans
+                    .iter()
+                    .filter(|&&(s, en, _)| wraps(s, en))
+                    .max_by_key(|&&(s, en, _)| en - s)
+                    .map(|&(_, _, sp)| sp)
+                    .filter(|sp| sp != src_span)
+                    .unwrap_or(*src_span)
+            };
             // Mint a value-flow edge (cpp init is `Whole`); the witness is its
             // lowering, so type inference sees the same `Variable → Edge(Expr)`
             // it always did — now with the source span kept for provenance.
@@ -2054,7 +2118,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                 target_at: *at,
                 source: target_span,
                 extraction: crate::model::file_analysis::Extraction::Whole,
-                reassigns: false,
+                reassigns: flow_assigns.contains(mid),
             });
         }
     }
