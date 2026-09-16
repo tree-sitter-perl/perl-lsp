@@ -342,6 +342,10 @@ bitflags::bitflags! {
         /// A storage slot with a generated writer (Corinna `:writer` /
         /// `:mutator` / `:accessor`, Moo `is => 'rw'`).
         const WRITER = 1 << 14;
+        /// A handler registered on a class-named rail (`@def.handler.class.<rail>`
+        /// / `.by.<rail>`): it sits on another symbol's token (a listener's
+        /// `handle`), so listings show that symbol, not this one.
+        const CLASS_RAIL = 1 << 15;
     }
 }
 
@@ -392,6 +396,7 @@ impl TryFrom<&str> for SymbolFlags {
             "param" => SymbolFlags::PARAM,
             "reader" => SymbolFlags::READER,
             "writer" => SymbolFlags::WRITER,
+            "class_rail" => SymbolFlags::CLASS_RAIL,
             other => return Err(UnknownAttribute(other.to_string())),
         })
     }
