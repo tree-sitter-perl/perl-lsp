@@ -508,15 +508,24 @@ fn string_dispatch_signature_for(
         push_sig(&mut signatures, sym, None);
     }
     if let Some(idx) = module_index {
+        // Every file registered under the name — stacked registrations may
+        // live in a losing candidate. The module name is this lane's
+        // provenance, so it keeps its own walk instead of the file-level
+        // speller; the classless rail files follow, named by nothing.
         for module_name in idx.modules_with_symbol(handler_name) {
-            // Every file registered under the name — stacked registrations
-            // may live in a losing candidate.
             for cached in idx.visible_def_candidates(&module_name) {
                 let whole = idx.whole_present(&cached);
                 for sym in whole.symbols() {
                     if sym.name != handler_name { continue; }
                     push_sig(&mut signatures, sym, Some(module_name.as_str()));
                 }
+            }
+        }
+        for cached in idx.handler_def_files(handler_name) {
+            let whole = idx.whole_present(&cached);
+            for sym in whole.symbols() {
+                if sym.name != handler_name { continue; }
+                push_sig(&mut signatures, sym, None);
             }
         }
     }

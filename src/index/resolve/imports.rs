@@ -212,26 +212,25 @@ pub(super) fn dispatch_handler_locations(
 ) -> Vec<RefLocation> {
     use crate::model::file_analysis::SymbolDetail;
     let mut locs: Vec<RefLocation> = Vec::new();
-    for module_name in module_index.modules_with_symbol(name) {
-        // Every file registered under the name — stacked registrations
-        // may live in a losing candidate.
-        for cached in module_index.visible_def_candidates(&module_name) {
-            let whole = module_index.whole_present(&cached);
-            for sym in whole.symbols() {
-                if sym.name != name {
-                    continue;
-                }
-                if let SymbolDetail::Handler { owner: o, .. } = &sym.detail {
-                    if o == owner {
-                        locs.push(RefLocation {
-                            key: FileKey::Path(cached.path.clone()),
-                            span: sym.selection_span,
-                            access: AccessKind::Declaration,
-                            // a class-keyed rail's handler token spells the
-                            // class, never the rail name
-                            rewritable: names != crate::model::file_analysis::RailNames::Classes,
-                            label: None
-                        });
+    for cached in module_index.handler_candidate_files(name) {
+        let whole = module_index.whole_present(&cached);
+        for sym in whole.symbols() {
+            if sym.name != name {
+                continue;
+            }
+            if let SymbolDetail::Handler { owner: o, .. } = &sym.detail {
+                if o == owner {
+                    let loc = RefLocation {
+                        key: FileKey::Path(cached.path.clone()),
+                        span: sym.selection_span,
+                        access: AccessKind::Declaration,
+                        // a class-keyed rail's handler token spells the
+                        // class, never the rail name
+                        rewritable: names != crate::model::file_analysis::RailNames::Classes,
+                        label: None,
+                    };
+                    if !locs.iter().any(|l| l.key == loc.key && l.span == loc.span) {
+                        locs.push(loc);
                     }
                 }
             }
