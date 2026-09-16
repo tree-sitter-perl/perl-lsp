@@ -10,7 +10,16 @@ use crate::model::file_analysis::NameSpellings;
 /// MINIMAL on purpose so the findings honestly measure how far
 /// patterns alone go.
 pub struct LangPack {
+    /// The base skeleton query. Bundled overlays (`bundled_overlays`) are
+    /// appended at assembly, each test-compiled alone first, so one broken
+    /// document drops with a diagnostic instead of taking the language out.
     pub query_source: &'static str,
+    /// Bundled framework/stdlib overlays: (document name, source).
+    pub bundled_overlays: &'static [(&'static str, &'static str)],
+    /// The registry's language id (`"php"`, `"cpp"`, ...) — keys pack-plugin
+    /// query overlays (`<plugin-dir>/<name>/queries/<lang_id>.scm`,
+    /// docs/prompt-pack-plugins.md) onto the language they extend.
+    pub lang_id: &'static str,
     /// How the language spells names — its namespace separator and its
     /// variable sigils. Baked onto `PackFacts::names`; every key function
     /// reads it there.
@@ -19,11 +28,59 @@ pub struct LangPack {
     /// Perl variable). `capture_kind` is the vocabulary name
     /// (`def.var`, `ref.method`, ...) so one pack hook serves all.
     pub shape_name: fn(capture_kind: &str, raw: &str) -> String,
-    /// Name for defs with no name token (anonymous subs).
-    pub default_name: fn(kind: &str) -> Option<&'static str>,
+    /// Name for defs with no name token (anonymous subs, anonymous
+    /// classes), given the def's 0-based start position: a kind whose
+    /// instances must stay distinct (php's anonymous classes — two per test
+    /// file is normal) spells the position in; structure-only defaults
+    /// (`(anon)`, `(union)`) ignore it. The spelling must be
+    /// identifier-shaped: the name rides the bareword-class lanes.
+    pub default_name: fn(kind: &str, row: usize, col: usize) -> Option<String>,
     /// Map a `@type.annot` token's text to a type — the pack predicate
     /// for languages whose ring 3 is partly in the tree (`x: int`).
     pub annot_type: fn(text: &str) -> Option<InferredType>,
+    /// Does a `@rettype` spelling name the RECEIVER rather than a concrete
+    /// type (PHP `static`/`$this`/`self`)? The writeback then publishes
+    /// `ReturnExpr::Receiver` so fluent builders chain — asked of the pack,
+    /// never a name branch in the engine (rule #10).
+    pub rettype_receiver: fn(text: &str) -> bool,
+    /// Display vocabulary: engine type tag → this language's spelling
+    /// (php `"HashRef"` → `"array"`). Rides `PackFacts.type_display`;
+    /// every human surface translates through it. Empty = engine tags.
+    pub type_display: &'static [(&'static str, &'static str)],
+    /// Field types answer through the registry: each data-member decl mints
+    /// `PackageSymbol{class, field} → Edge(Variable)` so a property-access
+    /// hop (`$this->query->where(...)`) dispatches the field and chains.
+    /// True only where the registry IS the field-type authority (php).
+    /// False for cpp: its field answers go through the instantiation-aware
+    /// `member_value_type` lane (template-param substitution, typedef
+    /// display), and a registry edge answers the RAW declared type first —
+    /// `item_: T` instead of the substituted `int`.
+    pub field_registry_edges: bool,
+    /// Receiver tokens that name the ENCLOSING class itself for member
+    /// access (php `self::` / `static::`): no typeable value node, the class
+    /// is read off the cursor's scope chain — the `receiver_names` rule for
+    /// a scoped access. Empty = none.
+    pub self_class_tokens: &'static [&'static str],
+    /// Node kinds of a bare CLASS TOKEN in receiver position (php `Foo::m(`,
+    /// `App\Foo::CONST` — `name` / `qualified_name`): the receiver's value
+    /// is the class it spells (leaf-keyed, like every class identity).
+    /// Empty = none.
+    pub class_token_kinds: &'static [&'static str],
+    /// Are local variables FUNCTION-scoped (php: an assignment inside an
+    /// `if` block declares for the whole function, and re-assignment is a
+    /// REBIND of the same variable, not a fresh declaration)? Var defs
+    /// then anchor to the nearest enclosing sub scope and same-scope
+    /// re-assignments demote to write references — one identity per
+    /// function, so references/rename see every site instead of
+    /// per-assignment islands (round-3 R5: a rename from any island
+    /// rewrote a fragment and broke the code). False = block-scoped
+    /// (cpp) or handled natively (Perl's `my`).
+    pub function_scoped_vars: bool,
+    /// The pack's constructor-method names (php `__construct`): a Method
+    /// target with one of these names is the class's constructor, and its
+    /// references include the class's `new Foo(...)` sites (non-rewritable
+    /// — the token spells the class). Rides `PackFacts::constructor_names`.
+    pub constructor_names: &'static [&'static str],
     /// Module-name → workspace-relative candidate paths — the entire
     /// per-language cross-file resolution strategy ("the one executable
     /// line"). Python: `pkg.mod` → pkg/mod.py | pkg/mod/__init__.py.
@@ -312,6 +369,8 @@ pub enum CmdEffect {
 pub fn perl_pack() -> LangPack {
     LangPack {
         query_source: include_str!("../../../queries/perl/skeleton.scm"),
+        bundled_overlays: &[],
+        lang_id: "perl",
         names: crate::model::conventions::PERL_SPELLINGS,
         shape_name: |kind, raw| match kind {
             // The builder stores variable symbols WITH sigil; varname
@@ -320,11 +379,18 @@ pub fn perl_pack() -> LangPack {
             // already carries the sigil.
             _ => raw.to_string(),
         },
-        default_name: |kind| match kind {
-            "anon" => Some("(anon)"),
+        default_name: |kind, _, _| match kind {
+            "anon" => Some("(anon)".to_string()),
             _ => None,
         },
         annot_type: |_| None,
+        rettype_receiver: |_| false,
+        type_display: &[],
+        field_registry_edges: false,
+        self_class_tokens: &[],
+        class_token_kinds: &[],
+        function_scoped_vars: false,
+        constructor_names: &[],
         module_paths: |m| vec![format!("{}.pm", m.replace("::", "/"))],
         shape_ctor: |_| false,
         import_call: |_, _| None,
@@ -358,9 +424,11 @@ pub fn perl_pack() -> LangPack {
 pub fn python_pack() -> LangPack {
     LangPack {
         query_source: include_str!("../../../queries/python/skeleton.scm"),
+        bundled_overlays: &[],
+        lang_id: "python",
         names: NameSpellings::NONE,
         shape_name: |_, raw| raw.to_string(),
-        default_name: |_| None,
+        default_name: |_, _, _| None,
         annot_type: |text| match text.trim() {
             "str" => Some(InferredType::String),
             "int" | "float" => Some(InferredType::Numeric),
@@ -371,6 +439,13 @@ pub fn python_pack() -> LangPack {
             }
             _ => None,
         },
+        rettype_receiver: |_| false,
+        type_display: &[],
+        field_registry_edges: false,
+        self_class_tokens: &[],
+        class_token_kinds: &[],
+        function_scoped_vars: false,
+        constructor_names: &[],
         module_paths: |m| {
             let base = m.replace('.', "/");
             vec![format!("{base}.py"), format!("{base}/__init__.py")]
@@ -413,10 +488,19 @@ pub fn python_pack() -> LangPack {
 pub fn r_pack() -> LangPack {
     LangPack {
         query_source: include_str!("../../../queries/r/skeleton.scm"),
+        bundled_overlays: &[],
+        lang_id: "r",
         names: NameSpellings::NONE,
         shape_name: |_, raw| raw.to_string(),
-        default_name: |_| None,
+        default_name: |_, _, _| None,
         annot_type: |_| None,
+        rettype_receiver: |_| false,
+        type_display: &[],
+        field_registry_edges: false,
+        self_class_tokens: &[],
+        class_token_kinds: &[],
+        function_scoped_vars: false,
+        constructor_names: &[],
         // No reliable lexical ctor convention in R (S4/R5 exist but
         // rare); class typing arrives via shapes and S3 later.
         // source("util.R") hands us the path verbatim; library(pkg)
@@ -458,10 +542,19 @@ pub fn r_pack() -> LangPack {
 pub fn cmake_pack() -> LangPack {
     LangPack {
         query_source: include_str!("../../../queries/cmake/skeleton.scm"),
+        bundled_overlays: &[],
+        lang_id: "cmake",
         names: NameSpellings::NONE,
         shape_name: |_, raw| raw.to_string(),
-        default_name: |_| None,
+        default_name: |_, _, _| None,
         annot_type: |_| None,
+        rettype_receiver: |_| false,
+        type_display: &[],
+        field_registry_edges: false,
+        self_class_tokens: &[],
+        class_token_kinds: &[],
+        function_scoped_vars: false,
+        constructor_names: &[],
         // include(util.cmake) is a literal path; add_subdirectory(src)
         // means src/CMakeLists.txt. The whole resolution strategy.
         module_paths: |m| {
@@ -510,9 +603,12 @@ pub fn cmake_pack() -> LangPack {
     }
 }
 
+// Live only under `feature = "php"` (or the pack tests); see `python_pack`.
 pub fn cpp_pack() -> LangPack {
     LangPack {
         query_source: include_str!("../../../queries/cpp/skeleton.scm"),
+        bundled_overlays: &[],
+        lang_id: "cpp",
         names: NameSpellings::with_separator("::"),
         // Template spellings get ONE canonical whitespace form so a
         // specialization's identity (`formatter<int, char>`) matches
@@ -522,8 +618,8 @@ pub fn cpp_pack() -> LangPack {
         // an anonymous inline union has no name token of its own; the
         // synthetic container is outline structure, not an addressable
         // member (the "anonymous" attribute keeps it out of completion).
-        default_name: |kind| match kind {
-            "unionfield" => Some("(union)"),
+        default_name: |kind, _, _| match kind {
+            "unionfield" => Some("(union)".to_string()),
             _ => None,
         },
         // C++ declared types ARE the witness source. Primitives → the
@@ -567,6 +663,13 @@ pub fn cpp_pack() -> LangPack {
                 }
             }
         },
+        rettype_receiver: |_| false,
+        type_display: &[],
+        field_registry_edges: false,
+        self_class_tokens: &[],
+        class_token_kinds: &[],
+        function_scoped_vars: false,
+        constructor_names: &[],
         // #include "a/b.h" / <vector>: strip the delimiters; a quoted
         // path is workspace-relative verbatim, a system header resolves
         // through include dirs (library_roots, later). Tier 1: identity.
