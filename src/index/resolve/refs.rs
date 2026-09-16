@@ -658,10 +658,13 @@ fn walk_refs(
                 }
                 // Tier attribution: a FileStore workspace entry rides the
                 // WORKSPACE role (Perl project files); everything else the
-                // rows name lives in a module-index tier (DEPENDENCY —
-                // @INC and the pack caches). The mask must admit the
-                // candidate's OWN tier, or an EDITABLE rename would walk
-                // read-only deps (and vice versa).
+                // rows name lives in a module-index tier, whose role the
+                // INDEX answers per path (`is_dependency_path`): the hub is
+                // all-`@INC` (DEPENDENCY), a pack sub-index holds the
+                // workspace's own files (WORKSPACE) plus declared dependency
+                // roots — composer's vendor (DEPENDENCY). The mask must
+                // admit the candidate's OWN tier, or an EDITABLE rename
+                // would walk read-only deps (and vice versa).
                 let ws_arc = files
                     .workspace_raw()
                     .get(path)
@@ -677,7 +680,12 @@ fn walk_refs(
                         ))
                     }
                     None => {
-                        if !mask.contains(RoleMask::DEPENDENCY) {
+                        let role = if idx.is_dependency_path(&path) {
+                            RoleMask::DEPENDENCY
+                        } else {
+                            RoleMask::WORKSPACE
+                        };
+                        if !mask.contains(role) {
                             continue;
                         }
                         match idx.cached_by_path(path) {
@@ -741,14 +749,33 @@ fn walk_refs(
         }
     }
 
-    // Dependencies (read-only modules from @INC / the pack-language cache).
-    // Per-FILE sweep (`for_each_cached_file`): the name-keyed view both
-    // repeats files and HIDES a file that lost every name tie. Skip paths an
-    // open/workspace copy already covered — those are fresher.
-    if mask.contains(RoleMask::DEPENDENCY) {
+    // The module-index tiers: `@INC` dependencies AND — in a pack
+    // sub-index — the workspace's own files, attributed per path
+    // (`is_dependency_path`; declared dependency roots like composer's
+    // vendor are the read-only part). Per-FILE sweep
+    // (`for_each_cached_file`): the name-keyed view both repeats files and
+    // HIDES a file that lost every name tie. Skip paths an open/workspace
+    // copy already covered — those are fresher.
+    //
+    // An editable (workspace-only) query asks the index first whether it
+    // HAS a workspace tier: the hub's every file is `@INC`, so without the
+    // question a rename would sweep the whole dependency cache to reject
+    // it file by file.
+    let deps_tier_wanted = mask.contains(RoleMask::DEPENDENCY)
+        || (mask.contains(RoleMask::WORKSPACE)
+            && module_index.is_some_and(|i| i.has_workspace_tier()));
+    if deps_tier_wanted {
         let _t = crate::util::ghost_stats::ScopedNs::start("refs.sweep.deps");
         if let Some(idx) = module_index {
             idx.for_each_cached_file(&mut |cached| {
+                let role = if idx.is_dependency_path(&cached.path) {
+                    RoleMask::DEPENDENCY
+                } else {
+                    RoleMask::WORKSPACE
+                };
+                if !mask.contains(role) {
+                    return;
+                }
                 if !covered_paths.insert(cached.path.clone()) {
                     return;
                 }
