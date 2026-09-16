@@ -94,11 +94,26 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     // `@arity.args`.
     let mut arg_counts_by_start: std::collections::HashMap<(usize, usize), usize> =
         std::collections::HashMap::new();
+    // `f(...)` sites: a call with no countable arguments — still a call.
+    let mut placeholder_call_at: std::collections::HashSet<(usize, usize)> = std::collections::HashSet::new();
+    // The same facts keyed by the MATCH that captured the callee alongside
+    // its list: the call pattern joins the two, so `$this->m (1)` — a space
+    // before the parentheses — is still a call. Adjacency stays the fallback
+    // for shapes whose list lands in another match.
+    let mut arg_counts_by_match: HashMap<usize, usize> = HashMap::new();
+    let mut placeholder_by_match: std::collections::HashSet<usize> = Default::default();
     // A callable's declared parameter arity, keyed by the parameter_list span.
     // Associated to its def symbol by span containment in `into_file_analysis`
     // (`@arity.sig` fires a separate match from the def name).
     let mut param_sigs: Vec<(crate::model::file_analysis::Span, crate::model::file_analysis::ParamArity)> =
         Vec::new();
+    // Bare variables written as call arguments, keyed by the argument
+    // list's start (the callee token's end — the same adjacency the arity
+    // join uses): (position, the variable's name, its token start). The
+    // callee ref's push mints one binding edge per entry
+    // (`docs/adr/by-ref-binding.md`); the callee's bag decides which
+    // positions alias.
+    let mut arg_vars_by_start: HashMap<(usize, usize), Vec<(u32, String, Point)>> = HashMap::new();
     // A callable's by-reference parameter positions with their names, keyed
     // by the parameter list's span (joined to the def symbol like the arity).
     let mut by_ref_params: Vec<(crate::model::file_analysis::Span, u32, String, crate::model::file_analysis::Span)> =
@@ -213,9 +228,53 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
             // named children; the C `...` at a CALL site never appears here).
             // Keyed by the list's start so the callee ref finds it by adjacency.
             if cap == "arity.args" {
-                arg_counts_by_start
-                    .insert((node.start_position().row, node.start_position().column),
-                            node.named_child_count());
+                // `f(...)` passes nothing — a first-class callable, not a call;
+                // `f(...$args)` passes an unknowable number. Neither mints a
+                // count: the callee still reads as callable, the arity lane
+                // stands down.
+                let placeholder = (0..node.named_child_count())
+                    .filter_map(|i| node.named_child(i))
+                    .any(|c| {
+                        (!pack.callable_placeholder_kind.is_empty()
+                            && c.kind() == pack.callable_placeholder_kind)
+                            // the spread sits inside an `argument` wrapper
+                            || (!pack.spread_arg_kind.is_empty()
+                                && (c.kind() == pack.spread_arg_kind
+                                    || c.named_child(0).is_some_and(|g| g.kind() == pack.spread_arg_kind)))
+                    });
+                if !placeholder {
+                    arg_counts_by_start
+                        .insert((node.start_position().row, node.start_position().column),
+                                node.named_child_count());
+                    arg_counts_by_match.insert(match_counter, node.named_child_count());
+                    for (position, arg) in
+                        (0..node.named_child_count()).filter_map(|i| node.named_child(i)).enumerate()
+                    {
+                        // a named argument (`f(out: $x)`) is matched by
+                        // name, not position — no site
+                        if arg.child_by_field_name("name").is_some() {
+                            continue;
+                        }
+                        // the bare variable itself, or its one-child wrapper
+                        // (php's `argument` node)
+                        let inner = if pack.simple_var_kinds.contains(&arg.kind()) {
+                            Some(arg)
+                        } else if arg.named_child_count() == 1 {
+                            arg.named_child(0).filter(|n| pack.simple_var_kinds.contains(&n.kind()))
+                        } else {
+                            None
+                        };
+                        let Some(inner) = inner else { continue };
+                        let text = inner.utf8_text(source).unwrap_or("");
+                        arg_vars_by_start
+                            .entry((node.start_position().row, node.start_position().column))
+                            .or_default()
+                            .push((position as u32, (pack.shape_name)("def.var", text), inner.start_position()));
+                    }
+                } else {
+                    placeholder_call_at.insert((node.start_position().row, node.start_position().column));
+                    placeholder_by_match.insert(match_counter);
+                }
                 continue;
             }
             // `@arity.sig`: a callable's parameter_list — count declared params
@@ -1148,9 +1207,23 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                         // method token ends; plain (uncalled) member/type refs
                         // have no adjacent arg list and stay `None`.
                         arg_count: matches!(e.cap.as_str(), "ref.call" | "ref.qcall" | "ref.member")
-                            .then(|| arg_counts_by_start.get(&(e.end.row, e.end.column)).copied())
+                            .then(|| {
+                                arg_counts_by_match
+                                    .get(&e.match_id)
+                                    .or_else(|| arg_counts_by_start.get(&(e.end.row, e.end.column)))
+                                    .copied()
+                            })
                             .flatten(),
-                        value_read: false,
+                        // A member token whose match carries an argument list
+                        // names a callable; without one it reads a value and
+                        // mints a `FieldAccess`. Only member tokens carry the
+                        // fact (a plain call is a callable by construction, a
+                        // type ref neither).
+                        value_read: e.cap == "ref.member"
+                            && !(arg_counts_by_match.contains_key(&e.match_id)
+                                || placeholder_by_match.contains(&e.match_id)
+                                || arg_counts_by_start.contains_key(&(e.end.row, e.end.column))
+                                || placeholder_call_at.contains(&(e.end.row, e.end.column))),
                         named_by_string: false,
                     });
                 }
