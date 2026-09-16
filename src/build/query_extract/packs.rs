@@ -161,6 +161,10 @@ pub struct LangPack {
     /// indentation-scoped (Python) or non-nesting packs.
     /// `docs/adr/config-superposition-declarations.md`.
     pub brace_scoped_members: bool,
+    /// The call expressions signature help can anchor on: node kind, the
+    /// field naming the callee token, the field holding the argument list.
+    /// Empty = the language declares no signature help.
+    pub call_shapes: &'static [CallShape],
     /// Completion trigger characters for the LSP
     /// `completionProvider.triggerCharacters` slot — the client auto-fires
     /// completion (and reports the char in `CompletionContext`) when one is
@@ -350,6 +354,18 @@ pub(crate) const C_FIELD_DECL_PEEL: PeelSpec = PeelSpec {
     record_stack: true,
 };
 
+/// A call-expression shape signature help climbs to from the cursor
+/// (`cursor_sentinel::call_at`).
+#[derive(Debug, Clone, Copy)]
+pub struct CallShape {
+    pub kind: &'static str,
+    /// Field naming the callee token (a member call's `name`, a function
+    /// call's `function`); the LAST `name`-like descendant is the token.
+    pub callee_field: &'static str,
+    /// Field holding the argument list node.
+    pub args_field: &'static str,
+}
+
 /// One type fact parsed from a documentation comment (`LangPack::doc_types`).
 /// The type is a raw spelling the pack has already normalized to what its
 /// `annot_type` accepts (generics stripped, `X|null` collapsed to `X`).
@@ -456,6 +472,7 @@ pub fn perl_pack() -> LangPack {
         preprocessor_macros: false,
         entrypoint_symbols: &[],
         brace_scoped_members: false,
+        call_shapes: &[],
         trigger_chars: &["$", "@", "%", ">", ":", "{"],
         receiver_names: &[],
         nested_peel: PeelSpec { wrappers: &[], annot_kinds: &[], leaf_to_def: &[], record_stack: true },
@@ -516,6 +533,7 @@ pub fn python_pack() -> LangPack {
         preprocessor_macros: false,
         entrypoint_symbols: &[],
         brace_scoped_members: false,
+        call_shapes: &[],
         trigger_chars: &["."],
         receiver_names: &["self", "cls"],
         nested_peel: PeelSpec { wrappers: &[], annot_kinds: &[], leaf_to_def: &[], record_stack: true },
@@ -576,6 +594,7 @@ pub fn r_pack() -> LangPack {
         preprocessor_macros: false,
         entrypoint_symbols: &[],
         brace_scoped_members: false,
+        call_shapes: &[],
         trigger_chars: &["$", "@", ":"],
         receiver_names: &[],
         nested_peel: PeelSpec { wrappers: &[], annot_kinds: &[], leaf_to_def: &[], record_stack: true },
@@ -644,6 +663,7 @@ pub fn cmake_pack() -> LangPack {
         preprocessor_macros: false,
         entrypoint_symbols: &[],
         brace_scoped_members: false,
+        call_shapes: &[],
         trigger_chars: &["{", "("],
         receiver_names: &[],
         nested_peel: PeelSpec { wrappers: &[], annot_kinds: &[], leaf_to_def: &[], record_stack: true },
@@ -766,6 +786,7 @@ pub fn cpp_pack() -> LangPack {
         preprocessor_macros: true,
         entrypoint_symbols: &["main"],
         brace_scoped_members: true,
+        call_shapes: &[],
         trigger_chars: &[".", ">", ":"],
         receiver_names: &["this"],
         // `field_identifier` only ever names a struct/class member (the
