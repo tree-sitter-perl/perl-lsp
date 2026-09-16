@@ -3207,6 +3207,75 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
             out.refs.extend(doc_refs);
         }
     }
+    // @inheritDoc param inheritance every syntax-untyped,
+    // locally-undocumented PARAM edges to a class-keyed row
+    // (`PackageSymbol{class, "method#p#$name"}`); the doc-join above
+    // publishes the row where an ancestor's docblock declares the type,
+    // and the registry's inheritance walk carries it across files. A
+    // dangling edge (nothing ever publishes) resolves to None for free.
+    {
+        let method_rows: Vec<(String, String, Span)> = out
+            .symbols
+            .iter()
+            .filter(|s| matches!(s.kind.as_str(), "sub" | "method"))
+            .filter_map(|s| {
+                s.package
+                    .as_ref()
+                    .map(|p| (p.clone(), s.name.clone(), Span { start: s.start, end: s.end }))
+            })
+            .collect();
+        let in_span = |p: Point, sp: &Span| {
+            (p.row, p.column) >= (sp.start.row, sp.start.column)
+                && (p.row, p.column) <= (sp.end.row, sp.end.column)
+        };
+        let mut edges: Vec<crate::model::witnesses::Witness> = Vec::new();
+        // NB: the local `param_sigs` vec — it moves into `out` only at the
+        // end of this fn, so `out.param_sigs` is still empty here.
+        for (sig_span, _) in &param_sigs {
+            let Some((cls, method, _)) = method_rows
+                .iter()
+                .find(|(_, _, msp)| in_span(sig_span.start, msp))
+            else {
+                continue;
+            };
+            for v in out
+                .symbols
+                .iter()
+                .filter(|v| v.kind == "var" && in_span(v.start, sig_span))
+            {
+                // A specifically-typed param never subscribes; a BARE
+                // container annot (`array $records`) still does — the whole
+                // @inheritDoc idiom is "syntax says array, the ancestor's
+                // doc says which element type" (same refinement rule as
+                // `doc_admits`).
+                if let Some(annot) = annot_text_by_var.get(&(v.name.clone(), v.scope)) {
+                    if !matches!(
+                        (pack.annot_type)(annot),
+                        Some(InferredType::HashRef | InferredType::ArrayRef)
+                    ) {
+                        continue;
+                    }
+                }
+                edges.push(crate::model::witnesses::Witness {
+                    attachment: crate::model::witnesses::WitnessAttachment::Variable {
+                        name: v.name.clone(),
+                        scope: v.scope,
+                    },
+                    source: crate::model::witnesses::WitnessSource::Annotation(
+                        crate::model::witnesses::AnnotationKind::InheritedParam,
+                    ),
+                    payload: crate::model::witnesses::WitnessPayload::Edge(
+                        crate::model::witnesses::WitnessAttachment::PackageSymbol {
+                            package: cls.clone(),
+                            name: format!("{}#p#{}", method, v.name),
+                        },
+                    ),
+                    span: Span { start: v.start, end: v.start },
+                });
+            }
+        }
+        out.witnesses.extend(edges);
+    }
 
     // Access-modifier stamp: the `@nonpublic.target` name spans mark
     // members whose modifier means non-public — the same `non_public`
