@@ -866,6 +866,7 @@ fn inject_member_blocks(
             kind: ScopeKind::Class { name: base.macro_name.clone() },
             span: base.body_scope_span,
             package: Some(base.macro_name.clone()),
+            owner: None,
         });
         skel.scope_count = skel.scopes.len();
         for m in &base.members {

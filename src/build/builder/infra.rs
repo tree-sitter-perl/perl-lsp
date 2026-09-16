@@ -21,6 +21,7 @@ impl<'a> Builder<'a> {
             parent,
             kind,
             span,
+            owner: None,
             package: pkg,
         });
         self.scope_stack.push(id);
@@ -116,25 +117,24 @@ impl<'a> Builder<'a> {
         self.add_symbol_ns(name, kind, span, selection_span, detail, Namespace::Language)
     }
 
-    /// Where `var` is bound inside `scope` — the earliest declaring
-    /// `Variable` symbol within the scope's span. The anchor every fact
-    /// about a parameter lands at, so the declaration's own write marker
-    /// (which retires everything strictly before it) leaves the fact
-    /// standing; `None` when nothing declares it (a `$_[0]` read). Reads
-    /// the name index: O(symbols sharing the name), never O(symbols).
+    /// Where parameter `var` of the callable owning `scope` is bound — the
+    /// site its `ParamInfo` carries. `None` when the scope owns no callable
+    /// or the callable declares no such parameter (a `$_[0]` read).
     pub(super) fn binding_site_of(&self, var: &str, scope: ScopeId) -> Option<Point> {
-        let region = self.scopes.get(scope.0 as usize)?.span;
-        self.symbols_by_name
-            .get(var)
-            .into_iter()
-            .flatten()
-            .map(|id| &self.symbols[id.0 as usize])
-            .filter(|s| {
-                matches!(s.kind, SymKind::Variable)
-                    && crate::model::file_analysis::contains_point(&region, s.selection_span.start)
-            })
-            .map(|s| s.selection_span.start)
-            .min_by_key(|p| (p.row, p.column))
+        let owner = self.scopes.get(scope.0 as usize)?.owner?;
+        match &self.symbols[owner.0 as usize].detail {
+            SymbolDetail::Sub { params, .. } => params.iter().find(|p| p.name == var)?.binding_site,
+            _ => None,
+        }
+    }
+
+    /// Push the body scope of callable `owner`, recording the pairing both
+    /// ways (`Scope::owner`, `owner_scope`).
+    pub(super) fn push_callable_scope(&mut self, kind: ScopeKind, span: Span, owner: SymbolId) -> ScopeId {
+        let id = self.push_scope(kind, span, None);
+        self.scopes[id.0 as usize].owner = Some(owner);
+        self.owner_scope.insert(owner, id);
+        id
     }
 
     /// Record that `a` and `b` were minted from one declaration token
@@ -177,7 +177,6 @@ impl<'a> Builder<'a> {
     ) -> SymbolId {
         let id = SymbolId(self.next_symbol_id);
         self.next_symbol_id += 1;
-        self.symbols_by_name.entry(name.clone()).or_default().push(id);
         // Every symbol attaches to the current lexical scope. Package
         // context lives separately in `package_ranges`; the variable
         // resolver gates `our` decls by package match at lookup time

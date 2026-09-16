@@ -420,6 +420,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
         kind: ScopeKind::File,
         span: Span { start: tree.root_node().start_position(), end: tree.root_node().end_position() },
         package: None,
+        owner: None,
     });
     scope_stack.push((tree.root_node().end_byte(), ScopeId(0)));
 
@@ -543,6 +544,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                     },
                     span: Span { start: e.start, end: e.end },
                     package: package.clone(),
+                    owner: None,
                 });
                 scope_stack.push((e.end_byte, id));
                 out.scope_count += 1;

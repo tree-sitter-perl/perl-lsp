@@ -772,7 +772,7 @@ impl<'a> Builder<'a> {
         // keep it) but not a workspace-addressable entity (workspace
         // search drops it).
         let lexical = node.child_by_field_name("lexical").is_some();
-        self.add_symbol(
+        let sub_id = self.add_symbol(
             name.clone(),
             if is_method { SymKind::Method } else { SymKind::Sub },
             node_to_span(node),
@@ -802,7 +802,7 @@ impl<'a> Builder<'a> {
         } else {
             ScopeKind::Sub { name: name.clone() }
         };
-        self.push_scope(scope_kind, node_to_span(node), None);
+        self.push_callable_scope(scope_kind, node_to_span(node), sub_id);
 
         // Record signature params as Variable symbols in the sub scope
         self.record_signature_params(node, &params);
@@ -877,12 +877,8 @@ impl<'a> Builder<'a> {
             }
         }
         let span = node_to_span(node);
-        self.ensure_anon_sub_symbol(node, &params);
-        self.push_scope(
-            ScopeKind::Sub { name: "(anon)".into() },
-            span,
-            None,
-        );
+        let sub_id = self.ensure_anon_sub_symbol(node, &params);
+        self.push_callable_scope(ScopeKind::Sub { name: "(anon)".into() }, span, sub_id);
         self.record_signature_params(node, &params);
         self.detect_first_param_type(&params, node);
         self.queue_children_then(node, |b| { b.pop_scope(); });
@@ -978,9 +974,9 @@ impl<'a> Builder<'a> {
                         if let Some(left) = assign.child_by_field_name("left") {
                             let at_params: Vec<ParamInfo> = self.collect_vars_from_decl(left)
                                 .into_iter()
-                                .map(|(name, _)| {
+                                .map(|(name, span)| {
                                     let is_slurpy = name.starts_with('@') || name.starts_with('%');
-                                    ParamInfo { name, default: None, is_slurpy, is_invocant: false }
+                                    ParamInfo { name, default: None, is_slurpy, is_invocant: false, binding_site: Some(span.start) }
                                 })
                                 .collect();
                             // Combine any preceding shift params with @_ params
@@ -1006,9 +1002,9 @@ impl<'a> Builder<'a> {
                         if let Some(left) = assign.child_by_field_name("left") {
                             let list_params: Vec<ParamInfo> = self.collect_vars_from_decl(left)
                                 .into_iter()
-                                .map(|(name, _)| {
+                                .map(|(name, span)| {
                                     let is_slurpy = name.starts_with('@') || name.starts_with('%');
-                                    ParamInfo { name, default: None, is_slurpy, is_invocant: false }
+                                    ParamInfo { name, default: None, is_slurpy, is_invocant: false, binding_site: Some(span.start) }
                                 })
                                 .collect();
                             if !list_params.is_empty() {
@@ -1019,12 +1015,18 @@ impl<'a> Builder<'a> {
                     }
 
                     // Pattern: my $var = shift; or my $var = shift || default; or my $var = shift // default;
+                    // The declared variable's own token binds either form.
+                    let binding_site = assign
+                        .child_by_field_name("left")
+                        .and_then(|l| self.collect_vars_from_decl(l).into_iter().next())
+                        .map(|(_, span)| span.start);
                     if let Some((var_name, default)) = self.extract_shift_param(assign, right) {
                         shift_params.push(ParamInfo {
                             name: var_name,
                             default,
                             is_slurpy: false,
-                    is_invocant: false,
+                            is_invocant: false,
+                            binding_site,
                         });
                         continue;
                     }
@@ -1035,7 +1037,8 @@ impl<'a> Builder<'a> {
                             name: var_name,
                             default: None,
                             is_slurpy: false,
-                    is_invocant: false,
+                            is_invocant: false,
+                            binding_site,
                         });
                         continue;
                     }
@@ -1125,7 +1128,7 @@ impl<'a> Builder<'a> {
                 match param.kind() {
                     "mandatory_parameter" => {
                         if let Some(var) = self.first_var_child(param) {
-                            params.push(ParamInfo { name: var, default: None, is_slurpy: false, is_invocant: false });
+                            params.push(ParamInfo { name: var, default: None, is_slurpy: false, is_invocant: false, binding_site: Some(param.start_position()) });
                         }
                     }
                     "optional_parameter" => {
@@ -1138,18 +1141,18 @@ impl<'a> Builder<'a> {
                             .and_then(|d| d.utf8_text(self.source).ok())
                             .map(|s| s.to_string());
                         if let Some(name) = var {
-                            params.push(ParamInfo { name, default, is_slurpy: false, is_invocant: false });
+                            params.push(ParamInfo { name, default, is_slurpy: false, is_invocant: false, binding_site: Some(param.start_position()) });
                         }
                     }
                     "slurpy_parameter" => {
                         if let Some(var) = self.first_var_child(param) {
-                            params.push(ParamInfo { name: var, default: None, is_slurpy: true, is_invocant: false });
+                            params.push(ParamInfo { name: var, default: None, is_slurpy: true, is_invocant: false, binding_site: Some(param.start_position()) });
                         }
                     }
                     "scalar" | "array" | "hash" => {
                         if let Ok(text) = param.utf8_text(self.source) {
                             let is_slurpy = matches!(param.kind(), "array" | "hash");
-                            params.push(ParamInfo { name: text.to_string(), default: None, is_slurpy, is_invocant: false });
+                            params.push(ParamInfo { name: text.to_string(), default: None, is_slurpy, is_invocant: false, binding_site: Some(param.start_position()) });
                         }
                     }
                     _ => {}
@@ -1232,8 +1235,10 @@ impl<'a> Builder<'a> {
             // Anchored at the parameter's binding token, like every other
             // parameter assertion: the declaration's own write marker
             // retires only what lies strictly before it.
-            let span = self
-                .param_binding_site(node, &variable)
+            let span = params
+                .iter()
+                .find(|p| p.name == variable)
+                .and_then(|p| p.binding_site)
                 .map(|p| Span { start: p, end: p })
                 .unwrap_or_else(|| node_to_span(node));
             if from_loader {
@@ -1295,46 +1300,6 @@ impl<'a> Builder<'a> {
         }
     }
 
-    /// The token that binds `name` in `sub_node`: its signature parameter,
-    /// else the leading `my (…) = @_` / `my $x = shift` declaration of the
-    /// body. `None` when the sub reads `@_` without ever binding the name.
-    pub(super) fn param_binding_site(&self, sub_node: Node<'a>, name: &str) -> Option<Point> {
-        for i in 0..sub_node.child_count() {
-            if let Some(sig) = sub_node.child(i) {
-                if sig.kind() == "signature" {
-                    for j in 0..sig.named_child_count() {
-                        if let Some(param) = sig.named_child(j) {
-                            if self.first_var_child(param).as_deref() == Some(name) {
-                                return Some(param.start_position());
-                            }
-                        }
-                    }
-                    return None;
-                }
-            }
-        }
-        let body = sub_node.child_by_field_name("body")?;
-        for i in 0..body.named_child_count() {
-            let Some(stmt) = body.named_child(i) else { continue };
-            let assign = if stmt.kind() == "expression_statement" {
-                stmt.named_child(0).filter(|n| n.kind() == "assignment_expression")
-            } else if stmt.kind() == "assignment_expression" {
-                Some(stmt)
-            } else {
-                None
-            };
-            let Some(assign) = assign else { break };
-            let Some(left) = assign.child_by_field_name("left") else { continue };
-            if left.kind() != "variable_declaration" {
-                continue;
-            }
-            if let Some((_, span)) = self.collect_vars_from_decl(left).into_iter().find(|(n, _)| n == name) {
-                return Some(span.start);
-            }
-        }
-        None
-    }
-
     pub(super) fn detect_first_param_type(&mut self, params: &[ParamInfo], node: Node<'a>) {
         // Find the first param with `is_invocant = true` — normally params[0] for
         // regular methods, but params[1] for `around` modifiers (params[0] is $orig).
@@ -1354,8 +1319,8 @@ impl<'a> Builder<'a> {
             let head = InferredType::FirstParam { package: pkg };
             // Anchored at the invocant's binding token: the declaration's
             // own write marker retires only what lies strictly before it.
-            let at = self
-                .param_binding_site(node, &invocant.name)
+            let at = invocant
+                .binding_site
                 .map(|p| Span { start: p, end: p })
                 .unwrap_or(span);
             self.push_type_constraint(TypeConstraint {
@@ -1513,7 +1478,8 @@ impl<'a> Builder<'a> {
                                 name: format!("${}", bare_name),
                                 default: None,
                                 is_slurpy: false,
-                    is_invocant: false,
+                                is_invocant: false,
+                                binding_site: None,
                             }],
                             is_method: true,
                             doc: None,

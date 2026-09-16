@@ -458,6 +458,7 @@ impl<'a> Builder<'a> {
                         default: None,
                         is_slurpy: false,
                         is_invocant: false,
+                    binding_site: None,
                     }],
                     is_method: true,
                     doc: None,

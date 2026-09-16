@@ -102,6 +102,12 @@ pub struct Scope {
     /// For `package Foo;` regions, this is "Foo".
     /// Inherited from parent when not overridden.
     pub package: Option<String>,
+    /// The callable this scope is the body of (a Sub / Method scope's own
+    /// symbol), minted when the scope is pushed. The one hop from a scope
+    /// to its parameters — `binding_site_of`, the enclosing-callable
+    /// question — so neither is a span scan. `None` for every other scope.
+    #[serde(default)]
+    pub owner: Option<SymbolId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -884,6 +890,14 @@ pub struct ParamInfo {
     /// this — the core never infers it from the name.
     #[serde(default)]
     pub is_invocant: bool,
+    /// Where the parameter is BOUND: its signature token, or the `my (…) =
+    /// @_` / `my $x = shift` declaration that unpacks it. Minted where the
+    /// extractor reads that token (rule #11), so every parameter-anchored
+    /// fact lands here and the declaration's own write marker leaves it
+    /// standing. `None` for a synthesized parameter (a generated writer's
+    /// value, a plugin-declared signature) — nothing in the source binds it.
+    #[serde(default, with = "point_opt_serde")]
+    pub binding_site: Option<Point>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

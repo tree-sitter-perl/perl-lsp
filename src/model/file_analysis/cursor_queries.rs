@@ -25,6 +25,17 @@ impl FileAnalysis {
     /// incoming projection groups reference sites by. `None` for top-level
     /// code (import-time calls, scripts): there is no callable to report.
     pub fn enclosing_callable_at(&self, point: Point) -> Option<&Symbol> {
+        // The scope chain carries the owner: the first scope up the chain
+        // that is a callable's body names it.
+        let mut cur = self.scope_at(point);
+        while let Some(id) = cur {
+            let sc = self.scope(id);
+            if let Some(owner) = sc.owner {
+                return Some(self.symbol(owner));
+            }
+            cur = sc.parent;
+        }
+        // A pack scope carries no owner yet: the span walk answers there.
         self.symbols
             .iter()
             .filter(|s| {

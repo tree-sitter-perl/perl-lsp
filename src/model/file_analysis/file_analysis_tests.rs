@@ -15,6 +15,7 @@ fn fa_with_constraints(constraints: Vec<TypeConstraint>) -> FileAnalysis {
                 end: Point::new(10, 0),
             },
             package: None,
+            owner: None,
         }],
         ..Default::default()
     });
@@ -128,6 +129,7 @@ fn test_resolve_sub_return_type() {
                 end: Point::new(10, 0),
             },
             package: None,
+            owner: None,
         }],
         symbols: vec![Symbol {
             id: SymbolId(0),

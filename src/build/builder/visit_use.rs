@@ -1669,31 +1669,14 @@ impl<'a> Builder<'a> {
                 SymbolDetail::Sub { params, .. } => params,
                 _ => continue,
             };
-            let var_name = match params.get(d.param_index) {
-                Some(p) if p.name.starts_with('$') => p.name.clone(),
+            let (var_name, binding_site) = match params.get(d.param_index) {
+                Some(p) if p.name.starts_with('$') => (p.name.clone(), p.binding_site),
                 _ => continue,
             };
             let sub_span = target.span;
-            // The sub's body scope: a Sub/Method scope whose span matches the
-            // declaration span. `record_signature_params` / `my $c = shift`
-            // both put the param variable in this scope.
-            let scope = self
-                .scopes
-                .iter()
-                .find(|s| {
-                    matches!(&s.kind, ScopeKind::Sub { name } | ScopeKind::Method { name } if *name == d.sub_name)
-                        && s.span == sub_span
-                })
-                .map(|s| s.id);
-            let scope = match scope {
-                Some(s) => s,
-                None => continue,
-            };
-            // Anchored at the parameter's binding site (see `binding_site_of`).
-            let at = self
-                .binding_site_of(&var_name, scope)
-                .map(|p| Span { start: p, end: p })
-                .unwrap_or(sub_span);
+            let Some(&scope) = self.owner_scope.get(&target.id) else { continue };
+            // Anchored at the parameter's binding site, else the sub.
+            let at = binding_site.map(|p| Span { start: p, end: p }).unwrap_or(sub_span);
             self.push_plugin_type_constraint(
                 TypeConstraint {
                     variable: var_name,

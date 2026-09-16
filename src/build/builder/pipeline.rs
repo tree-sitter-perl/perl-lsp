@@ -139,6 +139,7 @@ fn too_deep_analysis(tree: &Tree, depth: usize) -> FileAnalysis {
             kind: ScopeKind::File,
             span: node_to_span(tree.root_node()),
             package: Some("main".to_string()),
+            owner: None,
         }],
         plugin: crate::model::file_analysis::PluginFacts {
             diagnostics: vec![PluginDiagnostic {
@@ -277,7 +278,7 @@ fn build_once(
         source,
         scopes: Vec::new(),
         symbols: Vec::new(),
-        symbols_by_name: std::collections::HashMap::new(),
+        owner_scope: std::collections::HashMap::new(),
         refs: Vec::new(),
         deferred_var_types: Vec::new(),
         deferred_named_sub_param_types: Vec::new(),

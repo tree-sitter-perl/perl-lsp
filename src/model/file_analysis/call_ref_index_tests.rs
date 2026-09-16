@@ -363,6 +363,7 @@ fn equal_span_first_write_wins() {
                 end: Point::new(10, 0),
             },
             package: None,
+            owner: None,
         }],
         refs,
         ..Default::default()

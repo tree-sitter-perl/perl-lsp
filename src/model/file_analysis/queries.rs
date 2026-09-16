@@ -9,16 +9,11 @@ impl FileAnalysis {
     /// about a parameter lands at (a declaration's write marker retires
     /// only what lies strictly before it); `None` when nothing declares it.
     pub fn binding_site_of(&self, var: &str, scope: ScopeId) -> Option<Point> {
-        let region = self.scopes.get(scope.0 as usize)?.span;
-        self.symbols_named(var)
-            .iter()
-            .map(|&id| self.symbol(id))
-            .filter(|s| {
-                matches!(s.kind, SymKind::Variable)
-                    && contains_point(&region, s.selection_span.start)
-            })
-            .map(|s| s.selection_span.start)
-            .min_by_key(|p| (p.row, p.column))
+        let owner = self.scopes.get(scope.0 as usize)?.owner?;
+        match &self.symbol(owner).detail {
+            SymbolDetail::Sub { params, .. } => params.iter().find(|p| p.name == var)?.binding_site,
+            _ => None,
+        }
     }
 
     // ---- Query methods ----
