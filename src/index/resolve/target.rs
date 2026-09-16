@@ -3,6 +3,7 @@
 //! the per-feature policy those types carry (rename scope/options, group
 //! member rename rules).
 use super::*;
+use crate::model::file_analysis::RailNames;
 
 /// How a method that participates in an inheritance hierarchy is scoped for
 /// references + rename — `initializationOptions.rename.overrideScope`.
@@ -285,7 +286,8 @@ impl TargetRef {
             }
             RenameKind::Package(name) => TargetRef::new(name, TargetKind::Package, origin),
             RenameKind::Handler { owner, name } => {
-                TargetRef::new(name.clone(), TargetKind::Handler { owner, name }, origin)
+                let names = owner.names_are(&origin.pack);
+                TargetRef::new(name.clone(), TargetKind::Handler { owner, name, names }, origin)
             }
             RenameKind::HashKey(_) | RenameKind::Variable => return None,
         })
@@ -395,6 +397,11 @@ pub enum TargetKind {
     Handler {
         owner: HandlerOwner,
         name: String,
+        /// What the rail's names denote, minted from the origin's rail
+        /// declarations (`HandlerOwner::names_are`): a class-keyed rail's
+        /// spans are emission/handler tokens of the CLASS, so its target is
+        /// navigable but never rewritten.
+        names: RailNames,
     },
     /// A pack-language file-scope value reachable by BARE NAME from any file
     /// that can see it (C's flat linkage): an object- or function-like
