@@ -473,6 +473,24 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
         if e.cap == "key.elem" {
             key_elem_by_match.insert(e.match_id, Span { start: e.start, end: e.end });
         }
+        if e.cap == "seq.source.key" {
+            seq_key_by_match.insert(
+                e.match_id,
+                (
+                    crate::model::file_analysis::Span { start: e.start, end: e.end },
+                    e.text.clone(),
+                ),
+            );
+        }
+        if e.cap == "seq.source" {
+            seq_source_by_match.insert(
+                e.match_id,
+                (
+                    crate::model::file_analysis::Span { start: e.start, end: e.end },
+                    e.text.clone(),
+                ),
+            );
+        }
     }
     // `@ns.inline` — an inline namespace's NAME token, fired by a name-only
     // sibling pattern (its def/scope/context come from the base namespace
@@ -1261,6 +1279,79 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                 if let Some(primary) = spec_primary_by_match.get(&e.match_id) {
                     out.specializations
                         .push((shaped.clone(), (pack.shape_name)("spec.primary", primary)));
+                }
+                // Registry field edge (pack-gated — see `field_registry_edges`
+                // on `LangPack`): a data member's type lives as a Variable
+                // witness in its declaring scope, and this edge lets a
+                // property-access hop dispatch the field through the same
+                // class-keyed chase methods use.
+                // Foreach element peel: the loop var's value IS the
+                // collection's uniform element, deferred to query time via
+                // `Projected{base, Element}`. A simple-variable collection
+                // bases on the Variable (its witnesses live on the decl
+                // scope); anything else bases on the collection's own Expr
+                // span, where a member-access hop or call witness already
+                // answers (the same simple-vs-expression split the chain
+                // hop's receiver makes).
+                if kind == "var" {
+                    let seq_join = seq_source_by_match
+                        .get(&e.match_id)
+                        .map(|sv| (sv, crate::model::witnesses::ProjectionStep::Element))
+                        .or_else(|| {
+                            seq_key_by_match
+                                .get(&e.match_id)
+                                .map(|sv| (sv, crate::model::witnesses::ProjectionStep::Key))
+                        });
+                    if let Some(((src_span, src_text), step)) = seq_join {
+                        use crate::model::witnesses as wit;
+                        let simple_var = src_text
+                            .chars()
+                            .next()
+                            .is_some_and(|c| pack.names.is_sigil(c))
+                            && src_text.chars().skip(1).all(|c| c.is_alphanumeric() || c == '_');
+                        let base = if simple_var {
+                            wit::WitnessAttachment::Variable {
+                                name: (pack.shape_name)("ref.var", src_text),
+                                scope: cur_scope,
+                            }
+                        } else {
+                            wit::WitnessAttachment::Expr(*src_span)
+                        };
+                        out.witnesses.push(wit::Witness {
+                            attachment: wit::WitnessAttachment::Variable {
+                                name: (pack.shape_name)("def.var", &name),
+                                scope: cur_scope,
+                            },
+                            source: wit::WitnessSource::Builder("foreach_element".into()),
+                            payload: wit::WitnessPayload::Projected { base, step },
+                            // Zero-width at the decl: the binding types the
+                            // var for its whole lifetime, so it must not be
+                            // skipped as a narrowing fact scoped to the
+                            // token (the same rule annot witnesses follow).
+                            span: Span { start: e.start, end: e.start },
+                        });
+                    }
+                }
+                if kind == "field" && pack.field_registry_edges {
+                    if let Some(cls) = &pkg {
+                        use crate::model::witnesses as wit;
+                        // The field's VALUE edge on its own attachment
+                        // (`docs/adr/member-kinds.md`): a `ValueHop` chases
+                        // `Field`, a `MethodHop` chases `PackageSymbol`, so
+                        // no tag partitions one attachment by kind.
+                        out.witnesses.push(wit::Witness {
+                            attachment: wit::WitnessAttachment::Field {
+                                owner: cls.clone(),
+                                name: shaped.clone(),
+                            },
+                            source: wit::WitnessSource::Builder("field_decl".into()),
+                            payload: wit::WitnessPayload::Edge(wit::WitnessAttachment::Variable {
+                                name: shaped.clone(),
+                                scope: cur_scope,
+                            }),
+                            span: Span { start: e.start, end: e.end },
+                        });
+                    }
                 }
                 out.symbols.push(SkelSymbol {
                     name: shaped,
