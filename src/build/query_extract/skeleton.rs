@@ -151,6 +151,52 @@ pub struct SkeletonAnalysis {
     /// named is the method receiver, not a class member — its (wrongly
     /// sticky-tagged) class package is cleared in `into_file_analysis`.
     pub receiver_names: Vec<String>,
+    pub implicit_variables: Vec<String>,
+    pub throwaway_names: Vec<String>,
+    pub catch_all_methods: Vec<String>,
+    pub class_literal_member: String,
+    pub types_are_capitalized: bool,
+    pub enum_members: Vec<String>,
+    /// Member tokens on the left of an assignment (dynamic property sites).
+    pub member_writes: Vec<Span>,
+    /// Whole import-statement spans (`use A\B;` rows), for the insertion
+    /// point of an import quick-fix.
+    pub import_rows: Vec<Span>,
+    /// The pack's import statement template (`import_template`).
+    pub import_template: String,
+    /// The pack's contract stub template (`contract_stub`).
+    pub contract_stub: String,
+    /// The pack's native return-annotation template and native type spellings.
+    pub return_annotation_template: String,
+    pub native_type_spellings: Vec<(String, String)>,
+    pub static_property_sigil: String,
+    /// rail → the undefined-name lane's phrasing (`rails.json` labels).
+    pub rail_labels: Vec<(String, String)>,
+    /// Rails whose miss is a hint (`rails.json` hints).
+    pub rail_hints: Vec<String>,
+    /// rail → the parameter separator a use's name ends at (`rails.json`).
+    pub rail_name_seps: Vec<(String, String)>,
+    /// Expression spans whose value an overlay declared (`@expr.annot`) —
+    /// the callee-return edge is not minted for them.
+    pub annot_expr_spans: Vec<crate::model::file_analysis::Span>,
+    /// The last row of the file preamble (open tag, `declare` rows): an
+    /// inserted import goes after it when no import or namespace anchors.
+    pub preamble_end: Option<usize>,
+    /// `imports_bind_names`, baked.
+    pub imports_bind_names: bool,
+    /// `members_are_package_bound`, baked.
+    pub members_are_package_bound: bool,
+    /// Imported names a doc comment mentions (`@var Foo`, `@throws Foo`,
+    /// `@see Foo`): a use the tree never shows.
+    pub doc_mentions: Vec<String>,
+    /// The pack's `function_scoped_vars` fact (php) — drives the var
+    /// unification pass in `into_file_analysis`.
+    pub function_scoped_vars: bool,
+    /// The pack's constructor-method names, riding to `PackFacts`.
+    pub constructor_names: Vec<String>,
+    /// The pack's display vocabulary (engine tag → language spelling),
+    /// carried onto `PackFacts.type_display`.
+    pub type_display: Vec<(String, String)>,
     /// The language's name spellings (`LangPack::names`), baked onto
     /// `PackFacts::names`.
     pub names: crate::model::file_analysis::NameSpellings,
@@ -1170,6 +1216,26 @@ impl SkeletonAnalysis {
             // outline filters can exclude them generically (lang semantics in
             // the pack, generic logic in core).
             receiver_names: std::mem::take(&mut self.receiver_names),
+            implicit_variables: std::mem::take(&mut self.implicit_variables),
+            throwaway_names: std::mem::take(&mut self.throwaway_names),
+            catch_all_methods: std::mem::take(&mut self.catch_all_methods),
+            class_literal_member: std::mem::take(&mut self.class_literal_member),
+            import_rows: std::mem::take(&mut self.import_rows),
+            import_template: std::mem::take(&mut self.import_template),
+            contract_stub: std::mem::take(&mut self.contract_stub),
+            return_annotation_template: std::mem::take(&mut self.return_annotation_template),
+            native_type_spellings: std::mem::take(&mut self.native_type_spellings),
+            static_property_sigil: std::mem::take(&mut self.static_property_sigil),
+            rail_labels: std::mem::take(&mut self.rail_labels),
+            rail_hints: std::mem::take(&mut self.rail_hints),
+            preamble_end: self.preamble_end,
+            imports_bind_names: self.imports_bind_names,
+            members_are_package_bound: self.members_are_package_bound,
+            doc_mentions: std::mem::take(&mut self.doc_mentions),
+            types_are_capitalized: self.types_are_capitalized,
+            enum_members: std::mem::take(&mut self.enum_members),
+            type_display: std::mem::take(&mut self.type_display),
+            constructor_names: std::mem::take(&mut self.constructor_names),
             names: std::mem::take(&mut self.names),
             // Specialization family edges (spec → primary). NOT an inheritance
             // edge: a spec inherits nothing from its primary (it replaces

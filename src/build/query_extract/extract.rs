@@ -554,6 +554,33 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
         out.import_sites.push((raw, span));
     }
     out.receiver_names = pack.receiver_names.iter().map(|s| s.to_string()).collect();
+    out.implicit_variables = pack.implicit_variables.iter().map(|s| s.to_string()).collect();
+    out.throwaway_names = pack.throwaway_names.iter().map(|s| s.to_string()).collect();
+    out.catch_all_methods = pack.catch_all_methods.iter().map(|s| s.to_string()).collect();
+    out.class_literal_member = pack.class_literal_member.to_string();
+    out.import_template = pack.import_template.to_string();
+    out.contract_stub = pack.contract_stub.to_string();
+    out.return_annotation_template = pack.return_annotation_template.to_string();
+    out.native_type_spellings =
+        pack.native_type_spellings.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+    out.static_property_sigil = pack.static_property_sigil.to_string();
+    {
+        let conv = crate::build::query_extract::rail_conventions_for(pack);
+        out.rail_labels = conv.labels.clone();
+        out.rail_hints = conv.hints.clone();
+        out.rail_name_seps = conv.name_seps.clone();
+    }
+    out.imports_bind_names = pack.imports_bind_names;
+    out.members_are_package_bound = pack.members_are_package_bound;
+    out.enum_members = pack.enum_members.iter().map(|s| s.to_string()).collect();
+    out.types_are_capitalized = pack.types_are_capitalized;
+    out.function_scoped_vars = pack.function_scoped_vars;
+    out.constructor_names = pack.constructor_names.iter().map(|s| s.to_string()).collect();
+    out.type_display = pack
+        .type_display
+        .iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
     out.names = pack.names.clone();
     // Template params joined to their owner class — the owner shaped like a
     // def name (a partial spec's spelling canonicalizes) so the key matches
