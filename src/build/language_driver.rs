@@ -1445,6 +1445,7 @@ fn remap_spans(
         control_regions,
         param_regions,
         probe_regions,
+        by_ref_params,
         fold_regions,
         rails,
         class_rails,
@@ -1599,6 +1600,10 @@ fn remap_spans(
     }
     for span in probe_regions.iter_mut() {
         *span = rspan(*span);
+    }
+    for (sig, _, _, name_span) in by_ref_params.iter_mut() {
+        *sig = rspan(*sig);
+        *name_span = rspan(*name_span);
     }
     for (span, _) in fold_regions.iter_mut() {
         *span = rspan(*span);

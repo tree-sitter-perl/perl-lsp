@@ -218,6 +218,13 @@ pub struct SkeletonAnalysis {
     /// Existence-probe argument spans (`@probe.region`); the member lanes
     /// stay silent inside them.
     pub probe_regions: Vec<crate::model::file_analysis::Span>,
+    /// A callable's by-reference parameter positions: (its parameter-list
+    /// span, the position, the parameter's variable name, the name token).
+    /// Joined to the def symbol by the same containment as `param_sigs`, and
+    /// minted as `Param{..} → Edge(Variable{param, body})` witnesses — the
+    /// binding mode is a fact the callee's bag holds
+    /// (`docs/adr/by-ref-binding.md`), never a bit on the arity.
+    pub by_ref_params: Vec<(Span, u32, String, Span)>,
     /// Fold-only regions (`@fold` / `@fold.comment`, the bool = comment);
     /// joined with the scopes into `fold_ranges`.
     pub fold_regions: Vec<(crate::model::file_analysis::Span, bool)>,
@@ -582,7 +589,7 @@ impl SkeletonAnalysis {
             });
         }
         let mut bag = crate::model::witnesses::WitnessBag::default();
-        for w in self.witnesses {
+        for w in std::mem::take(&mut self.witnesses) {
             bag.push(w);
         }
         // Associate each callable def with its parameter arity: the def's OWN
@@ -593,19 +600,57 @@ impl SkeletonAnalysis {
         {
             let param_sigs = std::mem::take(&mut self.param_sigs);
             let after = |a: Point, b: Point| (a.row, a.column) >= (b.row, b.column);
-            for s in self.symbols.iter_mut() {
+            let by_ref_params = std::mem::take(&mut self.by_ref_params);
+            for (i, s) in self.symbols.iter_mut().enumerate() {
                 if !matches!(s.kind.as_str(), "sub" | "method") {
                     continue;
                 }
-                s.arity = param_sigs
+                let sig = param_sigs
                     .iter()
                     .filter(|(sp, _)| {
                         after(sp.start, s.name_end)
                             && after(s.end, sp.end)
                             && after(sp.start, s.start)
                     })
-                    .min_by_key(|(sp, _)| (sp.start.row, sp.start.column))
-                    .map(|(_, ar)| *ar);
+                    .min_by_key(|(sp, _)| (sp.start.row, sp.start.column));
+                s.arity = sig.map(|(_, ar)| *ar);
+                // The callable's body scope — the `Sub` scope its span opens
+                // — names this symbol as its owner (`Scope::owner`), the one
+                // hop from a scope to its parameters; the by-reference
+                // positions then bind through it.
+                let body = self
+                    .scopes
+                    .iter()
+                    .filter(|sc| {
+                        matches!(sc.kind, crate::model::file_analysis::ScopeKind::Sub { .. })
+                            && after(sc.span.start, s.name_end)
+                            && after(s.end, sc.span.end)
+                    })
+                    .min_by_key(|sc| (sc.span.start.row, sc.span.start.column))
+                    .map(|sc| sc.id);
+                if let Some(body) = body {
+                    self.scopes[body.0 as usize].owner = Some(SymbolId(i as u32));
+                }
+                let (Some((sig_span, _)), Some(body)) = (sig, body) else { continue };
+                for (_, index, pname, name_span) in
+                    by_ref_params.iter().filter(|(sp, _, _, _)| sp == sig_span)
+                {
+                    bag.push(crate::model::witnesses::Witness {
+                        attachment: crate::model::witnesses::WitnessAttachment::Param {
+                            package: s.package.clone().unwrap_or_default(),
+                            name: s.name.clone(),
+                            index: *index,
+                        },
+                        source: crate::model::witnesses::WitnessSource::Builder("by_ref_param".into()),
+                        payload: crate::model::witnesses::WitnessPayload::Edge(
+                            crate::model::witnesses::WitnessAttachment::Variable {
+                                name: pname.clone(),
+                                scope: body,
+                            },
+                        ),
+                        span: Span { start: name_span.start, end: name_span.start },
+                    });
+                }
             }
         }
         let mut symbols: Vec<Symbol> = self

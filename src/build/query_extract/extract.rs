@@ -99,6 +99,10 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     // (`@arity.sig` fires a separate match from the def name).
     let mut param_sigs: Vec<(crate::model::file_analysis::Span, crate::model::file_analysis::ParamArity)> =
         Vec::new();
+    // A callable's by-reference parameter positions with their names, keyed
+    // by the parameter list's span (joined to the def symbol like the arity).
+    let mut by_ref_params: Vec<(crate::model::file_analysis::Span, u32, String, crate::model::file_analysis::Span)> =
+        Vec::new();
     let mut cursor = QueryCursor::new();
     let mut matches = cursor.matches(query, tree.root_node(), source);
     let mut match_counter = 0usize;
@@ -223,20 +227,67 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                 let mut total = 0usize;
                 let mut required = 0usize;
                 let mut variadic = false;
+                let sig_span = crate::model::file_analysis::Span {
+                    start: node.start_position(),
+                    end: node.end_position(),
+                };
+                // A by-reference position (php `&$out`, C++ `T& x`): record
+                // the parameter's variable name so the def mints the
+                // aliasing edge the call sites bind through.
+                let mut note_by_ref = |ch: tree_sitter::Node, position: usize| {
+                    let by_ref = ch.child_by_field_name("reference_modifier").is_some()
+                        || ch
+                            .child_by_field_name("declarator")
+                            .is_some_and(|d| d.kind() == "reference_declarator");
+                    if !by_ref {
+                        return;
+                    }
+                    let name_node = ch.child_by_field_name("name").or_else(|| {
+                        let mut stack = vec![ch];
+                        while let Some(n) = stack.pop() {
+                            if n != ch && pack.simple_var_kinds.contains(&n.kind()) {
+                                return Some(n);
+                            }
+                            let mut w = n.walk();
+                            let kids: Vec<_> = n.named_children(&mut w).collect();
+                            stack.extend(kids.into_iter().rev());
+                        }
+                        None
+                    });
+                    let Some(name_node) = name_node else { return };
+                    let text = name_node.utf8_text(source).unwrap_or("");
+                    by_ref_params.push((
+                        sig_span,
+                        position as u32,
+                        (pack.shape_name)("def.var", text),
+                        crate::model::file_analysis::Span {
+                            start: name_node.start_position(),
+                            end: name_node.end_position(),
+                        },
+                    ));
+                };
                 let mut c = node.walk();
                 for ch in node.children(&mut c) {
                     match ch.kind() {
-                        "parameter_declaration" => { total += 1; required += 1; }
-                        "optional_parameter_declaration" => { total += 1; }
-                        "variadic_parameter_declaration" | "..." => variadic = true,
+                        "parameter_declaration" => { note_by_ref(ch, total); total += 1; required += 1; }
+                        "optional_parameter_declaration" => { note_by_ref(ch, total); total += 1; }
+                        // PHP: a parameter with a default is optional; a
+                        // promoted ctor param still counts toward arity.
+                        "simple_parameter" | "property_promotion_parameter" => {
+                            note_by_ref(ch, total);
+                            total += 1;
+                            if ch.child_by_field_name("default_value").is_none() {
+                                required += 1;
+                            }
+                        }
+                        "variadic_parameter_declaration" | "variadic_parameter" | "..." => {
+                            variadic = true
+                        }
                         _ => {}
                     }
                 }
                 param_sigs.push((
-                    crate::model::file_analysis::Span {
-                        start: node.start_position(),
-                        end: node.end_position(),
-                    },
+                    sig_span,
                     crate::model::file_analysis::ParamArity { total, required, variadic },
                 ));
                 continue;
@@ -740,6 +791,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
         .filter(|e| e.cap == "probe.region")
         .map(|e| Span { start: e.start, end: e.end })
         .collect();
+    out.by_ref_params = by_ref_params;
     // Fold-only regions (`@fold` / `@fold.comment`): blocks and comment
     // runs that fold in an editor without being scopes (php has no block
     // scoping, so an `if` body must not mint one).
