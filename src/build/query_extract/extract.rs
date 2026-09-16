@@ -418,6 +418,10 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     // `@ref.member` so the chain-hop witness (`Projected{base, MethodHop}`)
     // attaches where an OUTER call's receiver span will look for it.
     let mut hop_call_by_match: HashMap<usize, crate::model::file_analysis::Span> = HashMap::new();
+    // `@dispatch.via` — the dispatching function's name token (`do_action`),
+    // joined to the same match's `@ref.dispatch.named` string as the minted
+    // DispatchCall's `dispatcher` label.
+    let mut dispatch_via_by_match: HashMap<usize, String> = HashMap::new();
     // `@handler.name` — the token whose TEXT names a `@def.handler.by.<rail>`
     // handler in the same match (a listener's `handle(X $e)` is a handler
     // named `X` sitting on the method's name token).
@@ -459,6 +463,9 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                 e.match_id,
                 crate::model::file_analysis::Span { start: e.start, end: e.end },
             );
+        }
+        if e.cap == "dispatch.via" {
+            dispatch_via_by_match.insert(e.match_id, e.text.clone());
         }
         if e.cap == "handler.name" {
             handler_name_by_match.insert(e.match_id, e.text.clone());
@@ -1319,6 +1326,139 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                         e.match_id,
                         (*op, crate::model::file_analysis::Span { start: e.start, end: e.end }),
                     );
+                }
+            }
+            // String-named references (the tier-1 pack-plugin vocabulary,
+            // docs/prompt-pack-plugins.md): the captured string-content
+            // node's TEXT is the referenced name and its span IS the rename
+            // unit — the characters inside the quotes. `@ref.call.named`
+            // mints a FunctionCall ref (WP `add_action('init', 'wp_cron')`);
+            // `@ref.method.named` mints a MethodCall ref joined to the same
+            // match's `@member.recv` (`array($this, 'method')` callbacks),
+            // so dispatch types through the receiver like any member ref.
+            // No arg_count: the site registers the callee, it doesn't call
+            // it — an arity hint here would misfeed arity discrimination.
+            "ref.call.named" => {
+                // `'A\\B\\X::method'`: a static-method callable string. The
+                // class part is a qualified spelling (pinned like any other),
+                // the ref a Callable member on that class — the same identity
+                // `[X::class, 'method']` carries, so the backward walk finds it.
+                let split = pack
+                    .names
+                    .member_sep()
+                    .zip(pack.names.use_map_sep())
+                    .and_then(|(msep, sep)| e.text.split_once(msep).map(|(q, m)| (q, m, sep)));
+                if let Some((qual, method, sep)) = split {
+                    let (leaf, ns) = split_ns_leaf(qual, sep);
+                    if !ns.is_empty() {
+                        out.qualified_spellings.push((leaf.clone(), format!("{sep}{ns}")));
+                    }
+                    // The ref's span is the METHOD tail only — rename rewrites
+                    // exactly those characters; the invocant span is the
+                    // qualifier ahead of the `::`.
+                    let method_start = Point {
+                        row: e.end.row,
+                        column: e.end.column.saturating_sub(method.len()),
+                    };
+                    let qual_span = Span {
+                        start: e.start,
+                        end: Point { row: e.start.row, column: e.start.column + qual.len() },
+                    };
+                    out.refs.push(SkelRef {
+                        via: None,
+                        kind: "member".to_string(),
+                        name: method.to_string(),
+                        start: method_start,
+                        end: e.end,
+                        scope: cur_scope,
+                        // A string names its class ABSOLUTELY (`'A\F::cb'`
+                        // is `\A\F`, never relative to the namespace): the
+                        // invocant spells it so, and the use-map resolution
+                        // every bareword receiver goes through keeps it.
+                        invocant: Some((qual_span, format!("{sep}{}", qual.trim_start_matches(sep)))),
+                        member_op: None,
+                        arg_count: None,
+                        value_read: false,
+                        named_by_string: false,
+                    });
+                    continue;
+                }
+                out.refs.push(SkelRef {
+                    via: None,
+                    kind: "call".to_string(),
+                    name: e.text.clone(),
+                    start: e.start,
+                    end: e.end,
+                    scope: cur_scope,
+                    invocant: None,
+                    member_op: None,
+                    arg_count: None,
+                    value_read: false,
+                    named_by_string: false,
+                });
+            }
+            c if c == "ref.dispatch.named"
+                || c.starts_with("ref.dispatch.named.")
+                || c.starts_with("ref.dispatch.class.") =>
+            {
+                if let Some(rail) = c.strip_prefix("ref.dispatch.named.") {
+                    out.rails.push((Span { start: e.start, end: e.end }, rail.to_string()));
+                } else if let Some(rail) = c.strip_prefix("ref.dispatch.class.") {
+                    out.class_rails.push((Span { start: e.start, end: e.end }, rail.to_string()));
+                }
+                out.refs.push(SkelRef {
+                    via: dispatch_via_by_match.get(&e.match_id).cloned(),
+                    kind: "dispatch".to_string(),
+                    name: e.text.clone(),
+                    start: e.start,
+                    end: e.end,
+                    scope: cur_scope,
+                    invocant: None,
+                    member_op: None,
+                    arg_count: None,
+                    value_read: false,
+                    named_by_string: false,
+                });
+            }
+            // consumed by the prepass join above; nothing to mint here
+            "dispatch.via" => {}
+            // `.self` flavor: the string names a method of the ENCLOSING
+            // class (a PHPUnit attribute argument) — no receiver node
+            // exists, so the invocant is the current-package token,
+            // resolved by the enclosing-class walk like `self::`.
+            "ref.method.named.self" => {
+                out.refs.push(SkelRef {
+                    via: None,
+                    kind: "member".to_string(),
+                    name: e.text.clone(),
+                    start: e.start,
+                    end: e.end,
+                    scope: cur_scope,
+                    invocant: Some((
+                        crate::model::file_analysis::Span { start: e.start, end: e.end },
+                        "__PACKAGE__".to_string(),
+                    )),
+                    member_op: None,
+                    arg_count: None,
+                    value_read: false,
+                    named_by_string: true,
+                });
+            }
+            "ref.method.named" => {
+                if let Some(inv) = member_recv.get(&e.match_id).cloned() {
+                    out.refs.push(SkelRef {
+                    via: None,
+                        kind: "member".to_string(),
+                        name: e.text.clone(),
+                        start: e.start,
+                        end: e.end,
+                        scope: cur_scope,
+                        invocant: Some(inv),
+                        member_op: None,
+                        arg_count: None,
+                        value_read: false,
+                        named_by_string: true,
+                    });
                 }
             }
             cap if cap.starts_with("ref.") => {
