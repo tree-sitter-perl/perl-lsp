@@ -33,10 +33,14 @@ impl<'a> Builder<'a> {
 
             // Blocks create scopes (but only standalone blocks, not sub/class/for bodies)
             "block" | "do_block" => {
-                // Only create a Block scope if parent isn't already a scope-creator
+                // Only create a Block scope if parent isn't already a scope-creator.
+                // An anonymous sub is one too: its body shares the `(anon)` Sub
+                // scope the way a named sub's body shares its Sub scope, so a
+                // `my ($c) = @_` parameter sits at the same depth in both.
                 let parent_kind = node.parent().map(|p| p.kind()).unwrap_or("");
                 if !matches!(parent_kind,
                     "subroutine_declaration_statement" | "method_declaration_statement" |
+                    "anonymous_subroutine_expression" |
                     "class_statement" | "for_statement" | "foreach_statement" |
                     "varname" // block-deref: @{expr}, %{expr}, &{expr}
                 ) {

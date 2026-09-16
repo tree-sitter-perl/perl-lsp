@@ -117,13 +117,11 @@ impl<'a> Builder<'a> {
     }
 
     /// Where `var` is bound inside `scope` — the earliest declaring
-    /// `Variable` symbol within the scope's span (a helper callback's
-    /// `my ($c) = @_` sits in the body block one scope below the sub, so
-    /// the region is the rule, not scope membership). The anchor every
-    /// fact about a parameter lands at, so the declaration's own write
-    /// marker (which retires everything strictly before it) leaves the
-    /// fact standing; `None` when nothing declares it (a `$_[0]` read).
-    /// Reads the name index: O(symbols sharing the name), never O(symbols).
+    /// `Variable` symbol within the scope's span. The anchor every fact
+    /// about a parameter lands at, so the declaration's own write marker
+    /// (which retires everything strictly before it) leaves the fact
+    /// standing; `None` when nothing declares it (a `$_[0]` read). Reads
+    /// the name index: O(symbols sharing the name), never O(symbols).
     pub(super) fn binding_site_of(&self, var: &str, scope: ScopeId) -> Option<Point> {
         let region = self.scopes.get(scope.0 as usize)?.span;
         self.symbols_by_name

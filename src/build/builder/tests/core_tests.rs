@@ -1156,3 +1156,28 @@ fn shift_consumes_the_argument_window() {
     assert_eq!(class("$x", 10), None, "an anon sub has its own @_");
     assert!(fa.sub_return_type_at_arity("greet", None).is_none(), "greet returns arg 1, not Foo");
 }
+
+/// A sub body shares its Sub scope whether the sub is named or anonymous:
+/// `my ($c) = @_` in a callback and `my ($s) = @_` in a named sub sit at
+/// the same depth, so every parameter-anchored fact reads them the same
+/// way. An anonymous body that opened its own Block scope put its
+/// parameters one level deeper than a named sub's.
+#[test]
+fn anonymous_and_named_sub_bodies_share_their_sub_scope() {
+    let fa = build_fa("my $cb = sub { my ($c) = @_; 1 };\nsub named { my ($s) = @_; 1 }\n");
+    let scope_kind_of = |var: &str| {
+        let sym = fa
+            .symbols()
+            .iter()
+            .find(|s| s.name == var && matches!(s.kind, SymKind::Variable))
+            .unwrap_or_else(|| panic!("{var} declared"));
+        fa.scopes[sym.scope.0 as usize].kind.clone()
+    };
+    assert_eq!(scope_kind_of("$c"), ScopeKind::Sub { name: "(anon)".into() });
+    assert_eq!(scope_kind_of("$s"), ScopeKind::Sub { name: "named".into() });
+    assert!(
+        !fa.scopes.iter().any(|s| matches!(s.kind, ScopeKind::Block)),
+        "no Block scope for either body: {:?}",
+        fa.scopes.iter().map(|s| &s.kind).collect::<Vec<_>>()
+    );
+}
