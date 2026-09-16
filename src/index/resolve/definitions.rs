@@ -6,6 +6,11 @@ impl<'a> CandidateSet<'a> {
     /// The def site of `member` on `class` — origin symbols first, then the
     /// class's own cached file. Serves the template-family ranked goto-def
     /// (one location per ladder class that actually defines the member).
+    /// `class` is an IDENTITY: a caller holding a written spelling (a
+    /// qualifier the cursor sits after) resolves it first, and a ladder
+    /// class is already one — resolving an identity again re-qualifies a
+    /// head that collides with an import alias (`class_spelling_identity`
+    /// is not idempotent).
     pub(super) fn member_def_location(&self, class: &str, member: &str) -> Option<RefLocation> {
         // The member's def span in `fa` under `class`'s owner set, expanded
         // through inline-namespace transparency so a symbol filed under an
@@ -488,7 +493,8 @@ impl<'a> CandidateSet<'a> {
             if let Some(source) = self.source {
                 if let Some(owner) = qualifier_at_point(source, point) {
                     if let Some(name) = word_at_point(source, point) {
-                        if let Some(loc) = self.member_def_location(owner, name) {
+                        let owner = self.origin.class_spelling_identity(owner);
+                        if let Some(loc) = self.member_def_location(&owner, name) {
                             // The member lookup lands on the class DECLARATION;
                             // hop to the out-of-line body (decl→def axis).
                             return self.prefer_member_defs(loc);

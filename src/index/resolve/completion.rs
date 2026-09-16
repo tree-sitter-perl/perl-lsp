@@ -10,22 +10,27 @@ impl<'a> CandidateSet<'a> {
     pub(super) fn type_def_location(&self, type_name: &str, idx: &dyn CrossFileLookup) -> Option<RefLocation> {
         let wanted =
             |k: &SymKind| matches!(k, SymKind::Class | SymKind::Package | SymKind::Module);
+        // A written spelling names an identity (the file's use-map answer);
+        // the symbol is filed under it, or under the spelling itself where
+        // the two coincide.
+        let ident = self.origin.class_spelling_identity(type_name);
+        let names = |s: &crate::model::file_analysis::Symbol| s.name == ident || s.name == type_name;
         if let Some(sym) = self
             .origin
             .symbols()
             .iter()
-            .find(|s| s.name == type_name && wanted(&s.kind))
+            .find(|s| names(s) && wanted(&s.kind))
         {
             return Some(self.origin_decl(sym.selection_span));
         }
         // Whichever candidate file declares the type symbol — not the
         // name-slot winner.
-        idx.visible_def_candidates(type_name).iter().find_map(|cached| {
+        idx.visible_def_candidates(&ident).iter().find_map(|cached| {
             let whole = idx.whole_present(cached);
             let sym = whole
                 .symbols()
                 .iter()
-                .find(|s| s.name == type_name && wanted(&s.kind))?;
+                .find(|s| names(s) && wanted(&s.kind))?;
             Some(RefLocation {
                 key: FileKey::Path(cached.path.clone()),
                 span: sym.selection_span,
