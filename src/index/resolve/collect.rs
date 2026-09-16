@@ -931,16 +931,33 @@ pub(super) fn collect_from_analysis(
     // file's `o->op_type` types against a globally-arbitrary same-named
     // candidate and the site silently drops out. Transparent for Perl
     // (empty closure = the plain index).
+    // A name-keyed pack file (php) is scoped the same way, by its OWN
+    // use-map: `$c->pick()` in a file that `use`s `B\Collection` types
+    // against B's class, never the same-leaf stranger the plain index would
+    // hand back first. `for_origin` owns the derivation for both shapes.
     let scoped_storage: Option<crate::model::file_analysis::ScopedLookup>;
     let module_index: Option<&dyn CrossFileLookup> = match module_index {
-        Some(idx) if !analysis.pack.include_closure.is_empty() => {
+        Some(idx)
+            if crate::build::language_driver::LanguageRegistry::is_pack_language(
+                &analysis.language,
+            ) =>
+        {
             let path = key_for_sort(key);
-            // Guarded by a non-empty include closure — a pack-only shape.
+            let axis = crate::util::ghost_stats::timed("refs.visibility_axis", || {
+                crate::model::file_analysis::VisibilityAxis::for_origin(
+                    analysis,
+                    Some(path.as_path()),
+                    idx,
+                    crate::build::language_driver::LanguageRegistry::pack_visibility(
+                        &analysis.language,
+                    ),
+                )
+            });
             scoped_storage = Some(crate::model::file_analysis::ScopedLookup::new(
                 idx,
                 &analysis.pack.include_closure,
                 Some(path.as_path()),
-                crate::model::file_analysis::VisibilityAxis::IncludeClosure,
+                axis,
             ));
             // SAFETY: scoped_storage was just set to Some(..) on the line above,
             // in this same match arm — a lifetime-extension idiom, not a fallible read.
