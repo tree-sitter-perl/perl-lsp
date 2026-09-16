@@ -1040,7 +1040,14 @@ impl SkeletonAnalysis {
             // call resolves to its n-th argument's value witness.
             let call_args: std::collections::HashMap<Span, &Vec<Span>> =
                 self.macro_call_arg_spans.iter().map(|(s, a)| (*s, a)).collect();
+            let annot_exprs: std::collections::HashSet<Span> =
+                self.annot_expr_spans.iter().copied().collect();
             for (span, name) in &self.call_sites {
+                // An overlay declared this call's value (`@expr.annot`) —
+                // the callee's return is not its type.
+                if annot_exprs.contains(span) {
+                    continue;
+                }
                 // Identity/projection macro: the call's value IS its n-th
                 // argument. Edge to the argument's own `Expr` witness rather
                 // than the param-agnostic Symbol return (edges-not-values).
