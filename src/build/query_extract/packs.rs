@@ -165,6 +165,41 @@ pub struct LangPack {
     /// field naming the callee token, the field holding the argument list.
     /// Empty = the language declares no signature help.
     pub call_shapes: &'static [CallShape],
+    /// The node kind of a first-class-callable placeholder in an argument
+    /// list (php `f(...)` → `variadic_placeholder`): such a call passes no
+    /// arguments, so it mints no count. Empty = none.
+    pub callable_placeholder_kind: &'static str,
+    /// The key/value arrow inside a list literal (php `'k' => $v`): what a
+    /// destructuring slot's key is read before, and what makes a list keyed
+    /// rather than positional. Empty for a language whose lists carry no
+    /// written keys.
+    pub pair_arrow: &'static str,
+    /// The node kind of an argument SPREAD (php `f(...$args)` →
+    /// `variadic_unpacking`): the call's count is unknowable, so it mints
+    /// none and the arity lane stands down. Empty = none.
+    pub spread_arg_kind: &'static str,
+    /// Field a named argument carries its label under (php `f(name: 1)`):
+    /// positional parameter hints stop at the first one. Empty = the pack
+    /// has no named-argument form.
+    pub named_arg_field: &'static str,
+    /// The sigil a static property is spelled with after the scope
+    /// operator (php `self::$count`), while an instance read drops it
+    /// (`$o->count`). Empty = the spelling is the bare name in both.
+    pub static_property_sigil: &'static str,
+    /// A member name that is the CLASS-NAME LITERAL, never a member
+    /// (php `Foo::class`). Empty = none.
+    pub class_literal_member: &'static str,
+    /// The import statement that brings a fully-qualified name into scope,
+    /// `{}` standing for the name (php `use {};\n`). Empty = the language
+    /// has no import quick-fix.
+    pub import_template: &'static str,
+    /// An import row binds a NAME the file then spells (php `use A\B;`),
+    /// as opposed to splicing text (`#include`). Only bound names can be
+    /// unused.
+    pub imports_bind_names: bool,
+    /// The node kind of ONE argument inside a call's argument list (php
+    /// `argument`); empty = every named child of the list is an argument.
+    pub arg_kind: &'static str,
     /// Completion trigger characters for the LSP
     /// `completionProvider.triggerCharacters` slot — the client auto-fires
     /// completion (and reports the char in `CompletionContext`) when one is
@@ -473,6 +508,15 @@ pub fn perl_pack() -> LangPack {
         entrypoint_symbols: &[],
         brace_scoped_members: false,
         call_shapes: &[],
+        arg_kind: "",
+        callable_placeholder_kind: "",
+        pair_arrow: "=>",
+        spread_arg_kind: "",
+        named_arg_field: "",
+        static_property_sigil: "",
+        class_literal_member: "",
+        import_template: "",
+        imports_bind_names: false,
         trigger_chars: &["$", "@", "%", ">", ":", "{"],
         receiver_names: &[],
         nested_peel: PeelSpec { wrappers: &[], annot_kinds: &[], leaf_to_def: &[], record_stack: true },
@@ -534,6 +578,15 @@ pub fn python_pack() -> LangPack {
         entrypoint_symbols: &[],
         brace_scoped_members: false,
         call_shapes: &[],
+        arg_kind: "",
+        callable_placeholder_kind: "",
+        pair_arrow: "",
+        spread_arg_kind: "",
+        named_arg_field: "",
+        static_property_sigil: "",
+        class_literal_member: "",
+        import_template: "",
+        imports_bind_names: false,
         trigger_chars: &["."],
         receiver_names: &["self", "cls"],
         nested_peel: PeelSpec { wrappers: &[], annot_kinds: &[], leaf_to_def: &[], record_stack: true },
@@ -595,6 +648,15 @@ pub fn r_pack() -> LangPack {
         entrypoint_symbols: &[],
         brace_scoped_members: false,
         call_shapes: &[],
+        arg_kind: "",
+        callable_placeholder_kind: "",
+        pair_arrow: "",
+        spread_arg_kind: "",
+        named_arg_field: "",
+        static_property_sigil: "",
+        class_literal_member: "",
+        import_template: "",
+        imports_bind_names: false,
         trigger_chars: &["$", "@", ":"],
         receiver_names: &[],
         nested_peel: PeelSpec { wrappers: &[], annot_kinds: &[], leaf_to_def: &[], record_stack: true },
@@ -664,6 +726,15 @@ pub fn cmake_pack() -> LangPack {
         entrypoint_symbols: &[],
         brace_scoped_members: false,
         call_shapes: &[],
+        arg_kind: "",
+        callable_placeholder_kind: "",
+        pair_arrow: "",
+        spread_arg_kind: "",
+        named_arg_field: "",
+        static_property_sigil: "",
+        class_literal_member: "",
+        import_template: "",
+        imports_bind_names: false,
         trigger_chars: &["{", "("],
         receiver_names: &[],
         nested_peel: PeelSpec { wrappers: &[], annot_kinds: &[], leaf_to_def: &[], record_stack: true },
@@ -787,6 +858,15 @@ pub fn cpp_pack() -> LangPack {
         entrypoint_symbols: &["main"],
         brace_scoped_members: true,
         call_shapes: &[],
+        arg_kind: "",
+        callable_placeholder_kind: "",
+        pair_arrow: "",
+        spread_arg_kind: "",
+        named_arg_field: "",
+        static_property_sigil: "",
+        class_literal_member: "",
+        import_template: "",
+        imports_bind_names: false,
         trigger_chars: &[".", ">", ":"],
         receiver_names: &["this"],
         // `field_identifier` only ever names a struct/class member (the
