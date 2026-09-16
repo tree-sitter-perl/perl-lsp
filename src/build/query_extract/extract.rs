@@ -1264,6 +1264,61 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                                 || placeholder_call_at.contains(&(e.end.row, e.end.column))),
                         named_by_string: false,
                     });
+                    // Every bare variable this call passes is bound to the
+                    // callee's parameter slot — `Variable(arg) → Edge(Param)`
+                    // for a function, `Projected{receiver, ParamOf}` through
+                    // a dispatch. Only a position the callee declares by
+                    // reference answers (`docs/adr/by-ref-binding.md`);
+                    // zero-width at the argument token, a binding not a
+                    // narrowing region.
+                    if matches!(e.cap.as_str(), "ref.call" | "ref.qcall" | "ref.member") {
+                        if let Some(vars) = arg_vars_by_start.get(&(e.end.row, e.end.column)) {
+                            use crate::model::witnesses as wit;
+                            let callee = (pack.shape_name)(&e.cap, &e.text);
+                            for (index, var, at) in vars {
+                                let payload = if e.cap == "ref.member" {
+                                    let Some((inv_span, inv_text)) = member_recv.get(&e.match_id) else {
+                                        continue;
+                                    };
+                                    let base = if member_simple.get(&e.match_id).copied().unwrap_or(false) {
+                                        wit::WitnessAttachment::Variable {
+                                            name: (pack.shape_name)("def.var", inv_text),
+                                            scope: cur_scope,
+                                        }
+                                    } else {
+                                        wit::WitnessAttachment::Expr(*inv_span)
+                                    };
+                                    wit::WitnessPayload::Projected {
+                                        base,
+                                        step: wit::ProjectionStep::ParamOf {
+                                            member: callee.clone(),
+                                            index: *index,
+                                        },
+                                    }
+                                } else {
+                                    let (pkg, bare) =
+                                        crate::model::file_analysis::split_qualified(&callee, &pack.names);
+                                    wit::WitnessPayload::Edge(wit::WitnessAttachment::Param {
+                                        package: pkg
+                                            .map(str::to_string)
+                                            .or_else(|| package.clone())
+                                            .unwrap_or_default(),
+                                        name: bare.to_string(),
+                                        index: *index,
+                                    })
+                                };
+                                out.witnesses.push(wit::Witness {
+                                    attachment: wit::WitnessAttachment::Variable {
+                                        name: var.clone(),
+                                        scope: cur_scope,
+                                    },
+                                    source: wit::WitnessSource::Builder("call_arg_binding".into()),
+                                    payload,
+                                    span: Span { start: *at, end: *at },
+                                });
+                            }
+                        }
+                    }
                     // The chain-hop witness: the whole call's value is
                     // "dispatch `member` on the receiver's class" — deferred
                     // to query time via `MethodHop`, so a receiver that is
