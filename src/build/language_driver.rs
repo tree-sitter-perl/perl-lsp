@@ -628,6 +628,20 @@ impl PackDriver {
     ) {
         fa.pack.macro_defs = macro_defs;
         apply_attribute_macros(fa, recovered);
+        // Text rails: a file the grammar reads as text (a Blade template)
+        // still USES rail names — scanned as text, minted as the same
+        // DispatchCall refs a parsed `route('x')` gets, so references,
+        // rename and the undefined-name lane reach templates.
+        if let Some(p) = path {
+            let rails = crate::build::query_extract::text_rails_for(pack);
+            let p_str = p.to_string_lossy();
+            let applicable: Vec<&crate::build::query_extract::TextRail> =
+                rails.iter().filter(|r| r.files.iter().any(|suffix| p_str.ends_with(suffix.as_str()))).collect();
+            if !applicable.is_empty() {
+                let refs = scan_text_rails(fa, source, &applicable);
+                fa.adopt_text_refs(refs);
+            }
+        }
         // Access-specifier regions: a fresh parse of the ORIGINAL source
         // (spans already in original coords, no remap needed) tags each
         // member symbol non-public when its declaration falls under
@@ -759,6 +773,90 @@ fn adopt_path_rails(
         .collect();
     fa.adopt_path_symbols(symbols);
 }
+
+/// `name('literal'` occurrences of a text rail's calls, as DispatchCall refs
+/// on the rail. A parsed region (`<?php echo route('x') ?>` inside a
+/// template) already minted its ref — a text hit at the same start yields
+/// to it. Only the single-quoted, escape-free literal spelling is a name.
+pub(crate) fn scan_text_rails(
+    fa: &FileAnalysis,
+    source: &str,
+    rails: &[&crate::build::query_extract::TextRail],
+) -> Vec<crate::model::file_analysis::Ref> {
+    use crate::model::file_analysis::{AccessKind, HandlerOwner, Ref, RefBinding, RefKind, ScopeId, Span};
+    let taken: std::collections::HashSet<(usize, usize)> = fa
+        .refs()
+        .iter()
+        .filter(|r| matches!(r.kind, RefKind::DispatchCall { .. }))
+        .map(|r| (r.span.start.row, r.span.start.column))
+        .collect();
+    let bytes = source.as_bytes();
+    // An identifier byte in this language: its sigils and its namespace
+    // separator continue a name (`$route`, `App\route`) — a hit inside one
+    // is not the call.
+    let names = fa.names();
+    let ident = |b: u8| {
+        b.is_ascii_alphanumeric()
+            || b == b'_'
+            || names.sigils.iter().any(|&c| c.is_ascii() && c as u8 == b)
+            || names.sep().is_some_and(|sep| sep.as_bytes().contains(&b))
+    };
+    let mut out = Vec::new();
+    for rail in rails {
+        for call in &rail.calls {
+            let mut from = 0;
+            while let Some(pos) = source[from..].find(call.as_str()).map(|i| i + from) {
+                from = pos + call.len();
+                if pos > 0 && ident(bytes[pos - 1]) {
+                    continue;
+                }
+                let mut i = pos + call.len();
+                while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+                    i += 1;
+                }
+                if i >= bytes.len() || bytes[i] != b'(' {
+                    continue;
+                }
+                i += 1;
+                while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+                    i += 1;
+                }
+                if i >= bytes.len() || bytes[i] != b'\'' {
+                    continue;
+                }
+                let start = i + 1;
+                let Some(len) = source[start..].find('\'') else { continue };
+                let name = &source[start..start + len];
+                if name.is_empty()
+                    || names.sep().is_some_and(|sep| name.contains(sep))
+                    || name.chars().any(char::is_whitespace)
+                {
+                    continue;
+                }
+                if rail.requires.as_deref().is_some_and(|sub| !name.contains(sub)) {
+                    continue;
+                }
+                let s = crate::build::cursor_sentinel::byte_to_point(source, start);
+                if taken.contains(&(s.row, s.column)) {
+                    continue;
+                }
+                let e = crate::build::cursor_sentinel::byte_to_point(source, start + len);
+                out.push(Ref {
+                    kind: RefKind::DispatchCall { dispatcher: call.clone() },
+                    span: Span { start: s, end: e },
+                    scope: ScopeId(0),
+                    target_name: name.to_string(),
+                    access: AccessKind::Read,
+                    binding: Some(RefBinding::Handler { owner: HandlerOwner::Rail(rail.rail.clone()), sym: None }),
+                    folded_from: None,
+                    arg_count: None,
+                });
+            }
+        }
+    }
+    out
+}
+
 #[cfg(feature = "cpp")]
 fn cpp_driver() -> PackDriver {
     PackDriver {
