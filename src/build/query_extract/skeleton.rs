@@ -996,6 +996,11 @@ impl SkeletonAnalysis {
         // A `@ref.type` on a def's OWN name token (class/enum/typedef
         // declaring itself) is the declaration, not a use — suppress by
         // exact selection-span match so the Symbol stays the only claimant.
+        let member_write_spans: std::collections::HashSet<(usize, usize, usize, usize)> = self
+            .member_writes
+            .iter()
+            .map(|sp| (sp.start.row, sp.start.column, sp.end.row, sp.end.column))
+            .collect();
         let decl_name_spans: std::collections::HashSet<(usize, usize, usize, usize)> = symbols
             .iter()
             .map(|s| {

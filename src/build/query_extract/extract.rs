@@ -278,6 +278,9 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     // ---- join def name-captures to their def event ----
     use std::collections::HashMap;
     let mut names_by_match: HashMap<(usize, String), (String, Point, Point)> = HashMap::new();
+    // `@member.write` — a member on the LEFT of an assignment (php's
+    // dynamic property declaration site).
+    let mut member_writes: Vec<Span> = Vec::new();
     // `@qualifier` (a `Class::` on an out-of-line def) and `@rettype` (a
     // method's declared return type) — pre-collected like names because the
     // `@def` event fires before these inner captures.
@@ -298,6 +301,9 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
         if let Some(prefix) = e.cap.strip_suffix(".name") {
             names_by_match
                 .insert((e.match_id, prefix.to_string()), (e.text.clone(), e.start, e.end));
+        if e.cap == "member.write" {
+            member_writes.push(Span { start: e.start, end: e.end });
+        }
         }
         if e.cap == "qualifier" {
             qualifier_by_match.insert(e.match_id, e.text.clone());
@@ -573,6 +579,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     out.imports_bind_names = pack.imports_bind_names;
     out.members_are_package_bound = pack.members_are_package_bound;
     out.enum_members = pack.enum_members.iter().map(|s| s.to_string()).collect();
+    out.member_writes = std::mem::take(&mut member_writes);
     out.types_are_capitalized = pack.types_are_capitalized;
     out.function_scoped_vars = pack.function_scoped_vars;
     out.constructor_names = pack.constructor_names.iter().map(|s| s.to_string()).collect();
