@@ -1444,6 +1444,8 @@ fn remap_spans(
         moved_from,
         control_regions,
         param_regions,
+        probe_regions,
+        fold_regions,
         rails,
         class_rails,
         key_defs,
@@ -1521,6 +1523,14 @@ fn remap_spans(
     for (_, _, span) in var_reads.iter_mut() {
         *span = rspan(*span);
     }
+    // Member-write spans are matched against ref spans in
+    // `into_file_analysis` — original coords, like everything it joins.
+    for span in member_writes.iter_mut() {
+        *span = rspan(*span);
+    }
+    for span in import_rows.iter_mut() {
+        *span = rspan(*span);
+    }
     // Call-site spans feed the call-value edge (`into_file_analysis`, after
     // this remap) and must speak original coords like the flow-edge source
     // (the same call span) they land beside.
@@ -1585,6 +1595,12 @@ fn remap_spans(
         *span = rspan(*span);
     }
     for span in param_regions.iter_mut() {
+        *span = rspan(*span);
+    }
+    for span in probe_regions.iter_mut() {
+        *span = rspan(*span);
+    }
+    for (span, _) in fold_regions.iter_mut() {
         *span = rspan(*span);
     }
     for (span, _) in rails.iter_mut() {

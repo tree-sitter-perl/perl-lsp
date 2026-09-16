@@ -278,6 +278,8 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     // ---- join def name-captures to their def event ----
     use std::collections::HashMap;
     let mut names_by_match: HashMap<(usize, String), (String, Point, Point)> = HashMap::new();
+    let mut not_a_read: std::collections::HashSet<(usize, usize)> = std::collections::HashSet::new();
+    let mut def_name_ends: std::collections::HashSet<usize> = std::collections::HashSet::new();
     // `@member.write` — a member on the LEFT of an assignment (php's
     // dynamic property declaration site).
     let mut member_writes: Vec<Span> = Vec::new();
@@ -307,6 +309,12 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
         if let Some(prefix) = e.cap.strip_suffix(".name") {
             names_by_match
                 .insert((e.match_id, prefix.to_string()), (e.text.clone(), e.start, e.end));
+        if e.cap == "var.member" || e.cap.ends_with(".name") {
+            not_a_read.insert((e.start_byte, e.end_byte));
+            // a declaration's name token is nested in the `$name` a read
+            // pattern also matches: same END byte, never a read
+            def_name_ends.insert(e.end_byte);
+        }
         if e.cap == "member.write" {
             member_writes.push(Span { start: e.start, end: e.end });
         }
@@ -725,6 +733,21 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
         .filter(|e| e.cap == "param.region")
         .map(|e| Span { start: e.start, end: e.end })
         .collect();
+    // Existence probes (`@probe.region`: the argument list of `isset` /
+    // `empty`): a member read inside one asks whether the member exists.
+    out.probe_regions = events
+        .iter()
+        .filter(|e| e.cap == "probe.region")
+        .map(|e| Span { start: e.start, end: e.end })
+        .collect();
+    // Fold-only regions (`@fold` / `@fold.comment`): blocks and comment
+    // runs that fold in an editor without being scopes (php has no block
+    // scoping, so an `if` body must not mint one).
+    out.fold_regions = events
+        .iter()
+        .filter(|e| e.cap == "fold" || e.cap == "fold.comment")
+        .map(|e| (Span { start: e.start, end: e.end }, e.cap == "fold.comment"))
+        .collect();
 
     for e in &events {
         while scope_stack.len() > 1
@@ -1098,6 +1121,9 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                     });
                 }
             }
+            "expr.read.var"
+                if not_a_read.contains(&(e.start_byte, e.end_byte))
+                    || def_name_ends.contains(&e.end_byte) => {}
             "expr.read.var" => {
                 // a variable READ is an edge: Expr(span) resolves to
                 // whatever the Variable resolves to — same shape the

@@ -215,6 +215,12 @@ pub struct SkeletonAnalysis {
     /// Parameter-list spans (`@param.region`). The use-after-move check reads
     /// these to tell a moved parameter from a moved local (`use_after_move_reads`).
     pub param_regions: Vec<crate::model::file_analysis::Span>,
+    /// Existence-probe argument spans (`@probe.region`); the member lanes
+    /// stay silent inside them.
+    pub probe_regions: Vec<crate::model::file_analysis::Span>,
+    /// Fold-only regions (`@fold` / `@fold.comment`, the bool = comment);
+    /// joined with the scopes into `fold_ranges`.
+    pub fold_regions: Vec<(crate::model::file_analysis::Span, bool)>,
     /// Rail-suffixed handler defs / dispatch refs (`@def.handler.named.<rail>`,
     /// `@ref.dispatch.named.<rail>`): the token span → the rail name. Read
     /// at mint time to give the Handler / DispatchCall a `HandlerOwner::Rail`.
@@ -1346,11 +1352,38 @@ impl SkeletonAnalysis {
             moved_from: std::mem::take(&mut self.moved_from),
             control_regions: std::mem::take(&mut self.control_regions),
             param_regions: std::mem::take(&mut self.param_regions),
+            probe_regions: std::mem::take(&mut self.probe_regions),
             class_named_rails,
             ..Default::default()
         };
+        // Folding follows the scopes the skeleton minted: a class body, a
+        // function body, a block — every multi-line one is a region.
+        let mut fold_ranges: Vec<crate::model::file_analysis::FoldRange> = Vec::new();
+        let scope_folds = self
+            .scopes
+            .iter()
+            .filter(|sc| !matches!(sc.kind, crate::model::file_analysis::ScopeKind::File))
+            .map(|sc| (sc.span, false));
+        for (span, comment) in scope_folds.chain(self.fold_regions.drain(..)) {
+            let (start_line, end_line) = (span.start.row, span.end.row);
+            if end_line > start_line
+                && !fold_ranges.iter().any(|f| f.start_line == start_line && f.end_line == end_line)
+            {
+                fold_ranges.push(crate::model::file_analysis::FoldRange {
+                    start_line,
+                    end_line,
+                    kind: if comment {
+                        crate::model::file_analysis::FoldKind::Comment
+                    } else {
+                        crate::model::file_analysis::FoldKind::Region
+                    },
+                });
+            }
+        }
+        fold_ranges.sort_by_key(|f| (f.start_line, f.end_line));
         let mut fa = FileAnalysis::new(FileAnalysisParts {
             scopes: self.scopes,
+            fold_ranges,
             symbols,
             refs,
             witnesses: bag,
