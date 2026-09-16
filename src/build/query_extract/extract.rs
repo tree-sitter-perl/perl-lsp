@@ -435,6 +435,29 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
         HashMap::new();
     let mut seq_key_by_match: HashMap<usize, (crate::model::file_analysis::Span, String)> =
         HashMap::new();
+    // `@nonpublic.target` — def NAME spans whose member carries an access
+    // modifier meaning non-public (the vocabulary lives in the query's
+    // #any-of?). Joined to symbols by name span in a post-pass, stamping
+    // the same `non_public` attribute cpp access regions stamp.
+    // `@static.target` — def NAME spans of `static` members (the "static"
+    // attribute a scoped completion reads).
+    let mut static_name_spans: std::collections::HashSet<(Point, Point)> = std::collections::HashSet::new();
+    // `@alias.target` — a variable declared by reference assignment
+    // (`$h = &$opts['h']`): the `alias` attribute, a write through which is
+    // a use of the storage it names. Keyed by the name token's END: the
+    // capture sits on the sigil-less inner name the def's `$name` wraps.
+    let mut alias_name_ends: std::collections::HashSet<Point> = std::collections::HashSet::new();
+    // `@contract.target` — def NAME spans of contract callables (an
+    // interface's methods, an abstract method): a `contract` attribute, the
+    // requires of the role the declaring container is.
+    let mut contract_name_spans: std::collections::HashSet<(Point, Point)> = std::collections::HashSet::new();
+    let mut nonpublic_name_spans: std::collections::HashSet<(Point, Point)> =
+        std::collections::HashSet::new();
+    // `@classattr.<flavor>` — container-def name spans stamped with a
+    // flavor attribute ("interface"/"trait"): the model's SymKind::Class
+    // covers all three php container kinds, and SUPER/reference walks
+    // need to ask the value which one it is.
+    let mut classattr_by_name_span: HashMap<(Point, Point), String> = HashMap::new();
     for e in &events {
         if let Some(prefix) = e.cap.strip_suffix(".name") {
             names_by_match
@@ -481,6 +504,21 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                     e.text.clone(),
                 ),
             );
+        }
+        if e.cap == "static.target" {
+            static_name_spans.insert((e.start, e.end));
+        }
+        if e.cap == "alias.target" {
+            alias_name_ends.insert(e.end);
+        }
+        if e.cap == "contract.target" {
+            contract_name_spans.insert((e.start, e.end));
+        }
+        if e.cap == "nonpublic.target" {
+            nonpublic_name_spans.insert((e.start, e.end));
+        }
+        if let Some(flavor) = e.cap.strip_prefix("classattr.") {
+            classattr_by_name_span.insert((e.start, e.end), flavor.to_string());
         }
         if e.cap == "seq.source" {
             seq_source_by_match.insert(
@@ -1233,7 +1271,10 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                 let (name, name_start, name_end, defaulted) = names_by_match
                     .get(&(e.match_id, e.cap.clone()))
                     .cloned()
-                    .map(|(n, s, en)| (n, s, en, false))
+                    .map(|(n, s, en)| {
+                        let d = defaulted_matches.contains_key(&e.match_id);
+                        (n, s, en, d)
+                    })
                     .or_else(|| {
                         (pack.default_name)(&kind, e.start.row, e.start.column)
                             .map(|n| (n, e.start, e.start, true))
@@ -1373,6 +1414,19 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                     attributes: {
                         let mut a =
                             attrs_by_match.get(&e.match_id).cloned().unwrap_or_default();
+                        // `#[Deprecated]` is the attribute spelling of `@deprecated`
+                        if !pack.deprecated_attribute.is_empty()
+                            && a.iter().any(|x| x == pack.deprecated_attribute)
+                            && !a.iter().any(|x| x == "deprecated")
+                        {
+                            a.push("deprecated".to_string());
+                        }
+                        // the declaration WRITES a return annotation — a
+                        // structural fact the type witness cannot carry
+                        // (`: void` names no type)
+                        if rettype_by_match.contains_key(&e.match_id) {
+                            a.push("declared_return".to_string());
+                        }
                         // a default-named symbol is structure, not an
                         // addressable name — completion skips it.
                         if defaulted {
@@ -2749,6 +2803,45 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
         {
             if let Some(v) = move_var_txt.get(mid) {
                 out.moved_from.push(((pack.shape_name)("ref.var", v), *span, *scope));
+            }
+        }
+    }
+
+    // Access-modifier stamp: the `@nonpublic.target` name spans mark
+    // members whose modifier means non-public — the same `non_public`
+    // attribute cpp access regions stamp, read by the completion gates.
+    if !nonpublic_name_spans.is_empty()
+        || !classattr_by_name_span.is_empty()
+        || !static_name_spans.is_empty()
+        || !contract_name_spans.is_empty()
+        || !alias_name_ends.is_empty()
+    {
+        for sym in &mut out.symbols {
+            if sym.kind == "var"
+                && alias_name_ends.contains(&sym.name_end)
+                && !sym.attributes.iter().any(|a| a == "alias")
+            {
+                sym.attributes.push("alias".to_string());
+            }
+            if contract_name_spans.contains(&(sym.name_start, sym.name_end))
+                && !sym.attributes.iter().any(|a| a == "contract")
+            {
+                sym.attributes.push("contract".to_string());
+            }
+            if nonpublic_name_spans.contains(&(sym.name_start, sym.name_end))
+                && !sym.attributes.iter().any(|a| a == "non_public")
+            {
+                sym.attributes.push("non_public".to_string());
+            }
+            if static_name_spans.contains(&(sym.name_start, sym.name_end))
+                && !sym.attributes.iter().any(|a| a == "static")
+            {
+                sym.attributes.push("static".to_string());
+            }
+            if let Some(flavor) = classattr_by_name_span.get(&(sym.name_start, sym.name_end)) {
+                if sym.kind == "class" && !sym.attributes.iter().any(|a| a == flavor) {
+                    sym.attributes.push(flavor.clone());
+                }
             }
         }
     }

@@ -1409,6 +1409,66 @@ impl SkeletonAnalysis {
         for (child, parent) in &self.parents {
             packages.entry(child.clone()).or_default().parents.push(parent.clone());
         }
+        // Contracts: an interface, a trait or an abstract class is a role —
+        // it defers its obligations to a concrete composer — and each of
+        // its contract callables is a require that composer must provide
+        // (`unfulfilled_role_requires`, docs/adr/role-contracts.md). The
+        // contract symbols are excluded from provision the way Perl's
+        // `requires` markers are.
+        let mut contract_symbols: std::collections::HashSet<SymbolId> = Default::default();
+        for (i, sym) in symbols.iter().enumerate() {
+            let defers = sym
+                .attributes
+                .iter()
+                .any(|a| a == "interface" || a == "trait" || a == "abstract");
+            if sym.kind == SymKind::Class && defers {
+                packages.entry(sym.name.clone()).or_default().is_role = true;
+            }
+            if matches!(sym.kind, SymKind::Sub | SymKind::Method)
+                && sym.attributes.iter().any(|a| a == "contract")
+            {
+                contract_symbols.insert(SymbolId(i as u32));
+                if let Some(pkg) = &sym.package {
+                    let facts = packages.entry(pkg.clone()).or_default();
+                    if !facts.requires.contains(&sym.name) {
+                        facts.requires.push(sym.name.clone());
+                    }
+                }
+            }
+        }
+        // `$var = $recv->method()` bindings: hand the assignment to the
+        // language-generic MCB→bag bridge (`emit_method_call_binding_edges`),
+        // which resolves the receiver and chases the method's return lazily —
+        // at finalize AND at every enrichment re-run, so a receiver whose
+        // class only types once imports land still resolves. Join: the flow
+        // edge's SOURCE opens at a member ref's invocant; the rightmost such
+        // token is the chain's last hop. A chained receiver's invocant text
+        // (`$u->a()`) names no variable and no-ops harmlessly — single-hop
+        // bindings are the ones that type here.
+        let method_call_bindings: Vec<crate::model::file_analysis::MethodCallBinding> = self
+            .flow_edges
+            .iter()
+            .filter_map(|fe| {
+                self.refs
+                    .iter()
+                    .filter_map(|r| {
+                        let (inv_span, inv_text) = r.invocant.as_ref()?;
+                        (r.kind == "member"
+                            && inv_span.start == fe.source.start
+                            && (r.end.row, r.end.column)
+                                <= (fe.source.end.row, fe.source.end.column))
+                            .then(|| (r, inv_text.clone()))
+                    })
+                    .max_by_key(|(r, _)| (r.start.row, r.start.column))
+                    .map(|(r, inv)| crate::model::file_analysis::MethodCallBinding {
+                        variable: fe.target_name.clone(),
+                        invocant_var: inv,
+                        method_name: r.name.clone(),
+                        scope: fe.target_scope,
+                        span: fe.source,
+                    })
+            })
+            .collect();
         let pack = crate::model::file_analysis::PackFacts {
             // Pack-declared receiver names ride the FA so core's member /
             // outline filters can exclude them generically (lang semantics in
@@ -1491,6 +1551,7 @@ impl SkeletonAnalysis {
         let mut fa = FileAnalysis::new(FileAnalysisParts {
             scopes: self.scopes,
             fold_ranges,
+            contract_symbols,
             symbols,
             refs,
             witnesses: bag,
