@@ -226,7 +226,8 @@ pub fn rail_conventions_for(pack: &LangPack) -> std::sync::Arc<RailConventions> 
 
 /// The text rails in force for a language: bundled documents plus every
 /// discovered `<plugin-dir>/<name>/rails.json` — the `entry.json` posture
-/// (cached per process, a malformed document dropped with a diagnostic).
+/// (cached per (lang, plugin-path set), a malformed document dropped with a
+/// diagnostic).
 pub fn text_rails_for(pack: &LangPack) -> std::sync::Arc<Vec<TextRail>> {
     use std::collections::HashMap;
     use std::sync::{Arc, Mutex, OnceLock};
@@ -244,7 +245,14 @@ pub fn text_rails_for(pack: &LangPack) -> std::sync::Arc<Vec<TextRail>> {
         }
     }
     paths.sort();
-    let key = format!("{}|{}", pack.lang_id, paths.len());
+    // The key IS the discovered path set (the contract above), never its
+    // size: two plugin dirs of equal size would otherwise serve each other's
+    // documents.
+    let key = paths.iter().fold(pack.lang_id.to_string(), |mut k, p| {
+        k.push('|');
+        k.push_str(&p.to_string_lossy());
+        k
+    });
     if let Some(v) = cache.lock().unwrap().get(&key) {
         return Arc::clone(v);
     }
@@ -292,7 +300,14 @@ pub fn entry_markers_for(pack: &LangPack) -> std::sync::Arc<Vec<EntryMarker>> {
         }
     }
     paths.sort();
-    let key = format!("{}|{}", pack.lang_id, paths.len());
+    // The key IS the discovered path set (the contract above), never its
+    // size: two plugin dirs of equal size would otherwise serve each other's
+    // documents.
+    let key = paths.iter().fold(pack.lang_id.to_string(), |mut k, p| {
+        k.push('|');
+        k.push_str(&p.to_string_lossy());
+        k
+    });
     if let Some(v) = cache.lock().unwrap().get(&key) {
         return Arc::clone(v);
     }
