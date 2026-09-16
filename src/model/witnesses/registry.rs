@@ -441,10 +441,15 @@ impl ReducerRegistry {
         // so order isn't load-bearing — grouped with the other class-keyed
         // fallbacks. The `ClassName(name)` terminal lives in query_rec_body.
         r.register(Box::new(TypeNameReducer));
-        // DomainCoherenceFold claims the disjoint `Field{..}` shape (the
-        // int-used-as-enum domain vote) — no overlap with any flow-axis
-        // reducer, so order isn't load-bearing.
+        // The two `Field{..}` reducers claim disjoint PAYLOADS on one
+        // attachment: FieldValueReducer the slot's materialized value edge
+        // (what a `ValueHop` reads), DomainCoherenceFold the `DomainCompare`
+        // vote. Value first is load-bearing — the domain is a human-surface
+        // refinement and must never be the type that flows.
+        r.register(Box::new(FieldValueReducer));
         r.register(Box::new(DomainCoherenceFold));
+        // `Param{..}` is a disjoint attachment shape; order isn't load-bearing.
+        r.register(Box::new(ParamBindingReducer));
         // Last — fallback for "this Symbol's stored return type".
         r.register(Box::new(SubReturnReducer));
         r
@@ -1152,6 +1157,36 @@ impl ReducerRegistry {
             );
         }
 
+        // `Field{owner, name}` the local bag couldn't answer: the slot's
+        // value edge lives in the file declaring `owner` (cross-file
+        // primary), or the slot is a PARENT's (ancestry) — hops (1) and (2)
+        // of the `PackageSymbol` ladder, same shared visited set. No bridge
+        // hop: a plugin entity is a callable, never a stored value.
+        if let WitnessAttachment::Field { owner, name } = q.attachment {
+            if let Some(v) = self.owner_keyed_fallback(bag, q, state, owner, "field", &|p| {
+                WitnessAttachment::Field { owner: p, name: name.clone() }
+            }) {
+                return v;
+            }
+        }
+
+        // `Param{package, name, index}`: the callee's bag is the authority.
+        // Its own witness present but untyped → the position IS bound, so
+        // `Unknown` (a value flowed, nothing named it) rather than silence —
+        // silence would read as by-value. Absent locally → the callee lives
+        // elsewhere (cross-file primary) or the position is a parent's
+        // (ancestry): the `Field` ladder, same shared visited set.
+        if let WitnessAttachment::Param { package, name, index } = q.attachment {
+            if !bag.for_attachment(q.attachment).is_empty() {
+                return ReducedValue::Type(InferredType::Unknown);
+            }
+            if let Some(v) = self.owner_keyed_fallback(bag, q, state, package, "param", &|p| {
+                WitnessAttachment::Param { package: p, name: name.clone(), index: *index }
+            }) {
+                return v;
+            }
+        }
+
         ReducedValue::None
     }
 
@@ -1166,6 +1201,93 @@ impl ReducerRegistry {
     /// `query_variable_type` would reset visited and reopen mutual
     /// `Edge(Variable)` loops).
 
+
+
+    /// The owner-keyed ladder shared by the `Field` and `Param` fallbacks:
+    /// every candidate file declaring `owner` (cross-file primary), then the
+    /// same attachment re-keyed to each parent (`rekey`), one visited set
+    /// throughout. No bridge hop — neither a slot nor a parameter is a
+    /// plugin-synthesized callable.
+    ///
+    /// Out of line for the same reason as `moc_cross_file_primary`: this
+    /// block's locals would otherwise live in `query_rec_body`'s frame,
+    /// which is live once per inheritance hop against the 2 MiB stack the
+    /// depth-cap test pins, and a debug build overflowed it there.
+    #[inline(never)]
+    fn owner_keyed_fallback(
+        &self,
+        bag: &WitnessBag,
+        q: &ReducerQuery,
+        state: &mut QueryState,
+        owner: &str,
+        site: &'static str,
+        rekey: &dyn Fn(String) -> WitnessAttachment,
+    ) -> Option<ReducedValue> {
+        let ctx = q.context?;
+        if ctx.module_index.is_none() {
+            // A value hop runs under an opaque frame (the projection
+            // combines it), so no conclusion key names this exit.
+            super::note_bake_exit(site, false);
+        }
+        if let Some(idx) = ctx.module_index {
+            for cached in idx.visible_def_candidates(owner) {
+                crate::util::ghost_stats::count("moc.provider_fetched");
+                crate::util::ghost_stats::count(if site == "field" {
+                    "mocsite.field"
+                } else {
+                    "mocsite.param"
+                });
+                let full = idx.bag_present(&cached);
+                if std::ptr::eq(bag, &full.witnesses) {
+                    continue;
+                }
+                let cached_ctx = BagContext {
+                    scopes: &full.scopes,
+                    package_framework: &full.packages,
+                    module_index: Some(idx),
+                    package_parents: &full.packages,
+                    app_surface_consumers: &full.plugin.app_surface_consumers,
+                };
+                let sub_q = ReducerQuery {
+                    attachment: q.attachment,
+                    // Cross-file: point normalized (see the slot arm).
+                    point: None,
+                    framework: q.framework,
+                    arity_hint: None,
+                    receiver: q.receiver.clone(),
+                    args: q.args.clone(),
+                    context: Some(&cached_ctx),
+                };
+                let v = self.query_rec(&full.witnesses, &sub_q, state);
+                if *v != ReducedValue::None {
+                    return Some((*v).clone());
+                }
+            }
+        }
+        let parents = crate::model::file_analysis::parents_of(
+            owner,
+            ctx.package_parents,
+            ctx.module_index,
+            ctx.app_surface_consumers,
+        );
+        for p in parents {
+            let parent_att = rekey(p);
+            let sub_q = ReducerQuery {
+                attachment: &parent_att,
+                point: q.point,
+                framework: q.framework,
+                arity_hint: None,
+                receiver: q.receiver.clone(),
+                args: q.args.clone(),
+                context: q.context,
+            };
+            let v = self.query_rec(bag, &sub_q, state);
+            if *v != ReducedValue::None {
+                return Some((*v).clone());
+            }
+        }
+        None
+    }
 
     /// The cross-file primary hop of the `PackageSymbol` ladder: every file
     /// declaring `package`, asked in ladder order, first answer wins,
@@ -1852,27 +1974,6 @@ impl ReducerRegistry {
         state: &mut QueryState,
     ) -> Vec<Witness> {
         let raw = bag.for_attachment(q.attachment);
-        // Member-shape preference on a class attachment: a class can carry
-        // BOTH a value edge (`FIELD_EDGE_SOURCE`, the property) and callable
-        // edges (the method's return chain) under one member name. An
-        // arity-less query is a value read and takes the value edge; a
-        // query with an arity is a call and takes the callable edges. With
-        // only one kind present nothing is dropped — the shape only decides
-        // when the class genuinely overloads the name across kinds.
-        let raw: Vec<&Witness> = if matches!(q.attachment, WitnessAttachment::PackageSymbol { .. }) {
-            let is_field = |w: &&Witness| {
-                matches!(&w.source, WitnessSource::Builder(t) if t == FIELD_EDGE_SOURCE)
-            };
-            let fields = raw.iter().filter(|w| is_field(w)).count();
-            if fields > 0 && fields < raw.len() {
-                let want_field = q.arity_hint.is_none();
-                raw.into_iter().filter(|w| is_field(w) == want_field).collect()
-            } else {
-                raw
-            }
-        } else {
-            raw
-        };
         // Is this attachment's value a pass-through of ONE sub-chase, or a fold
         // over several? With siblings present, whatever a sub-chase answers is
         // combined with them before this frame returns, so no single exit key
@@ -1972,10 +2073,9 @@ impl ReducerRegistry {
                             span: w.span,
                         }),
                         // An edge that didn't resolve drops out — same as a
-                        // witness no reducer claims — unless it was an
-                        // assignment, which still HAPPENED: the variable now
-                        // holds something untypable, not its earlier value.
-                        None => out.extend(opaque_rebind_of(bag, w)),
+                        // witness no reducer claims. The write it lowered
+                        // still HAPPENED: its `Reset` marker records that.
+                        None => {}
                     }
                 }
                 WitnessPayload::CallReturn { target, arity } => {
@@ -2117,21 +2217,64 @@ impl ReducerRegistry {
                                 ) if args.len() == 2 => args.first().cloned(),
                                 _ => None,
                             },
-                            ProjectionStep::MethodHop { member, arity: _ }
-                            | ProjectionStep::ValueHop { member } => {
-                                let arity = match step {
-                                    ProjectionStep::MethodHop { arity, .. } => Some(*arity),
-                                    _ => None,
-                                };
-                                // Fresh dispatch on the base's class at the
-                                // call site's own arity; the base type IS the
-                                // dynamic receiver, so a fluent `Receiver`
-                                // return substitutes it (`$q->where()->get()`).
+                            ProjectionStep::ParamOf { member, index } => {
+                                // The dispatch class picks the callee; the
+                                // callee's bag says whether the position
+                                // aliases (`Param` fallback below).
                                 t.class_name().map(str::to_string).and_then(|class| {
-                                    let att = WitnessAttachment::PackageSymbol {
+                                    let att = WitnessAttachment::Param {
                                         package: class,
                                         name: member.clone(),
+                                        index: *index,
                                     };
+                                    let sub_q = ReducerQuery {
+                                        attachment: &att,
+                                        point: q.point,
+                                        framework: q.framework,
+                                        arity_hint: None,
+                                        receiver: Some(t.clone()),
+                                        args: q.args.clone(),
+                                        context: q.context,
+                                    };
+                                    state.in_opaque_frame(|state| {
+                                        match &*self.query_rec(bag, &sub_q, state) {
+                                            ReducedValue::Type(t) => Some(t.clone()),
+                                            ReducedValue::FactMap(_)
+                                            | ReducedValue::None => None,
+                                        }
+                                    })
+                                })
+                            }
+                            ProjectionStep::MethodHop { member, arity: _ }
+                            | ProjectionStep::ValueHop { member } => {
+                                // The step's kind picks the attachment: a call
+                                // dispatches `PackageSymbol{class, member}` at
+                                // the call's own arity, a value read chases
+                                // `Field{class, member}` — the slot's own
+                                // subject — so a same-named callable's return
+                                // can never answer a read, nor a field a call.
+                                // The base type IS the dynamic receiver, so a
+                                // fluent `Receiver` return substitutes it
+                                // (`$q->where()->get()`).
+                                let (att_of, arity): (fn(String, String) -> WitnessAttachment, Option<u32>) =
+                                    match step {
+                                        ProjectionStep::MethodHop { arity, .. } => (
+                                            |class, name| WitnessAttachment::PackageSymbol {
+                                                package: class,
+                                                name,
+                                            },
+                                            Some(*arity),
+                                        ),
+                                        _ => (
+                                            |class, name| WitnessAttachment::Field {
+                                                owner: class,
+                                                name,
+                                            },
+                                            None,
+                                        ),
+                                    };
+                                t.class_name().map(str::to_string).and_then(|class| {
+                                    let att = att_of(class, member.clone());
                                     let sub_q = ReducerQuery {
                                         attachment: &att,
                                         point: q.point,
@@ -2151,17 +2294,14 @@ impl ReducerRegistry {
                                 })
                             }
                         };
-                        match projected {
-                            Some(t) => out.push(Witness {
+                        if let Some(t) = projected {
+                            out.push(Witness {
                                 attachment: w.attachment.clone(),
                                 source: w.source.clone(),
                                 payload: WitnessPayload::InferredType(t),
                                 span: w.span,
-                            }),
-                            None => out.extend(opaque_rebind_of(bag, w)),
+                            });
                         }
-                    } else {
-                        out.extend(opaque_rebind_of(bag, w));
                     }
                 }
                 WitnessPayload::Tuple(elems) => {
@@ -2311,44 +2451,6 @@ impl ReducerRegistry {
     }
 }
 
-/// The reset an unresolved REASSIGNMENT edge materializes to
-/// (`REASSIGN_FLOW_SOURCE`, zero-width at the assignment site). A
-/// declaration's edge never resets — its companions (a first-param
-/// constraint at the sub's start, a docblock cast) may sit anywhere
-/// before it — and a region-spanned edge is a narrowing fact whose
-/// failure stays a plain drop-out.
-fn is_reassign_edge(w: &Witness) -> bool {
-    matches!(w.attachment, WitnessAttachment::Variable { .. })
-        && w.span.start == w.span.end
-        && matches!(&w.source, WitnessSource::Builder(t) if t == REASSIGN_FLOW_SOURCE)
-}
-
-/// A reassignment whose source nothing can type still HAPPENED: the edge
-/// materializes to its reset marker, an `Unknown` at the site under the
-/// reassign source, which `FrameworkAwareTypeFold` reads as the cutoff.
-/// Unless nothing was bound before it in the scope — asked of the BAG, edges
-/// included, because the prior binding may itself be an edge nothing typed
-/// — in which case this assignment IS the declaration (a pack without
-/// declaration syntax marks every plain assignment) and stays absent
-/// exactly as a `my` whose RHS nothing can type does.
-fn opaque_rebind_of(bag: &WitnessBag, w: &Witness) -> Option<Witness> {
-    if !is_reassign_edge(w) {
-        return None;
-    }
-    let WitnessAttachment::Variable { name, scope } = &w.attachment else {
-        return None;
-    };
-    if !scope_binds_variable_before(bag, name, *scope, w.span.start) {
-        return None;
-    }
-    Some(Witness {
-        attachment: w.attachment.clone(),
-        source: w.source.clone(),
-        payload: WitnessPayload::InferredType(InferredType::Unknown),
-        span: w.span,
-    })
-}
-
 /// Does this scope *bind* the variable — establish its value/identity via
 /// an explicit type, an assignment edge, or a class/bless observation — as
 /// opposed to merely OBSERVING rep use (`$v->{k}` → `HashRefAccess`)? A
@@ -2359,12 +2461,6 @@ fn opaque_rebind_of(bag: &WitnessBag, w: &Witness) -> Option<Witness> {
 /// observations are the weak case.
 fn scope_binds_variable(bag: &WitnessBag, var: &str, scope: ScopeId, point: Point) -> bool {
     binds_variable_where(bag, var, scope, |w| w.span.start <= point)
-}
-
-/// `scope_binds_variable` with the binding strictly BEFORE `point` —
-/// companions minted at `point` itself (the site under question) don't count.
-fn scope_binds_variable_before(bag: &WitnessBag, var: &str, scope: ScopeId, point: Point) -> bool {
-    binds_variable_where(bag, var, scope, |w| w.span.start < point)
 }
 
 fn binds_variable_where(
@@ -2379,17 +2475,8 @@ fn binds_variable_where(
     };
     bag.for_attachment(&att).iter().any(|w| {
         at(w)
-            && !matches!(
-                &w.payload,
-                WitnessPayload::Observation(
-                    TypeObservation::HashRefAccess
-                        | TypeObservation::ArrayRefAccess
-                        | TypeObservation::CodeRefInvocation
-                        | TypeObservation::NumericUse
-                        | TypeObservation::StringUse
-                        | TypeObservation::RegexpUse
-                )
-            )
+            && (w.payload.binds_value()
+                || !matches!(&w.payload, WitnessPayload::Observation(_) | WitnessPayload::Reset))
     })
 }
 

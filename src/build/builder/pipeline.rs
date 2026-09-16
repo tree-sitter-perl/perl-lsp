@@ -139,6 +139,7 @@ fn too_deep_analysis(tree: &Tree, depth: usize) -> FileAnalysis {
             kind: ScopeKind::File,
             span: node_to_span(tree.root_node()),
             package: Some("main".to_string()),
+            owner: None,
         }],
         plugin: crate::model::file_analysis::PluginFacts {
             diagnostics: vec![PluginDiagnostic {
@@ -155,6 +156,10 @@ fn too_deep_analysis(tree: &Tree, depth: usize) -> FileAnalysis {
                 code: "cst-too-deep".to_string(),
                 plugin_id: "core".to_string(),
             }],
+            ..Default::default()
+        },
+        pack: crate::model::file_analysis::PackFacts {
+            names: crate::model::conventions::PERL_SPELLINGS,
             ..Default::default()
         },
         ..Default::default()
@@ -277,6 +282,7 @@ fn build_once(
         source,
         scopes: Vec::new(),
         symbols: Vec::new(),
+        owner_scope: std::collections::HashMap::new(),
         refs: Vec::new(),
         deferred_var_types: Vec::new(),
         deferred_named_sub_param_types: Vec::new(),
@@ -465,11 +471,14 @@ fn build_once(
             .find(|s| crate::model::file_analysis::contains_point(&s.span, d.at.start))
             .map(|s| s.id)
             .unwrap_or(ScopeId(0));
+        // Anchored at the variable's binding site: a write marker at the
+        // declaration must not retire the plugin's claim about it.
+        let at = b.binding_site_of(&d.variable, scope).map(|p| Span { start: p, end: p }).unwrap_or(d.at);
         b.push_plugin_type_constraint(
             TypeConstraint {
                 variable: d.variable,
                 scope,
-                constraint_span: d.at,
+                constraint_span: at,
                 inferred_type: d.inferred_type,
             },
             d.plugin_id,
@@ -660,7 +669,10 @@ fn build_once(
         },
         // The pack lane is empty for Perl: no macros, no include graph,
         // no template params, no `std::move`.
-        pack: crate::model::file_analysis::PackFacts::default(),
+        pack: crate::model::file_analysis::PackFacts {
+            names: crate::model::conventions::PERL_SPELLINGS,
+            ..Default::default()
+        },
         type_provenance: b.type_provenance,
         package_ranges: b.package_ranges,
         witnesses: b.bag,
@@ -713,7 +725,7 @@ impl<'a> Builder<'a> {
     }
 
     /// The reset marker for a plain assignment to an already-bound name:
-    /// zero-width at the site, `REASSIGN_FLOW_SOURCE`, an `Unknown` payload.
+    /// zero-width at the site, a `WitnessPayload::Reset`.
     /// `FrameworkAwareTypeFold` reads it as the cutoff every earlier belief
     /// dies at, and as the value only when nothing typed lands at or after
     /// it. Idempotent per site, so the worklist fold can mint it each round.
@@ -721,17 +733,15 @@ impl<'a> Builder<'a> {
         use crate::model::witnesses::{Witness, WitnessAttachment, WitnessPayload, WitnessSource};
         let attachment = WitnessAttachment::Variable { name: variable, scope };
         let already = self.bag.for_attachment(&attachment).iter().any(|w| {
-            w.span.start == at
-                && w.span.end == at
-                && matches!(&w.source, WitnessSource::Builder(t) if t == crate::model::witnesses::REASSIGN_FLOW_SOURCE)
+            w.span.start == at && w.span.end == at && matches!(w.payload, WitnessPayload::Reset)
         });
         if already {
             return;
         }
         self.bag.push(Witness {
             attachment,
-            source: WitnessSource::Builder(crate::model::witnesses::REASSIGN_FLOW_SOURCE.into()),
-            payload: WitnessPayload::InferredType(InferredType::Unknown),
+            source: WitnessSource::Builder(crate::model::witnesses::RESET_SOURCE.into()),
+            payload: WitnessPayload::Reset,
             span: Span { start: at, end: at },
         });
     }

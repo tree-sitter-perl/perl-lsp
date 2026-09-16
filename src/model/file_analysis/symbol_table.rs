@@ -89,6 +89,7 @@ impl SymbolTable {
     /// scope's kind, exportedness the `@EXPORT`/`@EXPORT_OK` surface.
     pub fn row_seeds(
         &self,
+        names: &NameSpellings,
         linkage_visible: impl Fn(&Symbol) -> bool,
         exported: impl Fn(&str) -> bool,
     ) -> Vec<SymRowSeed> {
@@ -110,6 +111,7 @@ impl SymbolTable {
                 }
                 SymRowSeed {
                     name: s.name.clone(),
+                    key: name_match_key(&s.name, names),
                     kind: sym_kind_code(&s.kind),
                     span: s.selection_span,
                     container: s.package.clone(),
@@ -250,6 +252,6 @@ impl FileAnalysis {
     /// `export_lookup`), so "exported" never drifts between the two.
     pub fn sym_row_seeds(&self) -> Vec<SymRowSeed> {
         self.symbols
-            .row_seeds(|s| self.is_linkage_visible(s), |n| self.exports_name(n))
+            .row_seeds(&self.pack.names, |s| self.is_linkage_visible(s), |n| self.exports_name(n))
     }
 }

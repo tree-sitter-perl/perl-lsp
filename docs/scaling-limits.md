@@ -345,3 +345,38 @@ a large php corpus (WordPress core, laravel/framework); the fix, when the
 number warrants it, is to feed edges under the identity key only — the leaf
 registration needs the candidate table, never the edge indexes.
 
+## 8. An unresolved-method miss on an absent class — the probe is fixed, the repeat is not
+
+`--check`'s unresolved-method lane paid ~4.5 ms per `$obj->method` site
+whose class the ancestor walk could not settle: a synthetic 1,200-helper
+Mojolicious file (every helper calling `$c->render`) spent 32.8 s of a 44 s
+run in 7,202 walks, every one a miss (measured 2026-09-16, release build,
+fresh `XDG_CACHE_HOME`). Sampling put all of it in SQLite: the row-store
+prefilter probes (`sym_member_row_exists`, `sym_name_row_exists`,
+`name_row_exists`) asked `file_id = ? AND (name_id IN (subquery) OR key_id
+IN (subquery))`, which the planner runs as a scan of the file's rows
+whatever index exists — 21,605 rows, ~3 ms, per probe.
+
+Fixed at the query: each probe is two `EXISTS` halves and `syms` carries
+`(file_id, name_id, container_id)` + `(file_id, key_id, container_id)`
+instead of `(file_id)`, so each half is a covering point probe (~15 µs on
+the same file). The same run is now 0.43 s in the walk, 11 s wall; cold
+persist of the 3,539-file gold substrate pays `persist.shred` 928–949 ms →
+969–1034 ms and 2–3 % more store. `row_probes_plan_as_index_point_lookups`
+pins the plan, because a bundled SQLite upgrade can move it silently.
+
+What remains is the repeat, not the probe: the 7,202 walks still ask the
+store the same (file, name, container) question 7,202 times. Two steps,
+neither started:
+
+- **A sweep-scoped negative memo on the prefilter verdict**, keyed by
+  (path, registration generation, name, container) — the shape
+  `RetrievalMemoGuard` already gives `refs_to`. Sound under a fixed
+  generation; takes the probes per sweep to a handful.
+- **Tri-state module resolution** (`Present` / `Absent` / `Pending`)
+  surfaced from `IndexCore.cache`, whose `None` entry already means "the
+  resolver searched every @INC root and nothing provides it" while
+  `get_cached` flattens it into "not present now". With it the lane can
+  defer on `Pending` and re-run on the resolver's refresh, and treat
+  `Absent` as settled instead of honest-silent. The CLI resolves eagerly,
+  so every `--check` miss is already `Absent` by construction.

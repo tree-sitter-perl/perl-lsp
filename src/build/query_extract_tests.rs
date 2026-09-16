@@ -408,16 +408,17 @@ fn python_cross_file_function_refs_through_refs_to() {
     let (fa_a, _) = python_fa("def helper(x):\n    return x\n");
     let (fa_b, _) = python_fa("from a import helper\n\nz = helper(1)\n");
 
+    let target = crate::index::resolve::TargetRef::new(
+        "helper".into(),
+        crate::index::resolve::TargetKind::Sub { package: None },
+        &fa_b,
+    );
     let store = crate::index::file_store::FileStore::new();
     let pa = std::path::PathBuf::from("/fake/py/a.py");
     let pb = std::path::PathBuf::from("/fake/py/b.py");
     store.insert_workspace(pa.clone(), fa_a);
     store.insert_workspace(pb.clone(), fa_b);
 
-    let target = crate::index::resolve::TargetRef::new(
-        "helper".into(),
-        crate::index::resolve::TargetKind::Sub { package: None },
-    );
     let locs = crate::index::resolve::refs_to(&store, None, &target, crate::index::resolve::RoleMask::EDITABLE);
     let by_file: Vec<(String, crate::model::file_analysis::AccessKind)> = locs
         .iter()
@@ -2086,7 +2087,7 @@ fn cpp_fa(src: &str) -> crate::model::file_analysis::FileAnalysis {
 /// initializer shape — `T x = {…}`, `T x{…}`, `T x;` — the braced-init
 /// twin of the annotation-priority fix. The initializer's literals mint a
 /// `Numeric` flow witness (priority 10); the declared container mints an
-/// `ANNOT_SOURCE` witness (priority 20). Before the plain-`InferredType`
+/// `Annotation(Declared)` witness (priority 20). Before the plain-`InferredType`
 /// axis learned to break ties on source priority, the later flow witness
 /// clobbered the annot (latest-wins) and the variable hovered `Numeric`.
 #[test]
@@ -2569,7 +2570,7 @@ public:
     let recv = InferredType::Parametric(
         ParametricType::instance_from_spelling("Box<int>").unwrap(),
     );
-    let mvt = |m: &str| fa.member_value_type(&recv, m, None, None, crate::model::file_analysis::MemberShape::Unknown);
+    let mvt = |m: &str| fa.member_value_type(&recv, m, None, None);
     assert_eq!(mvt("get"), Some(InferredType::ClassName("int".into())), "bare param return");
     assert_eq!(mvt("v_"), Some(InferredType::ClassName("int".into())), "bare param field");
     assert_eq!(
@@ -2587,8 +2588,28 @@ public:
     assert_eq!(mvt("size"), Some(InferredType::Numeric), "concrete member unchanged");
     // No receiver args → no invented answer for param-shaped members.
     let bare = InferredType::ClassName("Box".into());
-    assert_eq!(fa.member_value_type(&bare, "get", None, None, crate::model::file_analysis::MemberShape::Unknown), None);
-    assert_eq!(fa.member_value_type(&bare, "size", None, None, crate::model::file_analysis::MemberShape::Unknown), Some(InferredType::Numeric));
+    assert_eq!(fa.member_value_type(&bare, "get", None, None), None);
+    assert_eq!(fa.member_value_type(&bare, "size", None, None), Some(InferredType::Numeric));
+}
+
+#[test]
+fn cpp_field_value_type_never_answers_a_callable() {
+    // `field_value_type` is what a `FieldAccess` ref asks: the class's
+    // value members only. `member_value_type` is the kind-less ladder for
+    // an asker with no ref in hand (the sentinel mid-keystroke).
+    use crate::model::file_analysis::InferredType;
+    let fa = cpp_fa(
+        "\
+struct S {
+    int v_;
+    int size();
+};
+",
+    );
+    let s = InferredType::ClassName("S".into());
+    assert_eq!(fa.field_value_type(&s, "v_", None), Some(InferredType::Numeric));
+    assert_eq!(fa.field_value_type(&s, "size", None), None, "a callable is not a value member");
+    assert_eq!(fa.member_value_type(&s, "size", None, None), Some(InferredType::Numeric));
 }
 
 #[test]
@@ -2638,16 +2659,16 @@ template <> struct codec<int, char> {
     );
     // pattern bindings feed member substitution: T bound THROUGH the shape
     assert_eq!(
-        fa.member_value_type(&inst("codec<Widget*, char>"), "deref", None, None, crate::model::file_analysis::MemberShape::Unknown),
+        fa.member_value_type(&inst("codec<Widget*, char>"), "deref", None, None),
         Some(InferredType::ClassName("Widget".into()))
     );
     assert_eq!(
-        fa.member_value_type(&inst("codec<vector<Widget>, char>"), "front", None, None, crate::model::file_analysis::MemberShape::Unknown),
+        fa.member_value_type(&inst("codec<vector<Widget>, char>"), "front", None, None),
         Some(InferredType::ClassName("Widget".into()))
     );
     // a member the spec doesn't define falls through the ladder to the primary
     assert_eq!(
-        fa.member_value_type(&inst("codec<Widget*, char>"), "parse", None, None, crate::model::file_analysis::MemberShape::Unknown),
+        fa.member_value_type(&inst("codec<Widget*, char>"), "parse", None, None),
         Some(InferredType::Numeric)
     );
     // the ladder itself is ranked and never pruned

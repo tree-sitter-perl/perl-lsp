@@ -90,14 +90,14 @@ impl FileAnalysis {
                 }
                 InferredType::HashWithKeys { keys: crate::model::file_analysis::SharedKeys::new(keys), open: true }
             };
-            let span = self
-                .scopes
-                .get(m.scope.0 as usize)
-                .map(|sc| Span { start: sc.span.start, end: sc.span.start })
-                .unwrap_or(Span {
-                    start: Point { row: 0, column: 0 },
-                    end: Point { row: 0, column: 0 },
-                });
+            // Anchored at the parameter's binding token (a write marker at
+            // its declaration retires what lies strictly before it), else
+            // the scope's start.
+            let at = self
+                .binding_site_of(&m.variable, m.scope)
+                .or_else(|| self.scopes.get(m.scope.0 as usize).map(|sc| sc.span.start))
+                .unwrap_or(Point { row: 0, column: 0 });
+            let span = Span { start: at, end: at };
             self.push_type_constraint(TypeConstraint {
                 variable: m.variable.clone(),
                 scope: m.scope,
@@ -160,6 +160,8 @@ impl FileAnalysis {
                     namespace: ns.clone(),
                     presentation: gs.presentation.clone(),
                     attributes: Vec::new(),
+                    flags: Default::default(),
+                    declared_with: None,
                     deref_stack: Vec::new(),
                     arity: None,
                 });
@@ -474,7 +476,7 @@ impl FileAnalysis {
             .call_bindings
             .iter()
             .flat_map(|b| {
-                [b.func_name.as_str(), split_qualified(&b.func_name).1]
+                [b.func_name.as_str(), split_qualified(&b.func_name, self.names()).1]
             })
             .collect();
         // A file with no call bindings needs no provider walk at all.
@@ -666,7 +668,7 @@ impl FileAnalysis {
             .collect();
         let binding_by_var: std::collections::HashMap<String, String> = self.call_bindings.iter()
             .filter_map(|b| {
-                let bare = split_qualified(&b.func_name).1.to_string();
+                let bare = split_qualified(&b.func_name, self.names()).1.to_string();
                 if imported_keyed_subs.contains(&bare) {
                     Some((b.variable.clone(), bare))
                 } else {
@@ -1084,7 +1086,7 @@ impl FileAnalysis {
         let mut out = Vec::new();
         for r in self.refs() {
             let (receiver, form) = match &r.kind {
-                RefKind::MethodCall { invocant, .. } => {
+                RefKind::MethodCall { invocant, .. } | RefKind::FieldAccess { invocant, .. } => {
                     // Only a scalar invocant can be undef/Optional; a
                     // bareword/`__PACKAGE__`/chain/bridged receiver never
                     // narrows here.
@@ -1311,7 +1313,7 @@ impl FileAnalysis {
             self.refs[idx].link_owned_symbol(sid);
         }
 
-        self.refs.refresh_name_target_indices();
+        self.refs.refresh_name_target_indices(&self.pack.names);
     }
 
 

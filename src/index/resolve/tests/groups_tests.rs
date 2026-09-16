@@ -546,6 +546,7 @@ fn test_renaming_import_remote_joins_source_alias_stays_local() {
 
     // Source rename reaches the consumer's REMOTE `beta` token.
     let src = TargetRef {
+        names: crate::model::conventions::PERL_SPELLINGS,
         name: "beta".to_string(),
         kind: TargetKind::Sub { package: Some("Exp".to_string()) },
         method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), bare_constant: false,
@@ -556,6 +557,7 @@ fn test_renaming_import_remote_joins_source_alias_stays_local() {
 
     // Alias rename is local to the consuming package — never the exporter.
     let alias = TargetRef {
+        names: crate::model::conventions::PERL_SPELLINGS,
         name: "rb".to_string(),
         kind: TargetKind::Sub { package: Some("Consumer".to_string()) },
         method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), bare_constant: false,
@@ -1194,6 +1196,7 @@ fn test_event_handler_refs_mark_folded_site_non_rewritable() {
     store.insert_workspace(path.clone(), parse(src));
 
     let target = TargetRef {
+        names: crate::model::conventions::PERL_SPELLINGS,
         name: "connect".to_string(),
         kind: TargetKind::Handler {
             owner: crate::model::file_analysis::HandlerOwner::Class("App".to_string()),
@@ -1429,6 +1432,7 @@ fn test_implementations_of_role_requires_fans_out_to_composers() {
     insert("My::Deep", "package My::Deep;\nuse Moo;\nwith 'My::SubRole';\nsub fetch { 7 }\n1;\n");
 
     let target = TargetRef {
+        names: crate::model::conventions::PERL_SPELLINGS,
         name: "fetch".to_string(),
         kind: TargetKind::Method { class: "My::Role".to_string() },
         method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), bare_constant: false,
@@ -1449,7 +1453,7 @@ fn test_implementations_of_role_requires_fans_out_to_composers() {
     );
 
     // Non-Method targets have no descendant-implementation semantics.
-    let pkg_target = TargetRef::new("My::Role".to_string(), TargetKind::Package);
+    let pkg_target = TargetRef::new("My::Role".to_string(), TargetKind::Package, &origin);
     assert!(implementations_of(&origin, Some(&idx), &pkg_target).is_empty());
 }
 
@@ -1482,6 +1486,7 @@ fn test_implementations_finds_mixin_sibling_override() {
     insert("Child", "package Child;\nuse base qw(Mixin Base);\n1;\n");
 
     let target = TargetRef {
+        names: crate::model::conventions::PERL_SPELLINGS,
         name: "save".to_string(),
         kind: TargetKind::Method { class: "Base".to_string() },
         method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), bare_constant: false,
@@ -1591,6 +1596,7 @@ fn test_implementations_on_sub_decl_target_finds_overrides() {
     insert("Sub1", "package Sub1;\nuse base qw(Base);\nsub save { 2 }\n1;\n");
 
     let target = TargetRef {
+        names: crate::model::conventions::PERL_SPELLINGS,
         name: "save".to_string(),
         kind: TargetKind::Sub { package: Some("Base".to_string()) },
         method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), bare_constant: false,
@@ -2169,7 +2175,7 @@ fn test_implementations_on_primary_enumerates_specialization_family() {
     idx.register_symbols(PathBuf::from("/fake/base.h"), Arc::new(cpp(primary_src)));
     idx.register_symbols(PathBuf::from("/fake/format.h"), Arc::new(cpp(specs_src)));
 
-    let target = TargetRef::new("formatter".to_string(), TargetKind::Package);
+    let target = TargetRef::new("formatter".to_string(), TargetKind::Package, &origin);
     let results = implementations_of(&origin, Some(&idx), &target);
     let files: Vec<String> = results
         .iter()

@@ -19,7 +19,7 @@ pub struct WarmStub {
 /// Bump when the stub's MEANING changes without breaking its bincode
 /// decode (a decode break self-heals to the full-blob path). Mismatch
 /// wipes the `stubs` table; the next warm backfills from full decodes.
-const STUB_VERSION: &str = "8";
+const STUB_VERSION: &str = "9";
 
 /// Gate the `stubs` table on the current stub generation — call once
 /// before a stub-consuming warm scan.

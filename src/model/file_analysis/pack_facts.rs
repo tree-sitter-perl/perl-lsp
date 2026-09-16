@@ -70,6 +70,13 @@ pub struct PackFacts {
     /// runtime-only, so an unmatched name is a lead, not an error.
     #[serde(default)]
     pub rail_hints: Vec<String>,
+    /// Rails whose names are CLASS identities (the rail document's
+    /// `names_are: class` — Laravel's event bus). Per-overlay data the
+    /// file carries, like `rail_labels`: which overlays load is a property
+    /// of the workspace, not of the language, so it is not a language
+    /// convention reached by id. Read through `HandlerOwner::names_are`.
+    #[serde(default)]
+    pub class_named_rails: Vec<String>,
     /// The last row of the file preamble (open tag, `declare` rows).
     #[serde(default)]
     pub preamble_end: Option<usize>,
@@ -77,10 +84,6 @@ pub struct PackFacts {
     /// spells is unused; false for text-splicing includes.
     #[serde(default)]
     pub imports_bind_names: bool,
-    /// A value read never resolves to a method, a call never to a field
-    /// (php); false lets Perl's accessor calls answer either kind.
-    #[serde(default)]
-    pub member_shapes_are_strict: bool,
     /// A member declaration belongs only to its enclosing container (no
     /// cross-package installs): contract provision is package-attributed.
     #[serde(default)]
@@ -151,13 +154,19 @@ pub struct PackFacts {
     #[serde(default)]
     pub qualified_spellings: Vec<(String, String)>,
 
-    /// The pack's namespace separator, when class identity is a namespace-
-    /// qualified name (`\` for the use-map packs). `None` = spellings are
-    /// identities already (C's flat linkage, Perl keys its own `::`); the
-    /// namespace questions (`identity_namespace`, `class_spelling_identity`)
-    /// gate on it.
+    /// How this analysis's language spells names — its separator and its
+    /// sigils — the data every key function reads (rule #12). Perl's
+    /// builder bakes `conventions::PERL_SPELLINGS`; a pack bakes
+    /// `LangPack::names`. The use-map questions (`identity_namespace`,
+    /// `class_spelling_identity`) gate on its `class_spelling`.
+    ///
+    /// A per-language constant carried per file ON PURPOSE (the rule #14
+    /// exception): a key is computed wherever an analysis is in hand — the
+    /// row store's probes, a target minted from an origin — and the
+    /// alternative is a process-wide language registry, which cannot say
+    /// which language a given name belongs to. A few bytes per blob.
     #[serde(default)]
-    pub namespace_sep: Option<char>,
+    pub names: NameSpellings,
 
     /// This file's transitive `#include` closure — canonical header paths it
     /// reaches. The cross-file VISIBILITY key: a name resolves preferentially to
@@ -204,23 +213,6 @@ pub struct PackFacts {
     /// the member exists; the undefined-member lanes stay silent there.
     #[serde(default)]
     pub probe_regions: Vec<Span>,
-    /// A bare variable written as a call argument (`f($x, $out)`), with the
-    /// argument list it sits in and its position there. The
-    /// undefined-variable lane joins the call ref through the list's start
-    /// (the callee token ends there, the adjacency `arg_count` also rides)
-    /// and asks the callee's `ParamArity::binds_arg`: a by-reference
-    /// position binds the variable instead of reading it.
-    #[serde(default)]
-    pub variable_arg_sites: Vec<ArgSite>,
-}
-
-/// One bare-variable argument: `var` is the variable token, `args` the
-/// enclosing argument list, `position` its index in that list.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ArgSite {
-    pub var: Span,
-    pub args: Span,
-    pub position: u32,
 }
 
 impl PackFacts {
@@ -266,8 +258,7 @@ impl PackFacts {
             + vcap(&self.moved_from)
             + vcap(&self.control_regions)
             + vcap(&self.param_regions)
-            + vcap(&self.probe_regions)
-            + vcap(&self.variable_arg_sites);
+            + vcap(&self.probe_regions);
 
         h.misc += map_str_vec(&self.template_params)
             + mcap(&self.specializes)
@@ -285,6 +276,7 @@ impl PackFacts {
             + self.static_property_sigil.capacity()
             + self.rail_labels.iter().map(|(a, b)| a.capacity() + b.capacity()).sum::<usize>()
             + self.rail_hints.iter().map(|a| a.capacity()).sum::<usize>()
+            + self.class_named_rails.iter().map(|a| a.capacity()).sum::<usize>()
             + vcap(&self.doc_mentions)
             + vcap(&self.type_display)
             + vcap(&self.constructor_names);

@@ -883,11 +883,13 @@ impl<'a> Builder<'a> {
         reassigns: bool,
     ) {
         let scope = self.scope_at_point(at);
-        // A REASSIGNMENT always lowers: its edge is the reset point the
-        // fold keys on (`FlowEdge::reassigns`), whatever the walk's eager TC
-        // for the same statement said — the two agree, or the refined TC
-        // subsumes the edge's re-derived shape. A declaration keeps the
-        // gate: its companions land anywhere in the scope, and a typed
+        // The write's reset marker, idempotent with the walk's own — the two
+        // lanes agree on every write site by construction.
+        self.push_reset_marker(name.clone(), scope, at);
+        // A REASSIGNMENT always lowers: its edge is the value the fold reads
+        // at the write, whatever the walk's eager TC for the same statement
+        // said — the two agree, or the refined TC subsumes the edge's
+        // re-derived shape. A declaration keeps the gate: a typed
         // declaration needs no fallback edge.
         let already_typed = !reassigns && self.bag_query_variable(&name, scope, at).is_some();
         let fe = crate::model::file_analysis::FlowEdge {

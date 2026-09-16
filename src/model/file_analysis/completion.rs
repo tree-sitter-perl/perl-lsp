@@ -275,7 +275,7 @@ impl FileAnalysis {
             .filter(|s| matches!(s.kind, SymKind::Sub | SymKind::Method))
             // An anonymous sub (name `(anon)`) has no callable name — never a
             // method candidate. Gate on callability, not the `(anon)` spelling.
-            .filter(|s| crate::model::conventions::is_callable_sub_name(&s.name))
+            .filter(|s| crate::model::conventions::is_callable_sub_name(&s.name, self.names()))
             // Lexicals never complete bare on a receiver; the `&name` lane
             // (`complete_lexical_methods_at`) is their one member source.
             .filter(|s| !matches!(&s.detail, SymbolDetail::Sub { lexical: true, .. }))
@@ -542,7 +542,7 @@ impl FileAnalysis {
             if !matches!(&sym.detail, SymbolDetail::Sub { lexical: true, .. }) {
                 continue;
             }
-            if !crate::model::conventions::is_callable_sub_name(&sym.name) {
+            if !crate::model::conventions::is_callable_sub_name(&sym.name, self.names()) {
                 continue;
             }
             let enclosing = &self.scope(sym.scope).span;
@@ -591,7 +591,7 @@ impl FileAnalysis {
         // Subs
         for sym in &self.symbols {
             if matches!(sym.kind, SymKind::Sub | SymKind::Method)
-                && crate::model::conventions::is_callable_sub_name(&sym.name)
+                && crate::model::conventions::is_callable_sub_name(&sym.name, self.names())
             {
                 // A lexical sub (`my sub helper`) is callable only inside
                 // its declaring block, from its declaration down — offering
@@ -1083,8 +1083,8 @@ impl FileAnalysis {
         let mut candidates = Vec::new();
         for sym in &self.symbols {
             if matches!(sym.kind, SymKind::Field) {
-                if let SymbolDetail::Field { ref attributes, .. } = sym.detail {
-                    if attributes.contains(&"param".to_string()) {
+                if let SymbolDetail::Field { .. } = sym.detail {
+                    if sym.flags.contains(SymbolFlags::PARAM) {
                         // Check this field belongs to the class
                         if self.symbol_in_class(sym.id, class_name) {
                             let key = sym.bare_name().to_string();
@@ -1382,20 +1382,33 @@ fn cross_file_resolved(sub_info: &SubInfo<'_>) -> ResolvedSub<'static> {
     }
 }
 
+/// A language's spelling for an engine type tag (`PackFacts::type_display`
+/// as a function): `Some` renders the language's own word, `None` keeps the
+/// engine's. Class names never pass through it — they are identities, not
+/// vocabulary — so the map is consulted per TAG at render time instead of
+/// re-tokenizing the rendered label (rule #13).
+pub type TypeVocab<'a> = &'a dyn Fn(&str) -> Option<String>;
+
+/// The engine's own rendering — every tag spelled as the engine names it.
 pub(crate) fn format_inferred_type(ty: &InferredType) -> String {
+    format_type_with(ty, &|_| None)
+}
+
+pub(crate) fn format_type_with(ty: &InferredType, vocab: TypeVocab) -> String {
+    let tag = |t: &str| vocab(t).unwrap_or_else(|| t.to_string());
     match ty {
         InferredType::ClassName(name) => name.clone(),
         InferredType::FirstParam { package } => package.clone(),
-        InferredType::HashRef => "HashRef".to_string(),
+        InferredType::HashRef => tag("HashRef"),
         // Structurally-typed hashes read as plain HashRef on the wire —
         // the per-key detail drives narrowing, not display (yet).
-        InferredType::HashWithKeys { .. } => "HashRef".to_string(),
-        InferredType::ArrayRef => "ArrayRef".to_string(),
-        InferredType::CodeRef { .. } => "CodeRef".to_string(),
-        InferredType::Regexp => "Regexp".to_string(),
-        InferredType::Numeric => "Numeric".to_string(),
-        InferredType::String => "String".to_string(),
-        InferredType::Parametric(p) => format_parametric_type(p),
+        InferredType::HashWithKeys { .. } => tag("HashRef"),
+        InferredType::ArrayRef => tag("ArrayRef"),
+        InferredType::CodeRef { .. } => tag("CodeRef"),
+        InferredType::Regexp => tag("Regexp"),
+        InferredType::Numeric => tag("Numeric"),
+        InferredType::String => tag("String"),
+        InferredType::Parametric(p) => format_parametric_with(p, vocab),
         InferredType::Sequence(elems) => {
             // Angle brackets, not `[...]` — markdown renderers treat
             // bracketed text as link syntax and either swallow it
@@ -1404,36 +1417,60 @@ pub(crate) fn format_inferred_type(ty: &InferredType) -> String {
             // Elide long tuples — a 64-slot literal's hover shouldn't be
             // a wall of element types.
             let mut parts: Vec<String> =
-                elems.iter().take(4).map(format_inferred_type).collect();
+                elems.iter().take(4).map(|e| format_type_with(e, vocab)).collect();
             if elems.len() > 4 {
                 parts.push("…".to_string());
             }
-            format!("Sequence<{}>", parts.join(", "))
+            format!("{}<{}>", tag("Sequence"), parts.join(", "))
         }
         InferredType::TypeConstraintOf(inner) => match inner {
-            Some(i) => format!("TypeConstraint<{}>", format_inferred_type(i)),
-            None => "TypeConstraint".to_string(),
+            Some(i) => format!("{}<{}>", tag("TypeConstraint"), format_type_with(i, vocab)),
+            None => tag("TypeConstraint"),
         },
         InferredType::BrandedRoute { base, controller, .. } => match controller {
             Some(c) => format!("{}<controller={}>", base, c),
             None => base.clone(),
         },
-        InferredType::Optional(inner) => format!("Maybe<{}>", format_inferred_type(inner)),
-        InferredType::Undef => "Undef".to_string(),
-        InferredType::Bool => "Bool".to_string(),
-        InferredType::Unknown => "unknown".to_string(),
+        InferredType::Optional(inner) => format!("{}<{}>", tag("Maybe"), format_type_with(inner, vocab)),
+        InferredType::Undef => tag("Undef"),
+        InferredType::Bool => tag("Bool"),
+        InferredType::Unknown => tag("unknown"),
+    }
+}
+
+/// The outermost constructor of a type's rendering — the class for a
+/// class, the base for a parametric, the engine tag for a container
+/// (`Sequence`, `Maybe`, …) — asked of the type, never peeled back out of
+/// its label. What `native_type_spellings` is keyed by.
+pub(crate) fn format_type_root(ty: &InferredType) -> String {
+    match ty {
+        InferredType::ClassName(name) => name.clone(),
+        InferredType::FirstParam { package } => package.clone(),
+        InferredType::Parametric(ParametricType::ResultSet { base, .. })
+        | InferredType::Parametric(ParametricType::Instance { base, .. })
+        | InferredType::BrandedRoute { base, .. } => base.clone(),
+        InferredType::Sequence(_) => "Sequence".to_string(),
+        InferredType::TypeConstraintOf(_) => "TypeConstraint".to_string(),
+        InferredType::Optional(_) => "Maybe".to_string(),
+        other => format_inferred_type(other),
     }
 }
 
 pub(super) fn format_parametric_type(p: &ParametricType) -> String {
+    format_parametric_with(p, &|_| None)
+}
+
+/// Presentation keeps the args (`b: Box<Widget>`) even though dispatch
+/// projects the base; the args render through the same vocabulary. The
+/// dispatch KEY is `exact_spelling`, which never takes a vocabulary.
+pub(super) fn format_parametric_with(p: &ParametricType, vocab: TypeVocab) -> String {
     match p {
         ParametricType::ResultSet { base, row } => {
             format!("{}<{}>", base, row)
         }
-        // Presentation keeps the args (`b: Box<Widget>`) even though
-        // dispatch projects the base.
-        ParametricType::Instance { base, .. } => {
-            p.exact_spelling().unwrap_or_else(|| base.clone())
+        ParametricType::Instance { base, args } => {
+            let parts: Vec<String> = args.iter().map(|a| format_type_with(a, vocab)).collect();
+            format!("{}<{}>", base, parts.join(", "))
         }
     }
 }

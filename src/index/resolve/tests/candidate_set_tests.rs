@@ -360,6 +360,7 @@ fn from_rename_kind_returns_none_for_kinds_with_no_target() {
 fn collect_from_analysis_still_finds_sub_refs_after_scope_hardening() {
     let fa = parse("package Foo;\nsub greet { 1 }\ngreet();\n1;\n");
     let target = TargetRef {
+        names: crate::model::conventions::PERL_SPELLINGS,
         name: "greet".to_string(),
         kind: TargetKind::Sub { package: Some("Foo".to_string()) },
         method_classes: Vec::new(),

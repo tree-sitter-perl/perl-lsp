@@ -1,6 +1,7 @@
 //! Declaration visitors: the `visit_node` dispatcher, ERROR recovery,
 //! packages/classes/subs, parameter extraction, variable decls and loops.
 
+use crate::model::file_analysis::SymbolFlags;
 use super::*;
 
 impl<'a> Builder<'a> {
@@ -33,10 +34,11 @@ impl<'a> Builder<'a> {
 
             // Blocks create scopes (but only standalone blocks, not sub/class/for bodies)
             "block" | "do_block" => {
-                // Only create a Block scope if parent isn't already a scope-creator
+                // Only create a Block scope if parent isn't already a scope-creator.
                 let parent_kind = node.parent().map(|p| p.kind()).unwrap_or("");
                 if !matches!(parent_kind,
                     "subroutine_declaration_statement" | "method_declaration_statement" |
+                    "anonymous_subroutine_expression" |
                     "class_statement" | "for_statement" | "foreach_statement" |
                     "varname" // block-deref: @{expr}, %{expr}, &{expr}
                 ) {
@@ -770,7 +772,7 @@ impl<'a> Builder<'a> {
         // keep it) but not a workspace-addressable entity (workspace
         // search drops it).
         let lexical = node.child_by_field_name("lexical").is_some();
-        self.add_symbol(
+        let sub_id = self.add_symbol(
             name.clone(),
             if is_method { SymKind::Method } else { SymKind::Sub },
             node_to_span(node),
@@ -800,7 +802,7 @@ impl<'a> Builder<'a> {
         } else {
             ScopeKind::Sub { name: name.clone() }
         };
-        self.push_scope(scope_kind, node_to_span(node), None);
+        self.push_callable_scope(scope_kind, node_to_span(node), sub_id);
 
         // Record signature params as Variable symbols in the sub scope
         self.record_signature_params(node, &params);
@@ -875,12 +877,8 @@ impl<'a> Builder<'a> {
             }
         }
         let span = node_to_span(node);
-        self.ensure_anon_sub_symbol(node, &params);
-        self.push_scope(
-            ScopeKind::Sub { name: "(anon)".into() },
-            span,
-            None,
-        );
+        let sub_id = self.ensure_anon_sub_symbol(node, &params);
+        self.push_callable_scope(ScopeKind::Sub { name: "(anon)".into() }, span, sub_id);
         self.record_signature_params(node, &params);
         self.detect_first_param_type(&params, node);
         self.queue_children_then(node, |b| { b.pop_scope(); });
@@ -976,9 +974,9 @@ impl<'a> Builder<'a> {
                         if let Some(left) = assign.child_by_field_name("left") {
                             let at_params: Vec<ParamInfo> = self.collect_vars_from_decl(left)
                                 .into_iter()
-                                .map(|(name, _)| {
+                                .map(|(name, span)| {
                                     let is_slurpy = name.starts_with('@') || name.starts_with('%');
-                                    ParamInfo { name, default: None, is_slurpy, is_invocant: false }
+                                    ParamInfo { name, default: None, is_slurpy, is_invocant: false, binding_site: Some(span.start) }
                                 })
                                 .collect();
                             // Combine any preceding shift params with @_ params
@@ -1004,9 +1002,9 @@ impl<'a> Builder<'a> {
                         if let Some(left) = assign.child_by_field_name("left") {
                             let list_params: Vec<ParamInfo> = self.collect_vars_from_decl(left)
                                 .into_iter()
-                                .map(|(name, _)| {
+                                .map(|(name, span)| {
                                     let is_slurpy = name.starts_with('@') || name.starts_with('%');
-                                    ParamInfo { name, default: None, is_slurpy, is_invocant: false }
+                                    ParamInfo { name, default: None, is_slurpy, is_invocant: false, binding_site: Some(span.start) }
                                 })
                                 .collect();
                             if !list_params.is_empty() {
@@ -1017,12 +1015,18 @@ impl<'a> Builder<'a> {
                     }
 
                     // Pattern: my $var = shift; or my $var = shift || default; or my $var = shift // default;
+                    // The declared variable's own token binds either form.
+                    let binding_site = assign
+                        .child_by_field_name("left")
+                        .and_then(|l| self.collect_vars_from_decl(l).into_iter().next())
+                        .map(|(_, span)| span.start);
                     if let Some((var_name, default)) = self.extract_shift_param(assign, right) {
                         shift_params.push(ParamInfo {
                             name: var_name,
                             default,
                             is_slurpy: false,
-                    is_invocant: false,
+                            is_invocant: false,
+                            binding_site,
                         });
                         continue;
                     }
@@ -1033,7 +1037,8 @@ impl<'a> Builder<'a> {
                             name: var_name,
                             default: None,
                             is_slurpy: false,
-                    is_invocant: false,
+                            is_invocant: false,
+                            binding_site,
                         });
                         continue;
                     }
@@ -1123,7 +1128,7 @@ impl<'a> Builder<'a> {
                 match param.kind() {
                     "mandatory_parameter" => {
                         if let Some(var) = self.first_var_child(param) {
-                            params.push(ParamInfo { name: var, default: None, is_slurpy: false, is_invocant: false });
+                            params.push(ParamInfo { name: var, default: None, is_slurpy: false, is_invocant: false, binding_site: Some(param.start_position()) });
                         }
                     }
                     "optional_parameter" => {
@@ -1136,18 +1141,18 @@ impl<'a> Builder<'a> {
                             .and_then(|d| d.utf8_text(self.source).ok())
                             .map(|s| s.to_string());
                         if let Some(name) = var {
-                            params.push(ParamInfo { name, default, is_slurpy: false, is_invocant: false });
+                            params.push(ParamInfo { name, default, is_slurpy: false, is_invocant: false, binding_site: Some(param.start_position()) });
                         }
                     }
                     "slurpy_parameter" => {
                         if let Some(var) = self.first_var_child(param) {
-                            params.push(ParamInfo { name: var, default: None, is_slurpy: true, is_invocant: false });
+                            params.push(ParamInfo { name: var, default: None, is_slurpy: true, is_invocant: false, binding_site: Some(param.start_position()) });
                         }
                     }
                     "scalar" | "array" | "hash" => {
                         if let Ok(text) = param.utf8_text(self.source) {
                             let is_slurpy = matches!(param.kind(), "array" | "hash");
-                            params.push(ParamInfo { name: text.to_string(), default: None, is_slurpy, is_invocant: false });
+                            params.push(ParamInfo { name: text.to_string(), default: None, is_slurpy, is_invocant: false, binding_site: Some(param.start_position()) });
                         }
                     }
                     _ => {}
@@ -1226,8 +1231,16 @@ impl<'a> Builder<'a> {
         self.param_type_wildcards = wildcards;
 
         let scope = self.current_scope();
-        let span = node_to_span(node);
         for (variable, in_role, class, from_loader) in to_gate {
+            // Anchored at the parameter's binding token, like every other
+            // parameter assertion: the declaration's own write marker
+            // retires only what lies strictly before it.
+            let span = params
+                .iter()
+                .find(|p| p.name == variable)
+                .and_then(|p| p.binding_site)
+                .map(|p| Span { start: p, end: p })
+                .unwrap_or_else(|| node_to_span(node));
             if from_loader {
                 // Callee-side marker: the real type arrives at
                 // enrichment from caller PluginLoad facts. The static
@@ -1304,10 +1317,16 @@ impl<'a> Builder<'a> {
         if let Some(pkg) = self.current_package.clone() {
             let (scope, span) = (self.current_scope(), node_to_span(node));
             let head = InferredType::FirstParam { package: pkg };
+            // Anchored at the invocant's binding token: the declaration's
+            // own write marker retires only what lies strictly before it.
+            let at = invocant
+                .binding_site
+                .map(|p| Span { start: p, end: p })
+                .unwrap_or(span);
             self.push_type_constraint(TypeConstraint {
                 variable: invocant.name.clone(),
                 scope,
-                constraint_span: span,
+                constraint_span: at,
                 inferred_type: head.clone(),
             });
             // `@_`'s argument window for this scope, headed by the same
@@ -1342,13 +1361,26 @@ impl<'a> Builder<'a> {
             } else {
                 SymbolDetail::Variable { sigil, decl_kind }
             };
-            self.add_symbol(
+            let sym_id = self.add_symbol(
                 name.clone(),
                 sym_kind,
                 node_to_span(node),
                 *var_span,
                 detail,
             );
+            // A field's declaration facts ride the closed flag set (rule
+            // #12): the attribute spellings become flags here, once, and
+            // stay on the symbol as display text.
+            if decl_kind == DeclKind::Field {
+                let attributes = self.collect_attributes(node);
+                let flags = attributes
+                    .iter()
+                    .filter_map(|a| crate::model::conventions::field_attribute_flag(a))
+                    .fold(SymbolFlags::empty(), |acc, f| acc | f);
+                let sym = &mut self.symbols[sym_id.0 as usize];
+                sym.flags = flags;
+                sym.attributes = attributes;
+            }
             self.add_ref(
                 RefKind::Variable,
                 *var_span,
@@ -1383,25 +1415,10 @@ impl<'a> Builder<'a> {
             // Synthesize accessor methods for `field $x :reader` / `:writer`
             if decl_kind == DeclKind::Field {
                 let bare_name = &name[1..]; // strip sigil
-                // Re-read attrs from the symbol we just stored (avoid re-collecting)
-                let has_reader;
-                let has_writer;
-                let has_param;
-                if let Some(last_sym) = self.symbols.last() {
-                    if let SymbolDetail::Field { ref attributes, .. } = last_sym.detail {
-                        has_reader = attributes.iter().any(|a| a == "reader");
-                        has_writer = attributes.iter().any(|a| a == "writer");
-                        has_param = attributes.iter().any(|a| a == "param");
-                    } else {
-                        has_reader = false;
-                        has_writer = false;
-                        has_param = false;
-                    }
-                } else {
-                    has_reader = false;
-                    has_writer = false;
-                    has_param = false;
-                }
+                let flags = self.symbols[sym_id.0 as usize].flags;
+                let has_reader = flags.contains(SymbolFlags::READER);
+                let has_writer = flags.contains(SymbolFlags::WRITER);
+                let has_param = flags.contains(SymbolFlags::PARAM);
                 // Bare-name sub-span of the `$x` token: synthesized
                 // projections (ctor key, reader) select THIS, not the
                 // sigiled var span — a rename writing a bare replacement
@@ -1461,7 +1478,8 @@ impl<'a> Builder<'a> {
                                 name: format!("${}", bare_name),
                                 default: None,
                                 is_slurpy: false,
-                    is_invocant: false,
+                                is_invocant: false,
+                                binding_site: None,
                             }],
                             is_method: true,
                             doc: None,

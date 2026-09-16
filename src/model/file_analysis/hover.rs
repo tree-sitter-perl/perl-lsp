@@ -5,22 +5,31 @@
 use super::*;
 
 impl FileAnalysis {
-    /// `format_inferred_type` through this file's language vocabulary
-    /// (`PackFacts.type_display`): a mapped tag renders as the language's
-    /// own spelling (php `array`, not `HashRef`); unmapped output (class
-    /// names, parametrics) and every Perl analysis (empty map) pass
-    /// through. THE type-label projection for human surfaces — hover,
-    /// inlay hints, signatures, completion detail all route here so a
-    /// language's vocabulary can't leak on one surface and not another.
+    /// This file's type vocabulary (`PackFacts.type_display`): a mapped
+    /// engine tag renders as the language's own spelling (php `array`, not
+    /// `HashRef`); an unmapped tag, every class name, and every Perl
+    /// analysis (empty map) pass through.
+    fn type_vocab(&self) -> impl Fn(&str) -> Option<String> + '_ {
+        move |tag: &str| {
+            self.pack
+                .type_display
+                .iter()
+                .find(|(k, _)| k == tag)
+                .map(|(_, v)| v.clone())
+        }
+    }
+
+    /// THE type-label projection for human surfaces — hover, inlay hints,
+    /// signatures, completion detail all route here so a language's
+    /// vocabulary can't leak on one surface and not another.
     pub fn render_type(&self, ty: &InferredType) -> String {
-        let raw = format_inferred_type(ty);
-        self.translate_type_label(raw)
+        format_type_with(ty, &self.type_vocab())
     }
 
     /// `Symbol::display_type` (class/deref-aware) through the same
     /// vocabulary.
     pub fn display_type_of(&self, sym: &Symbol, ty: &InferredType) -> String {
-        self.translate_type_label(sym.display_type(ty))
+        sym.display_type_with(ty, &self.type_vocab())
     }
 
     /// The NATIVE spelling a declaration would be written with for an
@@ -30,54 +39,18 @@ impl FileAnalysis {
     /// vocabulary (`type_display`) is a different question.
     pub fn native_type_spelling(&self, ty: &InferredType) -> Option<String> {
         if let InferredType::ClassName(n) = ty {
-            let leaf = n.rsplit(['\\', ':']).next().unwrap_or(n);
+            let (ns, leaf) = split_qualified(n, self.names());
             // the leaf must mean THIS class where it would be written
-            let ns = if n.len() > leaf.len() { Some(n[..n.len() - leaf.len() - 1].to_string()) } else { None };
             let seen = self.leaf_namespace(leaf).or_else(|| self.use_map_pins().own_namespace.clone());
-            return (ns.is_none() || seen.is_none() || ns == seen).then(|| leaf.to_string());
+            return (ns.is_none() || seen.is_none() || ns.map(str::to_string) == seen)
+                .then(|| leaf.to_string());
         }
-        let raw = format_inferred_type(ty);
-        let root = raw.split(['<', '(']).next().unwrap_or(&raw);
+        let root = format_type_root(ty);
         self.pack
             .native_type_spellings
             .iter()
-            .find(|(k, _)| k == root)
+            .find(|(k, _)| *k == root)
             .map(|(_, v)| v.clone())
-    }
-
-    fn translate_type_label(&self, raw: String) -> String {
-        if self.pack.type_display.is_empty() {
-            return raw;
-        }
-        // Token-wise: a composite label (`Sequence<String>`,
-        // `array<String, String>`) is translated per identifier so the
-        // engine's spellings never leak inside a generic argument either.
-        let mut out = String::with_capacity(raw.len());
-        let mut tok = String::new();
-        let flush = |tok: &mut String, out: &mut String| {
-            if tok.is_empty() {
-                return;
-            }
-            let mapped = self
-                .pack
-                .type_display
-                .iter()
-                .find(|(k, _)| k == tok)
-                .map(|(_, v)| v.clone())
-                .unwrap_or_else(|| tok.clone());
-            out.push_str(&mapped);
-            tok.clear();
-        };
-        for c in raw.chars() {
-            if c.is_alphanumeric() || c == '_' {
-                tok.push(c);
-            } else {
-                flush(&mut tok, &mut out);
-                out.push(c);
-            }
-        }
-        flush(&mut tok, &mut out);
-        out
     }
 
     /// Hover info: return display text for the symbol at cursor.
@@ -102,7 +75,7 @@ impl FileAnalysis {
                     if let Some(mr) = method_hover {
                         if matches!(mr.kind, RefKind::MethodCall { .. }) {
                             let class_name = self.method_call_invocant_class(mr, module_index);
-                            let mname = mr.unqualified_target_name();
+                            let mname = mr.unqualified_target_name(self.names());
                             if let Some(ref cn) = class_name {
                                 match self.resolve_method_in_ancestors(cn, mname, module_index) {
                                     Some(MethodResolution::Local { sym_id, class: ref defining_class, .. }) => {
@@ -169,7 +142,7 @@ impl FileAnalysis {
                     // calls match on the bare tail (symbols are keyed by
                     // bare name); the `Function` binding pins the package.
                     if let Some(sid) = self
-                        .package_scoped_callable(r.unqualified_target_name(), r.resolved_package())
+                        .package_scoped_callable(r.unqualified_target_name(self.names()), r.resolved_package())
                     {
                         return Some(self.format_symbol_hover(self.symbol(sid), source, module_index));
                     }
@@ -225,7 +198,7 @@ impl FileAnalysis {
                     // refs_to read, so hover never diverges.
                     let class_name = r.method_target().map(|t| t.invocant_class().to_string());
                     // The bare method name (FQ `$o->Foo::Bar::m` resolves `m`).
-                    let method = r.unqualified_target_name();
+                    let method = r.unqualified_target_name(self.names());
                     if let Some(ref cn) = class_name {
                         match self.resolve_method_in_ancestors(cn, method, module_index) {
                             Some(MethodResolution::Local { sym_id, class: ref defining_class, .. }) => {
@@ -283,16 +256,40 @@ impl FileAnalysis {
                         }
                     }
                 }
-                RefKind::PackageRef => {
-                    let row_ns = self.import_row_namespace(&r.span);
-                    for &sid in self.symbols_named(&r.target_name) {
-                        let sym = self.symbol(sid);
-                        if matches!(sym.kind, SymKind::Package | SymKind::Class) {
-                            if let Some(ns) = row_ns.as_deref() {
-                                if sym.package.as_deref().unwrap_or("") != ns {
-                                    continue;
+                RefKind::FieldAccess { .. } => {
+                    let cn = r.method_target().map(|t| t.invocant_class().to_string());
+                    let member = r.unqualified_target_name(self.names());
+                    if let Some(ref cn) = cn {
+                        match self.resolve_field_in_ancestors(cn, member, module_index) {
+                            Some(MethodResolution::Local { sym_id, .. }) => {
+                                let sym = self.symbol(sym_id);
+                                return Some(self.format_symbol_hover(sym, source, module_index));
+                            }
+                            Some(MethodResolution::CrossFile { ref class, .. }) => {
+                                let idx = module_index?;
+                                for cached in idx.visible_def_candidates(class) {
+                                    let whole = idx.whole_present(&cached);
+                                    let Some(sym) = whole.symbols().iter().find(|s| {
+                                        !matches!(s.kind, SymKind::Sub | SymKind::Method)
+                                            && s.name == member
+                                            && s.package.as_deref() == Some(class.as_str())
+                                            && whole.symbol_is_class_content(s)
+                                    }) else {
+                                        continue;
+                                    };
+                                    return Some(whole.format_symbol_hover(sym, "", Some(idx)));
                                 }
                             }
+                            None => {}
+                        }
+                    }
+                    return None;
+                }
+                RefKind::PackageRef => {
+                    let identity = self.spelled_identity(r);
+                    for &sid in self.symbols_named(&identity) {
+                        let sym = self.symbol(sid);
+                        if matches!(sym.kind, SymKind::Package | SymKind::Class) && sym.name == identity {
                             return Some(self.format_symbol_hover(sym, source, module_index));
                         }
                     }
@@ -407,10 +404,10 @@ impl FileAnalysis {
     ) -> String {
         let class = match owner {
             HandlerOwner::Class(n) => n.as_str(),
-            // A Global handler's namespace is the whole program — there is
-            // no class to gather stacked registrations under; the header
-            // renders and the class-keyed gathers below find nothing.
-            HandlerOwner::Global | HandlerOwner::Rail(_) | HandlerOwner::ClassRail(_) => "",
+            // A rail has no class to gather stacked registrations under;
+            // the header renders and the class-keyed gathers below find
+            // nothing.
+            HandlerOwner::Rail(_) => "",
         };
 
         // Gather stacked registrations from this file first, then any

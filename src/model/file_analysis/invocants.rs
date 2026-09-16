@@ -30,7 +30,7 @@ impl FileAnalysis {
                     // Qualified calls carry the full path in `target_name`;
                     // symbols are keyed by bare name + the `Function` binding.
                     if let Some(sid) = self
-                        .package_scoped_callable(r.unqualified_target_name(), r.resolved_package())
+                        .package_scoped_callable(r.unqualified_target_name(self.names()), r.resolved_package())
                     {
                         return Some((sid, true));
                     }
@@ -38,7 +38,7 @@ impl FileAnalysis {
                 RefKind::MethodCall { .. } => {
                     let class_name = self.method_call_invocant_class(r, module_index);
                     // Bare method name (FQ `$o->Foo::Bar::m` resolves `m`).
-                    let method = r.unqualified_target_name();
+                    let method = r.unqualified_target_name(self.names());
                     // Try inheritance-aware resolution first
                     if let Some(ref cn) = class_name {
                         match self.resolve_method_in_ancestors(cn, method, module_index) {
@@ -91,6 +91,17 @@ impl FileAnalysis {
                             return Some((sid, true));
                         }
                     }
+                }
+                RefKind::FieldAccess { .. } => {
+                    // The value walk only, and no name-match fallback: an
+                    // unpinned receiver is an honest miss for a field.
+                    let cn = self.method_call_invocant_class(r, module_index)?;
+                    if let Some(MethodResolution::Local { sym_id, .. }) =
+                        self.resolve_field_in_ancestors(&cn, r.unqualified_target_name(self.names()), module_index)
+                    {
+                        return Some((sym_id, true));
+                    }
+                    return None;
                 }
                 RefKind::PackageRef => {
                     for &sid in self.symbols_named(&r.target_name) {
@@ -299,53 +310,49 @@ impl FileAnalysis {
         Vec::new()
     }
 
-    /// A member's VALUE on a receiver — the receiver-typed entry every
-    /// tree-free member consumer routes through (the pack chain arm of
-    /// `expr_type_at_span`, the sentinel's receiver typing, member hover).
-    /// Dispatch runs the specificity ladder (`dispatch_of`), method
-    /// returns thread the (rebound) receiver into the `PackageSymbol`
-    /// query so `ReturnExpr::ParamOf` substitutes; a data field falls
-    /// back to its declared type with the class's params substituted
-    /// against the receiver's instance args.
+    /// A member's VALUE on a receiver when the asker does not know the
+    /// member's kind — the sentinel's receiver typing mid-keystroke, member
+    /// hover before a ref exists. Dispatch runs the specificity ladder
+    /// (`dispatch_of`); a method's return threads the (rebound) receiver
+    /// into the `PackageSymbol` query so `ReturnExpr::ParamOf` substitutes,
+    /// and a data field answers only when no callable carries the name. A
+    /// consumer holding the ref asks by kind instead: a `MethodCall`
+    /// routes here with its arity, a `FieldAccess` to `field_value_type`.
     pub fn member_value_type(
         &self,
         receiver: &InferredType,
         member: &str,
         module_index: Option<&dyn CrossFileLookup>,
         arg_count: Option<usize>,
-        shape: MemberShape,
     ) -> Option<InferredType> {
-        // On a strict pack the written shape picks the rung: a value read
-        // never means the method, a call never the field.
-        let strict = self.pack.member_shapes_are_strict;
         // The whole ladder, most-specific first: a member the winning spec
         // doesn't define falls through to the next rung (ultimately the
         // primary) — same never-pruned order goto-def presents.
         for (class, recv) in self.dispatch_ladder_of(receiver, module_index) {
-            // The registry publication is name-keyed (a field's assignment
-            // rides it too), so a value read on a strict pack takes the
-            // declared field first and consults the registry only when no
-            // method carries the name.
-            let value_read = strict && shape == MemberShape::Value;
-            if value_read {
-                if let Some(raw) = self.field_type_on_class(&class, member, module_index) {
-                    return Some(self.substitute_member_type(raw, &class, &recv, module_index));
-                }
-                if self
-                    .resolve_member_in_ancestors(&class, member, MemberShape::Callable, module_index)
-                    .is_some()
-                {
-                    continue;
-                }
-            }
             if let Some(t) =
                 self.method_return_type_on(&class, &recv, member, module_index, arg_count)
             {
                 return Some(t);
             }
-            if strict && shape == MemberShape::Callable {
+            let Some(raw) = self.field_type_on_class(&class, member, module_index) else {
                 continue;
-            }
+            };
+            return Some(self.substitute_member_type(raw, &class, &recv, module_index));
+        }
+        None
+    }
+
+    /// A VALUE member's type on a receiver — what a `FieldAccess` ref
+    /// reads: the declared (or assigned) type of the field the receiver's
+    /// class carries, with the class's params substituted against the
+    /// receiver's instance args. A callable never answers.
+    pub fn field_value_type(
+        &self,
+        receiver: &InferredType,
+        member: &str,
+        module_index: Option<&dyn CrossFileLookup>,
+    ) -> Option<InferredType> {
+        for (class, recv) in self.dispatch_ladder_of(receiver, module_index) {
             let Some(raw) = self.field_type_on_class(&class, member, module_index) else {
                 continue;
             };
@@ -421,9 +428,7 @@ impl FileAnalysis {
         r: &Ref,
         module_index: Option<&dyn CrossFileLookup>,
     ) -> Option<String> {
-        let RefKind::MethodCall { invocant, .. } = &r.kind else {
-            return None;
-        };
+        let invocant = r.member_site()?.invocant;
         let cn = 'cn: {
             // A qualified method token names its dispatch class explicitly
             // — Perl ignores the invocant's class for the lookup, so the
@@ -711,16 +716,15 @@ impl FileAnalysis {
         r: &Ref,
         module_index: Option<&dyn CrossFileLookup>,
     ) -> Option<InferredType> {
-        let RefKind::MethodCall { invocant, invocant_span, .. } = &r.kind else {
-            return None;
-        };
+        let site = r.member_site()?;
+        let (invocant, invocant_span) = (site.invocant, &site.invocant_span);
         let invocant = match invocant {
             crate::model::conventions::Invocant::Bridged { token, match_mode, .. } => {
                 return self
                     .resolve_bridged_class(
                         token,
                         *match_mode,
-                        r.unqualified_target_name(),
+                        r.unqualified_target_name(self.names()),
                         module_index,
                     )
                     .map(InferredType::ClassName);
@@ -817,7 +821,7 @@ impl FileAnalysis {
                         if let Some(recv_class) =
                             self.method_call_invocant_class(recv, module_index)
                         {
-                            let recv_method = recv.unqualified_target_name();
+                            let recv_method = recv.unqualified_target_name(self.names());
                             if crate::model::conventions::is_constructor_name(recv_method) {
                                 return Some(InferredType::ClassName(recv_class));
                             }
@@ -882,10 +886,10 @@ impl FileAnalysis {
         // reads as a baked verdict, so the references matcher never
         // re-resolves with the index) — answer None and leave the site to
         // the query-time rungs above.
-        if !crate::model::conventions::is_bareword_class_name(invocant) {
+        if !crate::model::conventions::is_bareword_class_name(invocant, self.names()) {
             return None;
         }
-        let bare = split_qualified(invocant).1;
+        let bare = split_qualified(invocant, self.names()).1;
         if let Some(InferredType::ClassName(c)) = self.sub_return_type_at_arity(bare, Some(0)) {
             return Some(InferredType::ClassName(c));
         }
@@ -903,26 +907,7 @@ impl FileAnalysis {
                 return Some(pkg.clone());
             }
         }
-        // A pack class-BODY scope opens under the OUTER package context, so
-        // the chain carries no package for a ref sitting directly in the
-        // body (php `protected string $fmt = self::FORMAT;` — the property
-        // default). Structural fallback: the narrowest Class symbol whose
-        // span contains this scope IS the enclosing class.
-        let sc = self.scope(scope);
-        let contains = |o: &Span, i: &Span| {
-            (o.start.row, o.start.column) <= (i.start.row, i.start.column)
-                && (i.end.row, i.end.column) <= (o.end.row, o.end.column)
-        };
-        self.symbols
-            .iter()
-            .filter(|c| matches!(c.kind, SymKind::Class) && contains(&c.span, &sc.span))
-            .min_by_key(|c| {
-                (
-                    c.span.end.row - c.span.start.row,
-                    c.span.end.column,
-                )
-            })
-            .map(|c| c.name.clone())
+        None
     }
 
     /// The class of the method enclosing `point` — the implicit-`this` class
@@ -1018,7 +1003,7 @@ impl FileAnalysis {
                 // bareword as the call and use that class. Mirrors the
                 // same rule in `invocant_type_at_node` and
                 // `resolve_invocant_class_tree`.
-                let bare = split_qualified(invocant).1;
+                let bare = split_qualified(invocant, self.names()).1;
                 if let Some(InferredType::ClassName(c)) =
                     self.sub_return_type_at_arity(bare, Some(0))
                 {
@@ -1131,49 +1116,37 @@ impl FileAnalysis {
         // composition site), preserving the role-only edge semantics of
         // docs/adr/role-contracts.md.
         let role_requires_of = |_composer: &str, c: &str| -> Option<Vec<String>> {
-            // A namespaced pack's parent edge carries the parent's identity:
-            // the candidate declaring THAT namespace is the parent — a
-            // same-leaf stranger (a `Connector` interface in another
-            // namespace beside the `Connector` base class next door) is
-            // not, whatever it requires. A path-keyed language (Perl) has no
-            // namespace claim.
-            let want_ns = self.identity_namespace(c);
-            let is_local = self
-                .symbols
-                .iter()
-                .any(|s| matches!(s.kind, SymKind::Package | SymKind::Class) && s.name == c)
-                && (want_ns.is_none() || self.declared_type_namespace(c) == want_ns);
-            if is_local {
+            // A parent edge carries the parent's IDENTITY (the FQN for a
+            // namespaced pack, the package name for Perl), so the file
+            // declaring exactly that name is the parent — a same-leaf
+            // stranger in another namespace is not, whatever it requires.
+            if self.find_type_decl(c).is_some() {
                 if !self.is_role_package(c) {
                     return None;
                 }
                 return Some(self.role_requires(c).to_vec());
             }
             // Role-ness and requires live in the packages lane (never
-            // evicted) of whichever candidate file declares the role.
+            // evicted) of whichever candidate file declares the role. The
+            // declaration rides the symbols axis (a resident copy is
+            // stripped), so the identity check reads that axis.
             let idx = module_index?;
             let candidates = idx.visible_def_candidates(c);
-            // The namespace rides the symbols axis (a resident copy is
-            // stripped); role-ness and requires ride the packages lane.
-            let pinned = match &want_ns {
-                Some(ns) => candidates.iter().find(|cached| {
-                    idx.symbols_present(cached).declared_type_namespace(c).as_deref() == Some(ns.as_str())
-                }),
-                None => None,
-            };
-            match (pinned, want_ns) {
-                // the pinned declaration decides, role or not
-                (Some(cached), _) => cached
+            if self.identity_namespace(c).is_some() {
+                // the declaration of that identity decides, role or not;
+                // none visible is not a guess
+                let declared = candidates
+                    .iter()
+                    .find(|cached| idx.symbols_present(cached).find_type_decl(c).is_some())?;
+                return declared
                     .analysis
                     .is_role_package(c)
-                    .then(|| cached.analysis.role_requires(c).to_vec()),
-                // a pin nothing visible satisfies: not a guess
-                (None, Some(_)) => None,
-                (None, None) => candidates
-                    .iter()
-                    .find(|cached| cached.analysis.is_role_package(c))
-                    .map(|cached| cached.analysis.role_requires(c).to_vec()),
+                    .then(|| declared.analysis.role_requires(c).to_vec());
             }
+            candidates
+                .iter()
+                .find(|cached| cached.analysis.is_role_package(c))
+                .map(|cached| cached.analysis.role_requires(c).to_vec())
         };
 
         let mut out: Vec<UnfulfilledRequire> = Vec::new();
@@ -1624,24 +1597,6 @@ impl FileAnalysis {
             .any(|m| m.name == name && at.is_none_or(|s| m.selection_span == s))
     }
 
-    /// Find the definition span of a package or class by name.
-    /// The file's own Package/Class declaration named `name`, narrowed to a
-    /// namespace claim when the token carries one: a token inside an import
-    /// row names its class in full, so this file's own same-leaf class is
-    /// not it unless the namespaces agree.
-    pub(super) fn find_package_or_class_in(&self, name: &str, ns: Option<&str>) -> Option<Span> {
-        for &sid in self.symbols_named(name) {
-            let sym = self.symbol(sid);
-            if matches!(sym.kind, SymKind::Package | SymKind::Class) {
-                if let Some(ns) = ns {
-                    if sym.package.as_deref().unwrap_or("") != ns {
-                        continue;
-                    }
-                }
-                return Some(sym.selection_span);
-            }
-        }
-        None
-    }
+
 
 }

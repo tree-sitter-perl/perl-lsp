@@ -281,6 +281,9 @@ impl<'a> Builder<'a> {
         }
 
         if attr_names.is_empty() { return; }
+        // The accessor each attr name minted, paired with its constructor
+        // key below (`Symbol::declared_with`).
+        let mut accessor_ids: Vec<(String, SymbolId)> = Vec::new();
 
         // After first arg: options (Moo/Moose) or default value (Mojo::Base).
         // Both the nested `=> (is => ...)` and the flat `, is => ...` forms
@@ -360,6 +363,7 @@ impl<'a> Builder<'a> {
                     lexical: false,
                         },
                     );
+                    accessor_ids.push((name.clone(), getter_id));
                     // Moo/Moose getter: arity 0 → isa-derived type
                     // (when known). When `isa` doesn't pin a type
                     // we still record provenance via `None` so
@@ -392,6 +396,7 @@ impl<'a> Builder<'a> {
                                     default: None,
                                     is_slurpy: false,
                     is_invocant: false,
+                    binding_site: None,
                                 }],
                                 is_method: true,
                                 doc: None,
@@ -433,6 +438,7 @@ impl<'a> Builder<'a> {
                                     default: None,
                                     is_slurpy: false,
                     is_invocant: false,
+                    binding_site: None,
                                 }],
                                 is_method: true,
                                 doc: None,
@@ -521,6 +527,7 @@ impl<'a> Builder<'a> {
                     lexical: false,
                         },
                     );
+                    accessor_ids.push((name.clone(), getter_id));
                     let getter_arm = getter_type.clone().map(|t| {
                         (
                             crate::model::witnesses::ArgGuard::Empty,
@@ -546,6 +553,7 @@ impl<'a> Builder<'a> {
                                 default: None,
                                 is_slurpy: false,
                     is_invocant: false,
+                    binding_site: None,
                             }],
                             is_method: true,
                             doc: None,
@@ -625,7 +633,7 @@ impl<'a> Builder<'a> {
                 name: "new".to_string(),
             };
             for (name, sel_span) in &attr_names {
-                self.add_symbol(
+                let key_id = self.add_symbol(
                     name.clone(),
                     SymKind::HashKeyDef,
                     node_to_span(node),
@@ -633,9 +641,11 @@ impl<'a> Builder<'a> {
                     SymbolDetail::HashKeyDef {
                         owner: owner.clone(),
                         is_dynamic: false,
-
                     },
                 );
+                if let Some((_, getter_id)) = accessor_ids.iter().find(|(n, _)| n == name) {
+                    self.pair_co_declared(*getter_id, key_id);
+                }
             }
         }
     }

@@ -236,6 +236,7 @@ impl ModuleIndex {
             crate::index::module_cache::sym_name_row_exists(
                 conn,
                 &cached.path.to_string_lossy(),
+                cached.analysis.names(),
                 name,
             )
         });
@@ -450,6 +451,7 @@ impl CrossFileLookup for ModuleIndex {
             crate::index::module_cache::sym_member_row_exists(
                 conn,
                 &cached.path.to_string_lossy(),
+                cached.analysis.names(),
                 name,
                 class,
             )
@@ -480,14 +482,15 @@ impl CrossFileLookup for ModuleIndex {
             return true;
         }
         let path = cached.path.to_string_lossy();
+        let names = cached.analysis.names();
         // Raw name only: the probes own the spelling policy (raw + match
         // key — `rows::probe_spelling`). `None` (file never shredded)
         // dominates `Some(false)` — fail open.
         let rows = self.with_rows_conn(|conn| {
             if attributed {
-                crate::index::module_cache::sym_member_row_exists(conn, &path, name, class)
+                crate::index::module_cache::sym_member_row_exists(conn, &path, names, name, class)
             } else {
-                crate::index::module_cache::name_row_exists(conn, &path, name)
+                crate::index::module_cache::name_row_exists(conn, &path, names, name)
             }
         });
         member_prefilter_may_declare(

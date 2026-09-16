@@ -275,7 +275,7 @@ sub search {
             // A `(` is never a type — a plain class name or None is fine.
             if let Some(InferredType::ClassName(ref c)) = ty {
                 assert!(
-                    crate::model::conventions::is_bareword_class_name(c),
+                    crate::model::conventions::is_bareword_class_name(c, &crate::model::conventions::PERL_SPELLINGS),
                     "{sub} at arity {arity:?} returned garbage ClassName({c:?})"
                 );
             }

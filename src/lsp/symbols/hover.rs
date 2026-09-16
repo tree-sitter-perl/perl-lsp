@@ -26,7 +26,7 @@ pub fn pack_hover_markdown(
     if let Some(r) = analysis.ref_at(point).filter(|r| matches!(r.kind, RefKind::MethodCall { .. })) {
         if let Some(midx) = module_index {
             if let Some(cn) = analysis.method_call_invocant_class(r, Some(midx)) {
-                let field = r.unqualified_target_name();
+                let field = r.unqualified_target_name(analysis.names());
                 // The receiver's full VALUE (not just its dispatch class):
                 // a template instance's args refine a param-shaped member
                 // type (`T get()` on a `Box<int>` receiver → `int`) — shown
@@ -41,7 +41,7 @@ pub fn pack_hover_markdown(
                 let substituted = |raw: Option<InferredType>| -> Option<InferredType> {
                     let sub = recv_ty
                         .as_ref()
-                        .and_then(|t| analysis.member_value_type(t, field, Some(midx), None, crate::model::file_analysis::MemberShape::Unknown))?;
+                        .and_then(|t| analysis.member_value_type(t, field, Some(midx), None))?;
                     (raw.as_ref() != Some(&sub)).then_some(sub)
                 };
                 if let Some(crate::model::file_analysis::MethodResolution::Local { sym_id, .. }) =
@@ -204,7 +204,7 @@ fn render_candidate_hover(
 /// the attribute is the value-borne "this Sub is macro-shaped" fact,
 /// checked before the kind match rather than re-deriving it from the name.
 fn hover_kind_label(sym: &crate::model::file_analysis::Symbol) -> &'static str {
-    if sym.attributes.iter().any(|a| a == "macro") {
+    if sym.flags.contains(crate::model::file_analysis::SymbolFlags::MACRO) {
         return "macro";
     }
     match sym.kind {
@@ -386,7 +386,7 @@ fn perl_hover_named(
             Some(parts.join("\n\n"))
         }
         crate::index::resolve::FunctionBinding::Qualified { package: pkg } => {
-            let bare = r.unqualified_target_name();
+            let bare = r.unqualified_target_name(analysis.names());
             // Symbol-disambiguated: the file defining `bare`, not the
             // name-slot winner (same rule as the FQ goto-def lane).
             let cached = module_index.candidate_defining_sub(pkg, bare)?;

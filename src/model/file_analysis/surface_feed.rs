@@ -79,9 +79,9 @@ impl FileAnalysis {
                     static_property_sigil: _static_property_sigil, // pack-wide convention
                     rail_labels: _rail_labels,       // pack-wide convention
                     rail_hints: _rail_hints,         // pack-wide convention
+                    class_named_rails: _class_named_rails, // overlay-wide convention
                     preamble_end: _preamble_end, // an editing aid
                     imports_bind_names: _imports_bind_names, // pack-wide convention
-                    member_shapes_are_strict: _member_shapes_are_strict, // pack-wide convention
                     members_are_package_bound: _members_are_package_bound, // pack-wide convention
                     doc_mentions: _doc_mentions, // a file-local lint fact
                     types_are_capitalized: _types_are_capitalized, // pack-wide convention
@@ -91,7 +91,7 @@ impl FileAnalysis {
                     specializes: _specializes,       // family edges; the file re-registers on its own rebuild even when Unchanged
                     use_aliases: _use_aliases,             // this file's OWN spelling table; a consumer never sees an alias
                     qualified_spellings: _qualified_spellings, // same: how THIS file spells classes
-                    namespace_sep: _namespace_sep,   // LangPack-wide convention, identical across the pack's files
+                    names: _names,                   // language-wide convention, identical across the language's files
                     template_params: _template_params, // instantiation substitution reads the provider live
                     include_closure: _include_closure, // this file's OWN visibility ranking key; its freshness lane is the closure dep-stamp (`closure_stamp`)
                     domain_sites: _domain_sites,     // raw sites; domains resolve live at query time
@@ -99,7 +99,6 @@ impl FileAnalysis {
                     control_regions: _control_regions, // own-file straight-line gate spans
                     param_regions: _param_regions,   // own-file parameter-region spans
                     probe_regions: _probe_regions,   // own-file existence-probe spans
-                    variable_arg_sites: _variable_arg_sites, // own-file argument sites
                 },
             plugin:
                 PluginFacts {

@@ -51,8 +51,8 @@ yet written), so the over-approximation is WANTED — but it has to be loud.
    `array<int, \App\User>` resolves like a bare one. The query side's
    `leaf_namespace_pins` and `class_spelling_identity` call the same
    ladder, so the pins, the identities and a written receiver's class
-   cannot disagree. The capability is `LangPack::namespace_sep`, baked
-   into `PackFacts::namespace_sep`; a pack without one is untouched.
+   cannot disagree. The capability is the separator in `LangPack::names`, baked
+   into `PackFacts::names`; a pack without one is untouched.
 6. **The index registers the identity AND its leaf.** `collect_linkage_feed`
    feeds a namespaced symbol under both keys: the identity is the exact
    key, the leaf the widening one (`ScopedLookup::use_map_candidates`).

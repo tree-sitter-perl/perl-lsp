@@ -215,6 +215,7 @@ sub run {
         &store,
         None,
         &TargetRef {
+            names: crate::model::conventions::PERL_SPELLINGS,
             name: "ready".to_string(),
             kind: TargetKind::Handler {
                 owner: HandlerOwner::Class("Producer".to_string()),

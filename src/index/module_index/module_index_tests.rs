@@ -2194,7 +2194,7 @@ fn typeglob_fallback_still_answers_from_a_candidate_the_ancestor_walk_rejected()
     let mut widget = build_fa("package Widget;\nsub paint { 1 }\n1;\n");
     for sym in widget.symbols_mut() {
         if sym.name == "paint" && matches!(sym.kind, SymKind::Sub | SymKind::Method) {
-            sym.attributes.push("reexport".to_string());
+            sym.flags.insert(crate::model::file_analysis::SymbolFlags::REEXPORT);
         }
     }
     reg("Widget", widget);
@@ -2251,7 +2251,7 @@ fn typeglob_fallback_keeps_its_provider_ordering_across_the_overlap() {
     let mut widget = build_fa("package Widget;\nsub paint { 1 }\n1;\n");
     for sym in widget.symbols_mut() {
         if sym.name == "paint" && matches!(sym.kind, SymKind::Sub | SymKind::Method) {
-            sym.attributes.push("reexport".to_string());
+            sym.flags.insert(crate::model::file_analysis::SymbolFlags::REEXPORT);
         }
     }
     reg("Widget", widget);

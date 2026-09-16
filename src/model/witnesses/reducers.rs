@@ -146,7 +146,7 @@ impl WitnessReducer for FrameworkAwareTypeFold {
             WitnessAttachment::Variable { .. } | WitnessAttachment::Expression(_)
         ) && matches!(
             w.payload,
-            WitnessPayload::InferredType(_) | WitnessPayload::Observation(_)
+            WitnessPayload::InferredType(_) | WitnessPayload::Observation(_) | WitnessPayload::Reset
         )
     }
 
@@ -216,37 +216,27 @@ impl WitnessReducer for FrameworkAwareTypeFold {
         // after a reset revives the variable through those axes.
         let mut last_observation_at: Option<Point> = None;
 
-        // A reassignment (`REASSIGN_FLOW_SOURCE`, zero-width at the write's
-        // site — materialized to the value it produced, or to the `Unknown`
-        // marker when nothing typed it) is a temporal RESET: at the query
-        // point every belief strictly before the latest one is dead — the
-        // class axis included, which otherwise wins in any order, so
-        // `$r = Foo->new; $r = {}` reads the hash. Companions minted at the
-        // site survive; what lands after accrues. A first assignment in a
-        // scope resets nothing and its marker, if any, is not a value.
+        // A write (`WitnessPayload::Reset`, zero-width at the write's site —
+        // a declaration or a plain assignment) is a temporal RESET: at the
+        // query point every belief strictly before the latest one is dead —
+        // the class axis included, which otherwise wins in any order, so
+        // `$r = Foo->new; $r = {}` reads the hash. Facts anchored at the
+        // site survive; what lands after accrues. A first write in a scope
+        // resets nothing and is not a value.
         let in_window = |w: &Witness| narrow_point.is_none_or(|p| w.span.start <= p);
-        let is_reset_marker = |w: &Witness| {
-            w.span.start == w.span.end
-                && matches!(&w.source, WitnessSource::Builder(t) if t == REASSIGN_FLOW_SOURCE)
-        };
+        // "Bound before" counts an earlier WRITE as a binding whatever it
+        // produced: a write whose RHS nothing typed leaves only its own
+        // marker behind, and the next write still replaces something.
         let bound_before = |site: Point| {
             ws.iter().filter(|w| in_window(w)).any(|w| {
                 w.span.start < site
-                    && matches!(
-                        &w.payload,
-                        WitnessPayload::InferredType(_)
-                            | WitnessPayload::Observation(
-                                TypeObservation::ClassAssertion(_)
-                                    | TypeObservation::FirstParamInMethod { .. }
-                                    | TypeObservation::BlessTarget(_)
-                            )
-                    )
+                    && (w.payload.binds_value() || matches!(w.payload, WitnessPayload::Reset))
             })
         };
         let reset_at = ws
             .iter()
             .filter(|w| in_window(w))
-            .filter(|w| is_reset_marker(w))
+            .filter(|w| matches!(w.payload, WitnessPayload::Reset))
             .map(|w| w.span.start)
             .max();
 
@@ -280,22 +270,8 @@ impl WitnessReducer for FrameworkAwareTypeFold {
                         first_param_class = Some(package.clone())
                     }
                     b @ InferredType::BrandedRoute { .. } => branded = Some(b.clone()),
-                    // A reset marker's `Unknown` has supremacy over its PAST
-                    // only: it never displaces a typed value at or after its
-                    // own site (the rebind's RHS, or a later write), and a
-                    // marker that retired nothing is not a value at all. An
-                    // annotated union (`@var A|B`) is a claim about the value
-                    // and rides the plain axis like any other.
-                    InferredType::Unknown if is_reset_marker(w) => {
-                        let stands = plain_type_at.is_some_and(|at| at >= w.span.start);
-                        if !stands && bound_before(w.span.start) {
-                            plain_type = Some(InferredType::Unknown);
-                            plain_type_priority = prio;
-                            plain_type_at = Some(w.span.start);
-                        }
-                    }
                     // Source priority breaks ties first (an EXPLICIT
-                    // annotation — `ANNOT_SOURCE`, priority 20 — governs over
+                    // annotation — `Annotation`, priority 20 — governs over
                     // an inferred flow type, priority 10, whatever the order
                     // they land in): the C++ `T x = {…}` braced-init case,
                     // where the initializer's `Numeric` flow witness would
@@ -318,6 +294,18 @@ impl WitnessReducer for FrameworkAwareTypeFold {
                         }
                     }
                 },
+                // A reset's `Unknown` has supremacy over its PAST only: it
+                // never displaces a typed value at or after its own site (the
+                // write's RHS, or a later write), and a write that retired
+                // nothing is not a value at all.
+                WitnessPayload::Reset => {
+                    let stands = plain_type_at.is_some_and(|at| at >= w.span.start);
+                    if !stands && bound_before(w.span.start) {
+                        plain_type = Some(InferredType::Unknown);
+                        plain_type_priority = prio;
+                        plain_type_at = Some(w.span.start);
+                    }
+                }
                 WitnessPayload::Observation(obs) => {
                     match obs {
                         TypeObservation::ClassAssertion(name) => {
@@ -410,7 +398,9 @@ impl WitnessReducer for FrameworkAwareTypeFold {
             return ReducedValue::Type(InferredType::String);
         }
 
-        if reset_at.is_some() {
+        // A write that retired something and was never displaced is the
+        // answer; a first write (a declaration nothing typed) is absence.
+        if reset_at.is_some_and(bound_before) {
             return ReducedValue::Type(InferredType::Unknown);
         }
         ReducedValue::None
@@ -792,6 +782,67 @@ impl WitnessReducer for TypeNameReducer {
     }
 }
 
+// ---- Field value ----
+//
+// Claims `Field{owner, name}` carrying a materialized `InferredType` — the
+// storage slot's value edge (`Edge(Variable{decl})`, pushed per field
+// declaration) after `materialize` chased it. Latest wins: the declaring
+// file's `Variable` fold already ranked annotation over assignment.
+
+pub struct FieldValueReducer;
+
+impl WitnessReducer for FieldValueReducer {
+    fn name(&self) -> &str {
+        "field_value"
+    }
+
+    fn claims(&self, w: &Witness) -> bool {
+        matches!(w.attachment, WitnessAttachment::Field { .. })
+            && matches!(w.payload, WitnessPayload::InferredType(_))
+    }
+
+    fn reduce(&self, ws: &[&Witness], _q: &ReducerQuery) -> ReducedValue {
+        for w in ws.iter().rev() {
+            if let WitnessPayload::InferredType(t) = &w.payload {
+                return ReducedValue::Type(t.clone());
+            }
+        }
+        ReducedValue::None
+    }
+}
+
+// ---- Parameter binding ----
+//
+// Claims `Param{package, name, index}` carrying a materialized
+// `InferredType` — the by-reference parameter's aliasing edge
+// (`Edge(Variable{param, body_scope})`) after `materialize` chased it.
+// Latest wins: what the callee last left in the parameter is what the
+// caller's variable holds after the call. The bound-but-untyped answer
+// (`Unknown`) is the registry's, not this reducer's — it needs the raw
+// bag to tell "edge that resolved to nothing" from "no edge".
+
+pub struct ParamBindingReducer;
+
+impl WitnessReducer for ParamBindingReducer {
+    fn name(&self) -> &str {
+        "param_binding"
+    }
+
+    fn claims(&self, w: &Witness) -> bool {
+        matches!(w.attachment, WitnessAttachment::Param { .. })
+            && matches!(w.payload, WitnessPayload::InferredType(_))
+    }
+
+    fn reduce(&self, ws: &[&Witness], _q: &ReducerQuery) -> ReducedValue {
+        for w in ws.iter().rev() {
+            if let WitnessPayload::InferredType(t) = &w.payload {
+                return ReducedValue::Type(t.clone());
+            }
+        }
+        ReducedValue::None
+    }
+}
+
 // ---- Domain-coherence fold (int-used-as-enum) ----
 //
 // Claims `Field{owner, name}` carrying `DomainCompare{enum_type}` — the
@@ -804,9 +855,11 @@ impl WitnessReducer for TypeNameReducer {
 // verdict never depends on witness-push order or HashMap iteration.
 //
 // The domain is defeasible — it refines the human surfaces (hover / the
-// navigation bridge), never the storage type that flows. Nothing on the
-// flow axis (Variable/Expr/Symbol/PackageSymbol) queries `Field`, so
-// returning the domain as a `ClassName` here can't leak into flow typing.
+// navigation bridge), never the storage type that flows. The flow axis
+// reaches `Field` only through a `ValueHop`, and `FieldValueReducer` is
+// registered ahead of this fold, so a slot with a value edge answers its
+// storage type before the vote is consulted; the vote itself is asked only
+// by `field_domain_for_owner`, over a private bag of `DomainCompare`.
 
 pub struct DomainCoherenceFold;
 
@@ -895,7 +948,7 @@ impl WitnessReducer for PluginOverrideReducer {
     fn claims(&self, w: &Witness) -> bool {
         matches!(w.attachment, WitnessAttachment::Symbol(_))
             && matches!(w.payload, WitnessPayload::InferredType(_))
-            && w.source.priority() > 10
+            && w.source.outranks_inference()
     }
 
     fn reduce(&self, ws: &[&Witness], _q: &ReducerQuery) -> ReducedValue {

@@ -319,7 +319,7 @@ impl FileAnalysis {
                     // `(union)`) nests its members: the body scope inside its
                     // span holds them. Attribute-gated — plain variables
                     // never own nested outline structure.
-                    if sym.attributes.iter().any(|a| a == "union") {
+                    if sym.flags.contains(SymbolFlags::UNION) {
                         let children = self
                             .find_body_scope(sym)
                             .map(|s| self.outline_children_of(s))
@@ -424,7 +424,7 @@ impl FileAnalysis {
         // the exact arm) are untouched. Union-attributed Variables (inline
         // field-union containers) own a body the same way.
         if matches!(sym.kind, SymKind::Package | SymKind::Class)
-            || sym.attributes.iter().any(|a| a == "union")
+            || sym.flags.contains(SymbolFlags::UNION)
         {
             let start = (sym.span.start.row, sym.span.start.column);
             let end = (sym.span.end.row, sym.span.end.column);
@@ -458,8 +458,8 @@ impl FileAnalysis {
                             let is_param = matches!(decl_kind, DeclKind::Param | DeclKind::ForVar);
                             (*sigil, readonly, is_param)
                         }
-                        SymbolDetail::Field { sigil, attributes } => {
-                            let readonly = !attributes.iter().any(|a| a == "writer" || a == "mutator" || a == "accessor");
+                        SymbolDetail::Field { sigil, .. } => {
+                            let readonly = !sym.flags.contains(SymbolFlags::WRITER);
                             (*sigil, readonly, true)
                         }
                         _ => continue,
@@ -541,7 +541,7 @@ impl FileAnalysis {
                 RefKind::FunctionCall => {
                     // Constant usages color like the decl; framework DSL keywords → macro.
                     let is_const = r.resolved_package().map_or(false, |pkg| {
-                        constant_names.contains(&(pkg, r.unqualified_target_name()))
+                        constant_names.contains(&(pkg, r.unqualified_target_name(self.names())))
                     });
                     let token_type = if is_const {
                         TOK_ENUM_MEMBER
@@ -560,6 +560,9 @@ impl FileAnalysis {
                     // Use method_name_span for precise highlighting of just the method name
                     let mods = 0; // TODO: readonly for ro accessors, static for class methods
                     tokens.push(PerlSemanticToken { span: *method_name_span, token_type: TOK_METHOD, modifiers: mods });
+                }
+                RefKind::FieldAccess { member_name_span, .. } => {
+                    tokens.push(PerlSemanticToken { span: *member_name_span, token_type: TOK_PROPERTY, modifiers: 0 });
                 }
                 RefKind::PackageRef => {
                     tokens.push(PerlSemanticToken { span: r.span, token_type: TOK_NAMESPACE, modifiers: 0 });

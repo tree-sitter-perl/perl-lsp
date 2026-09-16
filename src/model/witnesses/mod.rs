@@ -149,10 +149,17 @@ impl WitnessBag {
         self.rebuild_index();
     }
 
-    /// Does `att` carry a witness sourced from `Builder(tag)`? Used to ask
-    /// "was this variable's type written EXPLICITLY" (`skeleton-annot`) vs
-    /// inferred — the inlay-hint suppression for languages with explicit
-    /// types (`int c` needs no `: int` hint; `auto x` does).
+    /// Does an explicitly DECLARED fact (`WitnessSource::Annotation`) sit on
+    /// `att`? The inlay-hint suppression for languages with explicit types
+    /// asks this: `int c` needs no `: int` hint, `auto x` does.
+    pub fn has_annotation(&self, att: &WitnessAttachment) -> bool {
+        self.index.get(att).is_some_and(|idxs| {
+            idxs.iter().any(|&i| matches!(&self.witnesses[i].source, WitnessSource::Annotation(_)))
+        })
+    }
+
+    /// Does `att` carry a witness sourced from `Builder(tag)`? A provenance
+    /// probe (which pass pushed here), never a meaning — rule #14.
     pub fn has_builder_source(&self, att: &WitnessAttachment, tag: &str) -> bool {
         self.index.get(att).is_some_and(|idxs| {
             idxs.iter().any(|&i| {

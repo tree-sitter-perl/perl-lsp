@@ -19,6 +19,7 @@ designs live in `docs/prompt-storage-residuals.md`.
 | [Decl→def ranking on QUALIFIED / member goto-def](#decldef-ranking-on-qualified--member-goto-def--2026-07-15--open-claude) | 07-15 | should qualified goto-def rank def-over-decl, via the shared seam (B) or a local patch (A)? |
 | [Cross-file gated-emission visibility](#cross-file-gated-emission-visibility--2026-07-17--open-claude) | 07-17 | how do cross-file readers see a DBIC result class's deferred accessors — index-time materialize (picked) vs a per-query enriched overlay? |
 | [DBIC source-moniker disambiguation without a typed `$schema`](#dbic-source-moniker-disambiguation-without-a-typed-schema--2026-07-17--open-claude) | 07-17 | is the largest-source-family heuristic acceptable as the interim, or should moniker resolution wait for schema-value provenance? |
+| [Stacked refs at one span](#stacked-refs-at-one-span--2026-09-15--open-claude) | 09-15 | when two identities share a token (a class token that is also a rail use), is a companion ref with a cursor tiebreak enough, or should one ref carry several bindings? |
 
 Format per entry:
 
@@ -237,3 +238,32 @@ Format per entry:
   schema's result namespaces) move from core (`resolve_dbic_source_moniker`,
   where it sits with `extract_resultset_parametric`) into the DBIC plugin
   manifest when the DBIC-as-plugin port lands?
+
+---
+
+## Stacked refs at one span — 2026-09-15 — OPEN (Claude)
+- **Context:** the class-named rail (Laravel's event bus): `event(new X)`
+  is a class token AND a use on the event rail. Two refs sit on one span —
+  the class ref and a `DispatchCall` whose owner's names are classes —
+  and `ref_at` breaks the tie with `Ref::is_cursor_companion` so the token
+  keeps resolving as the class while goto-def's union and the handler
+  hierarchy surface the bus.
+- **Options:** A) a companion ref per extra identity + the cursor
+  tiebreak (one ref, one binding; projections union the companions).
+  B) one ref carrying a `Vec<RefBinding>` — the token has several
+  identities and every projection walks them. C) the rail use as a
+  derived fact on the class ref (no second ref; the rail is a projection
+  of "class token whose class is a declared event").
+- **Picked:** A. It keeps `Ref` single-bound (every matcher, row shredder
+  and surface arm reads one binding) and confines the stacking to the one
+  cursor tiebreak, which is a method on the value rather than a handler
+  branch. Two callers today: `ref_at` and the definitions union.
+- **Undo cost:** B reshapes `Ref::binding` (bincode + the relational rows
+  + every `binding` reader); C moves the rail use off the ref axis and
+  the undefined-event lane would have to re-derive it. Either is a model
+  commit plus an `EXTRACT_VERSION` bump; nothing persists the companion
+  shape beyond the ref rows.
+- **Discussion needed:** does a second stacked identity ever appear (a
+  string that is both a route name and a view name is kept APART by the
+  rail, so no)? If none does, A is the answer and the fork closes; if one
+  does, B is the honest shape and the tiebreak is the tell.

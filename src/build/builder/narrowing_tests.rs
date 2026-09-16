@@ -865,3 +865,31 @@ fn a_declaration_nothing_can_type_stays_absent() {
     let fa = build_fa("package P;\nsub m {\n  my $x = unknown_fn();\n  my $k = $x->{k};\n  my $o = $x;\n}\n1;\n");
     assert_eq!(fa.inferred_type_via_bag("$x", Point::new(4, 11)), Some(InferredType::HashRef));
 }
+
+#[test]
+fn a_declaration_is_a_write_and_resets_too() {
+    // A redeclaration retires the earlier belief exactly as a plain
+    // assignment does — there is one kind of write.
+    let fa = build_fa("package P;\nsub m {\n  my $x = Foo->new;\n  my $x = 'str';\n  my $o = $x;\n}\n1;\n");
+    assert_eq!(fa.inferred_type_via_bag("$x", Point::new(4, 11)), Some(InferredType::String));
+    let fa = build_fa("package P;\nsub m {\n  my $x = Foo->new;\n  my $x = unknown_fn();\n  my $o = $x;\n}\n1;\n");
+    assert_eq!(fa.inferred_type_via_bag("$x", Point::new(4, 11)), Some(InferredType::Unknown));
+}
+
+#[test]
+fn a_parameter_assertion_survives_its_own_declaration() {
+    // The first-param claim is anchored at the `$self` token, so the
+    // declaration's marker (which retires what lies strictly before it)
+    // leaves it standing — for the `@_` unpack and the `shift` idiom alike.
+    for src in [
+        "package P;\nsub m {\n  my ($self, $x) = @_;\n  my $o = $self;\n}\n1;\n",
+        "package P;\nsub m {\n  my $self = shift;\n  my $o = $self;\n}\n1;\n",
+    ] {
+        let fa = build_fa(src);
+        assert_eq!(
+            fa.inferred_type_via_bag("$self", Point::new(3, 14)),
+            Some(InferredType::ClassName("P".into())),
+            "{src}"
+        );
+    }
+}

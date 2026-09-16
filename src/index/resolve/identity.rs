@@ -156,7 +156,7 @@ pub fn resolve_symbol_scoped(
                 }
             }
             RefKind::MethodCall { .. } => {
-                let bare = r.unqualified_target_name().to_string();
+                let bare = r.unqualified_target_name(analysis.names()).to_string();
                 if let Some(class) = analysis.method_call_invocant_class(r, module_index) {
                     // Only an accessor-bearing group may claim a method-call
                     // cursor (`require_reader`).
@@ -202,6 +202,7 @@ pub fn resolve_symbol_scoped(
         return Some(ResolvedTarget::Target(TargetRef::new(
             name,
             TargetKind::PackageVar { package },
+            analysis,
         )));
     }
     // Pack-language backward lanes: def→uses mirrors of resolutions goto-def
@@ -214,7 +215,7 @@ pub fn resolve_symbol_scoped(
         // (`pack_macro_definition`); the backward target carries the same
         // name-keyed identity — object-like AND function-like.
         if analysis.names_macro_def(&sym.name, Some(sym.selection_span)) {
-            let mut t = TargetRef::new(sym.name.clone(), TargetKind::FileScopeValue);
+            let mut t = TargetRef::new(sym.name.clone(), TargetKind::FileScopeValue, analysis);
             t.def_paths = pack_def_paths(&sym.name, true, module_index);
             return Some(ResolvedTarget::Target(t));
         }
@@ -248,7 +249,7 @@ pub fn resolve_symbol_scoped(
         // A file-scope global / anonymous-enum constant: bare-name-keyed,
         // like the generic cross-file goto-def tail that resolves its uses.
         if analysis.symbol_is_file_scope_value(sym) {
-            let mut t = TargetRef::new(sym.name.clone(), TargetKind::FileScopeValue);
+            let mut t = TargetRef::new(sym.name.clone(), TargetKind::FileScopeValue, analysis);
             t.def_paths = pack_def_paths(&sym.name, true, module_index);
             return Some(ResolvedTarget::Target(t));
         }
@@ -264,7 +265,7 @@ pub fn resolve_symbol_scoped(
         if matches!(sym.kind, SymKind::Sub | SymKind::Method | SymKind::Variable)
             && names_visible_macro(&sym.name, analysis, module_index)
         {
-            let mut t = TargetRef::new(sym.name.clone(), TargetKind::FileScopeValue);
+            let mut t = TargetRef::new(sym.name.clone(), TargetKind::FileScopeValue, analysis);
             t.def_paths = pack_def_paths(
                 &sym.name,
                 analysis.names_macro_def(&sym.name, None),
@@ -282,9 +283,9 @@ pub fn resolve_symbol_scoped(
         // is call-shaped, never a per-package Sub — same canonical macro
         // identity as the def site.
         if matches!(r.kind, RefKind::FunctionCall { .. }) {
-            let name = r.unqualified_target_name();
+            let name = r.unqualified_target_name(analysis.names());
             if names_visible_macro(name, analysis, module_index) {
-                let mut t = TargetRef::new(name.to_string(), TargetKind::FileScopeValue);
+                let mut t = TargetRef::new(name.to_string(), TargetKind::FileScopeValue, analysis);
                 t.def_paths =
                     pack_def_paths(name, analysis.names_macro_def(name, None), module_index);
                 return Some(ResolvedTarget::Target(t));
@@ -347,7 +348,7 @@ pub fn resolve_symbol_scoped(
                 }
                 Some(None) => {
                     let mut t =
-                        TargetRef::new(r.target_name.clone(), TargetKind::FileScopeValue);
+                        TargetRef::new(r.target_name.clone(), TargetKind::FileScopeValue, analysis);
                     let origin_defines = analysis.names_macro_def(&r.target_name, None)
                         || r.resolved_symbol().is_some();
                     t.def_paths =
@@ -362,12 +363,12 @@ pub fn resolve_symbol_scoped(
         RenameKind::Variable => ResolvedTarget::Local,
         RenameKind::HashKey(name) => match analysis.hash_key_owner_at(point) {
             Some(HashKeyOwner::Sub { package, name: sub_name }) => ResolvedTarget::Target(
-                TargetRef::new(name, TargetKind::HashKeyOfSub { package, name: sub_name }),
+                TargetRef::new(name, TargetKind::HashKeyOfSub { package, name: sub_name }, analysis),
             ),
             // A bridged key (DBIC column condition-arg / accessor): the fallback
             // when no field-group path caught it (e.g. single-file, no index).
             Some(HashKeyOwner::Bridged { class }) => {
-                ResolvedTarget::Target(TargetRef::new(name, TargetKind::HashKeyOfBridged(class)))
+                ResolvedTarget::Target(TargetRef::new(name, TargetKind::HashKeyOfBridged(class), analysis))
             }
             // `Class` here is a `$obj->{key}` deref onto a real hash slot. If a
             // field group (Moo/bless `InternalKey`) didn't already claim it, it's

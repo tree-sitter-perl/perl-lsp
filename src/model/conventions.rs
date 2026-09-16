@@ -8,6 +8,66 @@
 //!
 //! Pure `&str` predicates only: no tree-sitter, so `file_analysis.rs` (which
 //! must stay tree-free) can use them. Node-level semantics live in `cst.rs`.
+//!
+//! Perl's name spellings — the `::` separator and the `$`/`@`/`%` sigils —
+//! are declared here once (`PERL_SPELLINGS`) exactly as a pack declares
+//! its own, and the key functions below take the spellings of the language
+//! whose name they handle: nothing in the model assumes a separator or a
+//! sigil (CLAUDE.md rule #12).
+
+use crate::model::file_analysis::{ClassSpelling, NameSpellings};
+
+/// Perl's name spellings: `::` qualifies, `$` / `@` / `%` lead variables.
+pub const PERL_SPELLINGS: NameSpellings = NameSpellings {
+    namespace_sep: Some(std::borrow::Cow::Borrowed("::")),
+    sigils: std::borrow::Cow::Borrowed(&['$', '@', '%']),
+    class_spelling: ClassSpelling::Identity,
+};
+
+/// Split a possibly-qualified name into `(Option<package>, basename)`.
+///
+/// A name token may carry a `Pkg::` qualifier (`Foo::Bar::baz`, `@Pkg::EXPORT`,
+/// `$Foo::Bar::x`). Resolution is always `(qualifier ?? current_package,
+/// basename)`. This is the ONE place that decides "is this name qualified" —
+/// every per-construct stripper (`Ref::unqualified_target_name`,
+/// `Builder::export_var_basename`, FQ-variable ref emission) routes through it
+/// (rule #10: encode the "is qualified" property once).
+///
+/// Input must be sigil-free (callers strip the sigils first). The text
+/// after the last separator is the basename; everything before it is the
+/// package. An unqualified name yields `(None, name)`. A leading separator
+/// (`::foo`, Perl's `main::` shorthand) yields an empty-string package,
+/// preserved verbatim.
+///
+/// The separator is `names`' — the language of the name — and nothing
+/// else: a name is split on exactly the separator its language declares,
+/// so a name that joins a class and a member (`App\Foo::bar`) must never
+/// reach here; the extractor mints those as two fields.
+pub fn split_qualified<'a>(name: &'a str, names: &NameSpellings) -> (Option<&'a str>, &'a str) {
+    match names.sep().and_then(|sep| name.rsplit_once(sep)) {
+        Some((pkg, base)) => (Some(pkg), base),
+        None => (None, name),
+    }
+}
+
+/// The relational ref index's shared key function: rows are keyed by
+/// `name_match_key(ref.target_name)`, retrieval probes
+/// `name_match_key(target.name)` — one function on both sides, so a row can
+/// never be missed by a spelling the matcher would accept (arms compare
+/// exact names or their unqualified tails; equal names have equal tails).
+/// Sigil variables keep the sigil on the tail (`$Foo::x` → `$x`) because
+/// variable identities carry it — under the language's OWN sigils, so a
+/// `$` in a language that declares none is identifier text.
+pub fn name_match_key(name: &str, names: &NameSpellings) -> String {
+    let mut chars = name.chars();
+    if let Some(sigil) = chars.next() {
+        if names.is_sigil(sigil) {
+            let (_, base) = split_qualified(chars.as_str(), names);
+            return format!("{sigil}{base}");
+        }
+    }
+    split_qualified(name, names).1.to_string()
+}
 
 /// Conventional invocant variable names — `sub f { my ($self) = @_ }` and
 /// friends. Accepts the bare identifier or the `$`-sigiled spelling so both
@@ -48,22 +108,38 @@ pub fn is_constructor_name(name: &str) -> bool {
 /// must NEVER be frozen as a class name (that produced `return_type: "("`).
 /// A class here is `InferredType::ClassName(text)`; only accept text a
 /// package could actually be spelled as.
-pub fn is_bareword_class_name(text: &str) -> bool {
-    // `::` is Perl's separator, `\` php's (`App\Support\Str`) — either way
-    // every segment must be a plain identifier, so a receiver EXPRESSION
-    // (`(new Coll([1]))->wrapUp([2])`) never passes as a class token.
-    // A leading `\` is php's ABSOLUTE spelling (`\A\F`, a string
-    // callable's class): still a class token, resolved as written.
-    let text = text.strip_prefix('\\').unwrap_or(text);
-    !text.is_empty()
-        && text
-            .split("::")
-            .flat_map(|part| part.split('\\'))
-            .all(|seg| {
-                let mut chars = seg.chars();
-                matches!(chars.next(), Some(c) if c.is_ascii_alphabetic() || c == '_')
-                    && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
-            })
+pub fn is_bareword_class_name(text: &str, names: &NameSpellings) -> bool {
+    // Every segment between the language's separator must be a plain
+    // identifier, so a receiver EXPRESSION (`(new Coll([1]))->wrapUp([2])`)
+    // never passes as a class token. A leading separator is the language's
+    // ABSOLUTE spelling (`\A\F`, `::main`): still a class token, resolved
+    // as written. The identifier class is ASCII today — known debt
+    // (docs/PARKED.md, identifier classification per language).
+    let is_ident = |seg: &str| {
+        let mut chars = seg.chars();
+        matches!(chars.next(), Some(c) if c.is_ascii_alphabetic() || c == '_')
+            && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+    };
+    let Some(sep) = names.sep() else { return is_ident(text) };
+    let text = text.strip_prefix(sep).unwrap_or(text);
+    if text.is_empty() {
+        return false;
+    }
+    text.split(sep).all(is_ident)
+}
+
+/// Perl's attribute vocabulary, spelling → flag — the one table for a
+/// Corinna `field` attribute (`:param`, `:reader`, the writer family
+/// `:writer` / `:mutator` / `:accessor`), the way a pack declares its own.
+/// A spelling with no declaration fact (`:ro` style hints) is display-only.
+pub fn field_attribute_flag(attr: &str) -> Option<crate::model::file_analysis::SymbolFlags> {
+    use crate::model::file_analysis::SymbolFlags;
+    Some(match attr {
+        "param" => SymbolFlags::PARAM,
+        "reader" => SymbolFlags::READER,
+        "writer" | "mutator" | "accessor" => SymbolFlags::WRITER,
+        _ => return None,
+    })
 }
 
 /// `__PACKAGE__` — the compile-time token for the enclosing package.
@@ -78,8 +154,8 @@ pub fn is_current_package_token(text: &str) -> bool {
 /// never surface as method-completion candidates (`$obj->(anon)` is not a
 /// thing). Gate completion sources on this property, not on the literal
 /// `(anon)` spelling (rule #10).
-pub fn is_callable_sub_name(name: &str) -> bool {
-    is_bareword_class_name(name)
+pub fn is_callable_sub_name(name: &str, names: &NameSpellings) -> bool {
+    is_bareword_class_name(name, names)
 }
 
 /// A method-call invocant in canonical spelling: variable invocants are
@@ -339,17 +415,49 @@ impl<'a> MethodToken<'a> {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_bareword_class_name, InvocantText, MethodToken};
+    use super::{is_bareword_class_name, InvocantText, MethodToken, PERL_SPELLINGS};
+    use crate::model::file_analysis::{ClassSpelling, NameSpellings};
 
     #[test]
     fn bareword_class_name_rejects_computed_receivers() {
         for ok in ["Foo", "Foo::Bar", "_Private", "DBIx::Class::ResultSet", "a1"] {
-            assert!(is_bareword_class_name(ok), "{ok} should be a class name");
+            assert!(is_bareword_class_name(ok, &PERL_SPELLINGS), "{ok} should be a class name");
         }
         // The DBIC `(ref $self)->new` idiom parses to these — never a class.
-        for bad in ["(ref $self)", "(", "(ref $self", "$self", "1Foo", "Foo::", "::Foo", ""] {
-            assert!(!is_bareword_class_name(bad), "{bad:?} must NOT be a class name");
+        for bad in ["(ref $self)", "(", "(ref $self", "$self", "1Foo", "Foo::", ""] {
+            assert!(!is_bareword_class_name(bad, &PERL_SPELLINGS), "{bad:?} must NOT be a class name");
         }
+    }
+
+    /// Each language's names split on ITS separator and keep ITS sigils —
+    /// never another's. A php-shaped language declares `\` and `$`; a
+    /// JavaScript-shaped one declares nothing, so `$el` is identifier text.
+    #[test]
+    fn a_name_splits_on_its_own_language_s_spellings_only() {
+        let php = NameSpellings {
+            namespace_sep: Some(std::borrow::Cow::Borrowed("\\")),
+            sigils: std::borrow::Cow::Borrowed(&['$']),
+            class_spelling: ClassSpelling::UseMap,
+        };
+        assert_eq!(super::split_qualified("App\\Models\\User", &php), (Some("App\\Models"), "User"));
+        assert_eq!(super::name_match_key("App\\Models\\User", &php), "User");
+        assert_eq!(super::name_match_key("$App\\x", &php), "$x");
+        assert!(is_bareword_class_name("App\\Support\\Str", &php));
+        assert!(is_bareword_class_name("\\A\\F", &php), "an absolute spelling is a class token");
+        assert!(!is_bareword_class_name("(new Coll([1]))", &php));
+        assert!(!is_bareword_class_name("A\\", &php));
+        // Perl's `::` is not php's separator and php's `\` is not Perl's.
+        assert_eq!(super::split_qualified("Foo::Bar", &php), (None, "Foo::Bar"));
+        assert_eq!(super::split_qualified("App\\User", &PERL_SPELLINGS), (None, "App\\User"));
+        assert_eq!(super::split_qualified("Foo::Bar::baz", &PERL_SPELLINGS), (Some("Foo::Bar"), "baz"));
+        assert_eq!(super::name_match_key("$Foo::x", &PERL_SPELLINGS), "$x");
+        let js = NameSpellings::NONE;
+        assert_eq!(super::name_match_key("$el", &js), "$el", "no sigils declared: `$` is identifier text");
+        assert_eq!(super::split_qualified("a.b", &js), (None, "a.b"));
+        // A separator does not make a use-map language: Perl qualifies with
+        // `::` and every spelling is its own identity.
+        assert_eq!(PERL_SPELLINGS.use_map_sep(), None);
+        assert_eq!(php.use_map_sep(), Some("\\"));
     }
 
     #[test]

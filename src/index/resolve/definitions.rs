@@ -124,7 +124,7 @@ impl<'a> CandidateSet<'a> {
             }
             SymKind::Variable => {
                 decl_fa.symbol_is_file_scope_value(sym)
-                    && sym.attributes.iter().any(|a| a == "extern")
+                    && sym.flags.contains(crate::model::file_analysis::SymbolFlags::EXTERN)
             }
             _ => false,
         };
@@ -156,7 +156,7 @@ impl<'a> CandidateSet<'a> {
                     _ => {
                         matches!(s.kind, SymKind::Variable)
                             && a.symbol_is_file_scope_value(s)
-                            && !s.attributes.iter().any(|at| at == "extern")
+                            && !s.flags.contains(crate::model::file_analysis::SymbolFlags::EXTERN)
                     }
                 }
         };
@@ -312,7 +312,7 @@ impl<'a> CandidateSet<'a> {
         let idx = self.idx()?;
         let r = analysis.ref_at(self.point)?;
         let argc = r.arg_count?;
-        let name = r.unqualified_target_name().to_string();
+        let name = r.unqualified_target_name(analysis.names()).to_string();
         // Anchor the family's scope on the primary resolution so overload
         // siblings gather in the right class/namespace without re-deriving C++
         // name lookup here.
@@ -588,7 +588,7 @@ impl<'a> CandidateSet<'a> {
                 if let RefKind::MethodCall { invocant_span: Some(inv), .. } = &r.kind {
                     if let Some(recv_ty) = analysis.expr_type_at_span(*inv, self.idx()) {
                         if recv_ty.as_parametric().is_some() {
-                            let member = r.unqualified_target_name();
+                            let member = r.unqualified_target_name(analysis.names());
                             let mut out: Vec<RefLocation> = Vec::new();
                             for (class, _) in
                                 analysis.dispatch_ladder_of(&recv_ty, self.idx())
@@ -767,7 +767,7 @@ impl<'a> CandidateSet<'a> {
                 // qualifier names the package directly; the defining package
                 // lives in another module.
                 Some(FunctionBinding::Qualified { package: pkg }) => {
-                    let bare = r.unqualified_target_name();
+                    let bare = r.unqualified_target_name(analysis.names());
                     // `pkg` may be declared in several files (a Perl package
                     // reopens anywhere; C linkage is flat). The query names a
                     // SYMBOL, and that is the disambiguator: the right file
@@ -814,7 +814,7 @@ impl<'a> CandidateSet<'a> {
             // the package lives in another module — resolve the package
             // global through the index, mirroring the FQ-call path. Honest
             // miss (no jump) when the package or its decl is absent.
-            if let Some((pkg, name)) = r.qualified_var_target() {
+            if let Some((pkg, name)) = r.qualified_var_target(analysis.names()) {
                 // Same candidate discipline as the FQ-call arm: the
                 // declaring file is whichever of `pkg`'s files defines the
                 // global, not the name-slot winner.
@@ -913,7 +913,7 @@ impl<'a> CandidateSet<'a> {
             if matches!(r.kind, RefKind::MethodCall { .. }) {
                 use crate::model::file_analysis::MethodResolution;
                 // FQ `$o->Foo::Bar::m` dispatches the bare `m` on the named class.
-                let method = r.unqualified_target_name();
+                let method = r.unqualified_target_name(analysis.names());
                 if let Some(cn) = analysis.method_call_invocant_class(r, Some(idx)) {
                     // The invocant resolved (e.g. a plugin-bridged route token
                     // → controller class) but the controller lives in THIS
@@ -1024,7 +1024,7 @@ impl<'a> CandidateSet<'a> {
         // which fires unconditionally for pack routing before this tail.
         if let Some(r) = analysis.ref_at(point) {
             if matches!(r.kind, RefKind::FunctionCall { .. } | RefKind::Variable) {
-                let name = r.unqualified_target_name();
+                let name = r.unqualified_target_name(analysis.names());
                 for cached in idx.visible_def_candidates(name) {
                     let whole = idx.whole_present(&cached);
                     if let Some(sym) = whole.symbols().iter().find(|s| {

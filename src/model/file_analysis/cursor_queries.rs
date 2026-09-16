@@ -8,19 +8,11 @@ impl FileAnalysis {
 
     /// Find the ref at a given point (cursor position).
     pub fn ref_at(&self, point: Point) -> Option<&Ref> {
-        // A class-rail emission (`event(new X)`) is a COMPANION of the
-        // class token's own ref at the same span: it never wins the cursor,
-        // so the token keeps resolving as the class; the bus surfaces
-        // through goto-def's union and the handler side's hierarchy.
+        // Narrowest span wins; among equal spans a companion (see
+        // `Ref::is_cursor_companion`) yields to the token's own ref.
         self.refs.iter()
             .filter(|r| contains_point(&r.span, point))
-            .min_by_key(|r| {
-                let companion = matches!(
-                    r.binding,
-                    Some(RefBinding::Handler { owner: HandlerOwner::ClassRail(_), .. })
-                );
-                (span_size(&r.span), companion as u8)
-            })
+            .min_by_key(|r| (span_size(&r.span), r.is_cursor_companion(&self.pack) as u8))
     }
 
     /// Find the symbol whose selection_span contains the point.
@@ -33,6 +25,17 @@ impl FileAnalysis {
     /// incoming projection groups reference sites by. `None` for top-level
     /// code (import-time calls, scripts): there is no callable to report.
     pub fn enclosing_callable_at(&self, point: Point) -> Option<&Symbol> {
+        // The scope chain carries the owner: the first scope up the chain
+        // that is a callable's body names it.
+        let mut cur = self.scope_at(point);
+        while let Some(id) = cur {
+            let sc = self.scope(id);
+            if let Some(owner) = sc.owner {
+                return Some(self.symbol(owner));
+            }
+            cur = sc.parent;
+        }
+        // A pack scope carries no owner yet: the span walk answers there.
         self.symbols
             .iter()
             .filter(|s| {
@@ -79,16 +82,15 @@ impl FileAnalysis {
                     // keyed by bare name — match on the unqualified tail and
                     // pin via `resolved_package` (the qualifier).
                     if let Some(sid) = self
-                        .package_scoped_callable(r.unqualified_target_name(), r.resolved_package())
+                        .package_scoped_callable(r.unqualified_target_name(self.names()), r.resolved_package())
                     {
                         return Some(self.symbol(sid).selection_span);
                     }
                     // Nothing local; leave cross-file resolution to
                     // the LSP adapter (symbols::find_definition).
                 }
-                RefKind::MethodCall { .. } => {
-
-                    // Method dispatch is the frozen edge, full stop.
+                RefKind::MethodCall { .. } | RefKind::FieldAccess { .. } => {
+                    // Member dispatch is the frozen edge, full stop.
                     // `Local` lands on the local symbol; `CrossFile`
                     // returns None so the LSP adapter resolves via the
                     // ModuleIndex; a `None` edge (invocant didn't infer —
@@ -117,8 +119,7 @@ impl FileAnalysis {
                     // `Buffer<MAX>`) mints a PackageRef for a VALUE token —
                     // the structural gates are pack-only shapes, so Perl
                     // package refs never take the fallback.
-                    let row_ns = self.import_row_namespace(&r.span);
-                    return self.find_package_or_class_in(&r.target_name, row_ns.as_deref()).or_else(|| {
+                    return self.find_type_decl(&self.spelled_identity(r)).or_else(|| {
                         self.symbols_named(&r.target_name)
                             .iter()
                             .map(|&sid| self.symbol(sid))
@@ -312,13 +313,13 @@ impl FileAnalysis {
                             // pair with `sub baz`; `resolved_package` (the
                             // qualifier) still isolates same-named subs
                             // across packages.
-                            if r.unqualified_target_name() == sym.name
+                            if r.unqualified_target_name(self.names()) == sym.name
                                 && r.resolved_package() == sym_package.as_deref() {
                                 results.push((r.span, r.access));
                             }
                         }
                         (RefKind::MethodCall { method_name_span, .. },
-                         SymKind::Sub | SymKind::Method) if r.unqualified_target_name() == sym.name => {
+                         SymKind::Sub | SymKind::Method) if r.unqualified_target_name(self.names()) == sym.name => {
                             // Same-class match only; unresolved or
                             // different-class invocants are excluded.
                             // Method-call ref.span covers the whole
@@ -328,6 +329,15 @@ impl FileAnalysis {
                             match (self.method_call_invocant_class(r, module_index), &sym_package) {
                                 (Some(cn), Some(pkg)) if cn == *pkg => {
                                     results.push((*method_name_span, r.access));
+                                }
+                                _ => {}
+                            }
+                        }
+                        (RefKind::FieldAccess { member_name_span, .. },
+                         SymKind::Field | SymKind::Variable) if r.unqualified_target_name(self.names()) == sym.name => {
+                            match (self.method_call_invocant_class(r, module_index), &sym_package) {
+                                (Some(cn), Some(pkg)) if cn == *pkg => {
+                                    results.push((*member_name_span, r.access));
                                 }
                                 _ => {}
                             }
@@ -348,13 +358,10 @@ impl FileAnalysis {
         // free: every `->op_type` across every struct pasting a role macro
         // froze onto the one `BASEOP::op_type` member, so they splat together.
         for r in self.refs() {
-            if let (
-                RefKind::MethodCall { method_name_span, .. },
-                Some(MethodTarget::Local { sym_id, .. }),
-            ) = (&r.kind, r.method_target())
-            {
+            let Some(site) = r.member_site() else { continue };
+            if let Some(MethodTarget::Local { sym_id, .. }) = r.method_target() {
                 if *sym_id == target_id {
-                    results.push((*method_name_span, r.access));
+                    results.push((site.name_span, r.access));
                 }
             }
         }
@@ -462,7 +469,7 @@ impl FileAnalysis {
         // `field $x :reader` in THIS file.
         if let Some(r) = self.ref_at(point) {
             if matches!(r.kind, RefKind::MethodCall { .. }) {
-                let bare = r.unqualified_target_name();
+                let bare = r.unqualified_target_name(self.names());
                 let cls = r
                     .method_target()
                     .map(|t| t.invocant_class().to_string())
@@ -585,14 +592,14 @@ impl FileAnalysis {
         self.attr_pair_group(attr, class)
     }
 
-    /// A `has`-synthesized attr pair: accessor Method + constructor
-    /// HashKeyDef with the same name, package, and selection span (they
-    /// were minted from the one `has 'name'` token — span equality is
-    /// what distinguishes the pair from a real `sub name` that happens
-    /// to share a class with someone's ctor key).
+    /// A synthesized attr pair: accessor Method + HashKeyDef minted from
+    /// the one `has 'name'` / `add_columns` token, linked at synthesis
+    /// through `Symbol::declared_with` — the relation is a fact the
+    /// minting site recorded, never a span coincidence a real `sub name`
+    /// could share.
     fn attr_pair_group(&self, bare: &str, class: &str) -> Option<FieldGroup> {
         // (1) Constructor-key pairing (Moo/Mojo `has`): the ctor-key HashKeyDef
-        // is the anchor; the accessor (if any) shares its selection span.
+        // is the anchor; the accessor (if any) is its declared twin.
         if let Some(key_def) = self.symbols.iter().find(|s| {
             matches!(s.kind, SymKind::HashKeyDef)
                 && s.name == bare
@@ -604,12 +611,10 @@ impl FileAnalysis {
                     } if p == class && crate::model::conventions::is_constructor_name(name)
                 )
         }) {
-            let accessor = self.symbols.iter().find(|s| {
-                matches!(s.kind, SymKind::Method)
-                    && s.name == bare
-                    && s.package.as_deref() == Some(class)
-                    && s.selection_span == key_def.selection_span
-            });
+            let accessor = key_def
+                .declared_with
+                .map(|id| self.symbol(id))
+                .filter(|s| matches!(s.kind, SymKind::Method));
             return Some(FieldGroup {
                 field_sym: None,
                 decl_span: Some(key_def.selection_span),
@@ -620,19 +625,16 @@ impl FileAnalysis {
             });
         }
         // (2) Class-key pairing (DBIC `add_columns`, Class::Accessor): an
-        // accessor Method and a `Class`-owned HashKeyDef of the same name
-        // minted from the SAME token (span equality is the synthesized-pair
-        // signal). The key side is reached via the `has_class_key` member;
-        // here we just confirm the pair exists and pin the decl span.
+        // accessor Method whose declared twin is a `Bridged`-owned
+        // HashKeyDef. The key side is reached via the `has_class_key`
+        // member; here we just confirm the pair exists and pin the decl span.
         let accessor = self.symbols.iter().find(|s| {
             matches!(s.kind, SymKind::Method)
                 && s.name == bare
                 && s.package.as_deref() == Some(class)
         })?;
-        let paired = self.symbols.iter().any(|s| {
+        let paired = accessor.declared_with.map(|id| self.symbol(id)).is_some_and(|s| {
             matches!(s.kind, SymKind::HashKeyDef)
-                && s.name == bare
-                && s.selection_span == accessor.selection_span
                 && matches!(
                     &s.detail,
                     SymbolDetail::HashKeyDef { owner: HashKeyOwner::Bridged { class: c }, .. } if c == class
@@ -652,7 +654,7 @@ impl FileAnalysis {
     }
 
     fn field_group_of(&self, sym: &Symbol) -> Option<FieldGroup> {
-        let SymbolDetail::Field { ref attributes, .. } = sym.detail else {
+        let SymbolDetail::Field { .. } = sym.detail else {
             return None;
         };
         if !sym.name.starts_with('$') {
@@ -663,8 +665,8 @@ impl FileAnalysis {
             decl_span: None,
             class: sym.package.clone()?,
             bare: sym.name[1..].to_string(),
-            has_param: attributes.iter().any(|a| a == "param"),
-            has_reader: attributes.iter().any(|a| a == "reader"),
+            has_param: sym.flags.contains(SymbolFlags::PARAM),
+            has_reader: sym.flags.contains(SymbolFlags::READER),
         })
     }
 
@@ -716,7 +718,7 @@ impl FileAnalysis {
         let mut spans = Vec::new();
         for r in self.refs() {
             if let RefKind::MethodCall { method_name_span, .. } = &r.kind {
-                if r.unqualified_target_name() != method {
+                if r.unqualified_target_name(self.names()) != method {
                     continue;
                 }
                 let cls = r
@@ -796,7 +798,7 @@ impl FileAnalysis {
         if g.has_reader {
             for r in self.refs() {
                 if let RefKind::MethodCall { method_name_span, .. } = &r.kind {
-                    if r.unqualified_target_name() != g.bare {
+                    if r.unqualified_target_name(self.names()) != g.bare {
                         continue;
                     }
                     let cls = r
@@ -865,7 +867,7 @@ impl FileAnalysis {
         // claim the same span as `Sub{class, verb}`. Gated on the key actually
         // being a column of the class (so `order_by` etc. fall through).
         if let (Some(enclosing), Some(idx)) = (enclosing_call, module_index) {
-            let verb = enclosing.unqualified_target_name();
+            let verb = enclosing.unqualified_target_name(self.names());
             if self.is_column_keyed_verb(verb) {
                 if let Some(class) = enclosing
                     .method_target()
@@ -911,7 +913,7 @@ impl FileAnalysis {
             {
                 return Some(HashKeyOwner::Sub {
                     package: Some(class),
-                    name: enclosing.unqualified_target_name().to_string(),
+                    name: enclosing.unqualified_target_name(self.names()).to_string(),
                 });
             }
         }
@@ -926,7 +928,7 @@ impl FileAnalysis {
             (&key_ref.kind, module_index)
         {
             if let Some(binding) = self.call_bindings.iter().find(|b| &b.variable == var_text) {
-                let func = split_qualified(&binding.func_name).1;
+                let func = split_qualified(&binding.func_name, self.names()).1;
                 if let Some((pkg, keys)) = self.imported_sub_keys(func, idx) {
                     if keys.iter().any(|k| k == &key_ref.target_name) {
                         return Some(HashKeyOwner::Sub {
@@ -960,11 +962,11 @@ impl FileAnalysis {
         }
         // Qualified calls (`Foo::bar`) pin at build time; only truly-bare
         // unresolved calls reach the index.
-        if split_qualified(&call_ref.target_name).0.is_some() {
+        if split_qualified(&call_ref.target_name, self.names()).0.is_some() {
             return None;
         }
         let idx = module_index?;
-        let name = call_ref.unqualified_target_name();
+        let name = call_ref.unqualified_target_name(self.names());
         // Later `use` wins, mirroring `resolve_call_package`'s import scan.
         // A split exporter's surface lives across its candidate files.
         for import in self.imports.iter().rev() {
@@ -984,25 +986,16 @@ impl FileAnalysis {
     /// The Field twin of a promoted-constructor-property PARAM token: php's
     /// `__construct(public readonly Level $level)` declares BOTH the ctor
     /// param (a `$level` Variable, body uses) and the class Field (`level`,
-    /// member accesses) with ONE source token. A cursor there lands on the
-    /// Variable (emitted first); resolution wants the member identity, so
-    /// re-target structurally: a Field one sigil-column to the right on the
-    /// same token. Perl analyses never exhibit the shape (fields there are
-    /// sigil-less symbols on their own tokens).
+    /// member accesses) with ONE source token, and the extractor links the
+    /// two through `declared_with`. A cursor there lands on the Variable
+    /// (emitted first); resolution wants the member identity.
     pub fn promoted_field_twin(&self, sym: &Symbol) -> Option<&Symbol> {
-        if !matches!(sym.kind, SymKind::Variable) || !sym.name.starts_with('$') {
+        if !matches!(sym.kind, SymKind::Variable) {
             return None;
         }
-        let bare = &sym.name[1..];
-        self.symbols_named(bare)
-            .iter()
-            .map(|&sid| self.symbol(sid))
-            .find(|f| {
-                matches!(f.kind, SymKind::Field)
-                    && f.selection_span.start.row == sym.selection_span.start.row
-                    && f.selection_span.start.column == sym.selection_span.start.column + 1
-                    && f.selection_span.end == sym.selection_span.end
-            })
+        sym.declared_with
+            .map(|id| self.symbol(id))
+            .filter(|f| matches!(f.kind, SymKind::Field))
     }
 
     /// The promoted param's (field decl span, variable USE spans) —
@@ -1022,23 +1015,21 @@ impl FileAnalysis {
                     && f.package.as_deref() == Some(class)
                     && self.symbol_is_class_content(f)
             })?;
-        let sigiled = format!("${member}");
-        let var_id = self
-            .symbols_named(&sigiled)
-            .iter()
-            .copied()
-            .find(|&sid| {
-                let v = self.symbol(sid);
-                matches!(v.kind, SymKind::Variable)
-                    && v.selection_span.start.row == field.selection_span.start.row
-                    && v.selection_span.start.column + 1 == field.selection_span.start.column
-                    && v.selection_span.end == field.selection_span.end
-            })?;
+        let var = field
+            .declared_with
+            .map(|id| self.symbol(id))
+            .filter(|v| matches!(v.kind, SymKind::Variable))?;
+        // A use span covers the sigiled variable; the group writes the bare
+        // member name, so each use narrows past the variable's OWN sigil.
+        let sigil_len = match &var.detail {
+            SymbolDetail::Variable { sigil, .. } => sigil.len_utf8(),
+            _ => 0,
+        };
         let uses = self
-            .collect_refs_for_target(var_id, false, None)
+            .collect_refs_for_target(var.id, false, None)
             .into_iter()
             .map(|(span, _)| Span {
-                start: Point::new(span.start.row, span.start.column + 1),
+                start: Point::new(span.start.row, span.start.column + sigil_len),
                 end: span.end,
             })
             .collect();
@@ -1182,11 +1173,12 @@ impl FileAnalysis {
                         .map(str::to_string)
                         .or_else(|| self.deferred_call_package(r, module_index));
                     return Some(RenameKind::Function {
-                        name: r.unqualified_target_name().to_string(),
+                        name: r.unqualified_target_name(self.names()).to_string(),
                         package,
                     });
                 }
-                RefKind::MethodCall { method_name_span, .. } => {
+                RefKind::MethodCall { method_name_span, .. }
+                | RefKind::FieldAccess { member_name_span: method_name_span, .. } => {
                     // `ref_at` can return a MethodCall ref for a cursor anywhere
                     // in the call — its span covers the args. But only the
                     // method-name token renames the method: a hash key in the
@@ -1202,7 +1194,7 @@ impl FileAnalysis {
                     let token_span = {
                         let mut s = *method_name_span;
                         let qual =
-                            r.target_name.len().saturating_sub(r.unqualified_target_name().len());
+                            r.target_name.len().saturating_sub(r.unqualified_target_name(self.names()).len());
                         s.start.column = s.start.column.saturating_sub(qual);
                         s
                     };
@@ -1211,7 +1203,7 @@ impl FileAnalysis {
                             // FQ `$o->Foo::Bar::m` renames the bare `m` tail; the
                             // qualifier scopes the class (same as Function above).
                             return Some(RenameKind::Method {
-                                name: r.unqualified_target_name().to_string(),
+                                name: r.unqualified_target_name(self.names()).to_string(),
                                 class,
                             });
                         }
@@ -1306,7 +1298,7 @@ impl FileAnalysis {
         if let Some(r) = self.ref_at(point) {
             if matches!(r.kind, RefKind::Variable | RefKind::ContainerAccess) {
                 // Qualified `$Pkg::var` — the package is explicit in the token.
-                if let Some((pkg, name)) = r.qualified_var_target() {
+                if let Some((pkg, name)) = r.qualified_var_target(self.names()) {
                     return Some((norm(pkg), name));
                 }
                 // Unqualified — a package var only if it resolves to an `our`.
@@ -1372,9 +1364,10 @@ impl FileAnalysis {
                         edits.push((r.span, new_name.to_string()));
                     }
                 }
-                RefKind::MethodCall { method_name_span, .. } => {
-                    // MethodCall refs target a class — `None` scope
-                    // doesn't reach methods.
+                RefKind::MethodCall { method_name_span, .. }
+                | RefKind::FieldAccess { member_name_span: method_name_span, .. } => {
+                    // Member refs target a class — `None` scope
+                    // doesn't reach members.
                     if let (Some(cls), Some(wanted)) =
                         (self.method_call_invocant_class(r, module_index), scope.as_ref())
                     {

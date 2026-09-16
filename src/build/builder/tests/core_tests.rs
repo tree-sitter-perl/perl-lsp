@@ -1156,3 +1156,87 @@ fn shift_consumes_the_argument_window() {
     assert_eq!(class("$x", 10), None, "an anon sub has its own @_");
     assert!(fa.sub_return_type_at_arity("greet", None).is_none(), "greet returns arg 1, not Foo");
 }
+
+/// A sub body shares its Sub scope whether the sub is named or anonymous:
+/// `my ($c) = @_` in a callback and `my ($s) = @_` in a named sub sit at
+/// the same depth, so every parameter-anchored fact reads them the same
+/// way. An anonymous body that opened its own Block scope put its
+/// parameters one level deeper than a named sub's.
+#[test]
+fn anonymous_and_named_sub_bodies_share_their_sub_scope() {
+    let fa = build_fa("my $cb = sub { my ($c) = @_; 1 };\nsub named { my ($s) = @_; 1 }\n");
+    let scope_kind_of = |var: &str| {
+        let sym = fa
+            .symbols()
+            .iter()
+            .find(|s| s.name == var && matches!(s.kind, SymKind::Variable))
+            .unwrap_or_else(|| panic!("{var} declared"));
+        fa.scopes[sym.scope.0 as usize].kind.clone()
+    };
+    assert_eq!(scope_kind_of("$c"), ScopeKind::Sub { name: "(anon)".into() });
+    assert_eq!(scope_kind_of("$s"), ScopeKind::Sub { name: "named".into() });
+    assert!(
+        !fa.scopes.iter().any(|s| matches!(s.kind, ScopeKind::Block)),
+        "no Block scope for either body: {:?}",
+        fa.scopes.iter().map(|s| &s.kind).collect::<Vec<_>>()
+    );
+}
+
+/// Corinna `field` attributes reach the closed flag set through Perl's own
+/// spelling table (`conventions::field_attribute_flag`), the way a pack's
+/// reach it through `TryFrom<&str>`; the synthesis reads the flags, and a
+/// spelling with no declaration fact stays display text.
+#[test]
+fn corinna_field_attributes_become_symbol_flags() {
+    let fa = build_fa(
+        "use v5.38;\nclass Point {\n    field $x :param :reader;\n    field $y :accessor :Foo;\n    field $z;\n}\n",
+    );
+    let flags_of = |name: &str| {
+        fa.symbols()
+            .iter()
+            .find(|s| s.name == name && matches!(s.kind, SymKind::Field))
+            .unwrap_or_else(|| panic!("{name} declared"))
+            .flags
+    };
+    assert_eq!(flags_of("$x"), SymbolFlags::PARAM | SymbolFlags::READER);
+    assert_eq!(flags_of("$y"), SymbolFlags::WRITER, ":accessor is a writer; :Foo mints no flag");
+    assert_eq!(flags_of("$z"), SymbolFlags::empty());
+    assert!(SymbolFlags::try_from("nonsense").is_err(), "an unknown spelling is an error, never a silent skip");
+    assert_eq!(SymbolFlags::try_from("static").unwrap(), SymbolFlags::STATIC);
+}
+
+/// A callable's body scope names its owner, and each parameter carries the
+/// token that binds it — both minted where the walk reads them, so the
+/// binding-site and enclosing-callable questions are lookups, not scans.
+#[test]
+fn scopes_own_their_callable_and_params_carry_their_binding_site() {
+    let fa = build_fa("sub named ($x, $y) { 1 }\nmy $cb = sub {\n    my ($c, $arg) = @_;\n    my $z = shift;\n    1;\n};\nsub old { my $s = shift; 1 }\n");
+    let sub = |name: &str| {
+        fa.symbols().iter().find(|s| s.name == name && matches!(s.kind, SymKind::Sub)).unwrap_or_else(|| panic!("{name}"))
+    };
+    let params_of = |name: &str| match &sub(name).detail {
+        SymbolDetail::Sub { params, .. } => params.clone(),
+        _ => panic!("{name} has params"),
+    };
+    // Signature params bind at their own token.
+    let named = params_of("named");
+    assert_eq!(named[0].binding_site, Some(Point { row: 0, column: 11 }));
+    assert_eq!(named[1].binding_site, Some(Point { row: 0, column: 15 }));
+    // `my (...) = @_` binds at the declared variable's token.
+    let anon = params_of("(anon)");
+    assert_eq!(anon[0].name, "$c");
+    assert_eq!(anon[0].binding_site, Some(Point { row: 2, column: 8 }));
+    assert_eq!(anon[1].binding_site, Some(Point { row: 2, column: 12 }));
+    // `my $s = shift` binds at `$s`.
+    assert_eq!(params_of("old")[0].binding_site, Some(Point { row: 6, column: 13 }));
+    // Every callable's body scope owns it; the model twin reads through it.
+    for name in ["named", "(anon)", "old"] {
+        let owner = sub(name).id;
+        let body = fa.scopes.iter().find(|s| s.owner == Some(owner)).unwrap_or_else(|| panic!("{name} body scope"));
+        assert!(matches!(body.kind, ScopeKind::Sub { .. }));
+        let first = params_of(name)[0].clone();
+        assert_eq!(fa.binding_site_of(&first.name, body.id), first.binding_site);
+    }
+    assert_eq!(fa.enclosing_callable_at(Point { row: 3, column: 4 }).map(|s| s.name.as_str()), Some("(anon)"));
+    assert!(fa.enclosing_callable_at(Point { row: 1, column: 0 }).is_none(), "top-level code has no callable");
+}

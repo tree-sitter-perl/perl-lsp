@@ -131,48 +131,65 @@ pub enum WitnessAttachment {
     /// `DomainCoherenceFold` folds them into the slot's DOMAIN type
     /// (`op_type: uint16_t` storage → `opcode` domain). The domain is a
     /// defeasible refinement for human surfaces; it never changes the
-    /// storage type that flows. Kept at the END for bincode variant-index
-    /// stability (bump `EXTRACT_VERSION`).
+    /// storage type that flows. The slot's VALUE rides the same
+    /// attachment as an `Edge(Variable{decl})` the pack extractor pushes
+    /// per field declaration: `ProjectionStep::ValueHop` chases it, and
+    /// the registry's `Field` fallback walks the owner's candidate files
+    /// and parents the way `PackageSymbol`'s does — a field a parent
+    /// declares answers a child's read. Kept at the END for bincode
+    /// variant-index stability (bump `EXTRACT_VERSION`).
     Field { owner: String, name: String },
+    /// Parameter `index` of the callable `name` in `package`, AS A BINDING
+    /// TARGET: the attachment a call site's argument aliases when the
+    /// parameter is declared by reference (php `&$out`, C++ `T&`). The
+    /// callee's own extraction pushes `Param{..} → Edge(Variable{param,
+    /// body_scope})` for exactly its by-reference positions and nothing for
+    /// the others, so the binding mode is a fact the callee's bag holds —
+    /// minted where the declaration is read (rule #11), never a bit a
+    /// consumer tests. A call site pushes `Variable(arg) → Edge(Param{..})`
+    /// (or `Projected{receiver, ParamOf}` through a dispatch) for every bare
+    /// variable it passes; the chase answers only where the callee aliases
+    /// the position, so a by-value argument's edge drops out and the
+    /// variable is left as it was. Bound-but-untyped answers `Unknown`
+    /// ("a value flowed here"), because the binding is a fact even when
+    /// the callee never types what it leaves behind. Cross-file the
+    /// registry walks the callee's candidate files and parents the way
+    /// `Field` does. Kept at the END for bincode variant-index stability
+    /// (bump `EXTRACT_VERSION`).
+    Param { package: String, name: String, index: u32 },
 }
 
 /// Index into `FileAnalysis::refs`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct RefIdx(pub u32);
 
-/// `WitnessSource::Builder` tag marking a variable's type as written
-/// EXPLICITLY (a declared static-type annotation) rather than inferred.
-/// Recognized by `WitnessSource::priority` (an explicit annotation
-/// outranks a flow guess) and by the inlay-hint suppression (an annotated
-/// declaration needs no synthetic `: T`).
-pub const ANNOT_SOURCE: &str = "skeleton-annot";
+/// What a `WitnessSource::Annotation` was declared BY — a closed set, so
+/// a producer cannot mint a spelling nothing reads and `--dump-package`
+/// names the provenance without a string compare.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum AnnotationKind {
+    /// A type written explicitly in the source (a declared static type, a
+    /// docblock `@var`). The inlay-hint suppression asks for this: an
+    /// annotated declaration needs no synthetic `: T`.
+    Declared,
+    /// An inherited parameter doc (`@inheritDoc`): the edge to the
+    /// ancestor's `@param`. Priority-tied with `Declared` so its
+    /// materialized answer (`array<X>`) beats the bare container the local
+    /// syntax contributed — at equal priority latest-wins applies and the
+    /// edge lands later, while a dangling edge drops out and leaves the
+    /// declared type standing.
+    InheritedParam,
+    /// A return arm that REFINES a bare declared container (`: array` over
+    /// `return [$q, $a]` — the tuple literal is strictly more informative).
+    /// Annotation priority for the same reason as `InheritedParam`: the
+    /// materialized `Sequence` must beat the `HashRef` annotation, and at
+    /// equal priority latest-wins does it.
+    Refinement,
+}
 
-/// The @inheritDoc param-subscription edge (`Variable → Edge(PackageSymbol
-/// {class, "method#p#name"})`). Priority-tied with `ANNOT_SOURCE` so its
-/// materialized answer (an ancestor's `@param array<X>`) beats the bare
-/// container the local syntax annot (`array $records`) contributed — at
-/// equal priority latest-wins applies and the edge lands later, while a
-/// dangling edge drops out and leaves the syntax annot standing.
-pub const INHERIT_PARAM_SOURCE: &str = "inherit-param";
-
-/// A return-arm chain that REFINES a bare declared container (`: array`
-/// over `return [$q, $a]` — the tuple literal is strictly more informative).
-/// Annot priority for the same reason as `INHERIT_PARAM_SOURCE`: the
-/// materialized `Sequence` must beat the `HashRef` annot, and at equal
-/// priority latest-wins does it (`HashRef` never subsumes `Sequence`).
-pub const REFINE_SOURCE: &str = "refines-container";
-
-/// Source tag of a class-member VALUE edge (`PackageSymbol{cls, field} →
-/// Edge(Variable)`): the registry's member-shape preference partitions a
-/// class attachment's edges on it.
-pub const FIELD_EDGE_SOURCE: &str = "field_edge";
-
-/// Source tag of a REASSIGNMENT's flow edge (`FlowEdge::reassigns`): the
-/// only witness whose failure to resolve `materialize` turns into an
-/// `OpaqueRebind` reset. Every other assignment lowering is a declaration
-/// (`"flow"`) or a companion (`mcb`, `chain_assignment`) and drops out
-/// silently when it cannot answer.
-pub const REASSIGN_FLOW_SOURCE: &str = "flow-reassign";
+/// Source tag of the builder's write markers (`WitnessPayload::Reset`) —
+/// provenance only; the payload carries the meaning.
+pub const RESET_SOURCE: &str = "reset";
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum WitnessSource {
@@ -184,13 +201,37 @@ pub enum WitnessSource {
     Enrichment(String),
     /// Derived from another ref — rename transport chases these as a DAG.
     DerivedFrom(RefIdx),
+    /// A DECLARED fact — see `AnnotationKind`. A source KIND, so it
+    /// outranks inference by construction and no reducer reads a tag to
+    /// find out. Kept at the END for bincode variant-index stability
+    /// (bump `EXTRACT_VERSION`).
+    Annotation(AnnotationKind),
+}
+
+impl WitnessPayload {
+    /// Does this witness BIND the variable's value — a type, a class
+    /// assertion, a first-param or bless witness — as opposed to observing
+    /// its use (a deref, a numeric context)? The reset rule and the
+    /// scope-binding walk ask this one question.
+    pub fn binds_value(&self) -> bool {
+        match self {
+            WitnessPayload::InferredType(_) => true,
+            WitnessPayload::Observation(o) => matches!(
+                o,
+                TypeObservation::ClassAssertion(_)
+                    | TypeObservation::FirstParamInMethod { .. }
+                    | TypeObservation::BlessTarget(_)
+            ),
+            _ => false,
+        }
+    }
 }
 
 impl WitnessSource {
     /// Priority for "highest-priority source wins" tie-breaking in
     /// reducers. Plugin overrides dominate everything else (the whole
     /// point of an override is "inference reaches the wrong answer
-    /// here"). An EXPLICIT type annotation (`ANNOT_SOURCE`) outranks a
+    /// here"). An EXPLICIT type annotation (`Annotation`) outranks a
     /// same-attachment inferred/flow class assertion: in a statically-
     /// typed pack language the declared type governs member dispatch, so a
     /// declared `RCPV *rcpv = FOO(...)` must resolve members on `RCPV`,
@@ -199,16 +240,32 @@ impl WitnessSource {
     /// remaining weights only need `Plugin > annotation > everything else`.
     pub fn priority(&self) -> u8 {
         match self {
-            WitnessSource::Plugin(_) => 100,
-            WitnessSource::Builder(tag)
-                if tag == ANNOT_SOURCE || tag == INHERIT_PARAM_SOURCE || tag == REFINE_SOURCE =>
-            {
-                20
-            }
+            WitnessSource::Plugin(_) => Self::OVERRIDE_PRIORITY,
+            WitnessSource::Annotation(_) => 20,
             WitnessSource::Builder(_)
             | WitnessSource::Enrichment(_)
-            | WitnessSource::DerivedFrom(_) => 10,
+            | WitnessSource::DerivedFrom(_) => Self::INFERENCE_PRIORITY,
         }
+    }
+
+    /// The priority every inferred (builder / enrichment / derived) source
+    /// carries — the floor a source must clear to outrank inference.
+    pub const INFERENCE_PRIORITY: u8 = 10;
+    /// The priority of a declared override (a plugin manifest's answer):
+    /// "inference reaches the wrong answer here", so it short-circuits
+    /// every reducer beneath it.
+    pub const OVERRIDE_PRIORITY: u8 = 100;
+
+    /// Does this source outrank an inferred answer on the same attachment?
+    /// (An annotation or an override; never a flow guess.)
+    pub fn outranks_inference(&self) -> bool {
+        self.priority() > Self::INFERENCE_PRIORITY
+    }
+
+    /// Is this source a declared override — one that dominates every
+    /// other answer on its attachment, whatever else is there?
+    pub fn is_override(&self) -> bool {
+        self.priority() >= Self::OVERRIDE_PRIORITY
     }
 }
 
@@ -309,6 +366,17 @@ pub enum WitnessPayload {
     /// mis-projects (docs/adr/destructuring.md). Kept at the END for
     /// bincode variant-index stability (bump `EXTRACT_VERSION`).
     Tuple(Vec<WitnessAttachment>),
+    /// A WRITE to the attachment's variable at this (zero-width) site —
+    /// a declaration or a plain assignment alike. `FrameworkAwareTypeFold`
+    /// reads it as the cutoff every earlier belief dies at, and as the
+    /// value (`Unknown`) only when something was bound before it and
+    /// nothing typed lands at or after it: a first binding resets nothing.
+    /// The site is the write's own token, and every fact about the
+    /// variable that must survive the write — a parameter assertion, a
+    /// declared type — is anchored AT its binding site, never before it
+    /// (rule #14). Kept at the END for bincode variant-index stability
+    /// (bump `EXTRACT_VERSION`).
+    Reset,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -335,10 +403,11 @@ pub enum ProjectionStep {
     /// per-slot answer exists). Kept at the END for bincode variant-index
     /// stability (bump `EXTRACT_VERSION`).
     Element,
-    /// A member READ (`$this->prop`, `obj->field`): dispatches `member` on
-    /// the base's class with no arity, preferring the class's value edge
-    /// (`FIELD_EDGE_SOURCE`) over a same-named callable's return. Kept at
-    /// the END for bincode variant-index stability (bump `EXTRACT_VERSION`).
+    /// A member VALUE read (`$this->prop`, `obj->field`): chases
+    /// `Field{owner: the base's class, name: member}` — the storage slot's
+    /// own attachment — never `PackageSymbol`, so a same-named callable's
+    /// return can never answer a value read. Kept at the END for bincode
+    /// variant-index stability (bump `EXTRACT_VERSION`).
     ValueHop { member: String },
     /// The KEY axis of an iterated collection — the pair-form foreach's
     /// first binding (`foreach ($m as $k => $v)`). A `Sequence`'s keys ARE
@@ -346,6 +415,12 @@ pub enum ProjectionStep {
     /// (`array<string, V>` docs) projects its first argument. Kept at the
     /// END for bincode variant-index stability (bump `EXTRACT_VERSION`).
     Key,
+    /// Parameter `index` of member `member` dispatched on the base's class:
+    /// chases `Param{class, member, index}` — the call-site half of a
+    /// by-reference binding whose receiver is a value (`$p->execute($cmd,
+    /// $out)`), the same deferred-dispatch shape as `MethodHop`. Kept at
+    /// the END for bincode variant-index stability (bump `EXTRACT_VERSION`).
+    ParamOf { member: String, index: u32 },
 }
 
 /// A sub's return type as a **deferred computation**, not a value:

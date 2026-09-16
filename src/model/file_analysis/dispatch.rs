@@ -74,26 +74,60 @@ pub enum HandlerOwner {
     /// Handler is registered on a specific class (typical for Mojo
     /// events, Moose roles, DBIC relationships, etc.).
     Class(String),
-    /// A flat, receiver-less handler namespace: the whole program shares
-    /// one name space of hooks (WordPress `add_action('init', …)` /
-    /// `do_action('init')`). No receiver types the dispatch — the string
-    /// alone is the identity — so receiver-gated machinery (dispatch-verb
-    /// manifests, invocant matching) skips these; name+owner equality is
-    /// the entire match.
-    Global,
-    /// A NAMED flat namespace — one rail per kind of string-named
-    /// framework entity (Laravel route names, view names, config keys …),
-    /// declared by the overlay capture's suffix (`@def.handler.named.route`
-    /// / `@ref.dispatch.named.route`). Same rules as `Global` (no receiver,
-    /// name + owner equality is the match); the rail keeps a route name
-    /// and a same-spelled view name apart.
+    /// A flat, receiver-less namespace — one rail per kind of string-named
+    /// framework entity (WordPress hooks, Laravel route names, view names,
+    /// config keys …), declared by the overlay capture's suffix
+    /// (`@def.handler.named.route` / `@ref.dispatch.named.route`). No
+    /// receiver types the dispatch — name + owner equality is the entire
+    /// match, so receiver-gated machinery (dispatch-verb manifests,
+    /// invocant matching) skips these; the rail keeps a route name and a
+    /// same-spelled view name apart. Every flat namespace is NAMED by its
+    /// overlay: an unnamed "global" one would claim the whole program for
+    /// what is one framework's hook space. What the rail's names ARE
+    /// (`RailNames`) is the rail document's declaration, asked through
+    /// `names_are`, never a second variant.
     Rail(String),
-    /// A named rail whose NAMES are class names (Laravel's event bus: an
-    /// emission `event(new X)` and a listener's `handle(X $e)` meet on
-    /// `X`). Spans are the emission and handler TOKENS, never the name
-    /// itself, so the rail is navigable but never renameable — the class
-    /// rename owns the name.
-    ClassRail(String),
+}
+
+/// What a rail's names denote — the rail document's `names_are`
+/// declaration, carried as `PackFacts::class_named_rails` and read through
+/// `HandlerOwner::names_are`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RailNames {
+    /// The name is a string the framework matches verbatim (a route name,
+    /// a view, a config key, a hook): renameable, the edit rewriting
+    /// inside the quotes at every site.
+    Strings,
+    /// The name is a CLASS identity (Laravel's event bus: an emission
+    /// `event(new X)` and a listener's `handle(X $e)` meet on `X`). Spans
+    /// sit on the emission and handler TOKENS, never on the name itself,
+    /// so the rail is navigable but never renameable — the class rename
+    /// owns the name — and its use ref is a companion of the class
+    /// token's own ref at the same span.
+    Classes,
+}
+
+impl HandlerOwner {
+    /// What this owner's names denote, under the rail declarations `pack`
+    /// carries. A class-owned handler's name is an event string; a rail
+    /// nobody declared denotes strings — the common and conservative case.
+    pub fn names_are(&self, pack: &PackFacts) -> RailNames {
+        match self {
+            HandlerOwner::Class(_) => RailNames::Strings,
+            HandlerOwner::Rail(rail) => {
+                if pack.class_named_rails.iter().any(|r| r == rail) {
+                    RailNames::Classes
+                } else {
+                    RailNames::Strings
+                }
+            }
+        }
+    }
+
+    /// The rail's names are class identities — see `RailNames::Classes`.
+    pub fn names_are_classes(&self, pack: &PackFacts) -> bool {
+        self.names_are(pack) == RailNames::Classes
+    }
 }
 
 // ---- Plugin namespace ----
