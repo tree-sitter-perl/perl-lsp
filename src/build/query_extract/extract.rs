@@ -3350,11 +3350,6 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     Ok(out)
 }
 
-/// Does a doc row get to type this (name, scope) slot? Yes when the syntax
-/// declared nothing (declared wins — docblocks drift), and ALSO when the doc
-/// is a `Sequence` refining a bare declared container (`array`/`iterable` —
-/// the spelling that cannot carry an element). The doc witness lands AFTER
-/// the declared one, so latest-wins reduction serves the refinement.
 /// The positional index of a destructuring slot: the number of TOP-LEVEL
 /// commas in the list text before the slot's byte offset (`[, $b]` → 1).
 /// `None` for a keyed list (a top-level `=>`): its positions are not
@@ -3404,6 +3399,11 @@ fn slot_key(list_text: &str, slot_offset: usize, arrow: &str) -> Option<String> 
     quoted.then(|| key[1..key.len() - 1].to_string())
 }
 
+/// Does a doc row get to type this (name, scope) slot? Yes when the syntax
+/// declared nothing (declared wins — docblocks drift), and ALSO when the doc
+/// is a `Sequence` refining a bare declared container (`array`/`iterable` —
+/// the spelling that cannot carry an element). The doc witness lands AFTER
+/// the declared one, so latest-wins reduction serves the refinement.
 fn doc_admits(
     pack: &LangPack,
     annot_text_by_var: &std::collections::HashMap<
