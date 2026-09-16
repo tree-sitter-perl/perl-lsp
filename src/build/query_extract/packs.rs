@@ -66,6 +66,14 @@ pub struct LangPack {
     /// display), and a registry edge answers the RAW declared type first —
     /// `item_: T` instead of the substituted `int`.
     pub field_registry_edges: bool,
+    /// Does this receiver spelling mean "dispatch from the parent of the
+    /// writing class, skipping it" (php `parent::`)? The ref is then
+    /// minted with the model's SUPER method token (`SUPER::name`, the
+    /// Perl `$self->SUPER::m` spelling) and a current-package invocant,
+    /// so goto-def, references, and rename all ride the existing SUPER
+    /// lane (`resolve_super_method`, refs_to's SUPER arm) — asked of the
+    /// pack, never a name branch in the engine (rule #10).
+    pub super_receiver: fn(text: &str) -> bool,
     /// Receiver tokens that name the ENCLOSING class itself for member
     /// access (php `self::` / `static::`): no typeable value node, the class
     /// is read off the cursor's scope chain — the `receiver_names` rule for
@@ -557,6 +565,7 @@ pub fn perl_pack() -> LangPack {
         rettype_receiver: |_| false,
         type_display: &[],
         field_registry_edges: false,
+        super_receiver: |_| false,
         self_class_tokens: &[],
         class_token_kinds: &[],
         function_scoped_vars: false,
@@ -638,6 +647,7 @@ pub fn python_pack() -> LangPack {
         rettype_receiver: |_| false,
         type_display: &[],
         field_registry_edges: false,
+        super_receiver: |_| false,
         self_class_tokens: &[],
         class_token_kinds: &[],
         function_scoped_vars: false,
@@ -719,6 +729,7 @@ pub fn r_pack() -> LangPack {
         rettype_receiver: |_| false,
         type_display: &[],
         field_registry_edges: false,
+        super_receiver: |_| false,
         self_class_tokens: &[],
         class_token_kinds: &[],
         function_scoped_vars: false,
@@ -799,6 +810,7 @@ pub fn cmake_pack() -> LangPack {
         rettype_receiver: |_| false,
         type_display: &[],
         field_registry_edges: false,
+        super_receiver: |_| false,
         self_class_tokens: &[],
         class_token_kinds: &[],
         function_scoped_vars: false,
@@ -940,6 +952,7 @@ pub fn cpp_pack() -> LangPack {
         rettype_receiver: |_| false,
         type_display: &[],
         field_registry_edges: false,
+        super_receiver: |_| false,
         self_class_tokens: &[],
         class_token_kinds: &[],
         function_scoped_vars: false,

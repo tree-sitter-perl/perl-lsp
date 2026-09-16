@@ -644,6 +644,16 @@
   operator: _ @member.op
   field: (field_identifier) @ref.member)
 
+; The CALLED form additionally mints a chain-hop witness on the whole call's
+; span (`@hop.call` + `@hop.member` — deliberately NOT `@ref.member`, the
+; pattern above already minted the ref): `w.get().spin()` types through the
+; receiver span's own hop with no intermediate variable.
+(call_expression
+  function: (field_expression
+    argument: (_) @member.recv
+    field: (field_identifier) @hop.member)
+  arguments: (argument_list) @arity.args) @hop.call
+
 ; ---- domain typing (int-used-as-enum): a struct-field SLOT compared or
 ; assigned against ANY value. `o->op_type == OP_CONST` / `o->op_type =
 ; OP_FREED` / `o->op_targ = pad_alloc(...)`. @domain.slot is the field access,
