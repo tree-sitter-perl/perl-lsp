@@ -812,6 +812,9 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     // guarded-block region, block scope).
     let mut pending_narrow: Vec<(String, crate::model::file_analysis::InferredType, Span, ScopeId)> =
         Vec::new();
+    // Class-body scopes (`register_class_body`), for the member-targeted
+    // flow (`@flow.target.member`): the witness lands where field readers look.
+    let mut class_body_scopes: std::collections::HashSet<ScopeId> = std::collections::HashSet::new();
     // `std::move(x)` halves, joined per match: the qualifier (`std`) + name
     // (`move`) verify the call IS std::move (no query predicates), the var is
     // the moved subject, the call span the region start + enclosing scope.
@@ -919,6 +922,15 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                     while context_stack.last().is_some_and(|&(d, _)| d >= scope_stack.len()) {
                         context_stack.pop();
                     }
+                    // The receiver name (`$this`) IS this class inside its
+                    // body — a witness at the body scope, so a chain based on
+                    // it (`$this->mailer->send()`) resolves through the same
+                    // registry chase as any typed variable. Class bodies
+                    // only: a namespace body carries a context too.
+                    if names_by_match.contains_key(&(e.match_id, "def.class".to_string())) {
+                        register_class_body(&mut out, pack, id, &text, e.start);
+                        class_body_scopes.insert(id);
+                    }
                     context_stack.push((scope_stack.len(), text));
                 }
                 // a guard narrowing whose block is THIS scope → the refined type
@@ -1021,7 +1033,15 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                     {
                         context_stack.pop();
                     }
-                    context_stack.push((scope_stack.len(), e.text.clone()));
+                    // php puts the class scope on the whole declaration, so
+                    // the body scope is ALREADY open here: it carries the
+                    // class as its package and the receiver witness.
+                    if names_by_match.contains_key(&(e.match_id, "def.class".to_string())) {
+                        let id = scope_stack.last().unwrap().1;
+                        register_class_body(&mut out, pack, id, &raw, e.start);
+                        class_body_scopes.insert(id);
+                    }
+                    context_stack.push((scope_stack.len(), raw));
                 }
             }
             "parent" => {
@@ -2216,4 +2236,45 @@ fn byte_range_of(events: &[Event], match_id: usize, cap: &str) -> Option<(usize,
         .iter()
         .find(|e| e.match_id == match_id && e.cap == cap)
         .map(|e| (e.start_byte, e.end_byte))
+}
+
+/// A class body scope: its package is the class (a member declared
+/// directly in the body — a constant, a property default — resolves its
+/// enclosing class as this, not the namespace), and the receiver name
+/// (`$this`) is witnessed as an instance of it, so every chain based on
+/// the receiver resolves through the registry like any typed variable.
+/// The one spelling of "this declaration is deprecated": the attribute the
+/// lane reads, plus the notice hover and the diagnostic show.
+fn mark_deprecated(sym: &mut crate::build::query_extract::SkelSymbol, text: Option<String>) {
+    if !sym.attributes.iter().any(|a| a == "deprecated") {
+        sym.attributes.push("deprecated".to_string());
+    }
+    if text.is_some() || sym.deprecation.is_none() {
+        sym.deprecation = text;
+    }
+}
+
+fn register_class_body(
+    out: &mut SkeletonAnalysis,
+    pack: &crate::build::query_extract::LangPack,
+    scope: crate::model::file_analysis::ScopeId,
+    class: &str,
+    at: Point,
+) {
+    if let Some(sc) = out.scopes.iter_mut().find(|s| s.id == scope) {
+        sc.package = Some(class.to_string());
+    }
+    for recv in pack.receiver_names {
+        out.witnesses.push(crate::model::witnesses::Witness {
+            attachment: crate::model::witnesses::WitnessAttachment::Variable {
+                name: recv.to_string(),
+                scope,
+            },
+            source: crate::model::witnesses::WitnessSource::Builder("skeleton-receiver".into()),
+            payload: crate::model::witnesses::WitnessPayload::InferredType(
+                crate::model::file_analysis::InferredType::ClassName(class.to_string()),
+            ),
+            span: Span { start: at, end: at },
+        });
+    }
 }
