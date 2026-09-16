@@ -52,6 +52,8 @@ pub fn open_cache_db(workspace_root: Option<&str>, lang: &str) -> Option<Connect
 /// writers share the Perl DB (resolver thread + workspace indexer), and a
 /// failed commit after resident copies were stripped is unrecoverable for
 /// the session — so waiting beats failing.
+// Read by the production opener only; the test opener shortens the wait.
+#[cfg_attr(test, allow(dead_code))]
 pub(super) const WRITER_BUSY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// The writer open, given the cache directory: WAL, busy handling, schema
@@ -139,6 +141,8 @@ thread_local! {
         const { std::cell::RefCell::new(None) };
 }
 
+// Used by the pack-language cache tests; a Perl-only test build has no caller.
+#[allow(dead_code)]
 /// Run `f` with `open_cache_db` backed by a real SQLite DB under `dir` on
 /// THIS thread. Thread-local, so parallel tests can't see each other's; the
 /// short busy timeout is what lets a test drive a *contended* writer without
