@@ -460,6 +460,89 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
         }
     }
 
+    // ---- class identities ----
+    // With a namespace separator every class spelling resolves ONCE, here,
+    // to the identity it names: `UseMap::resolve` — the same ladder the
+    // query side's pins are built from — over the rows just collected and
+    // the namespace in force at the spelling's position. A declaration
+    // joins its namespace directly. Without a separator a spelling IS its
+    // identity, and every resolver below is the identity function.
+    let ident_rows: Vec<(Span, String)> = use_map
+        .iter()
+        .filter(|(key, (_, leaf))| *key == leaf)
+        .map(|(_, (ns, leaf))| {
+            let zero = Point { row: 0, column: 0 };
+            // rows exist only where the use-map block above ran, i.e. a
+            // declared separator
+            let sep = pack.names.use_map_sep().unwrap_or_default();
+            let row = if ns.is_empty() { leaf.clone() } else { format!("{ns}{sep}{leaf}") };
+            (Span { start: zero, end: zero }, row)
+        })
+        .collect();
+    let ident_aliases = out_use_aliases.clone();
+    let namespace_marks: Vec<(Point, String)> = {
+        let mut v: Vec<(Point, String)> = events
+            .iter()
+            .filter(|e| e.cap == "def.package.name")
+            .map(|e| (e.start, e.text.trim_start_matches(pack.names.use_map_sep().unwrap_or_default()).to_string()))
+            .collect();
+        v.sort_by_key(|(p, _)| (p.row, p.column));
+        v
+    };
+    let namespace_at = |at: Point| -> Option<&str> {
+        namespace_marks
+            .iter()
+            .rev()
+            .find(|(p, _)| (p.row, p.column) <= (at.row, at.column))
+            .map(|(_, n)| n.as_str())
+    };
+    // A template parameter is a name in its own axis (`ParamOf` keys on
+    // the bare spelling), never a class spelling to resolve.
+    let template_names: std::collections::HashSet<String> = events
+        .iter()
+        .filter(|e| e.cap == "doc.comment")
+        .flat_map(|e| (pack.doc_types)(&e.text))
+        .filter_map(|f| match f {
+            super::packs::DocFact::Template { name, .. } => Some(name),
+            _ => None,
+        })
+        .collect();
+    let ident = |written: &str, at: Point| -> String {
+        // the current-class spellings name no namespace; the model
+        // resolves them to the enclosing class
+        if pack.self_class_tokens.contains(&written)
+            || crate::model::conventions::is_current_package_token(written)
+            || template_names.contains(written)
+        {
+            return written.to_string();
+        }
+        match pack.names.use_map_sep() {
+            None => written.to_string(),
+            Some(sep) => crate::model::file_analysis::UseMap {
+                rows: &ident_rows,
+                aliases: &ident_aliases,
+                own_namespace: namespace_at(at),
+                sep,
+            }
+            .resolve(written),
+        }
+    };
+    let ident_type = |ty: InferredType, at: Point| -> InferredType {
+        match pack.names.use_map_sep() {
+            None => ty,
+            Some(_) => ty.map_class_names(&mut |c| ident(c, at)),
+        }
+    };
+    let annot_ident = |text: &str, at: Point| -> Option<InferredType> {
+        (pack.annot_type)(text).map(|t| ident_type(t, at))
+    };
+    let decl_ident = |leaf: &str, at: Point| -> String {
+        match (pack.names.use_map_sep(), namespace_at(at)) {
+            (Some(sep), Some(ns)) if !ns.is_empty() => format!("{ns}{sep}{leaf}"),
+            _ => leaf.to_string(),
+        }
+    };
+
     // ---- the state machine: scope stack + sticky contexts ----
     let mut out = SkeletonAnalysis::default();
     out.use_aliases = out_use_aliases;
@@ -784,7 +867,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                     scope: cur_scope,
                     return_type: rettype_by_match
                         .get(&e.match_id)
-                        .and_then(|t| (pack.annot_type)(t)),
+                        .and_then(|t| annot_ident(t, e.start)),
                     receiver_instance_of: None,
                     receiver_return: rettype_by_match
                         .get(&e.match_id)
