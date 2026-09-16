@@ -317,6 +317,100 @@ pub fn entry_markers_for(pack: &LangPack) -> std::sync::Arc<Vec<EntryMarker>> {
     arc
 }
 
+// ---- pack-plugin query overlays (tier 1, docs/prompt-pack-plugins.md) ----
+
+/// Discovered overlay files for a language: every
+/// `<plugin-dir>/<name>/queries/<lang_id>.scm` under the shared plugin
+/// search path (`plugin_search_dirs` — one path for both plugin worlds),
+/// sorted by path so assembly order is deterministic. Read per call, like
+/// `plugin_source_paths` — cheap, and it keeps "what loads" and "what the
+/// cache fingerprint hashes" the same enumeration.
+pub fn pack_overlay_paths(lang_id: &str) -> Vec<std::path::PathBuf> {
+    let mut out: Vec<std::path::PathBuf> = Vec::new();
+    for dir in crate::build::plugin::rhai_host::plugin_search_dirs() {
+        if let Ok(read) = std::fs::read_dir(&dir) {
+            for entry in read.flatten() {
+                let candidate = entry.path().join("queries").join(format!("{lang_id}.scm"));
+                if candidate.is_file() {
+                    out.push(candidate);
+                }
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
+/// The pack's effective query source: the bundled query plus every
+/// surviving discovered overlay, assembled once per distinct overlay set
+/// and leaked (`cached_query` then compiles it once by content).
+///
+/// Per-overlay compile ISOLATION: each overlay is test-compiled ALONE
+/// against the grammar first; one that fails is dropped with a stderr
+/// diagnostic naming the file, and the bundled query + surviving overlays
+/// still serve — the same failure posture as a malformed `.rhai` (one bad
+/// plugin cannot take the language out).
+fn effective_query_source(language: &Language, pack: &LangPack) -> &'static str {
+    use std::collections::hash_map::DefaultHasher;
+    use std::collections::HashMap;
+    use std::hash::{Hash, Hasher};
+    use std::sync::{Mutex, OnceLock};
+    let paths = pack_overlay_paths(pack.lang_id);
+    if paths.is_empty() && pack.bundled_overlays.is_empty() {
+        return pack.query_source;
+    }
+    static ASSEMBLED: OnceLock<Mutex<HashMap<u64, &'static str>>> = OnceLock::new();
+    let cache = ASSEMBLED.get_or_init(|| Mutex::new(HashMap::new()));
+    let sources: Vec<(std::path::PathBuf, String)> = paths
+        .into_iter()
+        .filter_map(|p| std::fs::read_to_string(&p).ok().map(|s| (p, s)))
+        .collect();
+    let key = {
+        let mut h = DefaultHasher::new();
+        pack.lang_id.hash(&mut h);
+        // `bundled_overlays` is a per-`lang_id` compile-time constant, so the
+        // id covers it; a runtime-configurable bundle would have to hash in.
+        pack.query_source.hash(&mut h);
+        for (p, s) in &sources {
+            p.hash(&mut h);
+            s.hash(&mut h);
+        }
+        h.finish()
+    };
+    if let Some(src) = cache.lock().unwrap().get(&key) {
+        return src;
+    }
+    let mut assembled = String::from(pack.query_source);
+    // Bundled overlays get the same isolation as plugin-dir ones: a syntax
+    // slip in one framework document must not take every verb of the
+    // language dark (it did — the documents used to be one `concat!`).
+    for (name, s) in pack.bundled_overlays {
+        match Query::new(language, s) {
+            Ok(_) => {
+                assembled.push('\n');
+                assembled.push_str(s);
+            }
+            Err(e) => {
+                eprintln!("perl-lsp: bundled {} overlay {name} dropped: {e}", pack.lang_id);
+            }
+        }
+    }
+    for (p, s) in &sources {
+        match Query::new(language, s) {
+            Ok(_) => {
+                assembled.push('\n');
+                assembled.push_str(s);
+            }
+            Err(e) => {
+                eprintln!("perl-lsp: pack overlay {} dropped: {e}", p.display());
+            }
+        }
+    }
+    let leaked: &'static str = Box::leak(assembled.into_boxed_str());
+    cache.lock().unwrap().insert(key, leaked);
+    leaked
+}
+
 mod extract;
 mod packs;
 mod skeleton;
