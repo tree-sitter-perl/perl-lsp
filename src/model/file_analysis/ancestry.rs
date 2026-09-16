@@ -559,7 +559,7 @@ impl FileAnalysis {
             // then answers under its OWN identity — the member lives on
             // the stranger — and the verdict rides the result.
             let (cands, widened) = idx.visible_def_candidates_widening(cls);
-            let leaf = name_match_key(cls);
+            let leaf = name_match_key(cls, self.names());
             for cached in cands {
                 // Rows-backed pre-filter (`docs/prompt-relational-iteration.md`):
                 // skip the rehydrate when the row store PROVES this candidate
@@ -594,7 +594,7 @@ impl FileAnalysis {
                     whole
                         .symbols
                         .iter()
-                        .find(|s| matches!(s.kind, SymKind::Class) && name_match_key(&s.name) == leaf)
+                        .find(|s| matches!(s.kind, SymKind::Class) && name_match_key(&s.name, self.names()) == leaf)
                         .map(|s| s.name.clone())
                         .unwrap_or_else(|| cls.to_string())
                 } else {
@@ -913,7 +913,7 @@ impl FileAnalysis {
         // anonymous sub (`*__HM_DEDUP = sub () {0}`) is a symbol in the
         // class but not a name a method call can ever spell.
         let visible = |sym: &Symbol| {
-            crate::model::conventions::is_callable_sub_name(&sym.name)
+            crate::model::conventions::is_callable_sub_name(&sym.name, self.names())
                 // A lexical sub/method (`my sub` / `my method`) is scoped to
                 // its block, not the class: it never dispatches by name on an
                 // MRO and is invisible cross-file. The point-aware `&name`

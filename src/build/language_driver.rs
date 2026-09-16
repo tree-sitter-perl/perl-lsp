@@ -1220,6 +1220,7 @@ fn remap_spans(
         param_sigs,
         // Populated later (enrich_skeleton) already in original coords — no remap.
         macro_body_member_reads: _,
+        names: _,
     } = skel;
 
     for s in symbols.iter_mut() {

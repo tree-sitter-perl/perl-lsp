@@ -30,7 +30,7 @@ impl FileAnalysis {
                     // Qualified calls carry the full path in `target_name`;
                     // symbols are keyed by bare name + the `Function` binding.
                     if let Some(sid) = self
-                        .package_scoped_callable(r.unqualified_target_name(), r.resolved_package())
+                        .package_scoped_callable(r.unqualified_target_name(self.names()), r.resolved_package())
                     {
                         return Some((sid, true));
                     }
@@ -38,7 +38,7 @@ impl FileAnalysis {
                 RefKind::MethodCall { .. } => {
                     let class_name = self.method_call_invocant_class(r, module_index);
                     // Bare method name (FQ `$o->Foo::Bar::m` resolves `m`).
-                    let method = r.unqualified_target_name();
+                    let method = r.unqualified_target_name(self.names());
                     // Try inheritance-aware resolution first
                     if let Some(ref cn) = class_name {
                         match self.resolve_method_in_ancestors(cn, method, module_index) {
@@ -97,7 +97,7 @@ impl FileAnalysis {
                     // unpinned receiver is an honest miss for a field.
                     let cn = self.method_call_invocant_class(r, module_index)?;
                     if let Some(MethodResolution::Local { sym_id, .. }) =
-                        self.resolve_field_in_ancestors(&cn, r.unqualified_target_name(), module_index)
+                        self.resolve_field_in_ancestors(&cn, r.unqualified_target_name(self.names()), module_index)
                     {
                         return Some((sym_id, true));
                     }
@@ -724,7 +724,7 @@ impl FileAnalysis {
                     .resolve_bridged_class(
                         token,
                         *match_mode,
-                        r.unqualified_target_name(),
+                        r.unqualified_target_name(self.names()),
                         module_index,
                     )
                     .map(InferredType::ClassName);
@@ -821,7 +821,7 @@ impl FileAnalysis {
                         if let Some(recv_class) =
                             self.method_call_invocant_class(recv, module_index)
                         {
-                            let recv_method = recv.unqualified_target_name();
+                            let recv_method = recv.unqualified_target_name(self.names());
                             if crate::model::conventions::is_constructor_name(recv_method) {
                                 return Some(InferredType::ClassName(recv_class));
                             }
@@ -886,10 +886,10 @@ impl FileAnalysis {
         // reads as a baked verdict, so the references matcher never
         // re-resolves with the index) — answer None and leave the site to
         // the query-time rungs above.
-        if !crate::model::conventions::is_bareword_class_name(invocant) {
+        if !crate::model::conventions::is_bareword_class_name(invocant, self.names()) {
             return None;
         }
-        let bare = split_qualified(invocant).1;
+        let bare = split_qualified(invocant, self.names()).1;
         if let Some(InferredType::ClassName(c)) = self.sub_return_type_at_arity(bare, Some(0)) {
             return Some(InferredType::ClassName(c));
         }
@@ -1003,7 +1003,7 @@ impl FileAnalysis {
                 // bareword as the call and use that class. Mirrors the
                 // same rule in `invocant_type_at_node` and
                 // `resolve_invocant_class_tree`.
-                let bare = split_qualified(invocant).1;
+                let bare = split_qualified(invocant, self.names()).1;
                 if let Some(InferredType::ClassName(c)) =
                     self.sub_return_type_at_arity(bare, Some(0))
                 {

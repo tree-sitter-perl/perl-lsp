@@ -408,16 +408,17 @@ fn python_cross_file_function_refs_through_refs_to() {
     let (fa_a, _) = python_fa("def helper(x):\n    return x\n");
     let (fa_b, _) = python_fa("from a import helper\n\nz = helper(1)\n");
 
+    let target = crate::index::resolve::TargetRef::new(
+        "helper".into(),
+        crate::index::resolve::TargetKind::Sub { package: None },
+        &fa_b,
+    );
     let store = crate::index::file_store::FileStore::new();
     let pa = std::path::PathBuf::from("/fake/py/a.py");
     let pb = std::path::PathBuf::from("/fake/py/b.py");
     store.insert_workspace(pa.clone(), fa_a);
     store.insert_workspace(pb.clone(), fa_b);
 
-    let target = crate::index::resolve::TargetRef::new(
-        "helper".into(),
-        crate::index::resolve::TargetKind::Sub { package: None },
-    );
     let locs = crate::index::resolve::refs_to(&store, None, &target, crate::index::resolve::RoleMask::EDITABLE);
     let by_file: Vec<(String, crate::model::file_analysis::AccessKind)> = locs
         .iter()

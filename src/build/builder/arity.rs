@@ -299,7 +299,7 @@ pub(super) fn point_lt(a: tree_sitter::Point, b: tree_sitter::Point) -> bool {
 /// trailing component. `"Foo::Bar::baz"` → `"baz"`; `"baz"` → `"baz"`. Pure
 /// string op — does not consult the symbol table or package state.
 pub(super) fn bare_name(s: &str) -> &str {
-    crate::model::file_analysis::split_qualified(s).1
+    crate::model::file_analysis::split_qualified(s, &crate::model::conventions::PERL_SPELLINGS).1
 }
 
 /// If `return_node` is `return CALL`, where CALL is a simple named function

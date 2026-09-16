@@ -158,6 +158,10 @@ fn too_deep_analysis(tree: &Tree, depth: usize) -> FileAnalysis {
             }],
             ..Default::default()
         },
+        pack: crate::model::file_analysis::PackFacts {
+            names: crate::model::conventions::PERL_SPELLINGS,
+            ..Default::default()
+        },
         ..Default::default()
     });
     fa.finalize_post_walk();
@@ -665,7 +669,10 @@ fn build_once(
         },
         // The pack lane is empty for Perl: no macros, no include graph,
         // no template params, no `std::move`.
-        pack: crate::model::file_analysis::PackFacts::default(),
+        pack: crate::model::file_analysis::PackFacts {
+            names: crate::model::conventions::PERL_SPELLINGS,
+            ..Default::default()
+        },
         type_provenance: b.type_provenance,
         package_ranges: b.package_ranges,
         witnesses: b.bag,

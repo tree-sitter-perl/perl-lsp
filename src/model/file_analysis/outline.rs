@@ -541,7 +541,7 @@ impl FileAnalysis {
                 RefKind::FunctionCall => {
                     // Constant usages color like the decl; framework DSL keywords → macro.
                     let is_const = r.resolved_package().map_or(false, |pkg| {
-                        constant_names.contains(&(pkg, r.unqualified_target_name()))
+                        constant_names.contains(&(pkg, r.unqualified_target_name(self.names())))
                     });
                     let token_type = if is_const {
                         TOK_ENUM_MEMBER

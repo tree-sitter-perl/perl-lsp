@@ -393,7 +393,7 @@ impl<'a> Builder<'a> {
                 // `Sub::Exporter::setup_exporter({ exports => [...] })`.
                 // Match on the unqualified tail so the package prefix
                 // (which the caller may have aliased) isn't load-bearing.
-                let tail = crate::model::file_analysis::split_qualified(name).1;
+                let tail = crate::model::file_analysis::split_qualified(name, &crate::model::conventions::PERL_SPELLINGS).1;
                 if tail == "setup_exporter" {
                     if let Some(args) = node.child_by_field_name("arguments") {
                         self.detect_exporter_setup_call(tail, args);
@@ -924,7 +924,7 @@ impl<'a> Builder<'a> {
             if !matches!(r.kind, RefKind::FunctionCall) || r.binding.is_some() {
                 continue;
             }
-            if crate::model::file_analysis::split_qualified(&r.target_name).0.is_some() {
+            if crate::model::file_analysis::split_qualified(&r.target_name, &crate::model::conventions::PERL_SPELLINGS).0.is_some() {
                 continue; // qualified calls already pin at walk time (step 1)
             }
             let Some(pkgs) = sub_pkgs.get(r.target_name.as_str()) else { continue };
@@ -1411,7 +1411,7 @@ impl<'a> Builder<'a> {
             // the tail under `DateTime`, not the file's own `current_package`
             // (`DateTime::PP`), so `PackageSymbol{DateTime, _ymd2rd}` resolves.
             // Unqualified names stay under the current package.
-            let (target_pkg, local) = match crate::model::file_analysis::split_qualified(&name) {
+            let (target_pkg, local) = match crate::model::file_analysis::split_qualified(&name, &crate::model::conventions::PERL_SPELLINGS) {
                 (Some(prefix), tail) if !prefix.is_empty() => {
                     (Some(prefix.to_string()), tail.to_string())
                 }

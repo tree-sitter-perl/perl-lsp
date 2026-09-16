@@ -52,6 +52,7 @@ pub(super) fn group_from_projections(
                     package: Some(p.class.clone()),
                     name: "new".to_string(),
                 },
+                class_analysis,
             ),
             rename: MemberRename::Bare,
         });
@@ -61,6 +62,7 @@ pub(super) fn group_from_projections(
             target: TargetRef::new(
                 p.bare.clone(),
                 TargetKind::InternalHashKey { class: p.class.clone() },
+                class_analysis,
             ),
             rename: MemberRename::Bare,
         });
@@ -73,6 +75,7 @@ pub(super) fn group_from_projections(
             target: TargetRef::new(
                 p.bare.clone(),
                 TargetKind::HashKeyOfBridged(p.class.clone()),
+                class_analysis,
             ),
             rename: MemberRename::Bare,
         });
@@ -396,9 +399,9 @@ fn retrieve_indexed(idx: &dyn CrossFileLookup) -> std::sync::Arc<std::collection
 /// `name_match_key` spelling rows are written under, so retrieval is exactly
 /// as generous as the matcher's name checks.
 pub(super) fn retrieval_keys(target: &TargetRef, aliases: &[DelegationAlias]) -> Vec<String> {
-    let mut keys = vec![crate::model::file_analysis::name_match_key(&target.name)];
+    let mut keys = vec![crate::model::file_analysis::name_match_key(&target.name, &target.names)];
     for a in aliases {
-        let k = crate::model::file_analysis::name_match_key(&a.name);
+        let k = crate::model::file_analysis::name_match_key(&a.name, &target.names);
         if !keys.contains(&k) {
             keys.push(k);
         }
@@ -430,7 +433,7 @@ pub(super) fn matcher_view(
         TargetKind::Handler { .. } => !view.provisional_dispatches.is_empty(),
         TargetKind::Sub { .. } | TargetKind::Method { .. } => refs_keyed(&view, &target.name).any(|r| {
             matches!(r.kind, RefKind::MethodCall { .. })
-                && r.unqualified_target_name() == target.name
+                && r.unqualified_target_name(view.names()) == target.name
                 && !r.match_verdict_baked()
         }),
         TargetKind::HashKeyOfSub { .. }

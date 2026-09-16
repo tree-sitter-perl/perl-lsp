@@ -2,6 +2,7 @@
 //! plus the minimal host predicates patterns can't express.
 
 use super::*;
+use crate::model::file_analysis::NameSpellings;
 
 
 /// Per-language bundle: the query pack plus host predicates. The
@@ -10,6 +11,10 @@ use super::*;
 /// patterns alone go.
 pub struct LangPack {
     pub query_source: &'static str,
+    /// How the language spells names — its namespace separator and its
+    /// variable sigils. Baked onto `PackFacts::names`; every key function
+    /// reads it there.
+    pub names: NameSpellings,
     /// Shape a captured name token's text (e.g. keep the sigil on a
     /// Perl variable). `capture_kind` is the vocabulary name
     /// (`def.var`, `ref.method`, ...) so one pack hook serves all.
@@ -307,6 +312,7 @@ pub enum CmdEffect {
 pub fn perl_pack() -> LangPack {
     LangPack {
         query_source: include_str!("../../../queries/perl/skeleton.scm"),
+        names: crate::model::conventions::PERL_SPELLINGS,
         shape_name: |kind, raw| match kind {
             // The builder stores variable symbols WITH sigil; varname
             // captures are sigil-less. Predicate re-attaches nothing —
@@ -352,6 +358,7 @@ pub fn perl_pack() -> LangPack {
 pub fn python_pack() -> LangPack {
     LangPack {
         query_source: include_str!("../../../queries/python/skeleton.scm"),
+        names: NameSpellings::NONE,
         shape_name: |_, raw| raw.to_string(),
         default_name: |_| None,
         annot_type: |text| match text.trim() {
@@ -406,6 +413,7 @@ pub fn python_pack() -> LangPack {
 pub fn r_pack() -> LangPack {
     LangPack {
         query_source: include_str!("../../../queries/r/skeleton.scm"),
+        names: NameSpellings::NONE,
         shape_name: |_, raw| raw.to_string(),
         default_name: |_| None,
         annot_type: |_| None,
@@ -450,6 +458,7 @@ pub fn r_pack() -> LangPack {
 pub fn cmake_pack() -> LangPack {
     LangPack {
         query_source: include_str!("../../../queries/cmake/skeleton.scm"),
+        names: NameSpellings::NONE,
         shape_name: |_, raw| raw.to_string(),
         default_name: |_| None,
         annot_type: |_| None,
@@ -504,6 +513,7 @@ pub fn cmake_pack() -> LangPack {
 pub fn cpp_pack() -> LangPack {
     LangPack {
         query_source: include_str!("../../../queries/cpp/skeleton.scm"),
+        names: NameSpellings::with_separator("::"),
         // Template spellings get ONE canonical whitespace form so a
         // specialization's identity (`formatter<int, char>`) matches
         // however the source wrapped it. Identity for every non-template

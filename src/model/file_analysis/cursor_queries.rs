@@ -82,7 +82,7 @@ impl FileAnalysis {
                     // keyed by bare name — match on the unqualified tail and
                     // pin via `resolved_package` (the qualifier).
                     if let Some(sid) = self
-                        .package_scoped_callable(r.unqualified_target_name(), r.resolved_package())
+                        .package_scoped_callable(r.unqualified_target_name(self.names()), r.resolved_package())
                     {
                         return Some(self.symbol(sid).selection_span);
                     }
@@ -313,13 +313,13 @@ impl FileAnalysis {
                             // pair with `sub baz`; `resolved_package` (the
                             // qualifier) still isolates same-named subs
                             // across packages.
-                            if r.unqualified_target_name() == sym.name
+                            if r.unqualified_target_name(self.names()) == sym.name
                                 && r.resolved_package() == sym_package.as_deref() {
                                 results.push((r.span, r.access));
                             }
                         }
                         (RefKind::MethodCall { method_name_span, .. },
-                         SymKind::Sub | SymKind::Method) if r.unqualified_target_name() == sym.name => {
+                         SymKind::Sub | SymKind::Method) if r.unqualified_target_name(self.names()) == sym.name => {
                             // Same-class match only; unresolved or
                             // different-class invocants are excluded.
                             // Method-call ref.span covers the whole
@@ -334,7 +334,7 @@ impl FileAnalysis {
                             }
                         }
                         (RefKind::FieldAccess { member_name_span, .. },
-                         SymKind::Field | SymKind::Variable) if r.unqualified_target_name() == sym.name => {
+                         SymKind::Field | SymKind::Variable) if r.unqualified_target_name(self.names()) == sym.name => {
                             match (self.method_call_invocant_class(r, module_index), &sym_package) {
                                 (Some(cn), Some(pkg)) if cn == *pkg => {
                                     results.push((*member_name_span, r.access));
@@ -469,7 +469,7 @@ impl FileAnalysis {
         // `field $x :reader` in THIS file.
         if let Some(r) = self.ref_at(point) {
             if matches!(r.kind, RefKind::MethodCall { .. }) {
-                let bare = r.unqualified_target_name();
+                let bare = r.unqualified_target_name(self.names());
                 let cls = r
                     .method_target()
                     .map(|t| t.invocant_class().to_string())
@@ -718,7 +718,7 @@ impl FileAnalysis {
         let mut spans = Vec::new();
         for r in self.refs() {
             if let RefKind::MethodCall { method_name_span, .. } = &r.kind {
-                if r.unqualified_target_name() != method {
+                if r.unqualified_target_name(self.names()) != method {
                     continue;
                 }
                 let cls = r
@@ -798,7 +798,7 @@ impl FileAnalysis {
         if g.has_reader {
             for r in self.refs() {
                 if let RefKind::MethodCall { method_name_span, .. } = &r.kind {
-                    if r.unqualified_target_name() != g.bare {
+                    if r.unqualified_target_name(self.names()) != g.bare {
                         continue;
                     }
                     let cls = r
@@ -867,7 +867,7 @@ impl FileAnalysis {
         // claim the same span as `Sub{class, verb}`. Gated on the key actually
         // being a column of the class (so `order_by` etc. fall through).
         if let (Some(enclosing), Some(idx)) = (enclosing_call, module_index) {
-            let verb = enclosing.unqualified_target_name();
+            let verb = enclosing.unqualified_target_name(self.names());
             if self.is_column_keyed_verb(verb) {
                 if let Some(class) = enclosing
                     .method_target()
@@ -913,7 +913,7 @@ impl FileAnalysis {
             {
                 return Some(HashKeyOwner::Sub {
                     package: Some(class),
-                    name: enclosing.unqualified_target_name().to_string(),
+                    name: enclosing.unqualified_target_name(self.names()).to_string(),
                 });
             }
         }
@@ -928,7 +928,7 @@ impl FileAnalysis {
             (&key_ref.kind, module_index)
         {
             if let Some(binding) = self.call_bindings.iter().find(|b| &b.variable == var_text) {
-                let func = split_qualified(&binding.func_name).1;
+                let func = split_qualified(&binding.func_name, self.names()).1;
                 if let Some((pkg, keys)) = self.imported_sub_keys(func, idx) {
                     if keys.iter().any(|k| k == &key_ref.target_name) {
                         return Some(HashKeyOwner::Sub {
@@ -962,11 +962,11 @@ impl FileAnalysis {
         }
         // Qualified calls (`Foo::bar`) pin at build time; only truly-bare
         // unresolved calls reach the index.
-        if split_qualified(&call_ref.target_name).0.is_some() {
+        if split_qualified(&call_ref.target_name, self.names()).0.is_some() {
             return None;
         }
         let idx = module_index?;
-        let name = call_ref.unqualified_target_name();
+        let name = call_ref.unqualified_target_name(self.names());
         // Later `use` wins, mirroring `resolve_call_package`'s import scan.
         // A split exporter's surface lives across its candidate files.
         for import in self.imports.iter().rev() {
@@ -1173,7 +1173,7 @@ impl FileAnalysis {
                         .map(str::to_string)
                         .or_else(|| self.deferred_call_package(r, module_index));
                     return Some(RenameKind::Function {
-                        name: r.unqualified_target_name().to_string(),
+                        name: r.unqualified_target_name(self.names()).to_string(),
                         package,
                     });
                 }
@@ -1194,7 +1194,7 @@ impl FileAnalysis {
                     let token_span = {
                         let mut s = *method_name_span;
                         let qual =
-                            r.target_name.len().saturating_sub(r.unqualified_target_name().len());
+                            r.target_name.len().saturating_sub(r.unqualified_target_name(self.names()).len());
                         s.start.column = s.start.column.saturating_sub(qual);
                         s
                     };
@@ -1203,7 +1203,7 @@ impl FileAnalysis {
                             // FQ `$o->Foo::Bar::m` renames the bare `m` tail; the
                             // qualifier scopes the class (same as Function above).
                             return Some(RenameKind::Method {
-                                name: r.unqualified_target_name().to_string(),
+                                name: r.unqualified_target_name(self.names()).to_string(),
                                 class,
                             });
                         }
@@ -1298,7 +1298,7 @@ impl FileAnalysis {
         if let Some(r) = self.ref_at(point) {
             if matches!(r.kind, RefKind::Variable | RefKind::ContainerAccess) {
                 // Qualified `$Pkg::var` — the package is explicit in the token.
-                if let Some((pkg, name)) = r.qualified_var_target() {
+                if let Some((pkg, name)) = r.qualified_var_target(self.names()) {
                     return Some((norm(pkg), name));
                 }
                 // Unqualified — a package var only if it resolves to an `our`.

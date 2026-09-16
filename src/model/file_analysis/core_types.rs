@@ -207,6 +207,81 @@ impl Span {
     }
 }
 
+/// How a language spells names: the separator its qualified names split on
+/// and the sigils its variables carry. Every key function
+/// (`split_qualified`, `name_match_key`, `is_bareword_class_name`) takes
+/// the spellings of the language whose name it is handling, so no
+/// separator or sigil is ever assumed and no language's spelling can
+/// mis-key another's. Perl declares its own (`conventions::PERL_SPELLINGS`)
+/// exactly as a pack declares its (`LangPack::names`); an analysis carries
+/// the ones it was built under (`PackFacts::names`). Borrowed for the
+/// languages the binary declares, owned when read back from a blob.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct NameSpellings {
+    /// The namespace separator (`::`, `\`); `None` for a language whose
+    /// names are never qualified (a flat linkage).
+    pub namespace_sep: Option<std::borrow::Cow<'static, str>>,
+    /// Variable sigils a name may lead with (`$`, `@`, `%`); a language
+    /// with none declares none, so a `$` in its identifiers is identifier
+    /// text.
+    pub sigils: std::borrow::Cow<'static, [char]>,
+    /// What a written class spelling denotes.
+    pub class_spelling: ClassSpelling,
+}
+
+/// What a class spelling written in a file denotes — the capability the
+/// use-map questions (`use_map`, `identity_namespace`, `spelled_identity`)
+/// gate on. A separator alone does not decide it: Perl qualifies with
+/// `::` and every spelling is its own identity, while a use-map language
+/// resolves a bare leaf through the file's imports and namespace.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum ClassSpelling {
+    /// The spelling IS the identity (Perl's `Foo::Bar`, C's flat linkage).
+    #[default]
+    Identity,
+    /// The spelling resolves through the file's use-map: its import rows,
+    /// aliases and own namespace (`use A\B\Collection;` then `Collection`).
+    UseMap,
+}
+
+impl NameSpellings {
+    /// A language whose names carry no separator and no sigil.
+    pub const NONE: NameSpellings = NameSpellings {
+        namespace_sep: None,
+        sigils: std::borrow::Cow::Borrowed(&[]),
+        class_spelling: ClassSpelling::Identity,
+    };
+
+    /// A language with a namespace separator, no sigils, and spellings
+    /// that are identities as written (C++ until its `using` directives
+    /// are modeled).
+    pub const fn with_separator(sep: &'static str) -> NameSpellings {
+        NameSpellings {
+            namespace_sep: Some(std::borrow::Cow::Borrowed(sep)),
+            sigils: std::borrow::Cow::Borrowed(&[]),
+            class_spelling: ClassSpelling::Identity,
+        }
+    }
+
+    pub fn sep(&self) -> Option<&str> {
+        self.namespace_sep.as_deref()
+    }
+
+    /// The separator a use-map resolves with — `None` for a language whose
+    /// class spellings are identities as written, whether or not it
+    /// qualifies names. The one gate the use-map questions read.
+    pub fn use_map_sep(&self) -> Option<&str> {
+        match self.class_spelling {
+            ClassSpelling::UseMap => self.sep(),
+            ClassSpelling::Identity => None,
+        }
+    }
+
+    pub fn is_sigil(&self, c: char) -> bool {
+        self.sigils.contains(&c)
+    }
+}
+
 // ---- Symbol ----
 
 bitflags::bitflags! {
@@ -982,8 +1057,8 @@ impl Ref {
     /// `Sub` symbol pair this bare tail with the ref's `resolved_package`
     /// (= the qualifier) so `Foo::baz()` lands on `sub baz` in package
     /// `Foo`.
-    pub fn unqualified_target_name(&self) -> &str {
-        split_qualified(&self.target_name).1
+    pub fn unqualified_target_name(&self, names: &NameSpellings) -> &str {
+        split_qualified(&self.target_name, names).1
     }
 
     /// The name key this ref is retrievable under in the relational ref
@@ -994,8 +1069,8 @@ impl Ref {
     /// exact `target_name` or its unqualified tail; equal full names have
     /// equal tails). Sigil variables keep their sigil on the tail because
     /// variable symbols key with it (`$x`, not `x`).
-    pub fn match_key(&self) -> String {
-        name_match_key(&self.target_name)
+    pub fn match_key(&self, names: &NameSpellings) -> String {
+        name_match_key(&self.target_name, names)
     }
 
     /// For a fully-qualified variable read (`$Foo::Bar::x`, `@Pkg::arr`,
@@ -1006,13 +1081,13 @@ impl Ref {
     /// the basename because variable symbols are keyed with their sigil
     /// (`$x`, `@arr`, `%h`); a leading-`::` `main::` spelling yields an
     /// empty-string package, matching how package-globals in `main` key.
-    pub fn qualified_var_target(&self) -> Option<(&str, String)> {
+    pub fn qualified_var_target(&self, names: &NameSpellings) -> Option<(&str, String)> {
         let mut chars = self.target_name.chars();
         let sigil = chars.next()?;
-        if !matches!(sigil, '$' | '@' | '%') {
+        if !names.is_sigil(sigil) {
             return None;
         }
-        let (pkg, base) = split_qualified(chars.as_str());
+        let (pkg, base) = split_qualified(chars.as_str(), names);
         pkg.map(|p| (p, format!("{sigil}{base}")))
     }
 }
@@ -1146,7 +1221,7 @@ pub struct RefRowSeed {
 }
 
 impl Ref {
-    pub fn row_seed(&self) -> RefRowSeed {
+    pub fn row_seed(&self, names: &NameSpellings) -> RefRowSeed {
         let kind = match &self.kind {
             RefKind::Variable => 0,
             RefKind::FunctionCall => 1,
@@ -1176,7 +1251,7 @@ impl Ref {
         let flags = u8::from(self.folded_from.is_some())
             | (u8::from(self.resolved_symbol().is_some()) << 1);
         RefRowSeed {
-            key: self.match_key(),
+            key: self.match_key(names),
             kind,
             span: self.span,
             access: match self.access {
@@ -1202,6 +1277,10 @@ impl Ref {
 #[derive(Debug, Clone)]
 pub struct SymRowSeed {
     pub name: String,
+    /// What a REFERENCE to the symbol is keyed by (`name_match_key` under
+    /// the analysis's own spellings) — computed where the spellings are in
+    /// hand, so the store never re-derives it.
+    pub key: String,
     pub kind: u8,
     /// `selection_span` — the landing site workspace/symbol reports.
     pub span: Span,

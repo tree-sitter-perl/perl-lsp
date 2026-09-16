@@ -1062,6 +1062,10 @@ pub struct UseMapPins {
     /// Real-leaf lookups (a parent walk, a class-keyed candidate table)
     /// admit all of them; `namespace_of` still answers the bare spelling.
     pub visible: std::collections::HashMap<String, Vec<String>>,
+    /// The origin's name spellings — what a qualified name given to this
+    /// scope splits on. The scope carries its own rule; the lookup never
+    /// asks which language it serves.
+    pub names: NameSpellings,
 }
 
 impl UseMapPins {
@@ -1252,7 +1256,7 @@ impl<'a> ScopedLookup<'a> {
         pins: &UseMapPins,
         name: &str,
     ) -> (Vec<std::sync::Arc<CachedModule>>, bool) {
-        if let (Some(ns), leaf) = split_qualified(name) {
+        if let (Some(ns), leaf) = split_qualified(name, &pins.names) {
             let exact = self.inner.def_candidates(name);
             if !exact.is_empty() {
                 return (exact, false);

@@ -606,7 +606,7 @@ fn sym_member_probe_is_three_valued() {
     let path_str = pm.to_string_lossy().to_string();
 
     assert_eq!(
-        sym_member_row_exists(&conn, &path_str, "render", "My::Base"),
+        sym_member_row_exists(&conn, &path_str, &crate::model::conventions::PERL_SPELLINGS, "render", "My::Base"),
         None,
         "never shredded: the store cannot speak for the file"
     );
@@ -621,17 +621,17 @@ fn sym_member_probe_is_three_valued() {
     .unwrap();
 
     assert_eq!(
-        sym_member_row_exists(&conn, &path_str, "render", "My::Base"),
+        sym_member_row_exists(&conn, &path_str, &crate::model::conventions::PERL_SPELLINGS, "render", "My::Base"),
         Some(true),
         "a matching (name, container) row warrants the decode"
     );
     assert_eq!(
-        sym_member_row_exists(&conn, &path_str, "nonesuch", "My::Base"),
+        sym_member_row_exists(&conn, &path_str, &crate::model::conventions::PERL_SPELLINGS, "nonesuch", "My::Base"),
         Some(false),
         "covered and absent: the one verdict that licenses a skip"
     );
     assert_eq!(
-        sym_member_row_exists(&conn, &path_str, "render", "Other::Pkg"),
+        sym_member_row_exists(&conn, &path_str, &crate::model::conventions::PERL_SPELLINGS, "render", "Other::Pkg"),
         Some(false),
         "the container gates: the same name under another package is absent"
     );
@@ -665,24 +665,24 @@ fn row_probes_match_the_match_key_spelling() {
     .unwrap();
 
     assert_eq!(
-        sym_member_row_exists(&conn, &path_str, "My::Base::render", "My::Base"),
+        sym_member_row_exists(&conn, &path_str, &crate::model::conventions::PERL_SPELLINGS, "My::Base::render", "My::Base"),
         Some(true),
         "a qualified query name must reach the bare-keyed sym row"
     );
     assert_eq!(
-        name_row_exists(&conn, &path_str, "Some::Pkg::cache"),
+        name_row_exists(&conn, &path_str, &crate::model::conventions::PERL_SPELLINGS, "Some::Pkg::cache"),
         Some(true),
         "a qualified query name must reach the match-keyed ref row"
     );
     assert_eq!(
-        name_row_exists(&conn, &path_str, "nonesuch"),
+        name_row_exists(&conn, &path_str, &crate::model::conventions::PERL_SPELLINGS, "nonesuch"),
         Some(false),
         "normalization must not weaken the absence verdict"
     );
     // The container never normalizes: a package name's match key strips
     // the qualifier, which would let `Base` claim `My::Base`'s rows.
     assert_eq!(
-        sym_member_row_exists(&conn, &path_str, "render", "Base"),
+        sym_member_row_exists(&conn, &path_str, &crate::model::conventions::PERL_SPELLINGS, "render", "Base"),
         Some(false),
         "a bare container must not match a qualified one"
     );
@@ -855,7 +855,7 @@ fn ref_row_seed_match_keys() {
     let pm = dir.join("TestModule_keys.pm");
     std::fs::write(&pm, source).unwrap();
     let cached = parse_source_to_cached(source, &pm);
-    let keys: Vec<String> = cached.analysis.refs().iter().map(|r| r.match_key()).collect();
+    let keys: Vec<String> = cached.analysis.refs().iter().map(|r| r.match_key(cached.analysis.names())).collect();
     assert!(
         keys.iter().any(|k| k == "baz"),
         "qualified call keys by bare tail; got {keys:?}"
@@ -1384,7 +1384,7 @@ fn a_qualified_symbols_declaring_file_is_a_ref_candidate() {
     .unwrap();
 
     // The key a REFERENCE to this package carries.
-    let key = crate::model::file_analysis::name_match_key("Deep::Pkg::Thing");
+    let key = crate::model::file_analysis::name_match_key("Deep::Pkg::Thing", &crate::model::conventions::PERL_SPELLINGS);
     assert_eq!(key, "Thing");
     assert_eq!(
         ref_candidate_files(&conn, &[key]),

@@ -364,6 +364,7 @@ $schema->resultset('Schema::Result::Users')->search({ name => 'X' });
     store.insert_workspace(consumer_path.clone(), consumer_fa);
 
     let target = TargetRef {
+        names: crate::model::conventions::PERL_SPELLINGS,
         name: "name".to_string(),
         kind: TargetKind::HashKeyOfBridged("Schema::Result::Users".to_string()),
         method_classes: Vec::new(), scope: crate::index::resolve::OverrideScope::Dispatch, def_paths: Vec::new(), bare_constant: false,
@@ -486,6 +487,7 @@ my $name = $schema->resultset('Schema::Result::Users')->find(1)->name;
         &store,
         None,
         &TargetRef {
+            names: crate::model::conventions::PERL_SPELLINGS,
             name: "name".to_string(),
             kind: TargetKind::Method {
                 class: "Schema::Result::Users".to_string(),
@@ -805,6 +807,7 @@ sub action {
     store.insert_workspace(consumer_path.clone(), consumer_fa);
 
     let target = TargetRef {
+        names: crate::model::conventions::PERL_SPELLINGS,
         name: "name".to_string(),
         kind: TargetKind::HashKeyOfBridged("Schema::Result::Sner".to_string()),
         method_classes: Vec::new(), scope: crate::index::resolve::OverrideScope::Dispatch, def_paths: Vec::new(), bare_constant: false,
@@ -875,6 +878,7 @@ sub action {
     store.insert_workspace(consumer_path.clone(), consumer_fa);
 
     let target = TargetRef {
+        names: crate::model::conventions::PERL_SPELLINGS,
         name: "name".to_string(),
         kind: TargetKind::HashKeyOfBridged("Schema::Result::Sner".to_string()),
         method_classes: Vec::new(), scope: crate::index::resolve::OverrideScope::Dispatch, def_paths: Vec::new(), bare_constant: false,

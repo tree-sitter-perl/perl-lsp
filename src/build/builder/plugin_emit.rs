@@ -542,7 +542,7 @@ impl<'a> Builder<'a> {
                 // name defaults to the package the registration sits in (the
                 // sub is local to it). Resolution is deferred so a forward-
                 // declared sub still resolves.
-                let (package, sub_name) = match crate::model::file_analysis::split_qualified(&sub_name) {
+                let (package, sub_name) = match crate::model::file_analysis::split_qualified(&sub_name, &crate::model::conventions::PERL_SPELLINGS) {
                     (Some(pkg), n) => (Some(pkg.to_string()), n.to_string()),
                     (None, _) => (self.current_package.clone(), sub_name),
                 };

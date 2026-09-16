@@ -415,7 +415,7 @@ impl<'a> Builder<'a> {
             "refgen_expression" => {
                 let names = self.extract_names_from_refgen(node);
                 let raw = names.into_iter().next()?;
-                let (class, name) = match crate::model::file_analysis::split_qualified(&raw) {
+                let (class, name) = match crate::model::file_analysis::split_qualified(&raw, &crate::model::conventions::PERL_SPELLINGS) {
                     (Some(c), n) => (c.to_string(), n.to_string()),
                     (None, _) => (self.current_package.clone()?, raw),
                 };
@@ -440,7 +440,7 @@ impl<'a> Builder<'a> {
     /// than falling back to name-only union.
     pub(super) fn resolve_call_package(&self, call_name: &str) -> Option<String> {
         // (1) Qualified: `Foo::bar` → `Foo`.
-        if let (Some(pkg), _) = crate::model::file_analysis::split_qualified(call_name) {
+        if let (Some(pkg), _) = crate::model::file_analysis::split_qualified(call_name, &crate::model::conventions::PERL_SPELLINGS) {
             return Some(pkg.to_string());
         }
         // (2) Enclosing package defines the sub locally.

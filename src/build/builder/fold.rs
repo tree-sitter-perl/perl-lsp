@@ -49,7 +49,7 @@ impl<'a> Builder<'a> {
             // Cross-package goto-def for non-local packages happens at query
             // time via `qualified_var_target()` + module_index.
             if let Some((pkg, name)) = self.refs[idx]
-                .qualified_var_target()
+                .qualified_var_target(&crate::model::conventions::PERL_SPELLINGS)
                 .map(|(p, n)| (p.to_string(), n))
             {
                 if let Some(sym) = self.symbols.iter().find(|s| {

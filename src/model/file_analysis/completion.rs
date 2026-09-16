@@ -275,7 +275,7 @@ impl FileAnalysis {
             .filter(|s| matches!(s.kind, SymKind::Sub | SymKind::Method))
             // An anonymous sub (name `(anon)`) has no callable name — never a
             // method candidate. Gate on callability, not the `(anon)` spelling.
-            .filter(|s| crate::model::conventions::is_callable_sub_name(&s.name))
+            .filter(|s| crate::model::conventions::is_callable_sub_name(&s.name, self.names()))
             // Lexicals never complete bare on a receiver; the `&name` lane
             // (`complete_lexical_methods_at`) is their one member source.
             .filter(|s| !matches!(&s.detail, SymbolDetail::Sub { lexical: true, .. }))
@@ -542,7 +542,7 @@ impl FileAnalysis {
             if !matches!(&sym.detail, SymbolDetail::Sub { lexical: true, .. }) {
                 continue;
             }
-            if !crate::model::conventions::is_callable_sub_name(&sym.name) {
+            if !crate::model::conventions::is_callable_sub_name(&sym.name, self.names()) {
                 continue;
             }
             let enclosing = &self.scope(sym.scope).span;
@@ -591,7 +591,7 @@ impl FileAnalysis {
         // Subs
         for sym in &self.symbols {
             if matches!(sym.kind, SymKind::Sub | SymKind::Method)
-                && crate::model::conventions::is_callable_sub_name(&sym.name)
+                && crate::model::conventions::is_callable_sub_name(&sym.name, self.names())
             {
                 // A lexical sub (`my sub helper`) is callable only inside
                 // its declaring block, from its declaration down — offering

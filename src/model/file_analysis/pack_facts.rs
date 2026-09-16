@@ -154,14 +154,19 @@ pub struct PackFacts {
     #[serde(default)]
     pub qualified_spellings: Vec<(String, String)>,
 
-    /// The pack's namespace separator, when class identity is a namespace-
-    /// qualified name (the use-map packs). `None` = spellings are
-    /// identities already (C's flat linkage, Perl keys its own `::`); the
-    /// namespace questions (`identity_namespace`, `class_spelling_identity`)
-    /// gate on it. Data, never a literal downstream: every split of a
-    /// written spelling in the model reads this (rule #12).
+    /// How this analysis's language spells names — its separator and its
+    /// sigils — the data every key function reads (rule #12). Perl's
+    /// builder bakes `conventions::PERL_SPELLINGS`; a pack bakes
+    /// `LangPack::names`. The use-map questions (`identity_namespace`,
+    /// `class_spelling_identity`) gate on its `class_spelling`.
+    ///
+    /// A per-language constant carried per file ON PURPOSE (the rule #14
+    /// exception): a key is computed wherever an analysis is in hand — the
+    /// row store's probes, a target minted from an origin — and the
+    /// alternative is a process-wide language registry, which cannot say
+    /// which language a given name belongs to. A few bytes per blob.
     #[serde(default)]
-    pub namespace_sep: Option<String>,
+    pub names: NameSpellings,
 
     /// This file's transitive `#include` closure — canonical header paths it
     /// reaches. The cross-file VISIBILITY key: a name resolves preferentially to

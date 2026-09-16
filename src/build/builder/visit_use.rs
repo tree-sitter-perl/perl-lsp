@@ -619,7 +619,7 @@ impl<'a> Builder<'a> {
                 return;
             }
         }
-        if let (Some(qualifier), _) = crate::model::file_analysis::split_qualified(name) {
+        if let (Some(qualifier), _) = crate::model::file_analysis::split_qualified(name, &crate::model::conventions::PERL_SPELLINGS) {
             let ref_span = fq_tail_span(node, name);
             self.add_bound_ref(
                 RefKind::FunctionCall,
@@ -1123,7 +1123,7 @@ impl<'a> Builder<'a> {
             .strip_prefix('@')
             .or_else(|| stripped.strip_prefix('%'))
             .unwrap_or(stripped);
-        match crate::model::file_analysis::split_qualified(no_sigil).1 {
+        match crate::model::file_analysis::split_qualified(no_sigil, &crate::model::conventions::PERL_SPELLINGS).1 {
             "EXPORT_OK" => Some("@EXPORT_OK"),
             "EXPORT" => Some("@EXPORT"),
             "EXPORT_TAGS" => Some("%EXPORT_TAGS"),
@@ -1547,7 +1547,7 @@ impl<'a> Builder<'a> {
     /// retry. One lookup, two emission paths, byte-identical
     /// witnesses.
     pub(super) fn find_callee_symbol(&self, name: &str) -> Option<SymbolId> {
-        let (qualifier, bare) = crate::model::file_analysis::split_qualified(name);
+        let (qualifier, bare) = crate::model::file_analysis::split_qualified(name, &crate::model::conventions::PERL_SPELLINGS);
         self.symbols
             .iter()
             .find(|s| {
@@ -1567,7 +1567,7 @@ impl<'a> Builder<'a> {
     /// Same predicate as `find_callee_symbol`, so the two cannot drift into
     /// disagreeing about whether `Foo::bar()` is local.
     pub(super) fn local_callee_name<'n>(&self, name: &'n str) -> Option<&'n str> {
-        let (qualifier, bare) = crate::model::file_analysis::split_qualified(name);
+        let (qualifier, bare) = crate::model::file_analysis::split_qualified(name, &crate::model::conventions::PERL_SPELLINGS);
         if qualifier.is_none() {
             return Some(bare);
         }

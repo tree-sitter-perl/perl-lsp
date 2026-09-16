@@ -36,7 +36,7 @@ marked otherwise; the drain re-derived each rationale against current code.
   lane growing, not the sharing. The shape wanted: one sub-struct per
   language family the pack declares (`CppFacts`, `PhpFacts`), each
   default-empty, with the language-generic rows (`receiver_names`,
-  `import_rows`, `namespace_sep`, the region spans) staying on
+  `import_rows`, `names`, the region spans) staying on
   `PackFacts`; `surface_feed` destructures each exhaustively the way it
   does the lanes today. Cost: an `EXTRACT_VERSION` bump and every
   `pack.<field>` reader re-pathed; the win is that a cpp field cannot be

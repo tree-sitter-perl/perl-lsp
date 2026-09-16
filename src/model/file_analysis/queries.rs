@@ -4,6 +4,11 @@
 use super::*;
 
 impl FileAnalysis {
+    /// How this analysis's language spells names (`PackFacts::names`).
+    pub fn names(&self) -> &NameSpellings {
+        &self.pack.names
+    }
+
     /// Where `var` is bound inside `scope` — the earliest declaring
     /// `Variable` symbol within the scope's span. The anchor every fact
     /// about a parameter lands at (a declaration's write marker retires
@@ -655,7 +660,7 @@ impl FileAnalysis {
             .map(|(inv, r, _)| (inv, r))
         {
             if let Some(recv_ty) = self.expr_type_at_span(inv, module_index) {
-                let member = r.unqualified_target_name();
+                let member = r.unqualified_target_name(self.names());
                 // The ref's kind picks the rung: a value read never means
                 // the method, a call never the field.
                 let t = match &r.kind {

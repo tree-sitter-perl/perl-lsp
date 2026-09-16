@@ -3,6 +3,7 @@
 //! views (ref candidates, workspace/symbol rows, dead exports).
 
 use super::*;
+use crate::model::file_analysis::NameSpellings;
 
 /// String-intern cache for the shredder, held for the WRITER's lifetime
 /// rather than rebuilt per file.
@@ -153,11 +154,11 @@ pub fn shred_derived_rows(
             // name was undiscoverable for every qualified symbol: a package's
             // own declaration could not be found through the `syms` union that
             // exists to make declaration-only files candidates.
-            let key = crate::model::file_analysis::name_match_key(&seed.name);
-            let key_id = if key == seed.name {
+            let key = &seed.key;
+            let key_id = if *key == seed.name {
                 name_id
             } else {
-                intern_str(&key, &mut memo)?
+                intern_str(key, &mut memo)?
             };
             let container_id = match seed.container.as_deref() {
                 Some(c) => Some(intern_str(c, &mut memo)?),
@@ -510,6 +511,7 @@ pub fn sym_rows_matching(conn: &Connection, query: &str) -> Vec<SymRowHit> {
 pub fn sym_member_row_exists(
     conn: &Connection,
     path: &str,
+    names: &NameSpellings,
     name: &str,
     container: &str,
 ) -> Option<bool> {
@@ -518,7 +520,7 @@ pub fn sym_member_row_exists(
         .ok()?
         .query_row(params![path], |row| row.get(0))
         .ok()?;
-    let norm = probe_spelling(name);
+    let norm = probe_spelling(name, names);
     // A name or container the strings table never interned yields NULL from
     // the subselect, the comparison is false, and EXISTS answers 0 — which is
     // correct: no row can reference a string that was never stored. The
@@ -543,8 +545,10 @@ pub fn sym_member_row_exists(
 /// raw symbol name and its key. A caller threading spellings itself is the
 /// bug this replaces — a qualified query name (`My::Pkg::helper`) probed raw
 /// would miss the `helper`-keyed row and turn fail-open into a wrong skip.
-fn probe_spelling(name: &str) -> String {
-    crate::model::file_analysis::name_match_key(name)
+/// The key is computed under the PROBED FILE's spellings (`names`), the
+/// same ones its rows were shredded with.
+fn probe_spelling(name: &str, names: &NameSpellings) -> String {
+    crate::model::file_analysis::name_match_key(name, names)
 }
 
 /// The name-only sibling of `sym_member_row_exists`: can the store rule out
@@ -557,13 +561,18 @@ fn probe_spelling(name: &str) -> String {
 /// package — not the bridged class — so the (name, container) probe cannot
 /// serve that walk and a container-blind one can. Over-approximation is
 /// still toward the decode.
-pub fn sym_name_row_exists(conn: &Connection, path: &str, name: &str) -> Option<bool> {
+pub fn sym_name_row_exists(
+    conn: &Connection,
+    path: &str,
+    names: &NameSpellings,
+    name: &str,
+) -> Option<bool> {
     let file_id: i64 = conn
         .prepare_cached("SELECT file_id FROM files WHERE path = ?1")
         .ok()?
         .query_row(params![path], |row| row.get(0))
         .ok()?;
-    let norm = probe_spelling(name);
+    let norm = probe_spelling(name, names);
     conn.prepare_cached(
         "SELECT EXISTS(
             SELECT 1 FROM syms y
@@ -586,13 +595,18 @@ pub fn sym_name_row_exists(conn: &Connection, path: &str, name: &str) -> Option<
 /// WRITE ref, so a file with no ref row for the key provably carries no
 /// such witness. The syms half rides along for over-approximation — a
 /// wasted decode is the cheap error.
-pub fn name_row_exists(conn: &Connection, path: &str, name: &str) -> Option<bool> {
+pub fn name_row_exists(
+    conn: &Connection,
+    path: &str,
+    names: &NameSpellings,
+    name: &str,
+) -> Option<bool> {
     let file_id: i64 = conn
         .prepare_cached("SELECT file_id FROM files WHERE path = ?1")
         .ok()?
         .query_row(params![path], |row| row.get(0))
         .ok()?;
-    let norm = probe_spelling(name);
+    let norm = probe_spelling(name, names);
     conn.prepare_cached(
         "SELECT EXISTS(
             SELECT 1 FROM refs r

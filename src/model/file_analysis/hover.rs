@@ -39,7 +39,7 @@ impl FileAnalysis {
     /// vocabulary (`type_display`) is a different question.
     pub fn native_type_spelling(&self, ty: &InferredType) -> Option<String> {
         if let InferredType::ClassName(n) = ty {
-            let (ns, leaf) = split_qualified(n);
+            let (ns, leaf) = split_qualified(n, self.names());
             // the leaf must mean THIS class where it would be written
             let seen = self.leaf_namespace(leaf).or_else(|| self.use_map_pins().own_namespace.clone());
             return (ns.is_none() || seen.is_none() || ns.map(str::to_string) == seen)
@@ -75,7 +75,7 @@ impl FileAnalysis {
                     if let Some(mr) = method_hover {
                         if matches!(mr.kind, RefKind::MethodCall { .. }) {
                             let class_name = self.method_call_invocant_class(mr, module_index);
-                            let mname = mr.unqualified_target_name();
+                            let mname = mr.unqualified_target_name(self.names());
                             if let Some(ref cn) = class_name {
                                 match self.resolve_method_in_ancestors(cn, mname, module_index) {
                                     Some(MethodResolution::Local { sym_id, class: ref defining_class, .. }) => {
@@ -142,7 +142,7 @@ impl FileAnalysis {
                     // calls match on the bare tail (symbols are keyed by
                     // bare name); the `Function` binding pins the package.
                     if let Some(sid) = self
-                        .package_scoped_callable(r.unqualified_target_name(), r.resolved_package())
+                        .package_scoped_callable(r.unqualified_target_name(self.names()), r.resolved_package())
                     {
                         return Some(self.format_symbol_hover(self.symbol(sid), source, module_index));
                     }
@@ -198,7 +198,7 @@ impl FileAnalysis {
                     // refs_to read, so hover never diverges.
                     let class_name = r.method_target().map(|t| t.invocant_class().to_string());
                     // The bare method name (FQ `$o->Foo::Bar::m` resolves `m`).
-                    let method = r.unqualified_target_name();
+                    let method = r.unqualified_target_name(self.names());
                     if let Some(ref cn) = class_name {
                         match self.resolve_method_in_ancestors(cn, method, module_index) {
                             Some(MethodResolution::Local { sym_id, class: ref defining_class, .. }) => {
@@ -258,7 +258,7 @@ impl FileAnalysis {
                 }
                 RefKind::FieldAccess { .. } => {
                     let cn = r.method_target().map(|t| t.invocant_class().to_string());
-                    let member = r.unqualified_target_name();
+                    let member = r.unqualified_target_name(self.names());
                     if let Some(ref cn) = cn {
                         match self.resolve_field_in_ancestors(cn, member, module_index) {
                             Some(MethodResolution::Local { sym_id, .. }) => {

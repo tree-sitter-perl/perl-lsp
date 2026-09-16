@@ -110,6 +110,9 @@ pub struct SkeletonAnalysis {
     /// named is the method receiver, not a class member — its (wrongly
     /// sticky-tagged) class package is cleared in `into_file_analysis`.
     pub receiver_names: Vec<String>,
+    /// The language's name spellings (`LangPack::names`), baked onto
+    /// `PackFacts::names`.
+    pub names: crate::model::file_analysis::NameSpellings,
     /// Value-flow edges minted from `@flow` captures (`source → target`,
     /// extraction). Lowered to type witnesses here; carried onto the FA as the
     /// provenance tier.
@@ -377,6 +380,7 @@ impl SkeletonAnalysis {
         use crate::model::file_analysis::{
             FileAnalysis, FileAnalysisParts, SymKind, Symbol, SymbolDetail, SymbolId,
         };
+        let names = self.names.clone();
         // A NAMED typedef `typedef struct N {...} N;` matches both the
         // struct_specifier and the type_definition → two `class N` AT THE
         // SAME SPAN (one node, two capture patterns — e.g. the bodied
@@ -929,7 +933,7 @@ impl SkeletonAnalysis {
                     // start). The tail segment is an identifier, so it never
                     // spans rows — the end-anchored column math is safe.
                     "qcall" => {
-                        let (pkg, bare) = crate::model::file_analysis::split_qualified(&r.name);
+                        let (pkg, bare) = crate::model::file_analysis::split_qualified(&r.name, &names);
                         let pkg = pkg?;
                         span.start = tree_sitter::Point {
                             row: r.end.row,
@@ -998,7 +1002,7 @@ impl SkeletonAnalysis {
                 (
                     r.span.start.row,
                     r.span.start.column,
-                    r.unqualified_target_name().to_string(),
+                    r.unqualified_target_name(&names).to_string(),
                 )
             })
             .chain(symbols.iter().map(|s| {
@@ -1108,6 +1112,7 @@ impl SkeletonAnalysis {
             // outline filters can exclude them generically (lang semantics in
             // the pack, generic logic in core).
             receiver_names: std::mem::take(&mut self.receiver_names),
+            names: std::mem::take(&mut self.names),
             // Specialization family edges (spec → primary). NOT an inheritance
             // edge: a spec inherits nothing from its primary (it replaces
             // wholesale), so member resolution must never fall through this

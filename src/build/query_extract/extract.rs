@@ -389,6 +389,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     // ---- the state machine: scope stack + sticky contexts ----
     let mut out = SkeletonAnalysis::default();
     out.receiver_names = pack.receiver_names.iter().map(|s| s.to_string()).collect();
+    out.names = pack.names.clone();
     // Template params joined to their owner class — the owner shaped like a
     // def name (a partial spec's spelling canonicalizes) so the key matches
     // the Class symbol's identity. Source order = the `ParamOf` index axis.

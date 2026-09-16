@@ -693,6 +693,7 @@ sub retry {
         &store,
         None,
         &TargetRef {
+            names: crate::model::conventions::PERL_SPELLINGS,
             name: "MAX_RETRIES".to_string(),
             kind: TargetKind::Sub {
                 package: Some("QA::C".to_string()),
@@ -811,6 +812,7 @@ sub opt_b { 'b' }
         &store,
         None,
         &TargetRef {
+            names: crate::model::conventions::PERL_SPELLINGS,
             name: "opt_a".to_string(),
             kind: TargetKind::Sub {
                 package: Some("QA::E".to_string()),

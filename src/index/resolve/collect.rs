@@ -716,7 +716,7 @@ pub fn references_mask_for(
                 }
             }
             if !declared_in_workspace {
-                let keys = vec![crate::model::file_analysis::name_match_key(class)];
+                let keys = vec![crate::model::file_analysis::name_match_key(class, &target.names)];
                 for path in idx.ref_candidate_paths(&keys) {
                     let Some(arc) = files
                         .workspace_raw()
@@ -804,7 +804,7 @@ pub(super) fn collect_package_var(
         if !matches!(r.kind, RefKind::Variable | RefKind::ContainerAccess) {
             continue;
         }
-        if let Some((qpkg, qname)) = r.qualified_var_target() {
+        if let Some((qpkg, qname)) = r.qualified_var_target(analysis.names()) {
             // Qualified `$Pkg::var` (the sigil is canonicalized to the declared
             // one, so `@arr` element reads `$Pkg::arr[0]` still match `@arr`).
             if norm(qpkg) == package && qname == name {
@@ -871,7 +871,7 @@ pub(super) fn refs_keyed<'a>(
 ) -> impl Iterator<Item = &'a crate::model::file_analysis::Ref> + 'a {
     let refs = analysis.refs();
     analysis
-        .ref_indices_keyed(&crate::model::file_analysis::name_match_key(name))
+        .ref_indices_keyed(&crate::model::file_analysis::name_match_key(name, analysis.names()))
         .iter()
         .map(move |&i| &refs[i])
 }
@@ -1021,10 +1021,10 @@ pub(super) fn collect_from_analysis(
     // a match; the union is walked in ref order so `out` keeps the vec's
     // order (the final sort is by start point, and same-start refs — a
     // chain's outer call and its receiver — rely on insertion order).
-    let target_key = crate::model::file_analysis::name_match_key(&target.name);
+    let target_key = crate::model::file_analysis::name_match_key(&target.name, analysis.names());
     let mut keyed: Vec<usize> = analysis.ref_indices_keyed(&target_key).to_vec();
     for a in &visible_aliases {
-        let k = crate::model::file_analysis::name_match_key(&a.name);
+        let k = crate::model::file_analysis::name_match_key(&a.name, analysis.names());
         if k != target_key {
             keyed.extend_from_slice(analysis.ref_indices_keyed(&k));
         }
@@ -1039,7 +1039,7 @@ pub(super) fn collect_from_analysis(
         // dispatch-class checks in the call arms below still pin the right
         // package/class). Every other ref kind matches by exact name.
         let name_matches = if matches!(r.kind, RefKind::FunctionCall { .. } | RefKind::MethodCall { .. }) {
-            r.unqualified_target_name() == target.name
+            r.unqualified_target_name(analysis.names()) == target.name
         } else {
             r.target_name == target.name
         };
@@ -1058,7 +1058,7 @@ pub(super) fn collect_from_analysis(
             )
             && visible_aliases
                 .iter()
-                .any(|a| a.name == r.unqualified_target_name());
+                .any(|a| a.name == r.unqualified_target_name(analysis.names()));
         if !name_matches && !alias_matched {
             continue;
         }
@@ -1147,7 +1147,7 @@ pub(super) fn collect_from_analysis(
                 let Some(scope) = callable_scope_for_refs.as_ref() else {
                     continue;
                 };
-                let method = r.unqualified_target_name();
+                let method = r.unqualified_target_name(analysis.names());
                 {
                     let resolved_class = match r.method_target() {
                         // The frozen edge can carry an UNRESOLVED DBIC source

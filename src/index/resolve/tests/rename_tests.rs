@@ -82,6 +82,7 @@ $d->ping;
 
     // Targeting Base::ping (where rename cursor would sit at the `sub ping` declaration).
     let target = TargetRef {
+        names: crate::model::conventions::PERL_SPELLINGS,
         name: "ping".to_string(),
         kind: TargetKind::Method { class: "Base".to_string() },
         method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), bare_constant: false,
@@ -150,6 +151,7 @@ $b->ping;
     store.insert_workspace(consumer_path.clone(), parse(consumer_src));
 
     let target = TargetRef {
+        names: crate::model::conventions::PERL_SPELLINGS,
         name: "ping".to_string(),
         kind: TargetKind::Method { class: "Base".to_string() },
         method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), bare_constant: false,
@@ -221,6 +223,7 @@ $g->hello;
     store.insert_workspace(consumer_path.clone(), consumer_fa);
 
     let target = TargetRef {
+        names: crate::model::conventions::PERL_SPELLINGS,
         name: "hello".to_string(),
         kind: TargetKind::Method { class: "Greeter".to_string() },
         method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), bare_constant: false,

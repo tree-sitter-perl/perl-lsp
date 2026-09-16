@@ -7,7 +7,7 @@
 //! ladder, so the rules cannot drift between them.
 //!
 //! Pure `&str` over the pack lanes: no tree, no index. The separator is
-//! the pack's declared one (`PackFacts::namespace_sep`); a language whose
+//! the pack's declared one (`PackFacts::names`); a language whose
 //! spellings are already identities (C's flat linkage) never builds one.
 
 use super::Span;
@@ -24,7 +24,7 @@ pub struct UseMap<'a> {
     pub aliases: &'a [(String, String, String)],
     /// The namespace the file declares, when it declares exactly one.
     pub own_namespace: Option<&'a str>,
-    /// The namespace separator the spellings use (`PackFacts::namespace_sep`).
+    /// The namespace separator the spellings use (`PackFacts::names`).
     pub sep: &'a str,
 }
 

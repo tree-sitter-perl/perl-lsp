@@ -476,7 +476,7 @@ impl FileAnalysis {
             .call_bindings
             .iter()
             .flat_map(|b| {
-                [b.func_name.as_str(), split_qualified(&b.func_name).1]
+                [b.func_name.as_str(), split_qualified(&b.func_name, self.names()).1]
             })
             .collect();
         // A file with no call bindings needs no provider walk at all.
@@ -668,7 +668,7 @@ impl FileAnalysis {
             .collect();
         let binding_by_var: std::collections::HashMap<String, String> = self.call_bindings.iter()
             .filter_map(|b| {
-                let bare = split_qualified(&b.func_name).1.to_string();
+                let bare = split_qualified(&b.func_name, self.names()).1.to_string();
                 if imported_keyed_subs.contains(&bare) {
                     Some((b.variable.clone(), bare))
                 } else {
@@ -1313,7 +1313,7 @@ impl FileAnalysis {
             self.refs[idx].link_owned_symbol(sid);
         }
 
-        self.refs.refresh_name_target_indices();
+        self.refs.refresh_name_target_indices(&self.pack.names);
     }
 
 

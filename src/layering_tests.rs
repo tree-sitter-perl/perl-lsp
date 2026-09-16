@@ -1422,10 +1422,10 @@ fn language_spellings_have_one_home() {
     });
     let allow: &[(&str, usize, &str)] = &[
         ("index/module_cache/rows.rs", 2, "SQLite LIKE escaping — SQL syntax, not a language spelling"),
-        ("model/conventions.rs", 6, "Perl's home: sigil sites, plus the registry test registering a pack separator"),
+        ("model/conventions.rs", 8, "Perl's home: `PERL_SPELLINGS` and the sigil sites, plus the test's php-shaped fixture spellings and its use-map assertion"),
         ("model/file_analysis/class_queries.rs", 1, "Perl sigil trim on a Corinna field (legacy)"),
         ("model/file_analysis/completion.rs", 10, "Perl sigils re-derived outside conventions.rs — legacy, shrink-only"),
-        ("model/file_analysis/core_types.rs", 4, "the canonical attribute vocabulary (`TryFrom<&str> for SymbolFlags`) — the one table every language maps its spellings onto — plus a Perl sigil match on a qualified variable (legacy)"),
+        ("model/file_analysis/core_types.rs", 3, "the canonical attribute vocabulary (`TryFrom<&str> for SymbolFlags`) — the one table every language maps its spellings onto"),
         ("model/file_analysis/cursor_queries.rs", 4, "Perl sigil sites (legacy)"),
         ("model/file_analysis/enrichment.rs", 1, "Perl sigil on a hash-key access (legacy)"),
         ("model/file_analysis/invocants.rs", 3, "Perl sigil sites (legacy)"),
@@ -1446,7 +1446,7 @@ fn rendered_strings_are_not_reparsed() {
     let fns = [".split(", ".rsplit(", ".split_once(", ".rsplit_once(", ".splitn(", ".rsplitn("];
     let seen = count_lines(&files, &|l| fns.iter().any(|f| l.contains(f)));
     let allow: &[(&str, usize, &str)] = &[
-        ("model/conventions.rs", 4, "source text: Perl qualified names, class tokens, and the registered-separator splits"),
+        ("model/conventions.rs", 3, "source text: a name split on its language's declared separator, class-token segments, and Perl method tokens"),
         ("model/file_analysis/class_queries.rs", 1, "`use` rows as written, split on the pack's declared separator"),
         ("model/file_analysis/enrichment.rs", 1, "Perl package leaf vs a load name — both source-spelled"),
         ("model/file_analysis/invocants.rs", 2, "Perl `::` on source-spelled class and sub names"),

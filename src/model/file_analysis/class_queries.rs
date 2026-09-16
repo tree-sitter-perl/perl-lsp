@@ -681,7 +681,7 @@ impl FileAnalysis {
         let (class, name) = match &r.kind {
             RefKind::MethodCall { .. } | RefKind::FieldAccess { .. } => {
                 let class = self.method_call_invocant_class(r, module_index)?;
-                (class, r.unqualified_target_name().to_string())
+                (class, r.unqualified_target_name(self.names()).to_string())
             }
             RefKind::HashKeyAccess { .. } => {
                 let class = match r.hash_key_owner() {
@@ -1061,13 +1061,14 @@ impl FileAnalysis {
         }
     }
 
-    /// The namespace a class identity carries, for a namespaced pack: the
+    /// The namespace a class identity carries, for a use-map language: the
     /// qualifier of the FQN, the global namespace spelled `""`. `None`
-    /// for a pack whose identities carry no namespace, so a consumer's
-    /// origin-side ladder (pins, own namespace) still answers there.
+    /// for a language whose spellings are identities as written, so a
+    /// consumer's origin-side ladder (pins, own namespace) still answers
+    /// there.
     pub fn identity_namespace(&self, cls: &str) -> Option<String> {
-        self.pack.namespace_sep.as_ref()?;
-        Some(split_qualified(cls).0.unwrap_or_default().to_string())
+        self.pack.names.use_map_sep()?;
+        Some(split_qualified(cls, self.names()).0.unwrap_or_default().to_string())
     }
 
     /// The identity a class spelling written in this file names: the
@@ -1095,7 +1096,7 @@ impl FileAnalysis {
     /// resolves through the use-map. The one spelling→identity ladder the
     /// PackageRef lanes (goto-def, hover, references) share.
     pub fn spelled_identity(&self, r: &Ref) -> String {
-        match (self.pack.namespace_sep.as_deref(), self.pack.import_row_covering(&r.span)) {
+        match (self.pack.names.use_map_sep(), self.pack.import_row_covering(&r.span)) {
             (Some(sep), Some((_, raw))) => raw.strip_prefix(sep).unwrap_or(raw).to_string(),
             _ => self.class_spelling_identity(&r.target_name),
         }
@@ -1118,7 +1119,7 @@ impl FileAnalysis {
     pub fn declared_class_namespace(&self, leaf: &str) -> Option<String> {
         self.symbols()
             .iter()
-            .find(|s| matches!(s.kind, SymKind::Class) && (s.name == leaf || name_match_key(&s.name) == leaf))
+            .find(|s| matches!(s.kind, SymKind::Class) && (s.name == leaf || name_match_key(&s.name, self.names()) == leaf))
             .map(|s| s.package.clone().unwrap_or_default())
     }
 
@@ -1172,14 +1173,14 @@ impl FileAnalysis {
         self.use_map_with(pins.own_namespace.as_deref())
     }
 
-    /// `None` for a language whose spellings are already identities (no
-    /// declared separator): there is no map to resolve through.
+    /// `None` for a language whose spellings are identities as written
+    /// (`ClassSpelling::Identity`): there is no map to resolve through.
     fn use_map_with<'a>(&'a self, own_namespace: Option<&'a str>) -> Option<UseMap<'a>> {
         Some(UseMap {
             rows: &self.pack.include_directives,
             aliases: &self.pack.use_aliases,
             own_namespace,
-            sep: self.pack.namespace_sep.as_deref()?,
+            sep: self.pack.names.use_map_sep()?,
         })
     }
 
@@ -1197,9 +1198,9 @@ impl FileAnalysis {
                 })
                 .or_insert_with(|| Some(ns.to_string()));
         };
-        // Import rows carry a namespace only for a pack that declares a
-        // separator; C's `#include` paths ride the same lane and pin nothing.
-        if let Some(sep) = self.pack.namespace_sep.as_deref() {
+        // Import rows carry a namespace only for a use-map language; C's
+        // `#include` paths ride the same lane and pin nothing.
+        if let Some(sep) = self.pack.names.use_map_sep() {
             for (_, raw) in &self.pack.include_directives {
                 let t = raw.strip_prefix(sep).unwrap_or(raw);
                 // A bare row (`use Exception;`) names the GLOBAL namespace: the
@@ -1235,7 +1236,7 @@ impl FileAnalysis {
                     // the symbol is filed under its identity (the FQN for a
                     // namespaced pack); the pin is keyed by the leaf it binds
                     let ns = s.package.clone().unwrap_or_default();
-                    pin(&mut pins, &name_match_key(&s.name), &ns);
+                    pin(&mut pins, &name_match_key(&s.name, self.names()), &ns);
                 }
                 SymKind::Package => {
                     if own.as_deref().is_some_and(|o| o != s.name) {
@@ -1264,12 +1265,12 @@ impl FileAnalysis {
             }
             match &r.kind {
                 RefKind::PackageRef | RefKind::FunctionCall => {
-                    spelled.insert(r.unqualified_target_name().to_string());
+                    spelled.insert(r.unqualified_target_name(self.names()).to_string());
                 }
                 RefKind::MethodCall { invocant, .. } | RefKind::FieldAccess { invocant, .. } => {
                     let t = invocant.text();
-                    if crate::model::conventions::is_bareword_class_name(t) {
-                        spelled.insert(name_match_key(t));
+                    if crate::model::conventions::is_bareword_class_name(t, self.names()) {
+                        spelled.insert(name_match_key(t, self.names()));
                     }
                 }
                 _ => {}
@@ -1283,6 +1284,6 @@ impl FileAnalysis {
                 }
             }
         }
-        UseMapPins { pins, own_namespace: own_ns, spelled, visible }
+        UseMapPins { pins, own_namespace: own_ns, spelled, visible, names: self.pack.names.clone() }
     }
 }
