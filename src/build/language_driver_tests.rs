@@ -192,12 +192,7 @@ fn ctor_convention_unresolvable_uppercase_call_no_phantom_class() {
     let inv = fa
         .refs()
         .iter()
-        .find_map(|r| match &r.kind {
-            RefKind::MethodCall { invocant_span: Some(sp), .. } if r.target_name == "refcount" => {
-                Some(*sp)
-            }
-            _ => None,
-        })
+        .find_map(|r| (r.target_name == "refcount").then(|| r.member_site()?.invocant_span).flatten())
         .expect("rcpv->refcount minted a member ref with an invocant span");
     let ty = fa.expr_type_at_span(inv, None);
     assert!(
@@ -409,10 +404,7 @@ fn cpp_brace_init_declaration_survives_declarator_strip() {
     let inv = fa
         .refs()
         .iter()
-        .find_map(|r| match &r.kind {
-            RefKind::MethodCall { invocant_span: Some(sp), .. } if r.target_name == "x" => Some(*sp),
-            _ => None,
-        })
+        .find_map(|r| (r.target_name == "x").then(|| r.member_site()?.invocant_span).flatten())
         .expect("p.x minted a member ref with an invocant span");
     let t = fa.expr_type_at_span(inv, None).expect("receiver types");
     assert_eq!(t.class_name(), Some("Point"), "p types as Point: {t:?}");
@@ -467,13 +459,10 @@ fn h4_member_ref(
     use crate::model::file_analysis::RefKind;
     fa.refs()
         .iter()
-        .find_map(|r| match &r.kind {
-            RefKind::MethodCall { invocant_span: Some(sp), member_op, .. }
-                if r.target_name == "size" && r.span.start.row == 5 =>
-            {
-                Some((*sp, *member_op))
-            }
-            _ => None,
+        .find_map(|r| {
+            (r.target_name == "size" && r.span.start.row == 5)
+                .then(|| r.member_site().and_then(|m| Some((m.invocant_span?, m.member_op.copied()))))
+                .flatten()
         })
         .expect("w.size on the spliced line minted a member ref with an invocant span")
 }

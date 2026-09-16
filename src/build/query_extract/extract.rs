@@ -799,6 +799,8 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                         arg_count: matches!(e.cap.as_str(), "ref.call" | "ref.qcall" | "ref.member")
                             .then(|| arg_counts_by_start.get(&(e.end.row, e.end.column)).copied())
                             .flatten(),
+                        value_read: false,
+                        named_by_string: false,
                     });
                 }
             }
@@ -1093,6 +1095,8 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
             invocant: None,
             member_op: None,
             arg_count: Some(args.len()),
+            value_read: false,
+            named_by_string: false,
         });
         for effect in (pack.cmd_effects)(cmd) {
             match effect {
@@ -1129,6 +1133,8 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                                 invocant: None,
                                 member_op: None,
                                 arg_count: None,
+                                value_read: false,
+                                named_by_string: false,
                             });
                         }
                     }
