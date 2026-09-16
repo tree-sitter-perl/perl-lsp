@@ -102,6 +102,12 @@ pub struct Scope {
     /// For `package Foo;` regions, this is "Foo".
     /// Inherited from parent when not overridden.
     pub package: Option<String>,
+    /// The callable this scope is the body of (a Sub / Method scope's own
+    /// symbol), minted when the scope is pushed. The one hop from a scope
+    /// to its parameters — `binding_site_of`, the enclosing-callable
+    /// question — so neither is a span scan. `None` for every other scope.
+    #[serde(default)]
+    pub owner: Option<SymbolId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -193,7 +199,190 @@ impl Namespace {
     }
 }
 
+impl Span {
+    /// `other` lies within this span (inclusive at both ends).
+    pub fn contains(&self, other: &Span) -> bool {
+        (self.start.row, self.start.column) <= (other.start.row, other.start.column)
+            && (other.end.row, other.end.column) <= (self.end.row, self.end.column)
+    }
+}
+
+/// How a language spells names: the separator its qualified names split on
+/// and the sigils its variables carry. Every key function
+/// (`split_qualified`, `name_match_key`, `is_bareword_class_name`) takes
+/// the spellings of the language whose name it is handling, so no
+/// separator or sigil is ever assumed and no language's spelling can
+/// mis-key another's. Perl declares its own (`conventions::PERL_SPELLINGS`)
+/// exactly as a pack declares its (`LangPack::names`); an analysis carries
+/// the ones it was built under (`PackFacts::names`). Borrowed for the
+/// languages the binary declares, owned when read back from a blob.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct NameSpellings {
+    /// The namespace separator (`::`, `\`); `None` for a language whose
+    /// names are never qualified (a flat linkage).
+    pub namespace_sep: Option<std::borrow::Cow<'static, str>>,
+    /// Variable sigils a name may lead with (`$`, `@`, `%`); a language
+    /// with none declares none, so a `$` in its identifiers is identifier
+    /// text.
+    pub sigils: std::borrow::Cow<'static, [char]>,
+    /// What a written class spelling denotes.
+    pub class_spelling: ClassSpelling,
+}
+
+/// What a class spelling written in a file denotes — the capability the
+/// use-map questions (`use_map`, `identity_namespace`, `spelled_identity`)
+/// gate on. A separator alone does not decide it: Perl qualifies with
+/// `::` and every spelling is its own identity, while a use-map language
+/// resolves a bare leaf through the file's imports and namespace.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum ClassSpelling {
+    /// The spelling IS the identity (Perl's `Foo::Bar`, C's flat linkage).
+    #[default]
+    Identity,
+    /// The spelling resolves through the file's use-map: its import rows,
+    /// aliases and own namespace (`use A\B\Collection;` then `Collection`).
+    UseMap,
+}
+
+impl NameSpellings {
+    /// A language whose names carry no separator and no sigil.
+    pub const NONE: NameSpellings = NameSpellings {
+        namespace_sep: None,
+        sigils: std::borrow::Cow::Borrowed(&[]),
+        class_spelling: ClassSpelling::Identity,
+    };
+
+    /// A language with a namespace separator, no sigils, and spellings
+    /// that are identities as written (C++ until its `using` directives
+    /// are modeled).
+    pub const fn with_separator(sep: &'static str) -> NameSpellings {
+        NameSpellings {
+            namespace_sep: Some(std::borrow::Cow::Borrowed(sep)),
+            sigils: std::borrow::Cow::Borrowed(&[]),
+            class_spelling: ClassSpelling::Identity,
+        }
+    }
+
+    pub fn sep(&self) -> Option<&str> {
+        self.namespace_sep.as_deref()
+    }
+
+    /// The separator a use-map resolves with — `None` for a language whose
+    /// class spellings are identities as written, whether or not it
+    /// qualifies names. The one gate the use-map questions read.
+    pub fn use_map_sep(&self) -> Option<&str> {
+        match self.class_spelling {
+            ClassSpelling::UseMap => self.sep(),
+            ClassSpelling::Identity => None,
+        }
+    }
+
+    pub fn is_sigil(&self, c: char) -> bool {
+        self.sigils.contains(&c)
+    }
+}
+
 // ---- Symbol ----
+
+bitflags::bitflags! {
+    /// Declaration facts a symbol carries, as a closed flag set. Every
+    /// language maps its own attribute spellings onto these where it
+    /// mints the symbol — a pack at skeleton conversion through
+    /// `TryFrom<&str>` over the canonical names, Perl through
+    /// `conventions::field_attribute_flag` — and consumers ask
+    /// `contains(..)`, never compare an attribute string. Closed on
+    /// purpose: every flag so far has a language-generic meaning, and the
+    /// set rides the cache blob (`docs/adr/symbol-flags.md`).
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+    pub struct SymbolFlags: u32 {
+        /// A class-level member (`static`), reached through the class, not an instance.
+        const STATIC = 1 << 0;
+        /// A `Class` symbol that is an interface: its members are contracts, and a
+        /// concrete definer outranks it on the MRO.
+        const INTERFACE = 1 << 1;
+        /// Declared abstract.
+        const ABSTRACT = 1 << 2;
+        /// A default-named container (`(union)`): structure, not an addressable name.
+        const ANONYMOUS = 1 << 3;
+        /// Not public: completes only from inside its own class's body.
+        const NON_PUBLIC = 1 << 4;
+        /// A union container: its body nests its members in the outline.
+        const UNION = 1 << 5;
+        /// An `extern` declaration: a definition elsewhere is the landing.
+        const EXTERN = 1 << 6;
+        /// An inline namespace: its members are visible from the parent.
+        const INLINE = 1 << 7;
+        /// A re-export (`using Base::m;`): API surface, not a definition.
+        const REEXPORT = 1 << 8;
+        /// An include-guard `#define`: compilation plumbing, folded from listings.
+        const INCLUDE_GUARD = 1 << 9;
+        /// A function-like `#define`: a real callable that hover labels a macro.
+        const MACRO = 1 << 10;
+        /// Marked deprecated (the notice text rides `Presentation::deprecation`).
+        const DEPRECATED = 1 << 11;
+        /// A storage slot with a constructor key (Corinna `:param`, a promoted
+        /// constructor parameter): `Class->new(name => …)` binds it.
+        const PARAM = 1 << 12;
+        /// A storage slot with a generated reader (Corinna `:reader`, Moo
+        /// `is => 'ro'`).
+        const READER = 1 << 13;
+        /// A storage slot with a generated writer (Corinna `:writer` /
+        /// `:mutator` / `:accessor`, Moo `is => 'rw'`).
+        const WRITER = 1 << 14;
+    }
+}
+
+/// The wire form is the bare bit set — the same `u32` the cache blob has
+/// always carried, so a flag added at the tail reads old blobs unchanged.
+impl Serialize for SymbolFlags {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        self.bits().serialize(s)
+    }
+}
+
+impl<'de> Deserialize<'de> for SymbolFlags {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        u32::deserialize(d).map(SymbolFlags::from_bits_retain)
+    }
+}
+
+/// An attribute spelling no flag answers to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnknownAttribute(pub String);
+
+impl std::fmt::Display for UnknownAttribute {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "unknown symbol attribute `{}`", self.0)
+    }
+}
+
+/// The canonical attribute vocabulary — the ONE table from a spelling to
+/// a flag. A pack's skeleton conversion and its overlay validation both
+/// go through it, so a spelling that mints nothing is an error at the
+/// producer rather than a silent skip.
+impl TryFrom<&str> for SymbolFlags {
+    type Error = UnknownAttribute;
+    fn try_from(name: &str) -> Result<Self, Self::Error> {
+        Ok(match name {
+            "static" => SymbolFlags::STATIC,
+            "interface" => SymbolFlags::INTERFACE,
+            "abstract" => SymbolFlags::ABSTRACT,
+            "anonymous" => SymbolFlags::ANONYMOUS,
+            "non_public" => SymbolFlags::NON_PUBLIC,
+            "union" => SymbolFlags::UNION,
+            "extern" => SymbolFlags::EXTERN,
+            "inline" => SymbolFlags::INLINE,
+            "reexport" => SymbolFlags::REEXPORT,
+            "include_guard" => SymbolFlags::INCLUDE_GUARD,
+            "macro" => SymbolFlags::MACRO,
+            "deprecated" => SymbolFlags::DEPRECATED,
+            "param" => SymbolFlags::PARAM,
+            "reader" => SymbolFlags::READER,
+            "writer" => SymbolFlags::WRITER,
+            other => return Err(UnknownAttribute(other.to_string())),
+        })
+    }
+}
 
 /// How a symbol presents to humans — the ONE policy home for listing
 /// views (document outline, workspace-symbol, heatmap, completion
@@ -213,6 +402,15 @@ pub struct Presentation {
     /// structure.
     #[serde(default)]
     pub hide_in_outline: bool,
+    /// The declaration's documentation text (a php docblock's summary
+    /// paragraph, rendered under the hover signature). Types parsed from
+    /// the same comment ride the witness bag, never this string.
+    #[serde(default)]
+    pub doc: Option<String>,
+    /// The deprecation notice (`@deprecated text`), shown by the lane that
+    /// flags uses; the `deprecated` symbol attribute is the flag itself.
+    #[serde(default)]
+    pub deprecation: Option<String>,
     /// Plugin's final word on the LSP kind this symbol renders as
     /// (helper/route/task/event/…). Framework-synthesized entities
     /// resolve/complete/goto-def like regular symbols; `None` leaves
@@ -249,13 +447,24 @@ pub struct Symbol {
     /// How this symbol presents in listing views — see [`Presentation`].
     #[serde(default)]
     pub presentation: Presentation,
-    /// Free-string annotations the language pack attaches to this symbol —
-    /// today, the signal a recovered C++ class's declarator-position
-    /// attribute macro carried (`exported`, `deprecated`), looked up in the
-    /// plugin-declared attribute-macro vocabulary. Empty for ordinary
-    /// symbols. Surfaced in pack hover.
+    /// Free-string annotations the language pack attaches to this symbol
+    /// — the pack's OWN vocabulary (a php `readonly`, the signal a recovered
+    /// C++ attribute macro carried), surfaced in pack hover. Display only:
+    /// the model reasons on `flags`, never on these strings (rule #12).
     #[serde(default)]
     pub attributes: Vec<String>,
+    /// The closed set of declaration facts the model reasons on, minted by
+    /// whoever creates the symbol — the pack maps its attribute vocabulary
+    /// onto them at conversion, the Perl builder sets them directly.
+    #[serde(default)]
+    pub flags: SymbolFlags,
+    /// The OTHER symbol the same declaration token minted: a `has` accessor
+    /// and its constructor key, a promoted constructor parameter and its
+    /// field. Minted where the pair is synthesized, so no consumer
+    /// re-derives the pairing from span equality or column arithmetic
+    /// (rule #11).
+    #[serde(default)]
+    pub declared_with: Option<SymbolId>,
     /// The pointer/reference declarator stack a typed variable carries,
     /// outermost→leaf (`Box** pp` → `[Pointer, Pointer]`, `Box*& rp` →
     /// `[Reference, Pointer]`). Pointer-ness is dropped for type RESOLUTION
@@ -479,6 +688,12 @@ pub struct FlowEdge {
     /// `expr_type_at_span`, and the value-provenance anchor.
     pub source: Span,
     pub extraction: Extraction,
+    /// A plain assignment to a name the scope ALREADY binds (`$x = …`, never
+    /// `my $x = …` / a parameter / a class member). Provenance: the reset a
+    /// write performs is its own witness (`WitnessPayload::Reset`, minted
+    /// at every write site), not a property of this edge.
+    #[serde(default)]
+    pub reassigns: bool,
 }
 
 impl FlowEdge {
@@ -506,8 +721,13 @@ impl FlowEdge {
                 WitnessPayload::Edge(WitnessAttachment::Expr(self.source))
             }
             Extraction::Slurpy(_) => return None,
-            // KeyOf awaits its HashKey-projection lowering (a later stage).
-            Extraction::KeyOf(_) => return None,
+            // The value at a literal key of the source — a keyed
+            // destructure (`['k' => $v] = f()`) projecting through the
+            // source's keyed shape (`HashWithKeys`) at query time.
+            Extraction::KeyOf(k) => WitnessPayload::Projected {
+                base: WitnessAttachment::Expr(self.source),
+                step: ProjectionStep::HashKey(k.clone()),
+            },
             // A bare bind clears to undef — a value the bind uniquely knows
             // (like a literal), so a direct `InferredType`, not an edge.
             Extraction::Cleared => WitnessPayload::InferredType(InferredType::Undef),
@@ -549,7 +769,7 @@ impl Symbol {
     /// the class's API surface (outline/completion) but not a definition —
     /// member resolution sees through it to the origin ancestor.
     pub fn is_reexport(&self) -> bool {
-        self.attributes.iter().any(|a| a == "reexport")
+        self.flags.contains(SymbolFlags::REEXPORT)
     }
 
     /// Bare variable/field name without the sigil. Uses the sigil stored
@@ -572,14 +792,22 @@ impl Symbol {
     /// member hover, inlay hints, and signature help all render through it, so
     /// the pointer stars can't vanish on some surfaces and not others.
     pub fn display_type(&self, ty: &InferredType) -> String {
+        self.display_type_with(ty, &|_| None)
+    }
+
+    /// `display_type` through a language's type vocabulary
+    /// (`FileAnalysis::display_type_of` supplies the file's).
+    pub fn display_type_with(&self, ty: &InferredType, vocab: super::completion::TypeVocab) -> String {
         // A template instance displays its full spelling (`Box<Widget>`)
         // — presentation keeps the args even though dispatch keys the
         // base. Other flavors keep the dispatch-class display.
-        let base = ty
-            .as_parametric()
-            .and_then(|p| p.exact_spelling())
-            .or_else(|| ty.class_name().map(String::from))
-            .unwrap_or_else(|| format_inferred_type(ty));
+        let base = match ty.as_parametric() {
+            Some(p @ ParametricType::Instance { .. }) => super::completion::format_parametric_with(p, vocab),
+            _ => ty
+                .class_name()
+                .map(String::from)
+                .unwrap_or_else(|| super::completion::format_type_with(ty, vocab)),
+        };
         let stars: String = self.deref_stack.iter().map(|s| s.render()).collect();
         format!("{}{}", base, stars)
     }
@@ -737,6 +965,14 @@ pub struct ParamInfo {
     /// this — the core never infers it from the name.
     #[serde(default)]
     pub is_invocant: bool,
+    /// Where the parameter is BOUND: its signature token, or the `my (…) =
+    /// @_` / `my $x = shift` declaration that unpacks it. Minted where the
+    /// extractor reads that token (rule #11), so every parameter-anchored
+    /// fact lands here and the declaration's own write marker leaves it
+    /// standing. `None` for a synthesized parameter (a generated writer's
+    /// value, a plugin-declared signature) — nothing in the source binds it.
+    #[serde(default, with = "point_opt_serde")]
+    pub binding_site: Option<Point>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -786,45 +1022,33 @@ pub struct Ref {
     pub arg_count: Option<usize>,
 }
 
-/// Split a possibly-qualified name into `(Option<package>, basename)`.
-///
-/// A name token may carry a `Pkg::` qualifier (`Foo::Bar::baz`, `@Pkg::EXPORT`,
-/// `$Foo::Bar::x`). Resolution is always `(qualifier ?? current_package,
-/// basename)`. This is the ONE place that decides "is this name qualified" —
-/// every per-construct stripper (`Ref::unqualified_target_name`,
-/// `Builder::export_var_basename`, FQ-variable ref emission) routes through it
-/// (rule #10: encode the "is qualified" property once).
-///
-/// Input must be sigil-free (callers strip `$`/`@`/`%`/`&` first). The text
-/// after the last `::` is the basename; everything before it is the package.
-/// An unqualified name yields `(None, name)`. A leading `::` (`::foo`, the
-/// `main::` shorthand) yields an empty-string package, preserved verbatim.
-pub fn split_qualified(name: &str) -> (Option<&str>, &str) {
-    match name.rsplit_once("::") {
-        Some((pkg, base)) => (Some(pkg), base),
-        None => (None, name),
-    }
-}
-
-/// The relational ref index's shared key function: rows are keyed by
-/// `name_match_key(ref.target_name)`, retrieval probes
-/// `name_match_key(target.name)` — one function on both sides, so a row can
-/// never be missed by a spelling the matcher would accept (arms compare
-/// exact names or their unqualified tails; equal names have equal tails).
-/// Sigil variables keep the sigil on the tail (`$Foo::x` → `$x`) because
-/// variable identities carry it.
-pub fn name_match_key(name: &str) -> String {
-    let mut chars = name.chars();
-    if let Some(sigil) = chars.next() {
-        if matches!(sigil, '$' | '@' | '%') {
-            let (_, base) = split_qualified(chars.as_str());
-            return format!("{sigil}{base}");
-        }
-    }
-    split_qualified(name).1.to_string()
-}
+pub use crate::model::conventions::{name_match_key, split_qualified};
 
 impl Ref {
+    /// The receiver view of a member access (`MethodCall` / `FieldAccess`);
+    /// `None` for every other kind.
+    pub fn member_site(&self) -> Option<MemberSite<'_>> {
+        match &self.kind {
+            RefKind::MethodCall { invocant, invocant_span, method_name_span, member_op, .. } => {
+                Some(MemberSite {
+                    invocant,
+                    invocant_span: *invocant_span,
+                    name_span: *method_name_span,
+                    member_op: member_op.as_ref(),
+                })
+            }
+            RefKind::FieldAccess { invocant, invocant_span, member_name_span, member_op } => {
+                Some(MemberSite {
+                    invocant,
+                    invocant_span: *invocant_span,
+                    name_span: *member_name_span,
+                    member_op: member_op.as_ref(),
+                })
+            }
+            _ => None,
+        }
+    }
+
     /// The unqualified callable name for a `FunctionCall` ref. A
     /// fully-qualified call (`Foo::Bar::baz(...)`) keeps the whole path in
     /// `target_name` (the qualified-name hash-key binding logic and rename
@@ -833,8 +1057,8 @@ impl Ref {
     /// `Sub` symbol pair this bare tail with the ref's `resolved_package`
     /// (= the qualifier) so `Foo::baz()` lands on `sub baz` in package
     /// `Foo`.
-    pub fn unqualified_target_name(&self) -> &str {
-        split_qualified(&self.target_name).1
+    pub fn unqualified_target_name(&self, names: &NameSpellings) -> &str {
+        split_qualified(&self.target_name, names).1
     }
 
     /// The name key this ref is retrievable under in the relational ref
@@ -845,8 +1069,8 @@ impl Ref {
     /// exact `target_name` or its unqualified tail; equal full names have
     /// equal tails). Sigil variables keep their sigil on the tail because
     /// variable symbols key with it (`$x`, not `x`).
-    pub fn match_key(&self) -> String {
-        name_match_key(&self.target_name)
+    pub fn match_key(&self, names: &NameSpellings) -> String {
+        name_match_key(&self.target_name, names)
     }
 
     /// For a fully-qualified variable read (`$Foo::Bar::x`, `@Pkg::arr`,
@@ -857,13 +1081,13 @@ impl Ref {
     /// the basename because variable symbols are keyed with their sigil
     /// (`$x`, `@arr`, `%h`); a leading-`::` `main::` spelling yields an
     /// empty-string package, matching how package-globals in `main` key.
-    pub fn qualified_var_target(&self) -> Option<(&str, String)> {
+    pub fn qualified_var_target(&self, names: &NameSpellings) -> Option<(&str, String)> {
         let mut chars = self.target_name.chars();
         let sigil = chars.next()?;
-        if !matches!(sigil, '$' | '@' | '%') {
+        if !names.is_sigil(sigil) {
             return None;
         }
-        let (pkg, base) = split_qualified(chars.as_str());
+        let (pkg, base) = split_qualified(chars.as_str(), names);
         pkg.map(|p| (p, format!("{sigil}{base}")))
     }
 }
@@ -917,6 +1141,16 @@ impl Ref {
         }
     }
 
+    /// A ref that never wins a same-span cursor tie: it rides ANOTHER
+    /// ref's token and surfaces through projections (goto-def's union,
+    /// the handler side's hierarchy), never as the cursor's identity. The
+    /// one case today is a class-named rail's use (`event(new X)`), a
+    /// companion of the class token's own ref — the stacked-refs fork in
+    /// `docs/open-forks.md` is where a second case would reopen the shape.
+    pub fn is_cursor_companion(&self, pack: &PackFacts) -> bool {
+        self.handler_owner().is_some_and(|o| o.names_are_classes(pack))
+    }
+
     /// Whether matching this ref against a target consults only the frozen
     /// build-time verdict on the ref itself. `false` means the matcher's
     /// fallback arm re-derives the verdict at query time through this FILE's
@@ -928,7 +1162,7 @@ impl Ref {
     /// matched costs one whole decode, never a wrong answer.
     pub fn match_verdict_baked(&self) -> bool {
         match &self.kind {
-            RefKind::MethodCall { .. } => self.method_target().is_some(),
+            RefKind::MethodCall { .. } | RefKind::FieldAccess { .. } => self.method_target().is_some(),
             RefKind::HashKeyAccess { .. } => matches!(
                 self.hash_key_owner(),
                 Some(o) if !matches!(o, HashKeyOwner::Variable { .. })
@@ -987,7 +1221,7 @@ pub struct RefRowSeed {
 }
 
 impl Ref {
-    pub fn row_seed(&self) -> RefRowSeed {
+    pub fn row_seed(&self, names: &NameSpellings) -> RefRowSeed {
         let kind = match &self.kind {
             RefKind::Variable => 0,
             RefKind::FunctionCall => 1,
@@ -996,12 +1230,13 @@ impl Ref {
             RefKind::HashKeyAccess { .. } => 4,
             RefKind::ContainerAccess => 5,
             RefKind::DispatchCall { .. } => 6,
+            RefKind::FieldAccess { .. } => 7,
         };
         let (qual_kind, qual): (u8, Option<String>) = match &self.kind {
             RefKind::FunctionCall => {
                 (1, self.resolved_package().map(str::to_string))
             }
-            RefKind::MethodCall { .. } => (
+            RefKind::MethodCall { .. } | RefKind::FieldAccess { .. } => (
                 2,
                 self.method_target().map(|t| t.invocant_class().to_string()),
             ),
@@ -1016,7 +1251,7 @@ impl Ref {
         let flags = u8::from(self.folded_from.is_some())
             | (u8::from(self.resolved_symbol().is_some()) << 1);
         RefRowSeed {
-            key: self.match_key(),
+            key: self.match_key(names),
             kind,
             span: self.span,
             access: match self.access {
@@ -1042,6 +1277,10 @@ impl Ref {
 #[derive(Debug, Clone)]
 pub struct SymRowSeed {
     pub name: String,
+    /// What a REFERENCE to the symbol is keyed by (`name_match_key` under
+    /// the analysis's own spellings) — computed where the spellings are in
+    /// hand, so the store never re-derives it.
+    pub key: String,
     pub kind: u8,
     /// `selection_span` — the landing site workspace/symbol reports.
     pub span: Span,
@@ -1219,6 +1458,13 @@ pub enum RefKind {
         /// — its `deref_stack` decides the expected operator). `None` for Perl
         /// (one operator) and wrapper/chain receivers.
         member_op: Option<(MemberOp, Span)>,
+        /// The member was NAMED BY A STRING (`[$obj, 'method']`, a class-array
+        /// callable): a rename/reference target when it resolves, never an
+        /// unresolved-member finding when it does not — a two-element array
+        /// holding an object and a string is data until dispatch proves it a
+        /// callable (PHPUnit providers, key/value pairs).
+        #[serde(default)]
+        named_by_string: bool,
     },
     PackageRef,
     /// Key access `$h{k}` / `$obj->{k}`. Which hash owns the key (and the
@@ -1239,6 +1485,37 @@ pub enum RefKind {
     DispatchCall {
         dispatcher: String,
     },
+    /// A member VALUE on a receiver — `$this->prop`, `obj->field`, a
+    /// `$this->prop = …` write. The syntax told the extractor the token
+    /// names a stored value, not a callable, so the ref says so instead
+    /// of carrying a call ref plus a shape tag (rule #11). Resolves over
+    /// the class's value members only (`Field` / class-content
+    /// `Variable`), never a method: a value read of a name only a method
+    /// carries is an undeclared property. A language whose member read IS
+    /// a call (Perl's `$o->m`) never mints one. Receiver fields mirror
+    /// `MethodCall`'s so the invocant ladder serves both through
+    /// `Ref::member_site`. Kept at the END for bincode variant-index
+    /// stability (bump `EXTRACT_VERSION`).
+    FieldAccess {
+        invocant: crate::model::conventions::Invocant,
+        invocant_span: Option<Span>,
+        /// The member token alone (`r.span` may cover the whole access).
+        member_name_span: Span,
+        member_op: Option<(MemberOp, Span)>,
+    },
+}
+
+/// The receiver half of a member access, whatever the member's kind — the
+/// one view the invocant ladder, op-DX and the rename token gate read, so
+/// a `FieldAccess` and a `MethodCall` on the same receiver resolve it the
+/// same way.
+#[derive(Debug, Clone, Copy)]
+pub struct MemberSite<'a> {
+    pub invocant: &'a crate::model::conventions::Invocant,
+    pub invocant_span: Option<Span>,
+    /// The member token: the method name or the field name.
+    pub name_span: Span,
+    pub member_op: Option<&'a (MemberOp, Span)>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

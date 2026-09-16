@@ -46,6 +46,8 @@ pub struct RenameOptions {
 #[derive(Debug, Clone)]
 pub struct TargetRef {
     pub name: String,
+    /// The ORIGIN file's name spellings — what its keys are computed with.
+    pub names: crate::model::file_analysis::NameSpellings,
     pub kind: TargetKind,
     /// Override-fan-out scope for callable (`Sub`/`Method`) targets — read by
     /// `collect_from_analysis` to pick family-membership (Hierarchy) vs
@@ -97,6 +99,7 @@ impl TargetRef {
         let method_classes = method_classes_for(origin, &class, &name, module_index, scope);
         TargetRef {
             name,
+            names: origin.names().clone(),
             kind: TargetKind::Method { class },
             method_classes,
             scope,
@@ -123,6 +126,7 @@ impl TargetRef {
         let method_classes = origin.owned_accessor_family(&class, module_index);
         TargetRef {
             name,
+            names: origin.names().clone(),
             kind: TargetKind::Method { class },
             method_classes,
             scope: OverrideScope::Hierarchy,
@@ -132,13 +136,16 @@ impl TargetRef {
     }
 
     /// Build a non-Method target (no inheritance fan-out for declarations).
-    pub fn new(name: String, kind: TargetKind) -> Self {
+    /// `origin` is the file the cursor sits in: its spellings key the
+    /// target's name in every store the walk consults.
+    pub fn new(name: String, kind: TargetKind, origin: &FileAnalysis) -> Self {
         debug_assert!(
             !matches!(kind, TargetKind::Method { .. }),
             "use TargetRef::method so the rename chain is populated"
         );
         TargetRef {
             name,
+            names: origin.names().clone(),
             kind,
             method_classes: Vec::new(),
             scope: OverrideScope::default(),
@@ -201,6 +208,7 @@ impl TargetRef {
                 // WITH def_paths).
                 TargetRef {
                     name,
+                    names: origin.names().clone(),
                     kind: TargetKind::Sub { package },
                     method_classes,
                     scope,
@@ -211,9 +219,9 @@ impl TargetRef {
             RenameKind::Method { name, class } => {
                 TargetRef::method(name, class, origin, module_index, scope)
             }
-            RenameKind::Package(name) => TargetRef::new(name, TargetKind::Package),
+            RenameKind::Package(name) => TargetRef::new(name, TargetKind::Package, origin),
             RenameKind::Handler { owner, name } => {
-                TargetRef::new(name.clone(), TargetKind::Handler { owner, name })
+                TargetRef::new(name.clone(), TargetKind::Handler { owner, name }, origin)
             }
             RenameKind::HashKey(_) | RenameKind::Variable => return None,
         })

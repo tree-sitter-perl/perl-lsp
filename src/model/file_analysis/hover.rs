@@ -5,6 +5,54 @@
 use super::*;
 
 impl FileAnalysis {
+    /// This file's type vocabulary (`PackFacts.type_display`): a mapped
+    /// engine tag renders as the language's own spelling (php `array`, not
+    /// `HashRef`); an unmapped tag, every class name, and every Perl
+    /// analysis (empty map) pass through.
+    fn type_vocab(&self) -> impl Fn(&str) -> Option<String> + '_ {
+        move |tag: &str| {
+            self.pack
+                .type_display
+                .iter()
+                .find(|(k, _)| k == tag)
+                .map(|(_, v)| v.clone())
+        }
+    }
+
+    /// THE type-label projection for human surfaces — hover, inlay hints,
+    /// signatures, completion detail all route here so a language's
+    /// vocabulary can't leak on one surface and not another.
+    pub fn render_type(&self, ty: &InferredType) -> String {
+        format_type_with(ty, &self.type_vocab())
+    }
+
+    /// `Symbol::display_type` (class/deref-aware) through the same
+    /// vocabulary.
+    pub fn display_type_of(&self, sym: &Symbol, ty: &InferredType) -> String {
+        sym.display_type_with(ty, &self.type_vocab())
+    }
+
+    /// The NATIVE spelling a declaration would be written with for an
+    /// inferred type — `None` when the pack has no native spelling for it
+    /// (an ambiguous engine type, a class not visible by its leaf here, a
+    /// composite). What a quick-fix may write into the source; display
+    /// vocabulary (`type_display`) is a different question.
+    pub fn native_type_spelling(&self, ty: &InferredType) -> Option<String> {
+        if let InferredType::ClassName(n) = ty {
+            let (ns, leaf) = split_qualified(n, self.names());
+            // the leaf must mean THIS class where it would be written
+            let seen = self.leaf_namespace(leaf).or_else(|| self.use_map_pins().own_namespace.clone());
+            return (ns.is_none() || seen.is_none() || ns.map(str::to_string) == seen)
+                .then(|| leaf.to_string());
+        }
+        let root = format_type_root(ty);
+        self.pack
+            .native_type_spellings
+            .iter()
+            .find(|(k, _)| *k == root)
+            .map(|(_, v)| v.clone())
+    }
+
     /// Hover info: return display text for the symbol at cursor.
     pub fn hover_info(&self, point: Point, source: &str, module_index: Option<&dyn CrossFileLookup>) -> Option<String> {
         // Check refs first
@@ -27,7 +75,7 @@ impl FileAnalysis {
                     if let Some(mr) = method_hover {
                         if matches!(mr.kind, RefKind::MethodCall { .. }) {
                             let class_name = self.method_call_invocant_class(mr, module_index);
-                            let mname = mr.unqualified_target_name();
+                            let mname = mr.unqualified_target_name(self.names());
                             if let Some(ref cn) = class_name {
                                 match self.resolve_method_in_ancestors(cn, mname, module_index) {
                                     Some(MethodResolution::Local { sym_id, class: ref defining_class, .. }) => {
@@ -40,7 +88,7 @@ impl FileAnalysis {
                                         };
                                         let mut text = format!("```perl\n{}\n```\n\n*class {} — resolved from `{}`*", line.trim(), class_label, r.target_name);
                                         if let Some(ref rt) = self.find_method_return_type(cn, mname, module_index, None) {
-                                            text.push_str(&format!("\n\n*returns: {}*", format_inferred_type(&rt)));
+                                            text.push_str(&format!("\n\n*returns: {}*", self.render_type(&rt)));
                                         }
                                         if let SymbolDetail::Sub { ref doc, .. } = sym.detail {
                                             if let Some(ref d) = doc {
@@ -49,7 +97,7 @@ impl FileAnalysis {
                                         }
                                         return Some(text);
                                     }
-                                    Some(MethodResolution::CrossFile { ref class, ref def_module }) => {
+                                    Some(MethodResolution::CrossFile { ref class, ref def_module, .. }) => {
                                         if let Some(idx) = module_index {
                                             // Bridged helper lives in `def_module`; real
                                             // inherited method in `class`'s own module.
@@ -64,7 +112,7 @@ impl FileAnalysis {
                                                     let sig = format_cross_file_signature(mname, &sub_info);
                                                     let mut text = format!("```perl\n{}\n```\n\n*class {} — resolved from `{}`*", sig, class, r.target_name);
                                                     if let Some(rt) = sub_info.return_type(Some(idx)) {
-                                                        text.push_str(&format!("\n\n*returns: {}*", format_inferred_type(&rt)));
+                                                        text.push_str(&format!("\n\n*returns: {}*", self.render_type(&rt)));
                                                     }
                                                     if let Some(doc) = sub_info.doc() {
                                                         text.push_str(&format!("\n\n{}", doc));
@@ -94,7 +142,7 @@ impl FileAnalysis {
                     // calls match on the bare tail (symbols are keyed by
                     // bare name); the `Function` binding pins the package.
                     if let Some(sid) = self
-                        .package_scoped_callable(r.unqualified_target_name(), r.resolved_package())
+                        .package_scoped_callable(r.unqualified_target_name(self.names()), r.resolved_package())
                     {
                         return Some(self.format_symbol_hover(self.symbol(sid), source, module_index));
                     }
@@ -123,7 +171,7 @@ impl FileAnalysis {
                                 .join(", ");
                             let mut sig = format!("sub {}({})", r.target_name, sig_params);
                             if let Some(rt) = sub_info.return_type(Some(idx)) {
-                                sig.push_str(&format!(" → {}", format_inferred_type(&rt)));
+                                sig.push_str(&format!(" → {}", self.render_type(&rt)));
                             }
                             let mut text = format!("```perl\n{}\n```", sig);
                             if let Some(doc) = sub_info.doc() {
@@ -150,7 +198,7 @@ impl FileAnalysis {
                     // refs_to read, so hover never diverges.
                     let class_name = r.method_target().map(|t| t.invocant_class().to_string());
                     // The bare method name (FQ `$o->Foo::Bar::m` resolves `m`).
-                    let method = r.unqualified_target_name();
+                    let method = r.unqualified_target_name(self.names());
                     if let Some(ref cn) = class_name {
                         match self.resolve_method_in_ancestors(cn, method, module_index) {
                             Some(MethodResolution::Local { sym_id, class: ref defining_class, .. }) => {
@@ -163,11 +211,11 @@ impl FileAnalysis {
                                 };
                                 let mut text = format!("```perl\n{}\n```\n\n*class {}*", line.trim(), class_label);
                                 if let Some(ref rt) = self.find_method_return_type(cn, method, module_index, None) {
-                                    text.push_str(&format!("\n\n*returns: {}*", format_inferred_type(&rt)));
+                                    text.push_str(&format!("\n\n*returns: {}*", self.render_type(&rt)));
                                 }
                                 return Some(text);
                             }
-                            Some(MethodResolution::CrossFile { ref class, ref def_module }) => {
+                            Some(MethodResolution::CrossFile { ref class, ref def_module, .. }) => {
                                 if let Some(idx) = module_index {
                                     // Bridged helper lives in `def_module`; real
                                     // inherited method in `class`'s own module.
@@ -187,7 +235,7 @@ impl FileAnalysis {
                                             let sig = format_cross_file_signature(method, &sub_info);
                                             let mut text = format!("```perl\n{}\n```\n\n*class {}*", sig, class_label);
                                             if let Some(rt) = sub_info.return_type(Some(idx)) {
-                                                text.push_str(&format!("\n\n*returns: {}*", format_inferred_type(&rt)));
+                                                text.push_str(&format!("\n\n*returns: {}*", self.render_type(&rt)));
                                             }
                                             if let Some(doc) = sub_info.doc() {
                                                 text.push_str(&format!("\n\n{}", doc));
@@ -208,10 +256,40 @@ impl FileAnalysis {
                         }
                     }
                 }
+                RefKind::FieldAccess { .. } => {
+                    let cn = r.method_target().map(|t| t.invocant_class().to_string());
+                    let member = r.unqualified_target_name(self.names());
+                    if let Some(ref cn) = cn {
+                        match self.resolve_field_in_ancestors(cn, member, module_index) {
+                            Some(MethodResolution::Local { sym_id, .. }) => {
+                                let sym = self.symbol(sym_id);
+                                return Some(self.format_symbol_hover(sym, source, module_index));
+                            }
+                            Some(MethodResolution::CrossFile { ref class, .. }) => {
+                                let idx = module_index?;
+                                for cached in idx.visible_def_candidates(class) {
+                                    let whole = idx.whole_present(&cached);
+                                    let Some(sym) = whole.symbols().iter().find(|s| {
+                                        !matches!(s.kind, SymKind::Sub | SymKind::Method)
+                                            && s.name == member
+                                            && s.package.as_deref() == Some(class.as_str())
+                                            && whole.symbol_is_class_content(s)
+                                    }) else {
+                                        continue;
+                                    };
+                                    return Some(whole.format_symbol_hover(sym, "", Some(idx)));
+                                }
+                            }
+                            None => {}
+                        }
+                    }
+                    return None;
+                }
                 RefKind::PackageRef => {
-                    for &sid in self.symbols_named(&r.target_name) {
+                    let identity = self.spelled_identity(r);
+                    for &sid in self.symbols_named(&identity) {
                         let sym = self.symbol(sid);
-                        if matches!(sym.kind, SymKind::Package | SymKind::Class) {
+                        if matches!(sym.kind, SymKind::Package | SymKind::Class) && sym.name == identity {
                             return Some(self.format_symbol_hover(sym, source, module_index));
                         }
                     }
@@ -277,7 +355,7 @@ impl FileAnalysis {
         let render = |analysis: &FileAnalysis, sym: &Symbol| {
             let base = match analysis.inferred_type_via_bag_ctx(field, sym.span.end, module_index)
             {
-                Some(ty) => format!("{}: {}", field, sym.display_type(&ty)),
+                Some(ty) => format!("{}: {}", field, self.display_type_of(sym, &ty)),
                 None => field.to_string(),
             };
             // A union member shares storage with its siblings — surface the
@@ -326,6 +404,10 @@ impl FileAnalysis {
     ) -> String {
         let class = match owner {
             HandlerOwner::Class(n) => n.as_str(),
+            // A rail has no class to gather stacked registrations under;
+            // the header renders and the class-keyed gathers below find
+            // nothing.
+            HandlerOwner::Rail(_) => "",
         };
 
         // Gather stacked registrations from this file first, then any
@@ -480,7 +562,7 @@ impl FileAnalysis {
                 .inferred_type_via_bag_ctx(&sym.name, at, module_index)
                 .filter(InferredType::is_known)
             {
-                text.push_str(&format!("\n\n*type: {}*", format_inferred_type(&it)));
+                text.push_str(&format!("\n\n*type: {}*", self.render_type(&it)));
             }
         }
 
@@ -495,7 +577,7 @@ impl FileAnalysis {
             }
             if let SymbolDetail::Sub { ref doc, .. } = sym.detail {
                 if let Some(rt) = self.symbol_return_type_via_bag(sym.id, None) {
-                    text.push_str(&format!("\n\n*returns: {}*", format_inferred_type(&rt)));
+                    text.push_str(&format!("\n\n*returns: {}*", self.render_type(&rt)));
                 }
                 if let Some(d) = doc {
                     text.push_str(&format!("\n\n{}", d));

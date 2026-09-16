@@ -115,36 +115,22 @@ pub struct FrameworkAwareTypeFold;
 /// `ClassName` / `ClassAssertion`, its source priority, and WHERE it was
 /// made. Identity dominates rep, so this axis answers ahead of the plain
 /// axis — which is why it has to be retired explicitly: a plain-type write
-/// at or after it is a newer value, and without the retire `my $x =
-/// Foo->new; $x = 'str'` reads `Foo` forever. One owner for the three
-/// fields, so the two set sites and the one retire site cannot drift.
+/// Retirement is the reset cutoff's job (`my $x = Foo->new; $x = 'str'`
+/// reads `String` because the rebind's marker kills the assertion before
+/// it), never a comparison of the newcomer against the class: a deref's
+/// bare `HashRef` and an assignment's are the same value, and only the
+/// marker tells a write from an observation.
 #[derive(Default)]
 struct ClassIdentity {
     name: Option<String>,
     priority: u8,
-    at: Point,
 }
 
 impl ClassIdentity {
-    fn assert(&mut self, name: &str, priority: u8, at: Point) {
+    fn assert(&mut self, name: &str, priority: u8) {
         if priority >= self.priority {
             self.name = Some(name.to_string());
             self.priority = priority;
-            self.at = at;
-        }
-    }
-
-    /// A plain-type write at or after the standing identity, at no lower
-    /// priority, retires it — unless the class subsumes the newcomer: a
-    /// deref's bare `HashRef` reveals representation, not a new value.
-    fn retire_if_superseded(&mut self, newcomer: &InferredType, priority: u8, at: Point) {
-        let superseded = self.name.as_ref().is_some_and(|c| {
-            priority >= self.priority
-                && at >= self.at
-                && !InferredType::ClassName(c.clone()).subsumes_narrowing(newcomer)
-        });
-        if superseded {
-            self.name = None;
         }
     }
 }
@@ -160,7 +146,7 @@ impl WitnessReducer for FrameworkAwareTypeFold {
             WitnessAttachment::Variable { .. } | WitnessAttachment::Expression(_)
         ) && matches!(
             w.payload,
-            WitnessPayload::InferredType(_) | WitnessPayload::Observation(_)
+            WitnessPayload::InferredType(_) | WitnessPayload::Observation(_) | WitnessPayload::Reset
         )
     }
 
@@ -180,12 +166,19 @@ impl WitnessReducer for FrameworkAwareTypeFold {
         // InferredType witness containing it (already post-narrowing).
         // Falls through to the full fold otherwise.
         if let Some(point) = narrow_point {
+            // Source priority first (an annotation outranks a flow guess
+            // sharing the same class-wide extent), narrowest span second.
             let mut narrow: Option<(&Witness, u64)> = None;
             for w in ws {
                 if let WitnessPayload::InferredType(_) = w.payload {
                     if span_contains(&w.span, point) && !span_is_zero(&w.span) {
                         let area = span_area(&w.span);
-                        if narrow.map(|(_, a)| area < a).unwrap_or(true) {
+                        let prio = w.source.priority();
+                        let better = narrow.is_none_or(|(nw, a)| {
+                            let np = nw.source.priority();
+                            prio > np || (prio == np && area < a)
+                        });
+                        if better {
                             narrow = Some((*w, area));
                         }
                     }
@@ -218,6 +211,34 @@ impl WitnessReducer for FrameworkAwareTypeFold {
         let mut re = false;
         let mut plain_type: Option<InferredType> = None;
         let mut plain_type_priority: u8 = 0;
+        let mut plain_type_at: Option<Point> = None;
+        // Where a rep / scalar-context observation last landed: evidence
+        // after a reset revives the variable through those axes.
+        let mut last_observation_at: Option<Point> = None;
+
+        // A write (`WitnessPayload::Reset`, zero-width at the write's site —
+        // a declaration or a plain assignment) is a temporal RESET: at the
+        // query point every belief strictly before the latest one is dead —
+        // the class axis included, which otherwise wins in any order, so
+        // `$r = Foo->new; $r = {}` reads the hash. Facts anchored at the
+        // site survive; what lands after accrues. A first write in a scope
+        // resets nothing and is not a value.
+        let in_window = |w: &Witness| narrow_point.is_none_or(|p| w.span.start <= p);
+        // "Bound before" counts an earlier WRITE as a binding whatever it
+        // produced: a write whose RHS nothing typed leaves only its own
+        // marker behind, and the next write still replaces something.
+        let bound_before = |site: Point| {
+            ws.iter().filter(|w| in_window(w)).any(|w| {
+                w.span.start < site
+                    && (w.payload.binds_value() || matches!(w.payload, WitnessPayload::Reset))
+            })
+        };
+        let reset_at = ws
+            .iter()
+            .filter(|w| in_window(w))
+            .filter(|w| matches!(w.payload, WitnessPayload::Reset))
+            .map(|w| w.span.start)
+            .max();
 
         for w in ws {
             // Temporal ordering: only consider witnesses emitted at or
@@ -227,6 +248,9 @@ impl WitnessReducer for FrameworkAwareTypeFold {
                 if w.span.start > point {
                     continue;
                 }
+            }
+            if reset_at.is_some_and(|r| w.span.start < r) {
+                continue;
             }
             // Skip scoped InferredType witnesses that don't contain the
             // query point — narrowing facts for a different slice of the
@@ -240,14 +264,14 @@ impl WitnessReducer for FrameworkAwareTypeFold {
             match &w.payload {
                 WitnessPayload::InferredType(t) => match t {
                     InferredType::ClassName(name) => {
-                        class_assertion.assert(name, prio, w.span.start);
+                        class_assertion.assert(name, prio);
                     }
                     InferredType::FirstParam { package } => {
                         first_param_class = Some(package.clone())
                     }
                     b @ InferredType::BrandedRoute { .. } => branded = Some(b.clone()),
                     // Source priority breaks ties first (an EXPLICIT
-                    // annotation — `ANNOT_SOURCE`, priority 20 — governs over
+                    // annotation — `Annotation`, priority 20 — governs over
                     // an inferred flow type, priority 10, whatever the order
                     // they land in): the C++ `T x = {…}` braced-init case,
                     // where the initializer's `Numeric` flow witness would
@@ -266,27 +290,57 @@ impl WitnessReducer for FrameworkAwareTypeFold {
                         if prio > plain_type_priority || (prio == plain_type_priority && !subsumed) {
                             plain_type = Some(other.clone());
                             plain_type_priority = prio;
-                            class_assertion.retire_if_superseded(other, prio, w.span.start);
+                            plain_type_at = Some(w.span.start);
                         }
                     }
                 },
-                WitnessPayload::Observation(obs) => match obs {
-                    TypeObservation::ClassAssertion(name) => {
-                        class_assertion.assert(name, prio, w.span.start);
+                // A reset's `Unknown` has supremacy over its PAST only: it
+                // never displaces a typed value at or after its own site (the
+                // write's RHS, or a later write), and a write that retired
+                // nothing is not a value at all.
+                WitnessPayload::Reset => {
+                    let stands = plain_type_at.is_some_and(|at| at >= w.span.start);
+                    if !stands && bound_before(w.span.start) {
+                        plain_type = Some(InferredType::Unknown);
+                        plain_type_priority = prio;
+                        plain_type_at = Some(w.span.start);
                     }
-                    TypeObservation::FirstParamInMethod { package } => {
-                        first_param_class = Some(package.clone())
+                }
+                WitnessPayload::Observation(obs) => {
+                    match obs {
+                        TypeObservation::ClassAssertion(name) => {
+                            class_assertion.assert(name, prio);
+                        }
+                        TypeObservation::FirstParamInMethod { package } => {
+                            first_param_class = Some(package.clone())
+                        }
+                        TypeObservation::HashRefAccess => rep_obs = merge_rep(rep_obs, Rep::Hash),
+                        TypeObservation::ArrayRefAccess => rep_obs = merge_rep(rep_obs, Rep::Array),
+                        TypeObservation::CodeRefInvocation => rep_obs = merge_rep(rep_obs, Rep::Code),
+                        TypeObservation::BlessTarget(r) => bless_rep = Some(*r),
+                        TypeObservation::NumericUse => num = true,
+                        TypeObservation::StringUse => str_ = true,
+                        TypeObservation::RegexpUse => re = true,
                     }
-                    TypeObservation::HashRefAccess => rep_obs = merge_rep(rep_obs, Rep::Hash),
-                    TypeObservation::ArrayRefAccess => rep_obs = merge_rep(rep_obs, Rep::Array),
-                    TypeObservation::CodeRefInvocation => rep_obs = merge_rep(rep_obs, Rep::Code),
-                    TypeObservation::BlessTarget(r) => bless_rep = Some(*r),
-                    TypeObservation::NumericUse => num = true,
-                    TypeObservation::StringUse => str_ = true,
-                    TypeObservation::RegexpUse => re = true,
-                },
+                    if !matches!(
+                        obs,
+                        TypeObservation::ClassAssertion(_) | TypeObservation::FirstParamInMethod { .. }
+                    ) {
+                        last_observation_at = last_observation_at.max(Some(w.span.start));
+                    }
+                }
                 _ => {}
             }
+        }
+        // An `Unknown` on the plain axis (a reset the RHS never typed, a
+        // join approximation) yields to rep and scalar-context evidence that
+        // lands strictly after it: `$r = f(); $r->{k}` reads the hash. An
+        // annotation-priority `Unknown` is a claim and keeps its place.
+        if matches!(plain_type, Some(InferredType::Unknown))
+            && plain_type_priority <= WitnessSource::Builder(String::new()).priority()
+            && last_observation_at > plain_type_at
+        {
+            plain_type = None;
         }
 
         // A branded route dominates the bare-class companion: the
@@ -294,7 +348,6 @@ impl WitnessReducer for FrameworkAwareTypeFold {
         if let Some(b) = branded {
             return ReducedValue::Type(b);
         }
-
         // Class axis wins when consistent with the rep axis. On
         // contradiction or unknown rep, still return the class — the
         // user's intent is object-typed use; a rep mismatch is a
@@ -345,6 +398,11 @@ impl WitnessReducer for FrameworkAwareTypeFold {
             return ReducedValue::Type(InferredType::String);
         }
 
+        // A write that retired something and was never displaced is the
+        // answer; a first write (a declaration nothing typed) is absence.
+        if reset_at.is_some_and(bound_before) {
+            return ReducedValue::Type(InferredType::Unknown);
+        }
         ReducedValue::None
     }
 }
@@ -724,6 +782,67 @@ impl WitnessReducer for TypeNameReducer {
     }
 }
 
+// ---- Field value ----
+//
+// Claims `Field{owner, name}` carrying a materialized `InferredType` — the
+// storage slot's value edge (`Edge(Variable{decl})`, pushed per field
+// declaration) after `materialize` chased it. Latest wins: the declaring
+// file's `Variable` fold already ranked annotation over assignment.
+
+pub struct FieldValueReducer;
+
+impl WitnessReducer for FieldValueReducer {
+    fn name(&self) -> &str {
+        "field_value"
+    }
+
+    fn claims(&self, w: &Witness) -> bool {
+        matches!(w.attachment, WitnessAttachment::Field { .. })
+            && matches!(w.payload, WitnessPayload::InferredType(_))
+    }
+
+    fn reduce(&self, ws: &[&Witness], _q: &ReducerQuery) -> ReducedValue {
+        for w in ws.iter().rev() {
+            if let WitnessPayload::InferredType(t) = &w.payload {
+                return ReducedValue::Type(t.clone());
+            }
+        }
+        ReducedValue::None
+    }
+}
+
+// ---- Parameter binding ----
+//
+// Claims `Param{package, name, index}` carrying a materialized
+// `InferredType` — the by-reference parameter's aliasing edge
+// (`Edge(Variable{param, body_scope})`) after `materialize` chased it.
+// Latest wins: what the callee last left in the parameter is what the
+// caller's variable holds after the call. The bound-but-untyped answer
+// (`Unknown`) is the registry's, not this reducer's — it needs the raw
+// bag to tell "edge that resolved to nothing" from "no edge".
+
+pub struct ParamBindingReducer;
+
+impl WitnessReducer for ParamBindingReducer {
+    fn name(&self) -> &str {
+        "param_binding"
+    }
+
+    fn claims(&self, w: &Witness) -> bool {
+        matches!(w.attachment, WitnessAttachment::Param { .. })
+            && matches!(w.payload, WitnessPayload::InferredType(_))
+    }
+
+    fn reduce(&self, ws: &[&Witness], _q: &ReducerQuery) -> ReducedValue {
+        for w in ws.iter().rev() {
+            if let WitnessPayload::InferredType(t) = &w.payload {
+                return ReducedValue::Type(t.clone());
+            }
+        }
+        ReducedValue::None
+    }
+}
+
 // ---- Domain-coherence fold (int-used-as-enum) ----
 //
 // Claims `Field{owner, name}` carrying `DomainCompare{enum_type}` — the
@@ -736,9 +855,11 @@ impl WitnessReducer for TypeNameReducer {
 // verdict never depends on witness-push order or HashMap iteration.
 //
 // The domain is defeasible — it refines the human surfaces (hover / the
-// navigation bridge), never the storage type that flows. Nothing on the
-// flow axis (Variable/Expr/Symbol/PackageSymbol) queries `Field`, so
-// returning the domain as a `ClassName` here can't leak into flow typing.
+// navigation bridge), never the storage type that flows. The flow axis
+// reaches `Field` only through a `ValueHop`, and `FieldValueReducer` is
+// registered ahead of this fold, so a slot with a value edge answers its
+// storage type before the vote is consulted; the vote itself is asked only
+// by `field_domain_for_owner`, over a private bag of `DomainCompare`.
 
 pub struct DomainCoherenceFold;
 
@@ -827,7 +948,7 @@ impl WitnessReducer for PluginOverrideReducer {
     fn claims(&self, w: &Witness) -> bool {
         matches!(w.attachment, WitnessAttachment::Symbol(_))
             && matches!(w.payload, WitnessPayload::InferredType(_))
-            && w.source.priority() > 10
+            && w.source.outranks_inference()
     }
 
     fn reduce(&self, ws: &[&Witness], _q: &ReducerQuery) -> ReducedValue {

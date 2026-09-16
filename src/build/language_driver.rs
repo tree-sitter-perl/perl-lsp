@@ -866,6 +866,7 @@ fn inject_member_blocks(
             kind: ScopeKind::Class { name: base.macro_name.clone() },
             span: base.body_scope_span,
             package: Some(base.macro_name.clone()),
+            owner: None,
         });
         skel.scope_count = skel.scopes.len();
         for m in &base.members {
@@ -890,7 +891,7 @@ fn inject_member_blocks(
             });
             // The role member emits the SAME `TypeName` edge an expanded field
             // does — the edge is canonical (the hover leaf + the type chase
-            // resolve `op_type` → `unsigned short`). Tagged `ANNOT_SOURCE` (the
+            // resolve `op_type` → `unsigned short`). Tagged `Annotation(Declared)` (the
             // explicit-annotation source a plain field's declared type carries)
             // so priority and inlay suppression match field-for-field.
             let payload = match annot_type(&m.type_text) {
@@ -903,7 +904,7 @@ fn inject_member_blocks(
             if let Some(payload) = payload {
                 skel.witnesses.push(Witness {
                     attachment: WitnessAttachment::Variable { name: m.name.clone(), scope: scope_id },
-                    source: WitnessSource::Builder(crate::model::witnesses::ANNOT_SOURCE.into()),
+                    source: WitnessSource::Annotation(crate::model::witnesses::AnnotationKind::Declared),
                     payload,
                     span: m.name_span,
                 });
@@ -938,8 +939,9 @@ fn stamp_access_regions(fa: &mut FileAnalysis, regions: &[crate::build::cpp_repa
                 (s.end.row - s.start.row, s.end.column.saturating_sub(s.start.column))
             })
             .is_some_and(|r| r.non_public);
-        if non_public && !sym.attributes.iter().any(|a| a == "non_public") {
+        if non_public && !sym.flags.contains(crate::model::file_analysis::SymbolFlags::NON_PUBLIC) {
             sym.attributes.push("non_public".to_string());
+            sym.flags.insert(crate::model::file_analysis::SymbolFlags::NON_PUBLIC);
         }
     }
 }
@@ -1218,6 +1220,7 @@ fn remap_spans(
         param_sigs,
         // Populated later (enrich_skeleton) already in original coords — no remap.
         macro_body_member_reads: _,
+        names: _,
     } = skel;
 
     for s in symbols.iter_mut() {
@@ -1321,6 +1324,7 @@ fn remap_spans(
             target_at,
             source,
             extraction: _,
+            reassigns: _,
         } = fe;
         *target_at = r(*target_at);
         *source = rspan(*source);

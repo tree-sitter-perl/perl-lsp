@@ -507,8 +507,7 @@ fn resolve_node_type(
                             &InferredType::ClassName(class),
                             name,
                             module_index,
-                            None,
-                        )
+                            None)
                     })
                 {
                     return Some(t);

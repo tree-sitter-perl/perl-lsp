@@ -17,6 +17,57 @@ impl FileAnalysis {
         self.symbol_return_type_via_bag_ctx(sym_id, arg_count, None)
     }
 
+    /// The edit that imports `fq` for a use at `row`: the pack's
+    /// `import_template` inserted after the last import row above the site,
+    /// else after the package/namespace line, else after the preamble —
+    /// `(insertion point, text)`. `None` when the pack has no import form.
+    pub fn import_edit_for(&self, fq: &str, row: usize) -> Option<(Point, String)> {
+        let template = self.pack.import_template.as_str();
+        if template.is_empty() {
+            return None;
+        }
+        let (line, lead) = match self.pack.import_insertion_line(row) {
+            Some(l) => (l, ""),
+            None => {
+                let after_package = self
+                    .symbols()
+                    .iter()
+                    .filter(|s| matches!(s.kind, SymKind::Package) && s.selection_span.start.row < row)
+                    .map(|s| s.selection_span.end.row + 1)
+                    .max();
+                match after_package {
+                    Some(l) => (l, "\n"),
+                    None => (self.pack.preamble_end.map_or(1, |r| r + 1), "\n"),
+                }
+            }
+        };
+        let stmt = template.replace("{}", fq);
+        Some((Point { row: line, column: 0 }, format!("{lead}{stmt}")))
+    }
+
+    /// The inferred return ONLY when every return arm accounts for it: each
+    /// arm's expression carries a witness and none of them is `null`. The
+    /// arm fold drops an untyped or null arm and answers from the rest,
+    /// which is right for a hover and wrong for anything that would WRITE
+    /// the type (`string` over `return "a"; … return null;`).
+    pub fn total_inferred_return(&self, sym_id: SymbolId) -> Option<InferredType> {
+        use crate::model::witnesses::{WitnessAttachment as WA, WitnessPayload as WP};
+        let arms = self.witnesses.for_attachment(&WA::SymbolReturnArm(sym_id));
+        if arms.is_empty() {
+            return None;
+        }
+        for arm in &arms {
+            let WP::Edge(WA::Expr(span)) = &arm.payload else { return None };
+            let at = self.witnesses.for_attachment(&WA::Expr(*span));
+            if at.is_empty()
+                || at.iter().any(|w| matches!(w.payload, WP::InferredType(InferredType::Undef)))
+            {
+                return None;
+            }
+        }
+        self.symbol_return_type_via_bag(sym_id, None)
+    }
+
     /// As `symbol_return_type_via_bag`, but with a `ModuleIndex` so the
     /// reducer chase can cross module boundaries — the sub's body may return
     /// a value typed by a cross-file method chain (`my $m = Foo->new->bar; …;
@@ -185,7 +236,7 @@ impl FileAnalysis {
             if opaque {
                 return String::new();
             }
-            format!("{} → {}", base, format_inferred_type(&rt))
+            format!("{} → {}", base, self.render_type(&rt))
         } else {
             base
         }
@@ -258,6 +309,7 @@ impl FileAnalysis {
                 candidates.push(CompletionCandidate {
                     label: "new".to_string(),
                     kind: SymKind::Method,
+                    is_static: false,
                     detail: Some(self.method_detail(class_name, "new", None, module_index)),
                     insert_text: None,
                     sort_priority: PRIORITY_LOCAL,
@@ -314,32 +366,64 @@ impl FileAnalysis {
         for sym in &self.symbols {
             if matches!(sym.kind, SymKind::Variable | SymKind::Field)
                 && self.symbol_in_class(sym.id, cls)
-                && !self
-                    .pack.param_regions
-                    .iter()
-                    .any(|pr| contains(pr, &sym.selection_span))
-                // the class body itself, or a nested container body inside it
-                // (an inline union's members complete flat on the struct) —
-                // but never a method body (its locals carry the sticky class
-                // package too; the Sub boundary is what marks them locals).
-                && class_body.is_none_or(|cb| {
-                    self.scope_chain(sym.scope).contains(&cb)
-                        && !self.scope_within_sub_body(sym.scope)
-                })
+                // A Field is class content BY KIND — extraction only mints it
+                // for real data members, and constructor promotion (php
+                // `__construct(public string $name)`) legitimately places one
+                // inside a sub body and a param region, so the locals gates
+                // below apply to Variables only.
+                && (matches!(sym.kind, SymKind::Field)
+                    || (!self
+                        .pack
+                        .param_regions
+                        .iter()
+                        .any(|pr| contains(pr, &sym.selection_span))
+                        // the class body itself, or a nested container body
+                        // inside it (an inline union's members complete flat
+                        // on the struct) — but never a method body (its
+                        // locals carry the sticky class package too; the Sub
+                        // boundary is what marks them locals).
+                        && class_body.is_none_or(|cb| {
+                            self.scope_chain(sym.scope).contains(&cb)
+                                && !self.scope_within_sub_body(sym.scope)
+                        })))
                 && !self.pack.receiver_names.contains(&sym.name)
                 // an anonymous container (`(union)`) is structure, not an
                 // addressable member
-                && !sym.attributes.iter().any(|a| a == "anonymous")
+                && !sym.flags.contains(SymbolFlags::ANONYMOUS)
                 // access-specifier gate: a non-public member
                 // completes only from inside its OWN class's lexical body —
                 // two-state (friend/protected-via-inheritance not modeled).
                 && (requesting_class == Some(cls)
-                    || !sym.attributes.iter().any(|a| a == "non_public"))
+                    || !sym.flags.contains(SymbolFlags::NON_PUBLIC))
                 && seen.insert(sym.name.clone())
             {
                 candidates.push(CompletionCandidate {
                     label: sym.name.clone(),
                     kind: sym.kind,
+                    is_static: sym.flags.contains(SymbolFlags::STATIC),
+                    detail: None,
+                    insert_text: None,
+                    sort_priority: PRIORITY_LOCAL,
+                    additional_edits: vec![],
+                    import_fact: None,
+                    display_override: None,
+                });
+            }
+        }
+        // Class constants and enum cases (`SymKind::Enumerator`, the
+        // extraction's "const"/"enumerator" flattened): `self::LIMIT`,
+        // `Level::Debug` — members a scoped access completes, under the
+        // same access gate.
+        for sym in &self.symbols {
+            if matches!(sym.kind, SymKind::Enumerator)
+                && self.symbol_in_class(sym.id, cls)
+                && (requesting_class == Some(cls) || !sym.flags.contains(SymbolFlags::NON_PUBLIC))
+                && seen.insert(sym.name.clone())
+            {
+                candidates.push(CompletionCandidate {
+                    label: sym.name.clone(),
+                    kind: sym.kind,
+                    is_static: sym.flags.contains(SymbolFlags::STATIC),
                     detail: None,
                     insert_text: None,
                     sort_priority: PRIORITY_LOCAL,
@@ -411,7 +495,7 @@ impl FileAnalysis {
         };
         self.symbols.iter().find(|c| {
             c.id != sym.id
-                && c.attributes.iter().any(|a| a == "union")
+                && c.flags.contains(SymbolFlags::UNION)
                 && Some(c.scope) == sc.parent
                 && contains(&c.span, &sc.span)
         })
@@ -452,7 +536,7 @@ impl FileAnalysis {
         field: &str,
         module_index: Option<&dyn CrossFileLookup>,
     ) -> Option<InferredType> {
-        match self.resolve_method_in_ancestors(class, field, module_index)? {
+        match self.resolve_field_in_ancestors(class, field, module_index)? {
             MethodResolution::Local { sym_id, .. } => {
                 self.inferred_type_via_bag(field, self.symbol(sym_id).span.end)
             }
@@ -595,9 +679,9 @@ impl FileAnalysis {
         module_index: Option<&dyn CrossFileLookup>,
     ) -> Option<crate::model::witnesses::WitnessAttachment> {
         let (class, name) = match &r.kind {
-            RefKind::MethodCall { .. } => {
+            RefKind::MethodCall { .. } | RefKind::FieldAccess { .. } => {
                 let class = self.method_call_invocant_class(r, module_index)?;
-                (class, r.unqualified_target_name().to_string())
+                (class, r.unqualified_target_name(self.names()).to_string())
             }
             RefKind::HashKeyAccess { .. } => {
                 let class = match r.hash_key_owner() {
@@ -900,7 +984,8 @@ impl FileAnalysis {
             let SymbolDetail::Handler { owner, dispatchers: dd, .. } = &sym.detail else {
                 return false;
             };
-            let HandlerOwner::Class(c) = owner;
+            // Global handlers have no owner class — receiver-typed lookups skip them.
+            let HandlerOwner::Class(c) = owner else { return false };
             if c != owner_class { return false; }
             if !dispatchers.is_empty()
                 && !dd.iter().any(|d| dispatchers.iter().any(|n| n == d))
@@ -972,8 +1057,233 @@ impl FileAnalysis {
                 .inferred_type_via_bag(text, point)
                 .and_then(|t| t.class_name().map(str::to_string)),
             InvocantText::NonScalar(_) => None,
-            InvocantText::Bareword(b) => Some(b.to_string()),
+            InvocantText::Bareword(b) => Some(self.class_spelling_identity(b)),
         }
     }
 
+    /// The namespace a class identity carries, for a use-map language: the
+    /// qualifier of the FQN, the global namespace spelled `""`. `None`
+    /// for a language whose spellings are identities as written, so a
+    /// consumer's origin-side ladder (pins, own namespace) still answers
+    /// there.
+    pub fn identity_namespace(&self, cls: &str) -> Option<String> {
+        self.pack.names.use_map_sep()?;
+        Some(split_qualified(cls, self.names()).0.unwrap_or_default().to_string())
+    }
+
+    /// The identity a class spelling written in this file names: the
+    /// use-map's answer for a namespace-separated pack, the spelling
+    /// itself otherwise (Perl's `Foo::Bar` is already its identity).
+    ///
+    /// Takes a WRITTEN spelling — a ref's `target_name`, an invocant
+    /// bareword — never an identity. Resolution is not idempotent: a
+    /// relative qualified spelling resolves its head through the file's
+    /// imports, so feeding it an FQN whose head collides with an import
+    /// alias re-qualifies it (`use_map_tests::resolve_is_not_idempotent`).
+    /// Symbols, parents and witnesses already carry identities (the
+    /// extractor resolves as it mints); only ref text is written.
+    pub fn class_spelling_identity(&self, written: &str) -> String {
+        match self.use_map() {
+            Some(map) => map.resolve(written),
+            None => written.to_string(),
+        }
+    }
+
+    /// The identity the class token of `r` names, as THIS file spells it:
+    /// a token inside one of the file's own import rows names the row's
+    /// class in full (`use A\B\Parser as X;` — `Parser` there is `A\B\Parser`,
+    /// never this file's own `Parser`); anywhere else the written spelling
+    /// resolves through the use-map. The one spelling→identity ladder the
+    /// PackageRef lanes (goto-def, hover, references) share.
+    pub fn spelled_identity(&self, r: &Ref) -> String {
+        match (self.pack.names.use_map_sep(), self.pack.import_row_covering(&r.span)) {
+            (Some(sep), Some((_, raw))) => raw.strip_prefix(sep).unwrap_or(raw).to_string(),
+            _ => self.class_spelling_identity(&r.target_name),
+        }
+    }
+
+    /// This file's own Package/Class declaration filed under `identity` —
+    /// an exact lookup, never a leaf match: for a namespaced pack the
+    /// symbol carries the FQN, for Perl the package name IS the identity.
+    pub fn find_type_decl(&self, identity: &str) -> Option<Span> {
+        self.symbols_named(identity)
+            .iter()
+            .map(|&sid| self.symbol(sid))
+            .find(|s| matches!(s.kind, SymKind::Package | SymKind::Class) && s.name == identity)
+            .map(|s| s.selection_span)
+    }
+
+    /// The namespace this file's own `class LEAF` declaration carries
+    /// (`None` package = the global namespace, spelled `""`). `None` when
+    /// the file declares no such class.
+    pub fn declared_class_namespace(&self, leaf: &str) -> Option<String> {
+        self.symbols()
+            .iter()
+            .find(|s| matches!(s.kind, SymKind::Class) && (s.name == leaf || name_match_key(&s.name, self.names()) == leaf))
+            .map(|s| s.package.clone().unwrap_or_default())
+    }
+
+    /// The namespace `leaf` means AS SEEN FROM this file — the use-map
+    /// pins' answer (`UseMapPins::namespace_of`: the file's own declaration,
+    /// its `use` rows with aliases honored, its qualified spellings, and its
+    /// own namespace for a leaf it spells bare). `None` = the file makes no
+    /// claim, and every consumer of the pin stands down.
+    pub fn leaf_namespace(&self, leaf: &str) -> Option<String> {
+        self.use_map_pins().namespace_of(leaf).map(str::to_string)
+    }
+
+    /// Is the import of `ns\leaf` bound under an alias in this file? Then
+    /// the file spells that class by the alias, and the real leaf means
+    /// something else here (its own class, or its namespace's).
+    fn import_is_aliased(&self, ns: &str, leaf: &str) -> bool {
+        self.pack
+            .use_aliases
+            .iter()
+            .any(|(_, ans, aleaf)| ans == ns && aleaf == leaf)
+    }
+
+    /// Every leaf→namespace pin this file carries — its own class
+    /// declarations plus its qualified imports — the table a use-map
+    /// visibility axis is built from (`UseMapPins`). A leaf with
+    /// CONFLICTING evidence (declared here AND imported bare from
+    /// elsewhere, or imported bare from two namespaces) pins to nothing —
+    /// a wrong pin is a silent wrong answer. An ALIASED import never
+    /// conflicts: it pins the alias spelling and adds its namespace to
+    /// `visible` for the real leaf (`use Support\Collection as
+    /// BaseCollection; class Collection extends BaseCollection` pins
+    /// `Collection` to this file's own class and keeps `Support` reachable
+    /// for the parent walk).
+    /// `spelled` is every leaf the file writes as a class token (type
+    /// positions, parent clauses, `new X`, `X::m()` receivers): the
+    /// own-namespace default applies to those alone, never to a leaf the
+    /// file only reaches through some other class's dispatch.
+    pub fn use_map_pins(&self) -> std::sync::Arc<UseMapPins> {
+        self.use_map_pins
+            .get_or_init(|| std::sync::Arc::new(self.leaf_namespace_pins()))
+            .clone()
+    }
+
+    /// This file's use-map resolver over its own namespace
+    /// (`own_namespace`); `use_map_with` takes the namespace from a caller
+    /// that already derived it.
+    pub fn use_map(&self) -> Option<UseMap<'_>> {
+        let pins = self
+            .use_map_pins
+            .get_or_init(|| std::sync::Arc::new(self.leaf_namespace_pins()));
+        self.use_map_with(pins.own_namespace.as_deref())
+    }
+
+    /// `None` for a language whose spellings are identities as written
+    /// (`ClassSpelling::Identity`): there is no map to resolve through.
+    fn use_map_with<'a>(&'a self, own_namespace: Option<&'a str>) -> Option<UseMap<'a>> {
+        Some(UseMap {
+            rows: &self.pack.include_directives,
+            aliases: &self.pack.use_aliases,
+            own_namespace,
+            sep: self.pack.names.use_map_sep()?,
+        })
+    }
+
+    fn leaf_namespace_pins(&self) -> UseMapPins {
+        let mut pins: std::collections::HashMap<String, Option<String>> =
+            std::collections::HashMap::new();
+        let pin = |pins: &mut std::collections::HashMap<String, Option<String>>,
+                       leaf: &str,
+                       ns: &str| {
+            pins.entry(leaf.to_string())
+                .and_modify(|p| {
+                    if p.as_deref() != Some(ns) {
+                        *p = None;
+                    }
+                })
+                .or_insert_with(|| Some(ns.to_string()));
+        };
+        // Import rows carry a namespace only for a use-map language; C's
+        // `#include` paths ride the same lane and pin nothing.
+        if let Some(sep) = self.pack.names.use_map_sep() {
+            for (_, raw) in &self.pack.include_directives {
+                let t = raw.strip_prefix(sep).unwrap_or(raw);
+                // A bare row (`use Exception;`) names the GLOBAL namespace: the
+                // empty pin keeps a same-leaf class of the file's own namespace
+                // from claiming the name.
+                let (ns, leaf) = t.rsplit_once(sep).unwrap_or(("", t));
+                if leaf.is_empty() {
+                    continue;
+                }
+                // An aliased row pins the alias spelling (below), never the
+                // real leaf: `use Script\Event as ScriptEvent` in a file
+                // whose bare `Event` is its own namespace's class.
+                if self.import_is_aliased(ns, leaf) {
+                    continue;
+                }
+                pin(&mut pins, leaf, ns);
+            }
+        }
+        let mut visible: std::collections::HashMap<String, Vec<String>> =
+            std::collections::HashMap::new();
+        for (alias, ns, leaf) in &self.pack.use_aliases {
+            pin(&mut pins, alias, ns);
+            let v = visible.entry(leaf.clone()).or_default();
+            if !v.contains(ns) {
+                v.push(ns.clone());
+            }
+        }
+        let mut own: Option<String> = None;
+        let mut several = false;
+        for s in self.symbols().iter() {
+            match s.kind {
+                SymKind::Class => {
+                    // the symbol is filed under its identity (the FQN for a
+                    // namespaced pack); the pin is keyed by the leaf it binds
+                    let ns = s.package.clone().unwrap_or_default();
+                    pin(&mut pins, &name_match_key(&s.name, self.names()), &ns);
+                }
+                SymKind::Package => {
+                    if own.as_deref().is_some_and(|o| o != s.name) {
+                        several = true;
+                    }
+                    own.get_or_insert_with(|| s.name.clone());
+                }
+                _ => {}
+            }
+        }
+        let own_ns = if several { None } else { own.clone() };
+        // A qualified spelling names its namespace outright — the use-map
+        // resolver's answer for the whole spelling, split back to the pin's
+        // (namespace, leaf) shape.
+        if let Some(map) = self.use_map_with(own_ns.as_deref()) {
+            for (leaf, prefix) in &self.pack.qualified_spellings {
+                let (ns, _) = map.resolve_split(&format!("{prefix}{}{leaf}", map.sep));
+                pin(&mut pins, leaf, &ns);
+            }
+        }
+        let mut spelled: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for r in self.refs() {
+            // an import row's own leaf is not the file spelling the name
+            if self.pack.import_row_covering(&r.span).is_some() {
+                continue;
+            }
+            match &r.kind {
+                RefKind::PackageRef | RefKind::FunctionCall => {
+                    spelled.insert(r.unqualified_target_name(self.names()).to_string());
+                }
+                RefKind::MethodCall { invocant, .. } | RefKind::FieldAccess { invocant, .. } => {
+                    let t = invocant.text();
+                    if crate::model::conventions::is_bareword_class_name(t, self.names()) {
+                        spelled.insert(name_match_key(t, self.names()));
+                    }
+                }
+                _ => {}
+            }
+        }
+        for (leaf, ns) in &pins {
+            if let Some(ns) = ns {
+                let v = visible.entry(leaf.clone()).or_default();
+                if !v.contains(ns) {
+                    v.insert(0, ns.clone());
+                }
+            }
+        }
+        UseMapPins { pins, own_namespace: own_ns, spelled, visible, names: self.pack.names.clone() }
+    }
 }

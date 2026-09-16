@@ -141,7 +141,11 @@ pub fn resolve<'a>(
             origin,
             self_path.as_deref(),
             idx,
-            pack,
+            if pack {
+                crate::model::file_analysis::PackVisibility::IncludePaths
+            } else {
+                crate::model::file_analysis::PackVisibility::Host
+            },
         );
         crate::model::file_analysis::ScopedLookup::new(
             idx,

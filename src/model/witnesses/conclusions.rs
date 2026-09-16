@@ -732,7 +732,7 @@ pub fn bake_in_context(
 ) -> ConclusionMap {
     let _bake = BakeScope::enter();
     let mut map = HashMap::new();
-    let mut enumerate = |att: WitnessAttachment, map: &mut HashMap<_, _>| {
+    let enumerate = |att: WitnessAttachment, map: &mut HashMap<_, _>| {
         let Some(key) = ConclusionKey::from_attachment(&att) else {
             return;
         };

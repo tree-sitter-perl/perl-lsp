@@ -10,13 +10,13 @@ const SCHEMA_VERSION: &str = "10";
 /// Bumped when the builder's analysis output changes shape in a way that
 /// invalidates cached blobs. Unlike `SCHEMA_VERSION`, this does not drop
 /// the table — stale entries are re-resolved lazily with priority.
-pub const EXTRACT_VERSION: i64 = 197;
+pub const EXTRACT_VERSION: i64 = 208;
 
 /// Bumped when the ROW format of the relational ref index changes shape.
 /// Unlike `EXTRACT_VERSION` (which governs the blobs), a mismatch only wipes
 /// the derived `refs`/`files`/`strings` tables — the blobs stay valid and the
 /// next warm re-shreds rows from the already-decoded analyses for free.
-pub(super) const REF_ROWS_VERSION: &str = "6";
+pub(super) const REF_ROWS_VERSION: &str = "8";
 
 /// Row format of the `conclusions` lane. Bump on any change to the row's
 /// SHAPE or to what its stamp means.
@@ -186,7 +186,8 @@ pub fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
         );
         CREATE INDEX IF NOT EXISTS idx_syms_name ON syms(name_id);
         CREATE INDEX IF NOT EXISTS idx_syms_key ON syms(key_id);
-        CREATE INDEX IF NOT EXISTS idx_syms_file ON syms(file_id);
+        CREATE INDEX IF NOT EXISTS idx_syms_file_name ON syms(file_id, name_id, container_id);
+        CREATE INDEX IF NOT EXISTS idx_syms_file_key ON syms(file_id, key_id, container_id);
         CREATE TABLE IF NOT EXISTS conclusions (
             path       TEXT NOT NULL,
             generation INTEGER NOT NULL,
@@ -271,7 +272,8 @@ pub fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
              );
              CREATE INDEX idx_syms_name ON syms(name_id);
              CREATE INDEX idx_syms_key ON syms(key_id);
-             CREATE INDEX idx_syms_file ON syms(file_id);",
+             CREATE INDEX idx_syms_file_name ON syms(file_id, name_id, container_id);
+             CREATE INDEX idx_syms_file_key ON syms(file_id, key_id, container_id);",
         )?;
         conn.execute(
             "INSERT OR REPLACE INTO meta (key, value) VALUES ('ref_rows_version', ?1)",

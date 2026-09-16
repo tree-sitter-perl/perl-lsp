@@ -30,6 +30,7 @@ fn test_refs_to_finds_sub_across_workspace_files() {
         &store,
         None,
         &TargetRef {
+            names: crate::model::conventions::PERL_SPELLINGS,
             name: "foo".to_string(),
             kind: TargetKind::Sub {
                 package: Some("A".to_string()),
@@ -79,6 +80,7 @@ fn test_refs_to_exporter_extensible_cross_file() {
         &store,
         None,
         &TargetRef {
+            names: crate::model::conventions::PERL_SPELLINGS,
             name: "foo".to_string(),
             kind: TargetKind::Sub { package: Some("Ext".to_string()) },
             method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), bare_constant: false,
@@ -118,6 +120,7 @@ fn test_refs_to_exporter_declare_cross_file() {
         &store,
         None,
         &TargetRef {
+            names: crate::model::conventions::PERL_SPELLINGS,
             name: "foo".to_string(),
             kind: TargetKind::Sub { package: Some("Decl".to_string()) },
             method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), bare_constant: false,
@@ -157,6 +160,7 @@ fn test_refs_to_importer_consumer_cross_file() {
         &store,
         None,
         &TargetRef {
+            names: crate::model::conventions::PERL_SPELLINGS,
             name: "foo".to_string(),
             kind: TargetKind::Sub { package: Some("Src::Mod".to_string()) },
             method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), bare_constant: false,
@@ -189,6 +193,7 @@ fn test_refs_to_export_not_registered_without_use() {
         &store,
         None,
         &TargetRef {
+            names: crate::model::conventions::PERL_SPELLINGS,
             name: "phantom".to_string(),
             kind: TargetKind::Sub { package: Some("Plain".to_string()) },
             method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), bare_constant: false,
@@ -226,6 +231,7 @@ $app->routes->post('/users')->to(controller => 'Users', action => 'create');
         &store,
         None,
         &TargetRef {
+            names: crate::model::conventions::PERL_SPELLINGS,
             name: "create".to_string(),
             kind: TargetKind::Method {
                 class: "Mojolicious::Controller::_Helper::users".to_string(),
@@ -254,6 +260,7 @@ $app->routes->post('/users')->to(controller => 'Users', action => 'create');
         &store,
         None,
         &TargetRef {
+            names: crate::model::conventions::PERL_SPELLINGS,
             name: "create".to_string(),
             kind: TargetKind::Method {
                 class: "Users".to_string(),
@@ -308,6 +315,7 @@ $b->run;
         &store,
         None,
         &TargetRef {
+            names: crate::model::conventions::PERL_SPELLINGS,
             name: "run".to_string(),
             kind: TargetKind::Method {
                 class: "Foo".to_string(),
@@ -344,6 +352,7 @@ $b->run;
         &store,
         None,
         &TargetRef {
+            names: crate::model::conventions::PERL_SPELLINGS,
             name: "run".to_string(),
             kind: TargetKind::Method {
                 class: "Bar".to_string(),
@@ -406,6 +415,7 @@ sub run {
         &store,
         None,
         &TargetRef {
+            names: crate::model::conventions::PERL_SPELLINGS,
             name: "frobnicate".to_string(),
             kind: TargetKind::Method {
                 class: "Widget".to_string(),
@@ -467,6 +477,7 @@ sub run {
         &store,
         None,
         &TargetRef {
+            names: crate::model::conventions::PERL_SPELLINGS,
             name: "frobnicate".to_string(),
             kind: TargetKind::Method {
                 class: "Widget".to_string(),
@@ -590,6 +601,7 @@ Bler->new->hi;
         &store,
         None,
         &TargetRef {
+            names: crate::model::conventions::PERL_SPELLINGS,
             name: "hi".to_string(),
             kind: TargetKind::Method {
                 class: "Sner".to_string(),
@@ -636,6 +648,7 @@ Bler->new->hi;
         &store,
         None,
         &TargetRef {
+            names: crate::model::conventions::PERL_SPELLINGS,
             name: "hi".to_string(),
             kind: TargetKind::Method {
                 class: "Bler".to_string(),
@@ -783,6 +796,7 @@ $b->run;
     // ---- (3) references — via rename_kind_at → TargetRef → refs_to.
     let target_from_f = match fa.rename_kind_at(f_run_call, None) {
         Some(RenameKind::Method { name, class }) => TargetRef {
+            names: crate::model::conventions::PERL_SPELLINGS,
             name,
             kind: TargetKind::Method { class },
             method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), bare_constant: false,
@@ -937,6 +951,7 @@ hi();
     // Rename kind — for gr/rename construction.
     let target = match kind.as_ref() {
         Some(RenameKind::Function { name, package }) => TargetRef {
+            names: crate::model::conventions::PERL_SPELLINGS,
             name: name.clone(),
             kind: TargetKind::Sub {
                 package: package.clone(),
@@ -944,6 +959,7 @@ hi();
             method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), bare_constant: false,
         },
         Some(RenameKind::Method { name, class }) => TargetRef {
+            names: crate::model::conventions::PERL_SPELLINGS,
             name: name.clone(),
             kind: TargetKind::Method {
                 class: class.clone(),
@@ -1244,6 +1260,7 @@ $u->create(name => 'alice');
     let kind = f1_fa.rename_kind_at(cursor, Some(&idx));
     let target = match kind {
         Some(RenameKind::Method { name, class }) => TargetRef {
+            names: crate::model::conventions::PERL_SPELLINGS,
             name,
             kind: TargetKind::Method { class },
             method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), bare_constant: false,
@@ -1315,6 +1332,7 @@ fn test_refs_to_empty_when_no_hits() {
         &store,
         None,
         &TargetRef {
+            names: crate::model::conventions::PERL_SPELLINGS,
             name: "nonexistent".to_string(),
             kind: TargetKind::Sub { package: None },
             method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), bare_constant: false,
@@ -1347,6 +1365,7 @@ fn test_refs_to_finds_hash_key_def_and_access_same_file() {
         &store,
         None,
         &TargetRef {
+            names: crate::model::conventions::PERL_SPELLINGS,
             name: "host".to_string(),
             kind: TargetKind::HashKeyOfSub {
                 package: Some("Lib".to_string()),
@@ -1382,6 +1401,7 @@ fn test_refs_to_finds_cross_file_hash_key_def() {
         &store,
         None,
         &TargetRef {
+            names: crate::model::conventions::PERL_SPELLINGS,
             name: "host".to_string(),
             kind: TargetKind::HashKeyOfSub {
                 package: Some("Lib".to_string()),
@@ -1423,6 +1443,7 @@ fn test_refs_to_package_qualified_sub_owner_isolates_name_collisions() {
         &store,
         None,
         &TargetRef {
+            names: crate::model::conventions::PERL_SPELLINGS,
             name: "host".to_string(),
             kind: TargetKind::HashKeyOfSub {
                 package: Some("Alpha".to_string()),
@@ -1469,6 +1490,7 @@ fn test_refs_to_qualified_call_resolves_to_def() {
         &store,
         None,
         &TargetRef {
+            names: crate::model::conventions::PERL_SPELLINGS,
             name: "foo".to_string(),
             kind: TargetKind::Sub {
                 package: Some("A".to_string()),
@@ -1508,6 +1530,7 @@ fn test_refs_to_qualified_call_isolates_package() {
         &store,
         None,
         &TargetRef {
+            names: crate::model::conventions::PERL_SPELLINGS,
             name: "foo".to_string(),
             kind: TargetKind::Sub {
                 package: Some("A".to_string()),
@@ -1536,6 +1559,7 @@ fn test_refs_to_role_mask_excludes_workspace() {
         &store,
         None,
         &TargetRef {
+            names: crate::model::conventions::PERL_SPELLINGS,
             name: "foo".to_string(),
             kind: TargetKind::Sub { package: None },
             method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), bare_constant: false,
@@ -1633,6 +1657,7 @@ $b->touch();
     store.insert_workspace(consumer_path.clone(), consumer_fa);
 
     let target = TargetRef {
+        names: crate::model::conventions::PERL_SPELLINGS,
         name: "touch".to_string(),
         kind: TargetKind::Method { class: "B".to_string() },
         method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), bare_constant: false,
@@ -1774,6 +1799,7 @@ $x->ping();
         &store,
         Some(&idx),
         &TargetRef {
+            names: crate::model::conventions::PERL_SPELLINGS,
             name: "ping".to_string(),
             kind: TargetKind::Method { class: "C".to_string() },
             method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), bare_constant: false,
@@ -1947,6 +1973,7 @@ $x->makeFoo()->ping();
         &store,
         Some(&idx),
         &TargetRef {
+            names: crate::model::conventions::PERL_SPELLINGS,
             name: "ping".to_string(),
             kind: TargetKind::Method { class: "P".to_string() },
             method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), bare_constant: false,
@@ -2056,6 +2083,7 @@ sub fire ($minion) {\n  $minion->enqueue('send_email' => ['a@b']);\n}\n1;\n",
         &store,
         None,
         &TargetRef {
+            names: crate::model::conventions::PERL_SPELLINGS,
             name: "send_email".to_string(),
             kind: TargetKind::Handler {
                 owner: crate::model::file_analysis::HandlerOwner::Class("Minion".to_string()),
@@ -2134,6 +2162,7 @@ sub fire {\n  my $self = shift;\n  my $minion = My::Minion->new;\n  $minion->enq
         &store,
         Some(&idx),
         &TargetRef {
+            names: crate::model::conventions::PERL_SPELLINGS,
             name: "send_email".to_string(),
             kind: TargetKind::Handler {
                 owner: crate::model::file_analysis::HandlerOwner::Class("Minion".to_string()),
@@ -2187,6 +2216,7 @@ fn refs_to_fans_runtime_exported_sub_to_consumer() {
         &store,
         None,
         &TargetRef {
+            names: crate::model::conventions::PERL_SPELLINGS,
             name: "sweeten".to_string(),
             kind: TargetKind::Sub { package: Some("Sugar::Sub".to_string()) },
             method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), bare_constant: false,
@@ -2237,6 +2267,7 @@ fn refs_to_links_implicit_export_to_bare_use_consumer() {
     store.insert_workspace(consumer.clone(), parse(use_src));
 
     let target = TargetRef {
+        names: crate::model::conventions::PERL_SPELLINGS,
         name: "make_account".to_string(),
         kind: TargetKind::Sub { package: Some("Bank".to_string()) },
         method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), bare_constant: false,
@@ -2284,6 +2315,7 @@ fn refs_to_links_return_hash_key_cross_file() {
     store.insert_workspace(cons.clone(), parse(cons_src));
 
     let target = TargetRef {
+        names: crate::model::conventions::PERL_SPELLINGS,
         name: "host".to_string(),
         kind: TargetKind::HashKeyOfSub {
             package: Some("Cfg".to_string()),
@@ -2345,6 +2377,7 @@ fn references_cross_file_sub_fans_out_and_stays_package_scoped() {
     );
 
     let target = TargetRef {
+        names: crate::model::conventions::PERL_SPELLINGS,
         name: "info_to_task".to_string(),
         kind: TargetKind::Sub { package: Some("TaskInfo".to_string()) },
         method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), bare_constant: false,
@@ -2399,6 +2432,7 @@ fn references_cross_file_method_matches_inheriting_invocant() {
     store.insert_workspace(decoy_path.clone(), parse(decoy_src));
 
     let target = TargetRef {
+        names: crate::model::conventions::PERL_SPELLINGS,
         name: "success".to_string(),
         kind: TargetKind::Method { class: "Role::REST".to_string() },
         method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), bare_constant: false,
@@ -2433,6 +2467,7 @@ fn references_mask_scopes_to_editable_for_project_symbols() {
 
     // Declared in the workspace → editable, no dep scan.
     let in_ws = TargetRef {
+        names: crate::model::conventions::PERL_SPELLINGS,
         name: "thing".to_string(),
         kind: TargetKind::Sub { package: Some("Proj".to_string()) },
         method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), bare_constant: false,
@@ -2446,6 +2481,7 @@ fn references_mask_scopes_to_editable_for_project_symbols() {
     // No editable declaration anywhere → widen to VISIBLE so refs into
     // a dependency-defined symbol still surface.
     let dep_only = TargetRef {
+        names: crate::model::conventions::PERL_SPELLINGS,
         name: "nowhere".to_string(),
         kind: TargetKind::Sub { package: Some("CPAN::Thing".to_string()) },
         method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), bare_constant: false,

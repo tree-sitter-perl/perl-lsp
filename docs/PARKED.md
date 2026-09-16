@@ -27,6 +27,34 @@ marked otherwise; the drain re-derived each rationale against current code.
   declared example until ts-parser-perl 2.0.0 landed it; the list is
   empty today.
 
+- **`PackFacts` is one lane for every pack language** (recorded
+  2026-09-15, for after the php release). Thirty-four fields, of which a
+  Perl analysis carries none and a php analysis carries the cpp ones
+  (`macro_defs`, `include_directives`, `include_closure`, `moved_from`,
+  `template_params`, `specializes`) as empty vecs — and the reverse. The
+  ratchet (`layering_tests::pack_facts_fields_are_ratcheted`) stops the
+  lane growing, not the sharing. The shape wanted: one sub-struct per
+  language family the pack declares (`CppFacts`, `PhpFacts`), each
+  default-empty, with the language-generic rows (`receiver_names`,
+  `import_rows`, `names`, the region spans) staying on
+  `PackFacts`; `surface_feed` destructures each exhaustively the way it
+  does the lanes today. Cost: an `EXTRACT_VERSION` bump and every
+  `pack.<field>` reader re-pathed; the win is that a cpp field cannot be
+  read on a php analysis by construction. Not before release: it reshapes
+  the blob for no user-visible change.
+
+- **Two homes for a declaration's documentation text** (recorded
+  2026-09-15, for after the php release). Perl POD / preceding-comment
+  docs render from `SymbolDetail::Sub { doc }`; a php docblock's summary
+  renders from `Presentation::doc`. Same question ("what does hover show
+  under the signature"), two fields, two render paths in `hover.rs`. The
+  detail's field predates `Presentation`; the unification is to move the
+  Perl text onto `Presentation::doc` (presentation, not kind semantics —
+  the struct's own rule) and delete the detail field, with `resolve_tail_pod_docs`
+  and the plugin hover paths writing there. Cost: a blob bump and the
+  hover/completion-detail readers; the POD-source tests (`docs.rs`) keep
+  their assertions. Not before release: the two render identically today.
+
 - **Two include-BFS walkers + two `file_stamp` fns** (cpp_reparse vs
   module_cache): thrice examined, thrice left (different contracts/layers:
   parse-heavy macro gather vs memoized line-scan closure; `(hash,size)`
@@ -123,6 +151,22 @@ marked otherwise; the drain re-derived each rationale against current code.
   correctness memo cleared on resolve-stack drain vs long-lived
   byte-accounted LRU invalidated on content change. Never unify under one
   cache abstraction. [recorded 2026-07-17]
+- **The identifier class is ASCII, decided in the model.**
+  `conventions::is_bareword_class_name` (and `is_callable_sub_name` over
+  it) accepts a segment as an identifier only when it is
+  `[A-Za-z_][A-Za-z0-9_]*`. Perl (`use utf8`), PHP (`\x80-\xff` bytes)
+  and Python all admit non-ASCII identifiers, so a class or sub named in
+  Hebrew or with an accented letter is not a class token to us: no
+  invocant class, no completion candidate, no callable name. Wrong for
+  those languages and hard-coded in the one tier that must not know
+  what an identifier character is. **Fix:** identifier classification
+  becomes a per-language declaration on the analysis alongside the
+  separator and sigils (`NameSpellings` — the same seam those two now
+  ride), so the model asks the language's spellings whether a character
+  starts or continues an identifier and never decides itself. Additive:
+  a `NameSpellings` field with the ASCII class as the default preserves
+  every current answer. [recorded 2026-09-16]
+
 - **"Any pack language is on" has no name — it is an 18-fold literal
   disjunction.** The shared pack machinery (`PackDriver` itself,
   `query_extract`'s dead-code gate) is gated by

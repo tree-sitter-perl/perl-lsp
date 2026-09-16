@@ -3,6 +3,7 @@
 //! views (ref candidates, workspace/symbol rows, dead exports).
 
 use super::*;
+use crate::model::file_analysis::NameSpellings;
 
 /// String-intern cache for the shredder, held for the WRITER's lifetime
 /// rather than rebuilt per file.
@@ -65,6 +66,21 @@ thread_local! {
 /// standalone callers get per-statement autocommit, which is fine for
 /// single-file updates. Upserts the `files` row even for an empty file.
 pub fn shred_derived_rows(
+    conn: &Connection,
+    path: &str,
+    source: &str,
+    seeds: &[crate::model::file_analysis::RefRowSeed],
+    sym_seeds: &[crate::model::file_analysis::SymRowSeed],
+) -> rusqlite::Result<()> {
+    // Accumulated, never printed per file: the row-store write cost is what
+    // an index change on these tables moves, and the persist writer runs
+    // this once per file.
+    crate::util::ghost_stats::timed("persist.shred", || {
+        shred_derived_rows_inner(conn, path, source, seeds, sym_seeds)
+    })
+}
+
+fn shred_derived_rows_inner(
     conn: &Connection,
     path: &str,
     source: &str,
@@ -153,11 +169,11 @@ pub fn shred_derived_rows(
             // name was undiscoverable for every qualified symbol: a package's
             // own declaration could not be found through the `syms` union that
             // exists to make declaration-only files candidates.
-            let key = crate::model::file_analysis::name_match_key(&seed.name);
-            let key_id = if key == seed.name {
+            let key = &seed.key;
+            let key_id = if *key == seed.name {
                 name_id
             } else {
-                intern_str(&key, &mut memo)?
+                intern_str(key, &mut memo)?
             };
             let container_id = match seed.container.as_deref() {
                 Some(c) => Some(intern_str(c, &mut memo)?),
@@ -491,6 +507,48 @@ pub fn sym_rows_matching(conn: &Connection, query: &str) -> Vec<SymRowHit> {
     out
 }
 
+/// The per-file probes' SQL, shared with the plan test
+/// (`row_probes_plan_as_index_point_lookups`) that pins how SQLite runs
+/// them. Every `syms` half is its own `EXISTS`, never one `OR` inside a
+/// WHERE: an OR over two IN-subqueries plans as a scan of the `file_id`
+/// prefix whatever index exists (21,605 rows on a 1,200-helper file,
+/// ~3 ms), while each half alone is a covering point probe on
+/// `(file_id, name_id|key_id, container_id)` — ~15 µs on the same file.
+/// The plan is the SQLite planner's choice, so the test asserts it rather
+/// than this comment.
+pub(super) const SYM_MEMBER_PROBE_SQL: &str = "SELECT EXISTS(
+            SELECT 1 FROM syms y
+             WHERE y.file_id = ?1
+               AND y.name_id IN (SELECT str_id FROM strings WHERE s IN (?2, ?3))
+               AND y.container_id = (SELECT str_id FROM strings WHERE s = ?4))
+         OR EXISTS(
+            SELECT 1 FROM syms y
+             WHERE y.file_id = ?1
+               AND y.key_id IN (SELECT str_id FROM strings WHERE s IN (?2, ?3))
+               AND y.container_id = (SELECT str_id FROM strings WHERE s = ?4))";
+
+pub(super) const SYM_NAME_PROBE_SQL: &str = "SELECT EXISTS(
+            SELECT 1 FROM syms y
+             WHERE y.file_id = ?1
+               AND y.name_id IN (SELECT str_id FROM strings WHERE s IN (?2, ?3)))
+         OR EXISTS(
+            SELECT 1 FROM syms y
+             WHERE y.file_id = ?1
+               AND y.key_id IN (SELECT str_id FROM strings WHERE s IN (?2, ?3)))";
+
+pub(super) const NAME_PROBE_SQL: &str = "SELECT EXISTS(
+            SELECT 1 FROM refs r
+             WHERE r.name_id IN (SELECT str_id FROM strings WHERE s IN (?2, ?3))
+               AND r.file_id = ?1)
+         OR EXISTS(
+            SELECT 1 FROM syms y
+             WHERE y.file_id = ?1
+               AND y.name_id IN (SELECT str_id FROM strings WHERE s IN (?2, ?3)))
+         OR EXISTS(
+            SELECT 1 FROM syms y
+             WHERE y.file_id = ?1
+               AND y.key_id IN (SELECT str_id FROM strings WHERE s IN (?2, ?3)))";
+
 /// Can the row store rule out a member named `name` attributed to container
 /// `container` in `path`'s file? Three-valued, and the caller's license to
 /// skip a decode hangs on the distinction:
@@ -510,6 +568,7 @@ pub fn sym_rows_matching(conn: &Connection, query: &str) -> Vec<SymRowHit> {
 pub fn sym_member_row_exists(
     conn: &Connection,
     path: &str,
+    names: &NameSpellings,
     name: &str,
     container: &str,
 ) -> Option<bool> {
@@ -518,20 +577,13 @@ pub fn sym_member_row_exists(
         .ok()?
         .query_row(params![path], |row| row.get(0))
         .ok()?;
-    let norm = probe_spelling(name);
+    let norm = probe_spelling(name, names);
     // A name or container the strings table never interned yields NULL from
     // the subselect, the comparison is false, and EXISTS answers 0 — which is
     // correct: no row can reference a string that was never stored. The
     // container stays EXACT-match: it is a package name, and its match key
     // strips the qualifier, which would let `Base` claim `My::Base`'s rows.
-    conn.prepare_cached(
-        "SELECT EXISTS(
-            SELECT 1 FROM syms y
-             WHERE y.file_id = ?1
-               AND y.container_id = (SELECT str_id FROM strings WHERE s = ?4)
-               AND (y.name_id IN (SELECT str_id FROM strings WHERE s IN (?2, ?3))
-                    OR y.key_id IN (SELECT str_id FROM strings WHERE s IN (?2, ?3))))",
-    )
+    conn.prepare_cached(SYM_MEMBER_PROBE_SQL)
     .ok()?
     .query_row(params![file_id, name, norm, container], |row| row.get(0))
     .ok()
@@ -543,8 +595,10 @@ pub fn sym_member_row_exists(
 /// raw symbol name and its key. A caller threading spellings itself is the
 /// bug this replaces — a qualified query name (`My::Pkg::helper`) probed raw
 /// would miss the `helper`-keyed row and turn fail-open into a wrong skip.
-fn probe_spelling(name: &str) -> String {
-    crate::model::file_analysis::name_match_key(name)
+/// The key is computed under the PROBED FILE's spellings (`names`), the
+/// same ones its rows were shredded with.
+fn probe_spelling(name: &str, names: &NameSpellings) -> String {
+    crate::model::file_analysis::name_match_key(name, names)
 }
 
 /// The name-only sibling of `sym_member_row_exists`: can the store rule out
@@ -557,20 +611,19 @@ fn probe_spelling(name: &str) -> String {
 /// package — not the bridged class — so the (name, container) probe cannot
 /// serve that walk and a container-blind one can. Over-approximation is
 /// still toward the decode.
-pub fn sym_name_row_exists(conn: &Connection, path: &str, name: &str) -> Option<bool> {
+pub fn sym_name_row_exists(
+    conn: &Connection,
+    path: &str,
+    names: &NameSpellings,
+    name: &str,
+) -> Option<bool> {
     let file_id: i64 = conn
         .prepare_cached("SELECT file_id FROM files WHERE path = ?1")
         .ok()?
         .query_row(params![path], |row| row.get(0))
         .ok()?;
-    let norm = probe_spelling(name);
-    conn.prepare_cached(
-        "SELECT EXISTS(
-            SELECT 1 FROM syms y
-             WHERE y.file_id = ?1
-               AND (y.name_id IN (SELECT str_id FROM strings WHERE s IN (?2, ?3))
-                    OR y.key_id IN (SELECT str_id FROM strings WHERE s IN (?2, ?3))))",
-    )
+    let norm = probe_spelling(name, names);
+    conn.prepare_cached(SYM_NAME_PROBE_SQL)
     .ok()?
     .query_row(params![file_id, name, norm], |row| row.get(0))
     .ok()
@@ -586,24 +639,19 @@ pub fn sym_name_row_exists(conn: &Connection, path: &str, name: &str) -> Option<
 /// WRITE ref, so a file with no ref row for the key provably carries no
 /// such witness. The syms half rides along for over-approximation — a
 /// wasted decode is the cheap error.
-pub fn name_row_exists(conn: &Connection, path: &str, name: &str) -> Option<bool> {
+pub fn name_row_exists(
+    conn: &Connection,
+    path: &str,
+    names: &NameSpellings,
+    name: &str,
+) -> Option<bool> {
     let file_id: i64 = conn
         .prepare_cached("SELECT file_id FROM files WHERE path = ?1")
         .ok()?
         .query_row(params![path], |row| row.get(0))
         .ok()?;
-    let norm = probe_spelling(name);
-    conn.prepare_cached(
-        "SELECT EXISTS(
-            SELECT 1 FROM refs r
-             WHERE r.name_id IN (SELECT str_id FROM strings WHERE s IN (?2, ?3))
-               AND r.file_id = ?1)
-         OR EXISTS(
-            SELECT 1 FROM syms y
-             WHERE y.file_id = ?1
-               AND (y.name_id IN (SELECT str_id FROM strings WHERE s IN (?2, ?3))
-                    OR y.key_id IN (SELECT str_id FROM strings WHERE s IN (?2, ?3))))",
-    )
+    let norm = probe_spelling(name, names);
+    conn.prepare_cached(NAME_PROBE_SQL)
     .ok()?
     .query_row(params![file_id, name, norm], |row| row.get(0))
     .ok()

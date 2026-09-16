@@ -119,8 +119,8 @@ impl RefTable {
     }
 
     /// Every ref's relational row seed, in ref order.
-    pub fn row_seeds(&self) -> Vec<RefRowSeed> {
-        self.refs.iter().map(Ref::row_seed).collect()
+    pub fn row_seeds(&self, names: &NameSpellings) -> Vec<RefRowSeed> {
+        self.refs.iter().map(|r| r.row_seed(names)).collect()
     }
 
     /// Seal the enrichment baseline at the current length.
@@ -135,12 +135,12 @@ impl RefTable {
 
     /// Rebuild every index from the current refs. Both the name/target
     /// lookups and the start-anchored call index.
-    pub fn rebuild_indices(&mut self) {
+    pub fn rebuild_indices(&mut self, names: &NameSpellings) {
         self.by_key.clear();
         self.by_target.clear();
         self.call_by_start.clear();
         for (i, r) in self.refs.iter().enumerate() {
-            self.by_key.entry(r.match_key()).or_default().push(i);
+            self.by_key.entry(r.match_key(names)).or_default().push(i);
             if let Some(sym_id) = r.resolved_symbol() {
                 self.by_target.entry(sym_id).or_default().push(i);
             }
@@ -174,11 +174,11 @@ impl RefTable {
     /// sealed, and no post-build pass mints call refs), and enrichment
     /// restores that prefix verbatim before appending only synthetic
     /// key refs.
-    pub fn refresh_name_target_indices(&mut self) {
+    pub fn refresh_name_target_indices(&mut self, names: &NameSpellings) {
         self.by_key.clear();
         self.by_target.clear();
         for (i, r) in self.refs.iter().enumerate() {
-            self.by_key.entry(r.match_key()).or_default().push(i);
+            self.by_key.entry(r.match_key(names)).or_default().push(i);
             if let Some(sym_id) = r.resolved_symbol() {
                 self.by_target.entry(sym_id).or_default().push(i);
             }
@@ -269,6 +269,21 @@ impl FileAnalysis {
     // the pack language features; a Perl-only build has no mutator outside
     // `model/`.
     #[allow(dead_code)]
+    /// Adopt build-time refs minted after assembly (the driver's text
+    /// rails): appended, indexed, and sealed into the enrichment baseline —
+    /// they are facts of the build, not enrichment, so a re-enrichment
+    /// truncating to the baseline keeps them.
+    pub fn adopt_text_refs(&mut self, refs: Vec<Ref>) {
+        if refs.is_empty() {
+            return;
+        }
+        for r in refs {
+            self.refs.push(r);
+        }
+        self.refs.rebuild_indices(&self.pack.names);
+        self.refs.seal_baseline();
+    }
+
     pub fn refs_mut(&mut self) -> &mut [Ref] {
         self.refs.as_mut_slice()
     }
@@ -283,6 +298,6 @@ impl FileAnalysis {
     /// (`docs/adr/relational-ref-index.md`) — the shredder's input, twin
     /// of `sym_row_seeds`.
     pub fn ref_row_seeds(&self) -> Vec<RefRowSeed> {
-        self.refs.row_seeds()
+        self.refs.row_seeds(&self.pack.names)
     }
 }

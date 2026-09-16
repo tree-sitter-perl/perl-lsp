@@ -202,7 +202,7 @@ pub fn collect_diagnostics(
         let name = &r.target_name;
 
         // Skip package-qualified calls like Foo::bar()
-        if crate::model::file_analysis::split_qualified(name).0.is_some() {
+        if crate::model::file_analysis::split_qualified(name, analysis.names()).0.is_some() {
             continue;
         }
 

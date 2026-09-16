@@ -142,7 +142,7 @@ pub fn make_engine() -> Engine {
     // any call. Same predicate the native completion sources gate on
     // (`conventions::is_callable_sub_name`), same name on both sides.
     engine.register_fn("is_callable_sub_name", |name: &str| -> bool {
-        crate::model::conventions::is_callable_sub_name(name)
+        crate::model::conventions::is_callable_sub_name(name, &crate::model::conventions::PERL_SPELLINGS)
     });
 
     engine.register_fn("as_invocant_params", |list: Array| -> Array {

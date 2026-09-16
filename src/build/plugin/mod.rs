@@ -220,6 +220,8 @@ impl From<EmittedParam> for ParamInfo {
             default: p.default,
             is_slurpy: p.is_slurpy,
             is_invocant: p.is_invocant,
+            // A plugin-declared signature: nothing in the source binds it.
+            binding_site: None,
         }
     }
 }

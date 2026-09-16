@@ -129,6 +129,7 @@ impl FileAnalysis {
             flow_edges,
             unrowed_attachment_names: Vec::new(),
             degraded: false,
+            use_map_pins: Default::default(),
             // Pack drivers re-stamp their id post-construction.
             language: super::default_language(),
             scope_starts: Vec::new(),
@@ -294,7 +295,7 @@ impl FileAnalysis {
         use crate::model::witnesses::WitnessAttachment;
         let mut ref_keys: HashSet<String> = HashSet::new();
         for r in self.refs().iter() {
-            ref_keys.insert(r.match_key());
+            ref_keys.insert(r.match_key(self.names()));
         }
         // One pass over the symbols, THEN one over the attachments. The
         // per-attachment symbols scan this replaces was attachments x
@@ -305,7 +306,7 @@ impl FileAnalysis {
         for s in self.symbols().iter() {
             if let Some(p) = s.package.as_deref() {
                 let names = sym_names.entry(p).or_default();
-                let key = super::name_match_key(&s.name);
+                let key = super::name_match_key(&s.name, self.names());
                 if key != s.name {
                     names.insert(key);
                 }
@@ -339,7 +340,7 @@ impl FileAnalysis {
                 }
                 WitnessAttachment::SlotType { key, .. } => {
                     if !ref_keys.contains(key)
-                        && !ref_keys.contains(&super::name_match_key(key))
+                        && !ref_keys.contains(&super::name_match_key(key, self.names()))
                     {
                         out.push(key.clone());
                     }
@@ -443,9 +444,8 @@ impl FileAnalysis {
             // at build time. Leaving the edge `None` makes `refs_to` /
             // goto-def re-consult the plugin at query time (with the
             // index in hand) instead of trusting a guessed token.
-            if !matches!(r.kind, RefKind::MethodCall { .. })
-                || matches!(&r.kind, RefKind::MethodCall { invocant, .. } if invocant.is_bridged())
-            {
+            let Some(site) = r.member_site() else { continue };
+            if site.invocant.is_bridged() {
                 continue;
             }
             crate::util::ghost_stats::count("stamp.methodcall_considered");
@@ -457,7 +457,14 @@ impl FileAnalysis {
             let target = (|| self
                 .method_call_invocant_class(r, module_index)
                 .map(|cn| {
-                    match self.resolve_method_in_ancestors(&cn, r.unqualified_target_name(), module_index) {
+                    let member = r.unqualified_target_name(self.names());
+                    let resolved = match &r.kind {
+                        RefKind::FieldAccess { .. } => {
+                            self.resolve_field_in_ancestors(&cn, member, module_index)
+                        }
+                        _ => self.resolve_method_in_ancestors(&cn, member, module_index),
+                    };
+                    match resolved {
                         Some(MethodResolution::Local { sym_id, .. }) => MethodTarget::Local {
                             sym_id,
                             invocant_class: cn,
@@ -537,7 +544,7 @@ impl FileAnalysis {
             if crate::util::ghost_stats::probe("demands") {
                 if let Some(idx) = module_index {
                     if let Some(cn) = self.method_call_invocant_class(r, module_index) {
-                        let name = r.unqualified_target_name();
+                        let name = r.unqualified_target_name(self.names());
                         // Demanded here and provided by NOBODY up-chain — the
                         // degenerate-singleton case pass 2 would fire on.
                         if self
@@ -605,7 +612,7 @@ impl FileAnalysis {
             }
             if module_index.is_some() && crate::util::ghost_stats::probe("owner") {
                 if let Some(cn) = self.method_call_invocant_class(r, module_index) {
-                    let name = r.unqualified_target_name();
+                    let name = r.unqualified_target_name(self.names());
                     let arity = r.arg_count.map(|c| c as usize);
                     let owner = match self.resolve_method_in_ancestors(&cn, name, module_index) {
                         Some(MethodResolution::Local { class, .. })
@@ -795,7 +802,7 @@ impl FileAnalysis {
             // Bare method name: a qualified spelling (`SUPER::search`,
             // `Foo::search`) claims args exactly like the bare one — the
             // flavor's vocabulary is unqualified.
-            let Some(o) = p.method_arg_owner(call.unqualified_target_name()) else { continue };
+            let Some(o) = p.method_arg_owner(call.unqualified_target_name(self.names())) else { continue };
             owner_fixes.push((i, o));
         }
         for (i, o) in owner_fixes {
@@ -885,7 +892,7 @@ impl FileAnalysis {
             self.refs[idx].link_owned_symbol(sid);
         }
 
-        self.refs.rebuild_indices();
+        self.refs.rebuild_indices(&self.pack.names);
 
         // Export membership set — union of export + export_ok for O(1) lookup.
         self.export_lookup = self.export.iter()

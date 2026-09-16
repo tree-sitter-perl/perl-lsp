@@ -15,6 +15,7 @@ fn fa_with_constraints(constraints: Vec<TypeConstraint>) -> FileAnalysis {
                 end: Point::new(10, 0),
             },
             package: None,
+            owner: None,
         }],
         ..Default::default()
     });
@@ -128,6 +129,7 @@ fn test_resolve_sub_return_type() {
                 end: Point::new(10, 0),
             },
             package: None,
+            owner: None,
         }],
         symbols: vec![Symbol {
             id: SymbolId(0),
@@ -155,6 +157,8 @@ fn test_resolve_sub_return_type() {
             presentation: Default::default(),
             attributes: Vec::new(),
             deref_stack: Vec::new(),
+            flags: Default::default(),
+            declared_with: None,
             arity: None,
         }],
         ..Default::default()
@@ -246,6 +250,18 @@ fn test_resolve_return_type_object_does_not_subsume_arrayref() {
         resolve_return_type(&[
             InferredType::ClassName("Foo".into()),
             InferredType::ArrayRef,
+        ]),
+        None,
+    );
+}
+
+#[test]
+fn test_resolve_return_type_two_classes_disagree() {
+    assert_eq!(
+        resolve_return_type(&[
+            InferredType::ClassName("Foo".into()),
+            InferredType::HashRef,
+            InferredType::ClassName("Bar".into()),
         ]),
         None,
     );
@@ -2924,4 +2940,50 @@ fn probe_heap_estimate_vs_truth_on_a_giant_file() {
         true_per_clone_kb as f64 / (est as f64 / 1024.0).max(1.0),
     );
     eprintln!("{}", fa.heap_estimate());
+}
+
+#[test]
+fn field_walk_admits_value_members_only() {
+    // A called member admits any kind (Perl's `$o->m` is the only spelling
+    // a data member ever gets); a VALUE read admits fields alone, so a
+    // name only a method carries is an honest miss for it.
+    let fa = build_fa_from_source(
+        "\
+package W;
+sub recorded { 1 }
+1;
+",
+    );
+    assert!(matches!(
+        fa.resolve_method_in_ancestors("W", "recorded", None),
+        Some(MethodResolution::Local { .. })
+    ));
+    assert!(fa.resolve_field_in_ancestors("W", "recorded", None).is_none());
+}
+
+#[test]
+fn has_synthesis_links_accessor_and_ctor_key_as_co_declared() {
+    // One `has 'size'` token mints the accessor Method and the constructor
+    // key; the pair is a minted relation, so the group finds the accessor
+    // through it rather than through a span coincidence.
+    let fa = build_fa_from_source(
+        "\
+package Widget;
+use Moo;
+has 'size' => (is => 'rw');
+1;
+",
+    );
+    let key = fa
+        .symbols()
+        .iter()
+        .find(|s| s.kind == SymKind::HashKeyDef && s.name == "size")
+        .expect("ctor key");
+    let accessor = fa
+        .symbols()
+        .iter()
+        .find(|s| s.kind == SymKind::Method && s.name == "size")
+        .expect("accessor");
+    assert_eq!(key.declared_with, Some(accessor.id));
+    assert_eq!(accessor.declared_with, Some(key.id));
 }

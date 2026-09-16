@@ -271,7 +271,7 @@ impl<'a> Builder<'a> {
         // looks for a ref at the cursor, else falls back to `symbol_at`, which
         // would return this very Module symbol's own span). The cross-file
         // PackageRef resolver (symbols.rs) maps the name to its file; an
-        // in-file package resolves locally via `find_package_or_class`; a
+        // in-file package resolves locally via `find_package_or_class_in`; a
         // pragma that resolves to neither is an honest no-jump. Only for real
         // source — a synthetic `use` has no name span to anchor on.
         if node.is_some() {
@@ -619,7 +619,7 @@ impl<'a> Builder<'a> {
                 return;
             }
         }
-        if let (Some(qualifier), _) = crate::model::file_analysis::split_qualified(name) {
+        if let (Some(qualifier), _) = crate::model::file_analysis::split_qualified(name, &crate::model::conventions::PERL_SPELLINGS) {
             let ref_span = fq_tail_span(node, name);
             self.add_bound_ref(
                 RefKind::FunctionCall,
@@ -1123,7 +1123,7 @@ impl<'a> Builder<'a> {
             .strip_prefix('@')
             .or_else(|| stripped.strip_prefix('%'))
             .unwrap_or(stripped);
-        match crate::model::file_analysis::split_qualified(no_sigil).1 {
+        match crate::model::file_analysis::split_qualified(no_sigil, &crate::model::conventions::PERL_SPELLINGS).1 {
             "EXPORT_OK" => Some("@EXPORT_OK"),
             "EXPORT" => Some("@EXPORT"),
             "EXPORT_TAGS" => Some("%EXPORT_TAGS"),
@@ -1336,6 +1336,29 @@ impl<'a> Builder<'a> {
     /// read is only valid after the RHS walk has allocated its refs and
     /// anon-sub symbols.
     fn assignment_after_rhs(&mut self, node: Node<'a>, left: Node<'a>, right: Node<'a>) {
+        // Every write RESETS its targets — a declaration and a plain
+        // assignment alike: the marker lands now, before the walk types
+        // anything downstream of it, so a later `my $o = $x` folds against
+        // the value this write produced rather than the belief it replaced.
+        // A first write retires nothing, so a declaration costs nothing; the
+        // facts a declaration must not kill (a parameter assertion) are
+        // anchored at the binding site, never before it.
+        {
+            let at = left.start_position();
+            let scope = self.current_scope();
+            match self.lhs_list_targets(left) {
+                Some(targets) => {
+                    for (vt, _) in targets {
+                        self.push_reset_marker(vt, scope, at);
+                    }
+                }
+                None => {
+                    if let Some(vt) = self.get_var_text_from_lhs(left) {
+                        self.push_reset_marker(vt, scope, at);
+                    }
+                }
+            }
+        }
         // Push the RHS's Expr(span) witness so the bag is
         // canonical for this expression, then query for the
         // resolved type. `emit_expr_witness` covers every
@@ -1524,7 +1547,7 @@ impl<'a> Builder<'a> {
     /// retry. One lookup, two emission paths, byte-identical
     /// witnesses.
     pub(super) fn find_callee_symbol(&self, name: &str) -> Option<SymbolId> {
-        let (qualifier, bare) = crate::model::file_analysis::split_qualified(name);
+        let (qualifier, bare) = crate::model::file_analysis::split_qualified(name, &crate::model::conventions::PERL_SPELLINGS);
         self.symbols
             .iter()
             .find(|s| {
@@ -1544,7 +1567,7 @@ impl<'a> Builder<'a> {
     /// Same predicate as `find_callee_symbol`, so the two cannot drift into
     /// disagreeing about whether `Foo::bar()` is local.
     pub(super) fn local_callee_name<'n>(&self, name: &'n str) -> Option<&'n str> {
-        let (qualifier, bare) = crate::model::file_analysis::split_qualified(name);
+        let (qualifier, bare) = crate::model::file_analysis::split_qualified(name, &crate::model::conventions::PERL_SPELLINGS);
         if qualifier.is_none() {
             return Some(bare);
         }
@@ -1646,31 +1669,19 @@ impl<'a> Builder<'a> {
                 SymbolDetail::Sub { params, .. } => params,
                 _ => continue,
             };
-            let var_name = match params.get(d.param_index) {
-                Some(p) if p.name.starts_with('$') => p.name.clone(),
+            let (var_name, binding_site) = match params.get(d.param_index) {
+                Some(p) if p.name.starts_with('$') => (p.name.clone(), p.binding_site),
                 _ => continue,
             };
             let sub_span = target.span;
-            // The sub's body scope: a Sub/Method scope whose span matches the
-            // declaration span. `record_signature_params` / `my $c = shift`
-            // both put the param variable in this scope.
-            let scope = self
-                .scopes
-                .iter()
-                .find(|s| {
-                    matches!(&s.kind, ScopeKind::Sub { name } | ScopeKind::Method { name } if *name == d.sub_name)
-                        && s.span == sub_span
-                })
-                .map(|s| s.id);
-            let scope = match scope {
-                Some(s) => s,
-                None => continue,
-            };
+            let Some(&scope) = self.owner_scope.get(&target.id) else { continue };
+            // Anchored at the parameter's binding site, else the sub.
+            let at = binding_site.map(|p| Span { start: p, end: p }).unwrap_or(sub_span);
             self.push_plugin_type_constraint(
                 TypeConstraint {
                     variable: var_name,
                     scope,
-                    constraint_span: sub_span,
+                    constraint_span: at,
                     inferred_type: d.inferred_type.clone(),
                 },
                 d.plugin_id.clone(),

@@ -838,7 +838,7 @@ pub(crate) fn constructor_invocant<'a>(node: Node<'a>, src: &'a [u8]) -> Option<
         InvocantText::CurrentPackage => Some(inv),
         // A computed receiver (`(ref $self)->new`) parses to a leading `(`
         // that classifies as Bareword; only a real package name is a class.
-        InvocantText::Bareword(b) if crate::model::conventions::is_bareword_class_name(b) => Some(inv),
+        InvocantText::Bareword(b) if crate::model::conventions::is_bareword_class_name(b, &crate::model::conventions::PERL_SPELLINGS) => Some(inv),
         InvocantText::Bareword(_)
         | InvocantText::Scalar(_)
         | InvocantText::NonScalar(_)

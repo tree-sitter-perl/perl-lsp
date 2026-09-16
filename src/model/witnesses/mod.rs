@@ -149,10 +149,17 @@ impl WitnessBag {
         self.rebuild_index();
     }
 
-    /// Does `att` carry a witness sourced from `Builder(tag)`? Used to ask
-    /// "was this variable's type written EXPLICITLY" (`skeleton-annot`) vs
-    /// inferred — the inlay-hint suppression for languages with explicit
-    /// types (`int c` needs no `: int` hint; `auto x` does).
+    /// Does an explicitly DECLARED fact (`WitnessSource::Annotation`) sit on
+    /// `att`? The inlay-hint suppression for languages with explicit types
+    /// asks this: `int c` needs no `: int` hint, `auto x` does.
+    pub fn has_annotation(&self, att: &WitnessAttachment) -> bool {
+        self.index.get(att).is_some_and(|idxs| {
+            idxs.iter().any(|&i| matches!(&self.witnesses[i].source, WitnessSource::Annotation(_)))
+        })
+    }
+
+    /// Does `att` carry a witness sourced from `Builder(tag)`? A provenance
+    /// probe (which pass pushed here), never a meaning — rule #14.
     pub fn has_builder_source(&self, att: &WitnessAttachment, tag: &str) -> bool {
         self.index.get(att).is_some_and(|idxs| {
             idxs.iter().any(|&i| {
@@ -201,38 +208,13 @@ impl WitnessBag {
         removed
     }
 
-    /// Drop `Builder(tag)`-sourced witnesses on ONE attachment emitted at ONE
-    /// point. The call-binding propagator's replacement granularity: one
-    /// binding = one witness, identified by (attachment, span.start) — so a
+    /// Drop `Builder(tag)`-sourced witnesses at a SET of binding sites —
+    /// each (attachment, span.start) pair identifies one binding, so a
     /// binding can refine its published type without touching a sibling
-    /// binding of the same variable at another site.
-    pub fn remove_attachment_source_at(
-        &mut self,
-        att: &WitnessAttachment,
-        tag: &str,
-        at: Point,
-    ) -> usize {
-        let _t = crate::util::ghost_stats::ScopedNs::start("bag::remove_at");
-        let before = self.witnesses.len();
-        self.witnesses.retain(|w| {
-            !(&w.attachment == att
-                && w.span.start == at
-                && matches!(&w.source, WitnessSource::Builder(s) if s == tag))
-        });
-        let removed = before - self.witnesses.len();
-        if removed > 0 {
-            self.rebuild_index();
-        }
-        removed
-    }
-
-    /// Batch form of `remove_attachment_source_at`: one retain + at most one
-    /// index rebuild for the whole set. The per-binding form costs a full
-    /// bag scan AND a full index rebuild per call, which turns a pass with N
-    /// bindings into O(N * bag) — 20+ seconds of the 46k-line-file fold was
-    /// exactly this. Each (attachment, point) pair identifies one binding
-    /// site, so removing them together is equivalent to removing them one at
-    /// a time.
+    /// binding of the same variable at another site. One retain + at most
+    /// one index rebuild for the whole set: a per-site form costs a full bag
+    /// scan AND an index rebuild per call, O(N * bag) for N bindings — 20+
+    /// seconds of a 46k-line-file fold.
     pub fn remove_attachment_sources_at(
         &mut self,
         items: &[(WitnessAttachment, Point)],

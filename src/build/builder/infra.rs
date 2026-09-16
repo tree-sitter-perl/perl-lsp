@@ -21,6 +21,7 @@ impl<'a> Builder<'a> {
             parent,
             kind,
             span,
+            owner: None,
             package: pkg,
         });
         self.scope_stack.push(id);
@@ -116,6 +117,33 @@ impl<'a> Builder<'a> {
         self.add_symbol_ns(name, kind, span, selection_span, detail, Namespace::Language)
     }
 
+    /// Where parameter `var` of the callable owning `scope` is bound — the
+    /// site its `ParamInfo` carries. `None` when the scope owns no callable
+    /// or the callable declares no such parameter (a `$_[0]` read).
+    pub(super) fn binding_site_of(&self, var: &str, scope: ScopeId) -> Option<Point> {
+        let owner = self.scopes.get(scope.0 as usize)?.owner?;
+        match &self.symbols[owner.0 as usize].detail {
+            SymbolDetail::Sub { params, .. } => params.iter().find(|p| p.name == var)?.binding_site,
+            _ => None,
+        }
+    }
+
+    /// Push the body scope of callable `owner`, recording the pairing both
+    /// ways (`Scope::owner`, `owner_scope`).
+    pub(super) fn push_callable_scope(&mut self, kind: ScopeKind, span: Span, owner: SymbolId) -> ScopeId {
+        let id = self.push_scope(kind, span, None);
+        self.scopes[id.0 as usize].owner = Some(owner);
+        self.owner_scope.insert(owner, id);
+        id
+    }
+
+    /// Record that `a` and `b` were minted from one declaration token
+    /// (`Symbol::declared_with`), each way.
+    pub(super) fn pair_co_declared(&mut self, a: SymbolId, b: SymbolId) {
+        self.symbols[a.0 as usize].declared_with = Some(b);
+        self.symbols[b.0 as usize].declared_with = Some(a);
+    }
+
     pub(super) fn add_symbol_ns(
         &mut self,
         name: String,
@@ -166,6 +194,8 @@ impl<'a> Builder<'a> {
             namespace,
             presentation: Default::default(),
             attributes: Vec::new(),
+            flags: Default::default(),
+            declared_with: None,
             deref_stack: Vec::new(),
             // Perl carries params in `SymbolDetail::Sub`; `param_arity()`
             // reads them. No pack-minted arity here.
@@ -385,7 +415,7 @@ impl<'a> Builder<'a> {
             "refgen_expression" => {
                 let names = self.extract_names_from_refgen(node);
                 let raw = names.into_iter().next()?;
-                let (class, name) = match crate::model::file_analysis::split_qualified(&raw) {
+                let (class, name) = match crate::model::file_analysis::split_qualified(&raw, &crate::model::conventions::PERL_SPELLINGS) {
                     (Some(c), n) => (c.to_string(), n.to_string()),
                     (None, _) => (self.current_package.clone()?, raw),
                 };
@@ -410,7 +440,7 @@ impl<'a> Builder<'a> {
     /// than falling back to name-only union.
     pub(super) fn resolve_call_package(&self, call_name: &str) -> Option<String> {
         // (1) Qualified: `Foo::bar` → `Foo`.
-        if let (Some(pkg), _) = crate::model::file_analysis::split_qualified(call_name) {
+        if let (Some(pkg), _) = crate::model::file_analysis::split_qualified(call_name, &crate::model::conventions::PERL_SPELLINGS) {
             return Some(pkg.to_string());
         }
         // (2) Enclosing package defines the sub locally.

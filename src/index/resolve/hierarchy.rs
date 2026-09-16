@@ -458,7 +458,7 @@ impl<'a> CandidateSet<'a> {
                     e.insert(edges.len());
                     edges.push(CallEdge {
                         item: HierarchyItem {
-                            name: r.unqualified_target_name().to_string(),
+                            name: r.unqualified_target_name(self.origin.names()).to_string(),
                             kind: SymKind::Sub,
                             detail: None,
                             location: def,

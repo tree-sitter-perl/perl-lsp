@@ -1,6 +1,7 @@
 //! The skeleton data model: symbol/ref rows and `SkeletonAnalysis`,
 //! including its projection into `FileAnalysis`.
 
+use crate::model::file_analysis::SymbolFlags;
 use super::*;
 
 /// The skeleton's symbol row — deliberately stringly-kinded: the kind
@@ -109,6 +110,9 @@ pub struct SkeletonAnalysis {
     /// named is the method receiver, not a class member — its (wrongly
     /// sticky-tagged) class package is cleared in `into_file_analysis`.
     pub receiver_names: Vec<String>,
+    /// The language's name spellings (`LangPack::names`), baked onto
+    /// `PackFacts::names`.
+    pub names: crate::model::file_analysis::NameSpellings,
     /// Value-flow edges minted from `@flow` captures (`source → target`,
     /// extraction). Lowered to type witnesses here; carried onto the FA as the
     /// provenance tier.
@@ -376,6 +380,7 @@ impl SkeletonAnalysis {
         use crate::model::file_analysis::{
             FileAnalysis, FileAnalysisParts, SymKind, Symbol, SymbolDetail, SymbolId,
         };
+        let names = self.names.clone();
         // A NAMED typedef `typedef struct N {...} N;` matches both the
         // struct_specifier and the type_definition → two `class N` AT THE
         // SAME SPAN (one node, two capture patterns — e.g. the bodied
@@ -512,10 +517,12 @@ impl SkeletonAnalysis {
                 presentation: crate::model::file_analysis::Presentation {
                     // An include-guard `#define` is compilation plumbing,
                     // not a program entity — folded from listing views but
-                    // still resolvable (rule #7). The attribute stays on
-                    // the symbol for hover; the listing verdict is stamped
-                    // here so warm stub rebuilds mint it identically.
-                    hide_in_outline: s.attributes.iter().any(|a| a == "include_guard"),
+                    // still resolvable (rule #7). The listing verdict is
+                    // stamped here so warm stub rebuilds mint it identically.
+                    hide_in_outline: symbol_flags_of(&s.kind, &s.attributes)
+                        .contains(SymbolFlags::INCLUDE_GUARD),
+                    deprecation: None,
+                    doc: None,
                     display: None,
                     label: None,
                 },
@@ -535,6 +542,8 @@ impl SkeletonAnalysis {
                     }
                     a
                 },
+                flags: symbol_flags_of(&s.kind, &s.attributes),
+                declared_with: None,
                 deref_stack: s.deref_stack.clone(),
                 arity: s.arity,
             })
@@ -924,7 +933,7 @@ impl SkeletonAnalysis {
                     // start). The tail segment is an identifier, so it never
                     // spans rows — the end-anchored column math is safe.
                     "qcall" => {
-                        let (pkg, bare) = crate::model::file_analysis::split_qualified(&r.name);
+                        let (pkg, bare) = crate::model::file_analysis::split_qualified(&r.name, &names);
                         let pkg = pkg?;
                         span.start = tree_sitter::Point {
                             row: r.end.row,
@@ -944,6 +953,7 @@ impl SkeletonAnalysis {
                             invocant_span: Some(inv_span),
                             method_name_span: Span { start: r.start, end: r.end },
                             member_op: r.member_op,
+                            named_by_string: false,
                         }
                     }
                     // A type-position name (`Widget w;`, `struct op* o`, a
@@ -992,7 +1002,7 @@ impl SkeletonAnalysis {
                 (
                     r.span.start.row,
                     r.span.start.column,
-                    r.unqualified_target_name().to_string(),
+                    r.unqualified_target_name(&names).to_string(),
                 )
             })
             .chain(symbols.iter().map(|s| {
@@ -1068,6 +1078,7 @@ impl SkeletonAnalysis {
                             invocant_span: None,
                             method_name_span: *span,
                             member_op: None,
+                            named_by_string: false,
                         },
                         span: *span,
                         scope: crate::model::file_analysis::ScopeId(0),
@@ -1101,6 +1112,7 @@ impl SkeletonAnalysis {
             // outline filters can exclude them generically (lang semantics in
             // the pack, generic logic in core).
             receiver_names: std::mem::take(&mut self.receiver_names),
+            names: std::mem::take(&mut self.names),
             // Specialization family edges (spec → primary). NOT an inheritance
             // edge: a spec inherits nothing from its primary (it replaces
             // wholesale), so member resolution must never fall through this
@@ -1141,4 +1153,26 @@ impl SkeletonAnalysis {
         fa.finalize_post_walk();
         fa
     }
+}
+
+/// The closed flag set a pack symbol carries, from the skeleton's kind and
+/// the pack's attribute vocabulary — the ONE place a pack's attribute
+/// spellings become model facts (rule #12: the model asks the flag, never
+/// the string).
+fn symbol_flags_of(kind: &str, attributes: &[String]) -> SymbolFlags {
+    let mut flags = SymbolFlags::empty();
+    // A structural kind that IS a flag (`unionfield` is a union's member
+    // container); the canonical table answers the rest.
+    if let Ok(f) = SymbolFlags::try_from(if kind == "unionfield" { "union" } else { kind }) {
+        flags.insert(f);
+    }
+    // A `@sym.attr` token is source text (cpp's `register`, a php `#[Attr]`
+    // name): a spelling the table does not know is display-only, never an
+    // error — the query-DECLARED spellings are validated at overlay compile.
+    for a in attributes {
+        if let Ok(f) = SymbolFlags::try_from(a.as_str()) {
+            flags.insert(f);
+        }
+    }
+    flags
 }

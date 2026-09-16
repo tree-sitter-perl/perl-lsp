@@ -122,7 +122,7 @@ fn heatmap_symbol_row(
                     | RefKind::DispatchCall { .. }
             ) && within(&sym.span, &r.span)
             {
-                callees.insert(r.unqualified_target_name());
+                callees.insert(r.unqualified_target_name(analysis.names()));
             }
         }
         callees.remove(sym.name.as_str());
@@ -393,7 +393,7 @@ impl HeatmapItem<'_> {
             return (None, None);
         };
         let sym = self.sym;
-        let key = file_analysis::name_match_key(&sym.name);
+        let key = file_analysis::name_match_key(&sym.name, self.analysis.names());
         let forced = if referenced_names.contains(&key) {
             None // has reference rows — the projection must run
         } else {

@@ -104,11 +104,11 @@ fn refgen_goto_def_lands_on_sub_definition() {
 #[test]
 fn split_qualified_basics() {
     use crate::model::file_analysis::split_qualified;
-    assert_eq!(split_qualified("Foo::Bar::baz"), (Some("Foo::Bar"), "baz"));
-    assert_eq!(split_qualified("baz"), (None, "baz"));
-    assert_eq!(split_qualified("Foo::bar"), (Some("Foo"), "bar"));
+    assert_eq!(split_qualified("Foo::Bar::baz", &crate::model::conventions::PERL_SPELLINGS), (Some("Foo::Bar"), "baz"));
+    assert_eq!(split_qualified("baz", &crate::model::conventions::PERL_SPELLINGS), (None, "baz"));
+    assert_eq!(split_qualified("Foo::bar", &crate::model::conventions::PERL_SPELLINGS), (Some("Foo"), "bar"));
     // Leading `::` (main:: shorthand) → empty-string package, preserved.
-    assert_eq!(split_qualified("::foo"), (Some(""), "foo"));
+    assert_eq!(split_qualified("::foo", &crate::model::conventions::PERL_SPELLINGS), (Some(""), "foo"));
 }
 
 #[test]
@@ -435,6 +435,7 @@ fn sub_exporter_member_goto_def_and_references() {
         &store,
         None,
         &TargetRef {
+            names: crate::model::conventions::PERL_SPELLINGS,
             name: "foo".to_string(),
             kind: TargetKind::Sub {
                 package: Some("My::Exp".to_string()),
@@ -1085,6 +1086,7 @@ sub go {
             &store,
             None,
             &TargetRef {
+                names: crate::model::conventions::PERL_SPELLINGS,
                 name: name.to_string(),
                 kind: TargetKind::Sub { package: Some("Foo".to_string()) },
                 method_classes: Vec::new(), scope: crate::index::resolve::OverrideScope::Dispatch, def_paths: Vec::new(), bare_constant: false,
@@ -1201,6 +1203,7 @@ sub go {
             &store,
             None,
             &TargetRef {
+                names: crate::model::conventions::PERL_SPELLINGS,
                 name: name.to_string(),
                 kind: TargetKind::Sub { package: Some("Foo".to_string()) },
                 method_classes: Vec::new(), scope: crate::index::resolve::OverrideScope::Dispatch, def_paths: Vec::new(), bare_constant: false,

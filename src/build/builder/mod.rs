@@ -258,6 +258,9 @@ struct Builder<'a> {
 
     scopes: Vec<Scope>,
     symbols: Vec<Symbol>,
+    /// Callable symbol → the scope that is its body (`Scope::owner`'s
+    /// inverse), recorded where the Sub/Method scope is pushed.
+    owner_scope: std::collections::HashMap<SymbolId, ScopeId>,
     refs: Vec<Ref>,
     /// Plugin-emitted `VarType` constraints, resolved to scopes only
     /// after the whole CST has been walked (plugin dispatch runs
@@ -682,6 +685,8 @@ struct Builder<'a> {
     walk_stack: Vec<WalkTask<'a>>,
     /// Restore the pre-worklist recursive descent (`PERL_LSP_RECURSIVE_WALK=1`).
     /// Read once per build so the walk primitives branch on a bool, not on env.
+    /// Test-only: the descent exists for the walk-equivalence net.
+    #[cfg(test)]
     recursive_walk: bool,
 }
 

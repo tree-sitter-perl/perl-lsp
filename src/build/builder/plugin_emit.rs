@@ -232,11 +232,24 @@ impl<'a> Builder<'a> {
                 } else {
                     self.add_symbol_ns(name, SymKind::Method, span, selection_span, detail, ns)
                 };
+                // The ctor/column key the same plugin token minted first,
+                // if any — the pair is a fact of the token, recorded here.
+                let twin = self.symbols.iter().find(|s| {
+                    matches!(s.kind, SymKind::HashKeyDef)
+                        && s.name == self.symbols[sid.0 as usize].name
+                        && s.selection_span == selection_span
+                        && s.package == target_pkg
+                }).map(|s| s.id);
+                if let Some(k) = twin {
+                    self.pair_co_declared(k, sid);
+                }
                 // Stamped post-mint; kept out of `add_symbol_ns` so the
                 // core constructor stays narrow (defaults for the
                 // builder-native paths, plugin policy only here).
                 *self.presentation_mut(sid) = crate::model::file_analysis::Presentation {
                     hide_in_outline,
+                    doc: None,
+                    deprecation: None,
                     display,
                     label: outline_label,
                 };
@@ -286,7 +299,20 @@ impl<'a> Builder<'a> {
             }
             plugin::EmitAction::HashKeyDef { name, owner, span, selection_span } => {
                 let detail = SymbolDetail::HashKeyDef { owner, is_dynamic: false };
-                self.add_symbol_ns(name, SymKind::HashKeyDef, span, selection_span, detail, ns);
+                let pkg = self.current_package.clone();
+                let key_id =
+                    self.add_symbol_ns(name.clone(), SymKind::HashKeyDef, span, selection_span, detail, ns);
+                // The accessor the same plugin token minted (DBIC `add_columns`,
+                // Class::Accessor): one declaration, two symbols.
+                let twin = self.symbols.iter().find(|s| {
+                    matches!(s.kind, SymKind::Method)
+                        && s.name == name
+                        && s.selection_span == selection_span
+                        && s.package == pkg
+                }).map(|s| s.id);
+                if let Some(m) = twin {
+                    self.pair_co_declared(m, key_id);
+                }
             }
             plugin::EmitAction::HashKeyAccess { name, owner, var_text, span, access } => {
                 // Owner-carrying binding so the linkage pass (which looks
@@ -330,6 +356,8 @@ impl<'a> Builder<'a> {
                 let sid = self.add_symbol_ns(name, SymKind::Handler, span, selection_span, detail, ns);
                 *self.presentation_mut(sid) = crate::model::file_analysis::Presentation {
                     hide_in_outline,
+                    doc: None,
+                    deprecation: None,
                     display: Some(display),
                     label: outline_label,
                 };
@@ -384,6 +412,7 @@ impl<'a> Builder<'a> {
                         invocant_span,
                         method_name_span: span,
                         member_op: None,
+                        named_by_string: false,
                     },
                     span,
                     scope: self.current_scope(),
@@ -439,6 +468,8 @@ impl<'a> Builder<'a> {
                 let sid = self.add_symbol_ns(name, kind, span, selection_span, detail, ns);
                 *self.presentation_mut(sid) = crate::model::file_analysis::Presentation {
                     hide_in_outline,
+                    doc: None,
+                    deprecation: None,
                     display,
                     label: None,
                 };
@@ -511,7 +542,7 @@ impl<'a> Builder<'a> {
                 // name defaults to the package the registration sits in (the
                 // sub is local to it). Resolution is deferred so a forward-
                 // declared sub still resolves.
-                let (package, sub_name) = match crate::model::file_analysis::split_qualified(&sub_name) {
+                let (package, sub_name) = match crate::model::file_analysis::split_qualified(&sub_name, &crate::model::conventions::PERL_SPELLINGS) {
                     (Some(pkg), n) => (Some(pkg.to_string()), n.to_string()),
                     (None, _) => (self.current_package.clone(), sub_name),
                 };

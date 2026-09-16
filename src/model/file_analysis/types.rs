@@ -660,6 +660,43 @@ fn match_pattern_arg(
 }
 
 impl InferredType {
+    /// Rewrite every class name the type carries through `f`, recursing
+    /// into the shapes that nest one (sequence elements, optionals, keyed
+    /// values, parametric bases and arguments). The extractor's identity
+    /// pass maps a written spelling to the FQN it names with this, so a
+    /// class name never reaches the bag unresolved whatever shape wraps it.
+    pub fn map_class_names(self, f: &mut dyn FnMut(&str) -> String) -> Self {
+        use InferredType::*;
+        match self {
+            ClassName(c) => ClassName(f(&c)),
+            FirstParam { package } => FirstParam { package: f(&package) },
+            Parametric(ParametricType::ResultSet { base, row }) => {
+                Parametric(ParametricType::ResultSet { base: f(&base), row: f(&row) })
+            }
+            Parametric(ParametricType::Instance { base, args }) => Parametric(ParametricType::Instance {
+                base: f(&base),
+                args: args.into_iter().map(|a| a.map_class_names(f)).collect(),
+            }),
+            Sequence(v) => Sequence(v.into_iter().map(|e| e.map_class_names(f)).collect()),
+            TypeConstraintOf(t) => TypeConstraintOf(t.map(|b| Box::new(b.map_class_names(f)))),
+            BrandedRoute { base, controller, stash } => BrandedRoute {
+                base: f(&base),
+                controller: controller.map(|c| f(&c)),
+                stash,
+            },
+            HashWithKeys { mut keys, open } => {
+                for (_, v) in keys.to_mut().iter_mut() {
+                    if let Some(b) = v.take() {
+                        *v = Some(Box::new(b.map_class_names(f)));
+                    }
+                }
+                HashWithKeys { keys, open }
+            }
+            Optional(b) => Optional(Box::new(b.map_class_names(f))),
+            other => other,
+        }
+    }
+
     /// Extract the class name if this is an object type
     /// (ClassName, FirstParam, or Parametric — the latter
     /// delegates to the flavor's `class_name()`). For the row-
@@ -1023,9 +1060,14 @@ pub fn resolve_return_type(return_types: &[InferredType]) -> Option<InferredType
     }
     // Object subsumes HashRef: if some returns are Object(X) and others are
     // hash-shaped, the Object wins (overloaded hash access is common in Perl).
-    let mut object = None;
+    let mut object: Option<InferredType> = None;
     for t in return_types {
         if t.is_object() {
+            // Two different classes are a disagreement, not a choice of the
+            // arm that came last (`WP_Term` vs `WP_Error`).
+            if object.as_ref().is_some_and(|o| o != t) {
+                return None;
+            }
             object = Some(t.clone());
         } else if !t.is_hash_shaped() {
             // Non-hash, non-Object disagreement → Unknown

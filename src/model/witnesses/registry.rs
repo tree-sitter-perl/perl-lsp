@@ -441,10 +441,15 @@ impl ReducerRegistry {
         // so order isn't load-bearing — grouped with the other class-keyed
         // fallbacks. The `ClassName(name)` terminal lives in query_rec_body.
         r.register(Box::new(TypeNameReducer));
-        // DomainCoherenceFold claims the disjoint `Field{..}` shape (the
-        // int-used-as-enum domain vote) — no overlap with any flow-axis
-        // reducer, so order isn't load-bearing.
+        // The two `Field{..}` reducers claim disjoint PAYLOADS on one
+        // attachment: FieldValueReducer the slot's materialized value edge
+        // (what a `ValueHop` reads), DomainCoherenceFold the `DomainCompare`
+        // vote. Value first is load-bearing — the domain is a human-surface
+        // refinement and must never be the type that flows.
+        r.register(Box::new(FieldValueReducer));
         r.register(Box::new(DomainCoherenceFold));
+        // `Param{..}` is a disjoint attachment shape; order isn't load-bearing.
+        r.register(Box::new(ParamBindingReducer));
         // Last — fallback for "this Symbol's stored return type".
         r.register(Box::new(SubReturnReducer));
         r
@@ -1152,6 +1157,36 @@ impl ReducerRegistry {
             );
         }
 
+        // `Field{owner, name}` the local bag couldn't answer: the slot's
+        // value edge lives in the file declaring `owner` (cross-file
+        // primary), or the slot is a PARENT's (ancestry) — hops (1) and (2)
+        // of the `PackageSymbol` ladder, same shared visited set. No bridge
+        // hop: a plugin entity is a callable, never a stored value.
+        if let WitnessAttachment::Field { owner, name } = q.attachment {
+            if let Some(v) = self.owner_keyed_fallback(bag, q, state, owner, "field", &|p| {
+                WitnessAttachment::Field { owner: p, name: name.clone() }
+            }) {
+                return v;
+            }
+        }
+
+        // `Param{package, name, index}`: the callee's bag is the authority.
+        // Its own witness present but untyped → the position IS bound, so
+        // `Unknown` (a value flowed, nothing named it) rather than silence —
+        // silence would read as by-value. Absent locally → the callee lives
+        // elsewhere (cross-file primary) or the position is a parent's
+        // (ancestry): the `Field` ladder, same shared visited set.
+        if let WitnessAttachment::Param { package, name, index } = q.attachment {
+            if !bag.for_attachment(q.attachment).is_empty() {
+                return ReducedValue::Type(InferredType::Unknown);
+            }
+            if let Some(v) = self.owner_keyed_fallback(bag, q, state, package, "param", &|p| {
+                WitnessAttachment::Param { package: p, name: name.clone(), index: *index }
+            }) {
+                return v;
+            }
+        }
+
         ReducedValue::None
     }
 
@@ -1166,6 +1201,93 @@ impl ReducerRegistry {
     /// `query_variable_type` would reset visited and reopen mutual
     /// `Edge(Variable)` loops).
 
+
+
+    /// The owner-keyed ladder shared by the `Field` and `Param` fallbacks:
+    /// every candidate file declaring `owner` (cross-file primary), then the
+    /// same attachment re-keyed to each parent (`rekey`), one visited set
+    /// throughout. No bridge hop — neither a slot nor a parameter is a
+    /// plugin-synthesized callable.
+    ///
+    /// Out of line for the same reason as `moc_cross_file_primary`: this
+    /// block's locals would otherwise live in `query_rec_body`'s frame,
+    /// which is live once per inheritance hop against the 2 MiB stack the
+    /// depth-cap test pins, and a debug build overflowed it there.
+    #[inline(never)]
+    fn owner_keyed_fallback(
+        &self,
+        bag: &WitnessBag,
+        q: &ReducerQuery,
+        state: &mut QueryState,
+        owner: &str,
+        site: &'static str,
+        rekey: &dyn Fn(String) -> WitnessAttachment,
+    ) -> Option<ReducedValue> {
+        let ctx = q.context?;
+        if ctx.module_index.is_none() {
+            // A value hop runs under an opaque frame (the projection
+            // combines it), so no conclusion key names this exit.
+            super::note_bake_exit(site, false);
+        }
+        if let Some(idx) = ctx.module_index {
+            for cached in idx.visible_def_candidates(owner) {
+                crate::util::ghost_stats::count("moc.provider_fetched");
+                crate::util::ghost_stats::count(if site == "field" {
+                    "mocsite.field"
+                } else {
+                    "mocsite.param"
+                });
+                let full = idx.bag_present(&cached);
+                if std::ptr::eq(bag, &full.witnesses) {
+                    continue;
+                }
+                let cached_ctx = BagContext {
+                    scopes: &full.scopes,
+                    package_framework: &full.packages,
+                    module_index: Some(idx),
+                    package_parents: &full.packages,
+                    app_surface_consumers: &full.plugin.app_surface_consumers,
+                };
+                let sub_q = ReducerQuery {
+                    attachment: q.attachment,
+                    // Cross-file: point normalized (see the slot arm).
+                    point: None,
+                    framework: q.framework,
+                    arity_hint: None,
+                    receiver: q.receiver.clone(),
+                    args: q.args.clone(),
+                    context: Some(&cached_ctx),
+                };
+                let v = self.query_rec(&full.witnesses, &sub_q, state);
+                if *v != ReducedValue::None {
+                    return Some((*v).clone());
+                }
+            }
+        }
+        let parents = crate::model::file_analysis::parents_of(
+            owner,
+            ctx.package_parents,
+            ctx.module_index,
+            ctx.app_surface_consumers,
+        );
+        for p in parents {
+            let parent_att = rekey(p);
+            let sub_q = ReducerQuery {
+                attachment: &parent_att,
+                point: q.point,
+                framework: q.framework,
+                arity_hint: None,
+                receiver: q.receiver.clone(),
+                args: q.args.clone(),
+                context: q.context,
+            };
+            let v = self.query_rec(bag, &sub_q, state);
+            if *v != ReducedValue::None {
+                return Some((*v).clone());
+            }
+        }
+        None
+    }
 
     /// The cross-file primary hop of the `PackageSymbol` ladder: every file
     /// declaring `package`, asked in ladder order, first answer wins,
@@ -1943,16 +2065,18 @@ impl ReducerRegistry {
                             }
                         }
                     };
-                    if let Some(t) = resolved {
-                        out.push(Witness {
+                    match resolved {
+                        Some(t) => out.push(Witness {
                             attachment: w.attachment.clone(),
                             source: w.source.clone(),
                             payload: WitnessPayload::InferredType(t),
                             span: w.span,
-                        });
+                        }),
+                        // An edge that didn't resolve drops out — same as a
+                        // witness no reducer claims. The write it lowered
+                        // still HAPPENED: its `Reset` marker records that.
+                        None => {}
                     }
-                    // An edge that didn't resolve drops out — same as a
-                    // witness no reducer claims.
                 }
                 WitnessPayload::CallReturn { target, arity } => {
                     // A fresh method dispatch at the call's own arity. The
@@ -2063,6 +2187,112 @@ impl ReducerRegistry {
                                 })
                             }
                             ProjectionStep::ArrayIndex(i) => t.element_at(*i).cloned(),
+                            ProjectionStep::Element => match &t {
+                                crate::model::file_analysis::InferredType::Sequence(elems) => {
+                                    let mut it = elems.iter();
+                                    it.next().filter(|first| it.all(|e| e == *first)).cloned()
+                                }
+                                // A parametric container's TRAILING argument is
+                                // its element by the same positional convention
+                                // `ParamOf` projects (`array<K, V>` → V,
+                                // `vector<T>` → T) — no base-name branch.
+                                crate::model::file_analysis::InferredType::Parametric(
+                                    crate::model::file_analysis::ParametricType::Instance {
+                                        args, ..
+                                    },
+                                ) => args.last().cloned(),
+                                _ => None,
+                            },
+                            ProjectionStep::Key => match &t {
+                                // A sequence's keys ARE its positions.
+                                crate::model::file_analysis::InferredType::Sequence(_) => {
+                                    Some(crate::model::file_analysis::InferredType::Numeric)
+                                }
+                                // A two-argument instance keys by its first
+                                // argument (`array<string, V>` → string).
+                                crate::model::file_analysis::InferredType::Parametric(
+                                    crate::model::file_analysis::ParametricType::Instance {
+                                        args, ..
+                                    },
+                                ) if args.len() == 2 => args.first().cloned(),
+                                _ => None,
+                            },
+                            ProjectionStep::ParamOf { member, index } => {
+                                // The dispatch class picks the callee; the
+                                // callee's bag says whether the position
+                                // aliases (`Param` fallback below).
+                                t.class_name().map(str::to_string).and_then(|class| {
+                                    let att = WitnessAttachment::Param {
+                                        package: class,
+                                        name: member.clone(),
+                                        index: *index,
+                                    };
+                                    let sub_q = ReducerQuery {
+                                        attachment: &att,
+                                        point: q.point,
+                                        framework: q.framework,
+                                        arity_hint: None,
+                                        receiver: Some(t.clone()),
+                                        args: q.args.clone(),
+                                        context: q.context,
+                                    };
+                                    state.in_opaque_frame(|state| {
+                                        match &*self.query_rec(bag, &sub_q, state) {
+                                            ReducedValue::Type(t) => Some(t.clone()),
+                                            ReducedValue::FactMap(_)
+                                            | ReducedValue::None => None,
+                                        }
+                                    })
+                                })
+                            }
+                            ProjectionStep::MethodHop { member, arity: _ }
+                            | ProjectionStep::ValueHop { member } => {
+                                // The step's kind picks the attachment: a call
+                                // dispatches `PackageSymbol{class, member}` at
+                                // the call's own arity, a value read chases
+                                // `Field{class, member}` — the slot's own
+                                // subject — so a same-named callable's return
+                                // can never answer a read, nor a field a call.
+                                // The base type IS the dynamic receiver, so a
+                                // fluent `Receiver` return substitutes it
+                                // (`$q->where()->get()`).
+                                let (att_of, arity): (fn(String, String) -> WitnessAttachment, Option<u32>) =
+                                    match step {
+                                        ProjectionStep::MethodHop { arity, .. } => (
+                                            |class, name| WitnessAttachment::PackageSymbol {
+                                                package: class,
+                                                name,
+                                            },
+                                            Some(*arity),
+                                        ),
+                                        _ => (
+                                            |class, name| WitnessAttachment::Field {
+                                                owner: class,
+                                                name,
+                                            },
+                                            None,
+                                        ),
+                                    };
+                                t.class_name().map(str::to_string).and_then(|class| {
+                                    let att = att_of(class, member.clone());
+                                    let sub_q = ReducerQuery {
+                                        attachment: &att,
+                                        point: q.point,
+                                        framework: q.framework,
+                                        arity_hint: arity,
+                                        receiver: Some(t.clone()),
+                                        args: q.args.clone(),
+                                        context: q.context,
+                                    };
+                                    state.in_opaque_frame(|state| {
+                                        match &*self.query_rec(bag, &sub_q, state) {
+                                            ReducedValue::Type(t) => Some(t.clone()),
+                                            ReducedValue::FactMap(_)
+                                            | ReducedValue::None => None,
+                                        }
+                                    })
+                                })
+                            }
                         };
                         if let Some(t) = projected {
                             out.push(Witness {
@@ -2072,6 +2302,46 @@ impl ReducerRegistry {
                                 span: w.span,
                             });
                         }
+                    }
+                }
+                WitnessPayload::Tuple(elems) => {
+                    // Every slot must answer: a partial tuple would put the
+                    // wrong type at an index. Opaque frames throughout — the
+                    // value is assembled here, no sub-chase names it.
+                    let mut types = Vec::with_capacity(elems.len());
+                    for el in elems {
+                        let sub_q = ReducerQuery {
+                            attachment: el,
+                            point: q.point,
+                            framework: q.framework,
+                            arity_hint: None,
+                            receiver: q.receiver.clone(),
+                            args: q.args.clone(),
+                            context: q.context,
+                        };
+                        let t = state.in_opaque_frame(|state| {
+                            match &*self.query_rec(bag, &sub_q, state) {
+                                ReducedValue::Type(t) => Some(t.clone()),
+                                ReducedValue::FactMap(_) | ReducedValue::None => None,
+                            }
+                        });
+                        match t {
+                            Some(t) => types.push(t),
+                            None => {
+                                types.clear();
+                                break;
+                            }
+                        }
+                    }
+                    if !types.is_empty() {
+                        out.push(Witness {
+                            attachment: w.attachment.clone(),
+                            source: w.source.clone(),
+                            payload: WitnessPayload::InferredType(
+                                crate::model::file_analysis::InferredType::Sequence(types),
+                            ),
+                            span: w.span,
+                        });
                     }
                 }
                 WitnessPayload::QualifiedCallReturn { method_lookup, receiver_class, arity } => {
@@ -2190,23 +2460,23 @@ impl ReducerRegistry {
 /// variants count as bindings by default — only the bare rep/scalar
 /// observations are the weak case.
 fn scope_binds_variable(bag: &WitnessBag, var: &str, scope: ScopeId, point: Point) -> bool {
+    binds_variable_where(bag, var, scope, |w| w.span.start <= point)
+}
+
+fn binds_variable_where(
+    bag: &WitnessBag,
+    var: &str,
+    scope: ScopeId,
+    at: impl Fn(&Witness) -> bool,
+) -> bool {
     let att = WitnessAttachment::Variable {
         name: var.to_string(),
         scope,
     };
     bag.for_attachment(&att).iter().any(|w| {
-        w.span.start <= point
-            && !matches!(
-                &w.payload,
-                WitnessPayload::Observation(
-                    TypeObservation::HashRefAccess
-                        | TypeObservation::ArrayRefAccess
-                        | TypeObservation::CodeRefInvocation
-                        | TypeObservation::NumericUse
-                        | TypeObservation::StringUse
-                        | TypeObservation::RegexpUse
-                )
-            )
+        at(w)
+            && (w.payload.binds_value()
+                || !matches!(&w.payload, WitnessPayload::Observation(_) | WitnessPayload::Reset))
     })
 }
 

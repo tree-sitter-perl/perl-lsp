@@ -319,6 +319,7 @@ fn equal_span_first_write_wins() {
                     end: Point::new(0, 5),
                 },
                 member_op: None,
+                named_by_string: false,
             },
             span,
             scope: ScopeId(0),
@@ -340,6 +341,7 @@ fn equal_span_first_write_wins() {
                     end: Point::new(0, 7),
                 },
                 member_op: None,
+                named_by_string: false,
             },
             span,
             scope: ScopeId(0),
@@ -361,6 +363,7 @@ fn equal_span_first_write_wins() {
                 end: Point::new(10, 0),
             },
             package: None,
+            owner: None,
         }],
         refs,
         ..Default::default()

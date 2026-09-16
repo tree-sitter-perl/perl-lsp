@@ -389,6 +389,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     // ---- the state machine: scope stack + sticky contexts ----
     let mut out = SkeletonAnalysis::default();
     out.receiver_names = pack.receiver_names.iter().map(|s| s.to_string()).collect();
+    out.names = pack.names.clone();
     // Template params joined to their owner class — the owner shaped like a
     // def name (a partial spec's spelling canonicalizes) so the key matches
     // the Class symbol's identity. Source order = the `ParamOf` index axis.
@@ -420,6 +421,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
         kind: ScopeKind::File,
         span: Span { start: tree.root_node().start_position(), end: tree.root_node().end_position() },
         package: None,
+        owner: None,
     });
     scope_stack.push((tree.root_node().end_byte(), ScopeId(0)));
 
@@ -543,6 +545,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                     },
                     span: Span { start: e.start, end: e.end },
                     package: package.clone(),
+                    owner: None,
                 });
                 scope_stack.push((e.end_byte, id));
                 out.scope_count += 1;
@@ -1250,7 +1253,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
             if let Some(payload) = payload {
                 out.witnesses.push(crate::model::witnesses::Witness {
                     attachment: var.clone(),
-                    source: crate::model::witnesses::WitnessSource::Builder(crate::model::witnesses::ANNOT_SOURCE.into()),
+                    source: crate::model::witnesses::WitnessSource::Annotation(crate::model::witnesses::AnnotationKind::Declared),
                     payload,
                     span: annot_span,
                 });
@@ -1278,6 +1281,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                 target_at: *at,
                 source: target_span,
                 extraction: crate::model::file_analysis::Extraction::Whole,
+                reassigns: false,
             });
         }
     }
@@ -1290,6 +1294,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
             target_at: at,
             source: Span { start: at, end: at },
             extraction: crate::model::file_analysis::Extraction::Rebind,
+            reassigns: false,
         });
     }
     // Lower the value-flow edges to type-tier witnesses (the bag is canonical
