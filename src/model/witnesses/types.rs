@@ -163,27 +163,29 @@ pub enum WitnessAttachment {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct RefIdx(pub u32);
 
-/// `WitnessSource::Builder` tag marking a variable's type as written
-/// EXPLICITLY (a declared static-type annotation) rather than inferred.
-/// Recognized by `WitnessSource::priority` (an explicit annotation
-/// outranks a flow guess) and by the inlay-hint suppression (an annotated
-/// declaration needs no synthetic `: T`).
-pub const ANNOT_SOURCE: &str = "skeleton-annot";
-
-/// The @inheritDoc param-subscription edge (`Variable → Edge(PackageSymbol
-/// {class, "method#p#name"})`). Priority-tied with `ANNOT_SOURCE` so its
-/// materialized answer (an ancestor's `@param array<X>`) beats the bare
-/// container the local syntax annot (`array $records`) contributed — at
-/// equal priority latest-wins applies and the edge lands later, while a
-/// dangling edge drops out and leaves the syntax annot standing.
-pub const INHERIT_PARAM_SOURCE: &str = "inherit-param";
-
-/// A return-arm chain that REFINES a bare declared container (`: array`
-/// over `return [$q, $a]` — the tuple literal is strictly more informative).
-/// Annot priority for the same reason as `INHERIT_PARAM_SOURCE`: the
-/// materialized `Sequence` must beat the `HashRef` annot, and at equal
-/// priority latest-wins does it (`HashRef` never subsumes `Sequence`).
-pub const REFINE_SOURCE: &str = "refines-container";
+/// What a `WitnessSource::Annotation` was declared BY — a closed set, so
+/// a producer cannot mint a spelling nothing reads and `--dump-package`
+/// names the provenance without a string compare.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum AnnotationKind {
+    /// A type written explicitly in the source (a declared static type, a
+    /// docblock `@var`). The inlay-hint suppression asks for this: an
+    /// annotated declaration needs no synthetic `: T`.
+    Declared,
+    /// An inherited parameter doc (`@inheritDoc`): the edge to the
+    /// ancestor's `@param`. Priority-tied with `Declared` so its
+    /// materialized answer (`array<X>`) beats the bare container the local
+    /// syntax contributed — at equal priority latest-wins applies and the
+    /// edge lands later, while a dangling edge drops out and leaves the
+    /// declared type standing.
+    InheritedParam,
+    /// A return arm that REFINES a bare declared container (`: array` over
+    /// `return [$q, $a]` — the tuple literal is strictly more informative).
+    /// Annotation priority for the same reason as `InheritedParam`: the
+    /// materialized `Sequence` must beat the `HashRef` annotation, and at
+    /// equal priority latest-wins does it.
+    Refinement,
+}
 
 /// Source tag of the builder's write markers (`WitnessPayload::Reset`) —
 /// provenance only; the payload carries the meaning.
@@ -199,13 +201,11 @@ pub enum WitnessSource {
     Enrichment(String),
     /// Derived from another ref — rename transport chases these as a DAG.
     DerivedFrom(RefIdx),
-    /// A DECLARED fact: an explicit annotation in the source
-    /// (`ANNOT_SOURCE`), an inherited doc (`INHERIT_PARAM_SOURCE`), or a
-    /// return arm refining a declared container (`REFINE_SOURCE`). A
-    /// source KIND, so it outranks inference by construction and no
-    /// reducer reads the tag to find out. Kept at the END for bincode
-    /// variant-index stability (bump `EXTRACT_VERSION`).
-    Annotation(String),
+    /// A DECLARED fact — see `AnnotationKind`. A source KIND, so it
+    /// outranks inference by construction and no reducer reads a tag to
+    /// find out. Kept at the END for bincode variant-index stability
+    /// (bump `EXTRACT_VERSION`).
+    Annotation(AnnotationKind),
 }
 
 impl WitnessPayload {
@@ -231,7 +231,7 @@ impl WitnessSource {
     /// Priority for "highest-priority source wins" tie-breaking in
     /// reducers. Plugin overrides dominate everything else (the whole
     /// point of an override is "inference reaches the wrong answer
-    /// here"). An EXPLICIT type annotation (`ANNOT_SOURCE`) outranks a
+    /// here"). An EXPLICIT type annotation (`Annotation`) outranks a
     /// same-attachment inferred/flow class assertion: in a statically-
     /// typed pack language the declared type governs member dispatch, so a
     /// declared `RCPV *rcpv = FOO(...)` must resolve members on `RCPV`,

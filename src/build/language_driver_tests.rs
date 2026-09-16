@@ -276,7 +276,7 @@ fn macro_body_member_carries_field_payload_like_plain_field() {
     // hitlist-4 family C (findings 4 + 6a): a member declared inside a
     // `#define BASEOP` body must arrive with the SAME payload a plainly-declared
     // struct field carries — Field kind, the pointer deref_stack, and the
-    // explicit-annotation (`ANNOT_SOURCE`) witness — so hover keeps the `*` and
+    // explicit-annotation (`Annotation(Declared)`) witness — so hover keeps the `*` and
     // the redundant inlay hint is suppressed.
     use crate::model::file_analysis::{InferredType, SymKind};
     let src = "\
@@ -310,7 +310,7 @@ struct op { BASEOP };
     );
 
     // The renderers then agree: inlay over the member declarations emits no hint
-    // (Field kind + ANNOT_SOURCE both suppress) — exactly like a plain struct,
+    // (Field kind + `Annotation` both suppress) — exactly like a plain struct,
     // whose fields are never hinted either.
     let full = crate::lsp::symbols::inlay_hints(
         &fa,

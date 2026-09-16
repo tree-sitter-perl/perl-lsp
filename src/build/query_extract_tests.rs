@@ -2086,7 +2086,7 @@ fn cpp_fa(src: &str) -> crate::model::file_analysis::FileAnalysis {
 /// initializer shape — `T x = {…}`, `T x{…}`, `T x;` — the braced-init
 /// twin of the annotation-priority fix. The initializer's literals mint a
 /// `Numeric` flow witness (priority 10); the declared container mints an
-/// `ANNOT_SOURCE` witness (priority 20). Before the plain-`InferredType`
+/// `Annotation(Declared)` witness (priority 20). Before the plain-`InferredType`
 /// axis learned to break ties on source priority, the later flow witness
 /// clobbered the annot (latest-wins) and the variable hovered `Numeric`.
 #[test]

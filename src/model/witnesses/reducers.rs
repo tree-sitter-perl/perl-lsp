@@ -271,7 +271,7 @@ impl WitnessReducer for FrameworkAwareTypeFold {
                     }
                     b @ InferredType::BrandedRoute { .. } => branded = Some(b.clone()),
                     // Source priority breaks ties first (an EXPLICIT
-                    // annotation — `ANNOT_SOURCE`, priority 20 — governs over
+                    // annotation — `Annotation`, priority 20 — governs over
                     // an inferred flow type, priority 10, whatever the order
                     // they land in): the C++ `T x = {…}` braced-init case,
                     // where the initializer's `Numeric` flow witness would

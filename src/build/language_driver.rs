@@ -890,7 +890,7 @@ fn inject_member_blocks(
             });
             // The role member emits the SAME `TypeName` edge an expanded field
             // does — the edge is canonical (the hover leaf + the type chase
-            // resolve `op_type` → `unsigned short`). Tagged `ANNOT_SOURCE` (the
+            // resolve `op_type` → `unsigned short`). Tagged `Annotation(Declared)` (the
             // explicit-annotation source a plain field's declared type carries)
             // so priority and inlay suppression match field-for-field.
             let payload = match annot_type(&m.type_text) {
@@ -903,7 +903,7 @@ fn inject_member_blocks(
             if let Some(payload) = payload {
                 skel.witnesses.push(Witness {
                     attachment: WitnessAttachment::Variable { name: m.name.clone(), scope: scope_id },
-                    source: WitnessSource::Annotation(crate::model::witnesses::ANNOT_SOURCE.into()),
+                    source: WitnessSource::Annotation(crate::model::witnesses::AnnotationKind::Declared),
                     payload,
                     span: m.name_span,
                 });
