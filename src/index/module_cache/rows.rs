@@ -507,6 +507,48 @@ pub fn sym_rows_matching(conn: &Connection, query: &str) -> Vec<SymRowHit> {
     out
 }
 
+/// The per-file probes' SQL, shared with the plan test
+/// (`row_probes_plan_as_index_point_lookups`) that pins how SQLite runs
+/// them. Every `syms` half is its own `EXISTS`, never one `OR` inside a
+/// WHERE: an OR over two IN-subqueries plans as a scan of the `file_id`
+/// prefix whatever index exists (21,605 rows on a 1,200-helper file,
+/// ~3 ms), while each half alone is a covering point probe on
+/// `(file_id, name_id|key_id, container_id)` — ~15 µs on the same file.
+/// The plan is the SQLite planner's choice, so the test asserts it rather
+/// than this comment.
+pub(super) const SYM_MEMBER_PROBE_SQL: &str = "SELECT EXISTS(
+            SELECT 1 FROM syms y
+             WHERE y.file_id = ?1
+               AND y.name_id IN (SELECT str_id FROM strings WHERE s IN (?2, ?3))
+               AND y.container_id = (SELECT str_id FROM strings WHERE s = ?4))
+         OR EXISTS(
+            SELECT 1 FROM syms y
+             WHERE y.file_id = ?1
+               AND y.key_id IN (SELECT str_id FROM strings WHERE s IN (?2, ?3))
+               AND y.container_id = (SELECT str_id FROM strings WHERE s = ?4))";
+
+pub(super) const SYM_NAME_PROBE_SQL: &str = "SELECT EXISTS(
+            SELECT 1 FROM syms y
+             WHERE y.file_id = ?1
+               AND y.name_id IN (SELECT str_id FROM strings WHERE s IN (?2, ?3)))
+         OR EXISTS(
+            SELECT 1 FROM syms y
+             WHERE y.file_id = ?1
+               AND y.key_id IN (SELECT str_id FROM strings WHERE s IN (?2, ?3)))";
+
+pub(super) const NAME_PROBE_SQL: &str = "SELECT EXISTS(
+            SELECT 1 FROM refs r
+             WHERE r.name_id IN (SELECT str_id FROM strings WHERE s IN (?2, ?3))
+               AND r.file_id = ?1)
+         OR EXISTS(
+            SELECT 1 FROM syms y
+             WHERE y.file_id = ?1
+               AND y.name_id IN (SELECT str_id FROM strings WHERE s IN (?2, ?3)))
+         OR EXISTS(
+            SELECT 1 FROM syms y
+             WHERE y.file_id = ?1
+               AND y.key_id IN (SELECT str_id FROM strings WHERE s IN (?2, ?3)))";
+
 /// Can the row store rule out a member named `name` attributed to container
 /// `container` in `path`'s file? Three-valued, and the caller's license to
 /// skip a decode hangs on the distinction:
@@ -541,23 +583,7 @@ pub fn sym_member_row_exists(
     // correct: no row can reference a string that was never stored. The
     // container stays EXACT-match: it is a package name, and its match key
     // strips the qualifier, which would let `Base` claim `My::Base`'s rows.
-    conn.prepare_cached(
-        // Two EXISTS halves, never one `OR` inside a WHERE: SQLite plans an
-        // OR over two IN-subqueries as a scan of the `file_id` prefix
-        // (21,605 rows for a 1,200-helper file, ~3 ms), while each half on
-        // its own is a point probe on `(file_id, name_id|key_id,
-        // container_id)` — ~15 µs on the same file.
-        "SELECT EXISTS(
-            SELECT 1 FROM syms y
-             WHERE y.file_id = ?1
-               AND y.name_id IN (SELECT str_id FROM strings WHERE s IN (?2, ?3))
-               AND y.container_id = (SELECT str_id FROM strings WHERE s = ?4))
-         OR EXISTS(
-            SELECT 1 FROM syms y
-             WHERE y.file_id = ?1
-               AND y.key_id IN (SELECT str_id FROM strings WHERE s IN (?2, ?3))
-               AND y.container_id = (SELECT str_id FROM strings WHERE s = ?4))",
-    )
+    conn.prepare_cached(SYM_MEMBER_PROBE_SQL)
     .ok()?
     .query_row(params![file_id, name, norm, container], |row| row.get(0))
     .ok()
@@ -597,17 +623,7 @@ pub fn sym_name_row_exists(
         .query_row(params![path], |row| row.get(0))
         .ok()?;
     let norm = probe_spelling(name, names);
-    conn.prepare_cached(
-        // Split halves for the same reason as `sym_member_row_exists`.
-        "SELECT EXISTS(
-            SELECT 1 FROM syms y
-             WHERE y.file_id = ?1
-               AND y.name_id IN (SELECT str_id FROM strings WHERE s IN (?2, ?3)))
-         OR EXISTS(
-            SELECT 1 FROM syms y
-             WHERE y.file_id = ?1
-               AND y.key_id IN (SELECT str_id FROM strings WHERE s IN (?2, ?3)))",
-    )
+    conn.prepare_cached(SYM_NAME_PROBE_SQL)
     .ok()?
     .query_row(params![file_id, name, norm], |row| row.get(0))
     .ok()
@@ -635,20 +651,7 @@ pub fn name_row_exists(
         .query_row(params![path], |row| row.get(0))
         .ok()?;
     let norm = probe_spelling(name, names);
-    conn.prepare_cached(
-        "SELECT EXISTS(
-            SELECT 1 FROM refs r
-             WHERE r.name_id IN (SELECT str_id FROM strings WHERE s IN (?2, ?3))
-               AND r.file_id = ?1)
-         OR EXISTS(
-            SELECT 1 FROM syms y
-             WHERE y.file_id = ?1
-               AND y.name_id IN (SELECT str_id FROM strings WHERE s IN (?2, ?3)))
-         OR EXISTS(
-            SELECT 1 FROM syms y
-             WHERE y.file_id = ?1
-               AND y.key_id IN (SELECT str_id FROM strings WHERE s IN (?2, ?3)))",
-    )
+    conn.prepare_cached(NAME_PROBE_SQL)
     .ok()?
     .query_row(params![file_id, name, norm], |row| row.get(0))
     .ok()

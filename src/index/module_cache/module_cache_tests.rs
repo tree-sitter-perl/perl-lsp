@@ -690,6 +690,87 @@ fn row_probes_match_the_match_key_spelling() {
     let _ = std::fs::remove_file(&pm);
 }
 
+/// The probes' cost is the planner's choice, not the SQL's: an `OR` over
+/// two IN-subqueries planned as a scan of the `file_id` prefix on every
+/// SQLite version tried, and the split-`EXISTS` shape plus the composite
+/// indexes is what makes each half a covering point probe. A bundled
+/// SQLite upgrade can move the plan silently, so this pins it: every
+/// `syms` access in the three probes searches a composite index on all
+/// of `file_id` and the name column, and nothing scans.
+#[test]
+fn row_probes_plan_as_index_point_lookups() {
+    let conn = test_db();
+    let source = "package My::Base;\nsub render { my $s = shift; $s->{cache} = 1; }\n1;\n";
+    let dir = std::env::temp_dir();
+    let pm = dir.join("TestModule_probe_plan.pm");
+    std::fs::write(&pm, source).unwrap();
+    let cached = parse_source_to_cached(source, &pm);
+    let path_str = pm.to_string_lossy().to_string();
+    shred_derived_rows(
+        &conn,
+        &path_str,
+        "workspace",
+        &cached.analysis.ref_row_seeds(),
+        &cached.analysis.sym_row_seeds(),
+    )
+    .unwrap();
+
+    let plan = |sql: &str, args: &[&dyn rusqlite::ToSql]| -> Vec<String> {
+        let mut stmt = conn.prepare(&format!("EXPLAIN QUERY PLAN {sql}")).unwrap();
+        stmt.query_map(args, |row| row.get::<_, String>(3))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect()
+    };
+    let probes: [(&str, &str, Vec<Box<dyn rusqlite::ToSql>>); 3] = [
+        ("sym_member", super::rows::SYM_MEMBER_PROBE_SQL, vec![Box::new(1i64), Box::new("render"), Box::new("render"), Box::new("My::Base")]),
+        ("sym_name", super::rows::SYM_NAME_PROBE_SQL, vec![Box::new(1i64), Box::new("render"), Box::new("render")]),
+        ("name", super::rows::NAME_PROBE_SQL, vec![Box::new(1i64), Box::new("render"), Box::new("render")]),
+    ];
+    for (label, sql, args) in &probes {
+        let args: Vec<&dyn rusqlite::ToSql> = args.iter().map(|a| a.as_ref()).collect();
+        let lines = plan(sql, &args);
+        // Every table access in the whole query is an index search: the
+        // only SCAN allowed is the constant row the EXISTS shells produce.
+        // A version that plans any half as a table scan, or reaches
+        // `strings` without its UNIQUE index, fails here.
+        for l in &lines {
+            if l.starts_with("SCAN") {
+                assert_eq!(l, "SCAN CONSTANT ROW", "{label}: a table scan — {l} — plan: {lines:?}");
+            }
+            if l.starts_with("SEARCH") {
+                assert!(l.contains("INDEX"), "{label}: a search without an index — {l} — plan: {lines:?}");
+            }
+        }
+        // The `syms` halves are point probes on the composites over BOTH
+        // `file_id` and the name column — the `file_id` prefix alone would
+        // be a search that still walks the file's rows.
+        let syms_lines: Vec<&String> = lines.iter().filter(|l| l.contains(" y ")).collect();
+        assert!(!syms_lines.is_empty(), "{label}: no plan line for the syms alias — plan: {lines:?}");
+        for l in &syms_lines {
+            let point = (l.contains("idx_syms_file_name") && l.contains("(file_id=? AND name_id=?"))
+                || (l.contains("idx_syms_file_key") && l.contains("(file_id=? AND key_id=?"));
+            assert!(point, "{label}: a syms half is not a composite point probe — {l} — plan: {lines:?}");
+        }
+        // `refs` is WITHOUT ROWID, so its secondary index carries the key
+        // columns too; either index must constrain both.
+        for l in lines.iter().filter(|l| l.contains(" r ")) {
+            assert!(
+                l.contains("file_id=?") && l.contains("name_id=?"),
+                "{label}: the refs half must probe both key columns — {l} — plan: {lines:?}"
+            );
+        }
+        // The string interning lookups ride the UNIQUE index on `s`.
+        let strings_lines: Vec<&String> = lines.iter().filter(|l| l.contains("strings")).collect();
+        assert!(!strings_lines.is_empty(), "{label}: no strings lookup in the plan — plan: {lines:?}");
+        for l in &strings_lines {
+            assert!(l.contains("INDEX") && l.contains("(s=?)"), "{label}: a strings lookup off the UNIQUE index — {l} — plan: {lines:?}");
+        }
+    }
+
+    let _ = std::fs::remove_file(&pm);
+}
+
 /// `FLAG_EXPORTED` is minted from the real `@EXPORT`/`@EXPORT_OK` surface
 /// (`exports_name`), so the rows agree with the source the Surface projects —
 /// never a parallel notion of exportedness.
