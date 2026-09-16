@@ -835,6 +835,31 @@ pub trait CrossFileLookup {
         false
     }
     fn modules_with_symbol(&self, name: &str) -> Vec<String>;
+    /// Files whose recorded handler feed declares `name` — the pack tier's
+    /// rail files, which declare no class and so reach no name-keyed
+    /// registration. Default empty: an index with no handler axis.
+    fn handler_def_files(&self, _name: &str) -> Vec<std::sync::Arc<CachedModule>> {
+        Vec::new()
+    }
+    /// Every file that may declare handler `name` — the ONE speller for
+    /// goto-def, hover and signature help, so none of them can miss a
+    /// registration tier the others see. Stacked registrations live in
+    /// losing candidates, so every candidate of every name-keyed module
+    /// comes back, and the classless rail files follow.
+    fn handler_candidate_files(&self, name: &str) -> Vec<std::sync::Arc<CachedModule>> {
+        let mut out: Vec<std::sync::Arc<CachedModule>> = Vec::new();
+        let named = self.modules_with_symbol(name);
+        for cached in named
+            .iter()
+            .flat_map(|m| self.visible_def_candidates(m))
+            .chain(self.handler_def_files(name))
+        {
+            if !out.iter().any(|c| c.path == cached.path) {
+                out.push(cached);
+            }
+        }
+        out
+    }
     fn find_exporters(&self, func_name: &str) -> Vec<String>;
     fn defining_module_cached(&self, entry: &str, name: &str) -> Option<std::sync::Arc<CachedModule>>;
     fn module_declaring_method_in_package(&self, name: &str, class: &str) -> Option<String>;
@@ -1525,6 +1550,9 @@ impl<'a> CrossFileLookup for ScopedLookup<'a> {
     }
     fn modules_with_symbol(&self, name: &str) -> Vec<String> {
         self.inner.modules_with_symbol(name)
+    }
+    fn handler_def_files(&self, name: &str) -> Vec<std::sync::Arc<CachedModule>> {
+        self.inner.handler_def_files(name)
     }
     fn find_exporters(&self, func_name: &str) -> Vec<String> {
         self.inner.find_exporters(func_name)

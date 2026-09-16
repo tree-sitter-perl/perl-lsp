@@ -386,6 +386,12 @@ impl ModuleIndex {
         result
     }
 
+    /// Every handler name on the string rail `rail` this index holds
+    /// (rail-name completion's cross-file source).
+    pub fn rail_names(&self, rail: &str) -> Vec<String> {
+        self.core.edges.rail_names(rail)
+    }
+
     /// Generic "find modules with a symbol named N" primitive —
     /// O(1) hash + O(matches) scan for name-keyed predicates (never
     /// `for_each_cached` over the whole store). Callers apply their

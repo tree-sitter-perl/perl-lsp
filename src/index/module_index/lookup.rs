@@ -705,6 +705,15 @@ impl CrossFileLookup for ModuleIndex {
         self.modules_with_symbol(name)
     }
 
+    fn handler_def_files(&self, name: &str) -> Vec<Arc<CachedModule>> {
+        self.core
+            .edges
+            .handler_paths(name)
+            .into_iter()
+            .filter_map(|p| self.all_files.get(&p).map(|e| e.value().clone()))
+            .collect()
+    }
+
     fn find_exporters(&self, func_name: &str) -> Vec<String> {
         self.find_exporters(func_name)
     }
