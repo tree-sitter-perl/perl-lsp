@@ -203,6 +203,18 @@ pub struct LangPack {
     /// positional parameter hints stop at the first one. Empty = the pack
     /// has no named-argument form.
     pub named_arg_field: &'static str,
+    /// How the implement-missing-methods quick-fix spells a stub for one
+    /// contract declarator (`{}` = the declarator as written after the name,
+    /// `hi(string $n): string`). Empty = the pack offers no stub.
+    pub contract_stub: &'static str,
+    /// How a native return annotation is spelled after the parameter list
+    /// (`{}` = the type). Empty = the pack has no return annotations to add.
+    pub return_annotation_template: &'static str,
+    /// Engine type name → the pack's NATIVE spelling for a declared type
+    /// (`"HashRef"` → `"array"`); an engine type absent here has no native
+    /// spelling the pack would write (`Numeric`: `int` or `float`?). Unlike
+    /// `type_display`, this is what goes INTO the source.
+    pub native_type_spellings: &'static [(&'static str, &'static str)],
     /// The sigil a static property is spelled with after the scope
     /// operator (php `self::$count`), while an instance read drops it
     /// (`$o->count`). Empty = the spelling is the bare name in both.
@@ -218,6 +230,10 @@ pub struct LangPack {
     /// as opposed to splicing text (`#include`). Only bound names can be
     /// unused.
     pub imports_bind_names: bool,
+    /// The attribute that marks a declaration deprecated (php
+    /// `#[Deprecated]`); empty = none. Lands as the `deprecated` symbol
+    /// attribute exactly like the docblock tag.
+    pub deprecated_attribute: &'static str,
     /// Class, interface and attribute names the language itself provides
     /// in the global namespace (php's core + SPL): a global reference to
     /// one is never a type missing its import.
@@ -556,10 +572,14 @@ pub fn perl_pack() -> LangPack {
         pair_arrow: "=>",
         spread_arg_kind: "",
         named_arg_field: "",
+        contract_stub: "",
+        return_annotation_template: "",
+        native_type_spellings: &[],
         static_property_sigil: "",
         class_literal_member: "",
         import_template: "",
         imports_bind_names: false,
+        deprecated_attribute: "",
         builtin_types: &[],
         members_are_package_bound: true,
         types_are_capitalized: false,
@@ -635,10 +655,14 @@ pub fn python_pack() -> LangPack {
         pair_arrow: "",
         spread_arg_kind: "",
         named_arg_field: "",
+        contract_stub: "",
+        return_annotation_template: "",
+        native_type_spellings: &[],
         static_property_sigil: "",
         class_literal_member: "",
         import_template: "",
         imports_bind_names: false,
+        deprecated_attribute: "",
         builtin_types: &[],
         members_are_package_bound: true,
         types_are_capitalized: false,
@@ -714,10 +738,14 @@ pub fn r_pack() -> LangPack {
         pair_arrow: "",
         spread_arg_kind: "",
         named_arg_field: "",
+        contract_stub: "",
+        return_annotation_template: "",
+        native_type_spellings: &[],
         static_property_sigil: "",
         class_literal_member: "",
         import_template: "",
         imports_bind_names: false,
+        deprecated_attribute: "",
         builtin_types: &[],
         members_are_package_bound: true,
         types_are_capitalized: false,
@@ -801,10 +829,14 @@ pub fn cmake_pack() -> LangPack {
         pair_arrow: "",
         spread_arg_kind: "",
         named_arg_field: "",
+        contract_stub: "",
+        return_annotation_template: "",
+        native_type_spellings: &[],
         static_property_sigil: "",
         class_literal_member: "",
         import_template: "",
         imports_bind_names: false,
+        deprecated_attribute: "",
         builtin_types: &[],
         members_are_package_bound: true,
         types_are_capitalized: false,
@@ -942,10 +974,14 @@ pub fn cpp_pack() -> LangPack {
         pair_arrow: "",
         spread_arg_kind: "",
         named_arg_field: "",
+        contract_stub: "",
+        return_annotation_template: "",
+        native_type_spellings: &[],
         static_property_sigil: "",
         class_literal_member: "",
         import_template: "",
         imports_bind_names: false,
+        deprecated_attribute: "",
         builtin_types: &[],
         members_are_package_bound: true,
         types_are_capitalized: false,
