@@ -3,6 +3,56 @@
 use super::*;
 
 impl<'a> CandidateSet<'a> {
+    /// `parent::method` definition sites: the model's SUPER walk over the
+    /// enclosing class's parents (never the enclosing class itself), whose
+    /// interface deferral keeps an abstract stub as the answer only when
+    /// nothing concrete on the chain defines the method. `None` = no parent
+    /// defines it; the caller falls through to the generic lanes.
+    fn super_def_locations(
+        &self,
+        r: &crate::model::file_analysis::Ref,
+        method: &str,
+        idx: &dyn crate::model::file_analysis::CrossFileLookup,
+    ) -> Option<Vec<RefLocation>> {
+        use crate::model::file_analysis::MethodResolution;
+        let analysis = self.origin;
+        let encl = analysis.enclosing_class_for_scope(r.scope)?;
+        match analysis.resolve_super_method(&encl, method, Some(idx))? {
+            MethodResolution::Local { sym_id, .. } => analysis
+                .symbols()
+                .iter()
+                .find(|s| s.id == sym_id)
+                .map(|s| vec![self.origin_decl(s.selection_span)]),
+            MethodResolution::CrossFile { class, def_module, .. } => {
+                // Same lookup as the inherited-member lane: a real parent
+                // method lives in `class`'s own module, a bridged one in the
+                // registering file.
+                let module = def_module.as_deref().unwrap_or(class.as_str());
+                let cached = idx
+                    .candidate_defining_sub_in_package(module, &class, method)
+                    .or_else(|| idx.get_cached(module))?;
+                Url::from_file_path(&cached.path).ok()?;
+                let whole = idx.whole_present(&cached);
+                let span = whole
+                    .symbols()
+                    .iter()
+                    .find(|s| {
+                        matches!(s.kind, SymKind::Sub | SymKind::Method)
+                            && s.name == method
+                            && s.package.as_deref() == Some(class.as_str())
+                    })
+                    .map(|s| s.selection_span)?;
+                Some(vec![RefLocation {
+                    key: FileKey::Path(cached.path.clone()),
+                    span,
+                    access: AccessKind::Declaration,
+                    rewritable: true,
+                    label: None,
+                }])
+            }
+        }
+    }
+
     /// Word-keyed fallbacks stand down inside an import row
     /// (`PackFacts::import_row_covering`).
     fn point_in_import_row(&self, point: tree_sitter::Point) -> bool {
@@ -583,6 +633,25 @@ impl<'a> CandidateSet<'a> {
     fn definitions_primary(&self) -> Vec<RefLocation> {
         let analysis = self.origin;
         let point = self.point;
+
+        // `parent::` gd first (pack languages): it EXCLUDES the origin
+        // class's own override by construction — every ranked-family lane
+        // below would self-answer when the aliased parent shares the
+        // enclosing leaf (`use Support\Collection as BaseCollection;
+        // class Collection extends BaseCollection`).
+        if self.pack {
+            if let (Some(r), Some(idx)) = (analysis.ref_at(point), self.idx()) {
+                if matches!(r.kind, RefKind::MethodCall { .. }) {
+                    if let crate::model::conventions::MethodToken::Super(name) =
+                        crate::model::conventions::MethodToken::parse(&r.target_name)
+                    {
+                        if let Some(locs) = self.super_def_locations(r, name, idx) {
+                            return locs;
+                        }
+                    }
+                }
+            }
+        }
 
         // Owner-anchored forward resolution: a `::`-qualified value read
         // (`dynamic::STRING`, `absl::StatusCode::kNotFound`) names its OWNER
