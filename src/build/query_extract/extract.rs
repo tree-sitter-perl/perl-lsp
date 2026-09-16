@@ -424,6 +424,13 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     let mut handler_name_by_match: HashMap<usize, String> = HashMap::new();
     // `@key.elem` — the array element a `@def.handler.key` string heads.
     let mut key_elem_by_match: HashMap<usize, Span> = HashMap::new();
+    // `@seq.source` — a foreach's collection (span + text), joined to the
+    // same match's `@def.var` so the bound var carries the ELEMENT peel;
+    // `@seq.source.key` is the pair form's KEY twin (the Key step).
+    let mut seq_source_by_match: HashMap<usize, (crate::model::file_analysis::Span, String)> =
+        HashMap::new();
+    let mut seq_key_by_match: HashMap<usize, (crate::model::file_analysis::Span, String)> =
+        HashMap::new();
     for e in &events {
         if let Some(prefix) = e.cap.strip_suffix(".name") {
             names_by_match
@@ -783,6 +790,21 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     // `for (auto x : …)`) — they mint a `Rebind` FlowEdge so the narrowing
     // cutoff sees them, exactly like Perl's `foreach` var.
     let mut flow_rebinds: Vec<(String, ScopeId, Point)> = Vec::new();
+    // Destructuring slots (`@flow.slot` in a `@flow.slot.list`) and
+    // key-less array-literal tuples (`@tuple.*`) — joined per match after
+    // the loop (docs/adr/destructuring.md).
+    let mut flow_slots: Vec<(usize, String, ScopeId, Point, usize)> = Vec::new();
+    let mut slot_lists: HashMap<usize, (Span, usize, String)> = HashMap::new();
+    let mut tuple_arr_by_match: HashMap<usize, Span> = HashMap::new();
+    let mut tuple_elem_by_match: HashMap<usize, Span> = HashMap::new();
+    let mut tuple_init_by_match: HashMap<usize, (usize, bool)> = HashMap::new();
+    let mut tuple_keyed: std::collections::HashSet<usize> = std::collections::HashSet::new();
+    // `@branch.expr` / `@branch.arm` (match / ternary) and `@subscript.*`,
+    // joined per match after the loop.
+    let mut branch_expr_by_match: HashMap<usize, Span> = HashMap::new();
+    let mut branch_arm_by_match: HashMap<usize, Span> = HashMap::new();
+    let mut subscript_by_match: HashMap<usize, (Span, Option<Span>, Option<i32>, Option<String>)> =
+        HashMap::new();
     let mut annots: HashMap<usize, String> = HashMap::new();
     // keyed-shape collection: ctor + keys grouped per @expr.shape span
     let mut shape_spans: Vec<(usize, usize, Span)> = Vec::new();
@@ -1605,6 +1627,64 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                 out.return_sites
                     .push((cur_scope, Span { start: e.start, end: e.end }));
             }
+            "flow.slot" => {
+                flow_slots.push((
+                    e.match_id,
+                    (pack.shape_name)("def.var", &e.text),
+                    cur_scope,
+                    e.start,
+                    e.start_byte,
+                ));
+            }
+            "flow.slot.list" => {
+                slot_lists.insert(
+                    e.match_id,
+                    (Span { start: e.start, end: e.end }, e.start_byte, e.text.clone()),
+                );
+            }
+            "tuple.arr" => {
+                tuple_arr_by_match.insert(e.match_id, Span { start: e.start, end: e.end });
+            }
+            "tuple.elem" => {
+                tuple_elem_by_match.insert(e.match_id, Span { start: e.start, end: e.end });
+            }
+            "tuple.init" => {
+                tuple_init_by_match
+                    .insert(e.match_id, (e.start_byte, e.text.trim_start().starts_with("...")));
+            }
+            "tuple.keyed" => {
+                tuple_keyed.insert(e.match_id);
+            }
+            "branch.expr" => {
+                branch_expr_by_match.insert(e.match_id, Span { start: e.start, end: e.end });
+            }
+            "branch.arm" => {
+                branch_arm_by_match.insert(e.match_id, Span { start: e.start, end: e.end });
+            }
+            "subscript.expr" => {
+                subscript_by_match
+                    .entry(e.match_id)
+                    .or_insert((Span { start: e.start, end: e.end }, None, None, None))
+                    .0 = Span { start: e.start, end: e.end };
+            }
+            "subscript.base" => {
+                subscript_by_match
+                    .entry(e.match_id)
+                    .or_insert((Span { start: e.start, end: e.end }, None, None, None))
+                    .1 = Some(Span { start: e.start, end: e.end });
+            }
+            "subscript.int" => {
+                subscript_by_match
+                    .entry(e.match_id)
+                    .or_insert((Span { start: e.start, end: e.end }, None, None, None))
+                    .2 = e.text.trim().parse::<i32>().ok();
+            }
+            "subscript.key" => {
+                subscript_by_match
+                    .entry(e.match_id)
+                    .or_insert((Span { start: e.start, end: e.end }, None, None, None))
+                    .3 = Some(e.text.clone());
+            }
             "flow.target" => {
                 flow_targets.insert(
                     e.match_id,
@@ -1994,6 +2074,32 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     // Match-id order (deterministic) — two captures targeting the same
     // `Variable{name, scope}` slot would otherwise land witnesses in
     // HashMap-iteration order, flipping the latest-wins winner per process.
+    // Branch arms (match / ternary): the expression's value is its arms'
+    // AGREEMENT (`BranchArmFold`), never a literal found inside it.
+    {
+        let mut seen_expr: std::collections::HashSet<(Point, Point)> = Default::default();
+        for (mid, arm) in &branch_arm_by_match {
+            let Some(expr) = branch_expr_by_match.get(mid) else { continue };
+            if seen_expr.insert((expr.start, expr.end)) {
+                out.witnesses.push(crate::model::witnesses::Witness {
+                    attachment: crate::model::witnesses::WitnessAttachment::Expr(*expr),
+                    source: crate::model::witnesses::WitnessSource::Builder("skeleton".into()),
+                    payload: crate::model::witnesses::WitnessPayload::Edge(
+                        crate::model::witnesses::WitnessAttachment::BranchArm(*expr),
+                    ),
+                    span: *expr,
+                });
+            }
+            out.witnesses.push(crate::model::witnesses::Witness {
+                attachment: crate::model::witnesses::WitnessAttachment::BranchArm(*expr),
+                source: crate::model::witnesses::WitnessSource::Builder("skeleton".into()),
+                payload: crate::model::witnesses::WitnessPayload::Edge(
+                    crate::model::witnesses::WitnessAttachment::Expr(*arm),
+                ),
+                span: *arm,
+            });
+        }
+    }
     let mut flow_mids: Vec<&usize> = flow_targets.keys().collect();
     flow_mids.sort_unstable();
     // A member-expression rhs (`$q->where('a')`, `w.get()`) is a
@@ -2134,6 +2240,115 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
             reassigns: false,
         });
     }
+    // Destructuring slots bind POSITIONALLY off their source — the same
+    // FlowEdge lowering Perl's list assignment uses. A keyed list never
+    // binds (its positions are not positions); the defs still landed.
+    {
+        let mut element_hops: std::collections::HashSet<(Point, Point)> = Default::default();
+        for (mid, name, scope, at, byte) in &flow_slots {
+            let Some((list_span, list_byte, list_text)) = slot_lists.get(mid) else { continue };
+            let offset = byte.saturating_sub(*list_byte);
+            let extraction = match slot_position(list_text, offset, pack.pair_arrow) {
+                Some(pos) => crate::model::file_analysis::Extraction::Positional(pos),
+                None => match slot_key(list_text, offset, pack.pair_arrow) {
+                    Some(k) => crate::model::file_analysis::Extraction::KeyOf(k),
+                    None => continue,
+                },
+            };
+            let source = if let Some(src) = flow_sources.get(mid) {
+                *src
+            } else if let Some((seq_src, _)) = seq_source_by_match.get(mid) {
+                // foreach: the list IS the collection's element; the slots
+                // index into it — two projections chained through the
+                // list's own Expr span.
+                if element_hops.insert((list_span.start, list_span.end)) {
+                    out.witnesses.push(crate::model::witnesses::Witness {
+                        attachment: crate::model::witnesses::WitnessAttachment::Expr(*list_span),
+                        source: crate::model::witnesses::WitnessSource::Builder("skeleton".into()),
+                        payload: crate::model::witnesses::WitnessPayload::Projected {
+                            base: crate::model::witnesses::WitnessAttachment::Expr(*seq_src),
+                            step: crate::model::witnesses::ProjectionStep::Element,
+                        },
+                        span: *list_span,
+                    });
+                }
+                *list_span
+            } else {
+                continue;
+            };
+            out.flow_edges.push(crate::model::file_analysis::FlowEdge {
+                target_name: name.clone(),
+                target_scope: *scope,
+                target_at: *at,
+                source,
+                extraction,
+                reassigns: false,
+            });
+        }
+    }
+    // Key-less array literals are positional TUPLES of their elements'
+    // edges (`return [$queue, $agent]`); a keyed element or a spread makes
+    // the literal a map / open list — the tuple witness is withheld and the
+    // `expr.lit.hashref` / keyed-shape witnesses stand.
+    {
+        let mut by_arr: HashMap<(Point, Point), (Span, Vec<(usize, Span)>, bool)> = HashMap::new();
+        for (mid, arr_span) in &tuple_arr_by_match {
+            let entry = by_arr
+                .entry((arr_span.start, arr_span.end))
+                .or_insert((*arr_span, Vec::new(), false));
+            if tuple_keyed.contains(mid) {
+                entry.2 = true;
+                continue;
+            }
+            if let (Some(elem), Some((byte, spread))) =
+                (tuple_elem_by_match.get(mid), tuple_init_by_match.get(mid))
+            {
+                if *spread {
+                    entry.2 = true;
+                    continue;
+                }
+                entry.1.push((*byte, *elem));
+            }
+        }
+        const MAX_TUPLE: usize = 64;
+        for (_, (arr_span, mut elems, disqualified)) in by_arr {
+            if disqualified || elems.is_empty() || elems.len() > MAX_TUPLE {
+                continue;
+            }
+            elems.sort_by_key(|(b, _)| *b);
+            out.witnesses.push(crate::model::witnesses::Witness {
+                attachment: crate::model::witnesses::WitnessAttachment::Expr(arr_span),
+                source: crate::model::witnesses::WitnessSource::Builder("skeleton".into()),
+                payload: crate::model::witnesses::WitnessPayload::Tuple(
+                    elems
+                        .into_iter()
+                        .map(|(_, s)| crate::model::witnesses::WitnessAttachment::Expr(s))
+                        .collect(),
+                ),
+                span: arr_span,
+            });
+        }
+    }
+    // Subscripts project off their base: an integer index peels a slot, a
+    // literal string key drills a keyed shape — the same `Projected` steps
+    // the foreach/destructuring binders ride.
+    for (expr, base, idx, key) in subscript_by_match.values() {
+        let Some(base) = base else { continue };
+        let step = match (idx, key) {
+            (Some(i), _) => crate::model::witnesses::ProjectionStep::ArrayIndex(*i),
+            (None, Some(k)) => crate::model::witnesses::ProjectionStep::HashKey(k.clone()),
+            _ => continue,
+        };
+        out.witnesses.push(crate::model::witnesses::Witness {
+            attachment: crate::model::witnesses::WitnessAttachment::Expr(*expr),
+            source: crate::model::witnesses::WitnessSource::Builder("skeleton".into()),
+            payload: crate::model::witnesses::WitnessPayload::Projected {
+                base: crate::model::witnesses::WitnessAttachment::Expr(*base),
+                step,
+            },
+            span: *expr,
+        });
+    }
     // Lower the value-flow edges to type-tier witnesses (the bag is canonical
     // for types; the edges are the provenance tier above it).
     for fe in &out.flow_edges {
@@ -2191,6 +2406,54 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     }
     out.param_sigs = param_sigs;
     Ok(out)
+}
+/// The positional index of a destructuring slot: the number of TOP-LEVEL
+/// commas in the list text before the slot's byte offset (`[, $b]` → 1).
+/// `None` for a keyed list (a top-level `=>`): its positions are not
+/// positions, so the slot never binds positionally.
+fn slot_position(list_text: &str, slot_offset: usize, arrow: &str) -> Option<usize> {
+    let bytes = list_text.as_bytes();
+    let (mut depth, mut commas) = (0i32, 0usize);
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'(' | b'[' | b'{' => depth += 1,
+            b')' | b']' | b'}' => depth -= 1,
+            b',' if depth == 1 && i < slot_offset => commas += 1,
+            _ if depth == 1 && !arrow.is_empty() && list_text[i..].starts_with(arrow) => return None,
+            _ => {}
+        }
+        i += 1;
+    }
+    Some(commas)
+}
+
+/// The literal key of a KEYED destructuring slot (`['k' => $v]`): the
+/// quoted string before the `=>` that precedes the slot in its own
+/// top-level segment. `None` for a positional list or a non-literal key.
+fn slot_key(list_text: &str, slot_offset: usize, arrow: &str) -> Option<String> {
+    let bytes = list_text.as_bytes();
+    let (mut depth, mut seg_start) = (0i32, 0usize);
+    for (i, &c) in bytes.iter().enumerate().take(slot_offset.min(bytes.len())) {
+        match c {
+            b'(' | b'[' | b'{' => {
+                depth += 1;
+                if depth == 1 {
+                    seg_start = i + 1;
+                }
+            }
+            b')' | b']' | b'}' => depth -= 1,
+            b',' if depth == 1 => seg_start = i + 1,
+            _ => {}
+        }
+    }
+    let seg = &list_text[seg_start..slot_offset.min(list_text.len())];
+    let (key, _) = seg.split_once(arrow)?;
+    let key = key.trim();
+    let quoted = key.len() >= 2
+        && ((key.starts_with('\'') && key.ends_with('\''))
+            || (key.starts_with('"') && key.ends_with('"')));
+    quoted.then(|| key[1..key.len() - 1].to_string())
 }
 
 /// The `TypeName(alias) → …` payload for an underlying type spelling, resolving
