@@ -81,6 +81,13 @@ pub struct LangPack {
     /// references include the class's `new Foo(...)` sites (non-rewritable
     /// — the token spells the class). Rides `PackFacts::constructor_names`.
     pub constructor_names: &'static [&'static str],
+    /// Documentation-comment type facts (phpdoc `@return`/`@param`/`@var`):
+    /// the pack parses ITS OWN doc vocabulary out of a `@doc.comment`
+    /// capture's text, returning type spellings `annot_type` speaks.
+    /// The engine joins each comment to the def directly below it and
+    /// fills ONLY where the syntax declared nothing — declared types win
+    /// (docblocks drift). Empty = no doc lane.
+    pub doc_types: fn(text: &str) -> Vec<DocFact>,
     /// Module-name → workspace-relative candidate paths — the entire
     /// per-language cross-file resolution strategy ("the one executable
     /// line"). Python: `pkg.mod` → pkg/mod.py | pkg/mod/__init__.py.
@@ -343,6 +350,52 @@ pub(crate) const C_FIELD_DECL_PEEL: PeelSpec = PeelSpec {
     record_stack: true,
 };
 
+/// One type fact parsed from a documentation comment (`LangPack::doc_types`).
+/// The type is a raw spelling the pack has already normalized to what its
+/// `annot_type` accepts (generics stripped, `X|null` collapsed to `X`).
+#[derive(Debug, Clone)]
+pub enum DocFact {
+    /// `@return T` — the documented return of the def below the comment.
+    Return(String),
+    /// `@param T $name` — a documented parameter type; `name` carries the
+    /// language's own spelling (php keeps the `$`).
+    Param { name: String, ty: String },
+    /// `@var T [$name]` — the documented type of the property/variable
+    /// below (or, with a `$name`, of that specific local — the inline
+    /// `/** @var Type[] $rows */` idiom above an assignment).
+    Var { ty: String, name: Option<String> },
+    /// `@dataProvider name` — a PHPUnit docblock row naming a sibling
+    /// METHOD the runner will invoke. The join mints a real method
+    /// reference (invocant = the enclosing class) on the fact's own
+    /// line, so providers gain fan-in and rename reaches the row.
+    UsesMethod { name: String, line: usize, col: usize },
+    /// `@method [static] T name(...)` on a CLASS docblock — a documented
+    /// virtual method (Laravel facades, Eloquent's `__call` surface). The
+    /// join synthesizes a real method symbol on the class below, spanning
+    /// the fact's own `@method` line (`line` = 0-based offset within the
+    /// comment) so each row is a distinct, honest gd target.
+    Method { name: String, ret: Option<String>, line: usize, col: usize },
+    /// `@deprecated [text]` — the declaration is deprecated; the text is
+    /// what the diagnostic shows.
+    Deprecated(Option<String>),
+    /// `@template T [of X]` on a CLASS docblock — a declared generic
+    /// parameter, in row order (`line` is the ordering key). Feeds the
+    /// SAME per-class `template_params` axis cpp templates use, so a
+    /// method whose `@return` names the param publishes `ParamOf(i)`
+    /// through the existing writeback (Eloquent's `Builder<TModel>`).
+    Template { name: String, line: usize },
+    /// `@return Base<static|self|$this>` — the return is an instance of
+    /// `base` PARAMETRIZED BY THE RECEIVER (`Model::query()` returns
+    /// `Builder<static>`): the join publishes
+    /// `Operator(InstanceOf{base, [Receiver]})`, so `Book::query()`
+    /// carries `Builder<Book>` and a later `->first()` (`@return
+    /// TModel`) projects `Book` back out.
+    ReturnRecvInstance { base: String },
+    /// The comment's summary paragraph — every line before the first
+    /// `@tag`, joined; the text hover shows under the signature.
+    Description(String),
+}
+
 /// One effect of a command-dispatched statement.
 // Variants are constructed only by `cmake_pack` (command languages) and read by
 // the generic cmd-effect match; both absent in a build without that feature.
@@ -391,6 +444,7 @@ pub fn perl_pack() -> LangPack {
         class_token_kinds: &[],
         function_scoped_vars: false,
         constructor_names: &[],
+        doc_types: |_| vec![],
         module_paths: |m| vec![format!("{}.pm", m.replace("::", "/"))],
         shape_ctor: |_| false,
         import_call: |_, _| None,
@@ -446,6 +500,7 @@ pub fn python_pack() -> LangPack {
         class_token_kinds: &[],
         function_scoped_vars: false,
         constructor_names: &[],
+        doc_types: |_| vec![],
         module_paths: |m| {
             let base = m.replace('.', "/");
             vec![format!("{base}.py"), format!("{base}/__init__.py")]
@@ -501,6 +556,7 @@ pub fn r_pack() -> LangPack {
         class_token_kinds: &[],
         function_scoped_vars: false,
         constructor_names: &[],
+        doc_types: |_| vec![],
         // No reliable lexical ctor convention in R (S4/R5 exist but
         // rare); class typing arrives via shapes and S3 later.
         // source("util.R") hands us the path verbatim; library(pkg)
@@ -555,6 +611,7 @@ pub fn cmake_pack() -> LangPack {
         class_token_kinds: &[],
         function_scoped_vars: false,
         constructor_names: &[],
+        doc_types: |_| vec![],
         // include(util.cmake) is a literal path; add_subdirectory(src)
         // means src/CMakeLists.txt. The whole resolution strategy.
         module_paths: |m| {
@@ -670,6 +727,7 @@ pub fn cpp_pack() -> LangPack {
         class_token_kinds: &[],
         function_scoped_vars: false,
         constructor_names: &[],
+        doc_types: |_| vec![],
         // #include "a/b.h" / <vector>: strip the delimiters; a quoted
         // path is workspace-relative verbatim, a system header resolves
         // through include dirs (library_roots, later). Tier 1: identity.
@@ -794,6 +852,93 @@ pub(super) fn param_return_expr(
         },
         _ => None,
     }
+}
+
+/// Normalize one phpdoc type expression to a spelling `annot_type` speaks:
+/// generics stripped (`Collection<int,User>` → `Collection`), `User[]` is
+/// an array, the `null` arm of a union dropped (`?T` too), a REAL union
+/// (`string|false`) rejected — a two-armed claim is not a type answer.
+/// Where the leading type token of a phpdoc tail ends: the first
+/// whitespace OUTSIDE angle brackets — `array<string, User> $map` keeps
+/// its generic arguments (a plain whitespace split truncated it to
+/// `array<string,`). Callers slice `[..end]` for the type and
+/// `[end..]` for what follows (the `$name` of a @param).
+fn phpdoc_type_token_end(s: &str) -> usize {
+    let mut depth = 0usize;
+    for (i, c) in s.char_indices() {
+        if c.is_whitespace() && depth == 0 {
+            return i;
+        }
+        phpdoc_depth_step(c, &mut depth);
+    }
+    s.len()
+}
+
+/// The ONE bracket alphabet of phpdoc type text (`<{(` / `>})`): every
+/// top-level split and the token boundary step depth through here, so a
+/// new bracket spelling is added once, never in lockstep across walkers.
+fn phpdoc_depth_step(c: char, depth: &mut usize) {
+    match c {
+        '<' | '{' | '(' => *depth += 1,
+        '>' | '}' | ')' => *depth = depth.saturating_sub(1),
+        _ => {}
+    }
+}
+
+/// Split phpdoc type text on `sep` at bracket depth 0 (a separator inside
+/// generics / an array shape belongs to the enclosing part).
+fn phpdoc_split_top_level(s: &str, sep: char) -> Vec<&str> {
+    let mut out = Vec::new();
+    let (mut depth, mut start) = (0usize, 0usize);
+    for (i, c) in s.char_indices() {
+        if c == sep && depth == 0 {
+            out.push(&s[start..i]);
+            start = i + 1;
+        } else {
+            phpdoc_depth_step(c, &mut depth);
+        }
+    }
+    out.push(&s[start..]);
+    out
+}
+
+fn phpdoc_type(raw: &str) -> Option<String> {
+    let raw = raw.trim_start();
+    let raw = raw[..phpdoc_type_token_end(raw)].trim_start_matches('?');
+    if raw.is_empty() {
+        return None;
+    }
+    // Union split at TOP LEVEL only — a `|` inside generics is part of one
+    // arm (`static<int, static<int, TValue|TZipValue>>` is a single type;
+    // the naive split saw three and dropped laravel's whole fluent surface).
+    let mut arms = phpdoc_split_top_level(raw, '|');
+    arms.retain(|a| !a.eq_ignore_ascii_case("null") && !a.is_empty());
+    // A union survives WHOLE: `annot_type` answers `Unknown` for it, the
+    // fact every doc row (return, param, var, @method) carries the same way.
+    if arms.len() > 1 {
+        return Some(arms.join("|"));
+    }
+    let [one] = arms.as_slice() else { return None };
+    // Sequence spellings survive WHOLE — `annot_type` parses the element
+    // (`list<X>` / `array<K,V>` / `iterable<X>` / `X[]` → a one-slot
+    // `Sequence`); every other generic still strips to its base class
+    // (`Collection<int,User>` → `Collection`).
+    if one.ends_with("[]")
+        || (one.ends_with('>')
+            && ["list<", "array<", "iterable<", "non-empty-list<", "non-empty-array<"]
+                .iter()
+                .any(|p| one.starts_with(p)))
+        // array-shape spellings (`array{A, B}` / `object{k: T}`) survive
+        // whole too — `annot_type` parses the tuple / keyed shape.
+        || (one.ends_with('}')
+            && ["array{", "list{", "object{", "non-empty-array{", "non-empty-list{"]
+                .iter()
+                .any(|p| one.starts_with(p)))
+    {
+        return Some(one.to_string());
+    }
+    let base = one.split('<').next().unwrap_or(one);
+    (!base.is_empty()).then(|| base.to_string())
 }
 
 /// Peel `T` out of a `std::optional<T>` declared-type text, unqualified
