@@ -214,15 +214,13 @@ sub run {
     let results = refs_to(
         &store,
         None,
-        &TargetRef {
-            names: crate::model::conventions::PERL_SPELLINGS,
-            name: "ready".to_string(),
-            kind: TargetKind::Handler {
+        &TargetRef::for_test(
+            "ready",
+            TargetKind::Handler {
                 owner: HandlerOwner::Class("Producer".to_string()),
                 name: "ready".to_string(),
             },
-            method_classes: Vec::new(), scope: crate::index::resolve::OverrideScope::Dispatch, def_paths: Vec::new(), bare_constant: false,
-        },
+        ),
         RoleMask::EDITABLE,
     );
 

@@ -545,23 +545,16 @@ fn test_renaming_import_remote_joins_source_alias_stays_local() {
     };
 
     // Source rename reaches the consumer's REMOTE `beta` token.
-    let src = TargetRef {
-        names: crate::model::conventions::PERL_SPELLINGS,
-        name: "beta".to_string(),
-        kind: TargetKind::Sub { package: Some("Exp".to_string()) },
-        method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), bare_constant: false,
-    };
+    let src = TargetRef::for_test("beta", TargetKind::Sub { package: Some("Exp".to_string()) });
     let src_refs = refs_to(&store, Some(&idx), &src, RoleMask::EDITABLE);
     assert!(hit(&src_refs, &exp), "source def missing: {:?}", src_refs);
     assert!(hit(&src_refs, &cons), "remote `beta` token must join the source: {:?}", src_refs);
 
     // Alias rename is local to the consuming package — never the exporter.
-    let alias = TargetRef {
-        names: crate::model::conventions::PERL_SPELLINGS,
-        name: "rb".to_string(),
-        kind: TargetKind::Sub { package: Some("Consumer".to_string()) },
-        method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), bare_constant: false,
-    };
+    let alias = TargetRef::for_test(
+        "rb",
+        TargetKind::Sub { package: Some("Consumer".to_string()) },
+    );
     let alias_refs = refs_to(&store, Some(&idx), &alias, RoleMask::EDITABLE);
     assert!(hit(&alias_refs, &cons), "alias `-as` value + call missing: {:?}", alias_refs);
     assert!(
@@ -1195,15 +1188,13 @@ fn test_event_handler_refs_mark_folded_site_non_rewritable() {
          }\n1;\n";
     store.insert_workspace(path.clone(), parse(src));
 
-    let target = TargetRef {
-        names: crate::model::conventions::PERL_SPELLINGS,
-        name: "connect".to_string(),
-        kind: TargetKind::Handler {
+    let target = TargetRef::for_test(
+        "connect",
+        TargetKind::Handler {
             owner: crate::model::file_analysis::HandlerOwner::Class("App".to_string()),
             name: "connect".to_string(),
         },
-        method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), bare_constant: false,
-    };
+    );
     assert!(target.supports_cross_file_rename(), "Handler renames cross-file now");
 
     let refs = refs_to(&store, None, &target, RoleMask::EDITABLE);
@@ -1431,12 +1422,7 @@ fn test_implementations_of_role_requires_fans_out_to_composers() {
     );
     insert("My::Deep", "package My::Deep;\nuse Moo;\nwith 'My::SubRole';\nsub fetch { 7 }\n1;\n");
 
-    let target = TargetRef {
-        names: crate::model::conventions::PERL_SPELLINGS,
-        name: "fetch".to_string(),
-        kind: TargetKind::Method { class: "My::Role".to_string() },
-        method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), bare_constant: false,
-    };
+    let target = TargetRef::for_test("fetch", TargetKind::Method { class: "My::Role".to_string() });
     let origin = parse("package Probe;\n1;\n");
     let results = implementations_of(&origin, Some(&idx), &target);
     let files: Vec<String> = results
@@ -1485,12 +1471,7 @@ fn test_implementations_finds_mixin_sibling_override() {
     insert("Mixin", "package Mixin;\nsub save { 2 }\n1;\n");
     insert("Child", "package Child;\nuse base qw(Mixin Base);\n1;\n");
 
-    let target = TargetRef {
-        names: crate::model::conventions::PERL_SPELLINGS,
-        name: "save".to_string(),
-        kind: TargetKind::Method { class: "Base".to_string() },
-        method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), bare_constant: false,
-    };
+    let target = TargetRef::for_test("save", TargetKind::Method { class: "Base".to_string() });
     let origin = parse("package Probe;\n1;\n");
     let files: Vec<String> = implementations_of(&origin, Some(&idx), &target)
         .iter()
@@ -1595,12 +1576,7 @@ fn test_implementations_on_sub_decl_target_finds_overrides() {
     insert("Base", "package Base;\nsub save { 1 }\n1;\n");
     insert("Sub1", "package Sub1;\nuse base qw(Base);\nsub save { 2 }\n1;\n");
 
-    let target = TargetRef {
-        names: crate::model::conventions::PERL_SPELLINGS,
-        name: "save".to_string(),
-        kind: TargetKind::Sub { package: Some("Base".to_string()) },
-        method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), bare_constant: false,
-    };
+    let target = TargetRef::for_test("save", TargetKind::Sub { package: Some("Base".to_string()) });
     let origin = parse("package Probe;\n1;\n");
     let files: Vec<String> = implementations_of(&origin, Some(&idx), &target)
         .iter()

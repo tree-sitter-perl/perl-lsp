@@ -135,6 +135,23 @@ impl TargetRef {
         }
     }
 
+    /// A bare target for tests: the name and kind under test, every policy
+    /// field at the value the suites all wrote by hand. ONE constructor, so
+    /// a new field lands here instead of in thirty test literals — and a
+    /// test that cares about a policy field says so by setting it.
+    #[cfg(test)]
+    pub fn for_test(name: impl Into<String>, kind: TargetKind) -> Self {
+        TargetRef {
+            name: name.into(),
+            names: crate::model::conventions::PERL_SPELLINGS,
+            kind,
+            method_classes: Vec::new(),
+            scope: OverrideScope::Dispatch,
+            def_paths: Vec::new(),
+            bare_constant: false,
+        }
+    }
+
     /// Build a non-Method target (no inheritance fan-out for declarations).
     /// `origin` is the file the cursor sits in: its spellings key the
     /// target's name in every store the walk consults.
