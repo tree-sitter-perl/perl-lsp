@@ -986,3 +986,4 @@ fn exactly_one_fallback_driver() {
     assert_eq!(n, 1, "exactly one driver claims unclaimed files");
     assert!(reg.fallback().claims_unclaimed());
 }
+

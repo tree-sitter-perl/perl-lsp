@@ -188,6 +188,9 @@ pub trait LanguageDriver: Send + Sync {
 /// asserts the verb surface and regressions are caught; `Beta` = broad gold
 /// coverage, known gaps documented; `Alpha` = it parses and answers, with
 /// little or no net watching it — expect wrong answers.
+// The pack drivers that construct `Beta`/`Alpha` are feature-gated, so a
+// default (Perl-only) build sees only `Stable`.
+#[allow(dead_code)]
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Maturity {
     Stable,
@@ -2019,6 +2022,7 @@ impl LanguageRegistry {
 
     /// Every id this build can serve — the feature-dependent set, so a caller
     /// enumerating languages never carries its own list to drift.
+    #[cfg(test)]
     pub fn ids(&self) -> Vec<&'static str> {
         self.drivers.iter().map(|d| d.id()).collect()
     }
@@ -2032,6 +2036,7 @@ impl LanguageRegistry {
         match id {
             "cpp" => "C/C++",
             "python" => "Python",
+            "php" => "PHP",
             "r" => "R",
             "cmake" => "CMake",
             _ => id,
