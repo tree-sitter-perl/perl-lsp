@@ -826,6 +826,14 @@ pub trait CrossFileLookup {
         }
         out
     }
+    /// Does this index hold files of the WORKSPACE tier? Only a pack
+    /// sub-index does: the hub's cache is `@INC` end to end
+    /// (`is_dependency_path` says so for every path). Default `false`, so a
+    /// walk that wants workspace files alone skips the index whole instead
+    /// of sweeping every cached file to reject it.
+    fn has_workspace_tier(&self) -> bool {
+        false
+    }
     fn modules_with_symbol(&self, name: &str) -> Vec<String>;
     fn find_exporters(&self, func_name: &str) -> Vec<String>;
     fn defining_module_cached(&self, entry: &str, name: &str) -> Option<std::sync::Arc<CachedModule>>;
@@ -1512,6 +1520,9 @@ impl<'a> CrossFileLookup for ScopedLookup<'a> {
     // `parents_cached` deliberately NOT delegated: the provided default
     // unions over THIS decorator's `visible_def_candidates`, so the scope
     // (pack closure narrowing) applies to the parent relation too.
+    fn has_workspace_tier(&self) -> bool {
+        self.inner.has_workspace_tier()
+    }
     fn modules_with_symbol(&self, name: &str) -> Vec<String> {
         self.inner.modules_with_symbol(name)
     }

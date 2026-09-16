@@ -688,6 +688,13 @@ impl CrossFileLookup for ModuleIndex {
         }
     }
 
+    fn has_workspace_tier(&self) -> bool {
+        // The roots are set exactly when a pack sub-index is told which of
+        // its files are read-only dependencies; until then every path reads
+        // as `@INC`.
+        self.core.dependency_roots.read().is_ok_and(|g| g.is_some())
+    }
+
     fn workspace_root_path(&self) -> Option<std::path::PathBuf> {
         self.workspace_root()
             .as_deref()
