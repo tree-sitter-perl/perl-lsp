@@ -1022,15 +1022,6 @@ fn apply_attribute_macros(fa: &mut FileAnalysis, recovered: &[(String, String)])
     }
 }
 
-/// Inject the member-block synthetic bases + parent edges into the extracted
-/// skeleton (`docs/adr/macro-handling.md`, "Member-block macros = roles"). The
-/// macro's own `#define` symbol is reclassified Variable → Class (the navigable
-/// base), members are minted under it (package = the macro), and each member
-/// re-sources the SAME `TypeName` edge the expanded field would have. The
-/// existing ancestor walk (`resolve_method_in_ancestors` / `parents_of`) then
-/// delivers `o->op_type` resolution / hover / the references splat — no parallel
-/// field resolution. Spans are already in ORIGINAL coordinates.
-#[cfg(any(feature = "cpp", feature = "python", feature = "r", feature = "cmake"))]
 /// Type each function-like macro from its body: delegation (`#define F(x)
 /// G(x)`) reuses the see-through target as a value edge, else a param-
 /// independent body type (`#define SQ(x) ((x)*(x))` → Numeric). First def wins
@@ -1070,6 +1061,14 @@ fn macro_return_hints(
     out
 }
 
+/// Inject the member-block synthetic bases + parent edges into the extracted
+/// skeleton (`docs/adr/macro-handling.md`, "Member-block macros = roles"). The
+/// macro's own `#define` symbol is reclassified Variable → Class (the navigable
+/// base), members are minted under it (package = the macro), and each member
+/// re-sources the SAME `TypeName` edge the expanded field would have. The
+/// existing ancestor walk (`resolve_method_in_ancestors` / `parents_of`) then
+/// delivers `o->op_type` resolution / hover / the references splat — no parallel
+/// field resolution. Spans are already in ORIGINAL coordinates.
 #[cfg_attr(not(feature = "cpp"), allow(dead_code))]
 fn inject_member_blocks(
     skel: &mut crate::build::query_extract::SkeletonAnalysis,
