@@ -2933,6 +2933,25 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                 extraction: crate::model::file_analysis::Extraction::Whole,
                 reassigns: flow_assigns.contains(mid),
             });
+            // A plain assignment RESETS every earlier belief about the name,
+            // whatever its right-hand side types to: without the marker a
+            // class assertion outlives the write that replaced it
+            // (`$q = new Err(); $q = ['a' => 1];`) and an untyped rebind
+            // leaves the old class standing. Zero-width at the write — the
+            // fact's own site, and a point is a binding, not a narrowing
+            // region.
+            if flow_assigns.contains(mid) {
+                use crate::model::witnesses as wit;
+                out.witnesses.push(wit::Witness {
+                    attachment: wit::WitnessAttachment::Variable {
+                        name: name.clone(),
+                        scope: *scope,
+                    },
+                    source: wit::WitnessSource::Builder(wit::RESET_SOURCE.into()),
+                    payload: wit::WitnessPayload::Reset,
+                    span: Span { start: *at, end: *at },
+                });
+            }
         }
     }
     // Bind-shape rebinds (loop vars): no inflowing value, recorded for the
