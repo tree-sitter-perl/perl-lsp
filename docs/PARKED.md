@@ -608,6 +608,20 @@ marked otherwise; the drain re-derived each rationale against current code.
   #1: scan ERROR children for `const NAME =`) is deferred until a corpus
   shows more than the two known rows.
 
+- **A path rail's directory is Laravel's layout, not the project's**
+  (measured 2026-09-03, `bench/RESULTS.md` round 3). `laravel.rails.json`
+  hardcodes `"under": "/config/"`, and BookStack keeps its config under
+  `app/Config/` — so all 213 `config('…')` uses in that corpus miss their
+  definition and the undefined-name lane files 213 `warning` rows on a
+  real project. The rails whose `under` is a convention rather than a
+  framework guarantee (`config`, `lang`, `view`) all carry the same
+  exposure. Target shape: a workspace-config root per path rail — the
+  document declares the default, the project overrides it — which is a
+  configuration surface this build does not have yet (nothing else reads
+  a per-project setting, so the seam would exist for this alone).
+  Parked, not silenced: the misses are honest warnings about names the
+  lane genuinely cannot resolve. [recorded 2026-09-17]
+
 - **The mock lane enumerates builder-chain shapes** (php, branch 6). The
   PHPUnit overlay types `getMockBuilder(X::class)->…->getMock()` with a
   pattern per modifier count (zero, one, two) and covers the property
