@@ -3659,6 +3659,44 @@ $b = new Client('y');
     assert_eq!(new_sites.len(), 2, "both new-sites are references: {locs:?}");
 }
 
+/// A class that declares no constructor still constructs: the class token
+/// answers as the class, the member arm answers the construction sites when
+/// references start from the class, and the arity lane — which has no
+/// declaration to compare against — stays silent whatever the call passes.
+#[test]
+fn php_default_constructor_sites_reference_the_class_and_never_mismatch_arity() {
+    let src = "\
+<?php
+class Bare {
+    public function go(): int { return 1; }
+}
+$a = new Bare();
+$b = new Bare('x', 2);
+";
+    let (fa, _) = php_fa(src);
+    use crate::model::file_analysis::RefKind;
+    for row in [4usize, 5] {
+        let at = tree_sitter::Point { row, column: 9 };
+        let class_ref = fa.ref_at(at).unwrap_or_else(|| panic!("row {row} names the class"));
+        assert_eq!(class_ref.target_name, "Bare");
+        assert!(matches!(class_ref.kind, RefKind::PackageRef), "{:?}", class_ref.kind);
+        let call = fa
+            .call_ref_at_start(at)
+            .unwrap_or_else(|| panic!("row {row} calls the constructor"));
+        assert_eq!(call.target_name, "__construct");
+    }
+    // no `__construct` symbol exists, so no declared arity to mismatch
+    assert!(
+        !fa.symbols().iter().any(|s| s.name == "__construct"),
+        "the default constructor is declared by nothing"
+    );
+    let diags = crate::lsp::symbols::pack_symbol_diagnostics(&fa, None, true);
+    assert!(
+        !diags.iter().any(|d| matches!(&d.code, Some(tower_lsp::lsp_types::NumberOrString::String(c)) if c == "arity-mismatch")),
+        "the arity lane stays silent for a default constructor: {diags:?}"
+    );
+}
+
 #[test]
 fn php_global_docblock_types_the_binding() {
     // WordPress's typing convention: `@global wpdb $wpdb` above the
