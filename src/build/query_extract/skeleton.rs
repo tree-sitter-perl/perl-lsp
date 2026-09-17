@@ -82,7 +82,7 @@ pub struct SkelRef {
     /// invocant types query-time via `expr_type_at_span(span)` (text → the
     /// `InvocantName`). `None` for plain calls / var refs.
     pub invocant: Option<(crate::model::file_analysis::Span, String)>,
-    /// For a `"dispatch"` ref (`@ref.dispatch.named`): the dispatching
+    /// For a `"dispatch"` ref (`@ref.dispatch.named.<rail>`): the dispatching
     /// function's name (`do_action`, `apply_filters`) — the `RefKind::
     /// DispatchCall::dispatcher` label. `None` for every other kind.
     pub via: Option<String>,
@@ -527,17 +527,15 @@ impl SkeletonAnalysis {
         let rail_name_seps = std::mem::take(&mut self.rail_name_seps);
         // Every rail is named: the extractor mints a handler def / dispatch
         // ref only from a rail-suffixed capture, so a token with no rail
-        // entry here is an extractor invariant broken, not a flat default.
-        let rail_owner = |span: Span| -> crate::model::file_analysis::HandlerOwner {
-            class_rails
-                .iter()
-                .chain(rails.iter())
-                .find(|(s, _)| *s == span)
-                .map(|(_, rail)| crate::model::file_analysis::HandlerOwner::Rail(rail.clone()))
-                .unwrap_or_else(|| {
-                    debug_assert!(false, "a handler token at {span:?} names no rail");
-                    crate::model::file_analysis::HandlerOwner::Rail(String::new())
-                })
+        // entry cannot arise from any document — only from an extractor arm
+        // that forgot to record one, or from a span join the transform's
+        // remap broke. A default name here would file the token under a
+        // namespace no overlay declared, which reads as a wrong answer;
+        // minting nothing loses one fact and keeps the file analysable.
+        let rail_owner = |span: Span| -> Option<crate::model::file_analysis::HandlerOwner> {
+            let rail = class_rails.iter().chain(rails.iter()).find(|(s, _)| *s == span);
+            debug_assert!(rail.is_some(), "a handler token names its rail");
+            rail.map(|(_, rail)| crate::model::file_analysis::HandlerOwner::Rail(rail.clone()))
         };
         let mut class_named_rails: Vec<String> = Vec::new();
         for (_, rail) in &class_rails {
@@ -773,8 +771,9 @@ impl SkeletonAnalysis {
                     // parent-enum value typing (a const's value is its
                     // initializer, not the owning class).
                     "const" => SymKind::Enumerator,
-                    // a string-named hook registration (`@def.handler.named`):
-                    // the model's Handler — same-named registrations stack.
+                    // a string-named registration on a rail
+                    // (`@def.handler.named.<rail>`): the model's Handler —
+                    // same-named registrations stack.
                     "handler" => SymKind::Handler,
                     // "unionfield" (an inline union member-field container)
                     // stays Variable — its "union" attribute drives the
@@ -785,14 +784,13 @@ impl SkeletonAnalysis {
                 selection_span: Span { start: s.name_start, end: s.name_end },
                 scope: s.scope,
                 package: s.package.clone(),
-                detail: if s.kind == "handler" {
+                detail: if let Some(owner) = (s.kind == "handler")
+                    .then(|| rail_owner(Span { start: s.name_start, end: s.name_end }))
+                    .flatten()
+                {
                     // A flat namespace (a rail): the string alone is the
                     // identity, no receiver.
-                    SymbolDetail::Handler {
-                        owner: rail_owner(Span { start: s.name_start, end: s.name_end }),
-                        dispatchers: Vec::new(),
-                        params: Vec::new(),
-                    }
+                    SymbolDetail::Handler { owner, dispatchers: Vec::new(), params: Vec::new() }
                 } else if matches!(s.kind.as_str(), "sub" | "method") {
                     // The signature the `@arity.sig` join read. Perl's subs
                     // carry theirs the same way, so signature help, hover and
@@ -1352,7 +1350,7 @@ impl SkeletonAnalysis {
                     // symbol arm) — refs_to pairs it with the stacked Handler
                     // registrations by name+owner equality.
                     "dispatch" => {
-                        let owner = rail_owner(Span { start: r.start, end: r.end });
+                        let owner = rail_owner(Span { start: r.start, end: r.end })?;
                         // A rail with a parameter separator: the use names
                         // the head (`throttle:60,1` → `throttle`), and the
                         // span ends with it — a string never spans rows.
