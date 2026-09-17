@@ -1117,6 +1117,104 @@ fn php_callable_variable_call_does_not_take_its_arguments_type() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Shapes BookStack and composer wrote: the build-time
+/// method-call stamp honors the written shape, so goto-def on a same-file
+/// `$this->hasAuth()` lands on the method while `$this->hasAuth` reads the
+/// property; a keyed two-pair array (`['chapter' => $c, 'book' => $c->book]`)
+/// is NOT the `[$obj, 'method']` callable shape, so its key is no method
+/// reference, and neither is the value read beside it — a class declaring
+/// only `book()` has no `book` property; an Eloquent relation behind a
+/// chained modifier
+/// (`->belongsTo(Book::class)->withTrashed()`) still types the property.
+#[cfg(feature = "php")]
+#[test]
+fn php_shape_stamp_keyed_arrays_and_chained_relations() {
+    let dir = std::env::temp_dir().join(format!("perl-lsp-shape-stamp-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let w = |rel: &str, src: &str| std::fs::write(dir.join(rel), src).unwrap();
+    w("Svn.php", "<?php\nnamespace App;\nclass Svn\n{\n    /** @var bool */\n    protected $hasAuth = false;\n\n    public function go(): bool\n    {\n        return $this->hasAuth();\n    }\n\n    protected function hasAuth(): bool\n    {\n        return $this->hasAuth;\n    }\n}\n");
+    w("Chapter.php", "<?php\nnamespace App;\nclass Chapter\n{\n    public function book(): int { return 1; }\n    public function show(Chapter $chapter): array\n    {\n        return view(\"x\", [\n            \"chapter\" => $chapter,\n            \"book\" => $chapter->book,\n        ]);\n    }\n}\nfunction view(string $n, array $d): array { return $d; }\n");
+    w("Models.php", "<?php\nnamespace App;\nclass BelongsTo { public function withTrashed(): BelongsTo { return $this; } }\nabstract class Model { public function belongsTo(string $c): BelongsTo { return new BelongsTo(); } }\nclass Book extends Model { public function getUrl(): string { return \"u\"; } }\nabstract class BookChild extends Model\n{\n    public function book(): BelongsTo\n    {\n        return $this->belongsTo(Book::class)->withTrashed();\n    }\n}\nclass Page extends BookChild {}\n");
+    w("Use.php", "<?php\nnamespace App;\nfunction f(Page $page): void\n{\n    $page->book->getUrl();\n}\n");
+    let run = |args: &[&str]| {
+        let out = std::process::Command::new(env!("CARGO_BIN_EXE_perl-lsp"))
+            .args(args)
+            .env("XDG_CACHE_HOME", dir.join(".cache"))
+            .output()
+            .expect("run");
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+    let root = dir.to_str().unwrap();
+    // `$this->hasAuth()` (row 9) is the method (row 12); `$this->hasAuth` (row 14) the property (row 5).
+    let call = run(&["--definition", root, "Svn.php", "9", "22"]);
+    assert!(call.contains("Svn.php:12:"), "the call lands on the method: {call}");
+    let read = run(&["--definition", root, "Svn.php", "14", "22"]);
+    assert!(read.contains("Svn.php:5:"), "the read lands on the property: {read}");
+    // Neither the `"book"` key (row 9, col 13) nor the `$chapter->book`
+    // value read beside it is a reference of the callable `book()`: the key
+    // is not the `[$obj, 'method']` shape, and a value read never reaches a
+    // callable (`docs/adr/member-kinds.md`).
+    let key = run(&["--hover", root, "Chapter.php", "9", "13"]);
+    assert!(!key.contains("function book"), "an array key is not a method reference: {key}");
+    let refs: serde_json::Value = serde_json::from_str(&run(&["--references", root, "Chapter.php", "4", "20"])).unwrap();
+    let cols: Vec<(u64, u64)> = refs.as_array().unwrap().iter().map(|e| (e["line"].as_u64().unwrap(), e["col"].as_u64().unwrap())).collect();
+    assert_eq!(cols, vec![(4, 20)], "{cols:?}");
+    // The chained relation types the inherited property's chain.
+    let hover = run(&["--hover", root, "Use.php", "4", "17"]);
+    assert!(hover.contains("getUrl(): string"), "chain through a chained-modifier relation: {hover}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The member walk's wrong-family fallback belongs to the WALK, not to one
+/// class: `class B extends A` with `public $handler` on B and
+/// `function handler()` on A answers `$b->handler()` with A's method and
+/// `$b->handler` with B's property. Held per class, B's property ended the
+/// walk before A was ever reached (`docs/adr/member-kinds.md`).
+#[cfg(feature = "php")]
+#[test]
+fn php_member_walk_reaches_a_parents_same_family_declaration() {
+    let dir = std::env::temp_dir().join(format!("perl-lsp-mro-family-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("M.php"),
+        "<?php\n\
+         namespace App;\n\
+         class A\n\
+         {\n\
+             public function handler(): int { return 1; }\n\
+         }\n\
+         class B extends A\n\
+         {\n\
+             public $handler = 2;\n\
+         }\n\
+         class C\n\
+         {\n\
+             public function run(B $b): void\n\
+             {\n\
+                 $b->handler();\n\
+                 $x = $b->handler;\n\
+             }\n\
+         }\n",
+    )
+    .unwrap();
+    let run = |args: &[&str]| {
+        let out = std::process::Command::new(env!("CARGO_BIN_EXE_perl-lsp"))
+            .args(args)
+            .env("XDG_CACHE_HOME", dir.join(".cache"))
+            .output()
+            .expect("run");
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+    let root = dir.to_str().unwrap();
+    let call = run(&["--definition", root, "M.php", "14", "4"]);
+    assert!(call.contains("M.php:4:"), "the call reaches the parent's method: {call}");
+    let read = run(&["--definition", root, "M.php", "15", "9"]);
+    assert!(read.contains("M.php:8:"), "the value read stays on the property: {read}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// An Eloquent relation is ONE member declared in two spellings on one
 /// token — `cover()` the method, `->cover` the property Eloquent's `__get`
 /// serves. The extractor mints the pair as a relation
