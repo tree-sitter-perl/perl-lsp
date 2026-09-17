@@ -155,6 +155,16 @@ fn heatmap_symbol_row(
         // call site the static graph can see. The language declares which
         // names are entry points; nothing here compares names or families.
         Some("entry-point")
+    } else if matches!(sym.kind, SymKind::Method)
+        && crate::build::language_driver::LanguageRegistry::caps(&analysis.language)
+            .runtime_invoked_methods
+            .contains(&sym.name.as_str())
+    {
+        // php magic methods (`__toString`, `__invoke`, ...): the runtime
+        // invokes them structurally, so zero call sites is the expected
+        // state. The language declares the set — the method-shaped sibling
+        // of `entrypoint_symbols`.
+        Some("runtime-invoked")
     } else if matches!(sym.kind, SymKind::Package | SymKind::Class | SymKind::Module) {
         Some("package-implicit-use")
     } else if has_dynamic_dispatch
