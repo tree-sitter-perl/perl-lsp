@@ -16,7 +16,10 @@
     "event": "No listener for event",
     "view": "Undefined view",
     "config": "Undefined config key",
-    "lang": "Undefined translation key"
+    "lang": "Undefined translation key",
+    "middleware": "Undefined middleware"
   },
-  "names_are": { "event": "class" }
+  "names_are": { "event": "class" },
+  "hints": ["middleware"],
+  "name_seps": { "middleware": ":" }
 }
