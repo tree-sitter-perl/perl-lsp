@@ -4222,6 +4222,81 @@ function use_it(Record $record): Level {
     );
 }
 
+#[test]
+fn php_wp_hook_name_identity_connects_registration_and_firing() {
+    // Hook-NAME identity on the `hook` rail: `add_action('init', …)`
+    // declares the hook (a Handler named by the string, owned by the rail
+    // the overlay's capture suffix names) and `do_action('init')` fires
+    // it. References from either side list both; rename rewrites the name
+    // inside the quotes at every site.
+    let src = "\
+<?php
+function wp_cron(): int { return 1; }
+add_action('init', 'wp_cron');
+add_action('init', 'other_cb');
+do_action('init');
+do_action('shutdown');
+";
+    let (fa, _) = php_fa(src);
+    // cursor on the FIRING string ('init' at row 4, inside quotes)
+    let resolved = crate::index::resolve::resolve_symbol(
+        &fa,
+        tree_sitter::Point { row: 4, column: 12 },
+        None,
+    );
+    let target = match resolved {
+        Some(crate::index::resolve::ResolvedTarget::Target(t)) => t,
+        other => panic!("firing string must mint the Handler target: {other:?}"),
+    };
+    assert!(
+        matches!(
+            &target.kind,
+            crate::index::resolve::TargetKind::Handler {
+                owner: crate::model::file_analysis::HandlerOwner::Rail(rail),
+                name,
+                names: crate::model::file_analysis::RailNames::Strings,
+            } if rail == "hook" && name == "init"
+        ),
+        "the hook rail's names are the strings themselves: {target:?}"
+    );
+    let locs = crate::index::resolve::refs_to_in_file(
+        &crate::index::file_store::FileStore::new(),
+        None,
+        &target,
+        &crate::index::file_store::FileKey::Path(std::path::PathBuf::from("/wp/h.php")),
+        &fa,
+        crate::index::resolve::RoleMask::VISIBLE,
+    );
+    let rows: Vec<usize> = locs.iter().map(|l| l.span.start.row).collect();
+    assert!(rows.contains(&2) && rows.contains(&3), "both registrations: {locs:?}");
+    assert!(rows.contains(&4), "the firing site: {locs:?}");
+    assert!(!rows.contains(&5), "'shutdown' is a different hook: {locs:?}");
+    assert!(locs.iter().all(|l| l.rewritable), "rename rewrites inside quotes: {locs:?}");
+    // …and the other direction: a cursor on a REGISTRATION string resolves
+    // to the same target, so "from either side" is pinned, not assumed.
+    let from_reg = crate::index::resolve::resolve_symbol(
+        &fa,
+        tree_sitter::Point { row: 2, column: 12 },
+        None,
+    );
+    let reg_target = match from_reg {
+        Some(crate::index::resolve::ResolvedTarget::Target(t)) => t,
+        other => panic!("registration string must mint the Handler target: {other:?}"),
+    };
+    let reg_rows: Vec<usize> = crate::index::resolve::refs_to_in_file(
+        &crate::index::file_store::FileStore::new(),
+        None,
+        &reg_target,
+        &crate::index::file_store::FileKey::Path(std::path::PathBuf::from("/wp/h.php")),
+        &fa,
+        crate::index::resolve::RoleMask::VISIBLE,
+    )
+    .iter()
+    .map(|l| l.span.start.row)
+    .collect();
+    assert_eq!(reg_rows, rows, "either side lists the same sites");
+}
+
 
 #[test]
 fn php_member_rename_never_rewrites_import_leaves() {
