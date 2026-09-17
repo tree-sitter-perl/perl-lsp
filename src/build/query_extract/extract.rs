@@ -1820,6 +1820,20 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                             value_read: false,
                             named_by_string: false,
                         });
+                        if let (Some(vars), Some(cls)) = (
+                            arg_vars_by_start.get(&(e.end.row, e.end.column)),
+                            package.clone(),
+                        ) {
+                            bind_call_args(&mut out.witnesses, vars, cur_scope, |index| {
+                                Some(crate::model::witnesses::WitnessPayload::Edge(
+                                    crate::model::witnesses::WitnessAttachment::Param {
+                                        package: cls.clone(),
+                                        name: ctor.to_string(),
+                                        index,
+                                    },
+                                ))
+                            });
+                        }
                         continue;
                     }
                 }
@@ -1889,6 +1903,26 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                                 value_read: false,
                                 named_by_string: false,
                             });
+                            // The construction site calls the constructor, so
+                            // its arguments bind exactly as any other call's
+                            // do — the class is known statically here, which
+                            // is the only thing this arm supplies.
+                            if let Some(vars) = arg_vars_by_start.get(&(e.end.row, e.end.column)) {
+                                let written = qualified_by_match
+                                    .get(&e.match_id)
+                                    .cloned()
+                                    .unwrap_or_else(|| (pack.shape_name)("ref.type", &e.text));
+                                let cls = ident(&written, e.start);
+                                bind_call_args(&mut out.witnesses, vars, cur_scope, |index| {
+                                    Some(crate::model::witnesses::WitnessPayload::Edge(
+                                        crate::model::witnesses::WitnessAttachment::Param {
+                                            package: cls.clone(),
+                                            name: ctor.to_string(),
+                                            index,
+                                        },
+                                    ))
+                                });
+                            }
                             continue;
                         }
                     }
@@ -1967,22 +2001,13 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                                 || placeholder_call_at.contains(&(e.end.row, e.end.column))),
                         named_by_string: false,
                     });
-                    // Every bare variable this call passes is bound to the
-                    // callee's parameter slot — `Variable(arg) → Edge(Param)`
-                    // for a function, `Projected{receiver, ParamOf}` through
-                    // a dispatch. Only a position the callee declares by
-                    // reference answers (`docs/adr/by-ref-binding.md`);
-                    // zero-width at the argument token, a binding not a
-                    // narrowing region.
                     if matches!(e.cap.as_str(), "ref.call" | "ref.qcall" | "ref.member") {
                         if let Some(vars) = arg_vars_by_start.get(&(e.end.row, e.end.column)) {
                             use crate::model::witnesses as wit;
                             let callee = (pack.shape_name)(&e.cap, &e.text);
-                            for (index, var, at) in vars {
-                                let payload = if e.cap == "ref.member" {
-                                    let Some((inv_span, inv_text)) = member_recv.get(&e.match_id) else {
-                                        continue;
-                                    };
+                            bind_call_args(&mut out.witnesses, vars, cur_scope, |index| {
+                                if e.cap == "ref.member" {
+                                    let (inv_span, inv_text) = member_recv.get(&e.match_id)?;
                                     let base = if member_simple.get(&e.match_id).copied().unwrap_or(false) {
                                         wit::WitnessAttachment::Variable {
                                             name: (pack.shape_name)("def.var", inv_text),
@@ -1991,17 +2016,17 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                                     } else {
                                         wit::WitnessAttachment::Expr(*inv_span)
                                     };
-                                    wit::WitnessPayload::Projected {
+                                    Some(wit::WitnessPayload::Projected {
                                         base,
                                         step: wit::ProjectionStep::ParamOf {
                                             member: callee.clone(),
-                                            index: *index,
+                                            index,
                                         },
-                                    }
+                                    })
                                 } else {
                                     let (pkg, bare) =
                                         crate::model::file_analysis::split_qualified(&callee, &pack.names);
-                                    wit::WitnessPayload::Edge(wit::WitnessAttachment::Param {
+                                    Some(wit::WitnessPayload::Edge(wit::WitnessAttachment::Param {
                                         package: pkg
                                             .map(str::to_string)
                                             // A bare call names a free function, and a
@@ -2018,19 +2043,10 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                                             })
                                             .unwrap_or_default(),
                                         name: bare.to_string(),
-                                        index: *index,
-                                    })
-                                };
-                                out.witnesses.push(wit::Witness {
-                                    attachment: wit::WitnessAttachment::Variable {
-                                        name: var.clone(),
-                                        scope: cur_scope,
-                                    },
-                                    source: wit::WitnessSource::Builder("call_arg_binding".into()),
-                                    payload,
-                                    span: Span { start: *at, end: *at },
-                                });
-                            }
+                                        index,
+                                    }))
+                                }
+                            });
                         }
                     }
                     if let Some(q) = qualified_by_match.get(&e.match_id) {
@@ -3615,6 +3631,35 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
 /// commas in the list text before the slot's byte offset (`[, $b]` → 1).
 /// `None` for a keyed list (a top-level `=>`): its positions are not
 /// positions, so the slot never binds positionally.
+/// Bind every bare variable an argument list passes to the callee's
+/// parameter slot — `Variable(arg) → Edge(Param)` for a plain callee,
+/// `Projected{receiver, ParamOf}` through a dispatch. Only a position the
+/// callee declares by reference ever answers
+/// (`docs/adr/by-ref-binding.md`); the witness is zero-width at the
+/// argument token, a binding rather than a narrowing region.
+///
+/// `payload` is the only thing a call site varies — which callee the slot
+/// belongs to. A construction site knows its class statically and answers
+/// with the constructor's `Param`; nothing about the mint differs, so
+/// there is one body (rule #10).
+fn bind_call_args(
+    witnesses: &mut Vec<crate::model::witnesses::Witness>,
+    vars: &[(u32, String, Point)],
+    scope: crate::model::file_analysis::ScopeId,
+    mut payload: impl FnMut(u32) -> Option<crate::model::witnesses::WitnessPayload>,
+) {
+    use crate::model::witnesses as wit;
+    for (index, var, at) in vars {
+        let Some(payload) = payload(*index) else { continue };
+        witnesses.push(wit::Witness {
+            attachment: wit::WitnessAttachment::Variable { name: var.clone(), scope },
+            source: wit::WitnessSource::Builder("call_arg_binding".into()),
+            payload,
+            span: Span { start: *at, end: *at },
+        });
+    }
+}
+
 fn slot_position(list_text: &str, slot_offset: usize, arrow: &str) -> Option<usize> {
     let bytes = list_text.as_bytes();
     let (mut depth, mut commas) = (0i32, 0usize);
