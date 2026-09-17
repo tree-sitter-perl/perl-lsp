@@ -1,7 +1,7 @@
 //! Diagnostics: unresolved names, the narrowing family, `DiagnosticOptions`.
 
 use super::*;
-use crate::model::file_analysis::SymbolFlags;
+use crate::model::file_analysis::{name_match_key, SymbolFlags};
 
 /// Every diagnostic code this adapter mints, spelled ONCE. Metrics key on
 /// these strings (per-file yield counts in the ghost lane), so a literal at a
@@ -1194,6 +1194,56 @@ pub fn pack_symbol_diagnostics(
         }
     }
 
+    // ---- unused import: a bound name the file never spells ----
+    if pack.imports_bind_names {
+        let pins = analysis.use_map_pins();
+        let ns_heads = namespace_heads(analysis);
+        for row in &pack.include_directives {
+            let (span, raw) = (&row.span, &row.raw);
+            let leaf = name_match_key(raw, analysis.names());
+            let leaf = leaf.as_str();
+            // the alias token has a row of its own; the import's row reports
+            if !is_qualified(raw, analysis) && pack.use_aliases.iter().any(|(alias, _, _)| alias == leaf) {
+                continue;
+            }
+            // the name the row binds: its alias when it has one
+            let bound = pack
+                .use_aliases
+                .iter()
+                .find(|(_, ns, real)| {
+                    real == leaf && (join_name(analysis, ns, real) == *raw || (ns.is_empty() && real == raw))
+                })
+                .map(|(alias, _, _)| alias.as_str())
+                .unwrap_or(leaf);
+            // a constant import (`use const FOO`) has no spelling the
+            // walker records — silent
+            if bound.is_empty() || row.binds == ImportBinds::Const {
+                continue;
+            }
+            let used = pins.spelled.contains(bound)
+                || ns_heads.contains(bound)
+                || pack.doc_mentions.iter().any(|m| m == bound);
+            if used {
+                continue;
+            }
+            out.push(Diagnostic {
+                range: span_to_range(*span),
+                severity: Some(DiagnosticSeverity::HINT),
+                code: Some(NumberOrString::String("unused-import".to_string())),
+                source: Some("perl-lsp".to_string()),
+                message: format!("'{bound}' is imported but never used."),
+                tags: Some(vec![DiagnosticTag::UNNECESSARY]),
+                data: pack
+                    .import_rows
+                    .iter()
+                    .find(|r| span_within(*span, **r))
+                    .filter(|r| pack.include_directives.iter().filter(|i| span_within(i.span, **r)).count() == 1)
+                    .map(|r| serde_json::json!({ "row": [r.start.row, r.end.row] })),
+                ..Default::default()
+            });
+        }
+    }
+
     out
 }
 
@@ -1222,6 +1272,33 @@ fn deprecated_diag(span: Span, name: &str, text: &Option<String>) -> Diagnostic 
     }
 }
 
+/// Is `name` written with a qualifier in this file's language?
+fn is_qualified(name: &str, analysis: &FileAnalysis) -> bool {
+    crate::model::file_analysis::split_qualified(name, analysis.names()).0.is_some()
+}
+
+/// `namespace` and `leaf` joined the way this file's language spells a
+/// qualified name.
+fn join_name(analysis: &FileAnalysis, namespace: &str, leaf: &str) -> String {
+    format!("{namespace}{}{leaf}", analysis.names().sep().unwrap_or_default())
+}
+
+/// The leading segment of every namespace this file writes as a QUALIFIER
+/// (`Psr7\Utils` → `Psr7`): such a segment names a namespace, not a type
+/// and not an unused import.
+fn namespace_heads(analysis: &FileAnalysis) -> std::collections::HashSet<String> {
+    let names = analysis.names();
+    let Some(sep) = names.sep() else { return Default::default() };
+    analysis
+        .pack
+        .qualified_spellings
+        .iter()
+        .filter_map(|(_, prefix)| prefix.trim_start_matches(sep).split(sep).next())
+        .filter(|h| !h.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
 /// Does the callable owning `scope` materialize variables no declaration
 /// names (php `extract`, `eval`)? The extractor stamped that on the
 /// callable, so the variable lanes read the flag instead of matching call
@@ -1231,4 +1308,8 @@ fn dynamic_vars(analysis: &FileAnalysis, scope: crate::model::file_analysis::Sco
         .scope(scope)
         .owner
         .is_some_and(|sid| analysis.symbol(sid).flags.contains(SymbolFlags::DYNAMIC_VARS))
+}
+
+fn span_within(inner: Span, outer: Span) -> bool {
+    outer.contains(&inner)
 }

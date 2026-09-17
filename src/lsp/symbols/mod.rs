@@ -9,7 +9,7 @@ use crate::lsp::cursor_context;
 use crate::lsp::cursor_slot::Slot;
 use crate::model::file_analysis::{
     format_inferred_type, CompletionCandidate, CrossFileLookup, FileAnalysis, FoldKind,
-    GuardVerdict, HandlerOwner, InferredType, OutlineSymbol, ParamInfo, RefKind, Span,
+    GuardVerdict, HandlerOwner, ImportBinds, InferredType, OutlineSymbol, ParamInfo, RefKind, Span,
     SymKind as FaSymKind, SymbolDetail,
 };
 use crate::index::module_index::{ModuleIndex, SubInfo};
