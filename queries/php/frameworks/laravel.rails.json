@@ -2,5 +2,9 @@
   "language": "php",
   "text_rails": [
     { "rail": "route", "calls": ["route", "to_route"], "files": [".blade.php"] }
-  ]
+  ],
+  "labels": {
+    "event": "No listener for event"
+  },
+  "names_are": { "event": "class" }
 }
