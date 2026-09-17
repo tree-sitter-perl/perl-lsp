@@ -35,10 +35,6 @@ pub struct PackFacts {
     /// The member name that is the class-name literal (php `Foo::class`).
     #[serde(default)]
     pub class_literal_member: String,
-    /// Type names are capitalized by convention (an import row with a
-    /// lowercase leaf names a function or constant).
-    #[serde(default)]
-    pub types_are_capitalized: bool,
     /// Members every enum carries by language rule.
     #[serde(default)]
     pub enum_members: Vec<String>,

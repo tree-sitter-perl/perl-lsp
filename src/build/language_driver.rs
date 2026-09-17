@@ -1493,7 +1493,6 @@ fn remap_spans(
         throwaway_names: _,
         catch_all_methods: _,
         class_literal_member: _,
-        types_are_capitalized: _,
         enum_members: _,
         member_writes,
         import_rows,

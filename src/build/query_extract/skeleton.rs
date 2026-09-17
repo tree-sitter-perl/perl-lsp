@@ -160,7 +160,6 @@ pub struct SkeletonAnalysis {
     pub throwaway_names: Vec<String>,
     pub catch_all_methods: Vec<String>,
     pub class_literal_member: String,
-    pub types_are_capitalized: bool,
     pub enum_members: Vec<String>,
     /// Member tokens on the left of an assignment (dynamic property sites).
     pub member_writes: Vec<Span>,
@@ -1617,7 +1616,6 @@ impl SkeletonAnalysis {
             imports_bind_names: self.imports_bind_names,
             members_are_package_bound: self.members_are_package_bound,
             doc_mentions: std::mem::take(&mut self.doc_mentions),
-            types_are_capitalized: self.types_are_capitalized,
             enum_members: std::mem::take(&mut self.enum_members),
             type_display: std::mem::take(&mut self.type_display),
             constructor_names: std::mem::take(&mut self.constructor_names),

@@ -261,11 +261,6 @@ pub struct LangPack {
     /// contract is provided only by a declaration attributed to the
     /// composer's own MRO, never by a sibling class in the same file.
     pub members_are_package_bound: bool,
-    /// Type names start with a capital by convention, so an import row
-    /// whose leaf starts lowercase names a function or constant, not a
-    /// type (php's `use function A\b;` — the grammar parses it as a class
-    /// row).
-    pub types_are_capitalized: bool,
     /// Members every enum carries by language rule (php: `->value`,
     /// `->name`, `::cases()`, `::from()`, `::tryFrom()`).
     pub enum_members: &'static [&'static str],
@@ -615,7 +610,6 @@ pub fn perl_pack() -> LangPack {
         deprecated_attribute: "",
         builtin_types: &[],
         members_are_package_bound: true,
-        types_are_capitalized: false,
         enum_members: &[],
         trigger_chars: &["$", "@", "%", ">", ":", "{"],
         receiver_names: &[],
@@ -703,7 +697,6 @@ pub fn python_pack() -> LangPack {
         deprecated_attribute: "",
         builtin_types: &[],
         members_are_package_bound: true,
-        types_are_capitalized: false,
         enum_members: &[],
         trigger_chars: &["."],
         receiver_names: &["self", "cls"],
@@ -791,7 +784,6 @@ pub fn r_pack() -> LangPack {
         deprecated_attribute: "",
         builtin_types: &[],
         members_are_package_bound: true,
-        types_are_capitalized: false,
         enum_members: &[],
         trigger_chars: &["$", "@", ":"],
         receiver_names: &[],
@@ -887,7 +879,6 @@ pub fn cmake_pack() -> LangPack {
         deprecated_attribute: "",
         builtin_types: &[],
         members_are_package_bound: true,
-        types_are_capitalized: false,
         enum_members: &[],
         trigger_chars: &["{", "("],
         receiver_names: &[],
@@ -1037,7 +1028,6 @@ pub fn cpp_pack() -> LangPack {
         deprecated_attribute: "",
         builtin_types: &[],
         members_are_package_bound: true,
-        types_are_capitalized: false,
         enum_members: &[],
         trigger_chars: &[".", ">", ":"],
         receiver_names: &["this"],
