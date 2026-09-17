@@ -417,6 +417,44 @@ pub fn rail_of(cap: &str) -> Option<(RailCapture, &str)> {
     })
 }
 
+/// Capture names the extractor READS that no bundled skeleton spells.
+/// Only a framework overlay reaches for a call or member shape whose name
+/// is a STRING, so the skeleton has never needed to write one — but the
+/// extractor serves them, and a baseline that does not know them calls
+/// every one of them unserved.
+const OVERLAY_ONLY_CAPTURES: &[&str] =
+    &["ref.call.named", "ref.method.named.self", "dispatch.via"];
+
+/// The captures in `declared` the extractor does NOT serve — `--plugin-check`'s
+/// vocabulary lint, answered here so the CLI holds no vocabulary of its own.
+///
+/// A query document's capture list is a SUBSET of the served vocabulary,
+/// never the vocabulary itself: the skeleton spells what the skeleton
+/// needs, the rail families are open by construction (the rail is an
+/// overlay's own word), and [`OVERLAY_ONLY_CAPTURES`] is the rest. A
+/// `_`-prefixed capture is a query-internal anchor, served by definition.
+pub fn unserved_captures(
+    pack: &LangPack,
+    language: &tree_sitter::Language,
+    declared: &[&str],
+) -> Vec<String> {
+    let skeleton: std::collections::HashSet<String> =
+        match tree_sitter::Query::new(language, pack.query_source) {
+            Ok(base) => base.capture_names().iter().map(|s| s.to_string()).collect(),
+            Err(_) => Default::default(),
+        };
+    declared
+        .iter()
+        .filter(|c| {
+            !c.starts_with('_')
+                && !skeleton.contains(**c)
+                && !OVERLAY_ONLY_CAPTURES.contains(*c)
+                && rail_of(c).is_none()
+        })
+        .map(|s| s.to_string())
+        .collect()
+}
+
 /// The pack's effective query source: the bundled query plus every
 /// surviving discovered overlay, assembled once per distinct overlay set
 /// and leaked (`cached_query` then compiles it once by content).

@@ -222,19 +222,13 @@ fn check_pack_overlay(path: &Path, json_mode: bool) {
     };
     let compile_error = match tree_sitter::Query::new(&language, &source) {
         Ok(q) => {
-            // The bundled query's capture set IS the served vocabulary
-            // baseline; `_`-prefixed captures are query-internal anchors.
-            let known: std::collections::HashSet<String> =
-                match tree_sitter::Query::new(&language, pack.query_source) {
-                    Ok(base) => base.capture_names().iter().map(|s| s.to_string()).collect(),
-                    Err(_) => Default::default(),
-                };
-            let unknown: Vec<String> = q
-                .capture_names()
-                .iter()
-                .filter(|c| !c.starts_with('_') && !known.contains(**c))
-                .map(|s| s.to_string())
-                .collect();
+            // The extractor owns its served vocabulary; this arm only
+            // reports what it answers.
+            let unknown = crate::build::query_extract::unserved_captures(
+                &pack,
+                &language,
+                q.capture_names(),
+            );
             if json_mode {
                 println!(
                     "{}",
